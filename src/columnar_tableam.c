@@ -1297,11 +1297,15 @@ _PG_init(void)
 							"Bounds the transaction's held advisory locks to at "
 							"most this many per unique index. Equal keys always "
 							"share a bucket; unrelated keys may share one, which "
-							"only over-serializes.",
+							"only over-serializes. Fixed at server start because "
+							"the bucket is part of the advisory lock tag: two "
+							"backends inserting the same key must compute the "
+							"same bucket, which they only do when they agree on "
+							"this value.",
 							&columnar_unique_lock_buckets,
 							128,
 							1, 1048576,
-							PGC_USERSET,
+							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
 
