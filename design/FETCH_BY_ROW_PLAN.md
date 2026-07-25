@@ -76,12 +76,23 @@ directly from the row offset. Variable-width columns need an offset array, which
 the decoder can produce as it walks, at the cost of one array per decoded chunk.
 Worth doing after B, since B changes how often step 4 runs.
 
-## Also worth doing: fetch only the columns the caller needs
+## Fetch only the columns the caller needs: smaller than it looks
 
-The uniqueness check needs the key columns; the fetch decodes all of them. A
-needed-columns bitmap through `ColumnarReadRowByNumber` would cut the constant
-factor for the check without touching the caching question. Smallest of the three
-changes and fully independent.
+The first version of this plan put a needed-columns bitmap first, on the argument
+that the uniqueness check only needs the key columns. Checking the call path
+before writing it says otherwise.
+
+The check reaches the same callback every other fetch does. Core's
+`table_index_fetch_tuple_check` creates a slot, calls `table_index_fetch_tuple`,
+and throws the slot away; the access method cannot tell that call apart from a
+real fetch, and `columnar_index_fetch_tuple` fills every column of the slot
+either way. So a bitmap does not help the caller that would benefit most, because
+that caller has no way to declare what it needs.
+
+It still helps callers that do know, and it is still independent of the caching
+question, but it is no longer the piece to start with. Making the check itself
+cheap would need a visibility-only path, which is a change to what the callback
+does rather than to what it decodes, and is out of scope here.
 
 ## Proving it
 
@@ -102,11 +113,18 @@ sizes, where the wrong implementation cannot produce both.
 
 ## Order
 
-1. Needed-columns bitmap (independent, small, no caching questions).
-2. Statement-scoped decoded-group cache (option B), with the memory cap measured.
-3. Positional indexing to remove the walk (option C).
+1. Statement-scoped decoded-group cache (option B), with the memory cap measured.
+   It is the only piece that helps every caller, including the uniqueness check.
+2. Positional indexing to remove the walk (option C).
+3. Needed-columns bitmap, for the callers that can declare their needs.
 
 Each is its own PR with its own gate.
+
+On scoping the cache to a statement in practice: `GetCurrentCommandId(false)`
+recorded alongside the entry is enough, since any command boundary changes it, so
+a `pgcolumnar.vacuum` in the same transaction invalidates the entry without a
+dedicated hook. Key on the storage id as well, so a rewrite that allocates new
+storage cannot be served the old decode.
 
 ## Not this
 
