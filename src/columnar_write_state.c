@@ -128,6 +128,7 @@ static MemoryContext ColumnarWriteContext = NULL;
 static List *ColumnarWriteStates = NIL;
 
 static void columnar_flush_row_group(ColumnarWriteState *writeState);
+static void flush_ws_projections(ColumnarWriteState *writeState);
 static ChunkGroupBuffer *columnar_start_chunk_group(ColumnarWriteState *writeState);
 static void columnar_init_col_defs(ColumnarWriteState *writeState);
 
@@ -207,8 +208,32 @@ ColumnarGetWriteState(Relation rel)
 	foreach(lc, ColumnarWriteStates)
 	{
 		writeState = (ColumnarWriteState *) lfirst(lc);
-		if (writeState->relid == relid && writeState->subid == subid)
+		if (writeState->relid != relid || writeState->subid != subid)
+			continue;
+
+		/*
+		 * The descriptor is snapshotted when the buffer is opened, so a buffer
+		 * that predates an ALTER TABLE ... ADD COLUMN in this same transaction
+		 * still has the old column count and silently drops every value written
+		 * into the new column: the flushed chunks carry the old shape, and the
+		 * reader then serves the column's missing value for those rows. Nothing
+		 * else invalidates the buffer, since the write state registers no
+		 * relcache callback.
+		 *
+		 * The buffered rows are correct under the descriptor they were written
+		 * with, so flush them under it and open a new buffer for the new shape.
+		 */
+		if (writeState->natts == RelationGetDescr(rel)->natts)
 			return writeState;
+
+		if (writeState->stripeRowCount > 0)
+			columnar_flush_row_group(writeState);
+		flush_ws_projections(writeState);
+
+		oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
+		ColumnarWriteStates = list_delete_ptr(ColumnarWriteStates, writeState);
+		MemoryContextSwitchTo(oldContext);
+		break;
 	}
 
 	if (ColumnarWriteContext == NULL)

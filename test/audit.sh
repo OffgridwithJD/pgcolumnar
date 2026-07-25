@@ -18,6 +18,11 @@
 #      out-of-range chunk_group_row_limit / stripe_row_limit / compression_level
 #      rather than store it: a zero chunk_group_row_limit records a stripe with
 #      chunk_row_count = 0 and makes delete/update/fetch divide by zero.
+#   5. ALTER TABLE ADD COLUMN while a write buffer is already open in the same
+#      transaction. The buffer snapshots the tuple descriptor when it opens and
+#      nothing invalidates it, so every value written into the new column after
+#      the ALTER was silently dropped and the column read back as its missing
+#      value. Covers INSERT and UPDATE, with and without a default.
 #   4. CREATE INDEX must not leak a relation reference. A parallel index build
 #      opens a TableScanDesc per participant through columnar_scan_begin (which
 #      takes a relation reference); the index_build_range_scan callback owns that
@@ -211,6 +216,46 @@ check "create index no relation leak" "$LEAKS" "0"
 check "create index rows indexed once" \
 	"$(q "SET enable_seqscan=off; SELECT count(*) FROM idxleak WHERE a>0;")" "50000"
 q "DROP TABLE idxleak;" >/dev/null
+
+# ---------------------------------------------------------------------------
+# 5. ALTER TABLE ADD COLUMN with a write buffer already open in the same
+#    transaction. Writes to the new column must survive.
+# ---------------------------------------------------------------------------
+# The buffer is keyed by (relation, subtransaction) and snapshots the descriptor
+# when it opens; nothing invalidates it on DDL. A write before the ALTER opens
+# it with the old column count, so without the fix every value written into the
+# added column afterwards is dropped on the floor and the column reads back as
+# its missing value, with no error.
+
+q "CREATE TABLE wsalter (id int, v text) USING pgcolumnar;" >/dev/null
+q "BEGIN;
+   INSERT INTO wsalter VALUES (0,'x');
+   ALTER TABLE wsalter ADD COLUMN w int DEFAULT 7;
+   INSERT INTO wsalter VALUES (1,'a',99);
+   COMMIT;" >/dev/null
+check "add-column mid-transaction keeps the inserted value" \
+	"$(q "SELECT string_agg(DISTINCT coalesce(w::text,'NULL'), ',' ORDER BY coalesce(w::text,'NULL')) FROM wsalter;")" \
+	"7,99"
+
+q "CREATE TABLE wsalter2 (id int, v text) USING pgcolumnar;" >/dev/null
+q "BEGIN;
+   INSERT INTO wsalter2 VALUES (0,'x');
+   ALTER TABLE wsalter2 ADD COLUMN w int;
+   INSERT INTO wsalter2 VALUES (1,'a',99);
+   COMMIT;" >/dev/null
+check "add-column without a default keeps the inserted value" \
+	"$(q "SELECT count(*) FROM wsalter2 WHERE w = 99;")" "1"
+
+q "CREATE TABLE wsalter3 (id int, v text) USING pgcolumnar;" >/dev/null
+q "BEGIN;
+   INSERT INTO wsalter3 VALUES (0,'x');
+   ALTER TABLE wsalter3 ADD COLUMN w int DEFAULT 7;
+   UPDATE wsalter3 SET w = 55;
+   COMMIT;" >/dev/null
+check "add-column mid-transaction keeps a later UPDATE" \
+	"$(q "SELECT string_agg(DISTINCT w::text, ',') FROM wsalter3;")" "55"
+
+q "DROP TABLE wsalter; DROP TABLE wsalter2; DROP TABLE wsalter3;" >/dev/null
 
 echo
 if [ "$fail" = "0" ]; then
