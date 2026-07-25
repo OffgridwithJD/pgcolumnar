@@ -129,6 +129,10 @@ pgc_setup() {
 		echo "bytea_output='hex'"
 		# Keep planner honest but let small tables use the custom scan.
 		echo "max_parallel_workers_per_gather=0"
+		# The unique-insert lock bucket count is fixed at server start (it is part
+		# of the advisory lock tag, so backends must agree on it). A large prime
+		# keeps unrelated keys out of the same bucket in unique_conc.
+		echo "pgcolumnar.unique_lock_buckets=100003"
 	} | pgc_pg "cat >> '$PGC_PGDATA/postgresql.conf'"
 
 	# Start, retrying a few times: under rapid cluster churn (the version matrix
