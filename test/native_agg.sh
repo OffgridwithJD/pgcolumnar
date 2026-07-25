@@ -90,6 +90,26 @@ par_multi="$(plan_par 'SELECT count(*), sum(id), min(id), max(id) FROM n')"
 check "multi-agg beats a parallel plan" "$(has_aggnode "$par_multi")" "yes"
 check "multi-agg plan has no Gather"    "$(has_gather "$par_multi")"  "no"
 
+# count(*) is answered from each row group's stored row count, so it has no
+# reason to read zone maps at all. Reading them costs one catalog lookup per row
+# group returning an entry for every column, and on a 6,000,000-row table that
+# was the entire cost of the query (issue #133). Count the scans of
+# pgcolumnar.zone_map across the statement: each q is its own backend, and a
+# backend flushes its statistics when it exits, so the counter is settled by the
+# time the next one reads it.
+zm_scans() {
+	q "SELECT coalesce(idx_scan, 0) + coalesce(seq_scan, 0)
+	     FROM pg_stat_all_tables WHERE relid = 'pgcolumnar.zone_map'::regclass;"
+}
+zm_before="$(zm_scans)"; q 'SELECT count(*) FROM n;' >/dev/null; zm_after="$(zm_scans)"
+check "count(*) reads no zone maps" "$((zm_after - zm_before))" "0"
+
+# The same measurement the other way round, so the check above cannot pass just
+# because the counter never moves.
+zm_before="$(zm_scans)"; q 'SELECT count(*), sum(id) FROM n;' >/dev/null; zm_after="$(zm_scans)"
+check "an aggregate that needs zone maps reads them" \
+	"$([ "$((zm_after - zm_before))" -gt 0 ] && echo yes || echo no)" "yes"
+
 # A filtered aggregate falls back (no zone-map answer) but is still correct.
 check "filtered aggregate parity" \
 	"$(q 'SELECT count(*), sum(id) FROM n WHERE id > 5000;')" \
