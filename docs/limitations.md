@@ -147,7 +147,8 @@ listed are rejected.
 
 `uuid` is imported from a 16-byte fixed-length binary column, and `numeric` from
 a DECIMAL column stored as fixed or variable big-endian bytes with precision up
-to 38. A DECIMAL backed by an INT32 or INT64 physical column is not yet read.
+to 38, or from an INT32 or INT64 holding the unscaled integer, which is how
+writers store small precisions.
 
 `numeric` needs a declared precision for a Parquet round trip. The exporter
 writes DECIMAL only for a column declared `numeric(p,s)` with `p` up to 38; a
@@ -215,8 +216,9 @@ correct rows; these are the conditions under which it can skip at all:
   from `PREPARE`, does not drive skipping. This is deliberate: the skip set is
   computed once when the scan starts and reused across rescans.
 - The column must be stored as a Parquet INT32, INT64, FLOAT, or DOUBLE. Text,
-  bytea, uuid, numeric, and boolean columns are filtered but never skipped,
-  whatever their statistics.
+  bytea, uuid, and boolean columns are filtered but never skipped, whatever their
+  statistics. A `numeric` column follows its storage: one written as an INT32 or
+  INT64 DECIMAL does skip, one written as a byte-array DECIMAL does not.
 - The constant's type must match the column's type exactly. A cross-type
   comparison such as `ts >= DATE '2026-01-01'` against a `timestamp` column, or
   `bigint_col > 5::int`, does not skip.
