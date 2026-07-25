@@ -128,6 +128,10 @@ run_pg "echo \"listen_addresses=''\" >> '$PGDATA/postgresql.conf'"
 run_pg "echo \"unix_socket_directories='$WORKDIR'\" >> '$PGDATA/postgresql.conf'"
 # Cap any real hang so a bug cannot masquerade as a pass by blocking forever.
 run_pg "echo \"lock_timeout=60000\" >> '$PGDATA/postgresql.conf'"
+# The bucket count is part of the advisory lock tag, so it is fixed at server
+# start: two backends that disagreed would hash the same key to different buckets
+# and not serialize at all. A large prime keeps unrelated keys out of one bucket.
+run_pg "echo \"pgcolumnar.unique_lock_buckets=100003\" >> '$PGDATA/postgresql.conf'"
 echo "-- start"
 run_pg "pg_ctl -D '$PGDATA' -l '$LOGFILE' start -w" >/dev/null
 run_pg "createdb -h '$WORKDIR' -p $PORT uconc"
@@ -240,8 +244,14 @@ start_session s2
 start_session sh   # holder of the mid-statement pause lock
 send s1 "SET application_name='cc_s1';"
 send s2 "SET application_name='cc_s2';"
-send s1 "SET pgcolumnar.unique_lock_buckets=100003;"   # avoid false bucket sharing
-send s2 "SET pgcolumnar.unique_lock_buckets=100003;"
+# The value the sessions run under now comes from postgresql.conf above, since it
+# cannot be set per session. Pin both halves of that: the cluster really is
+# running it, and a session cannot change it out from under the lock tag.
+check "the cluster runs the bucket count the suite needs" \
+	"$(ctl_q "SHOW pgcolumnar.unique_lock_buckets")" "100003"
+check "the bucket count is fixed at server start" \
+	"$(ctl_q "SELECT context FROM pg_settings WHERE name = 'pgcolumnar.unique_lock_buckets'")" \
+	"postmaster"
 
 HKEY=1000   # holder advisory-lock key, unique per pause
 
