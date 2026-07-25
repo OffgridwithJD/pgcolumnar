@@ -1042,6 +1042,25 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
 	uint64		storageId;
 	List	   *groups;
 	ListCell   *lc;
+	bool		needZones = false;
+	int			na;
+
+	/*
+	 * count(*) comes from the row group's own stored row count. Every other
+	 * aggregate here reads a zone map, and reading them means one catalog lookup
+	 * per row group returning an entry for every column, whether the query names
+	 * that column or not. For a count(*) on its own that is all waste, and it is
+	 * the whole cost of the query: at 6,000,000 rows and the default limits it
+	 * measured 5.2 ms over 40 row groups, and 1.4 ms over 10 (issue #133).
+	 */
+	for (na = 0; na < state->naggs; na++)
+	{
+		if (state->specs[na].kind != COLUMNAR_AGG_COUNT_STAR)
+		{
+			needZones = true;
+			break;
+		}
+	}
 
 	ColumnarFlushWriteStateForRelation(state->relid);
 	rel = table_open(state->relid, AccessShareLock);
@@ -1053,26 +1072,31 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
 	foreach(lc, groups)
 	{
 		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
-		List	   *zones = ColumnarReadZoneMapList(storageId, rg->groupNumber,
-												   snap);
-		NativeZoneMapMetadata **byCol =
-			palloc0(sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
-		ListCell   *zc;
+		NativeZoneMapMetadata **byCol = NULL;
 		int			a;
 
-		foreach(zc, zones)
+		if (needZones)
 		{
-			NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(zc);
+			List	   *zones = ColumnarReadZoneMapList(storageId,
+														rg->groupNumber, snap);
+			ListCell   *zc;
 
-			if (z->columnIndex >= 0 && z->columnIndex < tupdesc->natts)
-				byCol[z->columnIndex] = z;
+			byCol = palloc0(sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
+			foreach(zc, zones)
+			{
+				NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(zc);
+
+				if (z->columnIndex >= 0 && z->columnIndex < tupdesc->natts)
+					byCol[z->columnIndex] = z;
+			}
 		}
 
 		for (a = 0; a < state->naggs; a++)
 		{
 			ColumnarAggSpec *spec = &state->specs[a];
 			NativeZoneMapMetadata *z =
-				(spec->attidx >= 0 && spec->attidx < tupdesc->natts)
+				(byCol != NULL && spec->attidx >= 0 &&
+				 spec->attidx < tupdesc->natts)
 				? byCol[spec->attidx] : NULL;
 
 			switch (spec->kind)
