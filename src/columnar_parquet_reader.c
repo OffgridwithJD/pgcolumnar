@@ -3606,13 +3606,32 @@ pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
  * see the limitation in the docs.
  */
 static void
-pqfdw_partition_values(const char *file, TupleDesc tupdesc, const bool *partMask,
-					   Datum *vals, bool *have)
+pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
+					   const bool *partMask, Datum *vals, bool *have)
 {
-	char	   *work = pstrdup(file);
+	size_t		rootlen = strlen(root);
+	const char *rel = file;
+	char	   *work;
+	char	   *base;
 	char	   *comp;
 	char	   *save = NULL;
 	int			i;
+
+	/*
+	 * Only the directory components between the declared root and the file are
+	 * partition components. Scanning the whole absolute path would let a
+	 * component above the root decide a column (a root under /exports/region=eu
+	 * would set "region" for every file), and would let a file literally named
+	 * dt=2026-01-02.parquet set "dt" from its own basename.
+	 */
+	if (strncmp(file, root, rootlen) == 0)
+		rel = file + rootlen;
+	work = pstrdup(rel);
+	base = strrchr(work, '/');
+	if (base != NULL)
+		*base = '\0';			/* drop the file name itself */
+	else
+		*work = '\0';			/* the file sits directly in the root */
 
 	for (i = 0; i < tupdesc->natts; i++)
 		have[i] = false;
@@ -3660,43 +3679,33 @@ pqfdw_partition_values(const char *file, TupleDesc tupdesc, const bool *partMask
 }
 
 /*
- * Whether the scan's quals exclude this file outright, given its partition values.
+ * Compile the quals that a file's partition values alone can decide.
  *
- * A clause that reads only partition columns is decided completely by those
- * values, so it is evaluated directly rather than reasoned about: that gets every
- * operator, IN lists, and expressions for free, and cannot disagree with what the
- * executor would decide about the same rows. Clauses that touch a file column are
- * left alone; they are row-group skipping's business.
+ * Done once for the scan, not once per file, for two reasons. It is the same
+ * expression every time, so recompiling per file is pure waste on a tree with
+ * many partitions. And ExecInitQual on a clause containing a SubPlan appends a
+ * SubPlanState to node->ss.ps.subPlan, which ExecEndNode walks at the end of the
+ * scan: compiled inside the per-file context, that list cell is freed by the
+ * reset at the bottom of the same iteration and read again much later. A
+ * partition-only clause can contain a SubPlan (`dt IN (SELECT ...)` leaves
+ * `dt = ANY (SubPlan 1)`, whose only Var is dt), so this is reachable, not
+ * theoretical.
  *
- * Pruning happens before the file is opened, so a pruned file costs no I/O at all.
+ * A clause qualifies when every Var it reads is a partition column AND it holds
+ * no volatile function. The Var test alone is not enough: pull_varattnos says
+ * nothing about volatility, so `dt = X OR random() < 0.5` would qualify, and
+ * deciding it once for a whole file is not the same as deciding it per row. One
+ * draw would then keep or drop every row of the file, silently returning fewer
+ * rows than the query asks for. Stable and immutable stay eligible; stable is
+ * constant within a statement, which is exactly the guarantee this needs.
  */
-static bool
-pqfdw_partition_excludes_file(ForeignScanState *node, TupleDesc tupdesc,
-							  const bool *partMask, Datum *vals, bool *have)
+static List *
+pqfdw_partition_quals(ForeignScanState *node, TupleDesc tupdesc,
+					  const bool *partMask)
 {
 	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
-	ExprContext *econtext = node->ss.ps.ps_ExprContext;
-	TupleTableSlot *slot;
+	List	   *compiled = NIL;
 	ListCell   *lc;
-	bool		excluded = false;
-	int			i;
-
-	if (fs->scan.plan.qual == NIL)
-		return false;
-
-	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
-	ExecClearTuple(slot);
-	for (i = 0; i < tupdesc->natts; i++)
-		slot->tts_isnull[i] = true;
-	for (i = 0; i < tupdesc->natts; i++)
-	{
-		if (have[i])
-		{
-			slot->tts_values[i] = vals[i];
-			slot->tts_isnull[i] = false;
-		}
-	}
-	ExecStoreVirtualTuple(slot);
 
 	foreach(lc, fs->scan.plan.qual)
 	{
@@ -3704,7 +3713,6 @@ pqfdw_partition_excludes_file(ForeignScanState *node, TupleDesc tupdesc,
 		Bitmapset  *attrs = NULL;
 		bool		partitionOnly = true;
 		int			x = -1;
-		ExprState  *state;
 
 		pull_varattnos(clause, fs->scan.scanrelid, &attrs);
 		if (bms_is_empty(attrs))
@@ -3722,18 +3730,54 @@ pqfdw_partition_excludes_file(ForeignScanState *node, TupleDesc tupdesc,
 		}
 		if (!partitionOnly)
 			continue;
+		if (contain_volatile_functions(clause))
+			continue;			/* not decidable once per file */
 
-		state = ExecInitQual(list_make1(clause), (PlanState *) node);
-		econtext->ecxt_scantuple = slot;
-		if (!ExecQual(state, econtext))
-		{
-			excluded = true;
-			break;
-		}
+		compiled = lappend(compiled, ExecInitQual(list_make1(clause),
+												 (PlanState *) node));
 	}
+	return compiled;
+}
 
-	ExecDropSingleTupleTableSlot(slot);
-	return excluded;
+/*
+ * Whether the compiled partition quals exclude this file outright.
+ *
+ * Pruning happens before the file is opened, so a pruned file costs no I/O at
+ * all, and its row groups never reach the EXPLAIN counters.
+ *
+ * Params are not a hazard here, though ExecQual would happily read one: the
+ * wrapper advertises no parameterized path (see pqfdwGetForeignPaths), so a
+ * rescan cannot arrive with different parameter values, which is the same
+ * assumption pqfdw_compute_skip already documents for the row-group skip mask.
+ * If a parameterized path is ever added, both become recompute-per-rescan.
+ */
+static bool
+pqfdw_partition_excludes_file(ForeignScanState *node, TupleTableSlot *slot,
+							  List *partQuals, TupleDesc tupdesc,
+							  Datum *vals, bool *have)
+{
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	ListCell   *lc;
+	int			i;
+
+	if (partQuals == NIL)
+		return false;
+
+	ExecClearTuple(slot);
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		slot->tts_values[i] = have[i] ? vals[i] : (Datum) 0;
+		slot->tts_isnull[i] = !have[i];
+	}
+	ExecStoreVirtualTuple(slot);
+
+	econtext->ecxt_scantuple = slot;
+	foreach(lc, partQuals)
+	{
+		if (!ExecQual((ExprState *) lfirst(lc), econtext))
+			return true;
+	}
+	return false;
 }
 
 static void
@@ -4094,6 +4138,8 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	int			nPart;
 	Datum	   *partVals = NULL;
 	bool	   *partHas = NULL;
+	List	   *partQuals = NIL;
+	TupleTableSlot *partSlot = NULL;
 
 	/* nothing to do for a plan-only (EXPLAIN without ANALYZE) invocation */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -4113,6 +4159,12 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 
 	files = pq_resolve_paths(path);
 	partMask = pqfdw_partition_mask(RelationGetRelid(rel), tupdesc, &nPart);
+	if (partMask != NULL)
+	{
+		/* compiled once, in the scan's own context, and reused for every file */
+		partQuals = pqfdw_partition_quals(node, tupdesc, partMask);
+		partSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	}
 
 	st = (PqFdwScanState *) palloc0(sizeof(PqFdwScanState));
 	/* randomAccess so ReScan can rewind the materialized rows */
@@ -4150,9 +4202,9 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 		{
 			partVals = (Datum *) palloc0(sizeof(Datum) * Max(tupdesc->natts, 1));
 			partHas = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
-			pqfdw_partition_values((char *) lfirst(lc), tupdesc, partMask,
+			pqfdw_partition_values(path, (char *) lfirst(lc), tupdesc, partMask,
 								   partVals, partHas);
-			if (pqfdw_partition_excludes_file(node, tupdesc, partMask,
+			if (pqfdw_partition_excludes_file(node, partSlot, partQuals, tupdesc,
 											  partVals, partHas))
 			{
 				st->filesPruned++;
@@ -4187,6 +4239,8 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 	MemoryContextDelete(fileCtx);
 	ExecDropSingleTupleTableSlot(slot);
+	if (partSlot != NULL)
+		ExecDropSingleTupleTableSlot(partSlot);
 
 	node->fdw_state = st;
 }

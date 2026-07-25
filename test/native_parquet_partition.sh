@@ -118,12 +118,48 @@ check "row groups are still skipped inside the surviving files" \
 	      SELECT count(*) FROM ev WHERE region = 'eu' AND id BETWEEN 2100 AND 2199" \
 		| grep 'Row Groups Skipped' | grep -oE '[0-9]+' | head -1)" "7"
 
+# ---- a volatile clause must not decide a whole file ------------------------
+#
+# Pruning evaluates a clause once per file. That is only equivalent to the
+# executor's per-row evaluation when the clause is a function of the partition
+# values alone, and a volatile function is not: one draw would keep or drop every
+# row of the file. pull_varattnos cannot see this, since it reports Vars only.
+#
+# The check is deterministic rather than statistical. vol_odd() advances a
+# sequence, so it is true on its first call and alternates. Files are read in
+# sorted path order, and OR short-circuits, so without the guard the first
+# dt=2026-01-01 file calls it and is kept, the second calls it and is pruned,
+# and the two dt=2026-01-02 files never call it because dt already matched.
+# Exactly one file is pruned without the guard, and none with it.
+psql_run "CREATE SEQUENCE volseq;"
+psql_run "CREATE FUNCTION vol_odd() RETURNS boolean LANGUAGE sql VOLATILE
+          AS \$\$ SELECT nextval('volseq') % 2 = 1 \$\$;"
+check "a volatile clause prunes nothing" \
+	"$(pruned_for "dt = DATE '2026-01-02' OR vol_odd()")" "0"
+# and the rows that must be there regardless of the volatile half still are
+check "a volatile clause keeps every matching partition row" \
+	"$(q "SELECT count(*) FROM ev
+	      WHERE (dt = DATE '2026-01-02' OR vol_odd()) AND dt = DATE '2026-01-02';")" \
+	"2000"
+
+# A stable function stays eligible: stable is constant within a statement, which
+# is the guarantee pruning needs, so this one still prunes.
+check "a stable clause still prunes" \
+	"$(pruned_for "dt = (DATE '2026-01-02' + 0)")" "2"
+
 # ---- a tree that does not match the declaration fails loudly ---------------
 mkdir -p "$ROOT/dt=2026-01-03"
 cp "$ROOT/dt=2026-01-01/region=eu/part.parquet" "$ROOT/dt=2026-01-03/loose.parquet"
 check "a file missing a declared partition component errors" \
 	"$(errs 'SELECT count(*) FROM ev;')" "OK"
 rm -rf "$ROOT/dt=2026-01-03"
+
+# Only components between the root and the file are partition components, so a
+# file named like one does not set a column from its own basename.
+cp "$ROOT/dt=2026-01-01/region=eu/part.parquet" "$ROOT/dt=2026-01-01/region=eu/dt=1999-01-01.parquet"
+check "a file whose basename looks like a partition component is unaffected" \
+	"$(q "SELECT count(*) FROM ev WHERE dt = DATE '1999-01-01';")" "0"
+rm -f "$ROOT/dt=2026-01-01/region=eu/dt=1999-01-01.parquet"
 
 psql_run "CREATE FOREIGN TABLE ev_bad (id int, v text, dt date, region text)
           SERVER pq OPTIONS (path '$ROOT', partition_columns 'dt,nosuch');"

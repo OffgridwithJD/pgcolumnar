@@ -193,9 +193,20 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
   the `partition_columns` table option. The columns are declared, not inferred
   from the tree, and `read_parquet` has no equivalent. A value is taken from the
   directory name literally: percent-encoded characters, which Hive writes for
-  values containing a slash or an equals sign, are not decoded. A file that does
-  not carry a directory component for every declared column raises rather than
-  producing rows with nulls in the partition columns.
+  values containing a slash or an equals sign, are not decoded, and
+  `__HIVE_DEFAULT_PARTITION__`, the marker Hive and Spark write for a null
+  partition value, is not recognized (it reaches the column's input function and
+  fails there for any type that cannot parse it). A file that does not carry a
+  directory component for every declared column raises rather than producing rows
+  with nulls in the partition columns.
+- Only the directory components between the declared path and the file are read
+  as partition values, so a component above the path, or a file whose own name
+  looks like `col=value`, does not set a column.
+- A predicate that reads only partition columns prunes files, unless it contains
+  a volatile function. Pruning decides a clause once per file, which matches what
+  the executor would decide per row only when the clause is a function of the
+  partition values alone; a volatile call is not, so such a clause is left to the
+  executor and prunes nothing. Stable and immutable functions still prune.
 - `parquet_schema` describes the first file of a directory or glob, assuming the
   set is uniform. The read paths still bind every file against the declared
   columns, so a mismatched file raises rather than returning wrong rows.
