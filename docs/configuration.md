@@ -16,6 +16,7 @@ pgColumnar has two kinds of settings:
 | --- | --- | --- | --- |
 | `pgcolumnar.stripe_row_limit` | integer | `150000` | Maximum rows per row group. The row group is the unit of write and the granularity at which whole segments are appended. Range 1000 to INT_MAX. |
 | `pgcolumnar.chunk_group_row_limit` | integer | `10000` | Maximum rows per vector. The vector is the unit of encoding and of min/max skipping. Range 100 to INT_MAX. |
+| `pgcolumnar.encoding_sample_rows` | integer | `2048` | Rows sampled to choose a vector's value encoding. Candidates are estimated on a strided sample and only the best two are applied to the whole vector. `0` applies every candidate to every vector, which is what earlier versions did. Affects write speed and, in principle, compression ratio; never correctness. |
 
 ### Compression
 

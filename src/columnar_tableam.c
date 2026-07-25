@@ -45,6 +45,7 @@ PG_MODULE_MAGIC;
 /* GUC-backed instance defaults (spec 8.3) */
 int			columnar_stripe_row_limit = 150000;
 int			columnar_chunk_group_row_limit = 10000;
+int			columnar_encoding_sample_rows = 2048;
 
 int			columnar_compression = COLUMNAR_COMPRESSION_ZSTD;
 int			columnar_compression_level = 3;
@@ -1122,6 +1123,19 @@ _PG_init(void)
 							&columnar_chunk_group_row_limit,
 							10000,
 							100, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.encoding_sample_rows",
+							"Rows sampled to choose a chunk's value encoding.",
+							"Candidate encodings are estimated on a strided sample "
+							"of this many values, and only the best two are applied "
+							"to the whole chunk. 0 applies every candidate to the "
+							"whole chunk, which is what earlier versions did.",
+							&columnar_encoding_sample_rows,
+							2048,
+							0, INT_MAX,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

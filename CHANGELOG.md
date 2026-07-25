@@ -52,6 +52,10 @@ unreleased. For the forward-looking plan see
   The foreign scan skips row groups excluded by the query's predicate (min/max
   statistics) and decodes only the referenced columns; `EXPLAIN ANALYZE` reports
   the row groups and columns read and skipped and the number of files.
+- Value encodings are chosen from a strided sample rather than by applying every
+  candidate to every vector. Measured on a 6,000,000-row load: 20.9 s to 15.7 s,
+  with byte-identical output. `pgcolumnar.encoding_sample_rows` controls the
+  sample size and `0` restores the previous exhaustive selection.
 - Hive-style partitioning on the `pgcolumnar_parquet` foreign-data wrapper. A
   foreign table declaring `partition_columns` reads `col=value` directory names
   as column values, and a predicate on a partition column drops whole files
