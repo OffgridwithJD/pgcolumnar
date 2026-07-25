@@ -217,10 +217,21 @@ skipped, and only referenced columns are decoded. Skipping requires a
 constant of the same type; [limitations.md](limitations.md) lists the conditions.
 A scan that skips nothing still returns correct rows.
 
+Table options: `path`, and `partition_columns` for a Hive-style layout. The
+latter names the columns whose values come from `col=value` directory components
+rather than from the files. They are declared rather than inferred, since a wrong
+guess would silently change which rows a query returns. A predicate on a
+partition column drops whole files before they are opened, reported as
+`Files Pruned`.
+
 ```sql
 CREATE SERVER pq FOREIGN DATA WRAPPER pgcolumnar_parquet;
 CREATE FOREIGN TABLE events (id int, ts timestamp, amount numeric(12,2))
   SERVER pq OPTIONS (path '/data/events/');
+
+-- events/dt=2026-01-01/region=eu/part-0.parquet
+CREATE FOREIGN TABLE events_p (id int, amount numeric(12,2), dt date, region text)
+  SERVER pq OPTIONS (path '/data/events', partition_columns 'dt,region');
 
 SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
 

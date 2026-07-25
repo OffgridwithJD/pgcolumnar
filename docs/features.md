@@ -145,6 +145,10 @@ coverage.
   skipped, the columns read, and the number of files. Skipping applies to
   `column op constant` clauses over integer and floating-point columns; see
   [limitations.md](limitations.md) for the exact conditions.
+- Hive-style partitioning: a foreign table declaring `partition_columns` reads
+  `col=value` directory names as columns, and a predicate on one of them drops
+  whole files before they are opened, so a pruned file costs no I/O at all.
+  `EXPLAIN ANALYZE` reports `Files Pruned`.
 - uuid and numeric columns are read from their Parquet representations, and the
   reader handles millisecond, microsecond, and nanosecond time units.
 - Files are read on demand rather than loaded whole. The footer is read first,

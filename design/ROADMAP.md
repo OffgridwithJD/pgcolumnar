@@ -38,6 +38,7 @@ matrix. Gap specifications are in [gaps/](gaps/).
 | Streaming Parquet reads: footer plus one page at a time, no whole-file load, no size ceiling | Phase G |
 | DECIMAL read from INT32/INT64 as well as fixed and variable byte arrays | Phase G |
 | Recursive directory walk, depth-bounded, not following directory symlinks | Phase G |
+| Hive-style partition pruning on the FDW: declared partition_columns, whole-file pruning | Phase G |
 | **Phase G read surface complete** — external Parquet read, pushdown, multi-file, streaming, all matrix-gated | Phase G |
 
 ## Remaining
@@ -169,9 +170,10 @@ are directions to investigate and spec, not validated recommendations:
 
 - External Parquet read with predicate and projection pushdown is done (Phase G,
   see above). What remains here: ORC, open table formats (Apache Iceberg, Delta
-  Lake, Hudi), and, within Parquet, Hive-style partition pruning. Streaming reads,
-  INT32/INT64-backed DECIMAL reads, and recursive directory walks are done (see
-  Done above).
+  Lake, Hudi). Within Parquet the remaining items are percent-decoding of
+  partition values and partition inference; streaming reads, INT32/INT64-backed
+  DECIMAL reads, recursive directory walks, and Hive-style partition pruning are
+  done (see Done above).
 - Arrow C Data Interface zero-copy export, and Arrow Flight SQL or ADBC access.
 - New PostgreSQL 17-19 integration points: read stream and asynchronous IO (partly
   used), `MERGE`, incremental materialized views (pg_ivm), logical decoding of
