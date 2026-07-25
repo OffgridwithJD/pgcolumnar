@@ -28,6 +28,8 @@
  */
 #include "columnar.h"
 
+#include "miscadmin.h"
+
 #include <math.h>
 
 #include "catalog/pg_type.h"
@@ -120,6 +122,20 @@ bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 
 /* inverse of bitpack: unpack n values of `width` bits each into out[]. inLen is
  * the number of bytes available at `in`; reads past it are rejected. */
+/*
+ * How often a per-value decode loop checks for interrupts. A vector holds up to
+ * pgcolumnar.chunk_group_row_limit values, which is user-settable and unbounded,
+ * so a decode of one vector is otherwise an uninterruptible stretch proportional
+ * to that setting. The stride is a power of two so the test is a mask, and large
+ * enough that it disappears next to the per-value work.
+ */
+#define COLUMNAR_DECODE_INTERRUPT_STRIDE 65536
+#define COLUMNAR_DECODE_INTERRUPT(i) \
+	do { \
+		if (((i) & (COLUMNAR_DECODE_INTERRUPT_STRIDE - 1)) == 0) \
+			CHECK_FOR_INTERRUPTS(); \
+	} while (0)
+
 static void
 bitunpack(const unsigned char *in, uint32 inLen, uint32 n, int width,
 		  uint64 *out)
@@ -146,6 +162,7 @@ bitunpack(const unsigned char *in, uint32 inLen, uint32 n, int width,
 		uint64		v = 0;
 		int			b;
 
+		COLUMNAR_DECODE_INTERRUPT(i);
 		for (b = 0; b < width; b++)
 		{
 			if ((in[(bitpos + b) >> 3] >> ((bitpos + b) & 7)) & 1)
@@ -241,6 +258,7 @@ decode_rle(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 	{
 		uint32		run;
 
+		COLUMNAR_DECODE_INTERRUPT(produced);
 		if (p + sizeof(uint32) > end)
 			DECODE_CORRUPT("RLE run header past encoded length");
 		memcpy(&run, p, sizeof(uint32));
@@ -329,7 +347,10 @@ decode_for(const char *enc, uint32 encLen, uint32 n, uint32 rawLen,
 	vals = palloc(sizeof(uint64) * (n > 0 ? n : 1));
 	bitunpack((const unsigned char *) enc + 10, encLen - 10, n, width, vals);
 	for (i = 0; i < n; i++)
+	{
+		COLUMNAR_DECODE_INTERRUPT(i);
 		store_uint(raw + (uint64) i * w, vals[i] + minv, w);
+	}
 	pfree(vals);
 	return raw;
 }
@@ -418,6 +439,7 @@ decode_delta(const char *enc, uint32 encLen, uint32 n, uint32 rawLen,
 		store_uint(raw, cur, w);
 	for (i = 1; i < n; i++)
 	{
+		COLUMNAR_DECODE_INTERRUPT(i);
 		cur = (uint64) ((int64) cur + unzigzag(deltas[i - 1]));
 		store_uint(raw + (uint64) i * w, cur, w);
 	}
@@ -607,6 +629,7 @@ decode_gorilla(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 	{
 		uint64		v;
 
+		COLUMNAR_DECODE_INTERRUPT(i);
 		if (br_get(&br, 1) == 0)
 			v = prev;
 		else
@@ -722,6 +745,7 @@ decode_dod(const char *enc, uint32 encLen, uint32 n, uint32 rawLen,
 	delta = firstDelta;
 	for (i = 1; i < n; i++)
 	{
+		COLUMNAR_DECODE_INTERRUPT(i);
 		if (i >= 2)
 			delta += unzigzag(dods[i - 2]);
 		cur = (uint64) ((int64) cur + delta);

@@ -18,6 +18,7 @@
 #include "access/htup_details.h"
 #include "access/relscan.h"
 #include "access/tupmacs.h"
+#include "miscadmin.h"
 #include "port/atomics.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -863,6 +864,9 @@ columnar_native_load_group(ColumnarReadState *rs)
 		NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(lc);
 		char	   *base;
 
+		/* decoding a column chunk is the expensive part of loading a group */
+		CHECK_FOR_INTERRUPTS();
+
 		if (cc->columnIndex < 0 || cc->columnIndex >= rs->natts)
 			continue;
 		base = rs->nativeBuffer + (cc->pageOffset - rg->fileOffset);
@@ -1001,6 +1005,16 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 	for (;;)
 	{
 		bool		deleted;
+
+		/*
+		 * This loop can run for a long time without producing a row: it skips
+		 * whole vectors ruled out by the zone maps, skips deleted rows one at a
+		 * time, and loads group after group. The executor only reaches its own
+		 * interrupt check when a row is returned, and the vectorized aggregate
+		 * path returns exactly one row for the whole scan, so without a check
+		 * here a query is uncancellable for the length of a full scan.
+		 */
+		CHECK_FOR_INTERRUPTS();
 
 		if (rs->nativeGroup == NULL || rs->rowInGroup >= rs->groupRowCount)
 		{
