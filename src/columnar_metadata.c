@@ -109,6 +109,7 @@
 
 static Oid	columnar_schema_oid(void);
 static Relation open_columnar_table(const char *name, LOCKMODE lockmode);
+static Oid	columnar_index_oid(const char *name);
 
 /*
  * columnar_schema_oid
@@ -134,6 +135,19 @@ open_columnar_table(const char *name, LOCKMODE lockmode)
 						COLUMNAR_SCHEMA_NAME, name)));
 
 	return table_open(relOid, lockmode);
+}
+
+/*
+ * columnar_index_oid
+ *		The OID of one of the metadata indexes, by name. Returns InvalidOid when
+ *		it cannot be resolved, which callers pass through to systable_beginscan
+ *		as indexOK = false so the lookup degrades to a heap scan rather than
+ *		failing.
+ */
+static Oid
+columnar_index_oid(const char *name)
+{
+	return get_relname_relid(name, columnar_schema_oid());
 }
 
 /*
@@ -1659,6 +1673,7 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKeyData key[2];
 	SysScanDesc scan;
+	Oid			idxOid;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -1666,7 +1681,9 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_bloom_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	idxOid = columnar_index_oid("bloom_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
+							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeBloomMetadata *b = palloc0(sizeof(NativeBloomMetadata));
@@ -1708,6 +1725,7 @@ ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snapsh
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKeyData key[2];
 	SysScanDesc scan;
+	Oid			idxOid;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -1715,7 +1733,9 @@ ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snapsh
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	idxOid = columnar_index_oid("zone_map_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
+							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeZoneMapMetadata *z;
@@ -1797,6 +1817,18 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 
 	ScanKeyInit(&key[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
+	/*
+	 * Deliberately a heap scan, unlike the per-row-group readers below.
+	 * ColumnarReadRowByNumber() calls this from columnar_index_fetch_tuple(),
+	 * which btree calls from _bt_check_unique() while it holds the index page,
+	 * and it passes the synthesized snapshot from ColumnarCatalogSnapshot(): an
+	 * unregistered copy whose curcid is pushed past the current command. An
+	 * index scan under that combination spins rather than returning, and
+	 * _bt_doinsert() retries forever (test/unique_conc.sh scenario 7).
+	 *
+	 * This one is also not where the cost is: it runs once per scan rather than
+	 * once per row group, so it is linear in the row-group count either way.
+	 */
 	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
@@ -1836,6 +1868,7 @@ ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snaps
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKeyData key[2];
 	SysScanDesc scan;
+	Oid			idxOid;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -1843,7 +1876,9 @@ ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snaps
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_column_chunk_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	idxOid = columnar_index_oid("column_chunk_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
+							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeColumnChunkMetadata *cc = palloc0(sizeof(NativeColumnChunkMetadata));
@@ -1894,6 +1929,7 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKeyData key[2];
 	SysScanDesc scan;
+	Oid			idxOid;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
@@ -1901,7 +1937,9 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	idxOid = columnar_index_oid("zone_map_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
+							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeZoneMapMetadata *z;
