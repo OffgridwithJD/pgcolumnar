@@ -208,8 +208,9 @@ correct rows; these are the conditions under which it can skip at all:
   from `PREPARE`, does not drive skipping. This is deliberate: the skip set is
   computed once when the scan starts and reused across rescans.
 - The column must be stored as a Parquet INT32, INT64, FLOAT, or DOUBLE. Text,
-  bytea, uuid, numeric, and boolean columns are filtered but never skipped,
-  whatever their statistics.
+  bytea, uuid, and boolean columns are filtered but never skipped, whatever their
+  statistics. A `numeric` column follows its storage: one written as an INT32 or
+  INT64 DECIMAL does skip, one written as a byte-array DECIMAL does not.
 - The constant's type must match the column's type exactly. A cross-type
   comparison such as `ts >= DATE '2026-01-01'` against a `timestamp` column, or
   `bigint_col > 5::int`, does not skip.

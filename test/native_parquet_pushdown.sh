@@ -182,4 +182,48 @@ check "read_parquet same file == oracle" \
 	"$(pgc_set_hash "SELECT * FROM pgcolumnar.read_parquet('$PARQ') AS t(id int4, val float8)")" \
 	"$(pgc_set_hash "SELECT * FROM h")"
 
+# ---- an INT32/INT64-backed DECIMAL is skippable ----------------------------
+#
+# A numeric column is only skippable when the file stores it as an INT32 or INT64
+# DECIMAL, because those are the physical types the statistics decode from; a
+# byte-array DECIMAL is filtered but never skipped. That distinction is newly
+# reachable (a numeric target could not bind to an integer leaf before), and a
+# scan that stops skipping still returns correct rows, so without this the
+# regression would be silent.
+
+if python3 -c 'import pyarrow.parquet' 2>/dev/null; then
+	python3 - "$PGC_WORKDIR" <<'PYDEC'
+import decimal, os, sys
+import pyarrow as pa, pyarrow.parquet as pq
+W = sys.argv[1]
+# four row groups with disjoint ranges, so a predicate can exclude three
+vals = [decimal.Decimal(i) / 100 for i in range(0, 40000)]
+t = pa.table({"d": pa.array(vals, pa.decimal128(18, 2))})
+pq.write_table(t, os.path.join(W, "dec_push.parquet"),
+               store_decimal_as_integer=True, compression="none",
+               row_group_size=10000)
+f = pq.ParquetFile(os.path.join(W, "dec_push.parquet"))
+if f.metadata.row_group(0).column(0).physical_type != "INT64":
+    sys.exit("decimal was not stored as INT64")
+if f.metadata.num_row_groups != 4:
+    sys.exit("expected 4 row groups")
+PYDEC
+	if [ $? -ne 0 ]; then
+		echo "SKIP  could not build the integer-DECIMAL pushdown file"
+	else
+		psql_run "CREATE FOREIGN TABLE ftdec (d numeric) SERVER pq
+		          OPTIONS (path '$PGC_WORKDIR/dec_push.parquet');"
+		# values 0.00 .. 399.99 across four groups of 100.00 each: a range inside
+		# the second group must exclude the other three
+		check "INT64-backed DECIMAL: predicate skips 3 of 4 groups" \
+			"$(skipped_for_t ftdec "d BETWEEN 120.00 AND 130.00")" "3"
+		check "INT64-backed DECIMAL: skipping did not drop rows" \
+			"$(q 'SELECT count(*) FROM ftdec WHERE d BETWEEN 120.00 AND 130.00;')" "1001"
+		check "INT64-backed DECIMAL: unfiltered scan skips nothing" \
+			"$(skipped_for_t ftdec 'd >= 0')" "0"
+	fi
+else
+	echo "SKIP  pyarrow not available; integer-DECIMAL pushdown case skipped"
+fi
+
 pgc_summary
