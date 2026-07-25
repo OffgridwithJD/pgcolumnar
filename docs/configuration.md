@@ -35,7 +35,6 @@ pgColumnar has two kinds of settings:
 | `pgcolumnar.enable_qual_pushdown` | boolean | `on` | Push scan qualifiers down so per-chunk min and max values can skip chunk groups. |
 | `pgcolumnar.enable_vectorization` | boolean | `on` | Use the vectorized aggregate path for supported ungrouped aggregates. |
 | `pgcolumnar.enable_bloom_filter` | boolean | `on` | Skip chunk groups on equality filters using per-chunk bloom filters. |
-| `pgcolumnar.enable_metadata_count` | boolean | `on` | Answer `count(*)` from catalog metadata without scanning the table. |
 | `pgcolumnar.enable_read_stream` | boolean | `on` | Prefetch block reads with the read stream API. Effective on PostgreSQL 17 and later. |
 
 ### Index-only scan and projections
