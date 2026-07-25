@@ -1,4 +1,4 @@
-# Phase G Parquet follow-ons -- session handoff
+# Phase G Parquet follow-ons and what came after -- session handoff
 
 Written 2026-07-24, updated the same day after the streaming work merged.
 Captures the state of the Phase G external-Parquet read work so the next session
@@ -57,9 +57,42 @@ Merged across this work:
 
 Gate on both: PostgreSQL 18.4 and 19beta2, all 61 suites, no failures.
 
+## Where main is now (2026-07-25, overnight session)
+
+`main` carries everything below. The three remaining Parquet roadmap items and the
+first half of the encoding work all landed, each as its own reviewed PR:
+
+- **#120** DECIMAL held in an INT32 or INT64, with the schema advice and the bind
+  path sharing one bounds check. Review added the pushdown coverage that was
+  missing, since a numeric backed by an integer DECIMAL is skippable and a scan
+  that stops skipping still returns correct rows.
+- **#121** recursive directory walk, depth-bounded, not following directory
+  symlinks, skipping `_` and `.` entries so a Spark output tree does not read its
+  own `_temporary` staging.
+- **#122** Hive-style partition columns and whole-file pruning, declared through
+  `partition_columns` rather than inferred. Two review findings mattered: a
+  volatile function in a partition-only clause would have decided a whole file at
+  once (fixed and proven by removal), and per-file `ExecInitQual` left a
+  `SubPlanState` in a context that was reset under it.
+- **#123** the measurement that decides the encoding work: trials that lose are
+  9.0 s of a 20.8 s load, the winner's own encode is 6.6 s, so the ceiling for
+  sampling is 1.76x rather than the 4x a naive reading suggests.
+- **#124** sample-based candidate selection, `pgcolumnar.encoding_sample_rows`.
+  1.33x on write with byte-identical output on the benchmark data. The sample is
+  windowed rather than strided because striding deletes runs shorter than the
+  stride, which the review caught and which the first fixture I wrote could not
+  see.
+
 ## Open
 
-Nothing. #114 is closed by #116, and #117 landed streaming. The next substantive
+Nothing in flight. #114 is closed by #116, and #117 landed streaming.
+
+The next substantive item is cascaded encodings, step 2 of
+`CASCADE_ENCODING_PLAN.md`. It is specified in `CASCADE_FORMAT_SPEC.md` and
+**waiting on one owner decision**: whether new chunks write the version 3
+descriptor as soon as a chain is chosen, or only under a per-table option. The
+recommendation and its reasoning are in that file. No code has been written for
+it. The next substantive
 work is a roadmap choice, not a Parquet loose end; see `design/ROADMAP.md`, whose
 remaining Parquet items are Hive-style partition pruning, a recursive directory
 walk, and INT32/INT64-backed DECIMAL reads.
