@@ -46,6 +46,15 @@ typedef struct DeleteVectorBuffer
 	SubTransactionId subid;
 	List	   *chunks;			/* list of DeleteVectorChunkBuffer* */
 	List	   *rowGroupCache;	/* cached NativeRowGroupMetadata* for resolution */
+
+	/*
+	 * Last lookup results. A delete arrives in row-number order, so the previous
+	 * answer is almost always the right one; without these, each row rescans both
+	 * lists from the head, and the entry it wants is the one most recently
+	 * appended to the tail.
+	 */
+	NativeRowGroupMetadata *lastGroup;
+	DeleteVectorChunkBuffer *lastChunk;
 } DeleteVectorBuffer;
 
 static MemoryContext ColumnarDeleteVectorContext = NULL;
@@ -115,6 +124,8 @@ delete_vector_get_buffer(Relation rel, uint64 storageId)
 	buf->subid = subid;
 	buf->chunks = NIL;
 	buf->rowGroupCache = NIL;
+	buf->lastChunk = NULL;
+	buf->lastGroup = NULL;
 	ColumnarDeleteVectorBuffers = lappend(ColumnarDeleteVectorBuffers, buf);
 	MemoryContextSwitchTo(oldContext);
 
@@ -133,6 +144,11 @@ delete_vector_find_row_group(DeleteVectorBuffer *buf, uint64 rowNumber)
 	ListCell   *lc;
 	int			attempt;
 
+	if (buf->lastGroup != NULL &&
+		rowNumber >= buf->lastGroup->firstRowNumber &&
+		rowNumber < buf->lastGroup->firstRowNumber + buf->lastGroup->rowCount)
+		return buf->lastGroup;
+
 	for (attempt = 0; attempt < 2; attempt++)
 	{
 		foreach(lc, buf->rowGroupCache)
@@ -141,7 +157,10 @@ delete_vector_find_row_group(DeleteVectorBuffer *buf, uint64 rowNumber)
 
 			if (rowNumber >= g->firstRowNumber &&
 				rowNumber < g->firstRowNumber + g->rowCount)
+			{
+				buf->lastGroup = g;
 				return g;
+			}
 		}
 
 		if (attempt == 0)
@@ -151,6 +170,7 @@ delete_vector_find_row_group(DeleteVectorBuffer *buf, uint64 rowNumber)
 			Snapshot	snap = ColumnarCatalogSnapshot(GetActiveSnapshot());
 
 			buf->rowGroupCache = ColumnarReadRowGroupList(buf->storageId, snap);
+			buf->lastGroup = NULL;	/* points into the list just replaced */
 			MemoryContextSwitchTo(oldContext);
 		}
 	}
@@ -170,12 +190,20 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
 	MemoryContext oldContext;
 	DeleteVectorChunkBuffer *chunk;
 
+	chunk = buf->lastChunk;
+	if (chunk != NULL && chunk->stripeId == stripeId &&
+		chunk->chunkId == chunkId && chunk->startRowNumber == startRowNumber)
+		return chunk;
+
 	foreach(lc, buf->chunks)
 	{
 		chunk = (DeleteVectorChunkBuffer *) lfirst(lc);
 		if (chunk->stripeId == stripeId && chunk->chunkId == chunkId &&
 			chunk->startRowNumber == startRowNumber)
+		{
+			buf->lastChunk = chunk;
 			return chunk;
+		}
 	}
 
 	oldContext = MemoryContextSwitchTo(ColumnarDeleteVectorContext);
@@ -188,6 +216,7 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
 	chunk->maskLen = (uint32) ((rowCount + 7) / 8);
 	chunk->mask = palloc0(chunk->maskLen);
 	buf->chunks = lappend(buf->chunks, chunk);
+	buf->lastChunk = chunk;
 	MemoryContextSwitchTo(oldContext);
 
 	return chunk;
@@ -330,6 +359,8 @@ delete_vector_flush_buffer(DeleteVectorBuffer *buf)
 
 	buf->chunks = NIL;
 	buf->rowGroupCache = NIL;
+	buf->lastChunk = NULL;
+	buf->lastGroup = NULL;
 }
 
 /*
