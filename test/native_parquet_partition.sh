@@ -179,4 +179,67 @@ check "declaring a file column as a partition column errors" \
 	"$(errs 'SELECT count(*) FROM ev_dup;')" "OK"
 check "backend survived the bad declarations" "$(q 'SELECT 1;')" "1"
 
+# ---- Hive value encoding ---------------------------------------------------
+#
+# A path component cannot hold a slash, and an equals sign would be ambiguous
+# against the key separator, so writers percent-encode them. Reading the value
+# literally gives a different value with no error, which is why this is part of
+# reading a partition rather than a nicety. __HIVE_DEFAULT_PARTITION__ is the
+# marker Hive and Spark write when the partition value is null.
+ENC="$W/enc"
+python3 - "$ENC" <<'PYENC'
+import os, sys
+import pyarrow as pa, pyarrow.parquet as pq
+ENC = sys.argv[1]
+# region=a=b percent-encoded, and a null partition marker
+plan = [("a%3Db", 0), ("__HIVE_DEFAULT_PARTITION__", 1000), ("plain", 2000)]
+for region, base in plan:
+    d = os.path.join(ENC, "region=" + region)
+    os.makedirs(d, exist_ok=True)
+    pq.write_table(pa.table({"id": pa.array(range(base, base + 100), pa.int32())}),
+                   os.path.join(d, "part.parquet"), compression="none")
+PYENC
+
+psql_run "CREATE FOREIGN TABLE ev_enc (id int, region text)
+          SERVER pq OPTIONS (path '$ENC', partition_columns 'region');"
+
+check "a percent-encoded partition value decodes" \
+	"$(q "SELECT DISTINCT region FROM ev_enc WHERE id < 100;")" "a=b"
+check "the encoded value is queryable as itself" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = 'a=b';")" "100"
+check "__HIVE_DEFAULT_PARTITION__ reads as null" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region IS NULL;")" "100"
+check "a null partition value is not the literal marker" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = '__HIVE_DEFAULT_PARTITION__';")" "0"
+check "an unencoded value is unaffected" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = 'plain';")" "100"
+check "all three partitions still read" "$(q 'SELECT count(*) FROM ev_enc;')" "300"
+
+# A null partition value prunes like any other: IS NOT NULL excludes exactly the
+# file whose directory carries the marker.
+check "a null partition value prunes" \
+	"$(q "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	      SELECT count(*) FROM ev_enc WHERE region IS NOT NULL" \
+		| grep 'Files Pruned' | grep -oE '[0-9]+' | head -1)" "1"
+
+# Percent-encoding can carry any byte, and the value becomes a PostgreSQL text
+# datum, so two byte sequences have to be refused rather than passed through.
+# A NUL would truncate the value silently (everything downstream is a C string),
+# and a byte invalid in the server encoding would admit invalid text, which
+# textin does not check. Both are what a path written by another tool can contain.
+mkdir -p "$ENC/region=a%00b" "$ENC/region=a%FFb"
+cp "$ENC/region=plain/part.parquet" "$ENC/region=a%00b/part.parquet"
+cp "$ENC/region=plain/part.parquet" "$ENC/region=a%FFb/part.parquet"
+# The NUL case is caught by the encoding validation as well as by the explicit
+# check, so this asserts the pair rather than either one; removing the explicit
+# check leaves it passing, which was verified rather than assumed.
+check "an encoded null byte in a partition value is rejected" \
+	"$(errs 'SELECT count(*) FROM ev_enc;')" "OK"
+rm -rf "$ENC/region=a%00b"
+check "a byte invalid in the server encoding is rejected" \
+	"$(errs 'SELECT count(*) FROM ev_enc;')" "OK"
+rm -rf "$ENC/region=a%FFb"
+check "the tree reads again once both are gone" "$(q 'SELECT count(*) FROM ev_enc;')" "300"
+check "backend survived the malformed partition values" "$(q 'SELECT 1;')" "1"
+
 pgc_summary

@@ -47,6 +47,7 @@
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
@@ -2990,7 +2991,8 @@ pq_read_rows(PqFile *pf, PqSource *src,
 			 ImpTop *tops, int ntops, ImpLeaf *leaves,
 			 TupleTableSlot *slot, PqRowSink sink, void *sinkarg,
 			 const bool *skipGroup, const bool *needTop,
-			 const Datum *constVals, const bool *constHas)
+			 const Datum *constVals, const bool *constHas,
+			 const bool *constNull)
 {
 	int			natts = slot->tts_tupleDescriptor->natts;
 	MemoryContext groupCtx;
@@ -3091,8 +3093,10 @@ pq_read_rows(PqFile *pf, PqSource *src,
 				{
 					if (constHas[i])
 					{
-						slot->tts_values[i] = constVals[i];
-						slot->tts_isnull[i] = false;
+						bool		null = constNull != NULL && constNull[i];
+
+						slot->tts_values[i] = null ? (Datum) 0 : constVals[i];
+						slot->tts_isnull[i] = null;
 					}
 				}
 			}
@@ -3257,7 +3261,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 	pq_check_row_groups(&pf, path);
 	tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
-					 slot, sink, sinkarg, NULL, NULL, NULL, NULL);
+					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL);
 	pq_source_close(&src);
 	return n;
 }
@@ -3592,6 +3596,95 @@ pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
 }
 
 /*
+ * The marker Hive and Spark write for a null partition value. A directory named
+ * dt=__HIVE_DEFAULT_PARTITION__ means the column is null for those rows, not that
+ * it holds that string, and every reader in this ecosystem treats it that way.
+ */
+#define PQ_HIVE_NULL_PARTITION "__HIVE_DEFAULT_PARTITION__"
+
+/*
+ * Percent-decode a partition value.
+ *
+ * A path component cannot contain a slash, and an equals sign in a value would be
+ * ambiguous against the key separator, so writers percent-encode those and any
+ * character they consider unsafe. Decoding is therefore part of reading the value,
+ * not a nicety: a value written as a%3Db is the string "a=b", and reading it
+ * literally gives a different value with no error.
+ *
+ * Only a well-formed %XX with two hex digits is decoded. A stray percent is left
+ * alone rather than treated as an error, because a value that legitimately
+ * contains one and was written by something that does not encode is more likely
+ * than a corrupt path.
+ *
+ * Two things the decoding itself must refuse, because percent-encoding can carry
+ * any byte and the value ends up in a PostgreSQL text datum:
+ *
+ * - An embedded NUL. Everything downstream is a C string, so %00 would truncate
+ *   the value silently; for a typed column the short text usually fails to parse,
+ *   but for text or varchar it lands as a quietly different value. The explicit
+ *   check below is for the diagnosis, not the detection: pg_verifymbstr also
+ *   rejects an embedded NUL, verified by removing this check and watching the
+ *   same file fail with "invalid byte sequence for encoding UTF8: 0x00". This
+ *   message names the file and says what is wrong with it, so it is kept, but no
+ *   test can isolate it from the encoding check and none claims to.
+ * - A byte sequence invalid in the server encoding. textin does not validate
+ *   encoding, so %FF in a UTF-8 database would admit invalid text that then flows
+ *   into result sets, comparisons and indexes. PostgreSQL validates
+ *   externally-sourced text at the boundary for this reason, which is what COPY
+ *   does with pg_verifymbstr, and this is the same boundary.
+ *
+ * The hex tests are ASCII-only rather than the ctype macros, whose behaviour is
+ * locale-dependent in principle.
+ */
+static inline bool
+pq_is_hex(char c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+		(c >= 'A' && c <= 'F');
+}
+
+static inline int
+pq_hex_val(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return c - 'A' + 10;
+}
+
+static char *
+pq_percent_decode(const char *src, const char *file)
+{
+	char	   *out = palloc(strlen(src) + 1);
+	const char *in = src;
+	char	   *o = out;
+
+	while (*in != '\0')
+	{
+		if (in[0] == '%' && pq_is_hex(in[1]) && pq_is_hex(in[2]))
+		{
+			int			b = (pq_hex_val(in[1]) << 4) | pq_hex_val(in[2]);
+
+			if (b == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+						 errmsg("partition value in \"%s\" contains an encoded null byte",
+								file)));
+			*o++ = (char) b;
+			in += 3;
+		}
+		else
+			*o++ = *in++;
+	}
+	*o = '\0';
+
+	/* the same check COPY makes on text arriving from outside the server */
+	pg_verifymbstr(out, o - out, false);
+	return out;
+}
+
+/*
  * Read one file's partition values out of its path.
  *
  * Every declared partition column must appear as a `name=value` directory
@@ -3607,7 +3700,8 @@ pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
  */
 static void
 pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
-					   const bool *partMask, Datum *vals, bool *have)
+					   const bool *partMask, Datum *vals, bool *have,
+					   bool *isnull)
 {
 	size_t		rootlen = strlen(root);
 	const char *rel = file;
@@ -3634,7 +3728,10 @@ pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
 		*work = '\0';			/* the file sits directly in the root */
 
 	for (i = 0; i < tupdesc->natts; i++)
+	{
 		have[i] = false;
+		isnull[i] = false;
+	}
 
 	for (comp = strtok_r(work, "/", &save); comp != NULL;
 		 comp = strtok_r(NULL, "/", &save))
@@ -3655,12 +3752,28 @@ pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
 			if (strcmp(NameStr(att->attname), key) != 0)
 				continue;
 			{
-				Oid			infunc;
-				Oid			ioparam;
+				char	   *text = pq_percent_decode(eq + 1, file);
 
-				getTypeInputInfo(att->atttypid, &infunc, &ioparam);
-				vals[i] = OidInputFunctionCall(infunc, eq + 1, ioparam,
-											   att->atttypmod);
+				/*
+				 * The null marker is checked after decoding, so a value that
+				 * spells it out through escapes is treated the same way a writer
+				 * that emitted it plainly would be.
+				 */
+				if (strcmp(text, PQ_HIVE_NULL_PARTITION) == 0)
+				{
+					vals[i] = (Datum) 0;
+					isnull[i] = true;
+				}
+				else
+				{
+					Oid			infunc;
+					Oid			ioparam;
+
+					getTypeInputInfo(att->atttypid, &infunc, &ioparam);
+					vals[i] = OidInputFunctionCall(infunc, text, ioparam,
+												   att->atttypmod);
+					isnull[i] = false;
+				}
 				have[i] = true;
 			}
 			break;
@@ -3754,7 +3867,7 @@ pqfdw_partition_quals(ForeignScanState *node, TupleDesc tupdesc,
 static bool
 pqfdw_partition_excludes_file(ForeignScanState *node, TupleTableSlot *slot,
 							  List *partQuals, TupleDesc tupdesc,
-							  Datum *vals, bool *have)
+							  Datum *vals, bool *have, const bool *isnull)
 {
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	ListCell   *lc;
@@ -3766,8 +3879,8 @@ pqfdw_partition_excludes_file(ForeignScanState *node, TupleTableSlot *slot,
 	ExecClearTuple(slot);
 	for (i = 0; i < tupdesc->natts; i++)
 	{
-		slot->tts_values[i] = have[i] ? vals[i] : (Datum) 0;
-		slot->tts_isnull[i] = !have[i];
+		slot->tts_values[i] = (have[i] && !isnull[i]) ? vals[i] : (Datum) 0;
+		slot->tts_isnull[i] = !have[i] || isnull[i];
 	}
 	ExecStoreVirtualTuple(slot);
 
@@ -4138,6 +4251,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	int			nPart;
 	Datum	   *partVals = NULL;
 	bool	   *partHas = NULL;
+	bool	   *partNull = NULL;
 	List	   *partQuals = NIL;
 	TupleTableSlot *partSlot = NULL;
 
@@ -4202,10 +4316,11 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 		{
 			partVals = (Datum *) palloc0(sizeof(Datum) * Max(tupdesc->natts, 1));
 			partHas = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
+			partNull = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
 			pqfdw_partition_values(path, (char *) lfirst(lc), tupdesc, partMask,
-								   partVals, partHas);
+								   partVals, partHas, partNull);
 			if (pqfdw_partition_excludes_file(node, partSlot, partQuals, tupdesc,
-											  partVals, partHas))
+											  partVals, partHas, partNull))
 			{
 				st->filesPruned++;
 				MemoryContextSwitchTo(old);
@@ -4231,7 +4346,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 
 		(void) pq_read_rows(&pf, &src, tops, ntops, leaves,
 							slot, pq_tuplestore_sink, st->tupstore, skipGroup,
-							needTop, partVals, partHas);
+							needTop, partVals, partHas, partNull);
 		pq_source_close(&src);
 
 		MemoryContextSwitchTo(old);
