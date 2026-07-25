@@ -258,15 +258,24 @@ decode_rle(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 	{
 		uint32		run;
 
-		COLUMNAR_DECODE_INTERRUPT(produced);
 		if (p + sizeof(uint32) > end)
 			DECODE_CORRUPT("RLE run header past encoded length");
 		memcpy(&run, p, sizeof(uint32));
 		p += sizeof(uint32);
 		if (p + w > end)
 			DECODE_CORRUPT("RLE run value past encoded length");
+
+		/*
+		 * The check belongs in the inner loop, not the outer one. A single run
+		 * can cover the whole vector, which is the case RLE is chosen for, and
+		 * the outer loop would then run once. Testing `produced` out here is also
+		 * unsound on its own: it advances by run length rather than by one, so it
+		 * can step over every multiple of the stride and never fire again after
+		 * the first run.
+		 */
 		while (run-- > 0 && produced < n)
 		{
+			COLUMNAR_DECODE_INTERRUPT(produced);
 			memcpy(raw + (uint64) produced * w, p, w);	/* produced < n; n*w == rawLen */
 			produced++;
 		}
@@ -1062,6 +1071,8 @@ decode_alp(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 		int64		v = forBase + (int64) offs[i];
 		double		rec = (double) v * alp_F10[f] * alp_IF10[e];
 
+		COLUMNAR_DECODE_INTERRUPT(i);
+
 		if (w == 8)
 			memcpy(raw + (uint64) i * 8, &rec, 8);
 		else
@@ -1244,6 +1255,7 @@ decode_dict(const char *enc, uint32 encLen, Form_pg_attribute att, uint32 n,
 	{
 		uint32		code = (uint32) codes[i];
 
+		COLUMNAR_DECODE_INTERRUPT(i);
 		if (code >= nd)
 			DECODE_CORRUPT("DICT code out of range");
 		if (dlen[code] > rawLen - pos)	/* pos <= rawLen invariant */
