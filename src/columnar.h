@@ -147,6 +147,7 @@ typedef struct ColumnarOptions
 /* GUC-backed instance defaults (spec 8.3) */
 extern int columnar_stripe_row_limit;
 extern int columnar_chunk_group_row_limit;
+extern int columnar_encoding_sample_rows;
 extern int columnar_compression;		/* one of COLUMNAR_COMPRESSION_* */
 extern int columnar_compression_level;	/* zstd level */
 extern bool columnar_enable_qual_pushdown;

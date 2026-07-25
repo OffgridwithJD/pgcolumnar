@@ -1823,6 +1823,81 @@ ColumnarEncodingName(int encodingType)
 	}
 }
 
+
+/*
+ * Sample-based candidate selection.
+ *
+ * Applying every candidate to the whole vector and keeping the smallest is
+ * correct but wasteful: measured on a 6,000,000-row load, the trials that lose
+ * are 9.0 s of a 20.8 s load, while the winner's own encode is 6.6 s (see
+ * design/CASCADE_ENCODING_PLAN.md). Estimating on a sample and applying only the
+ * best candidates recovers most of the wasted part.
+ *
+ * The sample is WINDOWED: a number of evenly spread windows of consecutive
+ * values, rather than a prefix or a pure stride. Each shape fails differently.
+ *
+ * A prefix describes the head and not the tail: an id column's first values look
+ * perfectly delta-encodable whether or not the rest is, and a column sorted on
+ * another key has runs at the front that do not continue.
+ *
+ * A pure stride fixes that for the candidates that read a global property (delta,
+ * delta-of-delta, frame-of-reference, Gorilla all survive it up to a scale
+ * factor) but destroys the one that reads a local property. Run-length sees only
+ * runs longer than the stride, so at a 10,000-row vector and a 2048-value sample
+ * the stride is 4 and runs of two or three vanish entirely; raising
+ * chunk_group_row_limit makes the stride, and the blind spot, proportionally
+ * larger. The column would just store larger, with no error and no test failure.
+ *
+ * Windows keep both properties: spread across the whole vector, so the head does
+ * not decide, and consecutive within a window, so runs are visible at their real
+ * length and successive values are genuinely successive.
+ *
+ * Getting this wrong costs size, never correctness: whatever is chosen is applied
+ * in full and recorded per vector, and the reader decodes what the descriptor
+ * says.
+ */
+#define ENCODE_SAMPLE_WINDOW 64
+
+/*
+ * Below this many sampled values nothing can be ranked: every candidate writes a
+ * fixed header, and against a handful of values that header alone exceeds the raw
+ * size, so no candidate beats raw and the vector would be stored unencoded. A
+ * setting that small therefore means the exhaustive path, not "sample tiny": the
+ * failure mode of the alternative is a silently much larger table.
+ */
+#define ENCODE_SAMPLE_MIN 128
+
+static char *
+build_sample(const char *raw, int w, uint32 n, uint32 want, uint32 *sampleN)
+{
+	uint32		win = ENCODE_SAMPLE_WINDOW;
+	uint32		nwin;
+	uint32		i;
+	uint32		taken = 0;
+	char	   *sample;
+
+	if (want == 0 || n <= want)
+		return NULL;			/* nothing to gain */
+	if (want < win)
+		win = want;
+	nwin = want / win;
+	if (nwin < 2 || n <= win)
+		return NULL;			/* too few windows to represent the vector */
+
+	sample = palloc((Size) nwin * win * w);
+	for (i = 0; i < nwin; i++)
+	{
+		/* windows evenly spread from the first value to the last full window */
+		uint64		start = ((uint64) i * (n - win)) / (nwin - 1);
+
+		memcpy(sample + (Size) taken * w, raw + (Size) start * w,
+			   (Size) win * w);
+		taken += win;
+	}
+	*sampleN = taken;
+	return sample;
+}
+
 /*
  * ColumnarEncodeChunk
  *		Choose and apply the best lightweight encoding for one chunk's raw value
@@ -1864,6 +1939,117 @@ ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 		*out = (char *) raw;
 		*outLen = rawLen;
 		return COLUMNAR_ENCODING_NONE;
+	}
+
+	/*
+	 * Choose the candidates to apply. With sampling on and a chunk big enough to
+	 * sample, each candidate is measured on a strided sample and only the best
+	 * two are applied to the whole chunk; two rather than one because the sample
+	 * ranks closely-matched candidates unreliably, and the second application is
+	 * cheap next to the three it replaces. With sampling off, or a chunk too
+	 * small for a stride, every candidate is applied as before.
+	 */
+	if (w > 0 && columnar_encoding_sample_rows >= ENCODE_SAMPLE_MIN)
+	{
+		uint32		sampleN = 0;
+		char	   *sample = build_sample(raw, w, n,
+										  (uint32) columnar_encoding_sample_rows,
+										  &sampleN);
+
+		if (sample != NULL)
+		{
+			uint32		sampleRawLen = sampleN * (uint32) w;
+			int			cand[2] = {COLUMNAR_ENCODING_NONE, COLUMNAR_ENCODING_NONE};
+			uint32		best[2] = {sampleRawLen, sampleRawLen};
+			int			c;
+
+#define SAMPLE_TRY(code, expr) \
+			do { \
+				if (expr) \
+				{ \
+					if (len < best[0]) \
+					{ \
+						best[1] = best[0]; cand[1] = cand[0]; \
+						best[0] = len; cand[0] = (code); \
+					} \
+					else if (len < best[1]) \
+					{ \
+						best[1] = len; cand[1] = (code); \
+					} \
+					pfree(buf); \
+				} \
+			} while (0)
+
+			SAMPLE_TRY(COLUMNAR_ENCODING_RLE,
+					   encode_rle(sample, sampleRawLen, w, sampleN, &buf, &len));
+			if (is_packable_int(att))
+			{
+				SAMPLE_TRY(COLUMNAR_ENCODING_FOR,
+						   encode_for(sample, sampleRawLen, w, sampleN, &buf, &len));
+				SAMPLE_TRY(COLUMNAR_ENCODING_DELTA,
+						   encode_delta(sample, sampleRawLen, w, sampleN, &buf, &len));
+				SAMPLE_TRY(COLUMNAR_ENCODING_DOD,
+						   encode_dod(sample, sampleRawLen, w, sampleN, &buf, &len));
+			}
+			if (is_gorilla_float(att))
+			{
+				SAMPLE_TRY(COLUMNAR_ENCODING_GORILLA,
+						   encode_gorilla(sample, sampleRawLen, w, sampleN, &buf, &len));
+				SAMPLE_TRY(COLUMNAR_ENCODING_ALP,
+						   encode_alp(sample, sampleRawLen, att, sampleN, &buf, &len));
+			}
+			SAMPLE_TRY(COLUMNAR_ENCODING_DICT,
+					   encode_dict(sample, sampleRawLen, att, sampleN, &buf, &len));
+#undef SAMPLE_TRY
+			pfree(sample);
+
+			/* apply the one or two the sample liked, to the whole chunk */
+			for (c = 0; c < 2; c++)
+			{
+				bool		ok = false;
+
+				switch (cand[c])
+				{
+					case COLUMNAR_ENCODING_RLE:
+						ok = encode_rle(raw, rawLen, w, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_FOR:
+						ok = encode_for(raw, rawLen, w, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_DELTA:
+						ok = encode_delta(raw, rawLen, w, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_DOD:
+						ok = encode_dod(raw, rawLen, w, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_GORILLA:
+						ok = encode_gorilla(raw, rawLen, w, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_ALP:
+						ok = encode_alp(raw, rawLen, att, n, &buf, &len);
+						break;
+					case COLUMNAR_ENCODING_DICT:
+						ok = encode_dict(raw, rawLen, att, n, &buf, &len);
+						break;
+					default:
+						continue;
+				}
+				if (ok && len < bestLen)
+				{
+					if (bestBuf)
+						pfree(bestBuf);
+					bestCode = cand[c];
+					bestBuf = buf;
+					bestLen = len;
+				}
+				else if (ok)
+					pfree(buf);
+			}
+
+			*out = bestBuf ? bestBuf : (char *) raw;
+			*outLen = bestLen;
+			return bestCode;
+		}
 	}
 
 	/* fixed-width encodings (rle/for/delta/dod/gorilla); dict handled below */

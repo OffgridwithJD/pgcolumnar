@@ -178,4 +178,116 @@ check "fsst stores one shared table per chunk (E3b)" \
 	     -ge 1 ] && echo yes || echo no)" \
 	"yes"
 
+# ---- sample-based candidate selection --------------------------------------
+#
+# pgcolumnar.encoding_sample_rows estimates each candidate on a strided sample and
+# applies only the best two to the whole chunk, instead of applying all of them.
+# 0 restores the exhaustive behaviour. What must hold is that the choice is an
+# optimisation: the rows that come back are identical either way, whatever
+# encoding each path picks.
+
+psql_run "CREATE TABLE se_h (id bigint, k int, f float8, txt text);"
+psql_run "INSERT INTO se_h SELECT g, (g % 977)::int, (g % 313)::float8 / 7.0,
+          'v-' || (g % 4096) FROM generate_series(1, 60000) g;"
+
+psql_run "CREATE TABLE se_off (LIKE se_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 0;
+          INSERT INTO se_off SELECT * FROM se_h;"
+psql_run "CREATE TABLE se_on (LIKE se_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 2048;
+          INSERT INTO se_on SELECT * FROM se_h;"
+
+check "sampling on == heap oracle" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_on')" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_h')"
+check "sampling off == heap oracle" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_off')" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_h')"
+check "sampling changes nothing a query can see" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_on')" \
+	"$(pgc_set_hash 'SELECT id, k, f, txt FROM se_off')"
+
+# The sample is strided rather than a prefix, which matters for a column whose
+# head does not describe its tail. Here the first 20000 values are constant, so a
+# prefix sample would choose run-length encoding and then apply it to a chunk that
+# is mostly random. Assert the sampled size stays close to what exhaustive
+# selection achieves; a prefix-sampled build would be far larger.
+psql_run "CREATE TABLE se_head_h (id bigint, v bigint);"
+psql_run "INSERT INTO se_head_h
+          SELECT g, CASE WHEN g <= 20000 THEN 7
+                         ELSE (g * 2654435761) % 1000000000 END
+          FROM generate_series(1, 60000) g;"
+psql_run "CREATE TABLE se_head_off (LIKE se_head_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 0;
+          INSERT INTO se_head_off SELECT * FROM se_head_h;"
+psql_run "CREATE TABLE se_head_on (LIKE se_head_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 2048;
+          INSERT INTO se_head_on SELECT * FROM se_head_h;"
+
+check "a misleading column head does not cost much ratio" \
+	"$([ "$(q "SELECT sum(page_length) FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_head_on')
+	             AND column_index = 1;")" -le \
+	     "$(q "SELECT ((sum(page_length) * 12) / 10)::bigint FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_head_off')
+	             AND column_index = 1;")" ] && echo yes || echo no)" \
+	"yes"
+check "misleading-head column still reads back exactly" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_head_on')" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_head_h')"
+
+# Run-length reads a local property, so the sample has to preserve runs. A pure
+# stride hides any run shorter than the stride, and the stride grows with
+# chunk_group_row_limit, which users are invited to raise. At 100000 rows per
+# vector the stride for a 2048-value sample is 48, so these runs of 30 disappear
+# entirely from a strided sample while remaining the best encoding for the column
+# by a wide margin. Windows of consecutive values keep them visible.
+#
+# Verified to discriminate: with the windowed sample replaced by a pure stride,
+# this check fails.
+psql_run "CREATE TABLE se_run_h (id bigint, v bigint);"
+psql_run "INSERT INTO se_run_h SELECT g, (g / 30) % 1000 FROM generate_series(1, 200000) g;"
+psql_run "CREATE TABLE se_run_off (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.chunk_group_row_limit = 100000;
+          SET pgcolumnar.encoding_sample_rows = 0;
+          INSERT INTO se_run_off SELECT * FROM se_run_h;"
+psql_run "CREATE TABLE se_run_on (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.chunk_group_row_limit = 100000;
+          SET pgcolumnar.encoding_sample_rows = 2048;
+          INSERT INTO se_run_on SELECT * FROM se_run_h;"
+check "a run-length column is not misjudged by the sample" \
+	"$([ "$(q "SELECT sum(page_length) FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_on')
+	             AND column_index = 1;")" -le \
+	     "$(q "SELECT ((sum(page_length) * 12) / 10)::bigint FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_off')
+	             AND column_index = 1;")" ] && echo yes || echo no)" \
+	"yes"
+check "run-length column reads back exactly" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_run_on')" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_run_h')"
+
+# A sample setting too small to rank anything means the exhaustive path, not a
+# tiny sample: the alternative silently stores every large vector raw.
+psql_run "CREATE TABLE se_tiny (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 8;
+          INSERT INTO se_tiny SELECT * FROM se_run_h;"
+check "a sample setting below the floor still encodes" \
+	"$([ "$(q "SELECT sum(page_length) FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_tiny')
+	             AND column_index = 1;")" -le \
+	     "$(q "SELECT ((sum(page_length) * 12) / 10)::bigint FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_off')
+	             AND column_index = 1;")" ] && echo yes || echo no)" \
+	"yes"
+
+# A chunk smaller than the sample window has no stride to take, so it falls back
+# to applying every candidate. That path has to keep working.
+psql_run "CREATE TABLE se_small (id bigint, v bigint) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 2048;
+          INSERT INTO se_small SELECT g, g * 3 FROM generate_series(1, 500) g;"
+check "a chunk smaller than the sample window still encodes" \
+	"$(q 'SELECT count(*), sum(v) FROM se_small;' | tr '|' ' ')" \
+	"500 375750"
+
 pgc_summary

@@ -167,3 +167,31 @@ unrecognized version with a clean error. A version 3 entry carrying a chain can
 therefore coexist with 2, and an older build meets a clear error rather than a
 wrong value. The open decision is still whether new tables write version 3 by
 default or only under a per-table option.
+
+## Step 1 built (2026-07-25)
+
+`pgcolumnar.encoding_sample_rows`, default 2048. Each candidate is estimated on a
+strided sample of the vector and only the best two are applied in full. Strided
+rather than a prefix, because a prefix of a sorted or clustered column describes
+the head and not the tail.
+
+Measured on the same 6,000,000-row load, sampling off against on:
+
+| | load | stored size |
+| --- | --- | --- |
+| `encoding_sample_rows = 0` (exhaustive) | 20.9 s | 8,585,216 |
+| `encoding_sample_rows = 2048` | 15.7 s | 8,585,216 |
+
+**1.33x on write, and byte-identical output**: on this data the sample picks the
+same encodings the exhaustive search does. That is 5.2 s of the 9.0 s ceiling,
+so about 58% of the discarded-trial cost is recovered; the rest is the trials the
+sample still runs plus the second candidate applied in full.
+
+Only fixed-width columns are sampled. A varlena stream is length-prefixed, so
+striding it means walking it anyway, and its candidate set is two rather than
+five.
+
+Byte-identical output is a property of this data, not a guarantee. The suite
+therefore asserts what must always hold (the rows read back are identical either
+way) and, for a column whose head does not describe its tail, that the sampled
+size stays within 20% of exhaustive.
