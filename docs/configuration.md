@@ -2,9 +2,11 @@
 
 pgColumnar has two kinds of settings:
 
-- Server settings under the `pgcolumnar.` prefix, listed below. Each can be set in
-  `postgresql.conf`, per session with `SET`, per role, or per database. All of
-  them are `USERSET`, so a session may change them without special privileges.
+- Server settings under the `pgcolumnar.` prefix, listed below. Most can be set in
+  `postgresql.conf`, per session with `SET`, per role, or per database, without
+  special privileges. Two are not: `pgcolumnar.enable_end_truncation` requires
+  superuser, and `pgcolumnar.unique_lock_buckets` can only be set at server start.
+  Each exception is noted in its own row below.
 - Per-table storage options, set with `pgcolumnar.alter_columnar_table_set`. These
   apply to one table and are used when that table writes new data.
 
@@ -62,7 +64,7 @@ pgColumnar has two kinds of settings:
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pgcolumnar.enable_unique_insert_lock` | boolean | `on` | Serialize concurrent inserts of the same unique-index key with a transaction-scoped advisory lock, so overlapping same-key inserts conflict correctly. |
-| `pgcolumnar.unique_lock_buckets` | integer | `128` | Advisory-lock buckets per unique index. Bounds how many advisory locks a transaction holds per unique index. Equal keys always share a bucket; unrelated keys may share one, which only over-serializes. Range 1 to 1048576. |
+| `pgcolumnar.unique_lock_buckets` | integer | `128` | Advisory-lock buckets per unique index. Bounds how many advisory locks a transaction holds per unique index. Equal keys always share a bucket; unrelated keys may share one, which only over-serializes. Range 1 to 1048576. Settable only at server start: the bucket is part of the lock tag, so backends that disagree on this value would not serialize against each other. |
 
 ## Per-table storage options
 
