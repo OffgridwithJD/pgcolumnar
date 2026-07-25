@@ -106,39 +106,64 @@ justification is size and speed.
 ## Step 1 result (measured 2026-07-25)
 
 Measured on PostgreSQL 18.4, non-assert, 6,000,000 rows through a five-column
-table chosen to exercise different encoders: a sequential bigint (delta), a
-low-cardinality int (RLE, dictionary), a scattered int (nothing helps), a float
+table chosen to exercise different encoders: a sequential bigint (delta family),
+a low-cardinality int (RLE, dictionary), a scattered int (nothing helps), a float
 (Gorilla, ALP), and repetitive text (FSST). One load per build, timed end to end.
 
-Three builds, the second and third produced by patching a throwaway copy:
+Four builds, the last three produced by patching a throwaway copy rather than
+instrumenting the shipped code:
 
 | build | load | stored size |
 | --- | --- | --- |
-| baseline: try every candidate, apply the winner | 20.8 s | 8.6 MB |
-| try every candidate, then discard it and store raw | 21.2 s | 29.2 MB |
+| baseline: try every candidate, keep the winner | 20.8 s | 8.59 MB |
+| encode only the winner each column actually gets | 11.8 s | 8.59 MB |
+| try every candidate, discard it, store raw | 21.2 s | 29.2 MB |
 | skip selection entirely, store raw | 5.2 s | 29.2 MB |
+
+The winners were read from `pgcolumnar.column_chunk` after a baseline load, then
+pinned: bigint to delta-of-delta, both ints to frame-of-reference, float to
+dictionary, text to FSST. The pinned build produces a byte-identical 8,585,216,
+which is what confirms the pins really are the winners rather than a lucky guess.
 
 Subtracting:
 
-- **Trying candidates: about 16.0 s, roughly 77% of load time.**
-- **Applying the winner: about zero.** Baseline minus discard is -0.4 s, which is
-  within run-to-run noise and slightly negative for a real reason: the winning
-  encoding is 3.4x smaller, so there is less to write.
-- Encoding buys 3.4x on this data (8.6 MB against 29.2 MB), which is what the
-  cost is paying for.
+- **The winner's own encode: 6.6 s** (pinned minus no-selection).
+- **Trials that lose and are thrown away: 9.0 s** (baseline minus pinned).
+- Encoding buys 3.4x on this data (8.59 MB against 29.2 MB).
 
-**Decision: build the sampling selector.** The plan said to let the number decide,
-and the number is that essentially all of the encoding cost is candidate trials
-rather than the encoding that is kept. A selector that estimates from a bounded
-sample and then encodes only the one or two most promising candidates in full
-addresses the part that costs, and cannot affect correctness: the chosen encoding
-is recorded per chunk, so a worse choice costs size, never correctness.
+So the ceiling for a sampling selector is the 9.0 s of discarded trials, about
+**43% of load time, a 1.76x speedup**, not the 4x that comparing against the
+no-selection build would suggest. The winner still has to be encoded in full
+whatever chooses it. Sampling also is not free: estimating from a sample costs
+something, and a selector that guesses wrong pays a worse ratio.
 
-Caveats worth keeping with the numbers: single run per build, so the 2% gap
-between baseline and discard is noise rather than a measurement of the apply
-cost; the ratio that matters (4x between selection and no selection) is far
-outside any plausible noise. Data shape drives this heavily, and a table of
-incompressible columns would spend less time in candidates that bail early.
+Candidates tried per column, which is what sets that ceiling and is the number to
+re-derive if the candidate set changes:
+
+| column type | candidates | which |
+| --- | --- | --- |
+| packable int (int2/int4/int8) | 5 | RLE, FOR, delta, delta-of-delta, dictionary |
+| float4/float8 | 4 | RLE, Gorilla, ALP, dictionary |
+| other fixed-width | 2 | RLE, dictionary |
+| varlena | 2 | dictionary, FSST |
+
+**Decision: build the sampling selector.** A 1.76x ceiling on write throughput is
+worth having, the mechanism is contained, and correctness is not at stake: the
+chosen encoding is recorded per chunk, so a worse choice costs size rather than
+correctness. Size is not free either, since a larger chunk is more bytes to read
+and decompress on every scan that touches it, so a selector that trades ratio for
+load speed has to be judged on both, not just on the load number.
+
+Caveats kept with the numbers: one run per build, so the 2% gap between baseline
+and try-then-discard is noise rather than a measurement; the ratios that drive
+the decision are far outside it. Data shape drives everything here, and a table
+of incompressible columns would spend less time in candidates that bail early.
 
 Cascading (step 2) is unaffected by this result. It remains the size lever, and
-it remains a format change.
+it remains a format change, though a smaller one than the plan assumed: the
+encoding descriptor is already versioned (`COLUMNAR_NATIVE_ENCDESC_VERSION`, now
+2) with a fixed-size entry per vector, and `columnar_reader.c` rejects an
+unrecognized version with a clean error. A version 3 entry carrying a chain can
+therefore coexist with 2, and an older build meets a clear error rather than a
+wrong value. The open decision is still whether new tables write version 3 by
+default or only under a per-table option.
