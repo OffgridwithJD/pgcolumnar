@@ -52,6 +52,12 @@ unreleased. For the forward-looking plan see
   The foreign scan skips row groups excluded by the query's predicate (min/max
   statistics) and decodes only the referenced columns; `EXPLAIN ANALYZE` reports
   the row groups and columns read and skipped and the number of files.
+- Hive-style partitioning on the `pgcolumnar_parquet` foreign-data wrapper. A
+  foreign table declaring `partition_columns` reads `col=value` directory names
+  as column values, and a predicate on a partition column drops whole files
+  before they are opened, so a pruned file costs no I/O. `EXPLAIN ANALYZE`
+  reports `Files Pruned`. The columns are declared rather than inferred, and a
+  file missing a declared component raises rather than yielding nulls.
 - A directory path now reads `*.parquet` files at any depth below it, where it
   previously read only the files directly inside. Entries whose name begins with
   `_` or `.` are skipped, so a Spark or Hive output directory does not read its
