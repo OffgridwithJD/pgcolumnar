@@ -2,8 +2,8 @@
 
 A fresh-eyes audit of the whole extension by a reviewer who had not worked on it,
 carried out on 2026-07-25 against `main` at `a24155b` and tracked forward as the
-tree moved. Seven defects were found and fixed, and a larger number of areas were
-checked and found sound.
+tree moved. Eight defects were found and fixed, all of them merged as of `main`
+at `548abbb`, and a larger number of areas were checked and found sound.
 
 This document exists for the second half. The findings are already in the commit
 log; what is not recorded anywhere else is which areas were examined and came back
@@ -73,6 +73,17 @@ containing NULLs, NaN, both infinities, empty strings, `uuid`, `bytea` and
 `numeric`, with deleted rows and an index present. Zero mismatches against the
 heap oracle.
 
+One of those nine was worthless and the sweep could not tell.
+`pgcolumnar.enable_metadata_count` had been declared, registered and read by
+nothing since `881fa51`, so toggling it did nothing and that column of the matrix
+was empty. It was removed in #139 and no longer exists. The lesson generalises:
+an invariance sweep confirms a setting is honoured only if something reads it, so
+grep for the variable behind each GUC before trusting a sweep over it.
+
+`pgcolumnar.enable_vectorization` is the setting to look at first next time. It
+now selects the metadata aggregate path, and #140 and #141 changed both what that
+path costs the planner and what it reads at execution.
+
 **Transactions and DDL.** Savepoint rollback of inserts and of deletes, nested
 subtransactions with inner and outer release, update-then-delete in one
 transaction, read-your-writes, truncate rollback, add-then-drop column, and
@@ -86,8 +97,10 @@ agree afterwards, and projections are rebuilt correctly.
 **Interoperability.** Fourteen Arrow and Parquet export/import round-trips over
 the same edge-case data, all byte-identical.
 
-**Suite baseline.** All 68 suites pass on `main` on PostgreSQL 18.4. The suites
-hide nothing; every finding above is in territory they do not cover.
+**Suite baseline.** Every suite passes on `main` on PostgreSQL 18.4. The suites
+hide nothing; every finding above is in territory they do not cover. The count is
+deliberately not quoted here because it moves: this audit and the WAL discipline
+work each added one.
 
 ## Techniques that found the defects
 
@@ -131,8 +144,13 @@ ways that look like the condition under test.
 **`cmd | grep -q PATTERN && echo OK` cannot pass under `set -o pipefail`** when
 `cmd` is still writing: `grep -q` exits at the first match, the upstream takes
 SIGPIPE, and the pipeline reports failure even though the match happened. Capture
-into a variable first and match with `case`. This produced a check that could
-never pass and whose failure was indistinguishable from a real one.
+into a variable first and match with `case`.
+
+What makes this one dangerous is not that the check fails. It is that the failure
+is indistinguishable from the condition under test, so it reads as a real defect
+in the code under review. In the instance that reached `main`, the check reported
+`NO ERROR` for a `SET` that had errored exactly as required, while a debug print
+of the same command showed the error text.
 
 **A backend spinning without an interrupt check cannot be killed by terminating
 its client.** Killing psql with `timeout` leaves the backend running, so a later
@@ -160,7 +178,7 @@ audit.
 
 ## Open
 
-#136 is the only finding still unmerged.
+Nothing from this audit is unmerged.
 
 Two items were left explicitly unfixed, both recorded where they belong rather
 than here: `ANALYZE` collects no statistics (#130 documents it; implementing
