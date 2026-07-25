@@ -192,11 +192,10 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 - Hive-style partitioning is available on the foreign-data wrapper only, through
   the `partition_columns` table option. The columns are declared, not inferred
   from the tree, and `read_parquet` has no equivalent. A value is taken from the
-  directory name literally: percent-encoded characters, which Hive writes for
-  values containing a slash or an equals sign, are not decoded, and
-  `__HIVE_DEFAULT_PARTITION__`, the marker Hive and Spark write for a null
-  partition value, is not recognized (it reaches the column's input function and
-  fails there for any type that cannot parse it). A file that does not carry a
+  directory name after percent-decoding, so a value written as `a%3Db` reads as
+  `a=b`, and `__HIVE_DEFAULT_PARTITION__`, the marker Hive and Spark write for a
+  null partition value, reads as NULL rather than as that string. A file that does
+  not carry a
   directory component for every declared column raises rather than producing rows
   with nulls in the partition columns.
 - Only the directory components between the declared path and the file are read

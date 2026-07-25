@@ -179,4 +179,47 @@ check "declaring a file column as a partition column errors" \
 	"$(errs 'SELECT count(*) FROM ev_dup;')" "OK"
 check "backend survived the bad declarations" "$(q 'SELECT 1;')" "1"
 
+# ---- Hive value encoding ---------------------------------------------------
+#
+# A path component cannot hold a slash, and an equals sign would be ambiguous
+# against the key separator, so writers percent-encode them. Reading the value
+# literally gives a different value with no error, which is why this is part of
+# reading a partition rather than a nicety. __HIVE_DEFAULT_PARTITION__ is the
+# marker Hive and Spark write when the partition value is null.
+ENC="$W/enc"
+python3 - "$ENC" <<'PYENC'
+import os, sys
+import pyarrow as pa, pyarrow.parquet as pq
+ENC = sys.argv[1]
+# region=a=b percent-encoded, and a null partition marker
+plan = [("a%3Db", 0), ("__HIVE_DEFAULT_PARTITION__", 1000), ("plain", 2000)]
+for region, base in plan:
+    d = os.path.join(ENC, "region=" + region)
+    os.makedirs(d, exist_ok=True)
+    pq.write_table(pa.table({"id": pa.array(range(base, base + 100), pa.int32())}),
+                   os.path.join(d, "part.parquet"), compression="none")
+PYENC
+
+psql_run "CREATE FOREIGN TABLE ev_enc (id int, region text)
+          SERVER pq OPTIONS (path '$ENC', partition_columns 'region');"
+
+check "a percent-encoded partition value decodes" \
+	"$(q "SELECT DISTINCT region FROM ev_enc WHERE id < 100;")" "a=b"
+check "the encoded value is queryable as itself" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = 'a=b';")" "100"
+check "__HIVE_DEFAULT_PARTITION__ reads as null" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region IS NULL;")" "100"
+check "a null partition value is not the literal marker" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = '__HIVE_DEFAULT_PARTITION__';")" "0"
+check "an unencoded value is unaffected" \
+	"$(q "SELECT count(*) FROM ev_enc WHERE region = 'plain';")" "100"
+check "all three partitions still read" "$(q 'SELECT count(*) FROM ev_enc;')" "300"
+
+# A null partition value prunes like any other: IS NOT NULL excludes exactly the
+# file whose directory carries the marker.
+check "a null partition value prunes" \
+	"$(q "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	      SELECT count(*) FROM ev_enc WHERE region IS NOT NULL" \
+		| grep 'Files Pruned' | grep -oE '[0-9]+' | head -1)" "1"
+
 pgc_summary

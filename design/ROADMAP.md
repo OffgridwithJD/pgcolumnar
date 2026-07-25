@@ -170,8 +170,8 @@ are directions to investigate and spec, not validated recommendations:
 
 - External Parquet read with predicate and projection pushdown is done (Phase G,
   see above). What remains here: ORC, open table formats (Apache Iceberg, Delta
-  Lake, Hudi). Within Parquet the remaining items are percent-decoding of
-  partition values and partition inference; streaming reads, INT32/INT64-backed
+  Lake, Hudi). Within Parquet the remaining item is partition inference; streaming
+  reads, INT32/INT64-backed
   DECIMAL reads, recursive directory walks, and Hive-style partition pruning are
   done (see Done above).
 - Arrow C Data Interface zero-copy export, and Arrow Flight SQL or ADBC access.
