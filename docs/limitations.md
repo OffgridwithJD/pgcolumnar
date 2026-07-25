@@ -33,6 +33,28 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
   columns, which is proportional to rows times row group size and is not yet
   optimized.
 
+## Planner statistics
+
+`ANALYZE` does not collect column statistics for a columnar table. It reports
+success and leaves `pg_statistic` empty, so `pg_stats` shows no rows for the
+table and autoanalyze has nothing to store either.
+
+The row count the planner uses is still accurate: it comes from row-group
+metadata rather than from `ANALYZE`, so scan and join costs are sized correctly.
+What is missing is everything `ANALYZE` would otherwise provide about the values
+in a column: most-common values, histograms, distinct counts, null fraction and
+average width. Predicates on a columnar table are therefore estimated with the
+planner's defaults rather than from the data, which mostly shows up as poor
+selectivity estimates for `WHERE` clauses and as join orders chosen from default
+distinct counts.
+
+A table whose plans depend on those estimates is better served by keeping the
+filtered columns in a heap table, or by checking `EXPLAIN` output rather than
+assuming the planner knows the distribution.
+
+`TABLESAMPLE` is also unsupported, and unlike `ANALYZE` it says so: it raises an
+error rather than returning no rows.
+
 ## Vacuum and compaction
 
 - `VACUUM FULL` and `CLUSTER` are not supported on a columnar table; the
