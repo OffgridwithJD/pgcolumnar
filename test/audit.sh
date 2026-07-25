@@ -18,6 +18,11 @@
 #      out-of-range chunk_group_row_limit / stripe_row_limit / compression_level
 #      rather than store it: a zero chunk_group_row_limit records a stripe with
 #      chunk_row_count = 0 and makes delete/update/fetch divide by zero.
+#   5. A same-statement duplicate against a unique index must be caught rather
+#      than spin. The second row is inserted while the first is still buffered
+#      and unflushed, so the uniqueness check fetches a row that has no row
+#      group yet; if that fetch cannot answer, _bt_doinsert retries forever.
+#      Cheap standalone cover for what unique_conc scenario 7 exercises.
 #   4. CREATE INDEX must not leak a relation reference. A parallel index build
 #      opens a TableScanDesc per participant through columnar_scan_begin (which
 #      takes a relation reference); the index_build_range_scan callback owns that
@@ -211,6 +216,28 @@ check "create index no relation leak" "$LEAKS" "0"
 check "create index rows indexed once" \
 	"$(q "SET enable_seqscan=off; SELECT count(*) FROM idxleak WHERE a>0;")" "50000"
 q "DROP TABLE idxleak;" >/dev/null
+
+# ---------------------------------------------------------------------------
+# 5. Same-statement duplicate against a unique index: caught, not spun on.
+# ---------------------------------------------------------------------------
+# The second row is inserted while the first is still buffered and unflushed, so
+# the uniqueness check fetches a row number no row group covers yet. If that
+# fetch cannot answer, _bt_doinsert retries the same index entry forever, which
+# shows up as a backend at 100% CPU rather than as an error. The timeout is the
+# assertion: without it a regression hangs this suite instead of failing it.
+
+q "CREATE TABLE ss_dup (k int) USING pgcolumnar;" >/dev/null
+q "CREATE UNIQUE INDEX ss_dup_uidx ON ss_dup (k);" >/dev/null
+ss_out="$(run_pg "timeout 60 psql -p $PORT -d audit -qAtX -c \"INSERT INTO ss_dup SELECT 7 FROM generate_series(1,2);\" 2>&1" || true)"
+check "same-statement duplicate is rejected, not spun on" \
+	"$(case "$ss_out" in
+		*"duplicate key value"*) echo rejected ;;
+		"") echo "TIMED OUT (uniqueness check did not terminate)" ;;
+		*) echo "$ss_out" | head -1 ;;
+	esac)" "rejected"
+check "same-statement duplicate inserted nothing" \
+	"$(q "SELECT count(*) FROM ss_dup;")" "0"
+q "DROP TABLE ss_dup;" >/dev/null
 
 echo
 if [ "$fail" = "0" ]; then

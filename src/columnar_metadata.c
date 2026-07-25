@@ -1812,15 +1812,24 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	ScanKeyData key[1];
 	SysScanDesc scan;
-	Oid			idxOid;
 	HeapTuple	tuple;
 	List	   *result = NIL;
 
 	ScanKeyInit(&key[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	idxOid = columnar_index_oid("row_group_pkey");
-	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
-							  1, key);
+	/*
+	 * Deliberately a heap scan, unlike the per-row-group readers below.
+	 * ColumnarReadRowByNumber() calls this from columnar_index_fetch_tuple(),
+	 * which btree calls from _bt_check_unique() while it holds the index page,
+	 * and it passes the synthesized snapshot from ColumnarCatalogSnapshot(): an
+	 * unregistered copy whose curcid is pushed past the current command. An
+	 * index scan under that combination spins rather than returning, and
+	 * _bt_doinsert() retries forever (test/unique_conc.sh scenario 7).
+	 *
+	 * This one is also not where the cost is: it runs once per scan rather than
+	 * once per row group, so it is linear in the row-group count either way.
+	 */
+	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeRowGroupMetadata *rg = palloc0(sizeof(NativeRowGroupMetadata));
