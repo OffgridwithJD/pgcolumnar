@@ -222,4 +222,24 @@ check "a null partition value prunes" \
 	      SELECT count(*) FROM ev_enc WHERE region IS NOT NULL" \
 		| grep 'Files Pruned' | grep -oE '[0-9]+' | head -1)" "1"
 
+# Percent-encoding can carry any byte, and the value becomes a PostgreSQL text
+# datum, so two byte sequences have to be refused rather than passed through.
+# A NUL would truncate the value silently (everything downstream is a C string),
+# and a byte invalid in the server encoding would admit invalid text, which
+# textin does not check. Both are what a path written by another tool can contain.
+mkdir -p "$ENC/region=a%00b" "$ENC/region=a%FFb"
+cp "$ENC/region=plain/part.parquet" "$ENC/region=a%00b/part.parquet"
+cp "$ENC/region=plain/part.parquet" "$ENC/region=a%FFb/part.parquet"
+# The NUL case is caught by the encoding validation as well as by the explicit
+# check, so this asserts the pair rather than either one; removing the explicit
+# check leaves it passing, which was verified rather than assumed.
+check "an encoded null byte in a partition value is rejected" \
+	"$(errs 'SELECT count(*) FROM ev_enc;')" "OK"
+rm -rf "$ENC/region=a%00b"
+check "a byte invalid in the server encoding is rejected" \
+	"$(errs 'SELECT count(*) FROM ev_enc;')" "OK"
+rm -rf "$ENC/region=a%FFb"
+check "the tree reads again once both are gone" "$(q 'SELECT count(*) FROM ev_enc;')" "300"
+check "backend survived the malformed partition values" "$(q 'SELECT 1;')" "1"
+
 pgc_summary

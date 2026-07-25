@@ -19,7 +19,6 @@
  */
 #include "columnar.h"
 
-#include <ctype.h>
 #include <math.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -48,6 +47,7 @@
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
@@ -3603,7 +3603,7 @@ pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
 #define PQ_HIVE_NULL_PARTITION "__HIVE_DEFAULT_PARTITION__"
 
 /*
- * Percent-decode a partition value in place.
+ * Percent-decode a partition value.
  *
  * A path component cannot contain a slash, and an equals sign in a value would be
  * ambiguous against the key separator, so writers percent-encode those and any
@@ -3614,10 +3614,47 @@ pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
  * Only a well-formed %XX with two hex digits is decoded. A stray percent is left
  * alone rather than treated as an error, because a value that legitimately
  * contains one and was written by something that does not encode is more likely
- * than a corrupt path, and the type's input function still gets the final say.
+ * than a corrupt path.
+ *
+ * Two things the decoding itself must refuse, because percent-encoding can carry
+ * any byte and the value ends up in a PostgreSQL text datum:
+ *
+ * - An embedded NUL. Everything downstream is a C string, so %00 would truncate
+ *   the value silently; for a typed column the short text usually fails to parse,
+ *   but for text or varchar it lands as a quietly different value. The explicit
+ *   check below is for the diagnosis, not the detection: pg_verifymbstr also
+ *   rejects an embedded NUL, verified by removing this check and watching the
+ *   same file fail with "invalid byte sequence for encoding UTF8: 0x00". This
+ *   message names the file and says what is wrong with it, so it is kept, but no
+ *   test can isolate it from the encoding check and none claims to.
+ * - A byte sequence invalid in the server encoding. textin does not validate
+ *   encoding, so %FF in a UTF-8 database would admit invalid text that then flows
+ *   into result sets, comparisons and indexes. PostgreSQL validates
+ *   externally-sourced text at the boundary for this reason, which is what COPY
+ *   does with pg_verifymbstr, and this is the same boundary.
+ *
+ * The hex tests are ASCII-only rather than the ctype macros, whose behaviour is
+ * locale-dependent in principle.
  */
+static inline bool
+pq_is_hex(char c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+		(c >= 'A' && c <= 'F');
+}
+
+static inline int
+pq_hex_val(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return c - 'A' + 10;
+}
+
 static char *
-pq_percent_decode(const char *src)
+pq_percent_decode(const char *src, const char *file)
 {
 	char	   *out = palloc(strlen(src) + 1);
 	const char *in = src;
@@ -3625,21 +3662,25 @@ pq_percent_decode(const char *src)
 
 	while (*in != '\0')
 	{
-		if (in[0] == '%' && isxdigit((unsigned char) in[1]) &&
-			isxdigit((unsigned char) in[2]))
+		if (in[0] == '%' && pq_is_hex(in[1]) && pq_is_hex(in[2]))
 		{
-			int			hi = isdigit((unsigned char) in[1])
-				? in[1] - '0' : (tolower((unsigned char) in[1]) - 'a' + 10);
-			int			lo = isdigit((unsigned char) in[2])
-				? in[2] - '0' : (tolower((unsigned char) in[2]) - 'a' + 10);
+			int			b = (pq_hex_val(in[1]) << 4) | pq_hex_val(in[2]);
 
-			*o++ = (char) ((hi << 4) | lo);
+			if (b == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+						 errmsg("partition value in \"%s\" contains an encoded null byte",
+								file)));
+			*o++ = (char) b;
 			in += 3;
 		}
 		else
 			*o++ = *in++;
 	}
 	*o = '\0';
+
+	/* the same check COPY makes on text arriving from outside the server */
+	pg_verifymbstr(out, o - out, false);
 	return out;
 }
 
@@ -3711,7 +3752,7 @@ pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
 			if (strcmp(NameStr(att->attname), key) != 0)
 				continue;
 			{
-				char	   *text = pq_percent_decode(eq + 1);
+				char	   *text = pq_percent_decode(eq + 1, file);
 
 				/*
 				 * The null marker is checked after decoding, so a value that
