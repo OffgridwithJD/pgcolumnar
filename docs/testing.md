@@ -43,6 +43,7 @@ test/native_parquet_hardening.sh /path/to/pg_config  # crafted-file decode guard
 test/native_parquet_multifile.sh /path/to/pg_config  # directory and glob reads
 test/native_parquet_streaming.sh /path/to/pg_config  # page-at-a-time reads, page guards
 test/native_parquet_partition.sh /path/to/pg_config  # Hive partition columns and pruning
+test/wal_envelope.sh      /path/to/pg_config  # WAL discipline: core mechanisms only
 test/native_writer.sh    /path/to/pg_config  # native format catalog output
 test/native_roundtrip.sh /path/to/pg_config  # native write then read round-trip
 test/native_encoding.sh  /path/to/pg_config  # native per-vector encoding cascade
