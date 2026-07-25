@@ -25,6 +25,8 @@
 #     offset   -> "negative page offset is rejected by the offset check"
 #     onedict  -> "a second dictionary page in a chunk is rejected"
 #     depth    -> "a tree deeper than the bound is rejected, not truncated"
+#     partmiss -> "a file missing a declared partition component errors"
+#                 (in native_parquet_partition.sh)
 #                 (in native_parquet_multifile.sh, not the streaming suite)
 #
 # v2levels is deliberately not in that list. No behavioural check separates it:
@@ -43,6 +45,11 @@ p = os.environ.get('PGC_MUT_SRC', '/root/mut/src/columnar_parquet_reader.c')
 s = open(p).read()
 
 MUT = {
+  # partition pruning: a file missing a declared partition component must error
+  # rather than yielding rows with a null where the value should be
+  'partmiss': ("""		if (partMask[i] && !have[i])
+			ereport(ERROR,""",
+               "\t\tif (false)\n\t\t\tereport(ERROR,"),
   # the recursive walk's depth bound
   'depth': ("""	if (depth > PQ_MAX_WALK_DEPTH)
 		ereport(ERROR,

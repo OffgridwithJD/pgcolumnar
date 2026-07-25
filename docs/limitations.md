@@ -188,9 +188,14 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
   directory reached through a symbolic link is not descended, because a link to an
   ancestor would make the walk endless; a symbolic link to a file is still
   followed. Nesting deeper than 32 levels raises rather than reading part of the
-  tree. There is no Hive-style partition pruning
-  yet (directory names
-  of the form `col=value` are not exposed as columns).
+  tree.
+- Hive-style partitioning is available on the foreign-data wrapper only, through
+  the `partition_columns` table option. The columns are declared, not inferred
+  from the tree, and `read_parquet` has no equivalent. A value is taken from the
+  directory name literally: percent-encoded characters, which Hive writes for
+  values containing a slash or an equals sign, are not decoded. A file that does
+  not carry a directory component for every declared column raises rather than
+  producing rows with nulls in the partition columns.
 - `parquet_schema` describes the first file of a directory or glob, assuming the
   set is uniform. The read paths still bind every file against the declared
   columns, so a mismatched file raises rather than returning wrong rows.

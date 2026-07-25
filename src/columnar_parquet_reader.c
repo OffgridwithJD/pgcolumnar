@@ -62,6 +62,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/varlena.h"
 #include "utils/tuplestore.h"
 #include "utils/typcache.h"
 #include "utils/uuid.h"
@@ -2556,7 +2557,7 @@ typedef struct ImpTop
  */
 static ImpTop *
 build_imp_targets(TupleDesc tupdesc, PqFile *pf,
-				  ImpLeaf **pleaves, int *ntops)
+				  ImpLeaf **pleaves, int *ntops, const bool *skipAtt)
 {
 	int			natts = tupdesc->natts;
 	ImpTop	   *tops = palloc0(sizeof(ImpTop) * Max(natts, 1));
@@ -2576,6 +2577,14 @@ build_imp_targets(TupleDesc tupdesc, PqFile *pf,
 		ImpTop	   *t;
 
 		if (att->attisdropped)
+			continue;
+		/*
+		 * A column the file does not carry: a partition column, whose value comes
+		 * from the directory name rather than from any leaf. Skipping it here is
+		 * what keeps the "every leaf must be declared" identity intact, since it
+		 * consumes no leaf.
+		 */
+		if (skipAtt != NULL && skipAtt[i])
 			continue;
 		typid = att->atttypid;
 		t = &tops[nt];
@@ -2980,7 +2989,8 @@ static int64
 pq_read_rows(PqFile *pf, PqSource *src,
 			 ImpTop *tops, int ntops, ImpLeaf *leaves,
 			 TupleTableSlot *slot, PqRowSink sink, void *sinkarg,
-			 const bool *skipGroup, const bool *needTop)
+			 const bool *skipGroup, const bool *needTop,
+			 const Datum *constVals, const bool *constHas)
 {
 	int			natts = slot->tts_tupleDescriptor->natts;
 	MemoryContext groupCtx;
@@ -3068,6 +3078,24 @@ pq_read_rows(PqFile *pf, PqSource *src,
 			ExecClearTuple(slot);
 			for (i = 0; i < natts; i++)
 				slot->tts_isnull[i] = true;
+
+			/*
+			 * Columns whose value is the same for every row of this file, which
+			 * today means partition columns read from the directory names. They
+			 * are stamped before the file's own columns are decoded so a decoded
+			 * column always wins if the two ever overlap.
+			 */
+			if (constHas != NULL)
+			{
+				for (i = 0; i < natts; i++)
+				{
+					if (constHas[i])
+					{
+						slot->tts_values[i] = constVals[i];
+						slot->tts_isnull[i] = false;
+					}
+				}
+			}
 
 			rowOld = MemoryContextSwitchTo(rowCtx);
 			for (t = 0; t < ntops; t++)
@@ -3227,9 +3255,9 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 
 	pq_source_open(path, &src, &pf);
 	pq_check_row_groups(&pf, path);
-	tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops);
+	tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
-					 slot, sink, sinkarg, NULL, NULL);
+					 slot, sink, sinkarg, NULL, NULL, NULL, NULL);
 	pq_source_close(&src);
 	return n;
 }
@@ -3468,12 +3496,13 @@ typedef struct PqFdwScanState
 	int			groupsSkipped;	/* skipped by predicate pushdown */
 	int			colsTotal;		/* top-level columns (same across files) */
 	int			colsRead;		/* decoded after projection pushdown */
-	int			filesRead;		/* files the path resolved to */
+	int			filesRead;		/* files the path resolved to, after pruning */
+	int			filesPruned;	/* dropped by a partition predicate, never opened */
 }			PqFdwScanState;
 
-/* the "path" option of a foreign table, or NULL if unset */
+/* a named option of a foreign table, or NULL if unset */
 static char *
-pqfdw_get_path(Oid foreigntableid)
+pqfdw_get_option(Oid foreigntableid, const char *name)
 {
 	ForeignTable *ft = GetForeignTable(foreigntableid);
 	ListCell   *lc;
@@ -3482,10 +3511,229 @@ pqfdw_get_path(Oid foreigntableid)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
 
-		if (strcmp(def->defname, "path") == 0)
+		if (strcmp(def->defname, name) == 0)
 			return defGetString(def);
 	}
 	return NULL;
+}
+
+static char *
+pqfdw_get_path(Oid foreigntableid)
+{
+	return pqfdw_get_option(foreigntableid, "path");
+}
+
+/*
+ * Hive-style partitioning: a path like /data/events/dt=2026-01-01/region=eu/f.parquet
+ * carries column values in its directory names. The columns are DECLARED, through
+ * the partition_columns table option, rather than inferred from the tree. Inference
+ * would mean guessing which components are partitions, and a wrong guess silently
+ * changes which rows a query returns, the same reason read_parquet requires a
+ * column definition list instead of inferring one.
+ *
+ * Returns a natts-sized mask of which attributes are partition columns, and NULL
+ * when the option is unset. Unknown names are an error: a typo must not silently
+ * degrade into "no partitioning".
+ */
+static bool *
+pqfdw_partition_mask(Oid foreigntableid, TupleDesc tupdesc, int *ncols)
+{
+	char	   *raw = pqfdw_get_option(foreigntableid, "partition_columns");
+	List	   *names = NIL;
+	ListCell   *lc;
+	bool	   *mask;
+
+	*ncols = 0;
+	if (raw == NULL)
+		return NULL;
+
+	if (!SplitIdentifierString(pstrdup(raw), ',', &names))
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("\"partition_columns\" is not a valid comma-separated column list")));
+
+	mask = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
+	foreach(lc, names)
+	{
+		char	   *nm = (char *) lfirst(lc);
+		int			i;
+		bool		found = false;
+
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+			if (att->attisdropped)
+				continue;
+			if (strcmp(NameStr(att->attname), nm) == 0)
+			{
+				if (mask[i])
+					ereport(ERROR,
+							(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+							 errmsg("column \"%s\" is listed twice in \"partition_columns\"",
+									nm)));
+				mask[i] = true;
+				(*ncols)++;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" named in \"partition_columns\" does not exist",
+							nm)));
+	}
+	if (*ncols == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("\"partition_columns\" cannot be empty")));
+	return mask;
+}
+
+/*
+ * Read one file's partition values out of its path.
+ *
+ * Every declared partition column must appear as a `name=value` directory
+ * component, and a file that is missing one is an error rather than a null: a
+ * tree that does not match what the table declares is a mistake worth reporting,
+ * not rows with holes in them. Values are converted with the column's own input
+ * function, so the declared type decides what a directory name means, and a value
+ * that will not convert raises through the normal input-function error.
+ *
+ * The value text is taken literally. Hive percent-encodes characters that cannot
+ * appear in a path component, and that decoding is deliberately not done here;
+ * see the limitation in the docs.
+ */
+static void
+pqfdw_partition_values(const char *file, TupleDesc tupdesc, const bool *partMask,
+					   Datum *vals, bool *have)
+{
+	char	   *work = pstrdup(file);
+	char	   *comp;
+	char	   *save = NULL;
+	int			i;
+
+	for (i = 0; i < tupdesc->natts; i++)
+		have[i] = false;
+
+	for (comp = strtok_r(work, "/", &save); comp != NULL;
+		 comp = strtok_r(NULL, "/", &save))
+	{
+		char	   *eq = strchr(comp, '=');
+		char	   *key;
+
+		if (eq == NULL || eq == comp)
+			continue;
+		key = pnstrdup(comp, eq - comp);
+
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+			if (!partMask[i] || att->attisdropped)
+				continue;
+			if (strcmp(NameStr(att->attname), key) != 0)
+				continue;
+			{
+				Oid			infunc;
+				Oid			ioparam;
+
+				getTypeInputInfo(att->atttypid, &infunc, &ioparam);
+				vals[i] = OidInputFunctionCall(infunc, eq + 1, ioparam,
+											   att->atttypmod);
+				have[i] = true;
+			}
+			break;
+		}
+	}
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		if (partMask[i] && !have[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
+					 errmsg("file \"%s\" has no \"%s=\" directory component",
+							file, NameStr(TupleDescAttr(tupdesc, i)->attname)),
+					 errhint("Every file under a partitioned path must carry a directory component for each column in \"partition_columns\".")));
+	}
+}
+
+/*
+ * Whether the scan's quals exclude this file outright, given its partition values.
+ *
+ * A clause that reads only partition columns is decided completely by those
+ * values, so it is evaluated directly rather than reasoned about: that gets every
+ * operator, IN lists, and expressions for free, and cannot disagree with what the
+ * executor would decide about the same rows. Clauses that touch a file column are
+ * left alone; they are row-group skipping's business.
+ *
+ * Pruning happens before the file is opened, so a pruned file costs no I/O at all.
+ */
+static bool
+pqfdw_partition_excludes_file(ForeignScanState *node, TupleDesc tupdesc,
+							  const bool *partMask, Datum *vals, bool *have)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	TupleTableSlot *slot;
+	ListCell   *lc;
+	bool		excluded = false;
+	int			i;
+
+	if (fs->scan.plan.qual == NIL)
+		return false;
+
+	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	ExecClearTuple(slot);
+	for (i = 0; i < tupdesc->natts; i++)
+		slot->tts_isnull[i] = true;
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		if (have[i])
+		{
+			slot->tts_values[i] = vals[i];
+			slot->tts_isnull[i] = false;
+		}
+	}
+	ExecStoreVirtualTuple(slot);
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+		Bitmapset  *attrs = NULL;
+		bool		partitionOnly = true;
+		int			x = -1;
+		ExprState  *state;
+
+		pull_varattnos(clause, fs->scan.scanrelid, &attrs);
+		if (bms_is_empty(attrs))
+			continue;			/* no columns at all: not ours to decide */
+		while ((x = bms_next_member(attrs, x)) >= 0)
+		{
+			int			attno = x + FirstLowInvalidHeapAttributeNumber;
+
+			/* whole-row or system column: cannot be decided from the path */
+			if (attno < 1 || attno > tupdesc->natts || !partMask[attno - 1])
+			{
+				partitionOnly = false;
+				break;
+			}
+		}
+		if (!partitionOnly)
+			continue;
+
+		state = ExecInitQual(list_make1(clause), (PlanState *) node);
+		econtext->ecxt_scantuple = slot;
+		if (!ExecQual(state, econtext))
+		{
+			excluded = true;
+			break;
+		}
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	return excluded;
 }
 
 static void
@@ -3842,6 +4090,10 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	List	   *files;
 	ListCell   *lc;
 	MemoryContext fileCtx;
+	bool	   *partMask;
+	int			nPart;
+	Datum	   *partVals = NULL;
+	bool	   *partHas = NULL;
 
 	/* nothing to do for a plan-only (EXPLAIN without ANALYZE) invocation */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -3860,12 +4112,12 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 						RelationGetRelationName(rel))));
 
 	files = pq_resolve_paths(path);
+	partMask = pqfdw_partition_mask(RelationGetRelid(rel), tupdesc, &nPart);
 
 	st = (PqFdwScanState *) palloc0(sizeof(PqFdwScanState));
 	/* randomAccess so ReScan can rewind the materialized rows */
 	st->tupstore = tuplestore_begin_heap(true, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
-	st->filesRead = list_length(files);
 
 	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 
@@ -3889,9 +4141,31 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 		int			ntops;
 		bool	   *skipGroup;
 
+		/*
+		 * Partition pruning, before the file is opened: a file whose directory
+		 * values fail a partition-only qual costs no I/O at all, which is what
+		 * makes this cheaper than row-group skipping rather than a variant of it.
+		 */
+		if (partMask != NULL)
+		{
+			partVals = (Datum *) palloc0(sizeof(Datum) * Max(tupdesc->natts, 1));
+			partHas = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
+			pqfdw_partition_values((char *) lfirst(lc), tupdesc, partMask,
+								   partVals, partHas);
+			if (pqfdw_partition_excludes_file(node, tupdesc, partMask,
+											  partVals, partHas))
+			{
+				st->filesPruned++;
+				MemoryContextSwitchTo(old);
+				MemoryContextReset(fileCtx);
+				continue;
+			}
+		}
+
+		st->filesRead++;
 		pq_source_open((char *) lfirst(lc), &src, &pf);
 		pq_check_row_groups(&pf, (char *) lfirst(lc));
-		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops);
+		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, partMask);
 
 		/* projection: decode only referenced columns (same set each file) */
 		needTop = pqfdw_compute_needed(node, tops, ntops, &nNeeded);
@@ -3905,7 +4179,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 
 		(void) pq_read_rows(&pf, &src, tops, ntops, leaves,
 							slot, pq_tuplestore_sink, st->tupstore, skipGroup,
-							needTop);
+							needTop, partVals, partHas);
 		pq_source_close(&src);
 
 		MemoryContextSwitchTo(old);
@@ -3996,6 +4270,8 @@ pqfdwExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	ExplainPropertyInteger("Columns Read", NULL, st->colsRead, es);
 	ExplainPropertyInteger("Columns Total", NULL, st->colsTotal, es);
 	ExplainPropertyInteger("Files", NULL, st->filesRead, es);
+	if (st->filesPruned > 0)
+		ExplainPropertyInteger("Files Pruned", NULL, st->filesPruned, es);
 }
 
 Datum
@@ -4037,11 +4313,26 @@ pgcolumnar_parquet_fdw_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 						 errmsg("\"path\" option cannot be empty")));
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, "partition_columns") == 0)
+		{
+			List	   *names = NIL;
+
+			if (defGetString(def)[0] == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"partition_columns\" option cannot be empty")));
+			if (!SplitIdentifierString(pstrdup(defGetString(def)), ',', &names) ||
+				names == NIL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"partition_columns\" is not a valid comma-separated column list")));
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid option \"%s\"", def->defname),
-					 errhint("The pgcolumnar_parquet wrapper accepts only the foreign-table option \"path\".")));
+					 errhint("The pgcolumnar_parquet wrapper accepts the foreign-table options \"path\" and \"partition_columns\".")));
 	}
 
 	PG_RETURN_VOID();
