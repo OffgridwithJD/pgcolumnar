@@ -128,6 +128,12 @@ run_pg "echo \"listen_addresses=''\" >> '$PGDATA/postgresql.conf'"
 run_pg "echo \"unix_socket_directories='$WORKDIR'\" >> '$PGDATA/postgresql.conf'"
 # Cap any real hang so a bug cannot masquerade as a pass by blocking forever.
 run_pg "echo \"lock_timeout=60000\" >> '$PGDATA/postgresql.conf'"
+# The bucket count is part of the advisory lock tag, so it is fixed at server
+# start rather than set per session: two backends that disagreed would hash the
+# same key to different buckets and not serialize at all. A large prime keeps
+# unrelated keys out of the same bucket, so a serialization this suite observes
+# is the real guarantee and not two keys colliding into one lock.
+run_pg "echo \"pgcolumnar.unique_lock_buckets=100003\" >> '$PGDATA/postgresql.conf'"
 echo "-- start"
 run_pg "pg_ctl -D '$PGDATA' -l '$LOGFILE' start -w" >/dev/null
 run_pg "createdb -h '$WORKDIR' -p $PORT uconc"
@@ -135,6 +141,9 @@ run_pg "createdb -h '$WORKDIR' -p $PORT uconc"
 PSQL="psql -h '$WORKDIR' -p $PORT -d uconc -qAtX -v ON_ERROR_STOP=1"
 SPSQL="psql -h '$WORKDIR' -p $PORT -d uconc -qAtX"
 ctl_q() { run_pg "$PSQL -c \"$1\""; }
+# Same, but keeps going on error and captures the message, for checks whose
+# subject is the error itself.
+ctl_qe() { run_pg "$SPSQL -c \"$1\" 2>&1"; }
 
 fail=0
 check() {  # name got want
@@ -240,17 +249,19 @@ start_session s2
 start_session sh   # holder of the mid-statement pause lock
 send s1 "SET application_name='cc_s1';"
 send s2 "SET application_name='cc_s2';"
-# The bucket count is part of the advisory lock tag, so it is fixed at server
-# start rather than set per session: two backends that disagreed would hash the
-# same key to different buckets and not serialize at all. pgc_setup puts the
-# large prime that avoids false bucket sharing into postgresql.conf, and the
-# check below pins that a session cannot change it out from under the guarantee.
+# This suite's cluster is started with the large prime above. Pin both halves of
+# what that buys: a session cannot change the count out from under the advisory
+# lock tag, and the cluster really is running the count the suite needs.
+# The output is captured before it is matched: piping ctl_qe straight into
+# grep -q makes grep exit on the first match, the psql upstream take SIGPIPE,
+# and the pipeline report failure under `set -o pipefail` even though the
+# message was there, which turns this into a check that can never pass.
+bucket_set_err="$(ctl_qe 'SET pgcolumnar.unique_lock_buckets = 1;')"
 check "the bucket count cannot be changed per session" \
-	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-		-d "$PGC_DB" -At -c 'SET pgcolumnar.unique_lock_buckets = 1;' 2>&1 |
+	"$(echo "$bucket_set_err" |
 		grep -qE 'ERROR:.*cannot be changed' && echo OK || echo "NO ERROR")" "OK"
 check "the cluster runs the bucket count the suite needs" \
-	"$(q 'SHOW pgcolumnar.unique_lock_buckets;')" "100003"
+	"$(ctl_q 'SHOW pgcolumnar.unique_lock_buckets;')" "100003"
 
 HKEY=1000   # holder advisory-lock key, unique per pause
 
