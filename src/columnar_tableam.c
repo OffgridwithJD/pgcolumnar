@@ -1129,10 +1129,13 @@ _PG_init(void)
 
 	DefineCustomIntVariable("pgcolumnar.encoding_sample_rows",
 							"Rows sampled to choose a chunk's value encoding.",
-							"Candidate encodings are estimated on a strided sample "
+							"Candidate encodings are estimated on a windowed sample "
 							"of this many values, and only the best two are applied "
-							"to the whole chunk. 0 applies every candidate to the "
-							"whole chunk, which is what earlier versions did.",
+							"to the whole vector. 0 applies every candidate to the "
+							"whole vector, which is what earlier versions did. A "
+							"value below 128 is treated as 0, because a sample that "
+							"small cannot rank candidates: every candidate's fixed "
+							"header would exceed the sample itself.",
 							&columnar_encoding_sample_rows,
 							2048,
 							0, INT_MAX,

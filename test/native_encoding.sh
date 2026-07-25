@@ -236,6 +236,51 @@ check "misleading-head column still reads back exactly" \
 	"$(pgc_set_hash 'SELECT id, v FROM se_head_on')" \
 	"$(pgc_set_hash 'SELECT id, v FROM se_head_h')"
 
+# Run-length reads a local property, so the sample has to preserve runs. A pure
+# stride hides any run shorter than the stride, and the stride grows with
+# chunk_group_row_limit, which users are invited to raise. At 100000 rows per
+# vector the stride for a 2048-value sample is 48, so these runs of 30 disappear
+# entirely from a strided sample while remaining the best encoding for the column
+# by a wide margin. Windows of consecutive values keep them visible.
+#
+# Verified to discriminate: with the windowed sample replaced by a pure stride,
+# this check fails.
+psql_run "CREATE TABLE se_run_h (id bigint, v bigint);"
+psql_run "INSERT INTO se_run_h SELECT g, (g / 30) % 1000 FROM generate_series(1, 200000) g;"
+psql_run "CREATE TABLE se_run_off (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.chunk_group_row_limit = 100000;
+          SET pgcolumnar.encoding_sample_rows = 0;
+          INSERT INTO se_run_off SELECT * FROM se_run_h;"
+psql_run "CREATE TABLE se_run_on (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.chunk_group_row_limit = 100000;
+          SET pgcolumnar.encoding_sample_rows = 2048;
+          INSERT INTO se_run_on SELECT * FROM se_run_h;"
+check "a run-length column is not misjudged by the sample" \
+	"$([ "$(q "SELECT sum(page_length) FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_on')
+	             AND column_index = 1;")" -le \
+	     "$(q "SELECT ((sum(page_length) * 12) / 10)::bigint FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_off')
+	             AND column_index = 1;")" ] && echo yes || echo no)" \
+	"yes"
+check "run-length column reads back exactly" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_run_on')" \
+	"$(pgc_set_hash 'SELECT id, v FROM se_run_h')"
+
+# A sample setting too small to rank anything means the exhaustive path, not a
+# tiny sample: the alternative silently stores every large vector raw.
+psql_run "CREATE TABLE se_tiny (LIKE se_run_h) USING pgcolumnar;"
+psql_run "SET pgcolumnar.encoding_sample_rows = 8;
+          INSERT INTO se_tiny SELECT * FROM se_run_h;"
+check "a sample setting below the floor still encodes" \
+	"$([ "$(q "SELECT sum(page_length) FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_tiny')
+	             AND column_index = 1;")" -le \
+	     "$(q "SELECT ((sum(page_length) * 12) / 10)::bigint FROM pgcolumnar.column_chunk
+	           WHERE storage_id = pgcolumnar.get_storage_id('se_run_off')
+	             AND column_index = 1;")" ] && echo yes || echo no)" \
+	"yes"
+
 # A chunk smaller than the sample window has no stride to take, so it falls back
 # to applying every candidate. That path has to keep working.
 psql_run "CREATE TABLE se_small (id bigint, v bigint) USING pgcolumnar;"

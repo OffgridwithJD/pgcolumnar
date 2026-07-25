@@ -1827,41 +1827,74 @@ ColumnarEncodingName(int encodingType)
 /*
  * Sample-based candidate selection.
  *
- * Applying every candidate to the whole chunk and keeping the smallest is
+ * Applying every candidate to the whole vector and keeping the smallest is
  * correct but wasteful: measured on a 6,000,000-row load, the trials that lose
  * are 9.0 s of a 20.8 s load, while the winner's own encode is 6.6 s (see
- * design/CASCADE_ENCODING_PLAN.md). Estimating on a sample and then applying only
- * the best candidates recovers most of the wasted part.
+ * design/CASCADE_ENCODING_PLAN.md). Estimating on a sample and applying only the
+ * best candidates recovers most of the wasted part.
  *
- * The sample is STRIDED, not a prefix. A prefix of a sorted or clustered column
- * says nothing about the rest of it: an id column's first 2048 values look
- * perfectly delta-encodable whether or not the tail is, and a column that is
- * sorted by another key has runs at the front that do not continue. Striding
- * costs one multiply per value and removes that whole class of misjudgement.
+ * The sample is WINDOWED: a number of evenly spread windows of consecutive
+ * values, rather than a prefix or a pure stride. Each shape fails differently.
  *
- * Only fixed-width columns are sampled. A varlena stream is a length-prefixed
- * sequence, so a strided sample means walking it anyway, and its candidate set is
- * two (dictionary, FSST) rather than five, so there is little to win.
+ * A prefix describes the head and not the tail: an id column's first values look
+ * perfectly delta-encodable whether or not the rest is, and a column sorted on
+ * another key has runs at the front that do not continue.
+ *
+ * A pure stride fixes that for the candidates that read a global property (delta,
+ * delta-of-delta, frame-of-reference, Gorilla all survive it up to a scale
+ * factor) but destroys the one that reads a local property. Run-length sees only
+ * runs longer than the stride, so at a 10,000-row vector and a 2048-value sample
+ * the stride is 4 and runs of two or three vanish entirely; raising
+ * chunk_group_row_limit makes the stride, and the blind spot, proportionally
+ * larger. The column would just store larger, with no error and no test failure.
+ *
+ * Windows keep both properties: spread across the whole vector, so the head does
+ * not decide, and consecutive within a window, so runs are visible at their real
+ * length and successive values are genuinely successive.
  *
  * Getting this wrong costs size, never correctness: whatever is chosen is applied
- * in full and recorded per chunk, and the reader decodes what the descriptor says.
+ * in full and recorded per vector, and the reader decodes what the descriptor
+ * says.
  */
+#define ENCODE_SAMPLE_WINDOW 64
+
+/*
+ * Below this many sampled values nothing can be ranked: every candidate writes a
+ * fixed header, and against a handful of values that header alone exceeds the raw
+ * size, so no candidate beats raw and the vector would be stored unencoded. A
+ * setting that small therefore means the exhaustive path, not "sample tiny": the
+ * failure mode of the alternative is a silently much larger table.
+ */
+#define ENCODE_SAMPLE_MIN 128
+
 static char *
 build_sample(const char *raw, int w, uint32 n, uint32 want, uint32 *sampleN)
 {
-	uint32		stride;
+	uint32		win = ENCODE_SAMPLE_WINDOW;
+	uint32		nwin;
 	uint32		i;
+	uint32		taken = 0;
 	char	   *sample;
 
 	if (want == 0 || n <= want)
 		return NULL;			/* nothing to gain */
-	stride = n / want;
-	if (stride < 2)
-		return NULL;
-	*sampleN = want;
-	sample = palloc((Size) want * w);
-	for (i = 0; i < want; i++)
-		memcpy(sample + (Size) i * w, raw + (Size) (i * stride) * w, w);
+	if (want < win)
+		win = want;
+	nwin = want / win;
+	if (nwin < 2 || n <= win)
+		return NULL;			/* too few windows to represent the vector */
+
+	sample = palloc((Size) nwin * win * w);
+	for (i = 0; i < nwin; i++)
+	{
+		/* windows evenly spread from the first value to the last full window */
+		uint64		start = ((uint64) i * (n - win)) / (nwin - 1);
+
+		memcpy(sample + (Size) taken * w, raw + (Size) start * w,
+			   (Size) win * w);
+		taken += win;
+	}
+	*sampleN = taken;
 	return sample;
 }
 
@@ -1916,7 +1949,7 @@ ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 	 * cheap next to the three it replaces. With sampling off, or a chunk too
 	 * small for a stride, every candidate is applied as before.
 	 */
-	if (w > 0 && columnar_encoding_sample_rows > 0)
+	if (w > 0 && columnar_encoding_sample_rows >= ENCODE_SAMPLE_MIN)
 	{
 		uint32		sampleN = 0;
 		char	   *sample = build_sample(raw, w, n,
