@@ -45,6 +45,7 @@ test/native_parquet_streaming.sh /path/to/pg_config  # page-at-a-time reads, pag
 test/native_parquet_partition.sh /path/to/pg_config  # Hive partition columns and pruning
 test/native_cancel.sh    /path/to/pg_config  # scan cancellation during a group load
 test/wal_envelope.sh     /path/to/pg_config  # WAL discipline: core mechanisms only
+test/decode_interrupts.sh /path/to/pg_config  # decode path stays interruptible
 test/native_writer.sh    /path/to/pg_config  # native format catalog output
 test/native_roundtrip.sh /path/to/pg_config  # native write then read round-trip
 test/native_encoding.sh  /path/to/pg_config  # native per-vector encoding cascade
