@@ -102,3 +102,43 @@ they compare against a heap oracle and will catch a cascade that decodes to the
 wrong values. A full 15 through 19 matrix before the format change merges, and the
 6M-row benchmark re-run with before and after numbers in the PR, since the whole
 justification is size and speed.
+
+## Step 1 result (measured 2026-07-25)
+
+Measured on PostgreSQL 18.4, non-assert, 6,000,000 rows through a five-column
+table chosen to exercise different encoders: a sequential bigint (delta), a
+low-cardinality int (RLE, dictionary), a scattered int (nothing helps), a float
+(Gorilla, ALP), and repetitive text (FSST). One load per build, timed end to end.
+
+Three builds, the second and third produced by patching a throwaway copy:
+
+| build | load | stored size |
+| --- | --- | --- |
+| baseline: try every candidate, apply the winner | 20.8 s | 8.6 MB |
+| try every candidate, then discard it and store raw | 21.2 s | 29.2 MB |
+| skip selection entirely, store raw | 5.2 s | 29.2 MB |
+
+Subtracting:
+
+- **Trying candidates: about 16.0 s, roughly 77% of load time.**
+- **Applying the winner: about zero.** Baseline minus discard is -0.4 s, which is
+  within run-to-run noise and slightly negative for a real reason: the winning
+  encoding is 3.4x smaller, so there is less to write.
+- Encoding buys 3.4x on this data (8.6 MB against 29.2 MB), which is what the
+  cost is paying for.
+
+**Decision: build the sampling selector.** The plan said to let the number decide,
+and the number is that essentially all of the encoding cost is candidate trials
+rather than the encoding that is kept. A selector that estimates from a bounded
+sample and then encodes only the one or two most promising candidates in full
+addresses the part that costs, and cannot affect correctness: the chosen encoding
+is recorded per chunk, so a worse choice costs size, never correctness.
+
+Caveats worth keeping with the numbers: single run per build, so the 2% gap
+between baseline and discard is noise rather than a measurement of the apply
+cost; the ratio that matters (4x between selection and no selection) is far
+outside any plausible noise. Data shape drives this heavily, and a table of
+incompressible columns would spend less time in candidates that bail early.
+
+Cascading (step 2) is unaffected by this result. It remains the size lever, and
+it remains a format change.
