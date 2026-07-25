@@ -2,9 +2,11 @@
 
 pgColumnar has two kinds of settings:
 
-- Server settings under the `pgcolumnar.` prefix, listed below. Each can be set in
-  `postgresql.conf`, per session with `SET`, per role, or per database. All of
-  them are `USERSET`, so a session may change them without special privileges.
+- Server settings under the `pgcolumnar.` prefix, listed below. Most can be set in
+  `postgresql.conf`, per session with `SET`, per role, or per database, without
+  special privileges. Two are not: `pgcolumnar.enable_end_truncation` requires
+  superuser, and `pgcolumnar.unique_lock_buckets` can only be set at server start.
+  Each exception is noted in its own row below.
 - Per-table storage options, set with `pgcolumnar.alter_columnar_table_set`. These
   apply to one table and are used when that table writes new data.
 
