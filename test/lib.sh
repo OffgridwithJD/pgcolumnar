@@ -347,8 +347,14 @@ pgc_summary() {
 		echo "$(basename "$0"): PASSED"
 	else
 		echo "$(basename "$0"): FAILED"
-		echo "---- server log tail ----"
-		pgc_pg "tail -40 '$PGC_LOGFILE'" 2>/dev/null || true
+		# A source-shape suite (wal_envelope, decode_interrupts) never calls
+		# pgc_setup, so there is no cluster and no log. Without this guard the
+		# summary dies on an unset PGC_LOGFILE under `set -u` and the suite
+		# reports "unbound variable" instead of which check failed.
+		if [ -n "${PGC_LOGFILE:-}" ]; then
+			echo "---- server log tail ----"
+			pgc_pg "tail -40 '$PGC_LOGFILE'" 2>/dev/null || true
+		fi
 	fi
 	exit $PGC_FAIL
 }
