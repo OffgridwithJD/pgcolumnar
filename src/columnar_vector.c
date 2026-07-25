@@ -36,6 +36,8 @@
  */
 #include "columnar.h"
 
+#include <math.h>
+
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/pg_aggregate.h"
@@ -57,8 +59,10 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
+#include "optimizer/cost.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/builtins.h"
+#include "utils/snapmgr.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
@@ -696,11 +700,83 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	cpath->path.rows = 1;
 
 	/*
-	 * The bare scan cost, with no per-tuple aggregate overhead: strictly cheaper
-	 * than any Agg-over-scan path, so the planner prefers this one.
+	 * Cost what this path actually reads.
+	 *
+	 * Pricing it at the cheapest scan's cost, as this did, is not merely
+	 * pessimistic: it loses. A parallel Agg divides that same scan cost across
+	 * workers and comes out cheaper, so the planner reads the whole table to
+	 * compute what this path takes from row-group metadata (issue #133).
+	 *
+	 * With no delete vector the executor answers every aggregate from that
+	 * metadata and reads no data pages, so the work is one metadata entry per row
+	 * group. With deletes it falls back to a real scan that applies the delete
+	 * mask, and the scan cost is the right price. The probe below asks the same
+	 * question execution asks; if the answer changes between planning and
+	 * execution the plan is mispriced, never wrong.
 	 */
-	cpath->path.startup_cost = cheapest->total_cost;
-	cpath->path.total_cost = cheapest->total_cost;
+	{
+		bool		hasDeletes = true;
+		Snapshot	snap = GetActiveSnapshot();
+
+		if (snap != NULL)
+		{
+			Relation	frel = table_open(relid, AccessShareLock);
+
+			hasDeletes =
+				ColumnarStorageHasDeleteVector(ColumnarStorageId(frel),
+											   ColumnarCatalogSnapshot(snap));
+			table_close(frel, AccessShareLock);
+		}
+
+		if (hasDeletes)
+		{
+			cpath->path.startup_cost = cheapest->total_cost;
+			cpath->path.total_cost = cheapest->total_cost;
+		}
+		else
+		{
+			ColumnarOptions opts;
+			int			limit = columnar_chunk_group_row_limit;
+			double		rows = input_rel->tuples;
+			double		ngroups;
+			Cost		cost;
+
+			/* the table's own limit when it sets one, else the GUC default */
+			if (ColumnarReadOptions(relid, &opts) &&
+				opts.chunkGroupRowLimitSet && opts.chunkGroupRowLimit > 0)
+				limit = opts.chunkGroupRowLimit;
+			if (limit <= 0)
+				limit = 1;
+
+			/*
+			 * A never-analyzed relation has no row estimate. Deriving one from
+			 * the page count keeps the cost tied to something real, so a missing
+			 * estimate cannot make this path look free.
+			 */
+			if (rows < 0)
+				rows = (input_rel->pages > 0)
+					? (double) input_rel->pages * 100.0
+					: 1000.0;
+			ngroups = ceil(rows / (double) limit);
+			if (ngroups < 1)
+				ngroups = 1;
+
+			cost = cpu_tuple_cost * 10;		/* getting to the catalog */
+			cost += ngroups * (cpu_tuple_cost +
+							   cpu_operator_cost * (double) naggs);
+
+			/* reading metadata is never dearer than reading the table */
+			if (cost > cheapest->total_cost)
+				cost = cheapest->total_cost;
+
+			/*
+			 * One row comes out, and only after every row group is folded in, so
+			 * there is no partial result to start up cheaply with.
+			 */
+			cpath->path.startup_cost = cost;
+			cpath->path.total_cost = cost;
+		}
+	}
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
