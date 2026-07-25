@@ -365,10 +365,11 @@ diff_query "wide most"     "SELECT id, a FROM %T WHERE sel > 100"
 # ---------------------------------------------------------------------------
 # Part 7: covering count(*) from metadata (gap 28)
 #
-# count(*) with no filter is answered from the catalog (visible stripe row
-# counts minus visible row-mask deletes), skipping the data scan. It must equal
-# the heap oracle after inserts, deletes, and updates, whether the metadata path
-# is on or off; and with it on, EXPLAIN ANALYZE shows no chunk groups scanned.
+# count(*) with no filter is answered from each row group's stored row count
+# (minus visible row-mask deletes), skipping the data scan. It must equal the
+# heap oracle after inserts, deletes, and updates, whether that path is taken or
+# not, so the loop below runs it both ways through
+# pgcolumnar.enable_vectorization, which is the switch that selects it.
 # ---------------------------------------------------------------------------
 echo "-- part 7: covering count(*)"
 
@@ -381,10 +382,10 @@ psql_run "UPDATE t_heap SET v = v + 1 WHERE id % 17 = 0;"
 psql_run "UPDATE t_col  SET v = v + 1 WHERE id % 17 = 0;"
 
 for mode in on off; do
-	q "ALTER DATABASE $PGC_DB SET pgcolumnar.enable_metadata_count=$mode;" >/dev/null
+	q "ALTER DATABASE $PGC_DB SET pgcolumnar.enable_vectorization=$mode;" >/dev/null
 	diff_query "count meta=$mode" "SELECT count(*) FROM %T"
 done
-q "ALTER DATABASE $PGC_DB RESET pgcolumnar.enable_metadata_count;" >/dev/null
+q "ALTER DATABASE $PGC_DB RESET pgcolumnar.enable_vectorization;" >/dev/null
 # The metadata count fast path is proven by the native_agg suite; the oracle
 # checks above prove the count is correct with the path on and off.
 

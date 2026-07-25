@@ -44,8 +44,10 @@ settings see the [configuration reference](configuration.md); for constraints se
 - Vectorized aggregate: an ungrouped `count`, `sum`, `avg`, `min`, or `max` over
   a supported column type is answered from the zone-map metadata, or by a
   column-at-a-time fold over the decoded values when the group has deletes,
-  without the per-tuple executor path.
-- `count(*)` with no filter is answered from catalog metadata without scanning.
+  without the per-tuple executor path. `count(*)` with no filter is one case of
+  this: it is answered from each row group's stored row count and reads no column
+  data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
+  aggregate over the scan instead.
 - Parallel scan across a table's row groups.
 - Read stream prefetch of block reads on PostgreSQL 17 and later
   (`pgcolumnar.enable_read_stream`).

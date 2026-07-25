@@ -70,9 +70,6 @@
 /* GUC: use the vectorized aggregate path (spec 8.3 scan control) */
 bool		columnar_enable_vectorization = true;
 
-/* GUC: answer count(*) from catalog metadata without scanning data (gap 28) */
-bool		columnar_enable_metadata_count = true;
-
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
  * ------------------------------------------------------------------------- */

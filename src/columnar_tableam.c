@@ -1190,15 +1190,6 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	DefineCustomBoolVariable("pgcolumnar.enable_metadata_count",
-							 "Answer count(*) from catalog metadata without scanning.",
-							 NULL,
-							 &columnar_enable_metadata_count,
-							 true,
-							 PGC_USERSET,
-							 0,
-							 NULL, NULL, NULL);
-
 	DefineCustomBoolVariable("pgcolumnar.enable_bloom_filter",
 							 "Skip chunk groups on equality using per-chunk bloom filters.",
 							 NULL,
