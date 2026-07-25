@@ -39,6 +39,25 @@ plan() {
 # no separate Aggregate node above a scan; a fallback plan has an Aggregate node
 # and no such line.
 has_aggnode() { echo "$1" | grep -q 'Columnar Vectorized Aggregates' && echo yes || echo no; }
+has_gather() { echo "$1" | grep -q 'Gather' && echo yes || echo no; }
+
+# Same, with a parallel plan available: workers allowed, no setup charge, and no
+# minimum table size, since the suite runs with max_parallel_workers_per_gather=0
+# and a fixture of a few pages, so without this a plan-choice check would never
+# see the alternative it is about.
+#
+# parallel_tuple_cost keeps its default on purpose. Zeroing it makes a Gather of
+# raw rows look free, which makes that Gather the cheapest scan path, and the
+# cost this check exists to catch was inherited from the cheapest scan path. With
+# the charge zeroed the wrong costing still picks the right plan and the check
+# passes for a reason that has nothing to do with the fix.
+plan_par() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "SET max_parallel_workers_per_gather = 4;
+		SET parallel_setup_cost = 0;
+		SET min_parallel_table_scan_size = 0;
+		EXPLAIN (COSTS OFF) $1" 2>/dev/null
+}
 
 # Supported aggregates answered from zone maps must equal the heap oracle.
 check "count(*)"          "$(q 'SELECT count(*) FROM n;')"        "$(q 'SELECT count(*) FROM h;')"
@@ -58,6 +77,18 @@ check "multi-agg"         "$(q 'SELECT count(*), sum(id), min(id), max(id) FROM 
 check "count(*) uses metadata agg node" "$(has_aggnode "$(plan 'SELECT count(*) FROM n')")" "yes"
 check "sum/min/max uses metadata agg node" \
 	"$(has_aggnode "$(plan 'SELECT sum(id), min(id), max(id) FROM n')")" "yes"
+
+# The path has to win on cost, not only exist. It reads one metadata entry per
+# row group; Gather over Partial Aggregate reads the whole table. Costing this
+# path at the scan's cost let the parallel plan take work the catalog already
+# has (issue #133), so pin the plan the planner picks once a parallel one is on
+# the table.
+par_count="$(plan_par 'SELECT count(*) FROM n')"
+check "count(*) beats a parallel plan"  "$(has_aggnode "$par_count")" "yes"
+check "count(*) plan has no Gather"     "$(has_gather "$par_count")"  "no"
+par_multi="$(plan_par 'SELECT count(*), sum(id), min(id), max(id) FROM n')"
+check "multi-agg beats a parallel plan" "$(has_aggnode "$par_multi")" "yes"
+check "multi-agg plan has no Gather"    "$(has_gather "$par_multi")"  "no"
 
 # A filtered aggregate falls back (no zone-map answer) but is still correct.
 check "filtered aggregate parity" \
