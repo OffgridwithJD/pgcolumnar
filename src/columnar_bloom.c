@@ -95,6 +95,23 @@ ColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
 	if (n < 64)
 		return false;			/* min/max and per-group scan suffice */
 
+	/*
+	 * Refuse to build a filter the cap cannot size properly. A filter is stored
+	 * per stripe, so n grows with pgcolumnar.stripe_row_limit (a USERSET GUC and
+	 * a reloption); once n * BLOOM_BITS_PER_VALUE exceeds BLOOM_MAX_BITS,
+	 * next_pow2 clamps and the bits-per-value falls below the ~10 this k was
+	 * chosen for. The filter then saturates: at four times the default stripe
+	 * limit almost every bit is set, so the probe answers "may be present" for
+	 * everything while still costing 256 KB per column per stripe to store and
+	 * read. No filter is better than one that never skips, and the reader
+	 * already treats an absent filter as "may match".
+	 *
+	 * This also keeps the multiply below in range: past this point it would
+	 * overflow uint32 for a large enough n.
+	 */
+	if ((uint64) n * BLOOM_BITS_PER_VALUE > BLOOM_MAX_BITS)
+		return false;
+
 	nbits = next_pow2(n * BLOOM_BITS_PER_VALUE);
 	nbytes = nbits / 8;
 	total = sizeof(uint32) + sizeof(uint8) + nbytes;
