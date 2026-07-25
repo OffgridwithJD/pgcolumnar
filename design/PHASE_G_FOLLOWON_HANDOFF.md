@@ -89,10 +89,18 @@ Nothing in flight. #114 is closed by #116, and #117 landed streaming.
 
 The next substantive item is cascaded encodings, step 2 of
 `CASCADE_ENCODING_PLAN.md`. It is specified in `CASCADE_FORMAT_SPEC.md` and
-**waiting on one owner decision**: whether new chunks write the version 3
-descriptor as soon as a chain is chosen, or only under a per-table option. The
-recommendation and its reasoning are in that file. No code has been written for
-it. The next substantive
+**waiting on two owner decisions**, both recorded there with recommendations:
+
+1. Whole-output chaining or component cascading. Every motivating pairing
+   (dictionary codes, run-length counts) names a component of a scheme's output
+   rather than the whole of it, so the simpler feature is probably not the one
+   worth building. This decides how large the work is: component cascading needs
+   each scheme to expose its output as named components first.
+2. When a table starts writing version 3 descriptors. Recommendation is
+   unconditionally once the feature ships, because the alternative makes the
+   incompatibility data-triggered and therefore unpredictable.
+
+No code has been written for it. The next substantive
 work is a roadmap choice, not a Parquet loose end; see `design/ROADMAP.md`, whose
 remaining Parquet items are Hive-style partition pruning, a recursive directory
 walk, and INT32/INT64-backed DECIMAL reads.

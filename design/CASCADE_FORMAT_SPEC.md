@@ -1,28 +1,32 @@
-# Cascaded encodings: format specification and the decision it needs
+# Cascaded encodings: format specification and the decisions it needs
 
-Written 2026-07-25, after step 1 of `CASCADE_ENCODING_PLAN.md` landed (sample
-selection, #124). This specifies the format change cascading needs and states the
-one decision that is the owner's rather than mine. No code has been written.
+Written 2026-07-25 after sample selection landed (#124), revised after the review
+of #125 found that the first version specified the wrong thing. No code has been
+written. Two decisions in here are the owner's rather than mine, and one of them
+determines whether the descriptor below is the right one at all.
 
-## What cascading is, in one paragraph
+## What cascading is meant to buy
 
-Encode the output of one scheme with another. Dictionary codes are small integers,
-so frame-of-reference plus bit-packing shrinks them further; run-length produces a
-value stream and a count stream, and the counts bit-pack well; delta output is
-often run-heavy. The paper this comes from reports most of its ratio win from
-exactly these pairings rather than from any single scheme. pgColumnar already has
-every primitive; what it lacks is a way to say "these two, in this order" on disk.
+Encode the output of one scheme with another. The pairings that motivate it:
 
-## What the format looks like today
+- a dictionary's **codes** are small integers, so frame-of-reference plus
+  bit-packing shrinks them further;
+- run-length's **count stream** bit-packs well;
+- delta output is often run-heavy.
+
+Read those carefully, because they are the crux of the first decision: every one
+of them names a *component* of a scheme's output, not the whole of it.
+
+## The format today
 
 The per-chunk `encoding_descriptor` in `pgcolumnar.column_chunk` is:
 
 ```
-[uint8  version]        currently COLUMNAR_NATIVE_ENCDESC_VERSION = 2
+[uint8  version]        COLUMNAR_NATIVE_ENCDESC_VERSION = 2
 [uint8  reserved]
 [uint32 vectorCount]
 [vectorCount entries of 13 bytes]
-    [uint8  encodingType]   one COLUMNAR_ENCODING_* code
+    [uint8  encodingType]
     [uint32 rawLen]
     [uint32 encLen]
     [uint32 valueCount]
@@ -30,89 +34,117 @@ The per-chunk `encoding_descriptor` in `pgcolumnar.column_chunk` is:
 [sharedTableLen bytes]
 ```
 
-Two facts make this cheaper to extend than the plan assumed:
+Verified: the descriptor is versioned, and `columnar_reader.c` rejects an
+unrecognized version with `ERRCODE_DATA_CORRUPTED` before reading anything else,
+so version 3 chunks can coexist with version 2 in one table.
 
-- The descriptor **is already versioned**, and `columnar_reader.c` rejects an
-  unrecognized version with a clean error rather than misreading it. A version 3
-  can therefore coexist with version 2 in the same table.
-- The entry is fixed-size, so a version 3 entry can be a different fixed size and
-  the reader can still index entries without parsing forward.
+## Decision 1: which feature is being built
 
-## Proposed version 3 entry
+These are different features and the earlier draft of this spec conflated them.
+
+**Whole-output chaining.** Scheme B consumes A's entire output as an opaque
+stream. The descriptor is simple, but the value is doubtful: A's output is not a
+uniform vector of the column's type, so most of the interesting Bs (frame-of
+reference, bit-packing, delta) have nothing to grip. This is the feature the
+earlier draft specified, and none of the motivating pairings are actually this.
+
+**Component cascading.** Scheme B encodes a *named component* of A's output: the
+dictionary's codes, run-length's counts. This is what every candidate pairing
+describes, and it is where the ratio win is. It is also the larger change: each
+scheme has to expose its output as named components with their own lengths and
+counts, and the descriptor has to say which component each stage encodes.
+
+**Recommendation: component cascading, descoped to dictionary codes first.** The
+dictionary case is the single highest-value pairing, it is the one whose component
+is already a clean array of fixed-width codes, and it can ship with a descriptor
+that only knows about one component per stage. Run-length counts come second, once
+the shape has proven itself.
+
+If the answer is whole-output chaining after all, this spec's descriptor is close
+to right and the candidate list needs rewriting. If it is component cascading, the
+descriptor below is the one to implement.
+
+## Decision 2: when a table starts writing version 3
+
+- **Unconditionally, once the feature ships.** The break is deterministic and tied
+  to the upgrade, so it is one CHANGELOG line: chunks written after this version
+  are not readable by older builds.
+- **Only when a chain is actually chosen.** More tables stay compatible, but the
+  break becomes *data-triggered*: a table an old binary reads today stops being
+  readable after a routine `INSERT` whose chunk happened to pick a chain. No
+  version bump, no setting change, nothing in the operator's control, and not
+  reproducible from the table definition.
+- **Behind a per-table option, default off.** Nothing changes until asked for; the
+  win sits behind a switch most people never find.
+
+**Recommendation: unconditional**, with a small addition either way: a function
+answering "does this table contain any version 3 chunks?", so a downgrade
+checklist can test the thing it actually cares about instead of inferring it.
+
+An earlier draft of this spec recommended the data-triggered variant. That was
+wrong for the reason above: it trades a predictable break for an unpredictable
+one, which is worse to operate even though it breaks fewer tables.
+
+## Proposed version 3 entry (component cascading, one component per stage)
 
 ```
-[uint8  chainLen]        1..PGCN_MAX_CHAIN (proposed 3)
-[uint8  encodingType[3]] applied in order; unused slots are COLUMNAR_ENCODING_NONE
-[uint32 rawLen]
-[uint32 encLen]
-[uint32 valueCount]
+[uint8  chainLen]          1..PGCN_MAX_CHAIN (proposed 3)
+[uint8  encodingType[3]]   stage schemes, unused slots COLUMNAR_ENCODING_NONE
+[uint8  component[3]]      which component of the previous stage each encodes
+[uint8  reserved]
+[uint32 valueCount]        the vector's logical value count
+[uint32 rawLen]            decoded raw byte length
+[uint32 encLen]            final encoded byte length
+[uint32 stageLen[2]]       byte length of each intermediate stage's output
+[uint32 stageCount[2]]     value count of each intermediate stage's output
 ```
 
-16 bytes rather than 13. Decoding runs the chain in reverse. `chainLen == 1`
-expresses exactly what version 2 expresses, so version 3 is a superset and there
-is no shape that only the old format can describe.
+36 bytes rather than 13.
 
-### Guards, each needing a test that fails without it
+The intermediate lengths are not optional bookkeeping, which the earlier draft
+missed. The decoders do not self-describe: `decode_rle` and friends are *told*
+their output shape, taking `rawLen` to size the allocation and `n` to terminate
+the loop, both from the descriptor. Decoding a chain runs the last stage first,
+and that stage needs the length and count of the intermediate it produces.
+Without them the reader is guessing. The alternative, making every encoding's
+output self-describing, changes every encoder's on-disk bytes and is a much larger
+change than this one.
 
-The reader must not trust any of this. The Parquet reader's three crafted-file
-bugs were all a file-declared value used without a range check, and this is the
-same class:
+`chainLen == 1` expresses exactly what version 2 expresses, so version 3 is a
+superset.
 
-- `chainLen` outside 1..`PGCN_MAX_CHAIN` is a corrupt descriptor, checked before
-  it drives the decode loop.
-- Each `encodingType` in the chain must be a known code, checked before dispatch.
-- A chain must not repeat a scheme that is not idempotent, and must not contain
-  `NONE` before its end. Both are cheap structural checks and both prevent a
-  decode loop that does not terminate in the shape the writer intended.
-- The intermediate length after each stage must be consistent with the next
-  stage's input, so a truncated or spliced descriptor fails rather than decoding
-  garbage.
+## Guards, each needing a test that fails without it
 
-### Candidate chains worth measuring first
+Same class of risk as the Parquet reader's three crafted-file bugs: a
+file-declared value used without a range check.
 
-Each is a claim about data shape, and each should be justified by a measured win
-on the 6M-row benchmark before it ships, not by the paper's numbers on their data:
+- `chainLen` outside 1..`PGCN_MAX_CHAIN`, checked before it drives the loop.
+- Each `encodingType` a known code, and each `component` valid for the scheme that
+  produced it, checked before dispatch.
+- Each `stageLen` and `stageCount` consistent with the neighbouring stages, so a
+  truncated or spliced descriptor fails rather than decoding garbage. This is
+  checkable only because the lengths are stored.
+- `NONE` must not appear before the end of the chain.
 
-- dictionary then frame-of-reference (low-cardinality columns)
-- dictionary then bit-packing (same, narrower codes)
-- run-length then bit-packing (the count stream)
-- delta then run-length (smooth-then-repetitive columns)
+Deliberately **not** a guard: rejecting a chain that repeats a scheme. That
+encodes today's opinion about useful chains into the reader, so a future writer
+that finds a repeated scheme worthwhile would produce data that older-but-still
+version 3 readers reject. Length and count validation is what keeps the decode
+loop bounded; repetition is a writer's business.
 
-Selection reuses the sampling selector from #124: estimate the chain on the same
-windowed sample, apply only the best.
+## Sequencing, once both decisions are made
 
-## The decision that is not mine
+Steps 1 and 2 cannot be sized until decision 1 is settled: if the answer is
+component cascading, exposing components is step 0 and it is the bulk of the work.
 
-**When does a table start writing version 3 descriptors?**
-
-- **Option A, version bump on write.** New chunks write version 3 as soon as the
-  build supports it. Simple, and every table benefits without action. The cost is
-  that an older binary reading a newer table gets a clean error rather than data,
-  which is a real operational break for anyone who downgrades or runs mixed
-  binaries against the same data directory.
-- **Option B, per-table option, default off.** `cascade_encodings = on` per table,
-  or a GUC. Nothing changes until asked for, so a downgrade stays safe until
-  someone opts in. The cost is that the win sits behind a switch most people will
-  never find, and the option becomes permanent surface area.
-
-My recommendation is **A with a documented floor**: write version 3 only when a
-chain is actually chosen, so a table whose columns never benefit stays readable by
-older builds, and document the downgrade break plainly in the CHANGELOG and
-`limitations.md`. That keeps the common case compatible and makes the
-incompatibility something a user opts into by having data that benefits, rather
-than by flipping a switch they have to learn about.
-
-That recommendation is a judgement about your users' upgrade discipline, which is
-why it is written here for a decision rather than implemented.
-
-## Sequencing once the decision is made
-
-1. Version 3 descriptor read path plus the guards and their crafted-descriptor
-   tests. Reading before writing, so a bad writer cannot produce unreadable data.
-2. Chain application in `ColumnarEncodeChunk`, one pairing at a time, each with
-   its measured win.
-3. Selection through the existing windowed sample.
+0. (component cascading only) Give each participating scheme a component view:
+   what its output is made of, each with a length and a count.
+1. Version 3 read path plus the guards and their crafted-descriptor tests.
+   Reading before writing, so a bad writer cannot produce unreadable data.
+2. Chain application in `ColumnarEncodeChunk`, one pairing at a time, each landing
+   with its measured win.
+3. Selection through the windowed sample from #124.
 4. Benchmark before and after on the 6M-row load: size and load time together,
    since a chain costs write time to save space.
-5. Full 15 through 19 matrix, with `differential` and `fuzz` as the real net:
-   they compare against a heap oracle and will catch a chain that decodes wrong.
+5. Full 15 through 19 matrix, with `differential` and `fuzz` as the real net: they
+   compare against a heap oracle and will catch a chain that decodes wrong.
