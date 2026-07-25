@@ -195,8 +195,22 @@ check "nested tree reads every level as one relation" \
 	"$oracle"
 check "nested tree row count" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_parquet('$TREE') AS t($cols);")" "3000"
-check "a non-parquet file deep in the tree is ignored" \
+# Spark and Hive write _SUCCESS beside the data and stage task output under
+# _temporary, so a walk that descends into them reads files another writer is
+# still producing. Names beginning with _ or . are skipped, directories and files
+# alike. The parquet file below _temporary is real, so if the rule were missing
+# this would read 4000 rows rather than 3000, which is what makes the check
+# independent of the row-count check above.
+mkdir -p "$TREE/_temporary/task-0" "$TREE/.hidden"
+cp "$DIR/part-0.parquet" "$TREE/_temporary/task-0/in-progress.parquet"
+cp "$DIR/part-0.parquet" "$TREE/.hidden/hidden.parquet"
+touch "$TREE/_SUCCESS"
+check "_temporary and dot directories are not walked" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_parquet('$TREE') AS t($cols);")" "3000"
+cp "$DIR/part-0.parquet" "$TREE/c/_part.parquet"
+check "a file whose name starts with _ is skipped too" \
+	"$(q "SELECT count(*) FROM pgcolumnar.read_parquet('$TREE') AS t($cols);")" "3000"
+rm -rf "$TREE/_temporary" "$TREE/.hidden" "$TREE/_SUCCESS" "$TREE/c/_part.parquet"
 
 # Order is by full path, not by directory-entry order, which varies by
 # filesystem. Sorting the three paths puts a/b/part-1 first, then a/part-0, then

@@ -53,7 +53,9 @@ unreleased. For the forward-looking plan see
   statistics) and decodes only the referenced columns; `EXPLAIN ANALYZE` reports
   the row groups and columns read and skipped and the number of files.
 - A directory path now reads `*.parquet` files at any depth below it, where it
-  previously read only the files directly inside. A directory reached through a
+  previously read only the files directly inside. Entries whose name begins with
+  `_` or `.` are skipped, so a Spark or Hive output directory does not read its
+  own `_temporary` staging tree. A directory reached through a
   symbolic link is not descended, since a link to an ancestor would make the walk
   endless; a symbolic link to a file is still followed. Nesting deeper than 32
   levels raises rather than reading part of the tree.

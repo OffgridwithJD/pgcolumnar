@@ -2741,6 +2741,18 @@ pq_walk_dir(const char *path, int depth, List **files, int *skipped)
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
 			continue;
 
+		/*
+		 * Skip names beginning with '_' or '.', the convention every engine in
+		 * this ecosystem writes and reads: a Spark or Hive output directory
+		 * carries _SUCCESS and a _temporary tree of in-progress task output, and
+		 * reading that tree means reading files another writer is still producing.
+		 * Hidden dotfiles are skipped for the same reason. This applies to
+		 * directories and files alike, and only to a walk: a path named
+		 * explicitly is still read.
+		 */
+		if (de->d_name[0] == '_' || de->d_name[0] == '.')
+			continue;
+
 		full = psprintf("%s/%s", path, de->d_name);
 
 		/* a directory reached through a symlink: not followed, see above */
