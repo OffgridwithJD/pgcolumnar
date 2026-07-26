@@ -78,6 +78,26 @@ value-stream codecs (round-trip over randomized and boundary inputs):
 test/pbt/run.sh [seed] [iterations]
 ```
 
+## Before merging: build every major
+
+```sh
+test/build_all_versions.sh
+```
+
+No clusters and no suites, just a compile against each installed major, about a
+minute for all five. Run it before merging anything that touches a version guard,
+a table access method callback signature, or `columnar_compat.h`.
+
+The per-PR gate runs the suites on two majors, which is the right trade for test
+time and structurally cannot see a defect on a major it never builds.
+`scan_analyze_next_block` changed signature at PG17; a change guarded the
+callback at PG18 instead; PG15, PG16, PG18 and PG19 all built, and `main` did not
+compile on PG17 at all while a two-major gate reported it green. This check
+catches that in a minute. The full matrix remains the thorough answer.
+
+Do not leave a branch broken on a supported major while a fix is pending. Land
+the fix.
+
 ## The version matrix
 
 To build and run every suite across a set of PostgreSQL majors in one pass, each
