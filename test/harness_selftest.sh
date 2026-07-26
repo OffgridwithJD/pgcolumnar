@@ -158,13 +158,15 @@ check "guard rejects a foreign cluster" "$_verdict" "foreign"
 TESTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$TESTDIR/run_all_versions.sh"
 
-# Not suites: the shared library, the runner itself, and the two developer
-# helpers that build rather than test. native_scale is a suite but is opt-in by
+# Not suites: the shared library, the two runners, and the two developer helpers
+# that build rather than test. build_all_versions compiles against every major
+# and is run before merging a change that touches a version guard; it takes no
+# cluster and reports per major, so the matrix cannot run it as a suite. native_scale is a suite but is opt-in by
 # design and says so in its own header: it runs at a row count the matrix should
 # not carry.
 not_a_suite() {
 	case "$1" in
-		lib|run_all_versions|devloop|rebuild|native_scale) return 0 ;;
+		lib|run_all_versions|build_all_versions|devloop|rebuild|native_scale) return 0 ;;
 		*) return 1 ;;
 	esac
 }
