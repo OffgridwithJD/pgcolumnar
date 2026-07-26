@@ -7,7 +7,7 @@
 # with planner defaults. The sampler maps each block core chooses to the slice of
 # its row group that the block stands for, and offers that slice's live rows.
 #
-# Four things are asserted.
+# Five things are asserted.
 #
 # 1. The statistics agree with a heap table on identical data. This is the
 #    differential oracle the rest of the suite uses, and it is what catches a
@@ -91,6 +91,27 @@ check "most_common_vals holds the same set as heap" \
 			(SELECT most_common_vals FROM pg_stats
 			  WHERE tablename = 'as_h' AND attname = 'status')::text::text[]) x);")" \
 	"t"
+
+# correlation is the statistic nothing outside this access method can supply, and
+# the one that decides whether vacuum_sorted and Z-order clustering are visible to
+# the planner at all. It only works because the slot's copy carries the item
+# pointer: ANALYZE sorts the sample by TID, and a virtual slot's copy_heap_tuple
+# re-forms through heap_form_tuple and drops it, which left every sampled tuple
+# with an invalid TID. That is not merely lossy -- it aborts an assert-enabled
+# backend in ItemPointerGetBlockNumber. Asserted here on a column stored in
+# ascending order, where the true correlation is 1.
+corr="$(stat as_c id correlation)"
+echo "-- correlation on an ascending column: ${corr}"
+
+check "correlation on an ascending column is near 1" \
+	"$(awk -v c="${corr:-0}" \
+		'BEGIN { print (c > 0.9) ? "yes" : "no (" c ")" }')" \
+	"yes"
+
+check "the sampled tuples carry a valid item pointer" \
+	"$(grep -c 'tuple->t_self = slot->tts_tid' \
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/columnar_tableam.c")" \
+	"1"
 
 # --- 2. the estimated row count is close to the truth --------------------------
 

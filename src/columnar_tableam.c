@@ -130,10 +130,59 @@ PG_FUNCTION_INFO_V1(columnar_handler);
  * slot / scan callbacks
  * ------------------------------------------------------------------------- */
 
+/*
+ * Slot operations for a columnar relation (issue #154).
+ *
+ * These are TTSOpsVirtual with one callback replaced. A virtual slot's
+ * copy_heap_tuple is heap_form_tuple over the slot's values, which leaves the
+ * new tuple's t_self invalid and never looks at tts_tid -- the slot's item
+ * pointer is simply dropped on the way out.
+ *
+ * That is fatal for ANALYZE rather than merely lossy. acquire_sample_rows
+ * collects the sample with ExecCopySlotHeapTuple and then sorts it by item
+ * pointer, and ItemPointerGetBlockNumber asserts the pointer is valid, so an
+ * assert-enabled backend dies on the sort:
+ *
+ *     TRAP: failed Assert("ItemPointerIsValid(pointer)"), itemptr.h:105
+ *
+ * On a non-assert build the same invalid pointers are read as garbage and the
+ * sample is sorted into an arbitrary order, which is the silent form of it: the
+ * correlation statistic is then computed over rows in no particular order and
+ * comes out as noise.
+ *
+ * Carrying tts_tid into t_self fixes both, and costs nothing on the scan path
+ * because copy_heap_tuple is not on it -- a scan stores values into the slot and
+ * the executor reads them from there.
+ *
+ * The slot is no longer "virtual" by TTS_IS_VIRTUAL, which is a pointer identity
+ * test against TTSOpsVirtual. That is safe here: nothing in core requires it,
+ * the paths that check it fall back to the general case, and the one that would
+ * error -- tts_virtual_getsomeattrs -- is unreachable because
+ * ExecStoreVirtualTuple sets tts_nvalid to the full attribute count, so
+ * slot_getsomeattrs never calls it. The full suite is run on an assert-enabled
+ * build to keep that reasoning honest.
+ */
+static TupleTableSlotOps ColumnarSlotOps;
+
+static HeapTuple
+columnar_slot_copy_heap_tuple(TupleTableSlot *slot)
+{
+	HeapTuple	tuple;
+
+	Assert(!TTS_EMPTY(slot));
+
+	tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+							slot->tts_values, slot->tts_isnull);
+	tuple->t_self = slot->tts_tid;
+	tuple->t_tableOid = slot->tts_tableOid;
+
+	return tuple;
+}
+
 static const TupleTableSlotOps *
 columnar_slot_callbacks(Relation relation)
 {
-	return &TTSOpsVirtual;
+	return &ColumnarSlotOps;
 }
 
 static TableScanDesc
@@ -1337,6 +1386,13 @@ columnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
 void
 _PG_init(void)
 {
+	/*
+	 * Virtual slot behaviour, except that a copied heap tuple keeps the slot's
+	 * item pointer. See the comment on columnar_slot_copy_heap_tuple.
+	 */
+	ColumnarSlotOps = TTSOpsVirtual;
+	ColumnarSlotOps.copy_heap_tuple = columnar_slot_copy_heap_tuple;
+
 	DefineCustomIntVariable("pgcolumnar.stripe_row_limit",
 							"Maximum number of rows per stripe.",
 							NULL,
