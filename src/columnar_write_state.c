@@ -31,12 +31,41 @@
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
 
+/*
+ * Direct comparison kinds for the zone min/max (issue #155).
+ *
+ * Tracking a chunk's min and max costs two comparisons per value per column, and
+ * routing each through fmgr is most of what they cost: removing min/max tracking
+ * entirely saved 15% of a five-int-column load, where the comparison itself is a
+ * subtraction. These are the types whose stored Datum can be read as a C value
+ * and compared without a collation, which is the same condition, and the same
+ * list, the vectorized filter's fast path uses (COLUMNAR_VECFAST_* in
+ * columnar_vector.c). Anything else keeps the fmgr path.
+ *
+ * float4 and float8 are deliberately NOT here even though the filter fast path
+ * takes them. btree float ordering puts NaN above every other value, which a C
+ * comparison gets wrong: every comparison against NaN is false, so NaN would read
+ * as equal and never become a chunk's maximum. A zone map with a maximum that is
+ * too low makes the reader skip a row group that does hold matching rows, and the
+ * query silently returns fewer rows. The filter path can take the same shortcut
+ * because it compares to answer one predicate, not to build stored bounds that a
+ * later scan trusts.
+ */
+typedef enum ColumnarFastCmp
+{
+	COLUMNAR_FASTCMP_NONE = 0,
+	COLUMNAR_FASTCMP_I16,
+	COLUMNAR_FASTCMP_I32,
+	COLUMNAR_FASTCMP_I64
+} ColumnarFastCmp;
+
 /* per-column, per-write-state facts needed for the min/max skip list */
 typedef struct ColumnarColumnDef
 {
 	bool		orderable;		/* type has a default btree comparison proc */
 	FmgrInfo	cmpFn;			/* the comparison proc, when orderable */
 	Oid			collation;		/* collation to compare under */
+	ColumnarFastCmp fastCmp;	/* direct comparison, when the type allows */
 
 	/*
 	 * int2/int4 column: its exact sum fits an int64 accumulator, so the zone map
@@ -133,6 +162,46 @@ static ChunkGroupBuffer *columnar_start_chunk_group(ColumnarWriteState *writeSta
 static void columnar_init_col_defs(ColumnarWriteState *writeState);
 
 /*
+ * columnar_cmp_value
+ *		Compare two values of a column under its ordering, taking the direct
+ *		route when the type allows one and fmgr otherwise. The integer kinds
+ *		reproduce their btree comparison exactly, so which route is taken can
+ *		never change the answer.
+ */
+static inline int32
+columnar_cmp_value(ColumnarColumnDef *def, Datum a, Datum b)
+{
+	switch (def->fastCmp)
+	{
+		case COLUMNAR_FASTCMP_I16:
+			{
+				int16		x = DatumGetInt16(a);
+				int16		y = DatumGetInt16(b);
+
+				return (x < y) ? -1 : (x > y) ? 1 : 0;
+			}
+		case COLUMNAR_FASTCMP_I32:
+			{
+				int32		x = DatumGetInt32(a);
+				int32		y = DatumGetInt32(b);
+
+				return (x < y) ? -1 : (x > y) ? 1 : 0;
+			}
+		case COLUMNAR_FASTCMP_I64:
+			{
+				int64		x = DatumGetInt64(a);
+				int64		y = DatumGetInt64(b);
+
+				return (x < y) ? -1 : (x > y) ? 1 : 0;
+			}
+		case COLUMNAR_FASTCMP_NONE:
+			break;
+	}
+
+	return DatumGetInt32(FunctionCall2Coll(&def->cmpFn, def->collation, a, b));
+}
+
+/*
  * columnar_init_col_defs
  *		Allocate and fill writeState->colDefs: for each column, resolve the btree
  *		comparison proc (for the per-chunk min/max skip list, spec 7.2) and the
@@ -163,6 +232,31 @@ columnar_init_col_defs(ColumnarWriteState *writeState)
 			fmgr_info_copy(&writeState->colDefs[c].cmpFn,
 						   &tce->cmp_proc_finfo, ColumnarWriteContext);
 			writeState->colDefs[c].collation = att->attcollation;
+
+			/*
+			 * Resolve a direct comparison where the type permits one. These
+			 * compare byte-for-byte under any collation, so the fast path
+			 * cannot disagree with the operator it replaces; the zone map it
+			 * feeds is read back through the same ordering.
+			 */
+			switch (att->atttypid)
+			{
+				case INT2OID:
+					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I16;
+					break;
+				case INT4OID:
+				case DATEOID:
+					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I32;
+					break;
+				case INT8OID:
+				case TIMESTAMPOID:
+				case TIMESTAMPTZOID:
+					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I64;
+					break;
+				default:
+					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_NONE;
+					break;
+			}
 		}
 
 		/* int2/int4: exact sum fits int64, carried in the zone map (D5) */
@@ -414,25 +508,30 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 				}
 				else
 				{
-					int32		cmpMin = DatumGetInt32(
-						FunctionCall2Coll(&def->cmpFn, def->collation,
-										  values[c], col->minValue));
-					int32		cmpMax = DatumGetInt32(
-						FunctionCall2Coll(&def->cmpFn, def->collation,
-										  values[c], col->maxValue));
+					/*
+					 * A value above the running maximum cannot also be below the
+					 * running minimum, so the second comparison is only needed
+					 * when the first does not settle it. Testing the maximum
+					 * first makes the ascending case -- which is what a bulk load
+					 * of a serial or timestamp column produces -- cost one
+					 * comparison per value instead of two.
+					 */
+					int32		cmpMax = columnar_cmp_value(def, values[c],
+														   col->maxValue);
 
-					if (cmpMin < 0)
-					{
-						if (!att->attbyval)
-							pfree(DatumGetPointer(col->minValue));
-						col->minValue = datumCopy(values[c], att->attbyval,
-												  att->attlen);
-					}
 					if (cmpMax > 0)
 					{
 						if (!att->attbyval)
 							pfree(DatumGetPointer(col->maxValue));
 						col->maxValue = datumCopy(values[c], att->attbyval,
+												  att->attlen);
+					}
+					else if (columnar_cmp_value(def, values[c],
+												col->minValue) < 0)
+					{
+						if (!att->attbyval)
+							pfree(DatumGetPointer(col->minValue));
+						col->minValue = datumCopy(values[c], att->attbyval,
 												  att->attlen);
 					}
 				}
