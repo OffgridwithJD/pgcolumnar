@@ -848,23 +848,23 @@ columnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
 	Snapshot	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot()
 		: GetTransactionSnapshot();
-	TupleDesc	tupdesc = RelationGetDescr(rel);
-	Datum	   *values = (Datum *) palloc(sizeof(Datum) * tupdesc->natts);
-	bool	   *nulls = (bool *) palloc(sizeof(bool) * tupdesc->natts);
 	int			i;
 
 	for (i = 0; i < delstate->ndeltids; i++)
 	{
 		uint64		rowNumber =
 			ColumnarItemPointerToRowNumber(&delstate->deltids[i].tid);
-		bool		live = ColumnarReadRowByNumber(rel, snapshot, rowNumber,
-												   values, nulls);
 
-		delstate->status[delstate->deltids[i].id].knowndeletable = !live;
+		/*
+		 * Only liveness matters here, and ColumnarRowIsLive decodes nothing to
+		 * answer it. This used to reconstruct every column of the row and then
+		 * free the result unread, once per candidate index tuple, on a path
+		 * nbtree drives during deletion (issue #157).
+		 */
+		delstate->status[delstate->deltids[i].id].knowndeletable =
+			!ColumnarRowIsLive(rel, snapshot, rowNumber);
 	}
 
-	pfree(values);
-	pfree(nulls);
 	return InvalidTransactionId;
 }
 #endif

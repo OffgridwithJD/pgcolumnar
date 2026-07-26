@@ -342,14 +342,11 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 	MemoryContext oldContext;
 	FmgrInfo   *outFns;
 	int			ncols;
-	int			tnatts;
 	int			i;
 	Snapshot	snap;
 	ColumnarReadState *readState;
 	Datum	   *rvals;
 	bool	   *rnulls;
-	Datum	   *basevals;
-	bool	   *basenulls;
 	uint64		projRowNum;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
@@ -393,7 +390,6 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 						projname, get_rel_name(relid))));
 
 	ncols = proj->columnsLen;
-	tnatts = RelationGetDescr(rel)->natts;
 
 	/* projection storage layout: [rownumber int8, projcol1..projcolK] */
 	projTupdesc = CreateTemplateTupleDesc(ncols + 1);
@@ -427,9 +423,6 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 	snap = GetActiveSnapshot();
 	rvals = palloc(sizeof(Datum) * (ncols + 1));
 	rnulls = palloc(sizeof(bool) * (ncols + 1));
-	basevals = palloc(sizeof(Datum) * tnatts);
-	basenulls = palloc(sizeof(bool) * tnatts);
-
 	readState = ColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
 											 projTupdesc, NULL, NULL, 0, NULL);
 
@@ -440,8 +433,13 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 		Datum		result;
 		bool		resnull = false;
 
-		/* deletes/visibility come from the base */
-		if (!ColumnarReadRowByNumber(rel, snap, baseRow, basevals, basenulls))
+		/*
+		 * Only the base row's visibility is wanted here -- every value this loop
+		 * emits comes from the projection's own storage. Reconstructing the whole
+		 * base row to answer that decoded every column and threw all of it away
+		 * (issue #157).
+		 */
+		if (!ColumnarRowIsLive(rel, snap, baseRow))
 			continue;
 
 		initStringInfo(&buf);
@@ -505,6 +503,7 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	bool	   *rnulls;
 	Datum	   *basevals;
 	bool	   *basenulls;
+	Bitmapset  *uncovered = NULL;
 	uint64		projRowNum;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
@@ -601,6 +600,18 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	basevals = palloc(sizeof(Datum) * tnatts);
 	basenulls = palloc(sizeof(bool) * tnatts);
 
+	/*
+	 * The base row is only read for the columns the projection does not carry,
+	 * so those are the only ones worth decoding (issue #157).
+	 */
+	for (i = 0; i < tnatts; i++)
+	{
+		if (TupleDescAttr(tableDesc, i)->attisdropped)
+			continue;
+		if (covered[i] < 0)
+			uncovered = bms_add_member(uncovered, i);
+	}
+
 	readState = ColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
 											 projTupdesc, NULL, NULL, 0, NULL);
 
@@ -612,8 +623,9 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 		bool		resnull = false;
 		bool		first = true;
 
-		/* fetch the base row (liveness + any non-covered columns) */
-		if (!ColumnarReadRowByNumber(rel, snap, baseRow, basevals, basenulls))
+		/* fetch the base row: liveness, and only the columns not covered */
+		if (!ColumnarReadRowByNumberCols(rel, snap, baseRow, basevals,
+										 basenulls, uncovered))
 			continue;
 
 		initStringInfo(&buf);

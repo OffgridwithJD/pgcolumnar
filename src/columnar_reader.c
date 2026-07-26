@@ -1633,9 +1633,23 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
 	return victim;
 }
 
-bool
-ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
-						Datum *values, bool *nulls)
+/*
+ * columnar_fetch_row
+ *		Shared worker behind the three fetch entry points below.
+ *
+ *		needed is a set of 0-based attribute numbers, or NULL for every column.
+ *		Note that a Bitmapset cannot tell "empty" from NULL -- an empty one *is*
+ *		NULL -- so a caller whose computed set comes out empty asks for every
+ *		column rather than none. That is the safe direction, and a caller that
+ *		genuinely wants no columns wants ColumnarRowIsLive instead.
+ *		A column outside it is not read, not decoded and not indexed, and comes
+ *		back null. wantValues == false stops as soon as liveness is settled,
+ *		without touching the group's bytes at all.
+ */
+static bool
+columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
+				   Datum *values, bool *nulls, Bitmapset *needed,
+				   bool wantValues)
 {
 	uint64		storageId = ColumnarStorageId(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1709,6 +1723,18 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			MemoryContextDelete(tmp);
 			return false;
 		}
+	}
+
+	/*
+	 * Liveness is fully settled here: it depends only on the row group covering
+	 * the row and on the delete vector. A caller that asks nothing else is done,
+	 * without the group's bytes being read or a single column decoded (#157).
+	 */
+	if (!wantValues)
+	{
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextDelete(tmp);
+		return true;
 	}
 
 	/*
@@ -1813,6 +1839,19 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		char	   *cursor;
 		uint64		present;
 
+		/*
+		 * A column the caller did not ask for is neither decoded nor indexed,
+		 * and reads as null rather than being left untouched: a caller that
+		 * projects and then reads outside its projection gets a null instead of
+		 * whatever the array happened to hold.
+		 */
+		if (needed != NULL && !bms_is_member(c, needed))
+		{
+			values[c] = (Datum) 0;
+			nulls[c] = true;
+			continue;
+		}
+
 		if (cc == NULL)
 		{
 			values[c] = getmissingattr(tupdesc, c + 1, &nulls[c]);
@@ -1901,6 +1940,51 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextDelete(tmp);
 	return true;
+}
+
+/*
+ * ColumnarReadRowByNumber
+ *		Reconstruct every column of the row addressed by a row number. False when
+ *		the row is not visible.
+ */
+bool
+ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
+						Datum *values, bool *nulls)
+{
+	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
+							  NULL, true);
+}
+
+/*
+ * ColumnarReadRowByNumberCols
+ *		As above, but decode only the columns in `needed`; the rest read as null.
+ *
+ *		Decoding every column whatever the caller wanted is not merely wasted
+ *		work on a wide table. The decoded bytes are measured against the fetch
+ *		cache's size cap, so the entry is dropped after every fetch and the group
+ *		is decoded again for the next row -- the behaviour the cache exists to
+ *		remove (issue #157).
+ */
+bool
+ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot, uint64 rowNumber,
+							Datum *values, bool *nulls, Bitmapset *needed)
+{
+	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
+							  needed, true);
+}
+
+/*
+ * ColumnarRowIsLive
+ *		Is the row visible? Decodes nothing.
+ *
+ *		columnar_index_delete_tuples asks exactly this, once per candidate index
+ *		tuple on a path nbtree drives during deletion, and answered it by
+ *		reconstructing every column and freeing the result unread.
+ */
+bool
+ColumnarRowIsLive(Relation rel, Snapshot snapshot, uint64 rowNumber)
+{
+	return columnar_fetch_row(rel, snapshot, rowNumber, NULL, NULL, NULL, false);
 }
 
 void
