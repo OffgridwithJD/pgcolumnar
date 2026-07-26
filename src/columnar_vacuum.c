@@ -110,104 +110,13 @@ uint64_cmp(const void *a, const void *b)
  * ------------------------------------------------------------------------- */
 
 /* the relation's ready+valid indexes, opened once for a rewrite pass */
-typedef struct RewriteIndexState
-{
-	int			n;
-	Relation   *rels;
-	IndexInfo **infos;
-	ExprState **predicates;		/* partial-index predicate, or NULL */
-	EState	   *estate;
-	TupleTableSlot *slot;
-} RewriteIndexState;
-
-static void
-rewrite_index_open(Relation rel, RewriteIndexState *ris)
-{
-	List	   *oids = RelationGetIndexList(rel);
-	int			cap = Max(list_length(oids), 1);
-	ListCell   *lc;
-
-	ris->n = 0;
-	ris->rels = palloc(cap * sizeof(Relation));
-	ris->infos = palloc(cap * sizeof(IndexInfo *));
-	ris->predicates = palloc(cap * sizeof(ExprState *));
-	ris->estate = CreateExecutorState();
-	ris->slot = MakeSingleTupleTableSlot(RelationGetDescr(rel), &TTSOpsVirtual);
-
-	foreach(lc, oids)
-	{
-		Oid			ioid = lfirst_oid(lc);
-		Relation	irel = index_open(ioid, RowExclusiveLock);
-		IndexInfo  *info;
-
-		if (!irel->rd_index->indisready || !irel->rd_index->indisvalid)
-		{
-			index_close(irel, RowExclusiveLock);
-			continue;
-		}
-		info = BuildIndexInfo(irel);
-		ris->rels[ris->n] = irel;
-		ris->infos[ris->n] = info;
-		ris->predicates[ris->n] = (info->ii_Predicate != NIL)
-			? ExecPrepareQual(info->ii_Predicate, ris->estate)
-			: NULL;
-		ris->n++;
-	}
-	list_free(oids);
-}
-
-static void
-rewrite_index_close(RewriteIndexState *ris)
-{
-	int			i;
-
-	for (i = 0; i < ris->n; i++)
-		index_close(ris->rels[i], RowExclusiveLock);
-	ExecDropSingleTupleTableSlot(ris->slot);
-	FreeExecutorState(ris->estate);
-}
-
-/* insert index entries for one rewritten row at its new row number */
-static void
-rewrite_index_insert_row(RewriteIndexState *ris, Relation rel,
-						 Datum *values, bool *isnull, uint64 rowNumber)
-{
-	int			natts = RelationGetDescr(rel)->natts;
-	ExprContext *econtext = GetPerTupleExprContext(ris->estate);
-	ItemPointerData tid;
-	int			i;
-
-	ColumnarRowNumberToItemPointer(rowNumber, &tid);
-
-	ExecClearTuple(ris->slot);
-	memcpy(ris->slot->tts_values, values, natts * sizeof(Datum));
-	memcpy(ris->slot->tts_isnull, isnull, natts * sizeof(bool));
-	ExecStoreVirtualTuple(ris->slot);
-	econtext->ecxt_scantuple = ris->slot;
-
-	for (i = 0; i < ris->n; i++)
-	{
-		Datum		ivalues[INDEX_MAX_KEYS];
-		bool		inulls[INDEX_MAX_KEYS];
-
-		/* skip rows a partial index does not cover */
-		if (ris->predicates[i] != NULL && !ExecQual(ris->predicates[i], econtext))
-			continue;
-
-		FormIndexDatum(ris->infos[i], ris->slot, ris->estate, ivalues, inulls);
-		index_insert(ris->rels[i], ivalues, inulls, &tid, rel,
-					 UNIQUE_CHECK_NO, false, ris->infos[i]);
-	}
-	ResetPerTupleExprContext(ris->estate);
-}
-
 /*
  * Rewrite one group's live rows into a fresh group and retire the old group.
  * Returns the number of live rows moved. Caller holds ShareUpdateExclusiveLock
  * on rel and has opened the indexes in ris.
  */
 static int64
-rewrite_one_group(Relation rel, RewriteIndexState *ris, uint64 storageId,
+rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 				  uint64 groupNumber, uint64 firstRow, uint64 rowCount)
 {
 	Oid			relid = RelationGetRelid(rel);
@@ -241,7 +150,7 @@ rewrite_one_group(Relation rel, RewriteIndexState *ris, uint64 storageId,
 
 		newRn = ColumnarWriteRow(ws, rel, values, isnull);
 		ColumnarProjectionFanoutRow(rel, ws, newRn, values, isnull);
-		rewrite_index_insert_row(ris, rel, values, isnull, newRn);
+		ColumnarIndexInsertRow(ris, rel, values, isnull, newRn, false);
 		moved++;
 	}
 	ColumnarFlushWriteStateForRelation(relid);
@@ -281,7 +190,7 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 	List	   *rgList;
 	ListCell   *lc;
 	List	   *cands = NIL;
-	RewriteIndexState ris;
+	ColumnarIndexInsertState *ris;
 	int64		rewritten = 0;
 
 	/* persist own pending work so the group list and deletes are current */
@@ -325,18 +234,18 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 	if (cands == NIL)
 		return 0;
 
-	rewrite_index_open(rel, &ris);
+	ris = ColumnarIndexInsertBegin(rel);
 	foreach(lc, cands)
 	{
 		RewriteCandidate *c = (RewriteCandidate *) lfirst(lc);
 
 		if (maxGroups > 0 && rewritten >= maxGroups)
 			break;
-		rewrite_one_group(rel, &ris, storageId, c->groupNumber,
+		rewrite_one_group(rel, ris, storageId, c->groupNumber,
 						  c->firstRow, c->rowCount);
 		rewritten++;
 	}
-	rewrite_index_close(&ris);
+	ColumnarIndexInsertEnd(ris);
 
 	COLUMNAR_ASSERT_NO_OVERLAP(storageId);
 	return rewritten;
@@ -386,7 +295,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	bool		nullsFirst = false;
 	ColumnarReadState *readState;
 	ColumnarWriteState *writeState;
-	RewriteIndexState ris;
+	ColumnarIndexInsertState *ris;
 	uint64		rowNumber;
 
 	/* persist own pending work so the group list and deletes are current */
@@ -473,7 +382,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	tuplesort_performsort(tsort);
 
 	/* write the sorted rows back as fresh groups, with online index maintenance */
-	rewrite_index_open(rel, &ris);
+	ris = ColumnarIndexInsertBegin(rel);
 	writeState = ColumnarGetWriteState(rel);
 	while (tuplesort_gettupleslot(tsort, true, false, augSlot, NULL))
 	{
@@ -485,11 +394,11 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 								 augSlot->tts_isnull);
 		ColumnarProjectionFanoutRow(rel, writeState, newRn, augSlot->tts_values,
 									augSlot->tts_isnull);
-		rewrite_index_insert_row(&ris, rel, augSlot->tts_values,
-								 augSlot->tts_isnull, newRn);
+		ColumnarIndexInsertRow(ris, rel, augSlot->tts_values,
+							   augSlot->tts_isnull, newRn, false);
 	}
 	ColumnarFlushWriteStateForRelation(relid);
-	rewrite_index_close(&ris);
+	ColumnarIndexInsertEnd(ris);
 	tuplesort_end(tsort);
 	ExecDropSingleTupleTableSlot(augSlot);
 

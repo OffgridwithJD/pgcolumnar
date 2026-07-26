@@ -2959,6 +2959,7 @@ typedef struct PqInsertSinkArg
 {
 	Relation	rel;
 	CommandId	cid;
+	ColumnarIndexInsertState *indexes;	/* NULL when the table has none */
 }			PqInsertSinkArg;
 
 static void
@@ -2967,6 +2968,19 @@ pq_insert_sink(TupleTableSlot *slot, void *arg)
 	PqInsertSinkArg *a = (PqInsertSinkArg *) arg;
 
 	table_tuple_insert(a->rel, slot, a->cid, 0, NULL);
+
+	/*
+	 * table_tuple_insert writes the row and nothing else: index maintenance is
+	 * the executor's job, and there is no executor here. Without this the
+	 * imported rows are invisible to every index scan and a unique index accepts
+	 * duplicates (issue #153). tts_tid carries the row number the insert
+	 * assigned.
+	 */
+	if (a->indexes != NULL)
+		ColumnarIndexInsertRow(a->indexes, a->rel, slot->tts_values,
+							   slot->tts_isnull,
+							   ColumnarItemPointerToRowNumber(&slot->tts_tid),
+							   true);
 }
 
 static void
@@ -3297,6 +3311,8 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 
 	sinkarg.rel = rel;
 	sinkarg.cid = GetCurrentCommandId(true);
+	sinkarg.indexes = ColumnarRelationHasIndexes(rel)
+		? ColumnarIndexInsertBegin(rel) : NULL;
 	/* insert every resolved file's rows; the per-file decode is bounded by
 	 * fileCtx. Each file is bound against the target's descriptor, so a directory
 	 * whose files disagree with the table errors rather than importing garbage. */
@@ -3313,6 +3329,9 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 		MemoryContextReset(fileCtx);
 	}
 	MemoryContextDelete(fileCtx);
+
+	if (sinkarg.indexes != NULL)
+		ColumnarIndexInsertEnd(sinkarg.indexes);
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, RowExclusiveLock);

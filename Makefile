@@ -11,6 +11,7 @@ OBJS = \
 	src/columnar_compression.o \
 	src/columnar_encoding.o \
 	src/columnar_bloom.o \
+	src/columnar_index.o \
 	src/columnar_reader.o \
 	src/columnar_delete_vector.o \
 	src/columnar_customscan.o \
