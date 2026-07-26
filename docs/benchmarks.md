@@ -178,9 +178,21 @@ Import, 6,000,000 rows, 5 columns:
 | arrow | 18533.2 | 0.3 |
 | parquet | 18746.0 | 0.3 |
 
-Import is about 18x slower than export and is the clearest optimisation target in
-the interop path: export writes a prepared buffer, while import goes through the
-full insert path including encoding selection and index maintenance.
+Import is about 18x slower than export, and the reason is not the import code.
+Measured separately: `import_arrow` costs 12,150 ms against 12,990 ms for an
+`INSERT INTO ... SELECT` of the same rows with no file involved, so there is no
+import-specific overhead. Reading the whole Parquet file through `read_parquet`
+costs 1,415 ms, 11% of the import. The other 89% is the write path, which is also
+4.9x slower than a heap insert of the same rows.
+
+So the target is bulk load in general rather than the interop path: both readers
+decode a column-oriented file into per-row values, and the writer copies them back
+into per-column buffers. Tracked as
+[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155) with a plan in
+`design/IMPORT_THROUGHPUT_PLAN.md`.
+
+Index maintenance is not in this path at all, which is a correctness bug rather
+than a cost: see [issue #153](https://github.com/jdatcmd/pgcolumnar/issues/153).
 
 Nested round-trip, 1,000,000 rows, one `int[3]` array column and one composite
 column:
