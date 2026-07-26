@@ -64,6 +64,29 @@ test/native_ios.sh       /path/to/pg_config  # native index-only scan
 test/native_projection.sh /path/to/pg_config # native projections
 ```
 
+## Defects are fixed, not documented
+
+A limitation written into the documentation stops looking like a defect. It reads
+as a design choice, people plan around it, and nobody reopens it. So a defect is
+resolved one of two ways, and writing it down is neither:
+
+- **Fix it.** Filing an issue is tracking, not resolving; an issue with no change
+  behind it is a defect the project has decided to keep.
+- **Or measure it and show it is not a defect**, then record the numbers so the
+  next person does not re-litigate it. `design/EXTERNAL_AUDIT_2026_07.md` closes
+  the `ColumnarDeleteVectorBufferedDeleted` nested scan this way: the shape is
+  real, the cost measured linear rather than quadratic, and adding the obvious
+  cache made it slower.
+
+`docs/limitations.md` is for what is genuinely out of scope or blocked by an
+external constraint: an extension cannot change WAL behaviour, PostgreSQL 13 and
+14 lack an API. It is not a parking space. Anything in it that is unfixed only
+because nobody has fixed it does not belong there.
+
+When a fix lands, sweep the docs in the same change. `ANALYZE` collecting no
+statistics sat in `limitations.md` as a limitation after the implementation had
+already merged, which is worse than either state alone.
+
 ## Differential oracle
 
 `test/differential.sh`, `recovery`, `fuzz`, `hardening`, and `concurrent_diff`

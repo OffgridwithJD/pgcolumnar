@@ -36,25 +36,24 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
 
 ## Planner statistics
 
-`ANALYZE` does not collect column statistics for a columnar table. It reports
-success and leaves `pg_statistic` empty, so `pg_stats` shows no rows for the
-table and autoanalyze has nothing to store either.
+`ANALYZE` collects column statistics for a columnar table: null fraction,
+distinct counts, most-common values, histograms and correlation, the same set it
+collects for a heap table. Predicates are estimated from the data.
 
-The row count the planner uses is still accurate: it comes from row-group
-metadata rather than from `ANALYZE`, so scan and join costs are sized correctly.
-What is missing is everything `ANALYZE` would otherwise provide about the values
-in a column: most-common values, histograms, distinct counts, null fraction and
-average width. Predicates on a columnar table are therefore estimated with the
-planner's defaults rather than from the data, which mostly shows up as poor
-selectivity estimates for `WHERE` clauses and as join orders chosen from default
-distinct counts.
+Correlation is worth calling out because it is the statistic that makes
+`pgcolumnar.vacuum_sorted` and Z-order clustering legible to the planner: a table
+stored sorted on a key reports a correlation near 1 for that column, and the
+planner can then price a range scan over it correctly.
 
-A table whose plans depend on those estimates is better served by keeping the
-filtered columns in a heap table, or by checking `EXPLAIN` output rather than
-assuming the planner knows the distribution.
+The row count the planner uses does not come from `ANALYZE` at all. It is derived
+from row-group metadata, so it is accurate whether or not the table has been
+analyzed. `pg_class.reltuples` runs a few percent low after `ANALYZE`, because
+blocks that hold no row-group data (the metapage, and space reserved but not yet
+written) count as visited while offering no rows; the planner does not use that
+figure for columnar tables.
 
-`TABLESAMPLE` is also unsupported, and unlike `ANALYZE` it says so: it raises an
-error rather than returning no rows.
+`TABLESAMPLE` is unsupported and says so: it raises an error rather than
+returning no rows.
 
 ## Vacuum and compaction
 
