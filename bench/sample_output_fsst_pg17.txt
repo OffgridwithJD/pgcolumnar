@@ -1,0 +1,12 @@
+===================== FSST INGESTION GATE ======================
+  rows                         3000000
+  heap INSERT                  1918.2 ms
+  columnar INSERT              12370.5 ms
+  round-trip                   MATCH
+  heap size                    439279616 bytes
+  columnar size                105807872 bytes
+  url chunks using FSST        20 / 20 (first-vector = FSST)
+================================================================
+Run once as shipped and once with encode_fsst stubbed to return false;
+the columnar-INSERT delta is FSST's ingestion cost, the size delta its ratio.
+FSST_EXIT=0
