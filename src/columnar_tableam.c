@@ -31,6 +31,9 @@
 #include "optimizer/plancat.h"
 #include "port/atomics.h"
 #include "storage/bufmgr.h"
+#if PG_VERSION_NUM >= 180000
+#include "storage/read_stream.h"
+#endif
 #include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "storage/spin.h"
@@ -76,10 +79,48 @@ static get_relation_info_hook_type prev_get_relation_info_hook = NULL;
 static Oid	columnar_am_oid_cache = InvalidOid;
 
 /* our scan descriptor wraps the base scan and the reader state */
+/*
+ * ANALYZE sampling state (issue #154).
+ *
+ * The scan_analyze_next_block contract is block-oriented: core's block sampler
+ * picks physical blocks, hands one to the AM at a time, and the AM offers the
+ * rows on it. A columnar block holds encoded column bytes rather than rows, so
+ * the rows "on" it have to be defined rather than read off it.
+ *
+ * Defining a block as a whole row group would be cluster sampling. A table sorted
+ * or Z-ordered on a key holds a narrow slice of that key per group, so whole-group
+ * sampling underestimates n_distinct and skews the MCV list -- and does so worst
+ * on the tables pgcolumnar.vacuum_sorted and Z-ordering work hardest to produce.
+ * Confidently wrong statistics are worse than none.
+ *
+ * Instead a block maps to the *slice* of its row group that the block's position
+ * within that group represents: a group of R rows spanning K blocks is cut into K
+ * equal row slices, and block j of the group offers slice j. That keeps the heap
+ * analogue exact -- a sampled block offers its own rows and no others, so core's
+ * liverows-per-block scaling stays honest -- while spreading the sample across the
+ * whole of every group core touches, which is what defeats the clustering trap.
+ * A row is offered by exactly one block, so no row can be sampled twice.
+ */
+typedef struct ColumnarAnalyzeState
+{
+	List	   *rowGroups;		/* NativeRowGroupMetadata *, in row order */
+	Snapshot	metaSnapshot;
+	MemoryContext cx;
+
+	/* the slice the current block maps to; sliceRows == 0 means "no rows here" */
+	uint64		sliceFirstRow;
+	uint64		sliceRows;
+	uint64		sliceNext;		/* next offset within the slice */
+
+	Datum	   *values;
+	bool	   *nulls;
+} ColumnarAnalyzeState;
+
 typedef struct ColumnarScanDescData
 {
 	TableScanDescData rs_base;
 	ColumnarReadState *readState;
+	ColumnarAnalyzeState *analyzeState;
 } ColumnarScanDescData;
 typedef struct ColumnarScanDescData *ColumnarScanDesc;
 
@@ -89,10 +130,59 @@ PG_FUNCTION_INFO_V1(columnar_handler);
  * slot / scan callbacks
  * ------------------------------------------------------------------------- */
 
+/*
+ * Slot operations for a columnar relation (issue #154).
+ *
+ * These are TTSOpsVirtual with one callback replaced. A virtual slot's
+ * copy_heap_tuple is heap_form_tuple over the slot's values, which leaves the
+ * new tuple's t_self invalid and never looks at tts_tid -- the slot's item
+ * pointer is simply dropped on the way out.
+ *
+ * That is fatal for ANALYZE rather than merely lossy. acquire_sample_rows
+ * collects the sample with ExecCopySlotHeapTuple and then sorts it by item
+ * pointer, and ItemPointerGetBlockNumber asserts the pointer is valid, so an
+ * assert-enabled backend dies on the sort:
+ *
+ *     TRAP: failed Assert("ItemPointerIsValid(pointer)"), itemptr.h:105
+ *
+ * On a non-assert build the same invalid pointers are read as garbage and the
+ * sample is sorted into an arbitrary order, which is the silent form of it: the
+ * correlation statistic is then computed over rows in no particular order and
+ * comes out as noise.
+ *
+ * Carrying tts_tid into t_self fixes both, and costs nothing on the scan path
+ * because copy_heap_tuple is not on it -- a scan stores values into the slot and
+ * the executor reads them from there.
+ *
+ * The slot is no longer "virtual" by TTS_IS_VIRTUAL, which is a pointer identity
+ * test against TTSOpsVirtual. That is safe here: nothing in core requires it,
+ * the paths that check it fall back to the general case, and the one that would
+ * error -- tts_virtual_getsomeattrs -- is unreachable because
+ * ExecStoreVirtualTuple sets tts_nvalid to the full attribute count, so
+ * slot_getsomeattrs never calls it. The full suite is run on an assert-enabled
+ * build to keep that reasoning honest.
+ */
+static TupleTableSlotOps ColumnarSlotOps;
+
+static HeapTuple
+columnar_slot_copy_heap_tuple(TupleTableSlot *slot)
+{
+	HeapTuple	tuple;
+
+	Assert(!TTS_EMPTY(slot));
+
+	tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+							slot->tts_values, slot->tts_isnull);
+	tuple->t_self = slot->tts_tid;
+	tuple->t_tableOid = slot->tts_tableOid;
+
+	return tuple;
+}
+
 static const TupleTableSlotOps *
 columnar_slot_callbacks(Relation relation)
 {
-	return &TTSOpsVirtual;
+	return &ColumnarSlotOps;
 }
 
 static TableScanDesc
@@ -137,6 +227,9 @@ columnar_scan_end(TableScanDesc sscan)
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 
 	ColumnarEndRead(scan->readState);
+
+	if (scan->analyzeState != NULL)
+		MemoryContextDelete(scan->analyzeState->cx);
 
 	/* release a snapshot restored+registered for a parallel worker */
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
@@ -381,16 +474,193 @@ columnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 	*allvisfrac = 0.0;
 }
 
-/* ANALYZE: phase 1 collects no statistics rather than crash */
+/*
+ * columnar_analyze_state
+ *		The sampling state for this scan, built on first use. The row group list
+ *		is read once: ANALYZE holds ShareUpdateExclusiveLock, so no group is added
+ *		or retired under us, and re-reading it per block would put a catalog scan
+ *		in the middle of the sample loop.
+ */
+static ColumnarAnalyzeState *
+columnar_analyze_state(ColumnarScanDesc scan)
+{
+	ColumnarAnalyzeState *st = scan->analyzeState;
+	Relation	rel = scan->rs_base.rs_rd;
+	MemoryContext oldContext;
+
+	if (st != NULL)
+		return st;
+
+	st = palloc0(sizeof(ColumnarAnalyzeState));
+	st->cx = AllocSetContextCreate(CurrentMemoryContext, "columnar analyze",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldContext = MemoryContextSwitchTo(st->cx);
+	st->metaSnapshot = ColumnarCatalogSnapshot(scan->rs_base.rs_snapshot);
+	st->rowGroups = ColumnarReadRowGroupList(ColumnarStorageId(rel),
+											 st->metaSnapshot);
+	st->values = palloc(sizeof(Datum) * RelationGetDescr(rel)->natts);
+	st->nulls = palloc(sizeof(bool) * RelationGetDescr(rel)->natts);
+	MemoryContextSwitchTo(oldContext);
+
+	scan->analyzeState = st;
+	return st;
+}
+
+/*
+ * columnar_analyze_set_slice
+ *		Point the sampler at the rows a physical block stands for.
+ *
+ *		The block's logical byte offset locates the row group it falls in; its
+ *		position within that group's byte range gives the slice ordinal, and the
+ *		group's rows are cut into as many equal slices as it spans blocks. A block
+ *		that lands outside every group -- the metapage, or space reserved but not
+ *		yet written -- yields an empty slice, which is the columnar equivalent of
+ *		sampling an empty heap page and is reported the same way: the block counts
+ *		as visited and offers nothing.
+ */
+static void
+columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
+{
+	uint64		logicalOffset;
+	ListCell   *lc;
+
+	st->sliceFirstRow = 0;
+	st->sliceRows = 0;
+	st->sliceNext = 0;
+
+	/* blocks 0 and 1 are the metapage and its reserve; no logical data there */
+	if ((uint64) blockno * COLUMNAR_BYTES_PER_PAGE < COLUMNAR_FIRST_LOGICAL_OFFSET)
+		return;
+
+	logicalOffset = (uint64) blockno * COLUMNAR_BYTES_PER_PAGE -
+		COLUMNAR_FIRST_LOGICAL_OFFSET;
+
+	foreach(lc, st->rowGroups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+		uint64		span;
+		uint64		nblocks;
+		uint64		slice;
+		uint64		firstOff;
+		uint64		endOff;
+
+		if (rg->rowCount == 0)
+			continue;
+		if (logicalOffset < rg->fileOffset)
+			continue;
+
+		/*
+		 * A group's footprint is its data length rounded up to a page, so the
+		 * blocks it owns are exactly those its rounded span covers. Using the
+		 * unrounded length would leave the last block of every group unmatched
+		 * and its slice of rows unreachable.
+		 */
+		span = COLUMNAR_PAGE_ROUND_UP(rg->byteLength);
+		if (logicalOffset >= rg->fileOffset + span)
+			continue;
+
+		nblocks = span / COLUMNAR_BYTES_PER_PAGE;
+		if (nblocks == 0)
+			nblocks = 1;
+		slice = (logicalOffset - rg->fileOffset) / COLUMNAR_BYTES_PER_PAGE;
+		if (slice >= nblocks)
+			slice = nblocks - 1;
+
+		/*
+		 * Cut the group's rows into nblocks slices. Computing both edges from the
+		 * same expression makes the slices exactly partition the group however the
+		 * division rounds, so every row belongs to one block and none to two.
+		 */
+		firstOff = (rg->rowCount * slice) / nblocks;
+		endOff = (rg->rowCount * (slice + 1)) / nblocks;
+
+		st->sliceFirstRow = rg->firstRowNumber + firstOff;
+		st->sliceRows = endOff - firstOff;
+		st->sliceNext = 0;
+		return;
+	}
+}
+
+#if PG_VERSION_NUM >= 180000
 static bool
 columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
 {
-	return false;
+	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
+	ColumnarAnalyzeState *st = columnar_analyze_state(cscan);
+	Buffer		buf = read_stream_next_buffer(stream, NULL);
+
+	if (!BufferIsValid(buf))
+		return false;
+
+	/*
+	 * The stream chose the block; the buffer's contents are of no use here,
+	 * because a columnar block holds encoded column bytes and the rows it stands
+	 * for are read through the fetch path instead. Release the pin at once rather
+	 * than holding it across the tuple loop as heap does.
+	 */
+	columnar_analyze_set_slice(st, BufferGetBlockNumber(buf));
+	ReleaseBuffer(buf);
+	return true;
 }
+#else
+static bool
+columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
+{
+	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
+
+	columnar_analyze_set_slice(columnar_analyze_state(cscan), blockno);
+	return true;
+}
+#endif
 
 static bool
 columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 {
+	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
+	ColumnarAnalyzeState *st = columnar_analyze_state(cscan);
+	Relation	rel = scan->rs_rd;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			i;
+
+	while (st->sliceNext < st->sliceRows)
+	{
+		uint64		rowNumber = st->sliceFirstRow + st->sliceNext++;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * A row the delete vector marks is dead for ANALYZE's purposes, and
+		 * counting it as such is what keeps core's live-row estimate right rather
+		 * than merely keeping it out of the sample.
+		 */
+		if (!ColumnarReadRowByNumber(rel, scan->rs_snapshot, rowNumber,
+									 st->values, st->nulls))
+		{
+			*deadrows += 1;
+			continue;
+		}
+
+		ExecClearTuple(slot);
+		for (i = 0; i < tupdesc->natts; i++)
+		{
+			slot->tts_values[i] = st->values[i];
+			slot->tts_isnull[i] = st->nulls[i];
+		}
+		ExecStoreVirtualTuple(slot);
+
+		/*
+		 * Give the row its synthetic address. ANALYZE sorts the collected sample
+		 * by item pointer before computing statistics, and the row-number mapping
+		 * is monotonic, so this is what makes the sorted order the physical order
+		 * -- which in turn is what makes the correlation statistic mean anything.
+		 * Correlation is the one statistic nothing outside this AM can supply.
+		 */
+		ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+
+		*liverows += 1;
+		return true;
+	}
+
 	return false;
 }
 
@@ -1116,6 +1386,13 @@ columnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
 void
 _PG_init(void)
 {
+	/*
+	 * Virtual slot behaviour, except that a copied heap tuple keeps the slot's
+	 * item pointer. See the comment on columnar_slot_copy_heap_tuple.
+	 */
+	ColumnarSlotOps = TTSOpsVirtual;
+	ColumnarSlotOps.copy_heap_tuple = columnar_slot_copy_heap_tuple;
+
 	DefineCustomIntVariable("pgcolumnar.stripe_row_limit",
 							"Maximum number of rows per stripe.",
 							NULL,
