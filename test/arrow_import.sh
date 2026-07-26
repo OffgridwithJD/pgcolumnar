@@ -129,4 +129,76 @@ PY
 	expect_error "reject dictionary-encoded file" "SELECT pgcolumnar.import_arrow('ri_d', '$DICTF');"
 fi
 
+IXFILE="$PGC_WORKDIR/ix_roundtrip.arrows"
+
+# ---------------------------------------------------------------------------
+# Import into a table that already has indexes (issue #153).
+#
+# table_tuple_insert writes the row and nothing else: index maintenance is the
+# executor's job, and an importer calling it directly has to do that itself.
+# When it did not, the rows landed in the table and in no index, so an index
+# scan returned nothing while a sequential scan returned everything, and a
+# unique index accepted the same key twice. Nothing errored either time.
+#
+# The checks below compare the two access paths against each other on the same
+# predicate, which is the shape that catches it: a count that only ever uses one
+# path passes whether or not the index was maintained.
+# ---------------------------------------------------------------------------
+
+psql_run "CREATE TABLE ix_src (id int, v text) USING pgcolumnar;"
+psql_run "INSERT INTO ix_src SELECT g, 'v' || g FROM generate_series(1, 3000) g;"
+psql_run "SELECT pgcolumnar.export_arrow('ix_src', '$IXFILE');"
+
+psql_run "CREATE TABLE ix_tgt (id int, v text) USING pgcolumnar;"
+psql_run "CREATE INDEX ix_tgt_id ON ix_tgt (id);"
+psql_run "SELECT pgcolumnar.import_arrow('ix_tgt', '$IXFILE');"
+
+# q echoes one line per statement, so take the last: the count, not the SETs.
+#
+# enable_seqscan does not discourage a custom scan, so turning it off on its own
+# leaves the columnar scan the cheapest path and the index is never consulted.
+# That made an earlier version of this check pass against a build with index
+# maintenance deliberately removed. pgcolumnar.enable_custom_scan is what takes
+# the columnar path out of the running, and the plan is asserted below so a
+# future costing change cannot quietly put it back.
+IDX_SETUP="SET enable_seqscan = off; SET pgcolumnar.enable_custom_scan = off;"
+idx_count() {  # force an index scan
+	q "$IDX_SETUP
+	   SELECT count(*) FROM ix_tgt WHERE id BETWEEN 100 AND 199;" | tail -1
+}
+idx_plan_is_index_scan() {
+	q "$IDX_SETUP
+	   EXPLAIN (COSTS OFF) SELECT count(*) FROM ix_tgt WHERE id BETWEEN 100 AND 199;" \
+		| grep -qi 'Index.*Scan' && echo yes || echo no
+}
+seq_count() {  # force a sequential scan
+	q "SET enable_indexscan = off; SET enable_bitmapscan = off;
+	   SET enable_indexonlyscan = off;
+	   SELECT count(*) FROM ix_tgt WHERE id BETWEEN 100 AND 199;" | tail -1
+}
+
+check "the index-scan check really uses the index" "$(idx_plan_is_index_scan)" "yes"
+check "import into an indexed table: both scans agree" "$(idx_count)" "$(seq_count)"
+check "import into an indexed table: the rows are there" "$(seq_count)" "100"
+check "import into an indexed table: a point lookup finds its row" \
+	"$(q "$IDX_SETUP
+	      SELECT count(*) FROM ix_tgt WHERE id = 2222;" | tail -1)" "1"
+
+# A unique index must police the second import rather than take it.
+psql_run "CREATE TABLE ix_uq (id int, v text) USING pgcolumnar;"
+psql_run "CREATE UNIQUE INDEX ix_uq_id ON ix_uq (id);"
+psql_run "SELECT pgcolumnar.import_arrow('ix_uq', '$IXFILE');"
+expect_error "importing the same keys twice raises unique_violation" \
+	"SELECT pgcolumnar.import_arrow('ix_uq', '$IXFILE');"
+check "the failed second import left the row count alone" \
+	"$(q 'SELECT count(*) FROM ix_uq;')" "3000"
+
+# A partial index must receive only the rows its predicate covers.
+psql_run "CREATE TABLE ix_part (id int, v text) USING pgcolumnar;"
+psql_run "CREATE INDEX ix_part_id ON ix_part (id) WHERE id <= 500;"
+psql_run "SELECT pgcolumnar.import_arrow('ix_part', '$IXFILE');"
+check "partial index covers its rows after import" \
+	"$(q "$IDX_SETUP
+	      SELECT count(*) FROM ix_part WHERE id BETWEEN 100 AND 199;" | tail -1)" "100"
+
 pgc_summary

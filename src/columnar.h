@@ -330,6 +330,25 @@ extern bool ColumnarVMIsVisible(Relation rel, BlockNumber blk);
 extern void ColumnarVMSetVisibleForRelation(Relation rel);
 extern void ColumnarDiscardFetchCache(void);
 
+/* index maintenance for callers that insert rows without an executor (#153) */
+typedef struct ColumnarIndexInsertState
+{
+	int			n;
+	Relation   *rels;
+	IndexInfo **infos;
+	ExprState **predicates;		/* partial-index predicate, or NULL */
+	EState	   *estate;
+	TupleTableSlot *slot;
+} ColumnarIndexInsertState;
+
+extern ColumnarIndexInsertState *ColumnarIndexInsertBegin(Relation rel);
+extern void ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
+								   Datum *values, bool *isnull,
+								   uint64 rowNumber, bool enforceUnique);
+extern void ColumnarIndexInsertEnd(ColumnarIndexInsertState *st);
+extern bool ColumnarRelationHasIndexes(Relation rel);
+
+
 /* a contiguous run of all-visible row numbers (gap 28 phase 3) */
 typedef struct ColumnarRowRange
 {

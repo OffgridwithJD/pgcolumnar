@@ -1905,6 +1905,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 	int			totalBuffers = 0;
 	FILE	   *f;
 	TupleTableSlot *slot;
+	ColumnarIndexInsertState *indexes;
 	CommandId	cid;
 	MemoryContext rowCtx;
 	int64		total = 0;
@@ -1973,6 +1974,8 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 
 	slot = table_slot_create(rel, NULL);
 	cid = GetCurrentCommandId(true);
+	indexes = ColumnarRelationHasIndexes(rel)
+		? ColumnarIndexInsertBegin(rel) : NULL;
 
 	/*
 	 * Per-row scratch context. Reconstructing a nested value (array/composite)
@@ -2110,6 +2113,19 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 					}
 					ExecStoreVirtualTuple(slot);
 					table_tuple_insert(rel, slot, cid, 0, NULL);
+
+					/*
+					 * table_tuple_insert writes the row and nothing else: index
+					 * maintenance belongs to the executor and there is none
+					 * here. Without this the imported rows are invisible to
+					 * every index scan and a unique index accepts duplicates
+					 * (issue #153). tts_tid carries the assigned row number.
+					 */
+					if (indexes != NULL)
+						ColumnarIndexInsertRow(indexes, rel, slot->tts_values,
+											   slot->tts_isnull,
+											   ColumnarItemPointerToRowNumber(&slot->tts_tid),
+											   true);
 					MemoryContextSwitchTo(oldCtx);
 					MemoryContextReset(rowCtx);
 					total++;
@@ -2131,6 +2147,9 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 
 	FreeFile(f);
 	MemoryContextDelete(rowCtx);
+	if (indexes != NULL)
+		ColumnarIndexInsertEnd(indexes);
+
 	ExecDropSingleTupleTableSlot(slot);
 	table_close(rel, RowExclusiveLock);
 	PG_RETURN_INT64(total);
