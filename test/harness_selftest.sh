@@ -142,4 +142,56 @@ _verdict="$(pgc_cluster_is_ours && echo ours || echo foreign)"
 PGC_PORT="$_saved_port"
 check "guard rejects a foreign cluster" "$_verdict" "foreign"
 
+# ---------------------------------------------------------------------------
+# Every suite must be registered in the matrix.
+#
+# A suite that run_all_versions.sh does not list is never run by any gate. It
+# passes review, it sits in the tree, and the first change to the code under it
+# breaks it silently. This has happened repeatedly: four consecutive PRs added a
+# suite without registering it, and two older suites (native_reclaim_reconcile
+# among them) had never been run by a gate at all.
+#
+# The allowlist is deliberately short and each entry needs a reason, because the
+# easy way to satisfy this check is to add a name to it.
+# ---------------------------------------------------------------------------
+
+TESTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER="$TESTDIR/run_all_versions.sh"
+
+# Not suites: the shared library, the runner itself, and the two developer
+# helpers that build rather than test. native_scale is a suite but is opt-in by
+# design and says so in its own header: it runs at a row count the matrix should
+# not carry.
+not_a_suite() {
+	case "$1" in
+		lib|run_all_versions|devloop|rebuild|native_scale) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# the SUITES=( ... ) array, flattened to one name per line
+listed_suites() {
+	awk '/^SUITES=\(/,/\)/' "$RUNNER" | tr ' \t' '\n\n' |
+		sed -e 's/^SUITES=(//' -e 's/)$//' -e 's/\\$//' |
+		grep -E '^[a-z0-9_]+$'
+}
+
+unregistered=""
+for f in "$TESTDIR"/*.sh; do
+	name="$(basename "$f" .sh)"
+	not_a_suite "$name" && continue
+	listed_suites | grep -qx "$name" || unregistered="$unregistered $name"
+done
+check "every suite is registered in run_all_versions.sh" \
+	"$([ -z "$unregistered" ] && echo none || echo "unregistered:$unregistered")" "none"
+
+# The reverse: a name in SUITES with no file is a rename or a typo, and the
+# runner would report it as a failure only when it tried to run it.
+missing_file=""
+while read -r name; do
+	[ -f "$TESTDIR/$name.sh" ] || missing_file="$missing_file $name"
+done < <(listed_suites)
+check "every registered suite has a file" \
+	"$([ -z "$missing_file" ] && echo none || echo "missing:$missing_file")" "none"
+
 pgc_summary

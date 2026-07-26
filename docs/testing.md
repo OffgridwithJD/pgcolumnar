@@ -52,6 +52,7 @@ test/native_writer.sh    /path/to/pg_config  # native format catalog output
 test/native_roundtrip.sh /path/to/pg_config  # native write then read round-trip
 test/native_encoding.sh  /path/to/pg_config  # native per-vector encoding cascade
 test/native_zonemap.sh   /path/to/pg_config  # native zone maps
+test/write_minmax_fastpath.sh /path/to/pg_config # direct zone min/max comparison
 test/native_skip.sh      /path/to/pg_config  # native chunk and vector skipping
 test/native_agg.sh       /path/to/pg_config  # native aggregate paths
 test/native_agg_deletes.sh /path/to/pg_config  # per-row-group fold when rows are deleted
