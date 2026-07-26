@@ -926,6 +926,7 @@ columnar_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_PARALLEL_ABORT:
 			ColumnarDiscardAllPendingWrites();
 			ColumnarDiscardAllDeleteVectors();
+			ColumnarDiscardFetchCache();
 			break;
 		default:
 			break;

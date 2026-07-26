@@ -18,6 +18,7 @@
 #include "access/htup_details.h"
 #include "access/relscan.h"
 #include "access/tupmacs.h"
+#include "access/xact.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
 #include "utils/memutils.h"
@@ -1267,6 +1268,155 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  *		to the row's position. Returns false when no stripe covers the row or
  *		the row is marked deleted in the delete vector (spec 7.5).
  */
+
+/* -------------------------------------------------------------------------
+ * Statement-scoped decoded row-group cache (issue #143).
+ *
+ * ColumnarReadRowByNumber() read and decoded a whole row group to return one
+ * row, so fetching N rows out of one group cost N times the group: measured at
+ * 878 ms for 5,000 rows, 4,452 ms for 10,000 and 19,211 ms for 20,000, all in a
+ * single group. Every index scan, bitmap scan, and index-driven UPDATE or DELETE
+ * goes through this path.
+ *
+ * Correctness comes from the scope rather than from an invalidation protocol. An
+ * entry is only used within the command that filled it, and a row group's bytes
+ * are immutable once written, so nothing can rewrite what a cached entry holds
+ * while that entry is live: a rewrite or compaction needs a lock this statement
+ * already excludes, and a reclaim that reuses a file offset can only happen in a
+ * later command, which the command id check rejects. Keying on the storage id as
+ * well means new storage is never served an old decode.
+ *
+ * Visibility is unaffected because it is not cached. The delete vector, the
+ * buffered delete marks and the validity bitmap are consulted per fetch; only
+ * decoded column values are held here.
+ *
+ * Entries live in contexts under TopTransactionContext, so an abort or commit
+ * frees them without a hook; ColumnarDiscardFetchCache() clears the descriptors
+ * to match.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Four entries rather than one. A sequential UPDATE walks rows in row-number
+ * order and stays inside one group, which one entry would serve, but an index
+ * delivers TIDs in index order, and on a column uncorrelated with row order
+ * consecutive fetches land in different groups. One entry hits about 1/G of the
+ * time there; a handful covers it and costs nothing measurable.
+ */
+#define COLUMNAR_FETCH_CACHE_ENTRIES	4
+
+/*
+ * Cap on the decoded size held at once, measured with MemoryContextMemAllocated
+ * rather than derived from the stored byte length: the stored form is encoded and
+ * compressed, so a group of wide text decodes to many times its size on disk, and
+ * sizing from disk would overshoot worst on exactly the tables this helps most.
+ */
+#define COLUMNAR_FETCH_CACHE_MAX_BYTES	(32 * 1024 * 1024)
+
+typedef struct ColumnarFetchGroup
+{
+	MemoryContext cx;			/* holds every pointer below; NULL when free */
+	uint64		storageId;
+	uint64		groupNumber;
+	CommandId	cid;			/* the command that filled this entry */
+	uint64		firstRowNumber;
+	uint64		rowCount;
+	uint64		fileOffset;
+	int			natts;
+	char	   *groupBuffer;	/* the group's raw bytes */
+	NativeColumnChunkMetadata **ccForCol;	/* [natts] */
+	char	  **rawBuf;			/* [natts]; NULL until that column is decoded */
+	uint64		lastUsed;
+}			ColumnarFetchGroup;
+
+static ColumnarFetchGroup columnarFetchCache[COLUMNAR_FETCH_CACHE_ENTRIES];
+static uint64 columnarFetchClock = 0;
+
+/* drop one entry and everything it holds */
+static void
+columnar_fetch_entry_reset(ColumnarFetchGroup *e)
+{
+	if (e->cx != NULL)
+		MemoryContextDelete(e->cx);
+	memset(e, 0, sizeof(*e));
+}
+
+/*
+ * ColumnarDiscardFetchCache
+ *		Forget every cached group. The contexts hang off TopTransactionContext
+ *		and are already gone by the time this runs at transaction end, so this
+ *		only clears the descriptors that pointed at them.
+ */
+void
+ColumnarDiscardFetchCache(void)
+{
+	memset(columnarFetchCache, 0, sizeof(columnarFetchCache));
+	columnarFetchClock = 0;
+}
+
+/*
+ * Find the entry for this group in this command, or prepare an empty one.
+ * Returns NULL when nothing should be cached, in which case the caller decodes
+ * into its own scratch context exactly as before.
+ */
+static ColumnarFetchGroup *
+columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
+{
+	CommandId	cid = GetCurrentCommandId(false);
+	ColumnarFetchGroup *victim = NULL;
+	int			i;
+
+	*hit = false;
+
+	for (i = 0; i < COLUMNAR_FETCH_CACHE_ENTRIES; i++)
+	{
+		ColumnarFetchGroup *e = &columnarFetchCache[i];
+
+		if (e->cx == NULL)
+		{
+			if (victim == NULL)
+				victim = e;
+			continue;
+		}
+		/* an entry from an earlier command can never be used again */
+		if (e->cid != cid)
+		{
+			columnar_fetch_entry_reset(e);
+			if (victim == NULL)
+				victim = e;
+			continue;
+		}
+		if (e->storageId == storageId && e->groupNumber == groupNumber)
+		{
+			e->lastUsed = ++columnarFetchClock;
+			*hit = true;
+			return e;
+		}
+	}
+
+	if (victim == NULL)
+	{
+		/* every slot is live in this command: take the least recently used */
+		uint64		oldest = UINT64_MAX;
+
+		for (i = 0; i < COLUMNAR_FETCH_CACHE_ENTRIES; i++)
+			if (columnarFetchCache[i].lastUsed < oldest)
+			{
+				oldest = columnarFetchCache[i].lastUsed;
+				victim = &columnarFetchCache[i];
+			}
+		columnar_fetch_entry_reset(victim);
+	}
+
+	victim->cx = AllocSetContextCreate(TopTransactionContext,
+									   "columnar fetch group",
+									   ALLOCSET_DEFAULT_SIZES);
+	victim->storageId = storageId;
+	victim->groupNumber = groupNumber;
+	victim->cid = cid;
+	victim->lastUsed = ++columnarFetchClock;
+	return victim;
+}
+
 bool
 ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 						Datum *values, bool *nulls)
@@ -1280,9 +1430,8 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	Snapshot	metaSnapshot;
 	List	   *rgList;
 	NativeRowGroupMetadata *rg = NULL;
-	List	   *nchunks;
-	NativeColumnChunkMetadata **ccForCol;
-	char	   *groupBuffer;
+	ColumnarFetchGroup *entry;
+	bool		hit;
 	int			validityBytes;
 	uint64		rowInGrp;
 	ListCell   *nlc;
@@ -1299,6 +1448,9 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * and reconstruct each column's value at its position. Index and bitmap scans
 	 * and unique enforcement call this. A deleted row (in the group's delete vector or
 	 * a not-yet-flushed buffered delete) is not visible.
+	 *
+	 * The row-group list is read per fetch and deliberately not cached: a group
+	 * flushed earlier in this same statement has to become visible here.
 	 */
 	rgList = ColumnarReadRowGroupList(storageId, metaSnapshot);
 	foreach(nlc, rgList)
@@ -1343,27 +1495,55 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		}
 	}
 
-	groupBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
-	if (rg->byteLength > 0)
-		ColumnarReadLogicalData(rel, rg->fileOffset, groupBuffer,
-								rg->byteLength);
-	nchunks = ColumnarReadColumnChunkList(storageId, rg->groupNumber,
-										  metaSnapshot);
-	validityBytes = (int) ((rg->rowCount + 7) / 8);
-
-	ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
-	foreach(nlc, nchunks)
+	/*
+	 * The group's bytes and its decoded columns are the expensive part and the
+	 * part that repeats across fetches of the same group, so they come from the
+	 * statement-scoped cache above. A miss fills the entry; a hit skips the read
+	 * and the decode entirely.
+	 */
+	entry = columnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+	if (!hit)
 	{
-		NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(nlc);
+		MemoryContext entryOld = MemoryContextSwitchTo(entry->cx);
+		List	   *nchunks;
 
-		if (cc->columnIndex >= 0 && cc->columnIndex < natts)
-			ccForCol[cc->columnIndex] = cc;
+		entry->firstRowNumber = rg->firstRowNumber;
+		entry->rowCount = rg->rowCount;
+		entry->fileOffset = rg->fileOffset;
+		entry->natts = natts;
+		entry->groupBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
+		entry->ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
+		entry->rawBuf = palloc0(sizeof(char *) * natts);
+		MemoryContextSwitchTo(tmp);
+
+		if (rg->byteLength > 0)
+			ColumnarReadLogicalData(rel, rg->fileOffset, entry->groupBuffer,
+									rg->byteLength);
+
+		nchunks = ColumnarReadColumnChunkList(storageId, rg->groupNumber,
+											  metaSnapshot);
+		foreach(nlc, nchunks)
+		{
+			NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(nlc);
+
+			if (cc->columnIndex >= 0 && cc->columnIndex < natts)
+			{
+				MemoryContextSwitchTo(entry->cx);
+				entry->ccForCol[cc->columnIndex] =
+					(NativeColumnChunkMetadata *) palloc(sizeof(*cc));
+				memcpy(entry->ccForCol[cc->columnIndex], cc, sizeof(*cc));
+				MemoryContextSwitchTo(tmp);
+			}
+		}
+		MemoryContextSwitchTo(entryOld);
 	}
+
+	validityBytes = (int) ((entry->rowCount + 7) / 8);
 
 	for (c = 0; c < natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, c);
-		NativeColumnChunkMetadata *cc = ccForCol[c];
+		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
 		char	   *base;
 		char	   *vbits;
 		char	   *rawBuf;
@@ -1377,7 +1557,7 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			continue;
 		}
 
-		base = groupBuffer + (cc->pageOffset - rg->fileOffset);
+		base = entry->groupBuffer + (cc->pageOffset - entry->fileOffset);
 		vbits = base;
 		if (((vbits[rowInGrp >> 3] >> (rowInGrp & 7)) & 1) == 0)
 		{
@@ -1391,15 +1571,24 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			if ((vbits[i >> 3] >> (i & 7)) & 1)
 				present++;
 
-		if (cc->encodingDescriptorLen == 1 &&
-			(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
-			rawBuf = base + validityBytes;
-		else
-			rawBuf = columnar_native_decode_chunk(tmp, att, base + validityBytes,
-												  (uint32) (cc->pageLength - validityBytes),
-												  cc->encodingDescriptor,
-												  cc->encodingDescriptorLen,
-												  cc->blockCodec, NULL, NULL);
+		if (entry->rawBuf[c] == NULL)
+		{
+			MemoryContext decOld = MemoryContextSwitchTo(entry->cx);
+
+			if (cc->encodingDescriptorLen == 1 &&
+				(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
+				entry->rawBuf[c] = base + validityBytes;
+			else
+				entry->rawBuf[c] =
+					columnar_native_decode_chunk(entry->cx, att,
+												 base + validityBytes,
+												 (uint32) (cc->pageLength - validityBytes),
+												 cc->encodingDescriptor,
+												 cc->encodingDescriptorLen,
+												 cc->blockCodec, NULL, NULL);
+			MemoryContextSwitchTo(decOld);
+		}
+		rawBuf = entry->rawBuf[c];
 
 		cursor = rawBuf;
 		for (i = 0; i < present; i++)
@@ -1407,6 +1596,15 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		values[c] = ColumnarDecodeValue(att, &cursor, target);
 		nulls[c] = false;
 	}
+
+	/*
+	 * Hold the entry only while it is worth holding. Measuring the context is
+	 * what makes the cap mean decoded bytes rather than stored bytes; a group
+	 * over the cap is used for this fetch and then dropped, so an outsized group
+	 * costs what it always did rather than pinning memory.
+	 */
+	if (MemoryContextMemAllocated(entry->cx, true) > COLUMNAR_FETCH_CACHE_MAX_BYTES)
+		columnar_fetch_entry_reset(entry);
 
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextDelete(tmp);

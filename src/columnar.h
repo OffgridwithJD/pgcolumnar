@@ -328,6 +328,7 @@ extern void ColumnarVMClearVisible(Relation rel, BlockNumber blk);
 extern void ColumnarVMClearForRow(Relation rel, uint64 rowNumber);
 extern bool ColumnarVMIsVisible(Relation rel, BlockNumber blk);
 extern void ColumnarVMSetVisibleForRelation(Relation rel);
+extern void ColumnarDiscardFetchCache(void);
 
 /* a contiguous run of all-visible row numbers (gap 28 phase 3) */
 typedef struct ColumnarRowRange
