@@ -31,7 +31,8 @@
 #include "optimizer/plancat.h"
 #include "port/atomics.h"
 #include "storage/bufmgr.h"
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 170000
+/* the read-stream ANALYZE rework landed in PG17, and so did this header */
 #include "storage/read_stream.h"
 #endif
 #include "storage/lmgr.h"
@@ -581,7 +582,14 @@ columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
 	}
 }
 
-#if PG_VERSION_NUM >= 180000
+/*
+ * The block comes from a read stream from PG17 and as a plain BlockNumber
+ * before that. columnar_compat.h supplies the parameter list and splits at the
+ * same major; these two must agree, and when they did not, PG17 took the
+ * pre-17 branch and failed to compile on a `blockno` its signature does not
+ * have.
+ */
+#if PG_VERSION_NUM >= 170000
 static bool
 columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
 {
