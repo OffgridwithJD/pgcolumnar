@@ -7,7 +7,7 @@
 # with planner defaults. The sampler maps each block core chooses to the slice of
 # its row group that the block stands for, and offers that slice's live rows.
 #
-# Five things are asserted.
+# Seven things are asserted.
 #
 # 1. The statistics agree with a heap table on identical data. This is the
 #    differential oracle the rest of the suite uses, and it is what catches a
@@ -57,11 +57,28 @@ psql_run "DROP TABLE IF EXISTS as_c; DROP TABLE IF EXISTS as_h;
 	FROM generate_series(1, $ROWS) g;
 	CREATE TABLE as_h (LIKE as_c);
 	INSERT INTO as_h SELECT * FROM as_c;
-	ANALYZE as_c; ANALYZE as_h;" >/dev/null 2>&1
+	ANALYZE as_c; ANALYZE as_h;" >/dev/null
 
 stat() {  # table, column, field
-	q "SELECT $3 FROM pg_stats WHERE tablename = '$1' AND attname = '$2';"
+	local v
+	v="$(q "SELECT $3 FROM pg_stats WHERE tablename = '$1' AND attname = '$2';")"
+	# A missing statistic reads as a sentinel rather than the empty string, so a
+	# failure says "(no statistic)" against "3" instead of "" against "3". It does
+	# not make an absent-vs-absent comparison fail; see the note below.
+	echo "${v:-(no statistic)}"
 }
+
+# ANALYZE is the statement under test and it is capable of taking the backend
+# down: an invalid item pointer in the sample aborts an assert-enabled server in
+# acquire_sample_rows. The setup blocks above therefore discard stdout but keep
+# stderr. Sending both to /dev/null, which is what this file did first, turns a
+# dead cluster into a run where every later check quietly reads an empty result
+# and the suite reports missing statistics instead of a crash.
+#
+# This check is the tripwire for that: it runs before anything reads pg_stats and
+# fails loudly if the server is gone.
+check "the server survived ANALYZE" \
+	"$(q "SELECT 'alive';")" "alive"
 
 check "ANALYZE now collects statistics at all" \
 	"$(q "SELECT count(*) > 0 FROM pg_stats WHERE tablename = 'as_c';")" "t"
@@ -76,6 +93,12 @@ check "null_frac matches heap within 0.02" \
 
 # n_distinct: these are small enough that ANALYZE reports them exactly, so an
 # exact comparison is the right assertion rather than a tolerance
+# Note what these differential checks do NOT cover. If the server has died, both
+# sides return no statistic, the two agree, and the check passes -- a differential
+# oracle agrees with itself when both halves are missing. That is why the two
+# checks above run first and are not differential: "the server survived ANALYZE"
+# and "ANALYZE now collects statistics at all" are what catch a dead cluster. The
+# sentinel below only makes the failure readable when one side is missing.
 for col in status v nullable; do
 	check "n_distinct on $col matches heap" \
 		"$(stat as_c $col n_distinct)" "$(stat as_h $col n_distinct)"
@@ -113,6 +136,23 @@ check "the sampled tuples carry a valid item pointer" \
 		"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/columnar_tableam.c")" \
 	"1"
 
+# No row may be offered twice. This is the observable consequence of the slice
+# arithmetic partitioning each group exactly, and the check is jdatcmd's from the
+# review of this PR: raise the statistics target until ANALYZE samples effectively
+# the whole table, then read n_distinct on the unique id column. A unique column
+# sampled once reports -1, meaning "distinct in proportion to the row count". A
+# row offered twice halves that proportion and reports about -0.5, so the defect
+# is visible in a single number rather than needing the sample inspected.
+psql_run "ALTER TABLE as_c ALTER COLUMN id SET STATISTICS 10000;
+	ANALYZE as_c;" >/dev/null
+
+check "no row is offered to the sampler twice" \
+	"$(stat as_c id n_distinct)" "-1"
+
+# put the target back so the later sections measure the default behaviour
+psql_run "ALTER TABLE as_c ALTER COLUMN id SET STATISTICS -1;
+	ANALYZE as_c;" >/dev/null
+
 # --- 2. the estimated row count is close to the truth --------------------------
 
 # This is the discriminating check. See the header: cluster sampling inflates it
@@ -139,7 +179,7 @@ psql_run "DROP TABLE IF EXISTS as_ck;
 	CREATE TABLE as_ck (id int, ck int, payload text) USING pgcolumnar;
 	INSERT INTO as_ck SELECT g, g / 1000, repeat('p', 20) || g
 		FROM generate_series(1, $ROWS) g;
-	ANALYZE as_ck;" >/dev/null 2>&1
+	ANALYZE as_ck;" >/dev/null
 
 true_nd="$(q "SELECT count(DISTINCT ck) FROM as_ck;")"
 got_nd="$(stat as_ck ck n_distinct)"
@@ -156,7 +196,7 @@ check "n_distinct on a clustered column is within 10% of the truth" \
 psql_run "DROP TABLE IF EXISTS as_dim;
 	CREATE TABLE as_dim (ck int primary key, label text);
 	INSERT INTO as_dim SELECT DISTINCT ck, 'l' || ck FROM as_ck;
-	ANALYZE as_dim;" >/dev/null 2>&1
+	ANALYZE as_dim;" >/dev/null
 
 # a selective predicate on the dimension: with statistics the planner knows the
 # fact-table side is large and the dimension side tiny
