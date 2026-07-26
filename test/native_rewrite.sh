@@ -92,4 +92,53 @@ SQL
 check "compact_rewrite holds ShareUpdateExclusiveLock" "${locks%%|*}" "1"
 check "compact_rewrite holds no AccessExclusiveLock" "${locks##*|}" "0"
 
+# ---------------------------------------------------------------------------
+# What makes the statement-scoped fetch cache safe (#143, #148).
+#
+# ColumnarReadRowByNumber caches a decoded row group keyed by
+# (storage_id, group_number). That is only sound because such a pair is never
+# re-served with different bytes, which rests on two allocator properties rather
+# than on any locking:
+#
+#   group numbers come from the monotonic metapage counter reserved in
+#   ColumnarReserveRowNumbers (meta->reservedStripeId += 1), never from the
+#   catalog maximum, so retiring a group does not free its number for reuse;
+#
+#   a rewrite writes into freshly allocated storage rather than over the old.
+#
+# Both are asserted here rather than in the fetch path, because this is where a
+# change would be made. If either stops holding, the cache can hand back a decode
+# of bytes that no longer exist and these checks are the warning.
+# ---------------------------------------------------------------------------
+
+before_max="$(q "SELECT coalesce(max(group_number), -1) FROM pgcolumnar.row_group
+                  WHERE storage_id = pgcolumnar.get_storage_id('n');")"
+psql_run "SELECT pgcolumnar.compact_rewrite('n', 0.1);" >/dev/null
+# Fresh ids: n carries a unique index, so re-inserting the original range would
+# fail and leave no new groups to look at.
+EXTRA="SELECT g + 1000000, g % 1000, 'p' || (g % 100) FROM generate_series(1, 2000) g"
+psql_run "INSERT INTO n $EXTRA;"
+psql_run "INSERT INTO h $EXTRA;"
+after_min_new="$(q "SELECT coalesce(min(group_number), -1) FROM pgcolumnar.row_group
+                     WHERE storage_id = pgcolumnar.get_storage_id('n')
+                       AND group_number > $before_max;")"
+
+check "a rewrite plus later writes reuse no group number" \
+	"$(q "SELECT count(*) = count(DISTINCT group_number) FROM pgcolumnar.row_group
+	       WHERE storage_id = pgcolumnar.get_storage_id('n');")" "t"
+check "group numbers issued after a rewrite are past every earlier one" \
+	"$([ "$after_min_new" -gt "$before_max" ] && echo yes || echo no)" "yes"
+
+# A full rewrite moves the table to new storage, so a cached decode keyed by the
+# old storage id can never match afterwards.
+sid_before="$(q "SELECT pgcolumnar.get_storage_id('n');")"
+psql_run "SELECT pgcolumnar.vacuum('n');" >/dev/null
+sid_after="$(q "SELECT pgcolumnar.get_storage_id('n');")"
+check "vacuum rewrites into a fresh storage id" \
+	"$([ "$sid_after" != "$sid_before" ] && echo yes || echo no)" "yes"
+
+# And the rows survive all of it, which is what the invariants are for.
+check "every live row still reads back after rewrite and vacuum" \
+	"$(q 'SELECT count(*) FROM n;')" "$(q 'SELECT count(*) FROM h;')"
+
 pgc_summary
