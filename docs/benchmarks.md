@@ -26,6 +26,11 @@ show the shape of the tradeoff, not a precise score. The dataset is synthetic an
 deliberately mixes column shapes that suit different encodings, so a table of
 purely random values will look worse and a repetitive one better.
 
+One change landed after these were measured and is not reflected in them: #160
+made the zone min/max tracking on the write path 5 to 7% faster, so every
+ingestion figure here (loads, imports, the FSST insert) is a floor rather than
+what the current tree does. Query latency and storage are unaffected.
+
 **Compare ratios across runs, not absolute milliseconds.** Re-measuring the
 previous run's commit on this machine on the same day (see
 [What changed](#what-changed-since-the-previous-run)) reproduced its query
