@@ -489,6 +489,15 @@ extern void ColumnarEndRead(ColumnarReadState *readState);
  * stripe indices, so several workers scanning the same relation each claim
  * distinct stripes. Set by the custom scan's DSM init callbacks.
  */
+/*
+ * Restrict a scan to a set of row groups (issue #149). Groups outside the set
+ * are skipped without their bytes being read. Must be called before the first
+ * ColumnarReadNextRow; ngroups == 0 makes the scan return no rows.
+ */
+extern void ColumnarReadRestrictToGroups(ColumnarReadState *readState,
+										 const uint64 *groupNumbers,
+										 int ngroups);
+
 extern void ColumnarReadSetParallelCounter(ColumnarReadState *readState,
 										   pg_atomic_uint32 *counter);
 

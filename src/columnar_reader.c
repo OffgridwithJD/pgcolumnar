@@ -71,6 +71,17 @@ struct ColumnarReadState
 	SkipPredicate *predicates;		/* [numPredicates], in readContext */
 	int			numPredicates;
 
+	/*
+	 * Optional restriction to a set of row groups (issue #149). When
+	 * restrictGroups is non-NULL only groups whose groupNumber appears in it are
+	 * read; the rest are passed over without their bytes being touched, exactly as
+	 * a zone-map non-match is. Sorted ascending, in readContext, so the claim loop
+	 * can binary search. The metadata aggregate path uses this to scan only the
+	 * row groups that have deleted rows, folding the others from their zone maps.
+	 */
+	uint64	   *restrictGroups;		/* [numRestrictGroups], sorted, or NULL */
+	int			numRestrictGroups;
+
 	bool		started;
 	bool		exhausted;
 
@@ -139,6 +150,42 @@ struct ColumnarReadState
 static void columnar_build_predicates(ColumnarReadState *readState,
 									  int nkeys, ScanKey keys);
 static int64 columnar_next_group_index(ColumnarReadState *readState);
+
+/* qsort comparator for the row group restriction set */
+static int
+columnar_uint64_cmp(const void *a, const void *b)
+{
+	uint64		x = *(const uint64 *) a;
+	uint64		y = *(const uint64 *) b;
+
+	return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+/*
+ * columnar_group_is_restricted_in
+ *		Is this group number in the read state's restriction set? Binary search
+ *		over the sorted array set by ColumnarReadRestrictToGroups. Only called
+ *		when restrictGroups is non-NULL.
+ */
+static bool
+columnar_group_is_restricted_in(ColumnarReadState *rs, uint64 groupNumber)
+{
+	int			lo = 0;
+	int			hi = rs->numRestrictGroups - 1;
+
+	while (lo <= hi)
+	{
+		int			mid = lo + (hi - lo) / 2;
+
+		if (rs->restrictGroups[mid] == groupNumber)
+			return true;
+		else if (rs->restrictGroups[mid] < groupNumber)
+			lo = mid + 1;
+		else
+			hi = mid - 1;
+	}
+	return false;
+}
 
 /* -------------------------------------------------------------------------
  * value stream codec (shared with the writer)
@@ -828,7 +875,10 @@ columnar_native_load_group(ColumnarReadState *rs)
 			return false;
 
 		rg = (NativeRowGroupMetadata *) list_nth(rs->rowGroupList, (int) gi);
-		if (rs->numPredicates > 0)
+		if (rs->restrictGroups != NULL &&
+			!columnar_group_is_restricted_in(rs, rg->groupNumber))
+			match = false;
+		else if (rs->numPredicates > 0)
 		{
 			MemoryContext old = MemoryContextSwitchTo(rs->skipContext);
 
@@ -1116,6 +1166,40 @@ ColumnarReadSetParallelCounter(ColumnarReadState *readState,
 							   pg_atomic_uint32 *counter)
 {
 	readState->parallelCounter = counter;
+}
+
+/*
+ * ColumnarReadRestrictToGroups
+ *		Restrict this scan to the given row group numbers (issue #149). Groups
+ *		outside the set are skipped in the claim loop, so their bytes are never
+ *		read and their column chunks never decoded. The array is copied into the
+ *		read state's own context and sorted there, so the caller may free its own.
+ *
+ *		Must be called before the first ColumnarReadNextRow. Passing ngroups == 0
+ *		makes the scan return no rows, which is the honest reading of "restrict to
+ *		nothing" and is what the aggregate path relies on when every group is
+ *		clean.
+ */
+void
+ColumnarReadRestrictToGroups(ColumnarReadState *readState,
+							 const uint64 *groupNumbers, int ngroups)
+{
+	MemoryContext oldContext;
+
+	Assert(!readState->started);
+
+	oldContext = MemoryContextSwitchTo(readState->readContext);
+	readState->restrictGroups = (uint64 *) palloc(sizeof(uint64) *
+												  (ngroups > 0 ? ngroups : 1));
+	readState->numRestrictGroups = ngroups;
+	if (ngroups > 0)
+	{
+		memcpy(readState->restrictGroups, groupNumbers,
+			   sizeof(uint64) * ngroups);
+		qsort(readState->restrictGroups, ngroups, sizeof(uint64),
+			  columnar_uint64_cmp);
+	}
+	MemoryContextSwitchTo(oldContext);
 }
 
 /* -------------------------------------------------------------------------

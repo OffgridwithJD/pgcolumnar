@@ -53,6 +53,7 @@ test/native_encoding.sh  /path/to/pg_config  # native per-vector encoding cascad
 test/native_zonemap.sh   /path/to/pg_config  # native zone maps
 test/native_skip.sh      /path/to/pg_config  # native chunk and vector skipping
 test/native_agg.sh       /path/to/pg_config  # native aggregate paths
+test/native_agg_deletes.sh /path/to/pg_config  # per-row-group fold when rows are deleted
 test/native_bloom.sh     /path/to/pg_config  # native per-chunk bloom filters
 test/native_vecskip.sh   /path/to/pg_config  # native per-vector skipping
 test/native_index.sh     /path/to/pg_config  # native index and index scan
