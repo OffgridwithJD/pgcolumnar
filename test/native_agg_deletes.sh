@@ -49,7 +49,7 @@ psql_run "DROP TABLE IF EXISTS ad_c; DROP TABLE IF EXISTS ad_h;
 
 groups="$(q "SELECT count(*) FROM pgcolumnar.row_group r
 	JOIN pgcolumnar.storage s ON s.storage_id = r.storage_id
-	WHERE s.relation_id = 'ad_c'::regclass;")"
+	WHERE s.relation_oid = 'ad_c'::regclass;")"
 echo "-- $ROWS rows in ${groups} row groups"
 
 # --- 1. the answers are right --------------------------------------------------
@@ -90,25 +90,31 @@ psql_run "DROP TABLE IF EXISTS ad_t;
 	CREATE TABLE ad_t (id int, v int) USING pgcolumnar;
 	INSERT INTO ad_t SELECT g, g % 1000 FROM generate_series(1, $ROWS) g;" >/dev/null 2>&1
 
-# server-side timing, best of three: psql's connect floor is ~15 ms and would
-# swamp a sub-millisecond query
-ms() {  # sql -> milliseconds, best of 3
-	local out best="" t
-	out="$(psql_run "\\timing on
-		$1
-		$1
-		$1" 2>/dev/null | grep -E '^Time:' | awk '{print $2}')"
-	for t in $out; do
-		if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then
-			best="$t"
-		fi
-	done
-	echo "${best:-0}"
+# Timed inside the server, best of three. psql's connect floor is about 15 ms and
+# would swamp a query that should take a fraction of one, so a client-side
+# stopwatch cannot see the difference this change makes.
+psql_run "CREATE OR REPLACE FUNCTION ad_ms(qry text, n int) RETURNS numeric AS \$\$
+	DECLARE t0 timestamptz; best numeric; cur numeric; i int;
+	BEGIN
+		EXECUTE qry;                       -- warm-up, discarded
+		FOR i IN 1..n LOOP
+			t0 := clock_timestamp();
+			EXECUTE qry;
+			cur := extract(epoch FROM clock_timestamp() - t0) * 1000;
+			IF best IS NULL OR cur < best THEN best := cur; END IF;
+		END LOOP;
+		RETURN round(best, 4);
+	END \$\$ LANGUAGE plpgsql;" >/dev/null 2>&1
+
+# A leading SET prints its own "SET" line ahead of the result, so take the last
+# line rather than the first.
+ms() {  # sql [session settings] -> milliseconds, best of 3
+	q "${2:-} SELECT ad_ms(\$q\$$1\$q\$, 3);" | tail -1
 }
 
-clean_ms="$(ms "SELECT count(*) FROM ad_t;")"
+clean_ms="$(ms "SELECT count(*) FROM ad_t")"
 psql_run "DELETE FROM ad_t WHERE id = $((ROWS / 2));" >/dev/null 2>&1
-dirty_ms="$(ms "SELECT count(*) FROM ad_t;")"
+dirty_ms="$(ms "SELECT count(*) FROM ad_t")"
 
 echo "-- count(*): ${clean_ms} ms with no deletes, ${dirty_ms} ms with one"
 
@@ -122,9 +128,9 @@ check "one deleted row does not put count(*) into a different class" \
 # min/max cannot come from a zone map once a row in that group is gone, so the
 # group is scanned. One dirty group out of many must still cost far less than
 # reading the table, which is what the vectorization-off path does.
-mm_ms="$(ms "SELECT min(v), max(v) FROM ad_t;")"
-full_ms="$(ms "SET pgcolumnar.enable_vectorization = off;
-	SELECT min(v), max(v) FROM ad_t;")"
+mm_ms="$(ms "SELECT min(v), max(v) FROM ad_t")"
+full_ms="$(ms "SELECT min(v), max(v) FROM ad_t" \
+	"SET pgcolumnar.enable_vectorization = off;")"
 
 echo "-- min/max: ${mm_ms} ms with one group dirty, ${full_ms} ms reading everything"
 
