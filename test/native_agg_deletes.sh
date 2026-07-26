@@ -18,10 +18,10 @@
 #    once from the scan that covers it.
 #
 # 2. count(*) no longer cares. Timed as a ratio against the same query on the
-#    same table with nothing deleted, because a millisecond threshold is not
-#    portable. count(*) over a group is its row count minus its deleted count,
-#    which is exact, so a delete should cost it almost nothing. Before the change
-#    this ratio was in the thousands.
+#    same table scanned in full, because a millisecond threshold is not portable.
+#    count(*) over a group is its row count minus its deleted count, which is
+#    exact, so a delete should not send the query back to reading the table.
+#    Before the change it did exactly that.
 #
 # 3. Only the dirty groups are read. min/max cannot be folded from a zone map
 #    once a row is gone, so those groups are scanned -- but only those. Timed
@@ -116,11 +116,26 @@ clean_ms="$(ms "SELECT count(*) FROM ad_t")"
 psql_run "DELETE FROM ad_t WHERE id = $((ROWS / 2));" >/dev/null 2>&1
 dirty_ms="$(ms "SELECT count(*) FROM ad_t")"
 
-echo "-- count(*): ${clean_ms} ms with no deletes, ${dirty_ms} ms with one"
+# The reference is a full scan of the same table, not the undeleted timing.
+#
+# Comparing the deleted timing against the clean one looked like the obvious
+# ratio and is the wrong shape: the clean figure is a metadata read of about
+# 0.03 ms, so any jitter at all moves the ratio by tens. On an assert-enabled
+# build -- which is what the matrix runs -- that failed about one run in three,
+# at 1.1960/0.0320 against a threshold of 20, while the behaviour under test was
+# perfectly correct.
+#
+# What the issue is actually about is that one deleted row must not send count(*)
+# back to reading the table. So the thing to measure against is reading the
+# table, which is milliseconds rather than microseconds and does not swing.
+scan_ms="$(ms "SELECT count(*) FROM ad_t" \
+	"SET pgcolumnar.enable_vectorization = off;")"
 
-check "one deleted row does not put count(*) into a different class" \
-	"$(awk -v c="$clean_ms" -v d="$dirty_ms" \
-		'BEGIN { print (c > 0 && d / c < 20) ? "yes" : "no (" d "/" c ")" }')" \
+echo "-- count(*): ${clean_ms} ms clean, ${dirty_ms} ms with one deleted, ${scan_ms} ms scanning"
+
+check "one deleted row does not send count(*) back to a full scan" \
+	"$(awk -v d="$dirty_ms" -v s="$scan_ms" \
+		'BEGIN { print (s > 0 && d < s / 4) ? "yes" : "no (" d " against a " s " scan)" }')" \
 	"yes"
 
 # --- 3. only the groups with deletes are read ----------------------------------
