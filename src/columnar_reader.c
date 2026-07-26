@@ -1278,13 +1278,25 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  * single group. Every index scan, bitmap scan, and index-driven UPDATE or DELETE
  * goes through this path.
  *
- * Correctness comes from the scope rather than from an invalidation protocol. An
- * entry is only used within the command that filled it, and a row group's bytes
- * are immutable once written, so nothing can rewrite what a cached entry holds
- * while that entry is live: a rewrite or compaction needs a lock this statement
- * already excludes, and a reclaim that reuses a file offset can only happen in a
- * later command, which the command id check rejects. Keying on the storage id as
- * well means new storage is never served an old decode.
+ * Correctness comes from the scope rather than from an invalidation protocol. A
+ * row group's bytes are immutable once written, and four independent things keep
+ * a stale entry from being used:
+ *
+ *   - the storage id is part of the key, so anything that allocates new storage
+ *     (pgcolumnar.vacuum, and any rewrite that goes through a new relfilenode)
+ *     misses rather than matching;
+ *   - a rewrite retires group numbers rather than reusing them, so a compacted
+ *     group never reappears under its old number with different content;
+ *   - the geometry an entry was filled with is re-checked against the catalog on
+ *     every hit, so a group number that did come back with a different shape is
+ *     treated as a miss;
+ *   - and an entry is only used within the command that filled it.
+ *
+ * Note it is NOT a lock argument. pgcolumnar.compact_rewrite runs under
+ * ShareUpdateExclusiveLock and does not conflict with a reader, so a concurrent
+ * compaction is possible while this cache is live; the reasons above are what
+ * make that safe, and test/native_rewrite.sh pins the two of them that are
+ * properties of the allocator rather than of this file.
  *
  * Visibility is unaffected because it is not cached. The delete vector, the
  * buffered delete marks and the validity bitmap are consulted per fetch; only
