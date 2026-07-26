@@ -47,6 +47,7 @@ test/native_cancel.sh    /path/to/pg_config  # scan cancellation during a group 
 test/wal_envelope.sh     /path/to/pg_config  # WAL discipline: core mechanisms only
 test/decode_interrupts.sh /path/to/pg_config  # decode path stays interruptible
 test/native_fetch_cache.sh /path/to/pg_config # fetch-by-row-number group cache
+test/native_fetch_position.sh /path/to/pg_config # reaching a fetched row without walking
 test/native_writer.sh    /path/to/pg_config  # native format catalog output
 test/native_roundtrip.sh /path/to/pg_config  # native write then read round-trip
 test/native_encoding.sh  /path/to/pg_config  # native per-vector encoding cascade

@@ -21,6 +21,7 @@
 #include "access/xact.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
+#include "port/pg_bitutils.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/typcache.h"
@@ -1421,11 +1422,130 @@ typedef struct ColumnarFetchGroup
 	char	   *groupBuffer;	/* the group's raw bytes */
 	NativeColumnChunkMetadata **ccForCol;	/* [natts] */
 	char	  **rawBuf;			/* [natts]; NULL until that column is decoded */
+
+	/*
+	 * Position indexes, built with rawBuf and holding for as long as it does
+	 * (issue #143). Reaching row r's value in a column used to mean counting the
+	 * validity bits below r and then decoding and discarding that many values, so
+	 * a hit was O(rows before r) and fetching a whole group stayed quadratic even
+	 * though the group was decoded once.
+	 *
+	 * rankPrefix[c][b] is the number of present values before 64-row block b, so
+	 * the rank of any row costs the prefix plus at most eight byte lookups.
+	 * valOffset[c][k] is the byte offset of the k-th present value within
+	 * rawBuf[c]; it is only built for varying-length columns, since a fixed-length
+	 * column's k-th value is at k * attlen.
+	 */
+	uint32	  **rankPrefix;		/* [natts]; NULL until that column is decoded */
+	uint32	  **valOffset;		/* [natts]; NULL for fixed-length columns */
 	uint64		lastUsed;
 }			ColumnarFetchGroup;
 
 static ColumnarFetchGroup columnarFetchCache[COLUMNAR_FETCH_CACHE_ENTRIES];
 static uint64 columnarFetchClock = 0;
+
+/* rows covered by one rankPrefix entry */
+#define COLUMNAR_RANK_BLOCK_ROWS 64
+#define COLUMNAR_RANK_BLOCK_BYTES (COLUMNAR_RANK_BLOCK_ROWS / 8)
+
+/*
+ * columnar_build_rank_prefix
+ *		Cumulative count of set validity bits at each 64-row boundary, so the
+ *		number of present values before an arbitrary row can be had without
+ *		walking to it. Entry b counts the bits below row b * 64; the array has one
+ *		more entry than there are blocks, so the last holds the column's total
+ *		present count. Bits at or past rowCount are ignored: the writer leaves the
+ *		tail of the final byte undefined, and counting it would claim values the
+ *		chunk does not hold.
+ */
+static uint32 *
+columnar_build_rank_prefix(const char *vbits, uint64 rowCount)
+{
+	uint64		nblocks = (rowCount + COLUMNAR_RANK_BLOCK_ROWS - 1) /
+		COLUMNAR_RANK_BLOCK_ROWS;
+	uint32	   *prefix = (uint32 *) palloc(sizeof(uint32) * (nblocks + 1));
+	uint32		running = 0;
+	uint64		b;
+
+	for (b = 0; b < nblocks; b++)
+	{
+		uint64		firstRow = b * COLUMNAR_RANK_BLOCK_ROWS;
+		uint64		lastRow = firstRow + COLUMNAR_RANK_BLOCK_ROWS;
+		uint64		byte;
+
+		prefix[b] = running;
+		if (lastRow > rowCount)
+			lastRow = rowCount;
+
+		for (byte = firstRow / 8; byte < (lastRow + 7) / 8; byte++)
+		{
+			unsigned char v = (unsigned char) vbits[byte];
+			uint64		bitsHere = lastRow - byte * 8;
+
+			/* the final byte of the final block can extend past rowCount */
+			if (bitsHere < 8)
+				v &= (unsigned char) ((1 << bitsHere) - 1);
+			running += pg_number_of_ones[v];
+		}
+	}
+	prefix[nblocks] = running;
+	return prefix;
+}
+
+/*
+ * columnar_rank_before
+ *		How many values are present in this column before row `row` of the group.
+ *		The block prefix plus at most eight byte lookups, in place of a loop over
+ *		every earlier row.
+ */
+static inline uint64
+columnar_rank_before(const char *vbits, const uint32 *prefix, uint64 row)
+{
+	uint64		blk = row / COLUMNAR_RANK_BLOCK_ROWS;
+	uint64		rank = prefix[blk];
+	uint64		byte = blk * COLUMNAR_RANK_BLOCK_BYTES;
+	uint64		endByte = row / 8;
+
+	for (; byte < endByte; byte++)
+		rank += pg_number_of_ones[(unsigned char) vbits[byte]];
+
+	if ((row & 7) != 0)
+		rank += pg_number_of_ones[(unsigned char) vbits[endByte] &
+								  (unsigned char) ((1 << (row & 7)) - 1)];
+	return rank;
+}
+
+/*
+ * columnar_build_val_offsets
+ *		Byte offset of every present value in a decoded varying-length stream.
+ *		One pass over the values, paid once per column per cached group, in place
+ *		of a partial pass on every fetch. Fixed-length columns never call this:
+ *		their k-th value is at k * attlen and needs no table.
+ */
+static uint32 *
+columnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
+{
+	uint32	   *offsets = (uint32 *) palloc(sizeof(uint32) * (nvalues + 1));
+	char	   *cursor = rawBuf;
+	uint32		k;
+
+	for (k = 0; k < nvalues; k++)
+	{
+		offsets[k] = (uint32) (cursor - rawBuf);
+		cursor += VARSIZE_ANY(cursor);
+
+		/*
+		 * A chunk holds as many values as chunk_group_row_limit allows, which is
+		 * a user-settable GUC, so this pass is bounded only by that. Check on the
+		 * same stride the decoders use, for the reason #128 and #146 record: a
+		 * long loop with no check is a query that cannot be cancelled.
+		 */
+		if ((k & 0xFFFF) == 0)
+			CHECK_FOR_INTERRUPTS();
+	}
+	offsets[nvalues] = (uint32) (cursor - rawBuf);
+	return offsets;
+}
 
 /* drop one entry and everything it holds */
 static void
@@ -1632,6 +1752,8 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->groupBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
 		entry->ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
 		entry->rawBuf = palloc0(sizeof(char *) * natts);
+		entry->rankPrefix = palloc0(sizeof(uint32 *) * natts);
+		entry->valOffset = palloc0(sizeof(uint32 *) * natts);
 		MemoryContextSwitchTo(tmp);
 
 		if (rg->byteLength > 0)
@@ -1690,7 +1812,6 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		char	   *rawBuf;
 		char	   *cursor;
 		uint64		present;
-		uint64		i;
 
 		if (cc == NULL)
 		{
@@ -1707,11 +1828,6 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			continue;
 		}
 
-		present = 0;
-		for (i = 0; i < rowInGrp; i++)
-			if ((vbits[i >> 3] >> (i & 7)) & 1)
-				present++;
-
 		if (entry->rawBuf[c] == NULL)
 		{
 			MemoryContext decOld = MemoryContextSwitchTo(entry->cx);
@@ -1727,13 +1843,43 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 												 cc->encodingDescriptor,
 												 cc->encodingDescriptorLen,
 												 cc->blockCodec, NULL, NULL);
+
+			/*
+			 * Index the column while it is being decoded, so every fetch into
+			 * this group afterwards reaches its row directly (issue #143). Both
+			 * indexes live in the entry context and so are measured by the cap
+			 * below and dropped with the rest of the entry.
+			 */
+			entry->rankPrefix[c] = columnar_build_rank_prefix(vbits,
+															 entry->rowCount);
+			if (att->attlen < 0)
+			{
+				uint64		nblocks = (entry->rowCount +
+									   COLUMNAR_RANK_BLOCK_ROWS - 1) /
+					COLUMNAR_RANK_BLOCK_ROWS;
+
+				entry->valOffset[c] =
+					columnar_build_val_offsets(att, entry->rawBuf[c],
+											   entry->rankPrefix[c][nblocks]);
+			}
 			MemoryContextSwitchTo(decOld);
 		}
 		rawBuf = entry->rawBuf[c];
 
-		cursor = rawBuf;
-		for (i = 0; i < present; i++)
-			(void) ColumnarDecodeValue(att, &cursor, tmp);
+		/*
+		 * The row's value sits at the rank-th position in the present-value
+		 * stream. A fixed-length column strides straight to it; a varying-length
+		 * one reads its offset out of the table built above. Neither depends on
+		 * how far into the group the row is, which is what made a cache hit
+		 * proportional to the row's position before.
+		 */
+		present = columnar_rank_before(vbits, entry->rankPrefix[c], rowInGrp);
+
+		if (att->attlen > 0)
+			cursor = rawBuf + present * (uint64) att->attlen;
+		else
+			cursor = rawBuf + entry->valOffset[c][present];
+
 		values[c] = ColumnarDecodeValue(att, &cursor, target);
 		nulls[c] = false;
 	}
@@ -1746,8 +1892,8 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 *
 	 * Dropping it here is safe because nothing handed back points into it: the
 	 * value that is returned is decoded into the caller's context by the
-	 * ColumnarDecodeValue call above, and the throwaway values the walk produces
-	 * go into tmp. Only the decoded stream itself lives in entry->cx.
+	 * ColumnarDecodeValue call above. Only the decoded stream and its two
+	 * position indexes live in entry->cx.
 	 */
 	if (MemoryContextMemAllocated(entry->cx, true) > COLUMNAR_FETCH_CACHE_MAX_BYTES)
 		columnar_fetch_entry_reset(entry);
