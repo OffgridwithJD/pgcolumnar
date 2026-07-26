@@ -1637,19 +1637,23 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
  * columnar_fetch_row
  *		Shared worker behind the three fetch entry points below.
  *
- *		needed is a set of 0-based attribute numbers, or NULL for every column.
- *		Note that a Bitmapset cannot tell "empty" from NULL -- an empty one *is*
- *		NULL -- so a caller whose computed set comes out empty asks for every
- *		column rather than none. That is the safe direction, and a caller that
- *		genuinely wants no columns wants ColumnarRowIsLive instead.
+ *		Which columns to decode is said two ways, and deliberately not one.
+ *		allColumns is an explicit flag; needed is a set of 0-based attribute
+ *		numbers consulted only when it is false.
+ *
+ *		The obvious single-argument form -- a set where NULL means "all" -- cannot
+ *		be made safe, because a Bitmapset does not distinguish empty from NULL: an
+ *		empty one *is* NULL. A caller that computes its set and finds nothing in it
+ *		would then silently ask for every column, which is the exact opposite, and
+ *		no assertion can catch it because the two cases are the same value.
  *		A column outside it is not read, not decoded and not indexed, and comes
  *		back null. wantValues == false stops as soon as liveness is settled,
  *		without touching the group's bytes at all.
  */
 static bool
 columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
-				   Datum *values, bool *nulls, Bitmapset *needed,
-				   bool wantValues)
+				   Datum *values, bool *nulls, bool allColumns,
+				   Bitmapset *needed, bool wantValues)
 {
 	uint64		storageId = ColumnarStorageId(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1845,7 +1849,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		 * projects and then reads outside its projection gets a null instead of
 		 * whatever the array happened to hold.
 		 */
-		if (needed != NULL && !bms_is_member(c, needed))
+		if (!allColumns && !bms_is_member(c, needed))
 		{
 			values[c] = (Datum) 0;
 			nulls[c] = true;
@@ -1952,12 +1956,15 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 						Datum *values, bool *nulls)
 {
 	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
-							  NULL, true);
+							  true, NULL, true);
 }
 
 /*
  * ColumnarReadRowByNumberCols
- *		As above, but decode only the columns in `needed`; the rest read as null.
+ *		Decode exactly the columns in `needed`; every other column reads as null.
+ *		An empty or NULL set therefore decodes nothing, which is what it says
+ *		rather than a silent "everything" -- for every column, call
+ *		ColumnarReadRowByNumber, which takes no set and cannot be misread.
  *
  *		Decoding every column whatever the caller wanted is not merely wasted
  *		work on a wide table. The decoded bytes are measured against the fetch
@@ -1970,7 +1977,7 @@ ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot, uint64 rowNumber,
 							Datum *values, bool *nulls, Bitmapset *needed)
 {
 	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
-							  needed, true);
+							  false, needed, true);
 }
 
 /*
@@ -1984,7 +1991,8 @@ ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot, uint64 rowNumber,
 bool
 ColumnarRowIsLive(Relation rel, Snapshot snapshot, uint64 rowNumber)
 {
-	return columnar_fetch_row(rel, snapshot, rowNumber, NULL, NULL, NULL, false);
+	return columnar_fetch_row(rel, snapshot, rowNumber, NULL, NULL,
+							  false, NULL, false);
 }
 
 void

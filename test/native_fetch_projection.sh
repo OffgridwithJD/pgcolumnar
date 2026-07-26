@@ -11,7 +11,7 @@
 # only for visibility, and pgcolumnar.reconstruct_via_projection, which needs
 # exactly the columns the projection does not carry.
 #
-# Three things are asserted.
+# Four things are asserted.
 #
 # 1. The output is unchanged. This is the whole risk of the change: a projection
 #    that decodes too few columns returns a null where a value belongs, and
@@ -23,8 +23,15 @@
 #    before decoding anything, so a delete that it failed to see would show up as
 #    a row that should have disappeared and did not.
 #
-# 3. A wide table is where this matters, so the fixture is wide. On a narrow one
-#    the difference between decoding one column and forty is not observable.
+# 3. The empty-set case is right. When a projection covers every column the
+#    computed set comes out empty, and a Bitmapset cannot tell empty from NULL.
+#    The first version of this API read NULL as "every column", so that case
+#    asked for the opposite of what it meant -- invisibly, because decoding
+#    everything still returns the right answer. The set now says what it means,
+#    which changes behaviour on that path, so the path is checked.
+#
+# 4. The call sites are the new ones. A wide fixture throughout, because on a
+#    narrow table decoding one column against forty is not observable.
 #
 # Usage:  test/native_fetch_projection.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -96,7 +103,35 @@ check "an uncovered column still reads correctly after a delete" \
 		WHERE split_part(r, '|', 1) = '101';")" \
 	"$(q "SELECT c${NCOLS}::text FROM fp_w WHERE id = 101;")"
 
-# --- 3. the entry points are the ones being used ------------------------------
+# --- 3. a projection that covers every column ---------------------------------
+
+# The set of columns to read from the base row is computed, and here it comes out
+# EMPTY, because the projection carries all of them. That is the case the old
+# "NULL means every column" convention got backwards: an empty computed set is
+# indistinguishable from NULL, so it asked for every column instead of none. It
+# still returned the right answer, which is why it was invisible -- it just did
+# the whole decode this change exists to avoid.
+#
+# The fix makes the set say what it means, so this path now decodes nothing. That
+# is a real behaviour change on a live path, so it is checked rather than assumed:
+# every value here has to come from the projection and still be right.
+psql_run "DROP TABLE IF EXISTS fp_all;
+	CREATE TABLE fp_all (id int$cols) USING pgcolumnar;
+	INSERT INTO fp_all SELECT g$sel FROM generate_series(1, 2000) g;" >/dev/null
+psql_run "SELECT pgcolumnar.add_projection('fp_all', 'fp_ap',
+	ARRAY['id', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10', 'c11', 'c12', 'c13', 'c14', 'c15', 'c16', 'c17', 'c18', 'c19', 'c20', 'c21', 'c22', 'c23', 'c24', 'c25', 'c26', 'c27', 'c28', 'c29', 'c30', 'c31', 'c32', 'c33', 'c34', 'c35', 'c36', 'c37', 'c38', 'c39', 'c40'], ARRAY['id']);" >/dev/null
+
+check "the all-covering projection reconstructs every row" \
+	"$(q "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('fp_all','fp_ap');")" \
+	"2000"
+
+check "and its values are right with nothing decoded from the base" \
+	"$(q "SELECT split_part(r, '|', 2) || '/' || split_part(r, '|', $((NCOLS + 1)))
+		FROM pgcolumnar.reconstruct_via_projection('fp_all','fp_ap') AS r
+		WHERE split_part(r, '|', 1) = '77';")" \
+	"$(q "SELECT c1::text || '/' || c${NCOLS}::text FROM fp_all WHERE id = 77;")"
+
+# --- 4. the entry points are the ones being used ------------------------------
 
 # The timing difference is real but modest, because the decoded-group cache
 # already amortises the decode across a group, so it is not asserted here. These
@@ -112,5 +147,13 @@ check "the reconstruct caller asks only for uncovered columns" \
 
 check "index deletion asks only whether the row is live" \
 	"$(grep -c 'ColumnarRowIsLive(rel, snapshot, rowNumber)' "$SRC/columnar_tableam.c")" "1"
+
+# and the convention that made an empty set mean its opposite stays gone: the
+# worker takes an explicit flag, so "every column" cannot be spelled as a set
+check "asking for every column is a flag, not an absent set" \
+	"$(grep -c 'bool allColumns' "$SRC/columnar_reader.c")" "1"
+
+check "the column test consults that flag rather than a null set" \
+	"$(grep -c '!allColumns && !bms_is_member(c, needed)' "$SRC/columnar_reader.c")" "1"
 
 pgc_summary
