@@ -1550,10 +1550,33 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 
 			if (cc->columnIndex >= 0 && cc->columnIndex < natts)
 			{
+				NativeColumnChunkMetadata *copy;
+
 				MemoryContextSwitchTo(entry->cx);
-				entry->ccForCol[cc->columnIndex] =
-					(NativeColumnChunkMetadata *) palloc(sizeof(*cc));
-				memcpy(entry->ccForCol[cc->columnIndex], cc, sizeof(*cc));
+				copy = (NativeColumnChunkMetadata *) palloc(sizeof(*cc));
+				memcpy(copy, cc, sizeof(*cc));
+
+				/*
+				 * encodingDescriptor is a pointer into the bytea the catalog
+				 * scan produced, which lives in tmp and dies with it at the end
+				 * of this call. Copying the struct alone leaves every later hit
+				 * reading freed memory, which usually still holds the old bytes
+				 * and so usually works: the projections suite caught it as
+				 * "unrecognized native encoding descriptor", but freed memory
+				 * that happens to decode is the same bug returning wrong values
+				 * in silence. The descriptor comes with the entry.
+				 */
+				if (cc->encodingDescriptor != NULL &&
+					cc->encodingDescriptorLen > 0)
+				{
+					char	   *desc = (char *) palloc(cc->encodingDescriptorLen);
+
+					memcpy(desc, cc->encodingDescriptor,
+						   cc->encodingDescriptorLen);
+					copy->encodingDescriptor = desc;
+				}
+
+				entry->ccForCol[cc->columnIndex] = copy;
 				MemoryContextSwitchTo(tmp);
 			}
 		}
