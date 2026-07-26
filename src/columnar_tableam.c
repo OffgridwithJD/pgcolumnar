@@ -978,6 +978,14 @@ columnar_executor_end(QueryDesc *queryDesc)
 
 	ColumnarFlushAllPendingWrites();
 	ColumnarFlushAllDeleteVectors();
+
+	/*
+	 * The fetch cache is scoped to a statement, so release it here rather than
+	 * waiting for transaction end. Without this a statement that filled every
+	 * slot pins them for the rest of the transaction, and a session sitting idle
+	 * in transaction after one UPDATE holds them indefinitely.
+	 */
+	ColumnarDiscardFetchCache();
 }
 
 /* -------------------------------------------------------------------------

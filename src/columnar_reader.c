@@ -1502,6 +1502,28 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * and the decode entirely.
 	 */
 	entry = columnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+
+	/*
+	 * The geometry the entry was filled with has to match the group just read
+	 * out of the catalog. The invariant that it always does is argued above and
+	 * is almost certainly true, but it is load-bearing rather than decorative:
+	 * validityBytes comes from the cached rowCount and base from the cached
+	 * fileOffset, so a group number that ever came back with different geometry
+	 * inside one command would be read at wrong offsets and return wrong values
+	 * rather than fail. Checking costs four comparisons and turns that into a
+	 * re-decode.
+	 */
+	if (hit &&
+		(entry->firstRowNumber != rg->firstRowNumber ||
+		 entry->rowCount != rg->rowCount ||
+		 entry->fileOffset != rg->fileOffset ||
+		 entry->natts != natts))
+	{
+		columnar_fetch_entry_reset(entry);
+		entry = columnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+		Assert(!hit);
+	}
+
 	if (!hit)
 	{
 		MemoryContext entryOld = MemoryContextSwitchTo(entry->cx);
@@ -1602,6 +1624,11 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * what makes the cap mean decoded bytes rather than stored bytes; a group
 	 * over the cap is used for this fetch and then dropped, so an outsized group
 	 * costs what it always did rather than pinning memory.
+	 *
+	 * Dropping it here is safe because nothing handed back points into it: the
+	 * value that is returned is decoded into the caller's context by the
+	 * ColumnarDecodeValue call above, and the throwaway values the walk produces
+	 * go into tmp. Only the decoded stream itself lives in entry->cx.
 	 */
 	if (MemoryContextMemAllocated(entry->cx, true) > COLUMNAR_FETCH_CACHE_MAX_BYTES)
 		columnar_fetch_entry_reset(entry);
