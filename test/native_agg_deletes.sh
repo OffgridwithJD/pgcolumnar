@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#
+# pgColumnar metadata aggregates against a table with deletes (issue #149).
+#
+# An ungrouped, unfiltered aggregate over a native table is answered from row
+# group metadata. A zone map describes every row written into its group, deleted
+# ones included, so a group with deletes cannot be folded from its zone map. That
+# used to be decided for the whole storage: one deleted row anywhere sent the
+# query to a full scan, and a table lost a 0.04 ms count(*) to a 95 ms scan
+# because one row of two million was gone.
+#
+# Deletion is a property of a row group, so the decision belongs there. Three
+# things are asserted, needing three kinds of evidence.
+#
+# 1. The answers are right. Differential against a heap mirror over four delete
+#    patterns, ending with one that dirties every group, because the interesting
+#    failure is a group folded twice or not at all -- once from its zone map and
+#    once from the scan that covers it.
+#
+# 2. count(*) no longer cares. Timed as a ratio against the same query on the
+#    same table with nothing deleted, because a millisecond threshold is not
+#    portable. count(*) over a group is its row count minus its deleted count,
+#    which is exact, so a delete should cost it almost nothing. Before the change
+#    this ratio was in the thousands.
+#
+# 3. Only the dirty groups are read. min/max cannot be folded from a zone map
+#    once a row is gone, so those groups are scanned -- but only those. Timed
+#    against the same query with vectorization off, which reads everything: one
+#    dirty group out of many must come in far under a full scan. Before the
+#    change the two were the same query.
+#
+# Usage:  test/native_agg_deletes.sh [PG_CONFIG]
+# Written fresh for pgColumnar.
+
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+ROWS=${PGC_AGGDEL_ROWS:-400000}
+
+psql_run "DROP TABLE IF EXISTS ad_c; DROP TABLE IF EXISTS ad_h;
+	CREATE TABLE ad_c (id int, v int, w bigint, s text) USING pgcolumnar;
+	INSERT INTO ad_c SELECT g, g % 1000, g * 7, 'r' || g
+		FROM generate_series(1, $ROWS) g;
+	CREATE TABLE ad_h (id int, v int, w bigint, s text);
+	INSERT INTO ad_h SELECT g, g % 1000, g * 7, 'r' || g
+		FROM generate_series(1, $ROWS) g;" >/dev/null 2>&1
+
+groups="$(q "SELECT count(*) FROM pgcolumnar.row_group r
+	JOIN pgcolumnar.storage s ON s.storage_id = r.storage_id
+	WHERE s.relation_id = 'ad_c'::regclass;")"
+echo "-- $ROWS rows in ${groups} row groups"
+
+# --- 1. the answers are right --------------------------------------------------
+
+AGGS="count(*) count(v) count(s) sum(v) avg(v) min(v) max(v) min(w) max(w) min(s) max(s)"
+
+differential() {  # label
+	local bad="" agg cv hv
+
+	for agg in $AGGS; do
+		cv="$(q "SELECT $agg FROM ad_c;")"
+		hv="$(q "SELECT $agg FROM ad_h;")"
+		[ "$cv" = "$hv" ] || bad="$bad $agg(columnar=$cv heap=$hv)"
+	done
+	check "aggregates match heap $1" "${bad:-same}" "same"
+}
+
+differential "with nothing deleted"
+
+psql_run "DELETE FROM ad_c WHERE id = $((ROWS / 2));
+	DELETE FROM ad_h WHERE id = $((ROWS / 2));" >/dev/null 2>&1
+differential "after one row is deleted"
+
+psql_run "DELETE FROM ad_c WHERE id BETWEEN 1 AND $((ROWS / 10));
+	DELETE FROM ad_h WHERE id BETWEEN 1 AND $((ROWS / 10));" >/dev/null 2>&1
+differential "after a contiguous tenth is deleted"
+
+# every group now has deletes, so every group takes the scan path
+psql_run "DELETE FROM ad_c WHERE id % 7 = 0;
+	DELETE FROM ad_h WHERE id % 7 = 0;" >/dev/null 2>&1
+differential "after every group is dirtied"
+
+# --- 2. count(*) no longer cares about a delete --------------------------------
+
+# a fresh pair: the table above is now heavily deleted, and this measures the
+# cost of *a* delete, not of many
+psql_run "DROP TABLE IF EXISTS ad_t;
+	CREATE TABLE ad_t (id int, v int) USING pgcolumnar;
+	INSERT INTO ad_t SELECT g, g % 1000 FROM generate_series(1, $ROWS) g;" >/dev/null 2>&1
+
+# server-side timing, best of three: psql's connect floor is ~15 ms and would
+# swamp a sub-millisecond query
+ms() {  # sql -> milliseconds, best of 3
+	local out best="" t
+	out="$(psql_run "\\timing on
+		$1
+		$1
+		$1" 2>/dev/null | grep -E '^Time:' | awk '{print $2}')"
+	for t in $out; do
+		if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then
+			best="$t"
+		fi
+	done
+	echo "${best:-0}"
+}
+
+clean_ms="$(ms "SELECT count(*) FROM ad_t;")"
+psql_run "DELETE FROM ad_t WHERE id = $((ROWS / 2));" >/dev/null 2>&1
+dirty_ms="$(ms "SELECT count(*) FROM ad_t;")"
+
+echo "-- count(*): ${clean_ms} ms with no deletes, ${dirty_ms} ms with one"
+
+check "one deleted row does not put count(*) into a different class" \
+	"$(awk -v c="$clean_ms" -v d="$dirty_ms" \
+		'BEGIN { print (c > 0 && d / c < 20) ? "yes" : "no (" d "/" c ")" }')" \
+	"yes"
+
+# --- 3. only the groups with deletes are read ----------------------------------
+
+# min/max cannot come from a zone map once a row in that group is gone, so the
+# group is scanned. One dirty group out of many must still cost far less than
+# reading the table, which is what the vectorization-off path does.
+mm_ms="$(ms "SELECT min(v), max(v) FROM ad_t;")"
+full_ms="$(ms "SET pgcolumnar.enable_vectorization = off;
+	SELECT min(v), max(v) FROM ad_t;")"
+
+echo "-- min/max: ${mm_ms} ms with one group dirty, ${full_ms} ms reading everything"
+
+check "a dirty group is scanned without scanning the clean ones" \
+	"$(awk -v m="$mm_ms" -v f="$full_ms" \
+		'BEGIN { print (f > 0 && m < f / 2) ? "yes" : "no (" m " vs " f ")" }')" \
+	"yes"
+
+# and the path is still the one being measured
+plan="$(q "EXPLAIN (COSTS off) SELECT count(*) FROM ad_t;" | head -1)"
+check "the metadata aggregate path is still chosen with a row deleted" \
+	"$(case "$plan" in *ColumnarScan*) echo yes ;; *) echo "no ($plan)" ;; esac)" \
+	"yes"
+
+pgc_summary
