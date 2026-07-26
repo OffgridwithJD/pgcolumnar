@@ -1,7 +1,7 @@
-started 2026-07-26T13:27:48+00:00
+started 2026-07-26T16:43:22+00:00
 == pgColumnar benchmark ==
 PG_CONFIG=/usr/local/pg17_nc/bin/pg_config  (PostgreSQL 17.10)
-scale=6000000 rows  reps=5  workdir=/tmp/pgcolumnar-bench.42LCXN
+scale=6000000 rows  reps=5  workdir=/tmp/pgcolumnar-bench.Vql4Q9
 -- building (non-assert expected)
 -- initdb and start
 -- loading 6000000 rows (staging, heap, columnar zstd, columnar none)
@@ -28,19 +28,19 @@ scale=6000000 rows  reps=5  workdir=/tmp/pgcolumnar-bench.42LCXN
 === QUERY LATENCY: heap vs columnar zstd (median ms of 5) ===
  id |                 query                  | heap_ms | columnar_ms | heap_over_col 
 ----+----------------------------------------+---------+-------------+---------------
-  1 | count(*) full table                    |  251.95 |        0.02 |      12597.50
-  2 | sum/avg over one int column            |  346.99 |        0.53 |        654.70
-  3 | filtered agg, min/max-skippable range  |  270.17 |       90.96 |          2.97
-  4 | point lookup by indexed id             |    0.01 |       26.75 |          0.00
-  5 | projection: 3 of 8 cols, 1% filter     |  260.56 |       80.18 |          3.25
+  1 | count(*) full table                    |  251.34 |        0.02 |      12567.00
+  2 | sum/avg over one int column            |  354.96 |        0.53 |        669.74
+  3 | filtered agg, min/max-skippable range  |  263.62 |       92.35 |          2.85
+  4 | point lookup by indexed id             |    0.01 |       23.75 |          0.00
+  5 | projection: 3 of 8 cols, 1% filter     |  264.94 |       81.58 |          3.25
 (5 rows)
 
 
 === VECTORIZATION on vs off (columnar zstd, median ms) ===
-        query         | on_ms | off_ms | speedup_vec 
-----------------------+-------+--------+-------------
- sum/avg over int     |  0.51 | 795.94 |     1560.67
- filtered agg (range) | 73.19 |  71.86 |        0.98
+        query         | on_ms | off_ms  | speedup_vec 
+----------------------+-------+---------+-------------
+ sum/avg over int     |  0.51 | 1352.10 |     2651.18
+ filtered agg (range) | 87.51 |   86.53 |        0.99
 (2 rows)
 
 
@@ -52,7 +52,7 @@ scale=6000000 rows  reps=5  workdir=/tmp/pgcolumnar-bench.42LCXN
 
      metric      | none | zstd | none_over_zstd 
 -----------------+------+------+----------------
- sum/avg scan ms | 0.50 | 0.50 | 
+ sum/avg scan ms | 0.50 | 0.49 | 
  count(*) ms     | 0.02 | 0.02 | 
 (2 rows)
 
@@ -66,7 +66,7 @@ ANALYZE
 === SORTED PROJECTION: narrow range scan on a scattered key (median ms) ===
         state         |   ms   
 ----------------------+--------
- before vacuum_sorted | 355.04
+ before vacuum_sorted | 348.79
 (1 row)
 
  vacuum_sorted 
@@ -77,7 +77,7 @@ ANALYZE
 ANALYZE
         state        |  ms   
 ---------------------+-------
- after vacuum_sorted | 45.81
+ after vacuum_sorted | 45.47
 (1 row)
 
 -- index-only scan
@@ -92,9 +92,9 @@ VACUUM
 ANALYZE
 
 === INDEX-ONLY SCAN on vs off (covering range count, median ms) ===
-             query              | on_ms |  off_ms  | speedup_ios 
---------------------------------+-------+----------+-------------
- covering count, id range (~2%) |  7.31 | 31845.77 |     4356.47
+             query              | on_ms | off_ms | speedup_ios 
+--------------------------------+-------+--------+-------------
+ covering count, id range (~2%) |  7.24 | 689.21 |       95.19
 (1 row)
 
 SET
@@ -113,7 +113,7 @@ ANALYZE
 === PROJECTION SCAN on vs off (covering row scan on a scattered sort key, median ms) ===
                 query                 | on_ms  | off_ms | speedup_proj 
 --------------------------------------+--------+--------+--------------
- sortk,val where sortk in ~0.1% range | 184.20 | 619.66 |         3.36
+ sortk,val where sortk in ~0.1% range | 201.16 | 646.43 |         3.21
 (1 row)
 
 SET
@@ -125,8 +125,8 @@ CREATE FUNCTION
 === EXPORT: Arrow IPC and Parquet (6000000 rows, 5 columns) ===
   format  |   ms   | file_size | m_rows_per_s 
 ----------+--------+-----------+--------------
- arrow    |  923.0 | 186 MB    |          6.5
- parquet  | 1009.8 | 186 MB    |          5.9
+ arrow    | 1029.3 | 186 MB    |          5.8
+ parquet  | 1113.7 | 186 MB    |          5.4
 (2 rows)
 
 -- import
@@ -138,8 +138,8 @@ CREATE FUNCTION
 === IMPORT: Arrow IPC and Parquet (6000000 rows, 5 columns) ===
   format  |   ms    | m_rows_per_s 
 ----------+---------+--------------
- arrow    | 16783.5 |          0.4
- parquet  | 17171.9 |          0.3
+ arrow    | 18533.2 |          0.3
+ parquet  | 18746.0 |          0.3
 (2 rows)
 
 (row-count check: expect 6000000 for both)
@@ -162,8 +162,8 @@ CREATE FUNCTION
 === NESTED export + import (1000000 rows: int[3] array + composite) ===
   format  | export_ms | import_ms | file_size 
 ----------+-----------+-----------+-----------
- arrow    |     528.5 |    4589.8 | 38 MB
- parquet  |     502.8 |    4709.5 | 35 MB
+ arrow    |     580.0 |    4914.0 | 38 MB
+ parquet  |     533.4 |    4923.5 | 35 MB
 (2 rows)
 
 (round-trip check: rows in source but not reconstructed; expect 0/0)
@@ -179,15 +179,15 @@ CREATE FUNCTION
 would find nothing left to delete)
              operation              | heap_ms | columnar_ms | columnar_over_heap 
 ------------------------------------+---------+-------------+--------------------
- single row by id                   |    0.02 |        0.20 |              10.00
- 1000 rows, ids in row order        |    3.68 |       22.34 |               6.07
- 1000 rows, ids scattered           |   42.38 |      161.08 |               3.80
+ single row by id                   |    0.02 |        0.22 |              11.00
+ 1000 rows, ids in row order        |    3.76 |       20.78 |               5.53
+ 1000 rows, ids scattered           |   44.07 |      146.07 |               3.31
 (3 rows)
 
 
              operation              | heap_ms | columnar_ms | columnar_over_heap 
 ------------------------------------+---------+-------------+--------------------
- DELETE 1000 rows by id range       |     0.5 |      1509.5 |            3019.00
+ DELETE 1000 rows by id range       |     0.5 |        22.8 |              45.60
 (1 row)
 
 (row counts must agree after the mutations)
@@ -198,28 +198,28 @@ would find nothing left to delete)
 
 
 === DuckDB comparison (same data, in-process columnar engine) ===
-Run Time (s): real 0.274 user 0.954821 sys 0.177469
+Run Time (s): real 0.291 user 1.031020 sys 0.175280
 ┌──────────────┐
 │ count_star() │
 │    int64     │
 ├──────────────┤
 │      6000000 │
 └──────────────┘
-Run Time (s): real 0.001 user 0.000417 sys 0.003882
+Run Time (s): real 0.001 user 0.003005 sys 0.000003
 ┌─────────────┬──────────┐
 │  sum(val)   │ avg(val) │
 │   int128    │  double  │
 ├─────────────┼──────────┤
 │ 29997000000 │   4999.5 │
 └─────────────┴──────────┘
-Run Time (s): real 0.004 user 0.010155 sys 0.001412
+Run Time (s): real 0.005 user 0.011782 sys 0.002136
 ┌───────────┐
 │ sum(val)  │
 │  int128   │
 ├───────────┤
 │ 599940000 │
 └───────────┘
-Run Time (s): real 0.000 user 0.001621 sys 0.000122
+Run Time (s): real 0.001 user 0.001992 sys 0.000000
 
 === Cross-engine read of pgColumnar's Parquet output (same file) ===
 ┌─────────┬─────────────┐
@@ -228,9 +228,9 @@ Run Time (s): real 0.000 user 0.001621 sys 0.000122
 ├─────────┼─────────────┤
 │ 6000000 │ 29997000000 │
 └─────────┴─────────────┘
-Run Time (s): real 0.008 user 0.030169 sys 0.003603
-pyarrow read_table: rows=6000000  sum_val=29997000000  128.3 ms
+Run Time (s): real 0.009 user 0.033436 sys 0.001970
+pyarrow read_table: rows=6000000  sum_val=29997000000  142.3 ms
 
 == benchmark complete ==
 BENCH_EXIT=0
-finished 2026-07-26T13:34:34+00:00
+finished 2026-07-26T16:47:12+00:00
