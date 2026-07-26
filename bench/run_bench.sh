@@ -452,6 +452,68 @@ SELECT
 SQL
 "
 
+# ---- mutation: UPDATE and DELETE reached by index --------------------------
+# The read benchmarks above leave the tables untouched, so this runs last and on
+# its own copies: an UPDATE would otherwise change what every earlier number was
+# measured against.
+#
+# This is the path issue #143 is about. A fetch by row number decodes the row
+# group the row lives in, so the cost of touching N rows in one group used to be
+# N times the group; a statement-scoped cache of the decoded group (#148) removes
+# the repeat. Two shapes are timed because they differ: ids in row order, which
+# is what a range UPDATE gives, and scattered ids, where consecutive fetches land
+# in different groups and a small cache helps less.
+DSCALE=$(( SCALE / 6 ))
+echo "-- mutation ($DSCALE rows)"
+run_pg "$PSQL <<SQL
+\\set QUIET on
+\\pset pager off
+SET max_parallel_workers_per_gather = 0;
+
+CREATE TABLE dh (LIKE h);
+INSERT INTO dh SELECT * FROM h WHERE id <= $DSCALE;
+CREATE INDEX dh_id ON dh (id);
+ANALYZE dh;
+
+CREATE TABLE dc (LIKE h) USING pgcolumnar;
+INSERT INTO dc SELECT * FROM h WHERE id <= $DSCALE;
+CREATE INDEX dc_id ON dc (id);
+
+\\echo
+\\echo === MUTATION: rows reached by index ($DSCALE rows) ===
+\\echo (median of $REPS for UPDATE; DELETE is a single run, since a repeat
+\\echo  would find nothing left to delete)
+SELECT format('%-34s', op) AS operation,
+       heap_ms, columnar_ms,
+       round(columnar_ms / nullif(heap_ms, 0), 2) AS columnar_over_heap
+FROM (
+	SELECT 'single row by id' AS op,
+	       bench_time('UPDATE dh SET val = val + 1 WHERE id = 1', $REPS) AS heap_ms,
+	       bench_time('UPDATE dc SET val = val + 1 WHERE id = 1', $REPS) AS columnar_ms
+	UNION ALL
+	SELECT '1000 rows, ids in row order',
+	       bench_time('UPDATE dh SET val = val + 1 WHERE id BETWEEN 2000 AND 2999', $REPS),
+	       bench_time('UPDATE dc SET val = val + 1 WHERE id BETWEEN 2000 AND 2999', $REPS)
+	UNION ALL
+	SELECT '1000 rows, ids scattered',
+	       bench_time('UPDATE dh SET val = val + 1 WHERE id % ($DSCALE / 1000) = 7', $REPS),
+	       bench_time('UPDATE dc SET val = val + 1 WHERE id % ($DSCALE / 1000) = 7', $REPS)
+) m;
+
+\\echo
+SELECT format('%-34s', op) AS operation, heap_ms, columnar_ms,
+       round(columnar_ms / nullif(heap_ms, 0), 2) AS columnar_over_heap
+FROM (
+	SELECT 'DELETE 1000 rows by id range' AS op,
+	       bench_rt('DELETE FROM dh WHERE id BETWEEN $(( DSCALE / 2 )) AND $(( DSCALE / 2 + 999 ))') AS heap_ms,
+	       bench_rt('DELETE FROM dc WHERE id BETWEEN $(( DSCALE / 2 )) AND $(( DSCALE / 2 + 999 ))') AS columnar_ms
+) d;
+
+\\echo (row counts must agree after the mutations)
+SELECT (SELECT count(*) FROM dh) AS heap_rows, (SELECT count(*) FROM dc) AS columnar_rows;
+SQL
+"
+
 # ---- optional DuckDB comparison --------------------------------------------
 if [ "${BENCH_DUCKDB:-0}" = "1" ] && command -v duckdb >/dev/null 2>&1; then
 	echo
