@@ -707,75 +707,92 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	 * workers and comes out cheaper, so the planner reads the whole table to
 	 * compute what this path takes from row-group metadata (issue #133).
 	 *
-	 * With no delete vector the executor answers every aggregate from that
-	 * metadata and reads no data pages, so the work is one metadata entry per row
-	 * group. With deletes it falls back to a real scan that applies the delete
-	 * mask, and the scan cost is the right price. The probe below asks the same
-	 * question execution asks; if the answer changes between planning and
-	 * execution the plan is mispriced, never wrong.
+	 * The executor answers a clean row group from its metadata and reads no data
+	 * pages for it; it reads only the groups that have deletes (issue #149). So
+	 * the price is one metadata entry per row group, plus a scan of the fraction
+	 * of the table that is deleted-in.
+	 *
+	 * Pricing the whole path at the scan cost the moment any row anywhere is
+	 * deleted, as this did, gives the planner back the choice this path exists to
+	 * take away: one deleted row out of six million made a parallel Agg look
+	 * cheaper again and #133 came back. The probe below asks the same question
+	 * execution asks; if the answer changes between planning and execution the
+	 * plan is mispriced, never wrong.
 	 */
 	{
-		bool		hasDeletes = true;
+		ColumnarOptions opts;
+		int			limit = columnar_stripe_row_limit;
+		double		rows = input_rel->tuples;
+		double		ngroups;
+		double		dirtyFraction = 0.0;
 		Snapshot	snap = GetActiveSnapshot();
+		Cost		cost;
 
+		/*
+		 * Row groups are governed by stripe_row_limit, not chunk_group_row_limit:
+		 * the latter sets the vector size within a group. Dividing by the vector
+		 * size overstated the group count by the ratio between them -- at the
+		 * default limits, 60 computed groups against 4 actual. The estimate was
+		 * clamped below the scan cost so it still chose right, but it was a wrong
+		 * model getting a right answer, and it stops being harmless as soon as the
+		 * clamp is not what decides.
+		 */
+		if (ColumnarReadOptions(relid, &opts) &&
+			opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
+			limit = opts.stripeRowLimit;
+		if (limit <= 0)
+			limit = 1;
+
+		/*
+		 * A never-analyzed relation has no row estimate. Deriving one from the
+		 * page count keeps the cost tied to something real, so a missing estimate
+		 * cannot make this path look free.
+		 */
+		if (rows < 0)
+			rows = (input_rel->pages > 0)
+				? (double) input_rel->pages * 100.0
+				: 1000.0;
+		ngroups = ceil(rows / (double) limit);
+		if (ngroups < 1)
+			ngroups = 1;
+
+		/*
+		 * What fraction of the groups must actually be read. Counting them exactly
+		 * would mean a delete-vector lookup per group at planning time, which is
+		 * the per-group catalog traffic this path exists to avoid paying. The
+		 * storage-wide probe is one lookup and distinguishes the case that matters
+		 * -- nothing deleted at all -- from the case where something is. When
+		 * something is, assume one group in four is affected rather than all of
+		 * them: wrong in both directions by a bounded factor, where the previous
+		 * all-or-nothing was wrong by the whole table.
+		 */
 		if (snap != NULL)
 		{
 			Relation	frel = table_open(relid, AccessShareLock);
 
-			hasDeletes =
-				ColumnarStorageHasDeleteVector(ColumnarStorageId(frel),
-											   ColumnarCatalogSnapshot(snap));
+			if (ColumnarStorageHasDeleteVector(ColumnarStorageId(frel),
+											   ColumnarCatalogSnapshot(snap)))
+				dirtyFraction = 0.25;
 			table_close(frel, AccessShareLock);
 		}
-
-		if (hasDeletes)
-		{
-			cpath->path.startup_cost = cheapest->total_cost;
-			cpath->path.total_cost = cheapest->total_cost;
-		}
 		else
-		{
-			ColumnarOptions opts;
-			int			limit = columnar_chunk_group_row_limit;
-			double		rows = input_rel->tuples;
-			double		ngroups;
-			Cost		cost;
+			dirtyFraction = 0.25;
 
-			/* the table's own limit when it sets one, else the GUC default */
-			if (ColumnarReadOptions(relid, &opts) &&
-				opts.chunkGroupRowLimitSet && opts.chunkGroupRowLimit > 0)
-				limit = opts.chunkGroupRowLimit;
-			if (limit <= 0)
-				limit = 1;
+		cost = cpu_tuple_cost * 10;		/* getting to the catalog */
+		cost += ngroups * (cpu_tuple_cost +
+						   cpu_operator_cost * (double) naggs);
+		cost += dirtyFraction * cheapest->total_cost;
 
-			/*
-			 * A never-analyzed relation has no row estimate. Deriving one from
-			 * the page count keeps the cost tied to something real, so a missing
-			 * estimate cannot make this path look free.
-			 */
-			if (rows < 0)
-				rows = (input_rel->pages > 0)
-					? (double) input_rel->pages * 100.0
-					: 1000.0;
-			ngroups = ceil(rows / (double) limit);
-			if (ngroups < 1)
-				ngroups = 1;
+		/* reading metadata is never dearer than reading the table */
+		if (cost > cheapest->total_cost)
+			cost = cheapest->total_cost;
 
-			cost = cpu_tuple_cost * 10;		/* getting to the catalog */
-			cost += ngroups * (cpu_tuple_cost +
-							   cpu_operator_cost * (double) naggs);
-
-			/* reading metadata is never dearer than reading the table */
-			if (cost > cheapest->total_cost)
-				cost = cheapest->total_cost;
-
-			/*
-			 * One row comes out, and only after every row group is folded in, so
-			 * there is no partial result to start up cheaply with.
-			 */
-			cpath->path.startup_cost = cost;
-			cpath->path.total_cost = cost;
-		}
+		/*
+		 * One row comes out, and only after every row group is folded in, so
+		 * there is no partial result to start up cheaply with.
+		 */
+		cpath->path.startup_cost = cost;
+		cpath->path.total_cost = cost;
 	}
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
@@ -1024,16 +1041,84 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
 }
 
 /*
+ * columnar_group_deleted_count
+ *		How many of this row group's rows are deleted, under the given catalog
+ *		snapshot. A group can have several delete_vector rows, whose bitmaps
+ *		overlap, so they are OR'd before counting rather than summed -- summing
+ *		deletedCount across entries would double-count a row deleted twice (spec
+ *		7.5, and the same combining the reader does when it builds a group's mask).
+ *		Bits past the group's row count are ignored.
+ */
+static uint64
+columnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
+							 Snapshot snap)
+{
+	uint32		want = (uint32) ((rg->rowCount + 7) / 8);
+	char	   *mask;
+	List	   *rml;
+	ListCell   *mc;
+	uint64		deleted = 0;
+	uint32		b;
+
+	rml = ColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
+	if (rml == NIL)
+		return 0;
+
+	mask = palloc0(want > 0 ? want : 1);
+	foreach(mc, rml)
+	{
+		DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mc);
+
+		if (rm->bitmap == NULL || rm->bitmapLen == 0)
+			continue;
+		for (b = 0; b < rm->bitmapLen && b < want; b++)
+			mask[b] |= rm->bitmap[b];
+	}
+
+	/*
+	 * Count set bits only up to rowCount. The last byte of the bitmap can carry
+	 * bits beyond the group's final row, and counting those would report more
+	 * rows deleted than the group holds.
+	 */
+	for (b = 0; b < want; b++)
+	{
+		uint64		base = (uint64) b * 8;
+		int			i;
+
+		for (i = 0; i < 8; i++)
+			if (base + i < rg->rowCount && ((mask[b] >> i) & 1))
+				deleted++;
+	}
+
+	pfree(mask);
+	return deleted;
+}
+
+/*
  * columnar_fill_native_metadata_agg
  *		Answer an ungrouped, unfiltered aggregate over a native (PGCN v1) table
- *		entirely from its whole-chunk zone maps (native spec 7.1, D5b): count(*)
- *		from row-group row counts, count(col) and the avg count from value_count,
- *		sum and the avg sum from the zone int sum (int2/int4), and min/max from the
+ *		from its whole-chunk zone maps (native spec 7.1, D5b): count(*) from
+ *		row-group row counts, count(col) and the avg count from value_count, sum
+ *		and the avg sum from the zone int sum (int2/int4), and min/max from the
  *		zone min/max. The upper-path hook adds this path only when every aggregate
- *		is so answerable and there is no filter, so no data pages are read.
+ *		is so answerable and there is no filter.
+ *
+ *		Deletes are handled per row group rather than per storage (issue #149). A
+ *		zone map describes every row written into its group, deleted ones
+ *		included, so a group with deletes cannot be folded from its zone map. It
+ *		used to be that one deleted row anywhere disabled this path for the whole
+ *		table, and a six-million-row table lost a 0.02 ms count(*) to a 222 ms scan
+ *		because a single row was gone. Deletion is a property of a group, so the
+ *		decision belongs there: clean groups fold from their zone maps, and only
+ *		the groups that actually have deletes are read.
+ *
+ *		Returns the groups that must be scanned, by group number, with *ndirty set
+ *		to their count. A count(*)-only query never returns any: count(*) over a
+ *		group is rowCount minus the deleted count, which is exact and needs no
+ *		data pages even when the group has deletes.
  */
-static void
-columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
+static uint64 *
+columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	Relation	rel;
@@ -1043,6 +1128,8 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
 	List	   *groups;
 	ListCell   *lc;
 	bool		needZones = false;
+	bool		anyDeletes;
+	uint64	   *dirty;
 	int			na;
 
 	/*
@@ -1068,12 +1155,51 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
 	snap = ColumnarCatalogSnapshot(estate->es_snapshot);
 	storageId = ColumnarStorageId(rel);
 
+	/*
+	 * One storage-wide probe first. When nothing is deleted no group can have
+	 * deletes, so the per-group delete lookup below is pure cost; skipping it
+	 * keeps a clean table at exactly the catalog traffic it had before this
+	 * change, which for a count(*) is the row group list and nothing else.
+	 */
+	anyDeletes = ColumnarStorageHasDeleteVector(storageId, snap);
+
 	groups = ColumnarReadRowGroupList(storageId, snap);
+	dirty = palloc(sizeof(uint64) * (list_length(groups) > 0
+									 ? list_length(groups) : 1));
+	*ndirty = 0;
+
 	foreach(lc, groups)
 	{
 		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
 		NativeZoneMapMetadata **byCol = NULL;
+		uint64		deleted = 0;
 		int			a;
+
+		if (anyDeletes)
+			deleted = columnar_group_deleted_count(storageId, rg, snap);
+
+		if (deleted > 0)
+		{
+			/*
+			 * This group's zone maps describe deleted rows too, so they cannot
+			 * answer anything that reads a value. count(*) is the exception: the
+			 * live row count is exactly rowCount - deleted, so a count(*)-only
+			 * query stays on metadata even here. Anything else defers the whole
+			 * group to the scan, which folds every aggregate for it -- including
+			 * count(*), so nothing is counted twice.
+			 */
+			if (!needZones)
+			{
+				for (a = 0; a < state->naggs; a++)
+				{
+					Assert(state->specs[a].kind == COLUMNAR_AGG_COUNT_STAR);
+					state->specs[a].count += (int64) (rg->rowCount - deleted);
+				}
+			}
+			else
+				dirty[(*ndirty)++] = rg->groupNumber;
+			continue;
+		}
 
 		if (needZones)
 		{
@@ -1161,6 +1287,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
 	}
 
 	table_close(rel, AccessShareLock);
+	return dirty;
 }
 
 /*
@@ -1170,9 +1297,14 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state)
  *		case where the zone-map-only path cannot be used because the storage has
  *		deletes (D6b). No quals: the upper-path hook only adds the native agg path
  *		when there is no filter.
+ *
+ *		When restrictGroups is non-NULL the scan is confined to those row groups
+ *		(issue #149), so only the groups that have deletes are read; the rest were
+ *		already folded from their zone maps by the caller.
  */
 static void
-columnar_native_scan_agg(ColumnarAggScanState *state)
+columnar_native_scan_agg(ColumnarAggScanState *state,
+						 const uint64 *restrictGroups, int nRestrictGroups)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	Relation	rel = table_open(state->relid, AccessShareLock);
@@ -1194,6 +1326,8 @@ columnar_native_scan_agg(ColumnarAggScanState *state)
 	ColumnarFlushDeleteVectorForRelation(rel);
 
 	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, projected, 0, NULL);
+	if (restrictGroups != NULL)
+		ColumnarReadRestrictToGroups(rs, restrictGroups, nRestrictGroups);
 	while (ColumnarReadNextRow(rs, values, nulls, &rowNumber))
 	{
 		for (a = 0; a < state->naggs; a++)
@@ -1219,32 +1353,34 @@ ColumnarExecAggScan(CustomScanState *node)
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	TupleTableSlot *result;
 	int			a;
-	EState	   *estate = node->ss.ps.state;
 	Relation	frel;
-	bool		hasDeletes;
+	uint64	   *dirtyGroups;
+	int			nDirtyGroups;
 
 	if (state->done)
 		return NULL;
 	state->done = true;
 
 	/*
-	 * A native table answers from zone maps when no rows are deleted (native spec
-	 * 7.1): the upper-path hook added this path only when every aggregate is
-	 * zone-map answerable and there is no filter, so no data pages are read. When
-	 * the storage has deletes the zone maps include deleted rows, so fall back to a
-	 * scan that applies the delete mask.
+	 * A native table answers from zone maps (native spec 7.1): the upper-path
+	 * hook added this path only when every aggregate is zone-map answerable and
+	 * there is no filter. A zone map covers deleted rows too, so a row group with
+	 * deletes cannot be folded from it; those groups are scanned instead, and only
+	 * those (issue #149).
+	 *
+	 * The delete vector must be flushed before any of this. A delete made earlier
+	 * in this transaction can still be sitting in the per-relation buffer, and a
+	 * group whose deletes are unflushed reads as clean -- which would fold it from
+	 * a zone map that counts the rows this transaction has already removed.
 	 */
 	frel = table_open(state->relid, AccessShareLock);
 	ColumnarFlushWriteStateForRelation(state->relid);
 	ColumnarFlushDeleteVectorForRelation(frel);
-	hasDeletes = ColumnarStorageHasDeleteVector(ColumnarStorageId(frel),
-										   ColumnarCatalogSnapshot(estate->es_snapshot));
 	table_close(frel, AccessShareLock);
 
-	if (hasDeletes)
-		columnar_native_scan_agg(state);
-	else
-		columnar_fill_native_metadata_agg(state);
+	dirtyGroups = columnar_fill_native_metadata_agg(state, &nDirtyGroups);
+	if (nDirtyGroups > 0)
+		columnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
 	state->haveStats = false;
 
 	/* build the single result row from the finalized aggregates */
