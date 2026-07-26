@@ -180,8 +180,31 @@ audit.
 
 Nothing from this audit is unmerged.
 
-Two items were left explicitly unfixed, both recorded where they belong rather
-than here: `ANALYZE` collects no statistics (#130 documents it; implementing
-sampling is the real fix), and `ColumnarDeleteVectorBufferedDeleted` retains the
-nested-scan shape that #134 fixed elsewhere, bounded by insert count rather than
-table size.
+Both items this audit left unfixed have since been fixed, which is the standing
+rule here: a defect that is written down and kept is a defect the project has
+decided to live with.
+
+`ANALYZE` collecting no statistics, which #130 recorded as "documented rather
+than changed", is implemented in #159: sampling spread across row groups, giving
+distribution statistics that match a heap mirror and a correlation of 1 on a
+sorted column. `docs/limitations.md` no longer describes it as a limitation.
+
+`ColumnarDeleteVectorBufferedDeleted`, recorded here as retaining the nested-scan
+shape that #134 fixed next door, is closed by measurement rather than by a patch,
+which is the other honest way to resolve one of these.
+
+It does not scale quadratically in practice. One transaction updating rows spread
+across many chunk buffers, with a unique index so the probe is on the path at all,
+PG18 non-assert:
+
+| rows updated across many chunk groups | with a last-chunk probe added | as it stands |
+| --- | --- | --- |
+| 40,000-row table | 317.6 ms | 299.2 ms |
+| 80,000-row table | 652.2 ms | 624.1 ms |
+
+Twice the table costs twice the time either way, so the term is linear, and adding
+the same last-chunk probe #134 used makes it marginally slower rather than faster:
+the extra branch costs more than the walk it skips, because the chunk list a single
+transaction accumulates stays short. The shape is real and the cost is not, so the
+right resolution is to record the numbers and stop tracking it, not to carry a
+patch that buys nothing.
