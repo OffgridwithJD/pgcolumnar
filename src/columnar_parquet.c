@@ -22,6 +22,8 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_parquet_format.h"
+#include "columnar_thrift.h"
 
 #include "fmgr.h"
 #include "access/htup_details.h"
@@ -50,34 +52,6 @@ PG_FUNCTION_INFO_V1(columnar_export_parquet);
 /* PostgreSQL epoch (2000-01-01) to Unix epoch (1970-01-01) offsets */
 #define PG_TO_UNIX_DAYS		((int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE))
 #define PG_TO_UNIX_USECS	(PG_TO_UNIX_DAYS * USECS_PER_DAY)
-
-/* Parquet physical types */
-#define PQ_BOOLEAN		0
-#define PQ_INT32		1
-#define PQ_INT64		2
-#define PQ_FLOAT		4
-#define PQ_DOUBLE		5
-#define PQ_BYTE_ARRAY	6
-#define PQ_FIXED_LEN_BYTE_ARRAY 7
-/* ConvertedType */
-#define PQ_CT_UTF8		0
-#define PQ_CT_DECIMAL	5
-#define PQ_CT_DATE		6
-#define PQ_CT_TIME_MICROS 8
-#define PQ_CT_TIMESTAMP_MICROS 10
-#define PQ_CT_INT_16	16
-/* Encoding */
-#define PQ_ENC_PLAIN	0
-#define PQ_ENC_RLE		3
-/* Thrift compact field types */
-#define TC_STOP			0
-#define TC_BOOL_TRUE	1
-#define TC_BOOL_FALSE	2
-#define TC_I32			5
-#define TC_I64			6
-#define TC_BINARY		8
-#define TC_LIST			9
-#define TC_STRUCT		12
 
 typedef enum ParquetKind
 {
@@ -147,88 +121,6 @@ numeric_to_int128(Datum numd, int scale, __int128 *out)
 	return true;
 }
 
-/* ---- Thrift compact-protocol writer (into a StringInfo) ---- */
-
-static void
-tc_varint(StringInfo b, uint64 v)
-{
-	while (v >= 0x80)
-	{
-		appendStringInfoChar(b, (char) ((v & 0x7f) | 0x80));
-		v >>= 7;
-	}
-	appendStringInfoChar(b, (char) v);
-}
-
-static void
-tc_zigzag32(StringInfo b, int32 v)
-{
-	tc_varint(b, (uint32) ((v << 1) ^ (v >> 31)));
-}
-
-static void
-tc_zigzag64(StringInfo b, int64 v)
-{
-	tc_varint(b, (uint64) ((v << 1) ^ (v >> 63)));
-}
-
-/* field header with delta-encoded id */
-static void
-tc_field(StringInfo b, int16 *lastId, int16 id, int type)
-{
-	int			delta = id - *lastId;
-
-	if (delta > 0 && delta <= 15)
-		appendStringInfoChar(b, (char) ((delta << 4) | type));
-	else
-	{
-		appendStringInfoChar(b, (char) type);
-		tc_zigzag32(b, id);
-	}
-	*lastId = id;
-}
-
-static void
-tc_i32_field(StringInfo b, int16 *lastId, int16 id, int32 v)
-{
-	tc_field(b, lastId, id, TC_I32);
-	tc_zigzag32(b, v);
-}
-
-static void
-tc_i64_field(StringInfo b, int16 *lastId, int16 id, int64 v)
-{
-	tc_field(b, lastId, id, TC_I64);
-	tc_zigzag64(b, v);
-}
-
-static void
-tc_string_field(StringInfo b, int16 *lastId, int16 id, const char *s, int len)
-{
-	tc_field(b, lastId, id, TC_BINARY);
-	tc_varint(b, (uint64) len);
-	if (len > 0)
-		appendBinaryStringInfo(b, s, len);
-}
-
-/* list header; caller then appends the elements */
-static void
-tc_list_header(StringInfo b, int size, int elemType)
-{
-	if (size < 15)
-		appendStringInfoChar(b, (char) ((size << 4) | elemType));
-	else
-	{
-		appendStringInfoChar(b, (char) (0xF0 | elemType));
-		tc_varint(b, (uint64) size);
-	}
-}
-
-static void
-tc_stop(StringInfo b)
-{
-	appendStringInfoChar(b, (char) TC_STOP);
-}
 
 /*
  * A leaf column is one Parquet column chunk: a scalar column, an array's element,
@@ -637,7 +529,7 @@ build_rle_levels(StringInfo out, const uint8 *levels, int64 n, int bit_width)
 	int32		len;
 
 	initStringInfo(&h);
-	tc_varint(&h, (uint64) ((ngroups << 1) | 1));	/* one bit-packed run */
+	ColumnarThriftPutVarint(&h, (uint64) ((ngroups << 1) | 1));	/* one bit-packed run */
 	for (i = 0; i < n; i++)
 	{
 		uint32		v = levels[i];
@@ -700,17 +592,17 @@ write_page_header(StringInfo out, int64 nrows, int32 body_size)
 	int16		dlast = 0;
 
 	/* PageHeader */
-	tc_i32_field(out, &last, 1, 0);			/* type = DATA_PAGE */
-	tc_i32_field(out, &last, 2, body_size); /* uncompressed_page_size */
-	tc_i32_field(out, &last, 3, body_size); /* compressed_page_size */
+	ColumnarThriftPutI32Field(out, &last, 1, 0);			/* type = DATA_PAGE */
+	ColumnarThriftPutI32Field(out, &last, 2, body_size); /* uncompressed_page_size */
+	ColumnarThriftPutI32Field(out, &last, 3, body_size); /* compressed_page_size */
 	/* field 5: data_page_header (struct) */
-	tc_field(out, &last, 5, TC_STRUCT);
-	tc_i32_field(out, &dlast, 1, (int32) nrows); /* num_values */
-	tc_i32_field(out, &dlast, 2, PQ_ENC_PLAIN);	/* encoding */
-	tc_i32_field(out, &dlast, 3, PQ_ENC_RLE);	/* def level encoding */
-	tc_i32_field(out, &dlast, 4, PQ_ENC_RLE);	/* rep level encoding */
-	tc_stop(out);								/* end data_page_header */
-	tc_stop(out);								/* end PageHeader */
+	ColumnarThriftPutField(out, &last, 5, TC_STRUCT);
+	ColumnarThriftPutI32Field(out, &dlast, 1, (int32) nrows); /* num_values */
+	ColumnarThriftPutI32Field(out, &dlast, 2, PQ_ENC_PLAIN);	/* encoding */
+	ColumnarThriftPutI32Field(out, &dlast, 3, PQ_ENC_RLE);	/* def level encoding */
+	ColumnarThriftPutI32Field(out, &dlast, 4, PQ_ENC_RLE);	/* rep level encoding */
+	ColumnarThriftPutStop(out);								/* end data_page_header */
+	ColumnarThriftPutStop(out);								/* end PageHeader */
 }
 
 /* ---- FileMetaData footer ---- */
@@ -719,9 +611,9 @@ write_schema_element_root(StringInfo b, int ncols)
 {
 	int16		last = 0;
 
-	tc_string_field(b, &last, 4, "schema", 6);	/* name */
-	tc_i32_field(b, &last, 5, ncols);			/* num_children */
-	tc_stop(b);
+	ColumnarThriftPutStringField(b, &last, 4, "schema", 6);	/* name */
+	ColumnarThriftPutI32Field(b, &last, 5, ncols);			/* num_children */
+	ColumnarThriftPutStop(b);
 }
 
 /* one leaf SchemaElement (a primitive) */
@@ -730,19 +622,19 @@ write_schema_leaf(StringInfo b, const char *name, PqLeaf *leaf, int repetition)
 {
 	int16		last = 0;
 
-	tc_i32_field(b, &last, 1, leaf->ptype);	/* type */
+	ColumnarThriftPutI32Field(b, &last, 1, leaf->ptype);	/* type */
 	if (leaf->ptype == PQ_FIXED_LEN_BYTE_ARRAY)
-		tc_i32_field(b, &last, 2, leaf->typeLength);
-	tc_i32_field(b, &last, 3, repetition);
-	tc_string_field(b, &last, 4, name, (int) strlen(name));
+		ColumnarThriftPutI32Field(b, &last, 2, leaf->typeLength);
+	ColumnarThriftPutI32Field(b, &last, 3, repetition);
+	ColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
 	if (leaf->convType >= 0)
-		tc_i32_field(b, &last, 6, leaf->convType);
+		ColumnarThriftPutI32Field(b, &last, 6, leaf->convType);
 	if (leaf->convType == PQ_CT_DECIMAL)
 	{
-		tc_i32_field(b, &last, 7, leaf->scale);
-		tc_i32_field(b, &last, 8, leaf->precision);
+		ColumnarThriftPutI32Field(b, &last, 7, leaf->scale);
+		ColumnarThriftPutI32Field(b, &last, 8, leaf->precision);
 	}
-	tc_stop(b);
+	ColumnarThriftPutStop(b);
 }
 
 /* one group SchemaElement (no physical type; has num_children) */
@@ -752,12 +644,12 @@ write_schema_group(StringInfo b, const char *name, int repetition,
 {
 	int16		last = 0;
 
-	tc_i32_field(b, &last, 3, repetition);
-	tc_string_field(b, &last, 4, name, (int) strlen(name));
-	tc_i32_field(b, &last, 5, num_children);
+	ColumnarThriftPutI32Field(b, &last, 3, repetition);
+	ColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
+	ColumnarThriftPutI32Field(b, &last, 5, num_children);
 	if (convType >= 0)
-		tc_i32_field(b, &last, 6, convType);
-	tc_stop(b);
+		ColumnarThriftPutI32Field(b, &last, 6, convType);
+	ColumnarThriftPutStop(b);
 }
 
 /* number of SchemaElements a top column contributes (excluding the root) */
@@ -817,27 +709,27 @@ write_column_chunk(StringInfo b, PqLeaf *c, PqColMeta *m)
 	int16		mlast = 0;
 	int			p;
 
-	tc_i64_field(b, &last, 2, m->dataPageOffset);	/* file_offset */
-	tc_field(b, &last, 3, TC_STRUCT);				/* meta_data */
-	tc_i32_field(b, &mlast, 1, c->ptype);			/* type */
-	tc_field(b, &mlast, 2, TC_LIST);				/* encodings [PLAIN, RLE] */
-	tc_list_header(b, 2, TC_I32);
-	tc_zigzag32(b, PQ_ENC_PLAIN);
-	tc_zigzag32(b, PQ_ENC_RLE);
-	tc_field(b, &mlast, 3, TC_LIST);				/* path_in_schema */
-	tc_list_header(b, c->pathlen, TC_BINARY);
+	ColumnarThriftPutI64Field(b, &last, 2, m->dataPageOffset);	/* file_offset */
+	ColumnarThriftPutField(b, &last, 3, TC_STRUCT);				/* meta_data */
+	ColumnarThriftPutI32Field(b, &mlast, 1, c->ptype);			/* type */
+	ColumnarThriftPutField(b, &mlast, 2, TC_LIST);				/* encodings [PLAIN, RLE] */
+	ColumnarThriftPutListHeader(b, 2, TC_I32);
+	ColumnarThriftPutZigzag32(b, PQ_ENC_PLAIN);
+	ColumnarThriftPutZigzag32(b, PQ_ENC_RLE);
+	ColumnarThriftPutField(b, &mlast, 3, TC_LIST);				/* path_in_schema */
+	ColumnarThriftPutListHeader(b, c->pathlen, TC_BINARY);
 	for (p = 0; p < c->pathlen; p++)
 	{
-		tc_varint(b, (uint64) strlen(c->path[p]));
+		ColumnarThriftPutVarint(b, (uint64) strlen(c->path[p]));
 		appendBinaryStringInfo(b, c->path[p], strlen(c->path[p]));
 	}
-	tc_i32_field(b, &mlast, 4, 0);					/* codec = UNCOMPRESSED */
-	tc_i64_field(b, &mlast, 5, m->numValues);		/* num_values */
-	tc_i64_field(b, &mlast, 6, m->totalSize);		/* total_uncompressed_size */
-	tc_i64_field(b, &mlast, 7, m->totalSize);		/* total_compressed_size */
-	tc_i64_field(b, &mlast, 9, m->dataPageOffset);	/* data_page_offset */
-	tc_stop(b);										/* end ColumnMetaData */
-	tc_stop(b);										/* end ColumnChunk */
+	ColumnarThriftPutI32Field(b, &mlast, 4, 0);					/* codec = UNCOMPRESSED */
+	ColumnarThriftPutI64Field(b, &mlast, 5, m->numValues);		/* num_values */
+	ColumnarThriftPutI64Field(b, &mlast, 6, m->totalSize);		/* total_uncompressed_size */
+	ColumnarThriftPutI64Field(b, &mlast, 7, m->totalSize);		/* total_compressed_size */
+	ColumnarThriftPutI64Field(b, &mlast, 9, m->dataPageOffset);	/* data_page_offset */
+	ColumnarThriftPutStop(b);										/* end ColumnMetaData */
+	ColumnarThriftPutStop(b);										/* end ColumnChunk */
 }
 
 static void
@@ -846,13 +738,13 @@ write_row_group(StringInfo b, PqLeaf *leaves, int nleaves, PqRowGroup *rg)
 	int16		last = 0;
 	int			i;
 
-	tc_field(b, &last, 1, TC_LIST);					/* columns */
-	tc_list_header(b, nleaves, TC_STRUCT);
+	ColumnarThriftPutField(b, &last, 1, TC_LIST);					/* columns */
+	ColumnarThriftPutListHeader(b, nleaves, TC_STRUCT);
 	for (i = 0; i < nleaves; i++)
 		write_column_chunk(b, &leaves[i], &rg->cols[i]);
-	tc_i64_field(b, &last, 2, rg->totalByteSize);
-	tc_i64_field(b, &last, 3, rg->numRows);
-	tc_stop(b);
+	ColumnarThriftPutI64Field(b, &last, 2, rg->totalByteSize);
+	ColumnarThriftPutI64Field(b, &last, 3, rg->numRows);
+	ColumnarThriftPutStop(b);
 }
 
 /* initialize a scalar leaf for a given type; *ok=false if unsupported */
@@ -1174,21 +1066,21 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 			nschema += schema_count_for_top(&tops[i]);
 
 		initStringInfo(&fmd);
-		tc_i32_field(&fmd, &last, 1, 1);	/* version */
+		ColumnarThriftPutI32Field(&fmd, &last, 1, 1);	/* version */
 		/* schema list (2): root + the (possibly nested) elements per column */
-		tc_field(&fmd, &last, 2, TC_LIST);
-		tc_list_header(&fmd, nschema, TC_STRUCT);
+		ColumnarThriftPutField(&fmd, &last, 2, TC_LIST);
+		ColumnarThriftPutListHeader(&fmd, nschema, TC_STRUCT);
 		write_schema_element_root(&fmd, ntop);
 		for (i = 0; i < ntop; i++)
 			write_top_schema(&fmd, &tops[i], leaves);
-		tc_i64_field(&fmd, &last, 3, total);	/* num_rows */
+		ColumnarThriftPutI64Field(&fmd, &last, 3, total);	/* num_rows */
 		/* row_groups list (4) */
-		tc_field(&fmd, &last, 4, TC_LIST);
-		tc_list_header(&fmd, nrgs, TC_STRUCT);
+		ColumnarThriftPutField(&fmd, &last, 4, TC_LIST);
+		ColumnarThriftPutListHeader(&fmd, nrgs, TC_STRUCT);
 		for (i = 0; i < nrgs; i++)
 			write_row_group(&fmd, leaves, nleaves, &rgs[i]);
-		tc_string_field(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
-		tc_stop(&fmd);
+		ColumnarThriftPutStringField(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
+		ColumnarThriftPutStop(&fmd);
 
 		fwrite(fmd.data, 1, fmd.len, f);
 		footerLen = fmd.len;

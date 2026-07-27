@@ -18,6 +18,9 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_parquet_format.h"
+#include "columnar_thrift.h"
+#include "columnar_parquet_codec.h"
 
 #include <math.h>
 #include <sys/stat.h>
@@ -87,30 +90,6 @@ PG_FUNCTION_INFO_V1(pgcolumnar_parquet_fdw_validator);
 #define PG_TO_UNIX_DAYS		((int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE))
 #define PG_TO_UNIX_USECS	(PG_TO_UNIX_DAYS * USECS_PER_DAY)
 
-/* Parquet physical types (parquet.thrift Type) */
-#define PQ_BOOLEAN		0
-#define PQ_INT32		1
-#define PQ_INT64		2
-#define PQ_FLOAT		4
-#define PQ_DOUBLE		5
-#define PQ_BYTE_ARRAY	6
-#define PQ_FIXED_LEN_BYTE_ARRAY 7
-
-/* ConvertedType (parquet.thrift ConvertedType); -1 means none */
-#define PQ_CT_UTF8				0
-#define PQ_CT_ENUM				4
-#define PQ_CT_DECIMAL			5
-#define PQ_CT_DATE				6
-#define PQ_CT_TIME_MILLIS		7
-#define PQ_CT_TIME_MICROS		8
-#define PQ_CT_TIMESTAMP_MILLIS	9
-#define PQ_CT_TIMESTAMP_MICROS	10
-#define PQ_CT_INT_8				15
-#define PQ_CT_INT_16			16
-#define PQ_CT_INT_32			17
-#define PQ_CT_INT_64			18
-#define PQ_CT_JSON				19
-
 /*
  * Resolved time unit for a TIME/TIMESTAMP column. Parquet carries this two ways:
  * the deprecated ConvertedType (TIME_MILLIS ... TIMESTAMP_MICROS) and the current
@@ -131,437 +110,12 @@ PG_FUNCTION_INFO_V1(pgcolumnar_parquet_fdw_validator);
 #define PQ_TU_MICROS	2
 #define PQ_TU_NANOS		3
 
-/* LogicalType union field ids (parquet.thrift LogicalType) */
-#define PQ_LT_TIME		7
-#define PQ_LT_TIMESTAMP	8
-/* TimeUnit union field ids */
-#define PQ_TUNIT_MILLIS	1
-#define PQ_TUNIT_MICROS	2
-#define PQ_TUNIT_NANOS	3
-
 /* Encodings (parquet.thrift Encoding) */
 #define PQE_PLAIN		0
 #define PQE_PLAIN_DICTIONARY 2
 #define PQE_RLE			3
 #define PQE_RLE_DICTIONARY 8
 
-/* Compression codecs */
-#define PQC_UNCOMPRESSED 0
-#define PQC_SNAPPY		1
-#define PQC_GZIP		2
-#define PQC_ZSTD		6
-#define PQC_LZ4_RAW		7
-
-/* PageType */
-#define PQ_PAGE_DATA	0
-#define PQ_PAGE_DICTIONARY 2
-#define PQ_PAGE_DATA_V2	3
-
-/* Thrift compact field types */
-#define TC_STOP			0
-#define TC_BOOL_TRUE	1
-#define TC_BOOL_FALSE	2
-#define TC_BYTE			3
-#define TC_I16			4
-#define TC_I32			5
-#define TC_I64			6
-#define TC_DOUBLE		7
-#define TC_BINARY		8
-#define TC_LIST			9
-#define TC_SET			10
-#define TC_STRUCT		12
-
-/* -------------------------------------------------------------------------
- * Snappy raw decompression (format spec: preamble varint uncompressed length,
- * then a stream of literal and copy elements). Clean-room from the format.
- * ------------------------------------------------------------------------- */
-static bool
-snappy_raw_uncompress(const uint8 *in, size_t inlen, StringInfo out)
-{
-	size_t		pos = 0;
-	uint32		ulen = 0;
-	int			shift = 0;
-
-	/* preamble: uncompressed length as a varint */
-	while (pos < inlen)
-	{
-		uint8		b = in[pos++];
-
-		ulen |= (uint32) (b & 0x7f) << shift;
-		if ((b & 0x80) == 0)
-			break;
-		shift += 7;
-		if (shift > 32)
-			return false;
-	}
-
-	enlargeStringInfo(out, ulen);
-	while (pos < inlen)
-	{
-		uint8		tag = in[pos++];
-		int			type = tag & 0x03;
-
-		if (type == 0)			/* literal */
-		{
-			uint32		len = (tag >> 2) + 1;
-
-			if (len > 60)
-			{
-				int			nb = (tag >> 2) - 59;	/* 1..4 bytes of length */
-				uint32		l = 0;
-				int			i;
-
-				if (pos + nb > inlen)
-					return false;
-				for (i = 0; i < nb; i++)
-					l |= (uint32) in[pos++] << (8 * i);
-				len = l + 1;
-			}
-			if (pos + len > inlen)
-				return false;
-			appendBinaryStringInfo(out, (const char *) in + pos, len);
-			pos += len;
-		}
-		else					/* copy */
-		{
-			uint32		len;
-			uint32		offset;
-			int			i;
-
-			if (type == 1)
-			{
-				len = ((tag >> 2) & 0x07) + 4;
-				if (pos >= inlen)
-					return false;
-				offset = ((uint32) (tag >> 5) << 8) | in[pos++];
-			}
-			else if (type == 2)
-			{
-				len = (tag >> 2) + 1;
-				if (pos + 2 > inlen)
-					return false;
-				offset = (uint32) in[pos] | ((uint32) in[pos + 1] << 8);
-				pos += 2;
-			}
-			else				/* type == 3 */
-			{
-				len = (tag >> 2) + 1;
-				if (pos + 4 > inlen)
-					return false;
-				offset = (uint32) in[pos] | ((uint32) in[pos + 1] << 8) |
-					((uint32) in[pos + 2] << 16) | ((uint32) in[pos + 3] << 24);
-				pos += 4;
-			}
-			if (offset == 0 || offset > (uint32) out->len)
-				return false;
-			/* copies may overlap, so copy byte by byte from the output so far */
-			for (i = 0; i < (int) len; i++)
-			{
-				char		c = out->data[out->len - offset];
-
-				appendBinaryStringInfo(out, &c, 1);
-			}
-		}
-	}
-	return (uint32) out->len == ulen;
-}
-
-/*
- * Decompress one Parquet page body according to its column-chunk codec.
- *
- * On success *out / *outlen point at the decompressed bytes: either straight into
- * `src` (uncompressed), or into `scratch` (any real codec). `usize` is the
- * uncompressed size from the page header, which zstd and lz4_raw require up front
- * (they do not self-describe the output length the way Snappy and gzip do); pass
- * the value portion's uncompressed size for a v2 data page, where the levels are
- * stored uncompressed ahead of the compressed values.
- *
- * A codec whose library was not built in, or an unknown codec id, returns false
- * so the caller raises a clean decode error rather than reading garbage.
- *
- * srclen and usize are file-declared and otherwise unvalidated (parse_page_header
- * casts a zigzag int, so a crafted header can present them as negative -- which
- * arrive here as an enormous size_t -- or absurdly large). Both are bounded to
- * MaxAllocSize up front so a crafted page yields a clean "return false" rather
- * than a generic allocation error deep in enlargeStringInfo or a decompressor.
- * Every codec that consumes usize also caps its output at it, so none can be
- * driven to allocate or inflate more than the header declares.
- */
-static bool
-pq_decompress(int codec, const uint8 *src, size_t srclen, size_t usize,
-			  StringInfo scratch, const uint8 **out, size_t *outlen)
-{
-	if (srclen > MaxAllocSize || usize > MaxAllocSize)
-		return false;
-
-	switch (codec)
-	{
-		case PQC_UNCOMPRESSED:
-			*out = src;
-			*outlen = srclen;
-			return true;
-
-		case PQC_SNAPPY:
-			/* Snappy self-describes its output length (a leading varint), which
-			 * snappy_raw_uncompress bounds; usize is not consulted. */
-			if (!snappy_raw_uncompress(src, srclen, scratch))
-				return false;
-			*out = (const uint8 *) scratch->data;
-			*outlen = scratch->len;
-			return true;
-
-#ifdef HAVE_LIBZ
-		case PQC_GZIP:
-			{
-				z_stream	zs;
-				int			rc;
-
-				/* Bound the output at the declared size, like zstd and lz4, so a
-				 * small crafted page cannot inflate into a huge allocation. */
-				if (usize == 0)
-					return false;
-				memset(&zs, 0, sizeof(zs));
-				/* 15 + 32: accept a gzip or zlib header (Parquet writes gzip) */
-				if (inflateInit2(&zs, 15 + 32) != Z_OK)
-					return false;
-				enlargeStringInfo(scratch, (int) usize);
-				zs.next_in = (Bytef *) src;
-				zs.avail_in = (uInt) srclen;
-				zs.next_out = (Bytef *) scratch->data;
-				zs.avail_out = (uInt) usize;
-				rc = inflate(&zs, Z_FINISH);
-				inflateEnd(&zs);
-				if (rc != Z_STREAM_END || zs.total_out != usize)
-					return false;
-				scratch->len = (int) usize;
-				scratch->data[scratch->len] = '\0';
-				*out = (const uint8 *) scratch->data;
-				*outlen = scratch->len;
-				return true;
-			}
-#endif
-
-#ifdef HAVE_LIBZSTD
-		case PQC_ZSTD:
-			{
-				size_t		got;
-
-				if (usize == 0)
-					return false;	/* zstd needs the output size */
-				enlargeStringInfo(scratch, (int) usize);
-				got = ZSTD_decompress(scratch->data, usize, src, srclen);
-				if (ZSTD_isError(got) || got != usize)
-					return false;
-				scratch->len = (int) got;
-				*out = (const uint8 *) scratch->data;
-				*outlen = scratch->len;
-				return true;
-			}
-#endif
-
-#ifdef HAVE_LIBLZ4
-		case PQC_LZ4_RAW:
-			{
-				int			got;
-
-				if (usize == 0)
-					return false;	/* lz4 raw needs the output size */
-				enlargeStringInfo(scratch, (int) usize);
-				got = LZ4_decompress_safe((const char *) src, scratch->data,
-										  (int) srclen, (int) usize);
-				if (got < 0 || (size_t) got != usize)
-					return false;
-				scratch->len = got;
-				*out = (const uint8 *) scratch->data;
-				*outlen = scratch->len;
-				return true;
-			}
-#endif
-
-		default:
-			return false;		/* unknown codec, or its library not built in */
-	}
-}
-
-/* -------------------------------------------------------------------------
- * Thrift compact-protocol reader over an in-memory buffer.
- * ------------------------------------------------------------------------- */
-typedef struct TCReader
-{
-	const uint8 *buf;
-	size_t		len;
-	size_t		pos;
-	bool		error;
-} TCReader;
-
-static uint64
-tcr_varint(TCReader *r)
-{
-	uint64		v = 0;
-	int			shift = 0;
-
-	while (r->pos < r->len)
-	{
-		uint8		b = r->buf[r->pos++];
-
-		v |= (uint64) (b & 0x7f) << shift;
-		if ((b & 0x80) == 0)
-			return v;
-		shift += 7;
-		if (shift > 63)
-			break;
-	}
-	r->error = true;
-	return v;
-}
-
-static int64
-tcr_zigzag(TCReader *r)
-{
-	uint64		u = tcr_varint(r);
-
-	return (int64) (u >> 1) ^ -(int64) (u & 1);
-}
-
-/* read a binary/string field: returns pointer into the buffer and its length */
-static const uint8 *
-tcr_bytes(TCReader *r, uint32 *outlen)
-{
-	uint64		n = tcr_varint(r);
-	const uint8 *p;
-
-	if (r->error || r->pos + n > r->len)
-	{
-		r->error = true;
-		*outlen = 0;
-		return NULL;
-	}
-	p = r->buf + r->pos;
-	r->pos += n;
-	*outlen = (uint32) n;
-	return p;
-}
-
-/*
- * Read a struct field header. Returns the compact field type in *ftype (TC_STOP
- * at end of struct) and the absolute field id in *fid. lastId is updated for the
- * short-form delta encoding.
- */
-static void
-tcr_field(TCReader *r, int *ftype, int *fid, int *lastId)
-{
-	uint8		b;
-
-	if (r->pos >= r->len)
-	{
-		r->error = true;
-		*ftype = TC_STOP;
-		return;
-	}
-	b = r->buf[r->pos++];
-	if (b == 0)
-	{
-		*ftype = TC_STOP;
-		return;
-	}
-	*ftype = b & 0x0f;
-	if ((b >> 4) != 0)
-		*fid = *lastId + (b >> 4);	/* short-form delta */
-	else
-		*fid = (int) tcr_zigzag(r);	/* long form */
-	*lastId = *fid;
-}
-
-/* skip a value of the given compact type (for fields we do not consume) */
-static void
-tcr_skip(TCReader *r, int ftype)
-{
-	switch (ftype)
-	{
-		case TC_BOOL_TRUE:
-		case TC_BOOL_FALSE:
-			break;
-		case TC_BYTE:
-			r->pos += 1;
-			break;
-		case TC_I16:
-		case TC_I32:
-		case TC_I64:
-			(void) tcr_zigzag(r);
-			break;
-		case TC_DOUBLE:
-			r->pos += 8;
-			break;
-		case TC_BINARY:
-			{
-				uint32		n;
-
-				(void) tcr_bytes(r, &n);
-				break;
-			}
-		case TC_LIST:
-		case TC_SET:
-			{
-				uint8		sizeType;
-				uint32		size;
-				int			et;
-				uint32		i;
-
-				if (r->pos >= r->len)
-				{
-					r->error = true;
-					return;
-				}
-				sizeType = r->buf[r->pos++];
-				size = (sizeType >> 4) & 0x0f;
-				et = sizeType & 0x0f;
-				if (size == 0x0f)
-					size = (uint32) tcr_varint(r);
-				for (i = 0; i < size && !r->error; i++)
-					tcr_skip(r, et);
-				break;
-			}
-		case TC_STRUCT:
-			{
-				int			lastId = 0;
-
-				for (;;)
-				{
-					int			ft,
-								fid;
-
-					tcr_field(r, &ft, &fid, &lastId);
-					if (ft == TC_STOP || r->error)
-						break;
-					tcr_skip(r, ft);
-				}
-				break;
-			}
-		default:
-			break;
-	}
-}
-
-/* list header: returns element count and element compact type */
-static uint32
-tcr_list_header(TCReader *r, int *etype)
-{
-	uint8		b;
-	uint32		size;
-
-	if (r->pos >= r->len)
-	{
-		r->error = true;
-		*etype = 0;
-		return 0;
-	}
-	b = r->buf[r->pos++];
-	size = (b >> 4) & 0x0f;
-	*etype = b & 0x0f;
-	if (size == 0x0f)
-		size = (uint32) tcr_varint(r);
-	return size;
-}
 
 /* -------------------------------------------------------------------------
  * Parsed metadata (flat schema only).
@@ -641,7 +195,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
@@ -649,7 +203,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 1:				/* max (deprecated): fallback only */
 				{
 					uint32		n;
-					const uint8 *p = tcr_bytes(r, &n);
+					const uint8 *p = ColumnarThriftBytes(r, &n);
 
 					if (p && !ch->has_max)
 					{
@@ -662,7 +216,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 2:				/* min (deprecated): fallback only */
 				{
 					uint32		n;
-					const uint8 *p = tcr_bytes(r, &n);
+					const uint8 *p = ColumnarThriftBytes(r, &n);
 
 					if (p && !ch->has_min)
 					{
@@ -675,7 +229,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 5:				/* max_value (preferred) */
 				{
 					uint32		n;
-					const uint8 *p = tcr_bytes(r, &n);
+					const uint8 *p = ColumnarThriftBytes(r, &n);
 
 					if (p)
 					{
@@ -688,7 +242,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 6:				/* min_value (preferred) */
 				{
 					uint32		n;
-					const uint8 *p = tcr_bytes(r, &n);
+					const uint8 *p = ColumnarThriftBytes(r, &n);
 
 					if (p)
 					{
@@ -699,7 +253,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 					break;
 				}
 			default:
-				tcr_skip(r, ft);
+				ColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -728,34 +282,34 @@ parse_column_meta(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 4:				/* codec */
-				ch->codec = (int) tcr_zigzag(r);
+				ch->codec = (int) ColumnarThriftZigzag(r);
 				break;
 			case 5:				/* num_values */
-				ch->num_values = tcr_zigzag(r);
+				ch->num_values = ColumnarThriftZigzag(r);
 				break;
 			case 7:				/* total_compressed_size */
-				ch->total_compressed_size = tcr_zigzag(r);
+				ch->total_compressed_size = ColumnarThriftZigzag(r);
 				break;
 			case 9:				/* data_page_offset */
-				ch->data_page_offset = tcr_zigzag(r);
+				ch->data_page_offset = ColumnarThriftZigzag(r);
 				break;
 			case 11:			/* dictionary_page_offset */
-				ch->dict_page_offset = tcr_zigzag(r);
+				ch->dict_page_offset = ColumnarThriftZigzag(r);
 				break;
 			case 12:			/* statistics */
 				if (ft == TC_STRUCT)
 					parse_statistics(r, ch);
 				else
-					tcr_skip(r, ft);
+					ColumnarThriftSkip(r, ft);
 				break;
 			default:
-				tcr_skip(r, ft);
+				ColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -772,13 +326,13 @@ parse_column_chunk(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if (fid == 3 && ft == TC_STRUCT)
 			parse_column_meta(r, ch);
 		else
-			tcr_skip(r, ft);
+			ColumnarThriftSkip(r, ft);
 	}
 }
 
@@ -791,7 +345,7 @@ parse_column_chunk(TCReader *r, PqChunk *ch)
  * This hand-walks nested Thrift unions and assumes the compact-protocol field
  * ordering the spec prescribes. A writer that reorders or partially populates the
  * union could desync the cursor -- but a desync fails the surrounding footer
- * parse (tcr_field / bounds checks catch it), so the blast radius is "file
+ * parse (ColumnarThriftField / bounds checks catch it), so the blast radius is "file
  * rejected", never a wrong value silently returned from a good decode.
  */
 static void
@@ -804,7 +358,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if ((fid == PQ_LT_TIME || fid == PQ_LT_TIMESTAMP) && ft == TC_STRUCT)
@@ -817,7 +371,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 				int			ift,
 							ifid;
 
-				tcr_field(r, &ift, &ifid, &innerLast);
+				ColumnarThriftField(r, &ift, &ifid, &innerLast);
 				if (ift == TC_STOP || r->error)
 					break;
 				if (ifid == 2 && ift == TC_STRUCT)	/* unit: union TimeUnit */
@@ -826,7 +380,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 					int			uft,
 								ufid;
 
-					tcr_field(r, &uft, &ufid, &uLast);
+					ColumnarThriftField(r, &uft, &ufid, &uLast);
 					if (uft != TC_STOP && !r->error)
 					{
 						switch (ufid)
@@ -842,17 +396,17 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 								break;
 						}
 						sc->is_timestamp = isTs;
-						tcr_skip(r, uft);	/* the unit member is an empty struct */
+						ColumnarThriftSkip(r, uft);	/* the unit member is an empty struct */
 						/* consume the union's STOP */
-						tcr_field(r, &uft, &ufid, &uLast);
+						ColumnarThriftField(r, &uft, &ufid, &uLast);
 					}
 				}
 				else
-					tcr_skip(r, ift);	/* isAdjustedToUTC and anything later */
+					ColumnarThriftSkip(r, ift);	/* isAdjustedToUTC and anything later */
 			}
 		}
 		else
-			tcr_skip(r, ft);
+			ColumnarThriftSkip(r, ft);
 	}
 }
 
@@ -878,47 +432,47 @@ parse_schema_element(TCReader *r, PqSchemaCol *sc)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 1:				/* type */
-				sc->phys_type = (int) tcr_zigzag(r);
+				sc->phys_type = (int) ColumnarThriftZigzag(r);
 				break;
 			case 2:				/* type_length */
-				sc->type_length = (int) tcr_zigzag(r);
+				sc->type_length = (int) ColumnarThriftZigzag(r);
 				break;
 			case 3:				/* repetition_type */
-				sc->repetition = (int) tcr_zigzag(r);
+				sc->repetition = (int) ColumnarThriftZigzag(r);
 				break;
 			case 4:				/* name */
 				{
 					uint32		n;
-					const uint8 *p = tcr_bytes(r, &n);
+					const uint8 *p = ColumnarThriftBytes(r, &n);
 
 					if (p)
 						sc->name = pnstrdup((const char *) p, n);
 					break;
 				}
 			case 5:				/* num_children */
-				num_children = (int) tcr_zigzag(r);
+				num_children = (int) ColumnarThriftZigzag(r);
 				sc->num_children = num_children;
 				break;
 			case 6:				/* converted_type */
-				sc->converted_type = (int) tcr_zigzag(r);
+				sc->converted_type = (int) ColumnarThriftZigzag(r);
 				break;
 			case 7:				/* scale (DECIMAL) */
-				sc->scale = (int) tcr_zigzag(r);
+				sc->scale = (int) ColumnarThriftZigzag(r);
 				break;
 			case 8:				/* precision (DECIMAL) */
-				sc->precision = (int) tcr_zigzag(r);
+				sc->precision = (int) ColumnarThriftZigzag(r);
 				break;
 			case 10:			/* logicalType */
 				parse_logical_type(r, sc);
 				break;
 			default:
-				tcr_skip(r, ft);
+				ColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -1009,14 +563,14 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 		int			ft,
 					fid;
 
-		tcr_field(&r, &ft, &fid, &lastId);
+		ColumnarThriftField(&r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r.error)
 			break;
 
 		if (fid == 2 && ft == TC_LIST)	/* schema: list<SchemaElement> */
 		{
 			int			etype;
-			uint32		n = tcr_list_header(&r, &etype);
+			uint32		n = ColumnarThriftListHeader(&r, &etype);
 			uint32		i;
 			PqSchemaCol *tmp = palloc0(sizeof(PqSchemaCol) * Max(n, 1));
 
@@ -1028,7 +582,7 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 		else if (fid == 4 && ft == TC_LIST)		/* row_groups */
 		{
 			int			etype;
-			uint32		n = tcr_list_header(&r, &etype);
+			uint32		n = ColumnarThriftListHeader(&r, &etype);
 			uint32		i;
 
 			pf->nrowgroups = n;
@@ -1045,13 +599,13 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 					int			rft,
 								rfid;
 
-					tcr_field(&r, &rft, &rfid, &rgLast);
+					ColumnarThriftField(&r, &rft, &rfid, &rgLast);
 					if (rft == TC_STOP || r.error)
 						break;
 					if (rfid == 1 && rft == TC_LIST)	/* columns */
 					{
 						int			cet;
-						uint32		cn = tcr_list_header(&r, &cet);
+						uint32		cn = ColumnarThriftListHeader(&r, &cet);
 						uint32		ci;
 
 						rg->chunks = palloc0(sizeof(PqChunk) * Max(cn, 1));
@@ -1060,14 +614,14 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 							parse_column_chunk(&r, &rg->chunks[ci]);
 					}
 					else if (rfid == 3)		/* num_rows */
-						rg->num_rows = tcr_zigzag(&r);
+						rg->num_rows = ColumnarThriftZigzag(&r);
 					else
-						tcr_skip(&r, rft);
+						ColumnarThriftSkip(&r, rft);
 				}
 			}
 		}
 		else
-			tcr_skip(&r, ft);
+			ColumnarThriftSkip(&r, ft);
 	}
 
 	if (r.error || pf->nelems < 1)
@@ -1697,7 +1251,7 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if (!v2)
@@ -1705,13 +1259,13 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 			switch (fid)
 			{
 				case 1:
-					h->num_values = (int) tcr_zigzag(r);
+					h->num_values = (int) ColumnarThriftZigzag(r);
 					break;
 				case 2:
-					h->encoding = (int) tcr_zigzag(r);
+					h->encoding = (int) ColumnarThriftZigzag(r);
 					break;
 				default:
-					tcr_skip(r, ft);
+					ColumnarThriftSkip(r, ft);
 					break;
 			}
 		}
@@ -1720,22 +1274,22 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 			switch (fid)
 			{
 				case 1:
-					h->num_values = (int) tcr_zigzag(r);
+					h->num_values = (int) ColumnarThriftZigzag(r);
 					break;
 				case 4:
-					h->encoding = (int) tcr_zigzag(r);
+					h->encoding = (int) ColumnarThriftZigzag(r);
 					break;
 				case 5:
-					h->def_levels_len = (int) tcr_zigzag(r);
+					h->def_levels_len = (int) ColumnarThriftZigzag(r);
 					break;
 				case 6:
-					h->rep_levels_len = (int) tcr_zigzag(r);
+					h->rep_levels_len = (int) ColumnarThriftZigzag(r);
 					break;
 				case 7:
 					h->is_compressed = (ft == TC_BOOL_TRUE);
 					break;
 				default:
-					tcr_skip(r, ft);
+					ColumnarThriftSkip(r, ft);
 					break;
 			}
 		}
@@ -1755,19 +1309,19 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 		int			ft,
 					fid;
 
-		tcr_field(r, &ft, &fid, &lastId);
+		ColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 1:
-				h->type = (int) tcr_zigzag(r);
+				h->type = (int) ColumnarThriftZigzag(r);
 				break;
 			case 2:
-				h->uncompressed_size = (int) tcr_zigzag(r);
+				h->uncompressed_size = (int) ColumnarThriftZigzag(r);
 				break;
 			case 3:
-				h->compressed_size = (int) tcr_zigzag(r);
+				h->compressed_size = (int) ColumnarThriftZigzag(r);
 				break;
 			case 5:				/* DataPageHeader (v1) */
 				parse_data_page_header(r, h, false);
@@ -1781,13 +1335,13 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 						int			dft,
 									dfid;
 
-						tcr_field(r, &dft, &dfid, &dl);
+						ColumnarThriftField(r, &dft, &dfid, &dl);
 						if (dft == TC_STOP || r->error)
 							break;
 						if (dfid == 1)
-							h->num_values = (int) tcr_zigzag(r);
+							h->num_values = (int) ColumnarThriftZigzag(r);
 						else
-							tcr_skip(r, dft);
+							ColumnarThriftSkip(r, dft);
 					}
 					break;
 				}
@@ -1795,7 +1349,7 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 				parse_data_page_header(r, h, true);
 				break;
 			default:
-				tcr_skip(r, ft);
+				ColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -2092,7 +1646,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 			const uint8 *end;
 			int			i;
 
-			if (!pq_decompress(ch->codec, praw, h.compressed_size,
+			if (!ColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
 							   h.uncompressed_size, &dec, &db, &dblen))
 				return false;
 			dictCount = h.num_values;
@@ -2157,7 +1711,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					size_t		vusize = (h.uncompressed_size > levLen)
 						? (size_t) (h.uncompressed_size - levLen) : 0;
 
-					if (!pq_decompress(ch->codec, vraw, vrawlen, vusize,
+					if (!ColumnarParquetDecompress(ch->codec, vraw, vrawlen, vusize,
 									   &dec, &valbuf, &vallen))
 						return false;
 				}
@@ -2173,7 +1727,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 				size_t		pblen;
 				size_t		off = 0;
 
-				if (!pq_decompress(ch->codec, praw, h.compressed_size,
+				if (!ColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
 								   h.uncompressed_size, &dec, &pb, &pblen))
 					return false;
 				/* v1: repetition levels first, then definition levels, both
