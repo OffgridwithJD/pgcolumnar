@@ -617,6 +617,20 @@ extern bool ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
 										Form_pg_attribute att,
 										char **tableOut, uint32 *tableLenOut);
 
+/*
+ * True when encoding the chunk with the table just built is still a win after
+ * the block compressor runs over the result, judged on the same sample the
+ * table was trained on. The per-vector test inside ColumnarEncodeChunk compares
+ * uncompressed lengths, which is the wrong objective when a codec is configured:
+ * FSST codes are smaller than repetitive text but much less compressible, so
+ * FSST can win every vector and still enlarge the chunk. Callers pass NULL for
+ * fsstTable when this returns false.
+ */
+extern bool ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
+										const char *table, uint32 tableLen,
+										int compressionType,
+										int compressionLevel);
+
 /* -------------------------------------------------------------------------
  * per-chunk bloom filters (columnar_bloom.c, I7)
  * ------------------------------------------------------------------------- */
