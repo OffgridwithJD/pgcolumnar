@@ -29,16 +29,15 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 ROWS=${PGC_EXCL_ROWS:-500}
 ARROW="${PGC_TMPDIR:-/tmp}/pgc_excl_$$.arrow"
 
-# btree_gist supplies the = operator class gist needs for a scalar column. Where
-# it is unavailable there is nothing to test, so say so rather than pass quietly.
-have_gist="$(q "SELECT count(*) FROM pg_available_extensions WHERE name = 'btree_gist';")"
-if [ "$have_gist" != "1" ]; then
-	echo "-- btree_gist unavailable; exclusion constraints cannot be built, skipping"
-	pgc_summary
-	exit 0
-fi
-
-psql_run "CREATE EXTENSION IF NOT EXISTS btree_gist;" >/dev/null
+# EXCLUDE USING btree (k WITH =) needs no extension and is still an exclusion
+# constraint rather than a unique index -- indisunique false, indisexclusion true
+# -- which is the distinction that matters here, because index_insert enforces
+# the one and not the other.
+#
+# The first version of this file required btree_gist and skipped without it,
+# reporting PASSED having run zero checks. On the machine the gate runs on there
+# was then no evidence behind the change at all, which is the same failure as a
+# suite no gate runs. Nothing here is conditional now.
 
 psql_run "DROP TABLE IF EXISTS ex_src;
 	CREATE TABLE ex_src (k int, v text) USING pgcolumnar;
@@ -47,7 +46,14 @@ psql_run "SELECT pgcolumnar.export_arrow('ex_src', '$ARROW');" >/dev/null
 
 psql_run "DROP TABLE IF EXISTS ex_t;
 	CREATE TABLE ex_t (k int, v text) USING pgcolumnar;
-	ALTER TABLE ex_t ADD CONSTRAINT ex_t_k EXCLUDE USING gist (k WITH =);" >/dev/null
+	ALTER TABLE ex_t ADD CONSTRAINT ex_t_k EXCLUDE USING btree (k WITH =);" >/dev/null
+
+# If this were a unique index the suite would pass through index_insert's own
+# enforcement and prove nothing about the path it is named for.
+check "the constraint is an exclusion constraint, not a unique index" \
+	"$(q "SELECT indisunique || '/' || indisexclusion FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'ex_t_k';")" \
+	"false/true"
 
 # --- 1. a clean import still works --------------------------------------------
 
