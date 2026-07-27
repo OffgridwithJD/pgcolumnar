@@ -142,6 +142,14 @@ typedef struct ColumnarScanDescData
 {
 	TableScanDescData rs_base;
 	ColumnarReadState *readState;
+
+	/*
+	 * The context the scan descriptor itself was allocated in. The read state
+	 * is built on the first getnextslot, where the current context is usually a
+	 * per-tuple one that is reset before the scan ends, so it is allocated here
+	 * instead and outlives the row that triggered it.
+	 */
+	MemoryContext scanContext;
 	ColumnarAnalyzeState *analyzeState;
 } ColumnarScanDescData;
 typedef struct ColumnarScanDescData *ColumnarScanDesc;
@@ -441,14 +449,66 @@ columnar_scan_begin(Relation rel, Snapshot snapshot, int nkeys,
 	scan->rs_base.rs_parallel = pscan;
 
 	/*
+	 * The read state is built on the first getnextslot, not here, because the
+	 * shape to decode against arrives with the slot and is not always the
+	 * relation's current one.
+	 *
+	 * ALTER TABLE ... ALTER COLUMN TYPE is where they differ (#178). Phase 2 of
+	 * ATRewriteTable has already updated pg_attribute when phase 3 scans the old
+	 * relation, so RelationGetDescr(rel) describes the new types while the bytes
+	 * on disk are still the old ones. Core hands the scan a slot built from
+	 * tab->oldDesc for exactly that reason; decoding against the relation
+	 * instead read 4-byte values as 8-byte ones and worse.
+	 *
+	 * For every other scan the slot's descriptor is the relation's, so this
+	 * costs a branch and changes nothing.
+	 *
 	 * Phase 2 projects all columns for a plain sequential scan (there is no
 	 * per-scan projection channel in the table AM without the custom scan of
 	 * a later phase), so we pass a NULL projection set. Any ScanKeys the
 	 * executor supplies are forwarded for chunk-group skipping.
 	 */
-	scan->readState = ColumnarBeginRead(rel, snapshot, pscan, NULL, nkeys, key);
+	scan->rs_base.rs_key = key;
+	scan->readState = NULL;
+	scan->scanContext = CurrentMemoryContext;
 
 	return (TableScanDesc) scan;
+}
+
+/*
+ * columnar_scan_read_state
+ *		The scan's reader, built on first use against the descriptor the caller
+ *		is asking for.
+ *
+ * Deferring it is what lets a rewrite decode against tab->oldDesc (#178). It
+ * also means no caller may assume scan->readState is already set: the parallel
+ * index build reads it straight off the scan without ever going through
+ * getnextslot, and dereferenced NULL the first time this was written that way.
+ * Everything that wants the reader comes through here.
+ *
+ * The read state is allocated in the context the scan descriptor itself lives
+ * in. The current context on first use is usually a per-tuple one that is reset
+ * before the scan ends, and ColumnarEndRead then frees an already-freed pointer.
+ */
+static ColumnarReadState *
+columnar_scan_read_state(ColumnarScanDesc scan, TupleDesc tupdesc)
+{
+	if (scan->readState == NULL)
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(scan->scanContext);
+
+		scan->readState =
+			ColumnarBeginReadWithStorage(scan->rs_base.rs_rd,
+										 scan->rs_base.rs_snapshot,
+										 ColumnarStorageId(scan->rs_base.rs_rd),
+										 tupdesc,
+										 scan->rs_base.rs_parallel, NULL,
+										 scan->rs_base.rs_nkeys,
+										 scan->rs_base.rs_key);
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	return scan->readState;
 }
 
 static void
@@ -456,7 +516,8 @@ columnar_scan_end(TableScanDesc sscan)
 {
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 
-	ColumnarEndRead(scan->readState);
+	if (scan->readState != NULL)
+		ColumnarEndRead(scan->readState);
 
 	if (scan->analyzeState != NULL)
 	{
@@ -479,7 +540,8 @@ columnar_scan_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 {
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 
-	ColumnarRescanRead(scan->readState);
+	if (scan->readState != NULL)
+		ColumnarRescanRead(scan->readState);
 }
 
 static bool
@@ -491,8 +553,9 @@ columnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
 
 	ExecClearTuple(slot);
 
-	if (!ColumnarReadNextRow(scan->readState, slot->tts_values,
-							 slot->tts_isnull, &rowNumber))
+	if (!ColumnarReadNextRow(columnar_scan_read_state(scan,
+													 slot->tts_tupleDescriptor),
+							 slot->tts_values, slot->tts_isnull, &rowNumber))
 		return false;
 
 	ExecStoreVirtualTuple(slot);
@@ -1325,7 +1388,13 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	 */
 	if (scan != NULL)
 	{
-		readState = ((ColumnarScanDesc) scan)->readState;
+		/*
+		 * An index build always wants the relation's current shape: it is
+		 * indexing what the table is now, not what an in-flight rewrite is
+		 * converting away from.
+		 */
+		readState = columnar_scan_read_state((ColumnarScanDesc) scan,
+											 RelationGetDescr(table_rel));
 		ownReadState = false;
 	}
 	else
