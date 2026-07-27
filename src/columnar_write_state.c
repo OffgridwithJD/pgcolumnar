@@ -32,6 +32,29 @@
 #include "utils/typcache.h"
 
 /*
+ * How many bytes of a column chunk to run through both candidates when deciding
+ * whether FSST still pays once the block compressor has had its turn.
+ *
+ * Bounded because the buffer is a copy of bytes already resident. Set from
+ * measurement rather than taste: on four text shapes at 300,000 rows, deciding
+ * over 256 kB (the table's training sample) gets one of them backwards, 1 MB
+ * gets all four right but lands 4% off the best size on one, and 4 MB matches
+ * the answer a whole-chunk decision gives on every shape. Four shapes is what
+ * this was calibrated on, so treat it as a floor that worked rather than a
+ * tuned optimum -- if a shape is found where it decides wrong, raise it.
+ *
+ * It trades write time for that accuracy, because the bytes judged here are
+ * FSST-encoded once to judge them and again per vector when the answer is yes.
+ * Medians of three at 300,000 rows, against main: 4 MB costs 12% on 's' || g
+ * and 63% on the e-mail shape while matching main's size on both; 1 MB costs
+ * nothing measurable on either but writes the e-mail shape 4% larger. Both are
+ * roughly 4x faster than main on high-entropy text, which is where the encoding
+ * was pure waste. Size is the guarantee worth keeping for a storage format, so
+ * the larger value is the default; lowering it here is the throughput trade.
+ */
+#define COLUMNAR_FSST_DECIDE_CAP (4 * 1024 * 1024)
+
+/*
  * Direct comparison kinds for the zone min/max (issue #155).
  *
  * Tracking a chunk's min and max costs two comparisons per value per column, and
@@ -787,6 +810,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 		if (att->attlen == -1)
 		{
 			StringInfoData corpus;
+			uint32		sampleLen = 0;
 
 			initStringInfo(&corpus);
 			foreach(lc, writeState->chunkGroups)
@@ -797,13 +821,49 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 				if (col->valueStream.len > 0)
 					appendBinaryStringInfo(&corpus, col->valueStream.data,
 										   col->valueStream.len);
-				if (corpus.len >= 262144)	/* matches FSST_SAMPLE_CAP: train the
-											 * one per-chunk table on a broad sample */
+				if (sampleLen == 0 && corpus.len >= 262144)
+					sampleLen = (uint32) corpus.len;	/* matches FSST_SAMPLE_CAP:
+														 * train the one per-chunk
+														 * table on a broad sample */
+				if (corpus.len >= COLUMNAR_FSST_DECIDE_CAP)
 					break;
 			}
+			if (sampleLen == 0)
+				sampleLen = (uint32) corpus.len;
+
+			/* the table is trained on the same prefix it always was */
 			if (corpus.len > 0)
-				ColumnarFsstBuildChunkTable(corpus.data, (uint32) corpus.len, att,
+				ColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
+
+			/*
+			 * A table that shrinks every vector can still enlarge the chunk,
+			 * because what lands on disk is this stream after the codec below
+			 * has run, and FSST codes compress far worse than the text they
+			 * replace. Ask before committing to it, and drop the table when the
+			 * answer is no: the vectors below then take their ordinary encoding
+			 * and skip the FSST attempt altogether, so the check pays for itself
+			 * in write time exactly when it saves space.
+			 *
+			 * This is asked over a much longer run of bytes than the table is
+			 * trained on, because the answer moves with volume and the sample
+			 * size is not neutral: zstd needs a good deal of FSST output before
+			 * it finds the structure in it. Measured on 300,000 e-mail-shaped
+			 * rows, the 256 kB training sample says FSST is 24% worse while over
+			 * the whole column it is 23% better -- a verdict that is not merely
+			 * imprecise but inverted, so no margin on the sample would be safe.
+			 */
+			if (fsstTable != NULL &&
+				!ColumnarFsstHelpsCompressed(corpus.data, (uint32) corpus.len,
+											 fsstTable, fsstTableLen,
+											 writeState->compressionType,
+											 writeState->compressionLevel))
+			{
+				pfree(fsstTable);
+				fsstTable = NULL;
+				fsstTableLen = 0;
+			}
+
 			pfree(corpus.data);
 		}
 

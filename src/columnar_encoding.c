@@ -1663,6 +1663,10 @@ ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
  * (no inline table). The per-vector win test compares the code stream alone to
  * the raw length: the shared table's bytes are amortized across the chunk and
  * not charged here, so FSST wins per vector whenever the codes are smaller.
+ *
+ * That test is only meaningful once ColumnarFsstHelpsCompressed has decided the
+ * chunk should use FSST at all; it is what charges the table and what compares
+ * against the compressed size actually written. See the comment on it below.
  */
 static bool
 encode_fsst_shared(const char *raw, uint32 rawLen, const char *table,
@@ -1718,6 +1722,73 @@ encode_fsst_shared(const char *raw, uint32 rawLen, const char *table,
 	*out = buf.data;
 	*outLen = buf.len;
 	return true;
+}
+
+/*
+ * Would FSST still pay once the block compressor has had its turn?
+ *
+ * The per-vector win test above compares encoded lengths, but the bytes that
+ * reach disk are compressed afterwards (columnar_write_state.c compresses the
+ * whole encoded stream). Those are different objectives, and for some shapes
+ * they disagree sharply: FSST turns highly repetitive text into a stream of
+ * high-entropy codes, which is smaller than the text but far less compressible
+ * than the text was. Scored uncompressed FSST wins; stored compressed it loses.
+ *
+ * Worse, the guard that gates this path -- only try FSST when nothing else
+ * compressed the vector -- selects for exactly that case, because a vector no
+ * encoding could shrink is usually one the general-purpose compressor can.
+ *
+ * So decide on the quantity that matters. The caller has already gathered a
+ * bounded sample of the chunk's value streams to train the symbol table; run
+ * both candidates through the configured codec and keep FSST only if it is
+ * genuinely smaller after compression. The symbol table's own bytes are charged
+ * to FSST here, which is also the only place they are charged at all.
+ *
+ * Cost is one FSST encode and two compressions of a sample capped at 256 kB,
+ * once per column chunk, and it is repaid immediately when the answer is no:
+ * the per-vector encode is then skipped for every vector in the chunk.
+ */
+bool
+ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
+							const char *table, uint32 tableLen,
+							int compressionType, int compressionLevel)
+{
+	char	   *codes = NULL;
+	char	   *plainComp = NULL;
+	char	   *codesComp = NULL;
+	uint32		codesLen = 0;
+	uint32		plainCompLen = 0;
+	uint32		codesCompLen = 0;
+	int			usedType;
+	int			usedLevel;
+	bool		helps;
+
+	/*
+	 * With no codec downstream the encoded length IS the stored length, so the
+	 * per-vector test is already measuring the right thing.
+	 */
+	if (compressionType == COLUMNAR_COMPRESSION_NONE)
+		return true;
+
+	if (!encode_fsst_shared(corpus, corpusLen, table, tableLen, &codes, &codesLen))
+		return false;
+
+	ColumnarCompressValueStream(corpus, corpusLen, compressionType,
+								compressionLevel, &plainComp, &plainCompLen,
+								&usedType, &usedLevel);
+	ColumnarCompressValueStream(codes, codesLen, compressionType,
+								compressionLevel, &codesComp, &codesCompLen,
+								&usedType, &usedLevel);
+
+	helps = ((uint64) codesCompLen + tableLen < (uint64) plainCompLen);
+
+	pfree(codes);
+	if (plainComp)
+		pfree(plainComp);
+	if (codesComp)
+		pfree(codesComp);
+
+	return helps;
 }
 
 /* decode a bare code stream against a chunk-shared serialized table (E3b) */
