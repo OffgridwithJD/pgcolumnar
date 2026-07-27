@@ -7,7 +7,7 @@
 # with planner defaults. The sampler maps each block core chooses to the slice of
 # its row group that the block stands for, and offers that slice's live rows.
 #
-# Seven things are asserted.
+# Eight things are asserted.
 #
 # 1. The statistics agree with a heap table on identical data. This is the
 #    differential oracle the rest of the suite uses, and it is what catches a
@@ -259,6 +259,53 @@ echo "-- rows discarded to return one row: ${with_index} with the index, ${no_in
 check "having an index available saves the point lookup real work" \
 	"$(awk -v a="$with_index" -v b="$no_index" \
 		'BEGIN { print (b > 0 && a < b / 2) ? "yes" : "no (" a " with the index, " b " without)" }')" \
+	"yes"
+
+# --- 5. ANALYZE is not proportional to the table ------------------------------
+
+# The sampler offers every row of every block core visits, so its cost is per row
+# OFFERED, not per row kept. Fetching each of those by row number re-read the row
+# group list from the catalog and re-located the row: ANALYZE on a 250,000-row,
+# eight-column table ran over 200 seconds and did not get faster when the
+# statistics target was lowered to 1, because lowering the target does not reduce
+# the rows offered when the table has fewer blocks than the target.
+#
+# A wide table is the shape that shows it, since width drives bytes per row rather
+# than row count, and past a point the decoded row group exceeds the fetch
+# cache's size cap so every offered row re-decodes the whole group. The size
+# below is chosen to sit past that point; measured on the unfixed build:
+#
+#     60,000 rows    526 ms
+#    100,000 rows    705 ms
+#    150,000 rows    over 1800 s        <- the cap is crossed
+#
+# and on the fixed build 341 ms against a 155 ms scan, which is why the threshold
+# has room. The reference is a full scan of the same table: ANALYZE reads a
+# sample and must not cost multiples of reading everything.
+psql_run "DROP TABLE IF EXISTS as_w;
+	CREATE TABLE as_w (a bigint, b int, c int, d int, e timestamptz,
+	                   f text, g text, h text) USING pgcolumnar;
+	INSERT INTO as_w SELECT g, g, g % 1000, g % 7,
+		'2020-01-01'::timestamptz + (g || ' sec')::interval,
+		repeat('x', 200) || g, repeat('y', 200) || g, repeat('z', 200) || g
+	FROM generate_series(1, ${PGC_ANALYZE_WIDE_ROWS:-40000}) g;" >/dev/null
+
+t0=$(date +%s%N)
+psql_run "ANALYZE as_w;" >/dev/null
+t1=$(date +%s%N)
+an_ms=$(( (t1 - t0) / 1000000 ))
+
+t0=$(date +%s%N)
+psql_run "SET pgcolumnar.enable_vectorization = off;
+	SELECT count(h) FROM as_w;" >/dev/null
+t1=$(date +%s%N)
+scan_ms=$(( (t1 - t0) / 1000000 ))
+
+echo "-- wide-table ANALYZE ${an_ms} ms against a ${scan_ms} ms full scan"
+
+check "ANALYZE on a wide table is not many times a full scan of it" \
+	"$(awk -v a="$an_ms" -v s="$scan_ms" \
+		'BEGIN { print (s > 0 && a < s * 20) ? "yes" : "no (" a "ms against a " s "ms scan)" }')" \
 	"yes"
 
 pgc_summary
