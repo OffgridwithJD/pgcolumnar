@@ -7,7 +7,7 @@ pgColumnar has two kinds of settings:
   special privileges. Two are not: `pgcolumnar.enable_end_truncation` requires
   superuser, and `pgcolumnar.unique_lock_buckets` can only be set at server start.
   Each exception is noted in its own row below.
-- Per-table storage options, set with `pgcolumnar.alter_columnar_table_set`. These
+- Per-table storage options, set with `pgcolumnar.set_options`. These
   apply to one table and are used when that table writes new data.
 
 ## Server settings
@@ -67,12 +67,12 @@ pgColumnar has two kinds of settings:
 
 ## Per-table storage options
 
-`pgcolumnar.alter_columnar_table_set` sets storage options on one table. New data
+`pgcolumnar.set_options` sets storage options on one table. New data
 written after the change uses the new values; data already written is unchanged
 until the table is rewritten (for example by `pgcolumnar.vacuum`).
 
 ```sql
-SELECT pgcolumnar.alter_columnar_table_set(
+SELECT pgcolumnar.set_options(
     'events',
     chunk_group_row_limit => 20000,
     stripe_row_limit      => 300000,
@@ -91,10 +91,10 @@ SELECT pgcolumnar.alter_columnar_table_set(
 Arguments left at their default (`NULL`) are not changed. A value outside the
 valid range for a limit or level is rejected.
 
-`pgcolumnar.alter_columnar_table_reset` returns options to the server defaults:
+`pgcolumnar.reset_options` returns options to the server defaults:
 
 ```sql
-SELECT pgcolumnar.alter_columnar_table_reset(
+SELECT pgcolumnar.reset_options(
     'events',
     chunk_group_row_limit => true,
     compression           => true);

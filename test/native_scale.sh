@@ -40,7 +40,7 @@ fsize() { q "SELECT pg_relation_size('n');"; }
 echo "-- loading $N rows into heap + columnar"
 psql_run "CREATE TABLE h (id int, a int, b bigint, c int);"
 psql_run "CREATE TABLE n (id int, a int, b bigint, c int) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 50000, chunk_group_row_limit => 10000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 50000, chunk_group_row_limit => 10000);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
 psql_run "CREATE INDEX n_id ON n (id);"

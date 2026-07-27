@@ -36,7 +36,7 @@ run() {			# $1 = on|off ; echoes "<free_rows_after_compact>|<final_size>|<ok|MIS
 		psql_run "CREATE TABLE h (id int, payload text);"
 		psql_run "CREATE TABLE n (id int, payload text) USING pgcolumnar;"
 		# 30 groups of 1000 rows so a deleted block frees many adjacent ranges.
-		psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+		psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
 		psql_run "SET pgcolumnar.reclaim_coalesce = $1; INSERT INTO h $GEN;"
 		psql_run "SET pgcolumnar.reclaim_coalesce = $1; INSERT INTO n $GEN;"
 		# fully delete a large CONTIGUOUS block of groups, then compact: many small
@@ -52,7 +52,7 @@ run() {			# $1 = on|off ; echoes "<free_rows_after_compact>|<final_size>|<ok|MIS
 
 	{
 		# force large output groups and recluster: reuses the freed space.
-		psql_run "SET pgcolumnar.reclaim_coalesce = $1; SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 20000, chunk_group_row_limit => 20000);"
+		psql_run "SET pgcolumnar.reclaim_coalesce = $1; SELECT pgcolumnar.set_options('n', stripe_row_limit => 20000, chunk_group_row_limit => 20000);"
 		psql_run "SET pgcolumnar.reclaim_coalesce = $1; SELECT pgcolumnar.recluster('n', 'id');"
 	} >/dev/null 2>&1
 

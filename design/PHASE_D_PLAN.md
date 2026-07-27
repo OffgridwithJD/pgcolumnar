@@ -21,7 +21,7 @@ PostgreSQL API only.
 - The parts of the engine independent of the format are reused unchanged: the
   table access method plumbing, MVCC and row visibility, index and index-only
   scan support, the vectorized executor, and the Arrow and Parquet codecs
-  (DESIGN_PIVOT_ORIGINAL_ENGINE.md section 3). Phase D adds a native reader and
+  (the re-origination design). Phase D adds a native reader and
   writer behind the interfaces those consume.
 - Deletes in Phase D continue to use the existing row-mask style marking adapted
   to row groups; the first-class delete vector replaces it in Phase F.

@@ -14,7 +14,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 # A columnar table with a small row-group limit so several row groups are written.
 psql_run "CREATE TABLE nw (id int, v text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('nw', stripe_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('nw', stripe_row_limit => 1000);"
 psql_run "INSERT INTO nw SELECT g, CASE WHEN g % 4 = 0 THEN NULL ELSE 'v'||g END FROM generate_series(1, 5000) g;"
 
 SID="$(q "SELECT pgcolumnar.get_storage_id('nw');")"

@@ -12,7 +12,7 @@
 setup
 {
 	CREATE TABLE iso (id int, v text) USING pgcolumnar;
-	SELECT pgcolumnar.alter_columnar_table_set('iso', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
+	SELECT pgcolumnar.set_options('iso', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
 	INSERT INTO iso SELECT g, md5(g::text) FROM generate_series(1, 3000) g;
 }
 

@@ -4,9 +4,9 @@ This plan proposes the next phase of pgColumnar work. It is derived entirely
 from publicly readable academic literature on columnar storage and from the
 current pgColumnar source and format spec. It names each technique, cites its
 public source, states where pgColumnar stands today, and proposes concrete,
-prioritized work. It preserves the clean-room discipline (see PROVENANCE.md and
-REWRITE_PLAN.md): all techniques below come from the cited papers and the public
-PostgreSQL API, never from any copyleft columnar project's source.
+prioritized work. It preserves the clean-room discipline (see PROVENANCE.md):
+all techniques below come from the cited papers and the public PostgreSQL API,
+never from any copyleft columnar project's source.
 
 ## Status
 
@@ -24,7 +24,7 @@ PostgreSQL 13-19. I9 (projections / Arrow interop) remains exploratory.
   primary sources, all freely readable, are cited inline by short tag and listed
   in full at the end.
 - **Format versioning.** Any on-disk change bumps the format minor version
-  (currently 2.0, see FORMAT_AND_INTERFACE_SPEC.md section 3) and must keep read
+  (2.0 at the time of writing) and must keep read
   compatibility with existing 2.0 files. New encodings are additive: an old
   reader refuses an unknown code; a new reader still reads code 0 (none).
 - **Test net.** The differential/recovery/fuzz suites (test/lib.sh and friends)
@@ -36,7 +36,7 @@ PostgreSQL 13-19. I9 (projections / Arrow interop) remains exploratory.
 ## Where pgColumnar stands today
 
 Confirmed from source (src/columnar_compression.c, columnar_reader.c,
-columnar_vector.c, columnar_cache.c) and FORMAT_AND_INTERFACE_SPEC.md:
+columnar_vector.c, columnar_cache.c) and the format specification of the day:
 
 - **Compression is block-level only.** Each chunk's value stream is the raw
   serialized column values, then optionally run through a general-purpose codec

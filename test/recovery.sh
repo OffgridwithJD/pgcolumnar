@@ -61,7 +61,7 @@ recovery_ran() {
 }
 
 make_pair "id int, v text, n numeric"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 2000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 2000);" >/dev/null
 
 # ---------------------------------------------------------------------------
 # Scenario 1: committed writes survive an immediate crash.

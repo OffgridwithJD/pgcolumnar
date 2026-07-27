@@ -81,7 +81,7 @@ To install a new build of the extension:
 2. Restart the server so the new library is loaded.
 
 The on-disk format version is recorded in the source and in
-[../design/FORMAT_AND_INTERFACE_SPEC.md](../design/FORMAT_AND_INTERFACE_SPEC.md).
+[../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
 A build that keeps the same format version reads tables written by earlier builds
 of that version without conversion.
 

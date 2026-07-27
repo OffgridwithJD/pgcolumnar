@@ -1,12 +1,10 @@
 # pgColumnar native format and interface specification
 
-Status: draft, in progress on the `re-origination` branch. This is the build
-source for the re-originated pgColumnar engine, replacing the 1.0-dev compatibility
-specification in [FORMAT_AND_INTERFACE_SPEC.md](FORMAT_AND_INTERFACE_SPEC.md). It
-is written from public research (the papers in section 15) and the open Apache
-Arrow, Parquet, and ORC specifications, not from any other implementation's
-source. See [PROVENANCE.md](../PROVENANCE.md), [TODO_PIVOT.md](TODO_PIVOT.md), and
-[DESIGN_PIVOT_ORIGINAL_ENGINE.md](DESIGN_PIVOT_ORIGINAL_ENGINE.md).
+Status: this is the build source for the pgColumnar engine and the sole
+specification of the format the implementation reads and writes. It is written
+from public research (the papers in section 15) and the open Apache Arrow,
+Parquet, and ORC specifications, not from any other implementation's source. See
+[PROVENANCE.md](../PROVENANCE.md).
 
 This document specifies the on-disk storage format, the metadata catalog, and the
 SQL interface. It records design decisions and contracts, not implementation
@@ -307,14 +305,14 @@ The design is grounded in these public sources (full context in
 - Operating on compressed data; column-store design space: Abadi et al., column
   stores survey and tutorial.
 
-## 16. Relationship to the 1.0-dev line
+## 16. Relationship to the earlier practice line
 
-The 1.0-dev format (2.2), specified in
-[FORMAT_AND_INTERFACE_SPEC.md](FORMAT_AND_INTERFACE_SPEC.md), remains on `main`
-and is preserved by the `v1.0-dev` tag. The native format is a separate line and
-is not required to read it. The implementation reuses the parts of the engine that
-are independent of the format (table access method plumbing, MVCC and row
-visibility, index and index-only-scan support, the vectorized executor, and the
-Arrow and Parquet codecs), as recorded in DESIGN_PIVOT_ORIGINAL_ENGINE.md section
-3, and re-originates the on-disk layout, catalog, and SQL surface per this
-document.
+An earlier practice line, preserved by the `v1.0-dev` tag, used a different
+on-disk format. That format is not carried forward: the native format described
+here is the only one the implementation reads or writes, and no conversion path
+is provided.
+
+The engine retains the parts that are independent of the on-disk format: table
+access method plumbing, MVCC and row visibility, index and index-only-scan
+support, the vectorized executor, and the Arrow and Parquet codecs. The on-disk
+layout, the metadata catalog, and the SQL surface are specified by this document.

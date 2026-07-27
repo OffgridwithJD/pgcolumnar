@@ -21,7 +21,7 @@ OID or objects that depend on it, such as views and foreign keys.
 SELECT pgcolumnar.alter_table_set_access_method('events', 'pgcolumnar');
 ```
 
-### pgcolumnar.alter_columnar_table_set(...) and pgcolumnar.alter_columnar_table_reset(...)
+### pgcolumnar.set_options(...) and pgcolumnar.reset_options(...)
 
 Set or reset per-table storage options (row group and vector row limits,
 compression codec and level). See

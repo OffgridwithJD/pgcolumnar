@@ -10,7 +10,7 @@
 setup
 {
 	CREATE TABLE iso (id int, v int) USING pgcolumnar;
-	SELECT pgcolumnar.alter_columnar_table_set('iso', stripe_row_limit => 1000);
+	SELECT pgcolumnar.set_options('iso', stripe_row_limit => 1000);
 	INSERT INTO iso SELECT g, g FROM generate_series(1, 50) g;
 }
 

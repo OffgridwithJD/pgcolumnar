@@ -115,7 +115,7 @@ echo "-- custom scan path"
 q "CREATE TABLE t (a int, b text, c int) USING pgcolumnar;" >/dev/null
 # One row group per 10000 rows, so 50000 rows form five row groups and a narrow
 # range predicate skips whole row groups by their zone-map min/max.
-q "SELECT pgcolumnar.alter_columnar_table_set('t', stripe_row_limit => 10000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t', stripe_row_limit => 10000);" >/dev/null
 q "INSERT INTO t SELECT g, 'r'||g, g%7 FROM generate_series(1,50000) g;" >/dev/null
 assert_plan "plain select uses custom scan" \
 	"EXPLAIN (COSTS OFF) SELECT * FROM t;" "Custom Scan (ColumnarScan)" "Seq Scan"
@@ -191,23 +191,23 @@ check "default uses zstd" \
 	"$(q "SELECT max(block_codec) FROM pgcolumnar.column_chunk WHERE storage_id=pgcolumnar.get_storage_id('o_def');")" "3"
 
 q "CREATE TABLE o_none (a int, b text) USING pgcolumnar;" >/dev/null
-q "SELECT pgcolumnar.alter_columnar_table_set('o_none', compression => 'none');" >/dev/null
+q "SELECT pgcolumnar.set_options('o_none', compression => 'none');" >/dev/null
 q "INSERT INTO o_none SELECT g, repeat('x',200) FROM generate_series(1,20000) g;" >/dev/null
 check "option none disables compression" \
 	"$(q "SELECT max(block_codec) FROM pgcolumnar.column_chunk WHERE storage_id=pgcolumnar.get_storage_id('o_none');")" "0"
 
 # chunk_group_row_limit option changes how many vectors a row group holds
 q "CREATE TABLE o_cg (a int) USING pgcolumnar;" >/dev/null
-q "SELECT pgcolumnar.alter_columnar_table_set('o_cg', chunk_group_row_limit => 1000);" >/dev/null
+q "SELECT pgcolumnar.set_options('o_cg', chunk_group_row_limit => 1000);" >/dev/null
 q "INSERT INTO o_cg SELECT g FROM generate_series(1,5000) g;" >/dev/null
 check "chunk group limit applied" \
 	"$(q "SELECT count(*) FROM pgcolumnar.zone_map WHERE storage_id=pgcolumnar.get_storage_id('o_cg') AND vector_index >= 0 AND column_index = 0;")" "5"
 
 # reset returns an option to the instance default
-q "SELECT pgcolumnar.alter_columnar_table_set('o_reset', chunk_group_row_limit => 1000);" 2>/dev/null || true
+q "SELECT pgcolumnar.set_options('o_reset', chunk_group_row_limit => 1000);" 2>/dev/null || true
 q "CREATE TABLE o_reset (a int) USING pgcolumnar;" >/dev/null
-q "SELECT pgcolumnar.alter_columnar_table_set('o_reset', chunk_group_row_limit => 1000);" >/dev/null
-q "SELECT pgcolumnar.alter_columnar_table_reset('o_reset', chunk_group_row_limit => true);" >/dev/null
+q "SELECT pgcolumnar.set_options('o_reset', chunk_group_row_limit => 1000);" >/dev/null
+q "SELECT pgcolumnar.reset_options('o_reset', chunk_group_row_limit => true);" >/dev/null
 q "INSERT INTO o_reset SELECT g FROM generate_series(1,5000) g;" >/dev/null
 check "reset restores default limit" \
 	"$(q "SELECT count(*) FROM pgcolumnar.zone_map WHERE storage_id=pgcolumnar.get_storage_id('o_reset') AND vector_index >= 0 AND column_index = 0;")" "1"
@@ -219,13 +219,13 @@ check "reset restores default limit" \
 # ---------------------------------------------------------------------------
 echo "-- vacuum compaction and space reclaim"
 q "CREATE TABLE v (a int, b text) USING pgcolumnar;" >/dev/null
-q "SELECT pgcolumnar.alter_columnar_table_set('v', stripe_row_limit => 1000);" >/dev/null
+q "SELECT pgcolumnar.set_options('v', stripe_row_limit => 1000);" >/dev/null
 q "INSERT INTO v SELECT g, 'v'||g FROM generate_series(1,5000) g;" >/dev/null
 check "v starts with five stripes" "$(q "SELECT count(*) FROM pgcolumnar.stats('v');")" "5"
 q "DELETE FROM v WHERE a % 2 = 0;" >/dev/null
 check "v live rows after delete" "$(q "SELECT count(*) FROM v;")" "2500"
 check "v deleted rows tracked" "$(q "SELECT sum(deletedrows) FROM pgcolumnar.stats('v');")" "2500"
-q "SELECT pgcolumnar.alter_columnar_table_reset('v', stripe_row_limit => true);" >/dev/null
+q "SELECT pgcolumnar.reset_options('v', stripe_row_limit => true);" >/dev/null
 q "SELECT pgcolumnar.vacuum('v');" >/dev/null
 check "v compacts to one stripe" "$(q "SELECT count(*) FROM pgcolumnar.stats('v');")" "1"
 check "v no deleted rows after vacuum" "$(q "SELECT COALESCE(sum(deletedrows),0) FROM pgcolumnar.stats('v');")" "0"

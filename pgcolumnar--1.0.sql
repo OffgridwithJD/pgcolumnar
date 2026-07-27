@@ -252,13 +252,13 @@ COMMENT ON FUNCTION pgcolumnar.alter_table_set_access_method(text, text)
 /* ---------------------------------------------------------------------------
  * Per-table option set and reset (spec 8.2)
  *
- * alter_columnar_table_set stores per-table option overrides; a NULL argument
- * leaves that option unchanged. alter_columnar_table_reset clears an option
+ * set_options stores per-table option overrides; a NULL argument
+ * leaves that option unchanged. reset_options clears an option
  * back to the instance default when its boolean argument is true. Options take
  * effect for writes that begin after they are set.
  * ------------------------------------------------------------------------- */
 
-CREATE FUNCTION pgcolumnar.alter_columnar_table_set(
+CREATE FUNCTION pgcolumnar.set_options(
 	table_name regclass,
 	chunk_group_row_limit int DEFAULT NULL,
 	stripe_row_limit int DEFAULT NULL,
@@ -266,7 +266,7 @@ CREATE FUNCTION pgcolumnar.alter_columnar_table_set(
 	compression_level int DEFAULT NULL)
 	RETURNS void
 	LANGUAGE plpgsql
-	AS $alter_columnar_table_set$
+	AS $set_options$
 BEGIN
 	IF compression IS NOT NULL AND
 	   compression NOT IN ('none', 'pglz', 'lz4', 'zstd') THEN
@@ -308,12 +308,12 @@ BEGIN
 		compression_level =
 			COALESCE(EXCLUDED.compression_level, o.compression_level);
 END;
-$alter_columnar_table_set$;
+$set_options$;
 
-COMMENT ON FUNCTION pgcolumnar.alter_columnar_table_set(regclass, int, int, name, int)
+COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int)
 	IS 'set per-table columnar options; NULL leaves a value unchanged';
 
-CREATE FUNCTION pgcolumnar.alter_columnar_table_reset(
+CREATE FUNCTION pgcolumnar.reset_options(
 	table_name regclass,
 	chunk_group_row_limit bool DEFAULT false,
 	stripe_row_limit bool DEFAULT false,
@@ -321,26 +321,26 @@ CREATE FUNCTION pgcolumnar.alter_columnar_table_reset(
 	compression_level bool DEFAULT false)
 	RETURNS void
 	LANGUAGE plpgsql
-	AS $alter_columnar_table_reset$
+	AS $reset_options$
 BEGIN
 	UPDATE pgcolumnar.options o SET
 		chunk_group_row_limit = CASE
-			WHEN alter_columnar_table_reset.chunk_group_row_limit
+			WHEN reset_options.chunk_group_row_limit
 			THEN NULL ELSE o.chunk_group_row_limit END,
 		stripe_row_limit = CASE
-			WHEN alter_columnar_table_reset.stripe_row_limit
+			WHEN reset_options.stripe_row_limit
 			THEN NULL ELSE o.stripe_row_limit END,
 		compression = CASE
-			WHEN alter_columnar_table_reset.compression
+			WHEN reset_options.compression
 			THEN NULL ELSE o.compression END,
 		compression_level = CASE
-			WHEN alter_columnar_table_reset.compression_level
+			WHEN reset_options.compression_level
 			THEN NULL ELSE o.compression_level END
 	WHERE o.regclass = table_name;
 END;
-$alter_columnar_table_reset$;
+$reset_options$;
 
-COMMENT ON FUNCTION pgcolumnar.alter_columnar_table_reset(regclass, bool, bool, bool, bool)
+COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool)
 	IS 'reset per-table columnar options to the instance defaults';
 
 /* ---------------------------------------------------------------------------

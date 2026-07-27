@@ -2,8 +2,8 @@
 
 Status: DONE. Phase H is the capstone of the re-origination: remove the legacy
 2.2 writer, reader, catalog, and the per-table format selector, leaving one
-native format line (PGCN v1). Owner decision (2026-07-21): a clean cut, no Hydra
-or Citus style page format and no on-disk compatibility shim. The `v1.0-dev` git
+native format line (PGCN v1). Owner decision (2026-07-21): a clean cut, no
+pre-existing page format and no on-disk compatibility shim. The `v1.0-dev` git
 tag preserves the old line permanently.
 
 Completed on `phase-h/retire-2.2`: H1 (native-only tests) merged in PR #68 with
@@ -11,7 +11,7 @@ the plan and the PostgreSQL 13/14 matrix drop; H2 (remove the 2.2 code, catalog,
 selector, and the 2.2-only vectorized scan path; ~2955 lines) and H3 (retire the
 two now-dead vectorized-scan GUCs and the full docs pass) follow on the branch.
 Two bugs surfaced during H2 and were fixed: a stale COMMENT ON FUNCTION arity on
-alter_columnar_table_reset that aborted CREATE EXTENSION, and an unconditional
+reset_options that aborted CREATE EXTENSION, and an unconditional
 pre-commit flush that reused a stale row-group id (duplicate row_group_pkey), now
 guarded by an early return in columnar_flush_row_group. columnar_relation_estimate_size
 gained a native row-group path. Gate: the full PostgreSQL 15-19 matrix passed
@@ -77,7 +77,7 @@ REMOVE (2.2-only):
   `columnar_default_format_version` extern, and the removed-function externs.
 - SQL (`pgcolumnar--1.0.sql`): the `stripe`, `chunk`, `chunk_group` tables and
   indexes; the `format_version` option column and its handling in
-  `alter_columnar_table_set` / `alter_columnar_table_reset`; the 2.2 `UNION ALL`
+  `set_options` / `reset_options`; the 2.2 `UNION ALL`
   arm of `pgcolumnar.stats`.
 
 CONVERT (collapse to the native arm, or fix a native gap):

@@ -14,9 +14,8 @@
  * Because compaction assigns fresh row numbers, indexes are rebuilt afterward
  * so their synthetic item pointers (spec 6) address the new rows.
  *
- * Independent MIT implementation built from design/FORMAT_AND_INTERFACE_SPEC.md
- * (format 2.0), design/REWRITE_PLAN.md section 6, and the public PostgreSQL 17
- * API only.
+ * Independent MIT implementation built from
+ * design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md and the public PostgreSQL API only.
  *
  *-------------------------------------------------------------------------
  */

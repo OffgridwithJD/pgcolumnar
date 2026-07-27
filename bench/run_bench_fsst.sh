@@ -109,7 +109,7 @@ heap_ms=$(time_insert h)
 echo "-- timing columnar (compression=none) ingestion"
 run_pg "$PSQL -q \
 	-c \"CREATE TABLE c (LIKE stage) USING pgcolumnar;\" \
-	-c \"SELECT pgcolumnar.alter_columnar_table_set('c', compression => 'none');\""
+	-c \"SELECT pgcolumnar.set_options('c', compression => 'none');\""
 col_ms=$(time_insert c)
 
 # Order-independent fingerprint (no giant string_agg): count, total length, and

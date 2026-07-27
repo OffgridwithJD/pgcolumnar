@@ -190,7 +190,7 @@ parity and native index and projection parity land alongside. Only then, Phase H
 
 ### Decision (owner, 2026-07-21): clean cut, no compatibility
 
-The project keeps no Hydra or Citus style page format and no storage-format
+The project keeps no pre-existing page format and no storage-format
 compatibility. Phase H is a required clean cut: the 2.2 writer and reader are
 removed together, not kept as a transitional read-only reader. Migration off 2.2
 is by COPY or Arrow/Parquet export/import while the 2.2 reader still exists at the

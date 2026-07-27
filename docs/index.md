@@ -58,7 +58,7 @@ WAL, replication, indexes, `COPY`, and `pg_dump`. The extension adds:
 The documents above are for users and administrators. The design and format
 specifications are separate:
 
-- [../design/FORMAT_AND_INTERFACE_SPEC.md](../design/FORMAT_AND_INTERFACE_SPEC.md):
+- [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md):
   on-disk format and SQL interface specification.
 - [ARCHITECTURE.md](ARCHITECTURE.md): source layout and how the pieces connect.
 - [../design/ROADMAP.md](../design/ROADMAP.md): completed work and remaining items.

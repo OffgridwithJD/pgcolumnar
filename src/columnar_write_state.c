@@ -354,7 +354,7 @@ ColumnarGetWriteState(Relation rel)
 	/*
 	 * Per-table options (spec 7.4) override the instance-wide GUC defaults for
 	 * this relation's writes. They are read at write-state creation, so a value
-	 * set with columnar.alter_columnar_table_set takes effect for subsequent
+	 * set with pgcolumnar.set_options takes effect for subsequent
 	 * inserts (spec 9).
 	 */
 	{

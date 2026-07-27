@@ -17,9 +17,9 @@
  * the planner Gather over several workers that each claim distinct stripes from
  * a shared atomic counter in the scan's DSM segment.
  *
- * Independent MIT implementation built from design/FORMAT_AND_INTERFACE_SPEC.md
- * (format 2.0), design/REWRITE_PLAN.md section 6, and the public PostgreSQL 17
- * API (the custom-scan provider contract in nodes/extensible.h and
+ * Independent MIT implementation built from
+ * design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md and the public PostgreSQL API (the
+ * custom-scan provider contract in nodes/extensible.h and
  * executor/nodeCustom.c) only.
  *
  *-------------------------------------------------------------------------

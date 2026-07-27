@@ -50,7 +50,7 @@ MATRIX_DEFS="
 	c_ztext   text"
 
 make_pair "$MATRIX_DEFS"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 5000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 5000);" >/dev/null
 
 load_pair "SELECT
 	g AS id,
@@ -153,7 +153,7 @@ diff_query "single count" "SELECT count(*) FROM %T"
 # ceil(N/100) chunk groups, and results must match at N-1, N, N+1.
 for N in 99 100 101 200 201 250; do
 	make_pair "id int, v text"
-	q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 100, stripe_row_limit => 100000);" >/dev/null
+	q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 100, stripe_row_limit => 100000);" >/dev/null
 	load_pair "SELECT g, 'r'||g FROM generate_series(1,$N) g"
 	want=$(( (N + 99) / 100 ))
 	check "cg boundary N=$N groups"  "$(chunk_group_count)" "$want"
@@ -165,7 +165,7 @@ done
 # 1000-row stripe limit with 100-row chunk groups and check N-1, N, N+1.
 for N in 1000 1001 2000 2001; do
 	make_pair "id int, v text"
-	q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 100, stripe_row_limit => 1000);" >/dev/null
+	q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 100, stripe_row_limit => 1000);" >/dev/null
 	load_pair "SELECT g, 'r'||g FROM generate_series(1,$N) g"
 	want=$(( (N + 999) / 1000 ))
 	check "stripe boundary N=$N stripes" "$(stripe_count)" "$want"
@@ -175,7 +175,7 @@ done
 
 # All-null column across many rows.
 make_pair "id int, allnull int, v text"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 100);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 100);" >/dev/null
 load_pair "SELECT g, NULL::int, 'r'||g FROM generate_series(1,350) g"
 diff_query "allnull column scan"  "SELECT * FROM %T"
 diff_query "allnull column count" "SELECT count(allnull) FROM %T"
@@ -185,7 +185,7 @@ diff_query "allnull column minmax" "SELECT min(allnull), max(allnull) FROM %T"
 # All-null chunk group: with 100-row groups, rows 101..200 have a NULL column,
 # the rest have values, so exactly one whole chunk group is all-null.
 make_pair "id int, sometimes int"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 100);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 100);" >/dev/null
 load_pair "SELECT g, CASE WHEN g BETWEEN 101 AND 200 THEN NULL ELSE g END FROM generate_series(1,400) g"
 diff_query "allnull chunk scan"   "SELECT * FROM %T"
 diff_query "allnull chunk range"  "SELECT id FROM %T WHERE sometimes BETWEEN 150 AND 250"
@@ -219,7 +219,7 @@ diff_query "wide row proj" "SELECT id, c1, c30, c60 FROM %T WHERE c30 > 5000"
 echo "-- part 3: lightweight encodings"
 
 make_pair "id int, seqv bigint, lowcard int, constv int, rnd bigint"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
 load_pair "SELECT g, g::bigint*3, g%4, 42, ((g*2654435761)%1000000000)::bigint FROM generate_series(1,10000) g"
 
 # correctness through the oracle
@@ -239,7 +239,7 @@ diff_query "enc aggregate"  "SELECT sum(seqv), min(lowcard), max(lowcard), count
 # delta lose), but small consecutive XOR -> Gorilla wins. tsreg: fixed-interval
 # timestamps -> zero delta-of-delta -> DOD beats delta.
 make_pair "id int, alt float8, tsreg timestamp, fr float8"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
 load_pair "SELECT g,
 	(1000 + sum(random() - 0.5) OVER (ORDER BY g))::float8,
 	TIMESTAMP '2020-01-01' + make_interval(mins => g),
@@ -253,7 +253,7 @@ diff_query "i4 ts minmax"  "SELECT min(tsreg), max(tsreg) FROM %T"
 # Dictionary (I5) for low-cardinality columns, including varlena/text which had
 # no lightweight encoding before. cat/tag repeat a few distinct values.
 make_pair "id int, cat text, tag varchar(16), code int, hicard text"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 2000, stripe_row_limit => 20000, compression => 'none');" >/dev/null
 load_pair "SELECT g,
 	(ARRAY['north','south','east','west'])[1 + g%4],
 	('t' || (g%6))::varchar(16),
@@ -267,7 +267,7 @@ diff_query "dict text group"  "SELECT cat, count(*) FROM %T GROUP BY cat"
 
 # a NONE-compression table still round-trips (encoding independent of codec)
 make_pair "id int, v bigint"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', compression => 'none');" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', compression => 'none');" >/dev/null
 load_pair "SELECT g, (g%7)::bigint FROM generate_series(1,5000) g"
 diff_query "enc+nocompress scan" "SELECT * FROM %T"
 diff_query "enc+nocompress agg"  "SELECT count(*), sum(v), min(v), max(v) FROM %T"
@@ -290,7 +290,7 @@ diff_query "enc+nocompress agg"  "SELECT count(*), sum(v), min(v), max(v) FROM %
 echo "-- part 4: aggregates with nulls and deletes"
 
 make_pair "id int, k int, big int, s smallint, nv int"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 5000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 5000);" >/dev/null
 load_pair "SELECT g, g%6, g*2, ((g%100)-50)::smallint,
 	CASE WHEN g%9=0 THEN NULL ELSE g%13 END
 	FROM generate_series(1,20000) g"
@@ -314,7 +314,7 @@ diff_query "agg minmax" "SELECT min(k), max(k), min(big), max(big), min(s), max(
 echo "-- part 5: bloom equality skipping"
 
 make_pair "id int, k bigint, u uuid"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
 load_pair "SELECT g, ((g*2654435761)%100000)::bigint, md5((g%99999)::text)::uuid
 	FROM generate_series(1,20000) g"
 
@@ -335,7 +335,7 @@ check "bloom absent correct"   "$(q "SELECT count(*) FROM t_col WHERE k = ${abse
 # equality skipping works and results stay correct, including under a mismatched
 # explicit COLLATE (which must not be pushed, so it never wrongly skips).
 make_pair "id int, tk text, tc text COLLATE \"C\""
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
 load_pair "SELECT g, 'k' || ((g*2654435761)%50000), 'c' || ((g*40503)%50000)
 	FROM generate_series(1,16000) g"
 diff_query "textbloom present"  "SELECT id FROM %T WHERE tk = 'k' || ((7*2654435761)%50000)"
@@ -354,7 +354,7 @@ diff_query "textbloom collate-mismatch" "SELECT count(*) FROM %T WHERE tk = 'k10
 echo "-- part 6: selective filter with wide projection"
 
 make_pair "id int, sel int, a text, b bigint, c numeric"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
 load_pair "SELECT g, g, 'a'||g, g::bigint*2, g::numeric*1.5 FROM generate_series(1,20000) g"
 
 diff_query "wide point"    "SELECT id, a, b, c FROM %T WHERE sel = 12345"
@@ -374,7 +374,7 @@ diff_query "wide most"     "SELECT id, a FROM %T WHERE sel > 100"
 echo "-- part 7: covering count(*)"
 
 make_pair "id int, v int"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 3000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 3000);" >/dev/null
 load_pair "SELECT g, g%10 FROM generate_series(1,20000) g"
 psql_run "DELETE FROM t_heap WHERE id % 13 = 0;"
 psql_run "DELETE FROM t_col  WHERE id % 13 = 0;"

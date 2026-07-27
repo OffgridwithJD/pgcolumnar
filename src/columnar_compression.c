@@ -10,8 +10,9 @@
  * linked only when the system libraries were found at build time; when they
  * are compiled out, a request for them falls back to a codec that is present.
  *
- * Independent MIT implementation built from design/FORMAT_AND_INTERFACE_SPEC.md
- * (format 2.0) and the public PostgreSQL and system library APIs only.
+ * Independent MIT implementation built from
+ * design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md and the public PostgreSQL and
+ * system library APIs only.
  *
  *-------------------------------------------------------------------------
  */
