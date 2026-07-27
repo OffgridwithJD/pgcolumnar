@@ -263,6 +263,22 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
 #endif
 
 /* -------------------------------------------------------------------------
+ * TupleTableSlotOps.copy_minimal_tuple() gained a trailing `Size extra`
+ * argument in PG18. An access method supplying its own slot operations has to
+ * match the struct exactly, so the wrapper is declared and forwarded through
+ * these two macros. Keep the boundary here in step with the callback in
+ * columnar_tableam.c; when the analyze block callback's guard drifted from the
+ * macro that supplies its parameters, PG17 stopped compiling.
+ * ------------------------------------------------------------------------- */
+#if PG_VERSION_NUM >= 180000
+#define COLUMNAR_COPY_MINIMAL_TUPLE_ARGS	TupleTableSlot *slot, Size extra
+#define COLUMNAR_COPY_MINIMAL_TUPLE_FWD(s)	((s), extra)
+#else
+#define COLUMNAR_COPY_MINIMAL_TUPLE_ARGS	TupleTableSlot *slot
+#define COLUMNAR_COPY_MINIMAL_TUPLE_FWD(s)	((s))
+#endif
+
+/* -------------------------------------------------------------------------
  * relation_vacuum()'s VacuumParams pointer became const in PG19.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM >= 190000

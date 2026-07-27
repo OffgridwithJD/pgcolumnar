@@ -165,12 +165,220 @@ PG_FUNCTION_INFO_V1(columnar_handler);
  */
 static TupleTableSlotOps ColumnarSlotOps;
 
+/*
+ * A slot that can defer its decode (issue #157).
+ *
+ * An index fetch used to reconstruct every column of the row before returning,
+ * because a virtual slot holds values and nothing else. On a wide table that is
+ * ruinous: the decoded row group exceeds the fetch cache's size cap, the entry is
+ * dropped after every fetch, and each row re-reads and re-decodes the whole
+ * group. Measured at 41 columns, 2,000 index fetches reading one column took
+ * about seventeen minutes.
+ *
+ * The executor never tells the access method which columns it will read, so there
+ * is no projection to pass down. But it does ask, through slot_getsomeattrs, and
+ * it asks for the smallest prefix it needs. So the slot carries the row's address
+ * instead of its values, and decodes when asked.
+ *
+ * Only the index fetch defers. Everything else stores values eagerly with
+ * ExecStoreVirtualTuple, which sets tts_nvalid to the full count, so getsomeattrs
+ * is never reached for those and their behaviour is unchanged.
+ */
+typedef struct ColumnarSlot
+{
+	/*
+	 * VirtualTupleTableSlot, not TupleTableSlot, and it must come first. Every
+	 * callback inherited from TTSOpsVirtual casts the slot to its own type and
+	 * uses the `data` pointer that follows the base: tts_virtual_materialize
+	 * writes it and tts_virtual_clear pfrees it. Deriving from TupleTableSlot
+	 * puts our own first field exactly where `data` belongs, so materialising a
+	 * slot would scribble on it and clearing one would free it.
+	 */
+	VirtualTupleTableSlot vslot;
+
+	/* set when the slot holds a row's address rather than its values */
+	bool		deferred;
+	Relation	rel;
+	Snapshot	snapshot;
+	uint64		rowNumber;
+} ColumnarSlot;
+
+/*
+ * The fields above must sit past everything the inherited callbacks touch. If
+ * VirtualTupleTableSlot ever grows, this fails to compile rather than silently
+ * aliasing.
+ */
+StaticAssertDecl(offsetof(ColumnarSlot, deferred) >= sizeof(VirtualTupleTableSlot),
+				 "ColumnarSlot fields must not overlap VirtualTupleTableSlot");
+
+/*
+ * columnar_slot_decode_upto
+ *		Materialise attributes 0 .. natts-1 of a deferred slot.
+ *
+ *		Decodes a prefix because that is what slot_getsomeattrs asks for, and the
+ *		executor asks for the largest attribute number it needs. A query reading
+ *		column 2 of 41 decodes two columns, not forty-one.
+ */
+static void
+columnar_slot_decode_upto(TupleTableSlot *slot, int natts)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	Bitmapset  *needed = NULL;
+	int			i;
+
+	Assert(cslot->deferred);
+
+	for (i = 0; i < natts; i++)
+		needed = bms_add_member(needed, i);
+
+	/*
+	 * Visibility was settled when the slot was filled, so this cannot fail for a
+	 * row that was live then. It can still miss a row held only in an unflushed
+	 * write buffer, which is where the buffered reader comes in; that path
+	 * reconstructs the whole row, which is correct if not lazy, and it is bounded
+	 * by what one transaction has buffered.
+	 */
+	if (!ColumnarReadRowByNumberCols(cslot->rel, cslot->snapshot,
+									 cslot->rowNumber, slot->tts_values,
+									 slot->tts_isnull, needed))
+		(void) ColumnarBufferedRowByNumber(cslot->rel, cslot->rowNumber,
+										   slot->tts_values, slot->tts_isnull);
+
+	bms_free(needed);
+
+	/*
+	 * Attributes past the prefix hold nothing meaningful yet. tts_nvalid is what
+	 * tells the executor how far it may read, so leaving them is correct, but a
+	 * later call asking for more has to decode again from the start rather than
+	 * assume the earlier ones are still there -- which they are, so it does not.
+	 */
+	slot->tts_nvalid = natts;
+}
+
+static void
+columnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+
+	if (!cslot->deferred)
+	{
+		/*
+		 * A slot filled eagerly has tts_nvalid at the full count already, so
+		 * nothing should reach here. Erroring matches the virtual slot this
+		 * otherwise behaves as, rather than silently returning junk.
+		 */
+		elog(ERROR, "getsomeattrs on a columnar slot that was filled eagerly");
+	}
+
+	columnar_slot_decode_upto(slot, natts);
+}
+
+/*
+ * Anything that wants the row whole -- materialising, copying, forming a tuple
+ * -- has to finish the decode first.
+ */
+static void
+columnar_slot_force_full(TupleTableSlot *slot)
+{
+	ColumnarSlot *cslot;
+
+	/*
+	 * Callers hand us slots that are not ours. copyslot in particular takes a
+	 * source of any type -- the executor copies an ordinary virtual slot into a
+	 * columnar one on every INSERT -- and casting that to ColumnarSlot reads
+	 * past the end of it, so the deferred flag is whatever happened to be in
+	 * the next word and the relation pointer behind it is garbage. That is a
+	 * segfault on the plainest INSERT there is, which is how it was found.
+	 */
+	if (slot->tts_ops != &ColumnarSlotOps)
+		return;
+
+	cslot = (ColumnarSlot *) slot;
+	if (cslot->deferred && slot->tts_nvalid < slot->tts_tupleDescriptor->natts)
+		columnar_slot_decode_upto(slot, slot->tts_tupleDescriptor->natts);
+}
+
+/*
+ * The added fields have to start out cleared: a slot that is never used for a
+ * deferred fetch still has them read, and MakeTupleTableSlot does not know they
+ * are there.
+ */
+static void
+columnar_slot_init(TupleTableSlot *slot)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+
+	TTSOpsVirtual.init(slot);
+	cslot->deferred = false;
+	cslot->rel = NULL;
+	cslot->snapshot = NULL;
+	cslot->rowNumber = 0;
+}
+
+static void
+columnar_slot_clear(TupleTableSlot *slot)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+
+	Assert(slot->tts_ops == &ColumnarSlotOps);
+	cslot->deferred = false;
+	cslot->rel = NULL;
+	cslot->snapshot = NULL;
+	cslot->rowNumber = 0;
+	TTSOpsVirtual.clear(slot);
+}
+
+static void
+columnar_slot_materialize(TupleTableSlot *slot)
+{
+	columnar_slot_force_full(slot);
+	TTSOpsVirtual.materialize(slot);
+}
+
+static void
+columnar_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
+{
+	columnar_slot_force_full(srcslot);
+	TTSOpsVirtual.copyslot(dstslot, srcslot);
+}
+
+static MinimalTuple
+columnar_slot_copy_minimal_tuple(COLUMNAR_COPY_MINIMAL_TUPLE_ARGS)
+{
+	columnar_slot_force_full(slot);
+	return TTSOpsVirtual.copy_minimal_tuple
+		COLUMNAR_COPY_MINIMAL_TUPLE_FWD(slot);
+}
+
+/*
+ * ColumnarSlotStoreDeferred
+ *		Point the slot at a row without decoding it. The caller has already
+ *		established that the row is visible.
+ */
+static void
+ColumnarSlotStoreDeferred(TupleTableSlot *slot, Relation rel,
+						  Snapshot snapshot, uint64 rowNumber)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+
+	ExecClearTuple(slot);
+	cslot->deferred = true;
+	cslot->rel = rel;
+	cslot->snapshot = snapshot;
+	cslot->rowNumber = rowNumber;
+
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+	slot->tts_nvalid = 0;
+}
+
 static HeapTuple
 columnar_slot_copy_heap_tuple(TupleTableSlot *slot)
 {
 	HeapTuple	tuple;
 
 	Assert(!TTS_EMPTY(slot));
+
+	columnar_slot_force_full(slot);
 
 	tuple = heap_form_tuple(slot->tts_tupleDescriptor,
 							slot->tts_values, slot->tts_isnull);
@@ -764,13 +972,23 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
 
 	ExecClearTuple(slot);
 
-	if (!ColumnarReadRowByNumber(rel, snapshot, rowNumber,
-								 slot->tts_values, slot->tts_isnull) &&
-		!ColumnarBufferedRowByNumber(rel, rowNumber,
-									 slot->tts_values, slot->tts_isnull))
+	/*
+	 * Settle visibility without decoding anything, then hand the slot the row's
+	 * address rather than its values (issue #157). The columns are decoded when
+	 * the executor asks for them, and it asks for the smallest prefix it needs.
+	 *
+	 * A row that is not in the flushed stripes may still be in this
+	 * transaction's write buffer, and that reader reconstructs whole rows, so it
+	 * is stored eagerly.
+	 */
+	if (ColumnarRowIsLive(rel, snapshot, rowNumber))
+		ColumnarSlotStoreDeferred(slot, rel, snapshot, rowNumber);
+	else if (ColumnarBufferedRowByNumber(rel, rowNumber,
+										 slot->tts_values, slot->tts_isnull))
+		ExecStoreVirtualTuple(slot);
+	else
 		return false;
 
-	ExecStoreVirtualTuple(slot);
 	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 
@@ -1399,7 +1617,14 @@ _PG_init(void)
 	 * item pointer. See the comment on columnar_slot_copy_heap_tuple.
 	 */
 	ColumnarSlotOps = TTSOpsVirtual;
+	ColumnarSlotOps.base_slot_size = sizeof(ColumnarSlot);
 	ColumnarSlotOps.copy_heap_tuple = columnar_slot_copy_heap_tuple;
+	ColumnarSlotOps.init = columnar_slot_init;
+	ColumnarSlotOps.getsomeattrs = columnar_slot_getsomeattrs;
+	ColumnarSlotOps.clear = columnar_slot_clear;
+	ColumnarSlotOps.materialize = columnar_slot_materialize;
+	ColumnarSlotOps.copyslot = columnar_slot_copyslot;
+	ColumnarSlotOps.copy_minimal_tuple = columnar_slot_copy_minimal_tuple;
 
 	DefineCustomIntVariable("pgcolumnar.stripe_row_limit",
 							"Maximum number of rows per stripe.",
