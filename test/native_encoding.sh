@@ -36,7 +36,7 @@ psql_run "INSERT INTO h $GEN;"
 for codec in none pglz lz4 zstd; do
 	tbl="n_$codec"
 	psql_run "CREATE TABLE $tbl (id int, k bigint, label text, rnd text, v int) USING pgcolumnar;"
-	psql_run "SELECT pgcolumnar.alter_columnar_table_set('$tbl', stripe_row_limit => 1500, compression => '$codec');"
+	psql_run "SELECT pgcolumnar.set_options('$tbl', stripe_row_limit => 1500, compression => '$codec');"
 	psql_run "INSERT INTO $tbl $GEN;"
 
 	check "[$codec] row count" "$(q "SELECT count(*) FROM $tbl;")" "6000"
@@ -99,7 +99,7 @@ psql_run "INSERT INTO hp VALUES (6001, '-0'::float8, 'NaN'::float8),
                                 (6003, 12.34, 0.0);"
 
 psql_run "CREATE TABLE np (id int, price float8, real8 float8) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('np', stripe_row_limit => 2048);"
+psql_run "SELECT pgcolumnar.set_options('np', stripe_row_limit => 2048);"
 psql_run "INSERT INTO np SELECT id, price, real8 FROM hp;"
 
 check "alp column round-trips exactly" \
@@ -134,7 +134,7 @@ psql_run "CREATE TABLE hf (id int, url text, blob bytea);"
 psql_run "INSERT INTO hf $FGEN;"
 
 psql_run "CREATE TABLE nf (id int, url text, blob bytea) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('nf', stripe_row_limit => 2048, compression => 'none');"
+psql_run "SELECT pgcolumnar.set_options('nf', stripe_row_limit => 2048, compression => 'none');"
 psql_run "INSERT INTO nf $FGEN;"
 
 check "fsst column round-trips exactly" \

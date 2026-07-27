@@ -42,7 +42,7 @@ expect_error() {
 # so that, before sorting, every group's [min,max] for k spans nearly the whole
 # domain and range skipping cannot prune. v is unique for aggregate checks.
 make_pair "id int, k int, v bigint, t text"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000);" >/dev/null
 load_pair "SELECT g, ((g*7919)%1000), g::bigint*2, 'r'||g FROM generate_series(1,50000) g"
 
 # ---------------------------------------------------------------------------

@@ -32,8 +32,9 @@
  * key type has no hash support, the index is handled with a single coarse
  * per-index lock instead: correctness-preserving over-serialization.
  *
- * This module derives everything from design/FORMAT_AND_INTERFACE_SPEC.md, the
- * issue #5 design analysis, and the public PostgreSQL API. See PROVENANCE.md.
+ * This module derives everything from
+ * design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md, the issue #5 design analysis, and
+ * the public PostgreSQL API. See PROVENANCE.md.
  *
  *-------------------------------------------------------------------------
  */

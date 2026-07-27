@@ -112,6 +112,13 @@ unreleased. For the forward-looking plan see
 - Lost delete marks under concurrent same-chunk-group deletes.
 - Relation-reference leak in parallel `CREATE INDEX`.
 
+### Changed
+
+- Renamed the per-table option functions to `pgcolumnar.set_options` and
+  `pgcolumnar.reset_options`. The previous names were carried over from an
+  earlier compatibility goal that no longer applies. No aliases are kept, since
+  the project is pre-release.
+
 ### Compatibility
 
 - Builds from one source tree on PostgreSQL 15 through 19. Every test suite runs

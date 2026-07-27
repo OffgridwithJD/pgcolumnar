@@ -27,7 +27,7 @@ Inspect the layout with [`pgcolumnar.stats`](sql-reference.md#pgcolumnarstatsrel
 
 The default codec is `zstd` at level 3. Set the default for new data with
 `pgcolumnar.compression` and `pgcolumnar.compression_level`, or per table with
-[`pgcolumnar.alter_columnar_table_set`](configuration.md#per-table-storage-options).
+[`pgcolumnar.set_options`](configuration.md#per-table-storage-options).
 
 | Codec | Notes |
 | --- | --- |
@@ -45,7 +45,7 @@ data, rewrite the table with [`pgcolumnar.vacuum`](sql-reference.md#pgcolumnarva
 minimum and maximum in a vector. Smaller vectors skip more precisely on selective
 range filters but hold less data per vector. `pgcolumnar.stripe_row_limit` (default
 150000) sets the write unit. The defaults suit most workloads. Change them for a
-table with `pgcolumnar.alter_columnar_table_set` when a specific access pattern
+table with `pgcolumnar.set_options` when a specific access pattern
 calls for it, and measure the result.
 
 ## Compaction and vacuum

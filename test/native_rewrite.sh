@@ -22,7 +22,7 @@ GEN="SELECT g, (g % 1000) AS v, 'p' || (g % 100) AS payload
 
 psql_run "CREATE TABLE h (id int, v int, payload text);"
 psql_run "CREATE TABLE n (id int, v int, payload text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1024, chunk_group_row_limit => 1024);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1024, chunk_group_row_limit => 1024);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
 psql_run "CREATE UNIQUE INDEX n_id_uq ON n (id);"

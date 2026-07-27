@@ -21,7 +21,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 # Small stripes and wide-ish rows so each stripe spans many blocks.
 make_pair "id int, k int, v bigint, t text"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', stripe_row_limit => 2000, chunk_group_row_limit => 1000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', stripe_row_limit => 2000, chunk_group_row_limit => 1000);" >/dev/null
 load_pair "SELECT g, g%100, g::bigint*3, repeat('x', (g%40)+1) FROM generate_series(1,50000) g"
 check "multiple stripes present" "$([ "$(stripe_count t_col)" -ge 10 ] && echo yes || echo no)" "yes"
 

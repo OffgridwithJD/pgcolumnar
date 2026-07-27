@@ -29,7 +29,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 GEN="SELECT g AS id, (g % 100) AS v, md5(g::text) AS payload FROM generate_series(1, 8000) g"
 psql_run "CREATE TABLE h (id int, v int, payload text);"
 psql_run "CREATE TABLE n (id int, v int, payload text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
 

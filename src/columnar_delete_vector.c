@@ -14,8 +14,8 @@
  * and at transaction pre-commit, and discarded on rollback and on the rollback
  * of the subtransaction that made the marks.
  *
- * Independent MIT implementation built from design/FORMAT_AND_INTERFACE_SPEC.md
- * (format 2.0) and the public PostgreSQL 17 API only.
+ * Independent MIT implementation built from
+ * design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md and the public PostgreSQL API only.
  *
  *-------------------------------------------------------------------------
  */

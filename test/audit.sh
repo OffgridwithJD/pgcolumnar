@@ -14,7 +14,7 @@
 #      comparison uses a different collation (an explicit COLLATE) must not
 #      drive skipping, or matching rows are wrongly dropped. Results must be
 #      identical whether or not qual pushdown is enabled.
-#   3. Per-table option bounds. alter_columnar_table_set must reject an
+#   3. Per-table option bounds. set_options must reject an
 #      out-of-range chunk_group_row_limit / stripe_row_limit / compression_level
 #      rather than store it: a zero chunk_group_row_limit records a stripe with
 #      chunk_row_count = 0 and makes delete/update/fetch divide by zero.
@@ -185,14 +185,14 @@ q "DROP TABLE col;" >/dev/null
 # ---------------------------------------------------------------------------
 q "CREATE TABLE opt (a int) USING pgcolumnar;" >/dev/null
 expect_error "reject chunk_group_row_limit 0" \
-	"SELECT pgcolumnar.alter_columnar_table_set('opt'::regclass, chunk_group_row_limit => 0);"
+	"SELECT pgcolumnar.set_options('opt'::regclass, chunk_group_row_limit => 0);"
 expect_error "reject stripe_row_limit 5" \
-	"SELECT pgcolumnar.alter_columnar_table_set('opt'::regclass, stripe_row_limit => 5);"
+	"SELECT pgcolumnar.set_options('opt'::regclass, stripe_row_limit => 5);"
 expect_error "reject compression_level 99" \
-	"SELECT pgcolumnar.alter_columnar_table_set('opt'::regclass, compression_level => 99);"
+	"SELECT pgcolumnar.set_options('opt'::regclass, compression_level => 99);"
 
 # valid values are accepted, and delete/update work (no divide-by-zero)
-q "SELECT pgcolumnar.alter_columnar_table_set('opt'::regclass,
+q "SELECT pgcolumnar.set_options('opt'::regclass,
      chunk_group_row_limit => 1000, stripe_row_limit => 2000, compression_level => 9);" >/dev/null
 q "INSERT INTO opt SELECT g FROM generate_series(1,10) g;" >/dev/null
 q "DELETE FROM opt WHERE a=5;" >/dev/null

@@ -16,7 +16,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 psql_run "CREATE TABLE h (id int PRIMARY KEY, k bigint, v text);"
 psql_run "CREATE TABLE n (id int PRIMARY KEY, k bigint, v text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 2048);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 2048);"
 GEN="SELECT g, (g * 10)::bigint, 'row-' || g FROM generate_series(1, 8000) g"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"

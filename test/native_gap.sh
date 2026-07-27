@@ -25,7 +25,7 @@ psql_run "CREATE FUNCTION pgcolumnar.debug_advance_reserved_offset(regclass, int
 
 psql_run "CREATE TABLE h (id int, v text);"
 psql_run "CREATE TABLE n (id int, v text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
 
 hash_n() { pgc_set_hash 'SELECT id, v FROM n'; }
 hash_h() { pgc_set_hash 'SELECT id, v FROM h'; }

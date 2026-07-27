@@ -133,7 +133,7 @@ default changes and the silent-wrong-results gaps cannot hide.
   (index, installation, administration, configuration, features, limitations,
   sql-reference, user-guide, benchmarks, testing, ARCHITECTURE), plus README.md
   and CHANGELOG.md, describes the native (PGCN v1) format as the format and the
-  `pgcolumnar` namespace. Remove any Hydra or Citus framing and any description of
+  `pgcolumnar` namespace. Remove any compatibility framing and any description of
   the 1.0-dev (2.2) format as current; the project keeps no such compatibility
   (a pointer to the `v1.0-dev` tag is the only mention the 2.2 line needs). Style:
   professional, no em-dashes, no extra adjectives (matches the existing user-docs

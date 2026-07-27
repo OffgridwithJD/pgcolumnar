@@ -126,9 +126,9 @@ check "fp count after delete matches base" \
 	"$(q 'SELECT count(*) FROM fo;')"
 
 echo "-- phase 2: multi-stripe fan-out (exceed the stripe row limit)"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('fo', stripe_row_limit => 2000);"
+psql_run "SELECT pgcolumnar.set_options('fo', stripe_row_limit => 2000);"
 psql_run "CREATE TABLE fo2 (a int, c int) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('fo2', stripe_row_limit => 2000);"
+psql_run "SELECT pgcolumnar.set_options('fo2', stripe_row_limit => 2000);"
 psql_run "SELECT pgcolumnar.add_projection('fo2', 'fp2', ARRAY['a','c'], ARRAY['c']);"
 psql_run "INSERT INTO fo2 SELECT g, (g*13)%1000 FROM generate_series(1,7000) g;"
 check "fp2 multi-stripe fan-out matches base" \

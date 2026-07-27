@@ -30,7 +30,7 @@ psql_run "ALTER DATABASE $PGC_DB SET pgcolumnar.enable_end_truncation = on;"
 
 psql_run "CREATE TABLE h (id int, v text);"
 psql_run "CREATE TABLE n (id int, v text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
 psql_run "INSERT INTO h SELECT g, md5(g::text) FROM generate_series(1, 8000) g;"
 psql_run "INSERT INTO n SELECT g, md5(g::text) FROM generate_series(1, 8000) g;"
 # partial deletes so every group is a compact_rewrite candidate

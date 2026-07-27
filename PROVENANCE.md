@@ -3,59 +3,46 @@
 pgColumnar is built with a clean-room method so that it is free of any copyright
 tie to other columnar projects and can be released under the MIT License.
 
-## Re-origination (the 2.0 line, on the re-origination branch)
+## What the implementation is built from
 
-The 1.0-dev line (on `main`, preserved by the `v1.0-dev` tag) was a clean-room
-reimplementation whose goal was compatibility with the Citus and Hydra columnar
-on-disk format and SQL interface. That work stands and is not disowned.
+The engine reads and writes the native format (PGCN v1), specified in
+[design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
+That specification is written from published column-store research and the open
+Apache Arrow, Parquet, and ORC specifications. The implementation is written from
+that specification and the public PostgreSQL API only.
 
-Going forward, on the `re-origination` branch, that compatibility goal is
-dropped: neither the on-disk format nor the SQL interface needs to match Citus or
-Hydra. The project is therefore re-originating its format, catalog, and SQL
-surface from public research (peer-reviewed papers) and the open Arrow, Parquet,
-and ORC specifications, rather than from the upstream design. The plan is in
-[design/DESIGN_PIVOT_ORIGINAL_ENGINE.md](design/DESIGN_PIVOT_ORIGINAL_ENGINE.md).
-
-What this changes for provenance:
-
-- The specification the implementation builds from is being replaced. The new
-  format and catalog specification (in progress) is written from public sources,
-  not extracted from upstream source.
-  [design/FORMAT_AND_INTERFACE_SPEC.md](design/FORMAT_AND_INTERFACE_SPEC.md)
-  described the 1.0-dev compatibility format and is retained as the record of
-  that line, not as the source for the re-originated engine.
-- The clean-room rule against reading upstream source is unchanged and still
-  binds every contributor.
-- Copyright is not patents; the note in the rewrite plan about checking for
-  patents on techniques used still applies.
-
-The roles, rules, and log below continue to govern all work.
+An earlier practice line, preserved by the `v1.0-dev` tag, targeted compatibility
+with a pre-existing columnar on-disk format and SQL surface. That goal was
+dropped. The format, catalog, and SQL surface were re-originated from public
+sources, and the earlier format is neither implemented nor readable by this code.
+The planning documents specific to that line were retired from `main` and remain
+in history under the `v1.0-dev` tag. Log entries below that cite them are kept
+unaltered as the dated record of what each phase was built from.
 
 ## Roles
 
-- Specification role. A context that read prior columnar source extracted only
-  functional and interoperability facts into
-  design/FORMAT_AND_INTERFACE_SPEC.md. That document contains no source and no
-  implementation expression. It records the on-disk format, the metadata
-  catalog, identifier encodings, compression codes, and the SQL surface.
+- Specification role. A context that had read prior columnar source extracted
+  only functional and interoperability facts, never source and never
+  implementation expression. That role's output belonged to the earlier practice
+  line and is not a build source for this engine.
 - Implementation role. A separate context writes all code, build files, and
-  tests using only the specification, the delivery plan, and the public
-  PostgreSQL documentation and headers.
+  tests using only the project's own specification, the delivery plan, and the
+  public PostgreSQL documentation and headers.
 
 ## Rules for implementers
 
 - Do not read, copy, or reference the source of any other columnar project.
-- Do not open the prior AGPL source tree. It is kept in a separate location and
-  is never checked out beside this repository.
-- Build only from the project's own specification and the public PostgreSQL API.
-  On the 1.0-dev line that specification was
-  design/FORMAT_AND_INTERFACE_SPEC.md. On the re-origination line it is the new
-  format and catalog specification written from public research and the open
-  Arrow/Parquet/ORC specifications (in progress; see
-  design/DESIGN_PIVOT_ORIGINAL_ENGINE.md).
-- Correctness may be checked by running the prior extension and comparing
+- Do not open a copyleft-licensed columnar source tree. Any such tree is kept in
+  a separate location and is never checked out beside this repository.
+- Build only from
+  [design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md)
+  and the public PostgreSQL API.
+- Correctness may be checked by running another extension and comparing
   observable behavior. Running a program is not copying it. Do not copy its test
-  files or expected output.
+  files or its expected output.
+- Copyright is not patents. Before release, confirm that no third party holds a
+  patent on a technique used here. The core methods, columnar row groups, per
+  chunk skip lists, and general block compression, are long-standing prior art.
 
 ## Log
 
@@ -204,7 +191,7 @@ The roles, rules, and log below continue to govern all work.
   read at write-state creation so per-table compression, compression level,
   chunk-group row limit, and stripe row limit override the instance GUC defaults
   for subsequent writes (ColumnarReadOptions), with the plpgsql
-  alter_columnar_table_set and alter_columnar_table_reset functions from spec
+  set_options and reset_options functions from spec
   8.2 and cleanup of a table's options row on drop. Added columnar.vacuum
   (columnar_vacuum.c), which materializes a relation's live rows (the reader
   skips row-mask-deleted rows), swaps the relation to a fresh relfilenode
@@ -350,7 +337,7 @@ The roles, rules, and log below continue to govern all work.
   columnar_clause_to_scankey now declines to push a clause whose operator
   collation differs from the column's attcollation, so the executor still
   filters but skipping never changes results (columnar_customscan.c). (3)
-  columnar.alter_columnar_table_set stored an out-of-range chunk_group_row_limit
+  columnar.set_options stored an out-of-range chunk_group_row_limit
   / stripe_row_limit / compression_level without validation; a zero
   chunk_group_row_limit recorded a stripe with chunk_row_count = 0 and made the
   row-number arithmetic divide by zero on delete/update/fetch. The setter now
@@ -538,17 +525,15 @@ pass on PostgreSQL 13 through 19, each from a clean per-major build. Every
 feature is off/on-equivalent where it has a GUC and is validated against a heap
 oracle, so none changes query results.
 
-- 2026-07-21. 1.0-dev tagged (`v1.0-dev`, format 2.2) as the compatibility
-  clean-room line on `main`. Owner then established that neither on-disk-format
-  nor SQL-API compatibility with Citus/Hydra is required. Started the
-  re-origination line on the `re-origination` branch: the format, catalog, and
-  SQL surface are being redesigned from public research and the open
-  Arrow/Parquet/ORC specifications, and the SQL namespace moves from `columnar`
-  to `pgcolumnar`. This Phase A change is documentation only; it retires
-  design/FORMAT_AND_INTERFACE_SPEC.md as the build source (kept as the 1.0-dev
-  record) and points the build source at the new specification to be written in
-  Phase B. No upstream source consulted. See
-  design/DESIGN_PIVOT_ORIGINAL_ENGINE.md and design/TODO_PIVOT.md.
+- 2026-07-21. 1.0-dev tagged (`v1.0-dev`, format 2.2) as the practice line on
+  `main`. Owner then established that neither on-disk-format nor SQL-API
+  compatibility with any pre-existing columnar extension is required. Started the
+  re-origination line: the format, catalog, and SQL surface are redesigned from
+  public research and the open Arrow/Parquet/ORC specifications, and the SQL
+  namespace moves from `columnar` to `pgcolumnar`. This Phase A change is
+  documentation only; it retires the earlier compatibility specification as the
+  build source and points the build source at the new specification written in
+  Phase B. No other columnar source consulted.
 - 2026-07-22. Re-origination cutover: merged `re-origination` into `main` (owner
   approved). The core pivot is complete: Phases A through D and H landed, so the
   native format (PGCN v1) is the sole on-disk format, built clean-room from

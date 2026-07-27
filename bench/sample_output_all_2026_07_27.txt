@@ -244,7 +244,7 @@ scale=3000000 rows  workdir=/tmp/pgcolumnar-fsstbench.WqMqsy
 -- staging 3000000 rows of shared-substring text
 -- timing heap ingestion (baseline)
 -- timing columnar (compression=none) ingestion
- alter_columnar_table_set 
+ set_options 
 --------------------------
  
 (1 row)

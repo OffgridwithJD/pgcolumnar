@@ -23,7 +23,7 @@ as_alice() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U al
 psql_run "CREATE ROLE alice NOSUPERUSER LOGIN;"
 psql_run "GRANT USAGE ON SCHEMA pgcolumnar TO alice;"
 psql_run "CREATE TABLE n (id int, v int) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.alter_columnar_table_set('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
 psql_run "INSERT INTO n SELECT g, g FROM generate_series(1, 3000) g;"
 
 # every maintenance/DDL function must refuse a non-owner with "must be owner".

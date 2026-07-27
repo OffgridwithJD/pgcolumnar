@@ -28,7 +28,7 @@ check "backend alive after invalid descriptor" "$(q "SELECT 1;")" "1"
 # A malformed bloom filter must be ignored, keeping results correct.
 echo "-- malformed bloom filter"
 make_pair "id int, k bigint"
-q "SELECT pgcolumnar.alter_columnar_table_set('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
+q "SELECT pgcolumnar.set_options('t_col', chunk_group_row_limit => 1000, stripe_row_limit => 20000);" >/dev/null
 load_pair "SELECT g, ((g*2654435761)%100000)::bigint FROM generate_series(1,8000) g"
 psql_run "UPDATE pgcolumnar.bloom SET filter = '\\\\x00'::bytea
 		  WHERE storage_id = pgcolumnar.get_storage_id('t_col') AND column_index = 1;"
