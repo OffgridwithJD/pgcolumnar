@@ -23,7 +23,72 @@
 
 set -uo pipefail
 
-SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ---------------------------------------------------------------------------
+# Run from a private copy of this script, and refuse to run twice at once.
+#
+# Both guards exist because both failures happened, and neither announced
+# itself as what it was.
+#
+# bash reads a script incrementally as it executes it, so editing this file
+# while a run is in progress corrupts the run in place. A gate died at
+# "line 139: `done'" with the file on disk perfectly valid, because the bytes
+# had moved under the interpreter between one read and the next. Re-executing
+# from a copy makes an in-flight run immune to whatever happens to the original.
+#
+# And two runs at once quietly ruin each other: they contend for clusters and
+# ports, and the symptom is a suite failing with no named check -- a wall of
+# ERROR: database "regress" already exists and a red result that looks exactly
+# like a real one. Three false reds in one day were traced to this. A run now
+# leaves a lock naming its pid, so the second one says so and stops instead of
+# producing a result nobody can trust.
+# ---------------------------------------------------------------------------
+
+PGC_RUN_LOCK="${PGC_RUN_LOCK:-/tmp/pgcolumnar-run_all_versions.lock}"
+
+if [ -z "${PGC_RUN_REEXEC:-}" ]; then
+	# Take the lock before copying, so two starts cannot both decide they are first.
+	if [ -e "$PGC_RUN_LOCK" ]; then
+		_holder="$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)"
+		if [ -n "$_holder" ] && kill -0 "$_holder" 2>/dev/null; then
+			echo "FATAL: a matrix run is already in progress (pid $_holder)" >&2
+			sed -n '2,$p' "$PGC_RUN_LOCK" >&2 2>/dev/null
+			echo "       wait for it, or kill $_holder, or set PGC_RUN_LOCK to run" >&2
+			echo "       against a separate tree on a different port." >&2
+			exit 1
+		fi
+		echo "note: taking over a stale lock from pid ${_holder:-unknown}" >&2
+		rm -f "$PGC_RUN_LOCK"
+	fi
+
+	{
+		echo "$$"
+		echo "       started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+		echo "       tree:    $(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+		echo "       args:    ${*:-<default matrix>}"
+	} > "$PGC_RUN_LOCK"
+
+	# The lock is removed only by the process that took it, so a stale-lock
+	# takeover cannot have its lock deleted by the run it replaced.
+	trap 'if [ "$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)" = "$$" ]; then rm -f "$PGC_RUN_LOCK"; fi' EXIT
+
+	_self="$(mktemp "/tmp/pgcolumnar-run_all_versions.$$.XXXXXX.sh")"
+	cp "${BASH_SOURCE[0]}" "$_self"
+	chmod +x "$_self"
+	PGC_RUN_REEXEC=1 \
+	PGC_RUN_SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
+	PGC_RUN_LOCK="$PGC_RUN_LOCK" \
+	PGC_RUN_OWNER="$$" \
+		bash "$_self" "$@"
+	_rc=$?
+	rm -f "$_self"
+	exit $_rc
+fi
+
+# Re-executed from the copy: the lock belongs to the parent, which removes it,
+# and the tree to test is the original one rather than wherever the copy landed.
+trap - EXIT
+
+SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SUITES=(harness_selftest smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
 	differential recovery fuzz hardening concurrent_diff parallel sorted_projection \
 	arrow_export parquet_export read_stream corruption \
@@ -45,7 +110,12 @@ else
 fi
 
 # A private base port per run, bumped per suite, to avoid clashes.
-BASE_PORT="${PGC_BASE_PORT:-55400}"
+#
+# Derived from the run's own pid rather than fixed, because a fixed default is
+# not private: two runs on one box then start at the same port and fight over
+# every cluster. The lock above makes that refuse rather than happen, but the
+# suites are also run individually, and they should not collide either.
+BASE_PORT="${PGC_BASE_PORT:-$(( 40000 + (${PGC_RUN_OWNER:-$$} % 20000) ))}"
 
 overall=0
 declare -a SUMMARY

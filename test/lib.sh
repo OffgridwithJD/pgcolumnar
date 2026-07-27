@@ -77,7 +77,12 @@ pgc_cluster_is_ours() {
 pgc_setup() {
 	PGC_PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 	PGC_BINDIR="$("$PGC_PG_CONFIG" --bindir)"
-	PGC_PORT="${PGC_PORT:-54329}"
+	# Derived from this process rather than a fixed 54329: two suites run at
+	# once on one box otherwise start on the same port, and the loser reports a
+	# wall of ERROR: database "regress" already exists with no named check
+	# failing -- a red that reads exactly like a real one. There is a retry
+	# below for when this still collides; the default should not guarantee it.
+	PGC_PORT="${PGC_PORT:-$(( 40000 + ($$ % 20000) ))}"
 	PGC_DB="${PGC_DB:-regress}"
 	PGC_LIBDIR="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)")"
 	PGC_SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -185,18 +190,48 @@ pgc_setup() {
 			exit 1
 		fi
 	}
-	# The cluster is up, connectable, and confirmed ours, so CREATE DATABASE cannot
-	# silently land on another suite's server.
+	# The cluster is up, connectable, confirmed ours, and was initdb'd minutes ago
+	# into a private mktemp directory. So PGC_DB cannot legitimately already
+	# exist, and there is nothing here to retry: create it once, and treat
+	# anything else as the problem it is.
+	#
+	# This used to loop ten times, creating the database and then failing to
+	# notice it had. The check asked psql_admin, which does not pass -At, so a
+	# one-row answer came back as a bordered table and "tr -dc 0-9" reduced
+	# "(1 row)" along with the value to "11" -- never equal to "1". The loop
+	# therefore always ran to its limit, and every suite emitted nine
+	# ERROR: database "regress" already exists into the server log on every run,
+	# passing or failing.
+	#
+	# That noise is why a genuine failure was twice read as port contention, by
+	# two different people on the same day: a red result whose log is a wall of
+	# "already exists" looks exactly like a suite that landed on someone else's
+	# cluster. Removing the noise is most of the value here; failing loudly on
+	# the impossible case is the rest.
 	{
-		local _a
+		local _exists
 
-		for _a in $(seq 1 10); do
-			if [ "$(psql_admin "SELECT 1 FROM pg_database WHERE datname = '$PGC_DB';" 2>/dev/null | tr -dc 0-9)" = "1" ]; then
-				break
-			fi
-			psql_admin "CREATE DATABASE $PGC_DB;" >/dev/null 2>&1 || true
-			sleep 1
-		done
+		_exists="$(psql_admin_scalar "SELECT count(*) FROM pg_database WHERE datname = '$PGC_DB';")"
+		case "$_exists" in
+			0)
+				if ! psql_admin "CREATE DATABASE $PGC_DB;" >/dev/null 2>&1; then
+					echo "FATAL: could not create database $PGC_DB on our own cluster" >&2
+					exit 1
+				fi
+				;;
+			1)
+				echo "FATAL: database $PGC_DB already exists on a cluster this suite" >&2
+				echo "       just created from a fresh initdb in $PGC_PGDATA." >&2
+				echo "       That means the server on port $PGC_PORT is not the one we" >&2
+				echo "       started, so nothing this suite reports would be about the" >&2
+				echo "       build under test." >&2
+				exit 1
+				;;
+			*)
+				echo "FATAL: could not determine whether $PGC_DB exists (got '$_exists')" >&2
+				exit 1
+				;;
+		esac
 	}
 	psql_run "CREATE EXTENSION pgcolumnar;" >/dev/null
 }
@@ -227,6 +262,15 @@ psql_run() {
 psql_admin() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 		-d postgres -v ON_ERROR_STOP=1 -q -c "$1"
+}
+
+# Scalar form of psql_admin. Separate because psql_admin is used for statements
+# and deliberately keeps psql's ordinary output; -At here means a caller reading
+# a single value gets the value and not a bordered table with "(1 row)" under it,
+# which is the mistake that made the cluster setup retry ten times.
+psql_admin_scalar() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d postgres -At -c "$1" 2>/dev/null
 }
 
 # Scalar query: echo a single value (empty on error).
