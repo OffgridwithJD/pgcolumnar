@@ -555,8 +555,45 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	cpath->path.parallel_safe = false;
 	cpath->path.parallel_workers = 0;
 	cpath->path.rows = rel->rows;
-	cpath->path.startup_cost = seqpath ? seqpath->startup_cost : 0;
-	cpath->path.total_cost = seqpath ? seqpath->total_cost : rel->rows;
+
+	/*
+	 * Inherit the sequential scan's cost when there is one, since this path
+	 * reads the same relation and the comparison against every other path
+	 * should turn on what it does differently, not on a different cost model.
+	 *
+	 * When there is none, cost the work: every page read once and the
+	 * restriction evaluated on every row. The fallback used to be rel->rows,
+	 * which is an output row count and not a cost at all.
+	 *
+	 * That fallback was not the rare case it looks like. add_path frees a path
+	 * it finds dominated, so the seqscan is gone from rel->pathlist by the time
+	 * this hook runs exactly when some index path beat it on both cost and
+	 * pathkeys -- which is to say, precisely on the selective lookups where
+	 * using the index matters most. Before ANALYZE the row estimate was a large
+	 * default and the resulting "cost" was accidentally large enough to lose. Once
+	 * ANALYZE supplied real statistics (#159), a selective predicate estimated
+	 * one row, so a full scan of the table was priced at 1.00, beat an index scan
+	 * of the same query costed at 174.29, and the planner stopped using the index.
+	 * That is issue #171: a point lookup went from 23.75 ms to 1251.88 ms the
+	 * moment the table had statistics. Regression-tested in test/analyze_stats.sh.
+	 */
+	if (seqpath != NULL)
+	{
+		cpath->path.startup_cost = seqpath->startup_cost;
+		cpath->path.total_cost = seqpath->total_cost;
+	}
+	else
+	{
+		QualCost	qcost = rel->baserestrictcost;
+		double		ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
+		Cost		run;
+
+		run = seq_page_cost * (double) rel->pages;
+		run += (cpu_tuple_cost + qcost.per_tuple) * ntuples;
+
+		cpath->path.startup_cost = qcost.startup;
+		cpath->path.total_cost = qcost.startup + run;
+	}
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
