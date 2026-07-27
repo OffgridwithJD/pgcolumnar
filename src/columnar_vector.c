@@ -1217,6 +1217,46 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 			}
 		}
 
+		/*
+		 * A column added by ALTER TABLE ADD COLUMN has no chunk, and so no zone
+		 * map, in any row group written before it existed. Its value for those
+		 * rows is the attribute's missing value, which the reader supplies
+		 * through getmissingattr -- but a zone map cannot, because there is
+		 * none. Folding such a group from its zone maps silently dropped every
+		 * one of those rows: count(col) came back 0 where a scan returned the
+		 * full row count, and sum, min and max came back null.
+		 *
+		 * Rather than reconstruct the missing value here, the group joins the
+		 * ones that have to be read. The scan path already produces missing
+		 * values correctly, and a group predating the column is exactly a group
+		 * whose contents the metadata cannot describe.
+		 */
+		if (needZones)
+		{
+			bool		missingColumn = false;
+
+			for (a = 0; a < state->naggs; a++)
+			{
+				int			ai = state->specs[a].attidx;
+
+				if (state->specs[a].kind == COLUMNAR_AGG_COUNT_STAR)
+					continue;
+				if (ai < 0 || ai >= tupdesc->natts)
+					continue;
+				if (byCol[ai] == NULL)
+				{
+					missingColumn = true;
+					break;
+				}
+			}
+
+			if (missingColumn)
+			{
+				dirty[(*ndirty)++] = rg->groupNumber;
+				continue;
+			}
+		}
+
 		for (a = 0; a < state->naggs; a++)
 		{
 			ColumnarAggSpec *spec = &state->specs[a];
