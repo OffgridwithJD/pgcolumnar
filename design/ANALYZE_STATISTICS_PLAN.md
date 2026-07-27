@@ -35,25 +35,43 @@ and zone maps skip physically whatever the planner believed.
 
 ## The trap to design around first
 
-The `scan_analyze_next_block` / `scan_analyze_next_tuple` contract is
-block-oriented and assumes heap addressing. The obvious columnar mapping is to
-treat the block number as a row group ordinal and return rows from within that
-group. That is cluster sampling, not simple random sampling, and for this engine
-it is wrong in a specific and dangerous direction.
+**Corrected after implementation (#159). The prediction below was half wrong, and
+the half that was wrong is the interesting half.**
 
-A table sorted or Z-ordered on a key holds a narrow slice of that key's range in
-each row group. Sampling whole groups therefore underestimates `n_distinct` and
-skews the most-common-value list toward whatever happened to be in the groups
-chosen. **The better the clustering, the worse the estimate**, which means a naive
-implementation produces confidently wrong statistics on exactly the tables the
-engine works hardest to optimise. Confidently wrong is worse than absent, because
-the planner trusts what it is given.
+The `scan_analyze_next_block` contract is block-oriented and assumes heap
+addressing. The obvious columnar mapping is to treat the block number as a row
+group ordinal and return rows from within that group. That is cluster sampling,
+not simple random sampling.
 
-The fix is to spread the sample across many groups rather than take all of it
-from few. That is affordable now in a way it was not a week ago: #152 replaced the
-walk to a row's position with a rank lookup, so reaching row *r* of a group no
-longer costs O(r), and a scattered sample within a group is no more expensive than
-a contiguous one.
+What this plan predicted: on a table sorted or Z-ordered on a key, each row group
+holds a narrow slice, so whole-group sampling would underestimate `n_distinct`
+and skew the most-common-value list, worst on exactly the tables the engine works
+hardest to produce.
+
+**That does not happen, and it was checked rather than argued about.** #159
+implemented the whole-group variant to find out. Offering every row of a group
+for each of the many blocks that group spans hands core far more rows than it
+asked for, so its reservoir ends up sampling most of the table and the
+distribution statistics come out fine: `n_distinct` 1000 against a true 1001 on
+the clustered fixture.
+
+What breaks instead is the row count, because those rows are counted against the
+fraction of blocks core visited:
+
+| mapping | reltuples for a 1,000,000-row table |
+| --- | --- |
+| whole row group per block | 20,500,000 |
+| one row slice per block | 986,666 |
+
+A factor of twenty, which is worse for the planner than any distribution skew
+would have been. So the mapping still matters and the slice approach is still
+right; the reason is the row count, not the distribution, and a test written to
+watch `n_distinct` on a clustered table would pass against the wrong
+implementation. #159's suite watches `reltuples` and says so.
+
+The general lesson is the one worth keeping: a predicted failure mode is a
+hypothesis, and writing the test for the predicted symptom rather than the
+measured one produces a check that passes against the bug.
 
 ## Approach
 
@@ -69,10 +87,22 @@ uses. `ColumnarReadRowByNumber` already produces `values`/`nulls` for a row
 number, so this is `heap_form_tuple` over that, with a synthetic item pointer from
 the row number as the index path already does.
 
-**Correlation.** Once rows carry their row numbers, core's own correlation
-computation works, because row number order is physical order. This falls out of
-the design rather than needing special handling, and it is the statistic worth the
-most here.
+**Correlation.** Worth the most here, and it does **not** fall out of the design,
+which is what an earlier revision of this plan claimed.
+
+`acquire_sample_rows` sorts the sample by item pointer, and the sample arrives
+through `ExecCopySlotHeapTuple`. A virtual slot's copy is `heap_form_tuple` over
+the slot's values, which sets `t_self` invalid and never reads `tts_tid`, so
+setting the slot's item pointer is not enough: every sampled tuple carries an
+invalid pointer. On a non-assert build the sort then permutes them arbitrarily
+and correlation comes out as noise; on an assert build the backend aborts on
+`ItemPointerIsValid`.
+
+The access method has to supply its own `copy_heap_tuple` that carries `tts_tid`
+into `t_self`, which is what #159 does. Correlation then reads 1.0 on an ascending
+column, matching a heap mirror. Recorded because the claim cost a revision to
+discover, and because the same one-line cause produced both the missing statistic
+and a crash.
 
 **Relation-level stats.** `vac_update_relstats` should record the live row count
 and the block count so `pg_class` stops reporting 0 rows, which is separately

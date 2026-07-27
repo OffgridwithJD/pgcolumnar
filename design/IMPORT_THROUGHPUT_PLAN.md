@@ -61,26 +61,54 @@ suggests.
 
 ## Order
 
-1. **A batching entry point.** Give the write path a way to accept many rows at
-   once, as `table_multi_insert` does for COPY, and have both importers use it.
-   This is worth doing first even without the column-wise work: it amortises the
-   per-call overhead and it is what the column-wise path needs underneath.
-2. **Column-wise transfer for the simple cases.** Fixed-width, no nulls, type
-   matches exactly. Measure before extending: if this does not move the number,
-   the model above is wrong and the rest should not be built on it.
-3. **Nullable and varying-length columns**, if step 2 pays.
-4. **Encoding selection reuse across chunks of the same column.** The selector
-   re-decides per vector; a column whose first several chunks all chose the same
-   encoding is unlikely to want a different one, and the sample cost could be
-   skipped after a run of agreement. This is the smallest of the four and should
-   be measured on its own, since it is easy to convince oneself it helps.
+**Corrected after measurement (#160). Step 1 as written would have delivered
+close to nothing, and that was worth finding before someone spent a month on
+it.**
+
+This plan reasoned that the waste is the per-row round trip, so a batching entry
+point should come first and would "amortise the per-call overhead" even on its
+own. If per-call overhead were the cost, a one-column load would show it as
+clearly as a five-column one, since it is the same rows and the same number of
+`table_tuple_insert` calls. Measured, 3,000,000 rows:
+
+| shape | heap | columnar | |
+| --- | --- | --- | --- |
+| 1 int column | 1272.4 ms | **908.1 ms** | **0.71x, faster than heap** |
+| 5 int columns | 1364.1 ms | 3697.0 ms | 2.7x |
+| 1 text column | 1284.3 ms | 4680.1 ms | 3.6x |
+| 5 mixed, one text | 1494.7 ms | 8604.8 ms | 5.8x |
+
+At one integer column the columnar write path beats heap. There is no per-call
+overhead to amortise. The cost is per value and roughly additive per column,
+about 900 ms per numeric column and about 4,600 ms for a text column, so the 4.9x
+this plan opens with is really "five columns, one of them text".
+
+Two further results from the same measurement: compression is not a factor
+(`none` is 2% faster than `zstd 3`, `lz4` indistinguishable), and ablation puts
+zone min/max tracking at 15 to 17% of the remaining per-value cost with no other
+single dominant term. #160 took that piece: comparing integer-family values
+directly instead of through fmgr, and testing the maximum first so an ascending
+load costs one comparison per value, for 5 to 7%.
+
+So the revised order is:
+
+1. **The varlena write path.** One text column costs more than five integer
+   columns, and that is where the 4.9x lives. Measure before designing: the
+   ablation above did not separate encoding selection from the value stream from
+   the flush for text specifically.
+2. **Column-at-a-time transfer** for the cases where the reader's representation
+   and the writer's already agree, judged per column type rather than per
+   nullability and width combination, since type is what the measurement says
+   dominates.
+3. **A batching entry point**, if anything above still wants one. It is not the
+   place to start and may not be needed at all.
 
 ## Not in scope
 
-`COPY` into a columnar table goes through the same write path and would benefit
-from step 1, but making `COPY` fast is a separate piece of work with its own
-interface questions. Worth noting so the batching entry point is not designed so
-narrowly that only the importers can use it.
+`COPY` into a columnar table goes through the same write path, so it benefits
+from anything that makes per-value work cheaper, which after the measurement
+above is where the win is. Making `COPY` itself fast is a separate piece of work
+with its own interface questions.
 
 ## What must not change
 
