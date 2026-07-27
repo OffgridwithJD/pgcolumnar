@@ -1706,6 +1706,22 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	}
 	rowInGrp = rowNumber - rg->firstRowNumber;
 
+	/*
+	 * SnapshotAny asks for the row whatever its visibility, so the delete vector
+	 * is not consulted for it. That is not a loophole, it is the contract: core
+	 * uses SnapshotAny to re-fetch a row it already knows the fate of.
+	 *
+	 * An AFTER UPDATE ... FOR EACH ROW trigger is the case that needs it (#179).
+	 * The update marks the old row deleted and the trigger then asks for that
+	 * same row to hand the user OLD -- so honouring the delete mark here answered
+	 * "no such row" to a question about a row the caller had just deleted itself,
+	 * and the statement died with "failed to fetch tuple for trigger".
+	 */
+	if (snapshot != NULL && snapshot->snapshot_type == SNAPSHOT_ANY)
+	{
+		/* no visibility filtering at all */
+	}
+	else
 	{
 		List	   *maskList = ColumnarReadDeleteVectorList(storageId,
 													   rg->groupNumber,
