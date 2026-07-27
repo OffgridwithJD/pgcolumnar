@@ -112,9 +112,30 @@ typedef struct ColumnarAnalyzeState
 	uint64		sliceFirstRow;
 	uint64		sliceRows;
 	uint64		sliceNext;		/* next offset within the slice */
+	uint64		sliceGroup;		/* the row group the slice belongs to */
 
 	Datum	   *values;
 	bool	   *nulls;
+
+	/*
+	 * A forward reader over the group the current slice belongs to.
+	 *
+	 * The rows a slice offers are a contiguous run of row numbers, slices within
+	 * a group are visited in ascending order, and groups likewise, so one
+	 * forward scan per group serves every slice in it. Fetching each row by
+	 * number instead -- which this did first -- re-reads the row group list from
+	 * the catalog and re-locates the row on every call, and ANALYZE offers every
+	 * row of every block core samples: 250,000 fetches on a 250,000-row table,
+	 * which ran for over 200 seconds and did not improve when the statistics
+	 * target was lowered, because the work is per row offered rather than per row
+	 * kept.
+	 */
+	ColumnarReadState *rs;		/* NULL until the first slice with rows */
+	uint64		rsGroup;		/* group number rs is restricted to */
+	bool		rsHavePending;	/* pendingRow/values hold an unconsumed row */
+	uint64		pendingRow;
+	Datum	   *pendingValues;
+	bool	   *pendingNulls;
 } ColumnarAnalyzeState;
 
 typedef struct ColumnarScanDescData
@@ -438,7 +459,11 @@ columnar_scan_end(TableScanDesc sscan)
 	ColumnarEndRead(scan->readState);
 
 	if (scan->analyzeState != NULL)
+	{
+		if (scan->analyzeState->rs != NULL)
+			ColumnarEndRead(scan->analyzeState->rs);
 		MemoryContextDelete(scan->analyzeState->cx);
+	}
 
 	/* release a snapshot restored+registered for a parallel worker */
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
@@ -709,6 +734,8 @@ columnar_analyze_state(ColumnarScanDesc scan)
 											 st->metaSnapshot);
 	st->values = palloc(sizeof(Datum) * RelationGetDescr(rel)->natts);
 	st->nulls = palloc(sizeof(bool) * RelationGetDescr(rel)->natts);
+	st->pendingValues = palloc(sizeof(Datum) * RelationGetDescr(rel)->natts);
+	st->pendingNulls = palloc(sizeof(bool) * RelationGetDescr(rel)->natts);
 	MemoryContextSwitchTo(oldContext);
 
 	scan->analyzeState = st;
@@ -786,6 +813,7 @@ columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
 		st->sliceFirstRow = rg->firstRowNumber + firstOff;
 		st->sliceRows = endOff - firstOff;
 		st->sliceNext = 0;
+		st->sliceGroup = rg->groupNumber;
 		return;
 	}
 }
@@ -836,25 +864,78 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 	ColumnarAnalyzeState *st = columnar_analyze_state(cscan);
 	Relation	rel = scan->rs_rd;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
+	uint64		sliceEnd = st->sliceFirstRow + st->sliceRows;
 	int			i;
 
-	while (st->sliceNext < st->sliceRows)
+	if (st->sliceRows == 0)
+		return false;
+
+	/* a slice in a new group needs a reader positioned on that group */
+	if (st->rs == NULL || st->rsGroup != st->sliceGroup)
 	{
-		uint64		rowNumber = st->sliceFirstRow + st->sliceNext++;
+		MemoryContext oldContext = MemoryContextSwitchTo(st->cx);
+
+		if (st->rs != NULL)
+			ColumnarEndRead(st->rs);
+		st->rs = ColumnarBeginRead(rel, scan->rs_snapshot, NULL, NULL, 0, NULL);
+		ColumnarReadRestrictToGroups(st->rs, &st->sliceGroup, 1);
+		st->rsGroup = st->sliceGroup;
+		st->rsHavePending = false;
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	for (;;)
+	{
+		uint64		rowNumber;
 
 		CHECK_FOR_INTERRUPTS();
 
-		/*
-		 * A row the delete vector marks is dead for ANALYZE's purposes, and
-		 * counting it as such is what keeps core's live-row estimate right rather
-		 * than merely keeping it out of the sample.
-		 */
-		if (!ColumnarReadRowByNumber(rel, scan->rs_snapshot, rowNumber,
-									 st->values, st->nulls))
+		if (st->rsHavePending)
 		{
-			*deadrows += 1;
-			continue;
+			rowNumber = st->pendingRow;
+			st->rsHavePending = false;
+			memcpy(st->values, st->pendingValues,
+				   sizeof(Datum) * tupdesc->natts);
+			memcpy(st->nulls, st->pendingNulls, sizeof(bool) * tupdesc->natts);
 		}
+		else if (!ColumnarReadNextRow(st->rs, st->values, st->nulls, &rowNumber))
+		{
+			/*
+			 * The group is exhausted. Any rows of this slice not returned were
+			 * removed by the delete vector, which the reader applies for us.
+			 */
+			*deadrows += (double) (sliceEnd - st->sliceFirstRow - st->sliceNext);
+			st->sliceNext = st->sliceRows;
+			return false;
+		}
+
+		/* rows before the slice belong to a block core has already visited */
+		if (rowNumber < st->sliceFirstRow)
+			continue;
+
+		if (rowNumber >= sliceEnd)
+		{
+			/*
+			 * Past the slice. Hold the row for the next one rather than losing
+			 * it: the reader only goes forward, and re-reading the group per
+			 * slice is what this design exists to avoid.
+			 */
+			memcpy(st->pendingValues, st->values, sizeof(Datum) * tupdesc->natts);
+			memcpy(st->pendingNulls, st->nulls, sizeof(bool) * tupdesc->natts);
+			st->pendingRow = rowNumber;
+			st->rsHavePending = true;
+			*deadrows += (double) (sliceEnd - st->sliceFirstRow - st->sliceNext);
+			st->sliceNext = st->sliceRows;
+			return false;
+		}
+
+		/*
+		 * Rows the reader skipped between the last one and this are deleted; the
+		 * live-row estimate core computes needs them counted, not merely left
+		 * out of the sample.
+		 */
+		*deadrows += (double) (rowNumber - st->sliceFirstRow - st->sliceNext);
+		st->sliceNext = rowNumber - st->sliceFirstRow + 1;
 
 		ExecClearTuple(slot);
 		for (i = 0; i < tupdesc->natts; i++)
@@ -869,15 +950,12 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 		 * by item pointer before computing statistics, and the row-number mapping
 		 * is monotonic, so this is what makes the sorted order the physical order
 		 * -- which in turn is what makes the correlation statistic mean anything.
-		 * Correlation is the one statistic nothing outside this AM can supply.
 		 */
 		ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 
 		*liverows += 1;
 		return true;
 	}
-
-	return false;
 }
 
 /* VACUUM: nothing to do in phase 1 (delete vector / compaction arrive later) */
