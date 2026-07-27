@@ -80,18 +80,38 @@ psql_run "INSERT INTO tr_c2 SELECT g, g * 2 FROM generate_series(1, $ROWS) g;" >
 psql_run "INSERT INTO tr_h2 SELECT g, g * 2 FROM generate_series(1, $ROWS) g;" >/dev/null
 both "a multi-row insert fires once per row with the right values" 2
 
-# More rows than fit one stripe, so some are flushed when the trigger runs and
-# some are still buffered -- the two sides of the branch being fixed. 1000 is the
-# floor for stripe_row_limit; an earlier version of this file asked for 100, the
-# SET failed, the table was never created, and the check compared 0 against 450
-# rather than exercising anything.
+# A mid-statement stripe flush rescues the whole statement, and that bounds the
+# defect, so it gets a case of its own.
 #
-# The two INSERTs are issued separately and on purpose. Run in one psql_run they
-# share ON_ERROR_STOP: against the unfixed build the columnar INSERT errors, the
-# script stops, the heap INSERT never runs, and the comparison finds 0 against 0
-# and passes. That is a check satisfied by both outcomes, which is the trap this
-# project keeps hitting; every heap/columnar pair below is issued as two calls
-# for that reason.
+# This file first claimed to cover "rows on both sides of a stripe boundary".
+# It did not, and it cannot: measured against the unfixed build, the failure
+# depends only on whether a flush happened during the statement, and the
+# threshold is exactly stripe_row_limit.
+#
+#      999 rows at stripe_row_limit=1000    -> fails
+#     1000 rows at stripe_row_limit=1000    -> all 1000 fire
+#     1500 rows at stripe_row_limit=100000  -> fails
+#
+# An insert that crosses the limit therefore cannot be made to fail by making it
+# bigger -- crossing is what rescues it, and the mechanism is worth writing down
+# because it is not obvious:
+#
+#   1. the stripe fills mid-statement and flushes, so the earliest rows are on
+#      disk before any trigger runs
+#   2. the first trigger's fetch therefore succeeds, and its body runs
+#   3. the body is itself a statement, and pgColumnar's ExecutorEnd hook calls
+#      ColumnarFlushAllPendingWrites when it ends -- flushing the outer INSERT's
+#      remaining buffered rows
+#   4. every later fetch then finds its row on disk
+#
+# So one successful fetch rescues the whole statement, through the trigger body.
+# Confirmed by removing the SQL from the body: with a trigger that only does
+# RETURN NULL, no ExecutorEnd fires between rows, and 1200 rows at a limit of
+# 1000 give 1000 successful fetches and then a failure on row 1001 -- exactly
+# the first buffered row.
+#
+# The case is kept and now says what it is: a control that passed before the fix
+# and has to keep passing after it.
 psql_run "DROP TABLE IF EXISTS tr_c3; DROP TABLE IF EXISTS tr_h3;
 	SET pgcolumnar.stripe_row_limit = 1000;
 	CREATE TABLE tr_c3 (id int, val int) USING pgcolumnar;
@@ -101,7 +121,22 @@ psql_run "CREATE TABLE tr_h3 (id int, val int);
 psql_run "SET pgcolumnar.stripe_row_limit = 1000;
 	INSERT INTO tr_c3 SELECT g, g FROM generate_series(1, 4500) g;" >/dev/null 2>&1 || true
 psql_run "INSERT INTO tr_h3 SELECT g, g FROM generate_series(1, 4500) g;" >/dev/null
-both "rows on both sides of a stripe boundary all fire" 3
+both "an insert crossing a stripe boundary fires for every row" 3
+
+# The discriminating multi-row case: more than one row and fewer than the stripe
+# limit, so nothing flushes mid-statement and every trigger has to reach a
+# buffered row. This is the shape an ordinary insert has, the default
+# stripe_row_limit being far larger than a typical statement.
+psql_run "DROP TABLE IF EXISTS tr_c7; DROP TABLE IF EXISTS tr_h7;
+	SET pgcolumnar.stripe_row_limit = 100000;
+	CREATE TABLE tr_c7 (id int, val int) USING pgcolumnar;
+	CREATE TRIGGER tr_c7_t AFTER INSERT ON tr_c7 FOR EACH ROW EXECUTE FUNCTION tr_f();" >/dev/null
+psql_run "CREATE TABLE tr_h7 (id int, val int);
+	CREATE TRIGGER tr_h7_t AFTER INSERT ON tr_h7 FOR EACH ROW EXECUTE FUNCTION tr_f();" >/dev/null
+psql_run "SET pgcolumnar.stripe_row_limit = 100000;
+	INSERT INTO tr_c7 SELECT g, g FROM generate_series(1, 1500) g;" >/dev/null 2>&1 || true
+psql_run "INSERT INTO tr_h7 SELECT g, g FROM generate_series(1, 1500) g;" >/dev/null
+both "1500 rows with no mid-statement flush all fire" 7
 
 # --- 2. the other row events ------------------------------------------------
 
