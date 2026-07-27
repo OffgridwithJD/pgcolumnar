@@ -57,6 +57,8 @@ pgc_cluster_datadir() {
 	return 1
 }
 
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 # True when nothing is accepting connections on the given port.
 pgc_port_free() {
 	! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
@@ -82,7 +84,7 @@ pgc_setup() {
 	# wall of ERROR: database "regress" already exists with no named check
 	# failing -- a red that reads exactly like a real one. There is a retry
 	# below for when this still collides; the default should not guarantee it.
-	PGC_PORT="${PGC_PORT:-$(( 40000 + ($$ % 20000) ))}"
+	PGC_PORT="${PGC_PORT:-$(pgc_pick_port)}"
 	PGC_DB="${PGC_DB:-regress}"
 	PGC_LIBDIR="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)")"
 	PGC_SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

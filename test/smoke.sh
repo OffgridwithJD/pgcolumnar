@@ -15,9 +15,11 @@
 
 set -euo pipefail
 
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 BINDIR="$("$PG_CONFIG" --bindir)"
-PORT="${PGC_PORT:-54321}"
+PORT="${PGC_PORT:-$(pgc_pick_port)}"
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # A scratch area the postgres user can read and write.

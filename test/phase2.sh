@@ -15,9 +15,11 @@
 
 set -euo pipefail
 
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 BINDIR="$("$PG_CONFIG" --bindir)"
-PORT="${PGC_PORT:-54322}"
+PORT="${PGC_PORT:-$(pgc_pick_port)}"
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WORKDIR="$(mktemp -d /tmp/pgcolumnar-phase2.XXXXXX)"
