@@ -333,18 +333,37 @@ extern void ColumnarDiscardFetchCache(void);
 /* index maintenance for callers that insert rows without an executor (#153) */
 typedef struct ColumnarIndexInsertState
 {
+	EState	   *estate;
+	TupleTableSlot *slot;
+
+	/*
+	 * Enforcing (import) mode: the executor's own index maintenance, bracketed
+	 * by an after-trigger query level so deferred constraints reach commit.
+	 */
+	bool		enforcing;
+	ResultRelInfo *rri;
+	bool		queryLevel;		/* the after-trigger level is open */
+
+	/*
+	 * Non-enforcing (rewrite) mode only: the executor has no "insert without
+	 * checking" mode, so this path opens the indexes itself.
+	 */
 	int			n;
 	Relation   *rels;
 	IndexInfo **infos;
 	ExprState **predicates;		/* partial-index predicate, or NULL */
-	EState	   *estate;
-	TupleTableSlot *slot;
 } ColumnarIndexInsertState;
 
-extern ColumnarIndexInsertState *ColumnarIndexInsertBegin(Relation rel);
+/*
+ * enforceConstraints is fixed for the life of the state rather than passed per
+ * row, because it selects which of the two routes above is built: an importer
+ * enforces for every row it inserts and a rewrite enforces for none.
+ */
+extern ColumnarIndexInsertState *ColumnarIndexInsertBegin(Relation rel,
+														  bool enforceConstraints);
 extern void ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
 								   Datum *values, bool *isnull,
-								   uint64 rowNumber, bool enforceUnique);
+								   uint64 rowNumber);
 extern void ColumnarIndexInsertEnd(ColumnarIndexInsertState *st);
 extern bool ColumnarRelationHasIndexes(Relation rel);
 
