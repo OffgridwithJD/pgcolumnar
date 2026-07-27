@@ -100,7 +100,7 @@ NEAR_HI=$N
 FAR_LO=$((ROWS - N + 1))
 FAR_HI=$ROWS
 
-upd_ms() {  # id-low, id-high
+upd_once() {  # id-low, id-high -> milliseconds for one pass
 	local start end
 	start=$(date +%s%N)
 	psql_run "$FORCE UPDATE fp_c SET fixed = fixed + 1
@@ -109,9 +109,30 @@ upd_ms() {  # id-low, id-high
 	echo $(( (end - start) / 1000000 ))
 }
 
+# The median of three passes, not one. A single pass is far too noisy to compare:
+# measured on an idle box, the far/near ratio of one pass ranged from 0.52 to
+# 1.94 across five repetitions, with the far end frequently the faster of the
+# two. That is well inside the tolerance, but a single sample wanders outside it
+# under any competing load, and this check failed a gate at 3.05 for that reason
+# alone. A flaky check in the matrix is worse than no check: it teaches the
+# reader to discount a red result.
+#
+# The median is taken rather than the tolerance widened, because widening is what
+# costs discriminating power. The defect this guards against (issue #143, the
+# fetch walking every earlier row of the group) made the far end quadratically
+# slower, 1,001,374 ms against 614 ms once fixed. A ratio of 3 catches that with
+# orders of magnitude to spare, so the threshold is not what needs relaxing.
+upd_ms() {  # id-low, id-high -> median of three passes
+	local a b c
+	a=$(upd_once "$1" "$2")
+	b=$(upd_once "$1" "$2")
+	c=$(upd_once "$1" "$2")
+	printf '%s\n%s\n%s\n' "$a" "$b" "$c" | sort -n | sed -n 2p
+}
+
 near="$(upd_ms $NEAR_LO $NEAR_HI)"
 far="$(upd_ms $FAR_LO $FAR_HI)"
-echo "-- $N fetches: first tenth ${near} ms, last tenth ${far} ms"
+echo "-- $N fetches, median of three: first tenth ${near} ms, last tenth ${far} ms"
 
 check "fetching from the far end of a group costs about what the near end does" \
 	"$(awk -v n="$near" -v f="$far" \
@@ -133,7 +154,7 @@ build() {  # table, rows
 # costs the same in a big group as in a small one even with the old walk, because
 # the walk is to the row's position and those rows are near the start either way:
 # that check would pass on both sides and prove nothing.
-fetch_ms() {  # table, table-rows, count
+fetch_once() {  # table, table-rows, count -> milliseconds for one pass
 	local start end
 	start=$(date +%s%N)
 	psql_run "$FORCE UPDATE $1 SET v = v + 1 WHERE id > $(( $2 - $3 ));" \
@@ -142,13 +163,37 @@ fetch_ms() {  # table, table-rows, count
 	echo $(( (end - start) / 1000000 ))
 }
 
+# Median of three, for the same reason as the near/far check above: one pass is
+# noise. This check failed a run at small=234ms big=483ms, a ratio of 2.06
+# against a 1.8 tolerance, on a tree where the positional indexes are present and
+# working -- the two structural checks below passed in that same run. Both timing
+# checks in this file are now medians.
+#
+# Know why this one's margin is thin, before widening it or tightening it. The
+# fetches share a single decode of the group, and that decode is O(group size),
+# so doubling the group legitimately adds close to double the one-time decode
+# even when every per-row lookup is O(1). The defect signature (a walk, so about
+# 2x) and the honest baseline therefore sit near each other by construction, and
+# no tolerance separates them cleanly. Raising the group ratio does not help: it
+# scales the decode with it. If this check needs more headroom, raise the fetch
+# count so per-fetch work dominates the shared decode, rather than moving the
+# threshold. The two structural checks below are what prove the mechanism; this
+# one is corroboration.
+fetch_ms() {  # table, table-rows, count -> median of three passes
+	local a b c
+	a=$(fetch_once "$1" "$2" "$3")
+	b=$(fetch_once "$1" "$2" "$3")
+	c=$(fetch_once "$1" "$2" "$3")
+	printf '%s\n%s\n%s\n' "$a" "$b" "$c" | sort -n | sed -n 2p
+}
+
 build fp_small $((ROWS / 2))
 build fp_big "$ROWS"
 
 K=$((ROWS / 20))
 small="$(fetch_ms fp_small $((ROWS / 2)) $K)"
 big="$(fetch_ms fp_big "$ROWS" $K)"
-echo "-- $K fetches at the far end: group of $((ROWS / 2)) took ${small} ms, group of $ROWS took ${big} ms"
+echo "-- $K fetches at the far end, median of three: group of $((ROWS / 2)) took ${small} ms, group of $ROWS took ${big} ms"
 
 check "doubling the row group does not double the cost of the same fetches" \
 	"$(awk -v s="$small" -v b="$big" \
