@@ -26,13 +26,15 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
 - Columnar storage is built for append-mostly data. Updates and deletes are
   supported, but they mark rows rather than rewriting data, and the space is
   reclaimed only by `pgcolumnar.vacuum`.
-- Point lookups are slow relative to heap. A single-row fetch by item pointer must
-  read and decode the row group that contains the row. Bloom filters speed up an
-  equality scan by skipping row groups, but do not help an index fetch by item
-  pointer.
-- A bulk `UPDATE` re-fetches each old row by item pointer to fill unchanged
-  columns, which is proportional to rows times row group size and is not yet
-  optimized.
+- Point lookups are slower than heap, though far less so than they were. A fetch
+  by item pointer locates the row's group and decodes only the columns the
+  executor asks for, reusing the decoded group for the rest of the statement, so
+  the cost no longer scales with the table's width or with the row's position in
+  its group. Heap still wins a single-row fetch outright. Bloom filters speed up
+  an equality scan by skipping row groups but do not help a fetch by item pointer.
+- Bulk `UPDATE` and `DELETE` reached by index are no longer proportional to rows
+  times row group size. They still cost several times what heap costs, because
+  each changed row is marked and rewritten rather than updated in place.
 
 ## Planner statistics
 
@@ -51,6 +53,14 @@ analyzed. `pg_class.reltuples` runs a few percent low after `ANALYZE`, because
 blocks that hold no row-group data (the metapage, and space reserved but not yet
 written) count as visited while offering no rows; the planner does not use that
 figure for columnar tables.
+
+`ANALYZE` samples rows through the fetch path, so its cost grows with the number
+and width of columns rather than only with row count. On a wide table it can take
+a long time, and autoanalyze runs it unprompted; see
+[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171), which also covers
+a point-lookup plan regression that appears once statistics exist. On a table
+where that matters, consider `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS 0`
+for columns no predicate uses.
 
 `TABLESAMPLE` is unsupported and says so: it raises an error rather than
 returning no rows.
@@ -114,6 +124,19 @@ for the build, like non-concurrent `CREATE INDEX`. Turn projection scans off wit
   reclaimed by `REINDEX`, not removed opportunistically.
 - `CREATE INDEX CONCURRENTLY` (the concurrent validate path) and partial
   block-range index builds are not supported.
+
+## Constraints on the import path
+
+`pgcolumnar.import_arrow` and `pgcolumnar.import_parquet` maintain every index on
+the target and enforce unique and exclusion constraints, so an import cannot
+reach a state an ordinary `INSERT` would refuse.
+
+One difference from ordinary DML remains: a **deferrable** unique constraint is
+checked as each row is inserted rather than deferred to commit. An import that
+would transiently violate uniqueness partway through, and be consistent by the
+end, is rejected where ordinary DML would accept it. Enforcing early is
+over-strict rather than unsound. Tracked as
+[issue #168](https://github.com/jdatcmd/pgcolumnar/issues/168).
 
 ## Vectorized aggregate coverage
 

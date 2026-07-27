@@ -48,13 +48,35 @@ export and import, flat and nested, for both Arrow and Parquet, all self-contain
 (no libarrow/libparquet dependency) and matrix-gated. See
 [gaps/27-arrow-parquet-interop.md](gaps/27-arrow-parquet-interop.md).
 
-The concrete remaining list is complete as of 2026-07-23. The former item, skip
-virtual generated-column storage, is DONE (the flush skips the chunk for
-`attgenerated = 'v'` columns and the reader returns their missing value; see
-`generated_columns.sh`). Phases E (ALP, FSST, chunk-shared FSST) and F (Z-order
-cluster, online compaction/rewrite/recluster, physical page reclaim) also landed
-on the native PGCN v1 engine, all matrix-gated on PostgreSQL 15-19. What follows
-is Future directions (larger, and some deferred for review).
+The concrete remaining list was complete as of 2026-07-23, and a July 2026
+external audit plus the follow-on work has since added and closed another round.
+Closed since: `ANALYZE` collecting no column statistics (#154), fetch by row
+number being quadratic within a row group (#143), the metadata aggregate losing
+its fast path to a single deleted row (#149), imports not maintaining indexes or
+enforcing unique and exclusion constraints (#153), and a wide table falling off
+the fetch cache into per-row group decode (#157). The audit record is
+[EXTERNAL_AUDIT_2026_07.md](EXTERNAL_AUDIT_2026_07.md).
+
+**Open, in the order they are worth taking:**
+
+1. **Bulk load throughput** (#155). The write path is about 4.9x slower than heap
+   on a five-column table and 15x slower than the read path. Measurement moved the
+   target: there is no per-row call overhead to amortise, since a one-column load
+   is *faster* than heap, and the cost is per value and additive per column, with
+   one text column costing more than five integer ones. The varlena write path is
+   where it lives. Plan in [IMPORT_THROUGHPUT_PLAN.md](IMPORT_THROUGHPUT_PLAN.md).
+2. **Deferrable unique constraints on the import path** (#168). Enforced at insert
+   time rather than deferred to commit: over-strict rather than unsound, and the
+   fix needs `UNIQUE_CHECK_PARTIAL` plus a queued recheck through the after-trigger
+   machinery.
+3. **`ANALYZE` cost and a point-lookup plan regression** (#171). A point lookup
+   measured 23.75 ms before statistics existed and 1251.88 ms after, and `ANALYZE`
+   itself ran for tens of minutes on a wide table in isolation without reproducing
+   inside the benchmark. Two symptoms, possibly one cause, both arriving with
+   #159. Autoanalyze runs the expensive half unprompted.
+4. **`reltuples` after `ANALYZE`** runs a few percent low, because blocks holding
+   no row-group data count as visited while offering no rows. The planner does not
+   use that figure for columnar tables, so this is cosmetic until something does.
 
 Deferred (documented, not yet built): end-truncation for lazy disk reclaim
 (corruption-critical VM-fork/WAL hazards, see PHASE_F_RECLAIM_PLAN.md); the F1

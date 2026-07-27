@@ -1,0 +1,291 @@
+commit: 7a9c9f7
+=== MAIN SUITE ===
+started 2026-07-27T12:49:19+00:00
+== pgColumnar benchmark ==
+PG_CONFIG=/usr/local/pg17_nc/bin/pg_config  (PostgreSQL 17.10)
+scale=6000000 rows  reps=5  workdir=/tmp/pgcolumnar-bench.vqC1qE
+-- building (non-assert expected)
+-- initdb and start
+-- loading 6000000 rows (staging, heap, columnar zstd, columnar none)
+-- running queries
+
+=== TABLE SIZES ===
+         table          | total_size |   bytes   
+------------------------+------------+-----------
+ heap                   | 707 MB     | 741793792
+ columnar (zstd)        | 135 MB     | 141033472
+ columnar (none)        | 40 MB      |  42287104
+(3 rows)
+
+
+(table-only size, excluding indexes)
+         table          | table_size 
+------------------------+------------
+ heap                   | 579 MB
+ columnar (none)        | 40 MB
+ columnar (zstd)        | 6096 kB
+(3 rows)
+
+
+=== QUERY LATENCY: heap vs columnar zstd (median ms of 5) ===
+ id |                 query                  | heap_ms | columnar_ms | heap_over_col 
+----+----------------------------------------+---------+-------------+---------------
+  1 | count(*) full table                    |  254.28 |        0.02 |      12714.00
+  2 | sum/avg over one int column            |  379.89 |        0.56 |        678.38
+  3 | filtered agg, min/max-skippable range  |  268.96 |       90.70 |          2.97
+  4 | point lookup by indexed id             |    0.01 |     1251.88 |          0.00
+  5 | projection: 3 of 8 cols, 1% filter     |  232.83 |       85.83 |          2.71
+(5 rows)
+
+
+=== VECTORIZATION on vs off (columnar zstd, median ms) ===
+        query         | on_ms | off_ms  | speedup_vec 
+----------------------+-------+---------+-------------
+ sum/avg over int     |  0.51 | 1392.60 |     2730.59
+ filtered agg (range) | 92.12 |   90.32 |        0.98
+(2 rows)
+
+
+=== COMPRESSION none vs zstd (size and scan latency) ===
+   metric   | none  |  zstd   | none_over_zstd 
+------------+-------+---------+----------------
+ total size | 40 MB | 6096 kB |           6.77
+(1 row)
+
+     metric      | none | zstd | none_over_zstd 
+-----------------+------+------+----------------
+ sum/avg scan ms | 0.52 | 0.52 | 
+ count(*) ms     | 0.02 | 0.02 | 
+(2 rows)
+
+-- sorted projection
+Pager usage is off.
+SET
+CREATE TABLE
+INSERT 0 6000000
+ANALYZE
+
+=== SORTED PROJECTION: narrow range scan on a scattered key (median ms) ===
+        state         |   ms   
+----------------------+--------
+ before vacuum_sorted | 364.13
+(1 row)
+
+ vacuum_sorted 
+---------------
+ 
+(1 row)
+
+ANALYZE
+        state        |  ms   
+---------------------+-------
+ after vacuum_sorted | 47.72
+(1 row)
+
+-- index-only scan
+Pager usage is off.
+SET
+SET
+SET
+CREATE TABLE
+INSERT 0 6000000
+CREATE INDEX
+VACUUM
+ANALYZE
+
+=== INDEX-ONLY SCAN on vs off (covering range count, median ms) ===
+             query              | on_ms | off_ms | speedup_ios 
+--------------------------------+-------+--------+-------------
+ covering count, id range (~2%) |  7.53 | 698.95 |       92.82
+(1 row)
+
+SET
+-- projection scan
+Pager usage is off.
+SET
+CREATE TABLE
+ add_projection 
+----------------
+ 
+(1 row)
+
+INSERT 0 6000000
+ANALYZE
+
+=== PROJECTION SCAN on vs off (covering row scan on a scattered sort key, median ms) ===
+                query                 | on_ms  | off_ms | speedup_proj 
+--------------------------------------+--------+--------+--------------
+ sortk,val where sortk in ~0.1% range | 191.41 | 635.35 |         3.32
+(1 row)
+
+SET
+-- export
+CREATE TABLE
+INSERT 0 6000000
+CREATE FUNCTION
+
+=== EXPORT: Arrow IPC and Parquet (6000000 rows, 5 columns) ===
+  format  |   ms   | file_size | m_rows_per_s 
+----------+--------+-----------+--------------
+ arrow    | 1008.6 | 186 MB    |          5.9
+ parquet  | 1100.2 | 186 MB    |          5.5
+(2 rows)
+
+-- import
+Pager usage is off.
+CREATE TABLE
+CREATE TABLE
+CREATE FUNCTION
+
+=== IMPORT: Arrow IPC and Parquet (6000000 rows, 5 columns) ===
+  format  |   ms    | m_rows_per_s 
+----------+---------+--------------
+ arrow    | 17721.5 |          0.3
+ parquet  | 17762.5 |          0.3
+(2 rows)
+
+(row-count check: expect 6000000 for both)
+ arrow_rows | parquet_rows 
+------------+--------------
+    6000000 |      6000000
+(1 row)
+
+-- nested export/import
+Pager usage is off.
+NOTICE:  type "bnc" does not exist, skipping
+DROP TYPE
+CREATE TYPE
+CREATE TABLE
+INSERT 0 1000000
+CREATE TABLE
+CREATE TABLE
+CREATE FUNCTION
+
+=== NESTED export + import (1000000 rows: int[3] array + composite) ===
+  format  | export_ms | import_ms | file_size 
+----------+-----------+-----------+-----------
+ arrow    |     622.8 |    4904.1 | 38 MB
+ parquet  |     533.7 |    4860.1 | 35 MB
+(2 rows)
+
+(round-trip check: rows in source but not reconstructed; expect 0/0)
+ arrow_diff | parquet_diff 
+------------+--------------
+          0 |            0
+(1 row)
+
+-- mutation (1000000 rows)
+
+=== MUTATION: rows reached by index (1000000 rows) ===
+(median of 5 for UPDATE; DELETE is a single run, since a repeat
+would find nothing left to delete)
+             operation              | heap_ms | columnar_ms | columnar_over_heap 
+------------------------------------+---------+-------------+--------------------
+ single row by id                   |    0.02 |        0.22 |              11.00
+ 1000 rows, ids in row order        |    3.81 |       14.28 |               3.75
+ 1000 rows, ids scattered           |   43.15 |      147.89 |               3.43
+(3 rows)
+
+
+             operation              | heap_ms | columnar_ms | columnar_over_heap 
+------------------------------------+---------+-------------+--------------------
+ DELETE 1000 rows by id range       |     0.5 |        14.7 |              29.40
+(1 row)
+
+(row counts must agree after the mutations)
+ heap_rows | columnar_rows 
+-----------+---------------
+    999000 |        999000
+(1 row)
+
+
+=== DuckDB comparison (same data, in-process columnar engine) ===
+Run Time (s): real 0.330 user 0.983363 sys 0.180577
+┌──────────────┐
+│ count_star() │
+│    int64     │
+├──────────────┤
+│      6000000 │
+└──────────────┘
+Run Time (s): real 0.001 user 0.000100 sys 0.002808
+┌─────────────┬──────────┐
+│  sum(val)   │ avg(val) │
+│   int128    │  double  │
+├─────────────┼──────────┤
+│ 29997000000 │   4999.5 │
+└─────────────┴──────────┘
+Run Time (s): real 0.004 user 0.013057 sys 0.000031
+┌───────────┐
+│ sum(val)  │
+│  int128   │
+├───────────┤
+│ 599940000 │
+└───────────┘
+Run Time (s): real 0.001 user 0.001897 sys 0.000000
+
+=== Cross-engine read of pgColumnar's Parquet output (same file) ===
+┌─────────┬─────────────┐
+│  rows   │   sum_val   │
+│  int64  │   int128    │
+├─────────┼─────────────┤
+│ 6000000 │ 29997000000 │
+└─────────┴─────────────┘
+Run Time (s): real 0.012 user 0.031017 sys 0.006628
+pyarrow read_table: rows=6000000  sum_val=29997000000  149.4 ms
+
+== benchmark complete ==
+MAIN_EXIT=0
+=== FSST ===
+== pgColumnar FSST ingestion micro-benchmark ==
+PG_CONFIG=/usr/local/pg17_nc/bin/pg_config  (PostgreSQL 17.10)
+scale=3000000 rows  workdir=/tmp/pgcolumnar-fsstbench.WqMqsy
+-- building (non-assert expected)
+-- initdb and start
+-- staging 3000000 rows of shared-substring text
+-- timing heap ingestion (baseline)
+-- timing columnar (compression=none) ingestion
+ alter_columnar_table_set 
+--------------------------
+ 
+(1 row)
+
+-- verify round-trip (heap vs columnar fingerprint)
+-- sizes and FSST usage
+
+===================== FSST INGESTION GATE ======================
+  rows                         3000000
+  heap INSERT                  2003.8 ms
+  columnar INSERT              12855.6 ms
+  round-trip                   MATCH
+  heap size                    439279616 bytes
+  columnar size                105807872 bytes
+  url chunks using FSST        20 / 20 (first-vector = FSST)
+================================================================
+Run once as shipped and once with encode_fsst stubbed to return false;
+the columnar-INSERT delta is FSST's ingestion cost, the size delta its ratio.
+FSST_EXIT=0
+=== READ STREAM ===
+== pgColumnar read-stream / AIO benchmark ==
+PG_CONFIG=/usr/local/pg18_uring/bin/pg_config  (PostgreSQL 18.4)
+rows=60000000  workdir=/tmp/pgcolumnar-rsbench.wij4kg
+-- build + install
+-- initdb
+-- load 60000000 rows x 8 random bigint columns (columnar, compression=none)
+   table size: 3675 MB   file: base/16384/16514   shared_buffers: 128MB
+
+=== COLD-SCAN LATENCY: io_method x read_stream (median of 3, ms) ===
+io_method  | rs_on_ms     | rs_off_ms    | rs_speedup
+-----------+--------------+--------------+-----------
+sync       | 40252.143    | 40237.624    | 1.00x
+worker     | 39436.133    | 40126.733    | 1.02x
+io_uring   | 40103.578    | 39850.971    | 0.99x
+
+=== io_method speedup vs sync (read_stream on) ===
+sync        40252.143 ms  (1.00x vs sync)
+worker      39436.133 ms  (1.02x vs sync)
+io_uring    40103.578 ms  (1.00x vs sync)
+
+== benchmark complete ==
+RS_EXIT=0
+finished 2026-07-27T13:15:23+00:00
+DONE

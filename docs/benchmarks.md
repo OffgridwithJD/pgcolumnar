@@ -17,19 +17,14 @@ Environment variables: `BENCH_SCALE` (rows, default 6000000), `BENCH_REPS`
 (timed repetitions, median reported, default 5), `BENCH_PORT`, and `BENCH_DUCKDB`
 (set to 1 to add a DuckDB comparison when `duckdb` is on `PATH`).
 
-The numbers below are one full run of all three harnesses, measured 2026-07-26 at
-commit `1be027b`: PostgreSQL 17.10 non-assert (18.4 with io_uring for the read
+The numbers below are one full run of all three harnesses, measured 2026-07-27 at
+commit `7a9c9f7`: PostgreSQL 17.10 non-assert (18.4 with io_uring for the read
 stream harness), 6,000,000 rows, 8-column table, median of 5, on 8 cores with
 24 GB of memory. Raw output is in
-[../bench/sample_output_pg17_6m.txt](../bench/sample_output_pg17_6m.txt). They
-show the shape of the tradeoff, not a precise score. The dataset is synthetic and
-deliberately mixes column shapes that suit different encodings, so a table of
+[../bench/sample_output_all_2026_07_27.txt](../bench/sample_output_all_2026_07_27.txt).
+They show the shape of the tradeoff, not a precise score. The dataset is synthetic
+and deliberately mixes column shapes that suit different encodings, so a table of
 purely random values will look worse and a repetitive one better.
-
-One change landed after these were measured and is not reflected in them: #160
-made the zone min/max tracking on the write path 5 to 7% faster, so every
-ingestion figure here (loads, imports, the FSST insert) is a floor rather than
-what the current tree does. Query latency and storage are unaffected.
 
 **Compare ratios across runs, not absolute milliseconds.** Re-measuring the
 previous run's commit on this machine on the same day (see
@@ -69,20 +64,29 @@ Heap versus columnar (zstd), median milliseconds:
 
 | query | heap | columnar | heap / columnar |
 | --- | --- | --- | --- |
-| count(*) full table | 251.34 | 0.02 | 12567 |
-| sum/avg over one int column | 354.96 | 0.53 | 670 |
-| filtered agg, min/max-skippable range | 263.62 | 92.35 | 2.85 |
-| projection: 3 of 8 cols, 1% filter | 264.94 | 81.58 | 3.25 |
-| point lookup by indexed id | 0.01 | 23.75 | 0.00 |
+| count(*) full table | 254.28 | 0.02 | 12714 |
+| sum/avg over one int column | 379.89 | 0.56 | 678 |
+| filtered agg, min/max-skippable range | 268.96 | 90.70 | 2.97 |
+| projection: 3 of 8 cols, 1% filter | 232.83 | 85.83 | 2.71 |
+| point lookup by indexed id | 0.01 | 1251.88 | 0.00 |
 
 `count(*)` and the ungrouped aggregates are answered from row-group metadata
 without decoding column data, which is why they are microseconds rather than
 milliseconds.
 
-The point lookup is the trade the design makes and does not hide: a single-row
-fetch decodes the row group the row lives in, so one row costs a whole group's
-decode. Columnar suits scans and aggregates; heap suits point lookups and
-write-heavy OLTP.
+**The point lookup number is a regression and is under investigation
+([issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171)), not a property
+of the design.** The previous run recorded 23.75 ms for the same query on the
+same machine. Two things are established: it is not the lazy-decoding slot, since
+an A/B across that merge on an unanalyzed table gives 16.42 ms before and 13.73 ms
+after; and the difference between that probe and this harness is that the harness
+runs `ANALYZE` on the table first. So the planner is choosing differently once
+statistics exist, and choosing worse. Treat the row as a bug report rather than a
+measurement of the fetch path.
+
+What remains true regardless: a single-row fetch has to locate and decode within
+the row group the row lives in, so columnar suits scans and aggregates while heap
+suits point lookups and write-heavy OLTP.
 
 ## Aggregates fall back once anything is deleted
 
@@ -115,9 +119,9 @@ single run for the delete:
 | operation | heap | columnar | columnar / heap |
 | --- | --- | --- | --- |
 | UPDATE single row by id | 0.02 ms | 0.22 ms | 11 |
-| UPDATE 1000 rows, ids in row order | 3.76 ms | 20.78 ms | 5.5 |
-| UPDATE 1000 rows, ids scattered | 44.07 ms | 146.07 ms | 3.3 |
-| DELETE 1000 rows by id range | 0.5 ms | 22.8 ms | 46 |
+| UPDATE 1000 rows, ids in row order | 3.81 ms | 14.28 ms | 3.8 |
+| UPDATE 1000 rows, ids scattered | 43.15 ms | 147.89 ms | 3.4 |
+| DELETE 1000 rows by id range | 0.5 ms | 14.7 ms | 29 |
 
 Row-ordered access does better than scattered because consecutive fetches stay
 inside one row group, which the statement-scoped decoded-group cache serves
@@ -135,14 +139,14 @@ Vectorization on versus off (columnar zstd, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sum/avg over int | 0.51 | 1352.10 | 2651 |
-| filtered agg (range) | 87.51 | 86.53 | 0.99 |
+| sum/avg over int | 0.51 | 1392.60 | 2731 |
+| filtered agg (range) | 92.12 | 90.32 | 0.98 |
 
 Index-only scan on versus off (covering range count, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| covering count, id range (~2%) | 7.24 | 689.21 | 95 |
+| covering count, id range (~2%) | 7.53 | 698.95 | 93 |
 
 The "off" column is the fetch-by-row path doing nothing else, which makes it the
 clearest single view of what that path costs, and the clearest measure of what
@@ -153,18 +157,18 @@ Projection scan on versus off (covering scan on a scattered sort key, median ms)
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sortk, val where sortk in ~0.1% range | 201.16 | 646.43 | 3.21 |
+| sortk, val where sortk in ~0.1% range | 191.41 | 635.35 | 3.32 |
 
 Sorted storage (`pgcolumnar.vacuum_sorted`), narrow range scan on a key not
 correlated with insert order, median ms:
 
 | state | ms |
 | --- | --- |
-| before vacuum_sorted | 348.79 |
-| after vacuum_sorted | 45.47 |
+| before vacuum_sorted | 364.13 |
+| after vacuum_sorted | 47.72 |
 
 Compression none versus zstd (columnar table-only): 40 MB versus 5.95 MB, with
-scan latency unchanged (0.50 ms against 0.49 ms), because the encoded stream is
+scan latency unchanged (0.52 ms against 0.52 ms), because the encoded stream is
 already small and the aggregates do not read it.
 
 ## Import and export
@@ -173,15 +177,15 @@ Export, 6,000,000 rows, 5 columns:
 
 | format | ms | file size | M rows/s |
 | --- | --- | --- | --- |
-| arrow | 1029.3 | 186 MB | 5.8 |
-| parquet | 1113.7 | 186 MB | 5.4 |
+| arrow | 1008.6 | 186 MB | 5.9 |
+| parquet | 1100.2 | 186 MB | 5.5 |
 
 Import, 6,000,000 rows, 5 columns:
 
 | format | ms | M rows/s |
 | --- | --- | --- |
-| arrow | 18533.2 | 0.3 |
-| parquet | 18746.0 | 0.3 |
+| arrow | 17721.5 | 0.3 |
+| parquet | 17762.5 | 0.3 |
 
 Import is about 18x slower than export, and the reason is not the import code.
 Measured separately: `import_arrow` costs 12,150 ms against 12,990 ms for an
@@ -204,8 +208,8 @@ column:
 
 | format | export ms | import ms | file size |
 | --- | --- | --- | --- |
-| arrow | 580.0 | 4914.0 | 38 MB |
-| parquet | 533.4 | 4923.5 | 35 MB |
+| arrow | 622.8 | 4904.1 | 38 MB |
+| parquet | 533.7 | 4860.1 | 35 MB |
 
 Both reconstructed tables matched the source exactly (zero differing rows).
 
@@ -215,8 +219,8 @@ Both reconstructed tables matched the source exactly (zero differing rows).
 
 | | |
 | --- | --- |
-| heap INSERT | 1.92 s |
-| columnar INSERT | 12.37 s |
+| heap INSERT | 2.00 s |
+| columnar INSERT | 12.86 s |
 | heap size | 419 MB |
 | columnar size | 101 MB |
 | vectors using FSST | 20 of 20 |
@@ -235,9 +239,9 @@ Cold-scan latency on the PostgreSQL 18 io_uring build, 60,000,000 rows, median o
 
 | io_method | read stream on | off | gain |
 | --- | --- | --- | --- |
-| `sync` | 38.12 s | 38.05 s | 1.00x |
-| `worker` | 37.49 s | 38.24 s | 1.02x |
-| `io_uring` | 38.03 s | 38.91 s | 1.02x |
+| `sync` | 40.25 s | 40.24 s | 1.00x |
+| `worker` | 39.44 s | 40.13 s | 1.02x |
+| `io_uring` | 40.10 s | 39.85 s | 0.99x |
 
 Across methods with the read stream on: `worker` 1.02x against `sync`, `io_uring`
 1.00x.
@@ -266,53 +270,43 @@ Reading the Parquet file pgColumnar wrote, 6,000,000 rows, count and sum:
 
 | reader | time |
 | --- | --- |
-| DuckDB `read_parquet` (stats-accelerated) | 8 ms |
-| pyarrow `read_table` (full materialization) | 128 ms |
+| DuckDB `read_parquet` (stats-accelerated) | 12 ms |
+| pyarrow `read_table` (full materialization) | 149 ms |
 
 These confirm the Parquet output is read by other engines without conversion.
 
 ## What changed since the previous run
 
-The previous version of this document recorded a run at commit `2f1320f` and
-flagged `count(*)` as slower than it should be, tracked as issue #133. That is
-fixed, and two further changes landed while this run was being written up. To
-measure honestly rather than compare across machines and days, the same harness
-was run on this machine on this day at each commit:
+Measured on the same machine, same harness, at three commits. The middle column
+is the run this document previously recorded.
 
-| metric | 2f1320f | f7adbdb | 1be027b | |
-| --- | --- | --- | --- | --- |
-| count(*) | 8.27 ms | 0.02 ms | 0.02 ms | 413x |
-| sum/avg over int | 8.04 ms | 0.53 ms | 0.53 ms | 15x |
-| covering count, index-only scan off | 200914.88 ms | 31845.77 ms | 689.21 ms | 291x |
-| DELETE 1000 rows by id range | not measured | 1509.5 ms | 22.8 ms | 66x |
-| count(*) with one row deleted | not measured | 222.28 ms | 0.18 ms | 1235x |
-| point lookup by id | 32.96 ms | 26.75 ms | 23.75 ms | 1.4x |
-| projection: 3 of 8 cols | 91.68 ms | 80.18 ms | 81.58 ms | 1.12x |
-| storage, all three tables | identical | identical | identical | no change |
+| metric | 2f1320f | 1be027b | 7a9c9f7 |
+| --- | --- | --- | --- |
+| count(*) | 8.27 ms | 0.02 ms | 0.02 ms |
+| sum/avg over int | 8.04 ms | 0.53 ms | 0.56 ms |
+| covering count, index-only scan off | 200,914 ms | 689 ms | 699 ms |
+| DELETE 1000 rows by id range | not measured | 22.8 ms | **14.7 ms** |
+| UPDATE 1000 rows, ids in row order | not measured | 20.78 ms | **14.28 ms** |
+| count(*) with one row deleted | 222.28 ms | 0.18 ms | 0.18 ms |
+| point lookup by indexed id | 32.96 ms | 23.75 ms | **1251.88 ms** |
+| storage, all three tables | identical | identical | identical |
 
-Four changes account for it:
+The mutation figures improved again, from the direct zone min/max comparison
+(#160) and the needed-columns fetch (#164).
 
-- **#133** fixed the aggregate path. The planner had been losing to a parallel
-  scan on cost, and `count(*)` was reading every column's zone maps and using none
-  of them.
-- **#148** cached the decoded row group for the length of a statement, so
-  fetching many rows from one group decodes it once.
-- **#152** replaced the walk to a row's position with a rank lookup, which is what
-  takes the index-only-scan-off shape from 31.8 s to 0.69 s and the delete from
-  1509 ms to 23 ms. Together with #148 that is issue #143 closed: the path is no
-  longer quadratic in the rows touched per group.
-- **#151** made the delete fallback per row group instead of per storage, so one
-  deleted row no longer costs the whole table its metadata answers.
+Two things do not appear in this table because they are not in the harness, and
+both are larger than anything in it:
 
-Nothing measured got slower.
+- **A wide table is no longer unusable for index-driven access.** 2,000 index
+  fetches reading one column of a 41-column table went from 1,001,374 ms to
+  614 ms when the lazily-decoding slot landed (#169), and an 11-column table from
+  284,148 ms to 159 ms. That is the cliff [issue #157] described, and it is gone.
+- **`ANALYZE` now collects statistics** (#159), including correlation, which is
+  what lets the planner see the locality `vacuum_sorted` and Z-ordering create.
+  Its cost is unmeasured here and is part of #171.
 
-The absolute ingestion and I/O figures in this document are higher than the
-previous run recorded (arrow import 18.5 s against 13.6 s, cold scans about 38 s
-against about 30 s), and they moved again between the two runs on this same day
-(arrow export 923 ms then 1029 ms) without any code touching that path.
-Re-running `2f1320f` today reproduces today's figures rather than the recorded
-ones, so this is the machine. It is the reason for the warning at the top about
-comparing ratios rather than milliseconds.
+The point lookup is the one number that moved the wrong way, and it moved a long
+way. See the note above it.
 
 ## Reading the results
 
