@@ -145,8 +145,18 @@ check "the visibility-only caller decodes nothing" \
 check "the reconstruct caller asks only for uncovered columns" \
 	"$(grep -c 'ColumnarReadRowByNumberCols(rel, snap, baseRow' "$SRC/columnar_projection.c")" "1"
 
-check "index deletion asks only whether the row is live" \
-	"$(grep -c 'ColumnarRowIsLive(rel, snapshot, rowNumber)' "$SRC/columnar_tableam.c")" "1"
+# Scoped to the function rather than counting a string across the file: the
+# string appears legitimately elsewhere now that the index fetch also asks only
+# for liveness, and a whole-file count turned that correct second use into a
+# failure.
+deltuples="$(awk '/^columnar_index_delete_tuples\(/,/^}/' "$SRC/columnar_tableam.c")"
+
+check "index deletion asks whether the row is live" \
+	"$(case "$deltuples" in *ColumnarRowIsLive*) echo yes ;; *) echo no ;; esac)" "yes"
+
+check "and does not decode the row to find out" \
+	"$(case "$deltuples" in *ColumnarReadRowByNumber*) echo "no (still decodes)" ;;
+		*) echo yes ;; esac)" "yes"
 
 # and the convention that made an empty set mean its opposite stays gone: the
 # worker takes an explicit flag, so "every column" cannot be spelled as a set

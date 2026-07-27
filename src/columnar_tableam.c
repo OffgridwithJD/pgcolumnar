@@ -280,10 +280,39 @@ columnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
 static void
 columnar_slot_force_full(TupleTableSlot *slot)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	ColumnarSlot *cslot;
 
+	/*
+	 * Callers hand us slots that are not ours. copyslot in particular takes a
+	 * source of any type -- the executor copies an ordinary virtual slot into a
+	 * columnar one on every INSERT -- and casting that to ColumnarSlot reads
+	 * past the end of it, so the deferred flag is whatever happened to be in
+	 * the next word and the relation pointer behind it is garbage. That is a
+	 * segfault on the plainest INSERT there is, which is how it was found.
+	 */
+	if (slot->tts_ops != &ColumnarSlotOps)
+		return;
+
+	cslot = (ColumnarSlot *) slot;
 	if (cslot->deferred && slot->tts_nvalid < slot->tts_tupleDescriptor->natts)
 		columnar_slot_decode_upto(slot, slot->tts_tupleDescriptor->natts);
+}
+
+/*
+ * The added fields have to start out cleared: a slot that is never used for a
+ * deferred fetch still has them read, and MakeTupleTableSlot does not know they
+ * are there.
+ */
+static void
+columnar_slot_init(TupleTableSlot *slot)
+{
+	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+
+	TTSOpsVirtual.init(slot);
+	cslot->deferred = false;
+	cslot->rel = NULL;
+	cslot->snapshot = NULL;
+	cslot->rowNumber = 0;
 }
 
 static void
@@ -291,6 +320,7 @@ columnar_slot_clear(TupleTableSlot *slot)
 {
 	ColumnarSlot *cslot = (ColumnarSlot *) slot;
 
+	Assert(slot->tts_ops == &ColumnarSlotOps);
 	cslot->deferred = false;
 	cslot->rel = NULL;
 	cslot->snapshot = NULL;
@@ -1589,6 +1619,7 @@ _PG_init(void)
 	ColumnarSlotOps = TTSOpsVirtual;
 	ColumnarSlotOps.base_slot_size = sizeof(ColumnarSlot);
 	ColumnarSlotOps.copy_heap_tuple = columnar_slot_copy_heap_tuple;
+	ColumnarSlotOps.init = columnar_slot_init;
 	ColumnarSlotOps.getsomeattrs = columnar_slot_getsomeattrs;
 	ColumnarSlotOps.clear = columnar_slot_clear;
 	ColumnarSlotOps.materialize = columnar_slot_materialize;
