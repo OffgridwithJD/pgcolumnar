@@ -20,6 +20,7 @@ OBJS = \
 	src/columnar_vacuum.o \
 	src/columnar_unique.o \
 	src/columnar_arrow.o \
+	src/columnar_flatbuffers.o \
 	src/columnar_thrift.o \
 	src/columnar_parquet_codec.o \
 	src/columnar_parquet.o \
