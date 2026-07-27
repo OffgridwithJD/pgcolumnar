@@ -1087,8 +1087,31 @@ columnar_tuple_fetch_row_version(Relation rel, ItemPointer tid,
 
 	ExecClearTuple(slot);
 
+	/*
+	 * Fall back to this transaction's write buffer, as the index fetch does.
+	 *
+	 * A row is given its stripe reservation -- and so its row number and item
+	 * pointer -- when it is buffered, not when the stripe is flushed. Between
+	 * those two moments the row has an address that nothing on disk answers to,
+	 * and a fetch by that address is not a fetch of a missing row.
+	 *
+	 * An AFTER INSERT ... FOR EACH ROW trigger lands exactly there (#179). The
+	 * trigger machinery records the TID when it queues the event and re-fetches
+	 * by it when the event fires, and after-row events fire in
+	 * AfterTriggerEndQuery -- before ExecutorEnd, and so before
+	 * finish_bulk_insert flushes the stripe. Every such trigger failed with
+	 * "failed to fetch tuple1 for AFTER trigger", taking its own INSERT down
+	 * with it.
+	 *
+	 * The buffered reader takes no locks and reads only process-local memory,
+	 * so this costs a search of the pending stripe and never a flush: writing a
+	 * partial stripe to satisfy a read would fragment storage for the sake of
+	 * data already in hand.
+	 */
 	if (!ColumnarReadRowByNumber(rel, snapshot, rowNumber,
-								 slot->tts_values, slot->tts_isnull))
+								 slot->tts_values, slot->tts_isnull) &&
+		!ColumnarBufferedRowByNumber(rel, rowNumber,
+									 slot->tts_values, slot->tts_isnull))
 		return false;
 
 	ExecStoreVirtualTuple(slot);
