@@ -2533,8 +2533,7 @@ pq_insert_sink(TupleTableSlot *slot, void *arg)
 	if (a->indexes != NULL)
 		ColumnarIndexInsertRow(a->indexes, a->rel, slot->tts_values,
 							   slot->tts_isnull,
-							   ColumnarItemPointerToRowNumber(&slot->tts_tid),
-							   true);
+							   ColumnarItemPointerToRowNumber(&slot->tts_tid));
 }
 
 static void
@@ -2866,7 +2865,7 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 	sinkarg.rel = rel;
 	sinkarg.cid = GetCurrentCommandId(true);
 	sinkarg.indexes = ColumnarRelationHasIndexes(rel)
-		? ColumnarIndexInsertBegin(rel) : NULL;
+		? ColumnarIndexInsertBegin(rel, true) : NULL;
 	/* insert every resolved file's rows; the per-file decode is bounded by
 	 * fileCtx. Each file is bound against the target's descriptor, so a directory
 	 * whose files disagree with the table errors rather than importing garbage. */
@@ -2888,7 +2887,16 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 		ColumnarIndexInsertEnd(sinkarg.indexes);
 
 	ExecDropSingleTupleTableSlot(slot);
-	table_close(rel, RowExclusiveLock);
+	/*
+	 * NoLock, not RowExclusiveLock: the lock has to outlive this function. A
+	 * deferred constraint queued by the load is fired at commit, and the
+	 * trigger machinery reopens the relation with NoLock on the assumption that
+	 * whoever queued the event still holds one (#168). Dropping it here aborts
+	 * an assert build in relation_open and is undefined on a non-assert one.
+	 * The lock is released with the transaction, as it is for an ordinary
+	 * INSERT.
+	 */
+	table_close(rel, NoLock);
 
 	PG_RETURN_INT64(total);
 }

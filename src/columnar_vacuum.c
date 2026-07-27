@@ -149,7 +149,7 @@ rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 
 		newRn = ColumnarWriteRow(ws, rel, values, isnull);
 		ColumnarProjectionFanoutRow(rel, ws, newRn, values, isnull);
-		ColumnarIndexInsertRow(ris, rel, values, isnull, newRn, false);
+		ColumnarIndexInsertRow(ris, rel, values, isnull, newRn);
 		moved++;
 	}
 	ColumnarFlushWriteStateForRelation(relid);
@@ -233,7 +233,7 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 	if (cands == NIL)
 		return 0;
 
-	ris = ColumnarIndexInsertBegin(rel);
+	ris = ColumnarIndexInsertBegin(rel, false);
 	foreach(lc, cands)
 	{
 		RewriteCandidate *c = (RewriteCandidate *) lfirst(lc);
@@ -381,7 +381,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	tuplesort_performsort(tsort);
 
 	/* write the sorted rows back as fresh groups, with online index maintenance */
-	ris = ColumnarIndexInsertBegin(rel);
+	ris = ColumnarIndexInsertBegin(rel, false);
 	writeState = ColumnarGetWriteState(rel);
 	while (tuplesort_gettupleslot(tsort, true, false, augSlot, NULL))
 	{
@@ -394,7 +394,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 		ColumnarProjectionFanoutRow(rel, writeState, newRn, augSlot->tts_values,
 									augSlot->tts_isnull);
 		ColumnarIndexInsertRow(ris, rel, augSlot->tts_values,
-							   augSlot->tts_isnull, newRn, false);
+							   augSlot->tts_isnull, newRn);
 	}
 	ColumnarFlushWriteStateForRelation(relid);
 	ColumnarIndexInsertEnd(ris);

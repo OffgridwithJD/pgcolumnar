@@ -453,4 +453,70 @@ ColumnarReindexRelation(Oid relid, int flags)
 							(pathkeys), (req_outer), (fdw_outer), (fdw_priv))
 #endif
 
+/* -------------------------------------------------------------------------
+ * Executor index maintenance on the import path (#168).
+ *
+ * Two signatures move independently here, so they get one macro each rather
+ * than one guard covering both -- the version they change at is not the same,
+ * and writing a single boundary is how main stopped compiling on 17 once
+ * before.
+ *
+ * ExecInitRangeTable: PG15 takes (estate, rangeTable). PG16 added permInfos,
+ * which is also when RTEPermissionInfo itself appeared. PG18 added
+ * unpruned_relids, which stays in PG19. We need no permissions checked (the
+ * caller has already checked its own) and prune nothing, so the extras are
+ * empty in every spelling.
+ *
+ * ExecInsertIndexTuples: PG19 reordered the arguments and replaced the three
+ * trailing bools with a flags word. We pass none of them -- this is a plain
+ * insert, errors on duplicates, and summarizing indexes are not special-cased
+ * -- so the flags value is 0 and the older spelling is three falses.
+ * ------------------------------------------------------------------------- */
+/*
+ * PG16 moved per-relation permission checking out of RangeTblEntry into a
+ * separate RTEPermissionInfo list, so the two spellings need different
+ * declarations as well as a different call. Either way we ask for nothing:
+ * requiredPerms of 0 means the executor checks no privilege here, because the
+ * importer has already checked its caller's.
+ */
+#if PG_VERSION_NUM >= 160000
+#define COLUMNAR_RTE_PERMINFO_DECL(v) \
+	RTEPermissionInfo *v = makeNode(RTEPermissionInfo)
+#define COLUMNAR_RTE_PERMINFO_INIT(rte, v, oid) \
+	do { \
+		(v)->relid = (oid); \
+		(v)->requiredPerms = 0; \
+		(rte)->perminfoindex = 1; \
+	} while (0)
+#else
+#define COLUMNAR_RTE_PERMINFO_DECL(v) void *v = NULL
+#define COLUMNAR_RTE_PERMINFO_INIT(rte, v, oid) \
+	do { \
+		(void) (v); \
+		(rte)->requiredPerms = 0; \
+	} while (0)
+#endif
+
+#if PG_VERSION_NUM >= 180000
+#define COLUMNAR_EXEC_INIT_RANGE_TABLE(estate, rte, perm) \
+	ExecInitRangeTable((estate), list_make1(rte), list_make1(perm), NULL)
+#elif PG_VERSION_NUM >= 160000
+#define COLUMNAR_EXEC_INIT_RANGE_TABLE(estate, rte, perm) \
+	ExecInitRangeTable((estate), list_make1(rte), list_make1(perm))
+#else
+#define COLUMNAR_EXEC_INIT_RANGE_TABLE(estate, rte, perm) \
+	ExecInitRangeTable((estate), list_make1(rte))
+#endif
+
+#if PG_VERSION_NUM >= 190000
+#define COLUMNAR_EXEC_INSERT_INDEX_TUPLES(rri, slot, estate) \
+	ExecInsertIndexTuples((rri), (estate), 0, (slot), NIL, NULL)
+#elif PG_VERSION_NUM >= 160000
+#define COLUMNAR_EXEC_INSERT_INDEX_TUPLES(rri, slot, estate) \
+	ExecInsertIndexTuples((rri), (slot), (estate), false, false, NULL, NIL, false)
+#else
+#define COLUMNAR_EXEC_INSERT_INDEX_TUPLES(rri, slot, estate) \
+	ExecInsertIndexTuples((rri), (slot), (estate), false, false, NULL, NIL)
+#endif
+
 #endif							/* COLUMNAR_COMPAT_H */

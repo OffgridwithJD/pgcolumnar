@@ -1975,7 +1975,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 	slot = table_slot_create(rel, NULL);
 	cid = GetCurrentCommandId(true);
 	indexes = ColumnarRelationHasIndexes(rel)
-		? ColumnarIndexInsertBegin(rel) : NULL;
+		? ColumnarIndexInsertBegin(rel, true) : NULL;
 
 	/*
 	 * Per-row scratch context. Reconstructing a nested value (array/composite)
@@ -2124,8 +2124,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 					if (indexes != NULL)
 						ColumnarIndexInsertRow(indexes, rel, slot->tts_values,
 											   slot->tts_isnull,
-											   ColumnarItemPointerToRowNumber(&slot->tts_tid),
-											   true);
+											   ColumnarItemPointerToRowNumber(&slot->tts_tid));
 					MemoryContextSwitchTo(oldCtx);
 					MemoryContextReset(rowCtx);
 					total++;
@@ -2151,6 +2150,15 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 		ColumnarIndexInsertEnd(indexes);
 
 	ExecDropSingleTupleTableSlot(slot);
-	table_close(rel, RowExclusiveLock);
+	/*
+	 * NoLock, not RowExclusiveLock: the lock has to outlive this function. A
+	 * deferred constraint queued by the load is fired at commit, and the
+	 * trigger machinery reopens the relation with NoLock on the assumption that
+	 * whoever queued the event still holds one (#168). Dropping it here aborts
+	 * an assert build in relation_open and is undefined on a non-assert one.
+	 * The lock is released with the transaction, as it is for an ordinary
+	 * INSERT.
+	 */
+	table_close(rel, NoLock);
 	PG_RETURN_INT64(total);
 }
