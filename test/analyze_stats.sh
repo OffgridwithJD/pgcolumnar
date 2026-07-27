@@ -216,4 +216,49 @@ check "a selective equality is estimated from the data, not the 0.5% default" \
 		'BEGIN { r = e / t; print (r > 0.2 && r < 0.5) ? "yes" : "no (" e " of " t ")" }')" \
 	"yes"
 
+# --- 5. statistics must not cost the index out of a point lookup (#171) --------
+
+# Collecting statistics made one query shape dramatically worse. The custom scan
+# inherits the seqscan's cost, but add_path frees a dominated path, so when an
+# index path beats the seqscan there is no seqscan left to inherit from -- and the
+# fallback was rel->rows, an output row count used as a cost. With real statistics
+# a selective predicate estimates one row, so a full scan was priced at 1.00 and
+# won. Measured on a 6M-row table: 23.75 ms before ANALYZE, 1251.88 ms after.
+#
+# Both checks below are behavioural rather than assertions about a cost number,
+# so neither can be satisfied by a differently-shaped wrong cost.
+
+psql_run "CREATE INDEX IF NOT EXISTS as_c_id ON as_c (id); ANALYZE as_c;" >/dev/null
+
+target=$((ROWS / 2))
+plan="$(q "EXPLAIN (COSTS off) SELECT * FROM as_c WHERE id = $target;")"
+echo "-- point-lookup plan after ANALYZE: $(printf '%s' "$plan" | head -1)"
+
+check "a point lookup on an indexed column still uses the index after ANALYZE" \
+	"$(  grep -qE 'Index (Only )?Scan|Bitmap Heap Scan' <<<"$plan" \
+		&& echo yes || echo "no ($(printf '%s' "$plan" | head -1))")" \
+	"yes"
+
+# The consequence, independent of plan shape: having the index available must
+# actually save work. The comparison is against the same query with the index
+# denied rather than against a fixed number of rows, so it stays discriminating
+# whatever the row group size is -- a fixed threshold would only separate the two
+# for as long as a group happens to be larger than it.
+discarded() {  # extra SET statements -> rows the filter threw away
+	local ea
+	ea="$(q "$1 EXPLAIN (ANALYZE, COSTS off, TIMING off, SUMMARY off)
+		SELECT * FROM as_c WHERE id = $target;")"
+	awk 'match($0, /Rows Removed by Filter: [0-9]+/) {
+		s = substr($0, RSTART, RLENGTH); sub(/[^0-9]+/, "", s); t += s } END { print t + 0 }' <<<"$ea"
+}
+
+with_index="$(discarded "")"
+no_index="$(discarded "SET enable_indexscan = off; SET enable_bitmapscan = off;")"
+echo "-- rows discarded to return one row: ${with_index} with the index, ${no_index} without it"
+
+check "having an index available saves the point lookup real work" \
+	"$(awk -v a="$with_index" -v b="$no_index" \
+		'BEGIN { print (b > 0 && a < b / 2) ? "yes" : "no (" a " with the index, " b " without)" }')" \
+	"yes"
+
 pgc_summary
