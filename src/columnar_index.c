@@ -31,10 +31,10 @@
  * parameter rather than a second implementation.
  *
  * A deferrable unique constraint is still enforced immediately here, where the
- * executor would defer it to commit. Matching that needs UNIQUE_CHECK_PARTIAL
- * plus a queued recheck through the after-trigger machinery, which is a larger
- * piece of work; enforcing early is over-strict rather than unsound, and it is
- * the safe direction to be wrong in.
+ * executor would defer it to commit. Tracked as issue #168, which carries the
+ * measurement and the UNIQUE_CHECK_PARTIAL plus queued-recheck sketch; enforcing
+ * early is over-strict rather than unsound, which is the safe direction to be
+ * wrong in while it is open.
  *
  * Written fresh for pgColumnar from the public PostgreSQL index API.
  *

@@ -547,6 +547,26 @@ extern void ColumnarFreeLivenessCache(ColumnarLivenessCache *cache);
 extern bool ColumnarReadRowByNumber(Relation rel, Snapshot snapshot,
 									uint64 rowNumber, Datum *values, bool *nulls);
 
+/*
+ * Decode exactly the columns in `needed` (0-based attnums); every other column
+ * reads as null. An empty or NULL set decodes nothing, which is what it says:
+ * this deliberately has no "NULL means all" convention, because a Bitmapset
+ * cannot distinguish empty from NULL, so a caller whose computed set came out
+ * empty would silently get the opposite of what it asked for. For every column
+ * call ColumnarReadRowByNumber, which takes no set.
+ *
+ * Decoding every column regardless makes a wide table exceed the fetch cache's
+ * size cap, so the entry is dropped after every fetch and the group is decoded
+ * again for the next row (issue #157).
+ */
+extern bool ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot,
+										uint64 rowNumber, Datum *values,
+										bool *nulls, Bitmapset *needed);
+
+/* Is the row visible? Decodes nothing. */
+extern bool ColumnarRowIsLive(Relation rel, Snapshot snapshot,
+							  uint64 rowNumber);
+
 /* -------------------------------------------------------------------------
  * Decoded chunk group (columnar_vector.c aggregate path)
  *
