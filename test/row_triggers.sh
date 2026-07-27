@@ -93,8 +93,25 @@ both "a multi-row insert fires once per row with the right values" 2
 #     1500 rows at stripe_row_limit=100000  -> fails
 #
 # An insert that crosses the limit therefore cannot be made to fail by making it
-# bigger -- crossing is what rescues it. The case is kept and now says what it
-# is: a control that passed before the fix and has to keep passing after it.
+# bigger -- crossing is what rescues it, and the mechanism is worth writing down
+# because it is not obvious:
+#
+#   1. the stripe fills mid-statement and flushes, so the earliest rows are on
+#      disk before any trigger runs
+#   2. the first trigger's fetch therefore succeeds, and its body runs
+#   3. the body is itself a statement, and pgColumnar's ExecutorEnd hook calls
+#      ColumnarFlushAllPendingWrites when it ends -- flushing the outer INSERT's
+#      remaining buffered rows
+#   4. every later fetch then finds its row on disk
+#
+# So one successful fetch rescues the whole statement, through the trigger body.
+# Confirmed by removing the SQL from the body: with a trigger that only does
+# RETURN NULL, no ExecutorEnd fires between rows, and 1200 rows at a limit of
+# 1000 give 1000 successful fetches and then a failure on row 1001 -- exactly
+# the first buffered row.
+#
+# The case is kept and now says what it is: a control that passed before the fix
+# and has to keep passing after it.
 psql_run "DROP TABLE IF EXISTS tr_c3; DROP TABLE IF EXISTS tr_h3;
 	SET pgcolumnar.stripe_row_limit = 1000;
 	CREATE TABLE tr_c3 (id int, val int) USING pgcolumnar;
