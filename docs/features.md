@@ -48,6 +48,13 @@ settings see the [configuration reference](configuration.md); for constraints se
   this: it is answered from each row group's stored row count and reads no column
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
   aggregate over the scan instead.
+- Column statistics: `ANALYZE` samples rows spread across row groups and stores
+  null fraction, distinct counts, most-common values, histograms and correlation,
+  so predicates are estimated from the data. Correlation is what lets the planner
+  see the locality `pgcolumnar.vacuum_sorted` and Z-order clustering create.
+- Fetch by row number decodes only the columns the executor asks for and reuses
+  the decoded row group for the rest of the statement, so an index-driven read of
+  a wide table does not decode columns it will not return.
 - Parallel scan across a table's row groups.
 - Read stream prefetch of block reads on PostgreSQL 17 and later
   (`pgcolumnar.enable_read_stream`).
@@ -125,7 +132,9 @@ coverage.
   `pgcolumnar.export_parquet(table, path)`, both without a libarrow or libparquet
   dependency.
 - Import from Arrow and Parquet: `pgcolumnar.import_arrow(table, path)` and
-  `pgcolumnar.import_parquet(table, path)` into an existing target table. The
+  `pgcolumnar.import_parquet(table, path)` into an existing target table The import
+  maintains every index on the target and enforces unique and exclusion
+  constraints, so it cannot leave the table in a state ordinary DML would refuse. The
   Parquet reader parses Thrift metadata, decompresses uncompressed, Snappy, GZIP,
   ZSTD, and LZ4_RAW pages, and decodes PLAIN and dictionary encodings from
   data-page versions 1 and 2.
