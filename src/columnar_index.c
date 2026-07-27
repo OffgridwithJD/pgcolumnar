@@ -16,13 +16,25 @@
  * (issue #153): an index scan over an imported table returned nothing, and a
  * unique index accepted the same key twice.
  *
- * The difference between the two callers is uniqueness. A rewrite moves rows
- * that already satisfied every constraint, and the row it is replacing is still
- * visible while it does, so checking uniqueness there would conflict with the
- * row being replaced; it passes UNIQUE_CHECK_NO. An import inserts genuinely new
- * rows, so a duplicate has to be caught, and it passes UNIQUE_CHECK_YES for the
- * unique indexes. That is the only behavioural difference, and it is a
+ * The difference between the two callers is whether constraints are enforced. A
+ * rewrite moves rows that already satisfied every constraint, and the row it is
+ * replacing is still visible while it does, so a conflict check there would find
+ * the row against itself; it enforces nothing. An import inserts genuinely new
+ * rows, so it enforces both kinds:
+ *
+ *   unique indexes     UNIQUE_CHECK_YES, which index_insert applies itself
+ *   exclusion          check_exclusion_constraint after the entry goes in,
+ *                      because index_insert does not enforce one
+ *
+ * The second was missing when this file was first written, so an import could
+ * leave a table in a state an ordinary INSERT would have refused. That is a
  * parameter rather than a second implementation.
+ *
+ * A deferrable unique constraint is still enforced immediately here, where the
+ * executor would defer it to commit. Matching that needs UNIQUE_CHECK_PARTIAL
+ * plus a queued recheck through the after-trigger machinery, which is a larger
+ * piece of work; enforcing early is over-strict rather than unsound, and it is
+ * the safe direction to be wrong in.
  *
  * Written fresh for pgColumnar from the public PostgreSQL index API.
  *
@@ -66,11 +78,25 @@ ColumnarIndexInsertBegin(Relation rel)
 		IndexInfo  *info;
 
 		/*
-		 * An index that is not ready or not valid is one a concurrent build has
-		 * not finished with. That build is responsible for the rows it covers,
-		 * so inserting into it here would double-insert.
+		 * indisready alone, which is the test the executor applies:
+		 * BuildIndexInfo passes indisready as ii_ReadyForInserts and
+		 * ExecInsertIndexTuples skips on that, never consulting indisvalid.
+		 *
+		 * The difference is the whole point of indisready. CREATE INDEX
+		 * CONCURRENTLY sets it before its second scan precisely so that
+		 * concurrent writers maintain the index while the build runs -- the
+		 * builder is not responsible for rows written after it started, so
+		 * skipping an indisready index loses them rather than avoiding a
+		 * double insert.
+		 *
+		 * Not reachable through CREATE INDEX CONCURRENTLY today, because
+		 * columnar_index_validate_scan is unsupported and the build fails
+		 * before the index becomes valid. It is reachable as debris: a failed
+		 * concurrent build leaves the index ready but invalid until someone
+		 * drops or reindexes it, and in that state an ordinary INSERT
+		 * maintains it while this path would not.
 		 */
-		if (!irel->rd_index->indisready || !irel->rd_index->indisvalid)
+		if (!irel->rd_index->indisready)
 		{
 			index_close(irel, RowExclusiveLock);
 			continue;
@@ -131,6 +157,22 @@ ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
 		FormIndexDatum(st->infos[i], st->slot, st->estate, ivalues, inulls);
 		index_insert(st->rels[i], ivalues, inulls, &tid, rel,
 					 check, false, st->infos[i]);
+
+		/*
+		 * An exclusion constraint is not a unique index and index_insert does
+		 * not enforce it: the executor inserts the entry and then scans for a
+		 * conflicting one. Without this an import could put a table into a
+		 * state an ordinary INSERT would have refused -- entries present, the
+		 * constraint violated, and nothing raised, which is the shape of the
+		 * defect #153 was about.
+		 *
+		 * Only when the caller is enforcing constraints at all. A rewrite moves
+		 * rows that already satisfied this one, and the row it replaces is
+		 * still visible, so checking there would find the row against itself.
+		 */
+		if (enforceUnique && st->infos[i]->ii_ExclusionOps != NULL)
+			check_exclusion_constraint(rel, st->rels[i], st->infos[i], &tid,
+									   ivalues, inulls, st->estate, false);
 	}
 	ResetPerTupleExprContext(st->estate);
 }
