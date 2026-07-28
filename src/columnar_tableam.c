@@ -831,8 +831,16 @@ columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
 	if ((uint64) blockno * COLUMNAR_BYTES_PER_PAGE < COLUMNAR_FIRST_LOGICAL_OFFSET)
 		return;
 
-	logicalOffset = (uint64) blockno * COLUMNAR_BYTES_PER_PAGE -
-		COLUMNAR_FIRST_LOGICAL_OFFSET;
+	/*
+	 * A row group's file_offset is already an absolute logical offset -- the
+	 * first one a table can have is COLUMNAR_FIRST_LOGICAL_OFFSET itself -- so
+	 * the block's offset is compared to it directly. Subtracting the first
+	 * offset here as well shifted every block two blocks low, and a table whose
+	 * only group started at the very beginning matched no block at all:
+	 * ANALYZE then scanned every page, was offered nothing, and recorded
+	 * reltuples = 0 for a table with rows in it.
+	 */
+	logicalOffset = (uint64) blockno * COLUMNAR_BYTES_PER_PAGE;
 
 	foreach(lc, st->rowGroups)
 	{
