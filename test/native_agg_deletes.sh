@@ -86,9 +86,29 @@ differential "after every group is dirtied"
 
 # a fresh pair: the table above is now heavily deleted, and this measures the
 # cost of *a* delete, not of many
+# Ten row groups, set per table rather than per session. The margin below
+# depends on this: one dirty group out of three is a third of the table before
+# any fixed overhead, measured against a half bound, and that is too little room.
+#
+# set_options rather than SET, because psql_run is one psql -c per call and so
+# one session per call. A SET here reaches only this statement, and a later
+# refactor that splits the call would silently drop it -- which is exactly what
+# the first version of this fix did: it set the GUC in the psql_run that builds
+# ad_c, forty lines above, and ad_t was still built with three groups.
 psql_run "DROP TABLE IF EXISTS ad_t;
 	CREATE TABLE ad_t (id int, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ad_t', stripe_row_limit => 40000);
 	INSERT INTO ad_t SELECT g, g % 1000 FROM generate_series(1, $ROWS) g;" >/dev/null 2>&1
+
+# The fixture's premise, asserted rather than printed. Every margin argument
+# below depends on this being ten, so a change that quietly returns it to three
+# fails here, naming the fixture, instead of resurfacing later as a timing check
+# that fails for an apparently unrelated reason.
+t_groups="$(q "SELECT count(*) FROM pgcolumnar.row_group r
+	JOIN pgcolumnar.storage s ON s.storage_id = r.storage_id
+	WHERE s.relation_oid = 'ad_t'::regclass;")"
+
+check "the timing fixture has the row groups its margin assumes" "$t_groups" "10"
 
 # Timed inside the server, best of three. psql's connect floor is about 15 ms and
 # would swamp a query that should take a fraction of one, so a client-side
