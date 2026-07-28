@@ -267,6 +267,7 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 	List	   *existing;
 	ListCell   *lc;
 	int			targetId = -1;
+	uint64		targetStorageId = 0;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -294,6 +295,7 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 		if (strcmp(p->name, projname) == 0)
 		{
 			targetId = p->projectionId;
+			targetStorageId = p->projStorageId;
 			break;
 		}
 	}
@@ -308,8 +310,17 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("the base projection cannot be dropped")));
 
-	/* phase 1 writes no data to a projection's storage, so there is nothing to
-	 * free yet; later phases free the projection's stripes here. */
+	/*
+	 * Free the projection's own storage before forgetting where it was. The
+	 * comment that stood here said phase 1 wrote no data to a projection's
+	 * storage so there was nothing to free; that stopped being true once
+	 * projections were written, and the metadata was orphaned from then on --
+	 * row groups, chunks, zone maps and bloom filters describing storage
+	 * nothing could name any more, because the row naming it had just been
+	 * deleted.
+	 */
+	if (targetStorageId != storageId)
+		ColumnarDeleteMetadata(targetStorageId);
 	ColumnarDeleteProjectionRow(storageId, targetId);
 
 	table_close(rel, ShareUpdateExclusiveLock);

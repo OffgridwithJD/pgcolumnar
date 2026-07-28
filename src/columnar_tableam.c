@@ -1686,6 +1686,26 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 		if (rel->rd_tableam == &columnar_am_methods)
 		{
 			uint64		storageId = ColumnarStorageId(rel);
+			List	   *projs = ColumnarListProjections(storageId);
+			ListCell   *lc;
+
+			/*
+			 * A projection keeps its own storage, so dropping the table has to
+			 * drop that too. Deleting only the base storage left the
+			 * projection's row groups, chunks, zone maps and bloom filters
+			 * behind with no relation to reach them from: metadata for a table
+			 * that no longer exists, accumulating one projection's worth per
+			 * drop. This is the same loop columnar_vacuum.c runs when it
+			 * rewrites into fresh storage.
+			 */
+			foreach(lc, projs)
+			{
+				ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+
+				if (p->projStorageId != storageId)
+					ColumnarDeleteMetadata(p->projStorageId);
+				ColumnarDeleteProjectionRow(storageId, p->projectionId);
+			}
 
 			ColumnarDeleteMetadata(storageId);
 			ColumnarDeleteOptions(objectId);
