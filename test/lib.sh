@@ -300,6 +300,27 @@ check() {
 	fi
 }
 
+# Is this query's plan the columnar custom scan?
+#
+# For a check that reads a counter out of EXPLAIN and asserts on it. Those
+# counters exist only on this node, so if the planner stops choosing it the read
+# returns nothing and the check fails describing skipping, or bloom, or
+# clustering -- anything except the plan change that actually happened.
+#
+# "Columnar Projected Columns" is the node's own marker: no other node reports
+# it, and the vectorized aggregate node reports "Columnar Vectorized Aggregates"
+# instead. A positive grep for the marker is deliberately not an absence test --
+# a plan that fell back to a sequential scan has no Columnar lines to be absent,
+# so an absence test would pass for exactly the case worth catching.
+#
+# EXPLAIN without ANALYZE is enough: the line comes from the plan rather than the
+# run, so the assertion costs a plan and does not execute the query.
+pgc_is_columnar_scan() {	# query -> yes|no
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "EXPLAIN (COSTS OFF) $1" 2>/dev/null \
+		| grep -q 'Columnar Projected Columns' && echo yes || echo no
+}
+
 # Order-independent set hash of an arbitrary query's result. The row is cast to
 # text as a whole composite so any column list works. No single quotes are used
 # in the wrapper (dollar-quoting + chr(10)) so the inner query may contain its

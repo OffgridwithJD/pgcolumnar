@@ -45,6 +45,11 @@ check "bloom rows written" \
 	"$(q "SELECT count(*) FROM pgcolumnar.bloom WHERE storage_id = pgcolumnar.get_storage_id('n') AND column_index = 1;")" \
 	"10"
 
+# The node, before any counter read out of it: the skip counts below come from
+# the columnar custom scan and from nowhere else.
+check "the plan under test is a columnar custom scan" \
+	"$(pgc_is_columnar_scan "SELECT id FROM n WHERE tag = $PROBE")" "yes"
+
 # Equality probe result parity.
 check "equality probe parity" \
 	"$(pgc_set_hash "SELECT id, tag FROM n WHERE tag = $PROBE")" \

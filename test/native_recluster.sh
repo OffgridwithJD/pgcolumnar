@@ -50,6 +50,11 @@ check "box parity (pre-recluster)" \
 	"$(pgc_set_hash "SELECT id, x, y, payload FROM n WHERE $BOX")" \
 	"$(pgc_set_hash "SELECT id, x, y, payload FROM h WHERE $BOX")"
 
+# The node, before any counter read out of it: the skip counts below are
+# reported by the columnar custom scan and by nothing else.
+check "the plan under test is a columnar custom scan" \
+	"$(pgc_is_columnar_scan "SELECT id FROM n WHERE $BOX")" "yes"
+
 before="$(skipped "SELECT id FROM n WHERE $BOX")"; before="${before:-0}"
 
 # Online recluster by (x, y).
