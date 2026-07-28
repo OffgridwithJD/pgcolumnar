@@ -103,6 +103,73 @@ So the revised order is:
 3. **A batching entry point**, if anything above still wants one. It is not the
    place to start and may not be needed at all.
 
+## Re-measured after #202, and what is left
+
+Step 1 has since been half answered by `encode_effort` (#202), so the numbers
+above no longer describe the tree. Re-measured on PostgreSQL 17.10 non-assert,
+**6,000,000 rows**, ratios against a heap insert of the same rows (ratios rather
+than millisecond counts, so common-mode load on the box cancels):
+
+| shape | effort=full | effort=fast | what fast recovers |
+| --- | --- | --- | --- |
+| 1 text column, low cardinality (`'name-'||(g%1000)`) | 3.83x | **3.01x** | 21% |
+| 1 text column, high entropy (`sha256`, 76 chars) | 6.48x | **1.94x** | 70% |
+| 5-col mixed, low-cardinality text | 5.59x | 5.55x | nothing |
+| 5-col mixed, high-entropy text | 8.83x | **4.13x** | 53% |
+
+And the per-column cost, integers only, no encoding search in play:
+
+| shape | heap | columnar | ratio |
+| --- | --- | --- | --- |
+| 1 column (bigint) | 2501 ms | **1671 ms** | **0.67x, faster than heap** |
+| 2 columns | 2318 ms | 2636 ms | 1.14x |
+| 4 columns | 2674 ms | 6744 ms | 2.52x |
+
+Three things follow, and they redirect what is left of this issue.
+
+**The knob solved the case it was built for, and only that case.** On high-entropy
+text `encode_effort = fast` takes 6.48x to 1.94x, which is near parity with heap
+for a format writing a fraction of the bytes. That is step 1 delivered for the
+shape where the FSST search was the cost.
+
+**It does not touch low-cardinality text, which is the more common shape.** Names,
+regions, categories, statuses: 3.83x becomes 3.01x, a fifth of it. `fast` skips
+the FSST search, so by elimination the remaining 3.01x is *not* FSST -- it is the
+dictionary path, the value stream, zone maps and compression. Nothing has
+attributed that yet, and the 5-column low-cardinality row shows why it matters:
+5.59x with the knob doing nothing at all. **This is the first thing to measure,
+and it should be an ablation, not a design.**
+
+**The per-column numeric cost is real and additive.** One bigint column beats
+heap; four integer columns cost 2.5x it. Heap is nearly flat across the same
+range (2501 to 2674 ms) because row overhead dominates and narrow columns are
+almost free to add. Columnar pays roughly 1 to 2 seconds per extra column per 6M
+rows. That is the tax on wide tables, and it is independent of text entirely.
+
+**A note on what column-at-a-time can and cannot buy.** Step 2 above applies only
+to `import_arrow` / `import_parquet`, where a column store is genuinely on both
+ends. `INSERT ... SELECT` has no columnar source -- the rows arrive from a heap
+scan -- so the per-row shape is not removable there, and the per-column costs
+above are what would remain. Since import already measures the same as an
+ordinary insert, step 2's ceiling is the slot round trip alone, not the encoding
+work underneath it. Worth stating before anyone budgets for it.
+
+### Revised order
+
+1. **Ablate the low-cardinality text path** at `encode_effort = fast`, separating
+   dictionary build, value stream, zone maps and compression. 3.01x with the
+   shipped knob already applied is the number to explain. No design until it is
+   attributed.
+2. **The per-column numeric tax.** ~1 to 2 s per column per 6M rows, additive,
+   and it sets the floor for every wide table regardless of type.
+3. **Column-at-a-time transfer** for the importers only, scoped by what step 1
+   and 2 leave on the table rather than by the original 4.9x.
+
+The headline number in this document should be read as shape-dependent, not as a
+single figure: measured today it ranges from **0.67x** (one integer column,
+faster than heap) to **8.83x** (five columns with long high-entropy text at full
+effort). "Bulk load is 4.9x slower than heap" was one point on that curve.
+
 ## Not in scope
 
 `COPY` into a columnar table goes through the same write path, so it benefits
