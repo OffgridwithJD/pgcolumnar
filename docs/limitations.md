@@ -165,9 +165,23 @@ on whether the filter was pushed down.
   columnar tables, which are WAL-logged relations.
 - `pg_dump` and `pg_restore` handle columnar tables. The target server must have
   the extension installed and preloaded.
-- Logical decoding reads heap-tuple WAL records. Changes to columnar tables are
-  not emitted through logical decoding, so logical replication does not carry
-  them. Use physical replication for columnar tables.
+- Logical decoding reads heap-tuple WAL records. Columnar data reaches WAL as
+  full-page images, which carry no tuple structure, so changes to columnar
+  tables are not emitted through logical decoding and logical replication does
+  not carry them. Use physical replication for columnar tables.
+
+  A decoding slot is not silent about a columnar table, which is the part worth
+  knowing before relying on one. The metadata catalog is made of ordinary heap
+  tables, so a slot delivers inserts and updates to `pgcolumnar.storage`,
+  `pgcolumnar.row_group`, `pgcolumnar.column_chunk`, `pgcolumnar.zone_map` and
+  `pgcolumnar.delete_vector` as the table is written. A consumer subscribed to
+  all tables therefore receives a stream of internal bookkeeping, including
+  encoded chunk descriptors as bytea, and none of the table's own rows. Filter
+  the `pgcolumnar` schema out of any publication.
+
+  To capture changes from a columnar table today, use a row trigger that writes
+  to a heap table and decode that. The recipe is in
+  [user-guide.md](user-guide.md#capture-changes-for-replication-or-cdc).
 
 ## Import and export type coverage
 

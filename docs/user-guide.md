@@ -166,6 +166,86 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 --     Files: 4
 ```
 
+## Capture changes for replication or CDC
+
+Logical decoding does not carry changes to a columnar table. Columnar data
+reaches WAL as full-page images, which carry no tuple structure for a decoder to
+read, so a replication slot never sees the rows. See
+[limitations](limitations.md#replication-and-backup).
+
+A slot is not quiet about the table, though. The metadata catalog is made of
+ordinary heap tables, so a slot subscribed to everything delivers the internal
+bookkeeping and none of the data:
+
+```
+table pgcolumnar.row_group:    INSERT: storage_id[bigint]:10000000000 group_number[bigint]:1 ...
+table pgcolumnar.column_chunk: INSERT: ... encoding_descriptor[bytea]:'\x020001...'
+table pgcolumnar.zone_map:     INSERT: ... minimum[bytea]:'\x0100000000000000' ...
+table pgcolumnar.delete_vector: UPDATE: ... bitmap[bytea]:'\x03' deleted_count[integer]:2
+```
+
+Exclude the `pgcolumnar` schema from any publication.
+
+To capture the changes themselves, write them to a heap table with a row trigger
+and decode that table. Row triggers fire on columnar tables and see the same
+rows a heap table would.
+
+```sql
+CREATE TABLE events (id bigint primary key, kind text, amount int)
+    USING pgcolumnar;
+
+CREATE TABLE events_cdc (
+    seq    bigserial primary key,
+    op     text,
+    id     bigint,
+    kind   text,
+    amount int
+);
+
+CREATE FUNCTION events_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        INSERT INTO events_cdc (op, id, kind, amount)
+            VALUES ('DELETE', OLD.id, OLD.kind, OLD.amount);
+    ELSE
+        INSERT INTO events_cdc (op, id, kind, amount)
+            VALUES (TG_OP, NEW.id, NEW.kind, NEW.amount);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER events_cdc_t AFTER INSERT OR UPDATE OR DELETE ON events
+    FOR EACH ROW EXECUTE FUNCTION events_capture();
+```
+
+The capture table is a heap table, so a slot carries it:
+
+```
+table public.events_cdc: INSERT: seq[bigint]:1 op[text]:'INSERT' id[bigint]:1 kind[text]:'sale'   amount[integer]:100
+table public.events_cdc: INSERT: seq[bigint]:3 op[text]:'UPDATE' id[bigint]:1 kind[text]:'sale'   amount[integer]:150
+table public.events_cdc: INSERT: seq[bigint]:4 op[text]:'DELETE' id[bigint]:2 kind[text]:'refund' amount[integer]:50
+```
+
+Four properties of this arrangement are worth knowing.
+
+An `UPDATE` arrives as one `UPDATE`. A columnar update is a delete of the old row
+and an insert of a new one internally, but the trigger fires once per row event,
+so the capture table records what the statement did rather than how the storage
+did it.
+
+The capture is transactional. The trigger runs in the same transaction as the
+statement, so a rolled back transaction leaves no captured rows, and the captured
+rows commit with the data.
+
+It costs a heap row per changed row, in write time and in space. Bulk loads are
+the case to think about before enabling it: a load of ten million rows writes ten
+million heap rows as well.
+
+The capture table needs pruning. Nothing deletes from it. Delete rows once the
+consumer has confirmed them, and remember that the deletes are themselves
+decoded unless the consumer filters them.
+
 ## Next steps
 
 - Operate tables in production: [Administration](administration.md).
