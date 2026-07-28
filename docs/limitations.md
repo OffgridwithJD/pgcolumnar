@@ -132,6 +132,13 @@ other than where the feature is used:
   `ALTER TABLE ADD CONSTRAINT` reject the constraint rather than accepting one
   that could never be satisfied. A columnar table on the child side of a foreign
   key is unaffected and works normally.
+- **Converting a table that is already referenced by a foreign key is refused
+  for the same reason.** `ALTER TABLE ... SET ACCESS METHOD pgcolumnar`, and
+  `pgcolumnar.alter_table_set_access_method`, reach the identical configuration
+  from the other side, so they are rejected while any foreign key references the
+  table. Drop the constraint first if the table should be columnar. Converting
+  the referencing side, and converting a table no foreign key points at, are
+  unaffected.
 - `INSERT ... ON CONFLICT DO UPDATE` takes a row lock and raises the same error.
   `ON CONFLICT DO NOTHING` does not, and works.
 
