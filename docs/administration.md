@@ -74,6 +74,23 @@ SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
 
 To compact every columnar table in a schema, use `pgcolumnar.vacuum_full`.
 
+`pgcolumnar.vacuum_sorted` sorts ascending on its columns, which tightens the
+minimum and maximum of the leading column. To tighten several columns at once,
+use `pgcolumnar.cluster`, which orders rows by a Z-order (Morton) curve over the
+columns given, so multi-column range and point filters skip more:
+
+```sql
+SELECT pgcolumnar.cluster('events', 'customer_id', 'ts');
+```
+
+**`pgcolumnar.cluster` holds `AccessExclusiveLock` for its whole run**, like
+PostgreSQL's own `CLUSTER` and `VACUUM FULL`: it rewrites the relation and swaps
+the file, so reads and writes on the table block until it finishes. Use it for an
+initial bulk reorganisation, on a table you can take offline.
+`pgcolumnar.recluster` is the online form of the same idea and is described
+below; prefer it on a live table. Neither changes query results — both only
+reorder physical storage.
+
 Leave autovacuum on. It maintains visibility-map bits and statistics for columnar
 tables. Schedule `pgcolumnar.vacuum` separately based on delete and update volume.
 

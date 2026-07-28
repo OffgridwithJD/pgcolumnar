@@ -60,6 +60,24 @@ but are often queried by range.
 SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
 ```
 
+### pgcolumnar.cluster(tablename regclass, VARIADIC columns name[])
+
+Rewrites a columnar table with its rows ordered by a Z-order (Morton)
+space-filling curve over the given columns. Where `vacuum_sorted` sorts ascending
+and so tightens the minimum and maximum of its leading column, Z-order tightens
+every clustered column at once, so multi-column range and point filters skip more
+vectors and chunk groups. Results are unchanged; only physical order is.
+
+**Holds `AccessExclusiveLock` for the duration**, like PostgreSQL's own `CLUSTER`
+and `VACUUM FULL`, because it rewrites the relation and swaps its file. Reads and
+writes on the table block until it completes. Use it for an initial bulk
+reorganisation; use [`pgcolumnar.recluster`](administration.md#online-maintenance-and-disk-reclaim)
+to reorder a live table without an exclusive lock.
+
+```sql
+SELECT pgcolumnar.cluster('events', 'customer_id', 'ts');
+```
+
 ### pgcolumnar.vacuum_full(schema name DEFAULT 'public', sleep_time real DEFAULT 0.0, stripe_count int DEFAULT 0)
 
 Runs `pgcolumnar.vacuum` on every columnar table in a schema. `sleep_time` is a
