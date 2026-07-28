@@ -23,10 +23,17 @@
 #
 # Both are guarded with check_stack_depth(), which turns the crash into a caught
 # ERROR (SQLSTATE 54001, statement_too_complex). That each guard is load-bearing
-# for its own vector was proven by removal: with only the ColumnarThriftSkip guard
-# present, the schema-chain footer still SIGSEGVs, and vice versa. This suite is
-# the regression, and pins max_stack_depth to its minimum so a small fixture trips
-# the guard on any build in the matrix.
+# for its own vector was proven by removal at the depths that actually overflow an
+# 8 MB stack: with only the ColumnarThriftSkip guard present a schema chain still
+# SIGSEGVs, and with only the walk_schema guard present a nested-struct footer
+# still SIGSEGVs.
+#
+# This suite is the regression for that, and deliberately does NOT overflow the
+# real C stack: it pins max_stack_depth to its minimum so a ~20 KB fixture trips
+# the guard on any build in the matrix. At that fixture depth, removing a guard
+# makes its check fail by returning the wrong answer (NOERR, or a parse error)
+# rather than by crashing. That is the intended trade: a harness that proved
+# itself by segfaulting a backend could not be run in the matrix at all.
 #
 # Run on an assert-enabled build, so if a guard is ever removed the crash it lets
 # through is unmistakable.
