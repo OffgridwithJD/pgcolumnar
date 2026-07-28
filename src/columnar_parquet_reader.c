@@ -519,6 +519,15 @@ walk_schema(PqFile *pf, int *cursor, int def, int rep,
 	int			d,
 				rp;
 
+	/*
+	 * num_children comes straight from the footer, so a schema that chains
+	 * group inside group descends here as deep as the file says. This is a
+	 * second unbounded recursion, reached only after the footer parses, so the
+	 * guard on ColumnarThriftSkip does not cover it; without one, a crafted
+	 * schema SIGSEGVs the backend and restarts the cluster.
+	 */
+	check_stack_depth();
+
 	if (*cursor >= pf->nelems)
 		return false;
 	e = &pf->elems[(*cursor)++];

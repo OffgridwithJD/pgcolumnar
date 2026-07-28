@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 
 #include "columnar_thrift.h"
 
@@ -105,6 +106,15 @@ ColumnarThriftField(TCReader *r, int *ftype, int *fid, int *lastId)
 void
 ColumnarThriftSkip(TCReader *r, int ftype)
 {
+	/*
+	 * A crafted footer can nest structs (or lists of structs) to any depth, and
+	 * every unrecognised field in the metadata is skipped through here. Without
+	 * this the recursion runs the C stack into its guard page and the backend
+	 * SIGSEGVs, which the postmaster treats as a crash and restarts the whole
+	 * cluster. check_stack_depth turns it into a caught ERROR.
+	 */
+	check_stack_depth();
+
 	switch (ftype)
 	{
 		case TC_BOOL_TRUE:
