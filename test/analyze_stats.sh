@@ -160,16 +160,36 @@ psql_run "ALTER TABLE as_c ALTER COLUMN id SET STATISTICS -1;
 est="$(q "SELECT reltuples::bigint FROM pg_class WHERE relname = 'as_c';")"
 echo "-- reltuples ${est} against a true ${ROWS}"
 
-# The tolerance is 15% rather than something tight because core scales liverows
-# by the fraction of blocks it visited, and some blocks belong to no row group --
-# the metapage, and space reserved but not yet occupied -- so they are counted as
-# visited while offering nothing. That biases the estimate low by however much of
-# the file is not group data. Measured: 95.0% of the truth at 500,000 rows and
-# 98.7% at 1,000,000. Against cluster sampling's 2050% the check still separates
-# the two by two orders of magnitude.
-check "reltuples is within 15% of the true row count" \
+# The tolerance is 2%, and the paragraph that used to be here explained a bias
+# that was a bug rather than a property of the design.
+#
+# It said the estimate is biased low by the share of the file that is not group
+# data, and quoted 95.0% of the truth at 500,000 rows and 98.7% at 1,000,000.
+# Those numbers were real, but their cause was not: a block was mapped to its row
+# group by comparing a block offset that had COLUMNAR_FIRST_LOGICAL_OFFSET
+# subtracted from it against a group offset that is already absolute, so every
+# block landed two blocks low and the tail of the last group was never offered.
+# Fixed in #189.
+#
+# That is why the tolerance has to move with the explanation. A 15% band was
+# wide enough to sit on top of a 5% undercount without noticing, and would sit
+# just as quietly on a regression that reintroduced one -- the check would have
+# gone on passing through exactly the defect it was measuring. A check tuned to
+# a defect passes on that defect forever after.
+#
+# 2% is set from measurement, not taste: on the fixed build the estimate is
+# 100.000% of the truth at 200,000, 500,000, 1,000,000, 2,000,000 and 5,000,000
+# rows, five ANALYZE runs at each of the first three, with no variation at all.
+# Sampling never introduces any here because the table compresses below the
+# block count the sampler would thin, so every block is visited and the count is
+# arithmetic rather than an estimate -- "scanned 482 of 482" at five million
+# rows. The band exists for shapes that do not compress that well, not for
+# noise anyone has seen. It is still two orders of magnitude away from cluster
+# sampling's 2050%, so it separates that case as decisively as before while now
+# also catching a 10% undercount.
+check "reltuples is within 2% of the true row count" \
 	"$(awk -v e="$est" -v t="$ROWS" \
-		'BEGIN { r = e / t; print (r > 0.85 && r < 1.15) ? "yes" : "no (" e " vs " t ")" }')" \
+		'BEGIN { r = e / t; print (r > 0.98 && r < 1.02) ? "yes" : "no (" e " vs " t ")" }')" \
 	"yes"
 
 # --- 3. a clustered table still estimates n_distinct ---------------------------
