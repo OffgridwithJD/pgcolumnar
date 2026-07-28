@@ -127,10 +127,7 @@ Two consequences are worth stating here, because the error surfaces somewhere
 other than where the feature is used:
 
 - **A foreign key cannot reference a columnar table, and is refused when it is
-  created.** Converting an existing table to columnar while a foreign key
-  references it is refused for the same reason, as is setting a columnar access
-  method on a partitioned table that is referenced, since every partition created
-  afterwards would inherit it and be refused in turn. The referential-integrity check reads the parent row with
+  created.** The referential-integrity check reads the parent row with
   `FOR KEY SHARE`, which a columnar table cannot serve, so `CREATE TABLE` and
   `ALTER TABLE ADD CONSTRAINT` reject the constraint rather than accepting one
   that could never be satisfied. A columnar table on the child side of a foreign
@@ -139,9 +136,11 @@ other than where the feature is used:
   for the same reason.** `ALTER TABLE ... SET ACCESS METHOD pgcolumnar`, and
   `pgcolumnar.alter_table_set_access_method`, reach the identical configuration
   from the other side, so they are rejected while any foreign key references the
-  table. Drop the constraint first if the table should be columnar. Converting
-  the referencing side, and converting a table no foreign key points at, are
-  unaffected.
+  table. A partitioned table is refused as well: it has no storage of its own,
+  but it chooses the access method every partition created afterwards inherits,
+  and each of those would then be refused in turn. Drop the constraint first if
+  the table should be columnar. Converting the referencing side, and converting
+  a table no foreign key points at, are unaffected.
 - `INSERT ... ON CONFLICT DO UPDATE` takes a row lock and raises the same error.
   `ON CONFLICT DO NOTHING` does not, and works.
 
