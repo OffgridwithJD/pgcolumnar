@@ -39,7 +39,22 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 ROWS=${PGC_AGGDEL_ROWS:-400000}
 
+# Ten row groups, not the three the default stripe_row_limit gives at this row
+# count. The margin depends on it: the check below asserts that scanning one
+# dirty group costs less than half of reading everything, and one group of three
+# is a third of the table before any fixed overhead. Measured at three groups it
+# came out at 52% and failed a PG19 matrix run on a correct build, having sat at
+# 48% and passed for weeks. At ten groups it measures 29 to 32% over three PG19
+# runs, which is a margin rather than a coin toss. Not the tenth the group count
+# suggests, because a scan of one group is not a tenth of the work of reading
+# all ten: the fixed cost per query does not divide. Twenty points of headroom
+# is what matters, not the ratio matching the arithmetic.
+#
+# The threshold is not what should move. A dirty group being scanned while the
+# clean ones are skipped is the property under test, and loosening the bound to
+# accommodate a fixture would stop it catching a build that scanned everything.
 psql_run "DROP TABLE IF EXISTS ad_c; DROP TABLE IF EXISTS ad_h;
+	SET pgcolumnar.stripe_row_limit = 40000;
 	CREATE TABLE ad_c (id int, v int, w bigint, s text) USING pgcolumnar;
 	INSERT INTO ad_c SELECT g, g % 1000, g * 7, 'r' || g
 		FROM generate_series(1, $ROWS) g;
