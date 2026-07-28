@@ -6,7 +6,7 @@ pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
 19. Every test suite runs on all five majors. PostgreSQL 13 and 14 still build
 but are out of the tested matrix.
 
-Two behaviors depend on the major:
+Three behaviors depend on the major:
 
 - `ALTER TABLE ... SET ACCESS METHOD` exists on PostgreSQL 15 and later. On 13 and
   14, `pgcolumnar.alter_table_set_access_method` builds a new table, copies rows,
@@ -15,6 +15,13 @@ Two behaviors depend on the major:
   foreign keys.
 - The read stream prefetch path (`pgcolumnar.enable_read_stream`) is effective on
   PostgreSQL 17 and later. On earlier majors the setting has no effect.
+- Setting the access method of a *partitioned* table requires PostgreSQL 17. On
+  15 and 16, core refuses `ALTER TABLE ... SET ACCESS METHOD` on any partitioned
+  table with `cannot change access method of a partitioned table`, so a
+  partitioned parent cannot be made columnar there and its later partitions
+  cannot inherit the choice. Give each partition the access method individually
+  instead. This is core's restriction, not this extension's, and it applies
+  whether or not a foreign key is involved.
 
 ## Host architecture
 

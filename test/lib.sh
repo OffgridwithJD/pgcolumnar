@@ -79,6 +79,11 @@ pgc_cluster_is_ours() {
 pgc_setup() {
 	PGC_PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 	PGC_BINDIR="$("$PGC_PG_CONFIG" --bindir)"
+	# One definition of the server major, for the suites that must branch on it.
+	# A behavior that exists only from some major is core's, not this extension's,
+	# and a check written against the newer one fails on the older ones for a
+	# reason that is not a defect. Branch on this rather than deriving it again.
+	PGC_MAJOR="$("$PGC_PG_CONFIG" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
 	# Derived from this process rather than a fixed 54329: two suites run at
 	# once on one box otherwise start on the same port, and the loser reports a
 	# wall of ERROR: database "regress" already exists with no named check
