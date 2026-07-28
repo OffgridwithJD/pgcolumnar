@@ -158,7 +158,8 @@ check "guard rejects a foreign cluster" "$_verdict" "foreign"
 TESTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$TESTDIR/run_all_versions.sh"
 
-# Not suites: the shared library, the two runners, and the two developer helpers
+# Not suites: the two shared libraries (lib.sh, and portlib.sh which lib.sh and
+# the standalone suites source for their port), the two runners, and the two developer helpers
 # that build rather than test. build_all_versions compiles against every major
 # and is run before merging a change that touches a version guard; it takes no
 # cluster and reports per major, so the matrix cannot run it as a suite. native_scale is a suite but is opt-in by
@@ -166,7 +167,7 @@ RUNNER="$TESTDIR/run_all_versions.sh"
 # not carry.
 not_a_suite() {
 	case "$1" in
-		lib|run_all_versions|build_all_versions|devloop|rebuild|native_scale) return 0 ;;
+		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild|native_scale) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -195,5 +196,21 @@ while read -r name; do
 done < <(listed_suites)
 check "every registered suite has a file" \
 	"$([ -z "$missing_file" ] && echo none || echo "missing:$missing_file")" "none"
+
+# ---- no suite hands every run the same default port ------------------------
+
+# #184 derived the port per run in lib.sh and in the matrix runner, which is
+# where the collisions that cost three gates came from. It did not reach the
+# suites that carry their own harness, and they were still starting on fixed
+# 54321 through 54327 -- so two standalone runs of the same suite still collided
+# by construction.
+#
+# This asserts the property rather than the absence of one literal, because a
+# check naming 54329 passed while seven other files still collided. That is how
+# the gap survived the first fix.
+_fixed_ports="$(grep -lE 'PGC_(BASE_)?PORT:-[0-9]+' "$TESTDIR"/*.sh 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
+
+check "no suite hands every run the same default port" \
+	"${_fixed_ports:-none}" "none"
 
 pgc_summary
