@@ -59,6 +59,19 @@ plan_par() {
 		EXPLAIN (COSTS OFF) $1" 2>/dev/null
 }
 
+# The node, before any answer read from it.
+#
+# Everything below compares a columnar answer to a heap oracle, and a fallback
+# plan returns exactly the same answers -- that is what makes it a correct
+# fallback. So the parity checks cannot tell the metadata path from the path it
+# replaces, and eleven of them passing says nothing about which one ran. Assert
+# the node first, so that a silent fall back fails here and names itself rather
+# than passing quietly eleven times over.
+check "count(*) uses the metadata agg node" \
+	"$(has_aggnode "$(plan 'SELECT count(*) FROM n')")" "yes"
+check "sum/min/max uses the metadata agg node" \
+	"$(has_aggnode "$(plan 'SELECT sum(id), min(id), max(id) FROM n')")" "yes"
+
 # Supported aggregates answered from zone maps must equal the heap oracle.
 check "count(*)"          "$(q 'SELECT count(*) FROM n;')"        "$(q 'SELECT count(*) FROM h;')"
 check "count(col,nulls)"  "$(q 'SELECT count(s) FROM n;')"       "$(q 'SELECT count(s) FROM h;')"
@@ -72,11 +85,6 @@ check "min(text)"         "$(q 'SELECT min(label) FROM n;')"     "$(q 'SELECT mi
 check "max(text)"         "$(q 'SELECT max(label) FROM n;')"     "$(q 'SELECT max(label) FROM h;')"
 check "multi-agg"         "$(q 'SELECT count(*), sum(id), min(id), max(id) FROM n;')" \
                           "$(q 'SELECT count(*), sum(id), min(id), max(id) FROM h;')"
-
-# The metadata path is actually taken (ColumnarAgg node, no underlying scan).
-check "count(*) uses metadata agg node" "$(has_aggnode "$(plan 'SELECT count(*) FROM n')")" "yes"
-check "sum/min/max uses metadata agg node" \
-	"$(has_aggnode "$(plan 'SELECT sum(id), min(id), max(id) FROM n')")" "yes"
 
 # The path has to win on cost, not only exist. It reads one metadata entry per
 # row group; Gather over Partial Aggregate reads the whole table. Costing this

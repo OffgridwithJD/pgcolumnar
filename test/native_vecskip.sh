@@ -34,6 +34,27 @@ counter() {
 }
 gt0() { [ "${1:-0}" -gt 0 ] && echo yes || echo no; }
 
+# The plan text for a query, and whether it is the scalar columnar custom scan.
+# "Columnar Projected Columns" is that node's own marker: the vectorized
+# aggregate node does not report it and no other node reports it at all.
+explain_of() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $1" 2>/dev/null
+}
+is_scalar_scan() {
+	explain_of "$1" | grep -q 'Columnar Projected Columns' && echo yes || echo no
+}
+
+# The node, before any counter is read out of it.
+#
+# Every "Columnar Vectors Skipped" and "Chunk Groups Removed by Filter" below is
+# read from this query's plan. If the planner stops choosing the columnar custom
+# scan, counter() returns empty and the comparisons start reporting a skipping
+# regression that is really a plan change. Assert the node first so the failure
+# names the actual cause.
+check "the plan under test is a columnar custom scan" \
+	"$(is_scalar_scan 'SELECT id FROM n WHERE id BETWEEN 100 AND 200')" "yes"
+
 check "row count" "$(q 'SELECT count(*) FROM n;')" "8192"
 check "single row group" \
 	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('n');")" \
