@@ -184,6 +184,12 @@ fetch_once() {  # table, table-rows, count -> milliseconds for one pass
 # itself a function of group size, so more fetches amplify the difference rather
 # than averaging it away.
 #
+# Those figures are from this file's fixture, which carries a varying-length
+# column. A reviewer measured flat ~1.0 across the same fetch counts on a
+# two-integer fixture, which is consistent rather than contradictory: a lighter
+# per-group decode is exactly the condition under which the effect disappears.
+# If this is ever remeasured, remeasure it on a fixture with a text column.
+#
 # What this check actually needed was not to be run beside five other suites;
 # run_all_versions.sh now runs it alone. The two structural checks below are what
 # prove the mechanism, and this one is corroboration.

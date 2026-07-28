@@ -137,6 +137,19 @@ declare -a SUMMARY
 # fetches amplify the difference instead of averaging it away. The comment in
 # native_fetch_position.sh that recommended exactly that has been corrected.
 #
+# Not every wall-clock ratio belongs here, and the distinction is measurable
+# rather than a matter of taste. native_fetch_cache asserts one on the same
+# index-driven fetch with the same stopwatch, and is deliberately absent: it
+# compares one big group against ten small ones, and the cache equalises
+# per-fetch cost across both sides, so contention is common-mode and cancels in
+# the ratio. Measured, six-way: absolute times roughly doubled and the ratio
+# stayed near 1 against a bound of 3, worst case 1.15.
+#
+# The three below measure quantities whose per-fetch or per-query cost is itself
+# a function of the thing being varied, so contention is differential and does
+# not cancel. That is the test for membership: does the load move both sides of
+# the ratio together?
+#
 # So they run alone. It costs a few minutes per major and it buys a timing
 # result that means something.
 is_timing_suite() {
