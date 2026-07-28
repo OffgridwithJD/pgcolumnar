@@ -124,7 +124,8 @@ rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 	bool	   *isnull = palloc(natts * sizeof(bool));
 	ColumnarWriteState *ws;
 	Snapshot	snap;
-	uint64		r;
+	ColumnarReadState *rs;
+	uint64		oldRn;
 	int64		moved = 0;
 
 	/* serialize with concurrent deleters to this group (see ColumnarUpsertDeleteVector) */
@@ -132,26 +133,52 @@ rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 
 	/* Read the group's live set under a snapshot taken after the lock, so every
 	 * delete committed before the lock is reflected. Register it (not just push
-	 * active): ColumnarReadRowByNumber derives a catalog snapshot copy that must
-	 * inherit a nonzero regd_count for PG18's heap-visibility assertion, which a
-	 * merely-active GetLatestSnapshot does not provide. */
+	 * active): the reader derives a catalog snapshot copy from it, in
+	 * ColumnarCatalogSnapshot, that must inherit a nonzero regd_count for PG18's
+	 * heap-visibility assertion, which a merely-active GetLatestSnapshot does not
+	 * provide. */
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	PushActiveSnapshot(snap);
 
 	ws = ColumnarGetWriteState(rel);
-	for (r = firstRow; r < firstRow + rowCount; r++)
+
+	/*
+	 * Stream the group rather than fetching its rows one at a time.
+	 *
+	 * ColumnarReadRowByNumber decodes the whole group to return one value and
+	 * relies on the fetch cache to make the next call cheap. That cache drops
+	 * any group whose decoded form exceeds COLUMNAR_FETCH_CACHE_MAX_BYTES, and
+	 * drops it after every fetch -- so a group over the cap by any margin made
+	 * this loop decode the entire group once per row.
+	 *
+	 * It is a cliff rather than a slope. Three columns of 150,000 rows with one
+	 * varlena among them decodes to 34,713,408 bytes against a 33,554,432 cap:
+	 * 3.5% over. On an idle box, rewriting 200,000 rows of that shape did not
+	 * finish inside 120 seconds, while the same table without the middle column
+	 * -- under the cap, so cached -- took 1.9.
+	 *
+	 * A reader restricted to this group decodes it once and walks it, which is
+	 * what the loop wanted all along, and it does not care how large the group
+	 * is: 60 decode calls for the shape above, against one per row per column.
+	 * ANALYZE's sampler was moved off the same per-row fetch for the same
+	 * reason.
+	 */
+	rs = ColumnarBeginRead(rel, snap, NULL, NULL, 0, NULL);
+	ColumnarReadRestrictToGroups(rs, &groupNumber, 1);
+
+	while (ColumnarReadNextRow(rs, values, isnull, &oldRn))
 	{
 		uint64		newRn;
 
 		CHECK_FOR_INTERRUPTS();
-		if (!ColumnarReadRowByNumber(rel, snap, r, values, isnull))
-			continue;			/* deleted or absent: drop it */
 
 		newRn = ColumnarWriteRow(ws, rel, values, isnull);
 		ColumnarProjectionFanoutRow(rel, ws, newRn, values, isnull);
 		ColumnarIndexInsertRow(ris, rel, values, isnull, newRn);
 		moved++;
 	}
+
+	ColumnarEndRead(rs);
 	ColumnarFlushWriteStateForRelation(relid);
 
 	/* atomically (same transaction) the new group is now in the catalog; drop the
