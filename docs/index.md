@@ -19,7 +19,7 @@ licensed under the MIT License.
 | Operate columnar tables in production | [Administration](administration.md) |
 | Look up a setting and its default | [Configuration reference](configuration.md) |
 | Look up a `pgcolumnar.*` function | [SQL reference](sql-reference.md) |
-| Check type coverage and known constraints | [Limitations and compatibility](limitations.md) |
+| Check release status, type coverage, and known constraints | [Limitations and compatibility](limitations.md) |
 | See size and latency numbers | [Benchmarks](benchmarks.md) |
 | Run the test suite | [Testing](testing.md) |
 
