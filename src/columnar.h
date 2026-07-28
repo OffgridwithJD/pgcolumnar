@@ -592,7 +592,7 @@ extern bool ColumnarRowIsLive(Relation rel, Snapshot snapshot,
  * A ColumnarVector is one decoded chunk group: for each projected column, the
  * whole group's values and null flags as flat arrays, plus the per-row deleted
  * flag resolved from the delete vector. The vectorized aggregate builds a selection
- * vector over it (ColumnarVecSelect); the scan itself is the scalar per-row
+ * vector over it; the scan itself is the scalar per-row
  * reader (ColumnarReadNextRow).
  * ------------------------------------------------------------------------- */
 typedef struct ColumnarVector
@@ -760,59 +760,11 @@ extern ScanKey ColumnarBuildScanKeys(List *qual, Index scanrelid,
 extern void ColumnarVectorInit(void);
 
 /*
- * A single pushed-down comparison predicate "column op const" evaluated
- * column-at-a-time over a decoded chunk group to build a selection vector.
+ * The vectorized predicate machinery that used to be declared here is private to
+ * columnar_vector.c. ColumnarVecRowPasses and ColumnarVecSelect were exported
+ * with no call site anywhere in the tree and are gone; see issue #200. What
+ * remains of it is a convertibility probe the planner uses, and it has no
+ * business outside that file.
  */
-typedef struct ColumnarVecPredicate
-{
-	int			attidx;			/* 0-based column index */
-	bool		varOnLeft;		/* column op const, else const op column */
-	FmgrInfo	opFn;			/* the operator function (returns bool) */
-	Datum		constValue;
-	Oid			collation;
-
-	/*
-	 * Typed fast path (I6). fastKind is one of COLUMNAR_VECFAST_* (0 = none,
-	 * use opFn); strategy is the btree strategy 1..5 (Less..Greater) already
-	 * normalized to "column op const". When fastKind is set, the predicate is
-	 * evaluated column-at-a-time with a branch-free typed loop instead of fmgr.
-	 */
-	int			fastKind;
-	int			strategy;
-} ColumnarVecPredicate;
-
-#define COLUMNAR_VECFAST_NONE 0
-#define COLUMNAR_VECFAST_I16 1
-#define COLUMNAR_VECFAST_I32 2
-#define COLUMNAR_VECFAST_I64 3
-#define COLUMNAR_VECFAST_F32 4
-#define COLUMNAR_VECFAST_F64 5
-
-/*
- * Build the array of evaluable predicates from a plan's restriction clauses.
- * Clauses that are not simple, strict "column op const" comparisons on the scan
- * relation are left out; *allConvertible reports whether every clause converted
- * (the vectorized aggregate requires that, so it can rely on the predicates
- * being the complete filter; the vectorized scan does not and lets the executor
- * re-apply the rest). Allocated in the current memory context.
- */
-extern ColumnarVecPredicate *ColumnarBuildVecPredicates(List *qual,
-														Index scanrelid,
-														TupleDesc tupdesc,
-														int *npreds,
-														bool *allConvertible);
-
-/* whether row i of a decoded chunk group passes every predicate (AND) */
-extern bool ColumnarVecRowPasses(ColumnarVecPredicate *preds, int npreds,
-								 ColumnarVector *vec, uint64 i);
-
-/*
- * Build a selection vector for a whole chunk group column-at-a-time (I6):
- * sel[i] is true when row i is not deleted and passes every predicate. Uses a
- * branch-free typed loop per predicate where possible, falling back to the
- * operator function otherwise. sel must have room for vec->nrows entries.
- */
-extern void ColumnarVecSelect(ColumnarVecPredicate *preds, int npreds,
-							  ColumnarVector *vec, bool *sel);
 
 #endif							/* PGCOLUMNAR_H */
