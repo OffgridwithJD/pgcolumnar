@@ -1052,8 +1052,24 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 						   cstate->nProjected, es);
 	ExplainPropertyInteger("Columnar Total Columns", NULL,
 						   cstate->nTotalColumns, es);
+	/*
+	 * Report what the scan pushes down, not what the planner handed it.
+	 *
+	 * cstate->nScanKeys is the count the planner produced, and it is the same
+	 * whether or not pushdown is enabled. But columnar_enable_qual_pushdown
+	 * gates columnar_build_predicates in ColumnarBeginRead, so with the setting
+	 * off the reader builds no predicates and skips no chunk groups: nothing is
+	 * pushed down in any sense the scan acts on. Someone turning the setting off
+	 * to test a theory, and checking EXPLAIN to confirm it took effect, was told
+	 * it had not (issue #191).
+	 *
+	 * Every other "Columnar ..." line here describes the run rather than the
+	 * plan -- Projected Columns, Chunk Groups Total and the counters below it --
+	 * so this one line meant something different from all of its neighbours.
+	 */
 	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
-						   cstate->nScanKeys, es);
+						   columnar_enable_qual_pushdown ? cstate->nScanKeys : 0,
+						   es);
 
 	if (cstate->readState != NULL)
 	{
