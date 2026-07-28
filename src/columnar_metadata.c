@@ -39,6 +39,7 @@
 #define Anum_options_stripe_row_limit 3
 #define Anum_options_compression_level 4
 #define Anum_options_compression 5
+#define Anum_options_encode_effort 6
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
 #define Anum_projection_storage_id 1
@@ -2088,6 +2089,29 @@ ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
 			{
 				opts->compressionSet = true;
 				opts->compressionType = code;
+			}
+		}
+
+		d = heap_getattr(tuple, Anum_options_encode_effort, tupdesc, &isnull);
+		if (!isnull)
+		{
+			const char *name = NameStr(*DatumGetName(d));
+
+			/*
+			 * An unrecognised value is ignored rather than raised on. set_options
+			 * rejects anything but "full" and "fast", so reaching this with
+			 * something else means the catalog was edited directly, and a write
+			 * path is the wrong place to fail for that.
+			 */
+			if (strcmp(name, "fast") == 0)
+			{
+				opts->encodeEffortSet = true;
+				opts->encodeEffort = COLUMNAR_ENCODE_EFFORT_FAST;
+			}
+			else if (strcmp(name, "full") == 0)
+			{
+				opts->encodeEffortSet = true;
+				opts->encodeEffort = COLUMNAR_ENCODE_EFFORT_FULL;
 			}
 		}
 

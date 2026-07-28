@@ -194,11 +194,19 @@ import-specific overhead. Reading the whole Parquet file through `read_parquet`
 costs 1,415 ms, 11% of the import. The other 89% is the write path, which is also
 4.9x slower than a heap insert of the same rows.
 
-So the target is bulk load in general rather than the interop path: both readers
-decode a column-oriented file into per-row values, and the writer copies them back
-into per-column buffers. Tracked as
+So the target is bulk load in general rather than the interop path. Tracked as
 [issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155) with a plan in
 `design/IMPORT_THROUGHPUT_PLAN.md`.
+
+The plan attributes the cost to the row/column transposition -- both readers
+decode a column-oriented file into per-row values, and the writer copies them
+back into per-column buffers. Measurement does not support that as the main
+term. A single integer column already writes faster than heap, and on a text
+column the write path is dominated by the FSST substring search: skipping it
+makes a 1,000,000-row load 1.2x to 5.7x faster, and on five of seven text shapes
+measured it produced byte-for-byte identical storage. `encode_effort = fast`
+(see [Configuration reference](configuration.md#encode-effort)) exposes that
+trade per table.
 
 Index maintenance is not in this path at all, which is a correctness bug rather
 than a cost: see [issue #153](https://github.com/jdatcmd/pgcolumnar/issues/153).

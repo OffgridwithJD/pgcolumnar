@@ -144,6 +144,7 @@ struct ColumnarWriteState
 	int			compressionType;	/* columnar.compression at open time */
 	int			compressionLevel;	/* columnar.compression_level at open time */
 	bool		bloomEnabled;		/* columnar.enable_bloom_filter at open time */
+	int			encodeEffort;		/* per-table encode_effort at open time */
 	uint64		storageId;
 	ColumnarColumnDef *colDefs;		/* array [natts], in writeContext */
 
@@ -381,6 +382,7 @@ ColumnarGetWriteState(Relation rel)
 	 * written under one decision.
 	 */
 	writeState->bloomEnabled = columnar_enable_bloom_filter;
+	writeState->encodeEffort = COLUMNAR_ENCODE_EFFORT_FULL;
 	writeState->storageId = ColumnarStorageId(rel);
 
 	/*
@@ -402,6 +404,8 @@ ColumnarGetWriteState(Relation rel)
 				writeState->compressionType = opts.compressionType;
 			if (opts.compressionLevelSet)
 				writeState->compressionLevel = opts.compressionLevel;
+			if (opts.encodeEffortSet)
+				writeState->encodeEffort = opts.encodeEffort;
 		}
 	}
 
@@ -840,8 +844,22 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			if (sampleLen == 0)
 				sampleLen = (uint32) corpus.len;
 
-			/* the table is trained on the same prefix it always was */
-			if (corpus.len > 0)
+			/*
+			 * encode_effort = fast skips the FSST substring search entirely:
+			 * no symbol table, so no whole-corpus decision below and no
+			 * per-vector encode either, since all three are reached only
+			 * through a non-NULL fsstTable.
+			 *
+			 * This is where a text column's write cost lives (issue #155).
+			 * Measured on 1,000,000 rows, one text column, the load runs 1.2x
+			 * to 5.7x faster without it -- and on five of the seven shapes
+			 * measured it produced byte-for-byte identical storage, so that
+			 * time bought nothing at all. On the two where FSST does win it
+			 * costs 2.7% and 12.2% more space, which is why this is a choice
+			 * offered rather than a default changed.
+			 */
+			if (corpus.len > 0 &&
+				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST)
 				ColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
 
@@ -1247,6 +1265,19 @@ columnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
 	 * filters from projections while the setting was on.
 	 */
 	ws->bloomEnabled = columnar_enable_bloom_filter;
+
+	/*
+	 * And under the same encode_effort as its base, for the same reason: a
+	 * projection written at a different effort from the table it projects would
+	 * make the setting mean something different depending on which copy you read.
+	 */
+	ws->encodeEffort = COLUMNAR_ENCODE_EFFORT_FULL;
+	{
+		ColumnarOptions opts;
+
+		if (ColumnarReadOptions(relid, &opts) && opts.encodeEffortSet)
+			ws->encodeEffort = opts.encodeEffort;
+	}
 	ws->storageId = storageId;
 	columnar_init_col_defs(ws);	/* min/max + bloom skip metadata for projections */
 	ws->stripeContext = AllocSetContextCreate(ColumnarWriteContext,
