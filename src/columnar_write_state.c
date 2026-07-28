@@ -143,6 +143,7 @@ struct ColumnarWriteState
 	int			chunkGroupRowLimit;
 	int			compressionType;	/* columnar.compression at open time */
 	int			compressionLevel;	/* columnar.compression_level at open time */
+	bool		bloomEnabled;		/* columnar.enable_bloom_filter at open time */
 	uint64		storageId;
 	ColumnarColumnDef *colDefs;		/* array [natts], in writeContext */
 
@@ -292,7 +293,8 @@ columnar_init_col_defs(ColumnarWriteState *writeState)
 		 * hashes consistently between this build and an equality probe. A
 		 * nondeterministic collation is left unbloomed.
 		 */
-		if (OidIsValid(tce->hash_proc_finfo.fn_oid) &&
+		if (writeState->bloomEnabled &&
+			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
 			ColumnarCollationIsDeterministic(att->attcollation))
 		{
 			writeState->colDefs[c].bloomable = true;
@@ -372,6 +374,13 @@ ColumnarGetWriteState(Relation rel)
 	writeState->chunkGroupRowLimit = columnar_chunk_group_row_limit;
 	writeState->compressionType = columnar_compression;
 	writeState->compressionLevel = columnar_compression_level;
+
+	/*
+	 * Whether to build bloom filters at all, captured here with the other
+	 * write-time settings rather than consulted per row, so one stripe is
+	 * written under one decision.
+	 */
+	writeState->bloomEnabled = columnar_enable_bloom_filter;
 	writeState->storageId = ColumnarStorageId(rel);
 
 	/*
@@ -1231,6 +1240,13 @@ columnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
 	ws->chunkGroupRowLimit = chunkGroupRowLimit;
 	ws->compressionType = compType;
 	ws->compressionLevel = compLevel;
+
+	/*
+	 * A projection is written under the same bloom decision as its base
+	 * relation. Leaving this unset would zero it, silently dropping bloom
+	 * filters from projections while the setting was on.
+	 */
+	ws->bloomEnabled = columnar_enable_bloom_filter;
 	ws->storageId = storageId;
 	columnar_init_col_defs(ws);	/* min/max + bloom skip metadata for projections */
 	ws->stripeContext = AllocSetContextCreate(ColumnarWriteContext,
