@@ -1671,6 +1671,19 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	ListCell   *nlc;
 	int			c;
 
+	/*
+	 * columnar_fetch_row is called once per item pointer by the executor -- per
+	 * row on an index or bitmap scan, and per duplicate by _bt_check_unique()
+	 * while it holds the index page (see columnar_metadata.c). None of those
+	 * callers checks for interrupts between fetches, and each fetch reads the
+	 * row-group list out of the catalog, so a statement that fetches many rows
+	 * spends its whole time in here. Without a check the loop is uncancellable
+	 * and never notices postmaster death -- a backend spun here at 100% CPU for
+	 * three days, outliving its cluster (#212). One check per fetch makes the
+	 * statement cancellable; the per-fetch cost itself is a separate fix.
+	 */
+	CHECK_FOR_INTERRUPTS();
+
 	tmp = AllocSetContextCreate(CurrentMemoryContext, "columnar fetch",
 								ALLOCSET_SMALL_SIZES);
 	oldContext = MemoryContextSwitchTo(tmp);
