@@ -175,10 +175,24 @@ fetch_once() {  # table, table-rows, count -> milliseconds for one pass
 # even when every per-row lookup is O(1). The defect signature (a walk, so about
 # 2x) and the honest baseline therefore sit near each other by construction, and
 # no tolerance separates them cleanly. Raising the group ratio does not help: it
-# scales the decode with it. If this check needs more headroom, raise the fetch
-# count so per-fetch work dominates the shared decode, rather than moving the
-# threshold. The two structural checks below are what prove the mechanism; this
-# one is corroboration.
+# scales the decode with it.
+#
+# An earlier version of this comment said the way to get headroom was to raise
+# the fetch count, so that per-fetch work dominates the shared decode. That was
+# reasoned from a cost model and it is wrong. Measured, the ratio moves the other
+# way: 1.08 at 6,000 fetches, 1.23 at 20,000, 1.29 at 40,000. Per-fetch cost is
+# itself a function of group size, so more fetches amplify the difference rather
+# than averaging it away.
+#
+# Those figures are from this file's fixture, which carries a varying-length
+# column. A reviewer measured flat ~1.0 across the same fetch counts on a
+# two-integer fixture, which is consistent rather than contradictory: a lighter
+# per-group decode is exactly the condition under which the effect disappears.
+# If this is ever remeasured, remeasure it on a fixture with a text column.
+#
+# What this check actually needed was not to be run beside five other suites;
+# run_all_versions.sh now runs it alone. The two structural checks below are what
+# prove the mechanism, and this one is corroboration.
 fetch_ms() {  # table, table-rows, count -> median of three passes
 	local a b c
 	a=$(fetch_once "$1" "$2" "$3")

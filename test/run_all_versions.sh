@@ -120,6 +120,45 @@ BASE_PORT="${PGC_BASE_PORT:-$(( 40000 + (${PGC_RUN_OWNER:-$$} % 20000) ))}"
 overall=0
 declare -a SUMMARY
 
+# Suites whose checks compare wall-clock times, and which therefore cannot be run
+# beside five others.
+#
+# The rest of the matrix runs PGC_JOBS suites at once, each with its own cluster,
+# so every ratio in those suites is measured under six-way contention. That is
+# not a fixture problem and no threshold survives it: the same check on the same
+# build measures 1.11 alone and 2.11 inside the matrix, against a bound of 2.0.
+# Three suites produced red gates that way in one session, each costing a re-run
+# to disprove, which is how a matrix teaches its readers to discount red.
+#
+# Tuning the fixtures was tried first and does not work. On the group-doubling
+# check, raising the fetch count to dilute the shared decode makes the ratio
+# worse rather than better -- 1.08 at 6,000 fetches, 1.23 at 20,000, 1.29 at
+# 40,000 -- because per-fetch cost is itself a function of group size, so more
+# fetches amplify the difference instead of averaging it away. The comment in
+# native_fetch_position.sh that recommended exactly that has been corrected.
+#
+# Not every wall-clock ratio belongs here, and the distinction is measurable
+# rather than a matter of taste. native_fetch_cache asserts one on the same
+# index-driven fetch with the same stopwatch, and is deliberately absent: it
+# compares one big group against ten small ones, and the cache equalises
+# per-fetch cost across both sides, so contention is common-mode and cancels in
+# the ratio. Measured, six-way: absolute times roughly doubled and the ratio
+# stayed near 1 against a bound of 3, worst case 1.15.
+#
+# The three below measure quantities whose per-fetch or per-query cost is itself
+# a function of the thing being varied, so contention is differential and does
+# not cancel. That is the test for membership: does the load move both sides of
+# the ratio together?
+#
+# So they run alone. It costs a few minutes per major and it buys a timing
+# result that means something.
+is_timing_suite() {
+	case "$1" in
+		native_fetch_position|native_cancel|native_agg_deletes) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
 		echo "SKIP  $pgc (not executable)"
@@ -174,6 +213,9 @@ for pgc in "${CONFIGS[@]}"; do
 	results=""
 	maxjobs="${PGC_JOBS:-6}"
 	for s in "${SUITES[@]}"; do
+		if is_timing_suite "$s"; then
+			continue
+		fi
 		# throttle to maxjobs concurrent suites
 		while [ "$(jobs -rp | wc -l)" -ge "$maxjobs" ]; do wait -n; done
 		port=$((BASE_PORT++))
@@ -184,6 +226,17 @@ for pgc in "${CONFIGS[@]}"; do
 		) &
 	done
 	wait
+
+	# Then the timing-sensitive suites, one at a time, with nothing else running.
+	for s in "${SUITES[@]}"; do
+		if ! is_timing_suite "$s"; then
+			continue
+		fi
+		port=$((BASE_PORT++))
+		PGC_SKIP_BUILD=1 PGC_PORT="$port" \
+			bash "$builddir/test/${s}.sh" "$pgc" >"$builddir/${s}.log" 2>&1
+		echo $? >"$builddir/${s}.rc"
+	done
 
 	# collect results in suite order for a stable, readable summary
 	for s in "${SUITES[@]}"; do
