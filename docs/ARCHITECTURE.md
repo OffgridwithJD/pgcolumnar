@@ -24,6 +24,38 @@ the per-chunk equality filters, `row_mask` records the delete and update marks,
 and `options` holds per-table settings. A storage id links a relation's physical
 file to its catalog rows.
 
+## Crash safety
+
+A columnar relation's data lives in its main fork through the buffer manager and
+WAL, and its metadata lives in WAL-logged heap catalogs, so a columnar table is
+as crash-safe as any other PostgreSQL relation and the guarantee rests on core
+rather than on this extension. No write path bypasses the buffer manager or
+writes the file directly: data pages are dirtied and WAL-logged with
+`log_newpage_buffer`, the initial metapage and reserved page are WAL-logged
+before they are extended, and truncation is an `XLOG_SMGR_TRUNCATE` record.
+
+Two crash shapes follow from this.
+
+- The whole cluster crashes. On restart, WAL replay restores every committed
+  write and discards every uncommitted one, so a committed columnar table matches
+  a heap table written the same way, and an in-flight transaction leaves nothing
+  visible. `test/recovery.sh` asserts both against a heap mirror.
+- One backend dies while the postmaster lives, which is the shape a fault in a
+  single session produces. The postmaster reinitializes shared memory, drops
+  every other session, and runs the same crash recovery. Committed columnar data
+  survives intact, and an uncommitted write in the dead backend leaves no visible
+  rows and no partial row group, for the same reason the cluster case does: the
+  surviving state is exactly what WAL records as committed. Other connected
+  sessions are dropped, not only the one that died. `test/native_backend_crash.sh`
+  asserts this against a heap mirror, killing one backend with `SIGSEGV` at more
+  than one point in the write path and once under a concurrent reader.
+
+What does not survive is process-local: an open transaction's uncommitted work,
+and the connections of every session live at the moment of the crash. Every
+committed row survives. No columnar-specific shared state is left broken for the
+next backend, because the data and its catalog are both ordinary WAL-logged
+storage.
+
 ## Module map
 
 ### columnar_tableam.c
