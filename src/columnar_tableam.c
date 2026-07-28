@@ -1872,12 +1872,34 @@ columnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
 		return;
 
 	/*
-	 * Ordinary tables only, matching the constraint-side check. A partitioned
-	 * table takes a different route to the same place -- its access method is
-	 * inherited by partitions created later -- and is not addressed here.
+	 * Ordinary tables and partitioned ones.
+	 *
+	 * A partitioned table has no storage of its own, so setting its access
+	 * method breaks nothing at the time. What it does is choose the access
+	 * method every partition created afterwards inherits -- and if the table is
+	 * referenced by a foreign key, every one of those is then refused by the
+	 * constraint-side check, because core clones the foreign key to each new
+	 * partition:
+	 *
+	 *     ALTER TABLE pp SET ACCESS METHOD pgcolumnar;   -- accepted
+	 *     CREATE TABLE pp9 PARTITION OF pp ...;
+	 *     ERROR: cannot create a foreign key referencing columnar table "pp9"
+	 *
+	 * That error names pp9, a table the user has just written, and says nothing
+	 * about the earlier ALTER that caused it. Refusing here is the same rule
+	 * this check already applies to an ordinary table: a configuration that
+	 * cannot be honoured is refused where it is chosen, not at every later use.
+	 *
+	 * Nothing is lost by refusing. The intent of setting a columnar access
+	 * method on a partitioned table is that its partitions be columnar, and
+	 * while the foreign key exists that is unreachable by any route (#201).
 	 */
-	if (get_rel_relkind(relid) != RELKIND_RELATION)
-		return;
+	{
+		char		relkind = get_rel_relkind(relid);
+
+		if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+			return;
+	}
 
 	foreach(lc, stmt->cmds)
 	{

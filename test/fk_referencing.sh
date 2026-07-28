@@ -220,4 +220,66 @@ check "converting back to heap is unaffected" \
 	"$(case "$back" in *ERROR*) echo "no ($back)" ;; *) echo yes ;; esac)" \
 	"yes"
 
+# --- 7. a partitioned parent is refused too (#201) -----------------------------
+
+# A partitioned table has no storage, so setting its access method breaks nothing
+# at the time. It chooses what every later partition inherits, and core clones a
+# foreign key to each new partition, so with the constraint in place every
+# ordinary partition creation is then refused -- by an error naming the partition
+# the user just wrote, saying nothing about the ALTER that caused it.
+#
+# The routes that were already covered are asserted first, because they are what
+# makes this a small gap rather than a trap: the constraint-side check fires on
+# the cloned constraint, so a columnar partition is refused however it arrives.
+
+psql_run "DROP TABLE IF EXISTS fk_pc; DROP TABLE IF EXISTS fk_pp;
+	CREATE TABLE fk_pp (id int PRIMARY KEY) PARTITION BY RANGE (id);
+	CREATE TABLE fk_pp1 PARTITION OF fk_pp FOR VALUES FROM (1) TO (100);
+	CREATE TABLE fk_pc (id int REFERENCES fk_pp(id));" >/dev/null
+
+perr="$(psql_run "CREATE TABLE fk_pp2 PARTITION OF fk_pp
+	FOR VALUES FROM (100) TO (200) USING pgcolumnar;" 2>&1 || true)"
+
+check "a columnar partition of an FK-referenced parent is refused" \
+	"$(case "$perr" in *"cannot create a foreign key referencing columnar table"*) echo yes ;;
+		*) echo "no ($perr)" ;; esac)" \
+	"yes"
+
+aerr="$(psql_run "ALTER TABLE fk_pp SET ACCESS METHOD pgcolumnar;" 2>&1 || true)"
+
+check "and setting the parent's access method is refused as well" \
+	"$(case "$aerr" in *"cannot convert table"*) echo yes ;; *) echo "no ($aerr)" ;; esac)" \
+	"yes"
+
+# The consequence that made it worth refusing: without this, the parent keeps a
+# columnar access method and the next ordinary partition creation fails.
+# Asked as "did it become columnar", not "is it heap": a partitioned table that
+# has never been given an access method has relam = 0, so a join against pg_am
+# returns nothing and an equality test against 'heap' fails on a correct build.
+# It did, on the first run of this check.
+check "so the parent did not become columnar" \
+	"$(q "SELECT count(*) FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+		WHERE c.relname = 'fk_pp' AND a.amname = 'pgcolumnar';")" \
+	"0"
+
+check "and a partition can still be created the ordinary way" \
+	"$(psql_run "CREATE TABLE fk_pp3 PARTITION OF fk_pp
+		FOR VALUES FROM (200) TO (300);" 2>&1 | grep -c ERROR)" \
+	"0"
+
+# The control, and the one that fails if the rule is keyed on the wrong thing: a
+# partitioned table nobody references converts fine, and its partitions inherit.
+psql_run "DROP TABLE IF EXISTS fk_free;
+	CREATE TABLE fk_free (id int) PARTITION BY RANGE (id);" >/dev/null
+
+check "a partitioned table with no foreign key still converts" \
+	"$(psql_run "ALTER TABLE fk_free SET ACCESS METHOD pgcolumnar;" 2>&1 | grep -c ERROR)" \
+	"0"
+
+check "and its partitions inherit the columnar access method" \
+	"$(psql_run "CREATE TABLE fk_free1 PARTITION OF fk_free FOR VALUES FROM (1) TO (100);" >/dev/null 2>&1;
+	   q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+		WHERE c.relname = 'fk_free1';")" \
+	"pgcolumnar"
+
 pgc_summary

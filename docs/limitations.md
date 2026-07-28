@@ -127,7 +127,10 @@ Two consequences are worth stating here, because the error surfaces somewhere
 other than where the feature is used:
 
 - **A foreign key cannot reference a columnar table, and is refused when it is
-  created.** The referential-integrity check reads the parent row with
+  created.** Converting an existing table to columnar while a foreign key
+  references it is refused for the same reason, as is setting a columnar access
+  method on a partitioned table that is referenced, since every partition created
+  afterwards would inherit it and be refused in turn. The referential-integrity check reads the parent row with
   `FOR KEY SHARE`, which a columnar table cannot serve, so `CREATE TABLE` and
   `ALTER TABLE ADD CONSTRAINT` reject the constraint rather than accepting one
   that could never be satisfied. A columnar table on the child side of a foreign
