@@ -11,10 +11,23 @@ Status: proposal, for review. Nothing here is implemented.
 > them. Use physical replication for columnar tables.
 
 That is accurate and it is worse in practice than it reads. A user with logical
-replication, or any CDC consumer, gets **silence** rather than an error: the
-columnar table's changes simply never appear in the stream. Nothing warns them.
+replication, or any CDC consumer, gets no error and no data. Nothing warns them.
 Of everything in that file this is the entry most likely to be discovered in
 production rather than in the manual.
+
+"Silence" describes the signal and not the stream. Measured on a real slot with
+`test_decoding`, over two inserts, an update and a delete:
+
+```
+changes naming the columnar table              0
+changes naming pgcolumnar internal catalogs   33
+changes naming an equivalent heap table        2
+```
+
+The consumer receives sixteen times more rows about our bookkeeping than a heap
+table produces about the user's data, and none of them are the user's. A stream
+that looks busy and carries nothing is harder to notice than one that carries
+nothing at all. `docs/limitations.md` and `docs/user-guide.md` now say so (#190).
 
 ## Why it does not already work
 
@@ -85,16 +98,29 @@ decoder knows exactly which row numbers a transaction added, and row group bytes
 are immutable once written, so re-reading them yields what was committed whenever
 the read happens.
 
-**Rejected**, for two reasons rather than one.
+**Rejected**, but not for the reason this plan first gave, and the correction is
+worth recording so B is not left looking impossible.
 
-It breaks the invariant that decoding is a function of the WAL stream alone. And
-the practical consequence is a retention hazard with no good answer: compaction
-and `pgcolumnar.vacuum` may rewrite or reclaim a row group before a lagging slot
-has read it, at which point the change is unreconstructable and the stream is
-silently short. Heap has no equivalent problem because the tuple data is in the
-WAL record. Solving it would mean teaching every reclamation path about
-replication slots -- a large amount of new coupling for a feature that has a
-cheaper route.
+The first draft rejected it on a retention hazard: compaction and
+`pgcolumnar.vacuum` may reclaim a row group before a lagging slot has read it,
+leaving the stream silently short, and fixing that looked like teaching every
+reclamation path to retain.
+
+ChronicallyJD's answer on review is better than the objection: **do not teach
+reclamation to retain, teach it to invalidate.** Core already makes exactly this
+trade for WAL a slot still needs -- the slot is not preserved, it is marked
+invalidated and the consumer finds out loudly. Reclamation would need to know
+only the oldest slot LSN, and a reclaim that crosses it invalidates the slot
+rather than truncating the stream. That is one comparison at reclaim time and no
+change to retention policy anywhere, and it converts the failure from a silently
+short stream into a visibly broken slot. Those are not the same class of problem.
+
+So the retention hazard is answerable. B is still not the recommendation, for the
+two reasons that remain: it breaks the invariant that decoding is a function of
+the WAL stream alone, and it couples the correctness of the stream to
+reclamation timing. The recommendation needs no decode-time access to storage at
+all, which is a stronger position than needing it and having an answer for when
+it fails.
 
 ### C. Decode the full-page images
 
@@ -119,13 +145,18 @@ or a recovery running a stock binary without this extension loaded replays the
 WAL correctly and ignores the message. Nothing about the cluster's
 recoverability depends on our build.
 
-Available on every supported major. The signature gained a `flush` argument
-after 15, so it needs one entry in `columnar_compat.h` beside the others:
+Available on every supported major. The signature gained a `flush` argument at
+**PostgreSQL 17**, verified in the headers of all five rather than inferred:
 
 ```c
-/* 15  */ LogLogicalMessage(prefix, message, size, transactional)
-/* 16+ */ LogLogicalMessage(prefix, message, size, transactional, flush)
+/* 15, 16 */ LogLogicalMessage(prefix, message, size, transactional)
+/* 17, 18, 19 */ LogLogicalMessage(prefix, message, size, transactional, flush)
 ```
+
+so the guard is `PG_VERSION_NUM >= 170000`, and it gets **its own macro** in
+`columnar_compat.h` rather than being folded in with another. Two signatures that
+move at different versions under one guard is how `main` stopped compiling on 17
+once already.
 
 ### E. Triggers, in user space  — available today, and the interim answer
 
@@ -195,11 +226,23 @@ must be benchmarked before it is recommended for anything.
    necessary; what N, and does it interact badly with `logical_decoding_work_mem`?
 2. **`TRUNCATE` and DDL.** `TRUNCATE` on a columnar table, and `ALTER TABLE`
    shapes that rewrite, need a decided answer rather than an accident.
-3. **Rewrites that are not user changes.** `pgcolumnar.vacuum`, `compact` and
-   `recluster` move rows between groups without changing table contents. These
-   must emit nothing, and the test for that matters more than the test for the
-   happy path -- a compaction that replays as a stream of inserts would silently
-   duplicate a table on the consumer.
+3. **Rewrites that are not user changes.** Stated once as an invariant rather
+   than as three cases, because future paths need a rule to check themselves
+   against: **anything that moves rows without changing table contents emits
+   nothing.** `pgcolumnar.vacuum`, `compact` and `recluster` are today's
+   instances. It is the same rule `columnar_index.c` already follows on the
+   rewrite path, where it enforces no constraint because the rows already
+   satisfied them.
+
+   This matters more than the happy path: a compaction replayed as a stream of
+   inserts silently duplicates a table on the consumer.
+
+   **The obvious test does not discriminate.** Asserting that a rewrite raises no
+   error passes on a build that emits a full stream of inserts. The test has to
+   assert that the consumer's change count is **unchanged across the rewrite**,
+   and it has to be run against a build where the rewrite does emit, or it proves
+   nothing. This project has been bitten five times by checks satisfied by both
+   outcomes; this is the place it would happen again.
 4. **Identity for deletes.** A delete vector records row numbers. A consumer needs
    the key columns, so the identity columns have to be read at flush time. What
    is the analogue of `REPLICA IDENTITY` here, and what happens with no primary
@@ -227,12 +270,29 @@ Discriminating cases, which matter more than the happy path:
 
 ## Phasing
 
-1. Per-table option, plumbing, and inserts only, with the abort and
-   no-op-on-rewrite tests. This is where the design is proven or not.
-2. Deletes and updates, with identity.
+1. Plumbing and inserts, with the abort and no-op-on-rewrite tests. This is where
+   the design is proven or not, and where the WAL cost gets measured. **The
+   per-table option is not enabled by this phase.**
+2. Deletes and updates, with identity. The option becomes reachable here.
 3. Import paths, `TRUNCATE`, and DDL.
 4. A reference consumer, and the documentation that says what this is not.
 
 Phase 1 is the one worth doing before deciding whether the rest is worth it: if
 the WAL cost measured there is unacceptable, that is the answer, and it is
-cheaper to learn it at phase 1 than at phase 4.
+cheaper to learn at phase 1 than at phase 4.
+
+**The option must lag the capability, not lead it**, and this is a correction to
+an earlier draft that had phase 1 shipping a usable option over inserts only.
+ChronicallyJD's objection is right and it is the load-bearing one in this plan: a
+consumer that enables change capture and receives inserts but not updates or
+deletes does not get a partial answer, it gets a wrong one that looks complete,
+and it builds a table that diverges from the source silently and permanently.
+Today's behaviour is worse in every respect except the one that counts -- it
+fails honestly, and the user eventually asks why they see nothing.
+
+So a feature that is wrong when half-built must not be reachable when half-built.
+Either the option refuses to enable until update and delete are covered, so
+phase 1 is reachable only from a test, or it is named for exactly what it does
+(`emit_inserts`, never `logical_decoding`) so nobody can turn it on believing
+they have change capture. Either is fine. Shipping phase 1 as `logical_decoding`
+is not.
