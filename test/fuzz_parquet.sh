@@ -28,9 +28,10 @@
 # a description of one.
 #
 # Usage:  test/fuzz_parquet.sh [PG_CONFIG]
-#   PGC_SEED=<int>   base seed (default 20260728)
-#   PGC_ITERS=<int>  mutants to run (default 300)
-#   PGC_FUZZ_KEEP=1  keep the corpus and every mutant, not only findings
+#   PGC_SEED=<int>            base seed (default 20260728)
+#   PGC_ITERS=<int>           mutants to run (default 100)
+#   PGC_FUZZ_KEEP=1           keep every mutant, not only the findings
+#   PGC_FUZZ_FINDINGS=<dir>   save findings outside the workdir, for campaigns
 #
 # Written fresh for pgColumnar.
 
@@ -51,8 +52,13 @@ SEED="${PGC_SEED:-20260728}"
 ITERS="${PGC_ITERS:-100}"
 PGC_FUZZ_KEEP="${PGC_FUZZ_KEEP:-0}"
 CORPUS="$PGC_WORKDIR/corpus"
-FINDINGS="$PGC_WORKDIR/findings"
+# Findings default into the workdir, which teardown removes. That is fine for the
+# gate, where the console output is the result, and useless for a campaign, where
+# the saved mutant and the full server-log excerpt are the whole point. Point
+# PGC_FUZZ_FINDINGS somewhere durable when running one.
+FINDINGS="${PGC_FUZZ_FINDINGS:-$PGC_WORKDIR/findings}"
 MUT="$PGC_WORKDIR/mutant.parquet"
+NEWLOG="$PGC_WORKDIR/newlog.txt"
 mkdir -p "$CORPUS" "$FINDINGS"
 chmod 777 "$CORPUS" "$FINDINGS"
 
@@ -107,11 +113,24 @@ sanitizer=0
 errors=0
 clean=0
 
+# Writes everything appended since the last call into $NEWLOG, and advances
+# LOGPOS.
+#
+# It writes to a file and is called as a plain command rather than returning the
+# text through $( ), because command substitution runs in a subshell and the
+# LOGPOS assignment there is discarded. That version looked like it worked and
+# did not: LOGPOS stayed 0, every call re-read the log from byte zero, and one
+# matching line anywhere in it was then re-reported against every later mutant.
+# A 500-mutant run produced 257 "findings" that were all the same five lines from
+# the first second of the run, with the seed number being the only thing that
+# differed. Attribution is the whole value of reading the log incrementally.
 log_since() {
 	local sz
 	sz=$(stat -c %s "$PGC_LOGFILE" 2>/dev/null || echo 0)
 	if [ "$sz" -gt "$LOGPOS" ]; then
-		tail -c +$((LOGPOS + 1)) "$PGC_LOGFILE" 2>/dev/null
+		tail -c +$((LOGPOS + 1)) "$PGC_LOGFILE" > "$NEWLOG" 2>/dev/null
+	else
+		: > "$NEWLOG"
 	fi
 	LOGPOS="$sz"
 }
@@ -166,6 +185,7 @@ run_stmt() {
 	# accepted. The suite reported three green checks over a run in which nothing
 	# was ever parsed. That is what the corpus check below exists to catch, and it
 	# is the only reason this was noticed.
+	log_since
 	out="$(timeout 30 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" \
 		-U postgres -d "$PGC_DB" -v ON_ERROR_STOP=0 \
 		-c "SET statement_timeout = '20s'; $stmt" 2>&1)"
@@ -179,7 +199,8 @@ run_stmt() {
 			return 1
 		fi
 	fi
-	newlog="$(log_since)"
+	log_since
+	newlog="$(cat "$NEWLOG" 2>/dev/null)"
 
 	# A sanitizer report is a finding even when the statement then succeeds.
 	if echo "$newlog" | grep -qE 'AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer|LeakSanitizer'; then
@@ -227,7 +248,7 @@ run_stmt() {
 }
 
 # Prime the log offset so seed setup above is not attributed to mutant 1.
-log_since >/dev/null
+log_since
 
 psql_run "DROP TABLE IF EXISTS fz_target;" >/dev/null 2>&1
 

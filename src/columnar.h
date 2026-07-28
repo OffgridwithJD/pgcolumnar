@@ -782,4 +782,51 @@ extern void ColumnarVectorInit(void);
  * business outside that file.
  */
 
+/* -------------------------------------------------------------------------
+ * Reading a varlena header out of a packed value buffer
+ * ------------------------------------------------------------------------- */
+
+/*
+ * VARSIZE_ANY for a pointer that may not be aligned.
+ *
+ * Values in a chunk's raw buffer are packed end to end with no alignment
+ * padding, so a four-byte varlena header starts wherever the previous value
+ * ended. VARSIZE_ANY reads that header by casting to varattrib_4b and loading a
+ * uint32, which is undefined behaviour on an unaligned address: it happens to
+ * work on x86_64 and is a SIGBUS on a strict-alignment target, which
+ * docs/limitations.md promises to support.
+ *
+ * This is not a crafted-input problem. An ordinary INSERT of low-cardinality
+ * text reports it six times under UBSAN, because encode_dict walks exactly such
+ * a buffer. It was found by the #214 fuzzer only in the sense that the fuzzer is
+ * why there was a sanitizer build to see it with.
+ *
+ * A one-byte header carries its length in the first byte, so it needs no
+ * alignment and goes through the ordinary macro.
+ *
+ * The four-byte case decodes the copied header itself rather than handing an
+ * aligned local back to VARSIZE_4B. That was the first attempt and it is also
+ * undefined: VARSIZE_4B casts its argument to varattrib_4b, and a uint32 local
+ * is not large enough for that type, which UBSAN reports as "insufficient space
+ * for an object of type 'varattrib_4b'". Trading an alignment fault for a
+ * type-size fault is not a fix. The shift and mask below mirror varatt.h
+ * exactly, including its endianness split, which is the only part worth
+ * duplicating.
+ */
+static inline uint32
+ColumnarVarSizeAnyUnaligned(const char *p)
+{
+	uint32		hdr;
+
+	if (VARATT_IS_1B(p) || VARATT_IS_1B_E(p))
+		return (uint32) VARSIZE_ANY(p);
+
+	memcpy(&hdr, p, sizeof(hdr));
+#ifdef WORDS_BIGENDIAN
+	return hdr & 0x3FFFFFFF;
+#else
+	return (hdr >> 2) & 0x3FFFFFFF;
+#endif
+}
+
 #endif							/* PGCOLUMNAR_H */

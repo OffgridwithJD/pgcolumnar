@@ -1132,7 +1132,8 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 	for (i = 0; i < n; i++)
 	{
 		const char *vp = raw + pos;
-		uint32		vlen = (w > 0) ? (uint32) w : (uint32) VARSIZE_ANY(vp);
+		uint32		vlen = (w > 0) ? (uint32) w
+			: ColumnarVarSizeAnyUnaligned(vp);
 		int			code = -1;
 
 		for (j = 0; j < nd; j++)

@@ -258,7 +258,7 @@ ColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 	}
 	else
 	{
-		Size		len = VARSIZE_ANY(p);
+		Size		len = ColumnarVarSizeAnyUnaligned(p);
 		char	   *copy = MemoryContextAlloc(targetContext, len);
 
 		memcpy(copy, p, len);
@@ -1532,7 +1532,7 @@ columnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
 	for (k = 0; k < nvalues; k++)
 	{
 		offsets[k] = (uint32) (cursor - rawBuf);
-		cursor += VARSIZE_ANY(cursor);
+		cursor += ColumnarVarSizeAnyUnaligned(cursor);
 
 		/*
 		 * A chunk holds as many values as chunk_group_row_limit allows, which is
