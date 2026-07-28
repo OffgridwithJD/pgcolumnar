@@ -37,6 +37,11 @@ skipped() {
 }
 gt0() { [ "${1:-0}" -gt 0 ] && echo yes || echo no; }
 
+# The node, before any counter read out of it: every skipped() below returns a
+# number only the columnar custom scan reports.
+check "the plan under test is a columnar custom scan" \
+	"$(pgc_is_columnar_scan 'SELECT id FROM n WHERE id BETWEEN 5000 AND 5100')" "yes"
+
 check "row count" "$(q 'SELECT count(*) FROM n;')" "20480"
 check "no-predicate scan returns all rows" "$(q 'SELECT count(*) FROM n;')" "$(q 'SELECT count(*) FROM h;')"
 

@@ -112,6 +112,10 @@ check "min and max match heap on every column" "${bad:-same}" "same"
 # A fast path that quietly widened every bound would pass checks 1 and 2 while
 # giving up the skipping the zone maps exist for, so assert groups are still
 # ruled out.
+# The node, before the counter read out of it.
+check "the plan under test is a columnar custom scan" \
+	"$(pgc_is_columnar_scan "SELECT count(*) FROM mm_c WHERE asc_i BETWEEN 19999 AND 20001")" "yes"
+
 skipped="$(q "EXPLAIN (ANALYZE, COSTS off, TIMING off, SUMMARY off)
 	SELECT count(*) FROM mm_c WHERE asc_i BETWEEN 19999 AND 20001;" \
 	| grep -oE 'Columnar Chunk Groups Removed by Filter: [0-9]+' \

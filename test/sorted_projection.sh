@@ -56,6 +56,11 @@ diff_query "pre order-by"   "SELECT k, v FROM %T ORDER BY k, v"
 diff_query "pre aggregate"  "SELECT k, count(*), sum(v) FROM %T GROUP BY k"
 diff_query "pre star"       "SELECT * FROM %T WHERE id % 997 = 0"
 
+# The node, before any counter read out of it: "Columnar Vectors Skipped" is
+# reported by the columnar custom scan and by nothing else.
+check "the plan under test is a columnar custom scan" \
+	"$(pgc_is_columnar_scan "SELECT sum(v) FROM t_col WHERE k BETWEEN 100 AND 120")" "yes"
+
 removed_before="$(groups_removed "SELECT sum(v) FROM t_col WHERE k BETWEEN 100 AND 120")"
 
 echo "-- sort the columnar table on k"
