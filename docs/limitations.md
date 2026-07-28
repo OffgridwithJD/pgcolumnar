@@ -1,5 +1,25 @@
 # Limitations and compatibility
 
+## Release status
+
+pgColumnar is pre-release. The version marker is `1.0-dev`, recorded in `VERSION`,
+and there has been no tagged release.
+
+Until there is, treat a columnar table as reloadable and keep the source the data
+was loaded from. The extension is appropriate today for evaluation, for analytical
+tables that can be rebuilt from an external source, and for development, testing,
+and measurement. It is not yet recommended for a production system of record or
+for data that cannot be reloaded.
+
+Hardening tracked before a first alpha is in the issue tracker: fuzzing the
+hand-rolled Parquet and Arrow parsers
+([issue #214](https://github.com/jdatcmd/pgcolumnar/issues/214)), a stated and
+tested boundary for untrusted input files
+([issue #216](https://github.com/jdatcmd/pgcolumnar/issues/216)), and a statement
+of the blast radius of a single backend crash
+([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The sections
+below are the standing functional limitations, separate from that work.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
@@ -43,6 +63,38 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
   times row group size. They still cost several times what heap costs, because
   each changed row is marked and rewritten rather than updated in place.
 
+## Bulk load and import throughput
+
+Loading a columnar table is slower than loading a heap for most shapes, and the
+factor depends on the data rather than on a single number. Measured at 6,000,000
+rows on PostgreSQL 17.10, non-assert, against a heap insert of the same rows:
+
+| shape | `encode_effort = full` | `encode_effort = fast` |
+| --- | --- | --- |
+| one `bigint` column | 0.67x | |
+| one low-cardinality text column | 3.83x | 3.01x |
+| one high-entropy text column | 6.48x | 1.94x |
+| five columns, low-cardinality text | 5.59x | 5.55x |
+| five columns, high-entropy text | 8.83x | 4.13x |
+
+A single narrow column can be faster than heap; five columns of long high-entropy
+text at full effort are several times slower. A single multiplier would be wrong
+in one direction or the other depending on the schema.
+
+`encode_effort` is the knob. The default, `full`, spends the most on encoding for
+the best storage ratio; `fast` trades some ratio for load speed and recovers most
+of the cost on high-entropy text, where the encoding search is what it skips. Set
+it per table with `pgcolumnar.set_options(rel, encode_effort => 'fast')`.
+Low-cardinality text is dominated by dictionary encoding rather than by that
+search, so `fast` helps it less.
+
+`import_arrow` and `import_parquet` are not slower than an ordinary `INSERT` of
+the same rows. There is no import-specific overhead; the cost is the columnar
+write path either way.
+
+Work on load throughput is tracked in
+[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155).
+
 ## Planner statistics
 
 `ANALYZE` collects column statistics for a columnar table: null fraction,
@@ -61,13 +113,8 @@ blocks that hold no row-group data (the metapage, and space reserved but not yet
 written) count as visited while offering no rows; the planner does not use that
 figure for columnar tables.
 
-`ANALYZE` samples rows through the fetch path, so its cost grows with the number
-and width of columns rather than only with row count. On a wide table it can take
-a long time, and autoanalyze runs it unprompted; see
-[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171), which also covers
-a point-lookup plan regression that appears once statistics exist. On a table
-where that matters, consider `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS 0`
-for columns no predicate uses.
+`ANALYZE` samples rows through the fetch path rather than by block, so it costs
+somewhat more on a columnar table than on a heap of the same size.
 
 `TABLESAMPLE` is unsupported and says so: it raises an error rather than
 returning no rows.
@@ -166,14 +213,10 @@ refused where it is chosen, not at every later use of it.
 
 `pgcolumnar.import_arrow` and `pgcolumnar.import_parquet` maintain every index on
 the target and enforce unique and exclusion constraints, so an import cannot
-reach a state an ordinary `INSERT` would refuse.
-
-One difference from ordinary DML remains: a **deferrable** unique constraint is
-checked as each row is inserted rather than deferred to commit. An import that
-would transiently violate uniqueness partway through, and be consistent by the
-end, is rejected where ordinary DML would accept it. Enforcing early is
-over-strict rather than unsound. Tracked as
-[issue #168](https://github.com/jdatcmd/pgcolumnar/issues/168).
+reach a state an ordinary `INSERT` would refuse. A deferrable constraint is
+deferred to commit on the import path as it is for ordinary DML, so an import
+that transiently violates uniqueness partway through and is consistent by the end
+commits rather than being rejected.
 
 ## Vectorized aggregate coverage
 
