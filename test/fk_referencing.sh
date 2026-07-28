@@ -26,6 +26,15 @@
 # and must keep working -- a fix that rejected both directions would take away
 # something that does.
 #
+# There are two ways into that configuration and the file covers both. Creating
+# the constraint against a columnar table is one; making an already-referenced
+# table columnar is the other, and it reaches the identical dead end from the
+# opposite side (sections 5 and 6). The second is refused at
+# ALTER TABLE ... SET ACCESS METHOD, so the controls there are about not
+# over-reaching: an unrelated ALTER TABLE on a referenced table, a conversion of
+# the referencing side, and a conversion of a table with no foreign key at all
+# must all still work.
+#
 # Usage:  test/fk_referencing.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 
@@ -133,6 +142,82 @@ err5="$(psql_run "CREATE TABLE fk_hh_child (id int REFERENCES fk_hh_parent(id));
 
 check "a foreign key between two heap tables is unaffected" \
 	"$(case "$err5" in *ERROR*) echo "no ($err5)" ;; *) echo yes ;; esac)" \
+	"yes"
+
+# --- 5. the same configuration reached by converting the parent ----------------
+
+# Refusing the constraint closes the door where the constraint is created. The
+# same unusable state is reachable from the other end: create both tables as
+# heap, then make the referenced one columnar. The constraint remains, the
+# parent is columnar, and every later insert into the child fails.
+psql_run "DROP TABLE IF EXISTS fk_conv_child; DROP TABLE IF EXISTS fk_conv_parent;
+	CREATE TABLE fk_conv_parent (id int PRIMARY KEY);
+	CREATE TABLE fk_conv_child (id int REFERENCES fk_conv_parent(id));
+	INSERT INTO fk_conv_parent VALUES (1);
+	INSERT INTO fk_conv_child VALUES (1);" >/dev/null
+
+conv="$(psql_run "ALTER TABLE fk_conv_parent SET ACCESS METHOD pgcolumnar;" 2>&1 || true)"
+
+check "converting an FK-referenced table to columnar is refused" \
+	"$(case "$conv" in *"referenced by a foreign key"*) echo yes ;; *) echo "no ($conv)" ;; esac)" \
+	"yes"
+
+check "and the error names the constraint" \
+	"$(case "$conv" in *"row locking is not supported"*) echo yes ;; *) echo "no ($conv)" ;; esac)" \
+	"yes"
+
+# The refusal has to leave the table alone, not half-convert it.
+check "the parent is still a row store" \
+	"$(q "SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam
+		WHERE c.relname = 'fk_conv_parent';" | tail -1)" "heap"
+
+# The trap this exists to prevent: the child stays writable.
+psql_run "INSERT INTO fk_conv_parent VALUES (2);" >/dev/null 2>&1
+ins="$(psql_run "INSERT INTO fk_conv_child VALUES (2);" 2>&1 || true)"
+check "the child is still writable afterwards" \
+	"$(case "$ins" in *ERROR*) echo "no ($ins)" ;; *) echo yes ;; esac)" \
+	"yes"
+
+# The extension's own helper runs the same statement, so it must be refused the
+# same way rather than becoming a way around the check.
+helper="$(psql_run "SELECT pgcolumnar.alter_table_set_access_method('fk_conv_parent', 'pgcolumnar');" 2>&1 || true)"
+check "the conversion helper is refused identically" \
+	"$(case "$helper" in *"referenced by a foreign key"*) echo yes ;; *) echo "no ($helper)" ;; esac)" \
+	"yes"
+
+# --- 6. and nothing else about SET ACCESS METHOD changes -----------------------
+
+# The over-rejection controls. A rule keyed on the wrong side, or one that fired
+# for any ALTER TABLE rather than this one, passes every check above and fails
+# these.
+
+psql_run "DROP TABLE IF EXISTS fk_conv_plain;
+	CREATE TABLE fk_conv_plain (id int PRIMARY KEY);
+	INSERT INTO fk_conv_plain VALUES (1);" >/dev/null
+plain="$(psql_run "ALTER TABLE fk_conv_plain SET ACCESS METHOD pgcolumnar;" 2>&1 || true)"
+check "a table with no foreign key still converts" \
+	"$(case "$plain" in *ERROR*) echo "no ($plain)" ;; *) echo yes ;; esac)" \
+	"yes"
+
+# The referencing side is the direction that works, so converting the CHILD must
+# still be allowed -- this is the mirror of check 3 above.
+childconv="$(psql_run "ALTER TABLE fk_conv_child SET ACCESS METHOD pgcolumnar;" 2>&1 || true)"
+check "converting the referencing side is still allowed" \
+	"$(case "$childconv" in *ERROR*) echo "no ($childconv)" ;; *) echo yes ;; esac)" \
+	"yes"
+
+# An unrelated ALTER TABLE on an FK-referenced table must be untouched. Checking
+# the command rather than the post-alter state is what keeps this true: a rule
+# that fired whenever a referenced table was columnar would reject this.
+other="$(psql_run "ALTER TABLE fk_conv_parent ADD COLUMN note text;" 2>&1 || true)"
+check "an unrelated ALTER TABLE on a referenced table is unaffected" \
+	"$(case "$other" in *ERROR*) echo "no ($other)" ;; *) echo yes ;; esac)" \
+	"yes"
+
+# Converting away from columnar is not this rule's business.
+back="$(psql_run "ALTER TABLE fk_conv_plain SET ACCESS METHOD heap;" 2>&1 || true)"
+check "converting back to heap is unaffected" \
+	"$(case "$back" in *ERROR*) echo "no ($back)" ;; *) echo yes ;; esac)" \
 	"yes"
 
 pgc_summary

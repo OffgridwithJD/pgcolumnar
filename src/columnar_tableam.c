@@ -43,7 +43,10 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_constraint.h"
+#include "tcop/utility.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -75,6 +78,7 @@ static const struct config_enum_entry columnar_compression_options[] = {
 static const TableAmRoutine columnar_am_methods;
 
 static object_access_hook_type prev_object_access_hook = NULL;
+static ProcessUtility_hook_type prev_process_utility_hook = NULL;
 static ExecutorEnd_hook_type prev_executor_end_hook = NULL;
 #if PG_VERSION_NUM >= 190000
 static build_simple_rel_hook_type prev_build_simple_rel_hook = NULL;
@@ -1749,6 +1753,183 @@ columnar_reject_fk_to_columnar(Oid constraintId)
 						 "and the referenced table heap.")));
 }
 
+/*
+ * columnar_am_is_columnar
+ *		Does this table access method oid resolve to this extension's routine?
+ *
+ * By handler identity rather than by name, so a second name for the same access
+ * method is still recognised.
+ */
+static bool
+columnar_am_is_columnar(Oid amoid)
+{
+	HeapTuple	tup;
+	Form_pg_am	amform;
+	Oid			handler;
+
+	if (!OidIsValid(amoid))
+		return false;
+
+	tup = SearchSysCache1(AMOID, ObjectIdGetDatum(amoid));
+	if (!HeapTupleIsValid(tup))
+		return false;
+
+	amform = (Form_pg_am) GETSTRUCT(tup);
+	handler = amform->amhandler;
+
+	/*
+	 * Only ask a table access method for its routine. An index access method
+	 * name here is a user error that core reports precisely; GetTableAmRoutine
+	 * would assert on it first.
+	 */
+	if (amform->amtype != AMTYPE_TABLE || !OidIsValid(handler))
+	{
+		ReleaseSysCache(tup);
+		return false;
+	}
+	ReleaseSysCache(tup);
+
+	return GetTableAmRoutine(handler) == &columnar_am_methods;
+}
+
+/*
+ * columnar_fk_referencing
+ *		Name of some foreign key whose referenced side is relid, or NULL.
+ */
+static char *
+columnar_fk_referencing(Oid relid)
+{
+	Relation	conRel;
+	SysScanDesc scan;
+	ScanKeyData key[2];
+	HeapTuple	tup;
+	char	   *conname = NULL;
+
+	ScanKeyInit(&key[0], Anum_pg_constraint_contype, BTEqualStrategyNumber,
+				F_CHAREQ, CharGetDatum(CONSTRAINT_FOREIGN));
+	ScanKeyInit(&key[1], Anum_pg_constraint_confrelid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+
+	/*
+	 * pg_constraint has no index on confrelid, so this is a heap scan with the
+	 * keys applied -- the same way core finds the foreign keys pointing at a
+	 * relation. It runs once per ALTER TABLE ... SET ACCESS METHOD.
+	 */
+	conRel = table_open(ConstraintRelationId, AccessShareLock);
+	scan = systable_beginscan(conRel, InvalidOid, false, NULL, 2, key);
+	tup = systable_getnext(scan);
+	if (HeapTupleIsValid(tup))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+
+		conname = pstrdup(NameStr(con->conname));
+	}
+	systable_endscan(scan);
+	table_close(conRel, AccessShareLock);
+
+	return conname;
+}
+
+/*
+ * columnar_reject_set_am_to_columnar
+ *		Refuse ALTER TABLE ... SET ACCESS METHOD to columnar when the relation is
+ *		the referenced side of a foreign key.
+ *
+ * columnar_reject_fk_to_columnar closes this door where the constraint is
+ * created. The same unusable configuration is reachable from the other end, by
+ * making the referenced table columnar after the constraint already exists:
+ *
+ *     CREATE TABLE p (id int PRIMARY KEY);          -- heap
+ *     CREATE TABLE c (id int REFERENCES p(id));     -- fine
+ *     ALTER TABLE p SET ACCESS METHOD pgcolumnar;   -- was accepted
+ *     INSERT INTO c VALUES (1);                     -- ERROR: row locking ...
+ *
+ * After that the constraint is still in pg_constraint, the parent is columnar,
+ * and every subsequent insert into the child fails -- the exact trap the
+ * constraint-side refusal exists to remove, arrived at from the other side. It
+ * is not unsound (deletes of referenced parent rows are still refused, and no
+ * child row is orphaned), so this is the same usability trap rather than a new
+ * correctness one.
+ *
+ * Checked here, in ProcessUtility, rather than in the object access hook. The
+ * post-alter hook fires for every ALTER TABLE subcommand and does not say which
+ * one ran, so refusing there would also reject an unrelated ALTER -- a rename,
+ * say -- on a table that had already reached this state under an older version.
+ * Refusing the command that chooses the configuration is both narrower and the
+ * rule the constraint-side check already follows.
+ *
+ * pgcolumnar.alter_table_set_access_method() needs no separate treatment: on
+ * every supported major it executes this same statement.
+ */
+static void
+columnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
+{
+	Oid			relid;
+	ListCell   *lc;
+
+	relid = RangeVarGetRelid(stmt->relation, NoLock, true);
+	if (!OidIsValid(relid))
+		return;
+
+	/*
+	 * Ordinary tables only, matching the constraint-side check. A partitioned
+	 * table takes a different route to the same place -- its access method is
+	 * inherited by partitions created later -- and is not addressed here.
+	 */
+	if (get_rel_relkind(relid) != RELKIND_RELATION)
+		return;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(lc);
+		const char *amname;
+		char	   *conname;
+
+		if (cmd->subtype != AT_SetAccessMethod)
+			continue;
+
+		/* SET ACCESS METHOD DEFAULT leaves the name unset (PG17+) */
+		amname = cmd->name ? cmd->name : default_table_access_method;
+
+		if (!columnar_am_is_columnar(get_table_am_oid(amname, true)))
+			continue;
+
+		conname = columnar_fk_referencing(relid);
+		if (conname == NULL)
+			continue;
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot convert table \"%s\" to columnar storage while it is referenced by a foreign key",
+						get_rel_name(relid)),
+				 errdetail("Constraint \"%s\" requires locking the referenced row, "
+						   "and row locking is not supported on columnar tables.",
+						   conname),
+				 errhint("Drop the foreign key constraint first, or leave this "
+						 "table on a row store.")));
+	}
+}
+
+static void
+columnar_process_utility(PlannedStmt *pstmt, const char *queryString,
+						 bool readOnlyTree, ProcessUtilityContext context,
+						 ParamListInfo params, QueryEnvironment *queryEnv,
+						 DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+
+	/* read-only inspection, so readOnlyTree needs no copy of the tree */
+	if (parsetree != NULL && IsA(parsetree, AlterTableStmt))
+		columnar_reject_set_am_to_columnar((AlterTableStmt *) parsetree);
+
+	if (prev_process_utility_hook)
+		prev_process_utility_hook(pstmt, queryString, readOnlyTree, context,
+								  params, queryEnv, dest, qc);
+	else
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+}
+
 static void
 columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 					   int subId, void *arg)
@@ -2110,6 +2291,9 @@ _PG_init(void)
 
 	prev_object_access_hook = object_access_hook;
 	object_access_hook = columnar_object_access;
+
+	prev_process_utility_hook = ProcessUtility_hook;
+	ProcessUtility_hook = columnar_process_utility;
 
 	prev_executor_end_hook = ExecutorEnd_hook;
 	ExecutorEnd_hook = columnar_executor_end;
