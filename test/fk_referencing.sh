@@ -269,17 +269,38 @@ check "and a partition can still be created the ordinary way" \
 
 # The control, and the one that fails if the rule is keyed on the wrong thing: a
 # partitioned table nobody references converts fine, and its partitions inherit.
+#
+# Core accepts SET ACCESS METHOD on a partitioned table only from PostgreSQL 17.
+# Before that it refuses every such ALTER whether or not a foreign key is
+# involved, so the control cannot be expressed there and these two checks fail on
+# a correct build. They did: added by #206 for issue #201 and gated on 18 and 19
+# only, they went in red on 15 and 16 and stayed red until the next full matrix
+# found them.
+#
+# The older majors get the inverse assertion rather than a silent skip, so the
+# suite still says something on them: the refusal must be core's, by core's
+# message. If this extension ever starts refusing first, or core lifts the
+# restriction, that check fails and this branch gets revisited.
 psql_run "DROP TABLE IF EXISTS fk_free;
 	CREATE TABLE fk_free (id int) PARTITION BY RANGE (id);" >/dev/null
 
-check "a partitioned table with no foreign key still converts" \
-	"$(psql_run "ALTER TABLE fk_free SET ACCESS METHOD pgcolumnar;" 2>&1 | grep -c ERROR)" \
-	"0"
+if [ "$PGC_MAJOR" -ge 17 ]; then
+	check "a partitioned table with no foreign key still converts" \
+		"$(psql_run "ALTER TABLE fk_free SET ACCESS METHOD pgcolumnar;" 2>&1 | grep -c ERROR)" \
+		"0"
 
-check "and its partitions inherit the columnar access method" \
-	"$(psql_run "CREATE TABLE fk_free1 PARTITION OF fk_free FOR VALUES FROM (1) TO (100);" >/dev/null 2>&1;
-	   q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
-		WHERE c.relname = 'fk_free1';")" \
-	"pgcolumnar"
+	check "and its partitions inherit the columnar access method" \
+		"$(psql_run "CREATE TABLE fk_free1 PARTITION OF fk_free FOR VALUES FROM (1) TO (100);" >/dev/null 2>&1;
+		   q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+			WHERE c.relname = 'fk_free1';")" \
+		"pgcolumnar"
+else
+	ferr="$(psql_run "ALTER TABLE fk_free SET ACCESS METHOD pgcolumnar;" 2>&1 || true)"
+
+	check "before 17, core refuses this for every partitioned table" \
+		"$(case "$ferr" in *"cannot change access method of a partitioned table"*) echo yes ;;
+			*) echo "no ($ferr)" ;; esac)" \
+		"yes"
+fi
 
 pgc_summary
