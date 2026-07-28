@@ -1815,22 +1815,26 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 	SysScanDesc scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
+	Oid			rgIdx = columnar_index_oid("row_group_pkey");
 
 	ScanKeyInit(&key[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	/*
-	 * Deliberately a heap scan, unlike the per-row-group readers below.
-	 * ColumnarReadRowByNumber() calls this from columnar_index_fetch_tuple(),
-	 * which btree calls from _bt_check_unique() while it holds the index page,
-	 * and it passes the synthesized snapshot from ColumnarCatalogSnapshot(): an
-	 * unregistered copy whose curcid is pushed past the current command. An
-	 * index scan under that combination spins rather than returning, and
-	 * _bt_doinsert() retries forever (test/unique_conc.sh scenario 7).
+	 * Index scan on row_group_pkey, so a fetch reads this storage's groups
+	 * rather than a heap scan of every storage's row groups in the database.
 	 *
-	 * This one is also not where the cost is: it runs once per scan rather than
-	 * once per row group, so it is linear in the row-group count either way.
+	 * This read is on the unique-check path: _bt_check_unique() reaches it
+	 * through columnar_index_fetch_tuple() under its own on-stack SnapshotDirty
+	 * and reads xmin/xmax back out afterwards. A bare index scan here once
+	 * spun the check forever (test/unique_conc.sh scenario 7): when this storage
+	 * has nothing flushed the scan matches no rows, HeapTupleSatisfiesDirty()
+	 * never runs, and the uninitialised out-fields are read as a phantom xact to
+	 * wait on. columnar_index_fetch_tuple() now resets those fields before the
+	 * fetch, the way HeapTupleSatisfiesDirty() does for a heap row, so the index
+	 * scan is safe: an in-progress group still sets xmin here and the check waits
+	 * on the real inserter.
 	 */
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	scan = systable_beginscan(rel, rgIdx, OidIsValid(rgIdx), snapshot, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeRowGroupMetadata *rg = palloc0(sizeof(NativeRowGroupMetadata));

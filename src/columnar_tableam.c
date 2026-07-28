@@ -1132,6 +1132,24 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
 	ExecClearTuple(slot);
 
 	/*
+	 * Honour the dirty-snapshot contract. _bt_check_unique() hands us its own
+	 * on-stack SnapshotDirty and reads xmin/xmax back out afterwards to pick the
+	 * xact to wait on; InitDirtySnapshot() leaves those fields uninitialised, and
+	 * HeapTupleSatisfiesDirty() -- which never runs on a columnar row -- is what
+	 * would reset and then set them for a heap row. Reset them here exactly as it
+	 * does at entry. The catalog read of the row's containing group below runs
+	 * under this same snapshot, so a group still being inserted by another
+	 * transaction sets xmin to that xact and the unique check waits on it; when
+	 * nothing covers the row the fields stay Invalid and the check does not wait
+	 * on stack garbage.
+	 */
+	if (snapshot != NULL && snapshot->snapshot_type == SNAPSHOT_DIRTY)
+	{
+		snapshot->xmin = snapshot->xmax = InvalidTransactionId;
+		snapshot->speculativeToken = 0;
+	}
+
+	/*
 	 * Settle visibility without decoding anything, then hand the slot the row's
 	 * address rather than its values (issue #157). The columns are decoded when
 	 * the executor asks for them, and it asks for the smallest prefix it needs.
