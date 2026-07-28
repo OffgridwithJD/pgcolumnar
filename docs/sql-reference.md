@@ -24,7 +24,7 @@ SELECT pgcolumnar.alter_table_set_access_method('events', 'pgcolumnar');
 ### pgcolumnar.set_options(...) and pgcolumnar.reset_options(...)
 
 Set or reset per-table storage options (row group and vector row limits,
-compression codec and level). See
+compression codec and level, and encode effort). See
 [Configuration reference](configuration.md#per-table-storage-options).
 
 ### pgcolumnar.get_storage_id(rel regclass) returns bigint

@@ -132,6 +132,19 @@
  * Per-table options (spec 7.4). A "set" flag distinguishes an explicitly
  * stored per-table value from the instance-wide GUC default.
  * ------------------------------------------------------------------------- */
+/*
+ * How much work the writer spends choosing an encoding (issue #155).
+ *
+ * FULL is what this format has always done. FAST skips the FSST substring
+ * search -- the symbol-table build, the whole-corpus "does it help" decision,
+ * and the per-vector encode -- which is where the write cost of a text column
+ * overwhelmingly is. Nothing else changes: dictionary, RLE, the numeric schemes
+ * and the block codec all still run, and a chunk written either way is read
+ * back by the same code.
+ */
+#define COLUMNAR_ENCODE_EFFORT_FULL 0
+#define COLUMNAR_ENCODE_EFFORT_FAST 1
+
 typedef struct ColumnarOptions
 {
 	bool		chunkGroupRowLimitSet;
@@ -142,6 +155,8 @@ typedef struct ColumnarOptions
 	int			compressionType;	/* one of COLUMNAR_COMPRESSION_* */
 	bool		compressionLevelSet;
 	int			compressionLevel;
+	bool		encodeEffortSet;
+	int			encodeEffort;		/* one of COLUMNAR_ENCODE_EFFORT_* */
 } ColumnarOptions;
 
 /* GUC-backed instance defaults (spec 8.3) */

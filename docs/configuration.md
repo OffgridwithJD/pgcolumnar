@@ -87,9 +87,44 @@ SELECT pgcolumnar.set_options(
 | `stripe_row_limit` | integer | Per-table override of `pgcolumnar.stripe_row_limit`. |
 | `compression` | name | One of `none`, `pglz`, `lz4`, `zstd`. |
 | `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
+| `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
 
 Arguments left at their default (`NULL`) are not changed. A value outside the
 valid range for a limit or level is rejected.
+
+### Encode effort
+
+`encode_effort = fast` skips the FSST substring search when writing text and
+other variable-length columns. Everything else is unchanged: dictionary,
+run-length, the numeric schemes and the block codec all still run, and a table
+written either way is read back by the same code, so the setting is a cost
+choice and never a compatibility one.
+
+It trades compression ratio for load speed, and how much of each depends
+entirely on the data:
+
+| Text shape (1,000,000 rows, one column) | Load speed-up with `fast` | Extra space |
+| --- | --- | --- |
+| 32-char hashes | 5.7x | 2.7% |
+| E-mail addresses | 3.5x | 12.2% |
+| 64-char hashes | 3.1x | none |
+| 256-char high-entropy | 2.4x | none |
+| Short low-entropy text | 1.2x to 2.7x | none |
+
+On five of the seven shapes measured, `fast` produced byte-for-byte identical
+storage, so the work it skipped had bought nothing. On the two where the search
+does pay, it pays properly. There is no way to know which case a column is
+without trying it, which is why this is a per-table choice and why the default
+keeps the full search.
+
+`fast` is worth considering for a bulk load you intend to compact later:
+`pgcolumnar.vacuum`, `pgcolumnar.compact_rewrite` and `pgcolumnar.recluster`
+rewrite the data under whatever effort is set at the time, so a table can be
+loaded cheaply and compressed properly afterwards.
+
+The option is per table rather than a session setting on purpose: the same data
+written through two sessions with different settings would otherwise be stored
+two different ways depending on which session loaded it.
 
 `pgcolumnar.reset_options` returns options to the server defaults:
 

@@ -53,7 +53,8 @@ CREATE TABLE pgcolumnar.options (
 	chunk_group_row_limit integer,
 	stripe_row_limit integer,
 	compression_level integer,
-	compression name
+	compression name,
+	encode_effort name
 );
 
 CREATE UNIQUE INDEX options_pkey
@@ -263,11 +264,18 @@ CREATE FUNCTION pgcolumnar.set_options(
 	chunk_group_row_limit int DEFAULT NULL,
 	stripe_row_limit int DEFAULT NULL,
 	compression name DEFAULT NULL,
-	compression_level int DEFAULT NULL)
+	compression_level int DEFAULT NULL,
+	encode_effort name DEFAULT NULL)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $set_options$
 BEGIN
+	IF encode_effort IS NOT NULL AND
+	   encode_effort NOT IN ('full', 'fast') THEN
+		RAISE EXCEPTION 'unknown columnar encode_effort "%"', encode_effort
+			USING HINT = 'Valid values are "full" and "fast".';
+	END IF;
+
 	IF compression IS NOT NULL AND
 	   compression NOT IN ('none', 'pglz', 'lz4', 'zstd') THEN
 		RAISE EXCEPTION 'unknown columnar compression "%"', compression;
@@ -295,9 +303,9 @@ BEGIN
 
 	INSERT INTO pgcolumnar.options AS o
 		(regclass, chunk_group_row_limit, stripe_row_limit,
-		 compression, compression_level)
+		 compression, compression_level, encode_effort)
 	VALUES (table_name, chunk_group_row_limit, stripe_row_limit,
-			compression, compression_level)
+			compression, compression_level, encode_effort)
 	ON CONFLICT (regclass) DO UPDATE SET
 		chunk_group_row_limit =
 			COALESCE(EXCLUDED.chunk_group_row_limit, o.chunk_group_row_limit),
@@ -306,11 +314,13 @@ BEGIN
 		compression =
 			COALESCE(EXCLUDED.compression, o.compression),
 		compression_level =
-			COALESCE(EXCLUDED.compression_level, o.compression_level);
+			COALESCE(EXCLUDED.compression_level, o.compression_level),
+		encode_effort =
+			COALESCE(EXCLUDED.encode_effort, o.encode_effort);
 END;
 $set_options$;
 
-COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int)
+COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int, name)
 	IS 'set per-table columnar options; NULL leaves a value unchanged';
 
 CREATE FUNCTION pgcolumnar.reset_options(
@@ -318,7 +328,8 @@ CREATE FUNCTION pgcolumnar.reset_options(
 	chunk_group_row_limit bool DEFAULT false,
 	stripe_row_limit bool DEFAULT false,
 	compression bool DEFAULT false,
-	compression_level bool DEFAULT false)
+	compression_level bool DEFAULT false,
+	encode_effort bool DEFAULT false)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $reset_options$
@@ -335,12 +346,15 @@ BEGIN
 			THEN NULL ELSE o.compression END,
 		compression_level = CASE
 			WHEN reset_options.compression_level
-			THEN NULL ELSE o.compression_level END
+			THEN NULL ELSE o.compression_level END,
+		encode_effort = CASE
+			WHEN reset_options.encode_effort
+			THEN NULL ELSE o.encode_effort END
 	WHERE o.regclass = table_name;
 END;
 $reset_options$;
 
-COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool)
+COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool, bool)
 	IS 'reset per-table columnar options to the instance defaults';
 
 /* ---------------------------------------------------------------------------
