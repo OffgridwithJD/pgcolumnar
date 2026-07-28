@@ -43,8 +43,31 @@ plan() {
 
 field() { echo "$1" | grep -oE "$2: [0-9]+" | head -1 | grep -oE '[0-9]+$'; }
 
+# Is this plan the scalar columnar custom scan, and not something else?
+#
+# "Columnar Projected Columns" is that node's own marker: the vectorized
+# aggregate node does not report it, and no other node reports it at all. A
+# positive grep for the node's marker is a stronger test than an absence test,
+# because a plan that fell back to a seq scan has no Columnar lines to be absent.
+is_scalar_scan() {
+	echo "$1" | grep -q 'Columnar Projected Columns' && echo yes || echo no
+}
+
 on="$(plan on)"
 off="$(plan off)"
+
+# --- 0. the node, before any number read from it --------------------------------
+
+# Every check below reads a counter out of these two plans and believes it. If
+# the planner ever stops choosing the columnar custom scan here -- a costing
+# change, a new path, a GUC default -- those counters go missing or come from
+# somewhere else, and a suite that only compared numbers would report a fix
+# where there was a plan change. This has to fail before anything is read.
+check "the plan under test is a columnar custom scan" "$(is_scalar_scan "$on")" "yes"
+
+# The setting under test must not be changing which node runs; if it did, every
+# comparison between the two plans below would be comparing different things.
+check "and it is still one with pushdown off" "$(is_scalar_scan "$off")" "yes"
 
 # --- 1. the reported number follows the setting ---------------------------------
 
