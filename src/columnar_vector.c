@@ -79,8 +79,10 @@ bool		columnar_enable_vectorization = true;
  * ------------------------------------------------------------------------- */
 
 /*
- * A single pushed-down comparison predicate "column op const" evaluated
- * column-at-a-time over a decoded chunk group to build a selection vector.
+ * One convertible "column op const" restriction clause. Scratch only: it is
+ * filled to decide whether a clause converts and discarded, and nothing stores
+ * an array of these. The machinery that evaluated them over a decoded chunk
+ * group had no call site and is deleted (issue #200).
  */
 typedef struct ColumnarVecPredicate
 {
@@ -89,23 +91,8 @@ typedef struct ColumnarVecPredicate
 	FmgrInfo	opFn;			/* the operator function (returns bool) */
 	Datum		constValue;
 	Oid			collation;
-
-	/*
-	 * Typed fast path (I6). fastKind is one of COLUMNAR_VECFAST_* (0 = none,
-	 * use opFn); strategy is the btree strategy 1..5 (Less..Greater) already
-	 * normalized to "column op const". When fastKind is set, the predicate is
-	 * evaluated column-at-a-time with a branch-free typed loop instead of fmgr.
-	 */
-	int			fastKind;
-	int			strategy;
 } ColumnarVecPredicate;
 
-#define COLUMNAR_VECFAST_NONE 0
-#define COLUMNAR_VECFAST_I16 1
-#define COLUMNAR_VECFAST_I32 2
-#define COLUMNAR_VECFAST_I64 3
-#define COLUMNAR_VECFAST_F32 4
-#define COLUMNAR_VECFAST_F64 5
 
 /*
  * columnar_clause_to_predicate
@@ -173,95 +160,6 @@ columnar_clause_to_predicate(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	fmgr_info(opfuncid, &pred->opFn);
 	pred->constValue = con->constvalue;
 	pred->collation = op->inputcollid;
-
-	/*
-	 * Resolve a typed fast path (I6): a storage kind from the column type and a
-	 * btree strategy from the operator, normalized to "column op const". Only
-	 * used when the constant has exactly the column's type (so the raw Datum can
-	 * be read as that C type); anything else keeps the operator-function path.
-	 * The eligible types compare byte-for-byte without collation, so the fast
-	 * path is collation-agnostic.
-	 */
-	pred->fastKind = COLUMNAR_VECFAST_NONE;
-	pred->strategy = 0;
-	if (con->consttype == var->vartype)
-	{
-		int			fk = COLUMNAR_VECFAST_NONE;
-
-		switch (var->vartype)
-		{
-			case INT2OID:
-				fk = COLUMNAR_VECFAST_I16;
-				break;
-			case INT4OID:
-			case DATEOID:
-				fk = COLUMNAR_VECFAST_I32;
-				break;
-			case INT8OID:
-			case TIMESTAMPOID:
-			case TIMESTAMPTZOID:
-				fk = COLUMNAR_VECFAST_I64;
-				break;
-			case FLOAT4OID:
-				fk = COLUMNAR_VECFAST_F32;
-				break;
-			case FLOAT8OID:
-				fk = COLUMNAR_VECFAST_F64;
-				break;
-			default:
-				break;
-		}
-
-		if (fk != COLUMNAR_VECFAST_NONE)
-		{
-			TypeCacheEntry *tce = lookup_type_cache(var->vartype,
-													TYPECACHE_BTREE_OPFAMILY);
-			int			strat = 0;
-
-			/* match the operator to a btree strategy of the type's opfamily */
-			if (OidIsValid(tce->btree_opf))
-			{
-				int			s;
-
-				for (s = BTLessStrategyNumber; s <= BTGreaterStrategyNumber; s++)
-				{
-					if (get_opfamily_member(tce->btree_opf, tce->btree_opintype,
-											tce->btree_opintype, s) == op->opno)
-					{
-						strat = s;
-						break;
-					}
-				}
-			}
-
-			if (strat != 0)
-			{
-				if (!varOnLeft)
-				{
-					switch (strat)
-					{
-						case BTLessStrategyNumber:
-							strat = BTGreaterStrategyNumber;
-							break;
-						case BTLessEqualStrategyNumber:
-							strat = BTGreaterEqualStrategyNumber;
-							break;
-						case BTGreaterEqualStrategyNumber:
-							strat = BTLessEqualStrategyNumber;
-							break;
-						case BTGreaterStrategyNumber:
-							strat = BTLessStrategyNumber;
-							break;
-						default:
-							break;	/* equal is symmetric */
-					}
-				}
-				pred->fastKind = fk;
-				pred->strategy = strat;
-			}
-		}
-	}
-
 	return true;
 }
 
