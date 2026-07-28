@@ -61,18 +61,16 @@
  * routing each through fmgr is most of what they cost: removing min/max tracking
  * entirely saved 15% of a five-int-column load, where the comparison itself is a
  * subtraction. These are the types whose stored Datum can be read as a C value
- * and compared without a collation, which is the same condition, and the same
- * list, the vectorized filter's fast path uses (COLUMNAR_VECFAST_* in
- * columnar_vector.c). Anything else keeps the fmgr path.
+ * and compared without a collation. Anything else keeps the fmgr path.
  *
- * float4 and float8 are deliberately NOT here even though the filter fast path
- * takes them. btree float ordering puts NaN above every other value, which a C
+ * float4 and float8 are deliberately NOT here, and the reason is worth keeping
+ * whatever else changes. btree float ordering puts NaN above every other value, which a C
  * comparison gets wrong: every comparison against NaN is false, so NaN would read
  * as equal and never become a chunk's maximum. A zone map with a maximum that is
  * too low makes the reader skip a row group that does hold matching rows, and the
- * query silently returns fewer rows. The filter path can take the same shortcut
- * because it compares to answer one predicate, not to build stored bounds that a
- * later scan trusts.
+ * query silently returns fewer rows. A path that compares to answer one
+ * predicate could take the shortcut, because it does not build stored bounds
+ * that a later scan trusts; this one does, so it cannot.
  */
 typedef enum ColumnarFastCmp
 {

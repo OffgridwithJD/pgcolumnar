@@ -79,6 +79,22 @@ bool		columnar_enable_vectorization = true;
  * ------------------------------------------------------------------------- */
 
 /*
+ * One convertible "column op const" restriction clause. Scratch only: it is
+ * filled to decide whether a clause converts and discarded, and nothing stores
+ * an array of these. The machinery that evaluated them over a decoded chunk
+ * group had no call site and is deleted (issue #200).
+ */
+typedef struct ColumnarVecPredicate
+{
+	int			attidx;			/* 0-based column index */
+	bool		varOnLeft;		/* column op const, else const op column */
+	FmgrInfo	opFn;			/* the operator function (returns bool) */
+	Datum		constValue;
+	Oid			collation;
+} ColumnarVecPredicate;
+
+
+/*
  * columnar_clause_to_predicate
  *		Turn one "column op const" (or "const op column") clause into a predicate
  *		we can evaluate row by row. Requires a strict boolean operator and a
@@ -144,248 +160,47 @@ columnar_clause_to_predicate(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	fmgr_info(opfuncid, &pred->opFn);
 	pred->constValue = con->constvalue;
 	pred->collation = op->inputcollid;
-
-	/*
-	 * Resolve a typed fast path (I6): a storage kind from the column type and a
-	 * btree strategy from the operator, normalized to "column op const". Only
-	 * used when the constant has exactly the column's type (so the raw Datum can
-	 * be read as that C type); anything else keeps the operator-function path.
-	 * The eligible types compare byte-for-byte without collation, so the fast
-	 * path is collation-agnostic.
-	 */
-	pred->fastKind = COLUMNAR_VECFAST_NONE;
-	pred->strategy = 0;
-	if (con->consttype == var->vartype)
-	{
-		int			fk = COLUMNAR_VECFAST_NONE;
-
-		switch (var->vartype)
-		{
-			case INT2OID:
-				fk = COLUMNAR_VECFAST_I16;
-				break;
-			case INT4OID:
-			case DATEOID:
-				fk = COLUMNAR_VECFAST_I32;
-				break;
-			case INT8OID:
-			case TIMESTAMPOID:
-			case TIMESTAMPTZOID:
-				fk = COLUMNAR_VECFAST_I64;
-				break;
-			case FLOAT4OID:
-				fk = COLUMNAR_VECFAST_F32;
-				break;
-			case FLOAT8OID:
-				fk = COLUMNAR_VECFAST_F64;
-				break;
-			default:
-				break;
-		}
-
-		if (fk != COLUMNAR_VECFAST_NONE)
-		{
-			TypeCacheEntry *tce = lookup_type_cache(var->vartype,
-													TYPECACHE_BTREE_OPFAMILY);
-			int			strat = 0;
-
-			/* match the operator to a btree strategy of the type's opfamily */
-			if (OidIsValid(tce->btree_opf))
-			{
-				int			s;
-
-				for (s = BTLessStrategyNumber; s <= BTGreaterStrategyNumber; s++)
-				{
-					if (get_opfamily_member(tce->btree_opf, tce->btree_opintype,
-											tce->btree_opintype, s) == op->opno)
-					{
-						strat = s;
-						break;
-					}
-				}
-			}
-
-			if (strat != 0)
-			{
-				if (!varOnLeft)
-				{
-					switch (strat)
-					{
-						case BTLessStrategyNumber:
-							strat = BTGreaterStrategyNumber;
-							break;
-						case BTLessEqualStrategyNumber:
-							strat = BTGreaterEqualStrategyNumber;
-							break;
-						case BTGreaterEqualStrategyNumber:
-							strat = BTLessEqualStrategyNumber;
-							break;
-						case BTGreaterStrategyNumber:
-							strat = BTLessStrategyNumber;
-							break;
-						default:
-							break;	/* equal is symmetric */
-					}
-				}
-				pred->fastKind = fk;
-				pred->strategy = strat;
-			}
-		}
-	}
-
 	return true;
 }
 
-ColumnarVecPredicate *
-ColumnarBuildVecPredicates(List *qual, Index scanrelid, TupleDesc tupdesc,
-						   int *npreds, bool *allConvertible)
+static void
+ColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
+							  int *nconvertible, bool *allConvertible)
 {
-	ColumnarVecPredicate *preds;
 	ListCell   *lc;
 	int			n = 0;
 
-	*npreds = 0;
+	*nconvertible = 0;
 	*allConvertible = true;
 	if (qual == NIL)
-		return NULL;
-
-	preds = (ColumnarVecPredicate *)
-		palloc0(sizeof(ColumnarVecPredicate) * list_length(qual));
+		return;
 
 	foreach(lc, qual)
 	{
+		ColumnarVecPredicate scratch;
+
 		if (columnar_clause_to_predicate((Node *) lfirst(lc), scanrelid, tupdesc,
-										 &preds[n]))
+										 &scratch))
 			n++;
 		else
 			*allConvertible = false;
 	}
 
-	*npreds = n;
-	return preds;
+	*nconvertible = n;
 }
 
-bool
-ColumnarVecRowPasses(ColumnarVecPredicate *preds, int npreds,
-					 ColumnarVector *vec, uint64 i)
-{
-	int			p;
-
-	for (p = 0; p < npreds; p++)
-	{
-		ColumnarVecPredicate *pred = &preds[p];
-		Datum		colval;
-		Datum		result;
-
-		/* the predicate column is always projected, so its array is present */
-		if (vec->isnull[pred->attidx][i])
-			return false;		/* strict op over NULL: row excluded */
-
-		colval = vec->values[pred->attidx][i];
-		if (pred->varOnLeft)
-			result = FunctionCall2Coll(&pred->opFn, pred->collation,
-									   colval, pred->constValue);
-		else
-			result = FunctionCall2Coll(&pred->opFn, pred->collation,
-									   pred->constValue, colval);
-
-		if (!DatumGetBool(result))
-			return false;
-	}
-
-	return true;
-}
 
 /*
- * Typed, branch-free predicate loops (I6). Each ANDs one predicate's result
- * into sel over the whole column array. The comparison is chosen once (outside
- * the inner loop) so the loop body has no data-dependent branch beyond the
- * comparison, which the compiler can auto-vectorize.
+ * The branch-free typed comparison loops that lived here built a selection
+ * vector, and were reached only from a function that had no call site anywhere
+ * in the tree; both are deleted (issue #200). Recoverable from history if a
+ * filtered aggregate path is ever built. What should not be recovered with them is their gating, which
+ * was none: the scalar path's predicates are gated on
+ * pgcolumnar.enable_qual_pushdown inside ColumnarBeginRead and these never were,
+ * so wiring them up as they stood would have filtered rows while EXPLAIN
+ * reported no pushdown at all.
  */
-#define VEC_CMP_BODY(GET, OP) \
-	{ for (i = 0; i < n; i++) { sel[i] = sel[i] & !isn[i] & (GET(vals[i]) OP c); } break; }
-#define VEC_CMP(NAME, CTYPE, GET) \
-static void \
-NAME(bool *sel, const Datum *vals, const bool *isn, uint64 n, int strat, Datum cdat) \
-{ \
-	CTYPE c = GET(cdat); \
-	uint64 i; \
-	switch (strat) \
-	{ \
-		case BTLessStrategyNumber: VEC_CMP_BODY(GET, <) \
-		case BTLessEqualStrategyNumber: VEC_CMP_BODY(GET, <=) \
-		case BTEqualStrategyNumber: VEC_CMP_BODY(GET, ==) \
-		case BTGreaterEqualStrategyNumber: VEC_CMP_BODY(GET, >=) \
-		case BTGreaterStrategyNumber: VEC_CMP_BODY(GET, >) \
-	} \
-}
 
-VEC_CMP(vecsel_i16, int16, DatumGetInt16)
-VEC_CMP(vecsel_i32, int32, DatumGetInt32)
-VEC_CMP(vecsel_i64, int64, DatumGetInt64)
-VEC_CMP(vecsel_f32, float4, DatumGetFloat4)
-VEC_CMP(vecsel_f64, float8, DatumGetFloat8)
-
-void
-ColumnarVecSelect(ColumnarVecPredicate *preds, int npreds,
-				  ColumnarVector *vec, bool *sel)
-{
-	uint64		n = vec->nrows;
-	uint64		i;
-	int			p;
-
-	/* start from the non-deleted rows */
-	for (i = 0; i < n; i++)
-		sel[i] = !vec->deleted[i];
-
-	for (p = 0; p < npreds; p++)
-	{
-		ColumnarVecPredicate *pred = &preds[p];
-		const Datum *vals = vec->values[pred->attidx];
-		const bool *isn = vec->isnull[pred->attidx];
-
-		switch (pred->fastKind)
-		{
-			case COLUMNAR_VECFAST_I16:
-				vecsel_i16(sel, vals, isn, n, pred->strategy, pred->constValue);
-				break;
-			case COLUMNAR_VECFAST_I32:
-				vecsel_i32(sel, vals, isn, n, pred->strategy, pred->constValue);
-				break;
-			case COLUMNAR_VECFAST_I64:
-				vecsel_i64(sel, vals, isn, n, pred->strategy, pred->constValue);
-				break;
-			case COLUMNAR_VECFAST_F32:
-				vecsel_f32(sel, vals, isn, n, pred->strategy, pred->constValue);
-				break;
-			case COLUMNAR_VECFAST_F64:
-				vecsel_f64(sel, vals, isn, n, pred->strategy, pred->constValue);
-				break;
-			default:
-				/* operator-function fallback, still column-at-a-time */
-				for (i = 0; i < n; i++)
-				{
-					Datum		r;
-
-					if (!sel[i])
-						continue;
-					if (isn[i])
-					{
-						sel[i] = false;
-						continue;
-					}
-					if (pred->varOnLeft)
-						r = FunctionCall2Coll(&pred->opFn, pred->collation,
-											  vals[i], pred->constValue);
-					else
-						r = FunctionCall2Coll(&pred->opFn, pred->collation,
-											  pred->constValue, vals[i]);
-					sel[i] = DatumGetBool(r);
-				}
-				break;
-		}
-	}
-}
 
 /* -------------------------------------------------------------------------
  * vectorized aggregate: classification
@@ -536,8 +351,7 @@ typedef struct ColumnarAggScanState
 	ColumnarAggSpec *specs;
 	int			naggs;
 
-	ColumnarVecPredicate *preds;
-	int			npreds;
+	int			npreds;			/* pushed-down predicate count, for EXPLAIN */
 
 	MemoryContext resultContext;	/* holds min/max running values */
 	bool		done;			/* the single result row was emitted */
@@ -678,8 +492,8 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		Relation	rel = table_open(relid, AccessShareLock);
 		TupleDesc	tupdesc = RelationGetDescr(rel);
 
-		(void) ColumnarBuildVecPredicates(quals, input_rel->relid, tupdesc,
-										  &npreds, &allConvertible);
+		ColumnarCountConvertibleQuals(quals, input_rel->relid, tupdesc,
+									  &npreds, &allConvertible);
 		table_close(rel, AccessShareLock);
 	}
 	if (!allConvertible)
@@ -886,9 +700,20 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 		}
 	}
 
-	state->preds = ColumnarBuildVecPredicates(state->quals, state->scanrelid,
-											  tupdesc, &state->npreds,
-											  &allConvertible);
+	/*
+	 * Only the count survives, and only EXPLAIN reads it. The predicate array was
+	 * stored here and never read: what would have applied it had no call site
+	 * anywhere in the tree and is deleted (issue #200).
+	 *
+	 * The call stays rather than the count being hardcoded to zero. This path is
+	 * only chosen when the relation has no quals, so the count is always zero
+	 * today and the call looks redundant, but that is an inference from a
+	 * planner early return several hundred lines away, and it is the kind that
+	 * stops being true without anyone noticing. Computing it costs one walk of
+	 * an empty list.
+	 */
+	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+								  &state->npreds, &allConvertible);
 
 	table_close(rel, AccessShareLock);
 }
