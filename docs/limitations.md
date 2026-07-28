@@ -126,17 +126,18 @@ columnar table and raise `columnar: row locking is not supported yet`.
 Two consequences are worth stating here, because the error surfaces somewhere
 other than where the feature is used:
 
-- **A foreign key that references a columnar table cannot be satisfied.** The
-  referential-integrity check reads the parent row with `FOR KEY SHARE`, so the
-  constraint is accepted by `CREATE TABLE` and then rejects every insert into the
-  child, including one whose parent row exists. A columnar table on the child
-  side of a foreign key is unaffected.
+- **A foreign key cannot reference a columnar table, and is refused when it is
+  created.** The referential-integrity check reads the parent row with
+  `FOR KEY SHARE`, which a columnar table cannot serve, so `CREATE TABLE` and
+  `ALTER TABLE ADD CONSTRAINT` reject the constraint rather than accepting one
+  that could never be satisfied. A columnar table on the child side of a foreign
+  key is unaffected and works normally.
 - `INSERT ... ON CONFLICT DO UPDATE` takes a row lock and raises the same error.
   `ON CONFLICT DO NOTHING` does not, and works.
 
-Unlogged columnar tables are also rejected, but at `CREATE TABLE`, which is the
-better place: the failure names the feature rather than appearing later as a
-constraint that cannot be met.
+Unlogged columnar tables are rejected at `CREATE TABLE` for the same reason, and
+that is the rule both follow: a configuration this access method cannot honour is
+refused where it is chosen, not at every later use of it.
 
 ## Indexes
 

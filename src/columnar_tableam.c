@@ -14,6 +14,8 @@
 #include "columnar.h"
 
 #include "access/multixact.h"
+#include "access/genam.h"
+#include "access/table.h"
 #include "access/relation.h"
 #include "access/relscan.h"
 #include "access/xact.h"
@@ -40,7 +42,11 @@
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "catalog/indexing.h"
+#include "catalog/pg_constraint.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -1663,8 +1669,85 @@ columnar_executor_end(QueryDesc *queryDesc)
 }
 
 /* -------------------------------------------------------------------------
- * object access hook: clean up metadata when a columnar table is dropped
+ * object access hook: clean up metadata when a columnar table is dropped, and
+ * refuse a foreign key that references a columnar table
  * ------------------------------------------------------------------------- */
+
+/*
+ * columnar_reject_fk_to_columnar
+ *		Raise on a foreign key whose referenced side is a columnar table.
+ *
+ * The referential-integrity check reads the referenced row with FOR KEY SHARE,
+ * to hold the parent key still until the referencing transaction ends. Row
+ * locking is not implemented for columnar tables (tuple_lock raises), so that
+ * read cannot succeed.
+ *
+ * Without this the constraint is accepted and then every insert into the
+ * referencing table fails, including inserts that satisfy it:
+ *
+ *     CREATE TABLE parent (id int PRIMARY KEY) USING pgcolumnar;
+ *     INSERT INTO parent VALUES (1);
+ *     CREATE TABLE child (id int REFERENCES parent(id));   -- accepted
+ *     INSERT INTO child VALUES (1);                        -- parent row exists
+ *     ERROR:  columnar: row locking is not supported yet
+ *
+ * A table that can never be written to is worse than a constraint that is
+ * refused, and the refusal belongs where the configuration is chosen rather
+ * than at every use of it. This is the shape core uses for an unlogged table
+ * under a foreign key, which fails at CREATE TABLE and not at each INSERT.
+ *
+ * Only the referenced side is refused. Columnar on the referencing side is
+ * fine: that direction reads the parent, which is heap, and writes the child
+ * through the ordinary insert path.
+ */
+static void
+columnar_reject_fk_to_columnar(Oid constraintId)
+{
+	Relation	conRel;
+	SysScanDesc scan;
+	ScanKeyData key;
+	HeapTuple	tup;
+	Oid			referenced = InvalidOid;
+
+	/*
+	 * Read pg_constraint with SnapshotSelf rather than through the syscache.
+	 * The post-create hook fires inside the command that inserted the row and
+	 * before any CommandCounterIncrement, so a syscache lookup does not find it
+	 * and the check silently passes -- which is exactly how the first version of
+	 * this failed, quietly and identically to having no check at all.
+	 */
+	conRel = table_open(ConstraintRelationId, AccessShareLock);
+	ScanKeyInit(&key, Anum_pg_constraint_oid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(constraintId));
+	scan = systable_beginscan(conRel, ConstraintOidIndexId, true,
+							  SnapshotSelf, 1, &key);
+	tup = systable_getnext(scan);
+	if (HeapTupleIsValid(tup))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+
+		if (con->contype == CONSTRAINT_FOREIGN)
+			referenced = con->confrelid;
+	}
+	systable_endscan(scan);
+	table_close(conRel, AccessShareLock);
+
+	if (!OidIsValid(referenced))
+		return;
+
+	if (get_rel_relkind(referenced) != RELKIND_RELATION)
+		return;
+
+	if (ColumnarIsColumnarRelation(referenced))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot create a foreign key referencing columnar table \"%s\"",
+						get_rel_name(referenced)),
+				 errdetail("Enforcing the constraint requires locking the referenced row, "
+						   "and row locking is not supported on columnar tables."),
+				 errhint("Reference a heap table, or keep the referencing table columnar "
+						 "and the referenced table heap.")));
+}
 
 static void
 columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
@@ -1672,6 +1755,9 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 {
 	if (prev_object_access_hook)
 		prev_object_access_hook(access, classId, objectId, subId, arg);
+
+	if (access == OAT_POST_CREATE && classId == ConstraintRelationId)
+		columnar_reject_fk_to_columnar(objectId);
 
 	if (access == OAT_DROP && classId == RelationRelationId && subId == 0)
 	{
