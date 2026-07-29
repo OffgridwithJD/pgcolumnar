@@ -5,9 +5,11 @@
   <img src="logo/pgcolumnar-logo.svg" alt="pgColumnar" width="360">
 </picture>
 
+<h1>pgColumnar</h1>
+
 <p><strong>Analytic column storage for PostgreSQL, built as a native table access method.</strong></p>
 
-[![PostgreSQL 15–19](https://img.shields.io/badge/PostgreSQL-15%E2%80%9319-336791?style=flat-square&logo=postgresql&logoColor=white)](docs/installation.md)
+[![PostgreSQL 15-19](https://img.shields.io/badge/PostgreSQL-15--19-336791?style=flat-square&logo=postgresql&logoColor=white)](docs/installation.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Built with C](https://img.shields.io/badge/Built%20with-C-555555?style=flat-square&logo=c&logoColor=white)](docs/ARCHITECTURE.md)
 [![Version 1.0-dev](https://img.shields.io/badge/version-1.0--dev-orange?style=flat-square)](VERSION)
@@ -15,8 +17,7 @@
 
 </div>
 
-Column-oriented storage for PostgreSQL, implemented as a table access method. A
-table created `USING pgcolumnar` stores its data by column, with per-column
+A table created `USING pgcolumnar` stores its data by column, with per-column
 compression, chunk-group skipping, and a vectorized aggregate path. It is for
 analytic workloads: large scans, aggregates, and column projections over
 append-mostly data.
