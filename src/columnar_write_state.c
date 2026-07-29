@@ -20,6 +20,7 @@
 #include "storage/procarray.h"
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
+#include "miscadmin.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -122,6 +123,20 @@ typedef struct ColumnChunkBuffer
 
 	/* accumulated 4-byte value hashes for the per-chunk bloom filter (I7) */
 	StringInfoData hashBuf;
+
+	/*
+	 * Byte offset into valueStream where each row's value begins, indexed by the
+	 * row's position within the chunk group. A null row records the offset it
+	 * would have had, so the lookup needs no null accounting.
+	 *
+	 * NULL until the first buffered fetch of this chunk group builds it, and
+	 * maintained on append after that. A load that never fetches never builds it
+	 * and pays nothing, which is deliberate: the insert path is what #155 is
+	 * about, and this exists only for the fetch path (#212).
+	 */
+	uint32	   *valOffsets;
+	uint64		valOffsetsLen;
+	uint64		valOffsetsCap;
 } ColumnChunkBuffer;
 
 /* one chunk group: all columns for a horizontal slice of rows */
@@ -428,6 +443,81 @@ ColumnarGetWriteState(Relation rel)
 }
 
 /*
+ * buffered_note_offset
+ *		Record where the next row's value begins, if this column is tracking
+ *		offsets at all.
+ *
+ * Returns immediately when the array does not exist, which is the case for every
+ * write that is never fetched from. The array is created only by
+ * buffered_build_offsets, on the first buffered fetch of the chunk group.
+ */
+static void
+buffered_note_offset(ColumnChunkBuffer *col, MemoryContext cxt, uint32 off)
+{
+	if (col->valOffsets == NULL)
+		return;
+
+	if (col->valOffsetsLen >= col->valOffsetsCap)
+	{
+		MemoryContext old = MemoryContextSwitchTo(cxt);
+
+		col->valOffsetsCap *= 2;
+		col->valOffsets = repalloc(col->valOffsets,
+								   sizeof(uint32) * col->valOffsetsCap);
+		MemoryContextSwitchTo(old);
+	}
+	col->valOffsets[col->valOffsetsLen++] = off;
+}
+
+/*
+ * buffered_build_offsets
+ *		Walk the column's value stream once and record where every row's value
+ *		begins, so later fetches can address a row instead of walking to it.
+ *
+ * This is the O(n) pass that used to run on *every* fetch. Decoded values are
+ * thrown away here, so they are built in a scratch context that is deleted at
+ * the end rather than left in the stripe context.
+ */
+static void
+buffered_build_offsets(ColumnChunkBuffer *col, Form_pg_attribute att,
+					   MemoryContext cxt, uint64 rowCount)
+{
+	MemoryContext old;
+	MemoryContext scratch;
+	char	   *cursor = col->valueStream.data;
+	uint64		i;
+
+	old = MemoryContextSwitchTo(cxt);
+	col->valOffsetsCap = Max(rowCount, 64);
+	col->valOffsets = palloc(sizeof(uint32) * col->valOffsetsCap);
+	col->valOffsetsLen = 0;
+	MemoryContextSwitchTo(old);
+
+	scratch = AllocSetContextCreate(CurrentMemoryContext,
+									"columnar buffered offsets",
+									ALLOCSET_SMALL_SIZES);
+
+	for (i = 0; i < rowCount; i++)
+	{
+		/*
+		 * Bounded by chunk_group_row_limit, which is user-settable, so this pass
+		 * is a cancellation point for the same reason the decoders are. It is
+		 * also on the unique-check fetch path, which had no interrupt check at
+		 * all before #220 and still has none below columnar_fetch_row.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		col->valOffsets[col->valOffsetsLen++] =
+			(uint32) (cursor - col->valueStream.data);
+
+		if (col->existsStream.data[i])
+			(void) ColumnarDecodeValue(att, &cursor, scratch);
+	}
+
+	MemoryContextDelete(scratch);
+}
+
+/*
  * columnar_start_chunk_group
  *		Begin a new chunk group inside the current stripe, allocated in the
  *		stripe memory context.
@@ -497,6 +587,14 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 	{
 		ColumnChunkBuffer *col = &group->columns[c];
 		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
+
+		/*
+		 * Where this row's value starts, recorded before it is written. Only
+		 * costs anything once a buffered fetch has built the array; see
+		 * buffered_note_offset.
+		 */
+		buffered_note_offset(col, writeState->stripeContext,
+							 (uint32) col->valueStream.len);
 
 		if (nulls[c])
 		{
@@ -641,15 +739,28 @@ ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 				ColumnChunkBuffer *col = &group->columns[c];
 				Form_pg_attribute att = TupleDescAttr(ws->tupdesc, c);
 				char	   *existsBytes = col->existsStream.data;
-				char	   *cursor = col->valueStream.data;
-				uint64		i;
+				char	   *cursor;
 
-				/* walk to posInGroup, skipping earlier present values */
-				for (i = 0; i < posInGroup; i++)
-				{
-					if (existsBytes[i])
-						(void) ColumnarDecodeValue(att, &cursor, target);
-				}
+				/*
+				 * Address the row rather than walking to it.
+				 *
+				 * This loop used to decode and discard every earlier value in
+				 * the chunk group, for every column, on every fetch, purely to
+				 * advance the cursor. _bt_check_unique() calls this once per
+				 * candidate while a statement buffers rows, so the cost was
+				 * O(rows x columns) per fetch and quadratic across a statement.
+				 * That is what pinned a core for three days in #212.
+				 *
+				 * The offsets are built once per chunk group on the first fetch
+				 * and maintained on append after that, so a load that never
+				 * fetches still pays nothing.
+				 */
+				if (col->valOffsets == NULL ||
+					col->valOffsetsLen < group->rowCount)
+					buffered_build_offsets(col, att, ws->stripeContext,
+										   group->rowCount);
+
+				cursor = col->valueStream.data + col->valOffsets[posInGroup];
 
 				if (existsBytes[posInGroup])
 				{
