@@ -14,9 +14,19 @@
 # all 92 suites on five majors are neither needed nor affordable under
 # instrumentation.
 #
-# Prove it works the way #224 asks: revert the fix it guards (columnar.h,
-# ColumnarVarSizeAnyUnaligned back to the direct 4-byte cast), rebuild, and this
-# gate goes red while the ordinary matrix stays green.
+# Prove it works the way #224 asks: undo the fix it guards and confirm this gate
+# goes red while the ordinary matrix stays green. Undo it in its TRUE pre-#225
+# form -- delete the ColumnarVarSizeAnyUnaligned helper and restore VARSIZE_ANY at
+# the three call sites (columnar_encoding.c, columnar_reader.c x2). That reports
+# the misalignment (about 20 of the 23 suites, at columnar_encoding.c:1135).
+# Do NOT instead rewrite the helper's body to the cast while keeping the inline
+# wrapper: clang stops emitting the alignment check across that inline boundary at
+# -O1, the gate stays green, and it looks like a proof that the gate does not work.
+#
+# That same boundary is the gate's one stated limit: a future regression that
+# reintroduces an unaligned read from inside an inlined wrapper would not be
+# reported here. "The sanitizer gate is green" means the defects in the forms it
+# exercises are absent, not that no unaligned access exists anywhere.
 #
 # Usage:  test/run_san.sh [SAN_PREFIX]      (default /usr/local/pg18_san)
 #   PGC_SAN_SUITES=<list>   override the suite subset
@@ -31,11 +41,28 @@ if [ ! -x "$PGCONF" ]; then
 	exit 1
 fi
 
-# A sanitizer violation must abort the backend, not print and continue: that is
-# what turns it into a suite failure. detect_leaks/stack_use_after_return are the
-# by-design tool leaks and initdb trip from build_san.sh, kept off here too.
+# Set the sanitizer options before running anything from this build: pg_config is
+# itself instrumented and leaks by design at exit, so without detect_leaks=0 even
+# the prerequisite check below aborts it and reads its output as empty. A
+# violation must also abort the backend, not print and continue: that is what
+# turns it into a suite failure. detect_leaks / stack_use_after_return match the
+# by-design tool leaks and initdb trip from build_san.sh.
 export ASAN_OPTIONS="detect_leaks=0:detect_stack_use_after_return=0:abort_on_error=1:print_stacktrace=1"
 export UBSAN_OPTIONS="halt_on_error=1:abort_on_error=1:print_stacktrace=1"
+
+# A build exists is not enough: it must be the sanitizer build. Pointed at an
+# ordinary or a mis-flagged one, the suites below fail for reasons unrelated to
+# what this gate tests -- a build missing -fno-sanitize=function, for instance,
+# aborts on dynahash's function-pointer casts and reports a timeout that reads
+# like a hang. Check the flags the gate depends on are actually in this build's
+# Makefile.global, the same place PGXS reads them from.
+_mkglobal="$("$PGCONF" --pgxs 2>/dev/null | xargs -r dirname | xargs -r dirname)/Makefile.global"
+if ! grep -q -- '-fsanitize=address,undefined' "$_mkglobal" 2>/dev/null ||
+   ! grep -q -- '-fno-sanitize=function' "$_mkglobal" 2>/dev/null; then
+	echo "FAIL  $SAN is not the expected ASAN+UBSAN build"
+	echo "      (its Makefile.global lacks -fsanitize=address,undefined and/or -fno-sanitize=function; rebuild with test/build_san.sh)"
+	exit 1
+fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
