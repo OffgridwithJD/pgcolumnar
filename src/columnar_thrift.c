@@ -60,7 +60,17 @@ ColumnarThriftBytes(TCReader *r, uint32 *outlen)
 	uint64		n = ColumnarThriftVarint(r);
 	const uint8 *p;
 
-	if (r->error || r->pos + n > r->len)
+	/*
+	 * Overflow-safe bounds check. n is a file-controlled 64-bit varint, so
+	 * "r->pos + n > r->len" can wrap size_t: a crafted n near 2^64 wraps the
+	 * sum back below r->len, passes the guard, and *outlen returns a truncated
+	 * multi-gigabyte length against an in-bounds pointer. That length then flows
+	 * to callers as a read bound (e.g. a column-chunk statistics min/max length
+	 * used as the end sentinel in plain_value_to_datum), producing an
+	 * out-of-bounds read and a backend crash on a hostile Parquet footer.
+	 * r->pos <= r->len is an invariant here, so r->len - r->pos is the safe form.
+	 */
+	if (r->error || n > r->len - r->pos)
 	{
 		r->error = true;
 		*outlen = 0;
