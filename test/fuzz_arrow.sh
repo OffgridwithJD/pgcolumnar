@@ -72,6 +72,12 @@ if [ "${#SEEDLINES[@]}" -eq 0 ]; then
 fi
 echo "-- ${#SEEDLINES[@]} seed files"
 
+# The composite type the struct seeds name in their column list. Created once here
+# so a struct-target table can be built; the corpus references it by name because
+# a composite column type cannot be written inline the way an array can.
+psql_run "DROP TYPE IF EXISTS pgc_fuzz_xy CASCADE;
+	CREATE TYPE pgc_fuzz_xy AS (x int, y text);" >/dev/null 2>&1
+
 # Keep only seeds the reader accepts pristine: create the matching target table
 # and import the untouched seed once. A seed the importer rejects would only ever
 # exercise the schema check and never the decode, and would make the property
