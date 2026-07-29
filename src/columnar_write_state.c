@@ -967,8 +967,20 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			 * costs 2.7% and 12.2% more space, which is why this is a choice
 			 * offered rather than a default changed.
 			 */
+			/*
+			 * Numeric never wins FSST: its value stream is base-10000 digit
+			 * words with little substring redundancy, so the symbol table built
+			 * here is always dropped by the shrink check below, after the build
+			 * has already cost the time. Skip the build for numeric, exactly as
+			 * encode_effort = fast does for every type. Measured on 8,000,000
+			 * rows, one numeric column, monotonic and high-entropy alike:
+			 * byte-for-byte identical storage and about 3.3x faster to load, and
+			 * a -p profile of the loading backend put ~37% of on-CPU time in the
+			 * FSST build this skips (issue #155).
+			 */
 			if (corpus.len > 0 &&
-				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST)
+				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
+				att->atttypid != NUMERICOID)
 				ColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
 
