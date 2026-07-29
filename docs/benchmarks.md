@@ -308,7 +308,7 @@ both are larger than anything in it:
 - **A wide table is no longer unusable for index-driven access.** 2,000 index
   fetches reading one column of a 41-column table went from 1,001,374 ms to
   614 ms when the lazily-decoding slot landed (#169), and an 11-column table from
-  284,148 ms to 159 ms. That is the cliff [issue #157] described, and it is gone.
+  284,148 ms to 159 ms. That is the cliff #157 described, and it is gone.
 - **`ANALYZE` now collects statistics** (#159), including correlation, which is
   what lets the planner see the locality `vacuum_sorted` and Z-ordering create.
   Its cost is unmeasured here and is part of #171.

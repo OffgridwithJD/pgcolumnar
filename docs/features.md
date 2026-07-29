@@ -38,9 +38,12 @@ settings see the [configuration reference](configuration.md); for constraints se
 - Chunk-group skipping: a per-chunk minimum and maximum skip list lets a filtered
   scan skip chunk groups that cannot match a pushed-down `column op const`
   qualifier. A per-chunk bloom filter additionally skips groups on an equality
-  probe whose value is provably absent, for hashable, non-collatable columns such
-  as ids and uuids. The executor always re-applies the full qualifier, so skipping
-  never changes results.
+  probe whose value is provably absent, for hashable columns whose collation is
+  deterministic. That covers non-collatable types such as ids and uuids as well
+  as text under an ordinary deterministic collation; only nondeterministic
+  collations are excluded, since there equal values need not share a hash. The
+  executor always re-applies the full qualifier, so skipping never changes
+  results.
 - Vectorized aggregate: an ungrouped `count`, `sum`, `avg`, `min`, or `max` over
   a supported column type is answered from the zone-map metadata, or by a
   column-at-a-time fold over the decoded values when the group has deletes,
@@ -168,7 +171,7 @@ coverage.
 - uuid and numeric columns are read from their Parquet representations, and the
   reader handles millisecond, microsecond, and nanosecond time units.
 - Files are read on demand rather than loaded whole. The footer is read first,
-  then pages as the scan reaches them, so memory does not scale with file size
-  and there is no practical limit on how large a file can be. A row group that
+  then pages as the scan reaches them, so memory use does not scale with file
+  size; a file is bounded by available disk rather than by memory. A row group that
   predicate pushdown excludes is never read from disk at all, and
   `parquet_schema` reads only the footer.

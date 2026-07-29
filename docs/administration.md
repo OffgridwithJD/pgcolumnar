@@ -88,7 +88,7 @@ PostgreSQL's own `CLUSTER` and `VACUUM FULL`: it rewrites the relation and swaps
 the file, so reads and writes on the table block until it finishes. Use it for an
 initial bulk reorganisation, on a table you can take offline.
 `pgcolumnar.recluster` is the online form of the same idea and is described
-below; prefer it on a live table. Neither changes query results — both only
+below; prefer it on a live table. Neither changes query results. Both only
 reorder physical storage.
 
 Leave autovacuum on. It maintains visibility-map bits and statistics for columnar

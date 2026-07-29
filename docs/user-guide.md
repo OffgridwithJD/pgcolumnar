@@ -146,10 +146,10 @@ groups and columns the query does not need:
 
 ```sql
 CREATE SERVER pq FOREIGN DATA WRAPPER pgcolumnar_parquet;
-CREATE FOREIGN TABLE events (id int, ts timestamp, amount numeric(12,2))
+CREATE FOREIGN TABLE events_parquet (id int, ts timestamp, amount numeric(12,2))
   SERVER pq OPTIONS (path '/data/events/');   -- a directory of *.parquet files
 
-SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
+SELECT sum(amount) FROM events_parquet WHERE ts >= '2026-01-01';
 ```
 
 A `path` may name one file, a directory (all `*.parquet` files below it, at any
