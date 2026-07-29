@@ -219,11 +219,33 @@ it is per-table and opt-in, and it should be measured and published rather than
 described. On the shapes in #155 the write path is already the weak spot, so this
 must be benchmarked before it is recommended for anything.
 
+**The replay side is free and the emission side is not, and the plan should not
+blur the two.** Physical replay of `XLOG_LOGICAL_MESSAGE` is a no-op, so a
+standby costs nothing beyond carrying the bytes. On the primary the record is
+ordinary WAL and is written whether or not anyone ever reads it. So emission is
+**gated on the table being opted in, and a table nobody has opted in emits
+nothing at all** -- no message, no size check, no branch beyond the flag test on
+the flush path. A cluster that never uses this feature must pay exactly zero for
+it, which is the difference between an opt-in feature and everyone subsidising a
+feature few use.
+
+Whether emission should be gated more tightly still -- on a replication slot
+actually existing, rather than only on the table's opt-in -- is an open question
+and is listed as one below. It is not obviously right: a slot created after the
+writes have happened would silently have no history, which is a worse failure than
+paying for WAL nobody read.
+
 ## Risks and open questions
 
 1. **Message size.** A row group is 150,000 rows by default. One message per row
    group may be very large. Batching per N rows within the group is probably
    necessary; what N, and does it interact badly with `logical_decoding_work_mem`?
+2. **What gates emission.** Opt-in per table is settled. Whether to gate more
+   tightly on a slot existing is not. Gating on a slot makes an unused feature
+   free even for an opted-in table, and makes a slot created afterwards see no
+   history, which is a silent gap rather than a cost. Decide it before building,
+   because it is the difference between "the table is being decoded" and "the
+   table might be decoded later" and those need different guarantees.
 2. **`TRUNCATE` and DDL.** `TRUNCATE` on a columnar table, and `ALTER TABLE`
    shapes that rewrite, need a decided answer rather than an accident.
 3. **Rewrites that are not user changes.** Stated once as an invariant rather
