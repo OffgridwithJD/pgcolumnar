@@ -57,13 +57,16 @@ def coldef(schema):
     return ", ".join(parts)
 
 
-def w(outdir, name, batches):
+def w(outdir, name, batches, cols=None):
     """Write one stream seed from a list of RecordBatches (>1 exercises the
-    multi-batch read loop) and report it with its column list."""
+    multi-batch read loop) and report it with its column list. Pass cols
+    explicitly for list and struct schemas, whose PostgreSQL type (an array or a
+    named composite) cannot be derived from the Arrow schema alone."""
     if not batches:
         return
     schema = batches[0].schema
-    cols = coldef(schema)
+    if cols is None:
+        cols = coldef(schema)
     if cols is None:
         print("SKIP %s (unmapped type)" % name, file=sys.stderr)
         return
@@ -134,6 +137,35 @@ def main():
         ("c", pa.array(["m%d" % (i % 7) for i in range(n)])),
         ("d", pa.array([i % 2 == 0 for i in range(n)], pa.bool_())),
     ])])
+
+    # --- list and struct: the recursive decode paths. import_arrow builds an
+    # A_LIST node for an array-typed target column and an A_STRUCT node for a
+    # composite one, recursively, and decodes with offset-driven child reads --
+    # the higher-risk shape a flat corpus never reaches. Their PostgreSQL types
+    # are passed explicitly; the driver pre-creates the composite type the struct
+    # seeds name (pgc_fuzz_xy) before it builds the target tables.
+    w(outdir, "list_int", [batch([("a", pa.array(
+        [[i, i + 1] for i in range(n)], pa.list_(pa.int32())))])], cols="a int4[]")
+    w(outdir, "list_text", [batch([("a", pa.array(
+        [["k%d" % (i % 5), "v%d" % i] for i in range(n)], pa.list_(pa.string())))])],
+      cols="a text[]")
+    w(outdir, "list_nulls", [batch([("a", pa.array(
+        [None if i % 4 == 0 else [i, None, i + 1] for i in range(n)],
+        pa.list_(pa.int32())))])], cols="a int4[]")
+    w(outdir, "list_empty", [batch([("a", pa.array(
+        [[] for _ in range(n)], pa.list_(pa.int32())))])], cols="a int4[]")
+
+    xy = pa.struct([("x", pa.int32()), ("y", pa.string())])
+    w(outdir, "struct_xy", [batch([("a", pa.array(
+        [{"x": i, "y": "s%d" % i} for i in range(n)], xy))])],
+      cols="a pgc_fuzz_xy")
+    w(outdir, "struct_nulls", [batch([("a", pa.array(
+        [None if i % 3 == 0 else {"x": i, "y": None} for i in range(n)], xy))])],
+      cols="a pgc_fuzz_xy")
+    # list of struct: both recursions at once (offsets into a struct child).
+    w(outdir, "list_struct", [batch([("a", pa.array(
+        [[{"x": i, "y": "e%d" % i}] for i in range(n)], pa.list_(xy)))])],
+      cols="a pgc_fuzz_xy[]")
 
 
 if __name__ == "__main__":
