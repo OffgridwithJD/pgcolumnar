@@ -7,11 +7,10 @@
 <p></p>
 <p><strong>Analytic column storage for PostgreSQL, built as a native table access method.</strong></p>
 
-[![PostgreSQL 15-19](https://img.shields.io/badge/PostgreSQL-15--19-336791?style=flat-square&logo=postgresql&logoColor=white)](docs/installation.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Built with C](https://img.shields.io/badge/Built%20with-C-555555?style=flat-square&logo=c&logoColor=white)](docs/ARCHITECTURE.md)
-[![Version 1.0-dev](https://img.shields.io/badge/version-1.0--dev-orange?style=flat-square)](VERSION)
-[![Status: pre-release](https://img.shields.io/badge/status-pre--release-yellow?style=flat-square)](docs/limitations.md#release-status)
+<a href="docs/installation.md"><img src="badges/postgresql.svg" alt="PostgreSQL 15-18 (+19 beta)"></a>
+<a href="LICENSE"><img src="badges/license.svg" alt="License: MIT"></a>
+<a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-dev"></a>
+<a href="docs/limitations.md#release-status"><img src="badges/status.svg" alt="Status: pre-release"></a>
 
 </div>
 
@@ -20,7 +19,8 @@ compression, chunk-group skipping, and a vectorized aggregate path. It is for
 analytic workloads: large scans, aggregates, and column projections over
 append-mostly data.
 
-pgColumnar builds from one source tree on PostgreSQL 15 through 19 and is
+pgColumnar builds from one source tree on PostgreSQL 15 through 18, with 19
+validated against 19beta2, and is
 licensed under the [MIT License](LICENSE). It is [pre-release](docs/limitations.md#release-status); the version marker
 is `1.0-dev`, recorded in `VERSION`. A table `USING pgcolumnar` is stored in the
 native on-disk format, PGCN v1.

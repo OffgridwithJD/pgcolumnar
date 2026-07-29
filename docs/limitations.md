@@ -23,8 +23,10 @@ below are the standing functional limitations, separate from that work.
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
-19. Every test suite runs on all five majors. PostgreSQL 13 and 14 still build
-but are out of the tested matrix.
+19. Every test suite runs on all five majors. Support for 19 is validated against
+19beta2 rather than a final release, and will be re-validated when 19 ships;
+15 through 18 are validated against released versions. PostgreSQL 13 and 14 still
+build but are out of the tested matrix.
 
 Three behaviors depend on the major:
 
