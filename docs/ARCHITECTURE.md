@@ -20,8 +20,10 @@ bitmap and a value stream encoded in fixed-size vectors. A separate set of
 ordinary heap tables in the `pgcolumnar` schema is the metadata catalog:
 `storage`, `row_group`, and `column_chunk` record the layout, `zone_map` records
 each chunk's and each vector's minimum and maximum for skipping, `bloom` records
-the per-chunk equality filters, `row_mask` records the delete and update marks,
-and `options` holds per-table settings. A storage id links a relation's physical
+the per-chunk equality filters, `delete_vector` records the delete and update
+marks, `projection` records secondary column projections, `free_space` tracks the
+reclaimable byte ranges freed by deletes and compaction, and `options` holds
+per-table settings. A storage id links a relation's physical
 file to its catalog rows.
 
 ## Crash safety
@@ -84,15 +86,20 @@ The physical storage layer: the metapage, the logical-to-physical byte mapping,
 and the append-only reservation model. A logical offset maps to a block number
 and in-page offset by `BYTES_PER_PAGE = BLCKSZ - SizeOfPageHeaderData`. The
 metapage holds three high-water marks (next stripe id, next row number, next
-logical byte offset) advanced under the relation extension lock, so concurrent
-writers serialize their reservations there and then write their data
-independently. This module reads and writes the raw logical buffers through the
+logical byte offset). The stripe id and row number are advanced under an
+exclusive lock on the metapage buffer, taken when a writer begins buffering a
+stripe, so every row gets its stable row number and item pointer at insert time;
+no extension lock is needed there because no data pages are extended. The byte
+offset is advanced separately at flush, once the stripe's size is known, under
+the relation extension lock the caller already holds to extend the data pages.
+Either way concurrent writers serialize their reservations and then write their
+data independently. This module reads and writes the raw logical buffers through the
 buffer manager.
 
 ### columnar_metadata.c
 Access to the `pgcolumnar` catalog tables and the storage-id sequence: the
-`storage`, `row_group`, `column_chunk`, `zone_map`, `bloom`, `row_mask`, and
-`options` tables. Metadata are ordinary heap tables keyed by storage id, read and
+`storage`, `row_group`, `column_chunk`, `zone_map`, `bloom`, `delete_vector`,
+`projection`, `free_space`, and `options` tables. Metadata are ordinary heap tables keyed by storage id, read and
 written with direct catalog access (heap opens, index scans, and inserts) rather
 than SPI, so metadata access does not depend on SPI reentrancy from inside a scan
 or write. Catalog reads use a snapshot whose command id is advanced so a
@@ -157,14 +164,13 @@ the shared counter. The liveness cache (`ColumnarBuildLivenessCache`) reads the
 row-group list and row masks once so a projection scan can test each row's base
 row number cheaply.
 
-### columnar_row_mask.c
+### columnar_delete_vector.c
 Delete and update marking. A delete, and the old side of an update, sets a bit
-in the `pgcolumnar.row_mask` entry for the row's row group rather than rewriting
-the group; an update inserts the new row with a fresh row number. Marks
+in the `pgcolumnar.delete_vector` entry for the row's row group rather than
+rewriting the group; an update inserts the new row with a fresh row number. Marks
 accumulate in a per-subtransaction in-memory buffer and are applied to the
-catalog in one upsert per row group at flush time. The reader loads a row
-group's mask and skips masked rows. This interim mask is replaced by first-class
-delete vectors in a later phase.
+catalog in one upsert per row group at flush time. The reader loads a row group's
+delete vector and skips marked rows.
 
 ### columnar_customscan.c
 Planner and executor integration. A `set_rel_pathlist_hook` replaces a columnar
@@ -219,7 +225,7 @@ storage id.
 Concurrent unique-key insert serialization (issue #5). Before a freshly inserted
 row is handed back to the executor's index maintenance, the table-AM insert
 paths call `ColumnarLockUniqueKeys`, which takes a transaction-scoped advisory
-lock (the same `SET_LOCKTAG_ADVISORY` primitive as the `columnar_row_mask`
+lock (the same `SET_LOCKTAG_ADVISORY` primitive as the `columnar_delete_vector`
 chunk-group lock) keyed by the row's unique key value(s). Because a columnar
 row's data is invisible to other backends until its stripe flushes at statement
 end, the btree dirty-snapshot uniqueness check can miss a conflict against a row
@@ -338,10 +344,10 @@ Scan: the planner installs the custom scan (`columnar_customscan`) with a column
 projection and scan keys -> the reader (`columnar_reader`) walks row groups, uses
 the zone maps in `columnar_metadata` to skip groups and vectors, decodes
 projected chunks through `columnar_encoding` / `columnar_compression` (optionally
-via `columnar_cache`), applies the row mask (`columnar_row_mask`), and returns
+via `columnar_cache`), applies the delete vector (`columnar_delete_vector`), and returns
 rows one at a time -> the executor re-applies the full qual as a filter. An
 ungrouped aggregate is answered by `columnar_vector` from the zone-map metadata.
 
 Delete or update: the custom scan supplies each row's item pointer ->
-`columnar_row_mask` marks the old row; an update also inserts the new row through
+`columnar_delete_vector` marks the old row; an update also inserts the new row through
 the writer.

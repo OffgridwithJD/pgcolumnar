@@ -78,6 +78,50 @@ to reorder a live table without an exclusive lock.
 SELECT pgcolumnar.cluster('events', 'customer_id', 'ts');
 ```
 
+### pgcolumnar.recluster(tablename regclass, VARIADIC columns name[]) returns bigint
+
+The online counterpart to `cluster`. Re-establishes the same Z-order clustering
+over the given columns, but under `ShareUpdateExclusiveLock`, so concurrent reads
+and writes continue instead of blocking. Returns the number of row groups
+reclustered.
+
+```sql
+SELECT pgcolumnar.recluster('events', 'customer_id', 'ts');
+```
+
+### pgcolumnar.compact(tablename regclass) returns bigint
+
+Retires row groups that are fully deleted, dropping their metadata so scans skip
+them. Holds only `ShareUpdateExclusiveLock`, so it runs against a live table.
+Returns the number of groups retired.
+
+```sql
+SELECT pgcolumnar.compact('events');
+```
+
+### pgcolumnar.compact_rewrite(tablename regclass, min_deleted_fraction float8 DEFAULT 0.2, max_groups int DEFAULT 0) returns bigint
+
+Rewrites partially-deleted row groups, those whose deleted fraction is at least
+`min_deleted_fraction`, to drop their dead rows and reclaim the space, under
+`ShareUpdateExclusiveLock`. `max_groups` caps how many groups a single call
+rewrites; 0 means no cap. Returns the number of groups rewritten.
+
+```sql
+SELECT pgcolumnar.compact_rewrite('events', 0.3);
+```
+
+### pgcolumnar.truncate(tablename regclass) returns bigint
+
+Returns trailing reclaimed blocks to the operating system. Best-effort: it takes
+`AccessExclusiveLock` conditionally for the brief physical step and returns 0
+without waiting if the table is busy, and it only removes space freed before the
+oldest-xmin horizon. Gated by `pgcolumnar.enable_end_truncation`, which is off by
+default. Returns the number of blocks truncated.
+
+```sql
+SELECT pgcolumnar.truncate('events');
+```
+
 ### pgcolumnar.vacuum_full(schema name DEFAULT 'public', sleep_time real DEFAULT 0.0, stripe_count int DEFAULT 0)
 
 Runs `pgcolumnar.vacuum` on every columnar table in a schema. `sleep_time` is a
