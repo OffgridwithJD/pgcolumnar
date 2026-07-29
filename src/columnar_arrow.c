@@ -1623,6 +1623,102 @@ imp_value_at(ImpNode *n, const uint8 *body, const int64 *bufOff,
 }
 
 /*
+ * imp_check_bounds
+ *		Reject a record batch whose declared row count or offsets do not fit its
+ *		buffers, before any value is read. The buffer (offset, length) pairs are
+ *		already checked against the body length by the caller; this checks the
+ *		other half, that reading `count` elements -- and, for varlena and list,
+ *		the offsets that index the data -- stays inside each buffer.
+ *
+ *		Without it a crafted RecordBatch `length`, or a crafted offset, drives
+ *		imp_scalar_at()/imp_value_at() to memcpy past a buffer and take the
+ *		backend down rather than raising an ERROR (issue #214, found by
+ *		test/fuzz_arrow.sh: a mutated int64 length made the row loop read row
+ *		450,000 of a 200-row buffer). Every read site below reads element i for
+ *		i < count, so bounding count against the buffers here bounds all of them.
+ *		Sizes are compared by division rather than multiplication so a huge
+ *		declared count cannot overflow the check itself.
+ */
+static void
+imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
+				 const int64 *bufLen, int nbuffers, int64 count)
+{
+	if (count < 0)
+		IMPORT_CORRUPT("negative element count");
+
+	/* validity bitmap: count bits, omitted (length 0) when null_count is 0 */
+	if (n->validBuf >= 0)
+	{
+		if (n->validBuf >= nbuffers)
+			IMPORT_CORRUPT("validity buffer index out of range");
+		if (bufLen[n->validBuf] > 0 && bufLen[n->validBuf] < (count + 7) / 8)
+			IMPORT_CORRUPT("validity buffer too small for the row count");
+	}
+
+	if (n->kind == A_STRUCT)
+	{
+		int			a,
+					ci = 0;
+
+		for (a = 0; a < n->structDesc->natts; a++)
+		{
+			if (TupleDescAttr(n->structDesc, a)->attisdropped)
+				continue;
+			imp_check_bounds(&n->children[ci++], body, bufOff, bufLen,
+							 nbuffers, count);
+		}
+		return;
+	}
+
+	if (n->kind == A_LIST || n->kind == A_UTF8 || n->kind == A_BINARY)
+	{
+		int64		oOff;
+		int64		k;
+		int32		prev = 0;
+
+		if (n->offBuf < 0 || n->offBuf >= nbuffers)
+			IMPORT_CORRUPT("offset buffer index out of range");
+		if (count + 1 > bufLen[n->offBuf] / 4)		/* (count+1) int32 offsets */
+			IMPORT_CORRUPT("offset buffer too small for the row count");
+		oOff = bufOff[n->offBuf];
+		for (k = 0; k <= count; k++)
+		{
+			int32		off;
+
+			memcpy(&off, body + oOff + k * 4, 4);
+			if (off < 0 || off < prev)
+				IMPORT_CORRUPT("offsets are not non-negative and non-decreasing");
+			prev = off;
+		}
+		/* prev is now the last offset: the child element count, or the data extent */
+		if (n->kind == A_LIST)
+			imp_check_bounds(&n->children[0], body, bufOff, bufLen, nbuffers, prev);
+		else
+		{
+			if (n->dataBuf < 0 || n->dataBuf >= nbuffers)
+				IMPORT_CORRUPT("data buffer index out of range");
+			if ((int64) prev > bufLen[n->dataBuf])
+				IMPORT_CORRUPT("string/binary data runs past its buffer");
+		}
+		return;
+	}
+
+	/* fixed-width scalar, including A_BOOL which is one bit per value */
+	if (n->dataBuf < 0 || n->dataBuf >= nbuffers)
+		IMPORT_CORRUPT("data buffer index out of range");
+	if (n->kind == A_BOOL)
+	{
+		if (bufLen[n->dataBuf] < (count + 7) / 8)
+			IMPORT_CORRUPT("bool buffer too small for the row count");
+		return;
+	}
+	if (n->width <= 0)
+		IMPORT_CORRUPT("non-positive scalar width");
+	if (count > bufLen[n->dataBuf] / n->width)
+		IMPORT_CORRUPT("value buffer too small for the row count");
+}
+
+/*
  * columnar_import_arrow
  *		SQL: columnar.import_arrow(rel regclass, path text) -> bigint.
  *		Insert the rows of an Arrow IPC stream file into a columnar table;
@@ -1830,6 +1926,14 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 						(uint64) bufOff[b] + bufLen[b] > (uint64) bodyLength)
 						IMPORT_CORRUPT("buffer out of range");
 				}
+
+				/*
+				 * Reject a batch whose row count or offsets overrun its buffers
+				 * before reading any value from them (issue #214).
+				 */
+				for (i = 0; i < ncols; i++)
+					imp_check_bounds(&tops[i], body, bufOff, bufLen,
+									 (int) nbuffers, nrows);
 
 				for (r = 0; r < nrows; r++)
 				{
