@@ -4,7 +4,7 @@
   <source media="(prefers-color-scheme: dark)" srcset="logo/pgcolumnar-logo-dark.svg">
   <img src="logo/pgcolumnar-logo.svg" alt="pgColumnar" width="360">
 </picture>
-
+<p></p>
 <p><strong>Analytic column storage for PostgreSQL, built as a native table access method.</strong></p>
 
 [![PostgreSQL 15-19](https://img.shields.io/badge/PostgreSQL-15--19-336791?style=flat-square&logo=postgresql&logoColor=white)](docs/installation.md)
