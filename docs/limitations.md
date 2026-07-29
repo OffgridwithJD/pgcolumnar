@@ -318,7 +318,9 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 `pgcolumnar_parquet` foreign-data wrapper) has these limits:
 
 - Reads are superuser only and run on little-endian hosts, as import and export
-  do, since they read a server-side path.
+  do, since they read a server-side path. A file from a source you did not produce
+  is untrusted input to a hand-rolled parser; see Security in the administration
+  guide for the trust boundary and that residual risk (fuzzing tracked in #214).
 - A `path` that is a directory reads the `*.parquet` files at any depth below
   it, descending into subdirectories. Entries whose name begins with `_` or `.`
   are skipped, directories and files alike, which is the convention Spark and Hive

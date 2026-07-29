@@ -208,7 +208,49 @@ columnar table, because reading the table requires the access method.
 
 ## Security
 
-The Arrow and Parquet import and export functions read and write files on the
-server host and require superuser. Grant them only to roles you trust with
-server-side file access, and control the paths those roles can reach. All other
-`pgcolumnar.*` functions run with ordinary table privileges.
+### Server-side file access
+
+Some `pgcolumnar` functions read or write a file on the server host rather than
+operating only on rows. Every one of them requires superuser, enforced in C at
+the point of use:
+
+| function | direction | required privilege |
+| --- | --- | --- |
+| `pgcolumnar.import_parquet(rel, path)` | reads a server file | superuser |
+| `pgcolumnar.read_parquet(path)` | reads a server file | superuser |
+| `pgcolumnar.parquet_schema(path)` | reads a server file | superuser |
+| a scan of a `pgcolumnar_parquet` foreign table | reads a server file | superuser |
+| `pgcolumnar.import_arrow(rel, path)` | reads a server file | superuser |
+| `pgcolumnar.export_parquet(rel, path)` | writes a server file | superuser |
+| `pgcolumnar.export_arrow(rel, path)` | writes a server file | superuser |
+
+Two layers keep a non-superuser out. The functions carry the default grant to
+`PUBLIC`, but the `pgcolumnar` schema does not grant `USAGE` to `PUBLIC`, so a
+role that was never given schema access cannot reach them at all; and even with
+schema access, the superuser check refuses the call. `test/server_file_privilege.sh`
+asserts every entry point above refuses a non-superuser, and holds that list as
+data so a new file-reading function is added to one place.
+
+Every other `pgcolumnar.*` function runs with ordinary table privileges.
+
+This is stricter than core's convention: `COPY FROM 'file'` needs membership in
+`pg_read_server_files`, not superuser, so a DBA can delegate file reading without
+handing over the cluster. pgColumnar keeps superuser for the pre-release: loosening
+to `pg_read_server_files` and `pg_write_server_files` later is backward compatible,
+while tightening later would break working setups. The looser roles are worth
+reconsidering once the parsers are fully fuzzed (see below), because they widen
+the set of roles that can reach a hand-rolled parser.
+
+### The file is untrusted input
+
+A Parquet or Arrow file from a source you did not produce is untrusted input to a
+hand-rolled parser. The metadata in a crafted file drives that parser directly, so
+a malformed or hostile file is a code-execution surface, not just a data-quality
+problem. The superuser boundary means the exposed case is a superuser reading a
+file they did not produce, which is the ordinary data-lake case rather than an
+exotic one: the file is external even though the role is trusted.
+
+The mitigation for that residual risk is fuzzing the parsers, tracked in #214,
+which so far covers the Parquet path. Until the Arrow path is fuzzed as well,
+treat an Arrow file from an untrusted source with the same caution, and prefer
+importing only files you generated or obtained from a source you trust.
