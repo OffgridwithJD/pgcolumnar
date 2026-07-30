@@ -58,6 +58,7 @@ PG_FUNCTION_INFO_V1(columnar_compact_rewrite);
 PG_FUNCTION_INFO_V1(columnar_recluster);
 PG_FUNCTION_INFO_V1(columnar_truncate);
 PG_FUNCTION_INFO_V1(columnar_debug_advance_reserved_offset);
+PG_FUNCTION_INFO_V1(columnar_debug_set_metapage_version);
 
 /* physical end-truncation opt-in (GUC), registered in _PG_init. Default off
  * until the abort/crash path is fully hardened and matrix-validated. */
@@ -1604,6 +1605,37 @@ columnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
 	}
 
 	ColumnarAdvanceReservedOffset(rel, (uint64) npages * COLUMNAR_BYTES_PER_PAGE);
+
+	table_close(rel, NoLock);
+	PG_RETURN_VOID();
+}
+
+/*
+ * columnar_debug_set_metapage_version
+ *		Test hook: overwrite a columnar table's stored metapage format version so
+ *		a subsequent read exercises the unsupported-version rejection in
+ *		ColumnarReadMetapage. Not bound in the shipped catalog; the format suite
+ *		creates the binding when it needs it (like the advance helper above).
+ */
+Datum
+columnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	int32		major = PG_GETARG_INT32(1);
+	int32		minor = PG_GETARG_INT32(2);
+	Relation	rel;
+
+	rel = table_open(relid, RowExclusiveLock);
+	if (!ColumnarIsColumnarRelation(relid))
+	{
+		table_close(rel, RowExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a columnar table",
+						RelationGetRelationName(rel))));
+	}
+
+	ColumnarDebugSetMetapageVersion(rel, (uint32) major, (uint32) minor);
 
 	table_close(rel, NoLock);
 	PG_RETURN_VOID();

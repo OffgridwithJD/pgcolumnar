@@ -277,6 +277,42 @@ ColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes)
 }
 
 /*
+ * ColumnarDebugSetMetapageVersion
+ *		Test-only: overwrite the metapage's stored physical format version. Reads
+ *		go through ColumnarReadMetapage, which rejects a version it does not
+ *		understand; this lets a test plant a bad version and confirm that guard
+ *		fires cleanly. Reachable only via the SQL binding the format suite
+ *		creates, never from the shipped catalog.
+ */
+void
+ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor, uint32 versionMinor)
+{
+	Buffer		buffer;
+	Page		page;
+	ColumnarMetapage *meta;
+
+	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
+	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(buffer);
+	meta = ColumnarMetapagePointer(page);
+
+	meta->versionMajor = versionMajor;
+	meta->versionMinor = versionMinor;
+
+	START_CRIT_SECTION();
+	MarkBufferDirty(buffer);
+	if (RelationNeedsWAL(rel))
+	{
+		XLogRecPtr	recptr = log_newpage_buffer(buffer, true);
+
+		PageSetLSN(page, recptr);
+	}
+	END_CRIT_SECTION();
+
+	UnlockReleaseBuffer(buffer);
+}
+
+/*
  * ColumnarSetReservedOffset
  *		Lower the metapage highwater to newOffset (physical end-truncation). The
  *		caller has computed newOffset as the end of all live data and holds an

@@ -20,6 +20,29 @@ of the blast radius of a single backend crash
 ([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The sections
 below are the standing functional limitations, separate from that work.
 
+## On-disk format stability
+
+The on-disk format is versioned. Each columnar relation records a native data
+format version (currently PGCN v1) and a physical metapage version. On every read
+the metapage version is checked: a version this build does not understand is
+rejected with a clear `unsupported columnar format version` error, and the read
+fails cleanly rather than misinterpreting bytes written by a different layout. The
+version stamps and that rejection are pinned by `test/native_format.sh`.
+
+Within a version the format round-trips faithfully: data written by a build reads
+back identically on any build that understands the same version, across every
+supported PostgreSQL major.
+
+There is no in-place upgrade across an incompatible format version yet. The format
+has not changed during the pre-release, so no migration has been needed; but until
+an upgrade path and a compatibility guarantee are committed to, treat the format
+as reload-required across an incompatible bump. This is the same posture as the
+release-status note above: keep the source a columnar table was loaded from, so it
+can be rebuilt if a future version changes the layout. A physical copy
+(`pg_basebackup`, file-system snapshot, replication) preserves the exact bytes and
+so stays readable by a build of the same version; it is not a substitute for the
+reloadable source across a version change.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
