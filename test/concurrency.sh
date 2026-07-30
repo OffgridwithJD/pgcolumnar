@@ -44,6 +44,11 @@
 # PG_CONFIG defaults to /usr/local/pg17/bin/pg_config. Run as a user that may
 # "runuser -u postgres" (e.g. root) when the current user is not postgres.
 
+
+# portlib.sh alone, not lib.sh: this suite carries its own harness, and the port
+# band is needed before any of it runs. Sourcing portlib twice is harmless.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 set -uo pipefail
 
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
@@ -71,13 +76,16 @@ port_is_free() {  # port -> 0 if nothing is listening on it
 pick_port() {
 	local p i
 	for i in $(seq 1 100); do
-		p=$(( (RANDOM % 20000) + 30000 ))
+		p=$(( PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO) ))
 		if port_is_free "$p"; then
 			echo "$p"
 			return 0
 		fi
 	done
-	echo $(( (RANDOM % 20000) + 30000 ))   # give up probing, use a random one
+	# Inside the band portlib.sh carves below the ephemeral floor: inside the
+	# ephemeral range, a probed-free port can still be taken by an outbound
+	# connection before the cluster binds it.
+	echo $(( PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO) ))   # give up probing
 }
 PORT="${PGC_PORT:-$(pick_port)}"
 

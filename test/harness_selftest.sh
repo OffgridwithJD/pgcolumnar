@@ -16,6 +16,11 @@
 # Usage:  test/harness_selftest.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 
+
+# portlib.sh alone, not lib.sh: this suite carries its own harness, and the port
+# band is needed before any of it runs. Sourcing portlib twice is harmless.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 set -uo pipefail
 
 PGC_SELFTEST_PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
@@ -29,7 +34,10 @@ SQ_DIR="$(mktemp -d /tmp/pgc-squatter.XXXXXX)"
 _port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 SQ_PORT=0
 for _try in $(seq 1 20); do
-	_cand=$(( 20000 + RANDOM % 20000 ))
+	# Inside the band portlib.sh carves below the ephemeral floor. The squatter
+	# must hold its port for the whole test, which it cannot do reliably from
+	# inside the range the kernel also allocates outbound connections from.
+	_cand=$(( PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO) ))
 	if _port_free "$_cand"; then
 		SQ_PORT=$_cand
 		break

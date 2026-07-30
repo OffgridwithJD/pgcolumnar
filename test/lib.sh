@@ -182,7 +182,12 @@ pgc_setup() {
 			# Prefer a port nothing is already listening on, so collisions are
 			# avoided rather than merely detected afterwards.
 			for _i in 1 2 3 4 5 6 7 8 9 10; do
-				PGC_PORT=$(( 2048 + (PGC_PORT + 1 + RANDOM % 40000) % 60000 ))
+				# Stays inside the main band. A retry that lands in the
+				# ephemeral range can be stolen between this probe and the bind
+				# below, which is the failure the retry exists to escape; one
+				# that lands in the auxiliary band collides with the extra
+				# clusters replication stands up. See portlib.sh.
+				PGC_PORT=$(( PGC_PORT_LO + (PGC_PORT + 1 + RANDOM % 5000) % (PGC_PORT_HI - PGC_PORT_LO) ))
 				if pgc_port_free "$PGC_PORT"; then
 					break
 				fi

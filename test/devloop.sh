@@ -56,7 +56,12 @@ for s in "$@"; do
 	echo "== suite: $s"
 	echo "===================================================================="
 	# A distinct high port per suite; lib.sh's own guard corrects a collision.
-	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((50000 + RANDOM % 9000)) \
+	# Below the ephemeral floor (portlib.sh). 50000-58999 sat inside it, so a
+	# devloop cluster could lose its port to an outbound connection between the
+	# choice and the bind, exactly as the matrix clusters did. Left as literals
+	# because this runs before any library is sourced; the range is checked
+	# against portlib's band by harness_selftest.
+	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((12000 + RANDOM % 15000)) \
 		bash "test/${s}.sh" "$PGC"; then
 		rc=1
 	fi

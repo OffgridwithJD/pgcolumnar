@@ -115,7 +115,47 @@ fi
 # not private: two runs on one box then start at the same port and fight over
 # every cluster. The lock above makes that refuse rather than happen, but the
 # suites are also run individually, and they should not collide either.
-BASE_PORT="${PGC_BASE_PORT:-$(( 40000 + (${PGC_RUN_OWNER:-$$} % 20000) ))}"
+#
+# Below the ephemeral floor, deliberately. This is the second copy of the
+# arithmetic in portlib.sh, kept because the driver re-executes itself from /tmp
+# and a tree-relative source would be the fragility that re-exec removes.
+#
+# The old band, 40000-59999, was entirely inside /proc/sys/net/ip_local_port_range
+# (32768-60999 here), so the kernel could hand a cluster's port to an outbound
+# connection between the free-check and the bind. See portlib.sh for the full
+# account; it is the cause of the intermittent replication failure.
+_pgc_eph_floor="$(awk '{print $1}' /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null)"
+case "$_pgc_eph_floor" in ''|*[!0-9]*) _pgc_eph_floor=32768 ;; esac
+if [ "$_pgc_eph_floor" -lt 20000 ]; then
+	echo "FATAL: ephemeral floor $_pgc_eph_floor too low to carve a private port band" >&2
+	echo "       /proc/sys/net/ipv4/ip_local_port_range starts at $_pgc_eph_floor; this" >&2
+	echo "       needs at least 20000 so cluster ports sit below the range the kernel" >&2
+	echo "       assigns to outbound connections. Raise it:" >&2
+	echo "           sysctl -w net.ipv4.ip_local_port_range=\"32768 60999\"" >&2
+	exit 1
+fi
+# Mirrors portlib.sh: main band below the auxiliary band, both below the floor.
+_pgc_aux_hi=$(( _pgc_eph_floor - 1000 ))
+_pgc_aux_lo=$(( _pgc_aux_hi - 2000 ))
+PGC_PORT_LO=10000
+PGC_PORT_HI=$(( _pgc_aux_lo - 200 ))
+_pgc_walk=1500
+_pgc_span=$(( PGC_PORT_HI - PGC_PORT_LO - _pgc_walk ))
+BASE_PORT="${PGC_BASE_PORT:-$(( PGC_PORT_LO + (${PGC_RUN_OWNER:-$$} % _pgc_span) ))}"
+
+# The band must hold one port per suite per major, plus the auxiliary clusters a
+# suite stands up beyond its own. Asserted rather than assumed: the walk is a
+# constant here and the suite list grows, so a silent overrun would put a cluster
+# back inside the ephemeral range -- the exact failure this layout removes, and
+# one that costs days to recognise.
+_pgc_need=$(( ${#SUITES[@]} * ${#CONFIGS[@]} + 16 ))
+if [ $(( BASE_PORT + _pgc_need )) -ge "$PGC_PORT_HI" ]; then
+	echo "FATAL: port band too small for this run" >&2
+	echo "       ${#SUITES[@]} suites x ${#CONFIGS[@]} majors needs $_pgc_need ports from $BASE_PORT," >&2
+	echo "       which passes the top of the band ($PGC_PORT_HI)." >&2
+	echo "       Raise net.ipv4.ip_local_port_range's floor, or set PGC_BASE_PORT lower." >&2
+	exit 1
+fi
 
 overall=0
 declare -a SUMMARY
@@ -292,7 +332,10 @@ for pgc in "${CONFIGS[@]}"; do
 			if grep -qE '^FAIL' "$builddir/${s}.log"; then
 				grep -E '^FAIL' "$builddir/${s}.log" | sed 's/^/      >> /'
 			fi
-			tail -20 "$builddir/${s}.log" | sed 's/^/      /'
+			# 60, not 20: a suite that prints a failure diagnostic and a
+			# server-log dump needs more room than 20 lines, and truncating it
+			# is how the replication failures stayed unreadable.
+			tail -60 "$builddir/${s}.log" | sed 's/^/      /'
 			results+="$s=FAIL "
 			verfail=1
 		fi
