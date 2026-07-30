@@ -32,14 +32,32 @@ jobs:
   # Full packaged suite matrix. Same suites the per-PR gate runs on 17/18, here
   # across every packaged major so 15 and 16 are covered too.
   suites:
-    name: suites (PG ${{ matrix.pg }})
-    runs-on: ubuntu-latest
+    name: suites (PG ${{ matrix.pg }}, ${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
     strategy:
       fail-fast: false
+      # The full packaged matrix on x86_64, and the current major on aarch64.
+      #
+      # aarch64 runs the suites rather than only building, because the defect
+      # class a second architecture actually adds is one no x86_64 run can show:
+      # x86_64 orders stores more strictly than aarch64, so a missing barrier in
+      # concurrent code is invisible on one and a defect on the other. The suites
+      # that would show it are the concurrent ones, and they need to execute, not
+      # compile.
+      #
+      # One major rather than four, because that defect class is a property of
+      # this extension's own code rather than of a PostgreSQL version boundary,
+      # and a nightly that takes four times as long to say the same thing is a
+      # nightly people start ignoring.
       matrix:
-        pg: ['15', '16', '17', '18']
+        include:
+          - { pg: '15', runner: ubuntu-latest }
+          - { pg: '16', runner: ubuntu-latest }
+          - { pg: '17', runner: ubuntu-latest }
+          - { pg: '18', runner: ubuntu-latest }
+          - { pg: '18', runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
 
