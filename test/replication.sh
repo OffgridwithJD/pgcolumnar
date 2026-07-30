@@ -322,10 +322,33 @@ check "and that one reads on the standby too" \
 # it came from the backup bytes, and nothing else. That is the documented claim
 # with nothing left to attribute it to.
 echo "-- restore in isolation (no streaming)"
-pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$RS_DIR' -X fetch -c fast" \
-	>/dev/null 2>&1
+# -X stream, not -X fetch. fetch collects the required WAL at the END of the
+# backup, so if the primary recycled a segment while the backup ran, the backup
+# itself fails -- the same retention problem the standby had, one layer up, and it
+# does fail under the parallel matrix. stream opens a second connection and takes
+# WAL as it is produced, using a temporary slot, so nothing it needs can be
+# recycled underneath it.
+#
+# This is still a restore, not a standby: no -R, so no standby.signal and no
+# primary_conninfo. The temporary slot exists only for the duration of the backup.
+pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$RS_DIR' -X stream -c fast" \
+	>"$PGC_WORKDIR/rs_backup.log" 2>&1
+
+# Distinguish "the backup failed" from "the cluster would not start". Without
+# this they are the same empty result, and the previous matrix could not tell
+# them apart.
+rs_backup_ok="$(pgc_pg "test -f '$RS_DIR/PG_VERSION' && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')"
+if [ "$rs_backup_ok" != yes ]; then
+	echo "  the restore backup failed; pg_basebackup said:"
+	sed 's/^/    /' "$PGC_WORKDIR/rs_backup.log" 2>/dev/null | tail -15
+fi
+check "the second base backup produced a data directory" "$rs_backup_ok" "yes"
+
 pgc_pg "sed -i 's/^port=.*/port=$RS_PORT/' '$RS_DIR/postgresql.conf'" >/dev/null 2>&1
-rs_start
+if ! rs_start; then
+	echo "FAIL  the restored cluster did not start"
+	PGC_FAIL=1
+fi
 check "the restored cluster accepts connections" "$(rs_q 'SELECT 1')" "1"
 
 # The control that makes the rest mean anything: if this were still following the
