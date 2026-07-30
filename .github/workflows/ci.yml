@@ -106,6 +106,17 @@ jobs:
           # skip themselves without it, which would be a silent loss of coverage.
           pip3 install --break-system-packages --quiet pyarrow || pip3 install --quiet pyarrow
 
+      - name: Confirm pyarrow is importable by the suites' interpreter
+        # Installing pyarrow and having the suites SEE it are different facts. The
+        # Arrow and Parquet suites skip themselves when the import fails, so a
+        # pip/interpreter skew turns those suites green without running them --
+        # a silent loss of exactly the coverage they exist for. The suites run
+        # under sudo, so check the import as root too, not only as the runner.
+        run: |
+          set -euo pipefail
+          python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow", pyarrow.__version__)'
+          sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+
       - name: Stop the packaged cluster
         # The suites start their own throwaway clusters on private ports; the
         # packaged one is unused and only competes for shared memory.
@@ -119,7 +130,19 @@ jobs:
           # to the change is worse than one that does not run. They stay in the
           # local matrix, which is where those numbers mean anything.
           # PGC_JOBS is sized for a 4-core runner rather than the local 8.
+          # PGC_REQUIRE_ISOLATION turns a missing pg_isolation_regress into a
+          # failure instead of a skip (#247), so the seven columnar race specs
+          # cannot report green without executing.
+          #
+          # #247 expected the binary to be absent on a packaged install. On PGDG
+          # and Ubuntu it is present: postgresql-client-NN ships it at
+          # $(pg_config --pgxs)/../test/isolation/pg_isolation_regress, which is
+          # exactly where isolation.sh looks. Verified against the packaged
+          # PostgreSQL 18 in the dev container: the suite runs its specs rather
+          # than skipping. So requiring it here costs nothing and converts an
+          # ambiguous PASS -- which a skip also produces -- into a real one.
           sudo -E env "PATH=$PATH" PGC_SKIP_TIMING=1 PGC_JOBS=4 \
+            PGC_REQUIRE_ISOLATION=1 \
             bash test/run_all_versions.sh /usr/lib/postgresql/17/bin/pg_config
 
       - name: Collect logs on failure
