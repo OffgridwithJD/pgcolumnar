@@ -293,4 +293,19 @@ sync_standby
 check "with the module back, the replayed table reads correctly" \
 	"$(hash_standby r2)" "$(hash_primary r2)"
 
+# On failure, restate the evidence at the END of the output.
+#
+# run_all_versions.sh tails the last 20 lines of a failing suite's log, and every
+# diagnostic this suite prints -- sb_start's standby log dump, the port line --
+# happens near the start, so the matrix showed twenty lines of passing scenario-3
+# checks and nothing about what broke. Three separate investigations of an
+# intermittent failure here were spent re-running the matrix with an external
+# snapshotter purely to recover text the suite had already printed.
+if [ "$PGC_FAIL" != 0 ]; then
+	echo "-- replication failed; primary port $PGC_PORT, standby port $SB_PORT"
+	echo "-- standby log tail:"
+	pgc_pg "tail -25 '$SB_LOG'" 2>/dev/null | sed 's/^/     /'
+	echo "-- standby data dir present: $(pgc_pg "test -d '$SB_DIR' && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')"
+fi
+
 pgc_summary
