@@ -33,6 +33,10 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 SB_DIR="$PGC_WORKDIR/standby"
 SB_LOG="$PGC_WORKDIR/standby.log"
+# A second, restore-only cluster. See the "restore in isolation" block: it exists
+# to take streaming out of the picture entirely.
+RS_DIR="$PGC_WORKDIR/restore"
+RS_LOG="$PGC_WORKDIR/restore.log"
 
 # The standby needs a port of its own, and PGC_PORT + 1 is the one choice that
 # cannot work. run_all_versions.sh hands each suite a port by walking upward from
@@ -76,6 +80,11 @@ if [ -z "$SB_PORT" ]; then
 	PGC_FAIL=1
 	pgc_summary
 fi
+RS_PORT="$(pick_sb_port)"
+while [ "$RS_PORT" = "$SB_PORT" ] || ! pgc_port_free "$RS_PORT"; do
+	RS_PORT=$((RS_PORT + 1))
+	[ "$RS_PORT" -gt 39000 ] && { echo "FAIL  no free port for the restore"; PGC_FAIL=1; pgc_summary; }
+done
 echo "-- primary port $PGC_PORT, standby port $SB_PORT"
 
 # ---------------------------------------------------------------------------
@@ -111,8 +120,29 @@ sb_start() {
 	return 1
 }
 
-# Stop the standby before the ordinary teardown takes the primary away.
-sb_teardown() { sb_stop; pgc_teardown; }
+rs_q() {   # query the RESTORE-ONLY cluster
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$RS_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "$1" 2>/dev/null || true
+}
+
+rs_stop() {
+	pgc_pg "pg_ctl -D '$RS_DIR' stop -m immediate -w" >/dev/null 2>&1 || true
+}
+
+rs_start() {
+	local i
+	pgc_pg "pg_ctl -D '$RS_DIR' -l '$RS_LOG' -t 120 start -w" >/dev/null 2>&1
+	for i in $(seq 1 120); do
+		[ "$(rs_q 'SELECT 1')" = 1 ] && return 0
+		sleep 0.5
+	done
+	echo "  restore cluster did not accept connections; last 15 lines of its log:"
+	pgc_pg "tail -15 '$RS_LOG'" 2>/dev/null | sed 's/^/    /'
+	return 1
+}
+
+# Stop both extra clusters before the ordinary teardown takes the primary away.
+sb_teardown() { sb_stop; rs_stop; pgc_teardown; }
 trap sb_teardown EXIT
 
 # Wait until the standby has replayed at least the primary's current LSN.
@@ -144,6 +174,20 @@ hash_standby() { sb_q "SELECT md5(string_agg(t::text, '' ORDER BY t::text)) FROM
 psql_run "CREATE TABLE r (id int, v text) USING pgcolumnar;
 	INSERT INTO r SELECT g, 'row' || g FROM generate_series(1,20000) g;" >/dev/null 2>&1
 
+# Declared BEFORE the backup on purpose. docs/limitations.md (#267) tells users a
+# physical backup preserves projections where pg_dump does not, and the claim is
+# about the bytewise copy containing them -- so the projection has to exist at
+# backup time or the test exercises streaming replay instead and the assertion
+# names a mechanism it never ran.
+psql_run "SELECT pgcolumnar.add_projection('r', 'r_pre', ARRAY['id','v'], ARRAY['id']);" >/dev/null 2>&1
+proj_sql="SELECT count(*) FROM pgcolumnar.projection
+	WHERE storage_id = pgcolumnar.get_storage_id('r') AND projection_id > 0"
+pri_proj="$(q "$proj_sql;")"
+check "the primary has a projection to preserve, before the backup runs" \
+	"$pri_proj" "1"
+pri_pre_rows="$(q "SELECT count(*) FROM pgcolumnar.read_projection('r','r_pre');")"
+check "and it reads on the primary" "$pri_pre_rows" "20000"
+
 echo "-- pg_basebackup"
 pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$SB_DIR' -R -X stream -c fast" \
 	>/dev/null 2>&1
@@ -172,25 +216,104 @@ sync_standby
 check "the base backup carried the initial rows" \
 	"$(hash_standby r)" "$(hash_primary r)"
 
-# Projections survive a physical backup, which docs/limitations.md now claims.
+# The claim docs/limitations.md makes: a physical backup preserves projections
+# where pg_dump does not.
 #
-# #266 and #267 established that pg_dump does NOT carry projections: they are
-# keyed by storage_id, which a logical restore regenerates, so the rows cannot be
-# carried and are pinned as lost in pg_dump_roundtrip.sh. The docs contrast that
-# with a physical backup preserving them, and that half was reasoning rather than
-# a test. pg_basebackup is a bytewise copy, so the projection rows and the storage
-# ids they reference both come across unchanged -- which is exactly the kind of
-# claim worth asserting rather than arguing, since it is the recovery path the
-# documentation sends people to.
-psql_run "SELECT pgcolumnar.add_projection('r', 'r_proj', ARRAY['id','v'], ARRAY['id']);" >/dev/null 2>&1
-proj_sql="SELECT count(*) FROM pgcolumnar.projection
-	WHERE storage_id = pgcolumnar.get_storage_id('r') AND projection_id > 0"
-pri_proj="$(q "$proj_sql;")"
-check "the primary has a projection to preserve" "$pri_proj" "1"
+# #266 and #267 established the negative half with a test -- projections are keyed
+# by storage_id, which a logical restore regenerates, so pg_dump cannot carry them
+# and pg_dump_roundtrip.sh pins the loss. The positive half was reasoning: the
+# backup is a bytewise copy, so the projection rows and the storage ids they name
+# both come across unchanged. r_pre was declared before pg_basebackup ran, so it
+# is genuinely in the backup and this asserts the documented mechanism.
+check "pg_basebackup carried the projection catalog row, unlike pg_dump (#266)" \
+	"$(sb_q "$proj_sql;")" "$pri_proj"
+
+# Existence is not usability. The catalog row can arrive while the projection's
+# own storage did not, which would read as preserved and behave as lost -- the
+# same existence-versus-function gap the index point-lookup covers in
+# pg_dump_roundtrip.sh. Read it on the standby and compare content, not counts.
+check "and the projection's storage came across intact and readable" \
+	"$(sb_q "SELECT count(*) FROM pgcolumnar.read_projection('r','r_pre');")" \
+	"$pri_pre_rows"
+check "with the same content the primary reads" \
+	"$(sb_q "SELECT md5(string_agg(x, '' ORDER BY x)) FROM pgcolumnar.read_projection('r','r_pre') x;")" \
+	"$(q "SELECT md5(string_agg(x, '' ORDER BY x)) FROM pgcolumnar.read_projection('r','r_pre') x;")"
+
+# A distinct property, worth keeping now that it is no longer mislabelled as the
+# backup one: a projection created AFTER the backup reaches the standby by WAL
+# replay of the DDL and its back-fill -- the sibling of the SMGR-truncate replay
+# this suite covers further down.
+psql_run "SELECT pgcolumnar.add_projection('r', 'r_post', ARRAY['id','v'], ARRAY['id']);" >/dev/null 2>&1
+check "the primary now has a second, post-backup projection" "$(q "$proj_sql;")" "2"
 
 sync_standby
-check "pg_basebackup preserved the projection, unlike pg_dump (#266)" \
-	"$(sb_q "$proj_sql;")" "$pri_proj"
+check "streaming replay carried a projection created after the backup" \
+	"$(sb_q "$proj_sql;")" "2"
+check "and that one reads on the standby too" \
+	"$(sb_q "SELECT count(*) FROM pgcolumnar.read_projection('r','r_post');")" \
+	"$pri_pre_rows"
+
+# ---------------------------------------------------------------------------
+# The same claim, with streaming taken out of the picture
+# ---------------------------------------------------------------------------
+#
+# Everything above runs against a streaming standby, which would hold a
+# projection whether it arrived in the backup or by replay afterwards. Declaring
+# r_pre before the backup means the backup must contain it, but the assertion
+# still cannot see which mechanism delivered it, so on its own it argues rather
+# than proves -- the exact failing this PR set out to fix.
+#
+# So take a second backup and bring it up as a standalone cluster: no -R, no
+# standby.signal, no primary_conninfo. It recovers to consistency from its own
+# WAL and opens read-write, never connecting to the primary. Anything present in
+# it came from the backup bytes, and nothing else. That is the documented claim
+# with nothing left to attribute it to.
+echo "-- restore in isolation (no streaming)"
+pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$RS_DIR' -X fetch -c fast" \
+	>/dev/null 2>&1
+pgc_pg "sed -i 's/^port=.*/port=$RS_PORT/' '$RS_DIR/postgresql.conf'" >/dev/null 2>&1
+rs_start
+check "the restored cluster accepts connections" "$(rs_q 'SELECT 1')" "1"
+
+# The control that makes the rest mean anything: if this were still following the
+# primary, or were the primary, "the projection is there" would prove nothing.
+check "the restored cluster is not in recovery (it is not following anyone)" \
+	"$(rs_q 'SELECT pg_is_in_recovery()')" "f"
+check "and has no upstream configured" \
+	"$(rs_q "SELECT count(*) FROM pg_stat_wal_receiver")" "0"
+check "and is a different cluster from the primary and the standby" \
+	"$([ "$(rs_q 'SHOW data_directory')" != "$(q 'SHOW data_directory')" ] && \
+	   [ "$(rs_q 'SHOW data_directory')" != "$(sb_q 'SHOW data_directory')" ] && \
+	   echo yes || echo no)" \
+	"yes"
+
+# Both of the next two compare the restored cluster against the primary, and a
+# comparison of two empty results passes while proving nothing -- so pin the
+# primary side to a literal first. Without these, dropping both projections on the
+# primary would turn the pair below green rather than red.
+rs_pri_count="$(q "$proj_sql;")"
+rs_pri_hash="$(q "SELECT md5(string_agg(x, '' ORDER BY x)) FROM pgcolumnar.read_projection('r','r_pre') x;")"
+check "the primary still has both projections when the backup is taken" \
+	"$rs_pri_count" "2"
+check "and a non-empty projection to compare against" \
+	"$([ -n "$rs_pri_hash" ] && echo yes || echo no)" "yes"
+
+# Compared against the primary's count now, not a literal: this backup is a
+# snapshot of the primary taken at this point, so both r_pre and r_post are in it.
+check "a physical backup alone preserves the projections, unlike pg_dump (#266)" \
+	"$(rs_q "$proj_sql;")" "$rs_pri_count"
+check "and its storage, readable with the same content" \
+	"$(rs_q "SELECT md5(string_agg(x, '' ORDER BY x)) FROM pgcolumnar.read_projection('r','r_pre') x;")" \
+	"$rs_pri_hash"
+
+# r_post was declared after the FIRST backup but before this one, so it is in
+# these bytes too. Its presence is not the point; its absence would mean this
+# backup predates it and the check above was reading a stale copy.
+check "and the later projection is in this backup as well, so it is not stale" \
+	"$(rs_q "SELECT count(*) FROM pgcolumnar.read_projection('r','r_post');")" \
+	"$pri_pre_rows"
+
+rs_stop
 
 # Positive control: with replay paused, a change on the primary must NOT appear.
 # This is the check that proves the comparison can fail. Everything after it is
