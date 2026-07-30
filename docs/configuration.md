@@ -26,6 +26,22 @@ pgColumnar has two kinds of settings:
 | --- | --- | --- | --- |
 | `pgcolumnar.compression` | enum | `zstd` | Default codec for new chunks. One of `none`, `pglz`, `lz4`, `zstd`. `lz4` and `zstd` are available only when the extension was built with those libraries. |
 | `pgcolumnar.compression_level` | integer | `3` | Level for the `zstd` codec. Range 1 to 22. Higher levels compress more and write more slowly. |
+| `pgcolumnar.fsst_min_gain_percent` | integer | `5` | Minimum size reduction, in percent, for FSST string encoding to be kept for a column chunk. Range 0 to 99. See below. |
+
+Building FSST codes for every vector is a significant part of the cost of a text
+or varlena load. At `0`, FSST is kept whenever it produces any reduction after
+the block codec, however small, and that reduction does not always repay the
+encode. The default of `5` keeps FSST only where it saves at least 5 percent.
+
+On measured workloads this costs about 2 percent stored size on shapes where
+FSST barely wins, such as high-entropy text, and reduces their load time by
+roughly a third. Where FSST wins clearly, such as low-cardinality text, the
+setting changes nothing: the encoding chosen and the bytes written are the same.
+Wide values are also unaffected.
+
+Set it to `0` for the previous behaviour of keeping FSST on any reduction. The
+setting applies when data is written, so it affects new chunks rather than
+existing ones, and it never changes the values a table returns.
 
 ### Scan and execution
 

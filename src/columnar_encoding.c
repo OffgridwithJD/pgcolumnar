@@ -1781,7 +1781,17 @@ ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 								compressionLevel, &codesComp, &codesCompLen,
 								&usedType, &usedLevel);
 
-	helps = ((uint64) codesCompLen + tableLen < (uint64) plainCompLen);
+	/*
+	 * Keep FSST only when the compressed win clears pgcolumnar.fsst_min_gain_percent,
+	 * not on any win at all. Encoding FSST codes for every vector of the chunk is a
+	 * dominant cost of a text/varlena load (issue #155), and a sub-margin win --
+	 * e.g. FSST ~1% smaller after compression on numeric -- does not repay it. At
+	 * 0 this is the original "any win keeps it"; the default is 5. The comparison is
+	 * multiplied out rather than subtracting a percentage of plainCompLen, so it
+	 * cannot underflow when plainCompLen is small.
+	 */
+	helps = (((uint64) codesCompLen + tableLen) * 100
+			 < (uint64) plainCompLen * (uint64) (100 - columnar_fsst_min_gain_percent));
 
 	pfree(codes);
 	if (plainComp)

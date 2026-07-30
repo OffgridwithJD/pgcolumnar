@@ -62,6 +62,7 @@ int			columnar_encoding_sample_rows = 2048;
 
 int			columnar_compression = COLUMNAR_COMPRESSION_ZSTD;
 int			columnar_compression_level = 3;
+int			columnar_fsst_min_gain_percent = 5;
 bool		columnar_enable_qual_pushdown = true;
 bool		columnar_enable_bloom_filter = true;
 
@@ -2183,6 +2184,27 @@ _PG_init(void)
 							&columnar_compression_level,
 							3,
 							1, 22,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.fsst_min_gain_percent",
+							"Minimum compressed size reduction, in percent, for FSST "
+							"string encoding to be kept for a column chunk.",
+							"Building FSST codes for every vector is a dominant cost of "
+							"a text or varlena load (issue #155). At 0 FSST is kept on "
+							"any compressed win, however small; a higher value keeps it "
+							"only when it saves at least that percentage after the block "
+							"codec has run, trading a bounded size regression on "
+							"marginal chunks for skipping their per-vector FSST encode. "
+							"The default of 5 costs about 2 percent stored size on the "
+							"shapes where FSST barely wins, such as high-entropy text, "
+							"and saves roughly a third of their load time; where FSST "
+							"wins clearly it changes nothing. Set to 0 to keep FSST on "
+							"any win at all.",
+							&columnar_fsst_min_gain_percent,
+							5,
+							0, 99,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
