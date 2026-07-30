@@ -141,6 +141,29 @@ jobs:
           grep -q -- '-fno-sanitize=function' "$mkglobal"
           echo "sanitizer flags present in Makefile.global"
 
+      - name: Prepare the runtime for AddressSanitizer, and prove the server starts
+        run: |
+          set -euo pipefail
+          # ASAN reserves a large shadow region at fixed offsets. On recent runner
+          # kernels the default ASLR entropy (vm.mmap_rnd_bits) is high enough that
+          # the shadow interleaves an existing mapping and every instrumented
+          # postmaster aborts at startup -- which the suites report only as
+          # "cluster failed to start", not as a sanitizer finding. Lowering the
+          # entropy is the standard workaround and affects only this runner.
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          # Prove the instrumented server actually starts before the suites, and
+          # surface its own log if it does not, so a startup failure is diagnosed
+          # here rather than hidden behind 23 "start attempt failed" lines.
+          export ASAN_OPTIONS="detect_leaks=0:detect_stack_use_after_return=0:abort_on_error=1"
+          d="$(mktemp -d)"
+          "$SAN_PREFIX/bin/initdb" -D "$d/data" -U postgres >/tmp/san-smoke.log 2>&1 \
+            || { echo "initdb (instrumented) failed:"; cat /tmp/san-smoke.log; exit 1; }
+          "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" -w \
+            -o "-p 5599 -c listen_addresses=127.0.0.1" -l "$d/logfile" start \
+            || { echo "instrumented postmaster failed to start:"; cat "$d/logfile"; exit 1; }
+          "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" stop -m fast || true
+          echo "instrumented server starts cleanly"
+
       - name: Run the sanitizer gate
         run: |
           set -euo pipefail
@@ -148,3 +171,11 @@ jobs:
           # runs the subset with ASAN/UBSAN violations fatal. Under sudo because
           # the suites start their own clusters; -E preserves the sanitizer env.
           sudo -E env "PATH=$PATH" bash test/run_san.sh "$SAN_PREFIX"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "===== ASAN start smoke log ====="; cat /tmp/san-smoke.log 2>/dev/null || true
+          for f in $(find /tmp -maxdepth 4 -name logfile -path '*pgcolumnar*' 2>/dev/null); do
+            echo "===== $f ====="; tail -60 "$f"
+          done
