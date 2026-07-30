@@ -24,7 +24,20 @@ PGXS="$("$PGC_PG_CONFIG" --pgxs)"
 ISO="$(dirname "$PGXS")/../test/isolation/pg_isolation_regress"
 
 if [ ! -x "$ISO" ]; then
-	echo "pg_isolation_regress not found at $ISO; SKIP"
+	# pg_isolation_regress is a build artifact under src/test/isolation; a
+	# packaged server-dev (as on a CI runner) does not ship it, so this suite
+	# would otherwise turn green without running any of the race specs -- a silent
+	# loss of exactly the coverage it exists for. Where the binary is expected to
+	# be present (CI, release gate), set PGC_REQUIRE_ISOLATION to make its absence
+	# a hard failure instead of a skip. Any non-empty value other than "0" arms
+	# it (1, true, yes, ...), so a truthy-looking value cannot silently disarm the
+	# guard -- the failure direction is safe.
+	if [ -n "${PGC_REQUIRE_ISOLATION:-}" ] && [ "${PGC_REQUIRE_ISOLATION}" != 0 ]; then
+		echo "FAIL  pg_isolation_regress not found at $ISO and PGC_REQUIRE_ISOLATION is set"
+		echo "      install it (built under src/test/isolation) or unset PGC_REQUIRE_ISOLATION"
+		exit 1
+	fi
+	echo "pg_isolation_regress not found at $ISO; SKIP (set PGC_REQUIRE_ISOLATION=1 to make this fatal)"
 	pgc_summary
 	exit 0
 fi
