@@ -83,7 +83,7 @@ fi
 RS_PORT="$(pick_sb_port)"
 while [ "$RS_PORT" = "$SB_PORT" ] || ! pgc_port_free "$RS_PORT"; do
 	RS_PORT=$((RS_PORT + 1))
-	[ "$RS_PORT" -gt 39000 ] && { echo "FAIL  no free port for the restore"; PGC_FAIL=1; pgc_summary; }
+	[ "$RS_PORT" -ge "$PGC_AUX_PORT_HI" ] && { echo "FAIL  no free port for the restore"; PGC_FAIL=1; pgc_summary; }
 done
 echo "-- primary port $PGC_PORT, standby port $SB_PORT"
 
@@ -131,13 +131,20 @@ rs_stop() {
 
 rs_start() {
 	local i
-	pgc_pg "pg_ctl -D '$RS_DIR' -l '$RS_LOG' -t 120 start -w" >/dev/null 2>&1
-	for i in $(seq 1 120); do
+	# pg_ctl's own output is kept, not discarded: when it is the thing that
+	# failed, sending it to /dev/null leaves nothing to read but an empty query
+	# result, and "the cluster did not answer" is not a diagnosis.
+	pgc_pg "pg_ctl -D '$RS_DIR' -l '$RS_LOG' -t 180 start -w" >"$PGC_WORKDIR/rs_ctl.log" 2>&1
+	for i in $(seq 1 240); do
 		[ "$(rs_q 'SELECT 1')" = 1 ] && return 0
 		sleep 0.5
 	done
-	echo "  restore cluster did not accept connections; last 15 lines of its log:"
-	pgc_pg "tail -15 '$RS_LOG'" 2>/dev/null | sed 's/^/    /'
+	echo "  restore cluster did not accept connections on port $RS_PORT"
+	echo "  pg_ctl said:"
+	sed 's/^/    /' "$PGC_WORKDIR/rs_ctl.log" 2>/dev/null | tail -10
+	echo "  is anything listening on $RS_PORT: $(pgc_port_free "$RS_PORT" && echo no || echo yes)"
+	echo "  restore cluster log:"
+	pgc_pg "tail -25 '$RS_LOG'" 2>/dev/null | sed 's/^/    /'
 	return 1
 }
 
