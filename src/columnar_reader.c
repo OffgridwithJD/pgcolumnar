@@ -307,6 +307,14 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 	readState->storageId = storageId;
 
 	/*
+	 * Reject a native data format version this build does not understand before
+	 * any bytes are decoded (#240). The metapage version was already checked when
+	 * ColumnarStorageId read the metapage; this is the independent data-format
+	 * stamp, catching a future encoding change that keeps the metapage layout.
+	 */
+	ColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
+
+	/*
 	 * Resolve each column's missing value once, for stripes that predate an
 	 * ADD COLUMN and therefore carry no chunk for the column (spec 6). A table
 	 * with no added-with-default columns yields all-NULL here.

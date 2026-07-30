@@ -23,11 +23,14 @@ below are the standing functional limitations, separate from that work.
 ## On-disk format stability
 
 The on-disk format is versioned. Each columnar relation records a native data
-format version (currently PGCN v1) and a physical metapage version. On every read
-the metapage version is checked: a version this build does not understand is
-rejected with an `unsupported columnar format version` error, and the read fails
-cleanly rather than misinterpreting bytes written by a different layout. The
-version stamps and that rejection are pinned by `test/native_format.sh`.
+format version (currently PGCN v1) and a physical metapage version, and both are
+checked on read. The metapage version guards the physical block layout; the
+native format version guards the data encoding, so a future version that changes
+the encoding while keeping the metapage layout is still caught. A version this
+build does not understand is rejected -- `unsupported columnar format version` for
+the metapage, `unsupported columnar native format version` for the data format --
+and the read fails cleanly rather than misinterpreting bytes written by a
+different layout. Both guards are pinned by `test/native_format.sh`.
 
 Within a version the format round-trips faithfully: data written and read back on
 the same build is byte-for-byte identical, which `test/native_format.sh` proves on

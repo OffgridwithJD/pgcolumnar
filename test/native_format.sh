@@ -92,4 +92,25 @@ check "the error names the offending version" \
 # The whole point of a clean rejection: the backend is still there afterwards.
 check "backend survives the rejection" "$(q 'SELECT 1;')" "1"
 
+# --- 4: native format_version is now enforced on read too (#240 decision) -----
+# The metapage version above guards the physical layout; format_version is the
+# independent data-format stamp. It used to be written and never read; it is now a
+# read-side guard (ColumnarCheckNativeFormatVersion at scan open), so a future
+# PGCN version that keeps the metapage layout but changes the encoding is rejected
+# rather than misread. A catalog UPDATE stands in for that future version -- the
+# value is read from pgcolumnar.storage, so no on-disk bytes need forging.
+psql_run "CREATE TABLE fv (id int, v text) USING pgcolumnar;"
+psql_run "INSERT INTO fv SELECT s, md5(s::text) FROM generate_series(1, 2000) s;"
+check "table reads at native format_version 1" "$(q 'SELECT count(*) FROM fv;')" "2000"
+fvsid="$(storage_id_of fv)"
+psql_run "UPDATE pgcolumnar.storage SET format_version = 99 WHERE storage_id = $fvsid;"
+fverr="$(err_of 'SELECT count(*) FROM fv;')"
+check "a read of a future native format_version fails (not silently misread)" \
+	"$([ -n "$fverr" ] && echo yes || echo no)" "yes"
+check "the failure is the native-format-version guard" \
+	"$(contains "$fverr" 'unsupported columnar native format version')" "yes"
+check "the native-format error names the offending version" \
+	"$(contains "$fverr" '99')" "yes"
+check "backend survives the native-format rejection" "$(q 'SELECT 1;')" "1"
+
 pgc_summary
