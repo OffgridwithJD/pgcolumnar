@@ -1,7 +1,9 @@
 # Installation
 
 pgColumnar builds with PGXS against an installed PostgreSQL server, versions 15
-through 19. PostgreSQL 13 and 14 still build but are out of the tested matrix.
+through 18, with 19 validated against 19beta2 and pending re-validation against
+the final release. PostgreSQL 13 and 14 still build but are out of the tested
+matrix.
 
 ## Requirements
 

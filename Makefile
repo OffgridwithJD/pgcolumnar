@@ -29,7 +29,7 @@ OBJS = \
 	src/columnar_parquet_reader.o
 
 EXTENSION = pgcolumnar
-DATA = pgcolumnar--1.0.sql
+DATA = pgcolumnar--1.0-dev.sql
 PGFILEDESC = "pgColumnar - column-oriented table access method"
 
 REGRESS =
