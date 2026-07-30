@@ -228,8 +228,20 @@ for pgc in "${CONFIGS[@]}"; do
 	wait
 
 	# Then the timing-sensitive suites, one at a time, with nothing else running.
+	#
+	# PGC_SKIP_TIMING=1 drops them entirely. That exists for shared CI hardware,
+	# where the wall-clock ratios these three assert cannot be trusted: a runner
+	# is noisy by construction and a gate that goes red for reasons unrelated to
+	# the change teaches its readers to discount red, which is worse than not
+	# running it. They stay in every local run, which is where the numbers mean
+	# something.
 	for s in "${SUITES[@]}"; do
 		if ! is_timing_suite "$s"; then
+			continue
+		fi
+		if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
+			echo "  SKIP  $s (PGC_SKIP_TIMING)"
+			echo 0 >"$builddir/${s}.rc"
 			continue
 		fi
 		port=$((BASE_PORT++))

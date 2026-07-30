@@ -66,19 +66,29 @@ end="$(awk -v s="$start" 'NR > s && /^[A-Za-z_][A-Za-z0-9_]*\(/ {print NR; exit}
 
 check "ColumnarTruncateMainFork was found" "$([ -n "$start" ] && echo yes || echo no)" "yes"
 
-# line number of the first match of a pattern inside the function, or 0
+# Line number of the first line inside the function that CONTAINS the literal
+# string, or empty.
+#
+# Deliberately a substring test rather than a regex match. Every pattern below is
+# literal C text, and passing one through awk's -v made the backslashes a string
+# escape before the regex ever saw them: awk turns "\(" into "(", so
+# 'XLogInsert\(RM_SMGR_ID' reached the matcher as 'XLogInsert(RM_SMGR_ID' with an
+# unterminated group, and never matched. Whether that happened at all depended on
+# the awk build, so this suite passed locally and failed on a runner with a
+# different mawk, reporting three steps of the envelope as missing when the code
+# was fine. index() has no escaping question to get wrong.
 at() {
 	awk -v s="$start" -v e="$end" -v pat="$1" \
-		'NR >= s && NR <= e && $0 ~ pat { print NR; exit }' "$FN"
+		'NR >= s && NR <= e && index($0, pat) { print NR; exit }' "$FN"
 }
 
-delay_set="$(at 'delayChkptFlags \|= DELAY_CHKPT_COMPLETE')"
-crit_in="$(at 'START_CRIT_SECTION\(\)')"
-insert="$(at 'XLogInsert\(RM_SMGR_ID')"
-flush="$(at 'XLogFlush\(')"
-trunc="$(at 'COLUMNAR_SMGRTRUNCATE\(')"
+delay_set="$(at 'delayChkptFlags |= DELAY_CHKPT_COMPLETE')"
+crit_in="$(at 'START_CRIT_SECTION()')"
+insert="$(at 'XLogInsert(RM_SMGR_ID')"
+flush="$(at 'XLogFlush(')"
+trunc="$(at 'COLUMNAR_SMGRTRUNCATE(')"
 delay_clear="$(at 'delayChkptFlags &= ~DELAY_CHKPT_COMPLETE')"
-crit_out="$(at 'END_CRIT_SECTION\(\)')"
+crit_out="$(at 'END_CRIT_SECTION()')"
 
 for v in delay_set crit_in insert flush trunc delay_clear crit_out; do
 	eval "val=\$$v"
