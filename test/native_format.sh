@@ -104,13 +104,19 @@ psql_run "INSERT INTO fv SELECT s, md5(s::text) FROM generate_series(1, 2000) s;
 check "table reads at native format_version 1" "$(q 'SELECT count(*) FROM fv;')" "2000"
 fvsid="$(storage_id_of fv)"
 psql_run "UPDATE pgcolumnar.storage SET format_version = 99 WHERE storage_id = $fvsid;"
-fverr="$(err_of 'SELECT count(*) FROM fv;')"
-check "a read of a future native format_version fails (not silently misread)" \
-	"$([ -n "$fverr" ] && echo yes || echo no)" "yes"
+# Two read shapes must both reject: a data-decoding scan (ColumnarBeginRead) and
+# the zone-map-only aggregate, which answers count/min/max from metadata without
+# ever opening a read state and so needs its own guard.
+fverr_scan="$(err_of 'SELECT v FROM fv LIMIT 1;')"
+fverr_agg="$(err_of 'SELECT count(*) FROM fv;')"
+check "a data read of a future native format_version fails (not silently misread)" \
+	"$([ -n "$fverr_scan" ] && echo yes || echo no)" "yes"
+check "an aggregate over a future native format_version fails (not silently misread)" \
+	"$([ -n "$fverr_agg" ] && echo yes || echo no)" "yes"
 check "the failure is the native-format-version guard" \
-	"$(contains "$fverr" 'unsupported columnar native format version')" "yes"
+	"$(contains "$fverr_scan" 'unsupported columnar native format version')" "yes"
 check "the native-format error names the offending version" \
-	"$(contains "$fverr" '99')" "yes"
+	"$(contains "$fverr_scan" '99')" "yes"
 check "backend survives the native-format rejection" "$(q 'SELECT 1;')" "1"
 
 pgc_summary
