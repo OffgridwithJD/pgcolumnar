@@ -60,18 +60,17 @@ verify() {  # label db
 	check "$label: access method is pgcolumnar"  "$(on "$db" "$am_sql;")" "pgcolumnar"
 	# tail -1: the two SET statements each emit a command tag before the result.
 	check "$label: restored index answers a point lookup" "$(on "$db" "$idx_sql;" | tail -1)" "12345"
-	# Pinned as an assertion of the CURRENT, WRONG behaviour rather than echoed.
+	# Per-table options survive the round trip (#248). They did not until the
+	# extension registered pgcolumnar.options with pg_extension_config_dump:
+	# rows in an extension's own tables are not dumped unless the extension asks,
+	# so a restored table silently reverted to default limits, compression and
+	# encode_effort.
 	#
-	# An echo in a passing suite is read by nobody, so a known gap recorded that
-	# way is a gap that gets forgotten. Asserting what happens today keeps the
-	# round-trip gate green while #248 is open, and makes fixing #248 turn this
-	# check RED -- which is exactly when someone needs reminding that this line
-	# and its expectation have to change. A known-wrong behaviour that is pinned
-	# cannot be fixed silently.
-	#
-	# When #248 lands: flip the expectation to "$before_opt" and delete this note.
-	check "$label: encode_effort is NOT preserved (pinned; see #248)" \
-		"$(on "$db" "$opt_sql;")" "<none>"
+	# This check was pinned to the broken behaviour while #248 was open, which is
+	# what turned it red the moment the fix landed and forced this line to be
+	# updated deliberately rather than a green run hiding the change.
+	check "$label: per-table options survive" \
+		"$(on "$db" "$opt_sql;")" "$before_opt"
 	on postgres "DROP DATABASE IF EXISTS $db;" >/dev/null 2>&1
 }
 

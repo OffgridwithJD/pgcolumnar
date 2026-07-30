@@ -60,6 +60,29 @@ CREATE TABLE pgcolumnar.options (
 CREATE UNIQUE INDEX options_pkey
 	ON pgcolumnar.options USING btree (regclass);
 
+/*
+ * Carry the per-table options through pg_dump (#248).
+ *
+ * Rows in an extension's own tables are not dumped unless the extension says so.
+ * Without this, pg_dump emitted the table definition and its data but never the
+ * options row, so a restored columnar table silently reverted to default
+ * stripe/chunk limits, compression and encode_effort. Silent, because nothing
+ * fails: the data is all there and only the settings are gone.
+ *
+ * This table and ONLY this table. Every other pgcolumnar catalog table is keyed
+ * by storage_id, which is assigned when the relation is created, so a restore
+ * generates new ones -- dumping those rows would restore metadata pointing at
+ * storage that no longer exists, which is worse than losing it. options is keyed
+ * by regclass, a name that survives dump and restore, and it holds user intent
+ * rather than physical layout, which is the same reason it is the only one worth
+ * carrying.
+ *
+ * Projections are user intent too and are still lost across a dump, for the
+ * storage_id reason above; re-emitting pgcolumnar.add_projection() calls is a
+ * different mechanism and its own problem.
+ */
+SELECT pg_catalog.pg_extension_config_dump('pgcolumnar.options', '');
+
 /* ---------------------------------------------------------------------------
  * pgcolumnar.projection (gap 26)
  *
