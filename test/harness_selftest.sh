@@ -239,7 +239,10 @@ check "no suite hands every run the same default port" \
 _eph="$(pgc_ephemeral_floor)"
 _offenders=""
 for _f in "$(dirname "${BASH_SOURCE[0]}")"/*.sh; do
-	# Port assignments of the form NAME_PORT=$(( ... )) or PGC_PORT=$(( ... )).
+	# Any *PORT assignment, not only the arithmetic form: a plain
+	# FOO_PORT=45000 would otherwise slip a check whose comment claims to cover
+	# every assignment. Comment lines are excluded so prose about the old ranges
+	# does not read as an offender.
 	while IFS= read -r _line; do
 		# Every integer literal in the expression; flag any at or above the floor.
 		for _n in $(printf '%s\n' "$_line" | grep -oE '[0-9]{4,}'); do
@@ -248,7 +251,7 @@ for _f in "$(dirname "${BASH_SOURCE[0]}")"/*.sh; do
 			fi
 		done
 	done <<-EOF
-		$(grep -hE '^[[:space:]]*[A-Za-z_]*PORT=\$\(\(|PGC_PORT=\$\(\(' "$_f" 2>/dev/null)
+		$(grep -hE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_]*PORT=' "$_f" 2>/dev/null | grep -vE '^[[:space:]]*#')
 	EOF
 done
 check "no test picks a port from inside the ephemeral range" \
