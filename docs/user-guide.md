@@ -251,6 +251,6 @@ decoded unless the consumer filters them.
 - Operate tables in production: [Administration](administration.md).
 - Improve range scans on a scattered key or serve a query from a column subset:
   [projections](administration.md#projections) and
-  [`pgcolumnar.vacuum_sorted`](sql-reference.md#pgcolumnarvacuum_sortedtablename-regclass-variadic-sort_columns-namel).
+  [`pgcolumnar.vacuum_sorted`](sql-reference.md#pgcolumnarvacuum_sortedtablename-regclass-variadic-sort_columns-name).
 - Move data in and out of the Arrow and Parquet ecosystem:
   [import and export](sql-reference.md#import-and-export).

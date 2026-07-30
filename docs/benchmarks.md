@@ -21,7 +21,7 @@ The numbers below are one full run of all three harnesses, measured 2026-07-27 a
 commit `7a9c9f7`: PostgreSQL 17.10 non-assert (18.4 with io_uring for the read
 stream harness), 6,000,000 rows, 8-column table, median of 5, on 8 cores with
 24 GB of memory. Raw output is in
-[../bench/sample_output_all_2026_07_27.txt](../bench/sample_output_all_2026_07_27.txt).
+[../bench/sample_output_all_2026_07_27.txt](https://github.com/jdatcmd/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
 They show the shape of the tradeoff, not a precise score. The dataset is synthetic
 and deliberately mixes column shapes that suit different encodings, so a table of
 purely random values will look worse and a repetitive one better.
