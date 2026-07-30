@@ -1,11 +1,17 @@
 # pgColumnar continuous integration.
 #
-# This mirrors the cadence the project already runs locally rather than
-# inventing a second one: a build preflight across every supported major, which
-# is what catches an API break, and the suite run on one major, which is what
-# catches a behaviour break. The full five-major suite matrix stays a local gate
-# (test/run_all_versions.sh) because PostgreSQL 19 is beta and not packaged in
-# PGDG stable, so CI cannot reproduce it honestly.
+# Two per-PR gates, matching the local cadence:
+#   - a build preflight across every packaged major, which catches an API break;
+#   - the suite matrix on the current majors (17 and 18), which catches a
+#     behaviour break -- previously PG17 only (#236), 18 added to close #243.
+#
+# The heavier coverage runs nightly in .github/workflows/nightly.yml, not per-PR:
+# the full packaged suite matrix (15-18) and the ASAN+UBSAN sanitizer gate -- the
+# only gate that catches the non-faulting memory-safety class the assert builds
+# miss. Per-PR stays fast; the deep coverage runs once a day and on demand.
+#
+# PostgreSQL 19 is beta and not packaged in PGDG stable, so it stays a local gate
+# (test/run_all_versions.sh against a source build).
 #
 # Warnings are failures here for the same reason they are in the local matrix.
 
@@ -79,17 +85,22 @@ jobs:
           # here is reported rather than failed on.
           [ -z "$missing" ] && echo "all resolve" || { echo "unresolved (informational):"; echo "$missing"; }
 
-  # Run the suites on one major. This is the behaviour gate; the local
-  # five-major matrix remains the release gate.
+  # Run the suites on the current majors (17 + 18). This is the per-PR behaviour
+  # gate; the full packaged matrix (15-18) runs nightly, and the local five-major
+  # matrix (adding PG19) remains the release gate. The two majors run in parallel.
   suites:
-    name: suites (PG 17)
+    name: suites (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['17', '18']
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL 17, codec headers, and pyarrow
+      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -100,7 +111,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            postgresql-17 postgresql-server-dev-17 \
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
             liblz4-dev libzstd-dev zlib1g-dev python3-pip
           # The Arrow and Parquet suites use pyarrow as an independent reader and
           # skip themselves without it, which would be a silent loss of coverage.
@@ -128,7 +139,7 @@ jobs:
         # packaged one is unused and only competes for shared memory.
         run: sudo systemctl stop postgresql || true
 
-      - name: Run the suite matrix on PG 17
+      - name: Run the suite matrix on PG ${{ matrix.pg }}
         run: |
           set -euo pipefail
           # PGC_SKIP_TIMING drops the three wall-clock suites: a shared runner
@@ -139,17 +150,9 @@ jobs:
           # PGC_REQUIRE_ISOLATION turns a missing pg_isolation_regress into a
           # failure instead of a skip (#247), so the seven columnar race specs
           # cannot report green without executing.
-          #
-          # #247 expected the binary to be absent on a packaged install. On PGDG
-          # and Ubuntu it is present: postgresql-client-NN ships it at
-          # $(pg_config --pgxs)/../test/isolation/pg_isolation_regress, which is
-          # exactly where isolation.sh looks. Verified against the packaged
-          # PostgreSQL 18 in the dev container: the suite runs its specs rather
-          # than skipping. So requiring it here costs nothing and converts an
-          # ambiguous PASS -- which a skip also produces -- into a real one.
           sudo -E env "PATH=$PATH" PGC_SKIP_TIMING=1 PGC_JOBS=4 \
             PGC_REQUIRE_ISOLATION=1 \
-            bash test/run_all_versions.sh /usr/lib/postgresql/17/bin/pg_config
+            bash test/run_all_versions.sh /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Collect logs on failure
         if: failure()
