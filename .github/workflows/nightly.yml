@@ -101,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang, build tools, codec headers, and pyarrow
+      - name: Install clang, build tools, codec headers, pyarrow; create the postgres user
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -109,9 +109,15 @@ jobs:
             clang llvm bison flex make perl \
             liblz4-dev libzstd-dev zlib1g-dev python3-pip
           clang --version | head -1
+          # A system pip install (root) lands where every user's interpreter finds
+          # it, including the postgres user the suites run as.
           sudo pip3 install --break-system-packages --quiet pyarrow \
             || sudo pip3 install --quiet pyarrow
-          sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+          # The suites run as a dedicated unprivileged DB user, not root:
+          # PostgreSQL refuses to run as root, and this job installs no package
+          # that would create a postgres user, so make one.
+          id postgres >/dev/null 2>&1 || sudo useradd -m postgres
+          sudo -u postgres python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow ok for postgres")'
 
       - name: Cache the instrumented PostgreSQL
         id: san-cache
@@ -141,41 +147,50 @@ jobs:
           grep -q -- '-fno-sanitize=function' "$mkglobal"
           echo "sanitizer flags present in Makefile.global"
 
-      - name: Prepare the runtime for AddressSanitizer, and prove the server starts
+      - name: Prepare the runtime and hand the build to postgres, proving it starts
         run: |
           set -euo pipefail
           # ASAN reserves a large shadow region at fixed offsets. On recent runner
           # kernels the default ASLR entropy (vm.mmap_rnd_bits) is high enough that
-          # the shadow interleaves an existing mapping and every instrumented
-          # postmaster aborts at startup -- which the suites report only as
-          # "cluster failed to start", not as a sanitizer finding. Lowering the
-          # entropy is the standard workaround and affects only this runner.
+          # the shadow interleaves an existing mapping and the instrumented
+          # postmaster aborts at startup. Lowering it is the standard workaround and
+          # affects only this runner.
           sudo sysctl -w vm.mmap_rnd_bits=28
-          # Prove the instrumented server actually starts before the suites, and
-          # surface its own log if it does not, so a startup failure is diagnosed
-          # here rather than hidden behind 23 "start attempt failed" lines.
-          export ASAN_OPTIONS="detect_leaks=0:detect_stack_use_after_return=0:abort_on_error=1"
-          d="$(mktemp -d)"
-          "$SAN_PREFIX/bin/initdb" -D "$d/data" -U postgres >/tmp/san-smoke.log 2>&1 \
-            || { echo "initdb (instrumented) failed:"; cat /tmp/san-smoke.log; exit 1; }
-          "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" -w \
-            -o "-p 5599 -c listen_addresses=127.0.0.1" -l "$d/logfile" start \
-            || { echo "instrumented postmaster failed to start:"; cat "$d/logfile"; exit 1; }
-          "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" stop -m fast || true
-          echo "instrumented server starts cleanly"
+          # The suites run as postgres, and run_san.sh both writes the extension
+          # into the prefix and builds it in the checkout, so postgres must own both
+          # and be able to traverse to the prefix under /home/runner.
+          sudo chmod o+x /home/runner
+          sudo chown -R postgres "$SAN_PREFIX" "$GITHUB_WORKSPACE"
+          # Prove the instrumented server starts as postgres, with ASAN_OPTIONS
+          # passed via env (not a login shell, which would strip it), before the
+          # suites -- so a startup failure is diagnosed here, not hidden behind 23
+          # "start attempt failed" lines.
+          sudo -u postgres env \
+            SAN_PREFIX="$SAN_PREFIX" \
+            ASAN_OPTIONS="detect_leaks=0:detect_stack_use_after_return=0:abort_on_error=1" \
+            bash -ec '
+              d="$(mktemp -d)"
+              "$SAN_PREFIX/bin/initdb" -D "$d/data" -A trust >/tmp/san-smoke.log 2>&1
+              "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" -w \
+                -o "-p 5599 -c listen_addresses=127.0.0.1" -l "$d/logfile" start >>/tmp/san-smoke.log 2>&1
+              "$SAN_PREFIX/bin/pg_ctl" -D "$d/data" stop -m fast >>/tmp/san-smoke.log 2>&1
+            ' || { echo "instrumented server failed to start as postgres:"; sudo cat /tmp/san-smoke.log; exit 1; }
+          echo "instrumented server starts cleanly as postgres"
 
-      - name: Run the sanitizer gate
+      - name: Run the sanitizer gate (as the postgres user)
         run: |
           set -euo pipefail
-          # run_san.sh builds the extension instrumented against this server and
-          # runs the subset with ASAN/UBSAN violations fatal. Under sudo because
-          # the suites start their own clusters; -E preserves the sanitizer env.
-          sudo -E env "PATH=$PATH" bash test/run_san.sh "$SAN_PREFIX"
+          # As postgres, not root. PostgreSQL refuses to run as root, and dropping
+          # from root via runuser strips ASAN_OPTIONS so the instrumented server
+          # aborts on the leak/stack traps -- the failure the first CI run hit. As
+          # postgres, pgc_setup's non-root path runs initdb/postmaster directly and
+          # run_san.sh's exported ASAN_OPTIONS is inherited. -E keeps PATH.
+          sudo -u postgres -E env "PATH=$PATH" bash test/run_san.sh "$SAN_PREFIX"
 
       - name: Collect logs on failure
         if: failure()
         run: |
-          echo "===== ASAN start smoke log ====="; cat /tmp/san-smoke.log 2>/dev/null || true
-          for f in $(find /tmp -maxdepth 4 -name logfile -path '*pgcolumnar*' 2>/dev/null); do
-            echo "===== $f ====="; tail -60 "$f"
+          echo "===== ASAN start smoke log ====="; sudo cat /tmp/san-smoke.log 2>/dev/null || true
+          for f in $(sudo find /tmp -maxdepth 4 -name server.log -path '*pgcolumnar*' 2>/dev/null); do
+            echo "===== $f ====="; sudo tail -60 "$f"
           done
