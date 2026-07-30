@@ -27,11 +27,18 @@ format version is enforced on read rather than only stamped on write
 What that testing does not cover is worth stating alongside it. Every result
 recorded in this repository comes from x86_64. The suites have not been run on
 aarch64 or on a big-endian platform
-([issue #242](https://github.com/jdatcmd/pgcolumnar/issues/242)). That matters
-more here than it would in most extensions: the code reads values out of packed
-on-disk buffers, and an unaligned read of that kind has already had to be fixed
-once, on a platform that tolerates it. Another architecture is untested rather
-than known to be broken, and building there should be treated accordingly.
+([issue #242](https://github.com/jdatcmd/pgcolumnar/issues/242)).
+
+Unaligned reads, one class that would be expected to differ by architecture, are
+covered independent of it: the sanitizer gate builds with clang's address and
+undefined-behaviour checks, which report a misaligned load on any host, and that
+gate exists because such a read was found and fixed once. What remains untested on
+another architecture is what a sanitizer on x86_64 cannot observe, principally
+memory ordering. x86_64 orders stores more strictly than aarch64 does, so a
+missing barrier in concurrent code can be invisible on one and a defect on the
+other. Another architecture is untested rather than known to be broken, and
+building there should be treated accordingly.
+
 PostgreSQL 19 coverage is against 19beta2, not a final release.
 
 The sections below are the standing functional limitations, separate from that
