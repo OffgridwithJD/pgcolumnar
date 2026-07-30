@@ -159,6 +159,29 @@ is_timing_suite() {
 	esac
 }
 
+# Suites that must not run beside five others, which is a wider set than the
+# timing ones and for a second reason.
+#
+# The timing suites are here because a wall-clock ratio cannot be measured under
+# contention. replication is here because it is heavy rather than because it
+# measures anything: it stands up a SECOND cluster, runs pg_basebackup, and
+# streams between the two, so at PGC_JOBS=6 it is competing with six other
+# clusters for the same box. It failed roughly one full matrix in three, on a
+# different major each time -- PG18, then PG19, then PG16 -- which is the
+# signature of resource contention rather than a defect in the suite or the
+# major.
+#
+# Deliberately NOT the same predicate as is_timing_suite, because
+# PGC_SKIP_TIMING drops those in CI and replication must still run there. Serial
+# and skipped are different properties and were one list until this suite needed
+# one without the other.
+runs_alone() {
+	case "$1" in
+		replication) return 0 ;;
+		*) is_timing_suite "$1" ;;
+	esac
+}
+
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
 		echo "SKIP  $pgc (not executable)"
@@ -213,7 +236,7 @@ for pgc in "${CONFIGS[@]}"; do
 	results=""
 	maxjobs="${PGC_JOBS:-6}"
 	for s in "${SUITES[@]}"; do
-		if is_timing_suite "$s"; then
+		if runs_alone "$s"; then
 			continue
 		fi
 		# throttle to maxjobs concurrent suites
@@ -236,10 +259,14 @@ for pgc in "${CONFIGS[@]}"; do
 	# running it. They stay in every local run, which is where the numbers mean
 	# something.
 	for s in "${SUITES[@]}"; do
-		if ! is_timing_suite "$s"; then
+		if ! runs_alone "$s"; then
 			continue
 		fi
-		if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
+		# PGC_SKIP_TIMING drops the wall-clock suites only. A suite that runs
+		# alone for a resource reason rather than a measurement one -- replication
+		# -- still runs, because there is nothing about a shared runner that makes
+		# its assertions untrustworthy, only slower.
+		if [ "${PGC_SKIP_TIMING:-0}" = 1 ] && is_timing_suite "$s"; then
 			echo "  SKIP  $s (PGC_SKIP_TIMING)"
 			echo 0 >"$builddir/${s}.rc"
 			continue
