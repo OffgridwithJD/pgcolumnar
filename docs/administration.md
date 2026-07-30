@@ -155,6 +155,11 @@ the base table and its projections. Projection scans are on by default
 (`pgcolumnar.enable_projection_scan`). Drop a projection with
 `pgcolumnar.drop_projection`.
 
+Projections are not carried by `pg_dump` / `pg_restore` -- they are keyed by
+internal storage ids that a restore regenerates -- so re-declare them with
+`pgcolumnar.add_projection` after a logical restore. A physical backup
+(`pg_basebackup`) preserves them.
+
 A projection adds write cost and storage, because inserts write it too. Add one
 for a query pattern that a covering, sorted column subset serves, and measure the
 result. Confirm the plan uses it with `EXPLAIN`, which names the chosen projection.

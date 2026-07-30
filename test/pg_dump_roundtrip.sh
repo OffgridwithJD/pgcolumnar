@@ -16,10 +16,15 @@
 # (ON_ERROR_STOP / pg_restore --exit-on-error), not by grepping for the word
 # "ERROR", which is localised.
 #
-# Per-table options set through pgcolumnar.set_options live in the
-# pgcolumnar.options catalog, not as reloptions, so pg_dump does not emit them
-# (issue #248). This suite reports whether they survive rather than asserting it,
-# so a known gap does not redden the round-trip gate.
+# Per-table state lives in extension-owned catalogs, which pg_dump only emits when
+# the extension registers them:
+#   - options (pgcolumnar.options, regclass-keyed) IS registered (#248/#258) and
+#     is asserted to survive below.
+#   - projections (pgcolumnar.projection, storage_id-keyed) cannot be carried that
+#     way -- restoring the rows would point at storage that no longer exists -- and
+#     nothing re-emits add_projection() at dump time yet, so they are lost. The
+#     check below pins that loss (#266): it goes red the day a fix lands, exactly
+#     as the options check did before #258.
 #
 set -uo pipefail
 
@@ -36,6 +41,7 @@ psql_run "CREATE TABLE dt (id bigint, kind int, payload text) USING pgcolumnar;"
 psql_run "SELECT pgcolumnar.set_options('dt', encode_effort => 'fast');" >/dev/null
 psql_run "INSERT INTO dt SELECT g, g % 7, 'p'||g FROM generate_series(1,50000) g;" >/dev/null
 psql_run "CREATE INDEX dt_id_idx ON dt (id);" >/dev/null
+psql_run "SELECT pgcolumnar.add_projection('dt', 'dt_proj', ARRAY['id','payload'], ARRAY['id']);" >/dev/null
 
 sum_sql="SELECT coalesce(sum(hashtextextended(id::text||'|'||kind::text||'|'||payload, 0)), 0) FROM dt"
 am_sql="SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.relname = 'dt'"
@@ -48,10 +54,14 @@ opt_sql="SELECT coalesce((SELECT encode_effort FROM pgcolumnar.options WHERE reg
 # Force the planner off seqscan so the point lookup exercises the restored index;
 # the returned value proves both the data and the index survived and work.
 idx_sql="SET enable_seqscan=off; SET enable_bitmapscan=off; SELECT id FROM dt WHERE id = 12345"
+# Declared projections for this table, keyed by its (restore-regenerated) storage id.
+proj_sql="SELECT count(*) FROM pgcolumnar.projection WHERE storage_id = pgcolumnar.get_storage_id('dt') AND projection_id > 0"
 
 before_count="$(q "SELECT count(*) FROM dt;")"
 before_sum="$(q "$sum_sql;")"
 before_opt="$(q "$opt_sql;")"
+before_proj="$(q "$proj_sql;")"
+check "the base table has a projection to preserve" "$before_proj" "1"
 
 verify() {  # label db
 	local label="$1" db="$2" ao
@@ -71,6 +81,13 @@ verify() {  # label db
 	# updated deliberately rather than a green run hiding the change.
 	check "$label: per-table options survive" \
 		"$(on "$db" "$opt_sql;")" "$before_opt"
+	# Projections are storage_id-keyed, so config_dump (which carries options)
+	# would restore rows pointing at storage that no longer exists. Nothing
+	# re-emits add_projection() at dump time yet, so a restored table has none.
+	# Pinned to that loss (#266): flip the expectation to "$before_proj" when a
+	# fix lands, exactly as the options check was flipped by #258.
+	check "$label: projections are NOT carried by pg_dump (pinned; see #266)" \
+		"$(on "$db" "$proj_sql;")" "0"
 	on postgres "DROP DATABASE IF EXISTS $db;" >/dev/null 2>&1
 }
 

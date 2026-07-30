@@ -245,8 +245,13 @@ on whether the filter was pushed down.
 
 - Physical replication and physical backups (`pg_basebackup`, snapshots) include
   columnar tables, which are WAL-logged relations.
-- `pg_dump` and `pg_restore` handle columnar tables. The target server must have
-  the extension installed and preloaded.
+- `pg_dump` and `pg_restore` handle columnar tables, and the target server must
+  have the extension installed and preloaded. Table data, indexes, and per-table
+  options (`pgcolumnar.set_options`) survive the round trip; **declared
+  projections (`pgcolumnar.add_projection`) do not** -- they are keyed by internal
+  storage ids that a restore regenerates, so a restored table has no projections
+  and they must be re-declared. A physical backup (`pg_basebackup`) copies the
+  cluster bytewise and preserves them.
 - Logical decoding reads heap-tuple WAL records. Columnar data reaches WAL as
   full-page images, which carry no tuple structure, so changes to columnar
   tables are not emitted through logical decoding and logical replication does
