@@ -284,6 +284,14 @@ for pgc in "${CONFIGS[@]}"; do
 			results+="$s=PASS "
 		else
 			echo "  FAIL  $s"
+			# The failing check first, then the tail. A suite that prints a
+			# diagnostic and a server-log dump on failure pushes its own FAIL
+			# lines out of a 20-line tail, which is how an intermittent
+			# replication failure stayed unreadable across many matrices: the
+			# evidence was in the log and the summary showed everything but.
+			if grep -qE '^FAIL' "$builddir/${s}.log"; then
+				grep -E '^FAIL' "$builddir/${s}.log" | sed 's/^/      >> /'
+			fi
 			tail -20 "$builddir/${s}.log" | sed 's/^/      /'
 			results+="$s=FAIL "
 			verfail=1
