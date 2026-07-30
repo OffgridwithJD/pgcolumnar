@@ -1387,14 +1387,21 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 	}
 }
 
-/* decode `n` PLAIN booleans (bit-packed) into Datums */
-static void
-decode_plain_bools(const uint8 *buf, int n, Datum *out)
+/* decode `n` PLAIN booleans (bit-packed) into Datums; false if buf is too short */
+static bool
+decode_plain_bools(const uint8 *buf, size_t buflen, int n, Datum *out)
 {
 	int			i;
 
+	/*
+	 * n bits occupy ceil(n/8) bytes. n comes from a page/dictionary header, so
+	 * reject a count the source buffer cannot hold rather than over-reading it.
+	 */
+	if (n < 0 || ((size_t) n + 7) / 8 > buflen)
+		return false;
 	for (i = 0; i < n; i++)
 		out[i] = BoolGetDatum((buf[i >> 3] >> (i & 7)) & 1);
+	return true;
 }
 
 /*
@@ -1686,7 +1693,10 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 			p = db;
 			end = db + dblen;
 			if (plan->expect_phys == PQ_BOOLEAN)
-				decode_plain_bools(db, dictCount, dict);
+			{
+				if (!decode_plain_bools(db, dblen, dictCount, dict))
+					return false;
+			}
 			else
 				for (i = 0; i < dictCount; i++)
 				{
@@ -1832,7 +1842,10 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 			else if (h.encoding == PQE_PLAIN)
 			{
 				if (plan->expect_phys == PQ_BOOLEAN)
-					decode_plain_bools(valbuf, nnn, pv);
+				{
+					if (!decode_plain_bools(valbuf, vallen, nnn, pv))
+						return false;
+				}
 				else
 				{
 					const uint8 *p = valbuf;
@@ -1866,6 +1879,15 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 			}
 			else
 				return false;	/* unsupported value encoding */
+
+			/*
+			 * A page's value count must fit within what the chunk declared: the
+			 * output arrays are sized to ch->num_values, while npage (h.num_values)
+			 * is an independent file-controlled count. Reject a page that would
+			 * push the running total past the chunk rather than overrunning them.
+			 */
+			if (npage < 0 || nEntries + (int64) npage > ch->num_values)
+				return false;
 
 			/* append this page's entries (levels) and present values */
 			for (i = 0; i < npage; i++)
