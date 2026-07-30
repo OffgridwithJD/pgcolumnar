@@ -32,8 +32,34 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 SB_DIR="$PGC_WORKDIR/standby"
-SB_PORT=$((PGC_PORT + 1))
 SB_LOG="$PGC_WORKDIR/standby.log"
+
+# The standby needs a port of its own, and PGC_PORT + 1 is the one choice that
+# cannot work. run_all_versions.sh hands each suite a port by walking upward from
+# a base, one per suite per major, so PGC_PORT + 1 is the NEXT suite's primary by
+# construction. It passes standalone and fails in the matrix, which is exactly
+# what it did: green on PG17 alone, red on PG18 inside the matrix.
+#
+# The matrix walks 40000 upward (portlib.sh), so this draws from below that range
+# and still verifies the port is free rather than assuming a range is enough.
+pick_sb_port() {
+	local base p
+	base=$(( 30000 + ($$ % 9000) ))
+	for p in $(seq "$base" $((base + 300))); do
+		if pgc_port_free "$p"; then
+			echo "$p"
+			return 0
+		fi
+	done
+	return 1
+}
+SB_PORT="$(pick_sb_port)"
+if [ -z "$SB_PORT" ]; then
+	echo "FAIL  no free port for the standby"
+	PGC_FAIL=1
+	pgc_summary
+fi
+echo "-- primary port $PGC_PORT, standby port $SB_PORT"
 
 # ---------------------------------------------------------------------------
 # Standby lifecycle
@@ -46,6 +72,26 @@ sb_q() {   # query the STANDBY
 
 sb_stop() {
 	pgc_pg "pg_ctl -D '$SB_DIR' stop -m immediate -w" >/dev/null 2>&1 || true
+}
+
+# Start the standby and wait until it actually answers, rather than trusting
+# pg_ctl -w.
+#
+# pg_ctl -w gives up after 60s by default and its exit status was being
+# discarded, so under the full matrix -- six suites and their clusters on one box
+# -- the standby sometimes had not reached a consistent state in time, and the
+# suite carried on and reported twelve empty-result failures downstream. One
+# unreachable standby should say so once, with its log, not cascade.
+sb_start() {
+	local i
+	pgc_pg "pg_ctl -D '$SB_DIR' -l '$SB_LOG' -t 120 start -w" >/dev/null 2>&1
+	for i in $(seq 1 120); do
+		[ "$(sb_q 'SELECT 1')" = 1 ] && return 0
+		sleep 0.5
+	done
+	echo "  standby did not accept connections; last 15 lines of its log:"
+	pgc_pg "tail -15 '$SB_LOG'" 2>/dev/null | sed 's/^/    /'
+	return 1
 }
 
 # Stop the standby before the ordinary teardown takes the primary away.
@@ -91,8 +137,7 @@ check "pg_basebackup produced a data directory" \
 # The backup copies postgresql.conf, so the standby inherits
 # shared_preload_libraries='pgcolumnar'. Only the port has to change.
 pgc_pg "sed -i 's/^port=.*/port=$SB_PORT/' '$SB_DIR/postgresql.conf'" >/dev/null 2>&1
-pgc_pg "pg_ctl -D '$SB_DIR' -l '$SB_LOG' start -w" >/dev/null 2>&1
-
+sb_start
 check "the standby accepts connections" "$(sb_q 'SELECT 1')" "1"
 
 # ---------------------------------------------------------------------------
@@ -218,8 +263,7 @@ psql_run "CREATE TABLE r2 (id int, v text) USING pgcolumnar;
 sb_stop
 pgc_pg "sed -i \"s/^shared_preload_libraries=.*/shared_preload_libraries=''/\" '$SB_DIR/postgresql.conf'" \
 	>/dev/null 2>&1
-pgc_pg "pg_ctl -D '$SB_DIR' -l '$SB_LOG' start -w" >/dev/null 2>&1
-
+sb_start
 check "a standby without pgcolumnar loaded still starts" "$(sb_q 'SELECT 1')" "1"
 check "and it is not running the module" \
 	"$(sb_q "SELECT count(*) FROM pg_extension WHERE extname='pgcolumnar' AND '' = current_setting('shared_preload_libraries')")" \
@@ -243,7 +287,7 @@ check "and did not PANIC (still in recovery, still answering)" \
 sb_stop
 pgc_pg "sed -i \"s/^shared_preload_libraries=.*/shared_preload_libraries='pgcolumnar'/\" '$SB_DIR/postgresql.conf'" \
 	>/dev/null 2>&1
-pgc_pg "pg_ctl -D '$SB_DIR' -l '$SB_LOG' start -w" >/dev/null 2>&1
+sb_start
 sync_standby
 
 check "with the module back, the replayed table reads correctly" \
