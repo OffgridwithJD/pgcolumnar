@@ -104,7 +104,13 @@ jobs:
             liblz4-dev libzstd-dev zlib1g-dev python3-pip
           # The Arrow and Parquet suites use pyarrow as an independent reader and
           # skip themselves without it, which would be a silent loss of coverage.
-          pip3 install --break-system-packages --quiet pyarrow || pip3 install --quiet pyarrow
+          # Installed with sudo on purpose. The suites run under sudo, so the
+          # interpreter that must find pyarrow is root's. A plain "pip3 install"
+          # as the runner lands in ~/.local and root cannot see it, which is
+          # exactly how the Arrow and Parquet suites came to report PASS in CI
+          # while skipping themselves.
+          sudo pip3 install --break-system-packages --quiet pyarrow \
+            || sudo pip3 install --quiet pyarrow
 
       - name: Confirm pyarrow is importable by the suites' interpreter
         # Installing pyarrow and having the suites SEE it are different facts. The
