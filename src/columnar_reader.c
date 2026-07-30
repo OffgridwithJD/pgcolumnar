@@ -1452,6 +1452,18 @@ typedef struct ColumnarFetchGroup
 static ColumnarFetchGroup columnarFetchCache[COLUMNAR_FETCH_CACHE_ENTRIES];
 static uint64 columnarFetchClock = 0;
 
+/*
+ * Memoized native-format-version validation for the by-row-number fetch path
+ * (#240). columnar_fetch_row runs once per row, so checking the storage's
+ * format_version against a catalog row on every call would be a per-row systable
+ * scan on a hot path. The value is immutable for a storage, so one check per
+ * (command, storageId) is enough; this single slot is cleared in
+ * ColumnarDiscardFetchCache, the same command/transaction boundary the fetch
+ * cache resets on.
+ */
+static uint64 columnarFetchFmtOkStorageId = 0;
+static bool columnarFetchFmtOk = false;
+
 /* rows covered by one rankPrefix entry */
 #define COLUMNAR_RANK_BLOCK_ROWS 64
 #define COLUMNAR_RANK_BLOCK_BYTES (COLUMNAR_RANK_BLOCK_ROWS / 8)
@@ -1575,6 +1587,7 @@ ColumnarDiscardFetchCache(void)
 {
 	memset(columnarFetchCache, 0, sizeof(columnarFetchCache));
 	columnarFetchClock = 0;
+	columnarFetchFmtOk = false;
 }
 
 /*
@@ -1691,6 +1704,24 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * statement cancellable; the per-fetch cost itself is a separate fix.
 	 */
 	CHECK_FOR_INTERRUPTS();
+
+	/*
+	 * Reject a native format_version this build does not understand before
+	 * decoding any bytes (#240). The scan-open paths check this in
+	 * ColumnarBeginReadWithStorage / ColumnarBeginAggScan, but the by-row-number
+	 * fetch path -- an index scan returning a decoded column, UPDATE re-fetching
+	 * the old row, and the vacuum row reader -- reaches neither. Only an actual
+	 * decode is guarded (wantValues); a visibility-only probe decodes nothing and
+	 * cannot misread. Memoized per command (see the slot above) so a large index
+	 * scan pays one catalog check rather than one per row.
+	 */
+	if (wantValues &&
+		!(columnarFetchFmtOk && columnarFetchFmtOkStorageId == storageId))
+	{
+		ColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
+		columnarFetchFmtOkStorageId = storageId;
+		columnarFetchFmtOk = true;
+	}
 
 	tmp = AllocSetContextCreate(CurrentMemoryContext, "columnar fetch",
 								ALLOCSET_SMALL_SIZES);

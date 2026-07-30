@@ -30,7 +30,15 @@ the encoding while keeping the metapage layout is still caught. A version this
 build does not understand is rejected -- `unsupported columnar format version` for
 the metapage, `unsupported columnar native format version` for the data format --
 and the read fails cleanly rather than misinterpreting bytes written by a
-different layout. Both guards are pinned by `test/native_format.sh`.
+different layout. The check runs on every decode path -- sequential scan,
+vectorized aggregate, and index-scan fetch -- so a version this build cannot read
+is refused whichever way the query reaches the data. Both guards are pinned by
+`test/native_format.sh`.
+
+A projection stores its own copy of the data and carries its own format version;
+it is validated against the projection's own storage, not the base table's. Each
+stored object is therefore self-describing, and a build that writes a new version
+stamps every object it writes, base and projections together.
 
 Within a version the format round-trips faithfully: data written and read back on
 the same build is byte-for-byte identical, which `test/native_format.sh` proves on

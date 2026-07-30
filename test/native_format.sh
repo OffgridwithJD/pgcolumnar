@@ -101,22 +101,29 @@ check "backend survives the rejection" "$(q 'SELECT 1;')" "1"
 # value is read from pgcolumnar.storage, so no on-disk bytes need forging.
 psql_run "CREATE TABLE fv (id int, v text) USING pgcolumnar;"
 psql_run "INSERT INTO fv SELECT s, md5(s::text) FROM generate_series(1, 2000) s;"
+psql_run "CREATE INDEX fv_id ON fv (id);"
 check "table reads at native format_version 1" "$(q 'SELECT count(*) FROM fv;')" "2000"
 fvsid="$(storage_id_of fv)"
 psql_run "UPDATE pgcolumnar.storage SET format_version = 99 WHERE storage_id = $fvsid;"
-# Two read shapes must both reject: a data-decoding scan (ColumnarBeginRead) and
-# the zone-map-only aggregate, which answers count/min/max from metadata without
-# ever opening a read state and so needs its own guard.
+# Three decode shapes must all reject. A seq scan opens a read state
+# (ColumnarBeginReadWithStorage); the zone-map-only aggregate answers from metadata
+# without one (ColumnarBeginAggScan); and an index-scan fetch of a non-key column
+# decodes through the by-row-number fetch path, which reaches neither scan-open
+# guard -- it is the case the first cut missed. All are keyed to the same catalog
+# UPDATE standing in for a future format version.
 fverr_scan="$(err_of 'SELECT v FROM fv LIMIT 1;')"
 fverr_agg="$(err_of 'SELECT count(*) FROM fv;')"
-check "a data read of a future native format_version fails (not silently misread)" \
+fverr_idx="$(err_of 'SET enable_seqscan=off; SET enable_bitmapscan=off; SELECT v FROM fv WHERE id = 42;')"
+check "a seq-scan read of a future native format_version fails (not silently misread)" \
 	"$([ -n "$fverr_scan" ] && echo yes || echo no)" "yes"
 check "an aggregate over a future native format_version fails (not silently misread)" \
 	"$([ -n "$fverr_agg" ] && echo yes || echo no)" "yes"
+check "an index-scan fetch of a decoded column fails (not silently misread)" \
+	"$([ -n "$fverr_idx" ] && echo yes || echo no)" "yes"
 check "the failure is the native-format-version guard" \
-	"$(contains "$fverr_scan" 'unsupported columnar native format version')" "yes"
+	"$(contains "$fverr_idx" 'unsupported columnar native format version')" "yes"
 check "the native-format error names the offending version" \
-	"$(contains "$fverr_scan" '99')" "yes"
+	"$(contains "$fverr_idx" '99')" "yes"
 check "backend survives the native-format rejection" "$(q 'SELECT 1;')" "1"
 
 pgc_summary
