@@ -188,8 +188,23 @@ check "the primary has a projection to preserve, before the backup runs" \
 pri_pre_rows="$(q "SELECT count(*) FROM pgcolumnar.read_projection('r','r_pre');")"
 check "and it reads on the primary" "$pri_pre_rows" "20000"
 
+# -C -S creates a physical replication slot and writes primary_slot_name into the
+# standby's config, so the primary retains WAL until the standby has consumed it.
+#
+# Without a slot the primary is free to recycle a segment the standby still needs,
+# and the standby then loops on
+#     ERROR: requested WAL segment ... has already been removed
+# until sync_standby gives up, after which every comparison below reads an empty
+# result and the suite reports a cascade of failures that say nothing about what
+# broke. That is the intermittent replication failure this suite has shown in the
+# matrix: it was never a columnar defect, it was WAL retention left to chance and
+# decided by checkpoint timing under parallel load.
+#
+# The restore-only backup further down requests a checkpoint (-c fast), which is
+# precisely the event that recycles those segments, so the isolation cluster made
+# a latent hole reproducible rather than introducing one.
 echo "-- pg_basebackup"
-pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$SB_DIR' -R -X stream -c fast" \
+pgc_pg "pg_basebackup -h 127.0.0.1 -p $PGC_PORT -U postgres -D '$SB_DIR' -R -C -S pgc_standby -X stream -c fast" \
 	>/dev/null 2>&1
 check "pg_basebackup produced a data directory" \
 	"$(pgc_pg "test -f '$SB_DIR/PG_VERSION' && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')" \
@@ -200,6 +215,16 @@ check "pg_basebackup produced a data directory" \
 pgc_pg "sed -i 's/^port=.*/port=$SB_PORT/' '$SB_DIR/postgresql.conf'" >/dev/null 2>&1
 sb_start
 check "the standby accepts connections" "$(sb_q 'SELECT 1')" "1"
+
+# The retention fix, asserted rather than assumed: a slot that was not created, or
+# that the standby is not using, leaves WAL recycling to chance again and the
+# failure comes back as an unexplained flake.
+check "a physical slot exists to hold WAL for the standby" \
+	"$(q "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'pgc_standby' AND slot_type = 'physical'")" \
+	"1"
+check "and the standby is actually connected through it" \
+	"$(q "SELECT active FROM pg_replication_slots WHERE slot_name = 'pgc_standby'")" \
+	"t"
 
 # ---------------------------------------------------------------------------
 # The controls. Without these the rest can pass while proving nothing.
