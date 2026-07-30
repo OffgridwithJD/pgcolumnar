@@ -134,3 +134,33 @@ test/run_all_versions.sh /usr/local/pg15/bin/pg_config ... /usr/local/pg19/bin/p
 All suites pass on PostgreSQL 15 through 19. PostgreSQL 19 is validated against
 19beta2; revalidation against the final PostgreSQL 19 release is pending that
 release.
+
+## Cross-major upgrade
+
+`pg_upgrade` is the path a user takes to a new major, and it is where an access
+method with its own catalog is most likely to break: the relation forks carry the
+data, the `pgcolumnar.*` tables carry the metadata, and both have to survive the
+transfer with the extension present on the new side. `test/pg_upgrade.sh` runs it
+and asserts the rows, the content hash, the access method and the per-table
+options all come across.
+
+It takes two majors at once and runs the upgrade twice per pair, so it is not part
+of the per-PR gate and not on by default. Ask for it:
+
+```sh
+PGC_RUN_UPGRADE=1 test/run_all_versions.sh
+```
+
+That runs each adjacent pair of the majors being tested, in both transfer modes.
+`link` shares the data files with the old cluster and `copy` does not, and they
+fail differently, so both are run. A single pair can also be run directly:
+
+```sh
+test/pg_upgrade.sh /usr/local/pg17/bin/pg_config /usr/local/pg18/bin/pg_config link
+```
+
+Run it before a release. `docs/limitations.md` states that data written by one
+build reads back identically on any build of the same format version, across every
+supported major, and this is the only thing that tests that claim. It is opt-in
+rather than per-PR for cost, not because it is optional: a claim in the
+documentation backed by a suite nobody runs is how coverage rots unnoticed.
