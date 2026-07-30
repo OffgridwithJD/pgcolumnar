@@ -1636,8 +1636,11 @@ imp_value_at(ImpNode *n, const uint8 *body, const int64 *bufOff,
  *		test/fuzz_arrow.sh: a mutated int64 length made the row loop read row
  *		450,000 of a 200-row buffer). Every read site below reads element i for
  *		i < count, so bounding count against the buffers here bounds all of them.
- *		Sizes are compared by division rather than multiplication so a huge
- *		declared count cannot overflow the check itself.
+ *		count is non-negative (checked below) and each size comparison is written
+ *		so neither side overflows int64: the buffer-side factor is bounded well
+ *		below INT64_MAX/8, and count+1 is taken in uint64. A huge declared count
+ *		is rejected, never wrapped past the check (a naive "(count + 7) / 8" or
+ *		"count + 1" overflowed for count near INT64_MAX and skipped the check).
  */
 static void
 imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
@@ -1651,7 +1654,7 @@ imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
 	{
 		if (n->validBuf >= nbuffers)
 			IMPORT_CORRUPT("validity buffer index out of range");
-		if (bufLen[n->validBuf] > 0 && bufLen[n->validBuf] < (count + 7) / 8)
+		if (bufLen[n->validBuf] > 0 && count > (int64) bufLen[n->validBuf] * 8)
 			IMPORT_CORRUPT("validity buffer too small for the row count");
 	}
 
@@ -1678,7 +1681,7 @@ imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
 
 		if (n->offBuf < 0 || n->offBuf >= nbuffers)
 			IMPORT_CORRUPT("offset buffer index out of range");
-		if (count + 1 > bufLen[n->offBuf] / 4)		/* (count+1) int32 offsets */
+		if ((uint64) count + 1 > (uint64) (bufLen[n->offBuf] / 4))	/* (count+1) int32 offsets */
 			IMPORT_CORRUPT("offset buffer too small for the row count");
 		oOff = bufOff[n->offBuf];
 		for (k = 0; k <= count; k++)
@@ -1708,7 +1711,7 @@ imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
 		IMPORT_CORRUPT("data buffer index out of range");
 	if (n->kind == A_BOOL)
 	{
-		if (bufLen[n->dataBuf] < (count + 7) / 8)
+		if (count > (int64) bufLen[n->dataBuf] * 8)
 			IMPORT_CORRUPT("bool buffer too small for the row count");
 		return;
 	}
