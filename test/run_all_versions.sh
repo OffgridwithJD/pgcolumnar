@@ -45,6 +45,39 @@ set -uo pipefail
 
 PGC_RUN_LOCK="${PGC_RUN_LOCK:-/tmp/pgcolumnar-run_all_versions.lock}"
 
+# --stop: the supported way to end a run in progress.
+#
+# It exists because the alternative was pkill, and pkill is wrong here twice: the
+# driver re-executes itself from /tmp under a generated name, so the obvious
+# pattern misses it, and killing postmasters directly bypasses pg_ctl. This reads
+# the lock, signals the owner, and lets the owner's own trap stop the suites and
+# their clusters properly.
+if [ "${1:-}" = "--stop" ]; then
+	if [ ! -e "$PGC_RUN_LOCK" ]; then
+		echo "no matrix run in progress (no lock at $PGC_RUN_LOCK)"
+		exit 0
+	fi
+	_owner="$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)"
+	if [ -z "$_owner" ] || ! kill -0 "$_owner" 2>/dev/null; then
+		echo "stale lock from pid ${_owner:-unknown}; removing it"
+		rm -f "$PGC_RUN_LOCK"
+		exit 0
+	fi
+	echo "stopping matrix run (pid $_owner)"
+	kill -TERM "$_owner" 2>/dev/null
+	for _i in $(seq 1 60); do
+		kill -0 "$_owner" 2>/dev/null || break
+		sleep 1
+	done
+	if kill -0 "$_owner" 2>/dev/null; then
+		echo "pid $_owner did not exit after 60s; sending KILL" >&2
+		kill -KILL "$_owner" 2>/dev/null
+	fi
+	rm -f "$PGC_RUN_LOCK"
+	echo "stopped"
+	exit 0
+fi
+
 if [ -z "${PGC_RUN_REEXEC:-}" ]; then
 	# Take the lock before copying, so two starts cannot both decide they are first.
 	if [ -e "$PGC_RUN_LOCK" ]; then
@@ -69,16 +102,35 @@ if [ -z "${PGC_RUN_REEXEC:-}" ]; then
 
 	# The lock is removed only by the process that took it, so a stale-lock
 	# takeover cannot have its lock deleted by the run it replaced.
-	trap 'if [ "$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)" = "$$" ]; then rm -f "$PGC_RUN_LOCK"; fi' EXIT
+	# INT and TERM as well as EXIT. A bash EXIT trap does not run when the shell
+	# is terminated by an untrapped signal, so without these a killed run left
+	# its lock behind and the next run refused to start against a pid that was
+	# already gone.
+	trap 'if [ "$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)" = "$$" ]; then rm -f "$PGC_RUN_LOCK"; fi' EXIT INT TERM
 
 	_self="$(mktemp "/tmp/pgcolumnar-run_all_versions.$$.XXXXXX.sh")"
 	cp "${BASH_SOURCE[0]}" "$_self"
 	chmod +x "$_self"
+	# Run the copy in the background and forward signals to it, rather than
+	# calling it directly. --stop signals this parent, but the child is the one
+	# holding the suite jobs, so a TERM that stops here and not there is exactly
+	# the orphaning this is meant to prevent.
 	PGC_RUN_REEXEC=1 \
 	PGC_RUN_SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
 	PGC_RUN_LOCK="$PGC_RUN_LOCK" \
 	PGC_RUN_OWNER="$$" \
-		bash "$_self" "$@"
+		bash "$_self" "$@" &
+	_child=$!
+	_forward_stop() {
+		kill -TERM "$_child" 2>/dev/null
+		wait "$_child" 2>/dev/null
+		if [ "$(sed -n 1p "$PGC_RUN_LOCK" 2>/dev/null)" = "$$" ]; then
+			rm -f "$PGC_RUN_LOCK"
+		fi
+		exit 130
+	}
+	trap _forward_stop INT TERM
+	wait "$_child"
 	_rc=$?
 	rm -f "$_self"
 	exit $_rc
@@ -87,6 +139,70 @@ fi
 # Re-executed from the copy: the lock belongs to the parent, which removes it,
 # and the tree to test is the original one rather than wherever the copy landed.
 trap - EXIT
+
+# ---------------------------------------------------------------------------
+# Stopping a run
+# ---------------------------------------------------------------------------
+#
+# This driver used to have no cleanup at all -- the line above dropped the
+# parent's EXIT trap and put nothing in its place -- and the suites it starts run
+# as background jobs. So killing the driver did not stop them: they were
+# reparented and carried on, holding their clusters and their ports, writing into
+# the log someone was reading. Both of those cost real time on this branch. One
+# orphaned run's output interleaved into a live run's log and produced a FAIL that
+# belonged to neither; another held the run lock for twenty minutes after it was
+# "killed", so three matrices refused to start and reported nothing.
+#
+# The only way to stop a run was pkill, which is the wrong instrument twice over:
+# it misses this process (re-executed from /tmp under a generated name) and it
+# kills postmasters out from under pg_ctl instead of asking them to stop.
+#
+# So: a signal now stops the suites, then stops their clusters with pg_ctl -- the
+# supported path, using the pg_ctl matching each cluster's own major, read from
+# its PG_VERSION rather than guessed.
+pgc_stop_clusters() {
+	local d sub datadir ver pgctl stopped=0
+	for d in /tmp/pgcolumnar-test.*/; do
+		[ -d "$d" ] || continue
+		for sub in data standby restore; do
+			datadir="$d$sub"
+			[ -f "$datadir/postmaster.pid" ] || continue
+			ver="$(sed -n 1p "$datadir/PG_VERSION" 2>/dev/null)"
+			pgctl="/usr/local/pg${ver}/bin/pg_ctl"
+			# Fall back to any pg_ctl only if the versioned one is absent; a
+			# mismatched pg_ctl refuses rather than corrupting anything.
+			[ -x "$pgctl" ] || pgctl="$(command -v pg_ctl 2>/dev/null)"
+			[ -n "$pgctl" ] && [ -x "$pgctl" ] || continue
+			if [ "$(id -u)" = 0 ] && id postgres >/dev/null 2>&1; then
+				su postgres -c "'$pgctl' -D '$datadir' stop -m immediate -w -t 30" >/dev/null 2>&1
+			else
+				"$pgctl" -D "$datadir" stop -m immediate -w -t 30 >/dev/null 2>&1
+			fi
+			stopped=$((stopped + 1))
+		done
+	done
+	[ "$stopped" -gt 0 ] && echo "stopped $stopped cluster(s) with pg_ctl" >&2
+	return 0
+}
+
+pgc_run_cleanup() {
+	local j
+	trap - INT TERM EXIT
+	echo "" >&2
+	echo "matrix interrupted -- stopping suites and their clusters" >&2
+	# Stop the suites first so they cannot start anything else, then their
+	# clusters. Their own EXIT traps handle the ones they can still reach.
+	for j in $(jobs -p 2>/dev/null); do kill -TERM "$j" 2>/dev/null; done
+	sleep 2
+	for j in $(jobs -p 2>/dev/null); do kill -KILL "$j" 2>/dev/null; done
+	pgc_stop_clusters
+	if [ -n "${PGC_CUR_BUILDDIR:-}" ] && [ -d "$PGC_CUR_BUILDDIR" ]; then
+		rm -rf "$PGC_CUR_BUILDDIR"
+		echo "removed the in-progress build directory" >&2
+	fi
+	exit 130
+}
+trap pgc_run_cleanup INT TERM
 
 SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SUITES=(harness_selftest smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
@@ -115,7 +231,47 @@ fi
 # not private: two runs on one box then start at the same port and fight over
 # every cluster. The lock above makes that refuse rather than happen, but the
 # suites are also run individually, and they should not collide either.
-BASE_PORT="${PGC_BASE_PORT:-$(( 40000 + (${PGC_RUN_OWNER:-$$} % 20000) ))}"
+#
+# Below the ephemeral floor, deliberately. This is the second copy of the
+# arithmetic in portlib.sh, kept because the driver re-executes itself from /tmp
+# and a tree-relative source would be the fragility that re-exec removes.
+#
+# The old band, 40000-59999, was entirely inside /proc/sys/net/ip_local_port_range
+# (32768-60999 here), so the kernel could hand a cluster's port to an outbound
+# connection between the free-check and the bind. See portlib.sh for the full
+# account; it is the cause of the intermittent replication failure.
+_pgc_eph_floor="$(awk '{print $1}' /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null)"
+case "$_pgc_eph_floor" in ''|*[!0-9]*) _pgc_eph_floor=32768 ;; esac
+if [ "$_pgc_eph_floor" -lt 20000 ]; then
+	echo "FATAL: ephemeral floor $_pgc_eph_floor too low to carve a private port band" >&2
+	echo "       /proc/sys/net/ipv4/ip_local_port_range starts at $_pgc_eph_floor; this" >&2
+	echo "       needs at least 20000 so cluster ports sit below the range the kernel" >&2
+	echo "       assigns to outbound connections. Raise it:" >&2
+	echo "           sysctl -w net.ipv4.ip_local_port_range=\"32768 60999\"" >&2
+	exit 1
+fi
+# Mirrors portlib.sh: main band below the auxiliary band, both below the floor.
+_pgc_aux_hi=$(( _pgc_eph_floor - 1000 ))
+_pgc_aux_lo=$(( _pgc_aux_hi - 2000 ))
+PGC_PORT_LO=10000
+PGC_PORT_HI=$(( _pgc_aux_lo - 200 ))
+_pgc_walk=1500
+_pgc_span=$(( PGC_PORT_HI - PGC_PORT_LO - _pgc_walk ))
+BASE_PORT="${PGC_BASE_PORT:-$(( PGC_PORT_LO + (${PGC_RUN_OWNER:-$$} % _pgc_span) ))}"
+
+# The band must hold one port per suite per major, plus the auxiliary clusters a
+# suite stands up beyond its own. Asserted rather than assumed: the walk is a
+# constant here and the suite list grows, so a silent overrun would put a cluster
+# back inside the ephemeral range -- the exact failure this layout removes, and
+# one that costs days to recognise.
+_pgc_need=$(( ${#SUITES[@]} * ${#CONFIGS[@]} + 16 ))
+if [ $(( BASE_PORT + _pgc_need )) -ge "$PGC_PORT_HI" ]; then
+	echo "FATAL: port band too small for this run" >&2
+	echo "       ${#SUITES[@]} suites x ${#CONFIGS[@]} majors needs $_pgc_need ports from $BASE_PORT," >&2
+	echo "       which passes the top of the band ($PGC_PORT_HI)." >&2
+	echo "       Raise net.ipv4.ip_local_port_range's floor, or set PGC_BASE_PORT lower." >&2
+	exit 1
+fi
 
 overall=0
 declare -a SUMMARY
@@ -192,6 +348,10 @@ for pgc in "${CONFIGS[@]}"; do
 	ver="$("$pgc" --version)"
 	major="$(echo "$ver" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
 	builddir="$(mktemp -d "/tmp/pgcolumnar-matrix-${major}.XXXXXX")"
+	# Recorded so an interrupted run can remove it. A completed major removes
+	# its own at the bottom of the loop; one that is stopped part-way used to
+	# leave a full source tree and install behind in /tmp.
+	PGC_CUR_BUILDDIR="$builddir"
 
 	echo "==================================================================="
 	echo "== $ver"
@@ -284,7 +444,18 @@ for pgc in "${CONFIGS[@]}"; do
 			results+="$s=PASS "
 		else
 			echo "  FAIL  $s"
-			tail -20 "$builddir/${s}.log" | sed 's/^/      /'
+			# The failing check first, then the tail. A suite that prints a
+			# diagnostic and a server-log dump on failure pushes its own FAIL
+			# lines out of a 20-line tail, which is how an intermittent
+			# replication failure stayed unreadable across many matrices: the
+			# evidence was in the log and the summary showed everything but.
+			if grep -qE '^FAIL' "$builddir/${s}.log"; then
+				grep -E '^FAIL' "$builddir/${s}.log" | sed 's/^/      >> /'
+			fi
+			# 60, not 20: a suite that prints a failure diagnostic and a
+			# server-log dump needs more room than 20 lines, and truncating it
+			# is how the replication failures stayed unreadable.
+			tail -60 "$builddir/${s}.log" | sed 's/^/      /'
 			results+="$s=FAIL "
 			verfail=1
 		fi

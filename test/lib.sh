@@ -59,11 +59,6 @@ pgc_cluster_datadir() {
 
 . "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
 
-# True when nothing is accepting connections on the given port.
-pgc_port_free() {
-	! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
 # True when the server answering on PGC_PORT is the cluster at PGC_PGDATA. This is
 # the guard the start loop applies before trusting a started cluster; naming it
 # lets the self-test exercise the decision itself rather than only its inputs. An
@@ -182,7 +177,12 @@ pgc_setup() {
 			# Prefer a port nothing is already listening on, so collisions are
 			# avoided rather than merely detected afterwards.
 			for _i in 1 2 3 4 5 6 7 8 9 10; do
-				PGC_PORT=$(( 2048 + (PGC_PORT + 1 + RANDOM % 40000) % 60000 ))
+				# Stays inside the main band. A retry that lands in the
+				# ephemeral range can be stolen between this probe and the bind
+				# below, which is the failure the retry exists to escape; one
+				# that lands in the auxiliary band collides with the extra
+				# clusters replication stands up. See portlib.sh.
+				PGC_PORT=$(( PGC_PORT_LO + (PGC_PORT + 1 + RANDOM % 5000) % (PGC_PORT_HI - PGC_PORT_LO) ))
 				if pgc_port_free "$PGC_PORT"; then
 					break
 				fi

@@ -20,6 +20,10 @@
 #
 # With no suites it just does the clean build (a bare "does it compile + link").
 
+
+# The port band. Sourced directly: devloop runs suites rather than using lib.sh.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 set -uo pipefail
 
 PGC="${1:-}"
@@ -55,8 +59,14 @@ for s in "$@"; do
 	echo "===================================================================="
 	echo "== suite: $s"
 	echo "===================================================================="
-	# A distinct high port per suite; lib.sh's own guard corrects a collision.
-	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((50000 + RANDOM % 9000)) \
+	# A distinct port per suite; lib.sh's own guard corrects a collision.
+	# Drawn from portlib's band, which sits below the kernel's ephemeral range:
+	# 50000-58999 sat inside it, so a devloop cluster could lose its port to an
+	# outbound connection between the choice and the bind, exactly as the matrix
+	# clusters did. Sourced rather than duplicated as literals -- an earlier
+	# version of this comment claimed the literals were checked against the band
+	# elsewhere, and no such check existed.
+	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
 		bash "test/${s}.sh" "$PGC"; then
 		rc=1
 	fi

@@ -40,12 +40,29 @@ SB_LOG="$PGC_WORKDIR/standby.log"
 # construction. It passes standalone and fails in the matrix, which is exactly
 # what it did: green on PG17 alone, red on PG18 inside the matrix.
 #
-# The matrix walks 40000 upward (portlib.sh), so this draws from below that range
-# and still verifies the port is free rather than assuming a range is enough.
+# Draws from below the ephemeral floor, and from a band the matrix's own walk
+# does not reach.
+#
+# The old band was 30000-38999. The ephemeral range on this box starts at 32768,
+# so most of that band was inside it, and this is where that cost the most: the
+# standby is started LATE, long after the port was chosen, which is the widest
+# possible window for an outbound connection to be assigned the same local port.
+# The result was
+#
+#     could not bind IPv4 address "127.0.0.1": Address already in use
+#
+# with nothing listening before or after -- a standby that never started, checks
+# that compared against an empty result, and a failure that moved majors every
+# run. portlib.sh carries the full account.
+#
+# Probing for free is kept, but it is now meaningful: below the floor, a port that
+# probes free is still free when the standby binds it, because the kernel does not
+# allocate from here.
 pick_sb_port() {
 	local base p
-	base=$(( 30000 + ($$ % 9000) ))
+	base=$(( PGC_AUX_PORT_LO + ($$ % (PGC_AUX_PORT_HI - PGC_AUX_PORT_LO)) ))
 	for p in $(seq "$base" $((base + 300))); do
+		[ "$p" -ge "$PGC_AUX_PORT_HI" ] && break
 		if pgc_port_free "$p"; then
 			echo "$p"
 			return 0

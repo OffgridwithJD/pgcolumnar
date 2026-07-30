@@ -37,6 +37,121 @@
 # its base once per suite per major, several hundred ports, and a base above the
 # ceiling once made every cluster fail with `invalid port number: "66009"`,
 # which presents as a broken tree rather than as a bad constant.
+#
+# It must also stop short of the EPHEMERAL range, which is the harder constraint
+# and was got wrong for a long time. On this box:
+#
+#     /proc/sys/net/ipv4/ip_local_port_range  ->  32768   60999
+#
+# The band was 40000-59999, entirely inside that. An outbound connection -- psql
+# reaching the primary, pg_basebackup, a walsender -- can be assigned any free
+# port in the ephemeral range as its LOCAL port, including the one a cluster is
+# about to bind. Probing that the port is free does not help: the probe and the
+# bind are different instants, and the kernel is free to hand the port out in
+# between.
+#
+# That is not theoretical. It is the intermittent replication failure this project
+# chased across many matrices:
+#
+#     could not bind IPv4 address "127.0.0.1": Address already in use
+#     HINT: Is another postmaster already running on port 33500?
+#
+# with nothing listening on that port before or after. It moved between majors
+# every run, because which connection lands on which port is a race, and it left
+# no evidence behind, because the ephemeral socket that won closed moments later.
+#
+# So the band is derived from the floor rather than hardcoded, and sits entirely
+# below it. A port below the ephemeral floor is never handed to an outbound
+# connection, so "free when probed" and "still free at bind" are the same fact.
+pgc_ephemeral_floor() {
+	local lo
+	lo="$(awk '{print $1}' /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null)"
+	case "$lo" in
+		''|*[!0-9]*) lo=32768 ;;
+	esac
+	printf '%s\n' "$lo"
+}
+
+# Two disjoint bands below the floor.
+#
+#   PGC_PORT_*      the suites' own clusters. The matrix walks upward from a base
+#                   in this band, one port per suite per major.
+#   PGC_AUX_PORT_*  extra clusters a single suite stands up beyond its own -- the
+#                   replication standby and its restore cluster. Separate so that
+#                   the matrix's walk cannot wander into a port a suite is about
+#                   to use, which the free-probe would then have to catch rather
+#                   than the layout preventing.
+#
+# ip_local_port_range's low value is a sysctl. It is 32768 here and on
+# ubuntu-latest, but an image is free to set it lower, and a band derived from a
+# floor that leaves no room beneath it would be tiny, empty, or negative. That
+# must fail loudly: silently falling back into the ephemeral range would reinstate
+# exactly the race this file exists to remove, and a picker that starves is worse
+# than one that says why.
+PGC_EPH_FLOOR="$(pgc_ephemeral_floor)"
+
+# Below this there is no room for two bands plus the matrix's walk.
+PGC_MIN_FLOOR=20000
+
+if [ "$PGC_EPH_FLOOR" -lt "$PGC_MIN_FLOOR" ]; then
+	echo "pgcolumnar: ephemeral floor $PGC_EPH_FLOOR too low to carve a private port band" >&2
+	echo "  /proc/sys/net/ipv4/ip_local_port_range starts at $PGC_EPH_FLOOR; this needs" >&2
+	echo "  at least $PGC_MIN_FLOOR so cluster ports can sit below the range the kernel" >&2
+	echo "  assigns to outbound connections. Raise it:" >&2
+	echo "      sysctl -w net.ipv4.ip_local_port_range=\"32768 60999\"" >&2
+	echo "  Running inside the ephemeral range makes clusters lose ports between the" >&2
+	echo "  free-check and the bind, intermittently and with no evidence left behind." >&2
+	exit 1
+fi
+
+# Auxiliary band: the 2000 ports just under the floor, less a 1000-port guard.
+PGC_AUX_PORT_HI=$(( PGC_EPH_FLOOR - 1000 ))
+PGC_AUX_PORT_LO=$(( PGC_AUX_PORT_HI - 2000 ))
+
+# Main band: from 10000 up to the auxiliary band, less the room the matrix needs
+# to walk upward from its base.
+PGC_PORT_LO=10000
+PGC_PORT_HI=$(( PGC_AUX_PORT_LO - 200 ))
+# Room for one port per suite per major, with slack. The matrix asserts its actual
+# demand against this rather than trusting the constant (see run_all_versions.sh).
+PGC_PORT_WALK=1500
+
+# Kept for callers that only need "the top of the safe range".
+PGC_PORT_CEIL="$PGC_PORT_HI"
+
 pgc_pick_port() {
-	printf '%s\n' "$(( 40000 + (${PGC_RUN_OWNER:-$$} % 20000) ))"
+	local span
+	span=$(( PGC_PORT_HI - PGC_PORT_LO - PGC_PORT_WALK ))
+	if [ "$span" -lt 1000 ]; then
+		echo "pgcolumnar: safe port band [$PGC_PORT_LO,$PGC_PORT_HI) too narrow" >&2
+		echo "  ephemeral floor is $PGC_EPH_FLOOR; need room for $PGC_PORT_WALK ports of walk" >&2
+		exit 1
+	fi
+	printf '%s\n' "$(( PGC_PORT_LO + (${PGC_RUN_OWNER:-$$} % span) ))"
+}
+
+# True when nothing is accepting connections on the given port.
+#
+# Lives here rather than in lib.sh because the band and the probe are one idea:
+# below the ephemeral floor a port that probes free is still free at bind time,
+# and a harness that has the band without the probe is only half-protected.
+# Suites that carry their own harness (pg_upgrade, unique_conc, concurrency,
+# harness_selftest) source this file and get both.
+pgc_port_free() {
+	! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# A free port from a band, verified rather than assumed. Callers pass the band so
+# a suite standing up extra clusters can draw from AUX while the matrix walks MAIN.
+pgc_pick_free_port() {
+	local lo="$1" hi="$2" seed="${3:-$$}" base p
+	base=$(( lo + (seed % (hi - lo)) ))
+	for p in $(seq "$base" $(( base + 300 ))); do
+		[ "$p" -ge "$hi" ] && break
+		if pgc_port_free "$p"; then
+			printf '%s\n' "$p"
+			return 0
+		fi
+	done
+	return 1
 }
