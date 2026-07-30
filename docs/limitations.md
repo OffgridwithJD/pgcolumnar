@@ -25,13 +25,16 @@ below are the standing functional limitations, separate from that work.
 The on-disk format is versioned. Each columnar relation records a native data
 format version (currently PGCN v1) and a physical metapage version. On every read
 the metapage version is checked: a version this build does not understand is
-rejected with a clear `unsupported columnar format version` error, and the read
-fails cleanly rather than misinterpreting bytes written by a different layout. The
+rejected with an `unsupported columnar format version` error, and the read fails
+cleanly rather than misinterpreting bytes written by a different layout. The
 version stamps and that rejection are pinned by `test/native_format.sh`.
 
-Within a version the format round-trips faithfully: data written by a build reads
-back identically on any build that understands the same version, across every
-supported PostgreSQL major.
+Within a version the format round-trips faithfully: data written and read back on
+the same build is byte-for-byte identical, which `test/native_format.sh` proves on
+every supported PostgreSQL major. Byte-for-byte preservation across a PostgreSQL
+major upgrade is asserted separately by `test/pg_upgrade.sh`; wiring that suite
+into the gate is tracked in
+[issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257).
 
 There is no in-place upgrade across an incompatible format version yet. The format
 has not changed during the pre-release, so no migration has been needed; but until

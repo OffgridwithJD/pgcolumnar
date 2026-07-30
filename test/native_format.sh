@@ -69,6 +69,16 @@ psql_run "CREATE TABLE bad (id int, v text) USING pgcolumnar;"
 psql_run "INSERT INTO bad SELECT s, md5(s::text) FROM generate_series(1, 2000) s;"
 check "table reads at the version this build wrote" "$(q 'SELECT count(*) FROM bad;')" "2000"
 
+# Pin the metapage major -- the version that is actually enforced on read, and
+# the one this suite exists to guard (format_version above is stamped but not
+# checked). ColumnarReadMetapage rejects on versionMajor != COLUMNAR_VERSION_MAJOR,
+# so re-stamping the current major must be a no-op the read accepts. Bump
+# COLUMNAR_VERSION_MAJOR by accident and this goes red; on a deliberate bump,
+# change the 2 below in the same commit.
+psql_run "SELECT pgcolumnar.debug_set_metapage_version('bad', 2, 2);"
+check "the metapage major this build writes is still 2" \
+	"$(q 'SELECT count(*) FROM bad;')" "2000"
+
 # Plant a major version this build does not understand.
 psql_run "SELECT pgcolumnar.debug_set_metapage_version('bad', 99, 0);"
 
