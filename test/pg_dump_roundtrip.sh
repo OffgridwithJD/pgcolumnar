@@ -39,7 +39,12 @@ psql_run "CREATE INDEX dt_id_idx ON dt (id);" >/dev/null
 
 sum_sql="SELECT coalesce(sum(hashtextextended(id::text||'|'||kind::text||'|'||payload, 0)), 0) FROM dt"
 am_sql="SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.relname = 'dt'"
-opt_sql="SELECT coalesce(encode_effort, '<none>') FROM pgcolumnar.options WHERE regclass = 'dt'::regclass"
+# A scalar subquery, so the answer is defined whether or not a row exists. The
+# plain form returned zero rows after a restore -- pg_dump does not emit the
+# options row at all -- and coalesce cannot rescue a missing row, so the result
+# was empty rather than '<none>' and the pinned assertion below read as a
+# different bug than the one it is pinning.
+opt_sql="SELECT coalesce((SELECT encode_effort FROM pgcolumnar.options WHERE regclass = 'dt'::regclass), '<none>')"
 # Force the planner off seqscan so the point lookup exercises the restored index;
 # the returned value proves both the data and the index survived and work.
 idx_sql="SET enable_seqscan=off; SET enable_bitmapscan=off; SELECT id FROM dt WHERE id = 12345"
@@ -55,9 +60,18 @@ verify() {  # label db
 	check "$label: access method is pgcolumnar"  "$(on "$db" "$am_sql;")" "pgcolumnar"
 	# tail -1: the two SET statements each emit a command tag before the result.
 	check "$label: restored index answers a point lookup" "$(on "$db" "$idx_sql;" | tail -1)" "12345"
-	ao="$(on "$db" "$opt_sql;")"
-	echo "-- $label: encode_effort before='$before_opt' after='$ao'"
-	[ "$ao" != "$before_opt" ] && echo "--   (options not preserved by pg_dump; see #248)"
+	# Pinned as an assertion of the CURRENT, WRONG behaviour rather than echoed.
+	#
+	# An echo in a passing suite is read by nobody, so a known gap recorded that
+	# way is a gap that gets forgotten. Asserting what happens today keeps the
+	# round-trip gate green while #248 is open, and makes fixing #248 turn this
+	# check RED -- which is exactly when someone needs reminding that this line
+	# and its expectation have to change. A known-wrong behaviour that is pinned
+	# cannot be fixed silently.
+	#
+	# When #248 lands: flip the expectation to "$before_opt" and delete this note.
+	check "$label: encode_effort is NOT preserved (pinned; see #248)" \
+		"$(on "$db" "$opt_sql;")" "<none>"
 	on postgres "DROP DATABASE IF EXISTS $db;" >/dev/null 2>&1
 }
 
