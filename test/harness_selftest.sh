@@ -164,12 +164,15 @@ RUNNER="$TESTDIR/run_all_versions.sh"
 # and is run before merging a change that touches a version guard; it takes no
 # cluster and reports per major, so the matrix cannot run it as a suite. native_scale is a suite but is opt-in by
 # design and says so in its own header: it runs at a row count the matrix should
-# not carry. build_san builds the ASAN+UBSAN PostgreSQL and run_san is the
+# not carry. pg_upgrade takes two pg_configs (an old major and a new one)
+# rather than one, so the matrix cannot invoke it the way it invokes a suite; it
+# is a second gate run explicitly, like run_san.
+# build_san builds the ASAN+UBSAN PostgreSQL and run_san is the
 # sanitizer gate (#224): they are a separate instrumented build and its runner,
 # not a suite the ordinary five-major matrix can carry.
 not_a_suite() {
 	case "$1" in
-		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild|native_scale|build_san|run_san) return 0 ;;
+		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild|native_scale|build_san|run_san|pg_upgrade) return 0 ;;
 		*) return 1 ;;
 	esac
 }
