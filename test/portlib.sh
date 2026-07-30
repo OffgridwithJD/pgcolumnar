@@ -129,3 +129,29 @@ pgc_pick_port() {
 	fi
 	printf '%s\n' "$(( PGC_PORT_LO + (${PGC_RUN_OWNER:-$$} % span) ))"
 }
+
+# True when nothing is accepting connections on the given port.
+#
+# Lives here rather than in lib.sh because the band and the probe are one idea:
+# below the ephemeral floor a port that probes free is still free at bind time,
+# and a harness that has the band without the probe is only half-protected.
+# Suites that carry their own harness (pg_upgrade, unique_conc, concurrency,
+# harness_selftest) source this file and get both.
+pgc_port_free() {
+	! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# A free port from a band, verified rather than assumed. Callers pass the band so
+# a suite standing up extra clusters can draw from AUX while the matrix walks MAIN.
+pgc_pick_free_port() {
+	local lo="$1" hi="$2" seed="${3:-$$}" base p
+	base=$(( lo + (seed % (hi - lo)) ))
+	for p in $(seq "$base" $(( base + 300 ))); do
+		[ "$p" -ge "$hi" ] && break
+		if pgc_port_free "$p"; then
+			printf '%s\n' "$p"
+			return 0
+		fi
+	done
+	return 1
+}

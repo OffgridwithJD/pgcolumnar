@@ -226,4 +226,32 @@ _fixed_ports="$(grep -lE 'PGC_(BASE_)?PORT:-[0-9]+' "$TESTDIR"/*.sh 2>/dev/null 
 check "no suite hands every run the same default port" \
 	"${_fixed_ports:-none}" "none"
 
+# --- no port picker may draw from inside the ephemeral range --------------
+#
+# The sweep that moved every picker below the kernel's ephemeral floor was a
+# one-time edit, and one-time edits come back. This asserts the property instead
+# of trusting it: any *PORT assignment in test/ whose literals reach into the
+# ephemeral range is a regression of the intermittent bind collision that cost
+# this project several days.
+#
+# An earlier version of the devloop comment claimed exactly this check existed
+# when it did not, which is the reason it exists now.
+_eph="$(pgc_ephemeral_floor)"
+_offenders=""
+for _f in "$(dirname "${BASH_SOURCE[0]}")"/*.sh; do
+	# Port assignments of the form NAME_PORT=$(( ... )) or PGC_PORT=$(( ... )).
+	while IFS= read -r _line; do
+		# Every integer literal in the expression; flag any at or above the floor.
+		for _n in $(printf '%s\n' "$_line" | grep -oE '[0-9]{4,}'); do
+			if [ "$_n" -ge "$_eph" ]; then
+				_offenders="$_offenders $(basename "$_f"):$_n"
+			fi
+		done
+	done <<-EOF
+		$(grep -hE '^[[:space:]]*[A-Za-z_]*PORT=\$\(\(|PGC_PORT=\$\(\(' "$_f" 2>/dev/null)
+	EOF
+done
+check "no test picks a port from inside the ephemeral range" \
+	"$([ -z "$_offenders" ] && echo none || echo "$_offenders")" "none"
+
 pgc_summary

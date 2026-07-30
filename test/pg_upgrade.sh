@@ -24,6 +24,10 @@
 set -uo pipefail
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# This suite carries its own harness rather than lib.sh (it drives two majors), so
+# it sources the port library directly for the band and the free-probe.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 OLD_PGC="${1:-}"
 NEW_PGC="${2:-}"
 MODE="${3:-copy}"
@@ -68,8 +72,23 @@ WORK="$(mktemp -d /tmp/pgcolumnar-upgrade.XXXXXX)"
 chmod 777 "$WORK"
 OLD_DATA="$WORK/old"
 NEW_DATA="$WORK/new"
-OLD_PORT=$(( 41000 + ($$ % 2000) ))
-NEW_PORT=$(( OLD_PORT + 1 ))
+# Both clusters bind TCP (listen_addresses='127.0.0.1' below), so their ports must
+# come from the band portlib.sh carves BELOW the kernel's ephemeral range. The old
+# 41000-42999 sat squarely inside it, which meant an outbound connection could be
+# assigned the port a cluster was about to bind -- intermittently, with nothing
+# listening before or after. The auxiliary band is the right one: like
+# replication's standby, this suite stands up clusters beyond a suite's own, and
+# it must not walk into the range the matrix is using.
+#
+# Probed rather than assumed free, and the two ports are drawn independently
+# rather than as N and N+1: adjacent-port allocation is its own collision source,
+# which is the bug this project already fixed once in replication.sh.
+OLD_PORT="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" "$$")"
+NEW_PORT="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" "$(( $$ + 601 ))")"
+if [ -z "$OLD_PORT" ] || [ -z "$NEW_PORT" ] || [ "$OLD_PORT" = "$NEW_PORT" ]; then
+	echo "FAIL  could not find two free ports in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI)" >&2
+	exit 1
+fi
 
 RUNPG=(env)
 if [ "$(id -u)" = "0" ]; then

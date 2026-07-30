@@ -52,6 +52,10 @@
 # PG_CONFIG defaults to /usr/local/pg17/bin/pg_config. Run as a user that may
 # "runuser -u postgres" (e.g. root) when the current user is not postgres.
 
+
+# Own harness rather than lib.sh; portlib carries the port band.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 set -uo pipefail
 
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
@@ -70,13 +74,17 @@ port_is_free() {
 		! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 	fi
 }
+# This cluster listens on a unix socket only (listen_addresses='' below), so the
+# number never binds a TCP port and the ephemeral race cannot reach it. Drawn from
+# portlib's band regardless: a port picker that is safe by accident, in a file
+# that says nothing about why, is one edit away from being unsafe.
 pick_port() {
 	local p i
 	for i in $(seq 1 100); do
-		p=$(( (RANDOM % 20000) + 30000 ))
+		p=$(( PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO) ))
 		if port_is_free "$p"; then echo "$p"; return 0; fi
 	done
-	echo $(( (RANDOM % 20000) + 30000 ))
+	echo $(( PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO) ))
 }
 PORT="${PGC_PORT:-$(pick_port)}"
 

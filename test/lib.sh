@@ -59,11 +59,6 @@ pgc_cluster_datadir() {
 
 . "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
 
-# True when nothing is accepting connections on the given port.
-pgc_port_free() {
-	! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
 # True when the server answering on PGC_PORT is the cluster at PGC_PGDATA. This is
 # the guard the start loop applies before trusting a started cluster; naming it
 # lets the self-test exercise the decision itself rather than only its inputs. An
