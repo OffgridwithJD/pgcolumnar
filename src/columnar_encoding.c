@@ -1786,7 +1786,7 @@ ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 	 * not on any win at all. Encoding FSST codes for every vector of the chunk is a
 	 * dominant cost of a text/varlena load (issue #155), and a sub-margin win --
 	 * e.g. FSST ~1% smaller after compression on numeric -- does not repay it. At
-	 * the default 0 this is the original "any win keeps it". The comparison is
+	 * 0 this is the original "any win keeps it"; the default is 5. The comparison is
 	 * multiplied out rather than subtracting a percentage of plainCompLen, so it
 	 * cannot underflow when plainCompLen is small.
 	 */

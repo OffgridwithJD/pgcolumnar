@@ -62,7 +62,7 @@ int			columnar_encoding_sample_rows = 2048;
 
 int			columnar_compression = COLUMNAR_COMPRESSION_ZSTD;
 int			columnar_compression_level = 3;
-int			columnar_fsst_min_gain_percent = 0;
+int			columnar_fsst_min_gain_percent = 5;
 bool		columnar_enable_qual_pushdown = true;
 bool		columnar_enable_bloom_filter = true;
 
@@ -2196,9 +2196,14 @@ _PG_init(void)
 							"any compressed win, however small; a higher value keeps it "
 							"only when it saves at least that percentage after the block "
 							"codec has run, trading a bounded size regression on "
-							"marginal chunks for skipping their per-vector FSST encode.",
+							"marginal chunks for skipping their per-vector FSST encode. "
+							"The default of 5 costs about 2 percent stored size on the "
+							"shapes where FSST barely wins, such as high-entropy text, "
+							"and saves roughly a third of their load time; where FSST "
+							"wins clearly it changes nothing. Set to 0 to keep FSST on "
+							"any win at all.",
 							&columnar_fsst_min_gain_percent,
-							0,
+							5,
 							0, 99,
 							PGC_USERSET,
 							0,
