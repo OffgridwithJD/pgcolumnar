@@ -1,0 +1,150 @@
+# pgColumnar nightly deep gate (issue #243).
+#
+# The per-PR gate (build-and-test.yml) is deliberately fast: build on 15-18, run
+# the suites on 17 and 18. This workflow runs the coverage that is too heavy for
+# every PR, once a day and on demand:
+#
+#   - the full packaged suite matrix (15, 16, 17, 18), so a behaviour, WAL, or
+#     access-method divergence on 15/16 is caught automatically rather than only
+#     by the local by-hand matrix;
+#   - the clang ASAN+UBSAN sanitizer gate, the only gate that catches the
+#     non-faulting memory-safety class the assert builds provably miss (issue
+#     #225). An instrumented PostgreSQL build is expensive, so it is cached and
+#     rebuilt only when test/build_san.sh or the pinned major changes.
+#
+# PostgreSQL 19 is beta and not in PGDG stable, so it stays a local gate.
+
+name: nightly deep gate
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # nightly, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # Full packaged suite matrix. Same suites the per-PR gate runs on 17/18, here
+  # across every packaged major so 15 and 16 are covered too.
+  suites:
+    name: suites (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['15', '16', '17', '18']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
+            liblz4-dev libzstd-dev zlib1g-dev python3-pip
+          # pyarrow for root (the suites run under sudo); the silent-skip trap the
+          # per-PR workflow documents applies here too.
+          sudo pip3 install --break-system-packages --quiet pyarrow \
+            || sudo pip3 install --quiet pyarrow
+
+      - name: Confirm pyarrow is importable by the suites' interpreter
+        run: |
+          set -euo pipefail
+          python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow", pyarrow.__version__)'
+          sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+
+      - name: Stop the packaged cluster
+        run: sudo systemctl stop postgresql || true
+
+      - name: Run the suite matrix on PG ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          # PGC_REQUIRE_ISOLATION makes a missing pg_isolation_regress fail rather
+          # than skip (#247); timing suites are dropped on shared runners.
+          sudo -E env "PATH=$PATH" PGC_SKIP_TIMING=1 PGC_JOBS=4 \
+            PGC_REQUIRE_ISOLATION=1 \
+            bash test/run_all_versions.sh /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          for f in /tmp/pgcolumnar-matrix-*/*.log; do
+            [ -e "$f" ] || continue
+            echo "===== $f ====="
+            tail -60 "$f"
+          done
+
+  # clang ASAN+UBSAN gate. Builds an instrumented PostgreSQL (cached) and runs the
+  # write/read/encode/import subset against it with sanitizer violations fatal.
+  sanitizer:
+    name: sanitizer gate (ASAN+UBSAN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    env:
+      PG_VERSION: "18.4"
+      SAN_PREFIX: /home/runner/pg_san
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang, build tools, codec headers, and pyarrow
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm bison flex make perl \
+            liblz4-dev libzstd-dev zlib1g-dev python3-pip
+          clang --version | head -1
+          sudo pip3 install --break-system-packages --quiet pyarrow \
+            || sudo pip3 install --quiet pyarrow
+          sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+
+      - name: Cache the instrumented PostgreSQL
+        id: san-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SAN_PREFIX }}
+          key: san-pg-${{ env.PG_VERSION }}-clang-${{ hashFiles('test/build_san.sh') }}-${{ runner.os }}
+
+      - name: Build the ASAN+UBSAN PostgreSQL (on cache miss)
+        if: steps.san-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pg-src.tar.bz2 \
+            "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2"
+          # build_san.sh honours PGC_PG_TARBALL (source) and PGC_SAN_SRC (scratch)
+          # and installs to the prefix argument; point all three at CI-writable
+          # paths instead of its /root defaults.
+          PGC_PG_TARBALL=/tmp/pg-src.tar.bz2 PGC_SAN_SRC=/tmp/pg_san_src \
+            bash test/build_san.sh "$SAN_PREFIX"
+
+      - name: Confirm the build is the expected sanitizer build
+        run: |
+          set -euo pipefail
+          "$SAN_PREFIX/bin/pg_config" --version
+          mkglobal="$("$SAN_PREFIX/bin/pg_config" --pgxs | xargs dirname | xargs dirname)/Makefile.global"
+          grep -q -- '-fsanitize=address,undefined' "$mkglobal"
+          grep -q -- '-fno-sanitize=function' "$mkglobal"
+          echo "sanitizer flags present in Makefile.global"
+
+      - name: Run the sanitizer gate
+        run: |
+          set -euo pipefail
+          # run_san.sh builds the extension instrumented against this server and
+          # runs the subset with ASAN/UBSAN violations fatal. Under sudo because
+          # the suites start their own clusters; -E preserves the sanitizer env.
+          sudo -E env "PATH=$PATH" bash test/run_san.sh "$SAN_PREFIX"
