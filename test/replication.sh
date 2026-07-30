@@ -172,6 +172,26 @@ sync_standby
 check "the base backup carried the initial rows" \
 	"$(hash_standby r)" "$(hash_primary r)"
 
+# Projections survive a physical backup, which docs/limitations.md now claims.
+#
+# #266 and #267 established that pg_dump does NOT carry projections: they are
+# keyed by storage_id, which a logical restore regenerates, so the rows cannot be
+# carried and are pinned as lost in pg_dump_roundtrip.sh. The docs contrast that
+# with a physical backup preserving them, and that half was reasoning rather than
+# a test. pg_basebackup is a bytewise copy, so the projection rows and the storage
+# ids they reference both come across unchanged -- which is exactly the kind of
+# claim worth asserting rather than arguing, since it is the recovery path the
+# documentation sends people to.
+psql_run "SELECT pgcolumnar.add_projection('r', 'r_proj', ARRAY['id','v'], ARRAY['id']);" >/dev/null 2>&1
+proj_sql="SELECT count(*) FROM pgcolumnar.projection
+	WHERE storage_id = pgcolumnar.get_storage_id('r') AND projection_id > 0"
+pri_proj="$(q "$proj_sql;")"
+check "the primary has a projection to preserve" "$pri_proj" "1"
+
+sync_standby
+check "pg_basebackup preserved the projection, unlike pg_dump (#266)" \
+	"$(sb_q "$proj_sql;")" "$pri_proj"
+
 # Positive control: with replay paused, a change on the primary must NOT appear.
 # This is the check that proves the comparison can fail. Everything after it is
 # only meaningful because this one showed a difference is detectable.
