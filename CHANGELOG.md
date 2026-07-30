@@ -85,6 +85,15 @@ unreleased. For the forward-looking plan see
 - Parquet read type coverage extended to uuid and numeric (from fixed and
   variable DECIMAL, precision up to 38), fixed-length binary, and millisecond,
   microsecond, and nanosecond time units.
+- `pgcolumnar.fsst_min_gain_percent`, a cost margin for the FSST string encoding
+  decision. FSST is kept only when it reduces the compressed chunk by at least
+  this percentage, default 5. Building FSST codes for every vector is one of the
+  larger costs of a text or varlena load, and a sub-margin reduction does not
+  repay it.
+- The on-disk format version is enforced when data is read, not only stamped when
+  it is written. Both the physical metapage version and the native data format
+  version are checked, on every path that decodes columnar data, so a file this
+  build cannot read is refused rather than misread.
 - User and administrator documentation under [docs/](docs/index.md):
   installation, user guide, administration, configuration reference, SQL
   reference, and limitations.
@@ -114,6 +123,12 @@ unreleased. For the forward-looking plan see
 
 ### Changed
 
+- FSST string encoding is now kept only when it reduces the compressed chunk by
+  at least 5 percent, rather than on any reduction at all. On shapes where FSST
+  barely wins, such as high-entropy text, this costs about 2 percent stored size
+  and reduces load time by roughly a third. Where FSST wins by more than the
+  margin the encoding and the stored bytes are unchanged. Set
+  `pgcolumnar.fsst_min_gain_percent` to 0 for the previous behaviour.
 - Renamed the per-table option functions to `pgcolumnar.set_options` and
   `pgcolumnar.reset_options`. The previous names were carried over from an
   earlier compatibility goal that no longer applies. No aliases are kept, since
@@ -125,3 +140,8 @@ unreleased. For the forward-looking plan see
   on all five majors.
 - The Arrow and Parquet import and export functions require superuser and run on
   little-endian hosts.
+- Cross-major `pg_upgrade` is covered by an opt-in gate
+  (`PGC_RUN_UPGRADE=1 test/run_all_versions.sh`), in both copy and link transfer
+  modes.
+- All recorded test results come from x86_64. The suites have not been run on
+  aarch64 or on a big-endian platform.

@@ -155,10 +155,11 @@ the base table and its projections. Projection scans are on by default
 (`pgcolumnar.enable_projection_scan`). Drop a projection with
 `pgcolumnar.drop_projection`.
 
-Projections are not carried by `pg_dump` / `pg_restore` -- they are keyed by
-internal storage ids that a restore regenerates -- so re-declare them with
+Projections are not carried by `pg_dump` and `pg_restore`. They are keyed by
+internal storage ids that a restore regenerates, so re-declare them with
 `pgcolumnar.add_projection` after a logical restore. A physical backup
-(`pg_basebackup`) preserves them.
+(`pg_basebackup`) preserves them, which `test/replication.sh` verifies against a
+standby.
 
 A projection adds write cost and storage, because inserts write it too. Add one
 for a query pattern that a covering, sorted column subset serves, and measure the
@@ -250,7 +251,7 @@ the set of roles that can reach a hand-rolled parser.
 
 A Parquet or Arrow file from a source you did not produce is untrusted input to a
 hand-rolled parser. The metadata in a crafted file drives that parser directly, so
-a malformed or hostile file is a code-execution surface, not just a data-quality
+a malformed or hostile file is a code-execution surface, not only a data-quality
 problem. The superuser boundary means the exposed case is a superuser reading a
 file they did not produce, which is the ordinary data-lake case rather than an
 exotic one: the file is external even though the role is trusted.

@@ -107,7 +107,7 @@ test/pbt/run.sh [seed] [iterations]
 test/build_all_versions.sh
 ```
 
-No clusters and no suites, just a compile against each installed major, about a
+No clusters and no suites, only a compile against each installed major, about a
 minute for all five. Run it before merging anything that touches a version guard,
 a table access method callback signature, or `columnar_compat.h`.
 
@@ -202,3 +202,53 @@ percentage, and expect the percentage to be unremarkable in places that are
 correct: a table access method carries defensive branches that should never be
 taken, and `columnar_compat.h` carries version shims of which one arm compiles per
 major.
+## Continuous integration
+
+Three workflows run in GitHub Actions.
+
+**On every pull request and push to `main`** (`.github/workflows/ci.yml`): a build
+against PostgreSQL 15, 16, 17 and 18 on both x86_64 and aarch64, treating compiler
+warnings as failures, and the suites on 17 and 18. The build preflight is what
+catches an API change between majors; the suite run is what catches a behaviour
+change.
+
+**Nightly at 06:00 UTC** (`.github/workflows/nightly.yml`): the full packaged
+suite matrix across 15 to 18 on x86_64, the current major on aarch64, the ASAN and
+UBSAN sanitizer gate against an instrumented PostgreSQL, and the coverage report.
+The sanitizer build is cached, since building it takes longer than running the
+suites against it.
+
+The aarch64 run executes the suites rather than only building them. Misaligned
+reads, the class most often expected to differ by architecture, are already
+reported by the sanitizer gate on any host. What a second architecture adds is
+what a sanitizer on x86_64 cannot observe: x86_64 orders stores more strictly than
+aarch64, so a missing barrier in concurrent code can be invisible on one and a
+defect on the other, and the suites that would show it have to run.
+
+**On documentation changes** (`.github/workflows/docs.yml`): builds and publishes
+the site at
+[jdatcmd.github.io/pgcolumnar](https://jdatcmd.github.io/pgcolumnar/).
+
+PostgreSQL 19 is deliberately absent from CI. It is beta and not packaged in PGDG
+stable, so CI cannot install it honestly. The local five-major matrix covers it,
+and remains the release gate.
+
+Two suites are not reachable from CI and are run locally: the cross-major upgrade
+gate above, and the timing suites, whose wall-clock ratios a shared runner cannot
+hold still. Skipping them there is a deliberate trade. A gate that goes red for
+reasons unrelated to the change teaches its readers to discount red, which is
+worse than not running it.
+
+## Stopping a run
+
+The matrix re-executes itself from a private copy in `/tmp` and runs its suites as
+background jobs, so signalling it by pattern does not reach the right process and
+leaves the suites running with their clusters and ports held. Use:
+
+```sh
+test/run_all_versions.sh --stop
+```
+
+That reads the run lock, signals the owner, and lets it stop the suites and then
+their clusters through `pg_ctl`. It also clears a lock left by a run that is no
+longer alive. Interrupting a run with Ctrl-C does the same cleanup.
