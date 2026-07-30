@@ -81,6 +81,15 @@ if [ -z "$SB_PORT" ]; then
 	pgc_summary
 fi
 RS_PORT="$(pick_sb_port)"
+# An empty pick would reach pgc_port_free "" below and probe nothing. Not
+# reachable with a dedicated 2000-port band and one replication run at a time,
+# but an unreachable branch that silently probes the empty string is the kind of
+# thing that stops being unreachable when the band is resized.
+if [ -z "$RS_PORT" ]; then
+	echo "FAIL  no free port for the restore cluster in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI)"
+	PGC_FAIL=1
+	pgc_summary
+fi
 while [ "$RS_PORT" = "$SB_PORT" ] || ! pgc_port_free "$RS_PORT"; do
 	RS_PORT=$((RS_PORT + 1))
 	[ "$RS_PORT" -ge "$PGC_AUX_PORT_HI" ] && { echo "FAIL  no free port for the restore"; PGC_FAIL=1; pgc_summary; }
