@@ -704,6 +704,15 @@ rle_bitpack_decode(const uint8 *buf, size_t len, int bit_width,
 		return true;
 	}
 
+	/*
+	 * bit_width is file-derived; bound it before it drives shift counts and
+	 * run-size arithmetic below. 0 is handled above; a Parquet definition level
+	 * or dictionary index fits in 32 bits, so anything larger is a malformed
+	 * page, and it would also make "1u << bit" undefined.
+	 */
+	if (bit_width < 0 || bit_width > 32)
+		return false;
+
 	while (produced < count)
 	{
 		uint64		header = 0;
@@ -723,13 +732,24 @@ rle_bitpack_decode(const uint8 *buf, size_t len, int bit_width,
 
 		if (header & 1)			/* bit-packed run */
 		{
-			int			ngroups = (int) (header >> 1);
-			int			nvals = ngroups * 8;
-			int			bytes = ngroups * bit_width;
-			int			v;
+			/*
+			 * ngroups is file-controlled. Compute run sizes in uint64/size_t and
+			 * bound them overflow-safely before use: the old int math
+			 * (ngroups * 8, ngroups * bit_width) overflowed on a crafted header,
+			 * and a negative "bytes" promoted to a huge size_t could slip past
+			 * "pos + bytes > len". Reject before multiplying. bit_width is bounded
+			 * to (0,32] above, so once pos + bytes <= len holds, every indexed
+			 * read below stays within [pos, pos + bytes) <= [pos, len).
+			 */
+			uint64		ngroups = header >> 1;
+			size_t		bytes;
+			uint64		v,
+						nvals;
 
-			if (pos + bytes > len)
+			if (ngroups > (len - pos) / (uint64) bit_width)
 				return false;
+			bytes = (size_t) ngroups * (uint64) bit_width;	/* <= len - pos */
+			nvals = ngroups * 8;
 			for (v = 0; v < nvals && produced < count; v++)
 			{
 				uint32		val = 0;
@@ -737,7 +757,7 @@ rle_bitpack_decode(const uint8 *buf, size_t len, int bit_width,
 
 				for (bit = 0; bit < bit_width; bit++)
 				{
-					int			abs = v * bit_width + bit;
+					size_t		abs = (size_t) v * (size_t) bit_width + (size_t) bit;
 
 					if (buf[pos + (abs >> 3)] & (1 << (abs & 7)))
 						val |= (1u << bit);
@@ -748,18 +768,21 @@ rle_bitpack_decode(const uint8 *buf, size_t len, int bit_width,
 		}
 		else					/* RLE run */
 		{
-			int			runlen = (int) (header >> 1);
-			int			nbytes = (bit_width + 7) / 8;
+			uint64		runlen = header >> 1;
+			int			nbytes = (bit_width + 7) / 8;	/* <= 4 (bit_width <= 32) */
 			uint32		val = 0;
 			int			i;
 
-			if (pos + nbytes > len)
+			if ((size_t) nbytes > len - pos)
 				return false;
 			for (i = 0; i < nbytes; i++)
 				val |= (uint32) buf[pos + i] << (8 * i);
 			pos += nbytes;
-			for (i = 0; i < runlen && produced < count; i++)
+			while (runlen > 0 && produced < count)
+			{
 				out[produced++] = val;
+				runlen--;
+			}
 		}
 	}
 	return true;
