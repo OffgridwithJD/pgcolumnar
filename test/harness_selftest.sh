@@ -180,7 +180,7 @@ RUNNER="$TESTDIR/run_all_versions.sh"
 # not a suite the ordinary five-major matrix can carry.
 not_a_suite() {
 	case "$1" in
-		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild|native_scale|build_san|run_san|pg_upgrade) return 0 ;;
+		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild|native_scale|build_san|run_san|run_coverage|pg_upgrade) return 0 ;;
 		*) return 1 ;;
 	esac
 }

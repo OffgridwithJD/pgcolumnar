@@ -164,3 +164,41 @@ build reads back identically on any build of the same format version, across eve
 supported major, and this is the only thing that tests that claim. It is opt-in
 rather than per-PR for cost, not because it is optional: a claim in the
 documentation backed by a suite nobody runs is how coverage rots unnoticed.
+
+## make installcheck
+
+The conventional entry point for a PostgreSQL extension:
+
+```sh
+make installcheck PG_CONFIG=/path/to/pg_config
+```
+
+It runs `sql/pgcolumnar.sql` against `expected/pgcolumnar.out`, then the seven
+isolation specs under `test/isolation/specs`. The target server must have
+`pgcolumnar` in `shared_preload_libraries`; without it the `CREATE EXTENSION` in
+the test fails, which is the correct outcome.
+
+This is a smoke test, not the gate. It compares a columnar table against a heap
+mirror across the main paths and confirms the race specs still hold. The gate is
+the version matrix above, which asserts properties with explicit controls rather
+than comparing output to a recorded file. Expected-output tests are kept
+deliberately thin here: their failure mode is to regenerate the expected file,
+which converts a defect into a new baseline.
+
+## Coverage
+
+```sh
+test/run_coverage.sh /path/to/pg_config
+```
+
+Builds instrumented, runs the suites against that build, and writes an HTML
+report to `coverage/html`. It runs nightly and uploads the report as an artifact.
+
+There is no threshold and nothing fails on the number, deliberately. A coverage
+threshold creates pressure to write tests that execute lines rather than tests
+that prove properties. The report answers the question a passing suite cannot:
+which code does nothing execute at all. Read it for holes rather than for the
+percentage, and expect the percentage to be unremarkable in places that are
+correct: a table access method carries defensive branches that should never be
+taken, and `columnar_compat.h` carries version shims of which one arm compiles per
+major.
