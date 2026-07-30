@@ -682,6 +682,18 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	rel = table_open(state->relid, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
 
+	/*
+	 * Guard the native format version before folding any aggregate (#240). The
+	 * plain read path checks it in ColumnarBeginReadWithStorage, but the
+	 * zone-map-only aggregate path answers count/min/max from metadata without
+	 * ever opening a read state, so the check must also sit here -- otherwise an
+	 * unsupported-format table answers from bytes this build may not decode
+	 * correctly. ColumnarStorageId reads the metapage, so its version is checked
+	 * here too.
+	 */
+	ColumnarCheckNativeFormatVersion(ColumnarStorageId(rel),
+									 RelationGetRelationName(rel));
+
 	/* finish setting up min/max comparison info now that we have the tupdesc */
 	for (a = 0; a < state->naggs; a++)
 	{

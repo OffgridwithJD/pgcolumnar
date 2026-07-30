@@ -20,6 +20,43 @@ of the blast radius of a single backend crash
 ([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The sections
 below are the standing functional limitations, separate from that work.
 
+## On-disk format stability
+
+The on-disk format is versioned. Each columnar relation records a native data
+format version (currently PGCN v1) and a physical metapage version, and both are
+checked on read. The metapage version guards the physical block layout; the
+native format version guards the data encoding, so a future version that changes
+the encoding while keeping the metapage layout is still caught. A version this
+build does not understand is rejected -- `unsupported columnar format version` for
+the metapage, `unsupported columnar native format version` for the data format --
+and the read fails cleanly rather than misinterpreting bytes written by a
+different layout. The check runs on every decode path -- sequential scan,
+vectorized aggregate, and index-scan fetch -- so a version this build cannot read
+is refused whichever way the query reaches the data. Both guards are pinned by
+`test/native_format.sh`.
+
+A projection stores its own copy of the data and carries its own format version;
+it is validated against the projection's own storage, not the base table's. Each
+stored object is therefore self-describing, and a build that writes a new version
+stamps every object it writes, base and projections together.
+
+Within a version the format round-trips faithfully: data written and read back on
+the same build is byte-for-byte identical, which `test/native_format.sh` proves on
+every supported PostgreSQL major. Byte-for-byte preservation across a PostgreSQL
+major upgrade is asserted separately by `test/pg_upgrade.sh`; wiring that suite
+into the gate is tracked in
+[issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257).
+
+There is no in-place upgrade across an incompatible format version yet. The format
+has not changed during the pre-release, so no migration has been needed; but until
+an upgrade path and a compatibility guarantee are committed to, treat the format
+as reload-required across an incompatible bump. This is the same posture as the
+release-status note above: keep the source a columnar table was loaded from, so it
+can be rebuilt if a future version changes the layout. A physical copy
+(`pg_basebackup`, file-system snapshot, replication) preserves the exact bytes and
+so stays readable by a build of the same version; it is not a substitute for the
+reloadable source across a version change.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and

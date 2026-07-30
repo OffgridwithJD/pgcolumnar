@@ -323,6 +323,8 @@ extern void ColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
 extern void ColumnarReserveOffset(Relation rel, uint64 dataLength,
 								  uint64 *fileOffset);
 extern void ColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes);
+extern void ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor,
+											uint32 versionMinor);
 extern void ColumnarSetReservedOffset(Relation rel, uint64 newOffset);
 extern void ColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks);
 extern void ColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
@@ -432,6 +434,7 @@ extern void ColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * ------------------------------------------------------------------------- */
 extern uint64 ColumnarNextStorageId(void);
 extern void ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
+extern void ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
 extern void ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
 extern void ColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc);
 extern void ColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z);

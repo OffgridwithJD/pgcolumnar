@@ -1518,6 +1518,62 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	table_close(rel, RowExclusiveLock);
 }
 
+/*
+ * ColumnarCheckNativeFormatVersion
+ *		Reject a native data format version this build does not understand, before
+ *		any bytes are decoded (issue #240). The physical metapage version is checked
+ *		separately when the metapage is read (ColumnarReadMetapage); this is the
+ *		independent data-format stamp (pgcolumnar.storage.format_version), so a
+ *		future PGCN version that changes the encoding while keeping the metapage
+ *		layout is caught here rather than silently misread.
+ *
+ *		A table with no storage row -- the 2.2-line writer never wrote one, or a
+ *		native table before its first flush -- has nothing to check and is
+ *		accepted. The value is read out and the scan closed before any ereport, so
+ *		nothing is left open across the error.
+ */
+void
+ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
+{
+	Relation	rel = open_columnar_table("storage", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	bool		found = false;
+	int32		formatVersion = 0;
+
+	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	/* NULL snapshot -> catalog snapshot, same as the other read-side scans. */
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+
+	tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_native_storage_format_version,
+									 tupdesc, &isnull);
+
+		if (!isnull)
+		{
+			found = true;
+			formatVersion = DatumGetInt32(d);
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	if (found && formatVersion != COLUMNAR_NATIVE_VERSION_MAJOR)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported columnar native format version %d",
+						formatVersion),
+				 errdetail("Relation \"%s\" was written with native format version %d; this build supports version %d.",
+						   relName, formatVersion, COLUMNAR_NATIVE_VERSION_MAJOR)));
+}
+
 void
 ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg)
 {
