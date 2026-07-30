@@ -148,10 +148,18 @@ trap sb_teardown EXIT
 # Wait until the standby has replayed at least the primary's current LSN.
 # Polls rather than sleeping a fixed amount: a fixed sleep is either flaky or
 # slow, and on a loaded box it is both.
+# The return value is deliberately not ignored by callers -- see sync_or_fail.
+#
+# 360 half-second attempts (3 minutes), not 60 seconds. Under the six-way matrix
+# this box has been observed taking a 34-second checkpoint, and a standby that is
+# merely slow is not a standby that is broken. A too-short budget here does not
+# report "the standby was slow"; it silently returns 1, every comparison after it
+# reads pre-sync state, and the suite fails on a content mismatch that names the
+# wrong thing entirely.
 sync_standby() {
 	local target i replayed
 	target="$(q "SELECT pg_current_wal_lsn()")"
-	for i in $(seq 1 120); do
+	for i in $(seq 1 360); do
 		replayed="$(sb_q "SELECT pg_last_wal_replay_lsn()")"
 		if [ -n "$replayed" ] && [ -n "$target" ] && \
 		   [ "$(sb_q "SELECT '$replayed'::pg_lsn >= '$target'::pg_lsn")" = t ]; then
@@ -159,6 +167,26 @@ sync_standby() {
 		fi
 		sleep 0.5
 	done
+	return 1
+}
+
+# Every caller goes through this. sync_standby returning 1 used to be discarded,
+# so a standby that never caught up produced a cascade of downstream content
+# mismatches instead of one line saying it never caught up -- the same discarded
+# exit status that sb_start had, in the same suite.
+sync_or_fail() {
+	if sync_standby; then
+		return 0
+	fi
+	echo "FAIL  the standby did not catch up (${1:-unnamed sync point})"
+	echo "      primary lsn: $(q "SELECT pg_current_wal_lsn()")"
+	echo "      standby replayed: $(sb_q "SELECT pg_last_wal_replay_lsn()")"
+	echo "      standby in recovery: $(sb_q "SELECT pg_is_in_recovery()")"
+	echo "      walreceiver: $(sb_q "SELECT count(*) FROM pg_stat_wal_receiver")"
+	echo "      slot active: $(q "SELECT active FROM pg_replication_slots WHERE slot_name='pgc_standby'")"
+	echo "      last 15 lines of the standby log:"
+	pgc_pg "tail -15 '$SB_LOG'" 2>/dev/null | sed 's/^/        /'
+	PGC_FAIL=1
 	return 1
 }
 
@@ -237,7 +265,7 @@ check "the standby is a different cluster from the primary" \
 	"$([ "$(sb_q 'SHOW data_directory')" != "$(q 'SHOW data_directory')" ] && echo yes || echo no)" \
 	"yes"
 
-sync_standby
+sync_or_fail "sync 1"
 check "the base backup carried the initial rows" \
 	"$(hash_standby r)" "$(hash_primary r)"
 
@@ -271,7 +299,7 @@ check "with the same content the primary reads" \
 psql_run "SELECT pgcolumnar.add_projection('r', 'r_post', ARRAY['id','v'], ARRAY['id']);" >/dev/null 2>&1
 check "the primary now has a second, post-backup projection" "$(q "$proj_sql;")" "2"
 
-sync_standby
+sync_or_fail "sync 2"
 check "streaming replay carried a projection created after the backup" \
 	"$(sb_q "$proj_sql;")" "2"
 check "and that one reads on the standby too" \
@@ -349,7 +377,7 @@ sleep 1
 check "with replay paused the standby does NOT see the new rows" \
 	"$(sb_q "SELECT count(*) FROM r WHERE v LIKE 'paused%'")" "0"
 sb_q "SELECT pg_wal_replay_resume()" >/dev/null
-sync_standby
+sync_or_fail "sync 3"
 check "after resuming, the standby sees them" \
 	"$(sb_q "SELECT count(*) FROM r WHERE v LIKE 'paused%'")" "100"
 
@@ -360,7 +388,7 @@ check "after resuming, the standby sees them" \
 psql_run "INSERT INTO r SELECT g, 'more' || g FROM generate_series(20001,40000) g;
 	DELETE FROM r WHERE id % 7 = 0;
 	UPDATE r SET v = v || '-u' WHERE id % 11 = 0;" >/dev/null 2>&1
-sync_standby
+sync_or_fail "sync 4"
 
 check "insert, delete and update replay identically" \
 	"$(hash_standby r)" "$(hash_primary r)"
@@ -372,11 +400,11 @@ check "and the row counts agree" \
 # ---------------------------------------------------------------------------
 
 psql_run "SELECT pgcolumnar.vacuum('r');" >/dev/null 2>&1
-sync_standby
+sync_or_fail "sync 5"
 check "vacuum replays identically" "$(hash_standby r)" "$(hash_primary r)"
 
 psql_run "SELECT pgcolumnar.compact('r');" >/dev/null 2>&1
-sync_standby
+sync_or_fail "sync 6"
 check "compact replays identically" "$(hash_standby r)" "$(hash_primary r)"
 
 # ColumnarTruncateMainFork is the one direct XLogInsert in the tree
@@ -405,7 +433,7 @@ psql_run "DROP TABLE IF EXISTS t;" >/dev/null 2>&1
 psql_run "CREATE TABLE t (id int, v text) USING pgcolumnar;" >/dev/null 2>&1
 psql_run "SELECT pgcolumnar.set_options('t', stripe_row_limit => 1000, chunk_group_row_limit => 1000);" >/dev/null 2>&1
 psql_run "INSERT INTO t SELECT g, md5(g::text) FROM generate_series(1,30000) g;" >/dev/null 2>&1
-sync_standby
+sync_or_fail "sync 7"
 
 psql_run "DELETE FROM t WHERE id > 15000;" >/dev/null 2>&1
 psql_run "SELECT pgcolumnar.compact('t');" >/dev/null 2>&1
@@ -419,7 +447,7 @@ check "the primary actually truncated (record was emitted)" \
 	"yes"
 
 pri_after="$(q "SELECT pg_relation_size('t')")"
-sync_standby
+sync_or_fail "sync 8"
 sb_after="$(sb_q "SELECT pg_relation_size('t')")"
 
 check "the standby's main fork shrank to match the primary" \
@@ -473,7 +501,7 @@ sb_stop
 pgc_pg "sed -i \"s/^shared_preload_libraries=.*/shared_preload_libraries='pgcolumnar'/\" '$SB_DIR/postgresql.conf'" \
 	>/dev/null 2>&1
 sb_start
-sync_standby
+sync_or_fail "sync 9"
 
 check "with the module back, the replayed table reads correctly" \
 	"$(hash_standby r2)" "$(hash_primary r2)"
