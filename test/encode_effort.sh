@@ -28,6 +28,26 @@ set -uo pipefail
 
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
+# Hold fsst_min_gain_percent at 0 for the whole suite, deliberately.
+#
+# This file compares encode_effort=fast against full, and that comparison only
+# says anything on a shape where FSST is actually chosen. md5 text is such a
+# shape, but only marginally: FSST wins it by roughly 2 percent, which is exactly
+# the sub-margin win the shipped default of 5 declines (#155, #271). At the
+# default, FSST is dropped for both arms, they store identical bytes, and the
+# suite fails reporting equal sizes. It did, on all five majors, the first time
+# that default landed.
+#
+# Pinning it states the dependency rather than inheriting it: the option under
+# test here is encode_effort, so the margin is held where FSST stays in play
+# instead of being left to a default that is free to move. The margin's own
+# behaviour is covered by fsst_margin.sh.
+#
+# Set on the database rather than per statement because psql_run opens its own
+# connection per call, so a SET would not outlive one, and every load in this
+# file needs it, not only the first pair.
+psql_run "ALTER DATABASE $PGC_DB SET pgcolumnar.fsst_min_gain_percent = 0;" >/dev/null 2>&1
+
 ROWS=${PGC_EFFORT_ROWS:-200000}
 
 stored() {	# byte-accurate stored size; pg_total_relation_size is page-granular
