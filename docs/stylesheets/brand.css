@@ -1,0 +1,160 @@
+/*
+ * pgColumnar documentation theme.
+ * Palette taken from the logo: ink navy #1F2A44, brand blue #2B5FD0 / #5B8DEF,
+ * amber accent #F59E0B / #F7B733, slate #5A6478. A dark navy header carries the
+ * mark; links are brand blue; interactive/hover states are amber.
+ */
+
+:root {
+  --pgc-navy:        #1F2A44;
+  --pgc-navy-deep:   #16203a;
+  --pgc-blue:        #2B5FD0;
+  --pgc-blue-light:  #5B8DEF;
+  --pgc-amber:       #F59E0B;
+  --pgc-amber-light: #F7B733;
+  --pgc-slate:       #5A6478;
+}
+
+/* ---- light scheme ------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color:        var(--pgc-navy);
+  --md-primary-fg-color--light: var(--pgc-blue);
+  --md-primary-fg-color--dark:  var(--pgc-navy-deep);
+  --md-primary-bg-color:        #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.75);
+
+  --md-accent-fg-color:         var(--pgc-amber);
+  --md-accent-fg-color--transparent: rgba(245, 158, 11, 0.1);
+
+  --md-typeset-a-color:         var(--pgc-blue);
+
+  /* a neutral with a faint navy bias rather than a flat grey */
+  --md-default-bg-color:        #fbfcfe;
+  --md-footer-bg-color:         var(--pgc-navy-deep);
+  --md-footer-bg-color--dark:   #0f1729;
+}
+
+/* ---- dark scheme -------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-hue: 222; /* bias the slate dark ground toward the brand navy */
+
+  --md-primary-fg-color:        var(--pgc-navy-deep);
+  --md-primary-fg-color--light: var(--pgc-blue-light);
+  --md-primary-fg-color--dark:  #0f1729;
+  --md-primary-bg-color:        #e7edf4;
+
+  --md-accent-fg-color:         var(--pgc-amber-light);
+  --md-typeset-a-color:         #7aa4f5;
+
+  --md-footer-bg-color:         #0f1729;
+}
+
+/* ---- header: keep the mark and title crisp on the navy bar -------------- */
+.md-header {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 8px rgba(15, 23, 41, 0.25);
+}
+.md-header__button.md-logo img {
+  height: 1.5rem;
+  width: auto;
+}
+.md-header__title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Active/hover nav tab gets an amber underline: one clear accent, used sparingly */
+.md-tabs__link {
+  opacity: 0.85;
+  transition: opacity 120ms;
+}
+.md-tabs__link:hover,
+.md-tabs__link--active {
+  opacity: 1;
+}
+.md-tabs__item--active .md-tabs__link {
+  position: relative;
+}
+.md-tabs__item--active .md-tabs__link::after {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: -2px;
+  height: 2px;
+  background: var(--pgc-amber);
+  border-radius: 2px;
+}
+
+/* ---- typography: give body copy room, headings a touch of weight -------- */
+.md-typeset {
+  font-feature-settings: "kern", "liga", "tnum";
+}
+.md-typeset h1 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.md-typeset h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 2.2em;
+}
+.md-typeset h2::after {
+  content: "";
+  display: block;
+  width: 2.25rem;
+  height: 2px;
+  margin-top: 0.35rem;
+  background: var(--pgc-amber);
+  border-radius: 2px;
+  opacity: 0.8;
+}
+
+/* ---- tables: readable, with a quiet navy header row --------------------- */
+.md-typeset table:not([class]) th {
+  background: color-mix(in srgb, var(--pgc-blue) 8%, transparent);
+  font-weight: 600;
+}
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background: color-mix(in srgb, var(--pgc-blue-light) 14%, transparent);
+}
+.md-typeset table:not([class]) {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- code: brand-tinted inline code, comfortable blocks ----------------- */
+.md-typeset code {
+  border-radius: 4px;
+}
+.md-typeset :not(pre) > code {
+  background: color-mix(in srgb, var(--pgc-blue) 8%, transparent);
+}
+[data-md-color-scheme="slate"] .md-typeset :not(pre) > code {
+  background: color-mix(in srgb, var(--pgc-blue-light) 12%, transparent);
+}
+
+/* ---- links: amber underline on hover, brand blue otherwise ------------- */
+.md-typeset a {
+  text-underline-offset: 0.15em;
+}
+.md-typeset a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+/* ---- home page: lift the intro table into cards-ish rows ---------------- */
+.md-typeset .md-button {
+  border-radius: 6px;
+}
+.md-typeset .md-button--primary {
+  background: var(--pgc-blue);
+  border-color: var(--pgc-blue);
+}
+.md-typeset .md-button--primary:hover {
+  background: var(--pgc-amber);
+  border-color: var(--pgc-amber);
+  color: var(--pgc-navy-deep);
+}
+
+/* Footer: a calm dark navy, generator line removed via config */
+.md-footer-meta {
+  background: var(--md-footer-bg-color--dark, var(--pgc-navy-deep));
+}

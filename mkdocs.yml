@@ -1,0 +1,113 @@
+site_name: pgColumnar
+site_description: Analytic column storage for PostgreSQL, built as a native table access method.
+site_url: https://jdatcmd.github.io/pgcolumnar/
+site_author: pgColumnar contributors
+
+repo_url: https://github.com/jdatcmd/pgcolumnar
+repo_name: jdatcmd/pgcolumnar
+edit_uri: edit/main/docs/
+
+copyright: >
+  pgColumnar is released under the MIT License. PostgreSQL is a trademark of the
+  PostgreSQL Community Association of Canada.
+
+theme:
+  name: material
+  logo: assets/pgcolumnar-mark.svg
+  favicon: assets/pgcolumnar-mark.svg
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+extra_css:
+  - stylesheets/brand.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/jdatcmd/pgcolumnar
+      name: pgColumnar on GitHub
+  generator: false
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.tilde
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - User guide: user-guide.md
+  - Concepts:
+      - Features: features.md
+      - Architecture: ARCHITECTURE.md
+  - Operations:
+      - Administration: administration.md
+      - Configuration: configuration.md
+      - Benchmarks: benchmarks.md
+  - Reference:
+      - SQL reference: sql-reference.md
+      - Limitations & compatibility: limitations.md
+  - Development:
+      - Testing: testing.md
