@@ -470,6 +470,66 @@ for pgc in "${CONFIGS[@]}"; do
 	rm -rf "$builddir"
 done
 
+# ---------------------------------------------------------------------------
+# Cross-major upgrade (opt-in: PGC_RUN_UPGRADE=1)
+# ---------------------------------------------------------------------------
+#
+# Off by default and deliberately not part of the per-PR gate. pg_upgrade needs
+# two majors at once, runs the upgrade twice per pair (copy and link), and is
+# expensive -- the same reason run_san.sh sits beside the matrix rather than in
+# it.
+#
+# It is here rather than only in a checklist because docs/limitations.md now makes
+# a cross-major claim -- that data written by one build reads back identically on
+# any build of the same format version, across every supported major -- and
+# test/pg_upgrade.sh is the only thing that tests it. A claim backed by a suite
+# nobody runs is the failure mode that left native_scale dark (#257).
+#
+# Adjacent pairs of the majors being tested, both transfer modes: link shares the
+# data files with the old cluster and copy does not, and they fail differently.
+if [ "${PGC_RUN_UPGRADE:-0}" = 1 ]; then
+	echo "==================================================================="
+	echo "== cross-major upgrade (PGC_RUN_UPGRADE=1)"
+	echo "==================================================================="
+
+	_ucount=0
+	for _i in $(seq 0 $(( ${#CONFIGS[@]} - 2 ))); do
+		_old="${CONFIGS[$_i]}"
+		_new="${CONFIGS[$((_i + 1))]}"
+		[ -x "$_old" ] && [ -x "$_new" ] || continue
+		_omaj="$("$_old" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+		_nmaj="$("$_new" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+		for _mode in copy link; do
+			_ucount=$((_ucount + 1))
+			_ulog="$(mktemp "/tmp/pgcolumnar-upgrade-${_omaj}-${_nmaj}-${_mode}.XXXXXX.log")"
+			if bash "$SRCDIR/test/pg_upgrade.sh" "$_old" "$_new" "$_mode" \
+				>"$_ulog" 2>&1; then
+				echo "  PASS  pg_upgrade PG$_omaj -> PG$_nmaj ($_mode)"
+				SUMMARY+=("PASS   upgrade PG$_omaj->PG$_nmaj ($_mode)")
+				rm -f "$_ulog"
+			else
+				echo "  FAIL  pg_upgrade PG$_omaj -> PG$_nmaj ($_mode)"
+				if grep -qE '^FAIL' "$_ulog"; then
+					grep -E '^FAIL' "$_ulog" | sed 's/^/      >> /'
+				fi
+				tail -40 "$_ulog" | sed 's/^/      /'
+				echo "      full log: $_ulog"
+				SUMMARY+=("FAIL   upgrade PG$_omaj->PG$_nmaj ($_mode)")
+				overall=1
+			fi
+		done
+	done
+
+	# Asked for the gate and got nothing: that is a failure, not a quiet pass.
+	# One pg_config short of a pair, or a typo in the list, would otherwise report
+	# green having upgraded nothing.
+	if [ "$_ucount" = 0 ]; then
+		echo "  FAIL  PGC_RUN_UPGRADE=1 but no adjacent pair of majors was runnable"
+		SUMMARY+=("FAIL   upgrade (no runnable pair)")
+		overall=1
+	fi
+fi
+
 echo
 echo "===================== MATRIX SUMMARY ============================"
 for line in "${SUMMARY[@]}"; do
