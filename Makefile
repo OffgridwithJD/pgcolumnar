@@ -32,7 +32,18 @@ EXTENSION = pgcolumnar
 DATA = pgcolumnar--1.0-dev.sql
 PGFILEDESC = "pgColumnar - column-oriented table access method"
 
-REGRESS =
+# make installcheck. Not the project's gate -- that is test/run_all_versions.sh,
+# which asserts properties with explicit controls -- but the conventional entry
+# point a packager or a new contributor reaches for, and it must not report
+# success while running nothing, which is what an empty REGRESS did.
+REGRESS = pgcolumnar
+
+# The race specs already exist under test/isolation/specs and were reachable only
+# through test/isolation.sh. ISOLATION_OPTS points pg_isolation_regress at that
+# directory rather than moving the specs to the layout PGXS assumes by default,
+# so there is one copy of them and one set of expected files.
+ISOLATION = $(notdir $(basename $(wildcard test/isolation/specs/*.spec)))
+ISOLATION_OPTS = --inputdir=test/isolation
 
 # Optional compression codecs. lz4 and zstd are linked when the system
 # development libraries are present (detected with pkg-config); otherwise
