@@ -785,7 +785,19 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 */
 	oldProjs = ColumnarListProjections(oldStorageId);
 
-	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
+	/*
+	 * Take the read snapshot AFTER the AccessExclusiveLock the caller already
+	 * holds, not the caller's pre-lock statement snapshot (#295). A row group
+	 * committed by another transaction while we waited for the lock is in that
+	 * pre-lock snapshot's in-progress set, so it would be invisible to the row
+	 * enumeration below and silently discarded by the relfilenode swap -- data
+	 * loss. A fresh GetLatestSnapshot sees every commit as of now. Register it
+	 * (not merely push active): ColumnarBeginRead derives a ColumnarCatalogSnapshot
+	 * copy that must inherit a nonzero regd_count for PG18's heap-visibility
+	 * assertion, exactly as the sibling rewrite/retire paths document.
+	 */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	PushActiveSnapshot(snapshot);
 
 	/*
 	 * Read every live row (the reader skips row-mask-deleted rows) and
@@ -939,6 +951,9 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * no-op here.
 	 */
 	ColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
+
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
 }
 
 /*
@@ -979,7 +994,12 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 
 	oldStorageId = ColumnarStorageId(rel);
 	oldProjs = ColumnarListProjections(oldStorageId);
-	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
+	/* fresh snapshot AFTER the AccessExclusiveLock, not the caller's pre-lock one,
+	 * so a row group committed during the lock wait is copied rather than dropped
+	 * by the swap (#295); registered for PG18's catalog-snapshot regd_count. Same
+	 * reasoning as columnar_compact_relation. */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	PushActiveSnapshot(snapshot);
 
 	/* augmented descriptor: the table's columns plus a trailing bytea Z-order key */
 	augdesc = CreateTemplateTupleDesc(natts + 1);
@@ -1075,6 +1095,9 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	ExecDropSingleTupleTableSlot(augSlot);
 
 	ColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
+
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
 }
 
 /*
