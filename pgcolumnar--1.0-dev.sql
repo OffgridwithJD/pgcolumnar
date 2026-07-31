@@ -531,6 +531,21 @@ CREATE FUNCTION pgcolumnar.vacuum_sorted(
 COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
 	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text (unlike the numeric-only Z-order cluster()). One-shot: not auto-maintained.';
 
+/*
+ * One-argument form: apply the declared sort_by key (#288). A VARIADIC function
+ * cannot be called cleanly with zero variadic arguments from an unknown literal
+ * (vacuum_sorted('t') would not resolve), so this explicit overload gives a
+ * clean bare-table call. It shares the C entry point, which uses PG_NARGS() to
+ * detect the missing column list and fall back to the persisted key.
+ */
+CREATE FUNCTION pgcolumnar.vacuum_sorted(tablename regclass)
+	RETURNS void
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'columnar_vacuum_sorted';
+
+COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass)
+	IS 'apply the table''s declared sort_by key from set_options (#288); errors if none is declared. Equivalent to a bare CLUSTER re-applying a remembered index.';
+
 CREATE FUNCTION pgcolumnar.cluster(
 	tablename regclass,
 	VARIADIC columns name[])

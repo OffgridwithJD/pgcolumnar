@@ -1193,7 +1193,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 	 * resolution + validation loop below so the explicit and declared paths
 	 * cannot diverge. Mirrors bare "CLUSTER t" re-applying a remembered index.
 	 */
-	if (!PG_ARGISNULL(1))
+	if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
 	{
 		ArrayType  *colArray = PG_GETARG_ARRAYTYPE_P(1);
 		Datum	   *colDatums;
