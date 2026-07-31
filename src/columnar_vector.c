@@ -213,7 +213,18 @@ typedef enum ColumnarAggKind
 	COLUMNAR_AGG_SUM_INT,
 	COLUMNAR_AGG_AVG_INT,
 	COLUMNAR_AGG_MIN,
-	COLUMNAR_AGG_MAX
+	COLUMNAR_AGG_MAX,
+	/*
+	 * Extended kinds used by the grouped path (#289). The ungrouped
+	 * metadata-fold path never produces these (its classifier still rejects
+	 * int8/float/numeric sum/avg), so its switches never see them.
+	 */
+	COLUMNAR_AGG_SUM_INT8,		/* sum(int8) -> numeric */
+	COLUMNAR_AGG_SUM_FLOAT,		/* sum(float4/float8) -> float8 */
+	COLUMNAR_AGG_SUM_NUMERIC,	/* sum(numeric) -> numeric */
+	COLUMNAR_AGG_AVG_INT8,		/* avg(int8) -> numeric */
+	COLUMNAR_AGG_AVG_FLOAT,		/* avg(float4/float8) -> float8 */
+	COLUMNAR_AGG_AVG_NUMERIC	/* avg(numeric) -> numeric */
 } ColumnarAggKind;
 
 typedef struct ColumnarAggSpec
@@ -233,6 +244,9 @@ typedef struct ColumnarAggSpec
 	int64		sum;			/* integer sum / avg sum */
 	bool		sawValue;		/* any non-null value contributed */
 	Datum		extreme;		/* min/max running value (in resultContext) */
+	float8		fsum;			/* float running sum (scan order, like float8_accum) */
+	Datum		nsum;			/* numeric running total (in resultContext) */
+	bool		nsumSet;		/* nsum initialized */
 } ColumnarAggSpec;
 
 /*
@@ -244,7 +258,8 @@ typedef struct ColumnarAggSpec
  *		scalar fallback.
  */
 static bool
-columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
+columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
+						 ColumnarAggSpec *spec)
 {
 	char	   *name;
 	Oid			nsp;
@@ -309,7 +324,19 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
 			spec->kind = COLUMNAR_AGG_SUM_INT;
 			return true;
 		}
-		return false;			/* int8->numeric, float, numeric: fall back */
+		if (allowExtended)
+		{
+			if (spec->inputType == INT8OID)
+				spec->kind = COLUMNAR_AGG_SUM_INT8;
+			else if (spec->inputType == FLOAT4OID || spec->inputType == FLOAT8OID)
+				spec->kind = COLUMNAR_AGG_SUM_FLOAT;
+			else if (spec->inputType == NUMERICOID)
+				spec->kind = COLUMNAR_AGG_SUM_NUMERIC;
+			else
+				return false;
+			return true;
+		}
+		return false;			/* ungrouped: int8/float/numeric fall back */
 	}
 
 	if (strcmp(name, "avg") == 0)
@@ -317,6 +344,18 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
 		if (spec->inputType == INT2OID || spec->inputType == INT4OID)
 		{
 			spec->kind = COLUMNAR_AGG_AVG_INT;
+			return true;
+		}
+		if (allowExtended)
+		{
+			if (spec->inputType == INT8OID)
+				spec->kind = COLUMNAR_AGG_AVG_INT8;
+			else if (spec->inputType == FLOAT4OID || spec->inputType == FLOAT8OID)
+				spec->kind = COLUMNAR_AGG_AVG_FLOAT;
+			else if (spec->inputType == NUMERICOID)
+				spec->kind = COLUMNAR_AGG_AVG_NUMERIC;
+			else
+				return false;
 			return true;
 		}
 		return false;
@@ -468,7 +507,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(expr, Aggref))
 			return;
 		if (!columnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
-									  &specs[i]))
+									  false, &specs[i]))
 			return;
 		i++;
 	}
@@ -653,7 +692,7 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
 		/* classified successfully at plan time; -1 skips the varno check */
-		(void) columnar_classify_aggref((Aggref *) tle->expr, -1,
+		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, false,
 										&state->specs[i]);
 		i++;
 	}
@@ -737,7 +776,7 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
  *		the run path's fallback and min/max handling.
  */
 static void
-columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
+columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 				   Datum val, bool isnull)
 {
 	switch (spec->kind)
@@ -775,6 +814,43 @@ columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
 			}
 			break;
 
+		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_AVG_FLOAT:
+			if (!isnull)
+			{
+				/* plain running sum in scan order, like core float8_accum */
+				spec->fsum += (spec->inputType == FLOAT4OID)
+					? (float8) DatumGetFloat4(val)
+					: DatumGetFloat8(val);
+				spec->count++;
+				spec->sawValue = true;
+			}
+			break;
+
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_AVG_INT8:
+		case COLUMNAR_AGG_SUM_NUMERIC:
+		case COLUMNAR_AGG_AVG_NUMERIC:
+			if (!isnull)
+			{
+				MemoryContext old = MemoryContextSwitchTo(resultContext);
+				Datum		nv = (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
+								  spec->kind == COLUMNAR_AGG_AVG_INT8)
+					? DirectFunctionCall1(int8_numeric, val)
+					: val;
+
+				if (!spec->nsumSet)
+					spec->nsum = datumCopy(nv, false, -1);
+				else
+					spec->nsum = DirectFunctionCall2(numeric_add,
+													 spec->nsum, nv);
+				spec->nsumSet = true;
+				spec->count++;
+				spec->sawValue = true;
+				MemoryContextSwitchTo(old);
+			}
+			break;
+
 		case COLUMNAR_AGG_MIN:
 		case COLUMNAR_AGG_MAX:
 			if (!isnull)
@@ -796,7 +872,7 @@ columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
 				if (take)
 				{
 					MemoryContext old =
-						MemoryContextSwitchTo(state->resultContext);
+						MemoryContextSwitchTo(resultContext);
 
 					if (spec->sawValue && !spec->byval)
 						pfree(DatumGetPointer(spec->extreme));
@@ -862,6 +938,42 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
 
 				return DirectFunctionCall2(numeric_div, sumd, cntd);
 			}
+
+		case COLUMNAR_AGG_SUM_FLOAT:
+			if (!spec->sawValue)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return Float8GetDatum(spec->fsum);
+
+		case COLUMNAR_AGG_AVG_FLOAT:
+			if (spec->count == 0)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return Float8GetDatum(spec->fsum / (float8) spec->count);
+
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_SUM_NUMERIC:
+			if (!spec->nsumSet)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return spec->nsum;
+
+		case COLUMNAR_AGG_AVG_INT8:
+		case COLUMNAR_AGG_AVG_NUMERIC:
+			if (spec->count == 0 || !spec->nsumSet)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return DirectFunctionCall2(numeric_div, spec->nsum,
+									   DirectFunctionCall1(int8_numeric,
+														   Int64GetDatum(spec->count)));
 
 		case COLUMNAR_AGG_MIN:
 		case COLUMNAR_AGG_MAX:
@@ -1212,10 +1324,10 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 			ColumnarAggSpec *spec = &state->specs[a];
 
 			if (spec->attidx >= 0)
-				columnar_apply_one(state, spec, values[spec->attidx],
-								   nulls[spec->attidx]);
+				columnar_apply_one(state->resultContext, spec,
+								   values[spec->attidx], nulls[spec->attidx]);
 			else
-				columnar_apply_one(state, spec, (Datum) 0, true);
+				columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
 		}
 	}
 	ColumnarEndRead(rs);
