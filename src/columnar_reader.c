@@ -1427,7 +1427,10 @@ typedef struct ColumnarFetchGroup
 	uint64		rowCount;
 	uint64		fileOffset;
 	int			natts;
-	char	   *groupBuffer;	/* the group's raw bytes */
+	char	  **pageBuf;		/* [natts]; a column's raw page bytes (validity +
+								 * encoded data), NULL until that column is read.
+								 * Read per column rather than the whole group so a
+								 * fetch touches only its projected columns (#287). */
 	NativeColumnChunkMetadata **ccForCol;	/* [natts] */
 	char	  **rawBuf;			/* [natts]; NULL until that column is decoded */
 
@@ -1847,17 +1850,22 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->rowCount = rg->rowCount;
 		entry->fileOffset = rg->fileOffset;
 		entry->natts = natts;
-		entry->groupBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
+		entry->pageBuf = palloc0(sizeof(char *) * natts);
 		entry->ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
 		entry->rawBuf = palloc0(sizeof(char *) * natts);
 		entry->rankPrefix = palloc0(sizeof(uint32 *) * natts);
 		entry->valOffset = palloc0(sizeof(uint32 *) * natts);
 		MemoryContextSwitchTo(tmp);
 
-		if (rg->byteLength > 0)
-			ColumnarReadLogicalData(rel, rg->fileOffset, entry->groupBuffer,
-									rg->byteLength);
-
+		/*
+		 * The column pages are NOT read here. Reading the whole group up front
+		 * pulled every column's bytes off disk and first-touch faulted a buffer
+		 * the size of the entire group, even when the fetch projects one column
+		 * of many -- the dominant cost of an index/bitmap-scan fetch (#287). Each
+		 * column's page is read on demand below, once, the first time that column
+		 * is decoded, so a fetch touches only the columns it returns and the cache
+		 * cap (measured by allocated bytes) reflects only what was read.
+		 */
 		nchunks = ColumnarReadColumnChunkList(storageId, rg->groupNumber,
 											  metaSnapshot);
 		foreach(nlc, nchunks)
@@ -1930,7 +1938,23 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			continue;
 		}
 
-		base = entry->groupBuffer + (cc->pageOffset - entry->fileOffset);
+		/*
+		 * Read this column's page bytes on first use and cache them in the entry
+		 * (#287). Validity bits and per-row rank both read from here on every
+		 * fetch into the group, so the page stays cached alongside the decoded
+		 * stream, not just until the decode. Only projected columns are ever read.
+		 */
+		if (entry->pageBuf[c] == NULL)
+		{
+			MemoryContext pgOld = MemoryContextSwitchTo(entry->cx);
+
+			entry->pageBuf[c] = palloc(cc->pageLength > 0 ? cc->pageLength : 1);
+			if (cc->pageLength > 0)
+				ColumnarReadLogicalData(rel, cc->pageOffset, entry->pageBuf[c],
+										cc->pageLength);
+			MemoryContextSwitchTo(pgOld);
+		}
+		base = entry->pageBuf[c];
 		vbits = base;
 		if (((vbits[rowInGrp >> 3] >> (rowInGrp & 7)) & 1) == 0)
 		{
