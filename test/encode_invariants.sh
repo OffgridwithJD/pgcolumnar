@@ -38,6 +38,32 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 ROWS="${PGC_ENCINV_ROWS:-4096}"
 
+# The C-level half. Bound here rather than shipped, like the other debug hooks.
+#
+# Two of the rewrites have edges no SQL fixture can reach, because the encoder
+# never selects the path: the (width == 64) mask in the bit packer, and the zero
+# guard in ctz_in. Both were confirmed unreachable by removal proofs that failed
+# to fail against the SQL checks below. This function calls the primitives
+# directly and compares each against a reference implementation of the algorithm
+# it replaced, which is the promise the rewrites actually made: the same bytes.
+psql_run "CREATE FUNCTION pgcolumnar.debug_encoding_selftest()
+  RETURNS SETOF text AS 'pgcolumnar', 'columnar_debug_encoding_selftest'
+  LANGUAGE C;" >/dev/null 2>&1
+
+selftest="$(q "SELECT * FROM pgcolumnar.debug_encoding_selftest();")"
+fails="$(printf '%s\n' "$selftest" | grep -c '^FAIL' || true)"
+ran="$(printf '%s\n' "$selftest" | sed -n 's/^cases=//p')"
+
+check "the encoding primitives match their reference implementations byte for byte" \
+	"$([ "$fails" = 0 ] && echo none || printf '%s' "$(printf '%s\n' "$selftest" | grep '^FAIL' | head -3)")" \
+	"none"
+# Without this a self-test that compared nothing would report no failures. It also
+# catches the self-test dying mid-run: pg_rightmost_one_pos64 asserts on zero, so
+# removing the ctz_in guard takes the backend down before any row is returned and
+# this reports ran=none rather than a clean pass. Proved by removal, both ways.
+check "and the self-test actually compared a meaningful number of cases" \
+	"$([ -n "$ran" ] && [ "$ran" -gt 500 ] && echo yes || echo "no (ran=${ran:-none})")" "yes"
+
 # Count vectors of the first non-id column that chose a given encoding type.
 # Same descriptor decode as write_fsst_compressed.sh: a 6-byte header whose last
 # four bytes are the vector count, then that many 13-byte entries.

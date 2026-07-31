@@ -33,8 +33,16 @@
 #include <math.h>
 
 #include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "port/pg_bitutils.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
+/*
+ * Explicit rather than inherited: through PostgreSQL 18 this arrives
+ * transitively behind funcapi.h, and on 19 it does not. The five-major matrix
+ * caught it as a build failure on 19 alone.
+ */
+#include "utils/tuplestore.h"
 
 /*
  * Decoding runs on bytes read back from disk. Normal pgColumnar data is
@@ -2499,4 +2507,304 @@ ColumnarDecodeChunk(const char *enc, uint32 encLen, int encodingType,
 							encodingType)));
 			return NULL;			/* keep the compiler happy */
 	}
+}
+
+/* -------------------------------------------------------------------------
+ * Test-only self-test of the encoding primitives (#155)
+ *
+ * The #155 rewrites replaced per-bit loops with word-at-a-time equivalents on
+ * the promise that they emit exactly the bytes the old code emitted. A SQL suite
+ * cannot check that promise directly: it can only observe what survives a round
+ * trip, and it cannot reach a primitive the encoder declines to select. Two edges
+ * turned out to be unreachable that way, both found by removal proofs that failed
+ * to fail: the (width == 64) mask in bitpack, because packing at full width never
+ * wins so the encoder never chooses it, and the zero guard in ctz_in, because
+ * Gorilla encodes an unchanged value with a same-as-previous bit and never XORs
+ * to zero.
+ *
+ * So the promise is checked here instead, against a reference implementation of
+ * the algorithm each rewrite replaced. The references below are the pre-rewrite
+ * code, kept deliberately naive: they are the oracle, so they are written to be
+ * obviously correct rather than fast. A difference in a single byte is a
+ * difference in stored data.
+ *
+ * Reached only through the binding the encoding suite creates; not in the shipped
+ * catalog, like the other debug hooks.
+ * ------------------------------------------------------------------------- */
+
+/* Reference bit packer: the pre-#285 per-bit loop. */
+static void
+ref_bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
+{
+	uint64		totalbits;
+	uint32		nbytes;
+	unsigned char *buf;
+	uint64		bitpos = 0;
+	uint32		i;
+
+	if (width == 0 || n == 0)
+		return;
+
+	totalbits = (uint64) n * (uint64) width;
+	nbytes = (uint32) ((totalbits + 7) / 8);
+	buf = palloc0(nbytes);
+
+	for (i = 0; i < n; i++)
+	{
+		uint64		v = vals[i];
+		int			b;
+
+		for (b = 0; b < width; b++)
+		{
+			if ((v >> b) & 1)
+				buf[(bitpos + b) >> 3] |= (unsigned char) (1u << ((bitpos + b) & 7));
+		}
+		bitpos += width;
+	}
+	appendBinaryStringInfo(out, (char *) buf, nbytes);
+	pfree(buf);
+}
+
+/* Reference bit writer: the pre-#286 per-bit loop. */
+static void
+ref_bw_put(BitWriter *bw, uint64 v, int bits)
+{
+	int			i;
+
+	for (i = 0; i < bits; i++)
+	{
+		if ((v >> i) & 1)
+			bw->cur |= (uint8) (1u << bw->nbits);
+		bw->nbits++;
+		if (bw->nbits == 8)
+		{
+			appendStringInfoChar(&bw->buf, (char) bw->cur);
+			bw->cur = 0;
+			bw->nbits = 0;
+		}
+	}
+}
+
+/* Reference leading-zero count within a window: the pre-#286 loop. */
+static int
+ref_clz_in(uint64 x, int total)
+{
+	int			n = 0;
+
+	while (n < total && ((x >> (total - 1 - n)) & 1) == 0)
+		n++;
+	return n;
+}
+
+/*
+ * Reference trailing-zero count. The pre-#286 loop had no zero guard and ran past
+ * the end of the value for x == 0, so this stops at 64 rather than reproducing
+ * that. The zero case is asserted separately against the documented answer.
+ */
+static int
+ref_ctz_in(uint64 x)
+{
+	int			n = 0;
+
+	while (n < 64 && ((x >> n) & 1) == 0)
+		n++;
+	return n;
+}
+
+/* Deterministic values (splitmix64), so a failure is reproducible. */
+static inline uint64
+selftest_rand(uint64 *state)
+{
+	uint64		z = (*state += UINT64CONST(0x9E3779B97F4A7C15));
+
+	z = (z ^ (z >> 30)) * UINT64CONST(0xBF58476D1CE4E5B9);
+	z = (z ^ (z >> 27)) * UINT64CONST(0x94D049BB133111EB);
+	return z ^ (z >> 31);
+}
+
+PG_FUNCTION_INFO_V1(columnar_debug_encoding_selftest);
+
+Datum
+columnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	retdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext oldContext;
+	int			width;
+	int			i;
+	int			cases = 0;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+
+	retdesc = CreateTemplateTupleDesc(1);
+	TupleDescInitEntry(retdesc, 1, "result", TEXTOID, -1, 0);
+
+	oldContext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = retdesc;
+	MemoryContextSwitchTo(oldContext);
+
+#define SELFTEST_FAIL(fmt, ...) \
+	do { \
+		Datum		d_[1]; \
+		bool		n_[1] = {false}; \
+		char		m_[256]; \
+		snprintf(m_, sizeof(m_), "FAIL " fmt, __VA_ARGS__); \
+		d_[0] = CStringGetTextDatum(m_); \
+		tuplestore_putvalues(tupstore, retdesc, d_, n_); \
+	} while (0)
+
+	/*
+	 * 1. bitpack against the per-bit reference, every width from 1 to 64.
+	 *
+	 * Widths above roughly 32, the nine-byte field span, and the (width == 64)
+	 * mask are unreachable from SQL because the encoder never selects packing
+	 * there; this is the only place they run. Several value counts are used so
+	 * the packing starts at every sub-byte offset.
+	 */
+	for (width = 1; width <= 64; width++)
+	{
+		static const uint32 counts[] = {1, 2, 3, 7, 8, 9, 17, 64, 129};
+		uint64		state = UINT64CONST(0x155) + (uint64) width;
+		uint32		ci;
+
+		for (ci = 0; ci < lengthof(counts); ci++)
+		{
+			uint32		n = counts[ci];
+			uint64	   *vals = palloc(sizeof(uint64) * n);
+			StringInfoData a;
+			StringInfoData b;
+			uint64		mask = (width == 64)
+				? ~UINT64CONST(0) : ((UINT64CONST(1) << width) - 1);
+			uint32		k;
+
+			for (k = 0; k < n; k++)
+				vals[k] = selftest_rand(&state) & mask;
+			vals[0] = 0;			/* extremes as well as random */
+			if (n > 1)
+				vals[1] = mask;
+
+			initStringInfo(&a);
+			initStringInfo(&b);
+			bitpack(vals, n, width, &a);
+			ref_bitpack(vals, n, width, &b);
+			cases++;
+
+			if (a.len != b.len)
+				SELFTEST_FAIL("bitpack width=%d n=%u: length %d vs reference %d",
+							  width, n, a.len, b.len);
+			else if (memcmp(a.data, b.data, a.len) != 0)
+				SELFTEST_FAIL("bitpack width=%d n=%u: bytes differ from reference",
+							  width, n);
+
+			pfree(a.data);
+			pfree(b.data);
+			pfree(vals);
+		}
+	}
+
+	/*
+	 * 2. bw_put against the per-bit reference. The batched writer carries up to
+	 * seven bits between calls and takes at most 57 at a time, so the sequence of
+	 * widths matters more than any single one.
+	 */
+	{
+		uint64		state = UINT64CONST(0xB17);
+		int			round;
+
+		for (round = 0; round < 8; round++)
+		{
+			BitWriter	bwa;
+			BitWriter	bwb;
+			int			bits;
+
+			bw_init(&bwa);
+			bw_init(&bwb);
+			for (bits = 1; bits <= 64; bits++)
+			{
+				uint64		v = selftest_rand(&state);
+				int			use = ((bits + round) % 64) + 1;
+
+				bw_put(&bwa, v, use);
+				ref_bw_put(&bwb, v, use);
+			}
+			cases++;
+			if (bwa.buf.len != bwb.buf.len)
+				SELFTEST_FAIL("bw_put round=%d: length %d vs reference %d",
+							  round, bwa.buf.len, bwb.buf.len);
+			else if (memcmp(bwa.buf.data, bwb.buf.data, bwa.buf.len) != 0)
+				SELFTEST_FAIL("bw_put round=%d: bytes differ from reference", round);
+			else if (bwa.nbits != bwb.nbits || bwa.cur != bwb.cur)
+				SELFTEST_FAIL("bw_put round=%d: carry %d/%u vs reference %d/%u",
+							  round, bwa.nbits, (unsigned) bwa.cur,
+							  bwb.nbits, (unsigned) bwb.cur);
+		}
+	}
+
+	/* 3. clz_in and ctz_in against the reference loops, over the edges a
+	 * hardware bit scan gets wrong if the zero case or the window is off. */
+	{
+		static const int totals[] = {8, 16, 32, 64};
+		uint64		state = UINT64CONST(0xC12);
+		uint32		ti;
+
+		for (ti = 0; ti < lengthof(totals); ti++)
+		{
+			int			total = totals[ti];
+			uint64		twin = (total == 64)
+				? ~UINT64CONST(0) : ((UINT64CONST(1) << total) - 1);
+
+			for (i = 0; i < 40; i++)
+			{
+				uint64		x;
+				int			got;
+				int			want;
+
+				switch (i)
+				{
+					case 0: x = 0; break;
+					case 1: x = 1; break;
+					case 2: x = twin; break;
+					case 3: x = UINT64CONST(1) << (total - 1); break;
+					default: x = selftest_rand(&state) & twin; break;
+				}
+
+				got = clz_in(x, total);
+				want = ref_clz_in(x, total);
+				cases++;
+				if (got != want)
+					SELFTEST_FAIL("clz_in(0x%llx, %d) = %d, reference %d",
+								  (unsigned long long) x, total, got, want);
+
+				got = ctz_in(x);
+				want = (x == 0) ? 0 : ref_ctz_in(x);
+				cases++;
+				if (got != want)
+					SELFTEST_FAIL("ctz_in(0x%llx) = %d, reference %d",
+								  (unsigned long long) x, got, want);
+			}
+		}
+	}
+
+	/* How many comparisons ran, so a suite can refuse a pass that came from
+	 * doing nothing, or from the backend dying part way through. */
+	{
+		Datum		d[1];
+		bool		nulls[1] = {false};
+		char		msg[64];
+
+		snprintf(msg, sizeof(msg), "cases=%d", cases);
+		d[0] = CStringGetTextDatum(msg);
+		tuplestore_putvalues(tupstore, retdesc, d, nulls);
+	}
+
+#undef SELFTEST_FAIL
+
+	return (Datum) 0;
 }
