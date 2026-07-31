@@ -33,13 +33,25 @@ concurrency:
 jobs:
   # Build against every supported major. Fast, and it is what an API change
   # between majors trips first.
+  # Both architectures, because a build preflight is cheap and the project has
+  # never compiled anywhere but x86_64 (#242). aarch64 is not covered by the
+  # sanitizer gate's alignment checking, which reports a misaligned load on any
+  # host: what a second architecture adds here is codegen and ABI differences at
+  # compile time, and, in the nightly suite run, a weaker memory model than
+  # x86_64's.
   build:
-    name: build (PG ${{ matrix.pg }})
-    runs-on: ubuntu-latest
+    name: build (PG ${{ matrix.pg }}, ${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # Two dimensions, so this is a cross product: every major on both
+      # architectures. Expressed as a second dimension rather than as include
+      # entries, because an include entry carrying only new keys is merged into
+      # the existing combinations instead of multiplying them, which would have
+      # produced four jobs on one architecture rather than eight on two.
       matrix:
         pg: ['15', '16', '17', '18']
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
