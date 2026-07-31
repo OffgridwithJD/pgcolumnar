@@ -254,3 +254,43 @@ test/run_all_versions.sh --stop
 That reads the run lock, signals the owner, and lets it stop the suites and then
 their clusters through `pg_ctl`. It also clears a lock left by a run that is no
 longer alive. Interrupting a run with Ctrl-C does the same cleanup.
+
+## Documentation style
+
+The user-facing documentation follows the ASD-STE100 writing rules. These are:
+
+- one topic to a sentence
+- active voice
+- present tense
+- articles kept
+- no gerund used as a noun
+- one term for one thing
+- no idiom
+ `test/docs_style.sh` checks
+the rules that a machine can check. It runs in the matrix, so a document that
+drifts goes red.
+
+```sh
+test/docs_style.sh
+```
+
+It enforces four rules over `docs/*.md` and `README.md`:
+
+- no em dash and no en dash
+- no double hyphen used as a dash in prose
+- a maximum of 25 words to a sentence
+- no phrase from an idiom list
+
+`CHANGELOG.md` is a record of what happened at the time it happened. To rewrite a
+landed entry would edit history. The gate therefore checks it for dash characters
+only.
+
+**Full ASD-STE100 compliance is not claimed.** Compliance is defined against the
+licensed ASD Dictionary. That dictionary holds approximately 900 approved words.
+Each word has one approved meaning and one part of speech. That dictionary is not available to this
+project, so the approved-vocabulary rule is not enforced and is not claimed. An
+unverifiable claim of compliance would be worse than an honest partial one.
+
+`design/` holds internal engineering records and is not checked. Code comments
+are not checked either. Both exist to explain why a thing is the way it is, and
+that reasoning is worth more than the uniformity would be.

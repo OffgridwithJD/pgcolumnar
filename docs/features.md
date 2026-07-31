@@ -11,26 +11,28 @@ settings see the [configuration reference](configuration.md); for constraints se
   WAL, and page checksums apply. Data is stored in the native format, PGCN v1,
   specified in
   [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
-- Value encodings are chosen per vector by estimating each candidate on a strided
-  sample and applying only the best two, rather than applying every candidate to
-  the whole vector. On a 6,000,000-row load this cuts write time by about a third
-  with no measured ratio cost. `pgcolumnar.encoding_sample_rows = 0` restores the
+- The writer selects the value encoding for each vector. It estimates each
+  candidate on a strided sample and then applies only the best two. It does not
+  apply each candidate to the whole vector. On a load of 6,000,000 rows this
+  removes approximately one third of the write time, with no measured cost to the
+  ratio. `pgcolumnar.encoding_sample_rows = 0` restores the
   exhaustive behaviour.
-- Rows are grouped into row groups (the write unit). Within a row group each
-  column is stored and compressed as its own chunk, and a chunk's values are
-  encoded in fixed-size vectors. Zone maps hold each chunk's and each vector's
+- The writer puts the rows into row groups, which are the unit of the write. In a
+  row group, it keeps each column as its own chunk and compresses each chunk
+  separately. It encodes the values of a chunk in vectors of a fixed size. Zone maps hold each chunk's and each vector's
   minimum and maximum for skipping.
 
 ## Encodings and compression
 
-- Type-aware value encodings applied per chunk before compression: run-length
-  (RLE), frame-of-reference with bit-packing (FOR), delta, delta-of-delta,
-  Gorilla XOR for floats, and a dictionary for low-cardinality columns including
-  text. Each chunk picks the encoding that shrinks it most, then the block codec
-  runs on the encoded stream.
+- Value encodings that know the type, applied to each chunk before compression.
+  These are run-length (RLE), frame-of-reference
+  with bit-packing (FOR), delta, delta-of-delta, and Gorilla XOR for floats.
+  There is also a dictionary for columns with a low cardinality, which includes
+  text. Each chunk takes the encoding that makes it
+  smallest. The block codec then runs on the encoded stream.
 - Block compression with four codecs: `none`, `pglz`, `lz4`, and `zstd` with a
-  level. Each column chunk is compressed independently, and a chunk that does not
-  shrink is stored uncompressed.
+  level. The writer compresses each column chunk separately. It stores a chunk
+  without compression if the compression makes it no smaller.
 
 ## Scan and execution
 
@@ -39,25 +41,26 @@ settings see the [configuration reference](configuration.md); for constraints se
   scan skip chunk groups that cannot match a pushed-down `column op const`
   qualifier. A per-chunk bloom filter additionally skips groups on an equality
   probe whose value is provably absent, for hashable columns whose collation is
-  deterministic. That covers non-collatable types such as ids and uuids as well
-  as text under an ordinary deterministic collation; only nondeterministic
-  collations are excluded, since there equal values need not share a hash. The
+  deterministic. This covers the types that have no collation,
+  such as ids and uuids. It also covers text under an ordinary deterministic
+  collation. It does not cover a nondeterministic collation, because two equal
+  values there do not have to share a hash. The
   executor always re-applies the full qualifier, so skipping never changes
   results.
-- Vectorized aggregate: an ungrouped `count`, `sum`, `avg`, `min`, or `max` over
-  a supported column type is answered from the zone-map metadata, or by a
-  column-at-a-time fold over the decoded values when the group has deletes,
-  without the per-tuple executor path. `count(*)` with no filter is one case of
+- Vectorized aggregate. The zone-map metadata answers an ungrouped `count`,
+  `sum`, `avg`, `min` or `max` on a supported column type. If the group has
+  deletes, a fold over the decoded values answers it, one column at a time.
+  Neither path uses the per-tuple executor path. `count(*)` with no filter is one case of
   this: it is answered from each row group's stored row count and reads no column
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
   aggregate over the scan instead.
-- Column statistics: `ANALYZE` samples rows spread across row groups and stores
-  null fraction, distinct counts, most-common values, histograms and correlation,
-  so predicates are estimated from the data. Correlation is what lets the planner
+- Column statistics. `ANALYZE` samples rows from across the row groups. It stores
+  the null fraction, the distinct counts, the most-common values, the histograms
+  and the correlation. The planner then estimates the predicates from the data. Correlation is what lets the planner
   see the locality `pgcolumnar.vacuum_sorted` and Z-order clustering create.
-- Fetch by row number decodes only the columns the executor asks for and reuses
-  the decoded row group for the rest of the statement, so an index-driven read of
-  a wide table does not decode columns it will not return.
+- A fetch by row number decodes only the columns that the executor asks for. It
+  keeps the decoded row group for the rest of the statement. An index-driven read
+  of a wide table therefore does not decode the columns that it will not return.
 - Parallel scan across a table's row groups.
 - Read stream prefetch of block reads on PostgreSQL 17 and later
   (`pgcolumnar.enable_read_stream`).
@@ -72,18 +75,20 @@ coverage.
   assigned a stable row number and synthetic item pointer at insert time, so
   ordinary index scans fetch rows by item pointer.
 - Index-only scans: a columnar visibility-map fork records which chunk groups are
-  all-visible. Lazy `VACUUM` sets the bit for a group whose inserting transaction
-  precedes the oldest snapshot horizon and that has no deletes; any write clears
-  the bit, and both are WAL-logged. A covering index query answers from the index
-  tuple for all-visible groups and falls back to the snapshot-checked row fetch
-  otherwise, so an index-only answer never returns a row not visible to the
-  snapshot. On by default (`pgcolumnar.enable_index_only_scan`).
+  all-visible. Lazy `VACUUM` sets the bit for a group when two conditions
+  are true. The inserting transaction of the group must come before the oldest
+  snapshot horizon. The group must also have no deletes. Any write clears the bit. WAL
+  records both operations. For an all-visible group, a covering index query
+  answers from the index tuple. For any other group, it uses the row fetch that
+  checks the snapshot. An index-only answer therefore never returns a row that
+  the snapshot cannot see. On by default (`pgcolumnar.enable_index_only_scan`).
 
 ## Projections
 
-- Multiple projections (C-Store model): `pgcolumnar.add_projection(table, name,
-  columns, sort_key)` declares an extra physical copy of a column subset, stored
-  in its own sort order and sharing the table's row identity. Every insert fans
+- Multiple projections, which follow the C-Store model.
+  `pgcolumnar.add_projection(table, name, columns, sort_key)` declares an extra
+  physical copy of a subset of the columns. That copy has its own sort order. It
+  shares the row identity of the table. Every insert fans
   out to each projection. A projection stored sorted has tight per-chunk minimum
   and maximum ranges.
 - The planner scans a projection instead of the base table when it covers the
@@ -107,10 +112,11 @@ coverage.
 
 ## Schema changes
 
-- `ALTER TABLE ... ADD COLUMN` on a populated table without a rewrite: a row group
-  written before the column existed carries no chunk for it, and the reader
-  produces the column's missing value (NULL, or the constant default the column
-  was added with), matching heap fast-default behavior.
+- `ALTER TABLE ... ADD COLUMN` on a table that holds rows, with no rewrite. A row
+  group that the writer wrote before the column existed carries no chunk for that
+  column. The reader then gives the missing value of the column. That value is
+  NULL, or the constant default that you gave with the column. This matches the
+  fast-default behaviour of a heap table.
 - `pgcolumnar.alter_table_set_access_method(table, method)` converts a table to or
   from columnar storage. See [limitations](limitations.md) for the PostgreSQL 13
   and 14 behavior.
@@ -121,10 +127,9 @@ coverage.
   combining small row groups, reclaiming deleted-row space, and rebuilding indexes.
   `pgcolumnar.vacuum_full(schema)` does the same across a schema.
 - `pgcolumnar.vacuum_sorted(table, col [, col ...])` rewrites a table stored sorted
-  on the given columns, ascending with nulls last. A sorted key gives tight,
-  non-overlapping per-chunk ranges, so range predicates and ordered scans skip
-  more chunk groups, and the sort key compresses better under RLE and delta
-  encodings. It is a one-time reorder, like `CLUSTER`: rows inserted afterward
+  on the given columns, ascending with nulls last. A sorted key gives tight per-chunk ranges that
+  do not overlap. Range predicates and ordered scans therefore skip more chunk
+  groups. The sort key also compresses better under the RLE and delta encodings. It is a one-time reorder, like `CLUSTER`: rows inserted afterward
   append in insert order until the next call.
 - `pgcolumnar.stats(table)` reports per-row-group row counts, deleted-row counts,
   chunk counts, and byte sizes.
@@ -135,12 +140,13 @@ coverage.
   `pgcolumnar.export_parquet(table, path)`, both without a libarrow or libparquet
   dependency.
 - Import from Arrow and Parquet: `pgcolumnar.import_arrow(table, path)` and
-  `pgcolumnar.import_parquet(table, path)` into an existing target table The import
-  maintains every index on the target and enforces unique and exclusion
-  constraints, so it cannot leave the table in a state ordinary DML would refuse. The
-  Parquet reader parses Thrift metadata, decompresses uncompressed, Snappy, GZIP,
-  ZSTD, and LZ4_RAW pages, and decodes PLAIN and dictionary encodings from
-  data-page versions 1 and 2.
+  `pgcolumnar.import_parquet(table, path)`, into a target table that exists. The
+  import maintains each index on the target. It also applies the unique
+  constraints and the exclusion constraints. It therefore cannot leave the table
+  in a state that ordinary DML would refuse. The Parquet reader parses the Thrift
+  metadata. It decompresses uncompressed, Snappy, GZIP, ZSTD and LZ4_RAW pages.
+  It decodes the PLAIN encoding and the dictionary encoding, from data-page
+  version 1 and version 2.
 - Both directions cover scalar types, one-dimensional arrays, and composite types
   (Arrow List and Struct, Parquet LIST and group), with nulls at every level. The
   functions require superuser and run on little-endian hosts. See the
@@ -154,24 +160,25 @@ coverage.
   leaf columns and the PostgreSQL type each maps to.
 - The `pgcolumnar_parquet` foreign-data wrapper exposes a Parquet file as a
   foreign table: `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (path '...')`.
-- A `path` that is a directory reads every `*.parquet` file below it, at any
-  depth, as one
-  relation, and a glob pattern expands the same way, in a deterministic sorted
-  order.
-- The foreign-table scan pushes work down: row groups whose min/max statistics
-  exclude the query's predicate are skipped, and only the columns the query
-  references are decoded. `EXPLAIN ANALYZE` reports the row groups read and
+- A `path` that is a directory reads each `*.parquet` file below it, at any
+  depth, as one relation. A glob pattern expands in the same way. Both use a
+  sorted order that does not change between runs.
+- The foreign-table scan pushes work down. It skips a row group when the minimum
+  and maximum statistics exclude the predicate of the query. It decodes only the
+  columns that the query refers to. `EXPLAIN ANALYZE` reports the row groups read and
   skipped, the columns read, and the number of files. Skipping applies to
   `column op constant` clauses over integer and floating-point columns; see
   [limitations.md](limitations.md) for the exact conditions.
-- Hive-style partitioning: a foreign table declaring `partition_columns` reads
-  `col=value` directory names as columns, and a predicate on one of them drops
-  whole files before they are opened, so a pruned file costs no I/O at all.
+- Hive-style partitioning. A foreign table that declares `partition_columns`
+  reads a `col=value` directory name as a column. A predicate on such a column
+  removes complete files before the reader opens them. A file that pruning
+  removes therefore costs no I/O.
   `EXPLAIN ANALYZE` reports `Files Pruned`.
 - uuid and numeric columns are read from their Parquet representations, and the
   reader handles millisecond, microsecond, and nanosecond time units.
-- Files are read on demand rather than loaded whole. The footer is read first,
-  then pages as the scan reaches them, so memory use does not scale with file
-  size; a file is bounded by available disk rather than by memory. A row group that
+- Files are read on demand rather than loaded whole. The reader reads the footer first. It then
+  reads each page when the scan reaches it. Memory use therefore does not increase
+  with the size of the file. The available disk limits a file, and memory does
+  not. A row group that
   predicate pushdown excludes is never read from disk at all, and
   `parquet_schema` reads only the footer.

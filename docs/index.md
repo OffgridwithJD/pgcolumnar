@@ -25,10 +25,11 @@ licensed under the MIT License.
 
 ## When to use columnar storage
 
-A columnar table stores each column separately and compresses it. Reads that
-touch a subset of columns and scan many rows benefit, because only the requested
-columns are read and decompressed, and per-chunk minimum and maximum values let
-the scan skip groups of rows that cannot match a filter.
+A columnar table stores each column separately and compresses it. A read that
+uses a subset of the columns and scans many rows gets a benefit from this. The
+scan reads and decompresses only the columns that the query asks for. The minimum
+and maximum of each chunk also let the scan skip the groups of rows that cannot
+match a filter.
 
 Use pgColumnar for:
 
