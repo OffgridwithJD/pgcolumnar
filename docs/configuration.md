@@ -110,6 +110,7 @@ SELECT pgcolumnar.set_options(
 | `compression` | name | One of `none`, `pglz`, `lz4`, `zstd`. |
 | `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
 | `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
+| `sort_by` | name[] | Declared physical sort key (#288), applied by `pgcolumnar.vacuum_sorted(t)` with no columns. Column names, so it survives `pg_dump`/restore. Not auto-maintained; re-run after inserts. Cannot name a virtual generated column. Clear with `reset_options(t, sort_by => true)`. |
 
 The function does not change an argument that keeps its default value of
 `NULL`. The function refuses a value that is outside the permitted range of a
