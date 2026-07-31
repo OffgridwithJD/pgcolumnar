@@ -87,6 +87,22 @@ A physical copy keeps the exact bytes, and a build of the same version can read
 it. `pg_basebackup`, a file-system snapshot and replication all make such a copy.
 A physical copy does not replace the source across a version change.
 
+The same posture covers the extension's own catalog, not only the on-disk data
+format. The install script of a build defines the `pgcolumnar` catalog tables for a fresh
+`CREATE EXTENSION`. The pre-release ships no `ALTER EXTENSION UPDATE` scripts, so
+there is no in-place catalog migration either.
+
+You can replace the shared library and the SQL script, and then restart, without
+a new `CREATE EXTENSION`. This can leave a catalog table without a column that a
+newer build needs. For example, `sort_by` was added to `pgcolumnar.options`. A function that
+uses that column fails against an `options` table that an older build created.
+
+Across an incompatible build, recreate the extension with `DROP EXTENSION` and
+`CREATE EXTENSION`, and load the data again. Do not replace the files in place. A
+dump that exists still restores into a newer build. `pg_dump` writes an explicit
+column list for the configuration tables of the extension, and a new column takes
+its default of NULL.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
@@ -207,6 +223,16 @@ returning no rows.
   it flushes with fewer than `stripe_row_limit` rows therefore leaves a gap in
   the row-number space. A row number must be unique and stable, and nothing more.
   The gap does no damage.
+- A declared `sort_by` key (#288) and `pgcolumnar.vacuum_sorted` are **one-shot**.
+  Rows that an insert adds after a sort go in at the end, in insertion order. No
+  operation sorts them again. Skip quality therefore decreases until the next
+  `vacuum_sorted`. PostgreSQL `CLUSTER` behaves the same way and is also not
+  maintained on insert. An online re-sort for text keys that does not block, and
+  automatic maintenance, are not implemented yet. A sort key is also a trade. It
+  puts the values of one dimension together, and it spreads the other dimensions
+  across each chunk group. A query that filters a *different* dimension can
+  therefore skip fewer groups than the natural insertion order permits. Sort by
+  the key that your selective queries filter on.
 
 ## Index-only scans
 

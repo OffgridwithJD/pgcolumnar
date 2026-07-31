@@ -54,8 +54,23 @@ CREATE TABLE pgcolumnar.options (
 	stripe_row_limit integer,
 	compression_level integer,
 	compression name,
-	encode_effort name
+	encode_effort name,
+	sort_by name[]                     -- declared physical sort key (#288)
 );
+
+/*
+ * sort_by holds COLUMN NAMES, not attnums, on purpose. pgcolumnar.options is
+ * the one catalog carried through pg_dump (pg_extension_config_dump below); a
+ * plain (non-binary-upgrade) pg_dump does not re-emit dropped columns, so live
+ * attnums renumber densely on restore while names do not. The governing rule:
+ * store NAMES in the dumped catalog (regclass, sort_by); store ATTNUMS only in
+ * the storage_id-keyed catalogs that are NOT dumped (projection.sort_key,
+ * row_group.sort_key), which are regenerated on restore anyway. See the
+ * regclass rationale below. NULL means no declared sort key; the apply path
+ * (vacuum_sorted with no explicit columns) resolves the names to attnums each
+ * time and re-validates them, so a later DROP/RENAME of a named column is
+ * caught then rather than corrupting anything.
+ */
 
 CREATE UNIQUE INDEX options_pkey
 	ON pgcolumnar.options USING btree (regclass);
@@ -288,10 +303,13 @@ CREATE FUNCTION pgcolumnar.set_options(
 	stripe_row_limit int DEFAULT NULL,
 	compression name DEFAULT NULL,
 	compression_level int DEFAULT NULL,
-	encode_effort name DEFAULT NULL)
+	encode_effort name DEFAULT NULL,
+	sort_by name[] DEFAULT NULL)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $set_options$
+DECLARE
+	col name;
 BEGIN
 	IF encode_effort IS NOT NULL AND
 	   encode_effort NOT IN ('full', 'fast') THEN
@@ -324,11 +342,38 @@ BEGIN
 		RAISE EXCEPTION 'compression_level must be between 1 and 22';
 	END IF;
 
+	/*
+	 * sort_by declares the physical sort key applied by vacuum_sorted() with no
+	 * explicit columns (#288). This is a cheap early check only: each named
+	 * column must exist, not be dropped, and not be a VIRTUAL generated column
+	 * (its value is not stored, so it cannot be sorted on). Orderability
+	 * (a default btree ordering operator) is NOT checked here -- the C apply
+	 * path is authoritative and re-resolves and re-validates the names every
+	 * run, because a column can be dropped or altered after it is declared.
+	 * attgenerated is '' or 's' before PG18; 'v' only exists from PG18, so the
+	 * "<> 'v'" test is correct and inert on older majors.
+	 */
+	IF sort_by IS NOT NULL THEN
+		FOREACH col IN ARRAY sort_by LOOP
+			IF NOT EXISTS (SELECT 1 FROM pg_attribute a
+						   WHERE a.attrelid = table_name
+							 AND a.attname = col
+							 AND a.attnum > 0
+							 AND NOT a.attisdropped
+							 AND a.attgenerated <> 'v') THEN
+				RAISE EXCEPTION 'column "%" cannot be used in sort_by for table %',
+					col, table_name
+					USING HINT = 'The column must exist, must not be dropped, '
+						'and must not be a VIRTUAL generated column.';
+			END IF;
+		END LOOP;
+	END IF;
+
 	INSERT INTO pgcolumnar.options AS o
 		(regclass, chunk_group_row_limit, stripe_row_limit,
-		 compression, compression_level, encode_effort)
+		 compression, compression_level, encode_effort, sort_by)
 	VALUES (table_name, chunk_group_row_limit, stripe_row_limit,
-			compression, compression_level, encode_effort)
+			compression, compression_level, encode_effort, sort_by)
 	ON CONFLICT (regclass) DO UPDATE SET
 		chunk_group_row_limit =
 			COALESCE(EXCLUDED.chunk_group_row_limit, o.chunk_group_row_limit),
@@ -339,12 +384,14 @@ BEGIN
 		compression_level =
 			COALESCE(EXCLUDED.compression_level, o.compression_level),
 		encode_effort =
-			COALESCE(EXCLUDED.encode_effort, o.encode_effort);
+			COALESCE(EXCLUDED.encode_effort, o.encode_effort),
+		sort_by =
+			COALESCE(EXCLUDED.sort_by, o.sort_by);
 END;
 $set_options$;
 
-COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int, name)
-	IS 'set per-table columnar options; NULL leaves a value unchanged';
+COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int, name, name[])
+	IS 'set per-table columnar options; NULL leaves a value unchanged. sort_by declares the physical sort key applied by vacuum_sorted() with no explicit columns (#288); it is NOT auto-maintained -- rows inserted after a sort append in insert order, so re-run vacuum_sorted() to re-establish it, like PostgreSQL CLUSTER';
 
 CREATE FUNCTION pgcolumnar.reset_options(
 	table_name regclass,
@@ -352,7 +399,8 @@ CREATE FUNCTION pgcolumnar.reset_options(
 	stripe_row_limit bool DEFAULT false,
 	compression bool DEFAULT false,
 	compression_level bool DEFAULT false,
-	encode_effort bool DEFAULT false)
+	encode_effort bool DEFAULT false,
+	sort_by bool DEFAULT false)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $reset_options$
@@ -372,12 +420,15 @@ BEGIN
 			THEN NULL ELSE o.compression_level END,
 		encode_effort = CASE
 			WHEN reset_options.encode_effort
-			THEN NULL ELSE o.encode_effort END
+			THEN NULL ELSE o.encode_effort END,
+		sort_by = CASE
+			WHEN reset_options.sort_by
+			THEN NULL ELSE o.sort_by END
 	WHERE o.regclass = table_name;
 END;
 $reset_options$;
 
-COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool, bool)
+COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool, bool, bool)
 	IS 'reset per-table columnar options to the instance defaults';
 
 /* ---------------------------------------------------------------------------
@@ -478,7 +529,22 @@ CREATE FUNCTION pgcolumnar.vacuum_sorted(
 	AS 'MODULE_PATHNAME', 'columnar_vacuum_sorted';
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
-	IS 'compact a columnar table, storing rows sorted ascending on the given columns';
+	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text (unlike the numeric-only Z-order cluster()). One-shot: not auto-maintained.';
+
+/*
+ * One-argument form: apply the declared sort_by key (#288). A VARIADIC function
+ * cannot be called cleanly with zero variadic arguments from an unknown literal
+ * (vacuum_sorted('t') would not resolve), so this explicit overload gives a
+ * clean bare-table call. It shares the C entry point, which uses PG_NARGS() to
+ * detect the missing column list and fall back to the persisted key.
+ */
+CREATE FUNCTION pgcolumnar.vacuum_sorted(tablename regclass)
+	RETURNS void
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'columnar_vacuum_sorted';
+
+COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass)
+	IS 'apply the table''s declared sort_by key from set_options (#288); errors if none is declared. Equivalent to a bare CLUSTER re-applying a remembered index.';
 
 CREATE FUNCTION pgcolumnar.cluster(
 	tablename regclass,

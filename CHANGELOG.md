@@ -11,6 +11,15 @@ unreleased. For the forward-looking plan see
 
 ### Added
 
+- Declarative `sort_by` clustering key (#288). `pgcolumnar.set_options(t, sort_by
+  => ARRAY['col', ...])` records a physical sort key; `pgcolumnar.vacuum_sorted(t)`
+  with no columns re-applies it, like PostgreSQL `CLUSTER` remembering an index.
+  The sorted rewrite works on any btree-orderable column, text included (the
+  Z-order `cluster()` is numeric-only), so a segment key such as `hostname`
+  tightens its zone maps and lets equality/range filters on it skip chunk groups.
+  Stored as column names, so it survives `pg_dump`/restore. Not auto-maintained;
+  re-run after inserts. Virtual generated columns are rejected as a sort key.
+
 - Column-oriented table access method (`USING pgcolumnar`) with per-column
   compression, chunk-group minimum and maximum skipping, per-chunk bloom filters,
   and a vectorized aggregate path.

@@ -23,8 +23,20 @@ SELECT pgcolumnar.alter_table_set_access_method('events', 'pgcolumnar');
 ### pgcolumnar.set_options(...) and pgcolumnar.reset_options(...)
 
 Set or reset per-table storage options (row group and vector row limits,
-compression codec and level, and encode effort). See
+compression codec and level, encode effort, and the declared `sort_by` key). See
 [Configuration reference](configuration.md#per-table-storage-options).
+
+`sort_by name[]` declares a physical sort key, applied by
+[`pgcolumnar.vacuum_sorted`](#pgcolumnarvacuum_sortedtablename-regclass-variadic-sort_columns-name)
+with no explicit columns. It is not auto-maintained; rows inserted after a sort
+append in insertion order, so re-run `vacuum_sorted` to re-establish it, like
+PostgreSQL `CLUSTER`. Column names must exist and cannot be virtual generated
+columns.
+
+```sql
+SELECT pgcolumnar.set_options('events', sort_by => ARRAY['customer_id','ts']);
+SELECT pgcolumnar.reset_options('events', sort_by => true);   -- clear it
+```
 
 ### pgcolumnar.get_storage_id(rel regclass) returns bigint
 
@@ -49,15 +61,35 @@ SELECT pgcolumnar.vacuum('events');
 
 ### pgcolumnar.vacuum_sorted(tablename regclass, VARIADIC sort_columns name[])
 
-Compacts a columnar table and stores its rows sorted ascending on the given
-columns. Sorted storage makes per-chunk minimum and maximum values tight and
-non-overlapping on the sort columns, so range filters on those columns skip more
-chunk groups. Use it for a column whose values are scattered in insertion order
-but are often queried by range.
+Compacts a columnar table and stores its rows sorted ascending (NULLS LAST) on
+the given columns. Sorted storage makes the per-chunk minimum and
+maximum values tight on the sort columns, and it stops them overlapping.
+Equality filters and range filters on those columns therefore skip more chunk
+groups. Any column with a btree ordering works, and this includes **text**. The
+Z-order `cluster()` takes numeric columns only. Use it for a segment
+key (e.g. `customer_id`, `hostname`) whose values are scattered in insertion
+order but are often filtered on.
+
+With **no columns**, it applies the `sort_by` key that `set_options` declared for
+the table. A bare `CLUSTER` re-applies a remembered index in the same way. It
+raises an error if the table declares no key:
 
 ```sql
-SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
+SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');          -- explicit
+SELECT pgcolumnar.set_options('events', sort_by => ARRAY['customer_id']);
+SELECT pgcolumnar.vacuum_sorted('events');                         -- declared key
 ```
+
+A sort key is a **trade** and not a free gain. A sort by a segment key puts the
+rows of each segment together, so a filter on that key skips most groups. It also
+spreads each *other* dimension across every group.
+
+For time-series data, a sort by `(segment_key, time)` keeps time in order *inside*
+each segment. A query that filters on time alone, across all segments, then
+prunes less than the natural time order permits.
+
+Sort by the key that your selective queries filter on. This is a one-shot
+reorder, and no operation maintains it.
 
 ### pgcolumnar.cluster(tablename regclass, VARIADIC columns name[])
 

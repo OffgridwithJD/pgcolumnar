@@ -455,6 +455,10 @@ extern void ColumnarDeleteMetadata(uint64 storageId);
 extern bool ColumnarReadOptions(Oid relid, ColumnarOptions *opts);
 extern void ColumnarDeleteOptions(Oid relid);
 
+/* declared physical sort key (#288); List of pstrdup'd column names, NIL if
+ * none is declared. Names (not attnums) so the value survives dump/restore. */
+extern List *ColumnarReadSortBy(Oid relid);
+
 /* projection catalog (gap 26, format 2.2). List entries are ColumnarProjection*
  * palloc'd in the current context, ordered by projection_id. */
 extern List *ColumnarListProjections(uint64 storageId);
