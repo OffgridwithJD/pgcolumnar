@@ -33,6 +33,7 @@
 #include <math.h>
 
 #include "catalog/pg_type.h"
+#include "port/pg_bitutils.h"
 #include "utils/memutils.h"
 
 /*
@@ -494,23 +495,40 @@ bw_init(BitWriter *bw)
 	bw->nbits = 0;
 }
 
-/* append the low `bits` bits of v, least-significant first */
+/*
+ * append the low `bits` bits of v, least-significant first
+ *
+ * Same LSB-first stream as a per-bit loop, but bits are merged into a 64-bit
+ * accumulator and whole bytes are flushed at once. The accumulator holds the
+ * up-to-7 carried bits (bw->cur) in its low positions with the new bits above,
+ * so each chunk stays within 64 bits: <= 7 carried + <= 57 taken.
+ */
 static void
 bw_put(BitWriter *bw, uint64 v, int bits)
 {
-	int			i;
+	if (bits <= 0)
+		return;
+	if (bits < 64)
+		v &= (UINT64CONST(1) << bits) - 1;
 
-	for (i = 0; i < bits; i++)
+	while (bits > 0)
 	{
-		if ((v >> i) & 1)
-			bw->cur |= (uint8) (1u << bw->nbits);
-		bw->nbits++;
-		if (bw->nbits == 8)
+		int			take = bits < 57 ? bits : 57;
+		uint64		chunk = v & ((UINT64CONST(1) << take) - 1);
+		uint64		acc = (uint64) bw->cur | (chunk << bw->nbits);
+		int			have = bw->nbits + take;
+
+		while (have >= 8)
 		{
-			appendStringInfoChar(&bw->buf, (char) bw->cur);
-			bw->cur = 0;
-			bw->nbits = 0;
+			appendStringInfoChar(&bw->buf, (char) (acc & 0xff));
+			acc >>= 8;
+			have -= 8;
 		}
+		bw->cur = (uint8) (acc & 0xff);
+		bw->nbits = have;
+
+		v >>= take;
+		bits -= take;
 	}
 }
 
@@ -562,25 +580,29 @@ br_get(BitReader *br, int bits)
 	return v;
 }
 
-/* leading/trailing zero counts of a non-zero value within a `total`-bit window */
+/*
+ * leading/trailing zero counts of a value within a `total`-bit window
+ *
+ * pg_leftmost/rightmost_one_pos64 compile to a hardware bit-scan and require a
+ * non-zero argument. clz within the window is the gap from the top window bit
+ * (total-1) down to the highest set bit; ctz is simply the lowest set-bit
+ * position. x < 2^total holds for every caller (total == w*8 and x is a w-byte
+ * value). x == 0 keeps the old all-zeros answer.
+ */
 static inline int
 clz_in(uint64 x, int total)
 {
-	int			n = 0;
-
-	while (n < total && ((x >> (total - 1 - n)) & 1) == 0)
-		n++;
-	return n;
+	if (x == 0)
+		return total;
+	return (total - 1) - pg_leftmost_one_pos64(x);
 }
 
 static inline int
 ctz_in(uint64 x)
 {
-	int			n = 0;
-
-	while (((x >> n) & 1) == 0)
-		n++;
-	return n;
+	if (x == 0)
+		return 0;
+	return pg_rightmost_one_pos64(x);
 }
 
 /* -------------------------------------------------------------------------
