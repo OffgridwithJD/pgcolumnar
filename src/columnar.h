@@ -470,6 +470,9 @@ extern void ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 												ArrayType *columns,
 												ArrayType *sortKey);
 extern void ColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
+/* Every declaration for a relation, for the drop hook: a dropped table must not
+ * leave rows behind whose regclass no longer resolves (#304). */
+extern void ColumnarDeleteProjectionDeclarationsForRel(Oid relid);
 extern void ColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
 
 /* whether a relation uses the columnar table access method */

@@ -289,4 +289,40 @@ check "new snapshot projection scan sees both batches" "$final" "20000"
 exec 9>&-
 wait "$A_PID" 2>/dev/null || true
 
+# --- DROP TABLE must not orphan a declaration (#304) -------------------------
+#
+# pgcolumnar.projection_declaration is keyed by regclass and dumped, so a row
+# left behind by a dropped table holds a regclass that no longer resolves. That
+# is not confined to the dropped table: rebuild_projections() resolves pd.rel for
+# every declaration, and resolving a dropped relation raises, so one orphan used
+# to abort the rebuild for every other table in the database.
+
+psql_run "DROP TABLE IF EXISTS od1; DROP TABLE IF EXISTS od2;" >/dev/null 2>&1
+for t in od1 od2; do
+	psql_run "CREATE TABLE $t (id int, v text) USING pgcolumnar;
+		INSERT INTO $t SELECT g, md5(g::text) FROM generate_series(1,500) g;
+		SELECT pgcolumnar.add_projection('$t','${t}_p',ARRAY['id','v'],ARRAY['id']);" >/dev/null 2>&1
+done
+decl="SELECT count(*) FROM pgcolumnar.projection_declaration WHERE rel::text IN ('od1','od2')"
+check "two declared projections to start" "$(q "$decl;")" "2"
+
+psql_run "DROP TABLE od1;" >/dev/null 2>&1
+check "DROP TABLE removes its declaration (#304)" "$(q "$decl;")" "1"
+check "and leaves the other table's declaration alone" \
+	"$(q "SELECT name FROM pgcolumnar.projection_declaration WHERE rel::text = 'od2';")" "od2_p"
+check "so a rebuild still works for the rest of the database" \
+	"$(q 'SELECT pgcolumnar.rebuild_projections();')" "0"
+
+# A database created by the build that shipped without the drop hook already
+# holds orphans, so the rebuild repairs them rather than aborting on them.
+psql_run "INSERT INTO pgcolumnar.projection_declaration
+	VALUES (2147483647::oid::regclass, 'ghost', ARRAY['id'], ARRAY['id']);" >/dev/null 2>&1
+check "an orphan left by an older build is present" \
+	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration WHERE name = 'ghost';")" "1"
+check "the rebuild does not abort on it" \
+	"$(q 'SELECT pgcolumnar.rebuild_projections();')" "0"
+check "and it removed the orphan" \
+	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration WHERE name = 'ghost';")" "0"
+psql_run "DROP TABLE IF EXISTS od2;" >/dev/null 2>&1
+
 pgc_summary

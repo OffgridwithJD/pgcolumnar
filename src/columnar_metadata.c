@@ -2458,6 +2458,39 @@ ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 	CommandCounterIncrement();
 }
 
+/*
+ * ColumnarDeleteProjectionDeclarationsForRel
+ *		Forget every declaration for a relation. Called when the relation is
+ *		dropped (#304).
+ *
+ *		Without this a dropped table leaves declaration rows whose regclass no
+ *		longer resolves, and the damage is not confined to that table: the
+ *		orphan is dumped by config_dump as a bare OID pointing at nothing, and
+ *		rebuild_projections() aborts on it, which stops every other table in the
+ *		database being rebuilt. pgcolumnar.options avoids this by being cleaned in
+ *		the same hook; this catalog needs the same treatment.
+ */
+void
+ColumnarDeleteProjectionDeclarationsForRel(Oid relid)
+{
+	Relation	rel = open_columnar_table("projection_declaration",
+										  RowExclusiveLock);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		CatalogTupleDelete(rel, &tuple->t_self);
+	systable_endscan(scan);
+
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
+}
+
 List *
 ColumnarListProjections(uint64 storageId)
 {
