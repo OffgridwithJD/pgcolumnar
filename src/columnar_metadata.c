@@ -40,6 +40,7 @@
 #define Anum_options_compression_level 4
 #define Anum_options_compression 5
 #define Anum_options_encode_effort 6
+#define Anum_options_sort_by 7
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
 #define Anum_projection_storage_id 1
@@ -2180,6 +2181,68 @@ ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
 	table_close(rel, AccessShareLock);
 
 	return found;
+}
+
+
+/*
+ * ColumnarReadSortBy
+ *		Load the declared sort_by column names for a relation (#288) from
+ *		pgcolumnar.options. Returns a List of pstrdup'd column-name strings in
+ *		the caller's memory context, or NIL when no sort key is declared (no
+ *		options row, or sort_by is SQL NULL, or the array is empty). Stored as
+ *		column NAMES, not attnums, so it survives dump/restore; the caller
+ *		resolves the names to attnums and validates them each apply. Read with
+ *		the same command-id-advanced snapshot as ColumnarReadOptions so a
+ *		sort_by set earlier in this transaction is visible.
+ */
+List *
+ColumnarReadSortBy(Oid relid)
+{
+	Relation	rel = open_columnar_table("options", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Snapshot	base;
+	Snapshot	snapshot;
+	List	   *names = NIL;
+
+	base = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
+	snapshot = ColumnarCatalogSnapshot(base);
+
+	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_options_sort_by, tupdesc, &isnull);
+
+		if (!isnull)
+		{
+			ArrayType  *arr = DatumGetArrayTypeP(d);
+			Datum	   *elems;
+			bool	   *elnulls;
+			int			n;
+			int			i;
+
+			deconstruct_array(arr, NAMEOID, NAMEDATALEN, false, 'c',
+							  &elems, &elnulls, &n);
+			for (i = 0; i < n; i++)
+			{
+				/* set_options rejects NULL names; guard defensively anyway */
+				if (elnulls[i])
+					continue;
+				names = lappend(names,
+								pstrdup(NameStr(*DatumGetName(elems[i]))));
+			}
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return names;
 }
 
 

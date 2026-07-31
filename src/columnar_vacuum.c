@@ -532,7 +532,9 @@ columnar_recluster(PG_FUNCTION_ARGS)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("column \"%s\" of type %s cannot be used as a clustering key",
 							colname, format_type_be(att->atttypid)),
-					 errhint("Z-order clustering supports integer, date/time, boolean, and floating-point columns.")));
+					 errhint("Z-order clustering supports integer, date/time, boolean, and floating-point columns. "
+							 "For a text or other btree-orderable key, use pgcolumnar.vacuum_sorted() "
+							 "(lexicographic sort on the given columns), optionally declared via set_options(..., sort_by => ...).")));
 		}
 		atts[i] = attno;
 	}
@@ -1145,36 +1147,31 @@ columnar_vacuum(PG_FUNCTION_ARGS)
  *		and helps the RLE/DELTA encodings on that key, so range predicates and
  *		ordered scans skip far more chunk groups. Results are unchanged; this only
  *		reorders physical storage. It is a one-shot reorder (not auto-maintained).
+ *
+ *		With no explicit columns (vacuum_sorted('t')) it applies the table's
+ *		declared sort_by key from pgcolumnar.options (#288), like a bare
+ *		"CLUSTER t" re-applying a remembered index; it errors if none is set.
+ *		Sorting supports any btree-orderable column, text included; the Z-order
+ *		cluster() path is numeric-only.
  */
 Datum
 columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 {
-	Oid			relid = PG_GETARG_OID(0);
-	ArrayType  *colArray;
-	Datum	   *colDatums;
-	bool	   *colNulls;
-	int			ncols;
+	Oid			relid;
 	Relation	rel;
 	TupleDesc	tupdesc;
+	List	   *colNames = NIL;
+	bool		fromPersisted = false;
 	AttrNumber *sortAtts;
+	int			ncols;
 	int			i;
+	ListCell   *lc;
 
 	if (PG_ARGISNULL(0))
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("table name cannot be null")));
-	if (PG_ARGISNULL(1))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("at least one sort column is required")));
-
-	colArray = PG_GETARG_ARRAYTYPE_P(1);
-	deconstruct_array(colArray, NAMEOID, NAMEDATALEN, false, 'c',
-					  &colDatums, &colNulls, &ncols);
-	if (ncols < 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("at least one sort column is required")));
+	relid = PG_GETARG_OID(0);
 
 	rel = table_open(relid, AccessExclusiveLock);
 
@@ -1189,34 +1186,101 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 
 	ColumnarRequireTableOwner(rel);
 
+	/*
+	 * Collect the sort-column names. Explicit columns win; when none are given
+	 * (vacuum_sorted('t'), or an empty/NULL VARIADIC array) fall back to the
+	 * sort_by key declared with set_options (#288). Both sources feed one
+	 * resolution + validation loop below so the explicit and declared paths
+	 * cannot diverge. Mirrors bare "CLUSTER t" re-applying a remembered index.
+	 */
+	if (!PG_ARGISNULL(1))
+	{
+		ArrayType  *colArray = PG_GETARG_ARRAYTYPE_P(1);
+		Datum	   *colDatums;
+		bool	   *colNulls;
+		int			n;
+
+		deconstruct_array(colArray, NAMEOID, NAMEDATALEN, false, 'c',
+						  &colDatums, &colNulls, &n);
+		for (i = 0; i < n; i++)
+		{
+			if (colNulls[i])
+			{
+				table_close(rel, AccessExclusiveLock);
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("sort column name cannot be null")));
+			}
+			colNames = lappend(colNames,
+							   pstrdup(NameStr(*DatumGetName(colDatums[i]))));
+		}
+	}
+
+	if (colNames == NIL)
+	{
+		colNames = ColumnarReadSortBy(relid);
+		fromPersisted = true;
+	}
+
+	if (colNames == NIL)
+	{
+		table_close(rel, AccessExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("no sort columns given and table \"%s\" has no declared sort_by key",
+						RelationGetRelationName(rel))),
+				errhint("Pass the sort columns explicitly, or declare them with "
+						"pgcolumnar.set_options(..., sort_by => ARRAY[...])."));
+	}
+
 	tupdesc = RelationGetDescr(rel);
+	ncols = list_length(colNames);
 	sortAtts = palloc(ncols * sizeof(AttrNumber));
 
-	for (i = 0; i < ncols; i++)
+	i = 0;
+	foreach(lc, colNames)
 	{
-		char	   *colname;
-		AttrNumber	attno;
+		char	   *colname = (char *) lfirst(lc);
+		AttrNumber	attno = get_attnum(relid, colname);
+		Form_pg_attribute att;
 
-		if (colNulls[i])
-		{
-			table_close(rel, AccessExclusiveLock);
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("sort column name cannot be null")));
-		}
-
-		colname = NameStr(*DatumGetName(colDatums[i]));
-		attno = get_attnum(relid, colname);
 		if (attno == InvalidAttrNumber || attno <= 0 ||
 			TupleDescAttr(tupdesc, attno - 1)->attisdropped)
 		{
 			table_close(rel, AccessExclusiveLock);
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("column \"%s\" does not exist in table \"%s\"",
-							colname, RelationGetRelationName(rel))));
+			if (fromPersisted)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("declared sort_by column \"%s\" does not exist in table \"%s\"",
+								colname, RelationGetRelationName(rel)),
+						 errhint("A column named in sort_by was dropped or renamed. Update it with "
+								 "pgcolumnar.set_options(..., sort_by => ARRAY[...]) or clear it with "
+								 "pgcolumnar.reset_options(..., sort_by => true).")));
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("column \"%s\" does not exist in table \"%s\"",
+								colname, RelationGetRelationName(rel))));
 		}
-		sortAtts[i] = attno;
+
+		att = TupleDescAttr(tupdesc, attno - 1);
+
+		/*
+		 * A virtual generated column ('v', PG18+) has no stored value, so rows
+		 * cannot be ordered by it. The literal is inert on PG < 18, where
+		 * attgenerated is only '\0' or 's'. Stored generated columns are fine.
+		 */
+		if (att->attgenerated == 'v')
+		{
+			table_close(rel, AccessExclusiveLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("column \"%s\" is a virtual generated column and cannot be a sort key",
+							colname),
+					 errhint("Virtual generated columns are not stored, so rows cannot be ordered by them.")));
+		}
+
+		sortAtts[i++] = attno;
 	}
 
 	columnar_compact_relation(rel, ncols, sortAtts);
@@ -1329,7 +1393,9 @@ columnar_cluster(PG_FUNCTION_ARGS)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("column \"%s\" of type %s cannot be used as a clustering key",
 							colname, format_type_be(att->atttypid)),
-					 errhint("Z-order clustering supports integer, date/time, boolean, and floating-point columns.")));
+					 errhint("Z-order clustering supports integer, date/time, boolean, and floating-point columns. "
+							 "For a text or other btree-orderable key, use pgcolumnar.vacuum_sorted() "
+							 "(lexicographic sort on the given columns), optionally declared via set_options(..., sort_by => ...).")));
 		}
 		atts[i] = attno;
 	}
