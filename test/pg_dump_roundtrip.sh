@@ -43,6 +43,16 @@ psql_run "INSERT INTO dt SELECT g, g % 7, 'p'||g FROM generate_series(1,50000) g
 psql_run "CREATE INDEX dt_id_idx ON dt (id);" >/dev/null
 psql_run "SELECT pgcolumnar.add_projection('dt', 'dt_proj', ARRAY['id','payload'], ARRAY['id']);" >/dev/null
 
+# #288: a table whose declared sort_by names columns that sit AFTER a dropped
+# column, so a plain pg_dump renumbers their attnums on restore (the dropped
+# column is not re-emitted). sort_by stores column NAMES, so it survives and
+# still resolves; a stored attnum would silently sort the restored table on the
+# wrong column. Verified in verify() for both dump formats.
+psql_run "CREATE TABLE ds (id bigint, doomed int, host text, ts timestamptz) USING pgcolumnar;" >/dev/null
+psql_run "INSERT INTO ds (id, host, ts) SELECT g, 'h'||(g%20), '2024-01-01'::timestamptz + (g%100)*interval '1 minute' FROM generate_series(1,20000) g;" >/dev/null
+psql_run "ALTER TABLE ds DROP COLUMN doomed;" >/dev/null
+psql_run "SELECT pgcolumnar.set_options('ds', sort_by => ARRAY['host','ts']);" >/dev/null
+
 sum_sql="SELECT coalesce(sum(hashtextextended(id::text||'|'||kind::text||'|'||payload, 0)), 0) FROM dt"
 am_sql="SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.relname = 'dt'"
 # A scalar subquery, so the answer is defined whether or not a row exists. The
@@ -88,6 +98,14 @@ verify() {  # label db
 	# fix lands, exactly as the options check was flipped by #258.
 	check "$label: projections are NOT carried by pg_dump (pinned; see #266)" \
 		"$(on "$db" "$proj_sql;")" "0"
+	# #288: the declared sort_by (stored as NAMES) survives even though ds had a
+	# dropped column that renumbered attnums on restore, and the zero-arg apply
+	# resolves the restored names and runs. A stored attnum would have pointed at
+	# the wrong or a missing column here.
+	check "$label: declared sort_by survives restore" \
+		"$(on "$db" "SELECT sort_by::text FROM pgcolumnar.options WHERE regclass='ds'::regclass;")" "{host,ts}"
+	check "$label: restored sort_by resolves and applies" \
+		"$(on "$db" "SELECT pgcolumnar.vacuum_sorted('ds'); SELECT count(*) FROM ds;" 2>/dev/null | tail -1)" "20000"
 	on postgres "DROP DATABASE IF EXISTS $db;" >/dev/null 2>&1
 }
 
