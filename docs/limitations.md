@@ -207,6 +207,14 @@ returning no rows.
   it flushes with fewer than `stripe_row_limit` rows therefore leaves a gap in
   the row-number space. A row number must be unique and stable, and nothing more.
   The gap does no damage.
+- A declared `sort_by` key (#288) and `pgcolumnar.vacuum_sorted` are one-shot.
+  Rows inserted after a sort are added in insertion order and are not re-sorted.
+  Skip quality then decays until the next `vacuum_sorted`. PostgreSQL `CLUSTER`
+  is also not maintained on insert. An online re-sort for text keys and automatic
+  maintenance are not built yet. Choosing a sort key is a trade-off. It groups
+  the rows by one dimension and spreads the others across every chunk group. A
+  query that filters a different dimension can then skip fewer groups than the
+  insertion order would. Sort by the key that your selective queries filter on.
 
 ## Index-only scans
 
