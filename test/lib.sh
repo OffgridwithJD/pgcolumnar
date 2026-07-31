@@ -305,6 +305,31 @@ check() {
 	fi
 }
 
+# A check whose subject is a wall-clock ratio.
+#
+# PGC_SKIP_TIMING exists because a shared runner cannot hold a ratio still, and
+# a gate that reds for reasons unrelated to the change teaches its readers to
+# discount red. Until now it was applied a whole suite at a time, which is too
+# blunt: native_cancel and native_fetch_cache each hold one ratio and several
+# correctness checks, so dropping the suite dropped the correctness with it
+# (#254). native_fetch_cache was not dropped at all, and flaked CI instead:
+#
+#     FAIL  fetching from one big group is not far dearer than from ten small
+#           ones: got [no (one=397ms ten=91ms)]
+#
+# So the ratio is skipped and the rest of the suite runs. A skip is announced
+# rather than silent, and it is not counted as a pass, because a count that
+# includes checks nobody ran is the thing this project keeps having to unlearn.
+check_timing() {
+	local name="$1" got="$2" want="$3"
+
+	if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
+		echo "SKIP  $name (PGC_SKIP_TIMING: wall-clock ratio)"
+		return 0
+	fi
+	check "$name" "$got" "$want"
+}
+
 # Is this query's plan the columnar custom scan?
 #
 # For a check that reads a counter out of EXPLAIN and asserts on it. Those
