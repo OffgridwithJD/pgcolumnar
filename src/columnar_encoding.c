@@ -86,7 +86,16 @@ bits_needed(uint64 maxval)
 	return n;
 }
 
-/* pack n values of `width` bits each (LSB-first) and append to out */
+/*
+ * pack n values of `width` bits each (LSB-first) and append to out
+ *
+ * Each field is masked to `width` bits and shifted into position, then emitted
+ * one output byte at a time via explicit shifts. Extracting each byte with a
+ * shift (rather than memcpy of a word) keeps the on-disk layout LSB-first and
+ * identical on any host endianness. A field spans at most 9 bytes (7 bits of
+ * sub-byte offset + 64 bits of value), so the inner loop runs <= 9 times
+ * regardless of width -- versus one iteration per bit in the naive form.
+ */
 static void
 bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 {
@@ -95,6 +104,7 @@ bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 	unsigned char *buf;
 	uint64		bitpos = 0;
 	uint32		i;
+	uint64		mask;
 
 	if (width == 0 || n == 0)
 		return;
@@ -102,16 +112,25 @@ bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 	totalbits = (uint64) n * (uint64) width;
 	nbytes = (uint32) ((totalbits + 7) / 8);
 	buf = palloc0(nbytes);
+	mask = (width == 64) ? ~UINT64CONST(0) : ((UINT64CONST(1) << width) - 1);
 
 	for (i = 0; i < n; i++)
 	{
-		uint64		v = vals[i];
-		int			b;
+		uint64		v = vals[i] & mask;
+		uint32		bytepos = (uint32) (bitpos >> 3);
+		uint32		bitoff = (uint32) (bitpos & 7);
+		uint64		lo = v << bitoff;
+		uint64		hi = bitoff ? (v >> (64 - bitoff)) : 0;
+		uint32		nb = (bitoff + (uint32) width + 7) >> 3;
+		uint32		k;
 
-		for (b = 0; b < width; b++)
+		for (k = 0; k < nb; k++)
 		{
-			if ((v >> b) & 1)
-				buf[(bitpos + b) >> 3] |= (unsigned char) (1u << ((bitpos + b) & 7));
+			unsigned char byte = (k < 8)
+				? (unsigned char) (lo >> (8 * k))
+				: (unsigned char) (hi >> (8 * (k - 8)));
+
+			buf[bytepos + k] |= byte;
 		}
 		bitpos += width;
 	}
