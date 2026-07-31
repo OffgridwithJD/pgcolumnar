@@ -212,3 +212,68 @@ jobs:
           for f in $(sudo find /tmp -maxdepth 4 -name server.log -path '*pgcolumnar*' 2>/dev/null); do
             echo "===== $f ====="; sudo tail -60 "$f"
           done
+
+  # Line and branch coverage, published as an artifact and nothing else.
+  #
+  # Deliberately not a gate: no threshold, no badge, and a drop cannot fail a
+  # pull request. A coverage threshold creates pressure to write tests that
+  # execute lines rather than tests that prove properties, and the assertions in
+  # this project's suites are the reason its defects get found. The report
+  # answers the question a passing suite cannot: which code does nothing execute
+  # at all.
+  #
+  # The number will look unremarkable and that is correct. A table access method
+  # carries defensive branches that should never be taken, and columnar_compat.h
+  # carries version shims of which one arm compiles per major.
+  coverage:
+    name: coverage report (PG 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 18, codec headers, lcov, and pyarrow
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-18 postgresql-server-dev-18 \
+            liblz4-dev libzstd-dev zlib1g-dev python3-pip lcov
+          # Installed with sudo because the suites run under sudo; a plain
+          # pip3 install lands in ~/.local where root cannot see it, which is how
+          # the Arrow and Parquet suites once reported PASS while skipping.
+          sudo pip3 install --break-system-packages --quiet pyarrow \
+            || sudo pip3 install --quiet pyarrow
+          sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+
+      - name: Stop the packaged cluster
+        run: sudo systemctl stop postgresql || true
+
+      - name: Build instrumented and run the suites
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" \
+            bash test/run_coverage.sh /usr/lib/postgresql/18/bin/pg_config
+
+      - name: Upload the HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/html
+          retention-days: 14
+
+      - name: Upload the tracefile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-info
+          path: coverage/coverage.info
+          retention-days: 14

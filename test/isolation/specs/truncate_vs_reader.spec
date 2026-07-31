@@ -11,6 +11,11 @@
 
 setup
 {
+	/* Self-contained: pg_isolation_regress under "make installcheck"
+	 * creates a fresh database without the extension, whereas
+	 * test/isolation.sh runs --use-existing against one that has it. */
+	SET client_min_messages = warning;
+	CREATE EXTENSION IF NOT EXISTS pgcolumnar;
 	CREATE TABLE iso (id int, v text) USING pgcolumnar;
 	SELECT pgcolumnar.set_options('iso', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
 	INSERT INTO iso SELECT g, md5(g::text) FROM generate_series(1, 3000) g;
