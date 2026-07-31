@@ -967,8 +967,17 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			 * costs 2.7% and 12.2% more space, which is why this is a choice
 			 * offered rather than a default changed.
 			 */
+			/*
+			 * Skip the FSST symbol-table build when a cheap distinct probe shows
+			 * the dictionary wins outright (#155): the build is the single largest
+			 * cost of a text load, and for a low-cardinality column the table is
+			 * built and then never used per vector. The probe reads the same corpus
+			 * the keep/drop decision uses, and only skips when the dictionary is
+			 * viable and wins for every vector, so the stored bytes are identical.
+			 */
 			if (corpus.len > 0 &&
-				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST)
+				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
+				!ColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
 				ColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
 

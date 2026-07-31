@@ -1629,6 +1629,75 @@ fsst_deserialize_table(const char *p, uint32 len, FsstTable *t)
 	}
 }
 
+/* FNV-1a over a byte range: a cheap, well-mixed 64-bit hash for the distinct
+ * probe below. Our own trivial implementation of the public FNV-1a formula, used
+ * only to bucket values while counting distinct ones. */
+static inline uint64
+columnar_fnv1a(const char *p, uint32 n)
+{
+	uint64		h = UINT64CONST(1469598103934665603);
+	uint32		i;
+
+	for (i = 0; i < n; i++)
+	{
+		h ^= (unsigned char) p[i];
+		h *= UINT64CONST(1099511628211);
+	}
+	return h;
+}
+
+/*
+ * ColumnarFsstDictWins
+ *		Cheap pre-check for the FSST table build (issue #155): would dictionary
+ *		encoding win outright, making the costly FSST symbol-table build wasted
+ *		work? FSST is only attempted per vector when a cheaper encoding has not
+ *		already shrunk the vector well; a low-cardinality column is compressed far
+ *		below that threshold by the dictionary, so the FSST table would be built
+ *		(the single largest cost of a text load, ~22% in profiling) and then never
+ *		used. Count distinct values over the corpus with a small open-addressing
+ *		hash set and stop the instant the count exceeds the dictionary's distinct
+ *		cap: at or below the cap the dictionary is viable for every 1024-row vector
+ *		and wins, so skipping the build produces byte-identical storage; above it
+ *		the column is a genuine FSST candidate and the caller builds the table.
+ *		This is our own heuristic; FSST is the public scheme (VLDB 2020).
+ */
+bool
+ColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
+{
+	/* Open-addressing set of value hashes, capacity a power of two comfortably
+	 * above the distinct cap so the load factor at the early-exit stays low. */
+	enum { FSST_CARD_SLOTS = 4096 };	/* > 2 * DICT_MAX_DISTINCT */
+	uint64		slot[FSST_CARD_SLOTS];
+	bool		used[FSST_CARD_SLOTS];
+	int			distinct = 0;
+	uint32		pos = 0;
+
+	memset(used, 0, sizeof(used));
+	while (pos < corpusLen)
+	{
+		uint32		vlen = ColumnarVarSizeAnyUnaligned(corpus + pos);
+		uint64		h;
+		uint32		s;
+
+		if (vlen == 0 || pos + vlen > corpusLen)
+			return false;		/* malformed run: let the caller build normally */
+
+		h = columnar_fnv1a(corpus + pos, vlen);
+		s = (uint32) (h & (FSST_CARD_SLOTS - 1));
+		while (used[s] && slot[s] != h)
+			s = (s + 1) & (FSST_CARD_SLOTS - 1);
+		if (!used[s])
+		{
+			used[s] = true;
+			slot[s] = h;
+			if (++distinct > DICT_MAX_DISTINCT)
+				return false;	/* high cardinality: a real FSST candidate */
+		}
+		pos += vlen;
+	}
+	return true;				/* dictionary wins; the FSST build is skippable */
+}
+
 /*
  * ColumnarFsstBuildChunkTable
  *		Build one FSST symbol table for a whole column chunk (E3b). The expensive
