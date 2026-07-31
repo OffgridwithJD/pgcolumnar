@@ -206,10 +206,26 @@ SELECT pgcolumnar.add_projection(
 
 ### pgcolumnar.drop_projection(rel regclass, name text)
 
-Drops a projection and frees its storage.
+Drops a projection and frees its storage. It also removes the declaration, so a
+later rebuild does not create the projection again.
 
 ```sql
 SELECT pgcolumnar.drop_projection('events', 'events_by_customer');
+```
+
+### pgcolumnar.rebuild_projections(rel regclass DEFAULT NULL)
+
+Builds each declared projection that has no storage, and returns the number that
+it built. Give a relation to limit it to one table. Give no argument to cover
+each table in the database.
+
+`pg_dump` carries the projection declarations, in
+`pgcolumnar.projection_declaration`, but it cannot carry the projection storage.
+Run this after a logical restore. A second run builds nothing, so it is safe to
+run at any time.
+
+```sql
+SELECT pgcolumnar.rebuild_projections();
 ```
 
 ### pgcolumnar.read_projection(rel regclass, name text) and pgcolumnar.reconstruct_via_projection(rel regclass, name text)

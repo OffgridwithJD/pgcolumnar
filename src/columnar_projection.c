@@ -249,6 +249,16 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	/* populate the projection from the table's existing rows (gap 26 back-fill) */
 	ColumnarBackfillProjection(rel, &proj);
 
+	/*
+	 * Record the declaration behind it, by relation and column name, so a dump
+	 * and restore can carry the intent even though it cannot carry the storage
+	 * (#266). Written here rather than in the SQL binding so that a projection
+	 * cannot come into existence without one.
+	 */
+	ColumnarRecordProjectionDeclaration(relid, projname, colsArr,
+										sortArr ? sortArr :
+										construct_empty_array(TEXTOID));
+
 	table_close(rel, ShareLock);
 	PG_RETURN_VOID();
 }
@@ -322,6 +332,9 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 	if (targetStorageId != storageId)
 		ColumnarDeleteMetadata(targetStorageId);
 	ColumnarDeleteProjectionRow(storageId, targetId);
+
+	/* and forget the declaration, so a later rebuild does not resurrect it (#266) */
+	ColumnarDeleteProjectionDeclaration(relid, projname);
 
 	table_close(rel, ShareUpdateExclusiveLock);
 	PG_RETURN_VOID();

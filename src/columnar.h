@@ -21,6 +21,7 @@
 #include "port/atomics.h"
 #include "lib/stringinfo.h"
 #include "nodes/bitmapset.h"
+#include "utils/array.h"
 #include "nodes/pg_list.h"
 #include "nodes/extensible.h"
 #include "storage/bufpage.h"
@@ -463,6 +464,12 @@ extern List *ColumnarReadSortBy(Oid relid);
  * palloc'd in the current context, ordered by projection_id. */
 extern List *ColumnarListProjections(uint64 storageId);
 extern void ColumnarInsertProjectionRow(const ColumnarProjection *proj);
+/* The dumpable declaration behind a projection, keyed by regclass and stored as
+ * column names so a dump and restore can carry it (#266). */
+extern void ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
+												ArrayType *columns,
+												ArrayType *sortKey);
+extern void ColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
 extern void ColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
 
 /* whether a relation uses the columnar table access method */
