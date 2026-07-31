@@ -87,6 +87,19 @@ A physical copy keeps the exact bytes, and a build of the same version can read
 it. `pg_basebackup`, a file-system snapshot and replication all make such a copy.
 A physical copy does not replace the source across a version change.
 
+The same posture covers the extension's own catalog, not only the on-disk data
+format. A build's install script defines the `pgcolumnar` catalog tables for a
+fresh `CREATE EXTENSION`. The pre-release ships no `ALTER EXTENSION UPDATE`
+scripts, so there is no in-place catalog migration either. You might swap the
+shared library and the SQL script and restart, without recreating the extension.
+That can leave a catalog table missing a column that a newer build expects. For
+example, `sort_by` was added to `pgcolumnar.options`. A function that references
+it would then fail against an `options` table that an older build created. Across
+an incompatible build, recreate the extension with `DROP` then `CREATE EXTENSION`,
+which reloads the data. Do not swap it in place. An existing dump still restores
+into a newer build. `pg_dump` emits an explicit column list for the extension's
+configuration tables, and new columns default to NULL.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
