@@ -2017,6 +2017,7 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 
 			ColumnarDeleteMetadata(storageId);
 			ColumnarDeleteOptions(objectId);
+			ColumnarDeleteProjectionDeclarationsForRel(objectId);
 		}
 
 		relation_close(rel, NoLock);

@@ -28,7 +28,11 @@ set -uo pipefail
 
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-# every catalog that hangs off a storage id, as one comparable string
+# every catalog a dropped table must take with it, as one comparable string.
+# projection_declaration is keyed by relid rather than storage id, but it is
+# still per-table config that must not outlive the table: leaving it behind
+# orphans a regclass that no longer resolves, which poisons rebuild_projections
+# and dumps a dangling regclass. It belongs in this count for the same reason.
 snapshot() {
 	q "SELECT (SELECT count(*) FROM pgcolumnar.storage) || '/' ||
 		(SELECT count(*) FROM pgcolumnar.projection) || '/' ||
@@ -36,7 +40,8 @@ snapshot() {
 		(SELECT count(*) FROM pgcolumnar.column_chunk) || '/' ||
 		(SELECT count(*) FROM pgcolumnar.zone_map) || '/' ||
 		(SELECT count(*) FROM pgcolumnar.bloom) || '/' ||
-		(SELECT count(*) FROM pgcolumnar.delete_vector);" | tail -1
+		(SELECT count(*) FROM pgcolumnar.delete_vector) || '/' ||
+		(SELECT count(*) FROM pgcolumnar.projection_declaration);" | tail -1
 }
 
 # --- 1. a plain table, which already cleaned up ------------------------------
@@ -92,6 +97,32 @@ check "no storage row refers to a missing relation" \
 	"$(q "SELECT count(*) FROM pgcolumnar.storage s
 		WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = s.relation_oid);" | tail -1)" \
 	"0"
+
+# --- 5b. no declaration may outlive its relation, and rebuild survives a drop -
+#
+# A declaration left behind is worse than debris: rebuild_projections walks
+# every declaration and calls get_storage_id(rel) on it, so one orphan with a
+# dropped rel aborts rebuild for every table in the database. Keep a live table
+# with a projection standing while a sibling with a projection is dropped, then
+# require rebuild to still succeed.
+
+psql_run "DROP TABLE IF EXISTS dcl_keep;
+	CREATE TABLE dcl_keep (id int, a int) USING pgcolumnar;" >/dev/null
+psql_run "SELECT pgcolumnar.add_projection('dcl_keep','kp',ARRAY['a'],ARRAY['a']);" >/dev/null
+psql_run "INSERT INTO dcl_keep SELECT g, g % 7 FROM generate_series(1, 2000) g;" >/dev/null
+psql_run "CREATE TABLE dcl_gone (id int, a int) USING pgcolumnar;" >/dev/null
+psql_run "SELECT pgcolumnar.add_projection('dcl_gone','gp',ARRAY['a'],ARRAY['a']);" >/dev/null
+psql_run "INSERT INTO dcl_gone SELECT g, g FROM generate_series(1, 2000) g;" >/dev/null
+psql_run "DROP TABLE dcl_gone;" >/dev/null
+
+check "no declaration refers to a missing relation" \
+	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration d
+		WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = d.rel);" | tail -1)" \
+	"0"
+rb="$(q "SELECT 'RB=' || pgcolumnar.rebuild_projections();" 2>&1 | tail -1)"
+check "rebuild_projections succeeds after a projected table was dropped" \
+	"$(case "$rb" in RB=*) echo ok ;; *) echo "$rb" ;; esac)" \
+	"ok"
 
 # --- 6. the table still works, which a too-eager cleanup would break ---------
 

@@ -470,6 +470,7 @@ extern void ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 												ArrayType *columns,
 												ArrayType *sortKey);
 extern void ColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
+extern void ColumnarDeleteProjectionDeclarationsForRel(Oid relid);
 extern void ColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
 
 /* whether a relation uses the columnar table access method */

@@ -2458,6 +2458,33 @@ ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 	CommandCounterIncrement();
 }
 
+/*
+ * ColumnarDeleteProjectionDeclarationsForRel
+ *		Forget every declaration for a relation. Called when the whole table is
+ *		dropped, so no declaration is left behind pointing at a relation that no
+ *		longer exists. This mirrors ColumnarDeleteOptions on the drop path: both
+ *		are relid-keyed config that a dropped table must not outlive.
+ */
+void
+ColumnarDeleteProjectionDeclarationsForRel(Oid relid)
+{
+	Relation	rel = open_columnar_table("projection_declaration",
+										  RowExclusiveLock);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+		CatalogTupleDelete(rel, &tuple->t_self);
+	systable_endscan(scan);
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
+}
+
 List *
 ColumnarListProjections(uint64 storageId)
 {
