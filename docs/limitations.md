@@ -370,10 +370,12 @@ The results therefore never depend on the pushdown.
   columnar tables, which are WAL-logged relations.
 - `pg_dump` and `pg_restore` handle columnar tables, and the target server must
   have the extension installed and preloaded. The table data, the indexes and the
-  per-table options (`pgcolumnar.set_options`) survive the round trip. **The
-  declared projections (`pgcolumnar.add_projection`) do not.** Their key is an
-  internal storage id, and a restore makes a new one. A restored table therefore
-  has no projections, and you must declare them again. A physical backup (`pg_basebackup`) copies the
+  per-table options (`pgcolumnar.set_options`) survive the round trip. The
+  projection **storage** does not. Its key is an internal storage id, and a
+  restore makes a new one. The projection **declaration** does survive, in
+  `pgcolumnar.projection_declaration`, which is keyed by relation and stores
+  column names. After a restore, run `pgcolumnar.rebuild_projections()` to build
+  the projections again from those declarations. A physical backup (`pg_basebackup`) copies the
   cluster bytewise and preserves them.
 - Logical decoding reads the WAL records of heap tuples. Columnar data reaches
   WAL as full-page images, and those carry no tuple structure. Logical decoding

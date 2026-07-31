@@ -43,6 +43,12 @@
 #define Anum_options_sort_by 7
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
+#define Anum_projection_declaration_rel 1
+#define Anum_projection_declaration_name 2
+#define Anum_projection_declaration_columns 3
+#define Anum_projection_declaration_sort_key 4
+#define Natts_projection_declaration 4
+
 #define Anum_projection_storage_id 1
 #define Anum_projection_projection_id 2
 #define Anum_projection_name 3
@@ -2372,6 +2378,84 @@ ColumnarInsertProjectionRow(const ColumnarProjection *proj)
 
 	table_close(rel, RowExclusiveLock);
 	CommandCounterIncrement();		/* make the row visible to later reads */
+}
+
+/*
+ * ColumnarRecordProjectionDeclaration
+ *		Record the intent behind a projection: which relation, which name, and
+ *		which columns by NAME rather than by attnum (#266).
+ *
+ *		This is written on the same path that creates the projection, so a
+ *		projection cannot exist without its declaration. pgcolumnar.projection
+ *		records the result and cannot survive a dump, because its key is a
+ *		storage id that a restore reassigns; this table can, for the same reason
+ *		pgcolumnar.options can.
+ *
+ *		Replaces any existing row for the pair, so re-declaring a projection does
+ *		not leave two declarations behind.
+ */
+void
+ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
+									ArrayType *columns, ArrayType *sortKey)
+{
+	Relation	rel;
+	TupleDesc	tupdesc;
+	Datum		values[Natts_projection_declaration];
+	bool		nulls[Natts_projection_declaration];
+	HeapTuple	tuple;
+
+	ColumnarDeleteProjectionDeclaration(relid, name);
+
+	rel = open_columnar_table("projection_declaration", RowExclusiveLock);
+	tupdesc = RelationGetDescr(rel);
+
+	memset(nulls, false, sizeof(nulls));
+	values[Anum_projection_declaration_rel - 1] = ObjectIdGetDatum(relid);
+	values[Anum_projection_declaration_name - 1] =
+		DirectFunctionCall1(namein, CStringGetDatum(name));
+	values[Anum_projection_declaration_columns - 1] = PointerGetDatum(columns);
+	values[Anum_projection_declaration_sort_key - 1] = PointerGetDatum(sortKey);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	CatalogTupleInsert(rel, tuple);
+	heap_freetuple(tuple);
+
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
+}
+
+/*
+ * ColumnarDeleteProjectionDeclaration
+ *		Forget the declaration for one projection. Called when it is dropped, and
+ *		before recording a replacement.
+ */
+void
+ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
+{
+	Relation	rel = open_columnar_table("projection_declaration",
+										  RowExclusiveLock);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+
+	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_projection_declaration_name,
+									 tupdesc, &isnull);
+
+		if (!isnull &&
+			strcmp(NameStr(*DatumGetName(d)), name) == 0)
+			CatalogTupleDelete(rel, &tuple->t_self);
+	}
+	systable_endscan(scan);
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
 }
 
 List *

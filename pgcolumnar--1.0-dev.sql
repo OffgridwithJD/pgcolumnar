@@ -98,6 +98,35 @@ CREATE UNIQUE INDEX options_pkey
  */
 SELECT pg_catalog.pg_extension_config_dump('pgcolumnar.options', '');
 
+/*
+ * The declared intent behind each projection, as opposed to pgcolumnar.projection
+ * which records the materialized result (#266).
+ *
+ * pgcolumnar.projection is keyed by storage_id and stores attnums, so pg_dump
+ * cannot carry it: a restore assigns new storage ids, and rows pointing at
+ * storage that does not exist would be worse than losing them. This table is
+ * keyed by regclass and stores column NAMES, for the same reason
+ * pgcolumnar.options is keyed by regclass and the sort_by key stores names: a
+ * name survives a dump and a restore, and a restore renumbers an attnum.
+ *
+ * So a dump carries the declaration and not the data. After a restore the
+ * declarations are present and the projection storage is not, and
+ * pgcolumnar.rebuild_projections() materializes them. Readers never consult this
+ * table. They read pgcolumnar.projection, where a row appears only after its
+ * storage exists.
+ */
+CREATE TABLE pgcolumnar.projection_declaration (
+	rel regclass NOT NULL,
+	name name NOT NULL,
+	columns text[] NOT NULL,
+	sort_key text[] NOT NULL
+);
+
+CREATE UNIQUE INDEX projection_declaration_pkey
+	ON pgcolumnar.projection_declaration USING btree (rel, name);
+
+SELECT pg_catalog.pg_extension_config_dump('pgcolumnar.projection_declaration', '');
+
 /* ---------------------------------------------------------------------------
  * pgcolumnar.projection (gap 26)
  *
@@ -462,6 +491,47 @@ CREATE FUNCTION pgcolumnar.drop_projection(rel regclass, name text)
 
 COMMENT ON FUNCTION pgcolumnar.drop_projection(regclass, text)
 	IS 'drop a declared projection and free its storage (gap 26)';
+
+/*
+ * Materialize every declaration that has no projection behind it (#266).
+ *
+ * The case this exists for is a logical restore. pg_dump carries
+ * pgcolumnar.projection_declaration and cannot carry the projection storage, so
+ * a restored table has the declarations and none of the projections. This builds
+ * them, and returns the number that it built.
+ *
+ * You can run it at any time. It does not act on a declaration that is already
+ * materialized, so a second run builds nothing.
+ */
+CREATE FUNCTION pgcolumnar.rebuild_projections(rel regclass DEFAULT NULL)
+	RETURNS integer
+	LANGUAGE plpgsql
+	AS $$
+DECLARE
+	d          record;
+	rebuilt    integer := 0;
+BEGIN
+	FOR d IN
+		SELECT pd.rel, pd.name, pd.columns, pd.sort_key
+		  FROM pgcolumnar.projection_declaration pd
+		 WHERE (rebuild_projections.rel IS NULL OR pd.rel = rebuild_projections.rel)
+		   AND NOT EXISTS (
+			   SELECT 1
+				 FROM pgcolumnar.projection p
+				WHERE p.storage_id = pgcolumnar.get_storage_id(pd.rel)
+				  AND p.name = pd.name
+				  AND p.projection_id > 0)
+		 ORDER BY pd.rel::text, pd.name
+	LOOP
+		PERFORM pgcolumnar.add_projection(d.rel, d.name::text, d.columns, d.sort_key);
+		rebuilt := rebuilt + 1;
+	END LOOP;
+	RETURN rebuilt;
+END;
+$$;
+
+COMMENT ON FUNCTION pgcolumnar.rebuild_projections(regclass)
+	IS 'materialize declared projections that have no storage, after a logical restore (#266)';
 
 CREATE FUNCTION pgcolumnar.read_projection(rel regclass, name text)
 	RETURNS SETOF text

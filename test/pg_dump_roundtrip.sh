@@ -73,6 +73,22 @@ before_opt="$(q "$opt_sql;")"
 before_proj="$(q "$proj_sql;")"
 check "the base table has a projection to preserve" "$before_proj" "1"
 
+decl_sql="SELECT count(*) FROM pgcolumnar.projection_declaration WHERE rel = 'dt'::regclass"
+before_decl="$(q "$decl_sql;")"
+check "and a declaration recorded for it" "$before_decl" "1"
+
+# Dropping a projection must forget its declaration as well. If it did not, a
+# later rebuild would resurrect a projection the operator deliberately removed,
+# which is a worse failure than the one #266 fixes.
+psql_run "SELECT pgcolumnar.add_projection('dt', 'dt_tmp', ARRAY['id'], ARRAY['id']);" >/dev/null 2>&1
+check "a second projection is declared" \
+	"$(q "$decl_sql;")" "2"
+psql_run "SELECT pgcolumnar.drop_projection('dt', 'dt_tmp');" >/dev/null 2>&1
+check "and dropping it forgets the declaration, so a rebuild cannot resurrect it" \
+	"$(q "$decl_sql;")" "1"
+check "a rebuild now builds nothing" \
+	"$(q "SELECT pgcolumnar.rebuild_projections();")" "0"
+
 verify() {  # label db
 	local label="$1" db="$2" ao
 	check "$label: row count survives"           "$(on "$db" "SELECT count(*) FROM dt;")" "$before_count"
@@ -91,12 +107,11 @@ verify() {  # label db
 	# updated deliberately rather than a green run hiding the change.
 	check "$label: per-table options survive" \
 		"$(on "$db" "$opt_sql;")" "$before_opt"
-	# Projections are storage_id-keyed, so config_dump (which carries options)
-	# would restore rows pointing at storage that no longer exists. Nothing
-	# re-emits add_projection() at dump time yet, so a restored table has none.
-	# Pinned to that loss (#266): flip the expectation to "$before_proj" when a
-	# fix lands, exactly as the options check was flipped by #258.
-	check "$label: projections are NOT carried by pg_dump (pinned; see #266)" \
+	# The projection STORAGE still cannot be carried: pgcolumnar.projection is
+	# keyed by a storage id that a restore reassigns, so restoring those rows
+	# would point at storage that does not exist. That half of #266 is unchanged
+	# and is still pinned here.
+	check "$label: projection storage is NOT carried by pg_dump (see #266)" \
 		"$(on "$db" "$proj_sql;")" "0"
 	# #288: the declared sort_by (stored as NAMES) survives even though ds had a
 	# dropped column that renumbered attnums on restore, and the zero-arg apply
@@ -106,6 +121,26 @@ verify() {  # label db
 		"$(on "$db" "SELECT sort_by::text FROM pgcolumnar.options WHERE regclass='ds'::regclass;")" "{host,ts}"
 	check "$label: restored sort_by resolves and applies" \
 		"$(on "$db" "SELECT pgcolumnar.vacuum_sorted('ds'); SELECT count(*) FROM ds;" 2>/dev/null | tail -1)" "20000"
+
+	# The DECLARATION is carried, which is the half #266 fixed. It is keyed by
+	# regclass and stores column names, so config_dump can restore it, and the
+	# intent survives even though the data does not.
+	check "$label: the projection declaration IS carried" \
+		"$(on "$db" "$decl_sql;")" "$before_decl"
+
+	# And it is recoverable rather than merely recorded. Without this the
+	# declaration would be a note about something the operator still cannot get
+	# back, which is not a fix.
+	check "$label: rebuild_projections() reports it rebuilt one" \
+		"$(on "$db" "SELECT pgcolumnar.rebuild_projections();")" "1"
+	check "$label: and the projection exists again after the rebuild" \
+		"$(on "$db" "$proj_sql;")" "$before_proj"
+	check "$label: and it reads the same rows as the base table" \
+		"$(on "$db" "SELECT count(*) FROM pgcolumnar.read_projection('dt','dt_proj');")" \
+		"$(on "$db" "SELECT count(*) FROM dt;")"
+	# Running it twice must build nothing, or a routine re-run would duplicate work.
+	check "$label: a second rebuild is a no-op" \
+		"$(on "$db" "SELECT pgcolumnar.rebuild_projections();")" "0"
 	on postgres "DROP DATABASE IF EXISTS $db;" >/dev/null 2>&1
 }
 

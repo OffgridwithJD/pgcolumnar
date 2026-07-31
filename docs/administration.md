@@ -163,11 +163,14 @@ the base table and its projections. Projection scans are on by default
 (`pgcolumnar.enable_projection_scan`). Drop a projection with
 `pgcolumnar.drop_projection`.
 
-`pg_dump` and `pg_restore` do not carry the projections. Their key is an internal
-storage id, and a restore makes a new one. Declare the projections again with
-`pgcolumnar.add_projection` after a logical restore. A physical backup
-(`pg_basebackup`) preserves them, which `test/replication.sh` verifies against a
-standby.
+`pg_dump` and `pg_restore` do not carry the projection storage. Its key is an
+internal storage id, and a restore makes a new one. They do carry the
+declaration, which `pgcolumnar.projection_declaration` holds by relation and
+column name. After a logical restore, run `pgcolumnar.rebuild_projections()`. It
+builds each declared projection that has no storage and returns the number that
+it built. A second run builds nothing. A physical backup (`pg_basebackup`)
+preserves the projections themselves, which `test/replication.sh` verifies
+against a standby.
 
 A projection adds write cost and storage, because inserts write it too. Add one
 for a query pattern that a covering, sorted column subset serves, and measure the
