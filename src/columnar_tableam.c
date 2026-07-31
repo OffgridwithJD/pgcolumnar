@@ -2017,6 +2017,14 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 
 			ColumnarDeleteMetadata(storageId);
 			ColumnarDeleteOptions(objectId);
+			/*
+			 * And the projection declarations, for the same reason and in the
+			 * same place (#304). A declaration left behind holds a regclass that
+			 * no longer resolves, which config_dump then dumps as a bare OID and
+			 * rebuild_projections() aborts on, taking every other table in the
+			 * database with it.
+			 */
+			ColumnarDeleteProjectionDeclarationsForRel(objectId);
 		}
 
 		relation_close(rel, NoLock);

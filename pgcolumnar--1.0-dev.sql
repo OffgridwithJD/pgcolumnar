@@ -511,6 +511,17 @@ DECLARE
 	d          record;
 	rebuilt    integer := 0;
 BEGIN
+	/*
+	 * Forget a declaration whose relation is gone (#304). The drop hook removes
+	 * these, so a current build does not make them. A database created by a
+	 * build that did not clean up on drop still holds them, and one such row
+	 * used to abort this function for every other table in the database: the
+	 * guard below resolves pd.rel, and resolving a dropped relation raises.
+	 * Deleting them here makes an affected database repair itself.
+	 */
+	DELETE FROM pgcolumnar.projection_declaration pd
+	 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = pd.rel);
+
 	FOR d IN
 		SELECT pd.rel, pd.name, pd.columns, pd.sort_key
 		  FROM pgcolumnar.projection_declaration pd
