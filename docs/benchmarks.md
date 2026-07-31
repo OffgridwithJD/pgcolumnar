@@ -13,25 +13,31 @@ Run them one at a time, on an idle machine, against a **non-assert** PostgreSQL
 build. Assertions distort timing, and a concurrent build or test run makes every
 figure meaningless.
 
-Environment variables: `BENCH_SCALE` (rows, default 6000000), `BENCH_REPS`
-(timed repetitions, median reported, default 5), `BENCH_PORT`, and `BENCH_DUCKDB`
-(set to 1 to add a DuckDB comparison when `duckdb` is on `PATH`).
+These environment variables control the harnesses:
 
-The numbers below are one full run of all three harnesses, measured 2026-07-27 at
-commit `7a9c9f7`: PostgreSQL 17.10 non-assert (18.4 with io_uring for the read
-stream harness), 6,000,000 rows, 8-column table, median of 5, on 8 cores with
-24 GB of memory. Raw output is in
+- `BENCH_SCALE`, the number of rows. The default is 6000000.
+- `BENCH_REPS`, the number of timed repetitions. The harness reports the median.
+  The default is 5.
+- `BENCH_PORT`.
+- `BENCH_DUCKDB`. Set it to 1 to add a DuckDB comparison, if `duckdb` is on
+  `PATH`.
+
+The numbers below come from one full run of all three harnesses on 2026-07-27, at
+commit `7a9c9f7`. The conditions were PostgreSQL 17.10 non-assert, 6,000,000
+rows, an 8-column table, the median of 5 repetitions, 8 cores and 24 GB of
+memory. The read stream harness used 18.4 with io_uring. Raw output is in
 [../bench/sample_output_all_2026_07_27.txt](https://github.com/jdatcmd/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
-They show the shape of the tradeoff, not a precise score. The dataset is synthetic
-and deliberately mixes column shapes that suit different encodings, so a table of
-purely random values will look worse and a repetitive one better.
+They show the shape of the trade and not a precise score. The dataset is
+synthetic. It mixes column shapes that suit different encodings, and it does this
+deliberately. A table of fully random values will therefore look worse, and a
+repetitive table will look better.
 
-**Compare ratios across runs, not absolute milliseconds.** Re-measuring the
-previous run's commit on this machine on the same day (see
-[What changed](#what-changed-since-the-previous-run)) reproduced its query
-latencies but came out about 20% slower on ingestion and I/O shapes than when
-those numbers were first recorded. Absolute figures move with the machine; the
-same-day comparison is the one to trust.
+**Compare the ratios between runs. Do not compare absolute milliseconds.** This
+machine measured the commit of the previous run again, on the same day. Refer to
+[What changed](#what-changed-since-the-previous-run). The query latencies were
+the same. But the ingestion shapes and the I/O shapes were approximately 20
+percent slower than the first record of those numbers. Absolute figures change
+with the machine. Trust the comparison that one day gives.
 
 ## Storage
 
@@ -74,25 +80,25 @@ Heap versus columnar (zstd), median milliseconds:
 without decoding column data, which is why they are microseconds rather than
 milliseconds.
 
-**The point lookup number is a regression and is under investigation
-([issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171)), not a property
-of the design.** The previous run recorded 23.75 ms for the same query on the
-same machine. Two things are established: it is not the lazy-decoding slot, since
-an A/B across that merge on an unanalyzed table gives 16.42 ms before and 13.73 ms
-after; and the difference between that probe and this harness is that the harness
-runs `ANALYZE` on the table first. So the planner is choosing differently once
+**The point lookup number is a regression and not a property of the design.**
+The investigation is
+[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171). The previous run recorded 23.75 ms for the same query on the
+same machine. Two facts are known. First, the cause is not the
+lazy-decoding slot. An A/B test across that merge, on a table without statistics,
+gives 16.42 ms before and 13.73 ms after. Second, the difference between that
+test and this harness is that the harness runs `ANALYZE` on the table first. So the planner is choosing differently once
 statistics exist, and choosing worse. Treat the row as a bug report rather than a
 measurement of the fetch path.
 
-What remains true regardless: a single-row fetch has to locate and decode within
-the row group the row lives in, so columnar suits scans and aggregates while heap
-suits point lookups and write-heavy OLTP.
+One point stays true in each case. A single-row fetch must find and decode the
+row inside its row group. Columnar storage therefore suits scans and aggregates.
+Heap storage suits point lookups and write-heavy OLTP.
 
 ## Aggregates fall back once anything is deleted
 
-The metadata answers above hold only while the storage has no delete vector. A
-zone map covers every row in its group including deleted ones, so once a row is
-deleted the metadata answer would be wrong and the executor falls back to a scan:
+The metadata answers above hold only while the storage has no delete vector. A zone map covers each row in its group, and this includes the deleted rows. After
+a delete, the metadata answer would therefore be incorrect, and the executor uses
+a scan instead:
 
 | state | count(*) | sum/avg | min/max |
 | --- | --- | --- | --- |
@@ -100,14 +106,15 @@ deleted the metadata answer would be wrong and the executor falls back to a scan
 | after deleting 1 row of 6,000,000 | 0.18 ms | 6.87 ms | 8.44 ms |
 | after `pgcolumnar.vacuum` | 0.02 ms | 0.31 ms | 0.31 ms |
 
-The fallback is per row group, so a delete costs only the groups it touches: the
-39 clean groups still fold from their zone maps and only the dirty one is read,
-which is why `sum/avg` costs one group's scan rather than forty. `count(*)` barely
-moves at all, because a group's live count is exactly its row count minus its
-deleted count and needs no data either way.
+The change applies to one row group at a time. A delete therefore costs only the
+groups that it touches. The 39 clean groups still fold from their zone maps, and
+the executor reads only the group with the delete. This is why `sum/avg` costs
+the scan of one group and not of forty. `count(*)` changes very little. The live
+count of a group is its row count less its deleted count, and neither figure
+needs the data.
 
-This used to be storage-wide, and one deleted row put `count(*)` at 222 ms and
-`min/max` at 317 ms instead of the figures above
+This behaviour used to apply to the whole storage. One deleted row then put
+`count(*)` at 222 ms and `min/max` at 317 ms, instead of the figures above
 ([issue #149](https://github.com/jdatcmd/pgcolumnar/issues/149), fixed). Vacuuming
 still helps, since it returns the dirty group to the clean path.
 
@@ -127,11 +134,11 @@ Row-ordered access does better than scattered because consecutive fetches stay
 inside one row group, which the statement-scoped decoded-group cache serves
 without re-decoding.
 
-The delete figure was the weakest number in this document at 1509 ms, when
-reaching a row still meant walking to it through every earlier row in its group.
-Both halves of [issue #143](https://github.com/jdatcmd/pgcolumnar/issues/143) are
-now in: the group is decoded once and cached, and a row's value is reached by rank
-rather than by walking. Deleting 1000 rows costs 22.8 ms rather than 1509.
+The delete figure was the weakest number in this document, at 1509 ms. At that
+time, to reach a row, the code went through each earlier row in the group. Both
+halves of [issue #143](https://github.com/jdatcmd/pgcolumnar/issues/143) are now
+complete. The code decodes the group one time and keeps it in a cache. It then
+reaches the value of a row by rank, and not by a walk. Deleting 1000 rows costs 22.8 ms rather than 1509.
 
 ## Feature toggles
 
@@ -148,9 +155,10 @@ Index-only scan on versus off (covering range count, median ms):
 | --- | --- | --- | --- |
 | covering count, id range (~2%) | 7.53 | 698.95 | 93 |
 
-The "off" column is the fetch-by-row path doing nothing else, which isolates
-what that path costs and what #143 changed: this shape was 200.9 s before the decoded-group cache, 31.8 s after
-it, and 0.69 s once the walk to the row went too.
+The "off" column is the fetch-by-row path with no other work. It therefore
+isolates the cost of that path and the effect of #143. This shape was 200.9 s
+before the decoded-group cache. It was 31.8 s after the cache. It is 0.69 s now
+that the walk to the row is also gone.
 
 Projection scan on versus off (covering scan on a scattered sort key, median ms):
 
@@ -166,9 +174,9 @@ correlated with insert order, median ms:
 | before vacuum_sorted | 364.13 |
 | after vacuum_sorted | 47.72 |
 
-Compression none versus zstd (columnar table-only): 40 MB versus 5.95 MB, with
-scan latency unchanged (0.52 ms against 0.52 ms), because the encoded stream is
-already small and the aggregates do not read it.
+Compression `none` against `zstd`, for the columnar table only: 40 MB against
+5.95 MB. The scan latency does not change, at 0.52 ms against 0.52 ms. The
+encoded stream is already small, and the aggregates do not read it.
 
 ## Import and export
 
@@ -187,9 +195,9 @@ Import, 6,000,000 rows, 5 columns:
 | parquet | 17762.5 | 0.3 |
 
 Import is about 18x slower than export, and the reason is not the import code.
-Measured separately: `import_arrow` costs 12,150 ms against 12,990 ms for an
-`INSERT INTO ... SELECT` of the same rows with no file involved, so there is no
-import-specific overhead. Reading the whole Parquet file through `read_parquet`
+A separate measurement shows this. `import_arrow` costs 12,150 ms. An
+`INSERT INTO ... SELECT` of the same rows, with no file, costs 12,990 ms. There
+is therefore no overhead that belongs to the import. Reading the whole Parquet file through `read_parquet`
 costs 1,415 ms, 11% of the import. The other 89% is the write path, which is also
 4.9x slower than a heap insert of the same rows.
 
@@ -197,13 +205,13 @@ So the target is bulk load in general rather than the interop path. Tracked as
 [issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155) with a plan in
 `design/IMPORT_THROUGHPUT_PLAN.md`.
 
-The plan attributes the cost to the row/column transposition, since both readers
-decode a column-oriented file into per-row values and the writer copies them
-back into per-column buffers. Measurement does not support that as the main
-term. A single integer column already writes faster than heap, and on a text
-column the write path is dominated by the FSST substring search: skipping it
-makes a 1,000,000-row load 1.2x to 5.7x faster, and on five of seven text shapes
-measured it produced byte-for-byte identical storage. `encode_effort = fast`
+The plan gives the cost to the transposition between rows and columns. Both
+readers decode a column-oriented file into per-row values, and the writer then
+copies those values back into per-column buffers. The measurements do not support
+that as the main term. A single integer column already writes faster than heap. On a text column, the
+FSST substring search is the largest part of the write path. To omit that search
+makes a load of 1,000,000 rows 1.2x to 5.7x faster. On five of the seven text
+shapes measured, it also produced storage that is identical byte for byte. `encode_effort = fast`
 (see [Configuration reference](configuration.md#encode-effort)) exposes that
 trade per table.
 
@@ -234,10 +242,10 @@ Both reconstructed tables matched the source exactly (zero differing rows).
 | round trip | exact match |
 
 FSST is chosen for every vector of the URL column and gives 4.2x on size, paid for
-with 6.4x on ingestion time. That ratio is why encoding selection is worth
-optimising, and why choosing candidates from a sample rather than applying all of
-them (`pgcolumnar.encoding_sample_rows`) measured 1.33x faster loads with
-byte-identical output.
+with 6.4x on ingestion time. That ratio is the reason to optimise the selection of the encoding. It is also
+the reason to choose the candidates from a sample, and not to apply each of them.
+`pgcolumnar.encoding_sample_rows` controls this. It measured loads that are 1.33x
+faster, with output that is identical byte for byte.
 
 ## Read stream and asynchronous IO
 
@@ -253,9 +261,10 @@ Cold-scan latency on the PostgreSQL 18 io_uring build, 60,000,000 rows, median o
 Across methods with the read stream on: `worker` 1.02x against `sync`, `io_uring`
 1.00x.
 
-These are small, and the honest reading is unchanged from the previous run: this
-workload is not I/O-bound in the way prefetching helps most, because the columnar
-layout already reads few, large, sequential regions. The feature costs nothing and
+These effects are small, and the correct reading does not change from the
+previous run. This workload is not I/O-bound in the way that gives prefetching
+the most benefit. The columnar layout already reads a small number of large,
+sequential regions. The feature costs nothing and
 helps slightly. It is not a headline.
 
 ## Cross-engine read
@@ -268,9 +277,9 @@ magnitude rather than a competitive claim:
 | count(*) | 1 ms | 0.02 ms |
 | sum/avg over int | 4 ms | 0.53 ms |
 
-pgColumnar is now ahead on both, which says less than it appears to: these are the
-two shapes it answers from catalog metadata without touching column data, and
-DuckDB is scanning. On the shapes that actually scan, the filtered aggregate and
+pgColumnar is now ahead on both. This result means less than it appears to.
+These are the two shapes that pgColumnar answers from catalog metadata, with no
+access to the column data, and DuckDB scans the data. On the shapes that actually scan, the filtered aggregate and
 the projection, it remains the other way round.
 
 Reading the Parquet file pgColumnar wrote, 6,000,000 rows, count and sum:
@@ -304,13 +313,13 @@ The mutation figures improved again, from the direct zone min/max comparison
 Two things do not appear in this table because they are not in the harness, and
 both are larger than anything in it:
 
-- **A wide table is no longer unusable for index-driven access.** 2,000 index
-  fetches reading one column of a 41-column table went from 1,001,374 ms to
-  614 ms when the lazily-decoding slot landed (#169), and an 11-column table from
-  284,148 ms to 159 ms. That is the cliff #157 described, and it is gone.
-- **`ANALYZE` now collects statistics** (#159), including correlation, which is
-  what lets the planner see the locality `vacuum_sorted` and Z-ordering create.
-  Its cost is unmeasured here and is part of #171.
+- **A wide table now permits index-driven access.** 2,000 index fetches that read
+  one column of a 41-column table went from 1,001,374 ms to 614 ms. The lazily
+  decoding slot (#169) made this change. An 11-column table went from 284,148 ms
+  to 159 ms. This is the large step that #157 described, and it is gone.
+- **`ANALYZE` now collects statistics** (#159). These include correlation, which
+  lets the planner see the locality that `vacuum_sorted` and Z-ordering make.
+  This document does not measure its cost. That measurement is part of #171.
 
 The point lookup is the one number that moved the wrong way, and it moved a long
 way. See the note above it.
@@ -323,7 +332,8 @@ projections, and index-only covering scans. The size reduction comes mostly from
 the encoding layer before zstd. Vectorization adds a large further speedup on
 aggregates, and storing a table sorted on its range key improves skipping.
 
-Heap wins on single-row fetches and on deletes, both by wide margins, and the
-aggregate advantage disappears on a table with deletes until it is vacuumed.
+Heap is better for single-row fetches and for deletes, and by a large margin in
+both. On a table with deletes, the aggregate advantage is not present until a
+vacuum runs.
 Columnar is the wrong choice for write-heavy OLTP and the right choice for
 scan-heavy and aggregate-heavy analytics over wide, append-mostly tables.

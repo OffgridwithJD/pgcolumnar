@@ -16,41 +16,49 @@ PostgreSQL pages, so the buffer manager, WAL, and page checksums apply. Block 0
 is a metapage, block 1 is reserved, and block 2 onward is a logical byte area.
 Rows are grouped into row groups (a run of up to `stripe_row_limit` rows, the
 write unit). Within a row group one column's data is a chunk, holding a validity
-bitmap and a value stream encoded in fixed-size vectors. A separate set of
-ordinary heap tables in the `pgcolumnar` schema is the metadata catalog:
-`storage`, `row_group`, and `column_chunk` record the layout, `zone_map` records
-each chunk's and each vector's minimum and maximum for skipping, `bloom` records
-the per-chunk equality filters, `delete_vector` records the delete and update
-marks, `projection` records secondary column projections, `free_space` tracks the
-reclaimable byte ranges freed by deletes and compaction, and `options` holds
-per-table settings. A storage id links a relation's physical
+bitmap and a value stream encoded in fixed-size vectors. The metadata catalog is a separate set of ordinary heap tables in the
+`pgcolumnar` schema:
+
+- `storage`, `row_group` and `column_chunk` record the layout.
+- `zone_map` records the minimum and maximum of each chunk and each vector, which
+  drive skipping.
+- `bloom` records the per-chunk equality filters.
+- `delete_vector` records the delete marks and the update marks.
+- `projection` records secondary column projections.
+- `free_space` tracks the reclaimable byte ranges that deletes and compaction
+  free.
+- `options` holds the per-table settings. A storage id links a relation's physical
 file to its catalog rows.
 
 ## Crash safety
 
-A columnar relation's data lives in its main fork through the buffer manager and
-WAL, and its metadata lives in WAL-logged heap catalogs, so a columnar table is
-as crash-safe as any other PostgreSQL relation and the guarantee rests on core
-rather than on this extension. No write path bypasses the buffer manager or
-writes the file directly: data pages are dirtied and WAL-logged with
-`log_newpage_buffer`, the initial metapage and reserved page are WAL-logged
-before they are extended, and truncation is an `XLOG_SMGR_TRUNCATE` record.
+The data of a columnar relation lives in its main fork, through the buffer
+manager and WAL. Its metadata lives in WAL-logged heap catalogs. A columnar table
+is therefore as crash-safe as any other PostgreSQL relation, and the guarantee
+rests on core PostgreSQL rather than on this extension.
+
+No write path goes around the buffer manager, and none writes the file directly.
+`log_newpage_buffer` dirties and WAL-logs the data pages. The metapage and the
+reserved page are WAL-logged before anything extends them. A truncation is an
+`XLOG_SMGR_TRUNCATE` record.
 
 Two crash shapes follow from this.
 
-- The whole cluster crashes. On restart, WAL replay restores every committed
-  write and discards every uncommitted one, so a committed columnar table matches
-  a heap table written the same way, and an in-flight transaction leaves nothing
-  visible. `test/recovery.sh` asserts both against a heap mirror.
+- The whole cluster crashes. On restart, WAL replay restores each committed write
+  and discards each uncommitted one. A committed columnar table then matches a
+  heap table that a load wrote the same way. A transaction that was in progress
+  leaves nothing visible. `test/recovery.sh` asserts both against a heap
+  mirror.
 - One backend dies while the postmaster lives, which is the shape a fault in a
   single session produces. The postmaster reinitializes shared memory, drops
   every other session, and runs the same crash recovery. Committed columnar data
-  survives intact, and an uncommitted write in the dead backend leaves no visible
-  rows and no partial row group, for the same reason the cluster case does: the
-  surviving state is exactly what WAL records as committed. Other connected
-  sessions are dropped, not only the one that died. `test/native_backend_crash.sh`
-  asserts this against a heap mirror, killing one backend with `SIGSEGV` at more
-  than one point in the write path and once under a concurrent reader.
+  survives without damage. An uncommitted write in the dead backend leaves no
+  visible rows and no partial row group. The reason is the same as for the
+  cluster case: the state that survives is what WAL records as committed. The
+  postmaster drops the other connected sessions as well, not only the session
+  that died. `test/native_backend_crash.sh` asserts this against a heap mirror.
+  It kills one backend with `SIGSEGV` at more than one point in the write path,
+  and one time under a concurrent reader.
 
 What does not survive is process-local: an open transaction's uncommitted work,
 and the connections of every session live at the moment of the crash. Every
@@ -278,32 +286,44 @@ feeds three surfaces over the same file parse and type inference:
 - `read_parquet` returns rows as a set-returning function, and `parquet_schema`
   reports the leaf columns and their inferred PostgreSQL types.
 - The `pgcolumnar_parquet` foreign-data wrapper materializes the file into a
-  tuplestore drained by the scan. It pushes down predicates by skipping row
-  groups whose min/max statistics prove empty (only fixed-width ordered types,
-  with NaN and inverted-interval guards), and projects by decoding only the
-  columns the plan references (computed from the base rel's reltarget and quals).
+  tuplestore that the scan drains. It pushes predicates down: it skips a row
+  group when the minimum and maximum statistics prove that the group is empty.
+  This applies to fixed-width ordered types only, and it guards against NaN and
+  against an inverted interval. It also projects: it decodes only the columns
+  that the plan refers to. It computes that set from the reltarget and the quals
+  of the base rel.
 
-A `path` that is a directory or glob resolves to a sorted list of files, each
-read through the same core into the one sink; per-file decode buffers are freed
-between files.
+A `path` that is a directory or a glob resolves to a sorted list of files. The
+same core reads each file into the one sink. The decode buffers of a file are
+freed before the next file.
 
 A file is reached through a `PqSource` handle rather than an image of its bytes.
-`pq_source_open` validates the two magics, bounds the file-declared footer
-length, and reads and parses only the footer, which is then held for the scan
-because the chunk statistics that drive row-group skipping point into it. Pages
-are read as the decoder reaches them: a header window that grows on a short parse
-(a v2 page header carries column statistics, so its size is file-controlled),
-then the page body, sized from that page's own `compressed_size` rather than the
-chunk's writer-supplied `total_compressed_size`. Values are copied out of the
-page, so each page is freed after use and peak raw memory is one page instead of
-one file. Consequences: file size is not a limit (the previous whole-file
-`palloc` capped a readable file at `MaxAllocSize`), a row group excluded by
-predicate pushdown costs no I/O, and `parquet_schema` reads no page bytes at all.
+`pq_source_open` validates the two magics and bounds the footer length that the
+file declares. It then reads and parses the footer only. It holds the footer for
+the scan, because the chunk statistics that drive row-group skipping point into
+it.
 
-Decode paths are hardened against crafted files: file-declared sizes, DECIMAL
-scale, per-row-group chunk counts, page offsets, per-page compressed sizes, and
-pages that claim no values are all range-checked, so a malformed footer yields a
-clean error rather than an out-of-bounds read, a wrong value, or unbounded work.
+The decoder reads each page when it reaches it. First it reads a header window,
+which grows if the parse is short. A v2 page header carries column statistics, so
+the file controls its size. Then it reads the page body. The size of the body
+comes from the `compressed_size` of that page, and not from the
+`total_compressed_size` that the writer supplied for the chunk. Values are copied out of the
+page, so each page is freed after use and peak raw memory is one page instead of
+one file. Three consequences follow. File size is no longer a limit, where the earlier
+whole-file `palloc` limited a readable file to `MaxAllocSize`. A row group that
+predicate pushdown excludes costs no I/O. `parquet_schema` reads no page bytes at
+all.
+
+The decode paths guard against crafted files. They range-check these items:
+
+- the sizes that the file declares
+- the DECIMAL scale
+- the chunk count of each row group
+- the page offsets
+- the compressed size of each page
+- a page that claims no values A
+malformed footer therefore gives an explicit error. It does not give a read
+outside the buffer, an incorrect value, or work without a bound.
 Each of those guards has a crafted-file test verified to fail when that specific
 guard is removed; `test/mutate_guard.py` is the harness that does the removing.
 
@@ -332,22 +352,36 @@ projections aligned to the compacted base.
 
 ## Data flow summaries
 
-Insert: executor calls the table-AM insert or multi-insert callback ->
-`columnar_unique` takes the per-key advisory lock for each applicable unique
-index (issue #5) -> `columnar_write_state` buffers the row into per-column
-buffers, assigning its reserved row number and item pointer -> a full vector is
-closed, a full row group is encoded per column by `columnar_encoding` /
-`columnar_compression`, written to pages by `columnar_storage`, and recorded by
-`columnar_metadata` -> remaining buffers flush at statement end and pre-commit.
+Insert:
 
-Scan: the planner installs the custom scan (`columnar_customscan`) with a column
-projection and scan keys -> the reader (`columnar_reader`) walks row groups, uses
-the zone maps in `columnar_metadata` to skip groups and vectors, decodes
-projected chunks through `columnar_encoding` / `columnar_compression` (optionally
-via `columnar_cache`), applies the delete vector (`columnar_delete_vector`), and returns
-rows one at a time -> the executor re-applies the full qual as a filter. An
-ungrouped aggregate is answered by `columnar_vector` from the zone-map metadata.
+1. The executor calls the table-AM insert callback or multi-insert callback.
+2. `columnar_unique` takes the per-key advisory lock for each unique index that
+   applies (issue #5).
+3. `columnar_write_state` puts the row into the per-column buffers. It gives the
+   row its reserved row number and its item pointer.
+4. When a vector is full, the writer closes it. When a row group is full,
+   `columnar_encoding` and `columnar_compression` encode each column,
+   `columnar_storage` writes the pages, and `columnar_metadata` records the
+   result.
+5. The remaining buffers flush at the end of the statement and before the
+   commit.
 
-Delete or update: the custom scan supplies each row's item pointer ->
-`columnar_delete_vector` marks the old row; an update also inserts the new row through
-the writer.
+Scan:
+
+1. The planner installs the custom scan (`columnar_customscan`) with a column
+   projection and with scan keys.
+2. The reader (`columnar_reader`) goes through the row groups. It uses the zone
+   maps in `columnar_metadata` to skip groups and vectors.
+3. The reader decodes the projected chunks through `columnar_encoding` and
+   `columnar_compression`, and can use `columnar_cache`.
+4. The reader applies the delete vector (`columnar_delete_vector`) and returns
+   the rows one at a time.
+5. The executor applies the full qual again, as a filter.
+
+`columnar_vector` answers an ungrouped aggregate from the zone-map metadata.
+
+Delete or update:
+
+1. The custom scan supplies the item pointer of each row.
+2. `columnar_delete_vector` marks the old row.
+3. An update also inserts the new row through the writer.
