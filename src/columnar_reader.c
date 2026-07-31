@@ -1112,8 +1112,28 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 
 			if ((vbits[rs->rowInGroup >> 3] >> (rs->rowInGroup & 7)) & 1)
 			{
-				values[c] = ColumnarDecodeValue(att, &rs->nativeValueCursor[c],
-												rs->rowContext);
+				/*
+				 * Fast path (#289): inline the attbyval decode. This is exactly
+				 * what ColumnarDecodeValue does for a by-value type -- one
+				 * fetch_att and advance attlen -- but skips the out-of-line call
+				 * and its own attbyval branch, which is the per-row decode
+				 * dispatch #289 profiled as hot. It works for both baseline and
+				 * descriptor chunks, since both leave nativeValueCursor pointing
+				 * at the present-value bytes. By-reference and varlena keep the
+				 * call, which copies into rowContext. No array, no extra memory,
+				 * so a scan that materialises few columns pays nothing extra.
+				 */
+				if (att->attbyval)
+				{
+					char	   *p = rs->nativeValueCursor[c];
+
+					values[c] = fetch_att(p, true, att->attlen);
+					rs->nativeValueCursor[c] = p + att->attlen;
+				}
+				else
+					values[c] = ColumnarDecodeValue(att,
+													&rs->nativeValueCursor[c],
+													rs->rowContext);
 				nulls[c] = false;
 			}
 			else
