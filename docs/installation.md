@@ -1,7 +1,7 @@
 # Installation
 
 pgColumnar builds with PGXS against an installed PostgreSQL server. The supported
-versions are 15 through 18. Version 19 is validated against 19beta2. Validation
+versions are 15 through 18. The project validates version 19 against 19beta2. Validation
 against the final 19 release is not done yet. PostgreSQL 13 and 14 build, but
 they are not in the tested matrix.
 

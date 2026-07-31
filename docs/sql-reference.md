@@ -11,10 +11,9 @@ Converts a table to another access method, for example from the default heap to
 `pgcolumnar` or back.
 
 On PostgreSQL 15 and later this runs `ALTER TABLE ... SET ACCESS METHOD`, which
-rewrites the table in place and preserves its identity and dependents. On
-PostgreSQL 13 and 14, which have no such command, it builds a sibling table with
-`LIKE ... INCLUDING ALL`, copies every row through the target method, and swaps
-names. On those two majors the conversion does not preserve the original table's
+rewrites the table in place and preserves its identity and dependents. PostgreSQL 13 and 14 do not have that command. On those two versions, the
+function makes a second table with `LIKE ... INCLUDING ALL`. It then copies each
+row through the target method and exchanges the names. On those two majors the conversion does not preserve the original table's
 OID or objects that depend on it, such as views and foreign keys.
 
 ```sql
@@ -63,10 +62,11 @@ SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
 ### pgcolumnar.cluster(tablename regclass, VARIADIC columns name[])
 
 Rewrites a columnar table with its rows ordered by a Z-order (Morton)
-space-filling curve over the given columns. Where `vacuum_sorted` sorts ascending
-and so tightens the minimum and maximum of its leading column, Z-order tightens
-every clustered column at once, so multi-column range and point filters skip more
-vectors and chunk groups. Results are unchanged; only physical order is.
+space-filling curve on the columns that you give. `vacuum_sorted` sorts in
+ascending order. Thus it makes the minimum and maximum of its first column
+tighter. Z-order makes each clustered column tighter at the same time. Range
+filters and point filters on more than one column then skip more vectors and more
+chunk groups. The results do not change. Only the physical order changes.
 
 **Holds `AccessExclusiveLock` for the duration**, like PostgreSQL's own `CLUSTER`
 and `VACUUM FULL`, because it rewrites the relation and swaps its file. Reads and
@@ -112,10 +112,11 @@ SELECT pgcolumnar.compact_rewrite('events', 0.3);
 
 ### pgcolumnar.truncate(tablename regclass) returns bigint
 
-Returns trailing reclaimed blocks to the operating system. Best-effort: it takes
-`AccessExclusiveLock` conditionally for the brief physical step and returns 0
-without waiting if the table is busy, and it only removes space freed before the
-oldest-xmin horizon. Gated by `pgcolumnar.enable_end_truncation`, which is off by
+Gives the reclaimed blocks at the end of the file back to the operating system.
+The function does what it can. It takes `AccessExclusiveLock` for the short
+physical step, but only if the lock is available. If the table is busy, the
+function returns 0 and does not wait. It removes only the space that became free
+before the oldest-xmin horizon. Gated by `pgcolumnar.enable_end_truncation`, which is off by
 default. Returns the number of blocks truncated.
 
 ```sql
@@ -125,7 +126,7 @@ SELECT pgcolumnar.truncate('events');
 ### pgcolumnar.vacuum_full(schema name DEFAULT 'public', sleep_time real DEFAULT 0.0, stripe_count int DEFAULT 0)
 
 Runs `pgcolumnar.vacuum` on every columnar table in a schema. `sleep_time` is a
-pause in seconds between tables. `stripe_count` is passed through to each call.
+pause in seconds between tables. Each call receives the same `stripe_count`.
 
 ```sql
 SELECT pgcolumnar.vacuum_full('public');
@@ -162,7 +163,7 @@ than the base table, the planner scans the projection instead. See
 ### pgcolumnar.add_projection(rel regclass, name text, columns text[], sort_key text[] DEFAULT '{}')
 
 Declares a projection on `rel` named `name`, storing `columns`, sorted on
-`sort_key`. Existing rows are back-filled when the projection is added.
+`sort_key`. When you add the projection, pgColumnar fills it with the rows that exist.
 
 ```sql
 SELECT pgcolumnar.add_projection(
@@ -189,8 +190,8 @@ inspection and testing, not for query use.
 These functions read and write Arrow IPC stream files and Parquet files. They
 require superuser, because they read and write files on the server host. They run
 on little-endian hosts only. They support scalar column types, one-dimensional
-arrays, and composite types, with nulls at every level. Multi-dimensional arrays
-and unsupported types are rejected. See
+arrays, and composite types, with nulls at every level. The functions refuse multi-dimensional arrays
+and types that they do not support. See
 [Limitations and compatibility](limitations.md).
 
 ### pgcolumnar.export_arrow(rel regclass, path text) returns bigint
@@ -206,7 +207,7 @@ rows written.
 ### pgcolumnar.import_arrow(rel regclass, path text) returns bigint
 
 Inserts the rows of an Arrow IPC stream file at `path` into the existing table
-`rel`. The table's column types define what is expected. Returns the number of
+`rel`. The column types of the table define the types that the function accepts. Returns the number of
 rows inserted.
 
 ### pgcolumnar.import_parquet(rel regclass, path text) returns bigint
@@ -231,23 +232,25 @@ SELECT pgcolumnar.import_parquet('events_copy', '/data/events/');
 ## Reading external Parquet
 
 These read a server-side Parquet file in place, without importing it. They
-require superuser and run on little-endian hosts. In every case `path` may be a
-single file, a directory (all `*.parquet` files below it at any depth, read as
-one relation
-in sorted order), or a glob pattern.
+require superuser and operate on little-endian hosts. In each function, `path`
+can be one of three things. It can be a single file. It can be a directory, and
+then the function reads all the `*.parquet` files below it at any depth as one
+relation, in sorted order. It can also be a glob pattern.
 
 ### pgcolumnar.read_parquet(path text) returns setof record
 
-Returns the rows of a Parquet file. The caller supplies a column definition list
-that names the output columns and their types; the reader binds it against the
-file's leaf columns by position, with the same type-compatibility rules as
-import.
+Returns the rows of a Parquet file. You must supply a column definition list. It
+gives the names of the output columns and their types. The reader connects the
+list to the leaf columns of the file by position. It uses the same rules for type
+compatibility as the import functions.
 
-The list must cover every leaf column in the file. Declaring a subset is an
-error, not a projection: the read stops with a message reporting the file's leaf
-count and the count the target expands to. The same rule applies to a foreign
-table's column definitions. Projection pushdown decides which of the declared
-columns are decoded, which is separate from how many must be declared. Use
+The list must contain each leaf column in the file. A list with fewer columns is
+an error and not a projection. The read stops and gives a message. The message
+contains the number of leaf columns in the file and the number that the target
+expands to. The same rule applies to a foreign
+table's column definitions. Projection pushdown selects the declared columns
+that the reader decodes. This is a separate question from the number of columns
+that you must declare. Use
 `parquet_schema` to generate the full list.
 
 ```sql
@@ -281,9 +284,10 @@ A scan that skips nothing still returns correct rows.
 
 Table options: `path`, and `partition_columns` for a Hive-style layout. The
 latter names the columns whose values come from `col=value` directory components
-rather than from the files. They are declared rather than inferred, since a wrong
-guess would silently change which rows a query returns. A predicate on a
-partition column drops whole files before they are opened, reported as
+rather than from the files. You declare these columns. pgColumnar does not infer
+them, because an incorrect value would change the rows that a query returns, with
+no message. A predicate on a partition column removes complete files before the
+reader opens them. The plan shows this as
 `Files Pruned`.
 
 ```sql
@@ -309,7 +313,7 @@ index-only scans. They are for diagnostics.
 
 ### pgcolumnar.vm_is_visible(rel regclass, blk int)
 
-Returns whether the given block (chunk group) is marked all-visible.
+Tells you if the block (chunk group) has the all-visible mark.
 
 ### pgcolumnar.vm_selftest(rel regclass, blk int)
 
