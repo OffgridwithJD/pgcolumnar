@@ -1113,6 +1113,8 @@ decode_alp(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 
 #define DICT_MAX_DISTINCT 1024
 
+static inline uint64 columnar_fnv1a(const char *p, uint32 n);
+
 static bool
 encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 			char **out, uint32 *outLen)
@@ -1129,20 +1131,43 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 	uint32		i;
 	int			j;
 
+	/*
+	 * Open-addressing hash of value -> distinct index (stored +1; 0 == empty),
+	 * so "have I seen this value?" is O(1) average instead of a memcmp scan over
+	 * every prior distinct value -- the O(n^2) that showed up as ~10% of a text
+	 * load in profiling (issue #155). First-seen assignment order is unchanged,
+	 * so the dictionary and codes are byte-identical to the linear build. Sized a
+	 * power of two above 2 * DICT_MAX_DISTINCT so the load factor stays <= 1/2.
+	 */
+	enum { DICT_HASH_SLOTS = 2048 };
+	uint32		hslot[DICT_HASH_SLOTS];
+
+	memset(hslot, 0, sizeof(hslot));
+
 	for (i = 0; i < n; i++)
 	{
 		const char *vp = raw + pos;
 		uint32		vlen = (w > 0) ? (uint32) w
 			: ColumnarVarSizeAnyUnaligned(vp);
+		uint64		h = columnar_fnv1a(vp, vlen);
+		uint32		s = (uint32) (h & (DICT_HASH_SLOTS - 1));
 		int			code = -1;
 
-		for (j = 0; j < nd; j++)
+		for (;;)
+		{
+			uint32		entry = hslot[s];
+
+			if (entry == 0)
+				break;			/* empty slot: value unseen; insert here below */
+			j = (int) (entry - 1);
 			if (distLen[j] == vlen &&
 				memcmp(raw + distOff[j], vp, vlen) == 0)
 			{
 				code = j;
 				break;
 			}
+			s = (s + 1) & (DICT_HASH_SLOTS - 1);	/* collision: keep probing */
+		}
 
 		if (code < 0)
 		{
@@ -1153,6 +1178,7 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 			}
 			distOff[nd] = pos;
 			distLen[nd] = vlen;
+			hslot[s] = (uint32) (nd + 1);	/* record at the empty slot found */
 			code = nd;
 			nd++;
 		}
