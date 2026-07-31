@@ -117,7 +117,7 @@ jobs:
   # extension. The suites on 19 stay local, where the beta can be validated
   # against a full matrix.
   build-beta:
-    name: build (PG ${{ env.PG_BETA }}, from source)
+    name: build (PG 19 beta, from source)
     runs-on: ubuntu-latest
     env:
       PG_BETA: 19beta2
