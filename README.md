@@ -82,9 +82,9 @@ See the [installation guide](docs/installation.md) for requirements and the
 ## Independence
 
 pgColumnar is an independent implementation. It is not derived from the source of
-any other columnar project. Its on-disk format, metadata catalog, and SQL
-interface are designed from published column-store research and the open Apache
-Arrow, Parquet, and ORC specifications, and are recorded in
+any other columnar project. Its on-disk format, its metadata catalog and its
+SQL interface come from published column-store research and from the open Apache
+Arrow, Parquet and ORC specifications. They are recorded in
 [design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
 The implementation is built from that specification and the public PostgreSQL
 API, by the clean-room method described in [PROVENANCE.md](PROVENANCE.md).

@@ -11,17 +11,17 @@ tables that can be rebuilt from an external source, and for development, testing
 and measurement. It is not yet recommended for a production system of record or
 for data that cannot be reloaded.
 
-The hardening that was tracked before a first alpha is complete. The hand-rolled
-Parquet and Arrow parsers are fuzzed, both by byte mutation and by structural
+The hardening that was tracked before a first alpha is complete. The
+Parquet and Arrow parsers, which this project wrote, are fuzzed, both by byte mutation and by structural
 mutation of the container format
 ([issue #214](https://github.com/jdatcmd/pgcolumnar/issues/214)). The boundary for
 untrusted input files is stated and tested
 ([issue #216](https://github.com/jdatcmd/pgcolumnar/issues/216)). The blast radius
 of a single backend crash is asserted and documented
-([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The on-disk
-format version is enforced on read rather than only stamped on write
-([issue #240](https://github.com/jdatcmd/pgcolumnar/issues/240)), and cross-major
-`pg_upgrade` is covered by a gate rather than by a suite nobody runs
+([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The build checks the on-disk format version
+on read. It does not only stamp the version on write
+([issue #240](https://github.com/jdatcmd/pgcolumnar/issues/240)). A gate covers
+cross-major `pg_upgrade`. Before, only a suite that nobody ran covered it
 ([issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257)).
 
 What that testing does not cover is worth stating alongside it. Every result
@@ -29,15 +29,17 @@ recorded in this repository comes from x86_64. The suites have not been run on
 aarch64 or on a big-endian platform
 ([issue #242](https://github.com/jdatcmd/pgcolumnar/issues/242)).
 
-Unaligned reads, one class that would be expected to differ by architecture, are
-covered independent of it: the sanitizer gate builds with clang's address and
-undefined-behaviour checks, which report a misaligned load on any host, and that
-gate exists because such a read was found and fixed once. What remains untested on
-another architecture is what a sanitizer on x86_64 cannot observe, principally
-memory ordering. x86_64 orders stores more strictly than aarch64 does, so a
-missing barrier in concurrent code can be invisible on one and a defect on the
-other. Another architecture is untested rather than known to be broken, and
-building there should be treated accordingly.
+Unaligned reads are one class that a reader could expect to differ by
+architecture. The tests cover that class on each architecture. The sanitizer gate
+builds with the clang address checks and undefined-behaviour checks. These report
+a misaligned load on any host. That gate exists because the project found and
+fixed such a read one time.
+
+What stays untested on another architecture is what a sanitizer on x86_64 cannot
+see. Memory ordering is the main item. x86_64 puts stores in a more strict order
+than aarch64. Thus a missing barrier in concurrent code can be invisible on one
+architecture and a defect on the other. Another architecture is untested. It is
+not known to be broken. Give it that status when you build there.
 
 PostgreSQL 19 coverage is against 19beta2, not a final release.
 
@@ -46,65 +48,70 @@ work.
 
 ## On-disk format stability
 
-The on-disk format is versioned. Each columnar relation records a native data
-format version (currently PGCN v1) and a physical metapage version, and both are
-checked on read. The metapage version guards the physical block layout; the
-native format version guards the data encoding, so a future version that changes
-the encoding while keeping the metapage layout is still caught. A version this
-build does not understand is rejected, reporting `unsupported columnar format
-version` for the metapage or `unsupported columnar native format version` for the
-data format, and the read fails rather than misinterpreting bytes written by a
-different layout. The check runs on every decode path, including sequential scan,
-vectorized aggregate, and index-scan fetch, so a version this build cannot read
-is refused whichever way the query reaches the data. Both guards are pinned by
+The on-disk format is versioned. Each columnar relation records two versions. The first is a native data format
+version, which is PGCN v1 at this time. The second is a physical metapage
+version. The build checks both on read.
+
+The metapage version guards the physical block layout. The native format version
+guards the data encoding. Thus the build also catches a future version that
+changes the encoding but keeps the metapage layout.
+
+The build refuses a version that it does not know. It reports `unsupported
+columnar format version` for the metapage, or `unsupported columnar native format
+version` for the data format. The read then fails. It does not read bytes that a
+different layout wrote. The check runs on each decode path. These paths include
+the sequential scan, the vectorized aggregate, and the index-scan fetch. Thus the
+build refuses a version that it cannot read, whichever path the query uses. Both guards are pinned by
 `test/native_format.sh`.
 
-A projection stores its own copy of the data and carries its own format version;
-it is validated against the projection's own storage, not the base table's. Each
-stored object is therefore self-describing, and a build that writes a new version
-stamps every object it writes, base and projections together.
+A projection stores its own copy of the data and carries its own format version.
+The build checks it against the storage of the projection and not against the
+storage of the base table. Each stored object therefore describes itself. A build
+that writes a new version stamps each object that it writes. This includes the
+base table and the projections together.
 
-Within a version the format round-trips faithfully: data written and read back on
-the same build is byte-for-byte identical, which `test/native_format.sh` proves on
-every supported PostgreSQL major. Byte-for-byte preservation across a PostgreSQL
-major upgrade is asserted separately by `test/pg_upgrade.sh`, which runs as an
-opt-in gate (`PGC_RUN_UPGRADE=1 test/run_all_versions.sh`) over each adjacent pair
-of majors in both copy and link transfer modes.
+In one version, the format keeps the data exactly. Data that one build writes and
+reads back is identical byte for byte. `test/native_format.sh` proves this on
+each supported PostgreSQL major. `test/pg_upgrade.sh` asserts the same property
+across a PostgreSQL major upgrade. It runs as an opt-in gate
+(`PGC_RUN_UPGRADE=1 test/run_all_versions.sh`). It covers each adjacent pair of
+majors, in the copy transfer mode and in the link transfer mode.
 
 There is no in-place upgrade across an incompatible format version. The format has
-not changed during the pre-release, so no migration has been needed. Until an
-upgrade path and a compatibility guarantee are committed to, treat the format as
-reload-required across an incompatible bump. This is the same posture as the
-release-status note above: keep the source a columnar table was loaded from, so it
-can be rebuilt if a future version changes the layout. A physical copy
-(`pg_basebackup`, file-system snapshot, replication) preserves the exact bytes and
-so stays readable by a build of the same version; it is not a substitute for the
-reloadable source across a version change.
+not changed during the pre-release, so no migration has been needed. The project has not
+committed to an upgrade path or to a compatibility guarantee. Until it does, a
+change to an incompatible version needs a reload. This is the same position as
+the release-status note above. Keep the source that you loaded a columnar table
+from. You can then build the table again if a future version changes the layout.
+A physical copy keeps the exact bytes, and a build of the same version can read
+it. `pg_basebackup`, a file-system snapshot and replication all make such a copy.
+A physical copy does not replace the source across a version change.
 
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and
-19. Every test suite runs on all five majors. Support for 19 is validated against
-19beta2 rather than a final release, and will be re-validated when 19 ships;
-15 through 18 are validated against released versions. PostgreSQL 13 and 14 still
+19. Every test suite runs on all five majors. The project validates 19 against 19beta2 and not against a final release. It will
+validate 19 again after the release. It validates 15 through 18 against released
+versions. PostgreSQL 13 and 14 still
 build but are out of the tested matrix.
 
 Three behaviors depend on the major:
 
 - `ALTER TABLE ... SET ACCESS METHOD` exists on PostgreSQL 15 and later. On 13 and
   14, `pgcolumnar.alter_table_set_access_method` builds a new table, copies rows,
-  and swaps names. This preserves columns, defaults, constraints, and indexes, but
-  not the original relation's OID or its dependent objects such as views and
-  foreign keys.
+  and exchanges the names. This keeps the columns, the defaults, the constraints
+  and the indexes. It does not keep the OID of the original relation. It also
+  does not keep the objects that depend on it, such as views and foreign keys.
 - The read stream prefetch path (`pgcolumnar.enable_read_stream`) is effective on
   PostgreSQL 17 and later. On earlier majors the setting has no effect.
-- Setting the access method of a *partitioned* table requires PostgreSQL 17. On
-  15 and 16, core refuses `ALTER TABLE ... SET ACCESS METHOD` on any partitioned
-  table with `cannot change access method of a partitioned table`, so a
-  partitioned parent cannot be made columnar there and its later partitions
-  cannot inherit the choice. Give each partition the access method individually
-  instead. This is core's restriction, not this extension's, and it applies
-  whether or not a foreign key is involved.
+- To set the access method of a *partitioned* table, you need PostgreSQL 17. On
+  15 and 16, core refuses `ALTER TABLE ... SET ACCESS METHOD` on each partitioned
+  table. It gives the message `cannot change access method of a partitioned
+  table`. You therefore cannot make a partitioned parent columnar on those two
+  majors, and its later partitions cannot take the choice from it. Set the access
+  method of each partition one at a time instead. This is a restriction of core
+  PostgreSQL and not of this extension. It applies with a foreign key and without
+  one.
 
 ## Host architecture
 
@@ -113,24 +120,27 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
 
 ## Workload and access patterns
 
-- Columnar storage is built for append-mostly data. Updates and deletes are
-  supported, but they mark rows rather than rewriting data, and the space is
-  reclaimed only by `pgcolumnar.vacuum`.
-- Point lookups are slower than heap, though far less so than they were. A fetch
-  by item pointer locates the row's group and decodes only the columns the
-  executor asks for, reusing the decoded group for the rest of the statement, so
-  the cost no longer scales with the table's width or with the row's position in
-  its group. Heap still wins a single-row fetch outright. Bloom filters speed up
-  an equality scan by skipping row groups but do not help a fetch by item pointer.
-- Bulk `UPDATE` and `DELETE` reached by index are no longer proportional to rows
-  times row group size. They still cost several times what heap costs, because
-  each changed row is marked and rewritten rather than updated in place.
+- Columnar storage is for data that you mostly append. Updates and deletes
+  operate, but they mark the rows and do not rewrite the data. Only
+  `pgcolumnar.vacuum` makes the space available again.
+- Point lookups are slower than heap, but much less slow than before. A fetch by
+  item pointer finds the group of the row. It decodes only the columns that the
+  executor asks for, and it keeps the decoded group for the rest of the
+  statement. The cost therefore no longer increases with the width of the table,
+  or with the position of the row in its group. Heap is still faster for a
+  single-row fetch. Bloom filters make an equality scan faster, because they skip
+  row groups. They do not help a fetch by item pointer.
+- A bulk `UPDATE` or `DELETE` through an index no longer costs the number of rows
+  multiplied by the row group size. It still costs several times more than heap.
+  The reason is that each changed row is marked and written again, and not
+  changed in place.
 
 ## Bulk load and import throughput
 
-Loading a columnar table is slower than loading a heap for most shapes, and the
-factor depends on the data rather than on a single number. Measured at 6,000,000
-rows on PostgreSQL 17.10, non-assert, against a heap insert of the same rows:
+For most data shapes, a load into a columnar table is slower than a load into a
+heap. The factor depends on the data. There is no single number. The measurement
+used 6,000,000 rows on PostgreSQL 17.10, non-assert, against a heap insert of the
+same rows:
 
 | shape | `encode_effort = full` | `encode_effort = fast` |
 | --- | --- | --- |
@@ -144,12 +154,13 @@ A single narrow column can be faster than heap; five columns of long high-entrop
 text at full effort are several times slower. A single multiplier would be wrong
 in one direction or the other depending on the schema.
 
-`encode_effort` is the knob. The default, `full`, spends the most on encoding for
-the best storage ratio; `fast` trades some ratio for load speed and recovers most
-of the cost on high-entropy text, where the encoding search is what it skips. Set
-it per table with `pgcolumnar.set_options(rel, encode_effort => 'fast')`.
-Low-cardinality text is dominated by dictionary encoding rather than by that
-search, so `fast` helps it less.
+`encode_effort` is the control. The default is `full`. It spends the most on the
+encoding and gives the best storage ratio. `fast` accepts a lower ratio and gives
+a higher load speed. On high-entropy text it recovers most of the cost, because
+the encoding search is the work that it omits. Set it for one table with
+`pgcolumnar.set_options(rel, encode_effort => 'fast')`. For low-cardinality text,
+dictionary encoding is the largest cost and not that search. `fast` therefore
+helps less.
 
 `import_arrow` and `import_parquet` are not slower than an ordinary `INSERT` of
 the same rows. There is no import-specific overhead; the cost is the columnar
@@ -160,24 +171,25 @@ Work on load throughput is tracked in
 
 ## Planner statistics
 
-`ANALYZE` collects column statistics for a columnar table: null fraction,
-distinct counts, most-common values, histograms and correlation, the same set it
-collects for a heap table. Predicates are estimated from the data.
+`ANALYZE` collects column statistics for a columnar table. These are the null
+fraction, the distinct counts, the most-common values, the histograms and the
+correlation. This is the same set that it collects for a heap table. The planner
+then estimates the predicates from the data.
 
-Correlation is worth calling out because it is the statistic that makes
-`pgcolumnar.vacuum_sorted` and Z-order clustering legible to the planner: a table
-stored sorted on a key reports a correlation near 1 for that column, and the
-planner can then price a range scan over it correctly.
+Correlation has a special importance. It is the statistic that shows
+`pgcolumnar.vacuum_sorted` and Z-order clustering to the planner. A table that is
+stored in sorted order on a key reports a correlation near 1 for that column. The
+planner can then give a correct cost to a range scan on it.
 
-The row count the planner uses does not come from `ANALYZE` at all. It is derived
-from row-group metadata, so it is accurate whether or not the table has been
-analyzed. `pg_class.reltuples` runs a few percent low after `ANALYZE`, because
-blocks that hold no row-group data (the metapage, and space reserved but not yet
-written) count as visited while offering no rows; the planner does not use that
-figure for columnar tables.
+The row count the planner uses does not come from `ANALYZE` at all. It comes from the row-group
+metadata. It is therefore correct whether or not `ANALYZE` has run.
+`pg_class.reltuples` is a few percent low after `ANALYZE`. Some blocks hold no
+row-group data, such as the metapage and the space that is reserved but not
+written. These blocks count as visited, but they give no rows. The planner does
+not use that figure for columnar tables.
 
-`ANALYZE` samples rows through the fetch path rather than by block, so it costs
-somewhat more on a columnar table than on a heap of the same size.
+`ANALYZE` samples the rows through the fetch path and not by block. It therefore
+costs more on a columnar table than on a heap of the same size.
 
 `TABLESAMPLE` is unsupported and says so: it raises an error rather than
 returning no rows.
@@ -188,51 +200,64 @@ returning no rows.
   copy-for-cluster path raises an error. Use `pgcolumnar.vacuum` or
   `pgcolumnar.vacuum_full` instead.
 - `pgcolumnar.vacuum` always rewrites the whole relation into full row groups. It
-  accepts a `stripe_count` argument for interface compatibility but performs the
-  full rewrite. Because it renumbers rows, it rebuilds the table's indexes.
-- Row numbers are reserved a whole row group at a time, so a row group flushed
-  with fewer than `stripe_row_limit` rows leaves a gap in the row-number space. Row
-  numbers need only be unique and stable, so the gap is harmless.
+  accepts a `stripe_count` argument for compatibility with the interface, but it
+  does the full rewrite. It gives the rows new numbers, so it also builds the
+  indexes of the table again.
+- The writer reserves row numbers one whole row group at a time. A row group that
+  it flushes with fewer than `stripe_row_limit` rows therefore leaves a gap in
+  the row-number space. A row number must be unique and stable, and nothing more.
+  The gap does no damage.
 
 ## Index-only scans
 
 An index-only scan uses the columnar visibility-map fork, which lazy `VACUUM`
-populates. A row group is reported all-visible only once its inserting
-transaction precedes the oldest snapshot horizon and it has no deletes, and any
-later write clears the bit. Recently loaded data is served by a snapshot-checked
-fetch until autovacuum or an explicit `VACUUM` marks it. Turn the feature off with
+populates. A row group gets the all-visible mark only when two conditions are true. Its
+inserting transaction must come before the oldest snapshot horizon, and the group
+must have no deletes. Any later write clears the bit. A fetch that checks the
+snapshot serves data that a load wrote recently. This continues until autovacuum
+or an explicit `VACUUM` marks the group. Turn the feature off with
 `pgcolumnar.enable_index_only_scan = off`.
 
 ## Projections
 
-Projections are additional sorted copies, so they add write and storage cost
-proportional to the number of projections, and they are rebuilt by
-`pgcolumnar.vacuum`. The planner uses a projection only when it covers every
-referenced column (no system columns or whole-row references) and its leading sort
-column is restricted; other queries scan the base. A projection added to a
-populated table is back-filled under `ShareLock`, which blocks concurrent writes
-for the build, like non-concurrent `CREATE INDEX`. Turn projection scans off with
+A projection is an additional sorted copy. Each projection therefore adds write
+cost and storage cost. `pgcolumnar.vacuum` builds the projections again.
+
+The planner uses a projection only when two conditions are true. The projection
+must contain each column that the query refers to, with no system columns and no
+whole-row references. The query must also restrict the leading sort column of the
+projection. Other queries read the base table.
+
+When you add a projection to a table that holds rows, the build fills it under
+`ShareLock`. That lock stops concurrent writes until the build completes, in the
+same way as a `CREATE INDEX` that is not concurrent. Turn projection scans off with
 `pgcolumnar.enable_projection_scan = off`.
 
 ## Concurrency
 
-- Concurrent deletes or updates to rows in the same row group serialize on that
-  row group's row-mask entry: a second writer waits for the first to commit,
-  re-reads the committed mask, and merges its bits, so both sets of delete marks
-  survive. Writes to different row groups proceed concurrently.
-- Concurrent inserts of the same unique key are serialized so the conflict is
-  always caught. Before a freshly inserted row reaches the uniqueness check, the
-  access method takes a transaction-scoped advisory lock keyed by the row's unique
-  key. Equal keys hash to the same lock, consistent with the index's equality, so
-  `numeric` `1.0` and `1.00`, `citext` case differences, and collation-equal text
-  serialize correctly. Keys hash into a bounded number of buckets per index
-  (`pgcolumnar.unique_lock_buckets`, default 128); unrelated keys sharing a bucket
-  are over-serialized, never under-serialized. Unique, immediate, valid indexes
-  are covered, including multi-column, partial, and expression indexes. An index
-  whose operator class cannot be matched to its key type's default equality, or
-  whose key type has no hash support, falls back to a single per-index lock. A
-  genuine same-key conflict can surface as a deadlock abort rather than a
-  `unique_violation`; both reject the duplicate. Turn the serialization off with
+- Concurrent deletes or updates to rows in the same row group go in sequence, on
+  the row-mask entry of that group. A second writer waits for the first writer to
+  commit. It then reads the committed mask again and merges its own bits. Thus
+  both sets of delete marks survive. Writes to different row groups continue at
+  the same time.
+- Concurrent inserts of the same unique key go in sequence. The server therefore
+  always finds the conflict. Before a new row reaches the uniqueness check, the
+  access method takes an advisory lock with the scope of the transaction. The key
+  of that lock is the unique key of the row. Equal keys hash to the same lock,
+  which agrees with the equality of the index. Thus `numeric` `1.0` and `1.00`,
+  `citext` values that differ only in case, and text values that a collation
+  makes equal, all go in sequence correctly. Each index has a limited number of buckets, which
+  `pgcolumnar.unique_lock_buckets` sets and which defaults to 128. Keys hash into
+  those buckets. Two keys that are not related can share a bucket. Such keys go
+  in sequence when they do not need to, but they never fail to go in sequence
+  when they must. This applies to unique, immediate and valid
+  indexes. It includes multi-column indexes, partial indexes and expression
+  indexes. Some indexes use a single lock for the whole index
+  instead. The first is an index whose operator class does not match
+  the default equality of its key type. The second is an index whose key type has
+  no hash support. A
+  true conflict on the same key can appear as a deadlock abort and not as a
+  `unique_violation`. Both results refuse the duplicate. Turn the serialization off with
   `pgcolumnar.enable_unique_insert_lock = off`.
 
 ## Row locking
@@ -243,27 +268,28 @@ columnar table and raise `columnar: row locking is not supported yet`.
 Two consequences are worth stating here, because the error surfaces somewhere
 other than where the feature is used:
 
-- **A foreign key cannot reference a columnar table, and is refused when it is
-  created.** The referential-integrity check reads the parent row with
-  `FOR KEY SHARE`, which a columnar table cannot serve, so `CREATE TABLE` and
-  `ALTER TABLE ADD CONSTRAINT` reject the constraint rather than accepting one
-  that could never be satisfied. A columnar table on the child side of a foreign
+- **A foreign key cannot refer to a columnar table. The server refuses such a
+  key when you create it.** The check for referential integrity reads the parent
+  row with `FOR KEY SHARE`. A columnar table cannot do that. `CREATE TABLE` and
+  `ALTER TABLE ADD CONSTRAINT` therefore refuse the constraint. They do not
+  accept a constraint that nothing could satisfy. A columnar table on the child side of a foreign
   key is unaffected and works normally.
-- **Converting a table that is already referenced by a foreign key is refused
-  for the same reason.** `ALTER TABLE ... SET ACCESS METHOD pgcolumnar`, and
-  `pgcolumnar.alter_table_set_access_method`, reach the identical configuration
-  from the other side, so they are rejected while any foreign key references the
-  table. A partitioned table is refused as well: it has no storage of its own,
-  but it chooses the access method every partition created afterwards inherits,
-  and each of those would then be refused in turn. Drop the constraint first if
-  the table should be columnar. Converting the referencing side, and converting
-  a table no foreign key points at, are unaffected.
+- **The server refuses a conversion of a table that a foreign key already refers
+  to. The reason is the same.** `ALTER TABLE ... SET ACCESS METHOD pgcolumnar` and
+  `pgcolumnar.alter_table_set_access_method` give the same configuration from the
+  other side. They are therefore refused while a foreign key refers to the table.
+  A partitioned table is also refused. It has no storage of its own. But it sets the access
+  method that each later partition takes, and core would then refuse each of those
+  partitions. Drop the constraint first if the table must be
+  columnar. A conversion of the referencing side is permitted. A conversion of a
+  table that no foreign key refers to is also permitted.
 - `INSERT ... ON CONFLICT DO UPDATE` takes a row lock and raises the same error.
   `ON CONFLICT DO NOTHING` does not, and works.
 
-Unlogged columnar tables are rejected at `CREATE TABLE` for the same reason, and
-that is the rule both follow: a configuration this access method cannot honour is
-refused where it is chosen, not at every later use of it.
+`CREATE TABLE` refuses an unlogged columnar table for the same reason. Both cases
+follow one rule. This access method refuses a configuration that it cannot
+support at the point where you choose it. It does not refuse it at each later
+use.
 
 ## Indexes
 
@@ -274,57 +300,68 @@ refused where it is chosen, not at every later use of it.
 
 ## Constraints on the import path
 
-`pgcolumnar.import_arrow` and `pgcolumnar.import_parquet` maintain every index on
-the target and enforce unique and exclusion constraints, so an import cannot
-reach a state an ordinary `INSERT` would refuse. A deferrable constraint is
-deferred to commit on the import path as it is for ordinary DML, so an import
-that transiently violates uniqueness partway through and is consistent by the end
-commits rather than being rejected.
+`pgcolumnar.import_arrow` and `pgcolumnar.import_parquet` maintain each index on
+the target. They also apply the unique constraints and the exclusion constraints.
+An import therefore cannot reach a state that an ordinary `INSERT` would refuse.
+The import path defers a deferrable constraint to the commit, as ordinary DML
+does. An import can therefore break uniqueness for a short time in the middle and
+still be correct at the end. Such an import commits, and the server does not
+refuse it.
 
 ## Vectorized aggregate coverage
 
-The vectorized aggregate path covers the single-relation, ungrouped
-`SELECT agg(col) FROM t [WHERE ...]` shape only, and only when every aggregate,
-column type, and filter clause is supported: `count` (including `count(*)` and
-`count(col)`), `sum` and `avg` over `smallint` and `integer` columns, and `min`
-and `max` over any type with a default ordering, with `WHERE` clauses that are
-conjunctions of simple `column op const` comparisons. Anything else (`sum` or
-`avg` over `bigint`, `numeric`, or floating point; ordered-set and string
-aggregates; `DISTINCT`-qualified aggregates; `GROUP BY`; `HAVING`; non-simple
-filters; joins; whole-row or system column references) falls back to the scalar
-plan and stays correct.
+The vectorized aggregate path covers one shape only. That shape is
+`SELECT agg(col) FROM t [WHERE ...]`, on one relation and with no grouping. The
+path also needs each aggregate, each column type and each filter clause to be
+supported. The supported set is:
+
+- `count`, which includes `count(*)` and `count(col)`.
+- `sum` and `avg` on `smallint` and `integer` columns.
+- `min` and `max` on any type that has a default ordering.
+- `WHERE` clauses that are conjunctions of simple `column op const` comparisons.
+
+Each other query uses the scalar plan and stays correct. These include `sum` or
+`avg` on `bigint`, `numeric` or floating point. They also include these:
+
+- ordered-set aggregates and string aggregates
+- aggregates with `DISTINCT`
+- `GROUP BY` and `HAVING`
+- filters that are not simple
+- joins
+- a reference to a whole row or to a system column
 
 ## Skipping and collation
 
-Chunk-group skipping from a pushed-down filter is applied only when the
-comparison's collation matches the column's own collation, the collation the
-stored minimum and maximum were ordered under. A differently collated comparison
-is still applied as a filter but does not drive skipping, so results never depend
-on whether the filter was pushed down.
+A pushed-down filter drives chunk-group skipping only when one condition is true.
+The collation of the comparison must match the collation of the column. That is
+the collation that put the stored minimum and maximum in order. A comparison with
+a different collation still operates as a filter, but it does not drive skipping.
+The results therefore never depend on the pushdown.
 
 ## Replication and backup
 
 - Physical replication and physical backups (`pg_basebackup`, snapshots) include
   columnar tables, which are WAL-logged relations.
 - `pg_dump` and `pg_restore` handle columnar tables, and the target server must
-  have the extension installed and preloaded. Table data, indexes, and per-table
-  options (`pgcolumnar.set_options`) survive the round trip; **declared
-  projections (`pgcolumnar.add_projection`) do not**. They are keyed by internal
-  storage ids that a restore regenerates, so a restored table has no projections
-  and they must be re-declared. A physical backup (`pg_basebackup`) copies the
+  have the extension installed and preloaded. The table data, the indexes and the
+  per-table options (`pgcolumnar.set_options`) survive the round trip. **The
+  declared projections (`pgcolumnar.add_projection`) do not.** Their key is an
+  internal storage id, and a restore makes a new one. A restored table therefore
+  has no projections, and you must declare them again. A physical backup (`pg_basebackup`) copies the
   cluster bytewise and preserves them.
-- Logical decoding reads heap-tuple WAL records. Columnar data reaches WAL as
-  full-page images, which carry no tuple structure, so changes to columnar
-  tables are not emitted through logical decoding and logical replication does
-  not carry them. Use physical replication for columnar tables.
+- Logical decoding reads the WAL records of heap tuples. Columnar data reaches
+  WAL as full-page images, and those carry no tuple structure. Logical decoding
+  therefore does not emit a change to a columnar table, and logical replication
+  does not carry it. Use physical replication for columnar tables.
 
   A decoding slot is not silent about a columnar table, which is the part worth
-  knowing before relying on one. The metadata catalog is made of ordinary heap
-  tables, so a slot delivers inserts and updates to `pgcolumnar.storage`,
+  knowing before relying on one. The metadata catalog uses ordinary heap tables.
+  A slot therefore delivers the inserts and the updates to `pgcolumnar.storage`,
   `pgcolumnar.row_group`, `pgcolumnar.column_chunk`, `pgcolumnar.zone_map` and
-  `pgcolumnar.delete_vector` as the table is written. A consumer subscribed to
-  all tables therefore receives a stream of internal bookkeeping, including
-  encoded chunk descriptors as bytea, and none of the table's own rows. Filter
+  `pgcolumnar.delete_vector` while the writer writes the table. A consumer with a
+  subscription to all tables therefore gets a stream of internal records. This
+  includes the encoded chunk descriptors, as bytea. It includes none of the rows
+  of the table. Filter
   the `pgcolumnar` schema out of any publication.
 
   To capture changes from a columnar table today, use a row trigger that writes
@@ -352,32 +389,33 @@ listed are rejected.
 | one-dimensional array of the above | yes | yes | yes | yes |
 | composite of the above | yes | yes | yes | yes |
 
-`uuid` is imported from a 16-byte fixed-length binary column, and `numeric` from
-a DECIMAL column stored as fixed or variable big-endian bytes with precision up
-to 38, or from an INT32 or INT64 holding the unscaled integer, which is how
-writers store small precisions.
+The reader imports `uuid` from a fixed-length binary column of 16 bytes. It
+imports `numeric` from a DECIMAL column with a precision up to 38. That column
+holds big-endian bytes, of fixed or variable length. The reader also imports
+`numeric` from an INT32 or an INT64 that holds the unscaled integer. Writers use
+that form for a small precision.
 
-`numeric` needs a declared precision for a Parquet round trip. The exporter
-writes DECIMAL only for a column declared `numeric(p,s)` with `p` up to 38; a
-`numeric` column with no precision, or one with `p` above 38, is exported as
-text, and a text column cannot be imported back into `numeric`. Declare
+`numeric` needs a declared precision for a Parquet round trip. The exporter writes DECIMAL only for a column that you
+declare as `numeric(p,s)`, with `p` up to 38. It writes a `numeric` column with
+no precision as text, and it does the same for a column with `p` above 38. The
+reader cannot import a text column back into `numeric`. Declare
 `numeric(p,s)` with `p` up to 38 when the file has to read back into a `numeric`
 column. Arrow export and import carry `numeric` in either form.
-`json` and `jsonb` can be exported to Parquet and read back with other tools, but
-pgColumnar does not currently import them; they are supported end to end through
-Arrow.
+The exporter can write `json` and `jsonb` to Parquet, and other tools can read
+them. pgColumnar cannot import them from Parquet at this time. Arrow supports
+both types in each direction.
 
 ## Compression codecs
 
 For the native table format, `lz4` and `zstd` are available only when the
-extension was built with the corresponding system libraries. When a codec is not
-built in, a request for it falls back to a codec that is present. `pglz` and
-`none` are always available.
+extension was built with the corresponding system libraries. When the build does not
+include a codec, a request for it uses a codec that the build does include.
+`pglz` and `none` are always available.
 
 When reading external Parquet files, the reader decodes uncompressed, Snappy,
-GZIP, ZSTD, and LZ4_RAW pages. GZIP requires a build with zlib, and ZSTD and
-LZ4_RAW require the same libraries as the native codecs; a page whose codec was
-not built in fails with a clean decode error. LZO, BROTLI, and the deprecated
+GZIP, ZSTD, and LZ4_RAW pages. GZIP needs a build with zlib. ZSTD and LZ4_RAW
+need the same libraries as the native codecs. A page whose codec the build did
+not include fails with an explicit decode error. LZO, BROTLI, and the deprecated
 Hadoop-framed LZ4 (codec 5, as distinct from LZ4_RAW) are not read.
 
 ## Reading external Parquet
@@ -386,34 +424,37 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 `pgcolumnar_parquet` foreign-data wrapper) has these limits:
 
 - Reads are superuser only and run on little-endian hosts, as import and export
-  do, since they read a server-side path. A file from a source you did not produce
-  is untrusted input to a hand-rolled parser; see Security in the administration
-  guide for the trust boundary and that residual risk (fuzzing tracked in #214).
+  do, since they read a server-side path. A file from a different source is input
+  without trust, and the parser for it is code that this project wrote. Refer to
+  Security in the administration guide for the trust boundary and the risk that
+  stays. Issue #214 tracks the fuzzing.
 - A `path` that is a directory reads the `*.parquet` files at any depth below
-  it, descending into subdirectories. Entries whose name begins with `_` or `.`
-  are skipped, directories and files alike, which is the convention Spark and Hive
-  write: `_SUCCESS` beside the data and in-progress task output under
-  `_temporary`. A path named explicitly is still read whatever it is called. A
-  directory reached through a symbolic link is not descended, because a link to an
-  ancestor would make the walk endless; a symbolic link to a file is still
-  followed. Nesting deeper than 32 levels raises rather than reading part of the
+  it, descending into subdirectories. The reader skips each entry whose name starts
+  with `_` or `.`, and it does this for directories and for files. Spark and Hive
+  write names of that form, such as `_SUCCESS` beside the data and the output of
+  a task in progress under `_temporary`. The reader still reads a path that you
+  name directly, whatever its name is. The reader does not go into a directory
+  that it reaches through a symbolic link. A link to a parent would make the walk
+  continue without end. It does follow a symbolic link to a file. Nesting deeper than 32 levels raises rather than reading part of the
   tree.
 - Hive-style partitioning is available on the foreign-data wrapper only, through
   the `partition_columns` table option. The columns are declared, not inferred
-  from the tree, and `read_parquet` has no equivalent. A value is taken from the
-  directory name after percent-decoding, so a value written as `a%3Db` reads as
-  `a=b`, and `__HIVE_DEFAULT_PARTITION__`, the marker Hive and Spark write for a
-  null partition value, reads as NULL rather than as that string. A file that does
-  not carry a
-  directory component for every declared column raises rather than producing rows
-  with nulls in the partition columns.
-- Only the directory components between the declared path and the file are read
-  as partition values, so a component above the path, or a file whose own name
-  looks like `col=value`, does not set a column.
+  from the tree, and `read_parquet` has no equivalent. The reader takes a value from the directory name,
+  after it decodes the percent escapes. A value written as `a%3Db` therefore
+  reads as `a=b`. Hive and Spark write `__HIVE_DEFAULT_PARTITION__` as the marker
+  for a null partition value, and the reader gives NULL for it, not that string.
+  A file must carry a directory component for each declared column. If it does
+  not, the reader raises an error. It does not give rows with nulls in the
+  partition columns.
+- The reader takes the partition values only from the directory components
+  between the declared path and the file. A component above the path does not set
+  a column. A file whose own name has the form `col=value` does not set one
+  either.
 - A predicate that reads only partition columns prunes files, unless it contains
-  a volatile function. Pruning decides a clause once per file, which matches what
-  the executor would decide per row only when the clause is a function of the
-  partition values alone; a volatile call is not, so such a clause is left to the
+  a volatile function. Pruning decides a clause one time for each file. That
+  matches the decision that the executor would make for each row, but only when
+  the clause depends on the partition values alone. A volatile call does not meet
+  that condition. The reader therefore leaves such a clause to the
   executor and prunes nothing. Stable and immutable functions still prune.
 - `parquet_schema` describes the first file of a directory or glob, assuming the
   set is uniform. The read paths still bind every file against the declared
@@ -421,11 +462,12 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 - A `TIMESTAMP` column with nanosecond precision is advised as `bigint`, which is
   exact; declaring it `timestamp` reads it with the sub-microsecond digits
   truncated.
-- A file is read as it is needed rather than loaded whole: the footer is held for
-  the duration of the scan, and pages are read one at a time. Peak memory for the
+- The reader reads a file in parts and does not load the whole file. It holds the
+  footer for the length of the scan. It reads the pages one at a time. Peak memory for the
   raw file data is one page, not one file, so file size is not a limit. What does
-  scale with the data is the decoded form of one row group for the columns the
-  query reads, since a row group is decoded before its rows are produced. A file
+  increase with the data is the decoded form of one row group, for the columns
+  that the query reads. The reader decodes a row group before it produces the rows
+  of that group. A file
   written with larger row groups therefore costs more memory than the same data
   written with smaller ones.
 - The column definition list, or a foreign table's column list, must cover every
@@ -447,9 +489,10 @@ correct rows; these are the conditions under which it can skip at all:
   comparison such as `ts >= DATE '2026-01-01'` against a `timestamp` column, or
   `bigint_col > 5::int`, does not skip.
 - The row group's statistics must carry both a minimum and a maximum, and the
-  interval must not be inverted. An unsigned Parquet column straddling the sign
-  boundary, or one narrowed into a smaller PostgreSQL type, decodes to an
-  interval that is not trusted for skipping.
+  interval must not be inverted. Two cases decode to an interval that the reader
+  does not trust for skipping. The first is an unsigned Parquet column that
+  crosses the sign boundary. The second is a column that the reader makes
+  narrower, into a smaller PostgreSQL type.
 
 The `Row Groups Skipped` counter in `EXPLAIN ANALYZE` reports what was actually
 skipped.
