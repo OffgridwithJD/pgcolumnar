@@ -75,7 +75,7 @@ storage, bulk and single insert, sequential scan open/next/close, delete and
 update (through the row mask), fetch a row by item pointer, size estimation, and
 truncate. It also holds `_PG_init`, which registers every `pgcolumnar.*` GUC (the
 compression codec and level, the row-group and vector row limits, and the qual
-pushdown, custom scan, vectorized aggregate, and column cache toggles), the
+pushdown, custom scan and vectorized aggregate toggles), the
 pre-commit hook that flushes pending writes, and the object-access hook that
 removes a table's metadata rows when the table is dropped.
 
@@ -207,15 +207,6 @@ integer average as numeric, min/max by the column type's default ordering). It i
 answered from the zone-map metadata, falling back to a scan-and-fold when the
 group has deletes. It is chosen only when every aggregate, column type, and
 clause is supported; anything else falls back to the scalar plan.
-
-### columnar_cache.c
-The optional decompressed-chunk cache, off by default behind
-`pgcolumnar.enable_column_cache` and bounded by `pgcolumnar.column_cache_size`
-megabytes. It is a backend-local, LRU-bounded cache of decompressed value
-streams keyed by storage id and absolute logical offset. It returns a fresh copy
-to the caller so eviction is always safe, and it is flushed on any relcache
-invalidation so a truncate offset reuse or a vacuum storage swap can never serve
-a stale buffer. It only avoids repeated decompression; it never changes results.
 
 ### columnar_vacuum.c
 Compaction, statistics, and storage-id lookup. `pgcolumnar.vacuum` materializes a
@@ -373,7 +364,7 @@ Scan:
 2. The reader (`columnar_reader`) goes through the row groups. It uses the zone
    maps in `columnar_metadata` to skip groups and vectors.
 3. The reader decodes the projected chunks through `columnar_encoding` and
-   `columnar_compression`, and can use `columnar_cache`.
+   `columnar_compression`.
 4. The reader applies the delete vector (`columnar_delete_vector`) and returns
    the rows one at a time.
 5. The executor applies the full qual again, as a filter.

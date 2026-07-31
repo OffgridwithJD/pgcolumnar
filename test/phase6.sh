@@ -110,20 +110,6 @@ eq_on_off() {
 	echo "PASS  $name: $on"
 }
 
-# Run a query with the decompressed-chunk cache on and off; assert equality.
-cache_on_off() {
-	local name="$1" query="$2"
-	local on off
-	on="$(run_pg "$PSQL -c \"SET pgcolumnar.enable_column_cache=on;  $query\"")"
-	off="$(run_pg "$PSQL -c \"SET pgcolumnar.enable_column_cache=off; $query\"")"
-	if [ -z "$on" ] || [ "$on" != "$off" ]; then
-		echo "FAIL  $name: cache-on [$on] != cache-off [$off]"
-		fail=1
-		return
-	fi
-	echo "PASS  $name: $on"
-}
-
 q "CREATE EXTENSION pgcolumnar;" >/dev/null
 
 # ---------------------------------------------------------------------------
@@ -207,16 +193,13 @@ eq_on_off "min empty is null"     "SELECT COALESCE(min(a)::text,'NULL') FROM nt 
 # the answer: cache on and cache off produce identical results, for aggregates
 # and for a filtered row scan.
 # ---------------------------------------------------------------------------
-echo "-- decompressed-chunk cache on vs off is identical"
-cache_on_off "cache agg suite" \
-	"SELECT count(*), sum(id), avg(id), min(id), max(id) FROM t WHERE id > 500;"
-cache_on_off "cache filtered scan" \
-	"SELECT md5(string_agg(id||'|'||label, ',' ORDER BY id)) FROM t WHERE id BETWEEN 20000 AND 21000;"
-cache_on_off "cache with nulls" \
-	"SELECT count(a), sum(a), min(txt) FROM nt WHERE a > 50;"
-# a small cache budget still returns correct results (exercises LRU eviction)
-small_on="$(q "SET pgcolumnar.enable_column_cache=on; SET pgcolumnar.column_cache_size=1; SELECT sum(id) FROM t;")"
-check "tiny cache still correct" "$small_on" "1250025000"
+# The decompressed-chunk cache assertions that stood here are gone with the
+# feature (#303). They compared results with the cache on against the cache off
+# and asserted the two were equal, and one of them claimed in a comment to
+# exercise LRU eviction. All three passed against a cache whose only entry point
+# had no callers, because a correctness-only comparison of two identical paths
+# cannot fail. If a cache returns here, its tests have to assert a hit that is
+# observable and an eviction that evicts.
 
 # ---------------------------------------------------------------------------
 # Fallback: aggregates and column types the vectorized path does not handle must

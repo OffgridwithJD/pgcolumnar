@@ -15,7 +15,6 @@ OBJS = \
 	src/columnar_reader.o \
 	src/columnar_delete_vector.o \
 	src/columnar_customscan.o \
-	src/columnar_cache.o \
 	src/columnar_vector.o \
 	src/columnar_vacuum.o \
 	src/columnar_unique.o \

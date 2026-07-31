@@ -173,11 +173,9 @@ extern bool columnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 
 /* Phase 6 GUCs (spec 8.3) */
 extern bool columnar_enable_vectorization;	/* vectorized aggregate path */
-extern bool columnar_enable_column_cache;	/* decompressed-chunk cache */
 extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
 extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
 extern bool columnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
-extern int columnar_column_cache_size;		/* cache budget in megabytes */
 
 /* issue #5: concurrent unique-key insert serialization */
 extern bool columnar_enable_unique_lock;	/* serialize same-key inserters */
@@ -741,20 +739,6 @@ extern char *ColumnarDecompressValueStream(const char *comp, uint32 compLen,
 										   int compressionType, uint32 rawLen,
 										   MemoryContext targetContext);
 
-/* -------------------------------------------------------------------------
- * decompressed-chunk cache (columnar_cache.c, spec 8.3, 9)
- *
- * An optional, backend-local cache of decompressed value streams, keyed by the
- * relation's storage id and the stream's absolute logical offset (both stable
- * and never reused within a storage id, except across a truncate, which fires a
- * relcache invalidation that flushes the whole cache). Off by default; when on
- * it only avoids repeated decompression and never changes results.
- * ------------------------------------------------------------------------- */
-extern void ColumnarCacheInit(void);
-extern char *ColumnarGetDecompressedStream(uint64 storageId, uint64 absOffset,
-										   const char *comp, uint32 compLen,
-										   int compressionType, uint32 rawLen,
-										   MemoryContext targetContext);
 
 /* -------------------------------------------------------------------------
  * concurrent unique-key insert serialization (columnar_unique.c, issue #5)

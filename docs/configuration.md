@@ -69,8 +69,6 @@ disk. It never changes the values that a table returns.
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `pgcolumnar.enable_column_cache` | boolean | `off` | Cache decompressed chunk groups so they can be reused across reads. |
-| `pgcolumnar.column_cache_size` | integer (MB) | `200` | Size of the decompressed-chunk cache. Applies when the column cache is enabled. Range 1 to INT_MAX. |
 
 ### Maintenance and disk reclaim
 

@@ -10,7 +10,7 @@ test/phase2.sh  /path/to/pg_config   # compression, projection, min/max skip, fi
 test/phase3.sh  /path/to/pg_config   # delete, update, MVCC, savepoints, temp tables
 test/phase4.sh  /path/to/pg_config   # btree/hash indexes, constraints, conversion
 test/phase5.sh  /path/to/pg_config   # custom scan, pushdown, options, vacuum
-test/phase6.sh  /path/to/pg_config   # aggregate correctness and the column cache
+test/phase6.sh  /path/to/pg_config   # aggregate correctness
 test/audit.sh   /path/to/pg_config   # regression tests for audited defects
 test/concurrency.sh      /path/to/pg_config  # concurrent same-chunk-group deletes
 test/unique_conc.sh      /path/to/pg_config  # concurrent same-unique-key inserts
