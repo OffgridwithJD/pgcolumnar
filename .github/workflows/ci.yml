@@ -128,8 +128,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
+          # gcc-14 explicitly. PostgreSQL 19's configure selects -std=gnu23, and
+          # the runner image's default gcc predates that spelling (it accepts
+          # gnu2x), so PostgreSQL builds and then the extension build inherits a
+          # flag its own compiler rejects. Pinning one compiler for both removes
+          # the mismatch rather than papering over the flag.
           sudo apt-get install -y --no-install-recommends \
-            build-essential flex bison libreadline-dev zlib1g-dev \
+            build-essential gcc-14 flex bison libreadline-dev zlib1g-dev \
             liblz4-dev libzstd-dev pkg-config
 
       - name: Cache the PostgreSQL beta build
@@ -137,7 +142,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/pgbeta
-          key: pgbeta-${{ env.PG_BETA }}-${{ runner.os }}-${{ runner.arch }}
+          key: pgbeta-${{ env.PG_BETA }}-gcc14-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build PostgreSQL ${{ env.PG_BETA }} (on cache miss)
         if: steps.cache-beta.outputs.cache-hit != 'true'
@@ -152,8 +157,8 @@ jobs:
           # Only what PGXS needs: pg_config, the headers, and the makefiles. ICU
           # and readline are dropped to keep the dependency list to what the
           # extension itself already requires.
-          ./configure --prefix="$HOME/pgbeta" --without-icu --without-readline \
-            --without-zlib --enable-debug >/dev/null
+          ./configure CC=gcc-14 --prefix="$HOME/pgbeta" --without-icu \
+            --without-readline --without-zlib --enable-debug >/dev/null
           make -j"$(nproc)" -C src >/dev/null
           make -C src install >/dev/null
           "$HOME/pgbeta/bin/pg_config" --version
@@ -163,7 +168,9 @@ jobs:
           set -euo pipefail
           PG_CONFIG="$HOME/pgbeta/bin/pg_config"
           "$PG_CONFIG" --version
-          make PG_CONFIG="$PG_CONFIG" 2> build.err || { cat build.err; exit 1; }
+          # Same compiler PostgreSQL was configured with, so the flags in
+          # Makefile.global are ones this compiler understands.
+          make CC=gcc-14 PG_CONFIG="$PG_CONFIG" 2> build.err || { cat build.err; exit 1; }
           if grep -q 'warning:' build.err; then
             echo "::error::compiler warnings are failures in this project"
             grep 'warning:' build.err
