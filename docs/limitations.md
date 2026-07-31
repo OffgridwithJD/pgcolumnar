@@ -11,14 +11,38 @@ tables that can be rebuilt from an external source, and for development, testing
 and measurement. It is not yet recommended for a production system of record or
 for data that cannot be reloaded.
 
-Hardening tracked before a first alpha is in the issue tracker: fuzzing the
-hand-rolled Parquet and Arrow parsers
-([issue #214](https://github.com/jdatcmd/pgcolumnar/issues/214)), a stated and
-tested boundary for untrusted input files
-([issue #216](https://github.com/jdatcmd/pgcolumnar/issues/216)), and a statement
-of the blast radius of a single backend crash
-([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The sections
-below are the standing functional limitations, separate from that work.
+The hardening that was tracked before a first alpha is complete. The hand-rolled
+Parquet and Arrow parsers are fuzzed, both by byte mutation and by structural
+mutation of the container format
+([issue #214](https://github.com/jdatcmd/pgcolumnar/issues/214)). The boundary for
+untrusted input files is stated and tested
+([issue #216](https://github.com/jdatcmd/pgcolumnar/issues/216)). The blast radius
+of a single backend crash is asserted and documented
+([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The on-disk
+format version is enforced on read rather than only stamped on write
+([issue #240](https://github.com/jdatcmd/pgcolumnar/issues/240)), and cross-major
+`pg_upgrade` is covered by a gate rather than by a suite nobody runs
+([issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257)).
+
+What that testing does not cover is worth stating alongside it. Every result
+recorded in this repository comes from x86_64. The suites have not been run on
+aarch64 or on a big-endian platform
+([issue #242](https://github.com/jdatcmd/pgcolumnar/issues/242)).
+
+Unaligned reads, one class that would be expected to differ by architecture, are
+covered independent of it: the sanitizer gate builds with clang's address and
+undefined-behaviour checks, which report a misaligned load on any host, and that
+gate exists because such a read was found and fixed once. What remains untested on
+another architecture is what a sanitizer on x86_64 cannot observe, principally
+memory ordering. x86_64 orders stores more strictly than aarch64 does, so a
+missing barrier in concurrent code can be invisible on one and a defect on the
+other. Another architecture is untested rather than known to be broken, and
+building there should be treated accordingly.
+
+PostgreSQL 19 coverage is against 19beta2, not a final release.
+
+The sections below are the standing functional limitations, separate from that
+work.
 
 ## On-disk format stability
 
@@ -27,11 +51,11 @@ format version (currently PGCN v1) and a physical metapage version, and both are
 checked on read. The metapage version guards the physical block layout; the
 native format version guards the data encoding, so a future version that changes
 the encoding while keeping the metapage layout is still caught. A version this
-build does not understand is rejected -- `unsupported columnar format version` for
-the metapage, `unsupported columnar native format version` for the data format --
-and the read fails cleanly rather than misinterpreting bytes written by a
-different layout. The check runs on every decode path -- sequential scan,
-vectorized aggregate, and index-scan fetch -- so a version this build cannot read
+build does not understand is rejected, reporting `unsupported columnar format
+version` for the metapage or `unsupported columnar native format version` for the
+data format, and the read fails rather than misinterpreting bytes written by a
+different layout. The check runs on every decode path, including sequential scan,
+vectorized aggregate, and index-scan fetch, so a version this build cannot read
 is refused whichever way the query reaches the data. Both guards are pinned by
 `test/native_format.sh`.
 
@@ -43,14 +67,14 @@ stamps every object it writes, base and projections together.
 Within a version the format round-trips faithfully: data written and read back on
 the same build is byte-for-byte identical, which `test/native_format.sh` proves on
 every supported PostgreSQL major. Byte-for-byte preservation across a PostgreSQL
-major upgrade is asserted separately by `test/pg_upgrade.sh`; wiring that suite
-into the gate is tracked in
-[issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257).
+major upgrade is asserted separately by `test/pg_upgrade.sh`, which runs as an
+opt-in gate (`PGC_RUN_UPGRADE=1 test/run_all_versions.sh`) over each adjacent pair
+of majors in both copy and link transfer modes.
 
-There is no in-place upgrade across an incompatible format version yet. The format
-has not changed during the pre-release, so no migration has been needed; but until
-an upgrade path and a compatibility guarantee are committed to, treat the format
-as reload-required across an incompatible bump. This is the same posture as the
+There is no in-place upgrade across an incompatible format version. The format has
+not changed during the pre-release, so no migration has been needed. Until an
+upgrade path and a compatibility guarantee are committed to, treat the format as
+reload-required across an incompatible bump. This is the same posture as the
 release-status note above: keep the source a columnar table was loaded from, so it
 can be rebuilt if a future version changes the layout. A physical copy
 (`pg_basebackup`, file-system snapshot, replication) preserves the exact bytes and
@@ -285,7 +309,7 @@ on whether the filter was pushed down.
 - `pg_dump` and `pg_restore` handle columnar tables, and the target server must
   have the extension installed and preloaded. Table data, indexes, and per-table
   options (`pgcolumnar.set_options`) survive the round trip; **declared
-  projections (`pgcolumnar.add_projection`) do not** -- they are keyed by internal
+  projections (`pgcolumnar.add_projection`) do not**. They are keyed by internal
   storage ids that a restore regenerates, so a restored table has no projections
   and they must be re-declared. A physical backup (`pg_basebackup`) copies the
   cluster bytewise and preserves them.
@@ -402,8 +426,8 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
   raw file data is one page, not one file, so file size is not a limit. What does
   scale with the data is the decoded form of one row group for the columns the
   query reads, since a row group is decoded before its rows are produced. A file
-  written with very large row groups therefore costs more memory than the same
-  data written with smaller ones.
+  written with larger row groups therefore costs more memory than the same data
+  written with smaller ones.
 - The column definition list, or a foreign table's column list, must cover every
   leaf column in the file. A shorter list is an error rather than a projection.
 

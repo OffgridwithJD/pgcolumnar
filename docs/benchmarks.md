@@ -148,9 +148,8 @@ Index-only scan on versus off (covering range count, median ms):
 | --- | --- | --- | --- |
 | covering count, id range (~2%) | 7.53 | 698.95 | 93 |
 
-The "off" column is the fetch-by-row path doing nothing else, which makes it the
-clearest single view of what that path costs, and the clearest measure of what
-#143 changed: this shape was 200.9 s before the decoded-group cache, 31.8 s after
+The "off" column is the fetch-by-row path doing nothing else, which isolates
+what that path costs and what #143 changed: this shape was 200.9 s before the decoded-group cache, 31.8 s after
 it, and 0.69 s once the walk to the row went too.
 
 Projection scan on versus off (covering scan on a scattered sort key, median ms):
@@ -198,8 +197,8 @@ So the target is bulk load in general rather than the interop path. Tracked as
 [issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155) with a plan in
 `design/IMPORT_THROUGHPUT_PLAN.md`.
 
-The plan attributes the cost to the row/column transposition -- both readers
-decode a column-oriented file into per-row values, and the writer copies them
+The plan attributes the cost to the row/column transposition, since both readers
+decode a column-oriented file into per-row values and the writer copies them
 back into per-column buffers. Measurement does not support that as the main
 term. A single integer column already writes faster than heap, and on a text
 column the write path is dominated by the FSST substring search: skipping it

@@ -76,8 +76,8 @@ Major-version compatibility shims. pgColumnar keeps one source tree that builds
 on PostgreSQL 15 through 19. PostgreSQL changed several of its own API and
 callback contracts across those majors (for example the RelFileNode to
 RelFileLocator rename in 16, the table-AM signature changes in 19, and the
-planner hook that edits the index list -- get_relation_info_hook through 18,
-build_simple_rel_hook in 19 -- used to enable index-only scans). Each shim here
+planner hook that edits the index list, which is get_relation_info_hook through
+18 and build_simple_rel_hook in 19, used to enable index-only scans). Each shim here
 only selects the correct core API for the running major; none of them change
 pgColumnar's behavior.
 
