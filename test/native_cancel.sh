@@ -65,7 +65,7 @@ check "the short timeout is what fired" \
 
 # Without interrupt checks in the load path the timeout cannot fire until the
 # load finishes, so cancel and full converge. With them it fires during the load.
-check "cancel arrives well before the load completes" \
+check_timing "cancel arrives well before the load completes" \
 	"$( [ "$cancel" -lt $(( full / 2 )) ] && echo yes || echo "no (cancel=${cancel}ms full=${full}ms)")" \
 	"yes"
 

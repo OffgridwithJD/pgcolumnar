@@ -69,7 +69,7 @@ echo "-- $UPD fetches: one group of $ROWS took ${one} ms; ten groups took ${many
 
 # Without the cache the single-group case decodes ten times as much per fetch and
 # lands near 10x. With it, both are dominated by the fetches and sit near 1x.
-check "fetching from one big group is not far dearer than from ten small ones" \
+check_timing "fetching from one big group is not far dearer than from ten small ones" \
 	"$( [ "$many" -gt 0 ] && [ $(( one / (many > 0 ? many : 1) )) -lt 3 ] && echo yes ||
 		echo "no (one=${one}ms ten=${many}ms)")" \
 	"yes"
