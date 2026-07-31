@@ -208,9 +208,10 @@ shims, and only one arm of each shim compiles for a given major.
 Three workflows run in GitHub Actions.
 
 **On every pull request and push to `main`** (`.github/workflows/ci.yml`): a
-build against PostgreSQL 15, 16, 17 and 18, on x86_64 and on aarch64. Each build
-treats a compiler warning as a failure. The suites run on 17 and 18. The build
-preflight catches an API change between majors. The suite run catches a change in
+build against PostgreSQL 15, 16, 17 and 18, on x86_64 and on aarch64. There is
+also a build against the PostgreSQL 19 beta, from source. Each build treats a
+compiler warning as a failure. The suites run on 17 and 18. The build preflight
+catches an API change between majors. The suite run catches a change in
 behaviour.
 
 **Nightly at 06:00 UTC** (`.github/workflows/nightly.yml`): the full packaged
@@ -230,9 +231,20 @@ defect on the other. The suites that would show it must run.
 the site at
 [jdatcmd.github.io/pgcolumnar](https://jdatcmd.github.io/pgcolumnar/).
 
-PostgreSQL 19 is deliberately absent from CI. It is beta and not packaged in PGDG
-stable, so CI cannot install it honestly. The local five-major matrix covers it,
-and remains the release gate.
+PostgreSQL 19 cannot be installed in CI: PGDG does not package it in stable,
+testing or snapshot. It is compiled there anyway, from source and cached, because
+being unable to install a major is not a reason to stop compiling against it, and
+the newest major is where header and API tightening lands.
+
+That distinction was not free. A set-returning function used
+`tuplestore_begin_heap` without including `utils/tuplestore.h`, which arrives
+transitively behind `funcapi.h` through PostgreSQL 18 and does not on 19. It
+compiled on every major CI could install and failed only on the one it could not,
+so a green CI run sat on a tree that did not build. The local matrix caught it
+before merge; nothing in CI would have.
+
+The suites on 19 remain local. The five-major matrix covers them and stays the
+release gate.
 
 Two suites do not run in CI and run locally instead. The first is the cross-major
 upgrade gate above. The second is the set of timing suites, because a shared
