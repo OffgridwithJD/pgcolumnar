@@ -232,15 +232,15 @@ the site at
 [jdatcmd.github.io/pgcolumnar](https://jdatcmd.github.io/pgcolumnar/).
 
 PostgreSQL 19 cannot be installed in CI: PGDG does not package it in stable,
-testing or snapshot. It is compiled there anyway, from source and cached, because
-being unable to install a major is not a reason to stop compiling against it, and
-the newest major is where header and API tightening lands.
+testing or snapshot. It is compiled there anyway, from source, and the build stays
+in a cache. To be unable to install a major is not a reason to stop compiling
+against it. The newest major is also where header and API tightening lands.
 
 That distinction was not free. A set-returning function used
 `tuplestore_begin_heap` without including `utils/tuplestore.h`, which arrives
-transitively behind `funcapi.h` through PostgreSQL 18 and does not on 19. It
-compiled on every major CI could install and failed only on the one it could not,
-so a green CI run sat on a tree that did not build. The local matrix caught it
+transitively behind `funcapi.h` through PostgreSQL 18 and does not on 19. It compiled on each major that CI could install. It failed only on
+the one that CI could not install. A green CI run therefore sat on a tree that did
+not build. The local matrix caught it
 before merge; nothing in CI would have.
 
 The suites on 19 remain local. The five-major matrix covers them and stays the
