@@ -2,13 +2,15 @@
 
 pgColumnar has two kinds of settings:
 
-- Server settings under the `pgcolumnar.` prefix, listed below. Most can be set in
-  `postgresql.conf`, per session with `SET`, per role, or per database, without
-  special privileges. Two are not: `pgcolumnar.enable_end_truncation` requires
-  superuser, and `pgcolumnar.unique_lock_buckets` can only be set at server start.
-  Each exception is noted in its own row below.
-- Per-table storage options, set with `pgcolumnar.set_options`. These
-  apply to one table and are used when that table writes new data.
+- Server settings. These settings use the `pgcolumnar.` prefix. The list is
+  below. For almost all of them, you do not need a special privilege. You can set
+  them in `postgresql.conf`, for one session with `SET`, for one role, or for one
+  database. There are two exceptions. `pgcolumnar.enable_end_truncation` needs
+  superuser. You can set `pgcolumnar.unique_lock_buckets` only at server start.
+  The row for each exception gives this condition again.
+- Per-table storage options. You set these options with
+  `pgcolumnar.set_options`. They apply to one table. That table uses them when it
+  writes new data.
 
 ## Server settings
 
@@ -18,7 +20,7 @@ pgColumnar has two kinds of settings:
 | --- | --- | --- | --- |
 | `pgcolumnar.stripe_row_limit` | integer | `150000` | Maximum rows per row group. The row group is the unit of write and the granularity at which whole segments are appended. Range 1000 to INT_MAX. |
 | `pgcolumnar.chunk_group_row_limit` | integer | `10000` | Maximum rows per vector. The vector is the unit of encoding and of min/max skipping. Range 100 to INT_MAX. |
-| `pgcolumnar.encoding_sample_rows` | integer | `2048` | Rows sampled to choose a vector's value encoding. Candidates are estimated on a windowed sample (evenly spread windows of consecutive values, so both global shape and local runs are visible) and only the best two are applied to the whole vector. `0` applies every candidate to every vector, which is what earlier versions did, and any value below 128 is treated as `0` because a smaller sample cannot rank candidates. Affects write speed and, in principle, compression ratio; never correctness. |
+| `pgcolumnar.encoding_sample_rows` | integer | `2048` | The number of rows that the writer samples to select the value encoding of a vector. The writer estimates each candidate on a sample of windows. The windows contain consecutive values and have an equal distance between them. Thus the sample shows the global shape and also the local runs. The writer then applies only the two best candidates to the full vector. A value of `0` applies each candidate to each vector. This is the behaviour of earlier versions. The writer changes a value below 128 to `0`, because a smaller sample cannot put the candidates in order. This setting changes the write speed. It can also change the compression ratio. It does not change correctness. |
 
 ### Compression
 
@@ -28,20 +30,23 @@ pgColumnar has two kinds of settings:
 | `pgcolumnar.compression_level` | integer | `3` | Level for the `zstd` codec. Range 1 to 22. Higher levels compress more and write more slowly. |
 | `pgcolumnar.fsst_min_gain_percent` | integer | `5` | Minimum size reduction, in percent, for FSST string encoding to be kept for a column chunk. Range 0 to 99. See below. |
 
-Building FSST codes for every vector is one of the larger costs of a text or
-varlena load. At `0`, FSST is kept whenever it produces any reduction after
-the block codec, however small, and that reduction does not always repay the
-encode. The default of `5` keeps FSST only where it saves at least 5 percent.
+To build the FSST codes for each vector is one of the larger costs of a load of
+text data. A value of `0` keeps FSST if it makes any reduction after the block
+codec. A small reduction does not always pay for the cost of the encode. The
+default of `5` keeps FSST only if it saves 5 percent or more.
 
-On measured workloads this costs about 2 percent stored size on shapes where
-FSST barely wins, such as high-entropy text, and reduces their load time by
-roughly a third. Where FSST wins by more than the margin, such as low-cardinality text, the
-setting changes nothing: the encoding chosen and the bytes written are the same.
-Wide values are also unaffected.
+Measurements show the effect of the default. For the data shapes where FSST wins
+by a small quantity, such as high-entropy text, the stored size increases by
+approximately 2 percent. The load time of the same data decreases by
+approximately one third. For the data shapes where FSST wins by more than the
+margin, such as low-cardinality text, the setting changes nothing. The writer
+selects the same encoding and writes the same bytes. Wide values also stay the
+same.
 
-Set it to `0` for the previous behaviour of keeping FSST on any reduction. The
-setting applies when data is written, so it affects new chunks rather than
-existing ones, and it never changes the values a table returns.
+To get the behaviour of earlier versions, set the value to `0`. Then FSST stays
+if it makes any reduction. The setting applies when the writer writes data. Thus
+it changes new chunks, but it does not change the chunks that are already on
+disk. It never changes the values that a table returns.
 
 ### Scan and execution
 
@@ -83,9 +88,10 @@ existing ones, and it never changes the values a table returns.
 
 ## Per-table storage options
 
-`pgcolumnar.set_options` sets storage options on one table. New data
-written after the change uses the new values; data already written is unchanged
-until the table is rewritten (for example by `pgcolumnar.vacuum`).
+`pgcolumnar.set_options` sets the storage options of one table. The new values
+apply to the data that the writer writes after the change. The data that is
+already on disk does not change. It changes only when a command rewrites the
+table, for example `pgcolumnar.vacuum`.
 
 ```sql
 SELECT pgcolumnar.set_options(
@@ -105,19 +111,21 @@ SELECT pgcolumnar.set_options(
 | `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
 | `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
 
-Arguments left at their default (`NULL`) are not changed. A value outside the
-valid range for a limit or level is rejected.
+The function does not change an argument that keeps its default value of
+`NULL`. The function refuses a value that is outside the permitted range of a
+limit or a level.
 
 ### Encode effort
 
-`encode_effort = fast` skips the FSST substring search when writing text and
-other variable-length columns. Everything else is unchanged: dictionary,
-run-length, the numeric schemes and the block codec all still run, and a table
-written either way is read back by the same code, so the setting is a cost
-choice and never a compatibility one.
+`encode_effort = fast` does not do the FSST substring search. This applies when
+the writer writes text columns and other columns of variable length. All other
+parts stay the same. The dictionary, the run-length encoding, the numeric
+schemes and the block codec all continue to operate. The same code reads a table
+that the writer wrote with either value. Thus this setting controls cost only.
+It does not control compatibility.
 
-It trades compression ratio for load speed, and how much of each depends
-entirely on the data:
+The setting decreases the compression ratio and increases the load speed. The
+quantity of each effect depends fully on the data:
 
 | Text shape (1,000,000 rows, one column) | Load speed-up with `fast` | Extra space |
 | --- | --- | --- |
@@ -127,20 +135,20 @@ entirely on the data:
 | 256-char high-entropy | 2.4x | none |
 | Short low-entropy text | 1.2x to 2.7x | none |
 
-On five of the seven shapes measured, `fast` produced byte-for-byte identical
-storage, so the work it skipped had bought nothing. On the two where the search
-does pay, it pays properly. There is no way to know which case a column is
-without trying it, which is why this is a per-table choice and why the default
-keeps the full search.
+The measurements used seven data shapes. For five of them, `fast` wrote storage
+that is identical byte for byte. Thus the work that it did not do gave no
+benefit. For the other two shapes, the search gives a large benefit. You cannot
+know which condition applies to a column until you try it. For this reason the
+option applies to one table, and the default keeps the full search.
 
-`fast` is worth considering for a bulk load you intend to compact later:
+Use `fast` for a bulk load if you will compact the table later.
 `pgcolumnar.vacuum`, `pgcolumnar.compact_rewrite` and `pgcolumnar.recluster`
-rewrite the data under whatever effort is set at the time, so a table can be
-loaded cheaply and compressed properly afterwards.
+rewrite the data. They use the effort value that applies at that time. Thus you
+can load a table at a low cost, then compress it fully after the load.
 
-The option is per table rather than a session setting on purpose: the same data
-written through two sessions with different settings would otherwise be stored
-two different ways depending on which session loaded it.
+The option applies to one table and is not a session setting. This is
+deliberate. If it were a session setting, two sessions with different values
+would store the same data in two different forms.
 
 `pgcolumnar.reset_options` returns options to the server defaults:
 
@@ -151,4 +159,4 @@ SELECT pgcolumnar.reset_options(
     compression           => true);
 ```
 
-Each boolean argument, when true, resets that option on the table.
+If a boolean argument is true, the function resets that option on the table.

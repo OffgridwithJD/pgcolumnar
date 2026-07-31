@@ -7,14 +7,15 @@ monitoring, backup, and security.
 ## Storage layout
 
 A columnar table is one PostgreSQL relation plus rows in the `pgcolumnar` catalog
-tables. Data is organized as follows:
+tables. pgColumnar puts data in this order:
 
 - A **row group** is the unit of write. Each write transaction appends one or
   more row groups of up to `pgcolumnar.stripe_row_limit` rows.
-- Within a row group, each column is stored and compressed separately as a
-  chunk. A chunk's values are encoded in **vectors** of up to
-  `pgcolumnar.chunk_group_row_limit` rows, the unit of the encoding cascade and
-  of minimum and maximum skipping.
+- In a row group, pgColumnar keeps each column as a chunk and compresses each
+  chunk separately. pgColumnar encodes the values of a chunk in **vectors**. A vector
+  holds a maximum of `pgcolumnar.chunk_group_row_limit` rows. The vector is the
+  unit of the encoding cascade. It is also the unit of minimum and maximum
+  skipping.
 - Each chunk records its minimum and maximum and an optional bloom filter, and a
   per-vector zone map records the finer minimum and maximum ranges.
 
@@ -75,21 +76,23 @@ SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
 To compact every columnar table in a schema, use `pgcolumnar.vacuum_full`.
 
 `pgcolumnar.vacuum_sorted` sorts ascending on its columns, which tightens the
-minimum and maximum of the leading column. To tighten several columns at once,
-use `pgcolumnar.cluster`, which orders rows by a Z-order (Morton) curve over the
-columns given, so multi-column range and point filters skip more:
+minimum and maximum of the leading column. To make several columns tighter at the
+same time, use `pgcolumnar.cluster`. It puts the rows in the order of a Z-order
+(Morton) curve on the columns that you give. Range filters and point filters on
+more than one column then skip more groups:
 
 ```sql
 SELECT pgcolumnar.cluster('events', 'customer_id', 'ts');
 ```
 
-**`pgcolumnar.cluster` holds `AccessExclusiveLock` for its whole run**, like
-PostgreSQL's own `CLUSTER` and `VACUUM FULL`: it rewrites the relation and swaps
-the file, so reads and writes on the table block until it finishes. Use it for an
-initial bulk reorganisation, on a table you can take offline.
-`pgcolumnar.recluster` is the online form of the same idea and is described
-below; prefer it on a live table. Neither changes query results. Both only
-reorder physical storage.
+**`pgcolumnar.cluster` holds `AccessExclusiveLock` until it completes.** The
+PostgreSQL commands `CLUSTER` and `VACUUM FULL` do the same. It rewrites the
+relation and replaces the file. Thus reads and writes on the table stop until it
+completes. Use it for a first bulk reorganisation, on a table that you can make
+unavailable.
+`pgcolumnar.recluster` does the same operation online. The text below describes
+it. Use it on a table that stays available. The two functions do not change query
+results. They change only the order of the physical storage.
 
 Leave autovacuum on. It maintains visibility-map bits and statistics for columnar
 tables. Schedule `pgcolumnar.vacuum` separately based on delete and update volume.
@@ -114,32 +117,37 @@ SELECT pgcolumnar.truncate('events');
 ```
 
 `pgcolumnar.truncate` is opt-in. Set `pgcolumnar.enable_end_truncation` to `on`
-first (see Configuration). It is best-effort: it takes a brief AccessExclusiveLock
-only when it is immediately available and returns 0 without waiting otherwise, so
-it does not block a busy table. It cannot run inside a transaction block. Run it
+first. Refer to Configuration. The function does what it can. It takes a short
+`AccessExclusiveLock`, but only if the lock is available immediately. If the lock
+is not available, the function returns 0 and does not wait. Thus it does not
+block a table that is busy. It cannot run inside a transaction block. Run it
 after a large delete followed by `pgcolumnar.compact`, when the freed space is at
 the end of the file.
 
 ## Index-only scans
 
-An index-only scan answers a query from the index without reading the table, when
-the index covers the query and the rows are marked all-visible. pgColumnar serves
-this through a columnar visibility-map fork:
+An index-only scan reads the index and not the table. pgColumnar can use one when
+two conditions are true. First, the index contains all the columns of the query.
+Second, the rows have the all-visible mark. A columnar visibility-map fork
+supplies this:
 
 - `VACUUM` marks a row group all-visible when its inserting transaction is old
   enough and the group has no deletes.
 - Any insert, update, or delete clears the bit for the affected group.
 
 Index-only scans are on by default (`pgcolumnar.enable_index_only_scan`). To make a
-covering query use one, ensure the table has been vacuumed since its last write.
+covering query use an index-only scan, run `VACUUM` on the table after the last
+write.
 Check with `EXPLAIN (ANALYZE)`: an index-only scan reports `Heap Fetches: 0`.
 
 ## Projections
 
 A projection stores a subset of a table's columns a second time, optionally
-sorted on a key. The planner scans a projection instead of the base table when it
-covers the query and serves it better, for example a range query on a key that is
-scattered in the base table but is the projection's sort key.
+sorted on a key. The planner reads a projection and not the base table when two
+conditions are true. First, the projection contains all the columns of the query.
+Second, the projection gives a better result. An example is a range query on a
+key. The key is in a random order in the base table, but it is the sort key of
+the projection.
 
 Declare a projection:
 
@@ -150,13 +158,13 @@ SELECT pgcolumnar.add_projection(
     sort_key => ARRAY['customer_id']);
 ```
 
-Existing rows are back-filled when the projection is added. New inserts write to
+When you add the projection, pgColumnar fills it with the rows that exist. New inserts write to
 the base table and its projections. Projection scans are on by default
 (`pgcolumnar.enable_projection_scan`). Drop a projection with
 `pgcolumnar.drop_projection`.
 
-Projections are not carried by `pg_dump` and `pg_restore`. They are keyed by
-internal storage ids that a restore regenerates, so re-declare them with
+`pg_dump` and `pg_restore` do not carry the projections. Their key is an internal
+storage id, and a restore makes a new one. Declare the projections again with
 `pgcolumnar.add_projection` after a logical restore. A physical backup
 (`pg_basebackup`) preserves them, which `test/replication.sh` verifies against a
 standby.
@@ -185,19 +193,20 @@ A high deleted-row percentage or a large number of small row groups indicates th
 
 ## Concurrent unique inserts
 
-When a columnar table has a unique index, `pgcolumnar.enable_unique_insert_lock`
-(on by default) serializes concurrent inserts of the same key with a
-transaction-scoped advisory lock, so overlapping same-key inserts conflict
-correctly. `pgcolumnar.unique_lock_buckets` (default 128) bounds how many advisory
+A columnar table can have a unique index. For such a table,
+`pgcolumnar.enable_unique_insert_lock` puts concurrent inserts of the same key in
+sequence. It uses an advisory lock with the scope of the transaction. Thus two
+inserts of the same key conflict correctly. The setting is on by default. `pgcolumnar.unique_lock_buckets` (default 128) bounds how many advisory
 locks a transaction holds per unique index. Leave the lock on unless you have a
 specific reason to change it.
 
 ## Column cache
 
-`pgcolumnar.enable_column_cache` (off by default) caches decompressed chunk groups
-so they can be reused across reads, sized by `pgcolumnar.column_cache_size` (default
-200 MB). Enable it for repeated scans over the same recently read data, and size
-the cache to the working set.
+`pgcolumnar.enable_column_cache` keeps chunk groups after decompression. Other
+reads can then use them again. `pgcolumnar.column_cache_size` sets the size, and
+the default is 200 MB. The cache is off by default. Enable it if you scan the
+same recent data more than one time. Set the size to the size of the working
+set.
 
 ## Backup and restore
 
@@ -230,33 +239,35 @@ the point of use:
 | `pgcolumnar.export_parquet(rel, path)` | writes a server file | superuser |
 | `pgcolumnar.export_arrow(rel, path)` | writes a server file | superuser |
 
-Two layers keep a non-superuser out. The functions carry the default grant to
-`PUBLIC`, but the `pgcolumnar` schema does not grant `USAGE` to `PUBLIC`, so a
-role that was never given schema access cannot reach them at all; and even with
-schema access, the superuser check refuses the call. `test/server_file_privilege.sh`
-asserts every entry point above refuses a non-superuser, and holds that list as
-data so a new file-reading function is added to one place.
+Two layers keep a non-superuser out. The functions have the default grant to
+`PUBLIC`. But the `pgcolumnar` schema does not grant `USAGE` to `PUBLIC`. Thus a
+role without access to the schema cannot reach the functions. If a role does have
+access to the schema, the superuser check refuses the call. `test/server_file_privilege.sh`
+checks that each entry point above refuses a non-superuser. It holds that list as
+data. Thus you add a new file-reading function in one place only.
 
 Every other `pgcolumnar.*` function runs with ordinary table privileges.
 
 This is stricter than core's convention: `COPY FROM 'file'` needs membership in
 `pg_read_server_files`, not superuser, so a DBA can delegate file reading without
-handing over the cluster. pgColumnar keeps superuser for the pre-release: loosening
-to `pg_read_server_files` and `pg_write_server_files` later is backward compatible,
-while tightening later would break working setups. The looser roles are worth
-reconsidering once the parsers are fully fuzzed (see below), because they widen
-the set of roles that can reach a hand-rolled parser.
+handing over the cluster. pgColumnar keeps superuser for the pre-release. A change to
+`pg_read_server_files` and `pg_write_server_files` later is backward compatible.
+A change to a more strict rule later would stop installations that operate
+correctly. Examine the less strict roles again after the fuzzing of the parsers
+is complete. Refer to the text below. These roles increase the number of roles
+that can reach a parser that this project wrote.
 
 ### The file is untrusted input
 
-A Parquet or Arrow file from a source you did not produce is untrusted input to a
-hand-rolled parser. The metadata in a crafted file drives that parser directly, so
-a malformed or hostile file is a code-execution surface, not only a data-quality
-problem. The superuser boundary means the exposed case is a superuser reading a
-file they did not produce, which is the ordinary data-lake case rather than an
-exotic one: the file is external even though the role is trusted.
+A Parquet file or an Arrow file from a different source is input without trust.
+The parser for these formats is code that this project wrote. The metadata in the
+file controls that parser directly. Thus a file that is incorrect or hostile is a
+surface for code execution. It is not only a problem of data quality. Because of the superuser boundary, the exposed condition is a superuser
+who reads a file that a different person made. This is the usual data-lake
+condition and not an unusual one. The role has trust, but the file is external.
 
 The mitigation for that residual risk is fuzzing the parsers, tracked in #214,
-which so far covers the Parquet path. Until the Arrow path is fuzzed as well,
-treat an Arrow file from an untrusted source with the same caution, and prefer
-importing only files you generated or obtained from a source you trust.
+which covers the Parquet path at this time. The fuzzing does not cover the Arrow
+path yet. Until it does, give the same care to an Arrow file from a source
+without trust. Import only the files that you made, or that you got from a source
+that you trust.

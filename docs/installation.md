@@ -1,66 +1,71 @@
 # Installation
 
-pgColumnar builds with PGXS against an installed PostgreSQL server, versions 15
-through 18, with 19 validated against 19beta2 and pending re-validation against
-the final release. PostgreSQL 13 and 14 still build but are out of the tested
-matrix.
+pgColumnar builds with PGXS against an installed PostgreSQL server. The supported
+versions are 15 through 18. The project validates version 19 against 19beta2. Validation
+against the final 19 release is not done yet. PostgreSQL 13 and 14 build, but
+they are not in the tested matrix.
 
 ## Requirements
 
-- A PostgreSQL server and its development headers, reachable through `pg_config`.
+- A PostgreSQL server and its development headers. The build finds them through
+  `pg_config`.
 - A C compiler and `make`.
-- `pkg-config`. It is used to detect the optional compression libraries.
-- Optional: `liblz4` and `libzstd` development libraries. When present, the `lz4`
-  and `zstd` codecs are compiled in. When absent, those codecs are compiled out
-  and a request for them on a columnar table falls back to a codec that is
-  present.
-- Optional: `zlib` development libraries. When present, the Parquet reader
-  decodes GZIP-compressed pages. It is not used by the native table format.
-- The fallback above applies to the native table format only. When an external
-  Parquet file holds a page compressed with a codec that was not built in, the
-  read fails with a decode error rather than falling back. See
-  [limitations.md](limitations.md) for the codecs the reader supports.
-- A little-endian host is required for the Arrow and Parquet import and export
-  functions and for reading external Parquet files (`read_parquet`,
-  `parquet_schema`, and the `pgcolumnar_parquet` foreign-data wrapper). The rest
-  of the extension runs on any host PostgreSQL supports.
+- `pkg-config`. The build uses it to find the optional compression libraries.
+- Optional: the `liblz4` and `libzstd` development libraries. If they are
+  available, the build includes the `lz4` and `zstd` codecs. If they are not
+  available, the build removes those codecs. A columnar table that requests a
+  removed codec then uses a codec that is available.
+- Optional: the `zlib` development library. If it is available, the Parquet
+  reader decodes GZIP-compressed pages. The native table format does not use
+  `zlib`.
+- A little-endian host, for the Arrow and Parquet functions only. These functions
+  are `read_parquet`, `parquet_schema`, the import and export functions, and the
+  `pgcolumnar_parquet` foreign-data wrapper. All other parts of the extension
+  operate on each host that PostgreSQL supports.
+
+The replacement of a removed codec applies to the native table format only. If an
+external Parquet file contains a page that uses a codec that the build removed,
+the read fails with a decode error. The read does not use a different codec. For
+the codecs that the reader supports, refer to [limitations.md](limitations.md).
 
 ## Build and install
 
-Point the build at the `pg_config` of the target server:
+Set the build to the `pg_config` of the target server:
 
 ```sh
 make PG_CONFIG=/path/to/pg_config
 make install PG_CONFIG=/path/to/pg_config
 ```
 
-`make install` copies `pgcolumnar.so`, the control file, and the SQL script into
-the server's library and extension directories.
+`make install` copies `pgcolumnar.so`, the control file, and the SQL script. It
+puts them in the library directory and the extension directory of the server.
 
 ## Load the library
 
-pgColumnar installs planner and executor hooks at library load time. Add it to
-`shared_preload_libraries` and restart the server:
+pgColumnar installs planner hooks and executor hooks when the server loads the
+library. Add the extension to `shared_preload_libraries`, then start the server
+again:
 
 ```
 shared_preload_libraries = 'pgcolumnar'
 ```
 
-Set this in `postgresql.conf` (or with `ALTER SYSTEM SET shared_preload_libraries
-= 'pgcolumnar'`), then restart. If other libraries are already preloaded, add
-`pgcolumnar` to the comma-separated list.
+Set this parameter in `postgresql.conf`. As an alternative, use `ALTER SYSTEM SET
+shared_preload_libraries = 'pgcolumnar'`. Then start the server again. If the
+parameter contains other libraries, add `pgcolumnar` to the list. Commas divide
+the items in the list.
 
 ## Create the extension
 
-In each database that will hold columnar tables:
+Do this in each database that will contain columnar tables:
 
 ```sql
 CREATE EXTENSION pgcolumnar;
 ```
 
-This creates the `pgcolumnar` schema, the `pgcolumnar` table access method, the
-catalog tables, and the `pgcolumnar.*` functions. The extension is not
-relocatable; its objects stay in the `pgcolumnar` schema.
+This command creates the `pgcolumnar` schema, the `pgcolumnar` table access
+method, the catalog tables, and the `pgcolumnar.*` functions. The extension is
+not relocatable. Its objects stay in the `pgcolumnar` schema.
 
 ## Verify
 
@@ -68,7 +73,7 @@ relocatable; its objects stay in the `pgcolumnar` schema.
 -- the access method is registered
 SELECT amname FROM pg_am WHERE amname = 'pgcolumnar';
 
--- a columnar table can be created and read
+-- you can create a columnar table and read it
 CREATE TABLE install_check (id int, v text) USING pgcolumnar;
 INSERT INTO install_check VALUES (1, 'ok');
 SELECT * FROM install_check;
@@ -80,22 +85,23 @@ DROP TABLE install_check;
 To install a new build of the extension:
 
 1. Run `make install` with the same `PG_CONFIG`.
-2. Restart the server so the new library is loaded.
+2. Start the server again, so that it loads the new library.
 
-The on-disk format version is recorded in the source and in
-[../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
-A build that keeps the same format version reads tables written by earlier builds
-of that version without conversion.
+The source records the on-disk format version. The specification also records it,
+in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
+A build that keeps the same format version reads the tables that earlier builds
+of that version wrote. A conversion is not necessary.
 
 ## Remove
 
-Drop the extension from a database, then remove the files if no database still
-uses it:
+First drop the extension from a database. Then remove the files, but only if no
+database uses the extension:
 
 ```sql
 DROP EXTENSION pgcolumnar;   -- fails if columnar tables still exist; drop them first
 ```
 
-Removing `pgcolumnar` from `shared_preload_libraries` and restarting unloads the
-library. Do this only after no database contains columnar tables, because reading
-a columnar table requires the access method to be present.
+To unload the library, remove `pgcolumnar` from `shared_preload_libraries` and
+start the server again. Do this only after you drop all columnar tables. A read
+of a columnar table needs the access method, and the access method is not
+available when the library is not loaded.

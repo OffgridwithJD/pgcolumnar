@@ -1,7 +1,8 @@
 # User guide
 
-This guide covers creating columnar tables, loading data, and querying them. It
-assumes the extension is installed and loaded (see [Installation](installation.md)).
+This guide tells you how to create columnar tables, how to load data, and how to
+query the tables. It assumes that you installed the extension and that the server
+loads it. Refer to [Installation](installation.md).
 
 ## Create a columnar table
 
@@ -42,15 +43,16 @@ To convert back to the default heap, use `heap` as the method.
 
 ## Load data
 
-Columnar storage is built for append-mostly data. Rows are buffered and written
-in row groups of up to `pgcolumnar.stripe_row_limit` rows. Each transaction writes
-its own row groups, so a load's shape affects the result:
+Columnar storage is for data that you mostly append. The writer holds rows in a
+buffer, then writes them in row groups. A row group contains a maximum of
+`pgcolumnar.stripe_row_limit` rows. Each transaction writes its own row groups.
+Thus the shape of a load changes the result:
 
 - Prefer `COPY` or multi-row `INSERT` over many single-row `INSERT` statements. A
   `COPY` of N rows writes about N divided by `stripe_row_limit` row groups.
-- Many small transactions produce many small row groups. If a table was loaded that
-  way, run [`pgcolumnar.vacuum`](sql-reference.md#pgcolumnarvacuumtablename-regclass-stripe_count-int-default-0)
-  to combine row groups.
+- Many small transactions make many small row groups. If a load used that method,
+  run [`pgcolumnar.vacuum`](sql-reference.md#pgcolumnarvacuumtablename-regclass-stripe_count-int-default-0)
+  to combine the row groups.
 
 ```sql
 COPY events FROM '/data/events.csv' WITH (FORMAT csv, HEADER);
@@ -90,8 +92,8 @@ controlled by a setting in the [Configuration reference](configuration.md):
 - Chunk-group skipping: per-chunk minimum and maximum values drop groups of rows
   that cannot satisfy a filter.
 - Bloom filters: per-chunk filters drop groups for equality filters.
-- Vectorized aggregate: an ungrouped count, sum, avg, min, or max over a
-  supported type is answered from the zone-map metadata.
+- Vectorized aggregate. The zone-map metadata answers an ungrouped count, sum,
+  avg, min, or max on a supported type.
 - `count(*)` answered from catalog metadata when there is no filter.
 
 ### Point lookups and indexes
@@ -103,10 +105,11 @@ CREATE INDEX ON events (id);
 SELECT * FROM events WHERE id = 12345;
 ```
 
-An index supports point lookups and range scans. When a query's columns are all
-in the index and the table's rows are marked all-visible, pgColumnar can answer
-from the index alone with an index-only scan, served by its visibility-map fork.
-Visibility bits are set by `VACUUM`. See
+An index supports point lookups and range scans. An index-only scan reads the
+index and not the table. pgColumnar can use one when two conditions are true.
+First, the index contains all the columns of the query. Second, the
+visibility-map fork marks the rows of the table as all-visible. `VACUUM` sets the
+visibility bits. Refer to
 [Administration](administration.md#index-only-scans).
 
 ## Arrays and composite types
@@ -229,18 +232,18 @@ table public.events_cdc: INSERT: seq[bigint]:4 op[text]:'DELETE' id[bigint]:2 ki
 
 Four properties of this arrangement are worth knowing.
 
-An `UPDATE` arrives as one `UPDATE`. A columnar update is a delete of the old row
-and an insert of a new one internally, but the trigger fires once per row event,
-so the capture table records what the statement did rather than how the storage
-did it.
+An `UPDATE` arrives as one `UPDATE`. Internally, a columnar update deletes the
+old row and inserts a new row. The trigger operates one time for each row event.
+Thus the capture table records the operation of the statement. It does not record
+the operation of the storage.
 
-The capture is transactional. The trigger runs in the same transaction as the
-statement, so a rolled back transaction leaves no captured rows, and the captured
-rows commit with the data.
+The capture is transactional. The trigger operates in the transaction of the
+statement. Thus a transaction that rolls back captures no rows. The captured rows
+commit together with the data.
 
-It costs a heap row per changed row, in write time and in space. Bulk loads are
-the case to think about before enabling it: a load of ten million rows writes ten
-million heap rows as well.
+The capture writes one heap row for each changed row. This has a cost in write
+time and in space. Examine bulk loads before you enable the capture. A load of
+ten million rows also writes ten million heap rows.
 
 The capture table needs pruning. Nothing deletes from it. Delete rows once the
 consumer has confirmed them, and remember that the deletes are themselves
