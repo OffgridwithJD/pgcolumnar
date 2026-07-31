@@ -33,7 +33,16 @@
 #include <math.h>
 
 #include "catalog/pg_type.h"
+#include "funcapi.h"
+#include "port/pg_bitutils.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
+/*
+ * Explicit rather than inherited: through PostgreSQL 18 this arrives
+ * transitively behind funcapi.h, and on 19 it does not. The five-major matrix
+ * caught it as a build failure on 19 alone.
+ */
+#include "utils/tuplestore.h"
 
 /*
  * Decoding runs on bytes read back from disk. Normal pgColumnar data is
@@ -86,7 +95,16 @@ bits_needed(uint64 maxval)
 	return n;
 }
 
-/* pack n values of `width` bits each (LSB-first) and append to out */
+/*
+ * pack n values of `width` bits each (LSB-first) and append to out
+ *
+ * Each field is masked to `width` bits and shifted into position, then emitted
+ * one output byte at a time via explicit shifts. Extracting each byte with a
+ * shift (rather than memcpy of a word) keeps the on-disk layout LSB-first and
+ * identical on any host endianness. A field spans at most 9 bytes (7 bits of
+ * sub-byte offset + 64 bits of value), so the inner loop runs <= 9 times
+ * regardless of width -- versus one iteration per bit in the naive form.
+ */
 static void
 bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 {
@@ -95,6 +113,7 @@ bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 	unsigned char *buf;
 	uint64		bitpos = 0;
 	uint32		i;
+	uint64		mask;
 
 	if (width == 0 || n == 0)
 		return;
@@ -102,16 +121,25 @@ bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
 	totalbits = (uint64) n * (uint64) width;
 	nbytes = (uint32) ((totalbits + 7) / 8);
 	buf = palloc0(nbytes);
+	mask = (width == 64) ? ~UINT64CONST(0) : ((UINT64CONST(1) << width) - 1);
 
 	for (i = 0; i < n; i++)
 	{
-		uint64		v = vals[i];
-		int			b;
+		uint64		v = vals[i] & mask;
+		uint32		bytepos = (uint32) (bitpos >> 3);
+		uint32		bitoff = (uint32) (bitpos & 7);
+		uint64		lo = v << bitoff;
+		uint64		hi = bitoff ? (v >> (64 - bitoff)) : 0;
+		uint32		nb = (bitoff + (uint32) width + 7) >> 3;
+		uint32		k;
 
-		for (b = 0; b < width; b++)
+		for (k = 0; k < nb; k++)
 		{
-			if ((v >> b) & 1)
-				buf[(bitpos + b) >> 3] |= (unsigned char) (1u << ((bitpos + b) & 7));
+			unsigned char byte = (k < 8)
+				? (unsigned char) (lo >> (8 * k))
+				: (unsigned char) (hi >> (8 * (k - 8)));
+
+			buf[bytepos + k] |= byte;
 		}
 		bitpos += width;
 	}
@@ -475,23 +503,40 @@ bw_init(BitWriter *bw)
 	bw->nbits = 0;
 }
 
-/* append the low `bits` bits of v, least-significant first */
+/*
+ * append the low `bits` bits of v, least-significant first
+ *
+ * Same LSB-first stream as a per-bit loop, but bits are merged into a 64-bit
+ * accumulator and whole bytes are flushed at once. The accumulator holds the
+ * up-to-7 carried bits (bw->cur) in its low positions with the new bits above,
+ * so each chunk stays within 64 bits: <= 7 carried + <= 57 taken.
+ */
 static void
 bw_put(BitWriter *bw, uint64 v, int bits)
 {
-	int			i;
+	if (bits <= 0)
+		return;
+	if (bits < 64)
+		v &= (UINT64CONST(1) << bits) - 1;
 
-	for (i = 0; i < bits; i++)
+	while (bits > 0)
 	{
-		if ((v >> i) & 1)
-			bw->cur |= (uint8) (1u << bw->nbits);
-		bw->nbits++;
-		if (bw->nbits == 8)
+		int			take = bits < 57 ? bits : 57;
+		uint64		chunk = v & ((UINT64CONST(1) << take) - 1);
+		uint64		acc = (uint64) bw->cur | (chunk << bw->nbits);
+		int			have = bw->nbits + take;
+
+		while (have >= 8)
 		{
-			appendStringInfoChar(&bw->buf, (char) bw->cur);
-			bw->cur = 0;
-			bw->nbits = 0;
+			appendStringInfoChar(&bw->buf, (char) (acc & 0xff));
+			acc >>= 8;
+			have -= 8;
 		}
+		bw->cur = (uint8) (acc & 0xff);
+		bw->nbits = have;
+
+		v >>= take;
+		bits -= take;
 	}
 }
 
@@ -543,25 +588,29 @@ br_get(BitReader *br, int bits)
 	return v;
 }
 
-/* leading/trailing zero counts of a non-zero value within a `total`-bit window */
+/*
+ * leading/trailing zero counts of a value within a `total`-bit window
+ *
+ * pg_leftmost/rightmost_one_pos64 compile to a hardware bit-scan and require a
+ * non-zero argument. clz within the window is the gap from the top window bit
+ * (total-1) down to the highest set bit; ctz is simply the lowest set-bit
+ * position. x < 2^total holds for every caller (total == w*8 and x is a w-byte
+ * value). x == 0 keeps the old all-zeros answer.
+ */
 static inline int
 clz_in(uint64 x, int total)
 {
-	int			n = 0;
-
-	while (n < total && ((x >> (total - 1 - n)) & 1) == 0)
-		n++;
-	return n;
+	if (x == 0)
+		return total;
+	return (total - 1) - pg_leftmost_one_pos64(x);
 }
 
 static inline int
 ctz_in(uint64 x)
 {
-	int			n = 0;
-
-	while (((x >> n) & 1) == 0)
-		n++;
-	return n;
+	if (x == 0)
+		return 0;
+	return pg_rightmost_one_pos64(x);
 }
 
 /* -------------------------------------------------------------------------
@@ -1113,6 +1162,8 @@ decode_alp(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 
 #define DICT_MAX_DISTINCT 1024
 
+static inline uint64 columnar_fnv1a(const char *p, uint32 n);
+
 static bool
 encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 			char **out, uint32 *outLen)
@@ -1129,20 +1180,43 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 	uint32		i;
 	int			j;
 
+	/*
+	 * Open-addressing hash of value -> distinct index (stored +1; 0 == empty),
+	 * so "have I seen this value?" is O(1) average instead of a memcmp scan over
+	 * every prior distinct value -- the O(n^2) that showed up as ~10% of a text
+	 * load in profiling (issue #155). First-seen assignment order is unchanged,
+	 * so the dictionary and codes are byte-identical to the linear build. Sized a
+	 * power of two above 2 * DICT_MAX_DISTINCT so the load factor stays <= 1/2.
+	 */
+	enum { DICT_HASH_SLOTS = 2048 };
+	uint32		hslot[DICT_HASH_SLOTS];
+
+	memset(hslot, 0, sizeof(hslot));
+
 	for (i = 0; i < n; i++)
 	{
 		const char *vp = raw + pos;
 		uint32		vlen = (w > 0) ? (uint32) w
 			: ColumnarVarSizeAnyUnaligned(vp);
+		uint64		h = columnar_fnv1a(vp, vlen);
+		uint32		s = (uint32) (h & (DICT_HASH_SLOTS - 1));
 		int			code = -1;
 
-		for (j = 0; j < nd; j++)
+		for (;;)
+		{
+			uint32		entry = hslot[s];
+
+			if (entry == 0)
+				break;			/* empty slot: value unseen; insert here below */
+			j = (int) (entry - 1);
 			if (distLen[j] == vlen &&
 				memcmp(raw + distOff[j], vp, vlen) == 0)
 			{
 				code = j;
 				break;
 			}
+			s = (s + 1) & (DICT_HASH_SLOTS - 1);	/* collision: keep probing */
+		}
 
 		if (code < 0)
 		{
@@ -1153,6 +1227,7 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 			}
 			distOff[nd] = pos;
 			distLen[nd] = vlen;
+			hslot[s] = (uint32) (nd + 1);	/* record at the empty slot found */
 			code = nd;
 			nd++;
 		}
@@ -1627,6 +1702,75 @@ fsst_deserialize_table(const char *p, uint32 len, FsstTable *t)
 		t->symLen[i] = L;
 		p += L;
 	}
+}
+
+/* FNV-1a over a byte range: a cheap, well-mixed 64-bit hash for the distinct
+ * probe below. Our own trivial implementation of the public FNV-1a formula, used
+ * only to bucket values while counting distinct ones. */
+static inline uint64
+columnar_fnv1a(const char *p, uint32 n)
+{
+	uint64		h = UINT64CONST(1469598103934665603);
+	uint32		i;
+
+	for (i = 0; i < n; i++)
+	{
+		h ^= (unsigned char) p[i];
+		h *= UINT64CONST(1099511628211);
+	}
+	return h;
+}
+
+/*
+ * ColumnarFsstDictWins
+ *		Cheap pre-check for the FSST table build (issue #155): would dictionary
+ *		encoding win outright, making the costly FSST symbol-table build wasted
+ *		work? FSST is only attempted per vector when a cheaper encoding has not
+ *		already shrunk the vector well; a low-cardinality column is compressed far
+ *		below that threshold by the dictionary, so the FSST table would be built
+ *		(the single largest cost of a text load, ~22% in profiling) and then never
+ *		used. Count distinct values over the corpus with a small open-addressing
+ *		hash set and stop the instant the count exceeds the dictionary's distinct
+ *		cap: at or below the cap the dictionary is viable for every 1024-row vector
+ *		and wins, so skipping the build produces byte-identical storage; above it
+ *		the column is a genuine FSST candidate and the caller builds the table.
+ *		This is our own heuristic; FSST is the public scheme (VLDB 2020).
+ */
+bool
+ColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
+{
+	/* Open-addressing set of value hashes, capacity a power of two comfortably
+	 * above the distinct cap so the load factor at the early-exit stays low. */
+	enum { FSST_CARD_SLOTS = 4096 };	/* > 2 * DICT_MAX_DISTINCT */
+	uint64		slot[FSST_CARD_SLOTS];
+	bool		used[FSST_CARD_SLOTS];
+	int			distinct = 0;
+	uint32		pos = 0;
+
+	memset(used, 0, sizeof(used));
+	while (pos < corpusLen)
+	{
+		uint32		vlen = ColumnarVarSizeAnyUnaligned(corpus + pos);
+		uint64		h;
+		uint32		s;
+
+		if (vlen == 0 || pos + vlen > corpusLen)
+			return false;		/* malformed run: let the caller build normally */
+
+		h = columnar_fnv1a(corpus + pos, vlen);
+		s = (uint32) (h & (FSST_CARD_SLOTS - 1));
+		while (used[s] && slot[s] != h)
+			s = (s + 1) & (FSST_CARD_SLOTS - 1);
+		if (!used[s])
+		{
+			used[s] = true;
+			slot[s] = h;
+			if (++distinct > DICT_MAX_DISTINCT)
+				return false;	/* high cardinality: a real FSST candidate */
+		}
+		pos += vlen;
+	}
+	return true;				/* dictionary wins; the FSST build is skippable */
 }
 
 /*
@@ -2363,4 +2507,304 @@ ColumnarDecodeChunk(const char *enc, uint32 encLen, int encodingType,
 							encodingType)));
 			return NULL;			/* keep the compiler happy */
 	}
+}
+
+/* -------------------------------------------------------------------------
+ * Test-only self-test of the encoding primitives (#155)
+ *
+ * The #155 rewrites replaced per-bit loops with word-at-a-time equivalents on
+ * the promise that they emit exactly the bytes the old code emitted. A SQL suite
+ * cannot check that promise directly: it can only observe what survives a round
+ * trip, and it cannot reach a primitive the encoder declines to select. Two edges
+ * turned out to be unreachable that way, both found by removal proofs that failed
+ * to fail: the (width == 64) mask in bitpack, because packing at full width never
+ * wins so the encoder never chooses it, and the zero guard in ctz_in, because
+ * Gorilla encodes an unchanged value with a same-as-previous bit and never XORs
+ * to zero.
+ *
+ * So the promise is checked here instead, against a reference implementation of
+ * the algorithm each rewrite replaced. The references below are the pre-rewrite
+ * code, kept deliberately naive: they are the oracle, so they are written to be
+ * obviously correct rather than fast. A difference in a single byte is a
+ * difference in stored data.
+ *
+ * Reached only through the binding the encoding suite creates; not in the shipped
+ * catalog, like the other debug hooks.
+ * ------------------------------------------------------------------------- */
+
+/* Reference bit packer: the pre-#285 per-bit loop. */
+static void
+ref_bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
+{
+	uint64		totalbits;
+	uint32		nbytes;
+	unsigned char *buf;
+	uint64		bitpos = 0;
+	uint32		i;
+
+	if (width == 0 || n == 0)
+		return;
+
+	totalbits = (uint64) n * (uint64) width;
+	nbytes = (uint32) ((totalbits + 7) / 8);
+	buf = palloc0(nbytes);
+
+	for (i = 0; i < n; i++)
+	{
+		uint64		v = vals[i];
+		int			b;
+
+		for (b = 0; b < width; b++)
+		{
+			if ((v >> b) & 1)
+				buf[(bitpos + b) >> 3] |= (unsigned char) (1u << ((bitpos + b) & 7));
+		}
+		bitpos += width;
+	}
+	appendBinaryStringInfo(out, (char *) buf, nbytes);
+	pfree(buf);
+}
+
+/* Reference bit writer: the pre-#286 per-bit loop. */
+static void
+ref_bw_put(BitWriter *bw, uint64 v, int bits)
+{
+	int			i;
+
+	for (i = 0; i < bits; i++)
+	{
+		if ((v >> i) & 1)
+			bw->cur |= (uint8) (1u << bw->nbits);
+		bw->nbits++;
+		if (bw->nbits == 8)
+		{
+			appendStringInfoChar(&bw->buf, (char) bw->cur);
+			bw->cur = 0;
+			bw->nbits = 0;
+		}
+	}
+}
+
+/* Reference leading-zero count within a window: the pre-#286 loop. */
+static int
+ref_clz_in(uint64 x, int total)
+{
+	int			n = 0;
+
+	while (n < total && ((x >> (total - 1 - n)) & 1) == 0)
+		n++;
+	return n;
+}
+
+/*
+ * Reference trailing-zero count. The pre-#286 loop had no zero guard and ran past
+ * the end of the value for x == 0, so this stops at 64 rather than reproducing
+ * that. The zero case is asserted separately against the documented answer.
+ */
+static int
+ref_ctz_in(uint64 x)
+{
+	int			n = 0;
+
+	while (n < 64 && ((x >> n) & 1) == 0)
+		n++;
+	return n;
+}
+
+/* Deterministic values (splitmix64), so a failure is reproducible. */
+static inline uint64
+selftest_rand(uint64 *state)
+{
+	uint64		z = (*state += UINT64CONST(0x9E3779B97F4A7C15));
+
+	z = (z ^ (z >> 30)) * UINT64CONST(0xBF58476D1CE4E5B9);
+	z = (z ^ (z >> 27)) * UINT64CONST(0x94D049BB133111EB);
+	return z ^ (z >> 31);
+}
+
+PG_FUNCTION_INFO_V1(columnar_debug_encoding_selftest);
+
+Datum
+columnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	retdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext oldContext;
+	int			width;
+	int			i;
+	int			cases = 0;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+
+	retdesc = CreateTemplateTupleDesc(1);
+	TupleDescInitEntry(retdesc, 1, "result", TEXTOID, -1, 0);
+
+	oldContext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = retdesc;
+	MemoryContextSwitchTo(oldContext);
+
+#define SELFTEST_FAIL(fmt, ...) \
+	do { \
+		Datum		d_[1]; \
+		bool		n_[1] = {false}; \
+		char		m_[256]; \
+		snprintf(m_, sizeof(m_), "FAIL " fmt, __VA_ARGS__); \
+		d_[0] = CStringGetTextDatum(m_); \
+		tuplestore_putvalues(tupstore, retdesc, d_, n_); \
+	} while (0)
+
+	/*
+	 * 1. bitpack against the per-bit reference, every width from 1 to 64.
+	 *
+	 * Widths above roughly 32, the nine-byte field span, and the (width == 64)
+	 * mask are unreachable from SQL because the encoder never selects packing
+	 * there; this is the only place they run. Several value counts are used so
+	 * the packing starts at every sub-byte offset.
+	 */
+	for (width = 1; width <= 64; width++)
+	{
+		static const uint32 counts[] = {1, 2, 3, 7, 8, 9, 17, 64, 129};
+		uint64		state = UINT64CONST(0x155) + (uint64) width;
+		uint32		ci;
+
+		for (ci = 0; ci < lengthof(counts); ci++)
+		{
+			uint32		n = counts[ci];
+			uint64	   *vals = palloc(sizeof(uint64) * n);
+			StringInfoData a;
+			StringInfoData b;
+			uint64		mask = (width == 64)
+				? ~UINT64CONST(0) : ((UINT64CONST(1) << width) - 1);
+			uint32		k;
+
+			for (k = 0; k < n; k++)
+				vals[k] = selftest_rand(&state) & mask;
+			vals[0] = 0;			/* extremes as well as random */
+			if (n > 1)
+				vals[1] = mask;
+
+			initStringInfo(&a);
+			initStringInfo(&b);
+			bitpack(vals, n, width, &a);
+			ref_bitpack(vals, n, width, &b);
+			cases++;
+
+			if (a.len != b.len)
+				SELFTEST_FAIL("bitpack width=%d n=%u: length %d vs reference %d",
+							  width, n, a.len, b.len);
+			else if (memcmp(a.data, b.data, a.len) != 0)
+				SELFTEST_FAIL("bitpack width=%d n=%u: bytes differ from reference",
+							  width, n);
+
+			pfree(a.data);
+			pfree(b.data);
+			pfree(vals);
+		}
+	}
+
+	/*
+	 * 2. bw_put against the per-bit reference. The batched writer carries up to
+	 * seven bits between calls and takes at most 57 at a time, so the sequence of
+	 * widths matters more than any single one.
+	 */
+	{
+		uint64		state = UINT64CONST(0xB17);
+		int			round;
+
+		for (round = 0; round < 8; round++)
+		{
+			BitWriter	bwa;
+			BitWriter	bwb;
+			int			bits;
+
+			bw_init(&bwa);
+			bw_init(&bwb);
+			for (bits = 1; bits <= 64; bits++)
+			{
+				uint64		v = selftest_rand(&state);
+				int			use = ((bits + round) % 64) + 1;
+
+				bw_put(&bwa, v, use);
+				ref_bw_put(&bwb, v, use);
+			}
+			cases++;
+			if (bwa.buf.len != bwb.buf.len)
+				SELFTEST_FAIL("bw_put round=%d: length %d vs reference %d",
+							  round, bwa.buf.len, bwb.buf.len);
+			else if (memcmp(bwa.buf.data, bwb.buf.data, bwa.buf.len) != 0)
+				SELFTEST_FAIL("bw_put round=%d: bytes differ from reference", round);
+			else if (bwa.nbits != bwb.nbits || bwa.cur != bwb.cur)
+				SELFTEST_FAIL("bw_put round=%d: carry %d/%u vs reference %d/%u",
+							  round, bwa.nbits, (unsigned) bwa.cur,
+							  bwb.nbits, (unsigned) bwb.cur);
+		}
+	}
+
+	/* 3. clz_in and ctz_in against the reference loops, over the edges a
+	 * hardware bit scan gets wrong if the zero case or the window is off. */
+	{
+		static const int totals[] = {8, 16, 32, 64};
+		uint64		state = UINT64CONST(0xC12);
+		uint32		ti;
+
+		for (ti = 0; ti < lengthof(totals); ti++)
+		{
+			int			total = totals[ti];
+			uint64		twin = (total == 64)
+				? ~UINT64CONST(0) : ((UINT64CONST(1) << total) - 1);
+
+			for (i = 0; i < 40; i++)
+			{
+				uint64		x;
+				int			got;
+				int			want;
+
+				switch (i)
+				{
+					case 0: x = 0; break;
+					case 1: x = 1; break;
+					case 2: x = twin; break;
+					case 3: x = UINT64CONST(1) << (total - 1); break;
+					default: x = selftest_rand(&state) & twin; break;
+				}
+
+				got = clz_in(x, total);
+				want = ref_clz_in(x, total);
+				cases++;
+				if (got != want)
+					SELFTEST_FAIL("clz_in(0x%llx, %d) = %d, reference %d",
+								  (unsigned long long) x, total, got, want);
+
+				got = ctz_in(x);
+				want = (x == 0) ? 0 : ref_ctz_in(x);
+				cases++;
+				if (got != want)
+					SELFTEST_FAIL("ctz_in(0x%llx) = %d, reference %d",
+								  (unsigned long long) x, got, want);
+			}
+		}
+	}
+
+	/* How many comparisons ran, so a suite can refuse a pass that came from
+	 * doing nothing, or from the backend dying part way through. */
+	{
+		Datum		d[1];
+		bool		nulls[1] = {false};
+		char		msg[64];
+
+		snprintf(msg, sizeof(msg), "cases=%d", cases);
+		d[0] = CStringGetTextDatum(msg);
+		tuplestore_putvalues(tupstore, retdesc, d, nulls);
+	}
+
+#undef SELFTEST_FAIL
+
+	return (Datum) 0;
 }

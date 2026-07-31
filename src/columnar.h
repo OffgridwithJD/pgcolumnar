@@ -654,6 +654,9 @@ extern const char *ColumnarEncodingName(int encodingType);
 extern bool ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
 										Form_pg_attribute att,
 										char **tableOut, uint32 *tableLenOut);
+/* Cheap distinct-count pre-check: true when dictionary encoding wins outright, so
+ * the costly FSST table build can be skipped with byte-identical output (#155). */
+extern bool ColumnarFsstDictWins(const char *corpus, uint32 corpusLen);
 
 /*
  * True when encoding the chunk with the table just built is still a win after
