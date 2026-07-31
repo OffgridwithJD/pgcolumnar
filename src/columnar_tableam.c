@@ -2253,15 +2253,6 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	DefineCustomBoolVariable("pgcolumnar.enable_column_cache",
-							 "Cache decompressed chunk groups to reuse across reads.",
-							 NULL,
-							 &columnar_enable_column_cache,
-							 false,
-							 PGC_USERSET,
-							 0,
-							 NULL, NULL, NULL);
-
 	DefineCustomBoolVariable("pgcolumnar.reclaim_coalesce",
 							 "Split oversized freed ranges on reuse and coalesce "
 							 "adjacent freed ranges, so compaction reclaims space "
@@ -2313,16 +2304,6 @@ _PG_init(void)
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
-
-	DefineCustomIntVariable("pgcolumnar.column_cache_size",
-							"Size of the decompressed-chunk cache, in megabytes.",
-							NULL,
-							&columnar_column_cache_size,
-							200,
-							1, INT_MAX,
-							PGC_USERSET,
-							GUC_UNIT_MB,
-							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pgcolumnar.enable_unique_insert_lock",
 							 "Serialize concurrent inserts of the same unique key.",
@@ -2388,7 +2369,6 @@ _PG_init(void)
 	ColumnarVectorInit();
 
 	/* set up the optional decompressed-chunk cache (spec 8.3) */
-	ColumnarCacheInit();
 
 	/* register the unique-index cache invalidation callback (issue #5) */
 	ColumnarUniqueInit();

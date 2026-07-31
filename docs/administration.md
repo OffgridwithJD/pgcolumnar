@@ -205,11 +205,9 @@ specific reason to change it.
 
 ## Column cache
 
-`pgcolumnar.enable_column_cache` keeps chunk groups after decompression. Other
-reads can then use them again. `pgcolumnar.column_cache_size` sets the size, and
-the default is 200 MB. The cache is off by default. Enable it if you scan the
-same recent data more than one time. Set the size to the size of the working
-set.
+There is no cache of decompressed chunk groups. A cache existed in an earlier
+build, but its only entry point lost its caller and the code did nothing. It was
+removed in #303 rather than left as a setting that changes nothing.
 
 ## Backup and restore
 

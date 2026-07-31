@@ -130,6 +130,16 @@ unreleased. For the forward-looking plan see
 - Lost delete marks under concurrent same-chunk-group deletes.
 - Relation-reference leak in parallel `CREATE INDEX`.
 
+### Removed
+
+- The decompressed-chunk cache, and the `pgcolumnar.enable_column_cache` and
+  `pgcolumnar.column_cache_size` settings with it. Its only entry point had lost
+  its caller when the earlier on-disk format was removed, so the cache had done
+  nothing since. Two settings and four passages of documentation described a
+  feature that did not run. A `postgresql.conf` that sets either parameter must
+  drop the line. The implementation is in the git history if the performance case
+  is made again against the current reader.
+
 ### Changed
 
 - FSST string encoding is now kept only when it reduces the compressed chunk by
