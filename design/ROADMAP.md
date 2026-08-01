@@ -2,7 +2,7 @@
 
 Status of the forward-looking work items and what remains. Every item preserves
 the clean-room discipline in [../PROVENANCE.md](../PROVENANCE.md) and must land
-with differential coverage against the heap oracle and pass the PostgreSQL 13-19
+with differential coverage against the heap oracle and pass the PostgreSQL 15-19
 matrix. Gap specifications are in [gaps/](gaps/).
 
 ## Done
@@ -63,64 +63,52 @@ point-lookup plan regression (#171), sorted layouts decaying with nothing to mea
 recluster not recording its ordered extent (#311), bloom filters read for every
 candidate group and every column (#314), the decode path having no
 interrupt-correctness gate that could fail (#254), and the untested column cache,
-which was resolved by the file being deleted (#282), the dead column cache (#303), and the C23 standard flag spelling (#294).
+which was resolved by the file being deleted (#282), the dead column cache (#303), the per-column bloom read (#314), and the C23 standard flag spelling (#294).
 
-**Open, in the order they are worth taking.** Every entry below was checked
-against its issue thread, its pull requests and main on 2026-08-01, not only
-against whether the issue is open.
+**Open, in the order they are worth taking.**
 
-1. **Full-scan aggregate performance** (#289). The only item here with work in
-   flight. Two halves, and they are at different stages.
-   The decompression half landed: #307 inlined the per-row attbyval decode
-   dispatch on the read path, measured at 3.8 percent on q4 and 3.2 percent on q5.
-   The aggregation half is open as #321, a grouped single-pass node behind
-   `pgcolumnar.enable_group_vectorization` (default off), measured at 1.20x on q4
-   and 1.38x on q5. It is not merged: review reproduced two wrong-answer defects
-   (`sum(real)` returns 0, and gating WHERE clauses are dropped) and a vacuous
-   test section.
-   Note what those numbers mean for planning. The 1.20x and 1.38x are not the
-   roughly 4x gap to TimescaleDB; by #321's own account the grouped node is the
-   foundation and the larger lever for that shape is dictionary-coded grouping on
-   the high-cardinality text key. The widest gap is q6, the filtered full scan, at
-   5.3x behind TimescaleDB and 3.1x slower than heap, which is the only shape
-   where columnar loses to heap. #321 does not touch q6.
-2. **Parallel bulk ingest** (#300). Bulk load itself is done: #155 closed after
-   four encoder levers (#283 to #286, merged via #290) took the 100M-row load from
-   783 s to 383 s with a byte-identical on-disk image.
-   The remaining lever is not what this entry used to say. #300's own profile on
-   10M real TSBS-cpu rows attributes the columnar text load to core COPY parse
-   about 21 percent, encode and columnar write about 53 percent, base row pipeline
-   about 27 percent, so bypassing the parser alone cannot make columnar load beat
-   heap. The measured top-ranked lever is parallelism over the existing encoder
-   with core COPY unchanged: a prototype loaded a fixed 16M-row subset in 85.2 s
-   at one writer and 11.5 s at eight, 7.39x, plateauing at the physical core
-   count.
-   `IMPORT_THROUGHPUT_PLAN.md` is *not* the reference for this: it predates the
-   #283 to #286 work and puts COPY explicitly under "Not in scope". Read the #300
-   thread instead.
+This list deliberately carries no measurements. Four successive rewrites of this
+file were each wrong because they restated numbers that live in the issues, and a
+restated number drifts the moment the issue moves. Each entry says what the work
+is and where the current numbers are; follow the link for figures.
+
+1. **Full-scan aggregate performance** (#289). The only item with work in flight.
+   The read-path decode dispatch was inlined in #307 (merged). The grouped
+   single-pass aggregate is open as #321, behind
+   `pgcolumnar.enable_group_vectorization`, default off, and is not merged: review
+   reproduced two wrong-answer defects and a vacuous test section.
+   Before planning from #321's numbers, read its body: by its own account the
+   grouped node is a foundation, and the larger lever for that query shape is
+   dictionary-coded grouping on the high-cardinality text key. The shapes where
+   pgColumnar is furthest behind, and the two where it is slower than heap, are
+   q6 and q8 in #289's table; nothing in flight addresses either.
+2. **Parallel bulk ingest** (#300). Bulk load itself is closed (#155): four
+   encoder levers landed via #290.
+   The remaining lever is not a COPY parser bypass. #300's own profile attributes
+   most of the columnar load to encode rather than to parse, so bypassing the
+   parser alone cannot close the gap to heap, and the measured lever is
+   parallelism over the existing encoder with core COPY unchanged. #323 is the
+   design and first slice. `IMPORT_THROUGHPUT_PLAN.md` is *not* the reference: it
+   predates the #283 to #286 work and puts COPY under "Not in scope". Read the
+   #300 thread.
 3. **Code comment audit** (#291) to the ASD-STE100 standard. The documentation
-   half landed in #298, which converted the user documents and added
-   `test/docs_style.sh` to the matrix as a durable gate. What remains is the code
-   comments, roughly 12,400 lines, which no gate covers and which the licensed
-   ASD-STE100 vocabulary list cannot be checked against.
+   half landed in #298, which added `test/docs_style.sh` to the matrix as a
+   durable gate. The code comments remain, and no gate covers them: the licensed
+   ASD-STE100 vocabulary list cannot be checked mechanically, so any claim of
+   compliance there is unverifiable by construction.
 
 Not work, but still open: **#310, selective-scan page reads**. Both causes are
-fixed and merged (#315 lazy per group, #317 per column, closing #314). Re-measured
-at 100M on 2026-08-01 with the data loaded once and only the library swapped:
-273,212 buffers and 1252 ms on the parent of the #315 merge, against 8,917 buffers
-and 39 ms with both fixes, 30.6x fewer buffers and 34x faster, about 1 percent of
-the table's pages. The reporter's own bench on the same shape reports 4610 ms to
-106 ms. One filter is 256 kB and the catalog is 3.5 GB on that table, larger than
-the data it describes, with about 55 percent of the query's CPU in anonymous-page
-faults copying it per scan. It stays open only for a confirmation reading on the
-real TSBS dataset, since the re-run used synthetic data at host cardinality 4000.
+fixed and merged (#315 and #317) and the effect was re-measured at 100M by both
+parties, on synthetic and on real TSBS data; the figures are in the issue. It
+stays open pending the reporter's sign-off, not further engineering.
 
-Formerly deferred, now built and on main: end-truncation for lazy disk reclaim
-ships as `pgcolumnar.truncate(regclass)` behind `pgcolumnar.enable_end_truncation`
-(commit 6f468f7); reclaim free-list splitting and coalescing landed via #90
-(commit 139dc97). Both were listed here as "not yet built" long after they were
-built. The F1 delete-vector catalog rename (PHASE_F_PLAN.md) is the only item of
-the three still outstanding.
+Formerly deferred, now built and on main. All three items this paragraph used to
+list as "not yet built" are built: end-truncation ships as
+`pgcolumnar.truncate(regclass)` behind `pgcolumnar.enable_end_truncation`, reclaim
+free-list splitting and coalescing landed via #90, and the F1 delete-vector
+catalog rename is done, which the schema shows directly:
+`pgcolumnar.delete_vector` is the catalog's name today. The previous revision of
+this paragraph corrected the first two and still called the third outstanding.
 
 ## Future directions
 
@@ -129,7 +117,7 @@ columnar-engine techniques (deep-research pass, 2026-07-21). Each notes rough
 effort and a primary citation. The speedup figures are self-reported by each
 system's authors on their own hardware and workloads; they indicate the value of
 a technique, not a guaranteed pgColumnar gain. Anything adopted still lands with
-differential coverage and the PostgreSQL 13-19 matrix, and clean-room provenance
+differential coverage and the PostgreSQL 15-19 matrix, and clean-room provenance
 is preserved.
 
 Already implemented on the native engine (this list predates that work; kept for
@@ -254,7 +242,7 @@ are directions to investigate and spec, not validated recommendations:
 ## PostgreSQL 18/19 adoption
 
 Features new in PostgreSQL 17-19 that pgColumnar can use, all version-gated to
-preserve the 13-19 matrix. Detail and sources in
+preserve the 15-19 matrix. Detail and sources in
 [PG18_19_OPPORTUNITIES.md](PG18_19_OPPORTUNITIES.md):
 
 - Read stream / AIO in the scan — shipped, see the Done table.
