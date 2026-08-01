@@ -128,11 +128,20 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # gcc-14 explicitly. PostgreSQL 19's configure selects -std=gnu23, and
-          # the runner image's default gcc predates that spelling (it accepts
-          # gnu2x), so PostgreSQL builds and then the extension build inherits a
-          # flag its own compiler rejects. Pinning one compiler for both removes
-          # the mismatch rather than papering over the flag.
+          # gcc-14 explicitly, so one compiler configures PostgreSQL and builds
+          # the extension.
+          #
+          # PGXS hands the extension the CFLAGS the server was configured with,
+          # and PostgreSQL's configure adapts those to its compiler. Configuring
+          # with a newer GCC and building with an older one therefore feeds the
+          # older compiler warning flags it does not have: gcc-15 adds
+          # -Wmissing-variable-declarations, which gcc-13 rejects outright.
+          # Pinning one compiler for both removes the mismatch.
+          #
+          # This is NOT where -std=gnu23 came from. That flag is set by this
+          # project's own Makefile for PostgreSQL 19, whose headers use C23
+          # constructs, and the Makefile now probes for the spelling the
+          # compiler accepts. See #294.
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-14 flex bison libreadline-dev zlib1g-dev \
             liblz4-dev libzstd-dev pkg-config

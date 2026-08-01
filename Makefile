@@ -70,18 +70,44 @@ endif
 
 PG_CONFIG ?= pg_config
 
+# Build note for source-built servers: PGXS hands this extension the CFLAGS the
+# server was configured with, and PostgreSQL's configure adapts those to its own
+# compiler. Build the extension with the compiler that configured the server, or
+# it can be handed warning flags it does not recognise. That is a toolchain
+# mismatch and not something this Makefile can paper over.
+#
 # Select the C standard by PostgreSQL major version. PostgreSQL 13 through 18
 # are written to compile as C17 (their headers predate C23), so pin gnu17 there
 # for a deterministic build regardless of the compiler's default. PostgreSQL 19
 # uses C23 constructs in its headers (for example typeof_unqual in nodes.h), so
-# it needs gnu23. The value is appended to CFLAGS through PG_CFLAGS, which PGXS
-# honors.
+# it needs C23.
 PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')
+
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+
+# The compiler PGXS will use, for the probe below. CC has to be settled before
+# the include, because PG_CFLAGS is only honored if it is set before it, so the
+# value is read out of the server's Makefile.global unless the caller named one
+# on the command line. Probing with make's default cc instead would test a
+# compiler that may not be the one that does the build.
+PG_MAKEFILE_GLOBAL := $(patsubst %/makefiles/pgxs.mk,%/Makefile.global,$(PGXS))
+PROBE_CC := $(if $(filter command line,$(origin CC)),$(CC),\
+	$(shell sed -n 's/^CC = //p' $(PG_MAKEFILE_GLOBAL) 2>/dev/null | head -1))
+PROBE_CC := $(if $(strip $(PROBE_CC)),$(PROBE_CC),cc)
+
 ifeq ($(shell test "$(PG_MAJORVERSION)" -ge 19 && echo yes),yes)
-PG_CFLAGS += -std=gnu23
+# GCC 14 and later spell C23 "gnu23"; GCC 13 accepts only "gnu2x" and rejects
+# the newer spelling outright. Both name the same language, and GCC 13 compiles
+# PostgreSQL 19's C23 headers under gnu2x, so ask the compiler which spelling it
+# takes rather than hardcode one (#294). Hardcoding gnu23 failed on GCC 13 with
+# an error naming a flag the user never set, which reads as a defect in this
+# project rather than a toolchain difference.
+C23_STD := $(shell echo 'int main(void){return 0;}' \
+	| $(PROBE_CC) -std=gnu23 -x c -c -o /dev/null - >/dev/null 2>&1 \
+	&& echo gnu23 || echo gnu2x)
+PG_CFLAGS += -std=$(C23_STD)
 else
 PG_CFLAGS += -std=gnu17
 endif
 
-PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
