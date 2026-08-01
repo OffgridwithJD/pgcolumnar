@@ -2254,9 +2254,12 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pgcolumnar.groupagg_max_groups",
-							"Plan-time cap on the estimated group count the grouped "
-							"vectorized aggregate will accept before falling back.",
-							NULL,
+							"Cap on the actual group count the grouped vectorized "
+							"aggregate builds before it stops with an error.",
+							"Enforced at execution against the real number of groups, "
+							"not the planner's estimate: over the cap the query errors "
+							"rather than falling back, since the plan is fixed by then. "
+							"Raise it, or turn off pgcolumnar.enable_group_vectorization.",
 							&columnar_groupagg_max_groups,
 							1000000, 1, INT_MAX,
 							PGC_USERSET,

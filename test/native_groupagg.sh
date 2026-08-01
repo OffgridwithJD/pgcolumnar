@@ -51,13 +51,27 @@ pgc_is_groupvec() {	# query -> yes|no
 }
 
 # toggle_diff LABEL "QUERY on t_col": same query, path off vs on, byte-exact.
+# Asserts the node actually fires with the GUC on -- without that premise a query
+# the node quietly rejects runs the scalar Agg in both arms and the comparison is
+# vacuously green (exactly how the float-sum defect slipped through before).
 toggle_diff() {
 	local label="$1" query="$2" h_off h_on
+	groupvec_on
+	check "$label [node fires]" "$(pgc_is_groupvec "$query")" yes
 	groupvec_off
 	h_off="$(pgc_set_hash "$query")"
 	groupvec_on
 	h_on="$(pgc_set_hash "$query")"
 	check "$label" "$h_on" "$h_off"
+}
+
+# oracle LABEL "TEMPLATE with %T": assert the grouped node is chosen for the
+# columnar form, then compare it to the heap oracle. The node-fires assertion is
+# the premise every comparison here needs and none used to state.
+oracle() {
+	local label="$1" tmpl="$2"
+	check "$label [node fires]" "$(pgc_is_groupvec "${tmpl//%T/t_col}")" yes
+	diff_query "$label" "$tmpl"
 }
 
 # ---- 1. the data: a q4/q5-shaped table with many group shapes ---------------
@@ -114,41 +128,60 @@ EXACT="count(*), count(i4), count(host),
 	sum(i2), sum(i4), sum(i8), sum(num),
 	min(f8), max(f8), min(host), max(host), min(ts), max(ts), min(i8), max(i8)"
 
-diff_query "oracle exact: GROUP BY host" \
+oracle "oracle exact: GROUP BY host" \
 	"SELECT host, $EXACT FROM %T GROUP BY host"
-diff_query "oracle exact: GROUP BY hour" \
+oracle "oracle exact: GROUP BY hour" \
 	"SELECT date_trunc('hour', ts), $EXACT FROM %T GROUP BY date_trunc('hour', ts)"
-diff_query "oracle exact: GROUP BY hour, host (q4/q5 shape)" \
+oracle "oracle exact: GROUP BY hour, host (q4/q5 shape)" \
 	"SELECT date_trunc('hour', ts), host, $EXACT FROM %T GROUP BY date_trunc('hour', ts), host"
-diff_query "oracle exact: GROUP BY region, host (two text keys)" \
+oracle "oracle exact: GROUP BY region, host (two text keys)" \
 	"SELECT region, host, $EXACT FROM %T GROUP BY region, host"
-diff_query "oracle exact: GROUP BY integer expr key" \
+oracle "oracle exact: GROUP BY integer expr key" \
 	"SELECT (g % 7), $EXACT FROM %T GROUP BY (g % 7)"
-diff_query "oracle exact: GROUP BY bigint column key" \
+oracle "oracle exact: GROUP BY smallint column key" \
 	"SELECT i2, count(*), sum(i4), min(f8), max(f8) FROM %T GROUP BY i2"
 
 # with a WHERE that both prunes groups and needs a residual recheck
-diff_query "oracle exact: WHERE range + GROUP BY hour, host" \
+oracle "oracle exact: WHERE range + GROUP BY hour, host" \
 	"SELECT date_trunc('hour', ts), host, $EXACT FROM %T
 	 WHERE ts >= timestamp '2024-01-01 02:00:00'
 	   AND ts <  timestamp '2024-01-01 06:00:00'
 	 GROUP BY date_trunc('hour', ts), host"
-diff_query "oracle exact: WHERE on measure + GROUP BY host" \
+oracle "oracle exact: WHERE on measure + GROUP BY host" \
 	"SELECT host, $EXACT FROM %T WHERE i4 > 40000 AND host IS NOT NULL GROUP BY host"
 
-# ---- 4. heap oracle: averages and float sums, rounded ----------------------
+# ---- 4. float and average accumulators, through the node --------------------
+# These are the accumulators the earlier suite left uncovered: rounding an
+# aggregate IN the SELECT list makes the output an expression over an aggregate,
+# which the node rejects, so both arms silently ran the scalar Agg and the check
+# was vacuous (that is how sum(real) returning 0 got through). Cover them by a
+# toggle-differential of the BARE aggregates: the GUC-off arm is core's Agg over
+# the same columnar rows in the same fold order, so the node's result must be
+# byte-identical -- and toggle_diff now asserts the node actually fires.
 
-ROUNDED="round(avg(i4)::numeric, 6), round(avg(i8)::numeric, 6),
-	round(avg(num)::numeric, 6),
-	round(sum(f8)::numeric, 4), round(avg(f8)::numeric, 6),
-	round(sum(f4)::numeric, 3), round(avg(f4)::numeric, 5)"
+FLOATAGG="sum(f4), sum(f8), sum(num),
+	avg(i2), avg(i4), avg(i8), avg(f4), avg(f8), avg(num)"
 
-diff_query "oracle rounded avg/float: GROUP BY host" \
-	"SELECT host, $ROUNDED FROM %T GROUP BY host"
-diff_query "oracle rounded avg/float: GROUP BY hour, host" \
-	"SELECT date_trunc('hour', ts), host, $ROUNDED FROM %T GROUP BY date_trunc('hour', ts), host"
+toggle_diff "toggle float/avg: GROUP BY host" \
+	"SELECT host, $FLOATAGG FROM t_col GROUP BY host"
+toggle_diff "toggle float/avg: GROUP BY hour, host" \
+	"SELECT date_trunc('hour', ts), host, $FLOATAGG FROM t_col GROUP BY date_trunc('hour', ts), host"
+toggle_diff "toggle float/avg: WHERE + GROUP BY region, host" \
+	"SELECT region, host, $FLOATAGG FROM t_col WHERE f8 IS NOT NULL GROUP BY region, host"
 
-# ---- 5. toggle-differential: off vs on, byte-exact accumulators ------------
+# min/max tie-break: numeric values equal by value but differing in display scale
+# (1.0 vs 1.00). Core's larger/smaller keep the later value on a tie; the node
+# must match. Order-sensitive, so tested as a toggle-differential (same fold
+# order in both arms), not against heap (which scans in a different order).
+psql_run "DROP TABLE IF EXISTS tie_col;
+          CREATE TABLE tie_col (k int, n numeric) USING pgcolumnar;
+          INSERT INTO tie_col VALUES
+            (1, 1.0), (1, 1.00), (1, 1.000), (1, 0.5), (1, 0.50),
+            (2, 5.5), (2, 5.50), (2, 5.500);" >/dev/null
+toggle_diff "toggle min/max numeric display-scale tie" \
+	"SELECT k, min(n), max(n) FROM tie_col GROUP BY k"
+
+# ---- 5. toggle-differential: exact accumulators, off vs on -----------------
 
 toggle_diff "toggle exact: GROUP BY host" \
 	"SELECT host, $EXACT FROM t_col GROUP BY host"
@@ -162,23 +195,21 @@ toggle_diff "toggle exact: GROUP BY region, host, WHERE" \
 groupvec_on
 # NULL keys already present (g%197, g%331); confirm the node is still used and
 # the NULL group matches the oracle.
-check "plan: NULL-bearing key still uses grouped node" \
-	"$(pgc_is_groupvec "SELECT host, count(*) FROM t_col GROUP BY host")" yes
-diff_query "oracle exact: NULL ts group folds like heap" \
+oracle "oracle exact: NULL ts group folds like heap" \
 	"SELECT date_trunc('hour', ts), count(*), sum(i4) FROM %T GROUP BY date_trunc('hour', ts)"
 
 psql_run "DELETE FROM t_heap WHERE g % 17 = 0;"
 psql_run "DELETE FROM t_col  WHERE g % 17 = 0;"
-diff_query "oracle exact: GROUP BY host after deletes" \
+oracle "oracle exact: GROUP BY host after deletes" \
 	"SELECT host, $EXACT FROM %T GROUP BY host"
 toggle_diff "toggle exact: GROUP BY host after deletes" \
 	"SELECT host, $EXACT FROM t_col GROUP BY host"
 
 psql_run "ALTER TABLE t_heap ADD COLUMN extra int DEFAULT 7;"
 psql_run "ALTER TABLE t_col  ADD COLUMN extra int DEFAULT 7;"
-diff_query "oracle exact: GROUP BY host, added column" \
+oracle "oracle exact: GROUP BY host, added column" \
 	"SELECT host, count(*), sum(extra), sum(i4) FROM %T GROUP BY host"
-diff_query "oracle exact: GROUP BY added column" \
+oracle "oracle exact: GROUP BY added column" \
 	"SELECT extra, count(*), sum(i4) FROM %T GROUP BY extra"
 
 # ---- 7. fallback shapes: not the node, still the right answer ---------------
@@ -212,10 +243,19 @@ psql_run "CREATE COLLATION IF NOT EXISTS ci (provider = icu, locale = 'und-u-ks-
 	2>/dev/null || true
 if [ "$(q "SELECT 1 FROM pg_collation WHERE collname = 'ci'")" = "1" ]; then
 	psql_run "CREATE TABLE t_ci (k text COLLATE ci, v int) USING pgcolumnar;"
-	psql_run "INSERT INTO t_ci SELECT 'K' || (g % 20), g FROM generate_series(1, 5000) g;"
+	# Keys where case is DECOUPLED from the suffix: case comes from g%2, the
+	# suffix from (g/2)%10, so for every suffix 0..9 both 'host'N and 'HOST'N
+	# exist -- 20 byte-distinct keys that case-fold to 10. A case-insensitive
+	# (level-2) collation yields 10 groups; a byte-equality path (which the node
+	# uses, and why it must fall back here) would yield 20. So this fixture fails
+	# if the fallback ever stops happening. (An earlier version used g%20, whose
+	# parity tracked g's, so nothing case-folded and the check was vacuous.)
+	psql_run "INSERT INTO t_ci
+	          SELECT (CASE WHEN g % 2 = 0 THEN 'host' ELSE 'HOST' END) || ((g / 2) % 10), g
+	          FROM generate_series(1, 5000) g;"
 	check "plan: non-deterministic collation key falls back" \
 		"$(pgc_is_groupvec "SELECT k, count(*) FROM t_ci GROUP BY k")" no
-	check "answer: non-deterministic collation grouping runs" \
+	check "answer: non-deterministic collation grouping is case-insensitive (10 groups)" \
 		"$(q "SELECT count(*) FROM (SELECT k FROM t_ci GROUP BY k) s")" \
 		"$(q "SELECT count(DISTINCT lower(k)) FROM t_ci")"
 else
@@ -231,6 +271,59 @@ diff_query "oracle exact: f(key) output still correct" \
 # GROUP BY with no aggregate -> falls back (nothing to vectorize)
 check "plan: GROUP BY with no aggregate falls back" \
 	"$(pgc_is_groupvec "SELECT host FROM t_col GROUP BY host")" no
+
+# ---- 7b. named regressions for the two reproduced wrong-answer blockers -----
+
+# Blocker 1: sum(real) once returned 0 -- a float8 Datum handed to a float4 slot.
+# With integer-valued reals the sum is exact regardless of fold order, so compare
+# to heap directly; require the node and require the result be nonzero.
+psql_run "DROP TABLE IF EXISTS r_col; DROP TABLE IF EXISTS r_heap;"
+psql_run "CREATE TABLE r_col (h int, r real, d float8) USING pgcolumnar;
+          CREATE TABLE r_heap (h int, r real, d float8);
+          INSERT INTO r_heap SELECT g % 4, (g % 7)::real, (g % 7)::float8
+                             FROM generate_series(1, 4000) g;
+          INSERT INTO r_col SELECT * FROM r_heap;" >/dev/null
+check "regress B1: sum(real) fires the node" \
+	"$(pgc_is_groupvec "SELECT h, sum(r) FROM r_col GROUP BY h")" yes
+check "regress B1: sum(real) matches heap, not 0" \
+	"$(pgc_set_hash "SELECT h, sum(r), sum(d) FROM r_col GROUP BY h")" \
+	"$(pgc_set_hash "SELECT h, sum(r), sum(d) FROM r_heap GROUP BY h")"
+check "regress B1: sum(real) is nonzero" \
+	"$(q "SELECT bool_and(s <> 0) FROM (SELECT sum(r) s FROM r_col GROUP BY h) x")" t
+
+# Blocker 2: a gating (pseudoconstant, one-time) WHERE was dropped, so a false
+# gate wrongly returned rows. The node cannot honor a one-time filter, so it must
+# fall back; either way the answer must match heap.
+check "regress B2: gating WHERE falls back (not the node)" \
+	"$(pgc_is_groupvec "SELECT host, count(*) FROM t_col WHERE (SELECT false) GROUP BY host")" no
+diff_query "regress B2: gating WHERE (SELECT false) returns no rows" \
+	"SELECT host, count(*) FROM %T WHERE (SELECT false) GROUP BY host"
+diff_query "regress B2: gating WHERE (SELECT true) is a no-op" \
+	"SELECT host, count(*), sum(i4) FROM %T WHERE (SELECT true) GROUP BY host"
+
+# Signed zero: core's sum assigns the first value directly, so sum of a lone -0.0
+# prints '-0'. Folding it into +0.0 would drop the sign. Toggle-diff over columnar
+# rows containing -0.0 (node vs core's scalar Agg, same fold order) is byte-exact.
+psql_run "DROP TABLE IF EXISTS z_col;
+          CREATE TABLE z_col (k int, r real, d float8) USING pgcolumnar;
+          INSERT INTO z_col VALUES (1,'-0','-0'), (2,'-0','-0'), (2,'-0','-0');" >/dev/null
+toggle_diff "toggle sum signed-zero (-0 preserved)" \
+	"SELECT k, sum(r), sum(d) FROM z_col GROUP BY k"
+
+# avg overflow parity: core's float accum keeps Youngs-Cramer Sxx and raises on
+# finite inputs whose sum-of-squares overflows even if the running sum stays
+# finite. The node must raise too. (diff_query can't compare two errors, so check
+# the node fires and errors with the same message.)
+psql_run "DROP TABLE IF EXISTS ov_col;
+          CREATE TABLE ov_col (k int, d float8) USING pgcolumnar;
+          INSERT INTO ov_col VALUES (1, -1e308), (1, 1e308);" >/dev/null
+check "avg(float8) overflow: node fires" \
+	"$(pgc_is_groupvec "SELECT k, avg(d) FROM ov_col GROUP BY k")" yes
+ov_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -Atc "SET pgcolumnar.enable_group_vectorization=on;
+		SELECT k, avg(d) FROM ov_col GROUP BY k" 2>&1 || true)"
+check "avg(float8) overflow errors like core" \
+	"$(printf '%s' "$ov_out" | grep -qi 'out of range' && echo yes || echo no)" yes
 
 # ---- 8. degenerate inputs --------------------------------------------------
 

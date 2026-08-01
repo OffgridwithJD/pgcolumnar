@@ -259,6 +259,7 @@ typedef struct ColumnarAggSpec
 	bool		sawValue;		/* any non-null value contributed */
 	Datum		extreme;		/* min/max running value (in resultContext) */
 	float8		fsum;			/* float running sum (scan order, like float8_accum) */
+	float8		fsxx;			/* avg(float): Youngs-Cramer Sxx, for overflow parity */
 	Datum		nsum;			/* numeric running total (in resultContext) */
 	bool		nsumSet;		/* nsum initialized */
 } ColumnarAggSpec;
@@ -459,11 +460,16 @@ columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
 		Oid			coll;
 		TypeCacheEntry *tce;
 
-		while (expr != NULL && IsA(expr, RelabelType))
-			expr = (Node *) ((RelabelType *) expr)->arg;
 		if (expr == NULL)
 			return false;
 
+		/*
+		 * Do NOT strip a wrapping RelabelType: it carries the cast's result type
+		 * and collation. Stripping it would read the type/collation from the
+		 * underlying value instead, which for an explicit COLLATE defeats the
+		 * deterministic-collation check below and could group with the wrong
+		 * equality. Group by the expression exactly as written.
+		 */
 		if (!bms_is_subset(pull_varnos(root, expr), input_rel->relids))
 			return false;
 		if (contain_volatile_functions(expr))
@@ -916,6 +922,13 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	if (rte == NULL || rte->rtekind != RTE_RELATION ||
 		rte->relkind != RELKIND_RELATION)
 		return;
+	/*
+	 * A legacy inheritance parent is a plain RELKIND_RELATION with rte->inh set;
+	 * its children hold rows this single-relation scan would never see. Leave the
+	 * whole tree to the ordinary Append + Agg plan.
+	 */
+	if (rte->inh)
+		return;
 	if (!OidIsValid(rte->relid) || !ColumnarIsColumnarRelation(rte->relid))
 		return;
 	relid = rte->relid;
@@ -948,16 +961,20 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		}
 		else
 		{
-			Node	   *stripped = oexpr;
 			ListCell   *kc;
 			int			k = 0;
 			int			found = -1;
 
-			while (stripped != NULL && IsA(stripped, RelabelType))
-				stripped = (Node *) ((RelabelType *) stripped)->arg;
+			/*
+			 * Match the output expression against a group key exactly as written
+			 * (no RelabelType stripping): the classifier stores keys un-stripped
+			 * too, and both come from the same target list, so equal() lines them
+			 * up. An output built on top of a key (not a bare reference) matches
+			 * nothing and forces the fallback.
+			 */
 			foreach(kc, groupKeys)
 			{
-				if (equal(stripped, (Node *) lfirst(kc)))
+				if (equal(oexpr, (Node *) lfirst(kc)))
 				{
 					found = k;
 					break;
@@ -987,15 +1004,60 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 									 input_rel->rows > 0 ? input_rel->rows : 1.0,
 									 NULL, NULL);
 
-	cheapest = input_rel->cheapest_total_path;
-	if (cheapest == NULL)
-		return;
+	/*
+	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time
+	 * filters, not per-row predicates. The residual ExecQual recheck this path
+	 * relies on runs per row and would never apply them, so a false gate would
+	 * wrongly return rows. They are rare; leave such a query to the ordinary plan.
+	 */
+	foreach(lc, input_rel->baserestrictinfo)
+	{
+		if (lfirst_node(RestrictInfo, lc)->pseudoconstant)
+			return;
+	}
 
 	/*
 	 * WHERE is carried whole and rechecked per row, so correctness never depends
 	 * on which clauses become scan keys; the scan keys only prune groups.
 	 */
 	quals = extract_actual_clauses(input_rel->baserestrictinfo, false);
+
+	/*
+	 * A WHERE clause referencing a system column or a whole-row Var cannot be
+	 * answered from the projected data columns this path reads, so fall back
+	 * rather than evaluate it against unset slot values.
+	 */
+	{
+		Bitmapset  *whereAtts = NULL;
+		int			m = -1;
+
+		pull_varattnos((Node *) quals, input_rel->relid, &whereAtts);
+		while ((m = bms_next_member(whereAtts, m)) >= 0)
+			if (m + FirstLowInvalidHeapAttributeNumber <= 0)
+				return;
+	}
+
+	/*
+	 * Cost from a full columnar scan, not input_rel->cheapest_total_path: the
+	 * cheapest overall path may be an index scan, but this node always performs a
+	 * full columnar scan, so pricing it from an index scan would understate it.
+	 * Take the cheapest non-index path (the columnar custom or sequential scan).
+	 */
+	cheapest = NULL;
+	foreach(lc, input_rel->pathlist)
+	{
+		Path	   *p = (Path *) lfirst(lc);
+
+		if (p->pathtype == T_IndexScan || p->pathtype == T_IndexOnlyScan ||
+			p->pathtype == T_BitmapHeapScan)
+			continue;
+		if (cheapest == NULL || p->total_cost < cheapest->total_cost)
+			cheapest = p;
+	}
+	if (cheapest == NULL)
+		cheapest = input_rel->cheapest_total_path;
+	if (cheapest == NULL)
+		return;
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
@@ -1157,6 +1219,38 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 }
 
 /*
+ * Running float additions that reproduce core's float4pl/float8pl exactly,
+ * including the overflow error: core raises "value out of range: overflow" when a
+ * finite + finite addition produces an infinity, and the grouped accumulators
+ * must do the same rather than silently carrying an Infinity the scalar Agg would
+ * never have produced. Same compiler and flags as the server (PGXS), so the
+ * arithmetic is bit-for-bit what float4pl/float8pl compute.
+ */
+static inline float8
+columnar_float8_pl(float8 a, float8 b)
+{
+	float8		r = a + b;
+
+	if (unlikely(isinf(r)) && !isinf(a) && !isinf(b))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value out of range: overflow")));
+	return r;
+}
+
+static inline float4
+columnar_float4_pl(float4 a, float4 b)
+{
+	float4		r = a + b;
+
+	if (unlikely(isinf(r)) && !isinf(a) && !isinf(b))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value out of range: overflow")));
+	return r;
+}
+
+/*
  * columnar_apply_one
  *		Fold one value (or a null) into an aggregate accumulator. This is the
  *		reference per-row semantics, shared by the vectorized per-row path and
@@ -1202,13 +1296,62 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 			break;
 
 		case COLUMNAR_AGG_SUM_FLOAT:
+			if (!isnull)
+			{
+				/*
+				 * sum(real) accumulates in real (core float4pl) and returns real;
+				 * sum(double precision) accumulates in float8 (core float8pl). Core's
+				 * sum has a strict transfn with a null initial state, so it assigns
+				 * the FIRST non-null value directly -- preserving a signed zero --
+				 * rather than adding it to +0.0. Match that, then fold the rest with
+				 * float4pl/float8pl semantics. For the float4 case fsum always holds
+				 * a value exactly representable as float4, so the round-trip through
+				 * (float4) reproduces float4pl step for step.
+				 */
+				if (!spec->sawValue)
+					spec->fsum = (spec->inputType == FLOAT4OID)
+						? (float8) DatumGetFloat4(val)
+						: DatumGetFloat8(val);
+				else if (spec->inputType == FLOAT4OID)
+					spec->fsum = (float8) columnar_float4_pl((float4) spec->fsum,
+															 DatumGetFloat4(val));
+				else
+					spec->fsum = columnar_float8_pl(spec->fsum,
+													DatumGetFloat8(val));
+				spec->sawValue = true;
+			}
+			break;
+
 		case COLUMNAR_AGG_AVG_FLOAT:
 			if (!isnull)
 			{
-				/* plain running sum in scan order, like core float8_accum */
-				spec->fsum += (spec->inputType == FLOAT4OID)
+				/*
+				 * avg is Sx/N, but core's float4_accum/float8_accum keep the
+				 * Youngs-Cramer Sxx as well and raise overflow when EITHER Sx or Sxx
+				 * goes finite+finite -> inf. Track Sxx only to reproduce that error
+				 * exactly (Sxx can overflow on finite inputs while Sx stays finite);
+				 * the returned average is Sx/N and is unaffected by it.
+				 */
+				float8		v = (spec->inputType == FLOAT4OID)
 					? (float8) DatumGetFloat4(val)
 					: DatumGetFloat8(val);
+				float8		n = (float8) spec->count;	/* N before this value */
+				float8		newN = n + 1.0;
+				float8		newSx = spec->fsum + v;
+
+				if (spec->count > 0)
+				{
+					float8		tmp = v * newN - newSx;
+					float8		newSxx = spec->fsxx + tmp * tmp / (n * newN);
+
+					if ((isinf(newSx) || isinf(newSxx)) &&
+						!isinf(spec->fsum) && !isinf(v))
+						ereport(ERROR,
+								(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								 errmsg("value out of range: overflow")));
+					spec->fsxx = newSxx;
+				}
+				spec->fsum = newSx;
 				spec->count++;
 				spec->sawValue = true;
 			}
@@ -1220,18 +1363,37 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 		case COLUMNAR_AGG_AVG_NUMERIC:
 			if (!isnull)
 			{
+				bool		is_int8 = (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
+									   spec->kind == COLUMNAR_AGG_AVG_INT8);
 				MemoryContext old = MemoryContextSwitchTo(resultContext);
-				Datum		nv = (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
-								  spec->kind == COLUMNAR_AGG_AVG_INT8)
+				Datum		nv = is_int8
 					? DirectFunctionCall1(int8_numeric, val)
 					: val;
 
+				/*
+				 * Keep live memory O(groups), not O(rows): free the previous
+				 * running sum and each per-row int8->numeric intermediate. Without
+				 * this every scanned row leaked one or two numerics into the
+				 * per-group context, which is not reset until end of scan -- O(rows)
+				 * on exactly the 100M-row shape this path targets.
+				 */
 				if (!spec->nsumSet)
-					spec->nsum = datumCopy(nv, false, -1);
+				{
+					/* int8: nv is freshly allocated and becomes the running sum;
+					 * numeric: nv is borrowed from the reader, so copy it. */
+					spec->nsum = is_int8 ? nv : datumCopy(nv, false, -1);
+					spec->nsumSet = true;
+				}
 				else
-					spec->nsum = DirectFunctionCall2(numeric_add,
-													 spec->nsum, nv);
-				spec->nsumSet = true;
+				{
+					Datum		newsum = DirectFunctionCall2(numeric_add,
+															 spec->nsum, nv);
+
+					pfree(DatumGetPointer(spec->nsum));
+					spec->nsum = newsum;
+					if (is_int8)
+						pfree(DatumGetPointer(nv));
+				}
 				spec->count++;
 				spec->sawValue = true;
 				MemoryContextSwitchTo(old);
@@ -1252,8 +1414,14 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 						FunctionCall2Coll(&spec->cmpFn, spec->collation,
 										  val, spec->extreme));
 
+					/*
+					 * On a tie, take the later value, matching core's larger and
+					 * smaller comparators (transfn(state, newval) returns newval
+					 * when equal). Observable for numeric 1.0 vs 1.00, which tie
+					 * by value but differ in display scale.
+					 */
 					take = (spec->kind == COLUMNAR_AGG_MIN)
-						? (cmp < 0) : (cmp > 0);
+						? (cmp <= 0) : (cmp >= 0);
 				}
 
 				if (take)
@@ -1332,7 +1500,10 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
 				*isnull = true;
 				return (Datum) 0;
 			}
-			return Float8GetDatum(spec->fsum);
+			/* sum(real) -> real; sum(double precision) -> double precision */
+			return (spec->inputType == FLOAT4OID)
+				? Float4GetDatum((float4) spec->fsum)
+				: Float8GetDatum(spec->fsum);
 
 		case COLUMNAR_AGG_AVG_FLOAT:
 			if (spec->count == 0)
@@ -1814,6 +1985,17 @@ ColumnarReScanAggScan(CustomScanState *node)
 		spec->sum = 0;
 		spec->sawValue = false;
 		spec->extreme = (Datum) 0;
+		/*
+		 * Also clear the running float/numeric accumulators. resultContext was
+		 * just reset, so nsum's storage is gone; leaving nsumSet true would make
+		 * the next scan add to (and free) a dangling pointer. The ungrouped path
+		 * does not classify these extended kinds today, but reset every field so a
+		 * rescan is safe if it ever does.
+		 */
+		spec->fsum = 0;
+		spec->fsxx = 0;
+		spec->nsum = (Datum) 0;
+		spec->nsumSet = false;
 	}
 }
 
@@ -1944,11 +2126,21 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->entries = NULL;
 	state->haveStats = false;
 
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
-
 	rel = table_open(state->relid, AccessShareLock);
 	basedesc = RelationGetDescr(rel);
+
+	/*
+	 * Count pushable filters for EXPLAIN before the EXPLAIN-only early return, so
+	 * a plain EXPLAIN reports the real pushed-down filter count instead of 0.
+	 */
+	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
+								  &state->npreds, &allConvertible);
+
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
 
 	/* guard the native format before decoding any value (#240) */
 	ColumnarCheckNativeFormatVersion(ColumnarStorageId(rel),
@@ -2018,10 +2210,6 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 		projected = bms_make_singleton(0);	/* count(*) with no keys touched */
 	state->projected = projected;
 
-	/* count pushable filters for EXPLAIN */
-	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
-								  &state->npreds, &allConvertible);
-
 	table_close(rel, AccessShareLock);
 }
 
@@ -2072,9 +2260,17 @@ columnar_groupagg_grow(ColumnarGroupAggScanState *state)
 	if (newCap <= oldCap)
 		return;					/* already at the ceiling; let probing lengthen */
 
+	/*
+	 * The table can grow past what a plain palloc allows (MaxAllocSize is 1 GB;
+	 * this array reaches it well before the 1<<30 entry ceiling), so allocate it
+	 * as a huge, zeroed chunk. Memory is still bounded by the actual group count
+	 * via pgcolumnar.groupagg_max_groups.
+	 */
 	old = MemoryContextSwitchTo(state->hashContext);
 	newEntries = (ColumnarGroupEntry *)
-		palloc0(sizeof(ColumnarGroupEntry) * newCap);
+		MemoryContextAllocExtended(state->hashContext,
+								   sizeof(ColumnarGroupEntry) * (Size) newCap,
+								   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	MemoryContextSwitchTo(old);
 
 	for (i = 0; i < oldCap; i++)
@@ -2244,10 +2440,15 @@ columnar_groupagg_build(ColumnarGroupAggScanState *state)
 		if (state->whereState != NULL && !ExecQual(state->whereState, econtext))
 			continue;
 
-		/* evaluate the group keys */
+		/*
+		 * Evaluate the group keys in the per-tuple context (reset each row at the
+		 * top of this loop), not the query context ExecEvalExpr would use, so a
+		 * byref key does not leak one allocation per scanned row. Datums that
+		 * start a new group are datumCopy'd into keyContext by the lookup.
+		 */
 		for (k = 0; k < state->nkeys; k++)
-			keyvals[k] = ExecEvalExpr(state->keys[k].exprState, econtext,
-									  &keynulls[k]);
+			keyvals[k] = ExecEvalExprSwitchContext(state->keys[k].exprState,
+												   econtext, &keynulls[k]);
 
 		e = columnar_groupagg_lookup(state, keyvals, keynulls);
 
