@@ -1995,7 +1995,7 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
-	ScanKeyData key[2];
+	ScanKeyData key[3];
 	SysScanDesc scan;
 	Oid			idxOid;
 	HeapTuple	tuple;
@@ -2005,9 +2005,18 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
+	/*
+	 * Group skipping reads only the whole-chunk rows (vector_index = -1). With
+	 * vector_index ahead of column_index in zone_map_pkey, a (storage_id,
+	 * group_number, vector_index = -1) scan seeks straight to them -- one row per
+	 * column, not one per column per vector read and discarded, and this runs for
+	 * every row group (#310).
+	 */
+	ScanKeyInit(&key[2], Anum_zone_map_vector_index, BTEqualStrategyNumber,
+				F_INT4EQ, Int32GetDatum(-1));
 	idxOid = columnar_index_oid("zone_map_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
-							  2, key);
+							  3, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		NativeZoneMapMetadata *z;

@@ -210,8 +210,15 @@ CREATE TABLE pgcolumnar.zone_map (
 	value_count bigint NOT NULL,
 	null_count bigint NOT NULL
 );
+-- vector_index precedes column_index so group skipping, which reads only the
+-- whole-chunk zone maps (vector_index = -1) and does so for every row group, can
+-- seek to them with a (storage_id, group_number, vector_index = -1) scan: one row
+-- per column instead of one per column per vector (~15x fewer at the default
+-- limits, #310). Uniqueness is unchanged -- same four columns. A partial index
+-- WHERE vector_index = -1 would be tighter still but pgColumnar writes zone_map
+-- via CatalogTupleInsert, which does not support partial indexes.
 CREATE UNIQUE INDEX zone_map_pkey
-	ON pgcolumnar.zone_map USING btree (storage_id, group_number, column_index, vector_index);
+	ON pgcolumnar.zone_map USING btree (storage_id, group_number, vector_index, column_index);
 
 -- Per-column-chunk bloom filter for equality skipping on hashable columns
 -- (native spec 7.2). One row per (storage_id, group_number, column_index).
