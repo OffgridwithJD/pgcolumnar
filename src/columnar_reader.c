@@ -697,9 +697,9 @@ static bool
 columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 {
 	List	   *zones;
-	List	   *blooms = NIL;
 	NativeZoneMapMetadata **byCol;
 	NativeBloomMetadata **byColBloom = NULL;
+	bool	   *bloomLookedUp = NULL;
 	ListCell   *lc;
 	int			p;
 
@@ -735,32 +735,36 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 			NativeBloomMetadata *b;
 
 			/*
-			 * Load this group's bloom filters on first use, not up front. A
-			 * bloom filter is only consulted for an equality predicate whose
-			 * zone map did not already rule the group out, so a group that the
-			 * zone map skips needs none of them. Reading them eagerly charged
-			 * every candidate group for filters that the great majority of them
-			 * never reach (#310).
+			 * Fetch this column's bloom filter on first use: not up front, and
+			 * not the whole group's.
 			 *
-			 * The cost this avoids is not small. A bloom filter holds one
-			 * bitmap per column, sized by the group's distinct values, so the
-			 * eager read scaled with both the column count and the group size.
-			 * Measured on 20 groups of 200,000 rows over 12 columns, it was 466
-			 * buffers per skipped group out of 504, and the whole query fell
-			 * from 9577 buffers to 1946.
+			 * A bloom filter is only consulted for an equality predicate whose
+			 * zone map did not already rule the group out, so a group that the
+			 * zone map skips needs none of them (#310). And a predicate probes
+			 * one column, so a group that is examined needs the filters of the
+			 * columns carrying predicates and no others (#314).
+			 *
+			 * Neither saving is small. A filter holds one bitmap per column
+			 * sized by the group's distinct values, so it is among the larger
+			 * things in the catalog. Reading a whole group's worth cost 466
+			 * buffers per skipped group out of 504 on 20 groups of 200,000 rows
+			 * over 12 columns, and 464 of 715 buffers on a single group scanned
+			 * whole with one predicate.
+			 *
+			 * bloomLookedUp records the fetch, not the result, so a column with
+			 * no filter is looked up once rather than on every predicate.
 			 */
 			if (byColBloom == NULL)
 			{
-				blooms = ColumnarReadBloomList(rs->storageId, groupNumber,
-											   rs->metaSnapshot);
 				byColBloom = palloc0(sizeof(NativeBloomMetadata *) * rs->natts);
-				foreach(lc, blooms)
-				{
-					NativeBloomMetadata *nb = (NativeBloomMetadata *) lfirst(lc);
-
-					if (nb->columnIndex >= 0 && nb->columnIndex < rs->natts)
-						byColBloom[nb->columnIndex] = nb;
-				}
+				bloomLookedUp = palloc0(sizeof(bool) * rs->natts);
+			}
+			if (!bloomLookedUp[pred->attidx])
+			{
+				byColBloom[pred->attidx] =
+					ColumnarReadBloomForColumn(rs->storageId, groupNumber,
+											   pred->attidx, rs->metaSnapshot);
+				bloomLookedUp[pred->attidx] = true;
 			}
 			b = byColBloom[pred->attidx];
 

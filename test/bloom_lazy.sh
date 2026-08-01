@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pgColumnar lazy bloom read (#310): a bloom filter is only consulted for an
+# pgColumnar bloom filter reads (#310, #314): a bloom filter is only consulted for an
 # equality predicate whose zone map did not already rule the group out. The
 # reader used to load every candidate group's bloom filters before evaluating
 # any predicate, so a scan that skipped 19 of 20 groups still paid for the bloom
@@ -15,6 +15,11 @@
 # changed: how much of that catalog the scan touches. The governing property is
 # that bloom reads follow the groups the scan KEEPS, not the groups it examines.
 #
+# The second half covers #314, the same principle across the other axis: a
+# predicate probes one column, so a group that IS examined needs the filters of
+# the columns carrying predicates and no others. The reader used to fetch every
+# column's filter for the group.
+#
 # Usage:  test/bloom_lazy.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 
@@ -26,7 +31,10 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 # monotonic with insertion order, so a zone map alone can exclude every group
 # except the one that holds the value.
 COLS="a int, b int, c int, d int, e int, f int, g1 int, h int, i int, j int, k int"
-VALS="g,g,g,g,g,g,g,g,g,g,g"
+# k repeats every 1000 rows, so every group holds every k value and no zone map
+# can exclude a group on it. That is what lets a single equality predicate keep
+# all the groups, which the control below needs. The rest are unique.
+VALS="g,g,g,g,g,g,g,g,g,g,g % 1000"
 
 build() {			# build(table, rows_per_group, group_count)
 	local t="$1" s="$2" n="$3"
@@ -87,7 +95,15 @@ check "bloom reads do not follow the skipped groups" \
 # A scan that keeps every group still reads bloom filters, so the lazy path is
 # deferring the read and not suppressing it. Without this, a change that simply
 # stopped reading bloom filters would pass the assertion above.
-ALL="SELECT count(*) FROM large WHERE seg >= 0 AND k = 7"
+#
+# One equality predicate in both cases, so the only thing that differs is how
+# many groups survive to reach it: k = 7 is present in every group, seg = 3 in
+# one. An earlier version of this control used a column whose values were unique
+# across the table, so its zone map excluded every group but one and it was
+# measuring the column count instead of the group count.
+ALL="SELECT count(*) FROM large WHERE k = 7"
+check "the control query really does keep every group" \
+	"$(groups_read "$ALL")" "$(groups_total "$ALL")"
 check "a scan that keeps every group reads more" \
 	"$( [ "$(bloom_blocks "$ALL")" -gt "$LARGE_BLK" ] && echo yes || echo no )" "yes"
 
@@ -123,5 +139,47 @@ check "results agree with bloom filters disabled" \
 check "an absent value agrees with bloom filters disabled" \
 	"$(nobloom 'SELECT count(*) FROM large WHERE k = -999;')" \
 	"$(q 'SELECT count(*) FROM h_mirror WHERE k = -999;')"
+
+# ---------------------------------------------------- reads follow the columns
+
+# #314. Twelve columns whose values repeat identically in every group, so no
+# zone map can exclude anything: every group is kept and every equality
+# predicate reaches its bloom filter. The only thing that varies between the two
+# queries is how many columns carry a predicate.
+psql_run "CREATE TABLE wide (p0 int, p1 int, p2 int, p3 int, p4 int, p5 int,
+						   q0 int, q1 int, q2 int, q3 int, q4 int, q5 int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('wide', stripe_row_limit => 20000, chunk_group_row_limit => 1024);"
+psql_run "INSERT INTO wide SELECT g % 500, g % 500, g % 500, g % 500, g % 500, g % 500,
+							   g % 500, g % 500, g % 500, g % 500, g % 500, g % 500
+					   FROM generate_series(1, 400000) g;"
+psql_run "ANALYZE wide;"
+
+ONE_PRED="SELECT count(*) FROM wide WHERE p0 = 1"
+SIX_PRED="SELECT count(*) FROM wide WHERE p0 = 1 AND p1 = 1 AND p2 = 1 AND p3 = 1 AND p4 = 1 AND p5 = 1"
+
+check "no group is excluded, so every predicate is reached" \
+	"$(groups_read "$ONE_PRED")" "$(groups_total "$ONE_PRED")"
+
+ONE_BLK="$(bloom_blocks "$ONE_PRED")"
+SIX_BLK="$(bloom_blocks "$SIX_PRED")"
+
+echo "      bloom blocks fetched: 1 predicate -> $ONE_BLK, 6 predicates -> $SIX_BLK"
+
+# The property. Six columns' filters cost more to read than one column's. When
+# the reader fetched the whole group's filters these two were identical, because
+# the work did not depend on the query at all.
+check "bloom reads follow the columns a query filters on" \
+	"$( [ "$SIX_BLK" -gt "$ONE_BLK" ] && echo yes || echo no )" "yes"
+
+# The one-predicate query must not be paying for all twelve columns. Six
+# predicates is half the columns, so reading all twelve would put the single
+# predicate at or above the six-predicate cost rather than well below it.
+check "one predicate costs well less than six" \
+	"$( [ $((ONE_BLK * 2)) -lt "$SIX_BLK" ] && echo yes || echo no )" "yes"
+
+check "the filtered answers agree with a heap mirror" \
+	"$(q "$ONE_PRED;")" "800"
+check "six predicates give the same answer as one here" \
+	"$(q "$SIX_PRED;")" "800"
 
 pgc_summary
