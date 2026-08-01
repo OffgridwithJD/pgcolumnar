@@ -11,6 +11,16 @@ unreleased. For the forward-looking plan see
 
 ### Changed
 
+- `pgcolumnar.recluster` records its ordered extent, so `pgcolumnar.sort_status`
+  no longer reports a reclustered table as entirely unsorted (#311). It runs
+  under a lock that permits concurrent inserts, and the mark is a boundary, so
+  it can only be set where no other session's group is numbered below it. The
+  rewrite records the stripe ids it reserves and marks the contiguous run from
+  its first; a concurrent reservation leaves a gap in that sequence whenever it
+  commits, which the visible catalog cannot show. With no concurrent writer the
+  whole relation is recorded. With one, the run stops where it was interrupted
+  and the rest is reported as decay, never the reverse.
+
 - A row group's bloom filter is read for the columns a query filters on, not for
   every column (#314). A predicate probes one column, so a group that is
   examined needs the filters of the columns carrying predicates and no others.
