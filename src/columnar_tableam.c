@@ -2244,6 +2244,25 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.enable_group_vectorization",
+							 "Use the vectorized aggregate fast path for GROUP BY queries.",
+							 NULL,
+							 &columnar_enable_group_vectorization,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.groupagg_max_groups",
+							"Plan-time cap on the estimated group count the grouped "
+							"vectorized aggregate will accept before falling back.",
+							NULL,
+							&columnar_groupagg_max_groups,
+							1000000, 1, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_bloom_filter",
 							 "Skip chunk groups on equality using per-chunk bloom filters.",
 							 NULL,

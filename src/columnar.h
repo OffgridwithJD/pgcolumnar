@@ -173,6 +173,8 @@ extern bool columnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 
 /* Phase 6 GUCs (spec 8.3) */
 extern bool columnar_enable_vectorization;	/* vectorized aggregate path */
+extern bool columnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#289) */
+extern int columnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
 extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
 extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
 extern bool columnar_enable_projection_scan;	/* scan a covering projection (gap 26) */

@@ -74,6 +74,16 @@
 /* GUC: use the vectorized aggregate path (spec 8.3 scan control) */
 bool		columnar_enable_vectorization = true;
 
+/*
+ * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
+ * grouped path is built out incrementally; the ungrouped path is unaffected.
+ * groupagg_max_groups caps the plan-time group estimate the grouped path will
+ * accept, so a high-cardinality grouping routes to the spillable core HashAgg
+ * rather than this (non-spilling) path.
+ */
+bool		columnar_enable_group_vectorization = false;
+int			columnar_groupagg_max_groups = 1000000;
+
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
  * ------------------------------------------------------------------------- */
