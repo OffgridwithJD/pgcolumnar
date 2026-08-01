@@ -85,14 +85,29 @@ physical cores does not help (measured plateau) and wastes memory.
 The admin picks the contract that fits the workload; both are all-or-nothing, and
 neither can leave a torn partial load committed.
 
-### `mode => 'atomic'` (two-phase commit)
+> **Architecture correction (verified 2026-08-01).** `COMMIT PREPARED` /
+> `ROLLBACK PREPARED` cannot run inside a transaction block, and a SQL function is
+> always in one — confirmed empirically (`EXECUTE of transaction commands is not
+> implemented`, and the utility path calls `PreventInTransactionBlock`). So the
+> coordinator that *finishes* the 2PC **cannot be the `parallel_copy()` SQL
+> function**. Atomic mode therefore runs the coordinator as its own background
+> worker: `parallel_copy()` launches one **coordinator bgworker**, which owns its
+> transaction loop, spawns the N loader bgworkers, prepares them, issues the
+> COMMIT/ROLLBACK PREPARED for all, writes the total back through the DSM, and
+> exits; the function just waits and returns that total. (The phase-2 plumbing —
+> DSM, loaders, bounded COPY, error propagation — is unchanged and reused; only
+> *who* runs it moves from the function to the coordinator bgworker.) Staging mode
+> below has no such constraint: `ATTACH PARTITION` is ordinary DDL the function can
+> run itself, so staging stays function-driven.
 
-Each worker loads into `target` directly, then `PREPARE TRANSACTION 'pgc_pcopy_<coordpid>_<i>'`
-instead of committing. When **all** workers report prepared, the coordinator
-`COMMIT PREPARED` each; if **any** worker fails or the coordinator is cancelled,
-it `ROLLBACK PREPARED` the ones that prepared and aborts the rest. True
-COPY-like atomicity **into a populated table** (append), because every row lands
-in one logical target and either all commit or none do.
+### `mode => 'atomic'` (two-phase commit, via a coordinator bgworker)
+
+Each loader worker loads into `target` directly, then `PREPARE TRANSACTION 'pgc_pcopy_<coordpid>_<i>'`
+instead of committing. When **all** loaders report prepared, the coordinator
+bgworker `COMMIT PREPARED`s each; if **any** loader fails or the launch is
+cancelled, it `ROLLBACK PREPARED`s the ones that prepared and aborts the rest.
+True COPY-like atomicity **into a populated table** (append), because every row
+lands in one logical target and either all commit or none do.
 
 - Requires `max_prepared_transactions >= workers` (checked up front with a clear
   error naming the setting).
