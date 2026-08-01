@@ -14,18 +14,18 @@ matrix. Gap specifications are in [gaps/](gaps/).
 | Bloom filters, including collatable/text columns | gap 25 |
 | Parallel scan | gap 23 |
 | Covering `count(*)` from metadata | gap 28 (slice) |
-| Sorted single-projection (`columnar.vacuum_sorted`) | gap 26 piece 1 |
-| Arrow IPC export (`columnar.export_arrow`) | gap 27 |
-| Parquet export (`columnar.export_parquet`) | gap 27 |
-| Read stream / AIO in the scan (`columnar.enable_read_stream`) | gap 29 |
+| Sorted single-projection (`pgcolumnar.vacuum_sorted`) | gap 26 piece 1 |
+| Arrow IPC export (`pgcolumnar.export_arrow`) | gap 27 |
+| Parquet export (`pgcolumnar.export_parquet`) | gap 27 |
+| Read stream / AIO in the scan (`pgcolumnar.enable_read_stream`) | gap 29 |
 | Corrupt-input decode/reader hardening | SECURITY_AUDIT.md |
 | Arrow/Parquet export type coverage (date/time/timestamp/uuid/numeric/json) | gaps/27-IMPL-export-type-coverage.md |
-| Arrow IPC import (`columnar.import_arrow`) | gap 27 |
+| Arrow IPC import (`pgcolumnar.import_arrow`) | gap 27 |
 | PG18/19 coverage: generated columns, temporal constraints; REPACK investigated | PG18_19_OPPORTUNITIES.md |
 | Full index-only scan (visibility-map fork, lazy vacuum, default on) | gap 28 |
 | Multiple projections (C-Store): catalog, write fan-out, planner scan, vacuum, back-fill | gap 26 piece 2 |
 | Arrow/Parquet nested export (arrays → List, composite → Struct/group) | gap 27 |
-| Parquet import (`columnar.import_parquet`): Snappy, dictionary, data page v1/v2 | gap 27 |
+| Parquet import (`pgcolumnar.import_parquet`): Snappy, dictionary, data page v1/v2 | gap 27 |
 | Arrow nested import (List → array, Struct → composite) | gap 27 |
 | Parquet nested import (LIST → array, group → composite; Dremel level assembly) | gap 27 |
 | **Gap 27 complete** — Arrow/Parquet interop: export + import, flat + nested, both formats | gap 27 |
@@ -57,42 +57,70 @@ enforcing unique and exclusion constraints (#153), and a wide table falling off
 the fetch cache into per-row group decode (#157). The audit record is
 [EXTERNAL_AUDIT_2026_07.md](EXTERNAL_AUDIT_2026_07.md).
 
-Closed since that list was written, on 2026-07-31: bulk load throughput (#155),
+Closed since that list was written, on 2026-07-31 and 2026-08-01: bulk load throughput (#155),
 deferrable unique constraints on the import path (#168), the `ANALYZE` cost and
 point-lookup plan regression (#171), sorted layouts decaying with nothing to measure it (#301), the online
 recluster not recording its ordered extent (#311), bloom filters read for every
 candidate group and every column (#314), the decode path having no
 interrupt-correctness gate that could fail (#254), and the untested column cache,
-which was resolved by the file being deleted (#282).
+which was resolved by the file being deleted (#282), the dead column cache (#303), and the C23 standard flag spelling (#294).
 
-**Open, in the order they are worth taking:**
+**Open, in the order they are worth taking.** Every entry below was checked
+against its issue thread, its pull requests and main on 2026-08-01, not only
+against whether the issue is open.
 
-1. **Selective-scan page reads** (#310). A query that skips to 1 of 667 chunk
-   groups still faulted most of the table's pages at 100M rows. Two causes are
-   fixed: the bloom filters of every candidate group were read before any skip
-   decision, and then the filters of every column rather than the columns a query
-   filters on. A 20-group probe fell from 9577 buffers to 1547. The 100M
-   measurement has not been re-run against those fixes, so how much of the
-   original 304,233 remains is unknown, and the issue stays open until it is.
-2. **Bulk ingest past core COPY** (#300). Bulk load itself is done: #155 closed on
-   2026-07-31 after four encoder levers (#283 to #286, merged via #290) took the
-   100M-row load from 783 s to 383 s with a byte-identical on-disk image, cutting
-   the gap to heap from about 4.9x to about 2.2x. What is left is core COPY's
-   per-field parse, which heap and TimescaleDB pay identically, so it needs a
-   different ingest path rather than a further encoder change. Background in
-   [IMPORT_THROUGHPUT_PLAN.md](IMPORT_THROUGHPUT_PLAN.md).
-3. **Vectorized decompression and aggregation** (#289) for full-scan aggregates,
-   about 4x behind TimescaleDB.
-4. **`reltuples` after `ANALYZE`** runs a few percent low, because blocks holding
-   no row-group data count as visited while offering no rows. The planner does not
-   use that figure for columnar tables, so this is cosmetic until something does.
+1. **Full-scan aggregate performance** (#289). The only item here with work in
+   flight. Two halves, and they are at different stages.
+   The decompression half landed: #307 inlined the per-row attbyval decode
+   dispatch on the read path, measured at 3.8 percent on q4 and 3.2 percent on q5.
+   The aggregation half is open as #321, a grouped single-pass node behind
+   `pgcolumnar.enable_group_vectorization` (default off), measured at 1.20x on q4
+   and 1.38x on q5. It is not merged: review reproduced two wrong-answer defects
+   (`sum(real)` returns 0, and gating WHERE clauses are dropped) and a vacuous
+   test section.
+   Note what those numbers mean for planning. The 1.20x and 1.38x are not the
+   roughly 4x gap to TimescaleDB; by #321's own account the grouped node is the
+   foundation and the larger lever for that shape is dictionary-coded grouping on
+   the high-cardinality text key. The widest gap is q6, the filtered full scan, at
+   5.3x behind TimescaleDB and 3.1x slower than heap, which is the only shape
+   where columnar loses to heap. #321 does not touch q6.
+2. **Parallel bulk ingest** (#300). Bulk load itself is done: #155 closed after
+   four encoder levers (#283 to #286, merged via #290) took the 100M-row load from
+   783 s to 383 s with a byte-identical on-disk image.
+   The remaining lever is not what this entry used to say. #300's own profile on
+   10M real TSBS-cpu rows attributes the columnar text load to core COPY parse
+   about 21 percent, encode and columnar write about 53 percent, base row pipeline
+   about 27 percent, so bypassing the parser alone cannot make columnar load beat
+   heap. The measured top-ranked lever is parallelism over the existing encoder
+   with core COPY unchanged: a prototype loaded a fixed 16M-row subset in 85.2 s
+   at one writer and 11.5 s at eight, 7.39x, plateauing at the physical core
+   count.
+   `IMPORT_THROUGHPUT_PLAN.md` is *not* the reference for this: it predates the
+   #283 to #286 work and puts COPY explicitly under "Not in scope". Read the #300
+   thread instead.
+3. **Code comment audit** (#291) to the ASD-STE100 standard. The documentation
+   half landed in #298, which converted the user documents and added
+   `test/docs_style.sh` to the matrix as a durable gate. What remains is the code
+   comments, roughly 12,400 lines, which no gate covers and which the licensed
+   ASD-STE100 vocabulary list cannot be checked against.
 
-Deferred (documented, not yet built): end-truncation for lazy disk reclaim
-(corruption-critical VM-fork/WAL hazards, see PHASE_F_RECLAIM_PLAN.md); the F1
-delete-vector catalog rename (PHASE_F_PLAN.md); reclaim free-list splitting and
-coalescing (design written up in PHASE_F_RECLAIM_SPLIT_COALESCE_PLAN.md, review
-before implementing: it changes storage-allocator offset math and is
-corruption-critical).
+Not work, but still open: **#310, selective-scan page reads**. Both causes are
+fixed and merged (#315 lazy per group, #317 per column, closing #314). Re-measured
+at 100M on 2026-08-01 with the data loaded once and only the library swapped:
+273,212 buffers and 1252 ms on the parent of the #315 merge, against 8,917 buffers
+and 39 ms with both fixes, 30.6x fewer buffers and 34x faster, about 1 percent of
+the table's pages. The reporter's own bench on the same shape reports 4610 ms to
+106 ms. One filter is 256 kB and the catalog is 3.5 GB on that table, larger than
+the data it describes, with about 55 percent of the query's CPU in anonymous-page
+faults copying it per scan. It stays open only for a confirmation reading on the
+real TSBS dataset, since the re-run used synthetic data at host cardinality 4000.
+
+Formerly deferred, now built and on main: end-truncation for lazy disk reclaim
+ships as `pgcolumnar.truncate(regclass)` behind `pgcolumnar.enable_end_truncation`
+(commit 6f468f7); reclaim free-list splitting and coalescing landed via #90
+(commit 139dc97). Both were listed here as "not yet built" long after they were
+built. The F1 delete-vector catalog rename (PHASE_F_PLAN.md) is the only item of
+the three still outstanding.
 
 ## Future directions
 
@@ -229,7 +257,7 @@ Features new in PostgreSQL 17-19 that pgColumnar can use, all version-gated to
 preserve the 13-19 matrix. Detail and sources in
 [PG18_19_OPPORTUNITIES.md](PG18_19_OPPORTUNITIES.md):
 
-- Read stream / AIO in the scan (item 0 above) — flagship.
+- Read stream / AIO in the scan — shipped, see the Done table.
 - Virtual generated columns (PostgreSQL 18): confirm read-time generation on a
   columnar table and add differential coverage.
 - Temporal constraints (`WITHOUT OVERLAPS` in 18, `FOR PORTION OF` in 19): verify
