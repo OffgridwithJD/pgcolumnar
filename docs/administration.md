@@ -73,6 +73,15 @@ use `pgcolumnar.vacuum_sorted`:
 SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
 ```
 
+A sort is one operation and not a setting. Rows inserted after it go in at the
+end, in insertion order. The sorted part of the table therefore shrinks in
+proportion as the table grows. Read `pgcolumnar.sort_status` to measure it, and re-sort when
+the unsorted part has grown enough to matter to your queries:
+
+```sql
+SELECT sorted_rows, appended_rows FROM pgcolumnar.sort_status('events');
+```
+
 To compact every columnar table in a schema, use `pgcolumnar.vacuum_full`.
 
 `pgcolumnar.vacuum_sorted` sorts ascending on its columns, which tightens the

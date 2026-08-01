@@ -11,6 +11,18 @@ unreleased. For the forward-looking plan see
 
 ### Added
 
+- `pgcolumnar.sort_status(rel)` reports how much of a sorted table is still in
+  sorted order (#301). `vacuum_sorted` and `cluster` order a table once; rows
+  inserted afterwards append in insertion order, and until now nothing measured
+  how large that unsorted tail had become. An ordering rewrite now records the
+  row group its run ends at, in a new `pgcolumnar.storage.sorted_through` column,
+  and the function reports sorted and appended groups and rows alongside the
+  declared `sort_by` key. A boundary rather than a count, so retiring a group
+  inside the run does not move the mark onto a later replacement. The mark lives
+  on the storage row, so any rewrite resets it with no invalidation step. The
+  online `recluster` does not set it and therefore reports more decay than a
+  table has (#311).
+
 - Declarative `sort_by` clustering key (#288). `pgcolumnar.set_options(t, sort_by
   => ARRAY['col', ...])` records a physical sort key; `pgcolumnar.vacuum_sorted(t)`
   with no columns re-applies it, like PostgreSQL `CLUSTER` remembering an index.

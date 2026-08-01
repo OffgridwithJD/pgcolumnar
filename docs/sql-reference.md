@@ -89,7 +89,9 @@ each segment. A query that filters on time alone, across all segments, then
 prunes less than the natural time order permits.
 
 Sort by the key that your selective queries filter on. This is a one-shot
-reorder, and no operation maintains it.
+reorder, and no operation maintains it. Read
+[`pgcolumnar.sort_status`](#pgcolumnarsort_statusrel-regclass) to measure how
+much of the order remains.
 
 ### pgcolumnar.cluster(tablename regclass, VARIADIC columns name[])
 
@@ -184,6 +186,48 @@ SELECT sum(rowcount) AS rows,
        pg_size_pretty(sum(datalength)) AS size
 FROM pgcolumnar.stats('events');
 ```
+
+### pgcolumnar.sort_status(rel regclass)
+
+Reports how much of a table's sorted order is still in place. Returns one row:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `sort_key` | name[] | The `sort_by` key declared by `set_options`, or NULL. |
+| `total_groups` | bigint | Row groups in the table. |
+| `sorted_groups` | bigint | Row groups written by the last ordering rewrite. |
+| `appended_groups` | bigint | Row groups written after it. |
+| `sorted_rows` | bigint | Rows stored in the sorted groups. |
+| `appended_rows` | bigint | Rows stored in the appended groups. |
+
+`pgcolumnar.vacuum_sorted` and `pgcolumnar.cluster` order a table once. Rows
+inserted afterwards go in at the end, in insertion order. The sorted part
+therefore shrinks in proportion as the table grows. This function measures that
+proportion, so you can decide when another sort is worth its cost.
+
+```sql
+-- what fraction of the table is still in sorted order
+SELECT sort_key,
+       sorted_rows,
+       appended_rows,
+       round(100.0 * sorted_rows / nullif(sorted_rows + appended_rows, 0), 1)
+         AS percent_sorted
+FROM pgcolumnar.sort_status('events');
+```
+
+A table that was never sorted reports zero sorted groups. An unsorted
+`pgcolumnar.vacuum` returns it to that state, because it rewrites the table
+without ordering it.
+
+The row counts are stored rows. Deleted rows stay stored until a maintenance
+operation reclaims them, so they are still counted here. Use
+[`pgcolumnar.stats`](#pgcolumnarstatsrel-regclass) to read the deleted count per
+group.
+
+Two limits apply. The online `pgcolumnar.recluster` does not record its order,
+so a table maintained that way reports more decay than it has. The counts also
+describe where rows are stored, not whether their values are still in order. An
+`UPDATE` stores the new row version at the end, which counts as appended.
 
 ## Projections
 

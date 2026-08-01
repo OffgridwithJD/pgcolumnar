@@ -63,7 +63,8 @@
 #define Anum_native_storage_format_version 3
 #define Anum_native_storage_vector_length 4
 #define Anum_native_storage_row_group_limit 5
-#define Natts_native_storage 5
+#define Anum_native_storage_sorted_through 6
+#define Natts_native_storage 6
 
 #define Anum_row_group_storage_id 1
 #define Anum_row_group_group_number 2
@@ -1518,10 +1519,84 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	values[Anum_native_storage_format_version - 1] = Int32GetDatum(s->formatVersion);
 	values[Anum_native_storage_vector_length - 1] = Int32GetDatum(s->vectorLength);
 	values[Anum_native_storage_row_group_limit - 1] = Int32GetDatum(s->rowGroupLimit);
+	/*
+	 * A new storage starts unordered. An ordering rewrite sets this afterwards
+	 * (ColumnarSetSortedThrough); an unsorted one leaves it NULL, which is what
+	 * makes a rewrite reset the sort state with no invalidation step.
+	 */
+	nulls[Anum_native_storage_sorted_through - 1] = true;
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	CatalogTupleInsert(rel, tuple);
 	heap_freetuple(tuple);
+	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * ColumnarSetSortedThrough
+ *		Record the row group number the last ordering rewrite ended at, so a
+ *		reader can tell how much of the layout is still ordered (issue #301).
+ *
+ *		Called at the end of an ordering rewrite, after the write state is
+ *		flushed, so every group it covers exists in pgcolumnar.row_group. Groups
+ *		written after that point get higher numbers and are the unsorted tail.
+ *
+ *		A boundary, not a count, because the online maintenance paths retire a
+ *		group and write its survivors back with a fresh, higher number. Those
+ *		replacements sit above the mark, which is where they belong: their rows
+ *		are no longer in the run's order. A count would slide down onto them as
+ *		the run shrank and report an order that is not there.
+ *
+ *		A storage with no row, which happens only when the rewrite wrote nothing
+ *		at all, has nothing to update and is left alone. The reader then sees no
+ *		groups and reports no decay.
+ */
+void
+ColumnarSetSortedThrough(uint64 storageId, int64 groupNumber)
+{
+	Relation	rel;
+	TupleDesc	tupdesc;
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	/*
+	 * The storage row was inserted by this same transaction, in the same command
+	 * that flushed the rewrite's first group. heap_update refuses to update a
+	 * tuple whose cmin is the current command ("attempted to update invisible
+	 * tuple"), and no choice of scan snapshot avoids that: advancing curcid only
+	 * makes the row visible to the scan, not to the update. Closing the command
+	 * makes the insert a completed one, which is what the update requires.
+	 */
+	CommandCounterIncrement();
+
+	rel = open_columnar_table("storage", RowExclusiveLock);
+	tupdesc = RelationGetDescr(rel);
+
+	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+
+	/* NULL snapshot -> catalog snapshot, as the other read-side scans use. */
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		Datum		values[Natts_native_storage];
+		bool		nulls[Natts_native_storage];
+		bool		replace[Natts_native_storage];
+		HeapTuple	newTuple;
+
+		memset(values, 0, sizeof(values));
+		memset(nulls, false, sizeof(nulls));
+		memset(replace, false, sizeof(replace));
+		values[Anum_native_storage_sorted_through - 1] = Int64GetDatum(groupNumber);
+		replace[Anum_native_storage_sorted_through - 1] = true;
+
+		newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
+		CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);
+		heap_freetuple(newTuple);
+	}
+	systable_endscan(scan);
 	table_close(rel, RowExclusiveLock);
 }
 
