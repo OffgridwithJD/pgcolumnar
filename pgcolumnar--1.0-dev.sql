@@ -894,7 +894,10 @@ COMMENT ON FUNCTION pgcolumnar.vacuum_full(name, real, int)
 -- Parallel bulk ingest (#300). Phase 1: the file range splitter. Given a
 -- server-side file and a worker count, return workers+1 ascending byte offsets
 -- that partition the file into that many line-aligned ranges, so a parallel load
--- can hand range [off[i], off[i+1]) to worker i without splitting any record.
+-- can hand range [off[i], off[i+1]) to worker i. The ranges are record-aligned
+-- for COPY *text* format only (a raw newline always ends a text record); they are
+-- NOT safe for CSV, whose quoted fields may contain literal newlines. `workers` is
+-- capped internally so a huge value cannot allocate unbounded memory.
 -- ---------------------------------------------------------------------------
 CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
 	RETURNS bigint[]
@@ -902,17 +905,20 @@ CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
 	AS 'MODULE_PATHNAME', 'columnar_file_split_offsets';
 
 COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
-	IS 'byte offsets that split a text file into N record-aligned ranges (#300)';
+	IS 'byte offsets that split a COPY text-format file into N record-aligned ranges (#300)';
 
--- Parallel bulk ingest: load a server-side text file into a columnar table across
--- N background workers, each running core COPY over a record-aligned byte range.
--- Returns the number of rows loaded. Text format only for now; the all-or-nothing
--- (2PC) and staging modes are being added per design/PARALLEL_COPY_PLAN.md.
+-- Parallel bulk ingest: load a server-side COPY text-format file into a columnar
+-- table across N background workers, each running core COPY over a record-aligned
+-- byte range. Returns the number of rows loaded. COPY text format only for now
+-- (CSV needs quote-aware splitting -- a later phase). workers => NULL derives a
+-- default from max_parallel_workers rather than grabbing the whole background
+-- worker pool. The all-or-nothing (2PC) and staging modes are being added per
+-- design/PARALLEL_COPY_PLAN.md.
 CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
-										 workers int DEFAULT 8)
+										 workers int DEFAULT NULL)
 	RETURNS bigint
 	LANGUAGE C
 	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
 
 COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
-	IS 'parallel bulk load of a text file into a columnar table across N workers (#300)';
+	IS 'parallel bulk load of a COPY text-format file into a columnar table across N workers (#300)';

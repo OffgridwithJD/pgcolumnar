@@ -35,10 +35,10 @@ comparison, and parallelism is the only lever that scales the *dominant* cost.
 
 ```sql
 pgcolumnar.parallel_copy(
-    target        regclass,      -- columnar table, or partitioned parent (staging mode)
+    target        regclass,      -- columnar table (partitioned parent: staging, deferred)
     filename      text,          -- server-side path (like COPY FROM file)
-    workers       int   DEFAULT NULL,      -- NULL => min(physical cores, 8)
-    mode          text  DEFAULT 'atomic',  -- 'atomic' | 'staging'
+    workers       int   DEFAULT NULL,      -- NULL => derived from max_parallel_workers
+    mode          text  DEFAULT 'atomic',  -- 'atomic' (v1); 'staging' deferred, see below
     format        text  DEFAULT 'text',    -- 'text' | 'csv'
     delimiter     text  DEFAULT NULL,
     null_string   text  DEFAULT NULL,
@@ -58,27 +58,39 @@ to a plain `COPY`** — this is the whole point: no looser parser to get wrong.
 The coordinator (the calling backend) runs a fixed pipeline:
 
 1. **Split the input into `workers` line-aligned byte ranges** without rewriting
-   the file. A small C helper opens `filename`, and for each of the N target
-   offsets seeks near `filesize * i / N`, scans forward to the next record
-   terminator, and records the exact byte offset. Ranges are `[off[i],
-   off[i+1])`, together covering the file with no overlap or gap.
-   - **`format text`**: safe. Text format escapes embedded newlines (`\n`), so a
-     raw `\n` is always a record boundary.
-   - **`format csv`**: a quoted field may contain a literal newline, so a naive
-     newline scan can split mid-record. v1 does a quote-state scan (track open
-     quotes, honoring `quote`/`escape`) when finding boundaries; if the scan
-     cannot prove a boundary (pathological quoting), it **falls back to a single
-     COPY** rather than risk a bad split. Correctness first.
+   the file. A small C helper opens `filename` (rejecting anything that is not a
+   regular file, as core COPY does), then makes a **single forward O(filesize)
+   pass** — reading in fixed chunks with `CHECK_FOR_INTERRUPTS`, emitting each
+   interior boundary at the first newline at or beyond `filesize * i / N`. (A
+   per-boundary seek-and-scan was the first cut; it was `O(filesize * workers)` on
+   a newline-poor file and not cancellable — the single pass removes both.) Ranges
+   are `[off[i], off[i+1])`, together covering the file with no overlap or gap; the
+   range count is bounded so a huge `workers` cannot allocate unbounded memory.
+   - **`format text`** (v1): safe. Text format escapes embedded newlines (`\n`), so
+     a raw `\n` is always a record boundary.
+   - **`format csv`** (later phase): a quoted field may contain a literal newline,
+     so a naive newline scan can split mid-record. The plan is a quote-state scan
+     (track open quotes, honoring `quote`/`escape`); if it cannot prove a boundary
+     (pathological quoting), it **falls back to a single COPY** rather than risk a
+     bad split. Until then the helper takes no format argument and its contract is
+     text-only, stated in both the C and SQL comments.
 2. **Launch N dynamic background workers** (`RegisterDynamicBackgroundWorker`).
    Each attaches the DSM segment, `BackgroundWorkerInitializeConnection`s to the
    coordinator's database/role, and runs COPY over its byte range using
    `BeginCopyFrom` with a range-limited data source (a callback that returns
    bytes only within `[off[i], off[i+1])`). Rows loaded and status are returned
-   through a `shm_mq` per worker.
+   through a shared per-worker slot (a status word + row count + error text).
 3. **Commit according to `mode`** (below). Then aggregate rows-loaded and return.
 
-Worker count defaults to `min(online physical cores, 8)`; oversubscribing past
-physical cores does not help (measured plateau) and wastes memory.
+Worker count, when the caller passes none, is **derived from the admin's existing
+parallelism budget** (`max_parallel_workers`), not raw physical cores. Two reasons
+(both from review): PostgreSQL exposes no portable physical-core count, and
+defaulting to `min(cores, 8)` on a stock server asks for the entire
+background-worker pool (`max_worker_processes`, default 8), starving autovacuum and
+everything else that needs a slot. The default is `max(1, max_parallel_workers / 2)`
+and the cap is exposed as a GUC, so there is one knob rather than two that can
+disagree. Oversubscribing past physical cores does not help (measured plateau) and
+wastes memory.
 
 ## Atomicity — two admin-selectable modes
 
@@ -122,22 +134,36 @@ lands in one logical target and either all commit or none do.
   reservations rather than corrupt them. (Verified by the prototype's clean
   concurrent loads; re-verified under assert + the differential oracle here.)
 
-### `mode => 'staging'` (partition attach)
+### `mode => 'staging'` (partition attach) — **deferred, not a v1 option**
 
-`target` must be a **partitioned table**. Each worker creates a fresh columnar
-table and loads its range into it (a normal single-relation COPY, its own
-committed transaction), then the coordinator `ALTER TABLE target ATTACH
-PARTITION` each staging table — a metadata-only operation. Atomic at the attach
-step: until attached the rows are invisible in `target`; a failure drops the
-unattached staging tables and nothing is visible in `target`.
-
-- No 2PC / `max_prepared_transactions` requirement.
-- Fits the natural time-series layout (partition by time or hostname) and the
-  "each worker owns one partition" split, so no cross-partition routing contention.
-- **Crash safety:** staging tables are ordinary relations; orphans from a
-  coordinator crash are droppable by name prefix (`pgcolumnar.parallel_copy_cleanup()`).
-- Requires the split to align with the partition key, or a documented staging→
-  attach where partitions are added rather than merged into existing ones.
+> **Review finding (2026-08-01), verified as a design defect.** The original idea:
+> `target` is partitioned, each worker loads its range into a fresh columnar table,
+> the coordinator `ALTER TABLE target ATTACH PARTITION`s each. It does not fit
+> together, for three reasons, and staging is therefore **removed from v1**:
+>
+> 1. **Byte ranges are not key ranges.** The splitter hands worker *i* a *byte*
+>    range of the file; a partition needs a *key* range. On unsorted input every
+>    staging table spans the whole key space, so each `ATTACH` either fails with
+>    "partition constraint is violated by some row" or, if a bound is wide enough to
+>    admit them, is useless. Nothing in this design makes the byte split align with
+>    the partition key, and the splitter cannot.
+> 2. **ATTACH is not metadata-only here.** Attaching a freshly loaded table runs a
+>    validation scan unless a matching `CHECK` constraint already proves the bound —
+>    for a columnar staging table that is a full decode of everything just written.
+>    If the target has a default partition (the normal defensive time-series
+>    layout), each ATTACH additionally takes `AccessExclusiveLock` on it and
+>    re-validates. That is an exclusive-level lock this project's rules require to be
+>    justified against a weaker correct one — and here it is not the metadata-only
+>    operation the plan claimed.
+> 3. **Atomicity was overstated.** The design never made the N ATTACHes one
+>    transaction; if they are not, a coordinator crash after *k* of *N* leaves *k*
+>    partitions permanently visible — the torn partial load the doc says cannot
+>    happen.
+>
+> The byte-range vs key-range mismatch is the deciding one and must be answered
+> before staging is a v1 option at all (a sort-aware or key-partitioning splitter,
+> or a columnar-native stripe splice, is a separate design). v1 ships **atomic mode
+> only**; staging is future work with its own plan and crash-safety proof.
 
 WAL: neither mode skips WAL in v1 (the measured profile showed WAL is not the
 pole — encode is — so unlogged staging is deferred; it is also blocked today by
@@ -155,38 +181,48 @@ Correctness is the hard part the issue flags, so the oracle is exhaustive:
   schema, empty file, single-row file, file not ending in a newline, a file whose
   size is not divisible by `workers`, and `workers` greater than the row count.
 - **Atomicity under failure.** Inject a worker failure (a poisoned row / a
-  forced error mid-range) and assert: `atomic` leaves `target` byte-identical to
-  its pre-load state (no partial rows); `staging` leaves no attached partition and
-  no orphan visible. Assert no prepared-transaction or staging-table leak after
-  a clean failure.
+  forced error mid-range) and assert `atomic` leaves `target` byte-identical to
+  its pre-load state (no partial rows), with no prepared-transaction leak after a
+  clean failure. (Staging's failure story is deferred with staging itself.)
 - **`workers=1` equals a plain COPY** exactly (degenerate path).
 - Assert build + **sanitizer** (bgworker + shm_mq + DSM lifetime is exactly the
   memory-safety surface ASan/UBSan catches) + full 18/19 matrix.
 
 ## Phased implementation
 
-1. **File range splitter** — C helper computing N line-aligned offsets (text +
-   csv quote-aware), unit-tested against handmade files. Self-contained, no
-   worker machinery. *(smallest first slice)*
-2. **Coordinator + one worker, `mode='atomic'`, `workers=1`** — end-to-end path
-   with the real COPY-over-range data source and 2PC of a single worker; proves
-   BeginCopyFrom-over-range and the shm_mq result channel.
-3. **N workers, `mode='atomic'`** — DSM fan-out, prepare/commit-all or
-   rollback-all, `max_prepared_transactions` guard, failure injection test.
-4. **`mode='staging'`** — staging tables + ATTACH PARTITION, cleanup helper.
-5. **CSV quote-aware split + full adversarial oracle + sanitizer + 18/19 gate.**
-6. **Bench:** parallel-8 100M headline vs single COPY; confirm ~7× and the
+1. **File range splitter** — C helper computing N line-aligned offsets for COPY
+   **text** format (one forward O(filesize) pass, interruptible, regular-file
+   guard, bounded worker count), unit-tested against handmade files including a
+   file with lines longer than the scan chunk and an assertion that the split is
+   real. Self-contained, no worker machinery. *(smallest first slice — landed)*
+2. **Coordinator + N loader workers, per-range-commit, `workers>=1`** — DSM
+   fan-out, the real COPY-over-range data source, and the shm status channel.
+   Proves BeginCopyFrom-over-range end to end. *(landed; not yet atomic)*
+3. **`mode='atomic'` via a coordinator bgworker** — the loaders `PREPARE
+   TRANSACTION`; a dedicated coordinator background worker (its own top-level
+   session, so it *can* run `COMMIT PREPARED`) commits-all or rolls-back-all, with
+   the `max_prepared_transactions` guard and a failure-injection test. This is the
+   architecture correction below; it makes atomic mode actually atomic.
+4. **CSV quote-aware split + full adversarial oracle + sanitizer + 18/19 gate.**
+5. **Bench:** parallel-8 100M headline vs single COPY; confirm ~7× and the
    overhead the coordinator adds over the raw prototype.
+
+*(Staging/ATTACH mode is removed from this plan — see the staging section above —
+and becomes separate future work once the byte-range vs key-range mismatch has a
+design.)*
 
 Each phase compiles, is gated, and is a reviewable commit.
 
-## Open questions for review
+## Open questions — resolved in review (2026-08-01)
 
-- **Mechanism:** native dynamic bgworkers (chosen here — no external dependency,
-  integrated cancellation/errors) vs a `dblink`-based orchestrator (simpler, but a
-  contrib dependency and self-connections). This plan assumes bgworkers.
-- **`staging` combine:** ATTACH PARTITION (chosen — metadata-only, requires a
-  partitioned target) vs a columnar-native stripe splice into a non-partitioned
-  target (faster for the unpartitioned case but needs storage-format surgery and
-  its own crash-safety proof — deferred).
-- Default `workers` cap (physical cores vs a fixed 8).
+- **Mechanism:** native dynamic bgworkers, **and the coordinator role moves into a
+  bgworker** (not the calling SQL function), because only a top-level session can
+  `COMMIT PREPARED`. Decided on that constraint, not dependency taste. dblink could
+  also finish the 2PC but adds a contrib dependency and self-connections.
+- **`staging` combine:** neither ATTACH nor a stripe splice, *yet* — the question
+  assumed ATTACH is metadata-only (it is not) and that byte ranges partition by
+  key (they do not). Staging is deferred until the byte-vs-key mismatch is
+  designed; it is not a v1 option regardless of the combine.
+- **Default `workers`:** not raw physical cores (no portable count; `min(cores,8)`
+  grabs the whole `max_worker_processes` pool). Derived from `max_parallel_workers`
+  (`max(1, budget/2)`) with the cap exposed as a single GUC.

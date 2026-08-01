@@ -23,6 +23,7 @@
 #include "postgres.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "columnar.h"
@@ -53,11 +54,120 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
-/* how much we read at a time while scanning forward to the next newline */
+/* how much we read at a time while scanning the file */
 #define COLUMNAR_SPLIT_SCAN_CHUNK 65536
+/* upper bound on worker/range count, enforced everywhere the count is taken from
+ * SQL, so a huge value cannot allocate gigabytes before doing any work */
+#define PCOPY_MAX_WORKERS 1024
+
+/*
+ * pcopy_open_regular_file
+ *		Open a server-side file for reading, requiring it to be a regular file.
+ *		Rejecting directories, devices and FIFOs matches core COPY (copyfrom.c
+ *		fstat + S_ISDIR) and avoids nonsense like a directory reported as an
+ *		8-exabyte splittable file or an uninterruptible open() on a FIFO. Returns
+ *		the fd, and the size via *size_out when size_out is not NULL.
+ */
+static int
+pcopy_open_regular_file(const char *path, off_t *size_out)
+{
+	int			fd;
+	struct stat st;
+
+	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	if (fd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\" for reading: %m", path)));
+	if (fstat(fd, &st) != 0)
+	{
+		int			save_errno = errno;
+
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", path)));
+	}
+	if (!S_ISREG(st.st_mode))
+	{
+		CloseTransientFile(fd);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not a regular file", path)));
+	}
+	if (size_out != NULL)
+		*size_out = st.st_size;
+	return fd;
+}
+
+/*
+ * pcopy_line_offsets
+ *		Compute nranges+1 line-aligned byte offsets partitioning an open file of
+ *		`size` bytes into that many ranges, in ONE forward pass (O(filesize),
+ *		interruptible), rather than a separate seek+scan per boundary. Each
+ *		interior boundary is the first byte after the first newline at or beyond
+ *		the even split point size*i/nranges; ranges may be empty when the file has
+ *		fewer records than ranges. Returns a palloc'd int64[nranges+1].
+ */
+static int64 *
+pcopy_line_offsets(int fd, off_t size, int nranges, const char *path)
+{
+	int64	   *offs = (int64 *) palloc(sizeof(int64) * (nranges + 1));
+	char	   *buf = (char *) palloc(COLUMNAR_SPLIT_SCAN_CHUNK);
+	int64		bufbase = 0;		/* absolute file offset of buf[0] */
+	int			next = 1;
+
+	offs[0] = 0;
+	offs[nranges] = (int64) size;
+
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not seek in file \"%s\": %m", path)));
+
+	while (next < nranges && bufbase < size)
+	{
+		int			got = (int) read(fd, buf, COLUMNAR_SPLIT_SCAN_CHUNK);
+		int			j;
+
+		if (got < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m", path)));
+		if (got == 0)
+			break;
+		for (j = 0; j < got && next < nranges; j++)
+		{
+			if (buf[j] == '\n')
+			{
+				int64		boundary = bufbase + j + 1;
+
+				/*
+				 * This newline is the first at or beyond every still-unfilled
+				 * split point it reaches; assign it to all of them (equal
+				 * consecutive offsets = empty ranges).
+				 */
+				while (next < nranges &&
+					   (int64) ((double) size * next / nranges) <= bufbase + j)
+					offs[next++] = boundary;
+			}
+		}
+		bufbase += got;
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	/* any split points past the last newline get the end of file */
+	while (next < nranges)
+		offs[next++] = (int64) size;
+
+	pfree(buf);
+	return offs;
+}
 
 PG_FUNCTION_INFO_V1(columnar_file_split_offsets);
 
@@ -67,10 +177,14 @@ PG_FUNCTION_INFO_V1(columnar_file_split_offsets);
  * Returns workers+1 ascending byte offsets [0 .. filesize] that split the file
  * into `workers` line-aligned ranges. off[0] is always 0 and off[workers] is
  * always the file size; each interior boundary is placed at the first byte after
- * the newline that follows the even split point filesize*i/workers, so no record
- * is ever split across two ranges. Ranges may be empty (equal consecutive
- * offsets) when the file has fewer records than workers -- that worker then loads
- * nothing, which is harmless.
+ * the newline that follows the even split point filesize*i/workers. This is a
+ * record boundary only for COPY *text* format, where a raw newline always ends a
+ * record (text format escapes any embedded newline). It is NOT safe for CSV,
+ * whose quoted fields may contain literal newlines -- quote-aware splitting is a
+ * later phase; callers holding a CSV must not use these offsets. Ranges may be
+ * empty (equal consecutive offsets) when the file has fewer records than workers
+ * -- that worker then loads nothing, which is harmless. `workers` is capped at
+ * PCOPY_MAX_WORKERS.
  */
 Datum
 columnar_file_split_offsets(PG_FUNCTION_ARGS)
@@ -82,14 +196,9 @@ columnar_file_split_offsets(PG_FUNCTION_ARGS)
 	int64	   *offs;
 	Datum	   *elems;
 	ArrayType  *result;
-	char	   *buf;
 	int			i;
 
-	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("path and workers must not be null")));
-
+	/* the SQL wrapper is STRICT, so NULL path/workers never reach here */
 	path = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	workers = PG_GETARG_INT32(1);
 
@@ -97,6 +206,13 @@ columnar_file_split_offsets(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("workers must be at least 1")));
+	/*
+	 * Bound the range count before allocating anything: this helper is callable
+	 * directly from SQL, and workers => 100000000 would otherwise palloc gigabytes
+	 * for the offset array before reading a byte.
+	 */
+	if (workers > PCOPY_MAX_WORKERS)
+		workers = PCOPY_MAX_WORKERS;
 
 	/*
 	 * Reading a server-side file is the same privilege COPY FROM file requires:
@@ -110,102 +226,9 @@ columnar_file_split_offsets(PG_FUNCTION_ARGS)
 				 errhint("Anyone can COPY from a file if they are a member of the "
 						 "pg_read_server_files role.")));
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
-	if (fd < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-
-	size = lseek(fd, 0, SEEK_END);
-	if (size < 0)
-	{
-		int			save_errno = errno;
-
-		CloseTransientFile(fd);
-		errno = save_errno;
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not seek in file \"%s\": %m", path)));
-	}
-
-	offs = (int64 *) palloc(sizeof(int64) * (workers + 1));
-	offs[0] = 0;
-	offs[workers] = (int64) size;
-	buf = (char *) palloc(COLUMNAR_SPLIT_SCAN_CHUNK);
-
-	for (i = 1; i < workers; i++)
-	{
-		int64		target = (int64) ((double) size * i / workers);
-		int64		pos;
-		bool		found = false;
-
-		/* never place a boundary before the previous one */
-		if (target < offs[i - 1])
-			target = offs[i - 1];
-		if (target >= size)
-		{
-			offs[i] = size;
-			continue;
-		}
-
-		/* scan forward from the split point to the first byte after a newline */
-		pos = target;
-		while (pos < size && !found)
-		{
-			int			want = (int) Min((int64) COLUMNAR_SPLIT_SCAN_CHUNK,
-										 size - pos);
-			int			got;
-			int			j;
-
-			if (lseek(fd, (off_t) pos, SEEK_SET) < 0)
-			{
-				int			save_errno = errno;
-
-				CloseTransientFile(fd);
-				errno = save_errno;
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not seek in file \"%s\": %m", path)));
-			}
-			got = (int) read(fd, buf, want);
-			if (got < 0)
-			{
-				int			save_errno = errno;
-
-				CloseTransientFile(fd);
-				errno = save_errno;
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m", path)));
-			}
-			if (got == 0)
-				break;			/* EOF without a newline: range runs to EOF */
-
-			for (j = 0; j < got; j++)
-			{
-				if (buf[j] == '\n')
-				{
-					offs[i] = pos + j + 1;	/* first byte of the next record */
-					found = true;
-					break;
-				}
-			}
-			pos += got;
-		}
-
-		/* no newline between the split point and EOF: this range extends to EOF */
-		if (!found)
-			offs[i] = size;
-
-		/* keep the sequence non-decreasing and bounded by the file size */
-		if (offs[i] < offs[i - 1])
-			offs[i] = offs[i - 1];
-		if (offs[i] > size)
-			offs[i] = size;
-	}
-
+	fd = pcopy_open_regular_file(path, &size);
+	offs = pcopy_line_offsets(fd, size, workers, path);
 	CloseTransientFile(fd);
-	pfree(buf);
 
 	elems = (Datum *) palloc(sizeof(Datum) * (workers + 1));
 	for (i = 0; i <= workers; i++)
@@ -236,8 +259,6 @@ columnar_file_split_offsets(PG_FUNCTION_ARGS)
 #define PCOPY_MAGIC			0x50434f50	/* 'PCOP' */
 #define PCOPY_KEY_HEADER	0
 #define PCOPY_KEY_WORKERS	1
-#define PCOPY_DEFAULT_WORKERS	8
-#define PCOPY_MAX_WORKERS	1024
 
 typedef enum PcopyState
 {
@@ -318,96 +339,33 @@ pcopy_compute_offsets(const char *path, int workers)
 	int			fd;
 	off_t		size;
 	int64	   *offs;
-	char	   *buf;
-	int			i;
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
-	if (fd < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	size = lseek(fd, 0, SEEK_END);
-	if (size < 0)
-	{
-		int			save_errno = errno;
-
-		CloseTransientFile(fd);
-		errno = save_errno;
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not seek in file \"%s\": %m", path)));
-	}
-
-	offs = (int64 *) palloc(sizeof(int64) * (workers + 1));
-	offs[0] = 0;
-	offs[workers] = (int64) size;
-	buf = (char *) palloc(COLUMNAR_SPLIT_SCAN_CHUNK);
-
-	for (i = 1; i < workers; i++)
-	{
-		int64		target = (int64) ((double) size * i / workers);
-		int64		pos;
-		bool		found = false;
-
-		if (target < offs[i - 1])
-			target = offs[i - 1];
-		if (target >= size)
-		{
-			offs[i] = size;
-			continue;
-		}
-		pos = target;
-		while (pos < size && !found)
-		{
-			int			want = (int) Min((int64) COLUMNAR_SPLIT_SCAN_CHUNK, size - pos);
-			int			got;
-			int			j;
-
-			if (lseek(fd, (off_t) pos, SEEK_SET) < 0)
-			{
-				int			save_errno = errno;
-
-				CloseTransientFile(fd);
-				errno = save_errno;
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not seek in file \"%s\": %m", path)));
-			}
-			got = (int) read(fd, buf, want);
-			if (got < 0)
-			{
-				int			save_errno = errno;
-
-				CloseTransientFile(fd);
-				errno = save_errno;
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m", path)));
-			}
-			if (got == 0)
-				break;
-			for (j = 0; j < got; j++)
-			{
-				if (buf[j] == '\n')
-				{
-					offs[i] = pos + j + 1;
-					found = true;
-					break;
-				}
-			}
-			pos += got;
-		}
-		if (!found)
-			offs[i] = size;
-		if (offs[i] < offs[i - 1])
-			offs[i] = offs[i - 1];
-		if (offs[i] > size)
-			offs[i] = size;
-	}
-
+	fd = pcopy_open_regular_file(path, &size);
+	offs = pcopy_line_offsets(fd, size, workers, path);
 	CloseTransientFile(fd);
-	pfree(buf);
 	return offs;
+}
+
+/*
+ * pcopy_auto_workers
+ *		The worker count to use when the caller does not pass one. Derived from the
+ *		admin's existing parallelism budget (max_parallel_workers) rather than a
+ *		fixed 8: defaulting to the whole background-worker pool would starve
+ *		autovacuum and everything else that needs a slot. Half the budget, at least
+ *		one, capped at PCOPY_MAX_WORKERS.
+ */
+static int
+pcopy_auto_workers(void)
+{
+	const char *s = GetConfigOption("max_parallel_workers", true, false);
+	int			budget = (s != NULL) ? atoi(s) : 8;
+	int			n = budget / 2;
+
+	if (n < 1)
+		n = 1;
+	if (n > PCOPY_MAX_WORKERS)
+		n = PCOPY_MAX_WORKERS;
+	return n;
 }
 
 /*
@@ -462,11 +420,7 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 
 		StartTransactionCommand();
 
-		fd = OpenTransientFile(hdr->filename, O_RDONLY | PG_BINARY);
-		if (fd < 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not open file \"%s\" for reading: %m", hdr->filename)));
+		fd = pcopy_open_regular_file(hdr->filename, NULL);
 		if (lseek(fd, (off_t) me->start_off, SEEK_SET) < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -589,7 +543,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 
 	relid = PG_GETARG_OID(0);
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
-	workers = PG_ARGISNULL(2) ? PCOPY_DEFAULT_WORKERS : PG_GETARG_INT32(2);
+	workers = PG_ARGISNULL(2) ? pcopy_auto_workers() : PG_GETARG_INT32(2);
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,

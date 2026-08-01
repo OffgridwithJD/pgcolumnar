@@ -97,6 +97,29 @@ check_reconstruct() {	# path workers label
 	check "$label: per-range loads reconstruct the whole file" "$h_split" "$h_whole"
 }
 
+# ---- the split must actually split -------------------------------------------
+# check_structure and check_reconstruct both pass on a splitter degraded to a
+# single range ({0, size, size, ..., size}): the offsets are ascending and
+# newline-aligned, and one range covering the whole file reconstructs it. That is
+# not hypothetical -- a bare-CR file and phase 5's "fall back to a single COPY"
+# path both produce exactly that shape. So when the file has far more records than
+# workers, assert every range is non-empty: the W-1 interior offsets must be
+# strictly increasing and strictly inside (0, size). A degraded split fails here.
+check_split_happened() {	# path workers label
+	local f="$1" w="$2" label="$3"
+	local size arr ok prev i off
+	size=$(stat -c %s "$f")
+	read -r -a arr <<<"$(offsets_of "$f" "$w")"
+	ok=1
+	prev=0
+	for i in $(seq 1 $((w - 1))); do
+		off=${arr[$i]:-}
+		{ [ "$off" -gt "$prev" ] && [ "$off" -lt "$size" ]; } 2>/dev/null || ok=0
+		prev=$off
+	done
+	check "$label: split is real (interior offsets distinct, ranges non-empty)" "$ok" 1
+}
+
 # ---- the main file: 5000 rows -----------------------------------------------
 
 make_pair "id int, txt text"
@@ -109,7 +132,23 @@ check "single-COPY heap and columnar agree" \
 for W in 1 2 3 8 16; do
 	check_structure "$F" "$W" "5000 rows / $W"
 	check_reconstruct "$F" "$W" "5000 rows / $W"
+	# 5000 rows >> W, so every range must be non-empty: catches a degraded split.
+	[ "$W" -ge 2 ] && check_split_happened "$F" "$W" "5000 rows / $W"
 done
+
+# a line longer than the 64 kB scan chunk: the boundary for a mid-file split lands
+# only after crossing a read-chunk boundary, exercising the multi-chunk read (the
+# only part of the scan with carried-over state).
+F_BIG="$DATADIR/biglines.txt"
+psql_run "COPY (SELECT g AS id, 'h'||g||'_'||repeat('x', 70000) AS txt
+                FROM generate_series(1, 20) g)
+          TO '$F_BIG' WITH (FORMAT text);" >/dev/null
+[ "$(id -u)" = "0" ] && chown postgres "$F_BIG"
+psql_run "TRUNCATE t_col;" >/dev/null
+psql_run "\copy t_col FROM '$F_BIG' WITH (FORMAT text)" >/dev/null
+check_structure "$F_BIG" 4 "long lines >64kB / 4 workers"
+check_reconstruct "$F_BIG" 4 "long lines >64kB / 4 workers"
+check_split_happened "$F_BIG" 4 "long lines >64kB / 4 workers"
 
 # more workers than rows: extra ranges must be empty, load still exact
 F_TINY=$(make_file 5)
@@ -118,12 +157,16 @@ psql_run "\copy t_col FROM '$F_TINY' WITH (FORMAT text)" >/dev/null
 check_structure "$F_TINY" 8 "5 rows / 8 workers"
 check_reconstruct "$F_TINY" 8 "5 rows / 8 workers (empty ranges)"
 
-# single row
+# single row: an edge smoke test only. With one record and 4 workers the correct
+# result is {0, size, size, size} -- the degenerate single-range shape -- so this
+# case cannot distinguish a working splitter from a degraded one (that is what
+# check_split_happened on the 5000-row file is for); it just confirms one record
+# does not crash or drop.
 F_ONE=$(make_file 1)
 psql_run "TRUNCATE t_col;" >/dev/null
 psql_run "\copy t_col FROM '$F_ONE' WITH (FORMAT text)" >/dev/null
-check_structure "$F_ONE" 4 "1 row / 4 workers"
-check_reconstruct "$F_ONE" 4 "1 row / 4 workers"
+check_structure "$F_ONE" 4 "1 row / 4 workers (edge smoke)"
+check_reconstruct "$F_ONE" 4 "1 row / 4 workers (edge smoke)"
 
 # file with no trailing newline: last range must still run to EOF
 F_NONL="$DATADIR/nonl.txt"
@@ -142,6 +185,14 @@ err_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U post
 	-d "$PGC_DB" -Atc "SELECT pgcolumnar.file_split_offsets('$F', 0)" 2>&1 || true)"
 check "workers < 1 is rejected" \
 	"$(printf '%s' "$err_out" | grep -qi "at least 1" && echo ok || echo no)" ok
+
+# a directory is rejected, not reported as an 8-exabyte splittable file (regression
+# for the missing fstat/S_ISREG guard: lseek(SEEK_END) on a directory fd returns a
+# huge value on Linux, so without the guard this returned {0, 9.2e18}).
+dir_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -Atc "SELECT pgcolumnar.file_split_offsets('$DATADIR', 1)" 2>&1 || true)"
+check "file_split_offsets: a directory is rejected (not an 8-exabyte file)" \
+	"$(printf '%s' "$dir_err" | grep -qi "not a regular file" && echo ok || echo no)" ok
 
 # ---- coordinator: pgcolumnar.parallel_copy loads == a single COPY ----------
 # The N-worker load of F must produce exactly the rows a single COPY does; t_heap
