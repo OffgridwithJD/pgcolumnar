@@ -703,7 +703,17 @@ static Node *
 ColumnarCreateScanState(CustomScan *cscan)
 {
 	if (cscan->scan.scanrelid == 0)
+	{
+		/*
+		 * Both upper aggregate paths are scanrelid==0 custom scans sharing these
+		 * registered methods. The grouped path (#289) carries a length-5
+		 * custom_private (rti, quals, relid, keys, output map); the ungrouped
+		 * path carries length 3.
+		 */
+		if (list_length(cscan->custom_private) == 5)
+			return ColumnarCreateGroupAggScanState(cscan);
 		return ColumnarCreateAggScanState(cscan);
+	}
 
 	return ColumnarCreateBaseScanState(cscan);
 }

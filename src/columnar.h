@@ -774,6 +774,7 @@ extern void ColumnarCustomScanInit(void);
  */
 extern const CustomScanMethods columnar_scan_methods;
 extern Node *ColumnarCreateAggScanState(CustomScan *cscan);
+extern Node *ColumnarCreateGroupAggScanState(CustomScan *cscan);
 
 /*
  * Build the chunk-group skip scan keys from a plan's restriction clauses.
