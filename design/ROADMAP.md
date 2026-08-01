@@ -57,9 +57,9 @@ enforcing unique and exclusion constraints (#153), and a wide table falling off
 the fetch cache into per-row group decode (#157). The audit record is
 [EXTERNAL_AUDIT_2026_07.md](EXTERNAL_AUDIT_2026_07.md).
 
-Closed since that list was written, on 2026-07-31: deferrable unique constraints
-on the import path (#168), the `ANALYZE` cost and point-lookup plan regression
-(#171), sorted layouts decaying with nothing to measure it (#301), the online
+Closed since that list was written, on 2026-07-31: bulk load throughput (#155),
+deferrable unique constraints on the import path (#168), the `ANALYZE` cost and
+point-lookup plan regression (#171), sorted layouts decaying with nothing to measure it (#301), the online
 recluster not recording its ordered extent (#311), bloom filters read for every
 candidate group and every column (#314), the decode path having no
 interrupt-correctness gate that could fail (#254), and the untested column cache,
@@ -74,13 +74,13 @@ which was resolved by the file being deleted (#282).
    filters on. A 20-group probe fell from 9577 buffers to 1547. The 100M
    measurement has not been re-run against those fixes, so how much of the
    original 304,233 remains is unknown, and the issue stays open until it is.
-2. **Bulk load throughput** (#155). The write path is about 4.9x slower than heap
-   on a five-column table and 15x slower than the read path. Measurement moved the
-   target: there is no per-row call overhead to amortise, since a one-column load
-   is *faster* than heap, and the cost is per value and additive per column, with
-   one text column costing more than five integer ones. The varlena write path is
-   where it lives. Plan in [IMPORT_THROUGHPUT_PLAN.md](IMPORT_THROUGHPUT_PLAN.md).
-   A separate ingest path that bypasses core COPY's per-field parse is #300.
+2. **Bulk ingest past core COPY** (#300). Bulk load itself is done: #155 closed on
+   2026-07-31 after four encoder levers (#283 to #286, merged via #290) took the
+   100M-row load from 783 s to 383 s with a byte-identical on-disk image, cutting
+   the gap to heap from about 4.9x to about 2.2x. What is left is core COPY's
+   per-field parse, which heap and TimescaleDB pay identically, so it needs a
+   different ingest path rather than a further encoder change. Background in
+   [IMPORT_THROUGHPUT_PLAN.md](IMPORT_THROUGHPUT_PLAN.md).
 3. **Vectorized decompression and aggregation** (#289) for full-scan aggregates,
    about 4x behind TimescaleDB.
 4. **`reltuples` after `ANALYZE`** runs a few percent low, because blocks holding
