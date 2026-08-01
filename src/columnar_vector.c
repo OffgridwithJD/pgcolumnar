@@ -898,7 +898,6 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	List	   *quals;
 	List	   *groupExprs;
 	ListCell   *lc;
-	int			nkeys;
 	int			naggs = 0;
 	int			aggIdx = 0;
 	double		dNumGroups;
@@ -924,7 +923,6 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	/* every GROUP BY key must be one we can evaluate and group exactly */
 	if (!columnar_classify_group_keys(root, input_rel, &groupKeys))
 		return;
-	nkeys = list_length(groupKeys);
 
 	/*
 	 * Every output entry is either a supported aggregate or a bare reference to
