@@ -57,23 +57,32 @@ enforcing unique and exclusion constraints (#153), and a wide table falling off
 the fetch cache into per-row group decode (#157). The audit record is
 [EXTERNAL_AUDIT_2026_07.md](EXTERNAL_AUDIT_2026_07.md).
 
+Closed since that list was written, on 2026-07-31: deferrable unique constraints
+on the import path (#168), the `ANALYZE` cost and point-lookup plan regression
+(#171), sorted layouts decaying with nothing to measure it (#301), the online
+recluster not recording its ordered extent (#311), bloom filters read for every
+candidate group and every column (#314), the decode path having no
+interrupt-correctness gate that could fail (#254), and the untested column cache,
+which was resolved by the file being deleted (#282).
+
 **Open, in the order they are worth taking:**
 
-1. **Bulk load throughput** (#155). The write path is about 4.9x slower than heap
+1. **Selective-scan page reads** (#310). A query that skips to 1 of 667 chunk
+   groups still faulted most of the table's pages at 100M rows. Two causes are
+   fixed: the bloom filters of every candidate group were read before any skip
+   decision, and then the filters of every column rather than the columns a query
+   filters on. A 20-group probe fell from 9577 buffers to 1547. The 100M
+   measurement has not been re-run against those fixes, so how much of the
+   original 304,233 remains is unknown, and the issue stays open until it is.
+2. **Bulk load throughput** (#155). The write path is about 4.9x slower than heap
    on a five-column table and 15x slower than the read path. Measurement moved the
    target: there is no per-row call overhead to amortise, since a one-column load
    is *faster* than heap, and the cost is per value and additive per column, with
    one text column costing more than five integer ones. The varlena write path is
    where it lives. Plan in [IMPORT_THROUGHPUT_PLAN.md](IMPORT_THROUGHPUT_PLAN.md).
-2. **Deferrable unique constraints on the import path** (#168). Enforced at insert
-   time rather than deferred to commit: over-strict rather than unsound, and the
-   fix needs `UNIQUE_CHECK_PARTIAL` plus a queued recheck through the after-trigger
-   machinery.
-3. **`ANALYZE` cost and a point-lookup plan regression** (#171). A point lookup
-   measured 23.75 ms before statistics existed and 1251.88 ms after, and `ANALYZE`
-   itself ran for tens of minutes on a wide table in isolation without reproducing
-   inside the benchmark. Two symptoms, possibly one cause, both arriving with
-   #159. Autoanalyze runs the expensive half unprompted.
+   A separate ingest path that bypasses core COPY's per-field parse is #300.
+3. **Vectorized decompression and aggregation** (#289) for full-scan aggregates,
+   about 4x behind TimescaleDB.
 4. **`reltuples` after `ANALYZE`** runs a few percent low, because blocks holding
    no row-group data count as visited while offering no rows. The planner does not
    use that figure for columnar tables, so this is cosmetic until something does.
