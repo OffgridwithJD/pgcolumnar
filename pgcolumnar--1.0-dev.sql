@@ -889,3 +889,17 @@ $vacuum_full$;
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_full(name, real, int)
 	IS 'compact every columnar table in a schema';
+
+-- ---------------------------------------------------------------------------
+-- Parallel bulk ingest (#300). Phase 1: the file range splitter. Given a
+-- server-side file and a worker count, return workers+1 ascending byte offsets
+-- that partition the file into that many line-aligned ranges, so a parallel load
+-- can hand range [off[i], off[i+1]) to worker i without splitting any record.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
+	RETURNS bigint[]
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'columnar_file_split_offsets';
+
+COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
+	IS 'byte offsets that split a text file into N record-aligned ranges (#300)';
