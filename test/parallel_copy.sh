@@ -143,4 +143,37 @@ err_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U post
 check "workers < 1 is rejected" \
 	"$(printf '%s' "$err_out" | grep -qi "at least 1" && echo ok || echo no)" ok
 
+# ---- coordinator: pgcolumnar.parallel_copy loads == a single COPY ----------
+# The N-worker load of F must produce exactly the rows a single COPY does; t_heap
+# already holds F via one COPY and is the oracle. (Worker counts kept <= 4 so the
+# default max_worker_processes has slots.)
+pcopy_run() {	# target workers -> echoes rows returned (empty on error)
+	q "SELECT pgcolumnar.parallel_copy('$1'::regclass, '$F', $2)"
+}
+
+for W in 1 2 4; do
+	psql_run "DROP TABLE IF EXISTS t_pc;
+	          CREATE TABLE t_pc (id int, txt text) USING pgcolumnar;" >/dev/null
+	check "parallel_copy($W workers): rows returned = 5000" "$(pcopy_run t_pc "$W")" 5000
+	check "parallel_copy($W workers): result == single-COPY oracle" \
+		"$(pgc_set_hash "SELECT * FROM t_pc")" "$(pgc_set_hash "SELECT * FROM t_heap")"
+done
+
+# a missing file errors cleanly -- no crash, no orphaned worker, nothing loaded
+psql_run "DROP TABLE IF EXISTS t_pc;
+          CREATE TABLE t_pc (id int, txt text) USING pgcolumnar;" >/dev/null
+pc_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -Atc "SELECT pgcolumnar.parallel_copy('t_pc'::regclass, '$DATADIR/nope.txt', 2)" 2>&1 || true)"
+check "parallel_copy missing file: errors, not crashes" \
+	"$(printf '%s' "$pc_err" | grep -qi "could not open" && echo ok || echo no)" ok
+check "parallel_copy missing file: server still up (no worker crash)" "$(q "SELECT 1")" 1
+check "parallel_copy missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pc")" 0
+
+# a non-columnar target is rejected before any worker is launched
+psql_run "DROP TABLE IF EXISTS t_pc_heap; CREATE TABLE t_pc_heap (id int, txt text);" >/dev/null
+nc_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -Atc "SELECT pgcolumnar.parallel_copy('t_pc_heap'::regclass, '$F', 2)" 2>&1 || true)"
+check "parallel_copy: non-columnar target rejected" \
+	"$(printf '%s' "$nc_err" | grep -qi "not a pgcolumnar table" && echo ok || echo no)" ok
+
 pgc_summary

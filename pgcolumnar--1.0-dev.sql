@@ -903,3 +903,16 @@ CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
 
 COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
 	IS 'byte offsets that split a text file into N record-aligned ranges (#300)';
+
+-- Parallel bulk ingest: load a server-side text file into a columnar table across
+-- N background workers, each running core COPY over a record-aligned byte range.
+-- Returns the number of rows loaded. Text format only for now; the all-or-nothing
+-- (2PC) and staging modes are being added per design/PARALLEL_COPY_PLAN.md.
+CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
+										 workers int DEFAULT 8)
+	RETURNS bigint
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
+
+COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
+	IS 'parallel bulk load of a text file into a columnar table across N workers (#300)';
