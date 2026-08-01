@@ -40,6 +40,30 @@ make install PG_CONFIG=/path/to/pg_config
 `make install` copies `pgcolumnar.so`, the control file, and the SQL script. It
 puts them in the library directory and the extension directory of the server.
 
+### Servers built from source
+
+Build the extension with the compiler that configured the server.
+
+PGXS gives the extension the compiler flags the server was configured with, and
+PostgreSQL's `configure` adapts those flags to its compiler. A server configured
+with a newer GCC therefore records flags an older GCC does not accept. GCC 15
+records `-Wmissing-variable-declarations`, which GCC 13 rejects. The build then
+stops on a flag you did not set:
+
+```
+gcc-13: error: unrecognized command-line option '-Wmissing-variable-declarations'
+```
+
+Name the compiler explicitly when the server was configured with one that is not
+your default:
+
+```sh
+make CC=gcc-14 PG_CONFIG=/path/to/pg_config
+```
+
+This does not apply to packaged servers. Their flags come from the package
+build, and the distribution compiler accepts them.
+
 ## Load the library
 
 pgColumnar installs planner hooks and executor hooks when the server loads the

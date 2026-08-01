@@ -11,6 +11,14 @@ unreleased. For the forward-looking plan see
 
 ### Changed
 
+- The C standard flag for PostgreSQL 19 is probed rather than hardcoded (#294).
+  This project sets `-std=gnu23` for PostgreSQL 19, whose headers use C23
+  constructs. GCC 13 accepts only the older `gnu2x` spelling of the same
+  language and rejects `gnu23` outright, so building against PostgreSQL 19 with
+  GCC 13 failed on a flag the user never set. The Makefile now asks the compiler
+  which spelling it takes. Every source file compiles under GCC 13 with `gnu2x`
+  against PostgreSQL 19 headers.
+
 - `pgcolumnar.recluster` records its ordered extent, so `pgcolumnar.sort_status`
   no longer reports a reclustered table as entirely unsorted (#311). It runs
   under a lock that permits concurrent inserts, and the mark is a boundary, so
