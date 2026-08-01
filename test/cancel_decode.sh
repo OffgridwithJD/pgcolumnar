@@ -61,16 +61,22 @@ QUERY() { echo "SELECT count(*) FROM $1 WHERE (a %% 7) = 999"; }
 
 # Cancel latency: milliseconds from issuing the statement to the error coming
 # back. Echoes "FAILED" when the statement was not cancelled at all.
+#
+# The best of three readings, not the average. Scheduling noise on a shared
+# runner only ever adds latency, so the minimum is the reading least polluted by
+# it, and a missing interrupt check raises the floor rather than the spread. An
+# average would let one descheduled run widen the ratio on its own.
 cancel_ms() {
-	local t="$1" c d out
-	c=$(date +%s%N)
-	out="$(raw "SET statement_timeout = 100; $(printf "$(QUERY "$t")")")"
-	d=$(date +%s%N)
-	if echo "$out" | grep -qi "canceling statement"; then
-		echo "$(( (d - c) / 1000000 ))"
-	else
-		echo "FAILED"
-	fi
+	local t="$1" c d out best= ms i
+	for i in 1 2 3; do
+		c=$(date +%s%N)
+		out="$(raw "SET statement_timeout = 100; $(printf "$(QUERY "$t")")")"
+		d=$(date +%s%N)
+		echo "$out" | grep -qi "canceling statement" || { echo FAILED; return; }
+		ms=$(( (d - c) / 1000000 ))
+		[ -z "$best" ] || [ "$ms" -lt "$best" ] && best="$ms"
+	done
+	echo "$best"
 }
 
 groups() { raw "SELECT count(*) FROM pgcolumnar.stats('$1');"; }
