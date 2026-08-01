@@ -169,7 +169,27 @@ CREATE TABLE pgcolumnar.storage (
 	relation_oid oid NOT NULL,
 	format_version integer NOT NULL,  -- native format major version (1)
 	vector_length integer NOT NULL,   -- values per vector (1024)
-	row_group_limit integer NOT NULL  -- max rows per row group
+	row_group_limit integer NOT NULL, -- max rows per row group
+	-- The row group number the last ordering rewrite ended at (#301). NULL means
+	-- the storage was never ordered.
+	--
+	-- pgcolumnar.vacuum_sorted, pgcolumnar.cluster and pgcolumnar.recluster order
+	-- every live row, so every group up to and including this number is part of
+	-- one ordered run. Groups numbered above it were written later, in insert
+	-- order, and are the unsorted tail. That is what makes a sorted layout decay,
+	-- and pgcolumnar.sort_status reports the size of each part.
+	--
+	-- It is a boundary rather than a count because the online maintenance paths
+	-- retire groups and write replacements with fresh, higher numbers. A count
+	-- would silently re-point at those replacements as the run shrank; a boundary
+	-- leaves them above the mark, where they belong.
+	--
+	-- It lives here rather than in pgcolumnar.options because a storage row has
+	-- exactly the right lifetime. Any rewrite creates a new storage id, so an
+	-- unsorted vacuum leaves this NULL and correctly reports the table as
+	-- unsorted, with no invalidation step. A value in an options row, which is
+	-- keyed by relation, would outlive the layout it describes.
+	sorted_through bigint
 );
 CREATE UNIQUE INDEX storage_pkey
 	ON pgcolumnar.storage USING btree (storage_id);
@@ -593,6 +613,78 @@ $stats$;
 
 COMMENT ON FUNCTION pgcolumnar.stats(regclass)
 	IS 'per-row-group statistics for a columnar table';
+
+/*
+ * How much of an ordered layout is still ordered (#301).
+ *
+ * pgcolumnar.vacuum_sorted and pgcolumnar.cluster order the whole relation once.
+ * They do not keep it ordered: rows inserted later append in insert order, so
+ * the ordered run stays at the front and an unsorted tail grows behind it. This
+ * reports the size of each part, so a DBA can decide when a re-sort is worth its
+ * cost instead of guessing.
+ *
+ * The ordered run is every row group numbered at or below the mark that the
+ * rewrite left in pgcolumnar.storage.sorted_through. Everything above it was
+ * written later.
+ *
+ * The row counts are stored rows. Rows deleted but not yet reclaimed are still
+ * stored, so they are still counted. pgcolumnar.stats reports the deleted count
+ * per group for callers that need to subtract it.
+ *
+ * Limits to read before acting on the numbers:
+ *
+ * 1. The online path pgcolumnar.recluster does not set the mark. It reorders
+ *    under a lock that permits concurrent inserts, so a group written by another
+ *    session can take a number inside its output range and there is no way to
+ *    tell the two apart afterwards. A relation kept ordered by recluster
+ *    therefore reports the decay of its last eager sort, which overstates the
+ *    real decay. See issue #311.
+ *
+ * 2. The mark says where an ordered run ended, not that the rows in it are still
+ *    in that order. Nothing in the design can move a stored row, so the run
+ *    holds its order; but an UPDATE writes the new row version at the end, which
+ *    counts as appended, and the old version stays in the run until it is
+ *    reclaimed.
+ *
+ * A relation that was never ordered reports no sorted groups, because a rewrite
+ * always creates a new storage row and only an ordering rewrite sets the mark on
+ * it. A relation with nothing written reports zeros.
+ */
+CREATE FUNCTION pgcolumnar.sort_status(
+	rel regclass,
+	OUT sort_key name[],
+	OUT total_groups bigint,
+	OUT sorted_groups bigint,
+	OUT appended_groups bigint,
+	OUT sorted_rows bigint,
+	OUT appended_rows bigint)
+	RETURNS record
+	LANGUAGE sql STABLE
+	AS $sort_status$
+	WITH s AS (
+		SELECT st.storage_id, st.sorted_through
+		FROM pgcolumnar.storage st
+		WHERE st.storage_id = pgcolumnar.get_storage_id(rel)
+	),
+	g AS (
+		-- A NULL mark means the storage was never ordered, so no group is in the
+		-- run. Comparing against NULL would make every count NULL instead.
+		SELECT rg.row_count,
+			   (s.sorted_through IS NOT NULL
+				AND rg.group_number <= s.sorted_through) AS in_run
+		FROM pgcolumnar.row_group rg
+		JOIN s ON rg.storage_id = s.storage_id
+	)
+	SELECT (SELECT o.sort_by FROM pgcolumnar.options o WHERE o.regclass = rel),
+		   (SELECT count(*)::bigint FROM g),
+		   (SELECT count(*)::bigint FROM g WHERE g.in_run),
+		   (SELECT count(*)::bigint FROM g WHERE NOT g.in_run),
+		   COALESCE((SELECT sum(g.row_count)::bigint FROM g WHERE g.in_run), 0::bigint),
+		   COALESCE((SELECT sum(g.row_count)::bigint FROM g WHERE NOT g.in_run), 0::bigint);
+$sort_status$;
+
+COMMENT ON FUNCTION pgcolumnar.sort_status(regclass)
+	IS 'how much of an ordered columnar table is still in its ordered run (#301)';
 
 CREATE FUNCTION pgcolumnar.vacuum(tablename regclass, stripe_count int DEFAULT 0)
 	RETURNS void

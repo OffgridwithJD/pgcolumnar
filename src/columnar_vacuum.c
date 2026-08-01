@@ -745,6 +745,44 @@ columnar_relation_storageid(PG_FUNCTION_ARGS)
 }
 
 /*
+ * record_sorted_extent
+ *		Mark where the ordered run this rewrite just wrote ends (issue #301).
+ *
+ *		Called only by the rewrites that order every live row, after the write
+ *		state is flushed, so every group they wrote is in pgcolumnar.row_group and
+ *		nothing has been appended yet. The highest group number present is
+ *		therefore the end of the run, and later inserts get higher numbers.
+ *
+ *		A rewrite that produced no groups at all, meaning the relation held no
+ *		live rows, leaves the mark alone. There is no run to record, and the
+ *		reader reports no decay because there are no groups.
+ */
+static void
+record_sorted_extent(Relation rel)
+{
+	uint64		storageId = ColumnarStorageId(rel);
+	List	   *groups;
+	uint64		lastGroup = 0;
+	bool		haveGroup = false;
+	ListCell   *lc;
+
+	groups = ColumnarReadRowGroupList(storageId,
+									  ColumnarCatalogSnapshot(GetActiveSnapshot()));
+	foreach(lc, groups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+
+		if (!haveGroup || rg->groupNumber > lastGroup)
+			lastGroup = rg->groupNumber;
+		haveGroup = true;
+	}
+	list_free_deep(groups);
+
+	if (haveGroup)
+		ColumnarSetSortedThrough(storageId, (int64) lastGroup);
+}
+
+/*
  * columnar_compact_relation
  *		Rewrite every live row of a columnar relation into fresh stripes. The
  *		relation is already open with AccessExclusiveLock.
@@ -941,6 +979,15 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	}
 	ColumnarFlushWriteStateForRelation(relid);
 
+	/*
+	 * A sorted rewrite leaves the whole relation ordered, so record its extent.
+	 * An unsorted one does not: the new storage row's zero already says the
+	 * layout is unsorted, and overwriting it would claim an order that is not
+	 * there.
+	 */
+	if (tsort != NULL)
+		record_sorted_extent(rel);
+
 	if (tsort != NULL)
 		tuplesort_end(tsort);
 	else
@@ -1093,6 +1140,10 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 		ExecClearTuple(augSlot);
 	}
 	ColumnarFlushWriteStateForRelation(relid);
+
+	/* Z-order is an order, so the same extent applies (see record_sorted_extent). */
+	record_sorted_extent(rel);
+
 	tuplesort_end(tsort);
 	ExecDropSingleTupleTableSlot(augSlot);
 

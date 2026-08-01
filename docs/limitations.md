@@ -226,7 +226,10 @@ returning no rows.
 - A declared `sort_by` key (#288) and `pgcolumnar.vacuum_sorted` are **one-shot**.
   Rows that an insert adds after a sort go in at the end, in insertion order. No
   operation sorts them again. Skip quality therefore decreases until the next
-  `vacuum_sorted`. PostgreSQL `CLUSTER` behaves the same way and is also not
+  `vacuum_sorted`. `pgcolumnar.sort_status` reports how far that has gone, so the
+  decision to re-sort rests on a measurement. The online `pgcolumnar.recluster`
+  does not record its order, so a table maintained that way reports more decay
+  than it has (#311). PostgreSQL `CLUSTER` behaves the same way and is also not
   maintained on insert. An online re-sort for text keys that does not block, and
   automatic maintenance, are not implemented yet. A sort key is also a trade. It
   puts the values of one dimension together, and it spreads the other dimensions
