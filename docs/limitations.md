@@ -228,8 +228,9 @@ returning no rows.
   operation sorts them again. Skip quality therefore decreases until the next
   `vacuum_sorted`. `pgcolumnar.sort_status` reports how far that has gone, so the
   decision to re-sort rests on a measurement. The online `pgcolumnar.recluster`
-  does not record its order, so a table maintained that way reports more decay
-  than it has (#311). PostgreSQL `CLUSTER` behaves the same way and is also not
+  records only the part of its output it can prove is one contiguous ordered
+  run. A table reclustered while another session was inserting therefore reports
+  more decay than it has. PostgreSQL `CLUSTER` behaves the same way and is also not
   maintained on insert. An online re-sort for text keys that does not block, and
   automatic maintenance, are not implemented yet. A sort key is also a trade. It
   puts the values of one dimension together, and it spreads the other dimensions

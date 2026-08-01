@@ -100,16 +100,23 @@ psql_run "SELECT pgcolumnar.cluster('t', 'id', 'k');"
 check "cluster reports no decay" "$(ss appended_groups)" "0"
 check "cluster counts every row as sorted" "$(ss sorted_rows)" "7500"
 
-# The online path does not set the mark, and says so rather than guessing: it
-# reorders under a lock that permits concurrent inserts, so a group written by
-# another session can land inside its output range (#311). Recording the mark
-# there would claim an order that may not hold. What it must not do is corrupt
-# the mark it did not set.
+# The online path records its extent too (#311). It reorders under a lock that
+# permits concurrent inserts, so it cannot trust the group numbering: it reports
+# the stripe ids it reserved, and the run stops at the first live group it did
+# not write.
 psql_run "SELECT pgcolumnar.vacuum('t');"
 check "the unsorted rewrite cleared the mark again" "$(ss sorted_groups)" "0"
 psql_run "SELECT pgcolumnar.recluster('t', 'id', 'k');"
-check "recluster leaves the mark unset" "$(ss sorted_groups)" "0"
-check "recluster is reported as fully appended" "$(ss appended_rows)" "7500"
+check "recluster records its extent" \
+	"$( [ "$(ss sorted_groups)" -gt 0 ] && echo yes || echo no )" "yes"
+check "recluster reports no decay" "$(ss appended_groups)" "0"
+check "recluster counts every row as sorted" "$(ss sorted_rows)" "7500"
+check "recluster reports no appended rows" "$(ss appended_rows)" "0"
+
+# Rows inserted after it are outside the run, same as for the eager paths.
+psql_run "INSERT INTO t SELECT g, (g * 7919) % 5000, 'v' || g FROM generate_series(7501, 8500) g;"
+check "rows inserted after recluster are appended" "$(ss appended_rows)" "1000"
+check "the reclustered rows are still counted as sorted" "$(ss sorted_rows)" "7500"
 
 # --------------------------------------- retiring a group inside the run
 

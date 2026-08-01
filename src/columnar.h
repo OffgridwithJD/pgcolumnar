@@ -505,6 +505,8 @@ extern void ColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *r
 typedef struct ColumnarWriteState ColumnarWriteState;
 
 extern ColumnarWriteState *ColumnarGetWriteState(Relation rel);
+extern int ColumnarWriteStateStripeCount(ColumnarWriteState *ws);
+extern uint64 *ColumnarWriteStateStripeIds(ColumnarWriteState *ws, int *n);
 extern uint64 ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 							   Datum *values, bool *nulls);
 extern void ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,

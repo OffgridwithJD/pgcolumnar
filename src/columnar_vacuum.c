@@ -287,6 +287,91 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
  *		(concurrent reads and writes). Returns the number of groups rewritten.
  */
 /*
+ * record_online_sorted_extent
+ *		Mark where this online rewrite's ordered run ends, when it can prove
+ *		where that is (#311).
+ *
+ *		The rewrite holds ShareUpdateExclusiveLock, so another session can be
+ *		inserting while it works. sort_status reads the mark as a boundary,
+ *		"every group numbered at or below this one is ordered", and a single
+ *		boundary can only say that if no foreign group is numbered below it.
+ *
+ *		Walking the live groups and stopping at the first one the rewrite did not
+ *		write is not enough, and the concurrent fixture in
+ *		test/recluster_extent.sh is what showed it. A concurrent inserter
+ *		reserves its stripe id when it buffers its first row and commits some
+ *		time later. If it commits after this runs, its group is not in the list
+ *		the walk sees, yet its id was drawn before some of the rewrite's own, so
+ *		it lands underneath the mark and is claimed as ordered. The visible
+ *		catalog cannot rule that out; the reservation sequence can.
+ *
+ *		A foreign reservation always consumes an id, so it always leaves a gap in
+ *		the rewrite's own ids, whenever it commits. So: the rewrite's ids must be
+ *		consecutive from its lowest, and the lowest live group must be that
+ *		lowest id. Then every group at or below the run's end is one the rewrite
+ *		wrote, and the boundary means what sort_status reads it to mean.
+ *
+ *		When it cannot prove that, it marks the part it can and leaves the rest
+ *		out. That reports more decay than there is, which is the direction to
+ *		fail in: it can prompt a re-sort that was not needed, where the opposite
+ *		leaves a decayed table looking ordered and costs every query against it.
+ */
+static void
+record_online_sorted_extent(Relation rel, uint64 storageId,
+							ColumnarWriteState *writeState, int stripeMark)
+{
+	int			nAll;
+	uint64	   *all = ColumnarWriteStateStripeIds(writeState, &nAll);
+	int			nOurs = nAll - stripeMark;
+	uint64	   *ours;
+	List	   *groups;
+	uint64		lowestLive;
+	uint64		runEnd;
+	int			i;
+
+	if (nOurs <= 0)
+		return;					/* this rewrite reserved nothing */
+
+	/* our own reservations, ascending */
+	ours = (uint64 *) palloc(sizeof(uint64) * nOurs);
+	memcpy(ours, all + stripeMark, sizeof(uint64) * nOurs);
+	qsort(ours, nOurs, sizeof(uint64), uint64_cmp);
+
+	groups = ColumnarReadRowGroupList(storageId,
+									  ColumnarCatalogSnapshot(GetActiveSnapshot()));
+	if (groups == NIL)
+	{
+		pfree(ours);
+		return;
+	}
+	/* the list is ordered by group number */
+	lowestLive = ((NativeRowGroupMetadata *) linitial(groups))->groupNumber;
+	list_free_deep(groups);
+
+	/*
+	 * A live group below our first reservation is one we did not write and did
+	 * not retire, so no boundary above it can be honest.
+	 */
+	if (lowestLive != ours[0])
+	{
+		pfree(ours);
+		return;
+	}
+
+	/* the consecutive run of our own ids, starting at the lowest */
+	runEnd = ours[0];
+	for (i = 1; i < nOurs; i++)
+	{
+		if (ours[i] != runEnd + 1)
+			break;				/* a foreign reservation took this id */
+		runEnd = ours[i];
+	}
+	pfree(ours);
+
+	ColumnarSetSortedThrough(storageId, (int64) runEnd);
+}
+
+/*
  * columnar_recluster_online
  *		Re-establish global Z-order clustering over the relation's live rows
  *		online (Phase F3c): read all live rows under a snapshot taken after
@@ -324,6 +409,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	ColumnarWriteState *writeState;
 	ColumnarIndexInsertState *ris;
 	uint64		rowNumber;
+	int			stripeMark;
 
 	/* persist own pending work so the group list and deletes are current */
 	ColumnarFlushWriteStateForRelation(relid);
@@ -411,6 +497,12 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	/* write the sorted rows back as fresh groups, with online index maintenance */
 	ris = ColumnarIndexInsertBegin(rel, false);
 	writeState = ColumnarGetWriteState(rel);
+	/*
+	 * Note where this rewrite's own stripe reservations begin (#311). The write
+	 * state can already hold entries from earlier work in this transaction, so
+	 * only the tail from here on belongs to us.
+	 */
+	stripeMark = ColumnarWriteStateStripeCount(writeState);
 	while (tuplesort_gettupleslot(tsort, true, false, augSlot, NULL))
 	{
 		uint64		newRn;
@@ -432,6 +524,9 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	/* retire the old groups; heap MVCC keeps them readable to older snapshots */
 	for (i = 0; i < nGroups; i++)
 		ColumnarRetireGroup(storageId, oldGroups[i]);
+
+	/* record how far the reordered run reaches (#311) */
+	record_online_sorted_extent(rel, storageId, writeState, stripeMark);
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snap);

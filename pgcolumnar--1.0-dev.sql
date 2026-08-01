@@ -633,12 +633,14 @@ COMMENT ON FUNCTION pgcolumnar.stats(regclass)
  *
  * Limits to read before acting on the numbers:
  *
- * 1. The online path pgcolumnar.recluster does not set the mark. It reorders
- *    under a lock that permits concurrent inserts, so a group written by another
- *    session can take a number inside its output range and there is no way to
- *    tell the two apart afterwards. A relation kept ordered by recluster
- *    therefore reports the decay of its last eager sort, which overstates the
- *    real decay. See issue #311.
+ * 1. The online pgcolumnar.recluster sets the mark only for the part of its
+ *    output it can prove is one contiguous ordered run. It reorders under a lock
+ *    that permits concurrent inserts, and a boundary can only mean "everything
+ *    at or below this is ordered" if no other session's group is numbered below
+ *    it. With no concurrent writer it records the whole relation. With one, it
+ *    records the run up to the point the other session interrupted, which can be
+ *    a small part of what it ordered, and reports the rest as decay. It errs
+ *    toward reporting too much decay, never too little.
  *
  * 2. The mark says where an ordered run ended, not that the rows in it are still
  *    in that order. Nothing in the design can move a stored row, so the run

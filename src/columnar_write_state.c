@@ -180,6 +180,23 @@ struct ColumnarWriteState
 	uint64		stripeFirstRowNumber;
 
 	/*
+	 * Every stripe id this write state has reserved, appended as it is reserved
+	 * (issue #311). The online reclustering path needs to know which row groups
+	 * it wrote, and no property of the group tells it: a concurrent inserter's
+	 * group takes a number above the retired ones exactly as the rewrite's own
+	 * output does, and its row numbers can fall inside the rewrite's range,
+	 * because reservations interleave. Recording the reservations is the only
+	 * exact answer. One append per stripe, against the flush that follows it.
+	 *
+	 * A plain array of uint64 rather than a List: a stripe id is 64 bits and
+	 * lappend_int would truncate it on a storage that has outlived INT_MAX
+	 * stripes.
+	 */
+	uint64	   *reservedStripeIds;
+	int			nReservedStripeIds;
+	int			reservedStripeIdsSize;
+
+	/*
 	 * Phase 2 (gap 26): additional projections fanned out from this relation's
 	 * inserts. projWriters hangs off the base write state so it shares the
 	 * (relid, subid) lifecycle -- flush, discard, subxact abort/promote all
@@ -197,6 +214,7 @@ static List *ColumnarWriteStates = NIL;
 static void columnar_flush_row_group(ColumnarWriteState *writeState);
 static void flush_ws_projections(ColumnarWriteState *writeState);
 static ChunkGroupBuffer *columnar_start_chunk_group(ColumnarWriteState *writeState);
+static uint64 *grow_uint64_array(uint64 *arr, int oldSize, int newSize);
 static void columnar_init_col_defs(ColumnarWriteState *writeState);
 
 /*
@@ -320,6 +338,46 @@ columnar_init_col_defs(ColumnarWriteState *writeState)
 }
 
 /*
+ * ColumnarWriteStateStripeCount
+ *		How many stripe reservations this write state has taken so far (#311).
+ *
+ *		A caller that wants to know which groups IT wrote records this before
+ *		its writes and takes the tail afterwards, because ColumnarGetWriteState
+ *		can hand back a state that already holds another statement's entries.
+ */
+int
+ColumnarWriteStateStripeCount(ColumnarWriteState *ws)
+{
+	return ws->nReservedStripeIds;
+}
+
+/*
+ * ColumnarWriteStateStripeIds
+ *		The stripe ids this write state has reserved, in reservation order.
+ *		Points at the write state's own array, which stays valid until the
+ *		transaction ends.
+ */
+uint64 *
+ColumnarWriteStateStripeIds(ColumnarWriteState *ws, int *n)
+{
+	*n = ws->nReservedStripeIds;
+	return ws->reservedStripeIds;
+}
+
+/*
+ * grow_uint64_array
+ *		Enlarge (or first allocate) an array of uint64 in the current context.
+ */
+static uint64 *
+grow_uint64_array(uint64 *arr, int oldSize, int newSize)
+{
+	if (arr == NULL)
+		return (uint64 *) palloc(sizeof(uint64) * newSize);
+	Assert(newSize > oldSize);
+	return (uint64 *) repalloc(arr, sizeof(uint64) * newSize);
+}
+
+/*
  * ColumnarGetWriteState
  *		Find or create the pending write state for a relation.
  */
@@ -434,6 +492,9 @@ ColumnarGetWriteState(Relation rel)
 	writeState->haveReservation = false;
 	writeState->stripeId = 0;
 	writeState->stripeFirstRowNumber = 0;
+	writeState->reservedStripeIds = NULL;
+	writeState->nReservedStripeIds = 0;
+	writeState->reservedStripeIdsSize = 0;
 
 	ColumnarWriteStates = lappend(ColumnarWriteStates, writeState);
 
@@ -575,6 +636,29 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 								  &writeState->stripeId,
 								  &writeState->stripeFirstRowNumber);
 		writeState->haveReservation = true;
+
+		/*
+		 * Record the reservation (#311). Allocated in writeContext, not
+		 * stripeContext, because it must outlive the stripe flush that resets
+		 * the latter.
+		 */
+		{
+			MemoryContext old = MemoryContextSwitchTo(writeState->writeContext);
+
+			if (writeState->nReservedStripeIds >= writeState->reservedStripeIdsSize)
+			{
+				int			newSize = writeState->reservedStripeIdsSize == 0
+					? 16 : writeState->reservedStripeIdsSize * 2;
+
+				writeState->reservedStripeIds =
+					grow_uint64_array(writeState->reservedStripeIds,
+									  writeState->reservedStripeIdsSize, newSize);
+				writeState->reservedStripeIdsSize = newSize;
+			}
+			writeState->reservedStripeIds[writeState->nReservedStripeIds++] =
+				writeState->stripeId;
+			MemoryContextSwitchTo(old);
+		}
 	}
 
 	rowNumber = writeState->stripeFirstRowNumber + writeState->stripeRowCount;
