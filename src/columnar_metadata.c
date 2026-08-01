@@ -1851,6 +1851,65 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 }
 
 /*
+ * ColumnarReadBloomForColumn
+ *		One column's bloom filter for one row group, or NULL when it has none
+ *		(issue #314).
+ *
+ *		bloom_pkey is (storage_id, group_number, column_index), so naming all
+ *		three makes this an exact index lookup rather than a range scan whose
+ *		unwanted rows are discarded by the caller. That matters because a bloom
+ *		filter is one of the larger things in this catalog: it is sized by the
+ *		group's distinct values, so reading a whole group's worth to probe one
+ *		column reads most of what it fetches for nothing.
+ */
+NativeBloomMetadata *
+ColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
+						   int columnIndex, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("bloom", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	Oid			idxOid;
+	HeapTuple	tuple;
+	NativeBloomMetadata *b = NULL;
+
+	ScanKeyInit(&key[0], Anum_bloom_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	ScanKeyInit(&key[1], Anum_bloom_group_number, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) groupNumber));
+	ScanKeyInit(&key[2], Anum_bloom_column_index, BTEqualStrategyNumber,
+				F_INT2EQ, Int16GetDatum((int16) columnIndex));
+	idxOid = columnar_index_oid("bloom_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
+							  3, key);
+	tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		bool		isnull;
+		Datum		d;
+
+		b = palloc0(sizeof(NativeBloomMetadata));
+		b->storageId = storageId;
+		b->groupNumber = groupNumber;
+		b->columnIndex = (int16) columnIndex;
+		d = heap_getattr(tuple, Anum_bloom_filter, tupdesc, &isnull);
+		if (!isnull)
+		{
+			bytea	   *bf = DatumGetByteaPP(d);
+
+			b->filterLen = VARSIZE_ANY_EXHDR(bf);
+			b->filter = (const char *) memcpy(palloc(b->filterLen + 1),
+											  VARDATA_ANY(bf), b->filterLen);
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return b;
+}
+
+/*
  * ColumnarReadZoneMapVectors
  *		The per-vector zone maps (vector_index >= 0) of one row group, for
  *		per-vector skipping (native spec 7.1, Phase D5b). Only min/max and the

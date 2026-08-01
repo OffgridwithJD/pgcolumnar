@@ -449,6 +449,10 @@ extern List *ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
 										Snapshot snapshot);
 extern List *ColumnarReadBloomList(uint64 storageId, uint64 groupNumber,
 								   Snapshot snapshot);
+extern NativeBloomMetadata *ColumnarReadBloomForColumn(uint64 storageId,
+													   uint64 groupNumber,
+													   int columnIndex,
+													   Snapshot snapshot);
 extern void ColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */

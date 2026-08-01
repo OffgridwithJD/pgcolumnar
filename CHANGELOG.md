@@ -11,6 +11,16 @@ unreleased. For the forward-looking plan see
 
 ### Changed
 
+- A row group's bloom filter is read for the columns a query filters on, not for
+  every column (#314). A predicate probes one column, so a group that is
+  examined needs the filters of the columns carrying predicates and no others.
+  `bloom_pkey` is `(storage_id, group_number, column_index)`, so naming the
+  column makes the fetch an exact index lookup rather than a range scan whose
+  unwanted rows are discarded. Measured on one group of 200,000 rows over 12
+  columns with one equality predicate: 715 buffers to 323, against a floor of
+  251 with the bloom read deleted outright. With #310 the same probe query falls
+  from 9577 buffers to 1547.
+
 - A row group's bloom filters are read only when a predicate reaches them, not
   before every skip decision (#310). A bloom filter is consulted only for an
   equality predicate whose zone map did not already rule the group out, so a
