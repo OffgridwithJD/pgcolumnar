@@ -9,6 +9,18 @@ unreleased. For the forward-looking plan see
 
 ## [Unreleased]
 
+### Changed
+
+- A row group's bloom filters are read only when a predicate reaches them, not
+  before every skip decision (#310). A bloom filter is consulted only for an
+  equality predicate whose zone map did not already rule the group out, so a
+  group the zone map skips needs none of them. The reader loaded them for every
+  candidate group, and the cost scaled with the column count and the group size,
+  because a filter holds one bitmap per column sized by the group's distinct
+  values. Measured on 20 groups of 200,000 rows over 12 columns: 466 buffers per
+  skipped group out of 504, with the whole query falling from 9577 buffers to
+  1946. Results do not change; the filter was always a pruning step.
+
 ### Added
 
 - `pgcolumnar.sort_status(rel)` reports how much of a sorted table is still in
