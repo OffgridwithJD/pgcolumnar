@@ -224,10 +224,12 @@ operation reclaims them, so they are still counted here. Use
 [`pgcolumnar.stats`](#pgcolumnarstatsrel-regclass) to read the deleted count per
 group.
 
-Two limits apply. The online `pgcolumnar.recluster` does not record its order,
-so a table maintained that way reports more decay than it has. The counts also
+Three limits apply. The online `pgcolumnar.recluster` does not record its order,
+so a table maintained that way reports more decay than it has. The counts
 describe where rows are stored, not whether their values are still in order. An
-`UPDATE` stores the new row version at the end, which counts as appended.
+`UPDATE` stores the new row version at the end, which counts as appended. The
+record is internal storage metadata and `pg_dump` does not carry it, so a
+restored table reports no sorted groups until you sort it again.
 
 ## Projections
 
