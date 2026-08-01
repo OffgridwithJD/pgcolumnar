@@ -45,9 +45,18 @@ unreleased. For the forward-looking plan see
   group the zone map skips needs none of them. The reader loaded them for every
   candidate group, and the cost scaled with the column count and the group size,
   because a filter holds one bitmap per column sized by the group's distinct
-  values. Measured on 20 groups of 200,000 rows over 12 columns: 466 buffers per
-  skipped group out of 504, with the whole query falling from 9577 buffers to
-  1946. Results do not change; the filter was always a pruning step.
+  values.
+
+  The scale of that is easy to understand: on a 100 million row TSBS-cpu table a
+  single filter is 256 kB, and the whole bloom catalog is 3.5 GB, larger than the
+  data it describes. A selective scan copied it per query through 256 kB
+  allocations, and profiling put about 55 percent of the query's CPU in
+  anonymous-page faults under the group-skip check.
+
+  On that table a clustered hostname query falls from 4610 ms to 106 ms, a factor
+  of 43. On a smaller shape, 20 groups of 200,000 rows over 12 columns, the cost
+  is 466 buffers per skipped group out of 504, and the query falls from 9577
+  buffers to 1946. Results do not change; the filter was always a pruning step.
 
 ### Added
 
