@@ -27,6 +27,9 @@ commit `7a9c9f7`. The conditions were PostgreSQL 17.10 non-assert, 6,000,000
 rows, an 8-column table, the median of 5 repetitions, 8 cores and 24 GB of
 memory. The read stream harness used 18.4 with io_uring. Raw output is in
 [../bench/sample_output_all_2026_07_27.txt](https://github.com/jdatcmd/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
+The Cross-engine comparison and the parallel sections are a separate, larger run.
+It ran on the bench host, at up to 100,000,000 rows, dated 2026-08-02. Each of
+those sections states its own method.
 They show the shape of the trade and not a precise score. The dataset is
 synthetic. It mixes column shapes that suit different encodings, and it does this
 deliberately. A table of fully random values will therefore look worse, and a
@@ -274,6 +277,30 @@ column:
 
 Both reconstructed tables matched the source exactly (zero differing rows).
 
+### Parallel export
+
+`pgcolumnar.parallel_export_parquet(table, dir, workers)` writes a columnar table
+to a directory of Parquet files with several background workers at once. Each
+worker takes a disjoint set of row groups and writes its own file. There is no
+coordinator and no shared write state, so export scales close to linearly with
+the worker count.
+
+Method: the bench host, 16 vCPU and 62 GB, PostgreSQL 18.4 non-assert, a
+50,000,000-row columnar table of 21 columns, source warm, median of three.
+
+| workers | seconds | speedup |
+| --- | --- | --- |
+| serial `export_parquet` | 72.1 | 1.00x |
+| 1 | 71.9 | 1.00x |
+| 2 | 36.6 | 1.97x |
+| 4 | 19.4 | 3.72x |
+| 8 | 10.2 | 7.11x |
+
+One worker matches the serial writer, so the dispatcher adds nothing. Eight
+workers cut a 72-second export to about 10 seconds. Every worker imports the one
+snapshot the dispatcher exported, so the files together are a single consistent
+image of the table at call time.
+
 ## String ingestion (FSST)
 
 3,000,000 rows of URL-like strings:
@@ -313,29 +340,118 @@ the most benefit. The columnar layout already reads a small number of large,
 sequential regions. The feature costs nothing and
 helps slightly. It is not a headline.
 
-## Cross-engine read
+## Cross-engine comparison
 
-DuckDB over the same data (`BENCH_DUCKDB=1`), as a sanity check on order of
-magnitude rather than a competitive claim:
+The sections above measure pgColumnar against heap on the 6,000,000-row synthetic
+suite. This section is a separate, larger run. It compares pgColumnar with heap,
+TimescaleDB, and Citus on the TSBS `cpu` workload, at 100,000,000 rows across 21
+columns. The data is loaded byte for byte the same way into each engine.
 
-| query | DuckDB | pgColumnar |
+Method: the bench host, 16 vCPU and 62 GB, PostgreSQL 18.4 non-assert, on
+2026-08-02 at the current `main` plus the export feature. Each engine has the box
+to itself. Latency is client-observed, one cold run after a restart with the
+cache dropped, then the median of three warm runs, interleaved per query. Each
+engine uses the configuration its own users would choose:
+
+- pgColumnar: columnar scan, storage in load order, which is time ascending.
+- TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time` descending.
+- heap: sequential scan with the secondary indexes a heap user would build.
+- Citus: single node, columnar storage, sharded.
+
+The query engines run serial (`max_parallel_workers_per_gather = 0`). That
+isolates the storage and scan path. It is not pgColumnar at its ceiling. The
+parallel scan below adds about four times on these same shapes.
+
+### Cross-engine storage
+
+Total relation size, including indexes, for the 100,000,000 rows:
+
+| engine | size | smaller than heap |
 | --- | --- | --- |
-| count(*) | 1 ms | 0.02 ms |
-| sum/avg over int | 4 ms | 0.53 ms |
+| heap | 22 GB | 1.0x |
+| TimescaleDB columnstore | 7.8 GB | 2.8x |
+| pgColumnar (zstd) | 6.4 GB | 3.4x |
 
-pgColumnar is now ahead on both. This result means less than it appears to.
-These are the two shapes that pgColumnar answers from catalog metadata, with no
-access to the column data, and DuckDB scans the data. On the shapes that actually scan, the filtered aggregate and
-the projection, it remains the other way round.
+pgColumnar is the smallest of the four. The encoding layer does most of this, and
+zstd compounds it, as the [Storage](#storage) section shows in detail.
 
-Reading the Parquet file pgColumnar wrote, 6,000,000 rows, count and sum:
+### Cross-engine query latency
+
+Warm latency, median of three, in milliseconds:
+
+| query | shape | pgColumnar | TimescaleDB | heap | Citus |
+| --- | --- | --- | --- | --- | --- |
+| q1 | one host, 1 hour | 994 | 4 | 11045 | 315 |
+| q2 | one host, 12 hours | 10532 | 5 | 11244 | 1935 |
+| q3 | one host, 12 hours, 5 aggregates | 10462 | 6 | 11341 | 3630 |
+| q4 | all hosts, 12 hours, group by host | 18856 | 5098 | 17290 | 6694 |
+| q5 | all hosts, 12 hours, 10 aggregates | 22671 | 10437 | 21247 | 15407 |
+| q6 | full scan, one value filter | 81966 | 1771 | 14699 | 8810 |
+| q7 | last point per host | 785 | 299 | 47 | timeout |
+| q8 | top 20 by max | 37397 | 7572 | 23970 | 12943 |
+
+Read this by query shape, not by a single winner. Three patterns hold.
+
+**TimescaleDB wins the host-filtered queries by a wide margin.** q1 to q3 filter
+on one `hostname`. The columnstore segments by `hostname`, so it reads one segment
+and skips the rest. pgColumnar stores in time order, so its zone maps do not skip
+on `hostname` and it scans the range. This is a layout choice, not a ceiling. A
+separate run stored the same table clustered on the filter key. q1 to q3 then fell
+from about ten seconds to about one hundred milliseconds, because the zone maps
+skipped. The cost is the all-host queries, which the clustered layout slows.
+
+**The full-scan aggregate is pgColumnar's weak shape today.** q6 reads every row
+and filters on a value column. pgColumnar serial is slower than heap on it. The
+decompression and aggregation path is not yet vectorized for this case. That work
+is [issue #289](https://github.com/jdatcmd/pgcolumnar/issues/289). The parallel
+scan below already brings q6 close to heap, and the vectorization will take it
+further.
+
+**Citus and pgColumnar are within a small factor on the heavy grouped queries**
+(q4, q5, q8). Citus times out on last point (q7) at the 120-second limit.
+
+The last-point query (q7) is not a scan number for pgColumnar or heap. Both tables
+have a `(hostname, time)` index. The query reads one row per host, so the planner
+walks the index rather than a full sort. TimescaleDB answers it from segment
+order.
+
+### Parallel scan
+
+The serial table above holds one axis fixed. pgColumnar's columnar scan
+parallelizes across workers. The same query shapes, on a 50,000,000-row columnar
+table with no index, serial against four workers, warm median milliseconds:
+
+| query | serial | 4 workers | speedup |
+| --- | --- | --- | --- |
+| q1 | 987 | 255 | 3.9x |
+| q2 | 9580 | 1977 | 4.8x |
+| q3 | 9570 | 1965 | 4.9x |
+| q4 | 15825 | 3387 | 4.7x |
+| q5 | 19155 | 4352 | 4.4x |
+| q6 | 40724 | 8290 | 4.9x |
+| q7 | 91112 | 26301 | 3.5x |
+| q8 | 15482 | 3332 | 4.6x |
+
+Four workers give close to four times on every shape. This table has no index. So
+q7 full-scans and sorts, and its serial figure is far above the indexed q7 in the
+table above. The point here is the speedup within a column, not a comparison with
+that run.
+
+### Reading Parquet from other engines
+
+The Parquet that pgColumnar writes is read by other engines without conversion.
+Over a 6,000,000-row file, count and sum:
 
 | reader | time |
 | --- | --- |
-| DuckDB `read_parquet` (stats-accelerated) | 12 ms |
-| pyarrow `read_table` (full materialization) | 149 ms |
+| DuckDB `read_parquet`, stats-accelerated | 12 ms |
+| pyarrow `read_table`, full materialization | 149 ms |
 
-These confirm the Parquet output is read by other engines without conversion.
+DuckDB over the same rows in its own store answers `count(*)` in 1 ms and
+`sum/avg` in 4 ms. pgColumnar answers both from catalog metadata, in 0.02 ms and
+0.53 ms, because it does not read the column data for those two shapes. On the
+shapes that scan, DuckDB leads. Treat this as an order-of-magnitude check, not a
+competitive claim.
 
 ## What changed since the previous run
 
