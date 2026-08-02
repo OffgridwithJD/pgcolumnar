@@ -123,6 +123,50 @@ check "in-txn export: read-back == committed rows (uncommitted rows absent)" \
 	"$(pgc_set_hash "SELECT * FROM pgcolumnar.read_parquet('$DTX') AS t($RB)")" \
 	"$(pgc_set_hash "SELECT id,k,v,txt FROM t_tx WHERE txt LIKE 'c%'")"
 
+# ---- item 2: a cancelled/failed export leaves a clean directory --------------
+# On failure the dispatcher removes the *.parquet it wrote, so read_parquet cannot
+# union a partial set as if complete and a retry is not blocked by require-empty.
+# Deterministic, not a timer race: run a big export in the background, WAIT until a
+# part file is actually on disk (so cleanup has something to remove and we know the
+# run reached execution), then cancel the dispatcher from this session. The table
+# is large enough that the export is still running when the first file appears.
+# control: an export writes files, so "0 after cancel" means cleanup, not "never wrote".
+q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$PGC_WORKDIR/cx_ok', 2)" >/dev/null
+check "cancel-control: a completed export writes files" \
+	"$([ "$(nfiles "$PGC_WORKDIR/cx_ok")" -ge 1 ] && echo yes || echo no)" yes
+psql_run "DROP TABLE IF EXISTS t_big;
+          CREATE TABLE t_big ($COLS) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('t_big'::regclass, stripe_row_limit => 4000);
+          INSERT INTO t_big SELECT g, g%1000, g::float8/7, 'r'
+                            FROM generate_series(1,20000000) g;" >/dev/null
+DCX="$PGC_WORKDIR/cx"
+BGLOG="$PGC_WORKDIR/cx_bg.log"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+	-c "SELECT pgcolumnar.parallel_export_parquet('t_big'::regclass, '$DCX', 4)" >"$BGLOG" 2>&1 &
+bgpid=$!
+wrote=no
+for i in $(seq 1 200); do
+	[ "$(nfiles "$DCX")" -ge 1 ] && { wrote=yes; break; }
+	sleep 0.1
+done
+check "a part file was on disk before the cancel (cleanup has files to remove)" "$wrote" yes
+q "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+   WHERE query LIKE '%parallel_export_parquet%' AND state = 'active'
+     AND pid <> pg_backend_pid()" >/dev/null
+wait "$bgpid" 2>/dev/null || true
+# assert the premise: the run was cancelled mid-flight, not completed before we
+# could cancel. If a very fast runner ever finishes 20M rows before the first poll
+# tick + cancel land, THIS line fails loudly (pointing at the fixture) instead of
+# the file-count check failing as if cleanup were broken. Grow t_big if it does.
+check "the export was cancelled mid-flight, not completed first (fixture premise)" \
+	"$(grep -qiE 'canceling statement|canceled on user request' "$BGLOG" && echo cancelled || echo completed)" cancelled
+check "a cancelled export leaves no partial files (item 2)" \
+	"$(nfiles "$DCX")" 0
+# and the cleaned directory is reusable (require-empty does not block a retry)
+q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$DCX', 2)" >/dev/null 2>&1
+check "retry into the cleaned directory succeeds" \
+	"$([ "$(nfiles "$DCX")" -ge 1 ] && echo yes || echo no)" yes
+
 # ---- error cases ------------------------------------------------------------
 # st_1 was written above, so it is non-empty
 expect_error "reject a non-empty output directory" \
