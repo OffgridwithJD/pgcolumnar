@@ -380,6 +380,51 @@ for W in 1 2 4; do
 		"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 done
 
+# ---- concurrency witness: prove the writers actually shared the storage -------
+# The oracle-equality checks above pass even if the loaders serialised by accident,
+# in which case they exercise nothing a single COPY did not. This block forces real
+# concurrent writing and asserts the structural fingerprint of it, so the guarantee
+# is visible in the suite rather than incidental. A small stripe_row_limit (set on
+# the table, so every loader reads it) makes each of N workers flush SEVERAL stripes
+# from a 40k-row file; then:
+#   (a) MORE distinct stripe ids than workers  -> many stripe reservations happened
+#       against the one shared metapage (each worker wrote more than one group);
+#   (b) no two stripes' byte ranges [fileoffset, fileoffset+datalength) overlap, and
+#       the per-stripe rowcounts cover every input row exactly  -> the concurrent
+#       writers neither collided on disk nor lost/duplicated a row. This is the
+#       SQL-visible form of COLUMNAR_ASSERT_NO_OVERLAP, which the assert gate also
+#       enforces from C. Row-number uniqueness is implied: a collision would drop or
+#       duplicate rows and fail (b)'s coverage and the oracle below.
+# And structurally: N 2PC-prepared loaders can only COMMIT together if the
+# storage-row lock was skipped -- with it held, loader 2 blocks on loader 1's
+# prepared xact forever -- so a passing run is itself evidence the skip fired.
+F_W=$(make_file 40000)
+psql_run "DROP TABLE IF EXISTS t_wit_heap; CREATE TABLE t_wit_heap (id int, txt text);
+          \copy t_wit_heap FROM '$F_W' WITH (FORMAT text)" >/dev/null
+psql_run "DROP TABLE IF EXISTS t_wit; CREATE TABLE t_wit (id int, txt text) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('t_wit'::regclass,
+                                        chunk_group_row_limit => 1000,
+                                        stripe_row_limit => 2000);" >/dev/null
+WN=4
+check "witness: parallel_copy(single table, $WN workers, 40000 rows) loads every row" \
+	"$(q "SELECT pgcolumnar.parallel_copy('t_wit'::regclass, '$F_W', $WN)")" 40000
+check "witness: result == single-COPY oracle" \
+	"$(pgc_set_hash "SELECT * FROM t_wit")" "$(pgc_set_hash "SELECT * FROM t_wit_heap")"
+# (a) more distinct stripes than workers: concurrent reservations, >1 group per worker
+check "witness: >$WN distinct stripe ids (each worker reserved several stripes)" \
+	"$(q "SELECT count(DISTINCT stripeid) > $WN FROM pgcolumnar.stats('t_wit'::regclass)")" t
+# (b) no two stripe byte ranges overlap (each overlap counted twice; want 0)
+check "witness: no stripe byte-range overlaps another (no on-disk collision)" \
+	"$(q "WITH s AS (SELECT stripeid, fileoffset AS lo, fileoffset+datalength AS hi
+	                 FROM pgcolumnar.stats('t_wit'::regclass))
+	      SELECT count(*) FROM s a JOIN s b
+	        ON a.stripeid <> b.stripeid AND a.lo < b.hi AND b.lo < a.hi")" 0
+# (b) per-stripe rowcounts cover every input row exactly (no lost/duplicated rows)
+check "witness: stripe rowcounts sum to every input row (complete coverage)" \
+	"$(q "SELECT sum(rowcount) FROM pgcolumnar.stats('t_wit'::regclass)")" 40000
+check "witness: no prepared-transaction leak" \
+	"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
+
 # single-table atomicity: a bad row rolls back the whole load, no leak
 psql_run "DROP TABLE IF EXISTS t_single; CREATE TABLE t_single (id int, txt text) USING pgcolumnar;" >/dev/null
 st_bad="$(err_of "SELECT pgcolumnar.parallel_copy('t_single'::regclass, '$F_BADKEY', 4)")"

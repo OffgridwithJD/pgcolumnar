@@ -90,13 +90,23 @@ today's engine. Real parallelism requires each worker to write **distinct storag
   and writers skip the creation lock (default-off `pgcolumnar.bulk_parallel_writer`,
   set only by loaders) when the row already exists committed. Lifts the single-table
   restriction. The change to the core write path is gated so ordinary writes are
-  unchanged. **Measured (bench, 20M slice): single COPY ~132.8 s vs
-  `parallel_copy(8)` into one table ~22.0 s = ~6.0×** (vs the 2.01× serialized
-  baseline), byte-identical, 0 leaks.
+  unchanged. **Measured (bench pg18n, 20M slice, warm/interleaved): single COPY
+  ~132.8 s vs `parallel_copy(8)` into one table ~22.0 s = ~6.0×** (vs the 2.01×
+  serialized baseline). Scaling N=1/2/4/8 = 133/69/37/21 s: 1.93× / 3.59× / 6.33×
+  — sub-linear at N=8 (≈79% of ideal), not "near-linear", but real. The bench signal
+  was a row count plus a `sum(usage_user)` — a float sum is order-dependent, so
+  matching it across a reordered parallel load is a decent signal, not proof. The
+  suite proves the result set is **byte-identical** via `pgc_set_hash`, and a
+  structural witness
+  (>N distinct stripes, no stripe byte-range overlap, complete row coverage) shows
+  the writers genuinely interleaved on the one storage without collision. 0 leaks.
 
 Together these cover both partitioned targets (v1) and arbitrary single tables
-(enhancement). The rest of this document is being revised to the partition-parallel
-design; the "atomic into one table" mechanism below is **retired** by this finding.
+(enhancement). The single-table case is now built via the columnar-core-bulk path
+above (default-off GUC); the **abandoned** approach retired below is the *original*
+"atomic into one table" design that held the per-storage lock across the whole
+transaction and deadlocked under 2PC — not single-table loading itself, which
+succeeds by skipping that lock once the storage row is committed.
 
 ## API
 
