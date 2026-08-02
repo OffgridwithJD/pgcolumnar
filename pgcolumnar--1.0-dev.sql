@@ -907,13 +907,17 @@ CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
 COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
 	IS 'byte offsets that split a COPY text-format file into N record-aligned ranges (#300)';
 
--- Parallel bulk ingest: load a server-side COPY text-format file into a columnar
--- table across N background workers, each running core COPY over a record-aligned
--- byte range. Returns the number of rows loaded. COPY text format only for now
--- (CSV needs quote-aware splitting -- a later phase). workers => NULL derives a
--- default from max_parallel_workers rather than grabbing the whole background
--- worker pool. The all-or-nothing (2PC) and staging modes are being added per
--- design/PARALLEL_COPY_PLAN.md.
+-- Parallel bulk ingest: atomically load a server-side COPY text-format file into a
+-- RANGE-partitioned columnar table across N background workers. Each worker loads a
+-- DISTINCT set of partitions (distinct storage), the only shape pgColumnar allows a
+-- parallel AND atomic bulk load: concurrent writers to one non-partitioned table
+-- serialize on the per-storage write lock and, under two-phase commit, deadlock
+-- (single-table parallel load is a planned columnar-core enhancement). Loaders
+-- PREPARE; a coordinator background worker COMMIT PREPAREDs them all, or ROLLBACK
+-- PREPAREDs on any failure. Returns rows loaded. Requirements: RANGE-partitioned
+-- target (single-column key, no DEFAULT partition), the file sorted ascending by
+-- that key, COPY text format, and max_prepared_transactions >= workers. workers =>
+-- NULL derives a default from max_parallel_workers. See design/PARALLEL_COPY_PLAN.md.
 CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 										 workers int DEFAULT NULL)
 	RETURNS bigint
@@ -921,4 +925,4 @@ CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
 
 COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
-	IS 'parallel bulk load of a COPY text-format file into a columnar table across N workers (#300)';
+	IS 'atomic parallel bulk load of a sorted text file into a RANGE-partitioned columnar table, one distinct partition set per worker (#300)';

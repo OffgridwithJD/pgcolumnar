@@ -31,6 +31,55 @@ Honest scope: heap parallelizes too, so both-parallel keeps heap ahead (columnar
 still pays the encode nobody else does); the win is the practical single-bulk-load
 comparison, and parallelism is the only lever that scales the *dominant* cost.
 
+## Architecture finding (2026-08-01, measured) — parallelism needs distinct storage
+
+Building the atomic (2PC) coordinator surfaced a hard constraint, proven on the
+bench (16 cores, pg18n, 20M-row TSBS slice, warm):
+
+| load | time | vs single |
+|--|--:|--:|
+| single COPY | 127.3 s | 1.00× |
+| 2 concurrent → **same** table | 255.3 s | **2.01× (serialized)** |
+| 2 concurrent → **separate** tables | 132.8 s | 1.04× (parallel) |
+
+pgColumnar serializes concurrent writers **to one table** on a transaction-scoped,
+per-storage-id advisory `ExclusiveLock` (`columnar_metadata.c:1489`,
+`ColumnarInsertNativeStorageRow`, "held to transaction end" to make the
+first-writer storage-row race safe). Two consequences:
+
+1. **Same-table parallel load gets no speedup** (2.01× above) — the measured 7.4×
+   only ever came from N COPYs into N *separate* tables (distinct storage ids →
+   distinct lock keys).
+2. **Atomic 2PC into one table deadlocks**: a loader that `PREPARE`s **retains**
+   that advisory lock; the other loaders block on it; the coordinator only
+   `COMMIT PREPARED`s after all loaders finish → nobody progresses. Reproduced: the
+   assert gate hung on the first 2-worker test; `pg_locks` showed the prepared
+   xact holding the advisory lock and the peer loader waiting on it.
+
+**So loading into a single columnar table cannot be both parallel and atomic** with
+today's engine. Real parallelism requires each worker to write **distinct storage**.
+
+### The pivot (validated) — two deliverables
+
+- **v1 — partition-parallel.** Target is a **partitioned** table; each worker loads
+  a **distinct partition** (distinct storage id → no shared lock → parallel *and*
+  2PC-atomic, no deadlock). Validated on the bench: 4 concurrent transactions each
+  `COPY`ing 5M rows into a distinct table, each `PREPARE TRANSACTION`, then
+  `COMMIT PREPARED` all — **prepare phase 33.3 s vs 32.0 s single (1.04×), rows
+  invisible until the commit-all (atomic), 0 prepared-xacts leaked.** The 2PC
+  coordinator/loader machinery already built works unchanged; the only new piece is
+  a **partition-aligned splitter** so no two workers touch the same partition.
+- **enhancement — columnar-core bulk.** A bulk-load path in the engine that lets
+  concurrent writers share **one** table without holding the per-storage lock for
+  the whole transaction (e.g. coordinator pre-creates+commits the storage row;
+  writers skip the creation lock when the row already exists committed). Lifts the
+  single-table restriction. Deferred behind v1 because it changes correctness-
+  sensitive core code.
+
+Together these cover both partitioned targets (v1) and arbitrary single tables
+(enhancement). The rest of this document is being revised to the partition-parallel
+design; the "atomic into one table" mechanism below is **retired** by this finding.
+
 ## API
 
 ```sql

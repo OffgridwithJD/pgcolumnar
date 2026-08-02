@@ -7,16 +7,20 @@
  * line-aligned byte range of the input file, so parse semantics stay exactly
  * core COPY's. See design/PARALLEL_COPY_PLAN.md.
  *
- * Phase 1 (this commit): the file range splitter. Given a server-side file and a
- * worker count N, return N+1 byte offsets that partition the file into N ranges,
- * each ending exactly on a record boundary, without rewriting the file. The
- * coordinator hands range [off[i], off[i+1]) to worker i. Text format only for
- * now: a raw newline is always a record boundary because text format escapes any
- * embedded newline (CSV quote-aware splitting is a later phase; see the plan).
+ * Contents:
+ *   - the file range splitter (columnar_file_split_offsets): N+1 line-aligned byte
+ *     offsets partitioning a COPY text-format file into N record-aligned ranges;
+ *   - the atomic (2PC) load: the SQL function launches a coordinator background
+ *     worker, which spawns N loader workers (each COPYs its range then PREPARE
+ *     TRANSACTIONs it) and then COMMIT PREPAREDs them all or ROLLBACK PREPAREDs
+ *     them all, so a failure in any range leaves no partial load.
+ * Text format only for now (a raw newline is always a text record boundary; CSV
+ * quote-aware splitting is a later phase, see the plan).
  *
  * Independent MIT implementation. References only the public PostgreSQL API
- * (server-file access in storage/fd.h, the role check used by COPY FROM file, and
- * array construction). No core/TimescaleDB/Citus/DuckDB source consulted.
+ * (server-file access, the COPY BeginCopyFrom interface, the background-worker and
+ * two-phase-commit APIs, and the role check used by COPY FROM file). No
+ * core/TimescaleDB/Citus/DuckDB/pg_background source consulted.
  *
  *-------------------------------------------------------------------------
  */
@@ -30,8 +34,10 @@
 
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/twophase.h"
 #include "access/xact.h"
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "fmgr.h"
@@ -43,6 +49,8 @@
 #include "nodes/value.h"
 #include "parser/parse_node.h"
 #include "parser/parse_relation.h"
+#include "partitioning/partbounds.h"
+#include "partitioning/partdesc.h"
 #include "postmaster/bgworker.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
@@ -55,8 +63,16 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/partcache.h"
 #include "utils/rel.h"
+
+/* 2PC global-transaction-id buffer size; core defines this, guard in case a
+ * given major puts it in a header we don't reach here. */
+#ifndef GIDSIZE
+#define GIDSIZE 200
+#endif
 
 /* how much we read at a time while scanning the file */
 #define COLUMNAR_SPLIT_SCAN_CHUNK 65536
@@ -241,40 +257,64 @@ columnar_file_split_offsets(PG_FUNCTION_ARGS)
 }
 
 /* -------------------------------------------------------------------------
- * Parallel bulk ingest coordinator + background worker (#300, phase 2).
+ * Parallel bulk ingest: atomic (2PC) coordinator + loader workers (#300, phase 3).
  *
- * The coordinator (the backend running pgcolumnar.parallel_copy) computes the
- * line-aligned byte ranges, lays out one DSM segment (a control header + a
- * per-worker slot array), launches N dynamic background workers, waits for them,
- * and reports the total rows. Each worker attaches the segment, connects, and
- * runs core COPY over its byte range via BeginCopyFrom with a bounded data
- * source, so parse and write semantics are exactly core COPY's. Workers report
- * success/failure through a shared status word (background-worker shutdown status
- * alone cannot tell success from crash).
+ * The SQL function pgcolumnar.parallel_copy computes the line-aligned byte ranges,
+ * lays out one DSM segment (a control header + a per-worker slot array), and
+ * launches ONE coordinator background worker; then it just waits and returns the
+ * coordinator's total. The coordinator does the real orchestration:
  *
- * This slice loads each range in its own committed transaction; the all-or-nothing
- * (2PC) and staging modes follow, per design/PARALLEL_COPY_PLAN.md.
+ *   1. launches N loader background workers over the same DSM segment;
+ *   2. each loader runs core COPY over its byte range via BeginCopyFrom with a
+ *      bounded data source (so parse/write semantics are exactly core COPY's),
+ *      then PREPARE TRANSACTION 'gid' instead of committing, reports rows +
+ *      PREPARED (or FAILED) through its shared slot, and exits;
+ *   3. once every loader has exited, the coordinator COMMIT PREPAREDs all of them
+ *      if all prepared, or ROLLBACK PREPAREDs the prepared ones if any failed.
+ *
+ * Atomicity: because no loader commits on its own, a failure in any range
+ * (a bad row, disk full, a constraint) leaves the whole load rolled back -- the
+ * target is byte-identical to its pre-load state. The one residual window is the
+ * standard 2PC in-doubt case: a coordinator crash *during* the final COMMIT
+ * PREPARED loop can leave some ranges committed and some still prepared, which a
+ * DBA resolves (prepared transactions are WAL-durable and listed in
+ * pg_prepared_xacts). See design/PARALLEL_COPY_PLAN.md.
+ *
+ * Why a coordinator bgworker at all: COMMIT PREPARED / ROLLBACK PREPARED cannot
+ * run inside a transaction block, and a SQL function always is one, so the
+ * function itself cannot finish the 2PC. A background worker is its own top-level
+ * session and can.
  * ------------------------------------------------------------------------- */
 
 #define PCOPY_MAGIC			0x50434f50	/* 'PCOP' */
 #define PCOPY_KEY_HEADER	0
 #define PCOPY_KEY_WORKERS	1
 
+/* per-loader outcome, reported through the slot's atomic state word */
 typedef enum PcopyState
 {
-	PCOPY_PENDING = 0,			/* not yet finished (also: worker crashed) */
-	PCOPY_DONE,					/* range loaded and committed */
-	PCOPY_FAILED				/* worker caught an error; see errmsg */
+	PCOPY_PENDING = 0,			/* not yet finished (also: loader crashed) */
+	PCOPY_PREPARED,				/* range loaded and PREPARE TRANSACTION'd */
+	PCOPY_FAILED				/* loader caught an error; see errmsg */
 } PcopyState;
+
+/* coordinator outcome, reported to the waiting function through the header */
+typedef enum PcopyCoordState
+{
+	PCOPY_COORD_PENDING = 0,	/* coordinator has not finished (also: crashed) */
+	PCOPY_COORD_DONE,			/* all ranges committed; total_rows is valid */
+	PCOPY_COORD_FAILED			/* rolled back / errored; see coord_errmsg */
+} PcopyCoordState;
 
 typedef struct PcopyWorkerSlot
 {
 	int64		start_off;		/* byte range [start_off, end_off) for this worker */
 	int64		end_off;
 	pg_atomic_uint32 state;		/* PcopyState */
-	int64		rows;			/* rows loaded (valid when state == PCOPY_DONE) */
+	int64		rows;			/* rows loaded (valid when state == PCOPY_PREPARED) */
 	int			sqlerrcode;
 	char		errmsg[512];
+	char		gid[GIDSIZE];	/* 2PC gid the coordinator assigned this loader */
 } PcopyWorkerSlot;
 
 typedef struct PcopyHeader
@@ -284,6 +324,12 @@ typedef struct PcopyHeader
 	Oid			relid;			/* target relation */
 	int			nworkers;
 	char		filename[MAXPGPATH];
+	/* coordinator -> function result channel */
+	pg_atomic_uint32 coord_state;	/* PcopyCoordState */
+	int64		total_rows;		/* valid when coord_state == PCOPY_COORD_DONE */
+	int			failed_worker;	/* index of the first failed loader, or -1 */
+	int			coord_sqlerrcode;
+	char		coord_errmsg[512];
 } PcopyHeader;
 
 /*
@@ -300,8 +346,9 @@ typedef struct PcopyRangeSource
 
 static PcopyRangeSource pcopy_src = {-1, 0, NULL};
 
-/* background-worker entry point, resolved via bgw_function_name */
+/* background-worker entry points, resolved via bgw_function_name */
 PGDLLEXPORT void pgcolumnar_parallel_copy_worker(Datum main_arg);
+PGDLLEXPORT void pgcolumnar_parallel_copy_coordinator(Datum main_arg);
 
 static int
 pcopy_range_read(void *outbuf, int minread, int maxread)
@@ -328,22 +375,231 @@ pcopy_range_read(void *outbuf, int minread, int maxread)
 }
 
 /*
- * pcopy_compute_offsets
- *		Line-aligned byte offsets partitioning `path` into `workers` ranges, the
- *		same computation columnar_file_split_offsets exposes to SQL, for the
- *		coordinator's internal use. Returns a palloc'd int64[workers+1].
+ * pcopy_partition_bucket
+ *		For a value `kd`, return the number of range bound datums it is >= (its
+ *		"bucket"): 0 for the first partition, up to ndatums for the last. Binary
+ *		search over the ascending bound datums using the partition key's compare
+ *		support function. For a covering RANGE layout this bucket is the partition
+ *		ordinal, so distinct buckets => distinct partitions.
+ */
+static int
+pcopy_partition_bucket(Datum kd, PartitionBoundInfo bi, FmgrInfo *cmpfn, Oid coll)
+{
+	int			lo = 0;
+	int			hi = bi->ndatums;
+
+	while (lo < hi)
+	{
+		int			mid = (lo + hi) / 2;
+		int32		c = DatumGetInt32(FunctionCall2Coll(cmpfn, coll, kd,
+													   bi->datums[mid][0]));
+
+		if (c >= 0)
+			lo = mid + 1;		/* kd >= this bound; it's in a higher bucket */
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+/*
+ * pcopy_partition_aligned_offsets
+ *		Split a COPY text-format file into *workers_io byte ranges ALIGNED to the
+ *		range-partition boundaries of `parent`, so each worker's range routes to a
+ *		distinct set of partitions and no two workers ever write the same partition
+ *		(the storage-lock contention that makes same-table parallel load serialize
+ *		and 2PC deadlock). Requires the file sorted ascending by the partition key
+ *		(verified as we scan). Returns a palloc'd int64[*workers_io + 1]; may lower
+ *		*workers_io to the number of partition segments.
+ *
+ * v1 restrictions (all checked): single-column RANGE partitioning, no DEFAULT
+ * partition, non-expression key, COPY text format with default (whole-table,
+ * table-order) column list, and a key field free of COPY escapes (true for the
+ * numeric/temporal keys people range-partition on).
  */
 static int64 *
-pcopy_compute_offsets(const char *path, int workers)
+pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_io)
 {
-	int			fd;
+	PartitionKey pkey = RelationGetPartitionKey(parent);
+	PartitionDesc pdesc = RelationGetPartitionDesc(parent, false);
+	PartitionBoundInfo bi;
+	TupleDesc	td = RelationGetDescr(parent);
+	AttrNumber	keyattno;
+	int			keyfield = 0;
+	Oid			keytype,
+				ioparam,
+				infnoid,
+				keycoll;
+	int32		keytypmod;
+	FmgrInfo	infn;
+	FmgrInfo   *cmpfn;
+	int			nseg;
+	int64	   *seg_start;
+	int64	   *woff;
+	int			W;
 	off_t		size;
-	int64	   *offs;
+	FILE	   *fp;
+	char	   *line = NULL;
+	size_t		cap = 0;
+	ssize_t		len;
+	int64		off = 0;
+	int			cur = 0;
+	int			prev_bucket = 0;
+	uint64		nrows = 0;
+	int			a;
+	int			b;
 
-	fd = pcopy_open_regular_file(path, &size);
-	offs = pcopy_line_offsets(fd, size, workers, path);
-	CloseTransientFile(fd);
-	return offs;
+	if (pkey->strategy != PARTITION_STRATEGY_RANGE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.parallel_copy supports only RANGE-partitioned targets"),
+				 errhint("Partition the target by the load's sort key (e.g. time).")));
+	if (pkey->partnatts != 1 || pkey->partattrs[0] == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.parallel_copy supports only single-column RANGE partition keys")));
+	bi = pdesc->boundinfo;
+	if (bi == NULL || bi->ndatums == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("target \"%s\" has no partitions to load into",
+						RelationGetRelationName(parent))));
+	if (bi->default_index >= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.parallel_copy does not support a DEFAULT partition"),
+				 errhint("A default partition can receive rows from any range, so workers could not stay on distinct partitions.")));
+
+	/* which tab-delimited field is the key (default COPY column order) */
+	keyattno = pkey->partattrs[0];
+	for (a = 1; a < keyattno; a++)
+		if (!TupleDescAttr(td, a - 1)->attisdropped)
+			keyfield++;
+
+	keytype = pkey->parttypid[0];
+	keytypmod = pkey->parttypmod[0];
+	keycoll = pkey->partcollation[0];
+	getTypeInputInfo(keytype, &infnoid, &ioparam);
+	fmgr_info(infnoid, &infn);
+	cmpfn = &pkey->partsupfunc[0];
+
+	nseg = bi->ndatums + 1;		/* buckets 0..ndatums */
+	seg_start = (int64 *) palloc(sizeof(int64) * (nseg + 1));
+	seg_start[0] = 0;
+
+	/*
+	 * Read via AllocateFile/FreeFile (PostgreSQL-tracked stdio) so getline() can do
+	 * the line parsing: OpenTransientFile + fdopen + fclose would close the OS fd
+	 * but leave fd.c's transient-file bookkeeping dangling ("temporary files not
+	 * closed at end-of-transaction"). The caller has already checked
+	 * pg_read_server_files; re-check it is a regular file here (AllocateFile does
+	 * not), matching pcopy_open_regular_file.
+	 */
+	{
+		struct stat st;
+
+		if (stat(path, &st) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not stat file \"%s\": %m", path)));
+		if (!S_ISREG(st.st_mode))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a regular file", path)));
+		size = st.st_size;
+	}
+	fp = AllocateFile(path, PG_BINARY_R);
+	if (fp == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\" for reading: %m", path)));
+
+	while ((len = getline(&line, &cap, fp)) != -1)
+	{
+		int64		line_start = off;
+		char	   *p = line;
+		int			f = 0;
+		int			flen;
+		char	   *fld;
+		Datum		kd;
+		int			bucket;
+
+		off += len;
+
+		/* advance to the key field */
+		for (f = 0; f < keyfield; f++)
+		{
+			p = strchr(p, '\t');
+			if (p == NULL)
+				break;
+			p++;
+		}
+		if (p == NULL)
+		{
+			FreeFile(fp);
+			ereport(ERROR,
+					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					 errmsg("row at byte %ld has too few columns for the partition key",
+							(long) line_start)));
+		}
+		flen = (int) strcspn(p, "\t\n");
+		fld = pnstrdup(p, flen);
+		kd = InputFunctionCall(&infn, fld, ioparam, keytypmod);
+		pfree(fld);
+
+		bucket = pcopy_partition_bucket(kd, bi, cmpfn, keycoll);
+		if (bucket < prev_bucket)
+		{
+			FreeFile(fp);
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("input file is not sorted ascending by the partition key"),
+					 errdetail("Row at byte %ld belongs to an earlier partition than a preceding row.",
+							   (long) line_start),
+					 errhint("Partition-parallel load requires the file sorted by the partition key.")));
+		}
+		while (cur < bucket)
+			seg_start[++cur] = line_start;
+		prev_bucket = bucket;
+
+		if ((++nrows & 0xFFFF) == 0)
+			CHECK_FOR_INTERRUPTS();
+	}
+	if (line)
+		free(line);				/* getline() uses malloc, not palloc */
+	FreeFile(fp);
+
+	while (cur < nseg - 1)
+		seg_start[++cur] = size;
+	seg_start[nseg] = size;
+
+	/* group contiguous segments into workers, balanced by bytes, snapped to
+	 * partition edges so each worker owns whole (distinct) partitions */
+	W = *workers_io;
+	if (W > nseg)
+		W = nseg;
+	if (W < 1)
+		W = 1;
+	woff = (int64 *) palloc(sizeof(int64) * (W + 1));
+	woff[0] = 0;
+	{
+		int64		target = size / W;
+		int			wi = 1;
+		int64		running = 0;
+
+		for (b = 0; b < nseg && wi < W; b++)
+		{
+			running += seg_start[b + 1] - seg_start[b];
+			if (running >= target * wi)
+				woff[wi++] = seg_start[b + 1];
+		}
+		while (wi <= W)
+			woff[wi++] = size;
+	}
+
+	pfree(seg_start);
+	*workers_io = W;
+	return woff;
 }
 
 /*
@@ -369,10 +625,11 @@ pcopy_auto_workers(void)
 }
 
 /*
- * pgcolumnar_parallel_copy_worker
- *		Background-worker entry: attach the DSM, connect, and run core COPY over
- *		this worker's byte range into the target, committing that range. Success or
- *		failure is reported through the shared slot's state word before exit.
+ * pgcolumnar_parallel_copy_worker (loader)
+ *		Background-worker entry: attach the DSM, connect, run core COPY over this
+ *		worker's byte range into the target, then PREPARE TRANSACTION 'gid' rather
+ *		than committing. Reports rows + PREPARED (or FAILED) through the shared slot
+ *		before exit; the coordinator finishes the 2PC.
  */
 PGDLLEXPORT void
 pgcolumnar_parallel_copy_worker(Datum main_arg)
@@ -404,7 +661,7 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 	slots = (PcopyWorkerSlot *) shm_toc_lookup(toc, PCOPY_KEY_WORKERS, false);
 	me = &slots[widx];
 
-#if PG_VERSION_NUM >= 160000
+#if PG_VERSION_NUM >= 170000
 	conn_flags |= BGWORKER_BYPASS_ROLELOGINCHECK;
 #endif
 	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
@@ -418,7 +675,14 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 		uint64		processed;
 		int			fd;
 
+		/*
+		 * An explicit transaction block (BEGIN) so we can PREPARE it: a bare
+		 * implicit transaction cannot be prepared (PrepareTransactionBlock would
+		 * turn into a no-op rollback).
+		 */
 		StartTransactionCommand();
+		BeginTransactionBlock();
+		CommitTransactionCommand();		/* TBLOCK_BEGIN -> in progress */
 
 		fd = pcopy_open_regular_file(hdr->filename, NULL);
 		if (lseek(fd, (off_t) me->start_off, SEEK_SET) < 0)
@@ -455,9 +719,12 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 						bms_add_member(perminfo->insertedCols,
 									   an - FirstLowInvalidHeapAttributeNumber);
 #else
-			RangeTblEntry *rte =
+			/* PG15: addRangeTableEntryForRelation returns a ParseNamespaceItem;
+			 * permissions live on the RangeTblEntry itself (no RTEPermissionInfo). */
+			ParseNamespaceItem *nsitem =
 				addRangeTableEntryForRelation(pstate, rel, RowExclusiveLock,
 											  NULL, false, false);
+			RangeTblEntry *rte = nsitem->p_rte;
 
 			rte->requiredPerms = ACL_INSERT;
 			for (an = 1; an <= td->natts; an++)
@@ -479,10 +746,23 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 		CloseTransientFile(fd);
 		pcopy_src.fd = -1;
 
-		CommitTransactionCommand();
+		/*
+		 * PREPARE instead of commit. The transaction becomes durable and
+		 * dissociated from this process; the coordinator (running as the same
+		 * role, so LockGXact accepts it) will COMMIT PREPARED or ROLLBACK
+		 * PREPARED it by gid once every loader has reported. After this the
+		 * loader holds no transaction, so writing the result slot is a plain
+		 * shared-memory store.
+		 */
+		if (!PrepareTransactionBlock(me->gid))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("pgcolumnar parallel_copy worker could not prepare transaction \"%s\"",
+							me->gid)));
+		CommitTransactionCommand();		/* TBLOCK_PREPARE -> PrepareTransaction() */
 
 		me->rows = (int64) processed;
-		pg_atomic_write_u32(&me->state, PCOPY_DONE);
+		pg_atomic_write_u32(&me->state, PCOPY_PREPARED);
 	}
 	PG_CATCH();
 	{
@@ -511,11 +791,206 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 	proc_exit(0);
 }
 
+/*
+ * pcopy_finish_prepared
+ *		COMMIT PREPARED (isCommit) or ROLLBACK PREPARED a gid from this (coordinator)
+ *		session. FinishPreparedTransaction is what the COMMIT/ROLLBACK PREPARED
+ *		utility statements call, and the utility path runs it inside the implicit
+ *		transaction command, so we wrap it the same way. May ereport (e.g. the gid
+ *		no longer exists); callers that must not fail use the _quietly variant.
+ */
+static void
+pcopy_finish_prepared(const char *gid, bool isCommit)
+{
+	StartTransactionCommand();
+	FinishPreparedTransaction(gid, isCommit);
+	CommitTransactionCommand();
+}
+
+/*
+ * pcopy_rollback_prepared_quietly
+ *		Best-effort ROLLBACK PREPARED that never throws, for cleanup paths already
+ *		handling an error. A gid that is already gone (committed, or never prepared)
+ *		just leaves the error flushed.
+ */
+static void
+pcopy_rollback_prepared_quietly(const char *gid)
+{
+	PG_TRY();
+	{
+		pcopy_finish_prepared(gid, false);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		AbortOutOfAnyTransaction();
+	}
+	PG_END_TRY();
+}
+
+/*
+ * pgcolumnar_parallel_copy_coordinator
+ *		Background-worker entry for atomic mode. Attaches the DSM, connects as the
+ *		calling role, launches the N loader workers, waits for them all, then either
+ *		COMMIT PREPAREDs every range (all prepared) or ROLLBACK PREPAREDs the ones
+ *		that prepared (any failed). The outcome + total rows are written to the
+ *		header for the waiting SQL function. Runs the 2PC finish that the function
+ *		cannot (transaction-control commands are illegal inside a function).
+ */
+PGDLLEXPORT void
+pgcolumnar_parallel_copy_coordinator(Datum main_arg)
+{
+	dsm_segment *seg;
+	shm_toc    *toc;
+	PcopyHeader *hdr;
+	PcopyWorkerSlot *slots;
+	int			nworkers;
+	uint32		conn_flags = BGWORKER_BYPASS_ALLOWCONN;
+	BackgroundWorker bw;
+	BackgroundWorkerHandle **handles;
+	int			i;
+
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+
+	seg = dsm_attach(DatumGetUInt32(main_arg));
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pgcolumnar parallel_copy coordinator could not attach to the shared segment")));
+	toc = shm_toc_attach(PCOPY_MAGIC, dsm_segment_address(seg));
+	if (toc == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pgcolumnar parallel_copy coordinator found a bad shared segment")));
+	hdr = (PcopyHeader *) shm_toc_lookup(toc, PCOPY_KEY_HEADER, false);
+	slots = (PcopyWorkerSlot *) shm_toc_lookup(toc, PCOPY_KEY_WORKERS, false);
+	nworkers = hdr->nworkers;
+
+#if PG_VERSION_NUM >= 170000
+	conn_flags |= BGWORKER_BYPASS_ROLELOGINCHECK;
+#endif
+	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
+
+	handles = (BackgroundWorkerHandle **)
+		palloc0(sizeof(BackgroundWorkerHandle *) * nworkers);
+
+	/* loader worker template (all share the one DSM segment) */
+	memset(&bw, 0, sizeof(bw));
+	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+	bw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	bw.bgw_restart_time = BGW_NEVER_RESTART;
+	strlcpy(bw.bgw_library_name, "pgcolumnar", BGW_MAXLEN);
+	strlcpy(bw.bgw_function_name, "pgcolumnar_parallel_copy_worker", BGW_MAXLEN);
+	snprintf(bw.bgw_name, BGW_MAXLEN, "pgcolumnar parallel_copy loader");
+	snprintf(bw.bgw_type, BGW_MAXLEN, "pgcolumnar parallel_copy loader");
+	bw.bgw_main_arg = main_arg;
+	bw.bgw_notify_pid = MyProcPid;
+
+	PG_TRY();
+	{
+		bool		all_prepared = true;
+		int			failed = -1;
+		int64		total = 0;
+
+		for (i = 0; i < nworkers; i++)
+		{
+			memcpy(bw.bgw_extra, &i, sizeof(int));
+			if (!RegisterDynamicBackgroundWorker(&bw, &handles[i]))
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+						 errmsg("could not register pgcolumnar parallel_copy loader %d of %d",
+								i + 1, nworkers),
+						 errhint("Increase max_worker_processes; atomic parallel_copy needs one coordinator plus %d loader slots.",
+								 nworkers)));
+		}
+
+		/* every loader runs to completion: it either PREPAREs or FAILs */
+		for (i = 0; i < nworkers; i++)
+			WaitForBackgroundWorkerShutdown(handles[i]);
+
+		for (i = 0; i < nworkers; i++)
+		{
+			if (pg_atomic_read_u32(&slots[i].state) != PCOPY_PREPARED)
+			{
+				all_prepared = false;
+				if (failed < 0)
+					failed = i;
+			}
+		}
+
+		if (all_prepared)
+		{
+			/*
+			 * Decision: commit. Committing N prepared transactions is not itself
+			 * one atomic step -- a coordinator crash mid-loop leaves the standard
+			 * 2PC in-doubt state (some committed, the rest prepared and listed in
+			 * pg_prepared_xacts for resolution). COMMIT PREPARED does not fail
+			 * transiently, so short of a crash this loop completes.
+			 */
+			for (i = 0; i < nworkers; i++)
+			{
+				pcopy_finish_prepared(slots[i].gid, true);
+				total += slots[i].rows;
+			}
+			hdr->total_rows = total;
+			pg_atomic_write_u32(&hdr->coord_state, PCOPY_COORD_DONE);
+		}
+		else
+		{
+			/* any failure: roll back every range that prepared -> no partial load */
+			for (i = 0; i < nworkers; i++)
+				if (pg_atomic_read_u32(&slots[i].state) == PCOPY_PREPARED)
+					pcopy_rollback_prepared_quietly(slots[i].gid);
+
+			hdr->failed_worker = failed;
+			hdr->coord_sqlerrcode = slots[failed].sqlerrcode;
+			strlcpy(hdr->coord_errmsg,
+					slots[failed].errmsg[0] ? slots[failed].errmsg
+					: "loader exited without reporting a result",
+					sizeof(hdr->coord_errmsg));
+			pg_atomic_write_u32(&hdr->coord_state, PCOPY_COORD_FAILED);
+		}
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+		MemoryContext ecxt;
+
+		ecxt = MemoryContextSwitchTo(TopMemoryContext);
+		edata = CopyErrorData();
+		hdr->coord_sqlerrcode = edata->sqlerrcode;
+		strlcpy(hdr->coord_errmsg,
+				edata->message ? edata->message : "coordinator error",
+				sizeof(hdr->coord_errmsg));
+		MemoryContextSwitchTo(ecxt);
+		FlushErrorState();
+		AbortOutOfAnyTransaction();
+
+		/* stop any loader still running, then undo any range that prepared */
+		for (i = 0; i < nworkers; i++)
+			if (handles[i] != NULL)
+				TerminateBackgroundWorker(handles[i]);
+		for (i = 0; i < nworkers; i++)
+			if (pg_atomic_read_u32(&slots[i].state) == PCOPY_PREPARED)
+				pcopy_rollback_prepared_quietly(slots[i].gid);
+
+		pg_atomic_write_u32(&hdr->coord_state, PCOPY_COORD_FAILED);
+	}
+	PG_END_TRY();
+
+	dsm_detach(seg);
+	proc_exit(0);
+}
+
 PG_FUNCTION_INFO_V1(columnar_parallel_copy);
 
 /*
  * columnar_parallel_copy(target regclass, filename text, workers int)
  *		-> rows loaded.
+ *
+ * Atomic bulk load: launches the coordinator bgworker (which spawns the loaders,
+ * 2-phase-commits them all or rolls them all back) and returns its total.
  */
 Datum
 columnar_parallel_copy(PG_FUNCTION_ARGS)
@@ -523,6 +998,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	Oid			relid;
 	char	   *path;
 	int			workers;
+	int			max_prepared;
 	int64	   *offs;
 	shm_toc_estimator est;
 	Size		segsize;
@@ -530,10 +1006,10 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	shm_toc    *toc;
 	PcopyHeader *hdr;
 	PcopyWorkerSlot *slots;
+	dsm_handle	dsmh;
 	BackgroundWorker bw;
-	BackgroundWorkerHandle **handles;
-	int64		total = 0;
-	int			failed = -1;
+	BackgroundWorkerHandle *coord_handle = NULL;
+	uint32		cstate;
 	int			i;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
@@ -557,22 +1033,51 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	if (workers > PCOPY_MAX_WORKERS)
 		workers = PCOPY_MAX_WORKERS;
 
-	/* validate the target is a columnar relation before spawning anything */
+	/*
+	 * The target must be a RANGE-partitioned table: each worker loads a distinct
+	 * partition (distinct storage id), the only shape pgcolumnar allows a parallel
+	 * AND atomic bulk load. Concurrent writers to one non-partitioned table
+	 * serialize on the per-storage write lock and, under 2PC, deadlock; single-table
+	 * parallel load is a planned columnar-core enhancement. Compute partition-
+	 * aligned byte ranges here (this may lower `workers` to the partition count).
+	 */
 	{
-		Relation	rel = table_open(relid, AccessShareLock);
+		Relation	parent = table_open(relid, AccessShareLock);
 
-		if (!ColumnarIsColumnarRelation(relid))
+		if (parent->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		{
-			table_close(rel, AccessShareLock);
+			char		nm[NAMEDATALEN];
+
+			strlcpy(nm, RelationGetRelationName(parent), NAMEDATALEN);
+			table_close(parent, AccessShareLock);
 			ereport(ERROR,
-					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-					 errmsg("\"%s\" is not a pgcolumnar table",
-							RelationGetRelationName(rel))));
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("pgcolumnar.parallel_copy requires a partitioned target, but \"%s\" is not partitioned",
+							nm),
+					 errhint("Partition the target so each worker loads a distinct partition. Parallel load into a single non-partitioned table is a planned enhancement.")));
 		}
-		table_close(rel, AccessShareLock);
+		offs = pcopy_partition_aligned_offsets(parent, path, &workers);
+		table_close(parent, AccessShareLock);
 	}
 
-	offs = pcopy_compute_offsets(path, workers);
+	/*
+	 * Atomic mode prepares one transaction per (effective) worker, so it needs at
+	 * least that many prepared-transaction slots. Check after the split (which may
+	 * have lowered the worker count) for a clear error rather than failing partway.
+	 * Necessary, not sufficient: slots shared with other sessions can still run out
+	 * at PREPARE time, which surfaces as a clean rollback with the loader's error.
+	 */
+	{
+		const char *s = GetConfigOption("max_prepared_transactions", true, false);
+
+		max_prepared = (s != NULL) ? atoi(s) : 0;
+	}
+	if (max_prepared < workers)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pgcolumnar.parallel_copy requires max_prepared_transactions >= %d, but it is %d",
+						workers, max_prepared),
+				 errhint("Atomic parallel_copy prepares one transaction per worker; raise max_prepared_transactions (requires a restart) or reduce workers.")));
 
 	/* lay out one DSM segment: control header + per-worker slot array */
 	shm_toc_initialize_estimator(&est);
@@ -588,12 +1093,18 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	slots = (PcopyWorkerSlot *) shm_toc_allocate(toc,
 												 mul_size(sizeof(PcopyWorkerSlot), workers));
 	shm_toc_insert(toc, PCOPY_KEY_WORKERS, slots);
+	dsmh = dsm_segment_handle(seg);
 
 	hdr->dbid = MyDatabaseId;
 	hdr->roleid = GetUserId();
 	hdr->relid = relid;
 	hdr->nworkers = workers;
 	strlcpy(hdr->filename, path, sizeof(hdr->filename));
+	hdr->total_rows = 0;
+	hdr->failed_worker = -1;
+	hdr->coord_sqlerrcode = 0;
+	hdr->coord_errmsg[0] = '\0';
+	pg_atomic_init_u32(&hdr->coord_state, PCOPY_COORD_PENDING);
 
 	for (i = 0; i < workers; i++)
 	{
@@ -603,74 +1114,72 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 		slots[i].sqlerrcode = 0;
 		slots[i].errmsg[0] = '\0';
 		pg_atomic_init_u32(&slots[i].state, PCOPY_PENDING);
+		/* gid unique among concurrently-prepared xacts: our pid + segment + index */
+		snprintf(slots[i].gid, GIDSIZE, "pgcolumnar/%d/%u/%d",
+				 (int) MyProcPid, (unsigned) dsmh, i);
 	}
 
-	handles = (BackgroundWorkerHandle **)
-		palloc0(sizeof(BackgroundWorkerHandle *) * workers);
-
+	/* one coordinator bgworker owns the loaders and the 2PC finish */
 	memset(&bw, 0, sizeof(bw));
 	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	bw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	bw.bgw_restart_time = BGW_NEVER_RESTART;
 	strlcpy(bw.bgw_library_name, "pgcolumnar", BGW_MAXLEN);
-	strlcpy(bw.bgw_function_name, "pgcolumnar_parallel_copy_worker", BGW_MAXLEN);
-	snprintf(bw.bgw_name, BGW_MAXLEN, "pgcolumnar parallel_copy");
-	snprintf(bw.bgw_type, BGW_MAXLEN, "pgcolumnar parallel_copy");
-	bw.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
+	strlcpy(bw.bgw_function_name, "pgcolumnar_parallel_copy_coordinator", BGW_MAXLEN);
+	snprintf(bw.bgw_name, BGW_MAXLEN, "pgcolumnar parallel_copy coordinator");
+	snprintf(bw.bgw_type, BGW_MAXLEN, "pgcolumnar parallel_copy coordinator");
+	bw.bgw_main_arg = UInt32GetDatum(dsmh);
 	bw.bgw_notify_pid = MyProcPid;
 
 	/*
-	 * Register and wait. On any error (a failed registration, or cancellation
-	 * while waiting) terminate every worker we launched so none are orphaned.
+	 * Launch the coordinator and wait. On cancellation, terminate it; the
+	 * coordinator rolls back or (if it had already decided to commit) leaves the
+	 * standard in-doubt prepared transactions for resolution.
 	 */
 	PG_TRY();
 	{
-		for (i = 0; i < workers; i++)
-		{
-			memcpy(bw.bgw_extra, &i, sizeof(int));
-			if (!RegisterDynamicBackgroundWorker(&bw, &handles[i]))
-				ereport(ERROR,
-						(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-						 errmsg("could not register pgcolumnar parallel_copy worker %d of %d",
-								i + 1, workers),
-						 errhint("Increase max_worker_processes.")));
-		}
-		for (i = 0; i < workers; i++)
-			WaitForBackgroundWorkerShutdown(handles[i]);
+		if (!RegisterDynamicBackgroundWorker(&bw, &coord_handle))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+					 errmsg("could not register pgcolumnar parallel_copy coordinator"),
+					 errhint("Increase max_worker_processes.")));
+		WaitForBackgroundWorkerShutdown(coord_handle);
 	}
 	PG_CATCH();
 	{
-		for (i = 0; i < workers; i++)
-			if (handles[i] != NULL)
-				TerminateBackgroundWorker(handles[i]);
+		if (coord_handle != NULL)
+			TerminateBackgroundWorker(coord_handle);
+		dsm_detach(seg);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	for (i = 0; i < workers; i++)
+	cstate = pg_atomic_read_u32(&hdr->coord_state);
+	if (cstate == PCOPY_COORD_DONE)
 	{
-		uint32		st = pg_atomic_read_u32(&slots[i].state);
+		int64		total = hdr->total_rows;
 
-		if (st == PCOPY_DONE)
-			total += slots[i].rows;
-		else if (failed < 0)
-			failed = i;
+		dsm_detach(seg);
+		PG_RETURN_INT64(total);
 	}
-
-	if (failed >= 0)
+	else
 	{
 		char		msg[512];
-		int			code = slots[failed].sqlerrcode;
+		int			code = hdr->coord_sqlerrcode;
+		int			fw = hdr->failed_worker;
 
-		strlcpy(msg, slots[failed].errmsg[0] ? slots[failed].errmsg
-				: "worker exited without reporting a result", sizeof(msg));
+		strlcpy(msg, hdr->coord_errmsg[0] ? hdr->coord_errmsg
+				: "coordinator exited without reporting a result", sizeof(msg));
 		dsm_detach(seg);
-		ereport(ERROR,
-				(errcode(code ? code : ERRCODE_INTERNAL_ERROR),
-				 errmsg("pgcolumnar.parallel_copy worker %d failed: %s",
-						failed, msg)));
+		if (fw >= 0)
+			ereport(ERROR,
+					(errcode(code ? code : ERRCODE_INTERNAL_ERROR),
+					 errmsg("pgcolumnar.parallel_copy worker %d failed: %s", fw, msg)));
+		else
+			ereport(ERROR,
+					(errcode(code ? code : ERRCODE_INTERNAL_ERROR),
+					 errmsg("pgcolumnar.parallel_copy failed: %s", msg)));
 	}
 
-	dsm_detach(seg);
-	PG_RETURN_INT64(total);
+	PG_RETURN_INT64(0);			/* unreachable */
 }

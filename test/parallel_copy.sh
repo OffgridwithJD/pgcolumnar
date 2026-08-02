@@ -23,6 +23,12 @@
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Atomic parallel_copy prepares one transaction per worker and runs a coordinator
+# bgworker plus N loader bgworkers, so the cluster needs 2PC capacity and enough
+# worker slots. max_prepared_transactions is PGC_POSTMASTER, so it must be set
+# before the cluster starts (pgc_setup reads PGC_EXTRA_CONF into postgresql.conf).
+export PGC_EXTRA_CONF=$'max_prepared_transactions=8\nmax_worker_processes=16'
+
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 DATADIR="$PGC_WORKDIR/pcopy"
@@ -194,37 +200,109 @@ dir_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U post
 check "file_split_offsets: a directory is rejected (not an 8-exabyte file)" \
 	"$(printf '%s' "$dir_err" | grep -qi "not a regular file" && echo ok || echo no)" ok
 
-# ---- coordinator: pgcolumnar.parallel_copy loads == a single COPY ----------
-# The N-worker load of F must produce exactly the rows a single COPY does; t_heap
-# already holds F via one COPY and is the oracle. (Worker counts kept <= 4 so the
-# default max_worker_processes has slots.)
-pcopy_run() {	# target workers -> echoes rows returned (empty on error)
-	q "SELECT pgcolumnar.parallel_copy('$1'::regclass, '$F', $2)"
+# ---- coordinator: pgcolumnar.parallel_copy (partition-parallel, atomic 2PC) ---
+# Each worker loads a DISTINCT partition (distinct storage id -> parallel AND
+# 2PC-atomic, no deadlock). The N-worker load of F must produce exactly the rows a
+# single COPY does; t_heap already holds F (id 1..5000, sorted by id) and is the
+# oracle. F is sorted by id, so we range-partition the target by id.
+err_of() {	# runs a query, echoes stderr+stdout (for error-path assertions)
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atc "$1" 2>&1 || true
+}
+mkpart() {	# name nparts  -> range-partitioned columnar table over id in [1,5000]
+	local name="$1" n="$2" i lo hi step ddl
+	step=$(( (5000 + n) / n ))
+	ddl="DROP TABLE IF EXISTS $name CASCADE; CREATE TABLE $name (id int, txt text) PARTITION BY RANGE (id);"
+	for i in $(seq 0 $((n - 1))); do
+		if [ "$i" = 0 ]; then lo=MINVALUE; else lo=$((i * step)); fi
+		if [ "$i" = $((n - 1)) ]; then hi=MAXVALUE; else hi=$(((i + 1) * step)); fi
+		ddl="$ddl CREATE TABLE ${name}_p$i PARTITION OF $name FOR VALUES FROM ($lo) TO ($hi) USING pgcolumnar;"
+	done
+	psql_run "$ddl" >/dev/null
 }
 
 for W in 1 2 4; do
-	psql_run "DROP TABLE IF EXISTS t_pc;
-	          CREATE TABLE t_pc (id int, txt text) USING pgcolumnar;" >/dev/null
-	check "parallel_copy($W workers): rows returned = 5000" "$(pcopy_run t_pc "$W")" 5000
-	check "parallel_copy($W workers): result == single-COPY oracle" \
-		"$(pgc_set_hash "SELECT * FROM t_pc")" "$(pgc_set_hash "SELECT * FROM t_heap")"
+	mkpart t_pcp 4
+	check "parallel_copy(partitioned, $W workers): rows returned = 5000" \
+		"$(q "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F', $W)")" 5000
+	check "parallel_copy(partitioned, $W workers): result == single-COPY oracle" \
+		"$(pgc_set_hash "SELECT * FROM t_pcp")" "$(pgc_set_hash "SELECT * FROM t_heap")"
+	check "parallel_copy(partitioned, $W workers): no prepared-transaction leak" \
+		"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 done
 
-# a missing file errors cleanly -- no crash, no orphaned worker, nothing loaded
-psql_run "DROP TABLE IF EXISTS t_pc;
-          CREATE TABLE t_pc (id int, txt text) USING pgcolumnar;" >/dev/null
-pc_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-	-d "$PGC_DB" -Atc "SELECT pgcolumnar.parallel_copy('t_pc'::regclass, '$DATADIR/nope.txt', 2)" 2>&1 || true)"
-check "parallel_copy missing file: errors, not crashes" \
-	"$(printf '%s' "$pc_err" | grep -qi "could not open" && echo ok || echo no)" ok
-check "parallel_copy missing file: server still up (no worker crash)" "$(q "SELECT 1")" 1
-check "parallel_copy missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pc")" 0
+# ---- atomicity 1: a bad partition-key value is rejected by the splitter -------
+# The splitter parses the key of every row; a non-integer id fails there, before
+# any worker/2PC -- nothing is loaded, no prepared transaction is created.
+F_BADKEY="$DATADIR/badkey.txt"
+{ for i in $(seq 1 400); do printf '%s\thost_%s\n' "$i" "$i"; done
+  printf '%s\t%s\n' "notanint" "boom"
+  for i in $(seq 401 800); do printf '%s\thost_%s\n' "$i" "$i"; done; } > "$F_BADKEY"
+[ "$(id -u)" = "0" ] && chown postgres "$F_BADKEY"
+mkpart t_pcp 4
+bk_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F_BADKEY', 4)")"
+check "atomic: a bad partition-key value is rejected" \
+	"$(printf '%s' "$bk_err" | grep -qiE 'invalid input syntax|not sorted' && echo ok || echo no)" ok
+check "atomic: bad-key load leaves the target empty" "$(q "SELECT count(*) FROM t_pcp")" 0
+check "atomic: no prepared-transaction leak after bad-key" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
-# a non-columnar target is rejected before any worker is launched
-psql_run "DROP TABLE IF EXISTS t_pc_heap; CREATE TABLE t_pc_heap (id int, txt text);" >/dev/null
-nc_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-	-d "$PGC_DB" -Atc "SELECT pgcolumnar.parallel_copy('t_pc_heap'::regclass, '$F', 2)" 2>&1 || true)"
-check "parallel_copy: non-columnar target rejected" \
-	"$(printf '%s' "$nc_err" | grep -qi "not a pgcolumnar table" && echo ok || echo no)" ok
+# ---- atomicity 2: a loader failure rolls back the PREPARED siblings -----------
+# A gapped partitioned target (ids 2000..2999 belong to NO partition, no default):
+# workers whose ranges route rows into the gap fail with "no partition of relation",
+# so the coordinator must ROLLBACK PREPARED every worker that already prepared ->
+# the target is left empty, with no orphaned prepared transaction.
+psql_run "DROP TABLE IF EXISTS t_gap CASCADE;
+          CREATE TABLE t_gap (id int, txt text) PARTITION BY RANGE (id);
+          CREATE TABLE t_gap_a PARTITION OF t_gap FOR VALUES FROM (MINVALUE) TO (2000) USING pgcolumnar;
+          CREATE TABLE t_gap_b PARTITION OF t_gap FOR VALUES FROM (3000) TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+gap_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_gap'::regclass, '$F', 4)")"
+check "atomic: a loader failure fails the whole load" \
+	"$(printf '%s' "$gap_err" | grep -qiE 'no partition of relation|failed' && echo ok || echo no)" ok
+check "atomic: loader-failure leaves the target empty (siblings rolled back)" \
+	"$(q "SELECT count(*) FROM t_gap")" 0
+check "atomic: no prepared-transaction leak after loader failure" \
+	"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
+check "atomic: server still up after a failed load" "$(q "SELECT 1")" 1
+
+# ---- input must be sorted by the partition key -------------------------------
+F_SHUF="$DATADIR/shuf.txt"
+shuf "$F" > "$F_SHUF"; [ "$(id -u)" = "0" ] && chown postgres "$F_SHUF"
+mkpart t_pcp 4
+shuf_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F_SHUF', 4)")"
+check "unsorted input is rejected" \
+	"$(printf '%s' "$shuf_err" | grep -qi "not sorted" && echo ok || echo no)" ok
+check "unsorted rejection loads nothing" "$(q "SELECT count(*) FROM t_pcp")" 0
+
+# ---- a DEFAULT partition is rejected (it could catch any worker's rows) -------
+psql_run "DROP TABLE IF EXISTS t_def CASCADE;
+          CREATE TABLE t_def (id int, txt text) PARTITION BY RANGE (id);
+          CREATE TABLE t_def_a PARTITION OF t_def FOR VALUES FROM (MINVALUE) TO (2500) USING pgcolumnar;
+          CREATE TABLE t_def_d PARTITION OF t_def DEFAULT USING pgcolumnar;" >/dev/null
+def_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_def'::regclass, '$F', 4)")"
+check "DEFAULT partition target is rejected" \
+	"$(printf '%s' "$def_err" | grep -qi "DEFAULT partition" && echo ok || echo no)" ok
+
+# ---- the max_prepared_transactions guard fires up front ----------------------
+# max_prepared_transactions is 8 (set above); a target with more partitions than
+# that, loaded with that many workers, must error before spawning, naming the GUC.
+mkpart t_pcp10 10
+guard_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp10'::regclass, '$F', 10)")"
+check "max_prepared_transactions guard fires" \
+	"$(printf '%s' "$guard_err" | grep -qi "max_prepared_transactions" && echo ok || echo no)" ok
+check "guard rejects before loading anything" "$(q "SELECT count(*) FROM t_pcp10")" 0
+
+# ---- a missing file errors cleanly -------------------------------------------
+mkpart t_pcp 4
+mf_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$DATADIR/nope.txt', 2)")"
+check "missing file: errors, not crashes" \
+	"$(printf '%s' "$mf_err" | grep -qiE "could not (open|stat)|no such file|not a regular file" && echo ok || echo no)" ok
+check "missing file: server still up (no worker crash)" "$(q "SELECT 1")" 1
+check "missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pcp")" 0
+
+# ---- a non-partitioned target is rejected (would serialize/deadlock) ----------
+psql_run "DROP TABLE IF EXISTS t_plain; CREATE TABLE t_plain (id int, txt text) USING pgcolumnar;" >/dev/null
+np_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_plain'::regclass, '$F', 2)")"
+check "non-partitioned target is rejected" \
+	"$(printf '%s' "$np_err" | grep -qi "not partitioned" && echo ok || echo no)" ok
 
 pgc_summary
