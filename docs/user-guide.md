@@ -85,6 +85,24 @@ count first, because the load prepares one transaction per worker. On a machine
 with many cores this loads several times faster than one `COPY`. See
 [Benchmarks](benchmarks.md#parallel-bulk-ingest) for measured numbers.
 
+### Parallel Parquet export
+
+To write a large columnar table out fast, use
+[`pgcolumnar.parallel_export_parquet`](sql-reference.md#pgcolumnarparallel_export_parquettarget-regclass-path-text-workers-int-default-null-returns-bigint).
+It fans the export across several read-only background workers, each writing one
+file into a directory, and returns the row count. Read the directory back with
+`pgcolumnar.read_parquet`.
+
+```sql
+SELECT pgcolumnar.parallel_export_parquet('events', '/data/events_out', 8);
+SELECT count(*) FROM pgcolumnar.read_parquet('/data/events_out')
+  AS t(id bigint, ts timestamptz, val double precision);
+```
+
+The output directory must be empty, and is created if it does not exist. The caller needs the
+`pg_write_server_files` role. See [Benchmarks](benchmarks.md#import-and-export)
+for measured numbers.
+
 ## Query
 
 Queries need no special syntax. The planner adds columnar scan and aggregate
@@ -154,7 +172,8 @@ INSERT INTO people VALUES (1, ARRAY['a','b'], ROW('Portland','97201')::addr);
 ## Read Parquet files in place
 
 You can query a server-side Parquet file without importing it, either as a
-set-returning function or as a foreign table. Both require superuser.
+set-returning function or as a foreign table. Both require the
+`pg_read_server_files` role, which superusers hold.
 
 ```sql
 -- inspect the file's columns and their inferred types

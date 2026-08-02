@@ -159,6 +159,10 @@ coverage.
 - Export to Arrow and Parquet: `pgcolumnar.export_arrow(table, path)` and
   `pgcolumnar.export_parquet(table, path)`, both without a libarrow or libparquet
   dependency.
+- Parallel Parquet export: `pgcolumnar.parallel_export_parquet(table, dir, workers)`
+  writes a columnar table to a directory of Parquet files with several read-only
+  background workers, one file each. It gives a near-linear speedup, returns the
+  row count, and `pgcolumnar.read_parquet` reads the directory back.
 - Import from Arrow and Parquet: `pgcolumnar.import_arrow(table, path)` and
   `pgcolumnar.import_parquet(table, path)`, into a target table that exists. The
   import maintains each index on the target. It also applies the unique
@@ -169,7 +173,9 @@ coverage.
   version 1 and version 2.
 - Both directions cover scalar types, one-dimensional arrays, and composite types
   (Arrow List and Struct, Parquet LIST and group), with nulls at every level. The
-  functions require superuser and run on little-endian hosts. See the
+  functions require a server-file role, `pg_read_server_files` to read or
+  `pg_write_server_files` to write, which superusers hold. They run on
+  little-endian hosts. See the
   [SQL reference](sql-reference.md#import-and-export) and the
   [type-coverage table](limitations.md#import-and-export-type-coverage).
 

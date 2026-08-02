@@ -284,9 +284,10 @@ inspection and testing, not for query use.
 
 ## Import and export
 
-These functions read and write Arrow IPC stream files and Parquet files. They
-require superuser, because they read and write files on the server host. They run
-on little-endian hosts only. They support scalar column types, one-dimensional
+These functions read and write Arrow IPC stream files and Parquet files. They read
+and write files on the server host, so a reader needs the `pg_read_server_files`
+role and a writer needs the `pg_write_server_files` role. Superusers hold both.
+They run on little-endian hosts only. They support scalar column types, one-dimensional
 arrays, and composite types, with nulls at every level. The functions refuse multi-dimensional arrays
 and types that they do not support. See
 [Limitations and compatibility](limitations.md).
@@ -364,10 +365,44 @@ SELECT pgcolumnar.parallel_copy('events', '/data/events.txt', 8);   -- returns r
 SELECT pgcolumnar.parallel_copy('events_by_day', '/data/events_sorted.txt', 8);
 ```
 
+### pgcolumnar.parallel_export_parquet(target regclass, path text, workers int DEFAULT NULL) returns bigint
+
+Writes a columnar table to a directory of Parquet files with several read-only
+background workers at once. Returns the number of rows written. The caller needs
+membership in the `pg_write_server_files` role, which superusers hold, and SELECT
+on the target. The output directory must be empty. It is created if it does not exist. Each worker writes
+its own `part-NNNN.parquet` file, and `pgcolumnar.read_parquet` reads the whole
+directory back as one relation.
+
+The target may be one of two kinds:
+
+- A single columnar table. The workers split it by row-group ranges, so each
+  worker writes a distinct part of the table.
+- A partitioned table whose partitions are columnar. Each worker takes a distinct
+  set of partitions and writes one file per partition.
+
+The export is read-only and consistent. The dispatcher exports one snapshot and
+every worker imports it. The files together are the committed image of the table
+at call time. This holds even when the call runs inside a transaction with
+uncommitted rows. There is no coordinator and no shared write state. If any worker
+fails the dispatcher removes the files it wrote, so a partial directory is never
+left for `read_parquet` to union.
+
+When `workers` is omitted the function derives a value from the target.
+
+```sql
+-- single columnar table, split across 8 workers
+SELECT pgcolumnar.parallel_export_parquet('events', '/data/events_out', 8);
+-- read the whole directory back as one relation
+SELECT count(*) FROM pgcolumnar.read_parquet('/data/events_out')
+  AS t(id bigint, ts timestamptz, val double precision);
+```
+
 ## Reading external Parquet
 
 These read a server-side Parquet file in place, without importing it. They
-require superuser and operate on little-endian hosts. In each function, `path`
+require the `pg_read_server_files` role, which superusers hold, and operate on
+little-endian hosts. In each function, `path`
 can be one of three things. It can be a single file. It can be a directory, and
 then the function reads all the `*.parquet` files below it at any depth as one
 relation, in sorted order. It can also be a glob pattern.
