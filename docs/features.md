@@ -53,7 +53,9 @@ settings see the [configuration reference](configuration.md); for constraints se
   Neither path uses the per-tuple executor path. `count(*)` with no filter is one case of
   this: it is answered from each row group's stored row count and reads no column
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
-  aggregate over the scan instead.
+  aggregate over the scan instead. An opt-in path vectorizes `GROUP BY` too. Set
+  `pgcolumnar.enable_group_vectorization` to `on` to group and aggregate in one
+  pass over the reader. It is off by default.
 - Column statistics. `ANALYZE` samples rows from across the row groups. It stores
   the null fraction, the distinct counts, the most-common values, the histograms
   and the correlation. The planner then estimates the predicates from the data. Correlation is what lets the planner
