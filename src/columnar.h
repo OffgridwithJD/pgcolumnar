@@ -177,6 +177,7 @@ extern bool columnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#28
 extern int columnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
 extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
 extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
+extern bool columnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
 extern bool columnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
 
 /* issue #5: concurrent unique-key insert serialization */
@@ -320,6 +321,7 @@ extern void ColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
 									 char persistence, uint64 storageId);
 extern void ColumnarReadMetapage(Relation rel, ColumnarMetapage *meta);
 extern uint64 ColumnarStorageId(Relation rel);
+extern void ColumnarEnsureStorageRow(Relation rel);	/* pre-create storage row (#300 parallel_copy) */
 extern void ColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
 									  uint64 *stripeId, uint64 *firstRowNumber);
 extern void ColumnarReserveOffset(Relation rel, uint64 dataLength,

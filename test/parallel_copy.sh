@@ -356,10 +356,36 @@ check "missing file: errors, not crashes" \
 check "missing file: server still up (no worker crash)" "$(q "SELECT 1")" 1
 check "missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pcp")" 0
 
-# ---- a non-partitioned target is rejected (would serialize/deadlock) ----------
-psql_run "DROP TABLE IF EXISTS t_plain; CREATE TABLE t_plain (id int, txt text) USING pgcolumnar;" >/dev/null
-np_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_plain'::regclass, '$F', 2)")"
-check "non-partitioned target is rejected" \
-	"$(printf '%s' "$np_err" | grep -qi "not partitioned" && echo ok || echo no)" ok
+# ---- a non-columnar (heap) target is rejected --------------------------------
+psql_run "DROP TABLE IF EXISTS t_heaptgt; CREATE TABLE t_heaptgt (id int, txt text);" >/dev/null
+nc_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_heaptgt'::regclass, '$F', 2)")"
+check "non-columnar target is rejected" \
+	"$(printf '%s' "$nc_err" | grep -qi "not a pgcolumnar table" && echo ok || echo no)" ok
+
+# ---- single columnar table: workers write ONE storage concurrently -----------
+# The storage-row creation lock is skipped by the loaders (the coordinator
+# pre-creates the row committed), so N loaders write the one storage in parallel and
+# 2PC-atomically. The result must equal a single COPY -- a concurrency race on the
+# shared storage would diverge from the oracle. The GUC that gates the engine's
+# skip must default off, so an ordinary write never takes that path.
+check "bulk_parallel_writer GUC defaults off (core write path unchanged)" \
+	"$(q "SHOW pgcolumnar.bulk_parallel_writer")" off
+for W in 1 2 4; do
+	psql_run "DROP TABLE IF EXISTS t_single; CREATE TABLE t_single (id int, txt text) USING pgcolumnar;" >/dev/null
+	check "parallel_copy(single table, $W workers): rows returned = 5000" \
+		"$(q "SELECT pgcolumnar.parallel_copy('t_single'::regclass, '$F', $W)")" 5000
+	check "parallel_copy(single table, $W workers): result == single-COPY oracle" \
+		"$(pgc_set_hash "SELECT * FROM t_single")" "$(pgc_set_hash "SELECT * FROM t_heap")"
+	check "parallel_copy(single table, $W workers): no prepared-transaction leak" \
+		"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
+done
+
+# single-table atomicity: a bad row rolls back the whole load, no leak
+psql_run "DROP TABLE IF EXISTS t_single; CREATE TABLE t_single (id int, txt text) USING pgcolumnar;" >/dev/null
+st_bad="$(err_of "SELECT pgcolumnar.parallel_copy('t_single'::regclass, '$F_BADKEY', 4)")"
+check "single table: a bad row fails the whole load" \
+	"$(printf '%s' "$st_bad" | grep -qiE 'invalid input syntax|failed' && echo ok || echo no)" ok
+check "single table: failed load leaves the target empty" "$(q "SELECT count(*) FROM t_single")" 0
+check "single table: no prepared-transaction leak after failure" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
 pgc_summary

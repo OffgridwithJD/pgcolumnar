@@ -914,10 +914,12 @@ COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
 -- serialize on the per-storage write lock and, under two-phase commit, deadlock
 -- (single-table parallel load is a planned columnar-core enhancement). Loaders
 -- PREPARE; a coordinator background worker COMMIT PREPAREDs them all, or ROLLBACK
--- PREPAREDs on any failure. Returns rows loaded. Requirements: RANGE-partitioned
--- target (single-column numeric/date-time key, no DEFAULT partition), the file
--- sorted ascending by that key, COPY text format, and max_prepared_transactions >=
--- workers. workers => NULL derives a default from max_parallel_workers.
+-- PREPAREDs on any failure. Returns rows loaded. The target is either a single
+-- columnar table (workers write its one storage concurrently) or a RANGE-partitioned
+-- table (each worker loads a distinct partition; requires a single-column
+-- numeric/date-time key, no DEFAULT partition, and the file sorted ascending by that
+-- key). COPY text format, and max_prepared_transactions >= workers. workers => NULL
+-- derives a default from max_parallel_workers.
 --
 -- Two behaviors to know: (1) the load commits in background workers, INDEPENDENTLY
 -- of the calling transaction, so its rows survive a subsequent ROLLBACK of the

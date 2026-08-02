@@ -198,6 +198,26 @@ pcopy_line_offsets(int fd, off_t size, int nranges, const char *path)
 	return offs;
 }
 
+/*
+ * pcopy_naive_offsets
+ *		Line-aligned byte offsets partitioning `path` into `workers` even ranges,
+ *		for the single-table load where every worker writes the one storage and any
+ *		record-aligned split is correct (no partition key, so no ordering
+ *		requirement). Returns a palloc'd int64[workers+1].
+ */
+static int64 *
+pcopy_naive_offsets(const char *path, int workers)
+{
+	int			fd;
+	off_t		size;
+	int64	   *offs;
+
+	fd = pcopy_open_regular_file(path, &size);
+	offs = pcopy_line_offsets(fd, size, workers, path);
+	CloseTransientFile(fd);
+	return offs;
+}
+
 PG_FUNCTION_INFO_V1(columnar_file_split_offsets);
 
 /*
@@ -334,8 +354,11 @@ typedef struct PcopyHeader
 {
 	Oid			dbid;
 	Oid			roleid;
-	Oid			relid;			/* target relation */
+	Oid			relid;			/* target relation (partitioned parent, or a single columnar table) */
 	int			nworkers;
+	bool		single_table;	/* target is one columnar table (not partitioned):
+								 * coordinator pre-creates the storage row and loaders
+								 * set columnar_bulk_parallel_writer */
 	char		filename[MAXPGPATH];
 	/* coordinator -> function result channel */
 	pg_atomic_uint32 coord_state;	/* PcopyCoordState */
@@ -740,6 +763,17 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 #endif
 	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
 
+	/*
+	 * Single-table load: this loader writes the one shared storage concurrently
+	 * with its siblings. The coordinator has pre-created and committed the storage
+	 * row, so opt this session into skipping the storage-row creation lock -- the
+	 * only transaction-length serializer on the same-storage write path. For a
+	 * partitioned target each loader owns distinct partitions (distinct storage) and
+	 * never contends, so the flag stays off there.
+	 */
+	if (hdr->single_table)
+		columnar_bulk_parallel_writer = true;
+
 	PG_TRY();
 	{
 		Relation	rel;
@@ -964,6 +998,25 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 #endif
 	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
 
+	/*
+	 * Single-table load: pre-create and COMMIT the storage catalog row before any
+	 * loader starts, in the coordinator's own top-level session (the SQL function
+	 * cannot commit). With the row committed, each loader -- which sets
+	 * columnar_bulk_parallel_writer -- sees it and skips the storage-row creation
+	 * lock, so N loaders write the one storage concurrently and 2PC-safely. The
+	 * coordinator itself leaves the flag off, so this uses the normal create path.
+	 */
+	if (hdr->single_table)
+	{
+		Relation	rel;
+
+		StartTransactionCommand();
+		rel = table_open(hdr->relid, RowExclusiveLock);
+		ColumnarEnsureStorageRow(rel);
+		table_close(rel, NoLock);
+		CommitTransactionCommand();
+	}
+
 	handles = (BackgroundWorkerHandle **)
 		palloc0(sizeof(BackgroundWorkerHandle *) * nworkers);
 
@@ -1149,6 +1202,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	char	   *path;
 	int			workers;
 	int			max_prepared;
+	bool		single_table = false;
 	int64	   *offs;
 	shm_toc_estimator est;
 	Size		segsize;
@@ -1192,20 +1246,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	 * aligned byte ranges here (this may lower `workers` to the partition count).
 	 */
 	{
-		Relation	parent = table_open(relid, AccessShareLock);
-
-		if (parent->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
-		{
-			char		nm[NAMEDATALEN];
-
-			strlcpy(nm, RelationGetRelationName(parent), NAMEDATALEN);
-			table_close(parent, AccessShareLock);
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgcolumnar.parallel_copy requires a partitioned target, but \"%s\" is not partitioned",
-							nm),
-					 errhint("Partition the target so each worker loads a distinct partition. Parallel load into a single non-partitioned table is a planned enhancement.")));
-		}
+		Relation	target = table_open(relid, AccessShareLock);
 
 		/*
 		 * The loaders run as this role and INSERT into the target, so the caller
@@ -1220,14 +1261,42 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 			{
 				char		nm[NAMEDATALEN];
 
-				strlcpy(nm, RelationGetRelationName(parent), NAMEDATALEN);
-				table_close(parent, AccessShareLock);
+				strlcpy(nm, RelationGetRelationName(target), NAMEDATALEN);
+				table_close(target, AccessShareLock);
 				aclcheck_error(aclresult, OBJECT_TABLE, nm);
 			}
 		}
 
-		offs = pcopy_partition_aligned_offsets(parent, path, &workers);
-		table_close(parent, AccessShareLock);
+		if (target->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			/* each worker loads a DISTINCT partition (distinct storage) */
+			offs = pcopy_partition_aligned_offsets(target, path, &workers);
+			single_table = false;
+		}
+		else if (ColumnarIsColumnarRelation(relid))
+		{
+			/*
+			 * A single columnar table: workers write the ONE storage concurrently
+			 * (distinct stripe/row-number reservations; the coordinator pre-creates
+			 * the storage row and the loaders skip its creation lock via
+			 * columnar_bulk_parallel_writer). Any record-aligned byte split is
+			 * correct -- no partition key, so no sorted-input requirement.
+			 */
+			offs = pcopy_naive_offsets(path, workers);
+			single_table = true;
+		}
+		else
+		{
+			char		nm[NAMEDATALEN];
+
+			strlcpy(nm, RelationGetRelationName(target), NAMEDATALEN);
+			table_close(target, AccessShareLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a pgcolumnar table or a partitioned table",
+							nm)));
+		}
+		table_close(target, AccessShareLock);
 	}
 
 	/*
@@ -1269,6 +1338,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	hdr->roleid = GetUserId();
 	hdr->relid = relid;
 	hdr->nworkers = workers;
+	hdr->single_table = single_table;
 	strlcpy(hdr->filename, path, sizeof(hdr->filename));
 	hdr->total_rows = 0;
 	hdr->failed_worker = -1;
