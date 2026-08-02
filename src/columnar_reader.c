@@ -69,6 +69,18 @@ struct ColumnarReadState
 	bool	   *missingIsnull;		/* [natts] */
 
 	Bitmapset  *projectedColumns;	/* 0-based; NULL means all columns */
+
+	/*
+	 * Column projection (#338). colWanted[c] is true when column c must actually
+	 * be read and decoded; it is the flattened form of projectedColumns, so the
+	 * per-row and per-chunk tests are an array index rather than a bitmapset
+	 * probe. A NULL projectedColumns means every column is wanted, which is what
+	 * every caller outside the custom scan and the vectorized aggregates passes,
+	 * so those paths keep reading whole groups exactly as before.
+	 */
+	bool	   *colWanted;			/* [natts] */
+	bool		allColumnsWanted;	/* true when colWanted is all true */
+
 	SkipPredicate *predicates;		/* [numPredicates], in readContext */
 	int			numPredicates;
 
@@ -105,10 +117,11 @@ struct ColumnarReadState
 
 	/*
 	 * Native format (PGCN v1) read state. The scan reads row groups and column
-	 * chunks from the native catalog. The current row group's bytes are read
-	 * whole into nativeBuffer (in groupContext); nativeValidity[c] points at each
-	 * column chunk's validity bitmap and nativeValueCursor[c] advances through its
-	 * uncompressed values.
+	 * chunks from the native catalog. The current row group's bytes are read into
+	 * nativeBuffer (in groupContext) -- whole, or only the projected columns'
+	 * ranges (#338); nativeValidity[c] points at each column chunk's validity
+	 * bitmap and nativeValueCursor[c] advances through its uncompressed values.
+	 * Both stay NULL for a column that was not read.
 	 */
 	List	   *rowGroupList;		/* NativeRowGroupMetadata* */
 	int			rowGroupIndex;		/* next row group to load */
@@ -332,6 +345,24 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 	}
 
 	readState->projectedColumns = bms_copy(projectedColumns);
+
+	/*
+	 * Flatten the projection (#338). A NULL bitmap means "all columns" -- that is
+	 * how columnar_projected_columns reports a whole-row Var, any system column,
+	 * and a query referencing no column at all (count(*)), and it is what every
+	 * caller that does not compute a projection passes.
+	 */
+	readState->colWanted = palloc(sizeof(bool) * readState->natts);
+	readState->allColumnsWanted = (projectedColumns == NULL ||
+								   !columnar_enable_column_projection);
+	{
+		int			pc;
+
+		for (pc = 0; pc < readState->natts; pc++)
+			readState->colWanted[pc] = readState->allColumnsWanted ||
+				bms_is_member(pc, projectedColumns);
+	}
+
 	readState->started = false;
 	readState->exhausted = false;
 	readState->parallelScan = parallelScan;
@@ -872,12 +903,173 @@ columnar_native_build_skipvec(ColumnarReadState *rs, uint64 groupNumber, int vec
 	rs->nativeSkipVec = any ? skip : NULL;
 }
 
+/* a half-open span of the row group's bytes, used to build coalesced reads */
+typedef struct ColumnarByteRange
+{
+	uint64		start;
+	uint64		end;
+} ColumnarByteRange;
+
+/*
+ * columnar_byte_range_cmp
+ *		Order byte ranges by start offset, so adjacent ones can be coalesced.
+ */
+static int
+columnar_byte_range_cmp(const void *a, const void *b)
+{
+	uint64		sa = ((const ColumnarByteRange *) a)->start;
+	uint64		sb = ((const ColumnarByteRange *) b)->start;
+
+	if (sa < sb)
+		return -1;
+	if (sa > sb)
+		return 1;
+	return 0;
+}
+
+/*
+ * columnar_native_read_projected
+ *		Read only the byte ranges the projected columns occupy (#338), rather
+ *		than the whole row group.
+ *
+ *		Ranges that touch or overlap in the file are coalesced, so a projection
+ *		covering neighbouring columns costs one read rather than one per column.
+ *		Chunks are written column-major (columnar_write_state.c), so in practice
+ *		a projection is a small number of runs. Everything lands at its natural
+ *		offset inside the full-size group buffer, leaving the rest untouched.
+ */
+static void
+columnar_native_read_projected(ColumnarReadState *rs,
+							   NativeRowGroupMetadata *rg, List *chunks)
+{
+	ColumnarByteRange *ranges;
+	uint64		groupEnd = rg->fileOffset + rg->byteLength;
+	uint64		minStart = groupEnd;
+	uint64		maxEnd = rg->fileOffset;
+	bool		sawChunk = false;
+	int			n = 0;
+	int			i;
+	ListCell   *lc;
+
+	if (chunks == NIL)
+		return;
+
+	ranges = (ColumnarByteRange *)
+		palloc(sizeof(ColumnarByteRange) * list_length(chunks));
+
+	foreach(lc, chunks)
+	{
+		NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(lc);
+
+		if (cc->columnIndex < 0 || cc->columnIndex >= rs->natts)
+			continue;
+
+		/*
+		 * Track the extent of every chunk, wanted or not, so the group can be
+		 * validated below.
+		 */
+		if (cc->pageLength > 0)
+		{
+			if (cc->pageOffset < minStart)
+				minStart = cc->pageOffset;
+			if (cc->pageOffset + cc->pageLength > maxEnd)
+				maxEnd = cc->pageOffset + cc->pageLength;
+			sawChunk = true;
+		}
+
+		if (!rs->colWanted[cc->columnIndex])
+			continue;
+		if (cc->pageLength == 0)
+			continue;
+
+		/*
+		 * The chunk must lie inside the group it belongs to. The whole-group
+		 * read never had to check this because it read the group as one span;
+		 * reading per chunk turns a bad catalog row into an out-of-bounds write,
+		 * so it is checked rather than assumed.
+		 */
+		if (cc->pageOffset < rg->fileOffset ||
+			cc->pageOffset + cc->pageLength > groupEnd)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("columnar chunk for column %d lies outside row group " UINT64_FORMAT,
+							cc->columnIndex + 1, rg->groupNumber),
+					 errdetail("Chunk spans [" UINT64_FORMAT ", " UINT64_FORMAT ") but the row group is ["
+							   UINT64_FORMAT ", " UINT64_FORMAT ").",
+							   cc->pageOffset, cc->pageOffset + cc->pageLength,
+							   rg->fileOffset, groupEnd)));
+
+		ranges[n].start = cc->pageOffset;
+		ranges[n].end = cc->pageOffset + cc->pageLength;
+		n++;
+	}
+
+	/*
+	 * The chunks must exactly tile the row group they belong to: the writer
+	 * lays them out column-major, back to back, and sets byte_length to their
+	 * total, with no padding between them (verified across plain inserts, ADD
+	 * COLUMN, stored generated columns, updates and deletes, compact,
+	 * vacuum_sorted, block-compressed columns, and VACUUM FULL).
+	 *
+	 * Checking it here is what keeps a corrupt row_group.byte_length detectable.
+	 * The whole-group read caught that incidentally, by trying to read a length
+	 * that ran past the end of the relation; a projected read only touches the
+	 * chunk ranges, so an inflated byte_length would otherwise go unnoticed and
+	 * be silently tolerated. This is the more direct check anyway -- it names
+	 * the inconsistency rather than surfacing as a short read.
+	 *
+	 * Reads with no projection keep the old path untouched, so
+	 * pgcolumnar.enable_column_projection=off remains a way back if a layout
+	 * this does not anticipate ever turns up.
+	 */
+	if (sawChunk && (maxEnd != groupEnd || minStart != rg->fileOffset))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("columnar row group " UINT64_FORMAT " is inconsistent with its column chunks",
+						rg->groupNumber),
+				 errdetail("The group spans [" UINT64_FORMAT ", " UINT64_FORMAT ") but its chunks span ["
+						   UINT64_FORMAT ", " UINT64_FORMAT ").",
+						   rg->fileOffset, groupEnd, minStart, maxEnd)));
+
+	/* every projected column postdates this group (ADD COLUMN): nothing to read */
+	if (n == 0)
+		return;
+
+	qsort(ranges, n, sizeof(ColumnarByteRange), columnar_byte_range_cmp);
+
+	for (i = 0; i < n;)
+	{
+		uint64		start = ranges[i].start;
+		uint64		end = ranges[i].end;
+		int			j = i + 1;
+
+		while (j < n && ranges[j].start <= end)
+		{
+			if (ranges[j].end > end)
+				end = ranges[j].end;
+			j++;
+		}
+
+		ColumnarReadLogicalData(rs->rel, start,
+								rs->nativeBuffer + (start - rg->fileOffset),
+								end - start);
+		i = j;
+	}
+
+	pfree(ranges);
+}
+
 /*
  * columnar_native_load_group
- *		Load the next native row group (PGCN v1, Phase D3): read its bytes whole
- *		into the group context and set each column's validity-bitmap pointer and
- *		values cursor. Row groups the zone maps prove cannot match are skipped
- *		(Phase D5b). Returns false when no more row groups remain.
+ *		Load the next native row group (PGCN v1, Phase D3): read the bytes of the
+ *		projected columns into the group context and set each such column's
+ *		validity-bitmap pointer and values cursor. Row groups the zone maps prove
+ *		cannot match are skipped (Phase D5b). Returns false when no more row
+ *		groups remain.
+ *
+ *		Without a projection this reads the group whole, as it always has. With
+ *		one it reads and decodes only the wanted columns (#338); the others are
+ *		left unmaterialised and the row loop emits NULL for them.
  */
 static bool
 columnar_native_load_group(ColumnarReadState *rs)
@@ -930,13 +1122,32 @@ columnar_native_load_group(ColumnarReadState *rs)
 	MemoryContextReset(rs->groupContext);
 	oldContext = MemoryContextSwitchTo(rs->groupContext);
 	rs->nativeGroup = rg;
-	rs->nativeBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
-	if (rg->byteLength > 0)
-		ColumnarReadLogicalData(rs->rel, rg->fileOffset, rs->nativeBuffer,
-								rg->byteLength);
 
+	/*
+	 * The chunk metadata is read before the data (#338) because it carries the
+	 * per-column byte ranges the projected read needs. It is a catalog read and
+	 * touches none of the group's data pages.
+	 */
 	chunks = ColumnarReadColumnChunkList(rs->storageId, rg->groupNumber,
 										 rs->metaSnapshot);
+
+	/*
+	 * Column projection (#338). The buffer is always allocated at full group
+	 * size so the base = nativeBuffer + (pageOffset - fileOffset) arithmetic
+	 * below stays valid for every chunk; only the wanted ranges are read into
+	 * it. palloc does not touch the pages it hands back, so the regions that are
+	 * never read cost no resident memory.
+	 */
+	rs->nativeBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
+	if (rg->byteLength > 0)
+	{
+		if (rs->allColumnsWanted)
+			ColumnarReadLogicalData(rs->rel, rg->fileOffset, rs->nativeBuffer,
+									rg->byteLength);
+		else
+			columnar_native_read_projected(rs, rg, chunks);
+	}
+
 	rs->nativeValidity = palloc0(sizeof(char *) * rs->natts);
 	rs->nativeValueCursor = palloc0(sizeof(char *) * rs->natts);
 	rs->nativeVecRawLen = (uint32 **) palloc0(sizeof(uint32 *) * rs->natts);
@@ -954,6 +1165,16 @@ columnar_native_load_group(ColumnarReadState *rs)
 
 		if (cc->columnIndex < 0 || cc->columnIndex >= rs->natts)
 			continue;
+
+		/*
+		 * Not projected (#338): its bytes were never read, so decoding it would
+		 * read uninitialized buffer. Leaving nativeValidity NULL is what marks
+		 * the column unmaterialised for the row loop, which emits an explicit
+		 * NULL for it rather than the ADD COLUMN missing value.
+		 */
+		if (!rs->colWanted[cc->columnIndex])
+			continue;
+
 		base = rs->nativeBuffer + (cc->pageOffset - rg->fileOffset);
 		rs->nativeValidity[cc->columnIndex] = base;
 
@@ -1126,6 +1347,23 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 		{
 			Form_pg_attribute att = TupleDescAttr(rs->tupdesc, c);
 			char	   *vbits = rs->nativeValidity[c];
+
+			/*
+			 * Not projected (#338): never read, so there is no value to give.
+			 * This is tested before the absent-column case on purpose. Both
+			 * leave nativeValidity NULL, but they mean different things, and
+			 * falling through to missingValues here would hand back an ADD
+			 * COLUMN default for a column that simply was not fetched -- a
+			 * plausible wrong value instead of an obvious one. Nothing above
+			 * the scan can read this column (the projection unions the
+			 * targetlist and the qual), so an explicit NULL is unobservable.
+			 */
+			if (!rs->colWanted[c])
+			{
+				values[c] = (Datum) 0;
+				nulls[c] = true;
+				continue;
+			}
 
 			/* column absent from this group (added by a later ADD COLUMN) */
 			if (vbits == NULL)

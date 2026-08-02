@@ -168,6 +168,7 @@ extern int columnar_compression;		/* one of COLUMNAR_COMPRESSION_* */
 extern int columnar_compression_level;	/* zstd level */
 extern int columnar_fsst_min_gain_percent;	/* min compressed FSST win to keep it (#155) */
 extern bool columnar_enable_qual_pushdown;
+extern bool columnar_enable_column_projection;
 extern bool columnar_enable_custom_scan;
 extern bool columnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 
