@@ -355,10 +355,22 @@ Each other query uses the scalar plan and stays correct. These include `sum` or
 
 - ordered-set aggregates and string aggregates
 - aggregates with `DISTINCT`
-- `GROUP BY` and `HAVING`
+- `GROUP BY` and `HAVING`, unless the opt-in grouped path below is enabled
 - filters that are not simple
 - joins
 - a reference to a whole row or to a system column
+
+A separate opt-in path vectorizes `GROUP BY`. It is off by default. Set
+`pgcolumnar.enable_group_vectorization` to `on` to enable it. It covers
+`SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys>` on one columnar
+relation. Each key must be non-volatile, hashable, and computable from that
+relation. A collatable key must use a deterministic collation. Each output must
+be a supported aggregate or a bare key reference. This path also accepts `sum`
+and `avg` on `bigint`, `numeric`, and floating-point columns, which the ungrouped
+path rejects. `pgcolumnar.groupagg_max_groups` caps the group count, default
+1,000,000. The cap is checked at execution against the real count, so a query
+that exceeds it errors rather than switching plans. Raise the cap or turn the
+path off.
 
 ## Skipping and collation
 
