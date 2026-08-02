@@ -81,20 +81,17 @@ is and where the current numbers are; follow the link for figures.
    dictionary-coded grouping on the high-cardinality text key. The shapes where
    pgColumnar is furthest behind, and the two where it is slower than heap, are
    q6 and q8 in #289's table; nothing in flight addresses either.
-2. **Parallel bulk ingest** (#300). Bulk load itself is closed (#155): four
-   encoder levers landed via #290.
-   The remaining lever is not a COPY parser bypass. #300's own profile attributes
-   most of the columnar load to encode rather than to parse, so bypassing the
-   parser alone cannot close the gap to heap, and the measured lever is
-   parallelism over the existing encoder with core COPY unchanged. #323 is the
-   design and first slice. `IMPORT_THROUGHPUT_PLAN.md` is *not* the reference: it
-   predates the #283 to #286 work and puts COPY under "Not in scope". Read the
-   #300 thread.
-3. **Code comment audit** (#291) to the ASD-STE100 standard. The documentation
+2. **Code comment audit** (#291) to the ASD-STE100 standard. The documentation
    half landed in #298, which added `test/docs_style.sh` to the matrix as a
    durable gate. The code comments remain, and no gate covers them: the licensed
    ASD-STE100 vocabulary list cannot be checked mechanically, so any claim of
    compliance there is unverifiable by construction.
+
+Bulk ingest is done and #300 is closed. `pgcolumnar.parallel_copy` fans core COPY,
+unchanged, across background workers: partition-parallel in #323, single-table in
+#324, both atomic via two-phase commit. The parser bypass the issue was named for
+was rejected on its own measurement, since parse is a minority of the load. Read
+the #300 thread for the profile and the two write-path findings it produced.
 
 Not work, but still open: **#310, selective-scan page reads**. Both causes are
 fixed and merged (#315 and #317) and the effect was re-measured at 100M by both
