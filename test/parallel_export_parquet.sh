@@ -138,7 +138,11 @@ psql_run "DROP TABLE IF EXISTS t_big;
           SELECT pgcolumnar.set_options('t_big'::regclass, stripe_row_limit => 2000);
           INSERT INTO t_big SELECT g, g%1000, g::float8/7, 'r'||g
                             FROM generate_series(1,8000000) g;" >/dev/null
-err_of "SET statement_timeout='400ms'; SELECT pgcolumnar.parallel_export_parquet('t_big'::regclass, '$PGC_WORKDIR/cx', 4)" >/dev/null
+cx_err="$(err_of "SET statement_timeout='400ms'; SELECT pgcolumnar.parallel_export_parquet('t_big'::regclass, '$PGC_WORKDIR/cx', 4)")"
+# pin that the run reached execution and was cancelled by the timeout, not rejected
+# up front -- otherwise "0 files" could pass without the cleanup path running
+check "the cancel was the statement timeout, not an early rejection" \
+	"$(printf '%s' "$cx_err" | grep -qiE 'statement timeout|canceling statement' && echo yes || echo no)" yes
 check "a cancelled export leaves no partial files (item 2)" \
 	"$(nfiles "$PGC_WORKDIR/cx")" 0
 # and the cleaned directory is reusable (require-empty does not block a retry)
