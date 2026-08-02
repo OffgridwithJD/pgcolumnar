@@ -38,6 +38,7 @@
 
 #include <math.h>
 
+#include "miscadmin.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/pg_aggregate.h"
@@ -87,6 +88,15 @@ bool		columnar_enable_vectorization = true;
  */
 bool		columnar_enable_group_vectorization = false;
 int			columnar_groupagg_max_groups = 1000000;
+
+/*
+ * GUC: extend the ungrouped vectorized aggregate to the shapes a zone map cannot
+ * answer -- an aggregate with a WHERE filter, or sum/avg over int8/float/numeric
+ * (#289). Those fall to the row-wise core Agg today; this folds them in one pass
+ * over the columnar scan instead. Default off while the path is proven and
+ * benchmarked; the metadata-answerable no-filter path is unaffected.
+ */
+bool		columnar_enable_ungrouped_vector_agg = false;
 
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
@@ -229,9 +239,9 @@ typedef enum ColumnarAggKind
 	COLUMNAR_AGG_MIN,
 	COLUMNAR_AGG_MAX,
 	/*
-	 * Extended kinds used by the grouped path (#289). The ungrouped
-	 * metadata-fold path never produces these (its classifier still rejects
-	 * int8/float/numeric sum/avg), so its switches never see them.
+	 * Extended kinds used by the grouped path and the ungrouped scan-fold path
+	 * (#289). The metadata-fold path (columnar_fill_native_metadata_agg) still
+	 * never produces these: a query using one is routed to scan-fold instead.
 	 */
 	COLUMNAR_AGG_SUM_INT8,		/* sum(int8) -> numeric */
 	COLUMNAR_AGG_SUM_FLOAT,		/* sum(float4/float8) -> float8 */
@@ -520,6 +530,26 @@ typedef struct ColumnarAggScanState
 	MemoryContext resultContext;	/* holds min/max running values */
 	bool		done;			/* the single result row was emitted */
 
+	/*
+	 * Scan-fold mode (#289): the aggregate has a WHERE filter, or a sum/avg a
+	 * zone map cannot answer, so the node scans and folds every surviving row
+	 * instead of answering from metadata. NULL whereState means no residual
+	 * recheck (a pure extended aggregate with no filter).
+	 */
+	bool		scanFold;
+	Bitmapset  *projected;		/* base columns the scan must return */
+	TupleTableSlot *baseSlot;	/* holds each read row for the qual recheck */
+	ExprState  *whereState;		/* residual WHERE recheck, or NULL */
+
+	/*
+	 * Batch fold (#289): when every aggregate and the whole WHERE are
+	 * batch-eligible, fold the decoded column buffer column-at-a-time instead of
+	 * one Datum tuple per row. batchEligible is decided at Begin (a shape
+	 * property, for EXPLAIN); batchFolded records that the fold actually ran.
+	 */
+	bool		batchEligible;
+	bool		batchFolded;
+
 	/* chunk-group skip counters captured for EXPLAIN */
 	bool		haveStats;
 	uint64		groupsRead;
@@ -607,6 +637,9 @@ typedef struct ColumnarGroupAggScanState
 static const CustomExecMethods columnar_groupagg_exec_methods;
 static void ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 									RelOptInfo *output_rel);
+static bool columnar_batch_shape_eligible(ColumnarAggScanState *state,
+										  TupleDesc tupdesc, ScanKey *keysOut,
+										  int *nkeysOut);
 
 /* -------------------------------------------------------------------------
  * vectorized aggregate: planning
@@ -640,6 +673,37 @@ static const CustomPathMethods columnar_agg_path_methods = {
 static create_upper_paths_hook_type prev_create_upper_paths_hook = NULL;
 
 /*
+ * columnar_agg_metadata_answerable
+ *		True when this aggregate kind is answerable from whole-chunk zone maps
+ *		with no data scan: count, count(col), sum/avg over int2/int4 (the zone
+ *		stores an int sum), min and max. The extended kinds (sum/avg over
+ *		int8/float/numeric) are not, so a query using one must scan and fold. See
+ *		columnar_fill_native_metadata_agg.
+ */
+static bool
+columnar_agg_metadata_answerable(ColumnarAggKind kind)
+{
+	switch (kind)
+	{
+		case COLUMNAR_AGG_COUNT_STAR:
+		case COLUMNAR_AGG_COUNT_COL:
+		case COLUMNAR_AGG_SUM_INT:
+		case COLUMNAR_AGG_AVG_INT:
+		case COLUMNAR_AGG_MIN:
+		case COLUMNAR_AGG_MAX:
+			return true;
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_SUM_NUMERIC:
+		case COLUMNAR_AGG_AVG_INT8:
+		case COLUMNAR_AGG_AVG_FLOAT:
+		case COLUMNAR_AGG_AVG_NUMERIC:
+			return false;
+	}
+	return false;
+}
+
+/*
  * ColumnarCreateUpperPaths
  *		create_upper_paths_hook: for a plain SELECT agg(col) FROM columnar_table
  *		[WHERE simple quals] with no grouping or HAVING, add a custom path that
@@ -663,6 +727,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *quals;
 	int			npreds;
 	bool		allConvertible;
+	bool		needsScan;
 	Path	   *cheapest;
 	CustomPath *cpath;
 
@@ -729,26 +794,62 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(expr, Aggref))
 			return;
 		if (!columnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
-									  false, &specs[i]))
+									  true, &specs[i]))
 			return;
 		i++;
 	}
 
 	/*
-	 * The ungrouped path supports no residual filter: collect any restriction
-	 * clauses so that with any WHERE we fall back to the ordinary Agg.
+	 * The whole WHERE, rechecked per row in scan-fold mode; NIL with no filter.
+	 * A native table answers an ungrouped aggregate from its zone maps with no
+	 * data scan (native spec 7.1), but only with no filter and every aggregate
+	 * zone-map answerable. A filter, or a sum/avg over int8/float/numeric, needs
+	 * the scan-fold path instead (#289).
 	 */
 	quals = extract_actual_clauses(input_rel->baserestrictinfo, false);
 
-	/*
-	 * A native table answers an ungrouped aggregate from its zone maps without a
-	 * data scan (native spec 7.1), but only when there is no residual filter; with
-	 * a filter, fall back to the ordinary Agg over the skipping-enabled custom
-	 * scan.
-	 */
-	if (quals != NIL)
-		return;
+	needsScan = (quals != NIL);
+	for (i = 0; i < naggs; i++)
+		if (!columnar_agg_metadata_answerable(specs[i].kind))
+			needsScan = true;
 
+	if (needsScan)
+	{
+		/*
+		 * Scan-fold path (#289): the ungrouped sibling of the grouped path. It
+		 * scans every surviving row once and folds it, so it handles a filter and
+		 * the extended sum/avg kinds a zone map cannot. Opt-in while it is proven.
+		 */
+		ListCell   *rc;
+		Bitmapset  *whereAtts = NULL;
+		int			m = -1;
+
+		if (!columnar_enable_ungrouped_vector_agg)
+			return;
+
+		/*
+		 * A pseudoconstant (gating) qual is a one-time filter, not a per-row
+		 * predicate; the recheck this path relies on runs per row and would never
+		 * apply it, so a false gate would wrongly return a row. Rare; fall back.
+		 * (Mirrors the grouped path.)
+		 */
+		foreach(rc, input_rel->baserestrictinfo)
+			if (lfirst_node(RestrictInfo, rc)->pseudoconstant)
+				return;
+
+		/*
+		 * A WHERE on a system column or a whole-row Var cannot be evaluated from
+		 * the projected data columns the recheck reads; fall back rather than
+		 * evaluate it against unset slot values.
+		 */
+		pull_varattnos((Node *) quals, input_rel->relid, &whereAtts);
+		while ((m = bms_next_member(whereAtts, m)) >= 0)
+			if (m + FirstLowInvalidHeapAttributeNumber <= 0)
+				return;
+
+		npreds = 0;				/* the EXPLAIN count is filled at execution */
+	}
+	else
 	{
 		Relation	rel = table_open(relid, AccessShareLock);
 		TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -756,9 +857,9 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		ColumnarCountConvertibleQuals(quals, input_rel->relid, tupdesc,
 									  &npreds, &allConvertible);
 		table_close(rel, AccessShareLock);
+		if (!allConvertible)
+			return;
 	}
-	if (!allConvertible)
-		return;
 
 	cheapest = input_rel->cheapest_total_path;
 	if (cheapest == NULL)
@@ -794,6 +895,34 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	 * execution asks; if the answer changes between planning and execution the
 	 * plan is mispriced, never wrong.
 	 */
+	if (needsScan)
+	{
+		/*
+		 * A full columnar scan, priced from the cheapest non-index path (an index
+		 * scan cannot serve this node), plus a token per-row bump so this opt-in
+		 * accelerator is chosen over the ordinary Agg-over-scan when it is enabled.
+		 */
+		Path	   *scanp = NULL;
+		ListCell   *pc;
+		Cost		cost;
+
+		foreach(pc, input_rel->pathlist)
+		{
+			Path	   *p = (Path *) lfirst(pc);
+
+			if (p->pathtype == T_IndexScan || p->pathtype == T_IndexOnlyScan ||
+				p->pathtype == T_BitmapHeapScan)
+				continue;
+			if (scanp == NULL || p->total_cost < scanp->total_cost)
+				scanp = p;
+		}
+		if (scanp == NULL)
+			scanp = cheapest;
+		cost = scanp->total_cost + cpu_tuple_cost;
+		cpath->path.startup_cost = cost;
+		cpath->path.total_cost = cost;
+	}
+	else
 	{
 		ColumnarOptions opts;
 		int			limit = columnar_stripe_row_limit;
@@ -1142,10 +1271,20 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
 		/* classified successfully at plan time; -1 skips the varno check */
-		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, false,
+		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true,
 										&state->specs[i]);
 		i++;
 	}
+
+	/*
+	 * Scan-fold mode (#289) matches the planner's routing: a residual filter, or
+	 * any aggregate a zone map cannot answer. The metadata-answerable no-filter
+	 * case keeps the zone-map path in ColumnarExecAggScan.
+	 */
+	state->scanFold = (state->quals != NIL);
+	for (i = 0; i < naggs; i++)
+		if (!columnar_agg_metadata_answerable(state->specs[i].kind))
+			state->scanFold = true;
 
 	return (Node *) state;
 }
@@ -1165,11 +1304,22 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->done = false;
 	state->haveStats = false;
 
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
-
 	rel = table_open(state->relid, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
+
+	/*
+	 * Batch eligibility is a shape property; decide it before the EXPLAIN-only
+	 * return so a plain EXPLAIN reports whether the batch fold will run.
+	 */
+	if (state->scanFold)
+		state->batchEligible =
+			columnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
+
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
 
 	/*
 	 * Guard the native format version before folding any aggregate (#240). The
@@ -1215,6 +1365,40 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
 								  &state->npreds, &allConvertible);
+
+	/*
+	 * Scan-fold mode reads and rechecks every surviving row (#289): a virtual
+	 * base slot to hold each row, the residual WHERE recheck (scan keys only
+	 * prune groups and vectors), and the set of columns the aggregates and the
+	 * WHERE reference so the reader returns them.
+	 */
+	if (state->scanFold)
+	{
+		Bitmapset  *proj = NULL;
+		int			x;
+
+		state->baseSlot = MakeSingleTupleTableSlot(CreateTupleDescCopy(tupdesc),
+												   &TTSOpsVirtual);
+		state->whereState = (state->quals != NIL)
+			? ExecInitQual(state->quals, &node->ss.ps)
+			: NULL;
+
+		pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
+		x = -1;
+		while ((x = bms_next_member(proj, x)) >= 0)
+		{
+			AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
+
+			if (attno > 0)
+				state->projected = bms_add_member(state->projected, attno - 1);
+		}
+		for (a = 0; a < state->naggs; a++)
+			if (state->specs[a].attidx >= 0)
+				state->projected = bms_add_member(state->projected,
+												  state->specs[a].attidx);
+		if (state->projected == NULL)
+			state->projected = bms_make_singleton(0);
+	}
 
 	table_close(rel, AccessShareLock);
 }
@@ -1835,6 +2019,323 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 	return dirty;
 }
 
+/* -------------------------------------------------------------------------
+ * ungrouped batch fold (#289)
+ *
+ * The row-at-a-time path materializes every projected column into a Datum tuple,
+ * resets a per-row memory context, and hands the tuple to ExecQual and the fold,
+ * once per row. For a full-scan ungrouped aggregate that per-row tax is the whole
+ * cost. The batch fold instead walks each loaded group's packed value streams,
+ * evaluates a pushable WHERE inline, and folds each surviving value through the
+ * same columnar_apply_one -- so accumulators are byte-identical to the row path,
+ * floats included -- with none of the per-row Datum, context, or executor cost.
+ * It runs only when every aggregate and the whole WHERE are batch-eligible; a
+ * false return means it folded nothing and the caller runs the always-correct
+ * row path.
+ * ------------------------------------------------------------------------- */
+
+/* PostgreSQL's float total order: NaN sorts above every non-NaN, NaN == NaN, and
+ * -0.0 == 0.0, matching float8_cmp_internal so an inline compare equals the
+ * operator ExecQual would call. */
+static inline int
+columnar_batch_float_cmp(double a, double b)
+{
+	if (isnan(a))
+		return isnan(b) ? 0 : 1;
+	if (isnan(b))
+		return -1;
+	return (a < b) ? -1 : (a > b) ? 1 : 0;
+}
+
+/* Whether one fixed-width numeric column value (known non-null) satisfies one
+ * btree scan key. */
+static bool
+columnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
+{
+	int			c;
+
+	switch (coltype)
+	{
+		case INT2OID:
+			{ int16 a = DatumGetInt16(val), b = DatumGetInt16(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case INT4OID:
+			{ int32 a = DatumGetInt32(val), b = DatumGetInt32(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case INT8OID:
+			{ int64 a = DatumGetInt64(val), b = DatumGetInt64(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case FLOAT4OID:
+			c = columnar_batch_float_cmp((double) DatumGetFloat4(val), (double) DatumGetFloat4(arg)); break;
+		case FLOAT8OID:
+			c = columnar_batch_float_cmp(DatumGetFloat8(val), DatumGetFloat8(arg)); break;
+		default:
+			return false;
+	}
+	switch (strat)
+	{
+		case BTLessStrategyNumber: return c < 0;
+		case BTLessEqualStrategyNumber: return c <= 0;
+		case BTEqualStrategyNumber: return c == 0;
+		case BTGreaterEqualStrategyNumber: return c >= 0;
+		case BTGreaterStrategyNumber: return c > 0;
+		default: return false;
+	}
+}
+
+/* A fixed-width by-value numeric column type the batch fold can read directly. */
+static bool
+columnar_batch_type_ok(Oid typ)
+{
+	return typ == INT2OID || typ == INT4OID || typ == INT8OID ||
+		typ == FLOAT4OID || typ == FLOAT8OID;
+}
+
+/* An aggregate kind the batch fold accumulates (folded via columnar_apply_one
+ * over a fixed-width by-value numeric column, or count). int8/numeric sum/avg and
+ * min/max stay on the row path. */
+static bool
+columnar_batch_agg_ok(ColumnarAggKind kind)
+{
+	switch (kind)
+	{
+		case COLUMNAR_AGG_COUNT_STAR:
+		case COLUMNAR_AGG_COUNT_COL:
+		case COLUMNAR_AGG_SUM_INT:
+		case COLUMNAR_AGG_AVG_INT:
+		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_AVG_FLOAT:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * columnar_batch_shape_eligible
+ *		Whether this aggregate's shape can use the batch fold: every aggregate is
+ *		batch-accumulable, the whole WHERE converts to scan keys (no residual), and
+ *		every key is a supported btree comparison on a batch-readable column. When
+ *		keysOut is non-NULL the built scan keys are returned for the fold to reuse;
+ *		otherwise they are only inspected. Deterministic from the query shape, so
+ *		Begin can report it in EXPLAIN before execution.
+ */
+static bool
+columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
+							  ScanKey *keysOut, int *nkeysOut)
+{
+	ScanKey		keys;
+	int			nkeys = 0;
+	int			npred;
+	bool		allConvertible;
+	int			a;
+	int			k;
+	bool		ok = true;
+
+	for (a = 0; a < state->naggs; a++)
+		if (!columnar_batch_agg_ok(state->specs[a].kind))
+			return false;
+
+	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+								  &npred, &allConvertible);
+	if (!allConvertible)
+		return false;
+
+	keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
+	for (k = 0; k < nkeys; k++)
+	{
+		ScanKey		key = &keys[k];
+		int			attidx = key->sk_attno - 1;
+		Oid			coltype;
+
+		if (key->sk_flags != 0 || attidx < 0 || attidx >= tupdesc->natts)
+			{ ok = false; break; }
+		coltype = TupleDescAttr(tupdesc, attidx)->atttypid;
+		if (!columnar_batch_type_ok(coltype))
+			{ ok = false; break; }
+		if (key->sk_subtype != InvalidOid && key->sk_subtype != coltype)
+			{ ok = false; break; }
+		if (key->sk_strategy < BTLessStrategyNumber ||
+			key->sk_strategy > BTGreaterStrategyNumber)
+			{ ok = false; break; }
+	}
+	if (!ok)
+		return false;
+
+	if (keysOut != NULL)
+	{
+		*keysOut = keys;
+		*nkeysOut = nkeys;
+	}
+	return true;
+}
+
+/* Reset the accumulators to their initial state (for a clean fall-back). */
+static void
+columnar_agg_specs_reset(ColumnarAggScanState *state)
+{
+	int			a;
+
+	MemoryContextReset(state->resultContext);
+	for (a = 0; a < state->naggs; a++)
+	{
+		ColumnarAggSpec *spec = &state->specs[a];
+
+		spec->count = 0;
+		spec->sum = 0;
+		spec->sawValue = false;
+		spec->extreme = (Datum) 0;
+		spec->fsum = 0;
+		spec->fsxx = 0;
+		spec->nsum = (Datum) 0;
+		spec->nsumSet = false;
+	}
+}
+
+/*
+ * columnar_native_batch_fold
+ *		Fold the whole scan column-at-a-time. Returns false (having folded and
+ *		reset nothing that the caller cannot redo) when the shape is not eligible
+ *		or a group is missing a needed column, so the caller runs the row path.
+ */
+static bool
+columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
+						   TupleDesc tupdesc)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ScanKey		keys = NULL;
+	int			nkeys = 0;
+	int			a;
+	int			k;
+	int			col;
+	int			natts = tupdesc->natts;
+	ColumnarReadState *rs;
+	const char **cvalidity = (const char **) palloc0(sizeof(char *) * natts);
+	const char **cpacked = (const char **) palloc0(sizeof(char *) * natts);
+	int16	   *cattlen = (int16 *) palloc0(sizeof(int16) * natts);
+	uint64	   *cpresent = (uint64 *) palloc0(sizeof(uint64) * natts);
+	bool	   *cneeded = (bool *) palloc0(sizeof(bool) * natts);
+	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
+	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
+
+	if (!columnar_batch_shape_eligible(state, tupdesc, &keys, &nkeys))
+		return false;
+
+	col = -1;
+	while ((col = bms_next_member(state->projected, col)) >= 0)
+		if (col >= 0 && col < natts)
+			cneeded[col] = true;
+
+	/*
+	 * No scan keys are pushed to the reader: the WHERE is applied inline per value
+	 * below. For a zone-map-selective filter, pushing keys would also prune whole
+	 * vectors; that is a later refinement (it needs present-index skipping) and
+	 * only helps a filter the vector min/max can rule out.
+	 */
+	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected, 0, NULL);
+
+	while (ColumnarReadFoldNextGroup(rs))
+	{
+		uint64		nrows;
+		const char *dmask;
+		uint32		dlen;
+		const bool *skipVec;
+		const uint32 *vecStart;
+		int			vcount;
+		uint64		r;
+
+		ColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
+								  &skipVec, &vecStart, &vcount);
+
+		for (col = 0; col < natts; col++)
+		{
+			const char *vbits;
+			const char *pk;
+			int16		al;
+			const uint32 *vrl;
+
+			cpresent[col] = 0;
+			if (!cneeded[col])
+				continue;
+			if (!ColumnarReadFoldColumn(rs, col, &vbits, &pk, &al, &vrl))
+			{
+				/*
+				 * The column is absent from this group (a later ADD COLUMN). The
+				 * batch path cannot supply its missing value, so reset and fall
+				 * back to the row path for the whole scan, which handles it.
+				 */
+				ColumnarEndRead(rs);
+				columnar_agg_specs_reset(state);
+				return false;
+			}
+			cvalidity[col] = vbits;
+			cpacked[col] = pk;
+			cattlen[col] = al;
+		}
+
+		for (r = 0; r < nrows; r++)
+		{
+			bool		del;
+			bool		pass = true;
+
+			CHECK_FOR_INTERRUPTS();
+
+			/* gather needed values at each column's present index; advance it */
+			for (col = 0; col < natts; col++)
+			{
+				if (!cneeded[col])
+					continue;
+				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+				{
+					cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+										  true, cattlen[col]);
+					cisnull[col] = false;
+					cpresent[col]++;
+				}
+				else
+					cisnull[col] = true;
+			}
+
+			del = (dmask != NULL && (r >> 3) < dlen &&
+				   (dmask[r >> 3] & (1 << (r & 7))) != 0);
+			if (del)
+				continue;			/* value slots already consumed above */
+
+			for (k = 0; k < nkeys; k++)
+			{
+				ScanKey		key = &keys[k];
+				int			attidx = key->sk_attno - 1;
+
+				if (cisnull[attidx] ||
+					!columnar_batch_key_pass(TupleDescAttr(tupdesc, attidx)->atttypid,
+											 cval[attidx], key->sk_strategy,
+											 key->sk_argument))
+				{
+					pass = false;
+					break;
+				}
+			}
+			if (!pass)
+				continue;
+
+			for (a = 0; a < state->naggs; a++)
+			{
+				ColumnarAggSpec *spec = &state->specs[a];
+
+				if (spec->attidx >= 0)
+					columnar_apply_one(state->resultContext, spec,
+									   cval[spec->attidx], cisnull[spec->attidx]);
+				else
+					columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
+			}
+		}
+	}
+
+	ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+					  &state->groupsTotal);
+	state->haveStats = true;
+	state->batchFolded = true;
+	ColumnarEndRead(rs);
+	return true;
+}
+
 /*
  * columnar_native_scan_agg
  *		Fold an ungrouped, unfiltered aggregate over a native table by scanning it
@@ -1852,29 +2353,88 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 						 const uint64 *restrictGroups, int nRestrictGroups)
 {
 	EState	   *estate = state->css.ss.ps.state;
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
 	Relation	rel = table_open(state->relid, AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
-	Bitmapset  *projected = NULL;
+	Bitmapset  *projected;
 	ColumnarReadState *rs;
+	ScanKey		keys = NULL;
+	int			nScanKeys = 0;
 	Datum	   *values = (Datum *) palloc(sizeof(Datum) * tupdesc->natts);
 	bool	   *nulls = (bool *) palloc(sizeof(bool) * tupdesc->natts);
 	uint64		rowNumber;
 	int			a;
 
-	for (a = 0; a < state->naggs; a++)
-		if (state->specs[a].attidx >= 0)
-			projected = bms_add_member(projected, state->specs[a].attidx);
-	if (projected == NULL)
-		projected = bms_make_singleton(0);	/* count(*) only: one column */
+	/*
+	 * Scan-fold mode carries the projected set (aggregate plus WHERE columns) and
+	 * a base slot for the per-row recheck; the dirty-groups metadata path passes
+	 * neither and projects only the aggregate columns.
+	 */
+	if (state->scanFold)
+		projected = state->projected;
+	else
+	{
+		projected = NULL;
+		for (a = 0; a < state->naggs; a++)
+			if (state->specs[a].attidx >= 0)
+				projected = bms_add_member(projected, state->specs[a].attidx);
+		if (projected == NULL)
+			projected = bms_make_singleton(0);	/* count(*) only: one column */
+	}
 
 	ColumnarFlushWriteStateForRelation(state->relid);
 	ColumnarFlushDeleteVectorForRelation(rel);
 
-	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, projected, 0, NULL);
+	/*
+	 * Batch fold when the shape allows it (#289): the whole scan folds
+	 * column-at-a-time, which is the point of this path. Only the full scan uses
+	 * it; the dirty-groups metadata tail (restrictGroups != NULL) stays on the
+	 * row path.
+	 */
+	if (state->scanFold && restrictGroups == NULL &&
+		columnar_native_batch_fold(state, rel, tupdesc))
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
+
+	/* push the WHERE down for group and vector pruning; the recheck is exact */
+	if (state->scanFold && state->quals != NIL)
+		keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc,
+									 &nScanKeys);
+
+	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, projected,
+						   nScanKeys, keys);
 	if (restrictGroups != NULL)
 		ColumnarReadRestrictToGroups(rs, restrictGroups, nRestrictGroups);
+
+	/* columns outside the projection stay null in the recheck slot */
+	if (state->whereState != NULL)
+		memset(state->baseSlot->tts_isnull, true, sizeof(bool) * tupdesc->natts);
+
 	while (ColumnarReadNextRow(rs, values, nulls, &rowNumber))
 	{
+		/*
+		 * Recheck the whole WHERE per row: the scan keys only prune groups and
+		 * vectors, so a surviving row may still fail the predicate.
+		 */
+		if (state->whereState != NULL)
+		{
+			int			x = -1;
+
+			ResetExprContext(econtext);
+			ExecClearTuple(state->baseSlot);
+			while ((x = bms_next_member(state->projected, x)) >= 0)
+			{
+				state->baseSlot->tts_values[x] = values[x];
+				state->baseSlot->tts_isnull[x] = nulls[x];
+			}
+			ExecStoreVirtualTuple(state->baseSlot);
+			econtext->ecxt_scantuple = state->baseSlot;
+			if (!ExecQual(state->whereState, econtext))
+				continue;
+		}
+
 		for (a = 0; a < state->naggs; a++)
 		{
 			ColumnarAggSpec *spec = &state->specs[a];
@@ -1886,6 +2446,14 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 				columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
 		}
 	}
+
+	if (state->scanFold)
+	{
+		ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+						  &state->groupsTotal);
+		state->haveStats = true;
+	}
+
 	ColumnarEndRead(rs);
 	table_close(rel, AccessShareLock);
 }
@@ -1923,10 +2491,22 @@ ColumnarExecAggScan(CustomScanState *node)
 	ColumnarFlushDeleteVectorForRelation(frel);
 	table_close(frel, AccessShareLock);
 
-	dirtyGroups = columnar_fill_native_metadata_agg(state, &nDirtyGroups);
-	if (nDirtyGroups > 0)
-		columnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
-	state->haveStats = false;
+	if (state->scanFold)
+	{
+		/*
+		 * A filter, or a sum/avg no zone map answers (#289): scan every row once
+		 * and fold it. columnar_native_scan_agg builds the scan keys, rechecks the
+		 * WHERE, and captures the EXPLAIN stats.
+		 */
+		columnar_native_scan_agg(state, NULL, 0);
+	}
+	else
+	{
+		dirtyGroups = columnar_fill_native_metadata_agg(state, &nDirtyGroups);
+		if (nDirtyGroups > 0)
+			columnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
+		state->haveStats = false;
+	}
 
 	/* build the single result row from the finalized aggregates */
 	ExecClearTuple(scanSlot);
@@ -1954,7 +2534,13 @@ ColumnarExecAggScan(CustomScanState *node)
 static void
 ColumnarEndAggScan(CustomScanState *node)
 {
-	/* the reader is ended inside ColumnarExecAggScan; nothing else to free */
+	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+
+	if (state->baseSlot != NULL)
+		ExecDropSingleTupleTableSlot(state->baseSlot);
+	state->baseSlot = NULL;
+	/* the reader is ended inside ColumnarExecAggScan; the memory contexts are
+	 * children of es_query_cxt and freed with it */
 }
 
 static void
@@ -1965,6 +2551,7 @@ ColumnarReScanAggScan(CustomScanState *node)
 
 	state->done = false;
 	state->haveStats = false;
+	state->batchFolded = false;
 	MemoryContextReset(state->resultContext);
 	for (a = 0; a < state->naggs; a++)
 	{
@@ -1977,9 +2564,9 @@ ColumnarReScanAggScan(CustomScanState *node)
 		/*
 		 * Also clear the running float/numeric accumulators. resultContext was
 		 * just reset, so nsum's storage is gone; leaving nsumSet true would make
-		 * the next scan add to (and free) a dangling pointer. The ungrouped path
-		 * does not classify these extended kinds today, but reset every field so a
-		 * rescan is safe if it ever does.
+		 * the next scan add to (and free) a dangling pointer. Scan-fold mode
+		 * classifies these extended kinds (#289), so this reset is load-bearing on
+		 * a rescan, not only defensive.
 		 */
 		spec->fsum = 0;
 		spec->fsxx = 0;
@@ -1997,6 +2584,9 @@ ColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *es)
 						   state->naggs, es);
 	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
 						   state->npreds, es);
+	if (state->scanFold)
+		ExplainPropertyText("Columnar Batch Fold",
+							state->batchEligible ? "yes" : "no", es);
 
 	if (state->haveStats)
 	{

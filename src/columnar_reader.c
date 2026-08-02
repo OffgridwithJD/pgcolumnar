@@ -1193,6 +1193,83 @@ ColumnarReadNextRow(ColumnarReadState *readState, Datum *values, bool *nulls,
 	return columnar_native_next_row(readState, values, nulls, rowNumber);
 }
 
+/* -------------------------------------------------------------------------
+ * Batch-fold accessors (#289)
+ *
+ * These expose the current loaded group's decoded buffer so an ungrouped
+ * aggregate can fold it column-at-a-time, without columnar_native_next_row
+ * producing one Datum tuple per row. Correctness is the caller's: it must walk
+ * each column's validity bitmap to map a row to its packed value (nulls have no
+ * slot), honor the delete mask, and step the per-column present index past a
+ * ruled-out vector. Only fixed-width by-value columns can be read this way; the
+ * caller checks that from the tuple descriptor before using ColumnarReadFoldColumn.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Advance to the next row group to fold, loading it (and honoring restrict,
+ * parallel and zone-map group skipping via columnar_native_load_group). Returns
+ * false at end of scan; on true, the accessors below describe the loaded group.
+ */
+bool
+ColumnarReadFoldNextGroup(ColumnarReadState *readState)
+{
+	columnar_read_start(readState);
+	if (readState->exhausted)
+		return false;
+	if (!columnar_native_load_group(readState))
+	{
+		readState->exhausted = true;
+		return false;
+	}
+	readState->rowInGroup = 0;
+	return true;
+}
+
+/*
+ * Group-level fold info: row count, the delete mask (row-indexed bits, NULL when
+ * the group has no deletes) and its byte length, the per-vector skip flags and
+ * vector row-start offsets (both NULL when per-vector skipping is inactive), and
+ * the vector count.
+ */
+void
+ColumnarReadFoldGroupInfo(ColumnarReadState *readState, uint64 *nrows,
+						  const char **deleteMask, uint32 *deleteMaskLen,
+						  const bool **skipVec, const uint32 **vecStart,
+						  int *vectorCount)
+{
+	*nrows = readState->groupRowCount;
+	*deleteMask = readState->nativeDeleteMask;
+	*deleteMaskLen = readState->nativeDeleteMaskLen;
+	*skipVec = readState->nativeSkipVec;
+	*vecStart = readState->nativeVecStart;
+	*vectorCount = readState->nativeVectorCount;
+}
+
+/*
+ * Column attidx in the loaded group: its validity bitmap (row-indexed; LSB-first),
+ * the base of its packed present values (contiguous, host-endian), the element
+ * width, and its per-vector decoded byte lengths (NULL when per-vector skipping is
+ * inactive, used to step the present index past a skipped vector). Returns false
+ * when the column is absent from this group (added by a later ALTER TABLE ADD
+ * COLUMN); the caller then folds it from the missing value or falls back.
+ */
+bool
+ColumnarReadFoldColumn(ColumnarReadState *readState, int attidx,
+					   const char **validity, const char **packed,
+					   int16 *attlen, const uint32 **vecRawLen)
+{
+	if (attidx < 0 || attidx >= readState->natts ||
+		readState->nativeValidity == NULL ||
+		readState->nativeValidity[attidx] == NULL)
+		return false;
+	*validity = readState->nativeValidity[attidx];
+	*packed = readState->nativeValueCursor[attidx];
+	*attlen = TupleDescAttr(readState->tupdesc, attidx)->attlen;
+	*vecRawLen = (readState->nativeVecRawLen != NULL)
+		? readState->nativeVecRawLen[attidx] : NULL;
+	return true;
+}
+
 /*
  * columnar_next_group_index
  *		The next native row group to scan, or -1 when none remain. The native

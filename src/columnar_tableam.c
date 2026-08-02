@@ -2254,6 +2254,17 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.enable_ungrouped_vector_agg",
+							 "Use the vectorized aggregate fast path for ungrouped "
+							 "aggregates with a filter or sum/avg over "
+							 "int8/float/numeric.",
+							 NULL,
+							 &columnar_enable_ungrouped_vector_agg,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomIntVariable("pgcolumnar.groupagg_max_groups",
 							"Cap on the actual group count the grouped vectorized "
 							"aggregate builds before it stops with an error.",
