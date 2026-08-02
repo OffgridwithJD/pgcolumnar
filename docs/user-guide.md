@@ -99,7 +99,7 @@ SELECT count(*) FROM pgcolumnar.read_parquet('/data/events_out')
   AS t(id bigint, ts timestamptz, val double precision);
 ```
 
-The output directory must exist and be empty, and the caller needs the
+The output directory must be empty, and is created if it does not exist. The caller needs the
 `pg_write_server_files` role. See [Benchmarks](benchmarks.md#import-and-export)
 for measured numbers.
 

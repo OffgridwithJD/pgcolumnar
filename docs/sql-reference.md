@@ -370,7 +370,7 @@ SELECT pgcolumnar.parallel_copy('events_by_day', '/data/events_sorted.txt', 8);
 Writes a columnar table to a directory of Parquet files with several read-only
 background workers at once. Returns the number of rows written. The caller needs
 membership in the `pg_write_server_files` role, which superusers hold, and SELECT
-on the target. The output directory must exist and be empty. Each worker writes
+on the target. The output directory must be empty. It is created if it does not exist. Each worker writes
 its own `part-NNNN.parquet` file, and `pgcolumnar.read_parquet` reads the whole
 directory back as one relation.
 
