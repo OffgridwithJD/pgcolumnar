@@ -46,6 +46,7 @@
 #include "access/sysattr.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/parsenodes.h"
 #include "nodes/value.h"
 #include "parser/parse_node.h"
 #include "parser/parse_relation.h"
@@ -391,8 +392,24 @@ pcopy_partition_bucket(Datum kd, PartitionBoundInfo bi, FmgrInfo *cmpfn, Oid col
 	while (lo < hi)
 	{
 		int			mid = (lo + hi) / 2;
-		int32		c = DatumGetInt32(FunctionCall2Coll(cmpfn, coll, kd,
-													   bi->datums[mid][0]));
+		int32		c;
+
+		/*
+		 * A MINVALUE/MAXVALUE range bound stores an UNDEFINED datum (the bound
+		 * info is palloc0'd, so datums[mid][0] reads as 0); its real meaning is in
+		 * kind[mid][0]. Core's partition_rbound_datum_cmp checks kind before
+		 * touching the datum, and so must we -- otherwise a signed key (int, or
+		 * timestamp[tz], which is negative before 2000-01-01) straddling 0 is
+		 * mis-bucketed around an unbounded first/last partition, planting a worker
+		 * boundary inside one partition and reintroducing the write-lock deadlock.
+		 */
+		if (bi->kind[mid][0] == PARTITION_RANGE_DATUM_MINVALUE)
+			c = 1;				/* bound is -inf: key is always greater */
+		else if (bi->kind[mid][0] == PARTITION_RANGE_DATUM_MAXVALUE)
+			c = -1;				/* bound is +inf: key is always smaller */
+		else
+			c = DatumGetInt32(FunctionCall2Coll(cmpfn, coll, kd,
+												bi->datums[mid][0]));
 
 		if (c >= 0)
 			lo = mid + 1;		/* kd >= this bound; it's in a higher bucket */
@@ -514,57 +531,68 @@ pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\" for reading: %m", path)));
 
-	while ((len = getline(&line, &cap, fp)) != -1)
+	/*
+	 * Wrap the scan so every exit path -- including an implicit throw from
+	 * InputFunctionCall on an unparseable key field (a \N NULL marker, an empty
+	 * field, non-numeric text) -- frees the getline() buffer (malloc'd, NOT
+	 * reclaimed by memory-context reset) and the AllocateFile handle.
+	 */
+	PG_TRY();
 	{
-		int64		line_start = off;
-		char	   *p = line;
-		int			f = 0;
-		int			flen;
-		char	   *fld;
-		Datum		kd;
-		int			bucket;
-
-		off += len;
-
-		/* advance to the key field */
-		for (f = 0; f < keyfield; f++)
+		while ((len = getline(&line, &cap, fp)) != -1)
 		{
-			p = strchr(p, '\t');
+			int64		line_start = off;
+			char	   *p = line;
+			int			f = 0;
+			int			flen;
+			char	   *fld;
+			Datum		kd;
+			int			bucket;
+
+			off += len;
+
+			/* advance to the key field */
+			for (f = 0; f < keyfield; f++)
+			{
+				p = strchr(p, '\t');
+				if (p == NULL)
+					break;
+				p++;
+			}
 			if (p == NULL)
-				break;
-			p++;
-		}
-		if (p == NULL)
-		{
-			FreeFile(fp);
-			ereport(ERROR,
-					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-					 errmsg("row at byte %ld has too few columns for the partition key",
-							(long) line_start)));
-		}
-		flen = (int) strcspn(p, "\t\n");
-		fld = pnstrdup(p, flen);
-		kd = InputFunctionCall(&infn, fld, ioparam, keytypmod);
-		pfree(fld);
+				ereport(ERROR,
+						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+						 errmsg("row at byte %ld has too few columns for the partition key",
+								(long) line_start)));
+			flen = (int) strcspn(p, "\t\n");
+			fld = pnstrdup(p, flen);
+			kd = InputFunctionCall(&infn, fld, ioparam, keytypmod);
+			pfree(fld);
 
-		bucket = pcopy_partition_bucket(kd, bi, cmpfn, keycoll);
-		if (bucket < prev_bucket)
-		{
-			FreeFile(fp);
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("input file is not sorted ascending by the partition key"),
-					 errdetail("Row at byte %ld belongs to an earlier partition than a preceding row.",
-							   (long) line_start),
-					 errhint("Partition-parallel load requires the file sorted by the partition key.")));
-		}
-		while (cur < bucket)
-			seg_start[++cur] = line_start;
-		prev_bucket = bucket;
+			bucket = pcopy_partition_bucket(kd, bi, cmpfn, keycoll);
+			if (bucket < prev_bucket)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("input file is not sorted ascending by the partition key"),
+						 errdetail("Row at byte %ld belongs to an earlier partition than a preceding row.",
+								   (long) line_start),
+						 errhint("Partition-parallel load requires the file sorted by the partition key.")));
+			while (cur < bucket)
+				seg_start[++cur] = line_start;
+			prev_bucket = bucket;
 
-		if ((++nrows & 0xFFFF) == 0)
-			CHECK_FOR_INTERRUPTS();
+			if ((++nrows & 0xFFFF) == 0)
+				CHECK_FOR_INTERRUPTS();
+		}
 	}
+	PG_CATCH();
+	{
+		if (line)
+			free(line);
+		FreeFile(fp);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	if (line)
 		free(line);				/* getline() uses malloc, not palloc */
 	FreeFile(fp);
@@ -967,10 +995,24 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 		FlushErrorState();
 		AbortOutOfAnyTransaction();
 
-		/* stop any loader still running, then undo any range that prepared */
+		/*
+		 * Stop every launched loader, then WAIT for each to actually exit before
+		 * reading its slot: a loader makes its transaction durable
+		 * (CommitTransactionCommand) just before storing PCOPY_PREPARED, so a slot
+		 * scanned mid-flight can read PENDING while a prepared transaction already
+		 * exists. Without the wait, an error after some loaders prepared (e.g.
+		 * RegisterDynamicBackgroundWorker exhausts max_worker_processes) would
+		 * orphan their prepared transactions in-doubt. SIGTERM'd loaders finish the
+		 * slot store (no interrupt point between the durable prepare and the store);
+		 * only an uncatchable SIGKILL in that window leaves an in-doubt xact, which
+		 * is then the documented pg_prepared_xacts / gid-prefix recovery case.
+		 */
 		for (i = 0; i < nworkers; i++)
 			if (handles[i] != NULL)
 				TerminateBackgroundWorker(handles[i]);
+		for (i = 0; i < nworkers; i++)
+			if (handles[i] != NULL)
+				WaitForBackgroundWorkerShutdown(handles[i]);
 		for (i = 0; i < nworkers; i++)
 			if (pg_atomic_read_u32(&slots[i].state) == PCOPY_PREPARED)
 				pcopy_rollback_prepared_quietly(slots[i].gid);

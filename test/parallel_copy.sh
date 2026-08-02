@@ -231,6 +231,30 @@ for W in 1 2 4; do
 		"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 done
 
+# ---- signed keys straddling 0 with an unbounded first partition --------------
+# Regression for the bucket miscompare that ignored MINVALUE/MAXVALUE bound kinds:
+# a [MINVALUE,100) partition holds keys on BOTH sides of 0, and a signed key
+# compared against the (undefined) MINVALUE datum-read-as-0 would split that one
+# partition across workers -> wrong result or the write-lock deadlock. Must load
+# correctly. (Positive-only keys hid this; hence an explicit negative fixture.)
+F_SIGNED="$DATADIR/signed.txt"
+psql_run "COPY (SELECT g AS id, 'h'||g AS txt FROM generate_series(-100, 399) g)
+          TO '$F_SIGNED' WITH (FORMAT text);" >/dev/null
+[ "$(id -u)" = "0" ] && chown postgres "$F_SIGNED"
+psql_run "DROP TABLE IF EXISTS t_heap_s; CREATE TABLE t_heap_s (id int, txt text);" >/dev/null
+psql_run "\copy t_heap_s FROM '$F_SIGNED' WITH (FORMAT text)" >/dev/null
+psql_run "DROP TABLE IF EXISTS t_signed CASCADE;
+          CREATE TABLE t_signed (id int, txt text) PARTITION BY RANGE (id);
+          CREATE TABLE t_signed_a PARTITION OF t_signed FOR VALUES FROM (MINVALUE) TO (100) USING pgcolumnar;
+          CREATE TABLE t_signed_b PARTITION OF t_signed FOR VALUES FROM (100) TO (300) USING pgcolumnar;
+          CREATE TABLE t_signed_c PARTITION OF t_signed FOR VALUES FROM (300) TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+check "signed keys straddling 0: rows returned = 500" \
+	"$(q "SELECT pgcolumnar.parallel_copy('t_signed'::regclass, '$F_SIGNED', 3)")" 500
+check "signed keys straddling 0: result == oracle (no misbucketing/deadlock)" \
+	"$(pgc_set_hash "SELECT * FROM t_signed")" "$(pgc_set_hash "SELECT * FROM t_heap_s")"
+check "signed keys straddling 0: no prepared-transaction leak" \
+	"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
+
 # ---- atomicity 1: a bad partition-key value is rejected by the splitter -------
 # The splitter parses the key of every row; a non-integer id fails there, before
 # any worker/2PC -- nothing is loaded, no prepared transaction is created.
