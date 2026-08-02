@@ -294,7 +294,7 @@ Method: the bench host, 16 vCPU and 62 GB, PostgreSQL 18.4 non-assert, a
 | 1 | 71.9 | 1.00x |
 | 2 | 36.6 | 1.97x |
 | 4 | 19.4 | 3.72x |
-| 8 | 10.2 | 7.11x |
+| 8 | 10.2 | 7.07x |
 
 One worker matches the serial writer, so the dispatcher adds nothing. Eight
 workers cut a 72-second export to about 10 seconds. Every worker imports the one
