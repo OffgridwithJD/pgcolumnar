@@ -80,6 +80,7 @@
 #include "utils/memutils.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 /* 2PC global-transaction-id buffer size; core defines this, guard in case a
  * given major puts it in a header we don't reach here. */
@@ -845,10 +846,20 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 
 		options = list_make1(makeDefElem("format",
 										 (Node *) makeString("text"), -1));
+		/*
+		 * Core runs COPY FROM inside a portal that pushes an active snapshot
+		 * (PortalRunUtility) before CopyFrom. We call CopyFrom directly, so we
+		 * push one ourselves: the columnar insert path reads pgcolumnar.options
+		 * via a visibility-checked systable scan, which requires a registered or
+		 * active snapshot. Pop it before PREPARE (a prepared transaction must
+		 * carry no active snapshot).
+		 */
+		PushActiveSnapshot(GetTransactionSnapshot());
 		cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false,
 							   pcopy_range_read, NIL, options);
 		processed = CopyFrom(cstate);
 		EndCopyFrom(cstate);
+		PopActiveSnapshot();
 		free_parsestate(pstate);
 		table_close(rel, NoLock);
 		CloseTransientFile(fd);
@@ -1011,9 +1022,21 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 		Relation	rel;
 
 		StartTransactionCommand();
+		/*
+		 * StartTransactionCommand does not push an active snapshot, but
+		 * ColumnarEnsureStorageRow reads pgcolumnar.options/storage via
+		 * systable scans, and those visibility checks require a registered or
+		 * active snapshot. A normal backend has one from the executor; this
+		 * bgworker does not, so push one explicitly. Without it the scan runs
+		 * on an unregistered GetTransactionSnapshot() and aborts an assert
+		 * build the moment the options relation has a matching row (i.e. when
+		 * the target has custom options set).
+		 */
+		PushActiveSnapshot(GetTransactionSnapshot());
 		rel = table_open(hdr->relid, RowExclusiveLock);
 		ColumnarEnsureStorageRow(rel);
 		table_close(rel, NoLock);
+		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 

@@ -399,8 +399,8 @@ done
 # storage-row lock was skipped -- with it held, loader 2 blocks on loader 1's
 # prepared xact forever -- so a passing run is itself evidence the skip fired.
 F_W=$(make_file 40000)
-psql_run "DROP TABLE IF EXISTS t_wit_heap; CREATE TABLE t_wit_heap (id int, txt text);
-          \copy t_wit_heap FROM '$F_W' WITH (FORMAT text)" >/dev/null
+psql_run "DROP TABLE IF EXISTS t_wit_heap; CREATE TABLE t_wit_heap (id int, txt text);" >/dev/null
+psql_run "\copy t_wit_heap FROM '$F_W' WITH (FORMAT text)" >/dev/null
 psql_run "DROP TABLE IF EXISTS t_wit; CREATE TABLE t_wit (id int, txt text) USING pgcolumnar;
           SELECT pgcolumnar.set_options('t_wit'::regclass,
                                         chunk_group_row_limit => 1000,
