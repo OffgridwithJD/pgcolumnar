@@ -72,11 +72,10 @@ file were each wrong because they restated numbers that live in the issues, and 
 restated number drifts the moment the issue moves. Each entry says what the work
 is and where the current numbers are; follow the link for figures.
 
-1. **Full-scan aggregate performance** (#289). The only item with work in flight.
-   The read-path decode dispatch was inlined in #307 (merged). The grouped
-   single-pass aggregate is open as #321, behind
-   `pgcolumnar.enable_group_vectorization`, default off, and is not merged: review
-   reproduced two wrong-answer defects and a vacuous test section.
+1. **Full-scan aggregate performance** (#289).
+   The read-path decode dispatch was inlined in #307 (merged), and the grouped
+   single-pass aggregate landed in #321, behind
+   `pgcolumnar.enable_group_vectorization` (default off).
    Before planning from #321's numbers, read its body: by its own account the
    grouped node is a foundation, and the larger lever for that query shape is
    dictionary-coded grouping on the high-cardinality text key. The shapes where
