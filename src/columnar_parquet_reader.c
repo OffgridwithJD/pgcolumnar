@@ -3540,11 +3540,14 @@ pqfdwGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntablei
 	/*
 	 * Estimate row count from the file size without reading it: a generic
 	 * bytes-per-row divisor. Only a planning ballpark; the executor reads the
-	 * real rows. The stat() is gated on superuser -- the same bar the scan
-	 * enforces -- so a non-privileged planner cannot use the EXPLAIN estimate to
-	 * probe whether a server-side path exists or how big it is.
+	 * real rows. The stat() is gated on pg_read_server_files -- the same bar the
+	 * scan enforces (#330) -- so a planner without that role cannot use the EXPLAIN
+	 * estimate to probe whether a server-side path exists or how big it is, and a
+	 * role that can read the file gets the size-derived estimate rather than the
+	 * flat default.
 	 */
-	if (superuser() && path != NULL && stat(path, &st) == 0 && st.st_size > 0)
+	if (has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES) &&
+		path != NULL && stat(path, &st) == 0 && st.st_size > 0)
 		rows = Max(1.0, (double) st.st_size / 64.0);
 	baserel->rows = rows;
 }
