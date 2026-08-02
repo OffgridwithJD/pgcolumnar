@@ -34,7 +34,9 @@
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "lib/stringinfo.h"
+#include "catalog/pg_authid_d.h"
 #include "miscadmin.h"
+#include "utils/acl.h"
 #include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -973,10 +975,10 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("relation and path must not be null")));
 
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_WRITE_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to export to a server-side file")));
+				 errmsg("must be superuser or a member of the pg_write_server_files role to write a server file")));
 
 	relid = PG_GETARG_OID(0);
 	pathText = PG_GETARG_TEXT_PP(1);
@@ -1750,10 +1752,10 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("relation and path must not be null")));
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to import from a server-side file")));
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
 	relid = PG_GETARG_OID(0);
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));

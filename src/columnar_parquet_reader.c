@@ -51,7 +51,9 @@
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
+#include "catalog/pg_authid_d.h"
 #include "miscadmin.h"
+#include "utils/acl.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -2904,10 +2906,10 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 	ListCell   *lc;
 	MemoryContext fileCtx;
 
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("columnar.import_parquet requires superuser (reads a server-side file)")));
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
 	/* resolve the path (file, directory, or glob) before taking the lock */
 	files = pq_resolve_paths(path);
@@ -2982,10 +2984,10 @@ columnar_read_parquet(PG_FUNCTION_ARGS)
 	List	   *files;
 	ListCell   *lc;
 
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("pgcolumnar.read_parquet requires superuser (reads a server-side file)")));
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
 	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
 		!(rsinfo->allowedModes & SFRM_Materialize))
@@ -3057,10 +3059,10 @@ columnar_parquet_schema(PG_FUNCTION_ARGS)
 	MemoryContext oldContext;
 	int			i;
 
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("columnar.parquet_schema requires superuser (reads a server-side file)")));
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
 	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
 		!(rsinfo->allowedModes & SFRM_Materialize))
@@ -3894,10 +3896,10 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
-	if (!superuser())
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("pgcolumnar_parquet foreign tables require superuser (read a server-side file)")));
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
 	path = pqfdw_get_path(RelationGetRelid(rel));
 	if (path == NULL)
