@@ -447,7 +447,9 @@ The results therefore never depend on the pushdown.
 
 ## Import and export type coverage
 
-The import and export functions require superuser and run on little-endian hosts.
+The import and export functions require the `pg_read_server_files` or
+`pg_write_server_files` role, which superusers hold, and run on little-endian
+hosts.
 They support one-dimensional arrays and composite types built from the scalar
 types below, with nulls at every level. Multi-dimensional arrays and types not
 listed are rejected.
@@ -500,8 +502,8 @@ Hadoop-framed LZ4 (codec 5, as distinct from LZ4_RAW) are not read.
 The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 `pgcolumnar_parquet` foreign-data wrapper) has these limits:
 
-- Reads are superuser only and run on little-endian hosts, as import and export
-  do, since they read a server-side path. A file from a different source is input
+- Reads require the `pg_read_server_files` role, which superusers hold, and run on
+  little-endian hosts, as import and export do, since they read a server-side path. A file from a different source is input
   without trust, and the parser for it is code that this project wrote. Refer to
   Security in the administration guide for the trust boundary and the risk that
   stays. Issue #214 tracks the fuzzing.
