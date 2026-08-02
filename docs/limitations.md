@@ -355,7 +355,7 @@ Each other query uses the scalar plan and stays correct. These include `sum` or
 
 - ordered-set aggregates and string aggregates
 - aggregates with `DISTINCT`
-- `GROUP BY` and `HAVING`, unless the opt-in grouped path below is enabled
+- `GROUP BY` (unless the opt-in grouped path below is enabled) and `HAVING`
 - filters that are not simple
 - joins
 - a reference to a whole row or to a system column
