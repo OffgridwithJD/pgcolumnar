@@ -67,8 +67,10 @@ today's engine. Real parallelism requires each worker to write **distinct storag
   `COPY`ing 5M rows into a distinct table, each `PREPARE TRANSACTION`, then
   `COMMIT PREPARED` all — **prepare phase 33.3 s vs 32.0 s single (1.04×), rows
   invisible until the commit-all (atomic), 0 prepared-xacts leaked.** The 2PC
-  coordinator/loader machinery already built works unchanged; the only new piece is
-  a **partition-aligned splitter** so no two workers touch the same partition.
+  coordinator/loader machinery already built is reused (the loaders now COPY into
+  the partitioned parent and tuple-route; the coordinator gained graceful-cancel
+  cleanup); the main new piece is a **partition-aligned splitter** so no two workers
+  touch the same partition.
 
   **Measured (bench, 20M-row TSBS slice, warm, interleaved 3 rounds):** single COPY
   ~126.8 s vs `parallel_copy(8)` into an 8-partition target ~25.6 s = **≈ 5.0×**;

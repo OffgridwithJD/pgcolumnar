@@ -915,9 +915,16 @@ COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
 -- (single-table parallel load is a planned columnar-core enhancement). Loaders
 -- PREPARE; a coordinator background worker COMMIT PREPAREDs them all, or ROLLBACK
 -- PREPAREDs on any failure. Returns rows loaded. Requirements: RANGE-partitioned
--- target (single-column key, no DEFAULT partition), the file sorted ascending by
--- that key, COPY text format, and max_prepared_transactions >= workers. workers =>
--- NULL derives a default from max_parallel_workers. See design/PARALLEL_COPY_PLAN.md.
+-- target (single-column numeric/date-time key, no DEFAULT partition), the file
+-- sorted ascending by that key, COPY text format, and max_prepared_transactions >=
+-- workers. workers => NULL derives a default from max_parallel_workers.
+--
+-- Two behaviors to know: (1) the load commits in background workers, INDEPENDENTLY
+-- of the calling transaction, so its rows survive a subsequent ROLLBACK of the
+-- caller -- treat the call like a COMMIT. (2) Do not call it while the calling
+-- transaction holds a lock on the target (e.g. after LOCK TABLE or a write to it):
+-- the loaders would block on that lock and the wait is invisible to the deadlock
+-- detector. See design/PARALLEL_COPY_PLAN.md.
 CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 										 workers int DEFAULT NULL)
 	RETURNS bigint

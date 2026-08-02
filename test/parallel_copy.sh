@@ -255,6 +255,39 @@ check "signed keys straddling 0: result == oracle (no misbucketing/deadlock)" \
 check "signed keys straddling 0: no prepared-transaction leak" \
 	"$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
+# ---- a text partition key (with MINVALUE/MAXVALUE bounds) is rejected, not crash --
+# jdatcmd's crash repro: a by-reference key + an unbounded bound would deref an
+# undefined datum. Now the numeric/temporal-key restriction rejects it cleanly, and
+# the kind-dispatch means even a would-be compare never touches the datum.
+psql_run "DROP TABLE IF EXISTS t_txtkey CASCADE;
+          CREATE TABLE t_txtkey (k text, v int) PARTITION BY RANGE (k);
+          CREATE TABLE t_txtkey_a PARTITION OF t_txtkey FOR VALUES FROM (MINVALUE) TO ('m') USING pgcolumnar;
+          CREATE TABLE t_txtkey_b PARTITION OF t_txtkey FOR VALUES FROM ('m') TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+tk_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_txtkey'::regclass, '$F', 2)")"
+check "text partition key is rejected (not a crash)" \
+	"$(printf '%s' "$tk_err" | grep -qi "numeric or date/time" && echo ok || echo no)" ok
+check "text partition key: server still up (no crash)" "$(q "SELECT 1")" 1
+
+# ---- key NOT in column 1, with a generated column before it -------------------
+# COPY's default column list skips generated columns, so the splitter's key-field
+# index must skip them too; otherwise every row buckets wrong.
+F_GEN="$DATADIR/genkey.txt"
+psql_run "COPY (SELECT 'lbl'||g AS label, g AS id FROM generate_series(1,3000) g)
+          TO '$F_GEN' WITH (FORMAT text);" >/dev/null
+[ "$(id -u)" = "0" ] && chown postgres "$F_GEN"
+GENSCHEMA="label text, gcol int GENERATED ALWAYS AS (id*2) STORED, id int"
+psql_run "DROP TABLE IF EXISTS t_heap_g; CREATE TABLE t_heap_g ($GENSCHEMA);" >/dev/null
+psql_run "\copy t_heap_g (label, id) FROM '$F_GEN' WITH (FORMAT text)" >/dev/null
+psql_run "DROP TABLE IF EXISTS t_gen CASCADE;
+          CREATE TABLE t_gen ($GENSCHEMA) PARTITION BY RANGE (id);
+          CREATE TABLE t_gen_a PARTITION OF t_gen FOR VALUES FROM (MINVALUE) TO (1000) USING pgcolumnar;
+          CREATE TABLE t_gen_b PARTITION OF t_gen FOR VALUES FROM (1000) TO (2000) USING pgcolumnar;
+          CREATE TABLE t_gen_c PARTITION OF t_gen FOR VALUES FROM (2000) TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+check "key not in column 1 (generated col before it): rows = 3000" \
+	"$(q "SELECT pgcolumnar.parallel_copy('t_gen'::regclass, '$F_GEN', 3)")" 3000
+check "key not in column 1: result == oracle" \
+	"$(pgc_set_hash "SELECT * FROM t_gen")" "$(pgc_set_hash "SELECT * FROM t_heap_g")"
+
 # ---- atomicity 1: a bad partition-key value is rejected by the splitter -------
 # The splitter parses the key of every row; a non-integer id fails there, before
 # any worker/2PC -- nothing is loaded, no prepared transaction is created.
@@ -266,7 +299,7 @@ F_BADKEY="$DATADIR/badkey.txt"
 mkpart t_pcp 4
 bk_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F_BADKEY', 4)")"
 check "atomic: a bad partition-key value is rejected" \
-	"$(printf '%s' "$bk_err" | grep -qiE 'invalid input syntax|not sorted' && echo ok || echo no)" ok
+	"$(printf '%s' "$bk_err" | grep -qi 'invalid input syntax' && echo ok || echo no)" ok
 check "atomic: bad-key load leaves the target empty" "$(q "SELECT count(*) FROM t_pcp")" 0
 check "atomic: no prepared-transaction leak after bad-key" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 

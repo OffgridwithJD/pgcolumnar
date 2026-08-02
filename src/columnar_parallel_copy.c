@@ -8,14 +8,21 @@
  * core COPY's. See design/PARALLEL_COPY_PLAN.md.
  *
  * Contents:
- *   - the file range splitter (columnar_file_split_offsets): N+1 line-aligned byte
- *     offsets partitioning a COPY text-format file into N record-aligned ranges;
+ *   - a partition-aligned splitter (pcopy_partition_aligned_offsets): one forward
+ *     pass over a key-sorted COPY text file, bucketing each row against the target's
+ *     RANGE bounds, that returns byte ranges each covering a DISTINCT set of the
+ *     target's partitions -- so no two workers ever write the same partition;
  *   - the atomic (2PC) load: the SQL function launches a coordinator background
- *     worker, which spawns N loader workers (each COPYs its range then PREPARE
- *     TRANSACTIONs it) and then COMMIT PREPAREDs them all or ROLLBACK PREPAREDs
- *     them all, so a failure in any range leaves no partial load.
- * Text format only for now (a raw newline is always a text record boundary; CSV
- * quote-aware splitting is a later phase, see the plan).
+ *     worker, which spawns N loader workers (each COPYs its byte range into the
+ *     partitioned parent -- tuple routing sends its rows to its partitions only --
+ *     then PREPARE TRANSACTIONs it), and then COMMIT PREPAREDs them all or ROLLBACK
+ *     PREPAREDs them all, so a failure in any range leaves no partial load. Distinct
+ *     partitions means distinct storage, which is what makes this parallel (no
+ *     shared per-storage write lock) and 2PC-safe (no deadlock).
+ *   - a standalone byte splitter (columnar_file_split_offsets) exposed to SQL: N+1
+ *     line-aligned offsets, a diagnostic the parallel load itself no longer calls.
+ * Text format only for now, numeric/date-time partition keys only (their text form
+ * is escape-free); CSV and other key types are later phases (see the plan).
  *
  * Independent MIT implementation. References only the public PostgreSQL API
  * (server-file access, the COPY BeginCopyFrom interface, the background-worker and
@@ -60,6 +67,11 @@
 #include "storage/shm_toc.h"
 #include "storage/shmem.h"
 #include "tcop/tcopprot.h"
+#if PG_VERSION_NUM >= 160000
+#include "utils/wait_event.h"	/* PG_WAIT_EXTENSION */
+#else
+#include "pgstat.h"
+#endif
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -487,15 +499,43 @@ pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_
 				 errmsg("pgcolumnar.parallel_copy does not support a DEFAULT partition"),
 				 errhint("A default partition can receive rows from any range, so workers could not stay on distinct partitions.")));
 
-	/* which tab-delimited field is the key (default COPY column order) */
+	/*
+	 * Which tab-delimited field is the key. A default COPY column list is the
+	 * non-dropped, non-generated attributes in order, so the field index must skip
+	 * BOTH -- a generated column before the key would otherwise shift every field.
+	 */
 	keyattno = pkey->partattrs[0];
 	for (a = 1; a < keyattno; a++)
-		if (!TupleDescAttr(td, a - 1)->attisdropped)
+	{
+		Form_pg_attribute att = TupleDescAttr(td, a - 1);
+
+		if (!att->attisdropped && att->attgenerated == '\0')
 			keyfield++;
+	}
 
 	keytype = pkey->parttypid[0];
 	keytypmod = pkey->parttypmod[0];
 	keycoll = pkey->partcollation[0];
+
+	/*
+	 * Restrict the key to numeric/date-time types. Their COPY text representation
+	 * never contains a delimiter, newline or backslash, so reading the raw field
+	 * without COPY de-escaping is exact. Other types (text, etc.) can carry escapes
+	 * that would mis-parse and mis-bucket a row -- de-escaping them is a planned
+	 * enhancement, and until then we reject rather than silently misroute.
+	 */
+	{
+		char		cat;
+		bool		preferred;
+
+		get_type_category_preferred(keytype, &cat, &preferred);
+		if (cat != TYPCATEGORY_NUMERIC && cat != TYPCATEGORY_DATETIME)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("pgcolumnar.parallel_copy supports only numeric or date/time partition keys"),
+					 errhint("The partition key is read from the text file without COPY de-escaping; support for other key types is a planned enhancement.")));
+	}
+
 	getTypeInputInfo(keytype, &infnoid, &ioparam);
 	fmgr_info(infnoid, &infn);
 	cmpfn = &pkey->partsupfunc[0];
@@ -564,12 +604,18 @@ pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_
 						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 						 errmsg("row at byte %ld has too few columns for the partition key",
 								(long) line_start)));
-			flen = (int) strcspn(p, "\t\n");
+			/* field ends at a tab, or a bare/CRLF line ending -- stopping at \r
+			 * too keeps a trailing \r out of the key value */
+			flen = (int) strcspn(p, "\t\r\n");
 			fld = pnstrdup(p, flen);
 			kd = InputFunctionCall(&infn, fld, ioparam, keytypmod);
 			pfree(fld);
 
 			bucket = pcopy_partition_bucket(kd, bi, cmpfn, keycoll);
+			/* free the parsed key: numeric and other by-reference key types would
+			 * otherwise leak one Datum per row across the whole pre-scan */
+			if (!pkey->parttypbyval[0])
+				pfree(DatumGetPointer(kd));
 			if (bucket < prev_bucket)
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_EXCEPTION),
@@ -865,6 +911,24 @@ pcopy_rollback_prepared_quietly(const char *gid)
  *		header for the waiting SQL function. Runs the 2PC finish that the function
  *		cannot (transaction-control commands are illegal inside a function).
  */
+/*
+ * The coordinator must NOT just die() on SIGTERM: proc_exit would run past its 2PC
+ * cleanup and orphan every loader's prepared transaction (pinning the cluster xmin
+ * horizon). Instead the handler records the request and wakes the wait loop, which
+ * rolls the prepared loaders back in normal backend context.
+ */
+static volatile sig_atomic_t pcopy_coord_got_sigterm = false;
+
+static void
+pcopy_coord_sigterm(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	pcopy_coord_got_sigterm = true;
+	SetLatch(MyLatch);
+	errno = save_errno;
+}
+
 PGDLLEXPORT void
 pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 {
@@ -878,7 +942,7 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 	BackgroundWorkerHandle **handles;
 	int			i;
 
-	pqsignal(SIGTERM, die);
+	pqsignal(SIGTERM, pcopy_coord_sigterm);
 	BackgroundWorkerUnblockSignals();
 
 	seg = dsm_attach(DatumGetUInt32(main_arg));
@@ -933,10 +997,53 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 								 nworkers)));
 		}
 
-		/* every loader runs to completion: it either PREPAREs or FAILs */
-		for (i = 0; i < nworkers; i++)
-			WaitForBackgroundWorkerShutdown(handles[i]);
+		/*
+		 * Wait for every loader to finish (PREPARE or FAIL), staying responsive to
+		 * cancellation. WaitForBackgroundWorkerShutdown would not return on cancel
+		 * with our non-die SIGTERM handler (the loader is still running), so poll the
+		 * handles on the latch and break out when asked to stop.
+		 */
+		for (;;)
+		{
+			int			running = 0;
 
+			for (i = 0; i < nworkers; i++)
+			{
+				pid_t		pid;
+
+				if (handles[i] != NULL &&
+					GetBackgroundWorkerPid(handles[i], &pid) != BGWH_STOPPED)
+					running++;
+			}
+			if (running == 0 || pcopy_coord_got_sigterm)
+				break;
+			(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 1000L, PG_WAIT_EXTENSION);
+			ResetLatch(MyLatch);
+		}
+
+		if (pcopy_coord_got_sigterm)
+		{
+			/*
+			 * Cancelled: stop every loader, wait for it to exit, then roll back
+			 * every range that prepared -- all in normal backend context, so no
+			 * prepared transaction is orphaned in-doubt.
+			 */
+			for (i = 0; i < nworkers; i++)
+				if (handles[i] != NULL)
+					TerminateBackgroundWorker(handles[i]);
+			for (i = 0; i < nworkers; i++)
+				if (handles[i] != NULL)
+					WaitForBackgroundWorkerShutdown(handles[i]);
+			for (i = 0; i < nworkers; i++)
+				if (pg_atomic_read_u32(&slots[i].state) == PCOPY_PREPARED)
+					pcopy_rollback_prepared_quietly(slots[i].gid);
+			strlcpy(hdr->coord_errmsg, "pgcolumnar.parallel_copy was cancelled",
+					sizeof(hdr->coord_errmsg));
+			pg_atomic_write_u32(&hdr->coord_state, PCOPY_COORD_FAILED);
+		}
+		else
+		{
 		for (i = 0; i < nworkers; i++)
 		{
 			if (pg_atomic_read_u32(&slots[i].state) != PCOPY_PREPARED)
@@ -979,6 +1086,7 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 					sizeof(hdr->coord_errmsg));
 			pg_atomic_write_u32(&hdr->coord_state, PCOPY_COORD_FAILED);
 		}
+		}						/* end: not cancelled */
 	}
 	PG_CATCH();
 	{
@@ -1098,6 +1206,26 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 							nm),
 					 errhint("Partition the target so each worker loads a distinct partition. Parallel load into a single non-partitioned table is a planned enhancement.")));
 		}
+
+		/*
+		 * The loaders run as this role and INSERT into the target, so the caller
+		 * must hold INSERT on it -- exactly what core COPY FROM checks. The loaders
+		 * do not run the executor permission check themselves, so enforce it here,
+		 * up front, before anything is spawned.
+		 */
+		{
+			AclResult	aclresult = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
+
+			if (aclresult != ACLCHECK_OK)
+			{
+				char		nm[NAMEDATALEN];
+
+				strlcpy(nm, RelationGetRelationName(parent), NAMEDATALEN);
+				table_close(parent, AccessShareLock);
+				aclcheck_error(aclresult, OBJECT_TABLE, nm);
+			}
+		}
+
 		offs = pcopy_partition_aligned_offsets(parent, path, &workers);
 		table_close(parent, AccessShareLock);
 	}
