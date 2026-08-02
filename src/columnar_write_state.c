@@ -504,6 +504,34 @@ ColumnarGetWriteState(Relation rel)
 }
 
 /*
+ * ColumnarEnsureStorageRow
+ *		Create the native storage catalog row for `rel` if it does not exist,
+ *		with exactly the metadata a normal flush would record. Used by
+ *		pgcolumnar.parallel_copy's coordinator to pre-create and commit the storage
+ *		row before launching concurrent loaders, so each loader (with
+ *		columnar_bulk_parallel_writer set) sees it committed and skips the
+ *		storage-row creation lock. Idempotent -- ColumnarInsertNativeStorageRow
+ *		returns if the row already exists.
+ */
+void
+ColumnarEnsureStorageRow(Relation rel)
+{
+	NativeStorageMetadata s;
+	ColumnarOptions opts;
+	int			stripeRowLimit = columnar_stripe_row_limit;
+
+	if (ColumnarReadOptions(RelationGetRelid(rel), &opts) && opts.stripeRowLimitSet)
+		stripeRowLimit = opts.stripeRowLimit;
+
+	s.storageId = ColumnarStorageId(rel);
+	s.relationOid = RelationGetRelid(rel);
+	s.formatVersion = COLUMNAR_NATIVE_VERSION_MAJOR;
+	s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
+	s.rowGroupLimit = stripeRowLimit;
+	ColumnarInsertNativeStorageRow(&s);
+}
+
+/*
  * buffered_note_offset
  *		Record where the next row's value begins, if this column is tracking
  *		offsets at all.

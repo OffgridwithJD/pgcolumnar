@@ -1451,6 +1451,15 @@ ColumnarDeleteMetadata(uint64 storageId)
 }
 
 /*
+ * Opt-in, default off. Set for its own session by a pgcolumnar.parallel_copy
+ * loader (backing the pgcolumnar.bulk_parallel_writer GUC, registered in
+ * _PG_init) so ColumnarInsertNativeStorageRow can skip the storage-row creation
+ * advisory lock when the row already exists committed. Ordinary writes never set
+ * it, so the default write path is unchanged.
+ */
+bool		columnar_bulk_parallel_writer = false;
+
+/*
  * ColumnarInsertNativeStorageRow, ColumnarInsertRowGroupRow,
  * ColumnarInsertColumnChunkRow
  *		Record the native-format catalog rows (PGCN v1, native spec 11). Called
@@ -1483,6 +1492,36 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	 * skips the insert. The lock is held to transaction end so the winner's row
 	 * is committed and visible before the loser proceeds.
 	 */
+	/*
+	 * Bulk-parallel fast path (opt-in, default off). A pgcolumnar.parallel_copy
+	 * loader sets columnar_bulk_parallel_writer for its own session; when the
+	 * storage row already exists in the latest committed state we skip the advisory
+	 * lock entirely and return. That lock exists ONLY to serialize the first-writer
+	 * creation race -- once the row is committed there is nothing to wait for -- and
+	 * holding it to transaction end is exactly what makes concurrent writers to one
+	 * storage serialize and, under two-phase commit, deadlock. Skipping it (only
+	 * when the row provably exists, and only for an opting-in loader whose
+	 * coordinator pre-created and committed that row) lets N loaders write one
+	 * table's storage concurrently and 2PC-safely. Every ordinary write leaves the
+	 * flag false and takes the unchanged path below.
+	 */
+	if (columnar_bulk_parallel_writer)
+	{
+		PushActiveSnapshot(GetLatestSnapshot());
+		snapshot = ColumnarCatalogSnapshot(GetActiveSnapshot());
+		ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+					F_INT8EQ, Int64GetDatum((int64) s->storageId));
+		scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+		exists = HeapTupleIsValid(systable_getnext(scan));
+		systable_endscan(scan);
+		PopActiveSnapshot();
+		if (exists)
+		{
+			table_close(rel, RowExclusiveLock);
+			return;
+		}
+	}
+
 	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
 						 (uint32) (s->storageId >> 32),
 						 (uint32) (s->storageId & 0xFFFFFFFF), 2);

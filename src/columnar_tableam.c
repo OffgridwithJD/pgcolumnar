@@ -2327,6 +2327,21 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.bulk_parallel_writer",
+							 "Internal. Set by pgcolumnar.parallel_copy loader workers "
+							 "so they skip the storage-row creation lock when the row "
+							 "already exists committed, allowing concurrent atomic writers "
+							 "to one table (#300). Safe even if set by hand: the skip fires "
+							 "only when the storage row is already committed, which is exactly "
+							 "when the creation lock guards nothing, so an ordinary write still "
+							 "behaves correctly. Off by default leaves the write path unchanged.",
+							 NULL,
+							 &columnar_bulk_parallel_writer,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_unique_insert_lock",
 							 "Serialize concurrent inserts of the same unique key.",
 							 "Takes a transaction-scoped advisory lock per unique "
