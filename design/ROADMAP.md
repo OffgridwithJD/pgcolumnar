@@ -93,10 +93,12 @@ unchanged, across background workers: partition-parallel in #323, single-table i
 was rejected on its own measurement, since parse is a minority of the load. Read
 the #300 thread for the profile and the two write-path findings it produced.
 
-Not work, but still open: **#310, selective-scan page reads**. Both causes are
-fixed and merged (#315 and #317) and the effect was re-measured at 100M by both
-parties, on synthetic and on real TSBS data; the figures are in the issue. It
-stays open pending the reporter's sign-off, not further engineering.
+Selective-scan page reads are done and #310 is closed. A query skipping to 1 of
+667 chunk groups used to fault about 85 percent of the table's pages; it now
+touches 3.5 percent. Both causes were bloom filters being read when nothing would
+consult them: for groups a scan skips (#315) and for columns no predicate probes
+(#317). Confirmed on the real 100M TSBS-cpu dataset with the same on-disk table
+and only the library swapped.
 
 Formerly deferred, now built and on main. All three items this paragraph used to
 list as "not yet built" are built: end-truncation ships as
