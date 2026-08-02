@@ -57,7 +57,14 @@ build() {			# build(table, stripe_row_limit)
 
 # The predicate matches nothing and is not pushed down, so the scan decodes the
 # whole relation and hands no tuple to the executor while doing it.
-QUERY() { echo "SELECT count(*) FROM $1 WHERE (a %% 7) = 999"; }
+#
+# Every column is named on purpose. The reader decodes only the columns a query
+# references (#338), so a predicate over one column would leave the other seven
+# unread and the scan would finish before there was anything to cancel -- the
+# premise check below would then fail, correctly, because nothing was being
+# tested. Each conjunct is an expression rather than a comparison to a constant
+# so that none of them is pushed down to the zone maps and used to skip groups.
+QUERY() { echo "SELECT count(*) FROM $1 WHERE (a %% 7) = 999 AND (b %% 7) = 999 AND length(c) < 0 AND length(d) < 0 AND length(e) < 0 AND length(f) < 0 AND length(h) < 0 AND length(i) < 0"; }
 
 # Cancel latency: milliseconds from issuing the statement to the error coming
 # back. Echoes "FAILED" when the statement was not cancelled at all.

@@ -64,6 +64,7 @@ int			columnar_compression = COLUMNAR_COMPRESSION_ZSTD;
 int			columnar_compression_level = 3;
 int			columnar_fsst_min_gain_percent = 5;
 bool		columnar_enable_qual_pushdown = true;
+bool		columnar_enable_column_projection = true;
 bool		columnar_enable_bloom_filter = true;
 
 /* value set for columnar.compression (spec 5, 8.3) */
@@ -2222,6 +2223,18 @@ _PG_init(void)
 							 "Push scan qualifiers down for chunk-group skipping.",
 							 NULL,
 							 &columnar_enable_qual_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pgcolumnar.enable_column_projection",
+							 "Read only the columns a query references.",
+							 "When off, every column of each visited row group is "
+							 "read and decoded, as before the projection was honored. "
+							 "Provided as an escape hatch and as the A/B oracle the "
+							 "projection tests compare against.",
+							 &columnar_enable_column_projection,
 							 true,
 							 PGC_USERSET,
 							 0,
