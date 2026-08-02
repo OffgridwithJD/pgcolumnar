@@ -4,18 +4,25 @@
  *		pgcolumnar.parallel_export_parquet: parallel Parquet export.
  *
  * N read-only background workers each write a disjoint slice of the source to
- * its own part-NNNN.parquet file under one output directory. Export is
- * read-only, so unlike parallel_copy there is no coordinator and no two-phase
- * commit -- the SQL function is itself the dispatcher. Every worker restores the
- * SAME serialized MVCC snapshot, so the exported directory is a consistent
- * point-in-time image. The directory is directly consumable by
- * pgcolumnar.read_parquet and the pgcolumnar_parquet foreign-data wrapper.
+ * its own part-NNNN.parquet file under one output directory, which
+ * pgcolumnar.read_parquet and the parquet FDW read back as a single relation.
+ * Export is read-only, so unlike parallel_copy there is no coordinator and no
+ * two-phase commit -- the SQL function is itself the dispatcher.
+ *
+ * Consistency: the dispatcher ExportSnapshot()s its MVCC snapshot and each worker
+ * ImportSnapshot()s it (the pg_dump parallel-dump mechanism), so every worker
+ * sees the identical committed image. This is the cross-transaction mechanism;
+ * the parallel-query SerializeSnapshot/RestoreSnapshot pair is NOT sound here,
+ * because these workers are independent backends rather than members of the
+ * dispatcher's parallel group. Rows the caller has written but not committed are
+ * not part of that committed image and are not exported.
  *
  * Two target kinds mirror parallel_copy:
  *	 - a partitioned table with columnar partitions: one file per leaf partition;
- *	   each worker owns a contiguous slice of the oid-sorted leaf list;
+ *	   the dispatcher ships the oid-sorted leaf list so workers do not re-derive
+ *	   it from the live catalog (which a concurrent ATTACH could desynchronise);
  *	 - a single columnar table: split by row-group index ranges; each worker
- *	   writes the groups in its slice via ColumnarReadRestrictToGroups.
+ *	   restricts its read to its slice via ColumnarReadRestrictToGroups.
  *
  * Cleanroom: public PostgreSQL APIs and this project's own code only.
  *
@@ -61,7 +68,7 @@
 #define PEXPORT_MAGIC		0x50455850	/* 'PEXP' */
 #define PEXPORT_KEY_HEADER	0
 #define PEXPORT_KEY_SLOTS	1
-#define PEXPORT_KEY_SNAPSHOT 2
+#define PEXPORT_KEY_LEAVES	2
 #define PEXPORT_MAX_WORKERS 32
 
 typedef enum PexportState
@@ -89,9 +96,18 @@ typedef struct PexportHeader
 	Oid			relid;			/* single columnar table, or partitioned parent */
 	uint64		storageId;		/* single-table storage id (0 when partitioned) */
 	int			nworkers;
+	int			npart;			/* leaf-partition count (0 when single-table) */
 	bool		single_table;
 	char		dirpath[MAXPGPATH];		/* output directory */
+	char		snapname[64];	/* ExportSnapshot() name workers ImportSnapshot() */
 } PexportHeader;
+
+/* handles for the error-cleanup callback */
+typedef struct PexportSpawn
+{
+	BackgroundWorkerHandle **handles;
+	int			n;
+} PexportSpawn;
 
 PGDLLEXPORT void pgcolumnar_parallel_export_worker(Datum main_arg);
 
@@ -113,8 +129,8 @@ pexport_oid_cmp(const void *a, const void *b)
 /*
  * pexport_leaf_partitions
  *		The oid-sorted leaf partitions of `parent`, palloc'd into *out; returns
- *		the count. The sort makes the order deterministic across processes, so a
- *		worker re-derives the identical list and slices it by index.
+ *		the count. The dispatcher computes this once and ships the array, so the
+ *		exact set is fixed for the whole export even if the catalog changes.
  */
 static int
 pexport_leaf_partitions(Oid parent, Oid **out)
@@ -145,7 +161,6 @@ pexport_leaf_partitions(Oid parent, Oid **out)
  * pexport_auto_workers
  *		Worker count when the caller passes none: half the admin's
  *		max_parallel_workers budget, at least one, capped at PEXPORT_MAX_WORKERS.
- *		Mirrors parallel_copy so the two features share one mental model.
  */
 static int
 pexport_auto_workers(void)
@@ -210,12 +225,24 @@ pexport_prepare_dir(const char *dir)
 	FreeDir(d);
 }
 
+/* error-cleanup: stop every worker so a dispatcher FATAL cannot leave them
+ * reading after the exported snapshot is gone */
+static void
+pexport_terminate_workers(int code, Datum arg)
+{
+	PexportSpawn *s = (PexportSpawn *) DatumGetPointer(arg);
+	int			i;
+
+	for (i = 0; i < s->n; i++)
+		if (s->handles[i] != NULL)
+			TerminateBackgroundWorker(s->handles[i]);
+}
+
 /*
  * pgcolumnar_parallel_export_worker
- *		Background-worker entry: attach the DSM, connect, restore the shared
+ *		Background-worker entry: attach the DSM, connect, import the dispatcher's
  *		snapshot, and write this worker's slice to its Parquet file(s). Read-only,
- *		so there is nothing to commit and no 2PC. Reports rows + DONE (or FAILED)
- *		through the shared slot before exit.
+ *		so there is nothing to commit and no 2PC.
  */
 PGDLLEXPORT void
 pgcolumnar_parallel_export_worker(Datum main_arg)
@@ -224,8 +251,8 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 	shm_toc    *toc;
 	PexportHeader *hdr;
 	PexportWorkerSlot *slots;
+	Oid		   *leaves;
 	PexportWorkerSlot *me;
-	char	   *snapbytes;
 	int			widx;
 	uint32		conn_flags = BGWORKER_BYPASS_ALLOWCONN;
 	Snapshot	snap;
@@ -247,7 +274,7 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 				 errmsg("pgcolumnar parallel_export worker found a bad shared segment")));
 	hdr = (PexportHeader *) shm_toc_lookup(toc, PEXPORT_KEY_HEADER, false);
 	slots = (PexportWorkerSlot *) shm_toc_lookup(toc, PEXPORT_KEY_SLOTS, false);
-	snapbytes = (char *) shm_toc_lookup(toc, PEXPORT_KEY_SNAPSHOT, false);
+	leaves = (Oid *) shm_toc_lookup(toc, PEXPORT_KEY_LEAVES, false);
 	me = &slots[widx];
 
 #if PG_VERSION_NUM >= 170000
@@ -255,8 +282,15 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 #endif
 	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
 
+	/*
+	 * Adopt the dispatcher's exact snapshot. ImportSnapshot requires a
+	 * repeatable-read (or serializable) transaction with no snapshot taken yet,
+	 * exactly as SET TRANSACTION SNAPSHOT does.
+	 */
 	StartTransactionCommand();
-	snap = RestoreSnapshot(snapbytes);
+	XactIsoLevel = XACT_REPEATABLE_READ;
+	ImportSnapshot(hdr->snapname);
+	snap = GetTransactionSnapshot();
 	PushActiveSnapshot(snap);
 
 	PG_TRY();
@@ -269,7 +303,8 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 			List	   *groups = ColumnarReadRowGroupList(hdr->storageId,
 														  ColumnarCatalogSnapshot(snap));
 			int			ntake = me->endIdx - me->startIdx;
-			uint64	   *gnos = (ntake > 0) ? palloc(sizeof(uint64) * ntake) : NULL;
+			/* always non-NULL, so an empty slice restricts to nothing (not all) */
+			uint64	   *gnos = palloc(sizeof(uint64) * Max(ntake, 1));
 			int			k = 0;
 			int			idx = 0;
 			ListCell   *lc;
@@ -284,25 +319,28 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 				}
 				idx++;
 			}
-			/* k == 0 only for an empty table (ntasks 0, one worker); a NULL
-			 * restrict then writes the whole empty table, i.e. zero rows. */
 			rows = ColumnarWriteParquetFile(rel, snap, me->filepath, gnos, k);
 			table_close(rel, AccessShareLock);
 		}
 		else
 		{
-			Oid		   *parts;
-			int			npart = pexport_leaf_partitions(hdr->relid, &parts);
 			int			i;
 
-			for (i = me->startIdx; i < me->endIdx && i < npart; i++)
+			for (i = me->startIdx; i < me->endIdx && i < hdr->npart; i++)
 			{
-				Relation	part = table_open(parts[i], AccessShareLock);
+				/* a fresh context per partition, so buffers do not accumulate */
+				MemoryContext pctx = AllocSetContextCreate(CurrentMemoryContext,
+														   "pgcolumnar parallel_export partition",
+														   ALLOCSET_DEFAULT_SIZES);
+				MemoryContext old = MemoryContextSwitchTo(pctx);
+				Relation	part = table_open(leaves[i], AccessShareLock);
 				char		fp[MAXPGPATH];
 
 				snprintf(fp, sizeof(fp), "%s/part-%04d.parquet", hdr->dirpath, i);
 				rows += ColumnarWriteParquetFile(part, snap, fp, NULL, 0);
 				table_close(part, AccessShareLock);
+				MemoryContextSwitchTo(old);
+				MemoryContextDelete(pctx);
 			}
 		}
 
@@ -347,19 +385,23 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	Relation	rel;
 	bool		single_table = false;
 	int			ntasks = 0;		/* row-group count, or leaf-partition count */
+	int			npart = 0;
+	Oid		   *leafoids = NULL;
 	uint64		storageId = 0;
 	Snapshot	snap;
-	Size		snaplen;
+	bool		pushed = false;
+	char	   *snapname;
 	shm_toc_estimator est;
 	Size		segsize;
 	dsm_segment *seg;
 	shm_toc    *toc;
 	PexportHeader *hdr;
 	PexportWorkerSlot *slots;
-	char	   *snapchunk;
+	Oid		   *leafchunk;
 	uint32		dsmh;
 	BackgroundWorker bw;
 	BackgroundWorkerHandle **handles;
+	PexportSpawn spawn;
 	int			i;
 	int			per,
 				rem,
@@ -382,7 +424,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 		workers = PEXPORT_MAX_WORKERS;
 
 	/*
-	 * The workers read a server-side file path and read the table. Require the
+	 * The workers write a server-side path and read the table. Require the
 	 * write-server-files role (the write-side analog of parallel_copy's
 	 * read-server-files check) plus SELECT on the target -- the workers do not
 	 * run the executor permission check, so enforce it here before spawning.
@@ -400,41 +442,40 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, AccessShareLock);
 
-	/* one shared MVCC snapshot for the whole export -> consistent image */
-	snap = (ActiveSnapshotSet() && IsMVCCSnapshot(GetActiveSnapshot()))
-		? GetActiveSnapshot() : GetTransactionSnapshot();
-	snap = RegisterSnapshot(snap);
+	/* an MVCC snapshot to export; a SQL function normally has one active */
+	if (!ActiveSnapshotSet())
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		pushed = true;
+	}
+	snap = GetActiveSnapshot();
 
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		Oid		   *parts;
-		int			npart = pexport_leaf_partitions(relid, &parts);
-
+		npart = pexport_leaf_partitions(relid, &leafoids);
 		if (npart == 0)
-		{
-			UnregisterSnapshot(snap);
-			table_close(rel, AccessShareLock);
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("partitioned table \"%s\" has no partitions to export",
 							RelationGetRelationName(rel))));
-		}
+		/* validate every leaf we will actually write, not just the parent */
 		for (i = 0; i < npart; i++)
 		{
-			if (!ColumnarIsColumnarRelation(parts[i]))
+			Relation	part = table_open(leafoids[i], AccessShareLock);
+
+			if (!ColumnarIsColumnarRelation(leafoids[i]))
 			{
 				char		nm[NAMEDATALEN];
 
-				strlcpy(nm, get_rel_name(parts[i]) ? get_rel_name(parts[i]) : "?",
-						NAMEDATALEN);
-				UnregisterSnapshot(snap);
-				table_close(rel, AccessShareLock);
+				strlcpy(nm, RelationGetRelationName(part), NAMEDATALEN);
+				table_close(part, AccessShareLock);
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("partition \"%s\" is not a columnar table", nm)));
 			}
+			ColumnarParquetCheckExportable(part);
+			table_close(part, AccessShareLock);
 		}
-		ColumnarParquetCheckExportable(rel);	/* leaves share the parent tupdesc */
 		single_table = false;
 		ntasks = npart;
 		if (workers > npart)
@@ -453,23 +494,25 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 			workers = Max(ntasks, 1);
 	}
 	else
-	{
-		UnregisterSnapshot(snap);
-		table_close(rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("relation \"%s\" is not a columnar table or a partitioned table with columnar partitions",
 						RelationGetRelationName(rel))));
-	}
 
 	pexport_prepare_dir(dir);
 
-	/* lay out one DSM segment: header + slots + the serialized snapshot */
-	snaplen = EstimateSnapshotSpace(snap);
+	/*
+	 * Export the snapshot for the workers to import. It stays valid until this
+	 * transaction ends, and this function holds the transaction open across the
+	 * whole wait, so every worker's import resolves against a live source.
+	 */
+	snapname = ExportSnapshot(snap);
+
+	/* lay out one DSM segment: header + slots + the leaf-oid array */
 	shm_toc_initialize_estimator(&est);
 	shm_toc_estimate_chunk(&est, sizeof(PexportHeader));
 	shm_toc_estimate_chunk(&est, mul_size(sizeof(PexportWorkerSlot), workers));
-	shm_toc_estimate_chunk(&est, snaplen);
+	shm_toc_estimate_chunk(&est, mul_size(sizeof(Oid), Max(npart, 1)));
 	shm_toc_estimate_keys(&est, 3);
 	segsize = shm_toc_estimate(&est);
 
@@ -480,9 +523,10 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	slots = (PexportWorkerSlot *) shm_toc_allocate(toc,
 												   mul_size(sizeof(PexportWorkerSlot), workers));
 	shm_toc_insert(toc, PEXPORT_KEY_SLOTS, slots);
-	snapchunk = (char *) shm_toc_allocate(toc, snaplen);
-	SerializeSnapshot(snap, snapchunk);
-	shm_toc_insert(toc, PEXPORT_KEY_SNAPSHOT, snapchunk);
+	leafchunk = (Oid *) shm_toc_allocate(toc, mul_size(sizeof(Oid), Max(npart, 1)));
+	shm_toc_insert(toc, PEXPORT_KEY_LEAVES, leafchunk);
+	for (i = 0; i < npart; i++)
+		leafchunk[i] = leafoids[i];
 	dsmh = dsm_segment_handle(seg);
 
 	hdr->dbid = MyDatabaseId;
@@ -490,8 +534,10 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	hdr->relid = relid;
 	hdr->storageId = storageId;
 	hdr->nworkers = workers;
+	hdr->npart = npart;
 	hdr->single_table = single_table;
 	strlcpy(hdr->dirpath, dir, sizeof(hdr->dirpath));
+	strlcpy(hdr->snapname, snapname, sizeof(hdr->snapname));
 
 	/* even-ish contiguous [startIdx, endIdx) task ranges */
 	per = ntasks / workers;
@@ -517,10 +563,13 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 
 	handles = (BackgroundWorkerHandle **)
 		palloc0(sizeof(BackgroundWorkerHandle *) * workers);
+	spawn.handles = handles;
+	spawn.n = workers;
 
 	memset(&bw, 0, sizeof(bw));
 	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-	bw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	/* read-only, so it may run once a standby has reached a consistent state */
+	bw.bgw_start_time = BgWorkerStart_ConsistentState;
 	bw.bgw_restart_time = BGW_NEVER_RESTART;
 	strlcpy(bw.bgw_library_name, "pgcolumnar", BGW_MAXLEN);
 	strlcpy(bw.bgw_function_name, "pgcolumnar_parallel_export_worker", BGW_MAXLEN);
@@ -529,7 +578,12 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	bw.bgw_main_arg = UInt32GetDatum(dsmh);
 	bw.bgw_notify_pid = MyProcPid;
 
-	PG_TRY();
+	/*
+	 * PG_ENSURE_ERROR_CLEANUP so a FATAL in this backend still terminates the
+	 * workers before it exits, rather than orphaning them to read on after the
+	 * exported snapshot is gone.
+	 */
+	PG_ENSURE_ERROR_CLEANUP(pexport_terminate_workers, PointerGetDatum(&spawn));
 	{
 		for (i = 0; i < workers; i++)
 		{
@@ -564,20 +618,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 			ResetLatch(MyLatch);
 		}
 	}
-	PG_CATCH();
-	{
-		for (i = 0; i < workers; i++)
-			if (handles[i] != NULL)
-				TerminateBackgroundWorker(handles[i]);
-		for (i = 0; i < workers; i++)
-			if (handles[i] != NULL)
-				WaitForBackgroundWorkerShutdown(handles[i]);
-		UnregisterSnapshot(snap);
-		dsm_detach(seg);
-		table_close(rel, AccessShareLock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+	PG_END_ENSURE_ERROR_CLEANUP(pexport_terminate_workers, PointerGetDatum(&spawn));
 
 	for (i = 0; i < workers; i++)
 	{
@@ -594,8 +635,9 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 
 		strlcpy(msg, slots[failed].errmsg[0] ? slots[failed].errmsg
 				: "worker exited without reporting a result", sizeof(msg));
-		UnregisterSnapshot(snap);
 		dsm_detach(seg);
+		if (pushed)
+			PopActiveSnapshot();
 		table_close(rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(code ? code : ERRCODE_INTERNAL_ERROR),
@@ -603,8 +645,9 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 						failed, msg)));
 	}
 
-	UnregisterSnapshot(snap);
 	dsm_detach(seg);
+	if (pushed)
+		PopActiveSnapshot();
 	table_close(rel, AccessShareLock);
 	PG_RETURN_INT64(total);
 }

@@ -1009,7 +1009,14 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 	nulls = palloc(sizeof(bool) * ntop);
 
 	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
-	if (restrictGroups != NULL && nRestrictGroups > 0)
+	/*
+	 * NULL restrictGroups means no restriction (the whole table). A non-NULL
+	 * list restricts to exactly those groups, so an empty list (nRestrictGroups
+	 * == 0) exports nothing. The parallel exporter always passes a non-NULL list,
+	 * so a worker whose slice is empty writes zero rows rather than -- as an
+	 * earlier version did -- the entire table.
+	 */
+	if (restrictGroups != NULL)
 		ColumnarReadRestrictToGroups(readState, restrictGroups, nRestrictGroups);
 
 	for (;;)

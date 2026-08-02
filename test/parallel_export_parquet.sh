@@ -99,6 +99,30 @@ check "empty: read-back is the empty set" \
 	"$(pgc_set_hash "SELECT * FROM pgcolumnar.read_parquet('$DE') AS t($RB)")" \
 	"$(pgc_set_hash "SELECT * FROM t_empty")"
 
+# ---- consistency: export INSIDE a transaction with uncommitted rows ---------
+# All workers import ONE exported snapshot, so the export is the committed image
+# at call time: no duplication, and rows the caller wrote but did not commit are
+# absent. This is jdatcmd's #329 repro; a broken snapshot handoff duplicated the
+# table and dropped the caller's rows, and no autocommit fixture could see it.
+psql_run "DROP TABLE IF EXISTS t_tx;
+          CREATE TABLE t_tx ($COLS) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('t_tx'::regclass, stripe_row_limit => 3000);
+          INSERT INTO t_tx SELECT g, g, g::float8/7, 'c'||g FROM generate_series(1,20000) g;" >/dev/null
+NC="$(q "SELECT count(*) FROM t_tx")"		# committed rows
+DTX="$PGC_WORKDIR/tx"
+# one psql session, one transaction: uncommitted INSERT, then export, then commit
+psql_run "BEGIN;
+          INSERT INTO t_tx SELECT g, g, g::float8/7, 'u'||g FROM generate_series(100001,100500) g;
+          SELECT pgcolumnar.parallel_export_parquet('t_tx'::regclass, '$DTX', 4);
+          COMMIT;" >/dev/null
+check "in-txn export: read-back count == committed count (no duplication)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.read_parquet('$DTX') AS t($RB)")" "$NC"
+check "in-txn export: no duplicate ids in the read-back" \
+	"$(q "SELECT count(DISTINCT id) FROM pgcolumnar.read_parquet('$DTX') AS t($RB)")" "$NC"
+check "in-txn export: read-back == committed rows (uncommitted rows absent)" \
+	"$(pgc_set_hash "SELECT * FROM pgcolumnar.read_parquet('$DTX') AS t($RB)")" \
+	"$(pgc_set_hash "SELECT id,k,v,txt FROM t_tx WHERE txt LIKE 'c%'")"
+
 # ---- error cases ------------------------------------------------------------
 # st_1 was written above, so it is non-empty
 expect_error "reject a non-empty output directory" \
