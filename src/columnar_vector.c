@@ -38,6 +38,7 @@
 
 #include <math.h>
 
+#include "miscadmin.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/pg_aggregate.h"
@@ -540,6 +541,15 @@ typedef struct ColumnarAggScanState
 	TupleTableSlot *baseSlot;	/* holds each read row for the qual recheck */
 	ExprState  *whereState;		/* residual WHERE recheck, or NULL */
 
+	/*
+	 * Batch fold (#289): when every aggregate and the whole WHERE are
+	 * batch-eligible, fold the decoded column buffer column-at-a-time instead of
+	 * one Datum tuple per row. batchEligible is decided at Begin (a shape
+	 * property, for EXPLAIN); batchFolded records that the fold actually ran.
+	 */
+	bool		batchEligible;
+	bool		batchFolded;
+
 	/* chunk-group skip counters captured for EXPLAIN */
 	bool		haveStats;
 	uint64		groupsRead;
@@ -627,6 +637,9 @@ typedef struct ColumnarGroupAggScanState
 static const CustomExecMethods columnar_groupagg_exec_methods;
 static void ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 									RelOptInfo *output_rel);
+static bool columnar_batch_shape_eligible(ColumnarAggScanState *state,
+										  TupleDesc tupdesc, ScanKey *keysOut,
+										  int *nkeysOut);
 
 /* -------------------------------------------------------------------------
  * vectorized aggregate: planning
@@ -1291,11 +1304,22 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->done = false;
 	state->haveStats = false;
 
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
-
 	rel = table_open(state->relid, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
+
+	/*
+	 * Batch eligibility is a shape property; decide it before the EXPLAIN-only
+	 * return so a plain EXPLAIN reports whether the batch fold will run.
+	 */
+	if (state->scanFold)
+		state->batchEligible =
+			columnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
+
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
 
 	/*
 	 * Guard the native format version before folding any aggregate (#240). The
@@ -1995,6 +2019,323 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 	return dirty;
 }
 
+/* -------------------------------------------------------------------------
+ * ungrouped batch fold (#289)
+ *
+ * The row-at-a-time path materializes every projected column into a Datum tuple,
+ * resets a per-row memory context, and hands the tuple to ExecQual and the fold,
+ * once per row. For a full-scan ungrouped aggregate that per-row tax is the whole
+ * cost. The batch fold instead walks each loaded group's packed value streams,
+ * evaluates a pushable WHERE inline, and folds each surviving value through the
+ * same columnar_apply_one -- so accumulators are byte-identical to the row path,
+ * floats included -- with none of the per-row Datum, context, or executor cost.
+ * It runs only when every aggregate and the whole WHERE are batch-eligible; a
+ * false return means it folded nothing and the caller runs the always-correct
+ * row path.
+ * ------------------------------------------------------------------------- */
+
+/* PostgreSQL's float total order: NaN sorts above every non-NaN, NaN == NaN, and
+ * -0.0 == 0.0, matching float8_cmp_internal so an inline compare equals the
+ * operator ExecQual would call. */
+static inline int
+columnar_batch_float_cmp(double a, double b)
+{
+	if (isnan(a))
+		return isnan(b) ? 0 : 1;
+	if (isnan(b))
+		return -1;
+	return (a < b) ? -1 : (a > b) ? 1 : 0;
+}
+
+/* Whether one fixed-width numeric column value (known non-null) satisfies one
+ * btree scan key. */
+static bool
+columnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
+{
+	int			c;
+
+	switch (coltype)
+	{
+		case INT2OID:
+			{ int16 a = DatumGetInt16(val), b = DatumGetInt16(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case INT4OID:
+			{ int32 a = DatumGetInt32(val), b = DatumGetInt32(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case INT8OID:
+			{ int64 a = DatumGetInt64(val), b = DatumGetInt64(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
+		case FLOAT4OID:
+			c = columnar_batch_float_cmp((double) DatumGetFloat4(val), (double) DatumGetFloat4(arg)); break;
+		case FLOAT8OID:
+			c = columnar_batch_float_cmp(DatumGetFloat8(val), DatumGetFloat8(arg)); break;
+		default:
+			return false;
+	}
+	switch (strat)
+	{
+		case BTLessStrategyNumber: return c < 0;
+		case BTLessEqualStrategyNumber: return c <= 0;
+		case BTEqualStrategyNumber: return c == 0;
+		case BTGreaterEqualStrategyNumber: return c >= 0;
+		case BTGreaterStrategyNumber: return c > 0;
+		default: return false;
+	}
+}
+
+/* A fixed-width by-value numeric column type the batch fold can read directly. */
+static bool
+columnar_batch_type_ok(Oid typ)
+{
+	return typ == INT2OID || typ == INT4OID || typ == INT8OID ||
+		typ == FLOAT4OID || typ == FLOAT8OID;
+}
+
+/* An aggregate kind the batch fold accumulates (folded via columnar_apply_one
+ * over a fixed-width by-value numeric column, or count). int8/numeric sum/avg and
+ * min/max stay on the row path. */
+static bool
+columnar_batch_agg_ok(ColumnarAggKind kind)
+{
+	switch (kind)
+	{
+		case COLUMNAR_AGG_COUNT_STAR:
+		case COLUMNAR_AGG_COUNT_COL:
+		case COLUMNAR_AGG_SUM_INT:
+		case COLUMNAR_AGG_AVG_INT:
+		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_AVG_FLOAT:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * columnar_batch_shape_eligible
+ *		Whether this aggregate's shape can use the batch fold: every aggregate is
+ *		batch-accumulable, the whole WHERE converts to scan keys (no residual), and
+ *		every key is a supported btree comparison on a batch-readable column. When
+ *		keysOut is non-NULL the built scan keys are returned for the fold to reuse;
+ *		otherwise they are only inspected. Deterministic from the query shape, so
+ *		Begin can report it in EXPLAIN before execution.
+ */
+static bool
+columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
+							  ScanKey *keysOut, int *nkeysOut)
+{
+	ScanKey		keys;
+	int			nkeys = 0;
+	int			npred;
+	bool		allConvertible;
+	int			a;
+	int			k;
+	bool		ok = true;
+
+	for (a = 0; a < state->naggs; a++)
+		if (!columnar_batch_agg_ok(state->specs[a].kind))
+			return false;
+
+	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+								  &npred, &allConvertible);
+	if (!allConvertible)
+		return false;
+
+	keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
+	for (k = 0; k < nkeys; k++)
+	{
+		ScanKey		key = &keys[k];
+		int			attidx = key->sk_attno - 1;
+		Oid			coltype;
+
+		if (key->sk_flags != 0 || attidx < 0 || attidx >= tupdesc->natts)
+			{ ok = false; break; }
+		coltype = TupleDescAttr(tupdesc, attidx)->atttypid;
+		if (!columnar_batch_type_ok(coltype))
+			{ ok = false; break; }
+		if (key->sk_subtype != InvalidOid && key->sk_subtype != coltype)
+			{ ok = false; break; }
+		if (key->sk_strategy < BTLessStrategyNumber ||
+			key->sk_strategy > BTGreaterStrategyNumber)
+			{ ok = false; break; }
+	}
+	if (!ok)
+		return false;
+
+	if (keysOut != NULL)
+	{
+		*keysOut = keys;
+		*nkeysOut = nkeys;
+	}
+	return true;
+}
+
+/* Reset the accumulators to their initial state (for a clean fall-back). */
+static void
+columnar_agg_specs_reset(ColumnarAggScanState *state)
+{
+	int			a;
+
+	MemoryContextReset(state->resultContext);
+	for (a = 0; a < state->naggs; a++)
+	{
+		ColumnarAggSpec *spec = &state->specs[a];
+
+		spec->count = 0;
+		spec->sum = 0;
+		spec->sawValue = false;
+		spec->extreme = (Datum) 0;
+		spec->fsum = 0;
+		spec->fsxx = 0;
+		spec->nsum = (Datum) 0;
+		spec->nsumSet = false;
+	}
+}
+
+/*
+ * columnar_native_batch_fold
+ *		Fold the whole scan column-at-a-time. Returns false (having folded and
+ *		reset nothing that the caller cannot redo) when the shape is not eligible
+ *		or a group is missing a needed column, so the caller runs the row path.
+ */
+static bool
+columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
+						   TupleDesc tupdesc)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ScanKey		keys = NULL;
+	int			nkeys = 0;
+	int			a;
+	int			k;
+	int			col;
+	int			natts = tupdesc->natts;
+	ColumnarReadState *rs;
+	const char **cvalidity = (const char **) palloc0(sizeof(char *) * natts);
+	const char **cpacked = (const char **) palloc0(sizeof(char *) * natts);
+	int16	   *cattlen = (int16 *) palloc0(sizeof(int16) * natts);
+	uint64	   *cpresent = (uint64 *) palloc0(sizeof(uint64) * natts);
+	bool	   *cneeded = (bool *) palloc0(sizeof(bool) * natts);
+	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
+	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
+
+	if (!columnar_batch_shape_eligible(state, tupdesc, &keys, &nkeys))
+		return false;
+
+	col = -1;
+	while ((col = bms_next_member(state->projected, col)) >= 0)
+		if (col >= 0 && col < natts)
+			cneeded[col] = true;
+
+	/*
+	 * No scan keys are pushed to the reader: the WHERE is applied inline per value
+	 * below. For a zone-map-selective filter, pushing keys would also prune whole
+	 * vectors; that is a later refinement (it needs present-index skipping) and
+	 * only helps a filter the vector min/max can rule out.
+	 */
+	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected, 0, NULL);
+
+	while (ColumnarReadFoldNextGroup(rs))
+	{
+		uint64		nrows;
+		const char *dmask;
+		uint32		dlen;
+		const bool *skipVec;
+		const uint32 *vecStart;
+		int			vcount;
+		uint64		r;
+
+		ColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
+								  &skipVec, &vecStart, &vcount);
+
+		for (col = 0; col < natts; col++)
+		{
+			const char *vbits;
+			const char *pk;
+			int16		al;
+			const uint32 *vrl;
+
+			cpresent[col] = 0;
+			if (!cneeded[col])
+				continue;
+			if (!ColumnarReadFoldColumn(rs, col, &vbits, &pk, &al, &vrl))
+			{
+				/*
+				 * The column is absent from this group (a later ADD COLUMN). The
+				 * batch path cannot supply its missing value, so reset and fall
+				 * back to the row path for the whole scan, which handles it.
+				 */
+				ColumnarEndRead(rs);
+				columnar_agg_specs_reset(state);
+				return false;
+			}
+			cvalidity[col] = vbits;
+			cpacked[col] = pk;
+			cattlen[col] = al;
+		}
+
+		for (r = 0; r < nrows; r++)
+		{
+			bool		del;
+			bool		pass = true;
+
+			CHECK_FOR_INTERRUPTS();
+
+			/* gather needed values at each column's present index; advance it */
+			for (col = 0; col < natts; col++)
+			{
+				if (!cneeded[col])
+					continue;
+				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+				{
+					cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+										  true, cattlen[col]);
+					cisnull[col] = false;
+					cpresent[col]++;
+				}
+				else
+					cisnull[col] = true;
+			}
+
+			del = (dmask != NULL && (r >> 3) < dlen &&
+				   (dmask[r >> 3] & (1 << (r & 7))) != 0);
+			if (del)
+				continue;			/* value slots already consumed above */
+
+			for (k = 0; k < nkeys; k++)
+			{
+				ScanKey		key = &keys[k];
+				int			attidx = key->sk_attno - 1;
+
+				if (cisnull[attidx] ||
+					!columnar_batch_key_pass(TupleDescAttr(tupdesc, attidx)->atttypid,
+											 cval[attidx], key->sk_strategy,
+											 key->sk_argument))
+				{
+					pass = false;
+					break;
+				}
+			}
+			if (!pass)
+				continue;
+
+			for (a = 0; a < state->naggs; a++)
+			{
+				ColumnarAggSpec *spec = &state->specs[a];
+
+				if (spec->attidx >= 0)
+					columnar_apply_one(state->resultContext, spec,
+									   cval[spec->attidx], cisnull[spec->attidx]);
+				else
+					columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
+			}
+		}
+	}
+
+	ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+					  &state->groupsTotal);
+	state->haveStats = true;
+	state->batchFolded = true;
+	ColumnarEndRead(rs);
+	return true;
+}
+
 /*
  * columnar_native_scan_agg
  *		Fold an ungrouped, unfiltered aggregate over a native table by scanning it
@@ -2043,6 +2384,19 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 
 	ColumnarFlushWriteStateForRelation(state->relid);
 	ColumnarFlushDeleteVectorForRelation(rel);
+
+	/*
+	 * Batch fold when the shape allows it (#289): the whole scan folds
+	 * column-at-a-time, which is the point of this path. Only the full scan uses
+	 * it; the dirty-groups metadata tail (restrictGroups != NULL) stays on the
+	 * row path.
+	 */
+	if (state->scanFold && restrictGroups == NULL &&
+		columnar_native_batch_fold(state, rel, tupdesc))
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
 
 	/* push the WHERE down for group and vector pruning; the recheck is exact */
 	if (state->scanFold && state->quals != NIL)
@@ -2197,6 +2551,7 @@ ColumnarReScanAggScan(CustomScanState *node)
 
 	state->done = false;
 	state->haveStats = false;
+	state->batchFolded = false;
 	MemoryContextReset(state->resultContext);
 	for (a = 0; a < state->naggs; a++)
 	{
@@ -2229,6 +2584,9 @@ ColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *es)
 						   state->naggs, es);
 	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
 						   state->npreds, es);
+	if (state->scanFold)
+		ExplainPropertyText("Columnar Batch Fold",
+							state->batchEligible ? "yes" : "no", es);
 
 	if (state->haveStats)
 	{

@@ -568,6 +568,20 @@ extern void ColumnarRescanRead(ColumnarReadState *readState);
 extern void ColumnarEndRead(ColumnarReadState *readState);
 
 /*
+ * Batch-fold accessors (#289): expose the current loaded group's decoded buffer
+ * so an ungrouped aggregate can fold it column-at-a-time instead of one Datum
+ * tuple per row. See the block comment in columnar_reader.c for the contract.
+ */
+extern bool ColumnarReadFoldNextGroup(ColumnarReadState *readState);
+extern void ColumnarReadFoldGroupInfo(ColumnarReadState *readState, uint64 *nrows,
+									  const char **deleteMask, uint32 *deleteMaskLen,
+									  const bool **skipVec, const uint32 **vecStart,
+									  int *vectorCount);
+extern bool ColumnarReadFoldColumn(ColumnarReadState *readState, int attidx,
+								   const char **validity, const char **packed,
+								   int16 *attlen, const uint32 **vecRawLen);
+
+/*
  * Restrict a scan to a set of row groups (issue #149). Groups outside the set
  * are skipped without their bytes being read. Must be called before the first
  * ColumnarReadNextRow; ngroups == 0 makes the scan return no rows.
