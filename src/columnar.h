@@ -578,6 +578,14 @@ extern void ColumnarReadRestrictToGroups(ColumnarReadState *readState,
 										 const uint64 *groupNumbers,
 										 int ngroups);
 
+/* Parquet export helpers, shared by the serial and parallel exporters
+ * (src/columnar_parquet.c). */
+extern int64 ColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
+									  const char *filepath,
+									  const uint64 *restrictGroups,
+									  int nRestrictGroups);
+extern void ColumnarParquetCheckExportable(Relation rel);
+
 extern void ColumnarReadSetParallelCounter(ColumnarReadState *readState,
 										   pg_atomic_uint32 *counter);
 

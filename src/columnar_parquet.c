@@ -884,22 +884,71 @@ build_top_column(TopColumn *tc, const char *name, Oid typid, int32 typmod,
 }
 
 /*
- * columnar_export_parquet
- *		SQL: columnar.export_parquet(rel regclass, path text) -> bigint.
+ * ColumnarParquetCheckExportable
+ *		Ereport if rel cannot be exported to Parquet (a dropped column, or a
+ *		column type the writer does not support). Lets the parallel exporter fail
+ *		fast in the dispatcher, before it opens files or spawns workers.
  */
-Datum
-columnar_export_parquet(PG_FUNCTION_ARGS)
+void
+ColumnarParquetCheckExportable(Relation rel)
 {
-	Oid			relid;
-	char	   *path;
-	Relation	rel;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			ntop = tupdesc->natts;
+	int			totalLeaves = 0;
+	int			nleaves = 0;
+	TopColumn  *tops;
+	PqLeaf	   *leaves;
+	int			i;
+
+	for (i = 0; i < ntop; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+		if (att->attisdropped)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar parquet export does not support dropped columns")));
+		totalLeaves += count_leaves_for(att->atttypid, att->atttypmod);
+	}
+	tops = palloc0(sizeof(TopColumn) * ntop);
+	leaves = palloc0(sizeof(PqLeaf) * Max(totalLeaves, 1));
+	for (i = 0; i < ntop; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		bool		ok = true;
+
+		build_top_column(&tops[i], NameStr(att->attname), att->atttypid,
+						 att->atttypmod, leaves, &nleaves, &ok);
+		if (!ok)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("column \"%s\" has type %s, which columnar parquet export does not support",
+							NameStr(att->attname),
+							format_type_be(att->atttypid))));
+	}
+	pfree(tops);
+	pfree(leaves);
+}
+
+/*
+ * ColumnarWriteParquetFile
+ *		Write rel's live rows to a Parquet file at filepath, under snapshot.
+ *		When restrictGroups is non-NULL, only those row groups are written (the
+ *		parallel exporter gives each worker a disjoint group slice). Returns rows
+ *		written. The caller owns rel (kept open) and the snapshot; on error this
+ *		ereports and the resource owner releases the lock. Shared by the serial
+ *		columnar_export_parquet and the parallel exporter.
+ */
+int64
+ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
+						 const uint64 *restrictGroups, int nRestrictGroups)
+{
 	TupleDesc	tupdesc;
 	int			ntop;
 	TopColumn  *tops;
 	PqLeaf	   *leaves;
 	int			nleaves = 0;
 	int			totalLeaves = 0;
-	Snapshot	snapshot;
 	ColumnarReadState *readState;
 	Datum	   *values;
 	bool	   *nulls;
@@ -914,28 +963,6 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 	int			rgCap = 0;
 	MemoryContext rgCtx = CurrentMemoryContext;
 
-	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("relation and path must not be null")));
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to export to a server-side file")));
-
-	relid = PG_GETARG_OID(0);
-	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
-
-	rel = table_open(relid, AccessShareLock);
-	if (!ColumnarIsColumnarRelation(relid))
-	{
-		table_close(rel, AccessShareLock);
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("relation \"%s\" is not a columnar table",
-						RelationGetRelationName(rel))));
-	}
-
 	tupdesc = RelationGetDescr(rel);
 	ntop = tupdesc->natts;
 
@@ -946,12 +973,9 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
 
 		if (att->attisdropped)
-		{
-			table_close(rel, AccessShareLock);
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("columnar.export_parquet does not support dropped columns")));
-		}
+					 errmsg("columnar parquet export does not support dropped columns")));
 		totalLeaves += count_leaves_for(att->atttypid, att->atttypmod);
 	}
 
@@ -965,24 +989,18 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 		build_top_column(&tops[i], NameStr(att->attname), att->atttypid,
 						 att->atttypmod, leaves, &nleaves, &ok);
 		if (!ok)
-		{
-			table_close(rel, AccessShareLock);
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("column \"%s\" has type %s, which columnar.export_parquet does not support",
+					 errmsg("column \"%s\" has type %s, which columnar parquet export does not support",
 							NameStr(att->attname),
 							format_type_be(att->atttypid))));
-		}
 	}
 
-	f = AllocateFile(path, PG_BINARY_W);
+	f = AllocateFile(filepath, PG_BINARY_W);
 	if (f == NULL)
-	{
-		table_close(rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for writing: %m", path)));
-	}
+				 errmsg("could not open file \"%s\" for writing: %m", filepath)));
 
 	fwrite("PAR1", 1, 4, f);		/* magic header */
 	offset = 4;
@@ -990,8 +1008,9 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 	values = palloc(sizeof(Datum) * ntop);
 	nulls = palloc(sizeof(bool) * ntop);
 
-	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
 	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	if (restrictGroups != NULL && nRestrictGroups > 0)
+		ColumnarReadRestrictToGroups(readState, restrictGroups, nRestrictGroups);
 
 	for (;;)
 	{
@@ -1090,12 +1109,51 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 	}
 
 	if (FreeFile(f) != 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write file \"%s\": %m", filepath)));
+
+	return total;
+}
+
+/*
+ * columnar_export_parquet
+ *		SQL: pgcolumnar.export_parquet(rel regclass, path text) -> bigint.
+ *		Thin wrapper over ColumnarWriteParquetFile for the whole table.
+ */
+Datum
+columnar_export_parquet(PG_FUNCTION_ARGS)
+{
+	Oid			relid;
+	char	   *path;
+	Relation	rel;
+	Snapshot	snapshot;
+	int64		total;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("relation and path must not be null")));
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to export to a server-side file")));
+
+	relid = PG_GETARG_OID(0);
+	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	rel = table_open(relid, AccessShareLock);
+	if (!ColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessShareLock);
 		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not write file \"%s\": %m", path)));
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a columnar table",
+						RelationGetRelationName(rel))));
 	}
+
+	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
+	total = ColumnarWriteParquetFile(rel, snapshot, path, NULL, 0);
 
 	table_close(rel, AccessShareLock);
 	PG_RETURN_INT64(total);
