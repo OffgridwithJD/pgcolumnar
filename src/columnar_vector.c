@@ -81,9 +81,9 @@ bool		columnar_enable_vectorization = true;
 /*
  * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
  * grouped path is built out incrementally; the ungrouped path is unaffected.
- * groupagg_max_groups caps the plan-time group estimate the grouped path will
- * accept, so a high-cardinality grouping routes to the spillable core HashAgg
- * rather than this (non-spilling) path.
+ * groupagg_max_groups caps the ACTUAL group count at execution time; exceeding
+ * it raises an error (see columnar_groupagg_lookup) rather than routing to core
+ * HashAgg. It is not a plan-time gate.
  */
 bool		columnar_enable_group_vectorization = false;
 int			columnar_groupagg_max_groups = 1000000;
@@ -587,7 +587,7 @@ typedef struct ColumnarGroupAggScanState
 	ColumnarGroupEntry *entries;	/* open-addressing table (power-of-two) */
 	int			capacity;
 	int			nGroups;
-	int			maxGroups;		/* GUC cap (planner guard) */
+	int			maxGroups;		/* GUC cap enforced at execution (columnar_groupagg_lookup) */
 
 	MemoryContext keyContext;	/* copied key Datums */
 	MemoryContext specContext;	/* per-group specs + running min/max/numeric */
@@ -735,8 +735,8 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	}
 
 	/*
-	 * Every restriction clause must convert to a predicate we evaluate exactly,
-	 * so the vectorized filter is the complete WHERE. Otherwise fall back.
+	 * The ungrouped path supports no residual filter: collect any restriction
+	 * clauses so that with any WHERE we fall back to the ordinary Agg.
 	 */
 	quals = extract_actual_clauses(input_rel->baserestrictinfo, false);
 
@@ -890,8 +890,9 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
  *		Add a grouped vectorized aggregate path (#289) when the query is one we
  *		can answer exactly: a single columnar base relation, an optional WHERE,
  *		every output entry either a supported aggregate or a bare reference to a
- *		supported GROUP BY key, and an estimated group count within the cap. On
- *		anything unsupported it adds nothing and the ordinary Agg plan runs.
+ *		supported GROUP BY key. On anything unsupported it adds nothing and the
+ *		ordinary Agg plan runs. The group-count cap is enforced only at
+ *		execution (columnar_groupagg_lookup).
  */
 static void
 ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
@@ -1253,8 +1254,8 @@ columnar_float4_pl(float4 a, float4 b)
 /*
  * columnar_apply_one
  *		Fold one value (or a null) into an aggregate accumulator. This is the
- *		reference per-row semantics, shared by the vectorized per-row path and
- *		the run path's fallback and min/max handling.
+ *		reference per-row semantics, shared by the ungrouped scan path
+ *		(columnar_native_scan_agg) and the grouped path (columnar_groupagg_build).
  */
 static void
 columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
@@ -1439,18 +1440,6 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 			break;
 	}
 }
-
-
-/*
- * columnar_run_agg
- *		Scan the base relation once and fold every chunk group into the aggregate
- *		accumulators. The reader (ColumnarBeginRead) applies min/max chunk-group
- *		skipping and the delete vector. With no pushed-down predicates and fixed-width
- *		aggregate columns, groups are folded run-at-a-time over the value stream
- *		(I3 compressed execution); otherwise, and for groups with deletes, the
- *		per-row vectorized path is used. Returns the read state so the caller can
- *		read skip counters for EXPLAIN before ending it.
- */
 
 
 /*

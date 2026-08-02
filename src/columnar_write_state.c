@@ -896,12 +896,13 @@ ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 /*
  * columnar_flush_row_group
  *		Native-format (PGCN v1) flush. Lay out the accumulated rows as one row
- *		group: each column is a column chunk of [validity bitmap][uncompressed
- *		values], where the validity bitmap is one bit per row (LSB-first) and the
- *		values are the concatenated present-value streams. Write the bytes to the
- *		relation file and record the native catalog rows (storage, row_group,
- *		column_chunk). Phase D2b baseline: the encoding is uncompressed; the
- *		cascade and zone maps arrive in D4/D5 and the native reader in D3.
+ *		group: each column is a column chunk of [validity bitmap][values], where
+ *		the validity bitmap is one bit per row (LSB-first) and the values are the
+ *		concatenated present-value streams encoded per-vector via the adaptive
+ *		cascade and then optionally block-compressed. Compute per-vector and
+ *		whole-chunk zone maps plus a per-chunk bloom filter. Write the bytes to
+ *		the relation file and record the native catalog rows (storage, row_group,
+ *		column_chunk, zone_map, bloom).
  */
 static void
 columnar_flush_row_group(ColumnarWriteState *writeState)

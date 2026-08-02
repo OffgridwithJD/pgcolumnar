@@ -126,8 +126,8 @@ snappy_raw_uncompress(const uint8 *in, size_t inlen, StringInfo out)
  *
  * On success *out / *outlen point at the decompressed bytes: either straight into
  * `src` (uncompressed), or into `scratch` (any real codec). `usize` is the
- * uncompressed size from the page header, which zstd and lz4_raw require up front
- * (they do not self-describe the output length the way Snappy and gzip do); pass
+ * uncompressed size from the page header, which zstd, lz4_raw and gzip require up
+ * front (only Snappy self-describes its output length, via a leading varint); pass
  * the value portion's uncompressed size for a v2 data page, where the levels are
  * stored uncompressed ahead of the compressed values.
  *

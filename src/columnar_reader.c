@@ -5,9 +5,10 @@
  *		stripes and reconstructs rows (spec 4, 6). Also holds the value-stream
  *		codec shared with the writer.
  *
- * Phase 1 stores value streams uncompressed. Each chunk carries an exists
- * (null bitmap) stream of one byte per row; present rows draw their value
- * from the value stream in order.
+ * The native format encodes value streams per vector and optionally block-
+ * compresses them; the reader reverses both. Each chunk carries an exists
+ * (null bitmap) stream of one bit per row (a validity bitmap); present rows
+ * draw their value from the value stream in order.
  *
  *-------------------------------------------------------------------------
  */

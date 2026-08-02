@@ -109,7 +109,7 @@ uint64_cmp(const void *a, const void *b)
  * conflict check in ColumnarUpsertDeleteVector.
  * ------------------------------------------------------------------------- */
 
-/* the relation's ready+valid indexes, opened once for a rewrite pass */
+/* the relation's ready indexes, opened once for a rewrite pass */
 /*
  * Rewrite one group's live rows into a fresh group and retire the old group.
  * Returns the number of live rows moved. Caller holds ShareUpdateExclusiveLock

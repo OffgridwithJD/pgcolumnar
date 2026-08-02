@@ -4,10 +4,10 @@
  *		Table access method handler for pgColumnar and extension glue:
  *		GUCs, the pre-commit flush hook, and drop-time metadata cleanup.
  *
- * Implements the subset of TableAmRoutine built through phase 3: create, bulk
- * insert, sequential scan, delete and update via the delete vector, fetch by tid,
- * size estimation, and non-transactional truncate. Index, vacuum, and sample
- * callbacks are stubbed for later phases.
+ * Implements the TableAmRoutine callbacks: create, bulk insert, sequential
+ * scan, delete and update via the delete vector, fetch by tid, size
+ * estimation, non-transactional truncate, index fetch/build, and lazy VACUUM.
+ * Only the TABLESAMPLE (sample) callbacks are stubbed for later phases.
  *
  *-------------------------------------------------------------------------
  */
@@ -1040,7 +1040,8 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 	}
 }
 
-/* VACUUM: nothing to do in phase 1 (delete vector / compaction arrive later) */
+/* VACUUM: mark all-visible groups in the VM fork and retire fully-deleted
+ * groups online, both under ShareUpdateExclusiveLock */
 static void
 columnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 						 BufferAccessStrategy bstrategy)
@@ -2404,8 +2405,6 @@ _PG_init(void)
 
 	/* install the vectorized-aggregate upper-path hook (spec 9) */
 	ColumnarVectorInit();
-
-	/* set up the optional decompressed-chunk cache (spec 8.3) */
 
 	/* register the unique-index cache invalidation callback (issue #5) */
 	ColumnarUniqueInit();

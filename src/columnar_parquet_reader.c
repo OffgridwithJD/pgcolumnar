@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * columnar_parquet_reader.c
- *		Parquet file import: columnar.import_parquet(rel regclass, path text).
+ *		Parquet file import: pgcolumnar.import_parquet(rel regclass, path text).
  *
  * A self-contained Parquet reader with no libparquet/libarrow dependency. It
  * parses the Thrift compact-protocol file metadata, decompresses Snappy (and
@@ -9,7 +9,7 @@
  * (RLE_DICTIONARY / PLAIN_DICTIONARY) encodings from both DATA_PAGE (v1) and
  * DATA_PAGE_V2 pages -- the combination pyarrow writes by default. Rows are
  * inserted into an existing target table (its tuple descriptor defines the
- * expected columns and types), mirroring columnar.import_arrow.
+ * expected columns and types), mirroring pgcolumnar.import_arrow.
  *
  * Independent MIT implementation built from the Apache Parquet format and Thrift
  * compact-protocol specifications, the Snappy format description, and the public
@@ -2330,14 +2330,6 @@ build_imp_targets(TupleDesc tupdesc, PqFile *pf,
 	return tops;
 }
 
-/*
- * Read an entire server-side Parquet file into a palloc'd buffer and parse its
- * footer metadata into *pf. On success the file bytes are returned in *bufOut
- * (length *lenOut), allocated in the caller's memory context. This never returns
- * on failure: any open/size/read/format/metadata error is reported with ereport,
- * so the caller does not need to check a return value or clean the buffer up.
- * The caller is responsible for any privilege check before calling.
- */
 /* strcmp comparator for list_sort over a List of cstrings */
 static int
 pq_list_str_cmp(const ListCell *a, const ListCell *b)
@@ -2890,7 +2882,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 }
 
 /*
- * columnar.import_parquet(rel regclass, path text) -> bigint
+ * pgcolumnar.import_parquet(rel regclass, path text) -> bigint
  */
 Datum
 columnar_import_parquet(PG_FUNCTION_ARGS)
@@ -2958,7 +2950,7 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar.read_parquet(path text) returns setof record
+ * pgcolumnar.read_parquet(path text) returns setof record
  *
  * Stream a server-side Parquet file's rows in place, without importing. The caller
  * supplies a column definition list:
@@ -3036,7 +3028,7 @@ columnar_read_parquet(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar.parquet_schema(path text)
+ * pgcolumnar.parquet_schema(path text)
  *     -> table(column_name text, data_type text, nullable bool)
  *
  * Read a server-side Parquet file's footer and report its leaf columns with the
@@ -3331,9 +3323,9 @@ pq_percent_decode(const char *src, const char *file)
  * function, so the declared type decides what a directory name means, and a value
  * that will not convert raises through the normal input-function error.
  *
- * The value text is taken literally. Hive percent-encodes characters that cannot
- * appear in a path component, and that decoding is deliberately not done here;
- * see the limitation in the docs.
+ * The value text is percent-decoded (see pq_percent_decode). Hive percent-encodes
+ * characters that cannot appear in a path component, so a value written as a%3Db
+ * is read as the string "a=b".
  */
 static void
 pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
@@ -4101,8 +4093,8 @@ pgcolumnar_parquet_fdw_handler(PG_FUNCTION_ARGS)
 }
 
 /*
- * Option validator: the only accepted option is "path" on a foreign table. Server,
- * wrapper, and user-mapping objects take no options.
+ * Option validator: the accepted options are "path" and "partition_columns" on a
+ * foreign table. Server, wrapper, and user-mapping objects take no options.
  */
 Datum
 pgcolumnar_parquet_fdw_validator(PG_FUNCTION_ARGS)

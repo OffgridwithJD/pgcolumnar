@@ -19,6 +19,10 @@
  *     PREPAREDs them all, so a failure in any range leaves no partial load. Distinct
  *     partitions means distinct storage, which is what makes this parallel (no
  *     shared per-storage write lock) and 2PC-safe (no deadlock).
+ *   - the single (non-partitioned) columnar table shape: N loaders write ONE shared
+ *     storage concurrently. Here parallelism does not come from distinct storage;
+ *     it comes from the coordinator pre-creating and committing the storage row so
+ *     the loaders skip its creation lock, each writing via columnar_bulk_parallel_writer.
  *   - a standalone byte splitter (columnar_file_split_offsets) exposed to SQL: N+1
  *     line-aligned offsets, a diagnostic the parallel load itself no longer calls.
  * Text format only for now, numeric/date-time partition keys only (their text form

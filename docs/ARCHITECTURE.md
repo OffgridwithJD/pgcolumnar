@@ -151,7 +151,8 @@ compression-block run iterator (`ColumnarBlockReader`) that exposes a chunk as
 
 ### columnar_bloom.c
 Per-chunk bloom filters for equality chunk-group skipping. The writer hashes each
-non-null value (hashable, non-collatable columns only) and builds a filter per
+non-null value (hashable columns whose collation is non-collatable or
+deterministic; nondeterministic collations are left unbloomed) and builds a filter per
 chunk; the reader probes it for an equality predicate the min/max range could not
 rule out, skipping the group when the value is provably absent. Never a false
 negative, so results are unaffected.
@@ -247,7 +248,8 @@ FlatBuffers builder emits the Schema and RecordBatch messages (MetadataVersion
 V5); rows are read in physical order via the scalar reader and buffered one
 RecordBatch at a time (validity bitmap, then values, with utf8/binary offsets).
 No libarrow dependency. Supported types are int2/int4/int8, float4/float8, bool,
-text/varchar, and bytea; other types are rejected. Little-endian hosts only.
+text/varchar, bytea, date/time/timestamp/timestamptz, uuid, numeric, and
+json/jsonb; other types are rejected. Little-endian hosts only.
 
 ### columnar_parquet.c
 Parquet export (`pgcolumnar.export_parquet`, gap 27). A self-contained Thrift

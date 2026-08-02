@@ -22,7 +22,7 @@
  *		stock visibilitymap_get_status. This decouples the write from any heap
  *		page and from the per-version visibilitymap_set signature.
  *
- *		Phase 1 exposes columnar.vm_selftest(rel, blk) to prove empirically that
+ *		Phase 1 exposes pgcolumnar.vm_selftest(rel, blk) to prove empirically that
  *		a bit written here is read back by visibilitymap_get_status on a columnar
  *		relation. Later phases wire set-in-vacuum and clear-on-write.
  *
@@ -52,7 +52,7 @@ PG_FUNCTION_INFO_V1(columnar_vm_is_visible);
 /*
  * Visibility-map on-disk layout. These mirror the private macros in
  * src/backend/access/heap/visibilitymap.c; the two-bits-per-heap-block layout
- * has been stable since PostgreSQL 9.6, and columnar.vm_selftest verifies at
+ * has been stable since PostgreSQL 9.6, and pgcolumnar.vm_selftest verifies at
  * run time that a bit written with this layout is read back by the backend's
  * own visibilitymap_get_status (which uses the real macros), so any divergence
  * would surface immediately in the matrix rather than silently.

@@ -2,9 +2,10 @@
  *
  * columnar_metadata.c
  *		Access to the "columnar" metadata catalog tables and the storage-id
- *		sequence (spec 7). Metadata are ordinary heap tables keyed by storage
- *		id; we read and write them with direct catalog access so we do not
- *		depend on SPI reentrancy.
+ *		sequence (spec 7). Most metadata are ordinary heap tables keyed by
+ *		storage id (the options and projection_declaration tables are keyed by
+ *		relation OID instead); we read and write them with direct catalog access
+ *		so we do not depend on SPI reentrancy.
  *
  *-------------------------------------------------------------------------
  */
@@ -161,7 +162,7 @@ columnar_index_oid(const char *name)
 
 /*
  * ColumnarNextStorageId
- *		Draw the next value from columnar.storageid_seq (spec 3, 7.6).
+ *		Draw the next value from pgcolumnar.storageid_seq (spec 3, 7.6).
  */
 uint64
 ColumnarNextStorageId(void)
@@ -173,7 +174,7 @@ ColumnarNextStorageId(void)
 	if (!OidIsValid(seqOid))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("columnar.storageid_seq does not exist")));
+				 errmsg("pgcolumnar.storageid_seq does not exist")));
 
 	value = nextval_internal(seqOid, false);
 	return (uint64) value;
@@ -488,7 +489,7 @@ insert_free_space_row(Relation rel, TupleDesc td, uint64 storageId,
  *		to a whole page), so free ranges tile the file page-aligned and a split
  *		remnant or a coalesced union stays page-aligned.
  *
- *		When columnar.reclaim_coalesce is on, the new range is merged with any
+ *		When pgcolumnar.reclaim_coalesce is on, the new range is merged with any
  *		immediately adjacent existing free range (left neighbor ending at this
  *		offset, or right neighbor starting at this range's end) before insertion,
  *		so a later request larger than either neighbor can still be satisfied from

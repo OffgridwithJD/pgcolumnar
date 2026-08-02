@@ -3,14 +3,14 @@
  * columnar_parquet.c
  *		Parquet file export for pgColumnar (gap 27, piece 2).
  *
- *		columnar.export_parquet(rel regclass, path text) writes a columnar table
+ *		pgcolumnar.export_parquet(rel regclass, path text) writes a columnar table
  *		to a Parquet file. The writer is self-contained -- it emits the Thrift
  *		compact-protocol metadata and PLAIN-encoded, UNCOMPRESSED data pages
  *		directly -- so there is no libparquet build or run-time dependency. Rows
  *		are read in physical order via the scalar reader; one row group is
  *		emitted per PARQUET_ROWGROUP_ROWS rows, with one DATA_PAGE per column.
  *
- *		First-slice type mapping (matches columnar.export_arrow): int2/int4 ->
+ *		First-slice type mapping (matches pgcolumnar.export_arrow): int2/int4 ->
  *		INT32 (int2 tagged INT_16), int8 -> INT64, float4 -> FLOAT, float8 ->
  *		DOUBLE, bool -> BOOLEAN, text/varchar -> BYTE_ARRAY (UTF8), bytea ->
  *		BYTE_ARRAY. All columns are OPTIONAL; nulls are carried in definition
