@@ -61,6 +61,9 @@
 #include "optimizer/planner.h"
 #include "optimizer/cost.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/tlist.h"
+#include "access/sysattr.h"
+#include "utils/selfuncs.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/datum.h"
@@ -68,11 +71,22 @@
 #include "utils/lsyscache.h"
 #include "access/stratnum.h"
 #include "access/tupmacs.h"
+#include "common/hashfn.h"
 #include "utils/rel.h"
 #include "utils/typcache.h"
 
 /* GUC: use the vectorized aggregate path (spec 8.3 scan control) */
 bool		columnar_enable_vectorization = true;
+
+/*
+ * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
+ * grouped path is built out incrementally; the ungrouped path is unaffected.
+ * groupagg_max_groups caps the plan-time group estimate the grouped path will
+ * accept, so a high-cardinality grouping routes to the spillable core HashAgg
+ * rather than this (non-spilling) path.
+ */
+bool		columnar_enable_group_vectorization = false;
+int			columnar_groupagg_max_groups = 1000000;
 
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
@@ -213,7 +227,18 @@ typedef enum ColumnarAggKind
 	COLUMNAR_AGG_SUM_INT,
 	COLUMNAR_AGG_AVG_INT,
 	COLUMNAR_AGG_MIN,
-	COLUMNAR_AGG_MAX
+	COLUMNAR_AGG_MAX,
+	/*
+	 * Extended kinds used by the grouped path (#289). The ungrouped
+	 * metadata-fold path never produces these (its classifier still rejects
+	 * int8/float/numeric sum/avg), so its switches never see them.
+	 */
+	COLUMNAR_AGG_SUM_INT8,		/* sum(int8) -> numeric */
+	COLUMNAR_AGG_SUM_FLOAT,		/* sum(float4/float8) -> float8 */
+	COLUMNAR_AGG_SUM_NUMERIC,	/* sum(numeric) -> numeric */
+	COLUMNAR_AGG_AVG_INT8,		/* avg(int8) -> numeric */
+	COLUMNAR_AGG_AVG_FLOAT,		/* avg(float4/float8) -> float8 */
+	COLUMNAR_AGG_AVG_NUMERIC	/* avg(numeric) -> numeric */
 } ColumnarAggKind;
 
 typedef struct ColumnarAggSpec
@@ -233,6 +258,10 @@ typedef struct ColumnarAggSpec
 	int64		sum;			/* integer sum / avg sum */
 	bool		sawValue;		/* any non-null value contributed */
 	Datum		extreme;		/* min/max running value (in resultContext) */
+	float8		fsum;			/* float running sum (scan order, like float8_accum) */
+	float8		fsxx;			/* avg(float): Youngs-Cramer Sxx, for overflow parity */
+	Datum		nsum;			/* numeric running total (in resultContext) */
+	bool		nsumSet;		/* nsum initialized */
 } ColumnarAggSpec;
 
 /*
@@ -244,7 +273,8 @@ typedef struct ColumnarAggSpec
  *		scalar fallback.
  */
 static bool
-columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
+columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
+						 ColumnarAggSpec *spec)
 {
 	char	   *name;
 	Oid			nsp;
@@ -309,7 +339,19 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
 			spec->kind = COLUMNAR_AGG_SUM_INT;
 			return true;
 		}
-		return false;			/* int8->numeric, float, numeric: fall back */
+		if (allowExtended)
+		{
+			if (spec->inputType == INT8OID)
+				spec->kind = COLUMNAR_AGG_SUM_INT8;
+			else if (spec->inputType == FLOAT4OID || spec->inputType == FLOAT8OID)
+				spec->kind = COLUMNAR_AGG_SUM_FLOAT;
+			else if (spec->inputType == NUMERICOID)
+				spec->kind = COLUMNAR_AGG_SUM_NUMERIC;
+			else
+				return false;
+			return true;
+		}
+		return false;			/* ungrouped: int8/float/numeric fall back */
 	}
 
 	if (strcmp(name, "avg") == 0)
@@ -317,6 +359,18 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
 		if (spec->inputType == INT2OID || spec->inputType == INT4OID)
 		{
 			spec->kind = COLUMNAR_AGG_AVG_INT;
+			return true;
+		}
+		if (allowExtended)
+		{
+			if (spec->inputType == INT8OID)
+				spec->kind = COLUMNAR_AGG_AVG_INT8;
+			else if (spec->inputType == FLOAT4OID || spec->inputType == FLOAT8OID)
+				spec->kind = COLUMNAR_AGG_AVG_FLOAT;
+			else if (spec->inputType == NUMERICOID)
+				spec->kind = COLUMNAR_AGG_AVG_NUMERIC;
+			else
+				return false;
 			return true;
 		}
 		return false;
@@ -334,6 +388,116 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, ColumnarAggSpec *spec)
 	}
 
 	return false;
+}
+
+/*
+ * columnar_group_key_unsupported_walker
+ *		Reject any node in a candidate GROUP BY key the grouped path cannot
+ *		evaluate against a bare base-relation slot: aggregates, grouping-set
+ *		constructs, window functions, sublinks/subplans, external parameters,
+ *		and whole-row or system-column Vars. Everything the executor's ordinary
+ *		expression machinery can evaluate from scan columns alone (Const, real
+ *		Vars, OpExpr, FuncExpr, CoerceViaIO, CaseExpr, ...) is accepted, subject
+ *		to the volatility and varno checks the caller also applies.
+ */
+static bool
+columnar_group_key_unsupported_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_Var:
+			{
+				Var		   *var = (Var *) node;
+
+				/* whole-row and system columns are not projectable here */
+				if (var->varattno <= 0)
+					return true;
+				return false;
+			}
+		case T_Aggref:
+		case T_GroupingFunc:
+		case T_WindowFunc:
+		case T_SubLink:
+		case T_SubPlan:
+		case T_AlternativeSubPlan:
+		case T_Param:
+			return true;
+		default:
+			break;
+	}
+
+	return expression_tree_walker(node, columnar_group_key_unsupported_walker,
+								  context);
+}
+
+/*
+ * columnar_classify_group_keys
+ *		Decide whether every GROUP BY key can be computed and grouped by the
+ *		grouped vectorized path, and if so return copies of the key expressions
+ *		(original varnos, one per grouping column). A key must be computable from
+ *		this relation alone, non-volatile, not set-returning, free of the node
+ *		kinds above, and have both a hash function and an equality operator; a
+ *		collatable key must use a deterministic collation, because grouping then
+ *		matches the byte-exact semantics the scalar path would produce. Returns
+ *		false (add no path, run the ordinary Agg) on anything unsupported.
+ */
+static bool
+columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
+							 List **keysOut)
+{
+	Query	   *parse = root->parse;
+	List	   *keys = NIL;
+	ListCell   *lc;
+
+	foreach(lc, parse->groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		Node	   *expr = get_sortgroupclause_expr(sgc, parse->targetList);
+		Oid			type;
+		Oid			coll;
+		TypeCacheEntry *tce;
+
+		if (expr == NULL)
+			return false;
+
+		/*
+		 * Do NOT strip a wrapping RelabelType: it carries the cast's result type
+		 * and collation. Stripping it would read the type/collation from the
+		 * underlying value instead, which for an explicit COLLATE defeats the
+		 * deterministic-collation check below and could group with the wrong
+		 * equality. Group by the expression exactly as written.
+		 */
+		if (!bms_is_subset(pull_varnos(root, expr), input_rel->relids))
+			return false;
+		if (contain_volatile_functions(expr))
+			return false;
+		if (expression_returns_set(expr))
+			return false;
+		if (columnar_group_key_unsupported_walker(expr, NULL))
+			return false;
+
+		type = exprType(expr);
+		coll = exprCollation(expr);
+		tce = lookup_type_cache(type,
+								TYPECACHE_HASH_PROC_FINFO |
+								TYPECACHE_EQ_OPR_FINFO);
+		if (!OidIsValid(tce->hash_proc_finfo.fn_oid))
+			return false;
+		if (!OidIsValid(tce->eq_opr_finfo.fn_oid))
+			return false;
+		if (OidIsValid(coll) && !ColumnarCollationIsDeterministic(coll))
+			return false;
+
+		keys = lappend(keys, copyObject(expr));
+	}
+
+	if (keys == NIL)
+		return false;
+	*keysOut = keys;
+	return true;
 }
 
 /* -------------------------------------------------------------------------
@@ -364,6 +528,85 @@ typedef struct ColumnarAggScanState
 } ColumnarAggScanState;
 
 static const CustomExecMethods columnar_agg_exec_methods;
+
+/* -------------------------------------------------------------------------
+ * grouped vectorized aggregate (#289): executor state
+ *
+ * Fires for SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys> over a
+ * single columnar relation. The reader (ColumnarReadNextRow) applies WHERE
+ * pushdown for group/vector skipping; each surviving row is rechecked against
+ * the full WHERE, its group keys are evaluated, and it is scattered into an
+ * open-addressing hash table whose per-group accumulators fold in scan order --
+ * byte-identical to the scalar Agg the planner would otherwise run. Grouping
+ * uses each key type's own hash and equality functions, so -0.0/NaN, numeric
+ * scale, and deterministic-collation text all group exactly as core does.
+ * ------------------------------------------------------------------------- */
+
+typedef struct ColumnarGroupKey
+{
+	Expr	   *expr;			/* key expression (original varnos) */
+	ExprState  *exprState;		/* evaluates it against the base slot */
+	Oid			type;
+	Oid			collation;
+	int16		typlen;
+	bool		byval;
+	FmgrInfo	hashFn;			/* type hash function */
+	FmgrInfo	eqFn;			/* type equality operator function */
+} ColumnarGroupKey;
+
+typedef struct ColumnarGroupEntry
+{
+	uint32		hash;
+	bool		used;
+	Datum	   *keys;			/* nkeys key values, in keyContext */
+	bool	   *keyNulls;		/* nkeys null flags */
+	ColumnarAggSpec *specs;		/* naggs accumulators, in specContext */
+} ColumnarGroupEntry;
+
+typedef struct ColumnarGroupAggScanState
+{
+	CustomScanState css;
+
+	Oid			relid;			/* base relation to scan */
+	List	   *quals;			/* WHERE clauses (original varnos) */
+	Index		scanrelid;		/* their range-table index */
+
+	int			nkeys;
+	ColumnarGroupKey *keys;
+
+	int			naggs;
+	ColumnarAggSpec *aggTemplate;	/* classified once; copied per new group */
+
+	int			nout;			/* output tuple width */
+	int		   *outMap;			/* per output pos: >=0 key index, else agg -(v)-1 */
+
+	Bitmapset  *projected;		/* base columns the reader must return */
+	TupleTableSlot *baseSlot;	/* holds each read row for key/qual eval */
+	ExprState  *whereState;		/* residual WHERE recheck, or NULL */
+
+	ColumnarGroupEntry *entries;	/* open-addressing table (power-of-two) */
+	int			capacity;
+	int			nGroups;
+	int			maxGroups;		/* GUC cap (planner guard) */
+
+	MemoryContext keyContext;	/* copied key Datums */
+	MemoryContext specContext;	/* per-group specs + running min/max/numeric */
+	MemoryContext hashContext;	/* the entries array itself */
+
+	bool		started;		/* scan + build completed */
+	int			emitPos;		/* next entry index to emit */
+
+	/* EXPLAIN */
+	int			npreds;
+	bool		haveStats;
+	uint64		groupsRead;
+	uint64		groupsSkipped;
+	uint64		groupsTotal;
+} ColumnarGroupAggScanState;
+
+static const CustomExecMethods columnar_groupagg_exec_methods;
+static void ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
+									RelOptInfo *output_rel);
 
 /* -------------------------------------------------------------------------
  * vectorized aggregate: planning
@@ -431,13 +674,31 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	if (!columnar_enable_vectorization || !columnar_enable_custom_scan)
 		return;
 
-	/* plain, ungrouped aggregation only (spec 9) */
 	if (!parse->hasAggs)
 		return;
+
+	/*
+	 * GROUP BY: try the grouped vectorized path (#289). It handles a plain
+	 * grouped aggregate over one columnar relation, with an optional WHERE, and
+	 * no grouping sets / HAVING / DISTINCT / window / SRF. Anything else, or an
+	 * unsupported key or aggregate, adds no path and the ordinary Agg runs.
+	 */
 	if (parse->groupClause != NIL || parse->groupingSets != NIL ||
 		parse->havingQual != NULL || parse->distinctClause != NIL ||
 		parse->hasWindowFuncs || parse->hasTargetSRFs)
+	{
+		if (columnar_enable_group_vectorization &&
+			parse->groupClause != NIL &&
+			parse->groupingSets == NIL &&
+			parse->havingQual == NULL &&
+			parse->distinctClause == NIL &&
+			!parse->hasWindowFuncs &&
+			!parse->hasTargetSRFs)
+			ColumnarTryGroupAggPath(root, input_rel, output_rel);
 		return;
+	}
+
+	/* plain, ungrouped aggregation only (spec 9) */
 
 	/* a single columnar base relation with no joins */
 	if (input_rel->reloptkind != RELOPT_BASEREL)
@@ -468,7 +729,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(expr, Aggref))
 			return;
 		if (!columnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
-									  &specs[i]))
+									  false, &specs[i]))
 			return;
 		i++;
 	}
@@ -624,6 +885,233 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	add_path(output_rel, &cpath->path);
 }
 
+/*
+ * ColumnarTryGroupAggPath
+ *		Add a grouped vectorized aggregate path (#289) when the query is one we
+ *		can answer exactly: a single columnar base relation, an optional WHERE,
+ *		every output entry either a supported aggregate or a bare reference to a
+ *		supported GROUP BY key, and an estimated group count within the cap. On
+ *		anything unsupported it adds nothing and the ordinary Agg plan runs.
+ */
+static void
+ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
+						RelOptInfo *output_rel)
+{
+	RangeTblEntry *rte;
+	Oid			relid;
+	List	   *groupKeys = NIL;
+	List	   *outMap = NIL;
+	List	   *quals;
+	List	   *groupExprs;
+	ListCell   *lc;
+	int			naggs = 0;
+	int			aggIdx = 0;
+	double		dNumGroups;
+	Path	   *cheapest;
+	CustomPath *cpath;
+
+	/* a single columnar base relation with no joins */
+	if (input_rel->reloptkind != RELOPT_BASEREL)
+		return;
+	if (bms_membership(input_rel->relids) != BMS_SINGLETON)
+		return;
+	if (input_rel->relid == 0 ||
+		input_rel->relid >= (Index) root->simple_rel_array_size)
+		return;
+	rte = root->simple_rte_array[input_rel->relid];
+	if (rte == NULL || rte->rtekind != RTE_RELATION ||
+		rte->relkind != RELKIND_RELATION)
+		return;
+	/*
+	 * A legacy inheritance parent is a plain RELKIND_RELATION with rte->inh set;
+	 * its children hold rows this single-relation scan would never see. Leave the
+	 * whole tree to the ordinary Append + Agg plan.
+	 */
+	if (rte->inh)
+		return;
+	if (!OidIsValid(rte->relid) || !ColumnarIsColumnarRelation(rte->relid))
+		return;
+	relid = rte->relid;
+
+	/* every GROUP BY key must be one we can evaluate and group exactly */
+	if (!columnar_classify_group_keys(root, input_rel, &groupKeys))
+		return;
+
+	/*
+	 * Every output entry is either a supported aggregate or a bare reference to
+	 * one of the group keys. An output expression built on top of a key (a
+	 * function of a grouping column) is not handled here and forces the fallback.
+	 * outMap records, per output position, the key index (>=0) or, encoded
+	 * negative, the aggregate index in output order.
+	 */
+	foreach(lc, output_rel->reltarget->exprs)
+	{
+		Node	   *oexpr = (Node *) lfirst(lc);
+
+		if (IsA(oexpr, Aggref))
+		{
+			ColumnarAggSpec spec;
+
+			if (!columnar_classify_aggref((Aggref *) oexpr,
+										  (int) input_rel->relid, true, &spec))
+				return;
+			outMap = lappend(outMap, makeInteger(-(aggIdx + 1)));
+			aggIdx++;
+			naggs++;
+		}
+		else
+		{
+			ListCell   *kc;
+			int			k = 0;
+			int			found = -1;
+
+			/*
+			 * Match the output expression against a group key exactly as written
+			 * (no RelabelType stripping): the classifier stores keys un-stripped
+			 * too, and both come from the same target list, so equal() lines them
+			 * up. An output built on top of a key (not a bare reference) matches
+			 * nothing and forces the fallback.
+			 */
+			foreach(kc, groupKeys)
+			{
+				if (equal(oexpr, (Node *) lfirst(kc)))
+				{
+					found = k;
+					break;
+				}
+				k++;
+			}
+			if (found < 0)
+				return;
+			outMap = lappend(outMap, makeInteger(found));
+		}
+	}
+	if (naggs == 0)
+		return;					/* no aggregate: leave it to the ordinary plan */
+
+	/*
+	 * estimate_num_groups only sizes the path's row estimate; it is deliberately
+	 * NOT a gate. For an expression key such as date_trunc(...) the planner
+	 * cannot estimate distinctness and returns a count near the input row count
+	 * (here ~8.4M estimated against 48k actual), which would wrongly disable this
+	 * path on exactly the large tables it helps. The unbounded-hash-table guard
+	 * is the execution-time cap on the actual group count
+	 * (pgcolumnar.groupagg_max_groups), which errors with guidance -- see
+	 * columnar_groupagg_lookup -- rather than silently declining the feature.
+	 */
+	groupExprs = groupKeys;
+	dNumGroups = estimate_num_groups(root, groupExprs,
+									 input_rel->rows > 0 ? input_rel->rows : 1.0,
+									 NULL, NULL);
+
+	/*
+	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time
+	 * filters, not per-row predicates. The residual ExecQual recheck this path
+	 * relies on runs per row and would never apply them, so a false gate would
+	 * wrongly return rows. They are rare; leave such a query to the ordinary plan.
+	 */
+	foreach(lc, input_rel->baserestrictinfo)
+	{
+		if (lfirst_node(RestrictInfo, lc)->pseudoconstant)
+			return;
+	}
+
+	/*
+	 * WHERE is carried whole and rechecked per row, so correctness never depends
+	 * on which clauses become scan keys; the scan keys only prune groups.
+	 */
+	quals = extract_actual_clauses(input_rel->baserestrictinfo, false);
+
+	/*
+	 * A WHERE clause referencing a system column or a whole-row Var cannot be
+	 * answered from the projected data columns this path reads, so fall back
+	 * rather than evaluate it against unset slot values.
+	 */
+	{
+		Bitmapset  *whereAtts = NULL;
+		int			m = -1;
+
+		pull_varattnos((Node *) quals, input_rel->relid, &whereAtts);
+		while ((m = bms_next_member(whereAtts, m)) >= 0)
+			if (m + FirstLowInvalidHeapAttributeNumber <= 0)
+				return;
+	}
+
+	/*
+	 * Cost from a full columnar scan, not input_rel->cheapest_total_path: the
+	 * cheapest overall path may be an index scan, but this node always performs a
+	 * full columnar scan, so pricing it from an index scan would understate it.
+	 * Take the cheapest non-index path (the columnar custom or sequential scan).
+	 */
+	cheapest = NULL;
+	foreach(lc, input_rel->pathlist)
+	{
+		Path	   *p = (Path *) lfirst(lc);
+
+		if (p->pathtype == T_IndexScan || p->pathtype == T_IndexOnlyScan ||
+			p->pathtype == T_BitmapHeapScan)
+			continue;
+		if (cheapest == NULL || p->total_cost < cheapest->total_cost)
+			cheapest = p;
+	}
+	if (cheapest == NULL)
+		cheapest = input_rel->cheapest_total_path;
+	if (cheapest == NULL)
+		return;
+
+	cpath = makeNode(CustomPath);
+	cpath->path.pathtype = T_CustomScan;
+	cpath->path.parent = output_rel;
+	cpath->path.pathtarget = output_rel->reltarget;
+	cpath->path.param_info = NULL;
+	cpath->path.parallel_aware = false;
+	cpath->path.parallel_safe = false;
+	cpath->path.parallel_workers = 0;
+	cpath->path.rows = (dNumGroups < 1.0) ? 1.0 : dNumGroups;
+
+	/*
+	 * Price just above the scan the reader already does. The fold is one hash
+	 * probe per row inside that scan, always cheaper than a separate Agg node's
+	 * per-row advance over the same scan, so a negligible fixed bump keeps this
+	 * reliably below the ordinary Agg-over-scan plan whenever the feature is
+	 * enabled. This is an opt-in accelerator: when it is on it should be the
+	 * plan, not a coin-flip against a HashAggregate whose cost is close. An
+	 * earlier version charged per output group, which let autoanalyze flip the
+	 * choice on large inputs -- so the node sometimes did not run at all. One row
+	 * per group comes out only after the whole scan is folded, so there is no
+	 * cheap partial start-up.
+	 */
+	{
+		Cost		cost = cheapest->total_cost + cpu_tuple_cost;
+
+		cpath->path.startup_cost = cost;
+		cpath->path.total_cost = cost;
+	}
+	cpath->path.pathkeys = NIL;
+	cpath->flags = 0;
+	cpath->custom_paths = NIL;
+#if PG_VERSION_NUM >= 170000
+	cpath->custom_restrictinfo = NIL;
+#endif
+
+	/*
+	 * custom_private (length 5 marks the grouped path for the shared create-state
+	 * dispatch): rti, WHERE quals, relid, group-key expressions, output map. The
+	 * planner leaves custom_private untouched by setrefs, so the key and qual
+	 * expressions keep their original varnos and evaluate against a base slot.
+	 */
+	cpath->custom_private =
+		list_make5(makeInteger((int) input_rel->relid),
+				   copyObject(quals),
+				   makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+							 ObjectIdGetDatum(relid), false, true),
+				   groupKeys,
+				   outMap);
+	cpath->methods = &columnar_agg_path_methods;
+
+	add_path(output_rel, &cpath->path);
+}
+
 /* -------------------------------------------------------------------------
  * vectorized aggregate: execution
  * ------------------------------------------------------------------------- */
@@ -653,7 +1141,7 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
 		/* classified successfully at plan time; -1 skips the varno check */
-		(void) columnar_classify_aggref((Aggref *) tle->expr, -1,
+		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, false,
 										&state->specs[i]);
 		i++;
 	}
@@ -731,13 +1219,45 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 }
 
 /*
+ * Running float additions that reproduce core's float4pl/float8pl exactly,
+ * including the overflow error: core raises "value out of range: overflow" when a
+ * finite + finite addition produces an infinity, and the grouped accumulators
+ * must do the same rather than silently carrying an Infinity the scalar Agg would
+ * never have produced. Same compiler and flags as the server (PGXS), so the
+ * arithmetic is bit-for-bit what float4pl/float8pl compute.
+ */
+static inline float8
+columnar_float8_pl(float8 a, float8 b)
+{
+	float8		r = a + b;
+
+	if (unlikely(isinf(r)) && !isinf(a) && !isinf(b))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value out of range: overflow")));
+	return r;
+}
+
+static inline float4
+columnar_float4_pl(float4 a, float4 b)
+{
+	float4		r = a + b;
+
+	if (unlikely(isinf(r)) && !isinf(a) && !isinf(b))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value out of range: overflow")));
+	return r;
+}
+
+/*
  * columnar_apply_one
  *		Fold one value (or a null) into an aggregate accumulator. This is the
  *		reference per-row semantics, shared by the vectorized per-row path and
  *		the run path's fallback and min/max handling.
  */
 static void
-columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
+columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 				   Datum val, bool isnull)
 {
 	switch (spec->kind)
@@ -775,6 +1295,111 @@ columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
 			}
 			break;
 
+		case COLUMNAR_AGG_SUM_FLOAT:
+			if (!isnull)
+			{
+				/*
+				 * sum(real) accumulates in real (core float4pl) and returns real;
+				 * sum(double precision) accumulates in float8 (core float8pl). Core's
+				 * sum has a strict transfn with a null initial state, so it assigns
+				 * the FIRST non-null value directly -- preserving a signed zero --
+				 * rather than adding it to +0.0. Match that, then fold the rest with
+				 * float4pl/float8pl semantics. For the float4 case fsum always holds
+				 * a value exactly representable as float4, so the round-trip through
+				 * (float4) reproduces float4pl step for step.
+				 */
+				if (!spec->sawValue)
+					spec->fsum = (spec->inputType == FLOAT4OID)
+						? (float8) DatumGetFloat4(val)
+						: DatumGetFloat8(val);
+				else if (spec->inputType == FLOAT4OID)
+					spec->fsum = (float8) columnar_float4_pl((float4) spec->fsum,
+															 DatumGetFloat4(val));
+				else
+					spec->fsum = columnar_float8_pl(spec->fsum,
+													DatumGetFloat8(val));
+				spec->sawValue = true;
+			}
+			break;
+
+		case COLUMNAR_AGG_AVG_FLOAT:
+			if (!isnull)
+			{
+				/*
+				 * avg is Sx/N, but core's float4_accum/float8_accum keep the
+				 * Youngs-Cramer Sxx as well and raise overflow when EITHER Sx or Sxx
+				 * goes finite+finite -> inf. Track Sxx only to reproduce that error
+				 * exactly (Sxx can overflow on finite inputs while Sx stays finite);
+				 * the returned average is Sx/N and is unaffected by it.
+				 */
+				float8		v = (spec->inputType == FLOAT4OID)
+					? (float8) DatumGetFloat4(val)
+					: DatumGetFloat8(val);
+				float8		n = (float8) spec->count;	/* N before this value */
+				float8		newN = n + 1.0;
+				float8		newSx = spec->fsum + v;
+
+				if (spec->count > 0)
+				{
+					float8		tmp = v * newN - newSx;
+					float8		newSxx = spec->fsxx + tmp * tmp / (n * newN);
+
+					if ((isinf(newSx) || isinf(newSxx)) &&
+						!isinf(spec->fsum) && !isinf(v))
+						ereport(ERROR,
+								(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								 errmsg("value out of range: overflow")));
+					spec->fsxx = newSxx;
+				}
+				spec->fsum = newSx;
+				spec->count++;
+				spec->sawValue = true;
+			}
+			break;
+
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_AVG_INT8:
+		case COLUMNAR_AGG_SUM_NUMERIC:
+		case COLUMNAR_AGG_AVG_NUMERIC:
+			if (!isnull)
+			{
+				bool		is_int8 = (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
+									   spec->kind == COLUMNAR_AGG_AVG_INT8);
+				MemoryContext old = MemoryContextSwitchTo(resultContext);
+				Datum		nv = is_int8
+					? DirectFunctionCall1(int8_numeric, val)
+					: val;
+
+				/*
+				 * Keep live memory O(groups), not O(rows): free the previous
+				 * running sum and each per-row int8->numeric intermediate. Without
+				 * this every scanned row leaked one or two numerics into the
+				 * per-group context, which is not reset until end of scan -- O(rows)
+				 * on exactly the 100M-row shape this path targets.
+				 */
+				if (!spec->nsumSet)
+				{
+					/* int8: nv is freshly allocated and becomes the running sum;
+					 * numeric: nv is borrowed from the reader, so copy it. */
+					spec->nsum = is_int8 ? nv : datumCopy(nv, false, -1);
+					spec->nsumSet = true;
+				}
+				else
+				{
+					Datum		newsum = DirectFunctionCall2(numeric_add,
+															 spec->nsum, nv);
+
+					pfree(DatumGetPointer(spec->nsum));
+					spec->nsum = newsum;
+					if (is_int8)
+						pfree(DatumGetPointer(nv));
+				}
+				spec->count++;
+				spec->sawValue = true;
+				MemoryContextSwitchTo(old);
+			}
+			break;
+
 		case COLUMNAR_AGG_MIN:
 		case COLUMNAR_AGG_MAX:
 			if (!isnull)
@@ -789,14 +1414,20 @@ columnar_apply_one(ColumnarAggScanState *state, ColumnarAggSpec *spec,
 						FunctionCall2Coll(&spec->cmpFn, spec->collation,
 										  val, spec->extreme));
 
+					/*
+					 * On a tie, take the later value, matching core's larger and
+					 * smaller comparators (transfn(state, newval) returns newval
+					 * when equal). Observable for numeric 1.0 vs 1.00, which tie
+					 * by value but differ in display scale.
+					 */
 					take = (spec->kind == COLUMNAR_AGG_MIN)
-						? (cmp < 0) : (cmp > 0);
+						? (cmp <= 0) : (cmp >= 0);
 				}
 
 				if (take)
 				{
 					MemoryContext old =
-						MemoryContextSwitchTo(state->resultContext);
+						MemoryContextSwitchTo(resultContext);
 
 					if (spec->sawValue && !spec->byval)
 						pfree(DatumGetPointer(spec->extreme));
@@ -862,6 +1493,45 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
 
 				return DirectFunctionCall2(numeric_div, sumd, cntd);
 			}
+
+		case COLUMNAR_AGG_SUM_FLOAT:
+			if (!spec->sawValue)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			/* sum(real) -> real; sum(double precision) -> double precision */
+			return (spec->inputType == FLOAT4OID)
+				? Float4GetDatum((float4) spec->fsum)
+				: Float8GetDatum(spec->fsum);
+
+		case COLUMNAR_AGG_AVG_FLOAT:
+			if (spec->count == 0)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return Float8GetDatum(spec->fsum / (float8) spec->count);
+
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_SUM_NUMERIC:
+			if (!spec->nsumSet)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return spec->nsum;
+
+		case COLUMNAR_AGG_AVG_INT8:
+		case COLUMNAR_AGG_AVG_NUMERIC:
+			if (spec->count == 0 || !spec->nsumSet)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return DirectFunctionCall2(numeric_div, spec->nsum,
+									   DirectFunctionCall1(int8_numeric,
+														   Int64GetDatum(spec->count)));
 
 		case COLUMNAR_AGG_MIN:
 		case COLUMNAR_AGG_MAX:
@@ -1159,6 +1829,15 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 						MemoryContextSwitchTo(oldcx);
 					}
 					break;
+				default:
+
+					/*
+					 * The extended int8/float/numeric sum/avg kinds are produced
+					 * only for the grouped path; the ungrouped classifier rejects
+					 * them, so they never reach this metadata fold.
+					 */
+					Assert(false);
+					break;
 			}
 		}
 	}
@@ -1212,10 +1891,10 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 			ColumnarAggSpec *spec = &state->specs[a];
 
 			if (spec->attidx >= 0)
-				columnar_apply_one(state, spec, values[spec->attidx],
-								   nulls[spec->attidx]);
+				columnar_apply_one(state->resultContext, spec,
+								   values[spec->attidx], nulls[spec->attidx]);
 			else
-				columnar_apply_one(state, spec, (Datum) 0, true);
+				columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
 		}
 	}
 	ColumnarEndRead(rs);
@@ -1306,6 +1985,17 @@ ColumnarReScanAggScan(CustomScanState *node)
 		spec->sum = 0;
 		spec->sawValue = false;
 		spec->extreme = (Datum) 0;
+		/*
+		 * Also clear the running float/numeric accumulators. resultContext was
+		 * just reset, so nsum's storage is gone; leaving nsumSet true would make
+		 * the next scan add to (and free) a dangling pointer. The ungrouped path
+		 * does not classify these extended kinds today, but reset every field so a
+		 * rescan is safe if it ever does.
+		 */
+		spec->fsum = 0;
+		spec->fsxx = 0;
+		spec->nsum = (Datum) 0;
+		spec->nsumSet = false;
 	}
 }
 
@@ -1337,6 +2027,564 @@ static const CustomExecMethods columnar_agg_exec_methods = {
 	.EndCustomScan = ColumnarEndAggScan,
 	.ReScanCustomScan = ColumnarReScanAggScan,
 	.ExplainCustomScan = ColumnarExplainAggScan,
+};
+
+/* -------------------------------------------------------------------------
+ * grouped vectorized aggregate (#289): execution
+ * ------------------------------------------------------------------------- */
+
+Node *
+ColumnarCreateGroupAggScanState(CustomScan *cscan)
+{
+	ColumnarGroupAggScanState *state =
+		(ColumnarGroupAggScanState *) palloc0(sizeof(ColumnarGroupAggScanState));
+	List	   *groupKeys;
+	List	   *outMapList;
+	ListCell   *lc;
+	int			i;
+	int			naggs = 0;
+
+	state->css.ss.ps.type = T_CustomScanState;
+	state->css.methods = &columnar_groupagg_exec_methods;
+
+	/* custom_private: rti, quals, relid, group-key exprs, output map (length 5) */
+	state->scanrelid = (Index) intVal(linitial(cscan->custom_private));
+	state->quals = (List *) lsecond(cscan->custom_private);
+	state->relid =
+		DatumGetObjectId(((Const *) lthird(cscan->custom_private))->constvalue);
+	groupKeys = (List *) lfourth(cscan->custom_private);
+	outMapList = (List *) list_nth(cscan->custom_private, 4);
+
+	state->nkeys = list_length(groupKeys);
+	state->keys = (ColumnarGroupKey *)
+		palloc0(sizeof(ColumnarGroupKey) * Max(state->nkeys, 1));
+	i = 0;
+	foreach(lc, groupKeys)
+		state->keys[i++].expr = (Expr *) lfirst(lc);
+
+	/* rebuild the aggregate template from the output tuple's aggregates */
+	foreach(lc, cscan->custom_scan_tlist)
+		if (IsA(((TargetEntry *) lfirst(lc))->expr, Aggref))
+			naggs++;
+	state->naggs = naggs;
+	state->aggTemplate = (ColumnarAggSpec *)
+		palloc0(sizeof(ColumnarAggSpec) * Max(naggs, 1));
+	i = 0;
+	foreach(lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Aggref))
+		{
+			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true,
+											&state->aggTemplate[i]);
+			i++;
+		}
+	}
+
+	state->nout = list_length(outMapList);
+	state->outMap = (int *) palloc(sizeof(int) * Max(state->nout, 1));
+	i = 0;
+	foreach(lc, outMapList)
+		state->outMap[i++] = intVal(lfirst(lc));
+
+	state->maxGroups = columnar_groupagg_max_groups;
+	state->capacity = 0;
+	state->nGroups = 0;
+	state->entries = NULL;
+
+	return (Node *) state;
+}
+
+static void
+ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	Relation	rel;
+	TupleDesc	basedesc;
+	Bitmapset  *proj = NULL;
+	Bitmapset  *projected = NULL;
+	List	   *keyExprList = NIL;
+	bool		allConvertible;
+	int			k;
+	int			a;
+	int			x;
+
+	state->specContext = AllocSetContextCreate(estate->es_query_cxt,
+											   "columnar groupagg specs",
+											   ALLOCSET_SMALL_SIZES);
+	state->keyContext = AllocSetContextCreate(estate->es_query_cxt,
+											  "columnar groupagg keys",
+											  ALLOCSET_SMALL_SIZES);
+	state->hashContext = AllocSetContextCreate(estate->es_query_cxt,
+											   "columnar groupagg table",
+											   ALLOCSET_DEFAULT_SIZES);
+	state->started = false;
+	state->emitPos = 0;
+	state->nGroups = 0;
+	state->capacity = 0;
+	state->entries = NULL;
+	state->haveStats = false;
+
+	rel = table_open(state->relid, AccessShareLock);
+	basedesc = RelationGetDescr(rel);
+
+	/*
+	 * Count pushable filters for EXPLAIN before the EXPLAIN-only early return, so
+	 * a plain EXPLAIN reports the real pushed-down filter count instead of 0.
+	 */
+	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
+								  &state->npreds, &allConvertible);
+
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
+
+	/* guard the native format before decoding any value (#240) */
+	ColumnarCheckNativeFormatVersion(ColumnarStorageId(rel),
+									 RelationGetRelationName(rel));
+
+	/* a virtual slot holding each read row for key and qual evaluation */
+	state->baseSlot = MakeSingleTupleTableSlot(CreateTupleDescCopy(basedesc),
+											   &TTSOpsVirtual);
+
+	/* group-key ExprStates and their hash/equality machinery */
+	for (k = 0; k < state->nkeys; k++)
+	{
+		ColumnarGroupKey *key = &state->keys[k];
+		Oid			type = exprType((Node *) key->expr);
+		TypeCacheEntry *tce = lookup_type_cache(type,
+												TYPECACHE_HASH_PROC_FINFO |
+												TYPECACHE_EQ_OPR_FINFO);
+
+		key->exprState = ExecInitExpr(key->expr, &node->ss.ps);
+		key->type = type;
+		key->collation = exprCollation((Node *) key->expr);
+		get_typlenbyval(type, &key->typlen, &key->byval);
+		fmgr_info_copy(&key->hashFn, &tce->hash_proc_finfo, estate->es_query_cxt);
+		fmgr_info_copy(&key->eqFn, &tce->eq_opr_finfo, estate->es_query_cxt);
+		keyExprList = lappend(keyExprList, key->expr);
+	}
+
+	/* residual WHERE recheck (the scan keys only prune groups) */
+	state->whereState = (state->quals != NIL)
+		? ExecInitQual(state->quals, &node->ss.ps)
+		: NULL;
+
+	/* finish min/max comparison setup on the per-agg template */
+	for (a = 0; a < state->naggs; a++)
+	{
+		ColumnarAggSpec *spec = &state->aggTemplate[a];
+
+		if (spec->kind == COLUMNAR_AGG_MIN || spec->kind == COLUMNAR_AGG_MAX)
+		{
+			Form_pg_attribute att = TupleDescAttr(basedesc, spec->attidx);
+			TypeCacheEntry *tce = lookup_type_cache(att->atttypid,
+													TYPECACHE_CMP_PROC_FINFO);
+
+			fmgr_info_copy(&spec->cmpFn, &tce->cmp_proc_finfo,
+						   estate->es_query_cxt);
+			spec->collation = att->attcollation;
+			spec->byval = att->attbyval;
+			spec->typlen = att->attlen;
+		}
+	}
+
+	/* project the columns the keys, WHERE and aggregates reference */
+	pull_varattnos((Node *) keyExprList, state->scanrelid, &proj);
+	pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
+	x = -1;
+	while ((x = bms_next_member(proj, x)) >= 0)
+	{
+		AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
+
+		if (attno > 0)
+			projected = bms_add_member(projected, attno - 1);
+	}
+	for (a = 0; a < state->naggs; a++)
+		if (state->aggTemplate[a].attidx >= 0)
+			projected = bms_add_member(projected, state->aggTemplate[a].attidx);
+	if (projected == NULL)
+		projected = bms_make_singleton(0);	/* count(*) with no keys touched */
+	state->projected = projected;
+
+	table_close(rel, AccessShareLock);
+}
+
+/*
+ * columnar_groupagg_keys_equal
+ *		Whether a probing row's keys match a stored group's, by SQL grouping
+ *		semantics: two nulls are equal, and non-nulls compare with the key type's
+ *		equality operator (with collation) -- exactly how core groups.
+ */
+static bool
+columnar_groupagg_keys_equal(ColumnarGroupAggScanState *state,
+							 ColumnarGroupEntry *e,
+							 Datum *keyvals, bool *keynulls)
+{
+	int			k;
+
+	for (k = 0; k < state->nkeys; k++)
+	{
+		if (e->keyNulls[k] != keynulls[k])
+			return false;
+		if (keynulls[k])
+			continue;
+		if (!DatumGetBool(FunctionCall2Coll(&state->keys[k].eqFn,
+											state->keys[k].collation,
+											e->keys[k], keyvals[k])))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * columnar_groupagg_grow
+ *		Double the open-addressing table and reinsert live entries. Entry structs
+ *		(and the key/spec pointers they carry) move by value; the pointed-at key
+ *		Datums and accumulators stay put in their own contexts.
+ */
+static void
+columnar_groupagg_grow(ColumnarGroupAggScanState *state)
+{
+	int			oldCap = state->capacity;
+	int			newCap = (oldCap <= 0) ? 1024 : oldCap * 2;
+	ColumnarGroupEntry *newEntries;
+	MemoryContext old;
+	int			i;
+
+	if (newCap > (1 << 30))
+		newCap = 1 << 30;
+	if (newCap <= oldCap)
+		return;					/* already at the ceiling; let probing lengthen */
+
+	/*
+	 * The table can grow past what a plain palloc allows (MaxAllocSize is 1 GB;
+	 * this array reaches it well before the 1<<30 entry ceiling), so allocate it
+	 * as a huge, zeroed chunk. Memory is still bounded by the actual group count
+	 * via pgcolumnar.groupagg_max_groups.
+	 */
+	old = MemoryContextSwitchTo(state->hashContext);
+	newEntries = (ColumnarGroupEntry *)
+		MemoryContextAllocExtended(state->hashContext,
+								   sizeof(ColumnarGroupEntry) * (Size) newCap,
+								   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
+	MemoryContextSwitchTo(old);
+
+	for (i = 0; i < oldCap; i++)
+	{
+		ColumnarGroupEntry *e = &state->entries[i];
+		uint32		idx;
+
+		if (!e->used)
+			continue;
+		idx = e->hash & (uint32) (newCap - 1);
+		while (newEntries[idx].used)
+			idx = (idx + 1) & (uint32) (newCap - 1);
+		newEntries[idx] = *e;
+	}
+
+	if (state->entries != NULL)
+		pfree(state->entries);
+	state->entries = newEntries;
+	state->capacity = newCap;
+}
+
+/*
+ * columnar_groupagg_lookup
+ *		Find the group for this row's keys, inserting a fresh one (with the key
+ *		Datums copied into keyContext and accumulators seeded from the template)
+ *		when it is new.
+ */
+static ColumnarGroupEntry *
+columnar_groupagg_lookup(ColumnarGroupAggScanState *state,
+						 Datum *keyvals, bool *keynulls)
+{
+	uint32		hash = 0;
+	uint32		idx;
+	int			k;
+	ColumnarGroupEntry *e;
+
+	/* grow before probing so the index is computed against the final table */
+	if ((int64) (state->nGroups + 1) * 10 >= (int64) state->capacity * 7)
+		columnar_groupagg_grow(state);
+
+	for (k = 0; k < state->nkeys; k++)
+	{
+		uint32		h;
+
+		if (keynulls[k])
+			h = 0x9e3779b9u;	/* fixed contribution for a null key */
+		else
+			h = DatumGetUInt32(FunctionCall1Coll(&state->keys[k].hashFn,
+												 state->keys[k].collation,
+												 keyvals[k]));
+		hash = hash_combine(hash, h);
+	}
+
+	idx = hash & (uint32) (state->capacity - 1);
+	for (;;)
+	{
+		e = &state->entries[idx];
+		if (!e->used)
+			break;
+		if (e->hash == hash &&
+			columnar_groupagg_keys_equal(state, e, keyvals, keynulls))
+			return e;
+		idx = (idx + 1) & (uint32) (state->capacity - 1);
+	}
+
+	/*
+	 * A new group. Bounding the actual group count keeps this no-spill hash table
+	 * from growing without limit; over the cap we stop with guidance rather than
+	 * exhaust memory, since the plan cannot fall back mid-scan.
+	 */
+	if (state->nGroups >= state->maxGroups)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("grouped vectorized aggregate exceeded pgcolumnar.groupagg_max_groups (%d)",
+						state->maxGroups),
+				 errhint("Raise pgcolumnar.groupagg_max_groups, or set "
+						 "pgcolumnar.enable_group_vectorization = off.")));
+
+	/* insert a new group here */
+	e->used = true;
+	e->hash = hash;
+	{
+		MemoryContext oldc = MemoryContextSwitchTo(state->keyContext);
+
+		e->keys = (Datum *) palloc(sizeof(Datum) * Max(state->nkeys, 1));
+		e->keyNulls = (bool *) palloc(sizeof(bool) * Max(state->nkeys, 1));
+		for (k = 0; k < state->nkeys; k++)
+		{
+			e->keyNulls[k] = keynulls[k];
+			if (keynulls[k])
+				e->keys[k] = (Datum) 0;
+			else
+				e->keys[k] = datumCopy(keyvals[k], state->keys[k].byval,
+									   state->keys[k].typlen);
+		}
+		MemoryContextSwitchTo(oldc);
+	}
+	{
+		MemoryContext oldc = MemoryContextSwitchTo(state->specContext);
+
+		e->specs = (ColumnarAggSpec *)
+			palloc(sizeof(ColumnarAggSpec) * Max(state->naggs, 1));
+		memcpy(e->specs, state->aggTemplate,
+			   sizeof(ColumnarAggSpec) * state->naggs);
+		MemoryContextSwitchTo(oldc);
+	}
+	state->nGroups++;
+	return e;
+}
+
+/*
+ * columnar_groupagg_build
+ *		Scan the relation once and fold every surviving row into its group. The
+ *		reader prunes groups and vectors with the pushed-down WHERE; each row is
+ *		rechecked against the whole WHERE, its keys evaluated, and its values
+ *		folded in scan order so accumulators match the scalar Agg byte for byte.
+ */
+static void
+columnar_groupagg_build(ColumnarGroupAggScanState *state)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+	Relation	rel = table_open(state->relid, AccessShareLock);
+	TupleDesc	basedesc = RelationGetDescr(rel);
+	int			natts = basedesc->natts;
+	Datum	   *values = (Datum *) palloc(sizeof(Datum) * natts);
+	bool	   *nulls = (bool *) palloc(sizeof(bool) * natts);
+	Datum	   *keyvals = (Datum *) palloc(sizeof(Datum) * Max(state->nkeys, 1));
+	bool	   *keynulls = (bool *) palloc(sizeof(bool) * Max(state->nkeys, 1));
+	ColumnarReadState *rs;
+	ScanKey		keys;
+	int			nScanKeys = 0;
+	uint64		rowNumber;
+
+	ColumnarFlushWriteStateForRelation(state->relid);
+	ColumnarFlushDeleteVectorForRelation(rel);
+
+	keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
+								 &nScanKeys);
+	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
+						   nScanKeys, keys);
+
+	/* columns outside the projection stay null in the base slot */
+	memset(state->baseSlot->tts_isnull, true, sizeof(bool) * natts);
+
+	while (ColumnarReadNextRow(rs, values, nulls, &rowNumber))
+	{
+		int			x;
+		int			k;
+		int			a;
+		ColumnarGroupEntry *e;
+
+		ResetExprContext(econtext);
+
+		/* stage the projected columns into the base slot */
+		ExecClearTuple(state->baseSlot);
+		x = -1;
+		while ((x = bms_next_member(state->projected, x)) >= 0)
+		{
+			state->baseSlot->tts_values[x] = values[x];
+			state->baseSlot->tts_isnull[x] = nulls[x];
+		}
+		ExecStoreVirtualTuple(state->baseSlot);
+		econtext->ecxt_scantuple = state->baseSlot;
+
+		/* recheck the full WHERE against this row */
+		if (state->whereState != NULL && !ExecQual(state->whereState, econtext))
+			continue;
+
+		/*
+		 * Evaluate the group keys in the per-tuple context (reset each row at the
+		 * top of this loop), not the query context ExecEvalExpr would use, so a
+		 * byref key does not leak one allocation per scanned row. Datums that
+		 * start a new group are datumCopy'd into keyContext by the lookup.
+		 */
+		for (k = 0; k < state->nkeys; k++)
+			keyvals[k] = ExecEvalExprSwitchContext(state->keys[k].exprState,
+												   econtext, &keynulls[k]);
+
+		e = columnar_groupagg_lookup(state, keyvals, keynulls);
+
+		/* fold this row's values into the group's accumulators */
+		for (a = 0; a < state->naggs; a++)
+		{
+			ColumnarAggSpec *spec = &e->specs[a];
+
+			if (spec->attidx >= 0)
+				columnar_apply_one(state->specContext, spec,
+								   values[spec->attidx], nulls[spec->attidx]);
+			else
+				columnar_apply_one(state->specContext, spec, (Datum) 0, true);
+		}
+	}
+
+	ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+					  &state->groupsTotal);
+	state->haveStats = true;
+
+	ColumnarEndRead(rs);
+	table_close(rel, AccessShareLock);
+}
+
+static TupleTableSlot *
+ColumnarExecGroupAggScan(CustomScanState *node)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	TupleTableSlot *scanSlot = node->ss.ss_ScanTupleSlot;
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+
+	if (!state->started)
+	{
+		columnar_groupagg_build(state);
+		state->started = true;
+		state->emitPos = 0;
+	}
+
+	while (state->emitPos < state->capacity)
+	{
+		ColumnarGroupEntry *e = &state->entries[state->emitPos++];
+		int			p;
+
+		if (!e->used)
+			continue;
+
+		ResetExprContext(econtext);
+		ExecClearTuple(scanSlot);
+		for (p = 0; p < state->nout; p++)
+		{
+			int			m = state->outMap[p];
+
+			if (m >= 0)
+			{
+				scanSlot->tts_values[p] = e->keys[m];
+				scanSlot->tts_isnull[p] = e->keyNulls[m];
+			}
+			else
+			{
+				int			a = -(m) - 1;
+
+				scanSlot->tts_values[p] =
+					columnar_agg_finalize(&e->specs[a], &scanSlot->tts_isnull[p]);
+			}
+		}
+		ExecStoreVirtualTuple(scanSlot);
+
+		if (node->ss.ps.ps_ProjInfo != NULL)
+		{
+			econtext->ecxt_scantuple = scanSlot;
+			return ExecProject(node->ss.ps.ps_ProjInfo);
+		}
+		return scanSlot;
+	}
+
+	return NULL;
+}
+
+static void
+ColumnarEndGroupAggScan(CustomScanState *node)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+
+	if (state->baseSlot != NULL)
+		ExecDropSingleTupleTableSlot(state->baseSlot);
+	state->baseSlot = NULL;
+	/* the memory contexts are children of es_query_cxt and freed with it */
+}
+
+static void
+ColumnarReScanGroupAggScan(CustomScanState *node)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+
+	state->started = false;
+	state->emitPos = 0;
+	state->nGroups = 0;
+	state->capacity = 0;
+	state->entries = NULL;
+	state->haveStats = false;
+	MemoryContextReset(state->keyContext);
+	MemoryContextReset(state->specContext);
+	MemoryContextReset(state->hashContext);
+}
+
+static void
+ColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
+							ExplainState *es)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+
+	ExplainPropertyInteger("Columnar Vectorized Group Keys", NULL,
+						   state->nkeys, es);
+	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
+						   state->naggs, es);
+	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
+						   state->npreds, es);
+
+	if (state->haveStats)
+	{
+		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
+							   (int64) state->groupsTotal, es);
+		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
+							   (int64) state->groupsRead, es);
+		ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
+							   (int64) state->groupsSkipped, es);
+	}
+}
+
+static const CustomExecMethods columnar_groupagg_exec_methods = {
+	.CustomName = "ColumnarScan",
+	.BeginCustomScan = ColumnarBeginGroupAggScan,
+	.ExecCustomScan = ColumnarExecGroupAggScan,
+	.EndCustomScan = ColumnarEndGroupAggScan,
+	.ReScanCustomScan = ColumnarReScanGroupAggScan,
+	.ExplainCustomScan = ColumnarExplainGroupAggScan,
 };
 
 /* -------------------------------------------------------------------------
