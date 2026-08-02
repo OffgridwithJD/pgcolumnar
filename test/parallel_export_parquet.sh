@@ -123,6 +123,29 @@ check "in-txn export: read-back == committed rows (uncommitted rows absent)" \
 	"$(pgc_set_hash "SELECT * FROM pgcolumnar.read_parquet('$DTX') AS t($RB)")" \
 	"$(pgc_set_hash "SELECT id,k,v,txt FROM t_tx WHERE txt LIKE 'c%'")"
 
+# ---- item 2: a cancelled/failed export leaves a clean directory --------------
+# On failure the dispatcher removes the *.parquet it wrote, so read_parquet cannot
+# union a partial set as if complete and a retry is not blocked by require-empty.
+# control: an export writes files, so "0 after cancel" means cleanup, not "never wrote".
+q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$PGC_WORKDIR/cx_ok', 2)" >/dev/null
+check "cancel-control: a completed export writes files" \
+	"$([ "$(nfiles "$PGC_WORKDIR/cx_ok")" -ge 1 ] && echo yes || echo no)" yes
+# a big export (many groups, 4 workers) cancelled mid-run: the wait loop's timeout
+# latency is ~1s, so 8M rows is well past what completes first. The workers create
+# their files early, so this exercises removal of files already on disk.
+psql_run "DROP TABLE IF EXISTS t_big;
+          CREATE TABLE t_big ($COLS) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('t_big'::regclass, stripe_row_limit => 2000);
+          INSERT INTO t_big SELECT g, g%1000, g::float8/7, 'r'||g
+                            FROM generate_series(1,8000000) g;" >/dev/null
+err_of "SET statement_timeout='400ms'; SELECT pgcolumnar.parallel_export_parquet('t_big'::regclass, '$PGC_WORKDIR/cx', 4)" >/dev/null
+check "a cancelled export leaves no partial files (item 2)" \
+	"$(nfiles "$PGC_WORKDIR/cx")" 0
+# and the cleaned directory is reusable (require-empty does not block a retry)
+q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$PGC_WORKDIR/cx', 2)" >/dev/null 2>&1
+check "retry into the cleaned directory succeeds" \
+	"$([ "$(nfiles "$PGC_WORKDIR/cx")" -ge 1 ] && echo yes || echo no)" yes
+
 # ---- error cases ------------------------------------------------------------
 # st_1 was written above, so it is non-empty
 expect_error "reject a non-empty output directory" \

@@ -102,11 +102,12 @@ typedef struct PexportHeader
 	char		snapname[64];	/* ExportSnapshot() name workers ImportSnapshot() */
 } PexportHeader;
 
-/* handles for the error-cleanup callback */
+/* handles + output dir for the error-cleanup callback */
 typedef struct PexportSpawn
 {
 	BackgroundWorkerHandle **handles;
 	int			n;
+	const char *dirpath;
 } PexportSpawn;
 
 PGDLLEXPORT void pgcolumnar_parallel_export_worker(Datum main_arg);
@@ -225,10 +226,42 @@ pexport_prepare_dir(const char *dir)
 	FreeDir(d);
 }
 
-/* error-cleanup: stop every worker so a dispatcher FATAL cannot leave them
- * reading after the exported snapshot is gone */
+/*
+ * pexport_remove_outputs
+ *		Best-effort removal of the *.parquet this export wrote. A failed or
+ *		cancelled run must not leave part files behind: read_parquet unions
+ *		whatever is present (so a partial set reads as a complete export), and the
+ *		require-empty-directory guard would block a retry. The output directory was
+ *		created or required empty at entry, so every *.parquet in it is ours.
+ */
 static void
-pexport_terminate_workers(int code, Datum arg)
+pexport_remove_outputs(const char *dir)
+{
+	DIR		   *d;
+	struct dirent *de;
+	char		fp[MAXPGPATH];
+
+	if (dir == NULL || dir[0] == '\0')
+		return;
+	d = AllocateDir(dir);
+	if (d == NULL)
+		return;
+	while ((de = ReadDir(d, dir)) != NULL)
+	{
+		size_t		len = strlen(de->d_name);
+
+		if (len < 8 || strcmp(de->d_name + len - 8, ".parquet") != 0)
+			continue;
+		snprintf(fp, sizeof(fp), "%s/%s", dir, de->d_name);
+		(void) unlink(fp);
+	}
+	FreeDir(d);
+}
+
+/* error-cleanup: stop every worker so a dispatcher FATAL cannot leave them
+ * reading after the exported snapshot is gone, and remove any partial output */
+static void
+pexport_cleanup(int code, Datum arg)
 {
 	PexportSpawn *s = (PexportSpawn *) DatumGetPointer(arg);
 	int			i;
@@ -236,6 +269,7 @@ pexport_terminate_workers(int code, Datum arg)
 	for (i = 0; i < s->n; i++)
 		if (s->handles[i] != NULL)
 			TerminateBackgroundWorker(s->handles[i]);
+	pexport_remove_outputs(s->dirpath);
 }
 
 /*
@@ -565,6 +599,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 		palloc0(sizeof(BackgroundWorkerHandle *) * workers);
 	spawn.handles = handles;
 	spawn.n = workers;
+	spawn.dirpath = dir;
 
 	memset(&bw, 0, sizeof(bw));
 	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -583,7 +618,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	 * workers before it exits, rather than orphaning them to read on after the
 	 * exported snapshot is gone.
 	 */
-	PG_ENSURE_ERROR_CLEANUP(pexport_terminate_workers, PointerGetDatum(&spawn));
+	PG_ENSURE_ERROR_CLEANUP(pexport_cleanup, PointerGetDatum(&spawn));
 	{
 		for (i = 0; i < workers; i++)
 		{
@@ -618,7 +653,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 			ResetLatch(MyLatch);
 		}
 	}
-	PG_END_ENSURE_ERROR_CLEANUP(pexport_terminate_workers, PointerGetDatum(&spawn));
+	PG_END_ENSURE_ERROR_CLEANUP(pexport_cleanup, PointerGetDatum(&spawn));
 
 	for (i = 0; i < workers; i++)
 	{
@@ -635,6 +670,9 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 
 		strlcpy(msg, slots[failed].errmsg[0] ? slots[failed].errmsg
 				: "worker exited without reporting a result", sizeof(msg));
+		/* all workers have stopped; drop any part files they wrote so the failed
+		 * run leaves a clean directory and a retry is not half-read or blocked */
+		pexport_remove_outputs(dir);
 		dsm_detach(seg);
 		if (pushed)
 			PopActiveSnapshot();
