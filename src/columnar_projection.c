@@ -5,13 +5,14 @@
  *
  * A projection is a named, ordered subset of a table's columns stored as its
  * own columnar storage, sorted on its sort key, sharing the table's row-number
- * identity space (the C-Store model; see design/gaps/26-*). Phase 1 provides the
- * catalog (columnar.projection) and the add/drop DDL only: declaring a
- * projection allocates its storage id and records the row, but no data is
- * written to a projection's storage yet (write fan-out is phase 2).
+ * identity space (the C-Store model; see design/gaps/26-*). The catalog
+ * (pgcolumnar.projection) and the add/drop DDL are provided here: declaring a
+ * projection allocates its storage id, records the catalog row, and back-fills
+ * the projection's storage from existing rows (ColumnarBackfillProjection). Read
+ * paths (read_projection, reconstruct_via_projection) are also provided.
  *
  * projection_id 0 is the implicit base projection (all live columns, insert
- * order). A table with no columnar.projection rows has a single implicit base
+ * order). A table with no pgcolumnar.projection rows has a single implicit base
  * projection, so pre-existing and 2.0/2.1 tables are unaffected. The base row is
  * recorded lazily the first time a projection is added.
  *
@@ -139,7 +140,7 @@ record_base_projection(Relation rel, uint64 storageId, List *existing)
 }
 
 /*
- * columnar.add_projection(rel, name, columns text[], sort_key text[])
+ * pgcolumnar.add_projection(rel, name, columns text[], sort_key text[])
  *		Declare a projection: a named column subset sorted on sort_key.
  */
 Datum
@@ -264,7 +265,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar.drop_projection(rel, name)
+ * pgcolumnar.drop_projection(rel, name)
  *		Drop a declared projection. The base projection cannot be dropped.
  */
 Datum
@@ -341,7 +342,7 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar.read_projection(rel, name) -> setof text
+ * pgcolumnar.read_projection(rel, name) -> setof text
  *		Debug/verification reader for a projection's storage (gap 26, phase 2).
  *		Scans the projection's stripes (in stored sort order), skips rows whose
  *		base row number is deleted or invisible per the base delete_vector/visibility,
@@ -490,7 +491,7 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar.reconstruct_via_projection(rel, name) -> setof text
+ * pgcolumnar.reconstruct_via_projection(rel, name) -> setof text
  *		Read every live row through a projection and reconstruct the full base
  *		row (gap 26, phase 3): columns stored in the projection come from the
  *		projection's own storage, and any remaining table columns are fetched

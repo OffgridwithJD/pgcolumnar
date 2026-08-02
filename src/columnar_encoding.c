@@ -2205,11 +2205,11 @@ ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 
 	/*
 	 * Choose the candidates to apply. With sampling on and a chunk big enough to
-	 * sample, each candidate is measured on a strided sample and only the best
+	 * sample, each candidate is measured on a windowed sample and only the best
 	 * two are applied to the whole chunk; two rather than one because the sample
 	 * ranks closely-matched candidates unreliably, and the second application is
 	 * cheap next to the three it replaces. With sampling off, or a chunk too
-	 * small for a stride, every candidate is applied as before.
+	 * small to sample, every candidate is applied as before.
 	 */
 	if (w > 0 && columnar_encoding_sample_rows >= ENCODE_SAMPLE_MIN)
 	{

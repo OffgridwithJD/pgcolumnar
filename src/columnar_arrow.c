@@ -3,7 +3,7 @@
  * columnar_arrow.c
  *		Arrow IPC stream export for pgColumnar (gap 27, piece 1).
  *
- *		columnar.export_arrow(rel regclass, path text) writes a columnar table
+ *		pgcolumnar.export_arrow(rel regclass, path text) writes a columnar table
  *		to an Apache Arrow IPC *stream* file: a Schema message, one RecordBatch
  *		message per ARROW_BATCH_ROWS rows, and an end-of-stream marker. The
  *		writer is self-contained -- it hand-builds the FlatBuffers metadata and
@@ -11,9 +11,11 @@
  *		or run-time dependency. Rows are read in physical order via the scalar
  *		reader; deleted rows are skipped by the reader.
  *
- *		First slice type mapping: int2/4/8, float4/8, bool, text/varchar (Utf8),
- *		bytea (Binary). Any other column type is rejected. Little-endian hosts
- *		only (the Arrow body mirrors native scalar bytes).
+ *		Type mapping: int2/4/8, float4/8, bool, text/varchar (Utf8), bytea
+ *		(Binary), date/time/timestamp/timestamptz, uuid, numeric, and json/jsonb;
+ *		1-D arrays (List) and composites (Struct) are also exported. A scalar type
+ *		with no mapping is rejected. Little-endian hosts only (the Arrow body
+ *		mirrors native scalar bytes).
  *
  * Independent MIT implementation built from the Apache Arrow columnar format
  * and IPC specifications (Schema.fbs, Message.fbs, encapsulated message format)
@@ -939,7 +941,7 @@ write_record_batch(FILE *f, ArrowCol *cols, int ncols, int64 nrows)
 
 /*
  * columnar_export_arrow
- *		SQL: columnar.export_arrow(rel regclass, path text) -> bigint.
+ *		SQL: pgcolumnar.export_arrow(rel regclass, path text) -> bigint.
  *		Write a columnar table to an Arrow IPC stream file; returns the number
  *		of rows written.
  */
@@ -1139,9 +1141,9 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 }
 
 /* =========================================================================
- * Arrow IPC stream import: columnar.import_arrow(rel regclass, path text).
+ * Arrow IPC stream import: pgcolumnar.import_arrow(rel regclass, path text).
  *
- * Reads an Arrow IPC *stream* file (as columnar.export_arrow writes, and as
+ * Reads an Arrow IPC *stream* file (as pgcolumnar.export_arrow writes, and as
  * pyarrow writes for non-dictionary arrays) and inserts its rows into an
  * existing columnar table whose column types match the file's schema, using
  * the reverse of the export type mapping. Uncompressed bodies only; a
@@ -1725,7 +1727,7 @@ imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
 
 /*
  * columnar_import_arrow
- *		SQL: columnar.import_arrow(rel regclass, path text) -> bigint.
+ *		SQL: pgcolumnar.import_arrow(rel regclass, path text) -> bigint.
  *		Insert the rows of an Arrow IPC stream file into a columnar table;
  *		returns the number of rows inserted.
  */

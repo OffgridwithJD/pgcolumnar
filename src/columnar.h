@@ -396,8 +396,8 @@ typedef struct ColumnarRowRange
 	uint64		rowCount;
 }			ColumnarRowRange;
 
-/* all-visible chunk-group row ranges: stripe committed past the horizon and no
- * deletes (committed or in-progress). Returns a List of ColumnarRowRange *. */
+/* row groups every one of whose rows is deleted as-of oldestXmin. Returns a
+ * List of palloc'd uint64 group numbers. */
 extern List *ColumnarComputeFullyDeletedGroups(uint64 storageId,
 											   TransactionId oldestXmin);
 extern void ColumnarRetireGroup(uint64 storageId, uint64 groupNumber);
@@ -409,6 +409,8 @@ extern bool ColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 										  TransactionId oldestXmin);
 extern void ColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd);
 extern void ColumnarReconcileFreeList(Relation dataRel);
+/* all-visible chunk-group row ranges: stripe committed past the horizon and no
+ * deletes (committed or in-progress). Returns a List of ColumnarRowRange *. */
 extern List *ColumnarComputeAllVisibleGroups(uint64 storageId,
 											 TransactionId oldestXmin);
 
@@ -565,11 +567,6 @@ extern void ColumnarRescanRead(ColumnarReadState *readState);
 extern void ColumnarEndRead(ColumnarReadState *readState);
 
 /*
- * Parallel scan (gap 23): point the read state at a shared atomic that hands out
- * stripe indices, so several workers scanning the same relation each claim
- * distinct stripes. Set by the custom scan's DSM init callbacks.
- */
-/*
  * Restrict a scan to a set of row groups (issue #149). Groups outside the set
  * are skipped without their bytes being read. Must be called before the first
  * ColumnarReadNextRow; ngroups == 0 makes the scan return no rows.
@@ -586,6 +583,11 @@ extern int64 ColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
 									  int nRestrictGroups);
 extern void ColumnarParquetCheckExportable(Relation rel);
 
+/*
+ * Parallel scan (gap 23): point the read state at a shared atomic that hands out
+ * stripe indices, so several workers scanning the same relation each claim
+ * distinct stripes. Set by the custom scan's DSM init callbacks.
+ */
 extern void ColumnarReadSetParallelCounter(ColumnarReadState *readState,
 										   pg_atomic_uint32 *counter);
 
@@ -599,12 +601,6 @@ extern void ColumnarReadStats(ColumnarReadState *readState,
 							  uint64 *groupsTotal);
 extern uint64 ColumnarVectorsSkipped(ColumnarReadState *readState);
 
-/*
- * Fetch a single row by its 1-based row number (spec 6), for the table AM's
- * fetch-by-tid callback used by UPDATE. Fills values/nulls (by-reference values
- * are allocated in the current memory context) and returns true when the row
- * exists and is not marked deleted in the delete vector.
- */
 /* cached base-liveness for a projection scan (gap 26): build once per scan,
  * probe per row with a binary search instead of a per-row catalog scan */
 typedef struct ColumnarLivenessCache ColumnarLivenessCache;
@@ -613,6 +609,12 @@ extern ColumnarLivenessCache *ColumnarBuildLivenessCache(Relation rel,
 extern bool ColumnarLivenessCacheIsLive(ColumnarLivenessCache *cache,
 										uint64 rowNumber);
 extern void ColumnarFreeLivenessCache(ColumnarLivenessCache *cache);
+/*
+ * Fetch a single row by its 1-based row number (spec 6), for the table AM's
+ * fetch-by-tid callback used by UPDATE. Fills values/nulls (by-reference values
+ * are allocated in the current memory context) and returns true when the row
+ * exists and is not marked deleted in the delete vector.
+ */
 extern bool ColumnarReadRowByNumber(Relation rel, Snapshot snapshot,
 									uint64 rowNumber, Datum *values, bool *nulls);
 
@@ -818,8 +820,9 @@ extern void ColumnarVectorInit(void);
  * padding, so a four-byte varlena header starts wherever the previous value
  * ended. VARSIZE_ANY reads that header by casting to varattrib_4b and loading a
  * uint32, which is undefined behaviour on an unaligned address: it happens to
- * work on x86_64 and is a SIGBUS on a strict-alignment target, which
- * docs/limitations.md promises to support.
+ * work on x86_64 and is a SIGBUS on a strict-alignment target; unaligned reads
+ * are covered by the sanitizer gate, though non-x86_64 architectures are
+ * untested (docs/limitations.md).
  *
  * This is not a crafted-input problem. An ordinary INSERT of low-cardinality
  * text reports it six times under UBSAN, because encode_dict walks exactly such

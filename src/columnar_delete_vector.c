@@ -135,8 +135,8 @@ delete_vector_get_buffer(Relation rel, uint64 storageId)
 
 /*
  * delete_vector_find_row_group
- *		Native (PGCN v1) analog of delete_vector_find_stripe: return the row group that
- *		contains rowNumber, rebuilding the cache from the catalog on a miss.
+ *		Native (PGCN v1): return the row group that contains rowNumber,
+ *		rebuilding the cache from the catalog on a miss.
  */
 static NativeRowGroupMetadata *
 delete_vector_find_row_group(DeleteVectorBuffer *buf, uint64 rowNumber)
@@ -226,10 +226,9 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
  * ColumnarMarkRowDeleted
  *		Record that the row with the given 1-based row number is deleted, by
  *		setting its bit in the in-memory delete buffer for its chunk group.
- *		Chunk-group boundaries are computed arithmetically: every chunk group
- *		but the last in a stripe holds exactly chunkRowCount rows (the writer
- *		fills a group before starting the next), so no chunk_group catalog read
- *		is needed here.
+ *		The mark targets the whole enclosing row group as one bitmap (chunk id
+ *		0), sized to the row group's rowCount, found via
+ *		delete_vector_find_row_group using its firstRowNumber and rowCount.
  */
 void
 ColumnarMarkRowDeleted(Relation rel, uint64 rowNumber)

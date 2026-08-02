@@ -67,11 +67,6 @@ disk. It never changes the values that a table returns.
 | `pgcolumnar.enable_index_only_scan` | boolean | `on` | Allow index-only scans on columnar tables, served by the columnar visibility-map fork. Set to `off` to force a plain index scan. |
 | `pgcolumnar.enable_projection_scan` | boolean | `on` | Let the planner scan a covering projection instead of the base table when one serves the query better. |
 
-### Column cache
-
-| Setting | Type | Default | Description |
-| --- | --- | --- | --- |
-
 ### Maintenance and disk reclaim
 
 | Setting | Type | Default | Description |
