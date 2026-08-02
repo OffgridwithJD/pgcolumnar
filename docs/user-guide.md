@@ -63,6 +63,28 @@ SELECT g, g % 1000, (random() * 100)::numeric(10,2), 'sale',
 FROM generate_series(1, 1000000) g;
 ```
 
+### Parallel bulk load
+
+A single `COPY` uses one core, and the columnar encode step is the largest part
+of a load. To use more cores, load a text file with
+[`pgcolumnar.parallel_copy`](sql-reference.md#pgcolumnarparallel_copytarget-regclass-filename-text-workers-int-default-null-returns-bigint).
+It fans the file across several background workers and returns the row count. The
+load is atomic, so a failure in any part rolls the whole load back. It commits on
+its own, so a `ROLLBACK` in the caller does not undo it.
+
+```sql
+CREATE TABLE events (id bigint, ts timestamptz, val double precision) USING pgcolumnar;
+SELECT pgcolumnar.parallel_copy('events', '/data/events.txt', 8);
+```
+
+The target is either a single columnar table or a RANGE-partitioned table with
+columnar partitions. A single table needs no row order. A partitioned target
+needs the file sorted ascending by the partition key, and the key type must be
+numeric or a date/time type. Set `max_prepared_transactions` above the worker
+count first, because the load prepares one transaction per worker. On a machine
+with many cores this loads several times faster than one `COPY`. See
+[Benchmarks](benchmarks.md#parallel-bulk-ingest) for measured numbers.
+
 ## Query
 
 Queries need no special syntax. The planner adds columnar scan and aggregate

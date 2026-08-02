@@ -134,6 +134,24 @@ coverage.
 - `pgcolumnar.stats(table)` reports per-row-group row counts, deleted-row counts,
   chunk counts, and byte sizes.
 
+## Parallel bulk ingest
+
+- `pgcolumnar.parallel_copy(target, path [, workers])` loads a COPY text file with
+  several background workers at once, as one atomic operation. It returns the row
+  count. The columnar encode step is CPU bound, so more workers give a large load
+  speedup up to the physical core count.
+- Each worker runs core `COPY` over a byte range of the file, so parse and write
+  behavior match `COPY FROM` exactly. There is no second parser to keep correct.
+- The load is atomic. Each worker prepares its transaction, and a coordinator
+  commits them together only when every worker succeeded. Any failure rolls the
+  whole load back, and the target keeps its earlier contents.
+- The target is a single columnar table or a RANGE-partitioned table with
+  columnar partitions. A single table needs no row order. A partitioned target
+  needs the file sorted ascending by the partition key, whose type must be
+  numeric or a date/time type.
+- See the [SQL reference](sql-reference.md#pgcolumnarparallel_copytarget-regclass-filename-text-workers-int-default-null-returns-bigint)
+  and [Benchmarks](benchmarks.md#parallel-bulk-ingest).
+
 ## Interoperability
 
 - Export to Arrow and Parquet: `pgcolumnar.export_arrow(table, path)` and

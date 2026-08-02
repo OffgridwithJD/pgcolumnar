@@ -326,6 +326,44 @@ SELECT pgcolumnar.import_parquet('events_copy', '/tmp/events.parquet');
 SELECT pgcolumnar.import_parquet('events_copy', '/data/events/');
 ```
 
+### pgcolumnar.parallel_copy(target regclass, filename text, workers int DEFAULT NULL) returns bigint
+
+Loads a text file into a columnar table with several background workers at once,
+as one atomic operation. Returns the number of rows loaded. The caller needs
+membership in the `pg_read_server_files` role, which superusers hold, and INSERT
+on the target. The file uses COPY text format. Each worker runs core `COPY` over
+a byte range of the file, so parse and write behavior match `COPY FROM` exactly.
+
+The target may be one of two kinds:
+
+- A single columnar table. The workers write the one table together. Any
+  record-aligned split of the file is correct, so the file needs no ordering.
+- A RANGE-partitioned table whose partitions are columnar. Each worker loads a
+  distinct set of partitions. The file must be sorted ascending by the partition
+  key. The key column may sit anywhere in the row, and its type must be numeric
+  or a date/time type. The function reports an error when the file is not sorted.
+
+The load is atomic. Each worker prepares its transaction rather than committing,
+and a coordinator commits them together only if every worker succeeded. A bad
+row, a full disk, or a constraint failure in any range rolls the whole load back.
+The target keeps its earlier contents. The load runs in background workers, so it
+commits on its own. It is not part of the calling transaction, and a caller
+`ROLLBACK` does not undo it. Set `max_prepared_transactions` above the worker
+count, because the load prepares one transaction per worker.
+
+When `workers` is omitted the function derives a value from the target. For a
+partitioned target it lowers `workers` to the partition count when the count is
+smaller.
+
+```sql
+-- single columnar table, any row order
+CREATE TABLE events (id bigint, ts timestamptz, val double precision) USING pgcolumnar;
+SELECT pgcolumnar.parallel_copy('events', '/data/events.txt', 8);   -- returns row count
+
+-- RANGE-partitioned target, file sorted ascending by the partition key
+SELECT pgcolumnar.parallel_copy('events_by_day', '/data/events_sorted.txt', 8);
+```
+
 ## Reading external Parquet
 
 These read a server-side Parquet file in place, without importing it. They

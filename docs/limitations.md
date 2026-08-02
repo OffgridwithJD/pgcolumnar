@@ -183,7 +183,40 @@ the same rows. There is no import-specific overhead; the cost is the columnar
 write path either way.
 
 Work on load throughput is tracked in
-[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155).
+[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155). One realized lever
+is [`pgcolumnar.parallel_copy`](#parallel-bulk-ingest). It loads a text file
+across several cores at once.
+
+## Parallel bulk ingest
+
+`pgcolumnar.parallel_copy` loads a text file with several workers at once. It has
+these constraints.
+
+- The file must use COPY text format. The function does not accept CSV or binary
+  format.
+- The target is a single columnar table or a RANGE-partitioned table with
+  columnar partitions. The function rejects any other target, such as a heap
+  table.
+- For a partitioned target the file must be sorted ascending by the partition
+  key. The key type must be numeric or a date/time type. The function reports an
+  error for a text key and for an unsorted file.
+- The caller needs membership in the `pg_read_server_files` role and INSERT on
+  the target. The file is read on the server host.
+- Set `max_prepared_transactions` above the worker count. The load prepares one
+  transaction per worker, and the function errors up front when the setting is
+  too low.
+- The speedup is bounded by the physical core count. The columnar encode step is
+  CPU bound, so workers past the physical cores add little.
+- The load commits on its own. It runs in background workers, so it is not part
+  of the calling transaction. A `ROLLBACK` in the caller does not undo the loaded
+  rows. The atomicity is across the workers, not with the caller.
+- The load is atomic through two-phase commit. A coordinator crash during the
+  final commit step can leave some ranges committed and some prepared. This is
+  the ordinary two-phase-commit in-doubt case. A DBA resolves it from
+  `pg_prepared_xacts`.
+
+See the [SQL reference](sql-reference.md#pgcolumnarparallel_copytarget-regclass-filename-text-workers-int-default-null-returns-bigint)
+and [Benchmarks](benchmarks.md#parallel-bulk-ingest).
 
 ## Planner statistics
 
