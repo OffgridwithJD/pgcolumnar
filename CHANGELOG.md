@@ -26,6 +26,19 @@ unreleased. For the forward-looking plan see
 
 ### Changed
 
+- Server-file functions now gate on the `pg_read_server_files` and
+  `pg_write_server_files` roles instead of `superuser()` (#330), matching core
+  `COPY ... FROM/TO 'file'` so a DBA can delegate server-file access without
+  handing over superuser. This is a deliberate loosening. The read functions
+  (`import_parquet`, `read_parquet`, `parquet_schema`, the `pgcolumnar_parquet`
+  foreign-table scan, `import_arrow`) parse files this project wrote, so they are
+  now reachable from a role short of superuser; give an untrusted Parquet or Arrow
+  file the care in `docs/administration.md` while the Arrow parser fuzzing (#214)
+  is incomplete. The write functions (`export_parquet`, `export_arrow`,
+  `parallel_export_parquet`) gate on `pg_write_server_files`. `file_split_offsets`
+  and `parallel_copy` already used the read role. `test/server_file_privilege.sh`
+  now covers the full set and fails if a new file function lacks a check.
+
 - The C standard flag for PostgreSQL 19 is probed rather than hardcoded (#294).
   This project sets `-std=gnu23` for PostgreSQL 19, whose headers use C23
   constructs. GCC 13 accepts only the older `gnu2x` spelling of the same

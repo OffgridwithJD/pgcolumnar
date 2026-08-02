@@ -236,45 +236,57 @@ columnar table, because reading the table requires the access method.
 ### Server-side file access
 
 Some `pgcolumnar` functions read or write a file on the server host rather than
-operating only on rows. Every one of them requires superuser, enforced in C at
-the point of use:
+operating only on rows. Each gates on the matching server-file role, enforced in C
+at the point of use. This is the convention core uses for `COPY ... FROM 'file'`
+and `COPY ... TO 'file'`.
 
 | function | direction | required privilege |
 | --- | --- | --- |
-| `pgcolumnar.import_parquet(rel, path)` | reads a server file | superuser |
-| `pgcolumnar.read_parquet(path)` | reads a server file | superuser |
-| `pgcolumnar.parquet_schema(path)` | reads a server file | superuser |
-| a scan of a `pgcolumnar_parquet` foreign table | reads a server file | superuser |
-| `pgcolumnar.import_arrow(rel, path)` | reads a server file | superuser |
-| `pgcolumnar.export_parquet(rel, path)` | writes a server file | superuser |
-| `pgcolumnar.export_arrow(rel, path)` | writes a server file | superuser |
+| `pgcolumnar.import_parquet(rel, path)` | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.read_parquet(path)` | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.parquet_schema(path)` | reads a server file | `pg_read_server_files` |
+| a scan of a `pgcolumnar_parquet` foreign table | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.import_arrow(rel, path)` | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.file_split_offsets(path, workers)` | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.parallel_copy(target, path, workers)` | reads a server file | `pg_read_server_files` |
+| `pgcolumnar.export_parquet(rel, path)` | writes a server file | `pg_write_server_files` |
+| `pgcolumnar.export_arrow(rel, path)` | writes a server file | `pg_write_server_files` |
+| `pgcolumnar.parallel_export_parquet(target, path, workers)` | writes a server file | `pg_write_server_files` |
 
-Two layers keep a non-superuser out. The functions have the default grant to
-`PUBLIC`. But the `pgcolumnar` schema does not grant `USAGE` to `PUBLIC`. Thus a
-role without access to the schema cannot reach the functions. If a role does have
-access to the schema, the superuser check refuses the call. `test/server_file_privilege.sh`
-checks that each entry point above refuses a non-superuser. It holds that list as
-data. Thus you add a new file-reading function in one place only.
+A superuser holds both roles, so a superuser reaches every function. A read
+function needs `pg_read_server_files`. A write function needs
+`pg_write_server_files`. A role without the matching role is refused in C at the
+point of use.
+
+Two layers keep an unprivileged role out. The `pgcolumnar` schema does not grant
+`USAGE` to `PUBLIC`, so a role without schema access cannot reach the functions. A
+role that does reach them is then refused by the role check unless it holds the
+matching server-file role.
+
+`test/server_file_privilege.sh` holds this table as data. It asserts that a role
+without the role is refused, and that a role with the role reaches the file. It
+also fails if a function that takes a file path is missing from the list. A new
+server-file function therefore cannot slip past the boundary.
 
 Every other `pgcolumnar.*` function runs with ordinary table privileges.
 
-This is stricter than core's convention: `COPY FROM 'file'` needs membership in
-`pg_read_server_files`, not superuser, so a DBA can delegate file reading without
-handing over the cluster. pgColumnar keeps superuser for the pre-release. A change to
-`pg_read_server_files` and `pg_write_server_files` later is backward compatible.
-A change to a more strict rule later would stop installations that operate
-correctly. Examine the less strict roles again after the fuzzing of the parsers
-is complete. Refer to the text below. These roles increase the number of roles
-that can reach a parser that this project wrote.
+This matches core, where `pg_read_server_files` and `pg_write_server_files` let a
+DBA delegate server-file access without a superuser. It is a deliberate change from
+the earlier pre-release rule, which required superuser. The read functions that
+parse Parquet or Arrow now reach a parser this project wrote from a role short of
+superuser. Give an untrusted file the care described below, and see the parser
+fuzzing status in that section.
 
 ### The file is untrusted input
 
 A Parquet file or an Arrow file from a different source is input without trust.
 The parser for these formats is code that this project wrote. The metadata in the
 file controls that parser directly. Thus a file that is incorrect or hostile is a
-surface for code execution. It is not only a problem of data quality. Because of the superuser boundary, the exposed condition is a superuser
-who reads a file that a different person made. This is the usual data-lake
-condition and not an unusual one. The role has trust, but the file is external.
+surface for code execution. It is not only a problem of data quality. The read functions now gate on
+`pg_read_server_files` rather than superuser. So the exposed condition is a role
+with that grant which reads a file a different person made. This is the usual
+data-lake condition and not an unusual one. The role has trust, but the file is
+external.
 
 The mitigation for that residual risk is fuzzing the parsers, tracked in #214,
 which covers the Parquet path at this time. The fuzzing does not cover the Arrow

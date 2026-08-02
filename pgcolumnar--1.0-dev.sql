@@ -784,6 +784,15 @@ CREATE FUNCTION pgcolumnar.export_parquet(rel regclass, path text)
 COMMENT ON FUNCTION pgcolumnar.export_parquet(regclass, text)
 	IS 'export a columnar table to a Parquet file; returns rows written';
 
+CREATE FUNCTION pgcolumnar.parallel_export_parquet(target regclass, path text,
+												   workers int DEFAULT NULL)
+	RETURNS bigint
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'columnar_parallel_export_parquet';
+
+COMMENT ON FUNCTION pgcolumnar.parallel_export_parquet(regclass, text, int)
+	IS 'parallel Parquet export using read-only background workers into a directory readable by pgcolumnar.read_parquet: a single columnar table split by row-group ranges, or a partitioned columnar table one file per partition; returns rows written (#300)';
+
 CREATE FUNCTION pgcolumnar.import_arrow(rel regclass, path text)
 	RETURNS bigint
 	LANGUAGE C
