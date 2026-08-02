@@ -178,6 +178,52 @@ Compression `none` against `zstd`, for the columnar table only: 40 MB against
 5.95 MB. The scan latency does not change, at 0.52 ms against 0.52 ms. The
 encoded stream is already small, and the aggregates do not read it.
 
+## Parallel bulk ingest
+
+`pgcolumnar.parallel_copy` loads a text file with several background workers at
+once. The columnar encode step is CPU bound, so the load speeds up with the worker
+count, up to the physical core count. The bench host has 8 physical cores and 16
+hardware threads.
+
+Method: PostgreSQL 18.4, non-assert, on the bench with 16 vCPU and 62 GB. The
+source file is a 20,000,000-row TSBS cpu slice of 21 columns, sorted by time. Each
+figure is the median of three interleaved rounds, with the file warm in the page
+cache. The baseline is one server-side `COPY`.
+
+Single columnar table, 20,000,000 rows:
+
+| workers | seconds | speedup |
+| --- | --- | --- |
+| 1 (COPY) | 129.8 | 1.00x |
+| 2 | 67.4 | 1.93x |
+| 4 | 36.1 | 3.60x |
+| 8 | 20.6 | 6.29x |
+| 16 | 18.9 | 6.87x |
+
+One worker matches a plain `COPY` at 130.4 s, so the coordinator and the two-phase
+commit add little. The result is the same data every time. All runs load
+20,000,000 rows with an identical `sum(usage_user)`. On-disk size varies by 0.03%
+across worker counts, because the byte split moves a few stripe boundaries.
+
+A 100,000,000-row load shows the same effect at scale. One `COPY` takes 644.1 s;
+`parallel_copy` with 16 workers takes 92.8 s, a 6.94x speedup. Both produce 2.67 GB
+on disk, within 0.004%. The row counts match. The float `sum` matches to nine
+figures and differs in the last, because parallel summation adds in a different
+order.
+
+RANGE-partitioned table, 20,000,000 rows, 24 hourly partitions:
+
+| workers | seconds | speedup |
+| --- | --- | --- |
+| 1 (COPY) | 134.0 | 1.00x |
+| 8 | 29.1 | 4.61x |
+| 16 | 25.4 | 5.27x |
+
+The partitioned path routes each row to its partition and gives each worker a
+distinct partition set. That routing costs a little more than the single-table
+split, so the speedup is lower. It still cuts a two-minute load to under 30
+seconds.
+
 ## Import and export
 
 Export, 6,000,000 rows, 5 columns:

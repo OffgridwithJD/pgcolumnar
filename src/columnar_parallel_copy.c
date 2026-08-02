@@ -1261,12 +1261,20 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 		workers = PCOPY_MAX_WORKERS;
 
 	/*
-	 * The target must be a RANGE-partitioned table: each worker loads a distinct
-	 * partition (distinct storage id), the only shape pgcolumnar allows a parallel
-	 * AND atomic bulk load. Concurrent writers to one non-partitioned table
-	 * serialize on the per-storage write lock and, under 2PC, deadlock; single-table
-	 * parallel load is a planned columnar-core enhancement. Compute partition-
-	 * aligned byte ranges here (this may lower `workers` to the partition count).
+	 * The target is one of two shapes that pgcolumnar can load in parallel AND
+	 * atomically:
+	 *   - a RANGE-partitioned table: each worker loads a distinct partition
+	 *     (distinct storage id), so there is nothing to serialize on. Compute
+	 *     partition-aligned byte ranges (this may lower `workers` to the partition
+	 *     count), which requires the file sorted by the partition key.
+	 *   - a single columnar table: the loaders write the one storage concurrently
+	 *     via columnar_bulk_parallel_writer (see below), so a naive record-aligned
+	 *     byte split is enough and the file needs no ordering.
+	 * Any other target (e.g. a heap, or a partitioned table with non-columnar
+	 * partitions) is rejected. A naive split of one non-partitioned columnar table
+	 * WITHOUT that opt-in would serialize on the per-storage write lock and, under
+	 * 2PC, deadlock -- which is why the single-table path pre-creates the storage
+	 * row and the loaders skip that lock.
 	 */
 	{
 		Relation	target = table_open(relid, AccessShareLock);

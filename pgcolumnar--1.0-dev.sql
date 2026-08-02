@@ -934,4 +934,4 @@ CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
 
 COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
-	IS 'atomic parallel bulk load of a sorted text file into a RANGE-partitioned columnar table, one distinct partition set per worker (#300)';
+	IS 'atomic parallel bulk load of a COPY text file into a columnar table using background workers: a single columnar table (any row order), or a RANGE-partitioned columnar table sorted by the partition key with one distinct partition set per worker (#300)';

@@ -9,6 +9,21 @@ unreleased. For the forward-looking plan see
 
 ## [Unreleased]
 
+### Added
+
+- `pgcolumnar.parallel_copy(target, path [, workers])` loads a COPY text file into
+  a columnar table with several background workers at once, and returns the row
+  count (#300). Each worker runs core `COPY` over a byte range of the file, so
+  parse and write behavior match `COPY FROM`. The load is atomic through two-phase
+  commit: every worker prepares its transaction, and a coordinator commits them
+  together only when all succeeded, so any failure rolls the whole load back. The
+  target is a single columnar table, where any record-aligned split is correct, or
+  a RANGE-partitioned table with columnar partitions, where the file must be sorted
+  ascending by the partition key and the key type must be numeric or a date/time
+  type. The columnar encode step is CPU bound, so the load scales with worker
+  count up to the physical core count. It landed in two parts, partition-parallel
+  (#323) and single-table (#324). See docs/user-guide.md and docs/benchmarks.md.
+
 ### Changed
 
 - The C standard flag for PostgreSQL 19 is probed rather than hardcoded (#294).
