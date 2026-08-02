@@ -140,6 +140,10 @@ pgc_setup() {
 		# of the advisory lock tag, so backends must agree on it). A large prime
 		# keeps unrelated keys out of the same bucket in unique_conc.
 		echo "pgcolumnar.unique_lock_buckets=100003"
+		# Per-suite extra GUCs, set before the cluster starts (some, like
+		# max_prepared_transactions, are PGC_POSTMASTER and cannot be changed
+		# later). parallel_copy.sh uses this for 2PC capacity + worker slots.
+		[ -n "${PGC_EXTRA_CONF:-}" ] && printf '%s\n' "$PGC_EXTRA_CONF"
 	} | pgc_pg "cat >> '$PGC_PGDATA/postgresql.conf'"
 
 	# Start, retrying a few times: under rapid cluster churn (the version matrix

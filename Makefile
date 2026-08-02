@@ -25,7 +25,8 @@ OBJS = \
 	src/columnar_parquet.o \
 	src/columnar_visibilitymap.o \
 	src/columnar_projection.o \
-	src/columnar_parquet_reader.o
+	src/columnar_parquet_reader.o \
+	src/columnar_parallel_copy.o
 
 EXTENSION = pgcolumnar
 DATA = pgcolumnar--1.0-dev.sql

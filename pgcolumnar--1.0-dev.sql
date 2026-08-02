@@ -889,3 +889,47 @@ $vacuum_full$;
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_full(name, real, int)
 	IS 'compact every columnar table in a schema';
+
+-- ---------------------------------------------------------------------------
+-- Parallel bulk ingest (#300). Phase 1: the file range splitter. Given a
+-- server-side file and a worker count, return workers+1 ascending byte offsets
+-- that partition the file into that many line-aligned ranges, so a parallel load
+-- can hand range [off[i], off[i+1]) to worker i. The ranges are record-aligned
+-- for COPY *text* format only (a raw newline always ends a text record); they are
+-- NOT safe for CSV, whose quoted fields may contain literal newlines. `workers` is
+-- capped internally so a huge value cannot allocate unbounded memory.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
+	RETURNS bigint[]
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'columnar_file_split_offsets';
+
+COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
+	IS 'byte offsets that split a COPY text-format file into N record-aligned ranges (#300)';
+
+-- Parallel bulk ingest: atomically load a server-side COPY text-format file into a
+-- RANGE-partitioned columnar table across N background workers. Each worker loads a
+-- DISTINCT set of partitions (distinct storage), the only shape pgColumnar allows a
+-- parallel AND atomic bulk load: concurrent writers to one non-partitioned table
+-- serialize on the per-storage write lock and, under two-phase commit, deadlock
+-- (single-table parallel load is a planned columnar-core enhancement). Loaders
+-- PREPARE; a coordinator background worker COMMIT PREPAREDs them all, or ROLLBACK
+-- PREPAREDs on any failure. Returns rows loaded. Requirements: RANGE-partitioned
+-- target (single-column numeric/date-time key, no DEFAULT partition), the file
+-- sorted ascending by that key, COPY text format, and max_prepared_transactions >=
+-- workers. workers => NULL derives a default from max_parallel_workers.
+--
+-- Two behaviors to know: (1) the load commits in background workers, INDEPENDENTLY
+-- of the calling transaction, so its rows survive a subsequent ROLLBACK of the
+-- caller -- treat the call like a COMMIT. (2) Do not call it while the calling
+-- transaction holds a lock on the target (e.g. after LOCK TABLE or a write to it):
+-- the loaders would block on that lock and the wait is invisible to the deadlock
+-- detector. See design/PARALLEL_COPY_PLAN.md.
+CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
+										 workers int DEFAULT NULL)
+	RETURNS bigint
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
+
+COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
+	IS 'atomic parallel bulk load of a sorted text file into a RANGE-partitioned columnar table, one distinct partition set per worker (#300)';
