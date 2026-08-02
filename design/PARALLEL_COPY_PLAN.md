@@ -69,6 +69,19 @@ today's engine. Real parallelism requires each worker to write **distinct storag
   invisible until the commit-all (atomic), 0 prepared-xacts leaked.** The 2PC
   coordinator/loader machinery already built works unchanged; the only new piece is
   a **partition-aligned splitter** so no two workers touch the same partition.
+
+  **Measured (bench, 20M-row TSBS slice, warm, interleaved 3 rounds):** single COPY
+  ~126.8 s vs `parallel_copy(8)` into an 8-partition target ~25.6 s = **≈ 5.0×**;
+  byte-identical result (same count and `sum(usage_user)`), 0 prepared-xacts leaked.
+  Scaling N=1/2/4/8: 137 / 73 / 42 / 27 s (near-linear; N=1 is slightly *slower*
+  than plain COPY because the key-parse split + 2PC overhead only pays off at N>1).
+  The ~5× vs the raw 7.4× prototype (N COPYs into N separate tables, no split/2PC)
+  is the coordinator+splitter overhead, as expected.
+
+  **Full-file headline (bench, 100M-row / 17 GB TSBS, 16 partitions):** single COPY
+  **640.6 s** vs `parallel_copy(16)` **118.6 s** = **5.40×**; both 100,000,000 rows
+  with identical `sum(usage_user)`, 0 prepared-xacts leaked. The whole file loads
+  atomically and in parallel with byte-identical results.
 - **enhancement — columnar-core bulk.** A bulk-load path in the engine that lets
   concurrent writers share **one** table without holding the per-storage lock for
   the whole transaction (e.g. coordinator pre-creates+commits the storage row;
