@@ -346,8 +346,10 @@ The target may be one of two kinds:
 The load is atomic. Each worker prepares its transaction rather than committing,
 and a coordinator commits them together only if every worker succeeded. A bad
 row, a full disk, or a constraint failure in any range rolls the whole load back.
-The target keeps its earlier contents. Set `max_prepared_transactions` above the
-worker count, because the load prepares one transaction per worker.
+The target keeps its earlier contents. The load runs in background workers, so it
+commits on its own. It is not part of the calling transaction, and a caller
+`ROLLBACK` does not undo it. Set `max_prepared_transactions` above the worker
+count, because the load prepares one transaction per worker.
 
 When `workers` is omitted the function derives a value from the target. For a
 partitioned target it lowers `workers` to the partition count when the count is

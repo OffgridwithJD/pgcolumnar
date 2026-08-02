@@ -69,7 +69,8 @@ A single `COPY` uses one core, and the columnar encode step is the largest part
 of a load. To use more cores, load a text file with
 [`pgcolumnar.parallel_copy`](sql-reference.md#pgcolumnarparallel_copytarget-regclass-filename-text-workers-int-default-null-returns-bigint).
 It fans the file across several background workers and returns the row count. The
-load is atomic, so a failure in any part rolls the whole load back.
+load is atomic, so a failure in any part rolls the whole load back. It commits on
+its own, so a `ROLLBACK` in the caller does not undo it.
 
 ```sql
 CREATE TABLE events (id bigint, ts timestamptz, val double precision) USING pgcolumnar;

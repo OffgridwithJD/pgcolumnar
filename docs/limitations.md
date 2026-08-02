@@ -207,6 +207,9 @@ these constraints.
   too low.
 - The speedup is bounded by the physical core count. The columnar encode step is
   CPU bound, so workers past the physical cores add little.
+- The load commits on its own. It runs in background workers, so it is not part
+  of the calling transaction. A `ROLLBACK` in the caller does not undo the loaded
+  rows. The atomicity is across the workers, not with the caller.
 - The load is atomic through two-phase commit. A coordinator crash during the
   final commit step can leave some ranges committed and some prepared. This is
   the ordinary two-phase-commit in-doubt case. A DBA resolves it from
