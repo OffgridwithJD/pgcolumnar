@@ -26,11 +26,14 @@
  */
 #include "columnar.h"
 
+#include <math.h>
+
 #include "access/parallel.h"
 #include "access/relation.h"
 #include "access/relscan.h"
 #include "access/stratnum.h"
 #include "access/table.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "storage/shm_toc.h"
 #include "commands/explain.h"
@@ -53,12 +56,15 @@
 #include "optimizer/restrictinfo.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 #include "utils/typcache.h"
 
 /* GUC: use the columnar custom scan path (spec 8.3) */
 bool		columnar_enable_custom_scan = true;
 /* GUC: let the planner scan a covering projection instead of the base (gap 26) */
 bool		columnar_enable_projection_scan = true;
+/* GUC: price a columnar index scan's per-row heap fetch (#355) */
+bool		columnar_enable_index_fetch_penalty = true;
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
@@ -488,6 +494,157 @@ columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 }
 
 /*
+ * columnar_index_correlation
+ *		|correlation| of the index's leading key against heap (row-number) order,
+ *		read from pg_statistic exactly as btcostestimate does (selfuncs.c). A value
+ *		near 1 means rows an ordered index scan visits are already clustered into a
+ *		few row groups; near 0 means they are scattered across all of them.
+ *
+ * We take only the leading key and, for a multi-column index, damp it: trailing
+ * keys reorder within a leading-key run, so the run's rows land less tightly than
+ * the leading correlation alone suggests. Returns 0.0 (treat as scattered, the
+ * conservative-for-us direction) whenever a statistic is missing -- an expression
+ * key, no ANALYZE, no correlation slot.
+ */
+static double
+columnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
+{
+	AttrNumber	attno;
+	Oid			sortop;
+	HeapTuple	st;
+	AttStatsSlot sslot;
+	double		corr = 0.0;
+
+	if (index->indexkeys == NULL || index->nkeycolumns < 1)
+		return 0.0;
+	attno = index->indexkeys[0];
+	if (attno <= 0)				/* 0 == expression key, no column statistic */
+		return 0.0;
+
+	sortop = get_opfamily_member(index->opfamily[0], index->opcintype[0],
+								 index->opcintype[0], BTLessStrategyNumber);
+	if (!OidIsValid(sortop))
+		return 0.0;
+
+	st = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(heapRelid),
+						 Int16GetDatum(attno), BoolGetDatum(false));
+	if (!HeapTupleIsValid(st))
+		return 0.0;
+
+	if (get_attstatsslot(&sslot, st, STATISTIC_KIND_CORRELATION, sortop,
+						 ATTSTATSSLOT_NUMBERS))
+	{
+		if (sslot.nnumbers == 1)
+		{
+			corr = sslot.numbers[0];
+			if (index->reverse_sort[0])
+				corr = -corr;
+			if (index->nkeycolumns > 1)
+				corr *= 0.75;
+		}
+		free_attstatsslot(&sslot);
+	}
+	ReleaseSysCache(st);
+	return corr;
+}
+
+/*
+ * columnar_scan_nproj
+ *		number of distinct base-relation columns a scan of this rel has to
+ *		materialize: the ones in the output target plus the ones in the
+ *		restriction clauses. Used to size the per-group decode cost, since the
+ *		fetch decodes a column at a time. Never returns less than 1.
+ */
+static int
+columnar_scan_nproj(RelOptInfo *rel, Index rti)
+{
+	Bitmapset  *attrs = NULL;
+	ListCell   *lc;
+	int			n;
+
+	pull_varattnos((Node *) rel->reltarget->exprs, rti, &attrs);
+	foreach(lc, rel->baserestrictinfo)
+		pull_varattnos((Node *) lfirst_node(RestrictInfo, lc)->clause, rti, &attrs);
+	n = bms_num_members(attrs);
+	bms_free(attrs);
+	return (n > 0) ? n : 1;
+}
+
+/*
+ * columnar_index_fetch_penalty
+ *		extra cost to add to a heap-fetching columnar index scan for the row-group
+ *		decodes its per-row fetches force. Core's cost_index prices a heap fetch as
+ *		a page or two; a columnar fetch decodes the whole row group the row lives in
+ *		(columnar_reader.c, ColumnarReadRowByNumber), which is why the planner picks
+ *		an index scan for an unclustered ORDER BY and then runs for minutes (#355).
+ *
+ * A statement-scoped cache (issue #143) means a group is decoded once per scan, not
+ * once per row, so the count that matters is how many *distinct* groups the fetched
+ * rows fall into:
+ *
+ *   - fully clustered (rho -> 1, or a TID-ordered bitmap heap scan): the rows sit in
+ *     ceil(rows / R) adjacent groups, the floor.
+ *   - fully scattered (rho -> 0): every fetched row can land in its own group, up to
+ *     one decode per row, the ceiling.
+ *   - between: interpolate on rho^2, the share of ordering variance the correlation
+ *     explains, matching how cost_index already blends min and max page cost.
+ *
+ * The one exception is the fetch cache cliff (#359): when one group's decoded width
+ * exceeds the cache cap it is never retained, so every fetch re-decodes regardless of
+ * clustering -- the ceiling, unconditionally. (When #359 makes that overflow
+ * proportional rather than total, this branch should soften with it.)
+ *
+ * decode_per_group is one group's cost: its pages read once, plus the per-value
+ * decode of R rows across the columns the scan needs.
+ */
+static Cost
+columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
+							 int nproj, bool tid_ordered)
+{
+	double		R = (double) columnar_stripe_row_limit;
+	double		N = (rel->tuples > 0) ? rel->tuples : rows;
+	double		n_groups,
+				pages_per_stripe,
+				decode_per_group;
+	double		groups_min,
+				groups_max,
+				groups_decoded,
+				csq;
+
+	if (rows <= 0 || R < 1)
+		return 0.0;
+
+	n_groups = ceil(N / R);
+	if (n_groups < 1)
+		n_groups = 1;
+	pages_per_stripe = ceil((double) rel->pages / n_groups);
+	if (pages_per_stripe < 1)
+		pages_per_stripe = 1;
+	decode_per_group = seq_page_cost * pages_per_stripe
+		+ cpu_operator_cost * R * (double) nproj;
+
+	groups_min = ceil(rows / R);
+	groups_max = rows;
+	if (tid_ordered)
+		groups_decoded = groups_min;
+	else
+	{
+		csq = rho * rho;
+		if (csq > 1.0)
+			csq = 1.0;
+		groups_decoded = groups_min + (groups_max - groups_min) * (1.0 - csq);
+	}
+
+	/* #359 cliff: a group too wide to cache is re-decoded on every fetch */
+	if ((double) rel->reltarget->width * R > (double) COLUMNAR_FETCH_CACHE_MAX_BYTES)
+		groups_decoded = groups_max;
+
+	if (groups_decoded < 0)
+		groups_decoded = 0;
+	return groups_decoded * decode_per_group;
+}
+
+/*
  * ColumnarSetRelPathlist
  *		set_rel_pathlist_hook: for a columnar base relation, replace the
  *		sequential-scan path with the columnar custom scan and drop parallel
@@ -685,6 +842,55 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 #endif
 			ppath->methods = &columnar_path_methods;
 			add_partial_path(rel, &ppath->path);
+		}
+	}
+
+	/*
+	 * Price the per-row heap fetch of the surviving index and bitmap paths
+	 * (#355). This runs last, after every add_path above, on purpose: it mutates
+	 * total_cost in place, which unsorts rel->pathlist, and no add_path may see an
+	 * unsorted list. add_path's dominance test compares each pair directly and so
+	 * is order-independent; only its insertion position depends on the sort, and
+	 * set_cheapest -- which core runs right after this hook -- rescans the whole
+	 * list, so the final choice reflects the updated costs.
+	 *
+	 * Only non-parameterized paths are touched. A parameterized index scan is a
+	 * nested-loop inner side rescanned per outer row; the fetch cache spans those
+	 * rescans (it is released at executor end, not per rescan), so the distinct-
+	 * group count this model assumes for a single pass understates the reuse and
+	 * would over-penalize the join. #355 is the standalone ordering/lookup case,
+	 * which is where param_info is NULL.
+	 *
+	 * total_cost only, never startup_cost: the fetch cost is paid as rows are
+	 * pulled, so a LIMIT that stops the scan early pays proportionally, which the
+	 * planner models by fractioning (total - startup).
+	 */
+	if (columnar_enable_index_fetch_penalty)
+	{
+		int			nproj = columnar_scan_nproj(rel, rti);
+
+		foreach(lc, rel->pathlist)
+		{
+			Path	   *p = (Path *) lfirst(lc);
+
+			if (p->param_info != NULL)
+				continue;
+			if (p->pathtype == T_IndexScan)
+			{
+				IndexPath  *ip = castNode(IndexPath, p);
+				double		rho = columnar_index_correlation(ip->indexinfo,
+															 rte->relid);
+
+				p->total_cost += columnar_index_fetch_penalty(rel, p->rows, rho,
+															  nproj, false);
+			}
+			else if (p->pathtype == T_BitmapHeapScan)
+			{
+				/* a bitmap heap scan fetches in TID (row-number) order */
+				p->total_cost += columnar_index_fetch_penalty(rel, p->rows, 1.0,
+															  nproj, true);
+			}
+			/* T_IndexOnlyScan and the custom scans do no heap fetch */
 		}
 	}
 }

@@ -182,6 +182,14 @@ extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) 
 extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
 extern bool columnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
 extern bool columnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
+extern bool columnar_enable_index_fetch_penalty;	/* price a columnar index scan's per-row fetch (#355) */
+
+/*
+ * Statement-scoped by-row-number fetch cache cap (columnar_reader.c). Named here
+ * so the index-fetch cost model (#355) can tell when a stripe is too wide to be
+ * retained across fetches and must be treated as re-decoded per row.
+ */
+#define COLUMNAR_FETCH_CACHE_MAX_BYTES	(32 * 1024 * 1024)
 
 /* issue #5: concurrent unique-key insert serialization */
 extern bool columnar_enable_unique_lock;	/* serialize same-key inserters */
