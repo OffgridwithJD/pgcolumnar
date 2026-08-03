@@ -94,5 +94,31 @@ TW_VEC="$(q -c "SET max_parallel_workers_per_gather=8; SET parallel_setup_cost=0
 TW_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT count(*), sum(v) FROM tiny")"
 check "more-workers-than-groups count+sum exact" "$TW_VEC" "$TW_SER"
 
+# ---- deletes: a worker is a separate backend (design hazard H2) -------------
+# The batch fold applies each group's delete mask, and the partial node flushes
+# write + delete state in the LEADER's InitializeDSM before workers launch -- a
+# worker cannot see the leader's unflushed in-transaction delete buffer. If that
+# flush were missing the workers would count deleted rows and diverge from serial.
+q -c "DELETE FROM t WHERE k IN (1,2,3);" >/dev/null
+D_VEC="$(q -c "$PAR $UG $PP" -c "SELECT count(*), sum(v) FROM t WHERE k < 700")"
+D_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT count(*), sum(v) FROM t WHERE k < 700")"
+check "committed deletes: parallel fold == serial" "$D_VEC" "$D_SER"
+
+# THE H2 CASE: delete more rows and run the parallel fold in the SAME transaction
+# so the deletes are still unflushed in the leader's buffer when workers launch.
+H2="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq 2>&1 <<SQL
+BEGIN;
+DELETE FROM t WHERE k IN (10,11,12,13,14);
+$PAR $UG $PP
+SELECT count(*), sum(v) FROM t WHERE k < 700;
+SET max_parallel_workers_per_gather=0;
+SELECT count(*), sum(v) FROM t WHERE k < 700;
+ROLLBACK;
+SQL
+)"
+H2_PAR="$(printf '%s\n' "$H2" | grep -E '^[0-9]+\|' | sed -n 1p)"
+H2_SER="$(printf '%s\n' "$H2" | grep -E '^[0-9]+\|' | sed -n 2p)"
+check "in-xact deletes (H2): parallel fold == serial" "$H2_PAR" "$H2_SER"
+
 check "server still up" "$(q -c 'SELECT 1')" 1
 pgc_summary
