@@ -937,8 +937,22 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * over a parallel columnar scan. Workers each claim distinct stripes from a
 	 * shared counter set up by the DSM callbacks. The cost model mirrors a
 	 * parallel seqscan: the per-tuple work is divided among the workers.
+	 *
+	 * Costed from the serial columnar path rather than from the seqscan, and no
+	 * longer conditional on a seqscan surviving (#362). add_path frees the
+	 * seqscan when an index path beats it -- precisely the selective queries
+	 * where the index is attractive -- so keying the partial path on seqpath
+	 * meant no parallel columnar path existed exactly there. That was invisible
+	 * while the index path won those queries anyway; once the fetch penalty
+	 * prices it out, the only alternative left was the *serial* columnar scan.
+	 * Measured on the 100M fixture: the serial path chosen at 2,350,535 and
+	 * 25.3 s, with a parallel path available at 589,348 and 4.6 s.
+	 *
+	 * cpath already carries the seqscan's costs when there was one and its own
+	 * computed costs when there was not, so this is identical wherever it used
+	 * to fire and defined wherever it did not.
 	 */
-	if (rel->consider_parallel && seqpath != NULL)
+	if (rel->consider_parallel)
 	{
 		int			workers = compute_parallel_worker(rel, rel->pages, -1,
 													  max_parallel_workers_per_gather);
@@ -956,9 +970,9 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			ppath->path.parallel_safe = true;
 			ppath->path.parallel_workers = workers;
 			ppath->path.rows = rel->rows / divisor;
-			ppath->path.startup_cost = seqpath->startup_cost;
-			ppath->path.total_cost = seqpath->startup_cost +
-				(seqpath->total_cost - seqpath->startup_cost) / divisor;
+			ppath->path.startup_cost = cpath->path.startup_cost;
+			ppath->path.total_cost = cpath->path.startup_cost +
+				(cpath->path.total_cost - cpath->path.startup_cost) / divisor;
 			ppath->path.pathkeys = NIL;
 			ppath->flags = 0;
 			ppath->custom_paths = NIL;
