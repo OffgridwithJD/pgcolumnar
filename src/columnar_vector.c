@@ -39,8 +39,11 @@
 #include <math.h>
 
 #include "miscadmin.h"
+#include "port/atomics.h"
+#include "access/parallel.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "storage/shm_toc.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
@@ -59,10 +62,12 @@
 #include "nodes/plannodes.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
 #include "optimizer/planner.h"
 #include "optimizer/cost.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "utils/array.h"
 #include "access/sysattr.h"
 #include "utils/selfuncs.h"
 #include "utils/builtins.h"
@@ -97,6 +102,17 @@ int			columnar_groupagg_max_groups = 1000000;
  * benchmarked; the metadata-answerable no-filter path is unaffected.
  */
 bool		columnar_enable_ungrouped_vector_agg = false;
+
+/*
+ * GUC: make the ungrouped vectorized batch fold parallel-aware (#289 phase 5/6).
+ * Each parallel worker claims distinct row groups through the same shared atomic
+ * the base parallel scan uses (gap 23) and folds them column-at-a-time, emitting
+ * one partial transition-state tuple; a core Finalize Aggregate combines the
+ * per-worker partials. Default off while the path is proven and benchmarked. Only
+ * the batch-eligible count/sum/avg-float shapes take the parallel arm; everything
+ * else keeps the serial node or the ordinary parallel core Agg.
+ */
+bool		columnar_enable_parallel_vector_agg = false;
 
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
@@ -284,7 +300,7 @@ typedef struct ColumnarAggSpec
  */
 static bool
 columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
-						 ColumnarAggSpec *spec)
+						 bool allowPartial, ColumnarAggSpec *spec)
 {
 	char	   *name;
 	Oid			nsp;
@@ -292,7 +308,17 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
 
 	if (agg->aggorder != NIL || agg->aggdistinct != NIL ||
 		agg->aggfilter != NULL || agg->aggvariadic ||
-		agg->aggkind != AGGKIND_NORMAL || agg->aggsplit != AGGSPLIT_SIMPLE)
+		agg->aggkind != AGGKIND_NORMAL)
+		return false;
+
+	/*
+	 * A plain node finalizes AGGSPLIT_SIMPLE aggrefs. The parallel arm (#289
+	 * phase 5/6) rebuilds specs from AGGSPLIT_INITIAL_SERIAL partial aggrefs and
+	 * emits transition state instead; the kind is still recovered from the
+	 * function name below, so only the split check relaxes.
+	 */
+	if (agg->aggsplit != AGGSPLIT_SIMPLE &&
+		!(allowPartial && agg->aggsplit == AGGSPLIT_INITIAL_SERIAL))
 		return false;
 
 	nsp = get_func_namespace(agg->aggfnoid);
@@ -550,6 +576,18 @@ typedef struct ColumnarAggScanState
 	bool		batchEligible;
 	bool		batchFolded;
 
+	/*
+	 * Parallel batch fold (#289 phase 5/6): a partial node emits its per-worker
+	 * transition state instead of the finalized value, and its reader claims
+	 * distinct row groups through parallelCounter -- the same shared atomic the
+	 * base parallel scan uses (gap 23). isPartial is set from the output tuple's
+	 * aggregate split at CreateState; parallelCounter is wired by the DSM/worker
+	 * init callbacks and stays NULL on the serial path (each group then read once
+	 * via the reader's own rowGroupIndex++).
+	 */
+	bool		isPartial;
+	pg_atomic_uint32 *parallelCounter;
+
 	/* chunk-group skip counters captured for EXPLAIN */
 	bool		haveStats;
 	uint64		groupsRead;
@@ -558,6 +596,7 @@ typedef struct ColumnarAggScanState
 } ColumnarAggScanState;
 
 static const CustomExecMethods columnar_agg_exec_methods;
+static const CustomExecMethods columnar_agg_parallel_exec_methods;
 
 /* -------------------------------------------------------------------------
  * grouped vectorized aggregate (#289): executor state
@@ -704,6 +743,31 @@ columnar_agg_metadata_answerable(ColumnarAggKind kind)
 }
 
 /*
+ * columnar_parallel_agg_ok
+ *		The first parallel slice (#289 phase 5/6): kinds whose transition state is
+ *		a plain, non-internal value the batch fold already holds and a core
+ *		Finalize can combine -- count(*), count(col), and sum/avg over float4/8.
+ *		count -> int8, sum(float) -> the identity float, avg(float) -> the _float8
+ *		{N,Sx,Sxx} array. The int8 sum/avg-int kinds (int8[]/int8[2]) and every
+ *		internal-transtype kind stay on the serial node or the ordinary core Agg
+ *		for now; q6's count(*)+avg(float8) is covered.
+ */
+static bool
+columnar_parallel_agg_ok(ColumnarAggKind kind)
+{
+	switch (kind)
+	{
+		case COLUMNAR_AGG_COUNT_STAR:
+		case COLUMNAR_AGG_COUNT_COL:
+		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_AVG_FLOAT:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
  * ColumnarCreateUpperPaths
  *		create_upper_paths_hook: for a plain SELECT agg(col) FROM columnar_table
  *		[WHERE simple quals] with no grouping or HAVING, add a custom path that
@@ -730,6 +794,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	bool		needsScan;
 	Path	   *cheapest;
 	CustomPath *cpath;
+	bool		parallelAdded = false;
 
 	if (prev_create_upper_paths_hook)
 		prev_create_upper_paths_hook(root, stage, input_rel, output_rel, extra);
@@ -794,7 +859,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(expr, Aggref))
 			return;
 		if (!columnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
-									  true, &specs[i]))
+									  true, false, &specs[i]))
 			return;
 		i++;
 	}
@@ -1011,7 +1076,111 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 							 ObjectIdGetDatum(relid), false, true));
 	cpath->methods = &columnar_agg_path_methods;
 
-	add_path(output_rel, &cpath->path);
+	/*
+	 * Parallel arm (#289 phase 5/6). When the shape is one whose transition state
+	 * the fold already holds and can be combined by a core Finalize
+	 * (columnar_parallel_agg_ok), and the base relation has a partial (parallel)
+	 * path, add a parallel-aware partial version of this node under Gather ->
+	 * Finalize Aggregate. Each worker claims distinct row groups through the shared
+	 * gap-23 counter and emits one per-worker transition-state tuple; the core
+	 * Finalize combines them exactly as it does for an ordinary parallel aggregate
+	 * (int8pl for count, float8_combine + float8_avg for avg(float8)).
+	 *
+	 * When this arm is added it supersedes the serial node at every worker count
+	 * (its Gather runs leader-only when no workers start), so the serial node is
+	 * added below only when the parallel arm was not -- keeping it, priced at the
+	 * cheap Gather cost by #133, would wrongly out-cost the genuinely parallel
+	 * plan. Opt-in while it is proven and benchmarked.
+	 */
+	if (needsScan && columnar_enable_parallel_vector_agg)
+	{
+		GroupPathExtraData *gpe = (GroupPathExtraData *) extra;
+		bool		parallelOk = (gpe != NULL &&
+								  (gpe->flags & GROUPING_CAN_PARTIAL_AGG) != 0 &&
+								  gpe->partial_costs_set &&
+								  output_rel->consider_parallel &&
+								  input_rel->partial_pathlist != NIL);
+
+		for (i = 0; parallelOk && i < naggs; i++)
+			if (!columnar_parallel_agg_ok(specs[i].kind))
+				parallelOk = false;
+
+		if (parallelOk)
+		{
+			RelOptInfo *pgr = fetch_upper_rel(root, UPPERREL_PARTIAL_GROUP_AGG,
+											  output_rel->relids);
+			Path	   *partialScan = NULL;
+			ListCell   *pc;
+
+			/* the cheapest per-worker base scan drives this partial node's cost */
+			foreach(pc, input_rel->partial_pathlist)
+			{
+				Path	   *p = (Path *) lfirst(pc);
+
+				if (partialScan == NULL || p->total_cost < partialScan->total_cost)
+					partialScan = p;
+			}
+
+			/*
+			 * pgr->reltarget is core's partial grouping target: the same Aggrefs,
+			 * marked AGGSPLIT_INITIAL_SERIAL, that the Finalize below combines. Reuse
+			 * it so the partial and final aggregates are structurally related and
+			 * setrefs matches them (build our own and they would not). Guard against
+			 * a partial rel core did not fully populate.
+			 */
+			if (partialScan != NULL && partialScan->parallel_workers >= 1 &&
+				pgr->reltarget != NULL)
+			{
+				CustomPath *ppath = makeNode(CustomPath);
+				GatherPath *gather;
+				double		grows = 1;
+				Cost		pcost = partialScan->total_cost + cpu_tuple_cost;
+
+				ppath->path.pathtype = T_CustomScan;
+				ppath->path.parent = pgr;
+				ppath->path.pathtarget = pgr->reltarget;
+				ppath->path.param_info = NULL;
+				ppath->path.parallel_aware = true;
+				ppath->path.parallel_safe = true;
+				ppath->path.parallel_workers = partialScan->parallel_workers;
+				ppath->path.rows = 1;	/* one partial tuple per worker */
+				ppath->path.startup_cost = pcost;
+				ppath->path.total_cost = pcost;
+				ppath->path.pathkeys = NIL;
+				ppath->flags = 0;
+				ppath->custom_paths = NIL;
+#if PG_VERSION_NUM >= 170000
+				ppath->custom_restrictinfo = NIL;
+#endif
+				ppath->custom_private =
+					list_make3(makeInteger((int) input_rel->relid),
+							   copyObject(quals),
+							   makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+										 ObjectIdGetDatum(relid), false, true));
+				ppath->methods = &columnar_agg_path_methods;
+
+				/*
+				 * Gather this partial node directly rather than add_partial_path'ing
+				 * it: add_partial_path may pfree a dominated path, and we hold the
+				 * only pointer create_gather_path needs.
+				 */
+				gather = create_gather_path(root, pgr, &ppath->path,
+											pgr->reltarget, NULL, &grows);
+
+				add_path(output_rel,
+						 (Path *) create_agg_path(root, output_rel, &gather->path,
+												  output_rel->reltarget,
+												  AGG_PLAIN, AGGSPLIT_FINAL_DESERIAL,
+												  NIL, NIL, &gpe->agg_final_costs,
+												  1));
+				parallelAdded = true;
+			}
+		}
+	}
+
+	/* the serial node is the fallback; skip it when the parallel arm was added */
+	if (!parallelAdded)
+		add_path(output_rel, &cpath->path);
 }
 
 /*
@@ -1083,7 +1252,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 			ColumnarAggSpec spec;
 
 			if (!columnar_classify_aggref((Aggref *) oexpr,
-										  (int) input_rel->relid, true, &spec))
+										  (int) input_rel->relid, true, false, &spec))
 				return;
 			outMap = lappend(outMap, makeInteger(-(aggIdx + 1)));
 			aggIdx++;
@@ -1256,12 +1425,31 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 	int			i = 0;
 
 	state->css.ss.ps.type = T_CustomScanState;
-	state->css.methods = &columnar_agg_exec_methods;
 
 	/* custom_private: rti (Integer), quals (List), relid (Const OIDOID) */
 	state->scanrelid = (Index) intVal(linitial(cscan->custom_private));
 	state->quals = (List *) lsecond(cscan->custom_private);
 	state->relid = DatumGetObjectId(((Const *) lthird(cscan->custom_private))->constvalue);
+
+	/*
+	 * A parallel partial node (#289 phase 5/6) is planned with
+	 * AGGSPLIT_INITIAL_SERIAL aggrefs in its output tuple: it emits per-worker
+	 * transition state a core Finalize combines. Detect it here and switch to the
+	 * exec methods table that carries the DSM/worker callbacks so each worker
+	 * shares the group-claim counter (gap 23).
+	 */
+	state->isPartial = false;
+	foreach(lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Aggref) &&
+			((Aggref *) tle->expr)->aggsplit != AGGSPLIT_SIMPLE)
+			state->isPartial = true;
+	}
+	state->css.methods = state->isPartial
+		? &columnar_agg_parallel_exec_methods
+		: &columnar_agg_exec_methods;
 
 	/* rebuild the aggregate specs from the output tuple's aggregates */
 	state->naggs = naggs;
@@ -1270,8 +1458,9 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
-		/* classified successfully at plan time; -1 skips the varno check */
-		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true,
+		/* classified successfully at plan time; -1 skips the varno check.
+		 * allowPartial accepts the partial arm's INITIAL_SERIAL aggrefs. */
+		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
 										&state->specs[i]);
 		i++;
 	}
@@ -1625,6 +1814,73 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 	}
 }
 
+
+/*
+ * columnar_agg_emit_partial
+ *		A parallel partial node (#289 phase 5/6) emits each aggregate's transition
+ *		state, not its finalized value, for a core Finalize Aggregate to combine.
+ *		The transition types match core's own partial aggregate exactly, so
+ *		int8pl (count) and float8_combine + float8_avg (avg) reproduce an ordinary
+ *		parallel aggregate -- overflow parity included, because float8_combine
+ *		re-derives and re-checks the Youngs-Cramer Sxx we pass through.
+ */
+static Datum
+columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
+{
+	*isnull = false;
+
+	switch (spec->kind)
+	{
+		case COLUMNAR_AGG_COUNT_STAR:
+		case COLUMNAR_AGG_COUNT_COL:
+			/* transtype int8: the running count is the partial state */
+			return Int64GetDatum(spec->count);
+
+		case COLUMNAR_AGG_SUM_FLOAT:
+
+			/*
+			 * transtype is the identity float (float4 for sum(real), float8 for
+			 * sum(double)); NULL until a value is seen so a strict float4pl/float8pl
+			 * combine treats a worker that matched no rows as absent, exactly as the
+			 * serial finalize does.
+			 */
+			if (!spec->sawValue)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return (spec->inputType == FLOAT4OID)
+				? Float4GetDatum((float4) spec->fsum)
+				: Float8GetDatum(spec->fsum);
+
+		case COLUMNAR_AGG_AVG_FLOAT:
+			{
+				/*
+				 * transtype _float8 {N, Sx, Sxx}: the same Youngs-Cramer state
+				 * float4_accum/float8_accum build and float8_combine merges. Always
+				 * non-null -- an empty worker emits {0,0,0}, which float8_avg maps to
+				 * NULL after the combine.
+				 */
+				Datum		elems[3];
+
+				elems[0] = Float8GetDatum((float8) spec->count);
+				elems[1] = Float8GetDatum(spec->fsum);
+				elems[2] = Float8GetDatum(spec->fsxx);
+				return PointerGetDatum(construct_array_builtin(elems, 3, FLOAT8OID));
+			}
+
+		default:
+
+			/*
+			 * The parallel arm is gated to the kinds above
+			 * (columnar_parallel_agg_ok), so this is unreachable; fail loudly rather
+			 * than emit a value of the wrong transition type.
+			 */
+			elog(ERROR, "columnar parallel partial: unsupported aggregate kind %d",
+				 (int) spec->kind);
+			return (Datum) 0;	/* keep the compiler happy */
+	}
+}
 
 /*
  * columnar_agg_finalize
@@ -2231,6 +2487,22 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 	 */
 	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected, 0, NULL);
 
+	/*
+	 * Parallel arm (#289 phase 5/6): route group claiming through the shared
+	 * atomic (gap 23) so each worker folds distinct row groups. A partial node
+	 * with no counter would read every group in every worker and the Finalize
+	 * would sum the duplicates -- a wrong answer, not a crash. The counter is
+	 * always wired for our node (it is planned only under a Gather, whose
+	 * InitializeDSM callback runs even leader-only), so a NULL here is a bug.
+	 */
+	if (state->parallelCounter != NULL)
+		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
+	else if (state->isPartial)
+	{
+		ColumnarEndRead(rs);
+		elog(ERROR, "parallel columnar aggregate ran without a shared group counter");
+	}
+
 	while (ColumnarReadFoldNextGroup(rs))
 	{
 		uint64		nrows;
@@ -2260,9 +2532,20 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 				 * The column is absent from this group (a later ADD COLUMN). The
 				 * batch path cannot supply its missing value, so reset and fall
 				 * back to the row path for the whole scan, which handles it.
+				 *
+				 * A parallel partial node cannot take that fallback: this group and
+				 * the ones before it were already claimed through the shared counter
+				 * (gap 23), so the row path would re-open with the counter advanced
+				 * past them and undercount. This is the one unsafe fallback; fail
+				 * cleanly rather than return a wrong answer. Rare (an old row group
+				 * predating an ADD COLUMN); turn the parallel GUC off for the table.
 				 */
 				ColumnarEndRead(rs);
 				columnar_agg_specs_reset(state);
+				if (state->isPartial)
+					elog(ERROR, "parallel columnar aggregate cannot fold a relation "
+						 "with a column added after some row groups; "
+						 "set pgcolumnar.enable_parallel_vector_agg = off");
 				return false;
 			}
 			cvalidity[col] = vbits;
@@ -2398,6 +2681,16 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 		return;
 	}
 
+	/*
+	 * The row path reached here because the shape is not batch-foldable (e.g. a
+	 * NULL test or a non-btree filter): columnar_native_batch_fold returned false
+	 * before claiming any group, so the shared counter is untouched and a parallel
+	 * partial node can fold correctly here too -- each worker just claims distinct
+	 * groups through the same atomic and applies the WHERE recheck per row. (The
+	 * one unsafe fallback -- an absent column discovered mid-scan, after the
+	 * counter has advanced -- errors inside the batch fold instead.)
+	 */
+
 	/* push the WHERE down for group and vector pruning; the recheck is exact */
 	if (state->scanFold && state->quals != NIL)
 		keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc,
@@ -2405,6 +2698,8 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 
 	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, projected,
 						   nScanKeys, keys);
+	if (state->parallelCounter != NULL)
+		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
 	if (restrictGroups != NULL)
 		ColumnarReadRestrictToGroups(rs, restrictGroups, nRestrictGroups);
 
@@ -2508,11 +2803,16 @@ ColumnarExecAggScan(CustomScanState *node)
 		state->haveStats = false;
 	}
 
-	/* build the single result row from the finalized aggregates */
+	/*
+	 * Build the single result row. A parallel partial node (#289 phase 5/6) emits
+	 * each aggregate's transition state for the core Finalize above it to combine;
+	 * every other node emits the finalized value.
+	 */
 	ExecClearTuple(scanSlot);
 	for (a = 0; a < state->naggs; a++)
-		scanSlot->tts_values[a] =
-			columnar_agg_finalize(&state->specs[a], &scanSlot->tts_isnull[a]);
+		scanSlot->tts_values[a] = state->isPartial
+			? columnar_agg_emit_partial(&state->specs[a], &scanSlot->tts_isnull[a])
+			: columnar_agg_finalize(&state->specs[a], &scanSlot->tts_isnull[a]);
 	ExecStoreVirtualTuple(scanSlot);
 
 	/*
@@ -2609,6 +2909,83 @@ static const CustomExecMethods columnar_agg_exec_methods = {
 };
 
 /* -------------------------------------------------------------------------
+ * parallel partial aggregate (#289 phase 5/6): DSM callbacks
+ *
+ * A shared pg_atomic_uint32 hands out row-group indices so each worker folds
+ * distinct groups -- the same mechanism the base parallel scan uses (gap 23).
+ * The custom scan framework sizes and allocates the DSM chunk from EstimateDSM
+ * and passes its address as `coordinate` to the DSM/worker init callbacks. Our
+ * agg node opens its reader lazily during Exec, strictly after both DSM-init and
+ * Worker-init, so the callbacks only need to record the counter on the state;
+ * ColumnarBeginRead wiring happens at fold time.
+ * ------------------------------------------------------------------------- */
+
+static Size
+ColumnarEstimateDSMAggScan(CustomScanState *node, ParallelContext *pcxt)
+{
+	return sizeof(pg_atomic_uint32);
+}
+
+static void
+ColumnarInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
+							 void *coordinate)
+{
+	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	pg_atomic_init_u32(counter, 0);
+	state->parallelCounter = counter;
+
+	/*
+	 * Flush this backend's pending writes and deletes here, in the leader, before
+	 * any worker launches (H2). A worker is a separate backend and cannot see the
+	 * leader's unflushed in-transaction buffers; flushing per-worker would miss
+	 * rows the leader deleted earlier in this transaction. The Exec-time flush in
+	 * every backend then only ever flushes its own (empty) buffers.
+	 */
+	ColumnarFlushWriteStateForRelation(state->relid);
+	{
+		Relation	frel = table_open(state->relid, AccessShareLock);
+
+		ColumnarFlushDeleteVectorForRelation(frel);
+		table_close(frel, AccessShareLock);
+	}
+}
+
+static void
+ColumnarReInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
+							   void *coordinate)
+{
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	/* a rescan restarts group claiming from zero for every participant */
+	pg_atomic_write_u32(counter, 0);
+}
+
+static void
+ColumnarInitializeWorkerAggScan(CustomScanState *node, shm_toc *toc,
+								void *coordinate)
+{
+	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	state->parallelCounter = counter;
+}
+
+static const CustomExecMethods columnar_agg_parallel_exec_methods = {
+	.CustomName = "ColumnarScan",
+	.BeginCustomScan = ColumnarBeginAggScan,
+	.ExecCustomScan = ColumnarExecAggScan,
+	.EndCustomScan = ColumnarEndAggScan,
+	.ReScanCustomScan = ColumnarReScanAggScan,
+	.ExplainCustomScan = ColumnarExplainAggScan,
+	.EstimateDSMCustomScan = ColumnarEstimateDSMAggScan,
+	.InitializeDSMCustomScan = ColumnarInitializeDSMAggScan,
+	.ReInitializeDSMCustomScan = ColumnarReInitializeDSMAggScan,
+	.InitializeWorkerCustomScan = ColumnarInitializeWorkerAggScan,
+};
+
+/* -------------------------------------------------------------------------
  * grouped vectorized aggregate (#289): execution
  * ------------------------------------------------------------------------- */
 
@@ -2655,7 +3032,7 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 
 		if (IsA(tle->expr, Aggref))
 		{
-			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true,
+			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, false,
 											&state->aggTemplate[i]);
 			i++;
 		}

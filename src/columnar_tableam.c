@@ -2278,6 +2278,17 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.enable_parallel_vector_agg",
+							 "Make the ungrouped vectorized batch fold parallel-aware: "
+							 "each worker folds distinct row groups and emits a partial "
+							 "aggregate a core Finalize combines.",
+							 NULL,
+							 &columnar_enable_parallel_vector_agg,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomIntVariable("pgcolumnar.groupagg_max_groups",
 							"Cap on the actual group count the grouped vectorized "
 							"aggregate builds before it stops with an error.",
