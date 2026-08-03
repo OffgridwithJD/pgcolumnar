@@ -563,6 +563,7 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 	char	   *rawBuf;
 	char	   *rawCursor;
 	uint32	   *vecRawLen;
+	MemoryContext decodeScratch;
 
 	if (descLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN ||
 		(uint8) desc[0] != COLUMNAR_NATIVE_ENCDESC_VERSION)
@@ -605,11 +606,25 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		dp += COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN;
 	}
 
+	/*
+	 * The decode's intermediates -- the decompressed encoded region and each
+	 * vector's decoded buffer (memcpy'd into rawBuf below) -- are scratch, not
+	 * results, but were allocated in cx. On the scan path cx is a group context
+	 * reset every group so it did not matter; on the by-row-number fetch path cx
+	 * is the statement-scoped cache entry that is NOT reset, so the scratch stayed
+	 * live and roughly tripled the entry's measured size, pushing a wide group's
+	 * projected prefix over the 32 MB fetch cap and forcing a re-decode on every
+	 * fetch (#353). Put the scratch in a child context and delete it before
+	 * returning, so cx keeps only rawBuf and vecRawLen.
+	 */
+	decodeScratch = AllocSetContextCreate(cx, "columnar decode scratch",
+										  ALLOCSET_DEFAULT_SIZES);
+
 	/* reverse the block codec to recover the concatenated encoded region */
 	if (blockCodec != COLUMNAR_COMPRESSION_NONE)
 		encRegion = ColumnarDecompressValueStream(values, valuesLen, blockCodec,
 												  (uint32) encTotal,
-												  cx);
+												  decodeScratch);
 	else
 	{
 		if ((uint64) valuesLen != encTotal)
@@ -645,7 +660,7 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 			char	   *rawVec = ColumnarDecodeChunk(encCursor, encLen, encType,
 													 att, valueCount, rawLen,
 													 sharedTable, sharedTableLen,
-													 cx);
+													 decodeScratch);
 
 			memcpy(rawCursor, rawVec, rawLen);
 			rawCursor += rawLen;
@@ -658,6 +673,8 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 	if (outVecCount != NULL)
 		*outVecCount = (int) vectorCount;
 
+	/* rawBuf and vecRawLen live in cx; the scratch above does not */
+	MemoryContextDelete(decodeScratch);
 	return rawBuf;
 }
 
