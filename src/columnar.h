@@ -176,6 +176,7 @@ extern bool columnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 extern bool columnar_enable_vectorization;	/* vectorized aggregate path */
 extern bool columnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#289) */
 extern bool columnar_enable_ungrouped_vector_agg;	/* filtered/extended ungrouped agg (#289) */
+extern bool columnar_enable_parallel_vector_agg;	/* parallel-aware ungrouped batch fold (#289 phase 5/6) */
 extern int columnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
 extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
 extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
