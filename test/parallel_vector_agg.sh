@@ -130,5 +130,114 @@ H2_PAR="$(printf '%s\n' "$H2" | grep -E '^[0-9]+\|' | sed -n 1p)"
 H2_SER="$(printf '%s\n' "$H2" | grep -E '^[0-9]+\|' | sed -n 2p)"
 check "in-xact deletes (H2): parallel fold == serial" "$H2_PAR" "$H2_SER"
 
+# ---- #349: the GROUPED vectorized fold is parallel-aware too ----------------
+# The grouped node used to be serial by construction (parallel_aware = false, no
+# DSM callbacks), so whenever it won it replaced a four-worker plan with a
+# single-threaded one -- a 1.92x regression on a full-scan GROUP BY with few
+# groups. It now plans Finalize HashAggregate -> Gather -> parallel-aware partial
+# grouped node: each worker claims distinct row groups through the same gap-23
+# counter, builds its OWN hash table over them, and emits one (group keys,
+# transition states) tuple per group for the core Finalize to combine by key.
+GVP="SET pgcolumnar.enable_group_vectorization=on;
+     SET pgcolumnar.enable_parallel_vector_agg=on;"
+
+q -c "DROP TABLE IF EXISTS gt;
+      CREATE TABLE gt (id int, h text, k int, v float8, w int) USING pgcolumnar;
+      SELECT pgcolumnar.set_options('gt'::regclass, stripe_row_limit => 20000);
+      INSERT INTO gt
+      SELECT g, 'h' || (g % 50), g % 200,
+             CASE WHEN g % 50 = 0 THEN NULL
+                  ELSE ((g % 13) - 6)::float8 * (10.0 ^ (g % 4)) END,
+             g % 13
+      FROM generate_series(1, 800000) g;
+      ANALYZE gt;" >/dev/null
+
+# Assert the fixture before comparing anything: two arms that both error return
+# empty and compare equal, which is a green check that tested nothing.
+check "premise: the grouped fixture has its rows" \
+   "$(q -c 'SELECT count(*) FROM gt')" 800000
+
+# Every assertion here is made against ONE EXPLAIN ANALYZE, and each names a
+# property core's own parallel grouped plan does NOT have. That distinction is
+# the whole point: without the change core still plans
+# "Finalize GroupAggregate -> Gather Merge -> Sort -> Partial HashAggregate" over
+# the same table, which has a Gather and launches workers too. Checking only for
+# "a Gather" or "workers launched" therefore passes on unmodified main and proves
+# nothing -- both did, until this was tightened.
+GEA="$(q -c "$PAR $GVP" -c "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT h, count(*), sum(w) FROM gt GROUP BY h")"
+
+# A HashAggregate finalize, not core's GroupAggregate-over-Sort.
+check "premise: grouped Finalize HashAggregate present (#349)" \
+   "$(printf '%s' "$GEA" | grep -qi 'Finalize HashAggregate' && echo y || echo n)" y
+# OUR grouped node, and it is the parallel-aware one.
+check "premise: the partial grouped node is under the Gather (#349)" \
+   "$(printf '%s' "$GEA" | grep -qi 'Parallel Custom Scan (ColumnarScan)' &&
+      printf '%s' "$GEA" | grep -qi 'Columnar Vectorized Group Keys' && echo y || echo n)" y
+# Planned is not launched: a leader-only run would satisfy every value check
+# below while never exercising a worker. Assert launch AND our node together, so
+# core's parallel plan cannot satisfy this on its own.
+check "premise: workers actually launched for OUR grouped node (#349)" \
+   "$(printf '%s' "$GEA" | grep -qiE 'Workers Launched: [1-9]' &&
+      printf '%s' "$GEA" | grep -qi 'Columnar Vectorized Group Keys' && echo y || echo n)" y
+
+# Each participant emits its own partial per group, so the Gather carries a
+# MULTIPLE of the group count and the Finalize collapses it back. 50 groups with
+# workers launched means the Gather must show strictly more than 50 rows; core's
+# partial-HashAggregate plan shows the same shape, so this is paired with the
+# node checks above rather than standing alone.
+GATHER_ROWS="$(printf '%s\n' "$GEA" | grep -iE '^ *-> *Gather' | grep -oE 'rows=[0-9.]+' | head -1 | cut -d= -f2 | cut -d. -f1)"
+check "the Gather carries per-worker partials, more than one row per group (#349)" \
+   "$( [ -n "$GATHER_ROWS" ] && [ "$GATHER_ROWS" -gt 50 ] && echo y ||
+       echo "n (gather rows=${GATHER_ROWS:-unset})")" y
+check "the Finalize collapses them back to exactly the group count (#349)" \
+   "$(q -c "$PAR $GVP" -c "SELECT count(*) FROM (SELECT h, count(*), sum(w) FROM gt GROUP BY h) s")" 50
+
+# ---- values: integer aggregates are exact against a serial oracle -----------
+G_VEC="$(q -c "$PAR $GVP" -c "SELECT h, count(*), sum(w) FROM gt WHERE k < 150 GROUP BY h ORDER BY h")"
+G_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT h, count(*), sum(w) FROM gt WHERE k < 150 GROUP BY h ORDER BY h")"
+check "grouped count+sum(int): parallel fold == serial oracle (#349)" "$G_VEC" "$G_SER"
+
+GM_VEC="$(q -c "$PAR $GVP" -c "SELECT h, k, count(*), sum(w) FROM gt WHERE v IS NOT NULL GROUP BY h, k ORDER BY h, k")"
+GM_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT h, k, count(*), sum(w) FROM gt WHERE v IS NOT NULL GROUP BY h, k ORDER BY h, k")"
+check "grouped multi-key + WHERE: parallel fold == serial oracle (#349)" "$GM_VEC" "$GM_SER"
+
+# ---- float: oracle is core's own PARALLEL agg, for the reason above ---------
+GF_VEC="$(q -c "$PAR $GVP" -c "SELECT h, round(avg(v)::numeric,6), round(sum(v)::numeric,6) FROM gt GROUP BY h ORDER BY h")"
+GF_PAR="$(q -c "$PAR" -c "SELECT h, round(avg(v)::numeric,6), round(sum(v)::numeric,6) FROM gt GROUP BY h ORDER BY h")"
+check "grouped avg/sum(float8): parallel fold == core parallel agg (#349)" "$GF_VEC" "$GF_PAR"
+
+# ---- a group count below the worker count: some workers see every group -----
+GW_VEC="$(q -c "$PAR $GVP SET max_parallel_workers_per_gather=8;" -c "SELECT k % 3 AS g, count(*), sum(w) FROM gt GROUP BY 1 ORDER BY 1")"
+GW_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT k % 3 AS g, count(*), sum(w) FROM gt GROUP BY 1 ORDER BY 1")"
+check "grouped few-groups-many-workers: parallel == serial (#349)" "$GW_VEC" "$GW_SER"
+
+# ---- H2 for the grouped node: in-transaction deletes -------------------------
+# The grouped node runs the same shape as the ungrouped H2 case above: delete
+# inside a transaction, then aggregate in parallel in that same transaction, and
+# require the parallel answer to match the serial one.
+#
+# What this does NOT establish, measured rather than assumed: it does not prove
+# the leader-side flush in ColumnarInitializeDSMGroupAggScan. Removing that flush
+# -- and the ungrouped one this is modelled on -- leaves both H2 checks green,
+# with in-transaction INSERT and DELETE and a confirmed parallel plan, because
+# the write and delete buffers are already flushed at the command boundary before
+# the aggregate is planned. The flush is kept as defence and for symmetry with
+# the ungrouped node, not because anything here fails without it. Stated so the
+# next person does not read a passing H2 check as cover for that flush.
+GH2="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq 2>&1 <<SQL
+BEGIN;
+DELETE FROM gt WHERE k IN (20,21,22,23,24);
+$PAR $GVP
+SELECT h, count(*), sum(w) FROM gt GROUP BY h ORDER BY h;
+SET max_parallel_workers_per_gather=0;
+SELECT h, count(*), sum(w) FROM gt GROUP BY h ORDER BY h;
+ROLLBACK;
+SQL
+)"
+GH2_PAR="$(printf '%s\n' "$GH2" | grep -E '^h[0-9]+\|' | sed -n '1,50p')"
+GH2_SER="$(printf '%s\n' "$GH2" | grep -E '^h[0-9]+\|' | sed -n '51,100p')"
+check "grouped in-xact deletes (H2): parallel fold == serial (#349)" "$GH2_PAR" "$GH2_SER"
+
 check "server still up" "$(q -c 'SELECT 1')" 1
 pgc_summary

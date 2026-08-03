@@ -665,6 +665,21 @@ typedef struct ColumnarGroupAggScanState
 	bool		started;		/* scan + build completed */
 	int			emitPos;		/* next entry index to emit */
 
+	/*
+	 * Parallel grouped fold (#349). A partial node emits each group's per-worker
+	 * transition state instead of the finalized value, and its reader claims
+	 * distinct row groups through parallelCounter -- the same shared atomic the
+	 * base parallel scan and the ungrouped partial node (#343) use (gap 23). Each
+	 * worker builds its own hash table over the row groups it claimed; the core
+	 * Finalize re-aggregates across workers by grouping key.
+	 *
+	 * isPartial is read from the output tuple's aggregate split at CreateState;
+	 * parallelCounter is wired by the DSM/worker callbacks, and is NULL in a
+	 * leader-only run, which then folds every row group itself.
+	 */
+	bool		isPartial;
+	pg_atomic_uint32 *parallelCounter;
+
 	/* EXPLAIN */
 	int			npreds;
 	bool		haveStats;
@@ -674,8 +689,9 @@ typedef struct ColumnarGroupAggScanState
 } ColumnarGroupAggScanState;
 
 static const CustomExecMethods columnar_groupagg_exec_methods;
+static const CustomExecMethods columnar_groupagg_parallel_exec_methods;
 static void ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
-									RelOptInfo *output_rel);
+									RelOptInfo *output_rel, void *extra);
 static bool columnar_batch_shape_eligible(ColumnarAggScanState *state,
 										  TupleDesc tupdesc, ScanKey *keysOut,
 										  int *nkeysOut);
@@ -826,7 +842,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 			parse->distinctClause == NIL &&
 			!parse->hasWindowFuncs &&
 			!parse->hasTargetSRFs)
-			ColumnarTryGroupAggPath(root, input_rel, output_rel);
+			ColumnarTryGroupAggPath(root, input_rel, output_rel, extra);
 		return;
 	}
 
@@ -1186,6 +1202,78 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 }
 
 /*
+ * columnar_groupagg_outmap
+ *		Map one target list onto this node's output: per position, the group-key
+ *		index (>= 0) or the aggregate index encoded as -(index + 1). False when an
+ *		entry is neither a supported aggregate nor a bare reference to a group key,
+ *		which forces the fallback.
+ *
+ *		Built per target rather than once, because the serial path outputs
+ *		output_rel->reltarget (finished values) while the parallel partial path
+ *		outputs core's UPPERREL_PARTIAL_GROUP_AGG target (grouping columns plus
+ *		AGGSPLIT_INITIAL_SERIAL aggrefs). The two differ in both the aggregate
+ *		split and, potentially, the column order, so each needs its own map.
+ *		allowPartial admits the INITIAL_SERIAL aggrefs of the second.
+ */
+static bool
+columnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
+						 bool allowPartial, List **outMapOut, int *naggsOut)
+{
+	List	   *outMap = NIL;
+	ListCell   *lc;
+	int			aggIdx = 0;
+
+	foreach(lc, exprs)
+	{
+		Node	   *oexpr = (Node *) lfirst(lc);
+
+		if (IsA(oexpr, Aggref))
+		{
+			ColumnarAggSpec spec;
+
+			if (!columnar_classify_aggref((Aggref *) oexpr, (int) scanrelid,
+										  true, allowPartial, &spec))
+				return false;
+			outMap = lappend(outMap, makeInteger(-(aggIdx + 1)));
+			aggIdx++;
+		}
+		else
+		{
+			ListCell   *kc;
+			int			k = 0;
+			int			found = -1;
+
+			/*
+			 * Match the output expression against a group key exactly as written
+			 * (no RelabelType stripping): the classifier stores keys un-stripped
+			 * too, and both come from the same target list, so equal() lines them
+			 * up. An output built on top of a key (not a bare reference) matches
+			 * nothing and forces the fallback.
+			 */
+			foreach(kc, groupKeys)
+			{
+				if (equal(oexpr, (Node *) lfirst(kc)))
+				{
+					found = k;
+					break;
+				}
+				k++;
+			}
+			if (found < 0)
+				return false;
+			outMap = lappend(outMap, makeInteger(found));
+		}
+	}
+
+	if (aggIdx == 0)
+		return false;			/* no aggregate: leave it to the ordinary plan */
+
+	*outMapOut = outMap;
+	*naggsOut = aggIdx;
+	return true;
+}
+
+/*
  * ColumnarTryGroupAggPath
  *		Add a grouped vectorized aggregate path (#289) when the query is one we
  *		can answer exactly: a single columnar base relation, an optional WHERE,
@@ -1193,10 +1281,15 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
  *		supported GROUP BY key. On anything unsupported it adds nothing and the
  *		ordinary Agg plan runs. The group-count cap is enforced only at
  *		execution (columnar_groupagg_lookup).
+ *
+ *		When the shape also qualifies for the parallel arm (#349) this adds
+ *		Finalize HashAggregate -> Gather -> parallel-aware partial node instead of
+ *		the serial node, so the vectorized fold runs across workers rather than
+ *		displacing a parallel plan with a single-threaded one.
  */
 static void
 ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
-						RelOptInfo *output_rel)
+						RelOptInfo *output_rel, void *extra)
 {
 	RangeTblEntry *rte;
 	Oid			relid;
@@ -1206,7 +1299,6 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	List	   *groupExprs;
 	ListCell   *lc;
 	int			naggs = 0;
-	int			aggIdx = 0;
 	double		dNumGroups;
 	Path	   *cheapest;
 	CustomPath *cpath;
@@ -1242,53 +1334,10 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Every output entry is either a supported aggregate or a bare reference to
 	 * one of the group keys. An output expression built on top of a key (a
 	 * function of a grouping column) is not handled here and forces the fallback.
-	 * outMap records, per output position, the key index (>=0) or, encoded
-	 * negative, the aggregate index in output order.
 	 */
-	foreach(lc, output_rel->reltarget->exprs)
-	{
-		Node	   *oexpr = (Node *) lfirst(lc);
-
-		if (IsA(oexpr, Aggref))
-		{
-			ColumnarAggSpec spec;
-
-			if (!columnar_classify_aggref((Aggref *) oexpr,
-										  (int) input_rel->relid, true, false, &spec))
-				return;
-			outMap = lappend(outMap, makeInteger(-(aggIdx + 1)));
-			aggIdx++;
-			naggs++;
-		}
-		else
-		{
-			ListCell   *kc;
-			int			k = 0;
-			int			found = -1;
-
-			/*
-			 * Match the output expression against a group key exactly as written
-			 * (no RelabelType stripping): the classifier stores keys un-stripped
-			 * too, and both come from the same target list, so equal() lines them
-			 * up. An output built on top of a key (not a bare reference) matches
-			 * nothing and forces the fallback.
-			 */
-			foreach(kc, groupKeys)
-			{
-				if (equal(oexpr, (Node *) lfirst(kc)))
-				{
-					found = k;
-					break;
-				}
-				k++;
-			}
-			if (found < 0)
-				return;
-			outMap = lappend(outMap, makeInteger(found));
-		}
-	}
-	if (naggs == 0)
-		return;					/* no aggregate: leave it to the ordinary plan */
+	if (!columnar_groupagg_outmap(output_rel->reltarget->exprs, groupKeys,
+								  input_rel->relid, false, &outMap, &naggs))
+		return;
 
 	/*
 	 * estimate_num_groups only sizes the path's row estimate; it is deliberately
@@ -1437,6 +1486,165 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 				   outMap);
 	cpath->methods = &columnar_agg_path_methods;
 
+	/*
+	 * Parallel arm (#349). The serial node above folds vectors instead of
+	 * advancing a row-wise Agg, which is cheaper per row, but it does that work on
+	 * every row without dividing it across workers -- so whenever it won it
+	 * replaced a four-worker plan with a single-threaded one. #350 made the
+	 * *choice* honest; this makes the node itself parallel, so it wins on merit
+	 * rather than needing to be priced to win.
+	 *
+	 * Each worker claims distinct row groups through the shared counter, builds
+	 * its own hash table over them, and emits one (group keys, transition states)
+	 * tuple per group. A core Finalize re-aggregates across workers by key,
+	 * exactly as it does for an ordinary parallel grouped aggregate.
+	 */
+	if (columnar_enable_parallel_vector_agg)
+	{
+		GroupPathExtraData *gpe = (GroupPathExtraData *) extra;
+		bool		parallelOk = (gpe != NULL &&
+								  (gpe->flags & GROUPING_CAN_PARTIAL_AGG) != 0 &&
+								  gpe->partial_costs_set &&
+								  output_rel->consider_parallel &&
+								  input_rel->partial_pathlist != NIL);
+		List	   *partialMap = NIL;
+		int			partialAggs = 0;
+
+		/*
+		 * Only the kinds whose transition state is a plain, non-internal value a
+		 * core Finalize can combine (#343). The rest keep the serial node.
+		 */
+		foreach(lc, output_rel->reltarget->exprs)
+		{
+			ColumnarAggSpec spec;
+
+			if (!parallelOk)
+				break;
+			if (!IsA(lfirst(lc), Aggref))
+				continue;
+			if (!columnar_classify_aggref((Aggref *) lfirst(lc),
+										  (int) input_rel->relid, true, false,
+										  &spec) ||
+				!columnar_parallel_agg_ok(spec.kind))
+				parallelOk = false;
+		}
+
+		if (parallelOk)
+		{
+			RelOptInfo *pgr = fetch_upper_rel(root, UPPERREL_PARTIAL_GROUP_AGG,
+											  output_rel->relids);
+			Path	   *partialScan = NULL;
+			ListCell   *pc;
+
+			/* the cheapest per-worker base scan drives this partial node's cost */
+			foreach(pc, input_rel->partial_pathlist)
+			{
+				Path	   *p = (Path *) lfirst(pc);
+
+				if (p->pathtype == T_IndexScan || p->pathtype == T_IndexOnlyScan ||
+					p->pathtype == T_BitmapHeapScan)
+					continue;
+				if (partialScan == NULL || p->total_cost < partialScan->total_cost)
+					partialScan = p;
+			}
+
+			/*
+			 * pgr->reltarget is core's partial grouping target: the grouping
+			 * columns plus the same Aggrefs marked AGGSPLIT_INITIAL_SERIAL that
+			 * the Finalize below combines. Reuse it rather than building one, so
+			 * the partial and final aggregates are structurally related and
+			 * setrefs matches them up -- build our own and they would not. The
+			 * output map has to be rebuilt against it, since its column order and
+			 * aggregate split both differ from output_rel->reltarget.
+			 */
+			if (partialScan != NULL && partialScan->parallel_workers >= 1 &&
+				pgr->reltarget != NULL &&
+				columnar_groupagg_outmap(pgr->reltarget->exprs, groupKeys,
+										 input_rel->relid, true,
+										 &partialMap, &partialAggs))
+			{
+				CustomPath *ppath = makeNode(CustomPath);
+				GatherPath *gather;
+				double		grows = dNumGroups;
+				Cost		pcost = partialScan->total_cost + cpu_tuple_cost +
+					cpu_operator_cost * partialScan->rows *
+					(partialAggs > 0 ? partialAggs : 1);
+#if PG_VERSION_NUM >= 160000
+				List	   *groupClause = root->processed_groupClause;
+#else
+				List	   *groupClause = root->parse->groupClause;
+#endif
+
+				ppath->path.pathtype = T_CustomScan;
+				ppath->path.parent = pgr;
+				ppath->path.pathtarget = pgr->reltarget;
+				ppath->path.param_info = NULL;
+				ppath->path.parallel_aware = true;
+				ppath->path.parallel_safe = true;
+				ppath->path.parallel_workers = partialScan->parallel_workers;
+
+				/*
+				 * Every worker may see every group, so each emits up to the whole
+				 * group count -- not the count divided by the worker count, which
+				 * is what an ordinary partial aggregate would estimate.
+				 */
+				ppath->path.rows = (dNumGroups < 1.0) ? 1.0 : dNumGroups;
+				ppath->path.startup_cost = pcost;
+				ppath->path.total_cost = pcost;
+				ppath->path.pathkeys = NIL;
+				ppath->flags = 0;
+				ppath->custom_paths = NIL;
+#if PG_VERSION_NUM >= 170000
+				ppath->custom_restrictinfo = NIL;
+#endif
+				ppath->custom_private =
+					list_make5(makeInteger((int) input_rel->relid),
+							   copyObject(quals),
+							   makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+										 ObjectIdGetDatum(relid), false, true),
+							   groupKeys,
+							   partialMap);
+				ppath->methods = &columnar_agg_path_methods;
+
+				/*
+				 * Gather this partial node directly rather than add_partial_path'ing
+				 * it: add_partial_path may pfree a dominated path, and we hold the
+				 * only pointer create_gather_path needs.
+				 */
+				gather = create_gather_path(root, pgr, &ppath->path,
+											pgr->reltarget, NULL, &grows);
+
+				add_path(output_rel,
+						 (Path *) create_agg_path(root, output_rel, &gather->path,
+												  output_rel->reltarget,
+												  AGG_HASHED,
+												  AGGSPLIT_FINAL_DESERIAL,
+												  groupClause, NIL,
+												  &gpe->agg_final_costs,
+												  dNumGroups));
+			}
+		}
+	}
+
+	/*
+	 * Offer the serial node too, even when the parallel arm was added, and let
+	 * the planner choose between them.
+	 *
+	 * The ungrouped arm (#343) deliberately does the opposite -- it drops its
+	 * serial node once the parallel one exists -- because #133 priced that node at
+	 * the cheap Gather cost, so keeping it would wrongly out-cost a genuinely
+	 * parallel plan. That reasoning does not carry over: #350 gave this node an
+	 * honest per-row charge, so it competes on merit and cannot win by being
+	 * underpriced.
+	 *
+	 * Suppressing it here actively costs. On a ten-aggregate windowed shape the
+	 * parallel arm is charged for ten aggregates per row and loses to core's own
+	 * parallel plan by a hair, so dropping the serial node left neither: 7,583 ms
+	 * with this feature off against 8,944 ms with it on, purely from the missing
+	 * path. Offering both makes turning the GUC on a strict addition to the
+	 * planner's choices, which is the only form in which an opt-in accelerator can
+	 * be safe to enable.
+	 */
 	add_path(output_rel, &cpath->path);
 }
 
@@ -3082,7 +3290,27 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 	int			naggs = 0;
 
 	state->css.ss.ps.type = T_CustomScanState;
-	state->css.methods = &columnar_groupagg_exec_methods;
+
+	/*
+	 * A parallel partial grouped node (#349) is planned with
+	 * AGGSPLIT_INITIAL_SERIAL aggrefs in its output tuple: it emits one
+	 * (group keys, transition states) tuple per group per worker for a core
+	 * Finalize to combine by key. Detect it from the output tuple exactly as the
+	 * ungrouped node does, and switch to the exec methods table carrying the
+	 * DSM/worker callbacks so every worker shares the group-claim counter.
+	 */
+	state->isPartial = false;
+	foreach(lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (IsA(tle->expr, Aggref) &&
+			((Aggref *) tle->expr)->aggsplit != AGGSPLIT_SIMPLE)
+			state->isPartial = true;
+	}
+	state->css.methods = state->isPartial
+		? &columnar_groupagg_parallel_exec_methods
+		: &columnar_groupagg_exec_methods;
 
 	/* custom_private: rti, quals, relid, group-key exprs, output map (length 5) */
 	state->scanrelid = (Index) intVal(linitial(cscan->custom_private));
@@ -3113,7 +3341,8 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 
 		if (IsA(tle->expr, Aggref))
 		{
-			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, false,
+			/* allowPartial accepts the parallel arm's INITIAL_SERIAL aggrefs */
+			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
 											&state->aggTemplate[i]);
 			i++;
 		}
@@ -3450,6 +3679,15 @@ columnar_groupagg_build(ColumnarGroupAggScanState *state)
 	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
 						   nScanKeys, keys);
 
+	/*
+	 * In a parallel partial run each participant folds only the row groups it
+	 * claims from the shared counter, so the union across workers is every group
+	 * exactly once (#349). NULL when this node is running leader-only, in which
+	 * case the reader walks every group as before.
+	 */
+	if (state->parallelCounter != NULL)
+		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
+
 	/* columns outside the projection stay null in the base slot */
 	memset(state->baseSlot->tts_isnull, true, sizeof(bool) * natts);
 
@@ -3547,8 +3785,19 @@ ColumnarExecGroupAggScan(CustomScanState *node)
 			{
 				int			a = -(m) - 1;
 
-				scanSlot->tts_values[p] =
-					columnar_agg_finalize(&e->specs[a], &scanSlot->tts_isnull[p]);
+				/*
+				 * A partial node hands the core Finalize this worker's transition
+				 * state for the group rather than the finished value; the Finalize
+				 * combines the states of every worker that saw the same key
+				 * (#349). A worker that claimed no row groups has an empty hash
+				 * table and so emits nothing at all, which is what the Finalize
+				 * expects -- not one empty group.
+				 */
+				scanSlot->tts_values[p] = state->isPartial
+					? columnar_agg_emit_partial(&e->specs[a],
+											   &scanSlot->tts_isnull[p])
+					: columnar_agg_finalize(&e->specs[a],
+											&scanSlot->tts_isnull[p]);
 			}
 		}
 		ExecStoreVirtualTuple(scanSlot);
@@ -3622,6 +3871,91 @@ static const CustomExecMethods columnar_groupagg_exec_methods = {
 	.EndCustomScan = ColumnarEndGroupAggScan,
 	.ReScanCustomScan = ColumnarReScanGroupAggScan,
 	.ExplainCustomScan = ColumnarExplainGroupAggScan,
+};
+
+/* -------------------------------------------------------------------------
+ * parallel partial grouped aggregate (#349): DSM callbacks
+ *
+ * The same shared pg_atomic_uint32 the ungrouped partial node uses (gap 23),
+ * handing out row-group indices so each worker folds distinct groups. These
+ * mirror the ungrouped four and cannot share their bodies: those cast the node
+ * to ColumnarAggScanState, and the grouped node is a different struct.
+ *
+ * The grouped node opens its reader lazily in Exec, strictly after both DSM-init
+ * and Worker-init, so the callbacks need only record the counter on the state.
+ * ------------------------------------------------------------------------- */
+
+static Size
+ColumnarEstimateDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt)
+{
+	return sizeof(pg_atomic_uint32);
+}
+
+static void
+ColumnarInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
+								  void *coordinate)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	pg_atomic_init_u32(counter, 0);
+	state->parallelCounter = counter;
+
+	/*
+	 * Flush this backend's pending writes and deletes in the leader, before any
+	 * worker launches: a worker is a separate backend and cannot see the leader's
+	 * unflushed in-transaction buffers. Mirrors what #343 does for the ungrouped
+	 * node.
+	 *
+	 * Defensive rather than load-bearing today, which is worth stating precisely
+	 * because the comment on the ungrouped copy reads as though it were required.
+	 * Removing both flushes and running in-transaction INSERT and DELETE followed
+	 * by a confirmed-parallel grouped aggregate produces answers identical to
+	 * serial, because the buffers are already flushed at the command boundary
+	 * before the aggregate is planned. It is kept because it is cheap and because
+	 * a future path that reaches here with unflushed state would silently give
+	 * workers a stale view; no test covers its removal, and none claims to.
+	 */
+	ColumnarFlushWriteStateForRelation(state->relid);
+	{
+		Relation	frel = table_open(state->relid, AccessShareLock);
+
+		ColumnarFlushDeleteVectorForRelation(frel);
+		table_close(frel, AccessShareLock);
+	}
+}
+
+static void
+ColumnarReInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
+									void *coordinate)
+{
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	/* a rescan restarts group claiming from zero for every participant */
+	pg_atomic_write_u32(counter, 0);
+}
+
+static void
+ColumnarInitializeWorkerGroupAggScan(CustomScanState *node, shm_toc *toc,
+									 void *coordinate)
+{
+	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
+
+	state->parallelCounter = counter;
+}
+
+static const CustomExecMethods columnar_groupagg_parallel_exec_methods = {
+	.CustomName = "ColumnarScan",
+	.BeginCustomScan = ColumnarBeginGroupAggScan,
+	.ExecCustomScan = ColumnarExecGroupAggScan,
+	.EndCustomScan = ColumnarEndGroupAggScan,
+	.ReScanCustomScan = ColumnarReScanGroupAggScan,
+	.ExplainCustomScan = ColumnarExplainGroupAggScan,
+	.EstimateDSMCustomScan = ColumnarEstimateDSMGroupAggScan,
+	.InitializeDSMCustomScan = ColumnarInitializeDSMGroupAggScan,
+	.ReInitializeDSMCustomScan = ColumnarReInitializeDSMGroupAggScan,
+	.InitializeWorkerCustomScan = ColumnarInitializeWorkerGroupAggScan,
 };
 
 /* -------------------------------------------------------------------------
