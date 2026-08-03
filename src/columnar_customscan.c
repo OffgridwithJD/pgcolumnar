@@ -662,6 +662,107 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 }
 
 /*
+ * columnar_path_order_cmp
+ *		Order two paths the way add_path keeps rel->pathlist ordered.
+ *
+ *		PG18 sorts by disabled_nodes and then total_cost; before that there is no
+ *		disabled_nodes field and the order is total_cost alone. Getting this wrong
+ *		does not fail to compile -- it silently hands add_path a list ordered by the
+ *		wrong key, so it is spelled out per version rather than assumed.
+ */
+static int
+columnar_path_order_cmp(const ListCell *a, const ListCell *b)
+{
+	const Path *pa = (const Path *) lfirst(a);
+	const Path *pb = (const Path *) lfirst(b);
+
+#if PG_VERSION_NUM >= 180000
+	if (pa->disabled_nodes != pb->disabled_nodes)
+		return (pa->disabled_nodes < pb->disabled_nodes) ? -1 : 1;
+#endif
+	if (pa->total_cost < pb->total_cost)
+		return -1;
+	if (pa->total_cost > pb->total_cost)
+		return 1;
+	return 0;
+}
+
+/*
+ * columnar_penalize_index_fetches
+ *		Price the per-row heap fetch of the surviving index and bitmap paths
+ *		(#355), and restore the ordering add_path expects.
+ *
+ *		This must run BEFORE the columnar paths are offered to add_path, not after
+ *		(issue #362). add_path frees a path it judges dominated, so a columnar path
+ *		offered while the index paths still carry their un-penalized costs is
+ *		discarded there and then; raising those costs afterwards changes what
+ *		EXPLAIN prints and leaves the planner with nothing to switch to. Measured
+ *		before the reorder: the planner chose an index scan it priced at 13,954,742
+ *		over a columnar path it priced at 589,348 -- one it could no longer see --
+ *		and ran 224 s where the columnar path runs 4.7 s.
+ *
+ *		The reason it used to run last was that mutating total_cost in place unsorts
+ *		rel->pathlist and no add_path may see an unsorted list. That is real, and it
+ *		is why the list is re-sorted here rather than left as the mutation leaves it.
+ *		At this point the list holds only index and bitmap paths -- the seqscans have
+ *		just been dropped -- so the sort is over a handful of entries.
+ *
+ *		Only non-parameterized paths are touched. A parameterized index scan is a
+ *		nested-loop inner side rescanned per outer row; the fetch cache spans those
+ *		rescans (it is released at executor end, not per rescan), so the distinct-
+ *		group count this model assumes for a single pass understates the reuse and
+ *		would over-penalize the join. #355 is the standalone ordering/lookup case,
+ *		which is where param_info is NULL.
+ *
+ *		total_cost only, never startup_cost: the fetch cost is paid as rows are
+ *		pulled, so a LIMIT that stops the scan early pays proportionally, which the
+ *		planner models by fractioning (total - startup).
+ */
+static void
+columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
+{
+	int			nproj;
+	bool		mutated = false;
+	ListCell   *lc;
+
+	if (!columnar_enable_index_fetch_penalty)
+		return;
+
+	nproj = columnar_scan_nproj(rel, rti);
+
+	foreach(lc, rel->pathlist)
+	{
+		Path	   *p = (Path *) lfirst(lc);
+		Cost		add = 0.0;
+
+		if (p->param_info != NULL)
+			continue;
+		if (p->pathtype == T_IndexScan)
+		{
+			IndexPath  *ip = castNode(IndexPath, p);
+			double		rho = columnar_index_correlation(ip->indexinfo, relid);
+
+			add = columnar_index_fetch_penalty(rel, p->rows, rho, nproj, false);
+		}
+		else if (p->pathtype == T_BitmapHeapScan)
+		{
+			/* a bitmap heap scan fetches in TID (row-number) order */
+			add = columnar_index_fetch_penalty(rel, p->rows, 1.0, nproj, true);
+		}
+		/* T_IndexOnlyScan and the custom scans do no heap fetch */
+
+		if (add > 0.0)
+		{
+			p->total_cost += add;
+			mutated = true;
+		}
+	}
+
+	if (mutated)
+		list_sort(rel->pathlist, columnar_path_order_cmp);
+}
+
+/*
  * ColumnarSetRelPathlist
  *		set_rel_pathlist_hook: for a columnar base relation, replace the
  *		sequential-scan path with the columnar custom scan and drop parallel
@@ -719,6 +820,14 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 	/* drop the seqscan partial paths; a columnar partial path is added below */
 	rel->partial_pathlist = NIL;
+
+	/*
+	 * Price the index/bitmap fetches now, while the only paths in the list are
+	 * the ones core built, and before any columnar path is offered below. #362:
+	 * doing this after the add_path calls meant the columnar path was judged
+	 * against index costs that had not yet been penalized, and freed.
+	 */
+	columnar_penalize_index_fetches(rel, rti, rte->relid);
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
@@ -859,55 +968,6 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 #endif
 			ppath->methods = &columnar_path_methods;
 			add_partial_path(rel, &ppath->path);
-		}
-	}
-
-	/*
-	 * Price the per-row heap fetch of the surviving index and bitmap paths
-	 * (#355). This runs last, after every add_path above, on purpose: it mutates
-	 * total_cost in place, which unsorts rel->pathlist, and no add_path may see an
-	 * unsorted list. add_path's dominance test compares each pair directly and so
-	 * is order-independent; only its insertion position depends on the sort, and
-	 * set_cheapest -- which core runs right after this hook -- rescans the whole
-	 * list, so the final choice reflects the updated costs.
-	 *
-	 * Only non-parameterized paths are touched. A parameterized index scan is a
-	 * nested-loop inner side rescanned per outer row; the fetch cache spans those
-	 * rescans (it is released at executor end, not per rescan), so the distinct-
-	 * group count this model assumes for a single pass understates the reuse and
-	 * would over-penalize the join. #355 is the standalone ordering/lookup case,
-	 * which is where param_info is NULL.
-	 *
-	 * total_cost only, never startup_cost: the fetch cost is paid as rows are
-	 * pulled, so a LIMIT that stops the scan early pays proportionally, which the
-	 * planner models by fractioning (total - startup).
-	 */
-	if (columnar_enable_index_fetch_penalty)
-	{
-		int			nproj = columnar_scan_nproj(rel, rti);
-
-		foreach(lc, rel->pathlist)
-		{
-			Path	   *p = (Path *) lfirst(lc);
-
-			if (p->param_info != NULL)
-				continue;
-			if (p->pathtype == T_IndexScan)
-			{
-				IndexPath  *ip = castNode(IndexPath, p);
-				double		rho = columnar_index_correlation(ip->indexinfo,
-															 rte->relid);
-
-				p->total_cost += columnar_index_fetch_penalty(rel, p->rows, rho,
-															  nproj, false);
-			}
-			else if (p->pathtype == T_BitmapHeapScan)
-			{
-				/* a bitmap heap scan fetches in TID (row-number) order */
-				p->total_cost += columnar_index_fetch_penalty(rel, p->rows, 1.0,
-															  nproj, true);
-			}
-			/* T_IndexOnlyScan and the custom scans do no heap fetch */
 		}
 	}
 }
