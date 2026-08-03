@@ -744,13 +744,13 @@ columnar_agg_metadata_answerable(ColumnarAggKind kind)
 
 /*
  * columnar_parallel_agg_ok
- *		The first parallel slice (#289 phase 5/6): kinds whose transition state is
- *		a plain, non-internal value the batch fold already holds and a core
- *		Finalize can combine -- count(*), count(col), and sum/avg over float4/8.
- *		count -> int8, sum(float) -> the identity float, avg(float) -> the _float8
- *		{N,Sx,Sxx} array. The int8 sum/avg-int kinds (int8[]/int8[2]) and every
- *		internal-transtype kind stay on the serial node or the ordinary core Agg
- *		for now; q6's count(*)+avg(float8) is covered.
+ *		Kinds whose transition state is a plain, non-internal value the batch fold
+ *		already holds and a core Finalize can combine (#289 phase 5/6): count(*),
+ *		count(col), and sum/avg over int2/int4/float4/float8. The transition types:
+ *		count/sum(int) -> int8, sum(float) -> the identity float, avg(int) -> the
+ *		int8[2] {N,sum} array, avg(float) -> the _float8 {N,Sx,Sxx} array. The
+ *		internal-transtype kinds (sum/avg over int8/numeric) are not batch-eligible
+ *		and stay on the serial node or the ordinary core Agg.
  */
 static bool
 columnar_parallel_agg_ok(ColumnarAggKind kind)
@@ -759,7 +759,9 @@ columnar_parallel_agg_ok(ColumnarAggKind kind)
 	{
 		case COLUMNAR_AGG_COUNT_STAR:
 		case COLUMNAR_AGG_COUNT_COL:
+		case COLUMNAR_AGG_SUM_INT:
 		case COLUMNAR_AGG_SUM_FLOAT:
+		case COLUMNAR_AGG_AVG_INT:
 		case COLUMNAR_AGG_AVG_FLOAT:
 			return true;
 		default:
@@ -1836,6 +1838,21 @@ columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
 			/* transtype int8: the running count is the partial state */
 			return Int64GetDatum(spec->count);
 
+		case COLUMNAR_AGG_SUM_INT:
+
+			/*
+			 * sum(int2/int4) -> int8 transtype. NULL until a value is seen: core's
+			 * sum(int) carries a NULL state for an empty input and its strict int8pl
+			 * combine then treats a worker that matched no rows as absent, so the
+			 * cross-worker sum and its overflow check match an ordinary parallel sum.
+			 */
+			if (!spec->sawValue)
+			{
+				*isnull = true;
+				return (Datum) 0;
+			}
+			return Int64GetDatum(spec->sum);
+
 		case COLUMNAR_AGG_SUM_FLOAT:
 
 			/*
@@ -1874,6 +1891,25 @@ columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
 				 */
 				return PointerGetDatum(construct_array(elems, 3, FLOAT8OID,
 													   sizeof(float8),
+													   FLOAT8PASSBYVAL,
+													   TYPALIGN_DOUBLE));
+			}
+
+		case COLUMNAR_AGG_AVG_INT:
+			{
+				/*
+				 * avg(int2/int4) -> _int8 {N, sum}: the same array int4_avg_accum
+				 * builds and int4_avg_combine merges, finalized by int8_avg to
+				 * numeric. Always non-null -- an empty worker emits {0,0}, which
+				 * int8_avg maps to NULL after the combine. int8's by-value/alignment
+				 * follow FLOAT8PASSBYVAL / TYPALIGN_DOUBLE, exactly as core builds it.
+				 */
+				Datum		elems[2];
+
+				elems[0] = Int64GetDatum(spec->count);
+				elems[1] = Int64GetDatum(spec->sum);
+				return PointerGetDatum(construct_array(elems, 2, INT8OID,
+													   sizeof(int64),
 													   FLOAT8PASSBYVAL,
 													   TYPALIGN_DOUBLE));
 			}
