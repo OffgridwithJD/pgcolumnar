@@ -397,4 +397,45 @@ check "the fetch penalty leaves a selective point lookup on the index (#355 vs #
 		|| echo "no ($(printf '%s' "$plan_pt" | head -1))")" \
 	"yes"
 
+# --- 7. the penalty must be applied before the columnar path is offered (#362) ----
+#
+# The checks above all use an ORDER BY with no restriction, which is the case where
+# the columnar path survives add_path on its own merits and the penalty gets to
+# decide. They passed on a build where the penalty could not change a plan at all.
+#
+# The failing shape is a SELECTIVE index condition. add_path frees a path it judges
+# dominated, so a columnar path offered while the index path still carries its
+# un-penalized cost is discarded there and then -- and a penalty applied afterwards
+# raises the surviving index path's cost with nothing left to switch to. Measured on
+# the 100M bench before the fix: an index scan priced at 13,954,742 chosen over a
+# columnar path priced at 589,348, running 224 s where the columnar path runs 4.7 s.
+#
+# This check fails on a build where the penalty runs after the add_path calls, which
+# is what makes it a test of the ordering rather than of the arithmetic.
+psql_run "DROP TABLE IF EXISTS o362;
+	CREATE TABLE o362 (id int, h int, pad text) USING pgcolumnar;
+	INSERT INTO o362 SELECT g, g % 1000, repeat('q', 64)
+		FROM generate_series(1, $O355_ROWS) g;
+	CREATE INDEX o362_h ON o362 (h);
+	ANALYZE o362;" >/dev/null
+
+# premise: the condition really is selective enough for the planner to want the index
+plan_sel_off="$(plan_of "${ord_setup} SET pgcolumnar.enable_index_fetch_penalty = off;
+	EXPLAIN (COSTS off) SELECT * FROM o362 WHERE h = 7;")"
+echo "-- selective h = 7, penalty off: $(printf '%s' "$plan_sel_off" | grep -m1 -E 'Scan|Sort')"
+check "without the penalty a selective scattered condition takes the index (#362 premise)" \
+	"$(grep -q 'Index Scan using o362_h' <<<"$plan_sel_off" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_sel_off" | head -1))")" \
+	"yes"
+
+# the fix: with the penalty on, the columnar path must still be in the running --
+# which it only is if the index path was priced before that path was offered
+plan_sel_on="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o362 WHERE h = 7;")"
+echo "-- selective h = 7, penalty on: $(printf '%s' "$plan_sel_on" | grep -m1 -E 'Scan|Sort')"
+check "the penalty is applied before the columnar path is offered, so it can still win (#362)" \
+	"$(  grep -q 'Custom Scan (ColumnarScan)' <<<"$plan_sel_on" \
+		&& ! grep -q 'Index Scan using o362_h' <<<"$plan_sel_on" \
+		&& echo yes || echo "no ($(printf '%s' "$plan_sel_on" | head -1))")" \
+	"yes"
+
 pgc_summary
