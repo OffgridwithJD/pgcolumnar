@@ -776,6 +776,8 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					   RangeTblEntry *rte)
 {
 	CustomPath *cpath;
+	Cost		serialStartupCost;
+	Cost		serialTotalCost;
 	Path	   *seqpath = NULL;
 	List	   *keep = NIL;
 	ListCell   *lc;
@@ -892,6 +894,18 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 #endif
 	cpath->methods = &columnar_path_methods;
 
+	/*
+	 * Keep the costs before offering the path. add_path FREES a path it judges
+	 * dominated, so cpath is not safe to read afterwards -- the parallel path
+	 * below is costed from these copies rather than from cpath. Reading the
+	 * struct after add_path is a use-after-free that shows up as a zero-cost
+	 * path rather than a crash, which is how it was found: a point lookup came
+	 * back as "Parallel Custom Scan ... (cost=0.00..0.00)" instead of an index
+	 * scan.
+	 */
+	serialStartupCost = cpath->path.startup_cost;
+	serialTotalCost = cpath->path.total_cost;
+
 	add_path(rel, &cpath->path);
 
 	/*
@@ -916,9 +930,15 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			ppath->path.parallel_safe = false;
 			ppath->path.parallel_workers = 0;
 			ppath->path.rows = rel->rows;
-			ppath->path.startup_cost = cpath->path.startup_cost;
-			ppath->path.total_cost = cpath->path.startup_cost +
-				(cpath->path.total_cost - cpath->path.startup_cost) * 0.5;
+			/*
+			 * From the captured costs, not from cpath: add_path above may have
+			 * freed it. This read is older than #362 and has the same failure
+			 * mode -- a projection path costed from freed memory whenever an
+			 * index path dominated the base columnar scan.
+			 */
+			ppath->path.startup_cost = serialStartupCost;
+			ppath->path.total_cost = serialStartupCost +
+				(serialTotalCost - serialStartupCost) * 0.5;
 			ppath->path.pathkeys = NIL;
 			ppath->flags = 0;
 			ppath->custom_paths = NIL;
@@ -948,9 +968,11 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * Measured on the 100M fixture: the serial path chosen at 2,350,535 and
 	 * 25.3 s, with a parallel path available at 589,348 and 4.6 s.
 	 *
-	 * cpath already carries the seqscan's costs when there was one and its own
-	 * computed costs when there was not, so this is identical wherever it used
-	 * to fire and defined wherever it did not.
+	 * The costs come from serialStartupCost/serialTotalCost, captured before
+	 * add_path, because add_path frees a dominated path and cpath cannot be read
+	 * after it. They carry the seqscan's costs when there was one and the
+	 * computed costs when there was not, so this is identical wherever the old
+	 * condition fired and defined wherever it did not.
 	 */
 	if (rel->consider_parallel)
 	{
@@ -970,9 +992,9 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			ppath->path.parallel_safe = true;
 			ppath->path.parallel_workers = workers;
 			ppath->path.rows = rel->rows / divisor;
-			ppath->path.startup_cost = cpath->path.startup_cost;
-			ppath->path.total_cost = cpath->path.startup_cost +
-				(cpath->path.total_cost - cpath->path.startup_cost) / divisor;
+			ppath->path.startup_cost = serialStartupCost;
+			ppath->path.total_cost = serialStartupCost +
+				(serialTotalCost - serialStartupCost) / divisor;
 			ppath->path.pathkeys = NIL;
 			ppath->flags = 0;
 			ppath->custom_paths = NIL;
