@@ -74,6 +74,16 @@ check "avg(v) parallel-vec ~= core parallel agg"  "$(reldiff 'avg(v)')" ok
 check "sum(v) parallel-vec ~= core parallel agg"  "$(reldiff 'sum(v)')" ok
 check "avg(w::float8) f4 ~= core parallel agg"    "$(reldiff 'avg(w)::float8')" ok
 
+# int sum/avg (#289 phase 5/6): sum(int)->int8, avg(int)->numeric. Integer sums
+# and numeric division have no float reassociation, so the parallel fold must
+# equal the serial oracle EXACTLY, and the plan must be the parallel fold.
+PLAN_I="$(q -c "$PAR $UG $PP" -c "EXPLAIN (COSTS OFF) SELECT sum(k), avg(k) FROM t WHERE k < 700")"
+check "premise: int sum/avg takes the parallel fold" \
+   "$(printf '%s' "$PLAN_I" | grep -qiE 'Gather' && printf '%s' "$PLAN_I" | grep -qi 'Batch Fold: yes' && echo y || echo n)" y
+IK_VEC="$(q -c "$PAR $UG $PP" -c "SELECT sum(k), avg(k) FROM t WHERE k < 700")"
+IK_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT sum(k), avg(k) FROM t WHERE k < 700")"
+check "sum(k)+avg(k) int: parallel fold == serial (exact)" "$IK_VEC" "$IK_SER"
+
 # ---- edge cases ------------------------------------------------------------
 # a NULL test is not batch-foldable: the partial must still be correct on the
 # row path (shape ineligible from the start -> shared counter untouched).
