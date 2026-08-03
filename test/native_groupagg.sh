@@ -336,4 +336,40 @@ psql_run "CREATE TABLE t_empty (k text, v int) USING pgcolumnar;"
 check "empty table: grouped scan yields 0 rows" \
 	"$(q "SELECT count(*) FROM (SELECT k, count(*) FROM t_empty GROUP BY k) s")" 0
 
+# ---- 9. the path pays for the folding it does (#349) -----------------------
+
+# The grouped path used to price itself at the scan cost plus a fixed bump, and
+# charged nothing for folding. Every competing plan pays a per-row aggregation
+# cost and this one paid none, so it won by construction -- including against a
+# parallel plan measured 1.9x faster than itself on a full-scan GROUP BY.
+#
+# The property asserted here is the one that was observably wrong and that does
+# not depend on the planner picking any particular plan at fixture scale: the
+# estimate must respond to how much folding the node will do. Ten aggregates
+# over the same rows must not be priced the same as one.
+psql_run "DROP TABLE IF EXISTS t_cost;
+          CREATE TABLE t_cost (host text, a int, b int, c int, d int, e int,
+                               f int, g2 int, h int, i int, j int)
+              USING pgcolumnar;
+          INSERT INTO t_cost
+          SELECT 'h' || (n % 50), n, n, n, n, n, n, n, n, n, n
+          FROM generate_series(1, 20000) n;
+          ANALYZE t_cost;" >/dev/null
+
+# cost of the Custom Scan top node, with the grouped path forced on
+gcost() {  # gcost <select-list>
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq \
+		-c "SET pgcolumnar.enable_group_vectorization=on" \
+		-c "EXPLAIN (COSTS ON) SELECT host, $1 FROM t_cost GROUP BY host" 2>&1 |
+		head -1 | grep -oE '\.\.[0-9]+\.[0-9]+' | tr -d '.' | head -1
+}
+C1="$(gcost 'avg(a)')"
+C10="$(gcost 'avg(a),avg(b),avg(c),avg(d),avg(e),avg(f),avg(g2),avg(h),avg(i),avg(j)')"
+echo "      grouped path cost: 1 aggregate $C1, 10 aggregates $C10"
+check "premise: the grouped path is costed at all (non-empty estimate)" \
+	"$( [ -n "$C1" ] && [ -n "$C10" ] && echo yes || echo no )" yes
+check "ten aggregates cost more than one (#349)" \
+	"$( [ "$C10" -gt "$C1" ] 2>/dev/null && echo yes || echo no )" yes
+
 pgc_summary

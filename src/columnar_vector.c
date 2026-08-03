@@ -1371,19 +1371,46 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	cpath->path.rows = (dNumGroups < 1.0) ? 1.0 : dNumGroups;
 
 	/*
-	 * Price just above the scan the reader already does. The fold is one hash
-	 * probe per row inside that scan, always cheaper than a separate Agg node's
-	 * per-row advance over the same scan, so a negligible fixed bump keeps this
-	 * reliably below the ordinary Agg-over-scan plan whenever the feature is
-	 * enabled. This is an opt-in accelerator: when it is on it should be the
-	 * plan, not a coin-flip against a HashAggregate whose cost is close. An
-	 * earlier version charged per output group, which let autoanalyze flip the
-	 * choice on large inputs -- so the node sometimes did not run at all. One row
-	 * per group comes out only after the whole scan is folded, so there is no
-	 * cheap partial start-up.
+	 * Price the scan this node performs, plus the folding it does over that
+	 * scan.
+	 *
+	 * Charging only the scan, as this did, makes the node unpriceable-against:
+	 * every competing plan pays a per-row aggregation cost and this one paid
+	 * none, so it won by construction against anything, including a parallel
+	 * plan several times faster than itself. That is not a conservative bias, it
+	 * is a blind spot -- and it cost ~1.9x on a full-scan GROUP BY with few
+	 * groups, where the four-worker plan this displaced was the better one
+	 * (issue #349).
+	 *
+	 * The node is serial, so it cannot simply be priced low and left to win. It
+	 * has to compete honestly: it folds vectors instead of advancing a row-wise
+	 * Agg, which is cheaper per row, but it does that work on every row without
+	 * dividing it across workers. Charging cpu_operator_cost per row per
+	 * aggregate -- the same rate core charges a transition -- expresses exactly
+	 * that. It is conservative, since the fold is cheaper per row than the
+	 * row-wise advance it replaces, and it leaves the node ahead wherever it
+	 * actually is ahead.
+	 *
+	 * Measured against the planner's own numbers on a 100M-row TSBS fixture, per
+	 * row per aggregate: any charge above ~0.0013 correctly loses the full-scan
+	 * case, and any charge below ~0.0107 correctly wins the windowed ones. The
+	 * default cpu_operator_cost of 0.0025 sits inside that range with margin at
+	 * both ends, so this is not tuned to the fixture.
+	 *
+	 * Charging per input row also makes the estimate respond to the number of
+	 * aggregates, which the previous cost did not: ten aggregates were priced
+	 * identically to one, while costing 2.35x as much to run.
+	 *
+	 * An earlier version charged per output GROUP, which let autoanalyze's group
+	 * estimate flip the choice on large inputs so the node sometimes did not run
+	 * at all. Per input row avoids that: it does not depend on n_distinct.
+	 *
+	 * One row per group comes out only after the whole scan is folded, so there
+	 * is no cheap partial start-up.
 	 */
 	{
-		Cost		cost = cheapest->total_cost + cpu_tuple_cost;
+		Cost		cost = cheapest->total_cost + cpu_tuple_cost +
+			cpu_operator_cost * cheapest->rows * (naggs > 0 ? naggs : 1);
 
 		cpath->path.startup_cost = cost;
 		cpath->path.total_cost = cost;
