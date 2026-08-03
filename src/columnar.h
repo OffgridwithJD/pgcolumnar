@@ -442,7 +442,8 @@ extern void ColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * ------------------------------------------------------------------------- */
 extern uint64 ColumnarNextStorageId(void);
 extern void ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
-extern void ColumnarSetSortedThrough(uint64 storageId, int64 groupNumber);
+extern void ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
+									int64 lastGroup);
 extern void ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
 extern void ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
 extern void ColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc);

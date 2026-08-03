@@ -189,7 +189,12 @@ CREATE TABLE pgcolumnar.storage (
 	-- unsorted vacuum leaves this NULL and correctly reports the table as
 	-- unsorted, with no invalidation step. A value in an options row, which is
 	-- keyed by relation, would outlive the layout it describes.
-	sorted_through bigint
+	sorted_through bigint,
+	-- Lower end of the ordered run (#342). The run is [sorted_from,
+	-- sorted_through]; a bare upper bound cannot exclude a concurrently written
+	-- group whose id was drawn below the rewrite's own first id, which is how a
+	-- foreign group came to be counted as ordered.
+	sorted_from bigint
 );
 CREATE UNIQUE INDEX storage_pkey
 	ON pgcolumnar.storage USING btree (storage_id);
@@ -623,9 +628,11 @@ COMMENT ON FUNCTION pgcolumnar.stats(regclass)
  * reports the size of each part, so a DBA can decide when a re-sort is worth its
  * cost instead of guessing.
  *
- * The ordered run is every row group numbered at or below the mark that the
- * rewrite left in pgcolumnar.storage.sorted_through. Everything above it was
- * written later.
+ * The ordered run is every row group numbered within the range the rewrite left
+ * in pgcolumnar.storage: from sorted_from to sorted_through inclusive. Groups
+ * above it were written later. Groups below it belong to a writer that started
+ * before the rewrite did and so were never ordered by it (#342); recording only
+ * an upper bound counted those as ordered.
  *
  * The row counts are stored rows. Rows deleted but not yet reclaimed are still
  * stored, so they are still counted. pgcolumnar.stats reports the deleted count
@@ -664,16 +671,25 @@ CREATE FUNCTION pgcolumnar.sort_status(
 	LANGUAGE sql STABLE
 	AS $sort_status$
 	WITH s AS (
-		SELECT st.storage_id, st.sorted_through
+		SELECT st.storage_id, st.sorted_through, st.sorted_from
 		FROM pgcolumnar.storage st
 		WHERE st.storage_id = pgcolumnar.get_storage_id(rel)
 	),
 	g AS (
 		-- A NULL mark means the storage was never ordered, so no group is in the
 		-- run. Comparing against NULL would make every count NULL instead.
+		--
+		-- The run is a range, not everything below a boundary (#342). A group
+		-- numbered below sorted_from was not written by the rewrite that set the
+		-- mark: its stripe id was drawn before the rewrite's first, so it is a
+		-- concurrent writer's group and is not ordered. sorted_from is NULL only
+		-- for a mark written before this column existed, where the old
+		-- everything-below reading is kept.
 		SELECT rg.row_count,
 			   (s.sorted_through IS NOT NULL
-				AND rg.group_number <= s.sorted_through) AS in_run
+				AND rg.group_number <= s.sorted_through
+				AND (s.sorted_from IS NULL
+					 OR rg.group_number >= s.sorted_from)) AS in_run
 		FROM pgcolumnar.row_group rg
 		JOIN s ON rg.storage_id = s.storage_id
 	)
