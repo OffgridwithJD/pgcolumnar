@@ -147,16 +147,19 @@ rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 	 * Stream the group rather than fetching its rows one at a time.
 	 *
 	 * ColumnarReadRowByNumber decodes the whole group to return one value and
-	 * relies on the fetch cache to make the next call cheap. That cache drops
-	 * any group whose decoded form exceeds COLUMNAR_FETCH_CACHE_MAX_BYTES, and
-	 * drops it after every fetch -- so a group over the cap by any margin made
-	 * this loop decode the entire group once per row.
+	 * relies on the fetch cache to make the next call cheap. That cache holds
+	 * only what fits under COLUMNAR_FETCH_CACHE_MAX_BYTES, so a group whose
+	 * decoded form exceeds the cap re-decodes the columns that did not fit, once
+	 * per row rather than once per group.
 	 *
-	 * It is a cliff rather than a slope. Three columns of 150,000 rows with one
-	 * varlena among them decodes to 34,713,408 bytes against a 33,554,432 cap:
-	 * 3.5% over. On an idle box, rewriting 200,000 rows of that shape did not
-	 * finish inside 120 seconds, while the same table without the middle column
-	 * -- under the cap, so cached -- took 1.9.
+	 * That used to be a cliff rather than a slope: the whole entry was dropped,
+	 * so a group over the cap by any margin decoded entirely, per row. Three
+	 * columns of 150,000 rows with one varlena among them decodes to 34,713,408
+	 * bytes against a 33,554,432 cap: 3.5% over. On an idle box, rewriting
+	 * 200,000 rows of that shape did not finish inside 120 seconds, while the
+	 * same table without the middle column -- under the cap, so cached -- took
+	 * 1.9. #359 made the overflow proportional, which shrinks that gap but does
+	 * not close it; streaming remains strictly cheaper than fetching per row.
 	 *
 	 * A reader restricted to this group decodes it once and walks it, which is
 	 * what the loop wanted all along, and it does not care how large the group

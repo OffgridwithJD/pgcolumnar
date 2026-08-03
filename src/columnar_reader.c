@@ -1793,6 +1793,15 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  * sizing from disk would overshoot worst on exactly the tables this helps most.
  * COLUMNAR_FETCH_CACHE_MAX_BYTES is defined in columnar.h so the index-fetch cost
  * model (#355) can name the same cap.
+ *
+ * The cap is enforced per column, not per entry (issue #359). It used to drop the
+ * whole entry, which made it a cliff: an entry one byte over was not retained at
+ * all, so every fetch re-read the group and re-decoded every column it touched.
+ * On the 100M fixture that was 2,833 ms at four aggregate columns and 134,147 at
+ * five, flat either side -- a 47x step inside the space of ordinary queries.
+ * Shrinking entries (#357 moved decode scratch out, ~3x) only moved the step.
+ * Now the columns that fit stay resident and only the remainder is re-decoded, so
+ * crossing the cap costs the overflow fraction rather than everything.
  */
 
 typedef struct ColumnarFetchGroup
@@ -1824,6 +1833,27 @@ typedef struct ColumnarFetchGroup
 	 */
 	uint32	  **rankPrefix;		/* [natts]; NULL until that column is decoded */
 	uint32	  **valOffset;		/* [natts]; NULL for fixed-length columns */
+
+	/*
+	 * Per-column residency, so exceeding the cap costs proportionally rather
+	 * than totally (issue #359).
+	 *
+	 * colCx[c] holds column c's decoded stream, one child context per column so
+	 * a single column can be released without disturbing the rest of the entry.
+	 * It is NULL when the column is undecoded, and also when the column decodes
+	 * to a pointer into groupBuffer (baseline encoding allocates nothing).
+	 *
+	 * overflow[c] marks a column that was decoded, did not fit, and was
+	 * released. Such a column decodes into per-fetch scratch from then on. The
+	 * mark is never cleared: the resident set has to be *stable*, because the
+	 * access pattern here is cyclic -- every fetch touches the same projected
+	 * columns in attribute order -- and evicting the least recently used column
+	 * against a cyclic pattern evicts precisely the column about to be needed,
+	 * which is a 100% miss rate, i.e. the very behaviour this removes. First
+	 * fit and then stop re-decodes only the columns that did not fit.
+	 */
+	MemoryContext *colCx;		/* [natts] */
+	bool	   *overflow;		/* [natts] */
 	uint64		lastUsed;
 }			ColumnarFetchGroup;
 
@@ -2230,6 +2260,8 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->rawBuf = palloc0(sizeof(char *) * natts);
 		entry->rankPrefix = palloc0(sizeof(uint32 *) * natts);
 		entry->valOffset = palloc0(sizeof(uint32 *) * natts);
+		entry->colCx = palloc0(sizeof(MemoryContext) * natts);
+		entry->overflow = palloc0(sizeof(bool) * natts);
 		MemoryContextSwitchTo(tmp);
 
 		if (rg->byteLength > 0)
@@ -2288,6 +2320,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		char	   *rawBuf;
 		char	   *cursor;
 		uint64		present;
+		bool		justDecoded;	/* this fetch decoded it; may not fit */
 
 		/*
 		 * A column the caller did not ask for is neither decoded nor indexed,
@@ -2317,43 +2350,87 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			continue;
 		}
 
-		if (entry->rawBuf[c] == NULL)
+		if (entry->rawBuf[c] != NULL)
 		{
-			MemoryContext decOld = MemoryContextSwitchTo(entry->cx);
+			rawBuf = entry->rawBuf[c];
+			justDecoded = false;
+		}
+		else
+		{
+			/*
+			 * A baseline chunk is not encoded, so its "decoded" stream is a
+			 * pointer into groupBuffer rather than an allocation. It costs the
+			 * entry nothing beyond the group bytes it already holds, so it is
+			 * always resident and is never a candidate for release below --
+			 * releasing it would mean freeing an interior pointer.
+			 */
+			bool		baseline = (cc->encodingDescriptorLen == 1 &&
+									(uint8) cc->encodingDescriptor[0] ==
+									COLUMNAR_NATIVE_ENCDESC_BASELINE);
+			MemoryContext decCx;
+			MemoryContext decOld;
 
-			if (cc->encodingDescriptorLen == 1 &&
-				(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
-				entry->rawBuf[c] = base + validityBytes;
+			if (baseline)
+				decCx = entry->cx;
+			else if (entry->overflow[c])
+				decCx = tmp;	/* known not to fit: decode per fetch */
 			else
-				entry->rawBuf[c] =
-					columnar_native_decode_chunk(entry->cx, att,
+				decCx = AllocSetContextCreate(entry->cx,
+											  "columnar fetch column",
+											  ALLOCSET_DEFAULT_SIZES);
+
+			decOld = MemoryContextSwitchTo(decCx);
+			if (baseline)
+				rawBuf = base + validityBytes;
+			else
+				rawBuf =
+					columnar_native_decode_chunk(decCx, att,
 												 base + validityBytes,
 												 (uint32) (cc->pageLength - validityBytes),
 												 cc->encodingDescriptor,
 												 cc->encodingDescriptorLen,
 												 cc->blockCodec, NULL, NULL);
+			MemoryContextSwitchTo(decOld);
 
 			/*
 			 * Index the column while it is being decoded, so every fetch into
-			 * this group afterwards reaches its row directly (issue #143). Both
-			 * indexes live in the entry context and so are measured by the cap
-			 * below and dropped with the rest of the entry.
+			 * this group afterwards reaches its row directly (issue #143).
+			 *
+			 * The indexes live in the entry context, not in the column's, so
+			 * they outlive a released column. That is deliberate: decoding the
+			 * same chunk bytes is deterministic and yields the same layout, so
+			 * the offsets stay valid across a re-decode. An overflowed column
+			 * therefore pays its decode again but still reaches its row in
+			 * constant time, which is what stops #143's quadratic returning
+			 * through this path. They are small next to the stream: rankPrefix
+			 * is four bytes per 64 rows, valOffset four per value.
 			 */
-			entry->rankPrefix[c] = columnar_build_rank_prefix(vbits,
-															 entry->rowCount);
-			if (att->attlen < 0)
+			if (entry->rankPrefix[c] == NULL)
 			{
-				uint64		nblocks = (entry->rowCount +
-									   COLUMNAR_RANK_BLOCK_ROWS - 1) /
-					COLUMNAR_RANK_BLOCK_ROWS;
+				MemoryContext idxOld = MemoryContextSwitchTo(entry->cx);
 
-				entry->valOffset[c] =
-					columnar_build_val_offsets(att, entry->rawBuf[c],
-											   entry->rankPrefix[c][nblocks]);
+				entry->rankPrefix[c] = columnar_build_rank_prefix(vbits,
+																 entry->rowCount);
+				if (att->attlen < 0)
+				{
+					uint64		nblocks = (entry->rowCount +
+										   COLUMNAR_RANK_BLOCK_ROWS - 1) /
+						COLUMNAR_RANK_BLOCK_ROWS;
+
+					entry->valOffset[c] =
+						columnar_build_val_offsets(att, rawBuf,
+												   entry->rankPrefix[c][nblocks]);
+				}
+				MemoryContextSwitchTo(idxOld);
 			}
-			MemoryContextSwitchTo(decOld);
+
+			if (decCx != tmp)
+			{
+				entry->rawBuf[c] = rawBuf;
+				entry->colCx[c] = baseline ? NULL : decCx;
+			}
+			justDecoded = true;
 		}
-		rawBuf = entry->rawBuf[c];
 
 		/*
 		 * The row's value sits at the rank-th position in the present-value
@@ -2371,20 +2448,45 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 
 		values[c] = ColumnarDecodeValue(att, &cursor, target);
 		nulls[c] = false;
+
+		/*
+		 * Release this column if it is the one that took the entry over the cap
+		 * (issue #359). Measuring the context is what makes the cap mean decoded
+		 * bytes rather than stored bytes; a column of wide text decodes to many
+		 * times its size on disk, and sizing from disk would overshoot worst on
+		 * exactly the tables this helps most.
+		 *
+		 * Releasing here rather than dropping the whole entry is what makes
+		 * going over the cap cost proportionally: the columns admitted before
+		 * this one stay resident and are decoded once, and only the remainder is
+		 * decoded per fetch. groupBuffer stays either way, so no fetch re-reads
+		 * the group from disk.
+		 *
+		 * It is safe because nothing handed back points into the column: the
+		 * value returned was copied into the caller's context by the
+		 * ColumnarDecodeValue call immediately above, and the position indexes
+		 * live in entry->cx rather than in the column's own context.
+		 */
+		if (justDecoded && entry->colCx[c] != NULL &&
+			MemoryContextMemAllocated(entry->cx, true) >
+			COLUMNAR_FETCH_CACHE_MAX_BYTES)
+		{
+			MemoryContextDelete(entry->colCx[c]);
+			entry->colCx[c] = NULL;
+			entry->rawBuf[c] = NULL;
+			entry->overflow[c] = true;
+		}
 	}
 
 	/*
-	 * Hold the entry only while it is worth holding. Measuring the context is
-	 * what makes the cap mean decoded bytes rather than stored bytes; a group
-	 * over the cap is used for this fetch and then dropped, so an outsized group
-	 * costs what it always did rather than pinning memory.
-	 *
-	 * Dropping it here is safe because nothing handed back points into it: the
-	 * value that is returned is decoded into the caller's context by the
-	 * ColumnarDecodeValue call above. Only the decoded stream and its two
-	 * position indexes live in entry->cx.
+	 * The per-column release above trims the entry back under the cap, so the
+	 * entry is bounded by it -- except in one case it cannot help: a group whose
+	 * *raw* bytes alone exceed the cap. Every column would overflow and the entry
+	 * would still pin groupBuffer, so four such entries could hold arbitrarily
+	 * much. Drop the entry whole there, which is what this path did for every
+	 * oversized group before, and keeps the cache bounded by 4 x the cap.
 	 */
-	if (MemoryContextMemAllocated(entry->cx, true) > COLUMNAR_FETCH_CACHE_MAX_BYTES)
+	if (rg->byteLength > COLUMNAR_FETCH_CACHE_MAX_BYTES)
 		columnar_fetch_entry_reset(entry);
 
 	MemoryContextSwitchTo(oldContext);
