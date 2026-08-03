@@ -2552,12 +2552,21 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 			cneeded[col] = true;
 
 	/*
-	 * No scan keys are pushed to the reader: the WHERE is applied inline per value
-	 * below. For a zone-map-selective filter, pushing keys would also prune whole
-	 * vectors; that is a later refinement (it needs present-index skipping) and
-	 * only helps a filter the vector min/max can rule out.
+	 * Push the scan keys so the reader prunes whole row groups its zone maps rule
+	 * out (#349). The fold walks every surviving group in full and still rechecks
+	 * the WHERE inline per value below, so pruning is a pure win: on clustered or
+	 * range-partitioned data -- the workload this fold targets -- it skips groups
+	 * no row can match instead of decoding and folding them. (Before this the fold
+	 * read every group, 100x more than the row path on a selective clustered scan.)
+	 *
+	 * Per-vector skipping WITHIN a surviving group is a separate refinement the
+	 * fold does not take: it would need to step the present index past a skipped
+	 * vector. That is safe to leave out because columnar_native_load_group builds
+	 * the packed present-value stream whole regardless of the skip vector, so
+	 * walking all rows and advancing the present index over each is correct.
 	 */
-	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected, 0, NULL);
+	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
+						   nkeys, keys);
 
 	/*
 	 * Parallel arm (#289 phase 5/6): route group claiming through the shared
