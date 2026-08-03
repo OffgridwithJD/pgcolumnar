@@ -96,4 +96,43 @@ check "a hit re-checks the group geometry it was filled with" \
 check "the cache is released at executor end, not only at transaction end" \
 	"$(grep -c 'ColumnarDiscardFetchCache' "$SRC/columnar_tableam.c")" "2"
 
+# --- #353: a wide group's decode scratch must not blow the fetch cap ----------
+# The by-row-number decode allocated its intermediates -- the decompressed region
+# and each vector's decoded buffer -- in the cached entry, ~3x the result. A wide
+# group's projected prefix then exceeded the 32MB cap and was re-decoded on every
+# fetch (measured ~200x). The scratch now lives in a transient context, so the
+# entry keeps only the result. Test: a wide table at the default stripe (one big
+# group, large decoded prefix) vs a small-stripe control; the wide case must not
+# be far dearer per fetch, and must return the same answer.
+wbuild() {  # table, stripe
+	psql_run "DROP TABLE IF EXISTS $1;
+		CREATE TABLE $1 (id int, h text, c1 int,c2 int,c3 int,c4 int,c5 int,c6 int,
+		                 c7 int,c8 int,c9 int,c10 int, u float8,
+		                 t1 text,t2 text,t3 text,t4 text,t5 text,t6 text,t7 text,t8 text)
+		    USING pgcolumnar;
+		SELECT pgcolumnar.set_options('$1', stripe_row_limit => $2);
+		INSERT INTO $1 SELECT g, 'h' || (g % 500), g,g,g,g,g,g,g,g,g,g, (g % 100)::float8,
+		    repeat('x',40),repeat('y',40),repeat('z',40),'a'||g,'b'||g,'c'||g,'d'||g,'e'||g
+		    FROM generate_series(1, 300000) g;
+		CREATE INDEX ${1}_h ON $1 (h);"
+}
+w_ms() {  # index-driven point query over one host: many fetches into few groups
+	local start end
+	start=$(date +%s%N)
+	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off; SET enable_bitmapscan=off;
+		SELECT count(*), max(u) FROM $1 WHERE h='h1';" >/dev/null 2>&1
+	end=$(date +%s%N); echo $(( (end - start) / 1000000 ))
+}
+wbuild fc_wide 150000      # default stripe: one/two big groups, wide decoded prefix
+wbuild fc_wnarrow 20000    # smaller groups that fit under the cap regardless
+bigw="$(w_ms fc_wide)"; smallw="$(w_ms fc_wnarrow)"
+echo "-- #353 wide point query: default-stripe ${bigw} ms, small-stripe ${smallw} ms"
+check_timing "a wide group's fetch is not far dearer than a small group's (#353)" \
+	"$( [ "$smallw" -gt 0 ] && [ $(( bigw / (smallw > 0 ? smallw : 1) )) -lt 5 ] && echo yes ||
+		echo "no (wide=${bigw}ms small=${smallw}ms)")" \
+	"yes"
+check "the wide-group point query is correct (#353)" \
+	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wide WHERE h='h1'")" \
+	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wnarrow WHERE h='h1'")"
+
 pgc_summary
