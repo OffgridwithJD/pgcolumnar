@@ -296,25 +296,31 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
  *		"every group numbered at or below this one is ordered", and a single
  *		boundary can only say that if no foreign group is numbered below it.
  *
- *		Walking the live groups and stopping at the first one the rewrite did not
- *		write is not enough, and the concurrent fixture in
- *		test/recluster_extent.sh is what showed it. A concurrent inserter
- *		reserves its stripe id when it buffers its first row and commits some
- *		time later. If it commits after this runs, its group is not in the list
- *		the walk sees, yet its id was drawn before some of the rewrite's own, so
- *		it lands underneath the mark and is claimed as ordered. The visible
- *		catalog cannot rule that out; the reservation sequence can.
+ *		A concurrent inserter reserves its stripe id when it buffers its first
+ *		row and commits some time later, so its group can be absent from any list
+ *		this reads while still owning an id among the rewrite's own.
  *
- *		A foreign reservation always consumes an id, so it always leaves a gap in
- *		the rewrite's own ids, whenever it commits. So: the rewrite's ids must be
- *		consecutive from its lowest, and the lowest live group must be that
- *		lowest id. Then every group at or below the run's end is one the rewrite
- *		wrote, and the boundary means what sort_status reads it to mean.
+ *		The run is therefore recorded as a range, [ours[0], runEnd], not as a
+ *		single upper bound. Ids come from one serialized counter, so a foreign id
+ *		strictly inside that range must have been drawn between two of the
+ *		rewrite's own draws, which breaks the consecutive run below and truncates
+ *		it before reaching that id. An id drawn below the rewrite's first falls
+ *		outside the range by construction. Both cases hold whenever the foreign
+ *		transaction commits, because neither depends on seeing it.
  *
- *		When it cannot prove that, it marks the part it can and leaves the rest
- *		out. That reports more decay than there is, which is the direction to
- *		fail in: it can prompt a re-sort that was not needed, where the opposite
- *		leaves a decayed table looking ordered and costs every query against it.
+ *		An earlier version marked only an upper bound and tried to exclude the
+ *		below case by requiring the lowest live group to equal ours[0]. That
+ *		could not work (#342): the group list was read under the rewrite's own
+ *		snapshot, taken before it read a row, and ColumnarCatalogSnapshot only
+ *		advances curcid rather than refreshing xmin/xmax, so a concurrent
+ *		inserter's group was invisible to the check whenever it committed. A
+ *		foreign group written just before the rewrite's first reservation was
+ *		then swept under the mark and counted as ordered.
+ *
+ *		Truncating at the first gap still marks only the part it can prove. That
+ *		reports more decay than there is, which is the direction to fail in: it
+ *		can prompt a re-sort that was not needed, where the opposite leaves a
+ *		decayed table looking ordered and costs every query against it.
  */
 static void
 record_online_sorted_extent(Relation rel, uint64 storageId,
@@ -324,8 +330,6 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 	uint64	   *all = ColumnarWriteStateStripeIds(writeState, &nAll);
 	int			nOurs = nAll - stripeMark;
 	uint64	   *ours;
-	List	   *groups;
-	uint64		lowestLive;
 	uint64		runEnd;
 	int			i;
 
@@ -337,27 +341,6 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 	memcpy(ours, all + stripeMark, sizeof(uint64) * nOurs);
 	qsort(ours, nOurs, sizeof(uint64), uint64_cmp);
 
-	groups = ColumnarReadRowGroupList(storageId,
-									  ColumnarCatalogSnapshot(GetActiveSnapshot()));
-	if (groups == NIL)
-	{
-		pfree(ours);
-		return;
-	}
-	/* the list is ordered by group number */
-	lowestLive = ((NativeRowGroupMetadata *) linitial(groups))->groupNumber;
-	list_free_deep(groups);
-
-	/*
-	 * A live group below our first reservation is one we did not write and did
-	 * not retire, so no boundary above it can be honest.
-	 */
-	if (lowestLive != ours[0])
-	{
-		pfree(ours);
-		return;
-	}
-
 	/* the consecutive run of our own ids, starting at the lowest */
 	runEnd = ours[0];
 	for (i = 1; i < nOurs; i++)
@@ -366,9 +349,9 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 			break;				/* a foreign reservation took this id */
 		runEnd = ours[i];
 	}
-	pfree(ours);
 
-	ColumnarSetSortedThrough(storageId, (int64) runEnd);
+	ColumnarSetSortedExtent(storageId, (int64) ours[0], (int64) runEnd);
+	pfree(ours);
 }
 
 /*
@@ -858,6 +841,7 @@ record_sorted_extent(Relation rel)
 	uint64		storageId = ColumnarStorageId(rel);
 	List	   *groups;
 	uint64		lastGroup = 0;
+	uint64		firstGroup = 0;
 	bool		haveGroup = false;
 	ListCell   *lc;
 
@@ -869,12 +853,14 @@ record_sorted_extent(Relation rel)
 
 		if (!haveGroup || rg->groupNumber > lastGroup)
 			lastGroup = rg->groupNumber;
+		if (!haveGroup || rg->groupNumber < firstGroup)
+			firstGroup = rg->groupNumber;
 		haveGroup = true;
 	}
 	list_free_deep(groups);
 
 	if (haveGroup)
-		ColumnarSetSortedThrough(storageId, (int64) lastGroup);
+		ColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup);
 }
 
 /*

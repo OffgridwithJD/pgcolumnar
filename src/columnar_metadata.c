@@ -65,7 +65,8 @@
 #define Anum_native_storage_vector_length 4
 #define Anum_native_storage_row_group_limit 5
 #define Anum_native_storage_sorted_through 6
-#define Natts_native_storage 6
+#define Anum_native_storage_sorted_from 7
+#define Natts_native_storage 7
 
 #define Anum_row_group_storage_id 1
 #define Anum_row_group_group_number 2
@@ -1565,6 +1566,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	 * makes a rewrite reset the sort state with no invalidation step.
 	 */
 	nulls[Anum_native_storage_sorted_through - 1] = true;
+	nulls[Anum_native_storage_sorted_from - 1] = true;
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	CatalogTupleInsert(rel, tuple);
@@ -1592,7 +1594,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
  *		groups and reports no decay.
  */
 void
-ColumnarSetSortedThrough(uint64 storageId, int64 groupNumber)
+ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
 {
 	Relation	rel;
 	TupleDesc	tupdesc;
@@ -1629,8 +1631,10 @@ ColumnarSetSortedThrough(uint64 storageId, int64 groupNumber)
 		memset(values, 0, sizeof(values));
 		memset(nulls, false, sizeof(nulls));
 		memset(replace, false, sizeof(replace));
-		values[Anum_native_storage_sorted_through - 1] = Int64GetDatum(groupNumber);
+		values[Anum_native_storage_sorted_through - 1] = Int64GetDatum(lastGroup);
 		replace[Anum_native_storage_sorted_through - 1] = true;
+		values[Anum_native_storage_sorted_from - 1] = Int64GetDatum(firstGroup);
+		replace[Anum_native_storage_sorted_from - 1] = true;
 
 		newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
 		CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);

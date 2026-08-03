@@ -63,9 +63,19 @@ RECL_DONE=$(date +%s%N)
 # nothing concurrent happened and the rest of this suite proves nothing.
 check "the insert committed while the rewrite was still running" \
 	"$( [ "$INS_DONE" -lt "$RECL_DONE" ] && echo yes || echo no )" "yes"
-check "the rewrite reported groups reclustered" \
-	"$( [ "$(cat /tmp/pgc_recluster_out.$$)" -gt 0 ] 2>/dev/null && echo yes || echo no )" "yes"
+# The real premise, and the one the wall-clock comparison above cannot establish
+# (#342). recluster returns the number of groups it retired, which is exactly the
+# set it read. The base load is BASE rows at stripe_row_limit, so a rewrite that
+# excluded the concurrent insert retires exactly that many groups; if the insert
+# landed in its work set it retires more, and it then legitimately ordered those
+# rows. Without this, that case fails the property check below and looks like a
+# product defect instead of an unmet precondition.
+RETIRED="$(cat /tmp/pgc_recluster_out.$$)"
 rm -f /tmp/pgc_recluster_out.$$
+check "the rewrite reported groups reclustered" \
+	"$( [ "$RETIRED" -gt 0 ] 2>/dev/null && echo yes || echo no )" "yes"
+check "premise: the concurrent insert was not in the rewrite's work set" \
+	"$RETIRED" "$((BASE / 20000))"
 
 check "every row is present afterwards" "$(raw 'SELECT count(*) FROM t;')" "$((BASE + 50000))"
 
@@ -87,6 +97,52 @@ check "the counts still cover every stored row" \
 			FROM pgcolumnar.sort_status('t');")" "true"
 check "the concurrent rows are reported as appended" \
 	"$( [ "$APPENDED" -gt 0 ] && echo yes || echo no )" "yes"
+
+# -------------------------------- the id-drawn-below case, deterministically
+
+# The defect in #342: a concurrent writer draws its stripe id when it buffers its
+# first row, so a writer that starts before the rewrite owns an id BELOW every id
+# the rewrite draws. The rewrite's own ids stay consecutive, so a mark that is a
+# bare upper bound sweeps that foreign group underneath it and counts unordered
+# rows as ordered.
+#
+# The concurrent section above only hits this when the scheduler cooperates, which
+# is why it failed on CI and not locally. This reproduces it with no timing at all:
+# the writer holds its transaction open, so the ordering is forced rather than
+# raced.
+#
+# The insert is deliberately smaller than stripe_row_limit. It draws its stripe id
+# while buffering, but does not flush until commit -- so it does not hold the
+# per-storage advisory lock that a flush takes to transaction end, and the rewrite
+# is free to run to completion in the meantime.
+raw "DROP TABLE IF EXISTS d;" >/dev/null
+raw "CREATE TABLE d (id int, k int, v text) USING pgcolumnar;" >/dev/null
+raw "SELECT pgcolumnar.set_options('d', stripe_row_limit => 20000, chunk_group_row_limit => 2048);" >/dev/null
+raw "INSERT INTO d SELECT g, ((g::bigint * 7919) % 100000)::int, 'v' || g FROM generate_series(1, 100000) g;" >/dev/null
+
+# Session B: draw a stripe id, then hold the transaction open across the rewrite.
+raw "BEGIN;
+     INSERT INTO d SELECT g, 1, 'late' || g FROM generate_series(900001, 905000) g;
+     SELECT pg_sleep(12);
+     COMMIT;" >/dev/null &
+HOLD_PID=$!
+sleep 3          # let B buffer its first row, which is when its id is drawn
+
+raw "SELECT pgcolumnar.recluster('d', 'id', 'k');" >/dev/null
+wait $HOLD_PID   # B commits now, writing its group at an id below the rewrite's
+
+D_SORTED="$(raw "SELECT sorted_rows FROM pgcolumnar.sort_status('d');")"
+D_APPEND="$(raw "SELECT appended_rows FROM pgcolumnar.sort_status('d');")"
+echo "      id-drawn-below: sorted $D_SORTED, appended $D_APPEND (100000 ordered + 5000 concurrent)"
+
+# The rewrite ordered the 100000 rows that existed. The 5000 written by the held
+# transaction were never read by it, so they must not be counted as ordered no
+# matter where their group number falls.
+check "a group numbered below the run is not counted as ordered" "$D_SORTED" "100000"
+check "the rows written below the run are reported as appended" "$D_APPEND" "5000"
+check "the id-drawn-below counts still cover every stored row" \
+	"$(raw "SELECT (sorted_rows + appended_rows = (SELECT sum(rowcount) FROM pgcolumnar.stats('d')))::text
+			FROM pgcolumnar.sort_status('d');")" "true"
 
 # ---------------------------------------------------- the uncontended case
 
