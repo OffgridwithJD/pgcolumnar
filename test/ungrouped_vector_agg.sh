@@ -119,5 +119,28 @@ psql_run "DELETE FROM t WHERE id IN (5, 2005, 40001)" >/dev/null
 ab "filtered avg after deletes"     "SELECT coalesce(avg(v)::text,'z') FROM t WHERE k > 500"
 ab "count(*) filter after deletes"  "SELECT count(*) FROM t WHERE k > 500"
 
+# ---- the fold prunes row groups its zone maps rule out (#349 item 2) ---------
+# On clustered data a selective filter lets the reader skip whole groups. The
+# fold used to open the reader with no scan keys and read every group; now it
+# pushes the keys, so it prunes like the row path -- while still rechecking the
+# WHERE inline, so the answer is unchanged. Assert it removes groups, removes the
+# same ones the row path does, and returns the row path's value.
+psql_run "DROP TABLE IF EXISTS cl;
+          CREATE TABLE cl (x float8, y float8) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('cl'::regclass, stripe_row_limit => 10000);
+          INSERT INTO cl SELECT g::float8, (g % 100)::float8
+              FROM generate_series(1, 500000) g ORDER BY g;" >/dev/null
+removed() {  # removed <on|off> -- chunk groups removed by filter, via EXPLAIN ANALYZE
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "$NOPAR" -c "SET $GUC=$1" \
+		-c "EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF) SELECT count(*), sum(y) FROM cl WHERE x > 490000" 2>&1 |
+		grep -oiE 'Removed by Filter: [0-9]+' | grep -oE '[0-9]+' | head -1
+}
+FOLD_REMOVED="$(removed on)"
+check "fold prunes groups on a clustered filter (removed>0)" \
+	"$([ "${FOLD_REMOVED:-0}" -gt 0 ] 2>/dev/null && echo yes || echo no)" yes
+check "fold prunes the same groups the row path does" "$FOLD_REMOVED" "$(removed off)"
+ab "clustered filtered agg on==off" "SELECT count(*)::text || '|' || coalesce(sum(y)::text,'z') FROM cl WHERE x > 490000"
+
 check "server still up" "$(q "SELECT 1")" 1
 pgc_summary
