@@ -377,43 +377,115 @@ zstd compounds it, as the [Storage](#storage) section shows in detail.
 
 ### Cross-engine query latency
 
-Warm latency, median of three, in milliseconds:
+Measured on 2026-08-03 against `main` at commit `00290d7`, on the same
+100,000,000-row fixture. This is a new run, not a correction of the previous
+table row by row. The earlier figures were taken before column projection landed (issue #338,
+fixed in #339). Every query then read and decoded every column of the table,
+whatever it referenced. The queries behind those figures were also not recorded.
+The two runs cannot be compared line by line.
 
-| query | shape | pgColumnar | TimescaleDB | heap | Citus |
+Method for this run, stated so it can be repeated:
+
+- All three engines hold the same 100,000,000 rows, verified before measuring.
+- `cpu_pgc` and `cpu_heap` each carry a `(hostname, time DESC)` btree.
+  TimescaleDB carries the equivalent index on its chunks.
+- pgColumnar and heap run with `max_parallel_workers_per_gather = 4`.
+  TimescaleDB runs serial, because its parallel path fails on this host with
+  `could not read blocks 0..0`. That fault is not caused by pgColumnar: it
+  persists with every pgColumnar planner hook disabled, and the chunks use the
+  heap access method.
+- pgColumnar figures are given twice: with default settings, and with
+  `enable_ungrouped_vector_agg`, `enable_parallel_vector_agg` and
+  `enable_group_vectorization` all on. Those three default to off.
+- Warm, `EXPLAIN (ANALYZE)` execution time, after one warm-up run.
+- Citus was not re-measured and is omitted rather than carried forward from a
+  run whose configuration is unknown.
+
+Milliseconds:
+
+| query | shape | pgColumnar | pgColumnar, all options on | heap | TimescaleDB (serial) |
 | --- | --- | --- | --- | --- | --- |
-| q1 | one host, 1 hour | 994 | 4 | 11045 | 315 |
-| q2 | one host, 12 hours | 10532 | 5 | 11244 | 1935 |
-| q3 | one host, 12 hours, 5 aggregates | 10462 | 6 | 11341 | 3630 |
-| q4 | all hosts, 12 hours, group by host | 18856 | 5098 | 17290 | 6694 |
-| q5 | all hosts, 12 hours, 10 aggregates | 22671 | 10437 | 21247 | 15407 |
-| q6 | full scan, one value filter | 81966 | 1771 | 14699 | 8810 |
-| q7 | last point per host | 785 | 299 | 47 | timeout |
-| q8 | top 20 by max | 37397 | 7572 | 23970 | 12943 |
+| q1 | one host, 1 hour | 10335 | 10253 | 6 | 0 |
+| q2 | one host, 12 hours | 123546 | 119534 | 8 | 1 |
+| q3 | one host, 12 hours, 5 aggregates | 161972 | 156701 | 8 | 2 |
+| q4 | all hosts, 12 hours, group by host | 7322 | 7863 | 13912 | 4515 |
+| q5 | all hosts, 12 hours, 10 aggregates | 16443 | 28494 | 17378 | 9576 |
+| q6 | full scan, one value filter | 2292 | 1592 | 9083 | 6956 |
+| q7 | last point per host | 368 | 365 | 31 | 196 |
+| q8 | top 20 by max | 5153 | 5124 | 8715 | 10171 |
 
-Read this by query shape, not by a single winner. Three patterns hold.
+The SQL is given at the end of this section. The previous table did not record
+it, which is the main reason its numbers cannot be checked.
 
-**TimescaleDB wins the host-filtered queries by a wide margin.** q1 to q3 filter
-on one `hostname`. The columnstore segments by `hostname`, so it reads one segment
-and skips the rest. pgColumnar stores in time order, so its zone maps do not skip
-on `hostname` and it scans the range. This is a layout choice, not a ceiling. A
-separate run stored the same table clustered on the filter key. q1 to q3 then fell
-from about ten seconds to about one hundred milliseconds, because the zone maps
-skipped. The cost is the all-host queries, which the clustered layout slows.
+Results were verified against heap per query. Counts and `max` aggregates match
+exactly. Averages agree to within 2.9e-15 relative difference. The residual is float
+reassociation across parallel workers. Every group present in one engine is
+present in the other.
 
-**The full-scan aggregate is pgColumnar's weak shape today.** q6 reads every row
-and filters on a value column. pgColumnar serial is slower than heap on it. The
-decompression and aggregation path is not yet vectorized for this case. That work
-is [issue #289](https://github.com/jdatcmd/pgcolumnar/issues/289). The parallel
-scan below already brings q6 close to heap, and the vectorization will take it
-further.
+**q1 to q3 are a defect, not a storage property.** They filter on one host and
+return 360, 4,320 and 4,320 rows. Both engines take the same `Index Scan` plan on the equivalent index.
+pgColumnar costs about 28.7 milliseconds per row returned. That cost is flat
+across a twelve-fold change in row count. The cause is
+[issue #353](https://github.com/jdatcmd/pgcolumnar/issues/353). The default
+`stripe_row_limit` of 150,000 puts a table this wide over the 32 MB fetch cache
+limit. Every fetch by row number then decodes the whole row group again. Lowering
+`stripe_row_limit` to 100,000 on the same data takes the same query from 32.98 to
+0.177 milliseconds per row. Until that is fixed, a table that serves selective
+point queries through an index should be created with a smaller
+`stripe_row_limit`.
 
-**Citus and pgColumnar are within a small factor on the heavy grouped queries**
-(q4, q5, q8). Citus times out on last point (q7) at the 120-second limit.
+[Issue #355](https://github.com/jdatcmd/pgcolumnar/issues/355) compounds it.
+The planner will choose an index scan over a columnar table to obtain ordering.
+It does that because the per-row fetch cost is not modelled. That is why these queries should
+not be read as a measure of the storage format.
 
-The last-point query (q7) is not a scan number for pgColumnar or heap. Both tables
-have a `(hostname, time)` index. The query reads one row per host, so the planner
-walks the index rather than a full sort. TimescaleDB answers it from segment
-order.
+**pgColumnar leads on the scan-bound shapes.** q4, q6 and q8 read a large part of
+the table. pgColumnar is ahead of heap on all three, and ahead of TimescaleDB on
+q6 and q8. q6 in particular is 1592 ms against TimescaleDB's 6956 ms, where the
+earlier table recorded 81966 ms against 1771 ms. Column projection accounts for
+most of that change: on this fixture it alone takes q6 from 45094 ms to 6491 ms.
+
+**The optional vectorization is not uniformly a win.** It helps q6, at 2292 ms
+down to 1592 ms. It leaves q1, q3, q7 and q8 unchanged. It costs on q5, 16443 ms
+up to 28494 ms, which is not yet explained and is tracked in
+[issue #349](https://github.com/jdatcmd/pgcolumnar/issues/349). This is why those
+settings default to off.
+
+**TimescaleDB leads on the host-filtered queries** for the reason given before:
+its columnstore segments by `hostname`, so it reads one segment. pgColumnar
+stores in load order, so its zone maps do not skip on `hostname`. Clustering a
+pgColumnar table on the filter key addresses that, at the cost of the all-host
+queries.
+
+#### Queries
+
+```sql
+-- q1, q2: one host, 1 hour and 12 hours
+SELECT date_trunc('minute',time) m, max(usage_user) FROM cpu
+WHERE hostname='host_1' AND time >= '2024-01-01' AND time < '2024-01-01' + interval '1 hour'
+GROUP BY 1 ORDER BY 1;
+
+-- q3: as q2 with five aggregates
+SELECT date_trunc('minute',time) m, max(usage_user), max(usage_system),
+       max(usage_idle), max(usage_nice), max(usage_iowait) FROM cpu
+WHERE hostname='host_1' AND time >= '2024-01-01' AND time < '2024-01-01' + interval '12 hours'
+GROUP BY 1 ORDER BY 1;
+
+-- q4, q5: all hosts over 12 hours, one metric and ten
+SELECT date_trunc('hour',time) h, hostname, avg(usage_user) FROM cpu
+WHERE time >= '2024-01-01' AND time < '2024-01-01' + interval '12 hours'
+GROUP BY 1,2;
+
+-- q6: full scan, one value filter
+SELECT count(*), avg(usage_system) FROM cpu WHERE usage_user > 90.0;
+
+-- q7: last point per host
+SELECT DISTINCT ON (hostname) hostname, time, usage_user FROM cpu
+ORDER BY hostname, time DESC;
+
+-- q8: top 20 by max
+SELECT hostname, max(usage_user) mx FROM cpu GROUP BY 1 ORDER BY mx DESC LIMIT 20;
+```
 
 ### Parallel scan
 
