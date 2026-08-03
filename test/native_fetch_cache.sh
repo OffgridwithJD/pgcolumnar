@@ -135,4 +135,71 @@ check "the wide-group point query is correct (#353)" \
 	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wide WHERE h='h1'")" \
 	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wnarrow WHERE h='h1'")"
 
+# --- #359: crossing the cap must cost proportionally, not totally -------------
+# The #353 case above measures a two-column projection across two group sizes. It
+# therefore never crosses the relocated cap, and went green on exactly the query
+# family that still cliffed. The axis it holds constant is the one that mattered:
+# projection width at a fixed group size. This varies that instead.
+#
+# Each text column below decodes to ~154 bytes x 50,000 rows = ~7.7 MB, so the
+# 32 MB cap falls between four and five projected columns. Going over it used to
+# drop the entry whole, so the fifth column cost a re-read of the group and a
+# re-decode of all five, on every fetch. The cache now keeps the columns that fit
+# and re-decodes only the remainder.
+#
+# Measured here, PG18 assert, going from four to five columns. Both figures are
+# from this suite rather than from a standalone probe, because the ~600 MB of
+# fixtures built above leave the box in a different state than a cold one, and the
+# ratio moves with it -- the same fixed build measures 2.2x standalone and 5.8x
+# here. Comparing a suite number against a standalone number would be comparing
+# two machines:
+#   before   77 ms -> 1902 ms   (24.7x, flat either side -- the cliff)
+#   after    64 ms ->  368 ms   (5.8x -- a ramp)
+# Four runs of the fixed build in this suite gave 5.6x, 5.6x, 5.9x and 6.4x. The
+# bound is 12x, roughly a factor of two clear of either build, so it discriminates
+# the shape rather than encoding one box's timings.
+psql_run "DROP TABLE IF EXISTS fc_w359;
+	CREATE TABLE fc_w359 (id int, h text,
+	    t1 text,t2 text,t3 text,t4 text,t5 text) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('fc_w359', stripe_row_limit => 50000);
+	INSERT INTO fc_w359 SELECT g, 'h' || (g % 1000),
+	    repeat('a',150),repeat('b',150),repeat('c',150),
+	    repeat('d',150),repeat('e',150)
+	FROM generate_series(1,100000) g;
+	CREATE INDEX fc_w359_h ON fc_w359 (h);"
+
+w359_ms() {  # number of projected text columns
+	local n=$1 sel="count(*)" i start end
+	for i in $(seq 1 "$n"); do sel="$sel, max(t$i)"; done
+	# warm, so the comparison is decode cost rather than first-touch I/O
+	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off;
+		SET enable_bitmapscan=off;
+		SELECT $sel FROM fc_w359 WHERE h='h7';" >/dev/null 2>&1
+	start=$(date +%s%N)
+	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off;
+		SET enable_bitmapscan=off;
+		SELECT $sel FROM fc_w359 WHERE h='h7';" >/dev/null 2>&1
+	end=$(date +%s%N); echo $(( (end - start) / 1000000 ))
+}
+
+under="$(w359_ms 4)"   # ~30 MB decoded: fits
+over="$(w359_ms 5)"    # ~38 MB decoded: does not
+echo "-- #359 projection width: four columns ${under} ms, five columns ${over} ms"
+check_timing "crossing the fetch cache cap costs proportionally, not totally (#359)" \
+	"$( [ "$under" -gt 0 ] && [ $(( over / (under > 0 ? under : 1) )) -lt 12 ] && echo yes ||
+		echo "no (four=${under}ms five=${over}ms)")" \
+	"yes"
+
+# The columns that overflow are re-decoded rather than skipped, so they must still
+# read correctly -- a cache that quietly returned nulls for them would be fast and
+# wrong, and the timing check alone would not notice.
+check "the over-cap projection returns the same values as the under-cap one (#359)" \
+	"$(q "SELECT max(t1) || '|' || max(t4) FROM fc_w359 WHERE h='h7'")" \
+	"$(q "SELECT max(t1) || '|' || max(t4) FROM fc_w359 WHERE h='h7' AND t5 IS NOT NULL")"
+check "every over-cap column reads back its written value (#359)" \
+	"$(q "SELECT count(*) FROM fc_w359 WHERE h='h7'
+	      AND t1 = repeat('a',150) AND t2 = repeat('b',150) AND t3 = repeat('c',150)
+	      AND t4 = repeat('d',150) AND t5 = repeat('e',150)")" \
+	"$(q "SELECT count(*) FROM fc_w359 WHERE h='h7'")"
+
 pgc_summary

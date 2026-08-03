@@ -609,6 +609,7 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 	double		groups_min,
 				groups_max,
 				groups_decoded,
+				decoded_width,
 				csq;
 
 	if (rows <= 0 || R < 1)
@@ -635,9 +636,25 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 		groups_decoded = groups_min + (groups_max - groups_min) * (1.0 - csq);
 	}
 
-	/* #359 cliff: a group too wide to cache is re-decoded on every fetch */
-	if ((double) rel->reltarget->width * R > (double) COLUMNAR_FETCH_CACHE_MAX_BYTES)
-		groups_decoded = groups_max;
+	/*
+	 * A group too wide to hold entirely in the fetch cache re-decodes the part
+	 * that did not fit, once per fetch rather than once per group.
+	 *
+	 * This was a cliff -- the whole entry was dropped, so exceeding the cap by
+	 * any margin meant every group re-decoded, and the model said so. #359 made
+	 * the cache admit columns until the cap and re-decode only the remainder, so
+	 * the extra decoding is now the overflow *fraction* of the projection. Model
+	 * it the same way: blend between decoding each group once and decoding one
+	 * per fetch, by how much of the decoded group does not fit.
+	 */
+	decoded_width = (double) rel->reltarget->width * R;
+	if (decoded_width > (double) COLUMNAR_FETCH_CACHE_MAX_BYTES)
+	{
+		double		resident = (double) COLUMNAR_FETCH_CACHE_MAX_BYTES /
+			decoded_width;
+
+		groups_decoded += (groups_max - groups_decoded) * (1.0 - resident);
+	}
 
 	if (groups_decoded < 0)
 		groups_decoded = 0;
