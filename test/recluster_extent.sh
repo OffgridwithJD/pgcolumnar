@@ -144,6 +144,36 @@ check "the id-drawn-below counts still cover every stored row" \
 	"$(raw "SELECT (sorted_rows + appended_rows = (SELECT sum(rowcount) FROM pgcolumnar.stats('d')))::text
 			FROM pgcolumnar.sort_status('d');")" "true"
 
+# ------------------------------- a projection must not read as foreign (#345)
+
+# The rewrite's projection fan-out writes through its own write state but draws
+# stripe ids from THIS relation's counter, and records its groups under the
+# projection's own storage id. So its ids interleave with the rewrite's own and
+# are invisible in the base relation's group list -- exactly what a foreign
+# reservation looks like. Treating them as foreign truncated the ordered run at
+# the first projection flush, so a table that had just been fully reclustered
+# reported almost all of itself as decayed.
+#
+# Both arms are identical except for the projection, so the projection is
+# established as the cause rather than assumed.
+for arm in noproj withproj; do
+	raw "DROP TABLE IF EXISTS pr_$arm;" >/dev/null
+	raw "CREATE TABLE pr_$arm (id int, k int, v text) USING pgcolumnar;" >/dev/null
+	raw "SELECT pgcolumnar.set_options('pr_$arm', stripe_row_limit => 20000);" >/dev/null
+	raw "INSERT INTO pr_$arm SELECT g, ((g::bigint * 7919) % 100000)::int, 'v' || g
+	     FROM generate_series(1, 200000) g;" >/dev/null
+	if [ "$arm" = withproj ]; then
+		E="$(raw "SELECT pgcolumnar.add_projection('pr_$arm', 'p_$arm', ARRAY['k','id'], ARRAY['k']);")"
+		case "$E" in *ERROR*) echo "      add_projection failed: $E";; esac
+	fi
+	raw "SELECT pgcolumnar.recluster('pr_$arm', 'id', 'k');" >/dev/null
+	S="$(raw "SELECT sorted_rows FROM pgcolumnar.sort_status('pr_$arm');")"
+	A="$(raw "SELECT appended_rows FROM pgcolumnar.sort_status('pr_$arm');")"
+	echo "      $arm: sorted $S, appended $A"
+	check "$arm: a full recluster claims every row" "$S" "200000"
+	check "$arm: a full recluster leaves nothing appended" "$A" "0"
+done
+
 # ---------------------------------------------------- the uncontended case
 
 # With no concurrent writer the rewrite orders everything, so the run covers the
