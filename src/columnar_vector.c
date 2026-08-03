@@ -1866,7 +1866,16 @@ columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
 				elems[0] = Float8GetDatum((float8) spec->count);
 				elems[1] = Float8GetDatum(spec->fsum);
 				elems[2] = Float8GetDatum(spec->fsxx);
-				return PointerGetDatum(construct_array_builtin(elems, 3, FLOAT8OID));
+				/*
+				 * construct_array with explicit float8 type params, exactly as
+				 * core's float8_accum builds this transition array. NOT
+				 * construct_array_builtin: its supported-type list did not include
+				 * float8 (type 701) until PG18, so it errors on PG15-17.
+				 */
+				return PointerGetDatum(construct_array(elems, 3, FLOAT8OID,
+													   sizeof(float8),
+													   FLOAT8PASSBYVAL,
+													   TYPALIGN_DOUBLE));
 			}
 
 		default:
