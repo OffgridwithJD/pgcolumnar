@@ -2363,6 +2363,19 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.enable_index_fetch_penalty",
+							 "Add the cost of the row-group decodes a columnar index "
+							 "scan's per-row heap fetches force (#355).",
+							 "A columnar heap fetch decodes the whole row group the row "
+							 "lives in, so an unclustered ordered index scan can cost far "
+							 "more than core's per-page estimate. Off restores the "
+							 "unpenalized planner behaviour.",
+							 &columnar_enable_index_fetch_penalty,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.bulk_parallel_writer",
 							 "Internal. Set by pgcolumnar.parallel_copy loader workers "
 							 "so they skip the storage-row creation lock when the row "

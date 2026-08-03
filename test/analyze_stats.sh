@@ -328,4 +328,73 @@ check "ANALYZE on a wide table is not many times a full scan of it" \
 		'BEGIN { print (s > 0 && a < s * 20) ? "yes" : "no (" a "ms against a " s "ms scan)" }')" \
 	"yes"
 
+# --- 6. the fetch cost keeps the planner off an unclustered ordered index (#355) --
+#
+# An ordered index scan on a columnar table pays for the order by fetching each row
+# by number, and each fetch decodes the whole row group the row lives in. When the
+# ordering column is unclustered those rows are scattered across every group, so the
+# scan decodes the table many times over -- but core prices the fetch as a page or
+# two and picks the index to avoid a sort. columnar_index_fetch_penalty adds the
+# decode cost, so a sort over the scan wins instead. Measured on the bench, an
+# unclustered ORDER BY that took minutes on the index dropped to seconds once it
+# sorted.
+#
+# The checks are behavioural (plan shape), and paired: the same query is planned
+# with the penalty on and off, so the second is the premise of the first -- if the
+# planner would not have taken the index without the penalty there is nothing for it
+# to have prevented. random_page_cost is set to the SSD value the penalty has to
+# overcome; parallelism is off so the plan shape is deterministic.
+O355_ROWS=${PGC_O355_ROWS:-300000}
+# scat is a full permutation of 0..N-1 (48271 is coprime to N), so it is maximally
+# unclustered against row order -- correlation ~0. The multiply is done in bigint;
+# g*48271 overflows int4 well before g reaches N.
+psql_run "DROP TABLE IF EXISTS o355;
+	CREATE TABLE o355 (id int, scat int, pad text) USING pgcolumnar;
+	INSERT INTO o355 SELECT g, ((g::bigint * 48271) % $O355_ROWS)::int, repeat('p', 48)
+		FROM generate_series(1, $O355_ROWS) g;
+	CREATE INDEX o355_scat ON o355 (scat);
+	CREATE INDEX o355_id ON o355 (id);
+	ANALYZE o355;" >/dev/null
+
+# SET and EXPLAIN must share one q call (one psql session) for the GUC to apply to
+# the plan; q does not pass -q, so strip the SET command tags it echoes.
+ord_setup="SET max_parallel_workers_per_gather = 0; SET random_page_cost = 1.0;"
+plan_of() { q "$1" | grep -v '^SET$'; }
+
+# premise: without the penalty the planner takes the scattered index for ordering
+plan_off="$(plan_of "${ord_setup} SET pgcolumnar.enable_index_fetch_penalty = off;
+	EXPLAIN (COSTS off) SELECT * FROM o355 ORDER BY scat;")"
+echo "-- ORDER BY scat, penalty off: $(printf '%s' "$plan_off" | grep -m1 -E 'Scan|Sort')"
+check "without the fetch penalty an unclustered ORDER BY takes the index (#355 premise)" \
+	"$(grep -q 'Index Scan using o355_scat' <<<"$plan_off" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_off" | head -1))")" \
+	"yes"
+
+# with the penalty (on by default) the same query sorts instead of fetching per row
+plan_on="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o355 ORDER BY scat;")"
+echo "-- ORDER BY scat, penalty on: $(printf '%s' "$plan_on" | grep -m1 -E 'Scan|Sort')"
+check "the fetch penalty makes an unclustered ORDER BY sort rather than fetch per row (#355)" \
+	"$(  grep -qE 'Sort' <<<"$plan_on" && ! grep -q 'Index Scan using o355_scat' <<<"$plan_on" \
+		&& echo yes || echo "no ($(printf '%s' "$plan_on" | head -1))")" \
+	"yes"
+
+# safety: a clustered ordering column is still cheap to fetch, so the penalty must
+# not cost it out of the index -- this is the direction that would silently regress.
+plan_cl="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o355 ORDER BY id;")"
+echo "-- ORDER BY id (clustered), penalty on: $(printf '%s' "$plan_cl" | grep -m1 -E 'Scan|Sort')"
+check "the fetch penalty leaves a clustered ORDER BY on its index (#355 must not over-fire)" \
+	"$(grep -q 'Index Scan using o355_id' <<<"$plan_cl" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_cl" | head -1))")" \
+	"yes"
+
+# safety: a selective point lookup must still take the index (guards #171 under the
+# penalty, on a table that also carries a scattered secondary index)
+o355_target=$(( O355_ROWS / 2 ))
+plan_pt="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o355 WHERE id = $o355_target;")"
+echo "-- point lookup on id, penalty on: $(printf '%s' "$plan_pt" | grep -m1 -E 'Scan|Sort')"
+check "the fetch penalty leaves a selective point lookup on the index (#355 vs #171)" \
+	"$(grep -qE 'Index (Only )?Scan|Bitmap Heap Scan' <<<"$plan_pt" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_pt" | head -1))")" \
+	"yes"
+
 pgc_summary

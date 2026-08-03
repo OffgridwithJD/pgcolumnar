@@ -1791,8 +1791,9 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  * rather than derived from the stored byte length: the stored form is encoded and
  * compressed, so a group of wide text decodes to many times its size on disk, and
  * sizing from disk would overshoot worst on exactly the tables this helps most.
+ * COLUMNAR_FETCH_CACHE_MAX_BYTES is defined in columnar.h so the index-fetch cost
+ * model (#355) can name the same cap.
  */
-#define COLUMNAR_FETCH_CACHE_MAX_BYTES	(32 * 1024 * 1024)
 
 typedef struct ColumnarFetchGroup
 {
