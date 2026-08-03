@@ -1457,6 +1457,63 @@ typedef struct ColumnarProjWriter
 	MemoryContext rowCtx;		/* reset after each stripe flush: row datums */
 	ColumnarWriteState *innerWs;	/* reused stripe encoder for this projection */
 } ColumnarProjWriter;
+/*
+ * ColumnarWriteStateProjStripeIds
+ *		The stripe ids this write state's projection fan-out drew (#345).
+ *
+ *		A projection writes through its own inner write state but reserves from
+ *		the BASE relation's stripe counter, because ColumnarWriteRow is called
+ *		with the base relation (see flush_proj_writer). Its groups are recorded
+ *		under the projection's own storage id, so they never appear in the base
+ *		relation's row group list.
+ *
+ *		That combination is why the caller needs these separately. To
+ *		record_online_sorted_extent, an id drawn by its own projection fan-out is
+ *		indistinguishable from one taken by another session: both leave a gap in
+ *		the base write state's ids. Treating the former as foreign truncated the
+ *		ordered run at the first projection flush, so a fully reclustered table
+ *		with a projection reported almost all of itself as decayed.
+ *
+ *		Returns a palloc'd array in the caller's context, or NULL when this write
+ *		state has no projection writers.
+ */
+uint64 *
+ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n)
+{
+	ListCell   *lc;
+	uint64	   *ids = NULL;
+	int			total = 0;
+	int			k = 0;
+
+	*n = 0;
+	if (ws->projWriters == NIL)
+		return NULL;
+
+	foreach(lc, ws->projWriters)
+	{
+		ColumnarProjWriter *w = (ColumnarProjWriter *) lfirst(lc);
+
+		if (w->innerWs != NULL)
+			total += w->innerWs->nReservedStripeIds;
+	}
+	if (total == 0)
+		return NULL;
+
+	ids = (uint64 *) palloc(sizeof(uint64) * total);
+	foreach(lc, ws->projWriters)
+	{
+		ColumnarProjWriter *w = (ColumnarProjWriter *) lfirst(lc);
+		int			i;
+
+		if (w->innerWs == NULL)
+			continue;
+		for (i = 0; i < w->innerWs->nReservedStripeIds; i++)
+			ids[k++] = w->innerWs->reservedStripeIds[i];
+	}
+	*n = k;
+	return ids;
+}
+
 
 /*
  * columnar_build_write_state

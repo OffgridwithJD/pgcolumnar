@@ -336,10 +336,44 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 	if (nOurs <= 0)
 		return;					/* this rewrite reserved nothing */
 
-	/* our own reservations, ascending */
+	/*
+	 * Our own reservations, ascending -- including the ones our projection
+	 * fan-out drew (#345). A projection writes through its own write state but
+	 * reserves from this relation's stripe counter, so its ids interleave with
+	 * ours and would otherwise read as foreign reservations, truncating the run
+	 * at the first projection flush. They are ours: the same transaction drew
+	 * them. Only ids at or above our own first one are taken, so anything drawn
+	 * before this rewrite began is still excluded.
+	 */
 	ours = (uint64 *) palloc(sizeof(uint64) * nOurs);
 	memcpy(ours, all + stripeMark, sizeof(uint64) * nOurs);
 	qsort(ours, nOurs, sizeof(uint64), uint64_cmp);
+
+	{
+		int			nProj = 0;
+		uint64	   *projIds = ColumnarWriteStateProjStripeIds(writeState, &nProj);
+
+		if (nProj > 0)
+		{
+			uint64		lo = ours[0];
+			uint64	   *merged = (uint64 *) palloc(sizeof(uint64) * (nOurs + nProj));
+			int			m = nOurs;
+			int			j;
+
+			memcpy(merged, ours, sizeof(uint64) * nOurs);
+			for (j = 0; j < nProj; j++)
+			{
+				if (projIds[j] >= lo)
+					merged[m++] = projIds[j];
+			}
+			pfree(ours);
+			ours = merged;
+			nOurs = m;
+			qsort(ours, nOurs, sizeof(uint64), uint64_cmp);
+		}
+		if (projIds != NULL)
+			pfree(projIds);
+	}
 
 	/* the consecutive run of our own ids, starting at the lowest */
 	runEnd = ours[0];
