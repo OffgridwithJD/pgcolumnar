@@ -19,6 +19,9 @@
 # Usage:
 #   test/extension_upgrade.sh [PG_CONFIG] [OLD_REF_OR_DIR]
 #
+# PGC_UPGRADE_OLD_SRC is the same thing by environment, which is how run_all_versions.sh
+# supplies it in an environment with no .git. An explicit second argument wins over it.
+#
 # The second argument is either a git ref or a path to an already-checked-out source
 # tree. A ref defaults to the previous release and is built in a throwaway clone, so the
 # working tree is never checked out from under the caller.
@@ -34,7 +37,7 @@
 set -uo pipefail
 
 PG_CONFIG=${1:-pg_config}
-OLD_SRC=${2:-v1.0-alpha}
+OLD_SRC=${2:-${PGC_UPGRADE_OLD_SRC:-v1.0-alpha}}
 SRCDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # The cluster binds a port, so it must come from the band portlib.sh carves BELOW the
@@ -66,17 +69,34 @@ q () { runpg "$BINDIR/psql" -h /tmp -p "$PORT" -d extupg -X -Atc "$1" 2>&1; }
 echo "== extension_upgrade: PG$PGMAJ, old $OLD_SRC"
 
 # ---- 1. build and install the old extension, from a throwaway clone ------------------
-# Directory form first: a path to an already-checked-out old tree needs no git at all.
+# Skip and fail are different answers, and the difference is who asked for what.
+#
+#   named an old source that cannot be honoured -> FAIL, the caller asked for a thing
+#   named nothing, and the tree cannot supply one -> SKIP, the environment cannot
+#
+# A silent skip that exits 0 is the bug this suite exists to catch, so the skip is loud,
+# reports SKIP rather than PASS, and exits 2 so the runner can tell the two apart.
+EXPLICIT=0
+{ [ "$#" -ge 2 ] || [ -n "${PGC_UPGRADE_OLD_SRC:-}" ]; } && EXPLICIT=1
+
+if [ "$EXPLICIT" = 0 ] && [ ! -d "$SRCDIR/.git" ]; then
+	echo "  SKIP  $SRCDIR is not a git checkout, so the default ref $OLD_SRC cannot be built."
+	echo "        The container loop copies the tree without .git. Supply the old source:"
+	echo "        PGC_UPGRADE_OLD_SRC=/path/to/old/source, or pass it as the second argument."
+	echo "== extension_upgrade: SKIP"
+	exit 2
+fi
+
+# Directory form: a path to an already-checked-out old tree needs no git at all.
 if [ -d "$OLD_SRC" ]; then
 	[ -f "$OLD_SRC/Makefile" ] || { echo "  FAIL  $OLD_SRC has no Makefile"; exit 1; }
 	cp -a "$OLD_SRC" "$TMP/old" || { echo "FATAL: could not copy $OLD_SRC"; exit 1; }
 	echo "  old source: directory $OLD_SRC"
 else
-	# A missing ref must fail, not skip. This gate is invoked deliberately, and a skip
-	# that exits 0 would let it go inert the moment someone clones without tags. That is
-	# the same shape as the bug it exists to catch: everything green, nothing checked.
+	# Only reachable when an old source was named explicitly, so this is a failure and
+	# not a skip: the caller asked for something this tree cannot provide.
 	if [ ! -d "$SRCDIR/.git" ]; then
-		echo "  FAIL  $SRCDIR is not a git checkout, so the ref form cannot work here."
+		echo "  FAIL  $SRCDIR is not a git checkout, so the ref $OLD_SRC cannot be built."
 		echo "        The container loop copies the tree without .git. Pass a directory:"
 		echo "        test/extension_upgrade.sh $PG_CONFIG /path/to/old/source"
 		exit 1

@@ -200,6 +200,18 @@ Pass a directory holding the old source instead:
 test/extension_upgrade.sh /usr/local/pg18/bin/pg_config /root/pgcolumnar-1.0-alpha
 ```
 
+Through the runner, give it the same directory by environment:
+
+```sh
+PGC_RUN_UPGRADE=1 PGC_UPGRADE_OLD_SRC=/root/pgcolumnar-1.0-alpha \
+    test/run_all_versions.sh
+```
+
+Without it, in a tree that has no `.git`, the suite reports **SKIP** and the matrix
+records `SKIP`. It does not report a pass, because a gate that goes green having run
+nothing is the defect this suite exists to catch. It does not report a failure either. Being unable to
+obtain an old build is a property of the environment, not of the code under test.
+
 ## make installcheck
 
 The conventional entry point for a PostgreSQL extension:
