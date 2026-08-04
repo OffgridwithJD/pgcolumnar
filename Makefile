@@ -30,7 +30,7 @@ OBJS = \
 	src/columnar_parallel_export.o
 
 EXTENSION = pgcolumnar
-DATA = pgcolumnar--1.0-dev.sql
+DATA = pgcolumnar--1.0-alpha.sql pgcolumnar--1.0-dev--1.0-alpha.sql
 PGFILEDESC = "pgColumnar - column-oriented table access method"
 
 # make installcheck. Not the project's gate -- that is test/run_all_versions.sh,
