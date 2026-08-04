@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parallel_copy.c
+ * pgcolumnar_parallel_copy.c
  *		Parallel bulk ingest for pgColumnar (#300).
  *
  * Splits a load across background workers, each running core COPY over a
@@ -22,8 +22,8 @@
  *   - the single (non-partitioned) columnar table shape: N loaders write ONE shared
  *     storage concurrently. Here parallelism does not come from distinct storage;
  *     it comes from the coordinator pre-creating and committing the storage row so
- *     the loaders skip its creation lock, each writing via columnar_bulk_parallel_writer.
- *   - a standalone byte splitter (columnar_file_split_offsets) exposed to SQL: N+1
+ *     the loaders skip its creation lock, each writing via pgcolumnar_bulk_parallel_writer.
+ *   - a standalone byte splitter (pgcolumnar_file_split_offsets) exposed to SQL: N+1
  *     line-aligned offsets, a diagnostic the parallel load itself no longer calls.
  * Text format only for now, numeric/date-time partition keys only (their text form
  * is escape-free); CSV and other key types are later phases (see the plan).
@@ -223,10 +223,10 @@ pcopy_naive_offsets(const char *path, int workers)
 	return offs;
 }
 
-PG_FUNCTION_INFO_V1(columnar_file_split_offsets);
+PG_FUNCTION_INFO_V1(pgcolumnar_file_split_offsets);
 
 /*
- * columnar_file_split_offsets(path text, workers int) -> bigint[]
+ * pgcolumnar_file_split_offsets(path text, workers int) -> bigint[]
  *
  * Returns workers+1 ascending byte offsets [0 .. filesize] that split the file
  * into `workers` line-aligned ranges. off[0] is always 0 and off[workers] is
@@ -241,7 +241,7 @@ PG_FUNCTION_INFO_V1(columnar_file_split_offsets);
  * PCOPY_MAX_WORKERS.
  */
 Datum
-columnar_file_split_offsets(PG_FUNCTION_ARGS)
+pgcolumnar_file_split_offsets(PG_FUNCTION_ARGS)
 {
 	char	   *path;
 	int32		workers;
@@ -363,7 +363,7 @@ typedef struct PcopyHeader
 	int			nworkers;
 	bool		single_table;	/* target is one columnar table (not partitioned):
 								 * coordinator pre-creates the storage row and loaders
-								 * set columnar_bulk_parallel_writer */
+								 * set pgcolumnar_bulk_parallel_writer */
 	char		filename[MAXPGPATH];
 	/* coordinator -> function result channel */
 	pg_atomic_uint32 coord_state;	/* PcopyCoordState */
@@ -777,7 +777,7 @@ pgcolumnar_parallel_copy_worker(Datum main_arg)
 	 * never contends, so the flag stays off there.
 	 */
 	if (hdr->single_table)
-		columnar_bulk_parallel_writer = true;
+		pgcolumnar_bulk_parallel_writer = true;
 
 	PG_TRY();
 	{
@@ -1017,7 +1017,7 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 	 * Single-table load: pre-create and COMMIT the storage catalog row before any
 	 * loader starts, in the coordinator's own top-level session (the SQL function
 	 * cannot commit). With the row committed, each loader -- which sets
-	 * columnar_bulk_parallel_writer -- sees it and skips the storage-row creation
+	 * pgcolumnar_bulk_parallel_writer -- sees it and skips the storage-row creation
 	 * lock, so N loaders write the one storage concurrently and 2PC-safely. The
 	 * coordinator itself leaves the flag off, so this uses the normal create path.
 	 */
@@ -1028,7 +1028,7 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 		StartTransactionCommand();
 		/*
 		 * StartTransactionCommand does not push an active snapshot, but
-		 * ColumnarEnsureStorageRow reads pgcolumnar.options/storage via
+		 * PgColumnarEnsureStorageRow reads pgcolumnar.options/storage via
 		 * systable scans, and those visibility checks require a registered or
 		 * active snapshot. A normal backend has one from the executor; this
 		 * bgworker does not, so push one explicitly. Without it the scan runs
@@ -1038,7 +1038,7 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 		 */
 		PushActiveSnapshot(GetTransactionSnapshot());
 		rel = table_open(hdr->relid, RowExclusiveLock);
-		ColumnarEnsureStorageRow(rel);
+		PgColumnarEnsureStorageRow(rel);
 		table_close(rel, NoLock);
 		PopActiveSnapshot();
 		CommitTransactionCommand();
@@ -1213,17 +1213,17 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 	proc_exit(0);
 }
 
-PG_FUNCTION_INFO_V1(columnar_parallel_copy);
+PG_FUNCTION_INFO_V1(pgcolumnar_parallel_copy);
 
 /*
- * columnar_parallel_copy(target regclass, filename text, workers int)
+ * pgcolumnar_parallel_copy(target regclass, filename text, workers int)
  *		-> rows loaded.
  *
  * Atomic bulk load: launches the coordinator bgworker (which spawns the loaders,
  * 2-phase-commits them all or rolls them all back) and returns its total.
  */
 Datum
-columnar_parallel_copy(PG_FUNCTION_ARGS)
+pgcolumnar_parallel_copy(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *path;
@@ -1272,7 +1272,7 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 	 *     partition-aligned byte ranges (this may lower `workers` to the partition
 	 *     count), which requires the file sorted by the partition key.
 	 *   - a single columnar table: the loaders write the one storage concurrently
-	 *     via columnar_bulk_parallel_writer (see below), so a naive record-aligned
+	 *     via pgcolumnar_bulk_parallel_writer (see below), so a naive record-aligned
 	 *     byte split is enough and the file needs no ordering.
 	 * Any other target (e.g. a heap, or a partitioned table with non-columnar
 	 * partitions) is rejected. A naive split of one non-partitioned columnar table
@@ -1308,13 +1308,13 @@ columnar_parallel_copy(PG_FUNCTION_ARGS)
 			offs = pcopy_partition_aligned_offsets(target, path, &workers);
 			single_table = false;
 		}
-		else if (ColumnarIsColumnarRelation(relid))
+		else if (PgColumnarIsColumnarRelation(relid))
 		{
 			/*
 			 * A single columnar table: workers write the ONE storage concurrently
 			 * (distinct stripe/row-number reservations; the coordinator pre-creates
 			 * the storage row and the loaders skip its creation lock via
-			 * columnar_bulk_parallel_writer). Any record-aligned byte split is
+			 * pgcolumnar_bulk_parallel_writer). Any record-aligned byte split is
 			 * correct -- no partition key, so no sorted-input requirement.
 			 */
 			offs = pcopy_naive_offsets(path, workers);

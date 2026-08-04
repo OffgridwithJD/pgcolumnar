@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parquet_codec.c
- *		Parquet data-page decompression. See columnar_parquet_codec.h.
+ * pgcolumnar_parquet_codec.c
+ *		Parquet data-page decompression. See pgcolumnar_parquet_codec.h.
  *
  * Written fresh for pgColumnar from the public Apache Parquet specification and
  * the public Snappy format description.
@@ -143,7 +143,7 @@ snappy_raw_uncompress(const uint8 *in, size_t inlen, StringInfo out)
  * driven to allocate or inflate more than the header declares.
  */
 bool
-ColumnarParquetDecompress(int codec, const uint8 *src, size_t srclen, size_t usize,
+PgColumnarParquetDecompress(int codec, const uint8 *src, size_t srclen, size_t usize,
 			  StringInfo scratch, const uint8 **out, size_t *outlen)
 {
 	if (srclen > MaxAllocSize || usize > MaxAllocSize)

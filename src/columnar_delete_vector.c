@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_delete_vector.c
+ * pgcolumnar_delete_vector.c
  *		Delete and update marking for pgColumnar (spec 7.5, 9). Deletes do not
  *		rewrite stripes; instead a bit is set in the columnar.delete_vector entry for
  *		the affected chunk group. Update is delete-plus-insert, so it also uses
@@ -57,8 +57,8 @@ typedef struct DeleteVectorBuffer
 	DeleteVectorChunkBuffer *lastChunk;
 } DeleteVectorBuffer;
 
-static MemoryContext ColumnarDeleteVectorContext = NULL;
-static List *ColumnarDeleteVectorBuffers = NIL;
+static MemoryContext PgColumnarDeleteVectorContext = NULL;
+static List *PgColumnarDeleteVectorBuffers = NIL;
 
 static DeleteVectorBuffer *delete_vector_get_buffer(Relation rel, uint64 storageId);
 static NativeRowGroupMetadata *delete_vector_find_row_group(DeleteVectorBuffer *buf,
@@ -74,7 +74,7 @@ static void delete_vector_flush_buffer(DeleteVectorBuffer *buf);
  * delete_vector_chunk_cmp
  *		Total order over chunk-group buffers by (stripeId, chunkId,
  *		startRowNumber). Flushing in this order makes every transaction acquire
- *		the per-chunk-group locks (columnar_metadata.c) in the same global
+ *		the per-chunk-group locks (pgcolumnar_metadata.c) in the same global
  *		order, so two concurrent deleters cannot form an AB-BA deadlock cycle.
  */
 static int
@@ -105,19 +105,19 @@ delete_vector_get_buffer(Relation rel, uint64 storageId)
 	MemoryContext oldContext;
 	DeleteVectorBuffer *buf;
 
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 	{
 		buf = (DeleteVectorBuffer *) lfirst(lc);
 		if (buf->storageId == storageId && buf->subid == subid)
 			return buf;
 	}
 
-	if (ColumnarDeleteVectorContext == NULL)
-		ColumnarDeleteVectorContext = AllocSetContextCreate(TopTransactionContext,
+	if (PgColumnarDeleteVectorContext == NULL)
+		PgColumnarDeleteVectorContext = AllocSetContextCreate(TopTransactionContext,
 													   "columnar delete vector",
 													   ALLOCSET_DEFAULT_SIZES);
 
-	oldContext = MemoryContextSwitchTo(ColumnarDeleteVectorContext);
+	oldContext = MemoryContextSwitchTo(PgColumnarDeleteVectorContext);
 	buf = palloc0(sizeof(DeleteVectorBuffer));
 	buf->relid = RelationGetRelid(rel);
 	buf->storageId = storageId;
@@ -126,7 +126,7 @@ delete_vector_get_buffer(Relation rel, uint64 storageId)
 	buf->rowGroupCache = NIL;
 	buf->lastChunk = NULL;
 	buf->lastGroup = NULL;
-	ColumnarDeleteVectorBuffers = lappend(ColumnarDeleteVectorBuffers, buf);
+	PgColumnarDeleteVectorBuffers = lappend(PgColumnarDeleteVectorBuffers, buf);
 	MemoryContextSwitchTo(oldContext);
 
 	return buf;
@@ -166,10 +166,10 @@ delete_vector_find_row_group(DeleteVectorBuffer *buf, uint64 rowNumber)
 		if (attempt == 0)
 		{
 			MemoryContext oldContext =
-				MemoryContextSwitchTo(ColumnarDeleteVectorContext);
-			Snapshot	snap = ColumnarCatalogSnapshot(GetActiveSnapshot());
+				MemoryContextSwitchTo(PgColumnarDeleteVectorContext);
+			Snapshot	snap = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 
-			buf->rowGroupCache = ColumnarReadRowGroupList(buf->storageId, snap);
+			buf->rowGroupCache = PgColumnarReadRowGroupList(buf->storageId, snap);
 			buf->lastGroup = NULL;	/* points into the list just replaced */
 			MemoryContextSwitchTo(oldContext);
 		}
@@ -206,7 +206,7 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
 		}
 	}
 
-	oldContext = MemoryContextSwitchTo(ColumnarDeleteVectorContext);
+	oldContext = MemoryContextSwitchTo(PgColumnarDeleteVectorContext);
 	chunk = palloc0(sizeof(DeleteVectorChunkBuffer));
 	chunk->stripeId = stripeId;
 	chunk->chunkId = chunkId;
@@ -223,7 +223,7 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
 }
 
 /*
- * ColumnarMarkRowDeleted
+ * PgColumnarMarkRowDeleted
  *		Record that the row with the given 1-based row number is deleted, by
  *		setting its bit in the in-memory delete buffer for its chunk group.
  *		The mark targets the whole enclosing row group as one bitmap (chunk id
@@ -231,9 +231,9 @@ delete_vector_get_chunk(DeleteVectorBuffer *buf, uint64 stripeId, int chunkId,
  *		delete_vector_find_row_group using its firstRowNumber and rowCount.
  */
 void
-ColumnarMarkRowDeleted(Relation rel, uint64 rowNumber)
+PgColumnarMarkRowDeleted(Relation rel, uint64 rowNumber)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	DeleteVectorBuffer *buf = delete_vector_get_buffer(rel, storageId);
 	uint64		startRowNumber;
 	uint64		endRowNumber;
@@ -263,26 +263,26 @@ ColumnarMarkRowDeleted(Relation rel, uint64 rowNumber)
 	 * index-only scan never skips the fetch for a block with a dead row (gap 28).
 	 * A no-op unless a prior vacuum had marked the block visible.
 	 */
-	ColumnarVMClearForRow(rel, rowNumber);
+	PgColumnarVMClearForRow(rel, rowNumber);
 }
 
 /*
- * ColumnarDeleteVectorBufferedDeleted
+ * PgColumnarDeleteVectorBufferedDeleted
  *		True when the row is marked deleted in an in-memory row-mask buffer that
  *		has not yet been flushed to the catalog. The unique/primary-key check runs
  *		as part of an insert (or the insert half of an update) and fetches a
- *		conflicting row through ColumnarReadRowByNumber before the delete of the
+ *		conflicting row through PgColumnarReadRowByNumber before the delete of the
  *		old row is flushed; consulting the buffer here lets a same-key UPDATE (the
  *		old row is buffered-deleted) proceed. Checks every buffer for the relation,
  *		across subtransactions.
  */
 bool
-ColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber)
+PgColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber)
 {
 	Oid			relid = RelationGetRelid(rel);
 	ListCell   *lc;
 
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 	{
 		DeleteVectorBuffer *buf = (DeleteVectorBuffer *) lfirst(lc);
 		ListCell   *cc;
@@ -350,7 +350,7 @@ delete_vector_flush_buffer(DeleteVectorBuffer *buf)
 		rm.bitmap = chunk->mask;
 		rm.bitmapLen = chunk->maskLen;
 
-		ColumnarUpsertDeleteVector(buf->storageId, &rm);
+		PgColumnarUpsertDeleteVector(buf->storageId, &rm);
 	}
 
 	if (pushedSnapshot)
@@ -363,17 +363,17 @@ delete_vector_flush_buffer(DeleteVectorBuffer *buf)
 }
 
 /*
- * ColumnarFlushDeleteVectorForRelation
+ * PgColumnarFlushDeleteVectorForRelation
  *		Flush pending delete marks for one relation. Called at scan start so a
  *		delete made earlier in this transaction is visible to a later scan.
  */
 void
-ColumnarFlushDeleteVectorForRelation(Relation rel)
+PgColumnarFlushDeleteVectorForRelation(Relation rel)
 {
 	Oid			relid = RelationGetRelid(rel);
 	ListCell   *lc;
 
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 	{
 		DeleteVectorBuffer *buf = (DeleteVectorBuffer *) lfirst(lc);
 
@@ -383,47 +383,47 @@ ColumnarFlushDeleteVectorForRelation(Relation rel)
 }
 
 /*
- * ColumnarFlushAllDeleteVectors
+ * PgColumnarFlushAllDeleteVectors
  *		Flush every pending delete buffer. Called at transaction pre-commit.
  */
 void
-ColumnarFlushAllDeleteVectors(void)
+PgColumnarFlushAllDeleteVectors(void)
 {
 	ListCell   *lc;
 
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 		delete_vector_flush_buffer((DeleteVectorBuffer *) lfirst(lc));
 }
 
 /*
- * ColumnarDiscardAllDeleteVectors
+ * PgColumnarDiscardAllDeleteVectors
  *		Forget all pending delete buffers (transaction end).
  */
 void
-ColumnarDiscardAllDeleteVectors(void)
+PgColumnarDiscardAllDeleteVectors(void)
 {
-	ColumnarDeleteVectorBuffers = NIL;
-	ColumnarDeleteVectorContext = NULL;
+	PgColumnarDeleteVectorBuffers = NIL;
+	PgColumnarDeleteVectorContext = NULL;
 }
 
 /*
- * ColumnarDeleteVectorDiscardSubXact
+ * PgColumnarDeleteVectorDiscardSubXact
  *		Drop delete buffers made in an aborting subtransaction. The catalog
  *		rows they would have produced were never written (or, if a scan flushed
  *		them, are made invisible by the subtransaction abort itself).
  */
 void
-ColumnarDeleteVectorDiscardSubXact(SubTransactionId subid)
+PgColumnarDeleteVectorDiscardSubXact(SubTransactionId subid)
 {
 	List	   *kept = NIL;
 	ListCell   *lc;
 	MemoryContext oldContext;
 
-	if (ColumnarDeleteVectorBuffers == NIL)
+	if (PgColumnarDeleteVectorBuffers == NIL)
 		return;
 
-	oldContext = MemoryContextSwitchTo(ColumnarDeleteVectorContext);
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	oldContext = MemoryContextSwitchTo(PgColumnarDeleteVectorContext);
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 	{
 		DeleteVectorBuffer *buf = (DeleteVectorBuffer *) lfirst(lc);
 
@@ -432,20 +432,20 @@ ColumnarDeleteVectorDiscardSubXact(SubTransactionId subid)
 	}
 	MemoryContextSwitchTo(oldContext);
 
-	ColumnarDeleteVectorBuffers = kept;
+	PgColumnarDeleteVectorBuffers = kept;
 }
 
 /*
- * ColumnarDeleteVectorPromoteSubXact
+ * PgColumnarDeleteVectorPromoteSubXact
  *		On subtransaction commit, reassign its delete buffers to the parent so
  *		they survive until the parent resolves.
  */
 void
-ColumnarDeleteVectorPromoteSubXact(SubTransactionId subid, SubTransactionId parent)
+PgColumnarDeleteVectorPromoteSubXact(SubTransactionId subid, SubTransactionId parent)
 {
 	ListCell   *lc;
 
-	foreach(lc, ColumnarDeleteVectorBuffers)
+	foreach(lc, PgColumnarDeleteVectorBuffers)
 	{
 		DeleteVectorBuffer *buf = (DeleteVectorBuffer *) lfirst(lc);
 

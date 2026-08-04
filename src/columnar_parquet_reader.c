@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parquet_reader.c
+ * pgcolumnar_parquet_reader.c
  *		Parquet file import: pgcolumnar.import_parquet(rel regclass, path text).
  *
  * A self-contained Parquet reader with no libparquet/libarrow dependency. It
@@ -83,9 +83,9 @@
 #include <lz4.h>
 #endif
 
-PG_FUNCTION_INFO_V1(columnar_import_parquet);
-PG_FUNCTION_INFO_V1(columnar_parquet_schema);
-PG_FUNCTION_INFO_V1(columnar_read_parquet);
+PG_FUNCTION_INFO_V1(pgcolumnar_import_parquet);
+PG_FUNCTION_INFO_V1(pgcolumnar_parquet_schema);
+PG_FUNCTION_INFO_V1(pgcolumnar_read_parquet);
 PG_FUNCTION_INFO_V1(pgcolumnar_parquet_fdw_handler);
 PG_FUNCTION_INFO_V1(pgcolumnar_parquet_fdw_validator);
 
@@ -197,7 +197,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
@@ -205,7 +205,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 1:				/* max (deprecated): fallback only */
 				{
 					uint32		n;
-					const uint8 *p = ColumnarThriftBytes(r, &n);
+					const uint8 *p = PgColumnarThriftBytes(r, &n);
 
 					if (p && !ch->has_max)
 					{
@@ -218,7 +218,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 2:				/* min (deprecated): fallback only */
 				{
 					uint32		n;
-					const uint8 *p = ColumnarThriftBytes(r, &n);
+					const uint8 *p = PgColumnarThriftBytes(r, &n);
 
 					if (p && !ch->has_min)
 					{
@@ -231,7 +231,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 5:				/* max_value (preferred) */
 				{
 					uint32		n;
-					const uint8 *p = ColumnarThriftBytes(r, &n);
+					const uint8 *p = PgColumnarThriftBytes(r, &n);
 
 					if (p)
 					{
@@ -244,7 +244,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 			case 6:				/* min_value (preferred) */
 				{
 					uint32		n;
-					const uint8 *p = ColumnarThriftBytes(r, &n);
+					const uint8 *p = PgColumnarThriftBytes(r, &n);
 
 					if (p)
 					{
@@ -255,7 +255,7 @@ parse_statistics(TCReader *r, PqChunk *ch)
 					break;
 				}
 			default:
-				ColumnarThriftSkip(r, ft);
+				PgColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -284,34 +284,34 @@ parse_column_meta(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 4:				/* codec */
-				ch->codec = (int) ColumnarThriftZigzag(r);
+				ch->codec = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 5:				/* num_values */
-				ch->num_values = ColumnarThriftZigzag(r);
+				ch->num_values = PgColumnarThriftZigzag(r);
 				break;
 			case 7:				/* total_compressed_size */
-				ch->total_compressed_size = ColumnarThriftZigzag(r);
+				ch->total_compressed_size = PgColumnarThriftZigzag(r);
 				break;
 			case 9:				/* data_page_offset */
-				ch->data_page_offset = ColumnarThriftZigzag(r);
+				ch->data_page_offset = PgColumnarThriftZigzag(r);
 				break;
 			case 11:			/* dictionary_page_offset */
-				ch->dict_page_offset = ColumnarThriftZigzag(r);
+				ch->dict_page_offset = PgColumnarThriftZigzag(r);
 				break;
 			case 12:			/* statistics */
 				if (ft == TC_STRUCT)
 					parse_statistics(r, ch);
 				else
-					ColumnarThriftSkip(r, ft);
+					PgColumnarThriftSkip(r, ft);
 				break;
 			default:
-				ColumnarThriftSkip(r, ft);
+				PgColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -328,13 +328,13 @@ parse_column_chunk(TCReader *r, PqChunk *ch)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if (fid == 3 && ft == TC_STRUCT)
 			parse_column_meta(r, ch);
 		else
-			ColumnarThriftSkip(r, ft);
+			PgColumnarThriftSkip(r, ft);
 	}
 }
 
@@ -347,7 +347,7 @@ parse_column_chunk(TCReader *r, PqChunk *ch)
  * This hand-walks nested Thrift unions and assumes the compact-protocol field
  * ordering the spec prescribes. A writer that reorders or partially populates the
  * union could desync the cursor -- but a desync fails the surrounding footer
- * parse (ColumnarThriftField / bounds checks catch it), so the blast radius is "file
+ * parse (PgColumnarThriftField / bounds checks catch it), so the blast radius is "file
  * rejected", never a wrong value silently returned from a good decode.
  */
 static void
@@ -360,7 +360,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if ((fid == PQ_LT_TIME || fid == PQ_LT_TIMESTAMP) && ft == TC_STRUCT)
@@ -373,7 +373,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 				int			ift,
 							ifid;
 
-				ColumnarThriftField(r, &ift, &ifid, &innerLast);
+				PgColumnarThriftField(r, &ift, &ifid, &innerLast);
 				if (ift == TC_STOP || r->error)
 					break;
 				if (ifid == 2 && ift == TC_STRUCT)	/* unit: union TimeUnit */
@@ -382,7 +382,7 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 					int			uft,
 								ufid;
 
-					ColumnarThriftField(r, &uft, &ufid, &uLast);
+					PgColumnarThriftField(r, &uft, &ufid, &uLast);
 					if (uft != TC_STOP && !r->error)
 					{
 						switch (ufid)
@@ -398,17 +398,17 @@ parse_logical_type(TCReader *r, PqSchemaCol *sc)
 								break;
 						}
 						sc->is_timestamp = isTs;
-						ColumnarThriftSkip(r, uft);	/* the unit member is an empty struct */
+						PgColumnarThriftSkip(r, uft);	/* the unit member is an empty struct */
 						/* consume the union's STOP */
-						ColumnarThriftField(r, &uft, &ufid, &uLast);
+						PgColumnarThriftField(r, &uft, &ufid, &uLast);
 					}
 				}
 				else
-					ColumnarThriftSkip(r, ift);	/* isAdjustedToUTC and anything later */
+					PgColumnarThriftSkip(r, ift);	/* isAdjustedToUTC and anything later */
 			}
 		}
 		else
-			ColumnarThriftSkip(r, ft);
+			PgColumnarThriftSkip(r, ft);
 	}
 }
 
@@ -434,47 +434,47 @@ parse_schema_element(TCReader *r, PqSchemaCol *sc)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 1:				/* type */
-				sc->phys_type = (int) ColumnarThriftZigzag(r);
+				sc->phys_type = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 2:				/* type_length */
-				sc->type_length = (int) ColumnarThriftZigzag(r);
+				sc->type_length = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 3:				/* repetition_type */
-				sc->repetition = (int) ColumnarThriftZigzag(r);
+				sc->repetition = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 4:				/* name */
 				{
 					uint32		n;
-					const uint8 *p = ColumnarThriftBytes(r, &n);
+					const uint8 *p = PgColumnarThriftBytes(r, &n);
 
 					if (p)
 						sc->name = pnstrdup((const char *) p, n);
 					break;
 				}
 			case 5:				/* num_children */
-				num_children = (int) ColumnarThriftZigzag(r);
+				num_children = (int) PgColumnarThriftZigzag(r);
 				sc->num_children = num_children;
 				break;
 			case 6:				/* converted_type */
-				sc->converted_type = (int) ColumnarThriftZigzag(r);
+				sc->converted_type = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 7:				/* scale (DECIMAL) */
-				sc->scale = (int) ColumnarThriftZigzag(r);
+				sc->scale = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 8:				/* precision (DECIMAL) */
-				sc->precision = (int) ColumnarThriftZigzag(r);
+				sc->precision = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 10:			/* logicalType */
 				parse_logical_type(r, sc);
 				break;
 			default:
-				ColumnarThriftSkip(r, ft);
+				PgColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -525,7 +525,7 @@ walk_schema(PqFile *pf, int *cursor, int def, int rep,
 	 * num_children comes straight from the footer, so a schema that chains
 	 * group inside group descends here as deep as the file says. This is a
 	 * second unbounded recursion, reached only after the footer parses, so the
-	 * guard on ColumnarThriftSkip does not cover it; without one, a crafted
+	 * guard on PgColumnarThriftSkip does not cover it; without one, a crafted
 	 * schema SIGSEGVs the backend and restarts the cluster.
 	 */
 	check_stack_depth();
@@ -574,14 +574,14 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(&r, &ft, &fid, &lastId);
+		PgColumnarThriftField(&r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r.error)
 			break;
 
 		if (fid == 2 && ft == TC_LIST)	/* schema: list<SchemaElement> */
 		{
 			int			etype;
-			uint32		n = ColumnarThriftListHeader(&r, &etype);
+			uint32		n = PgColumnarThriftListHeader(&r, &etype);
 			uint32		i;
 			PqSchemaCol *tmp = palloc0(sizeof(PqSchemaCol) * Max(n, 1));
 
@@ -593,7 +593,7 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 		else if (fid == 4 && ft == TC_LIST)		/* row_groups */
 		{
 			int			etype;
-			uint32		n = ColumnarThriftListHeader(&r, &etype);
+			uint32		n = PgColumnarThriftListHeader(&r, &etype);
 			uint32		i;
 
 			pf->nrowgroups = n;
@@ -610,13 +610,13 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 					int			rft,
 								rfid;
 
-					ColumnarThriftField(&r, &rft, &rfid, &rgLast);
+					PgColumnarThriftField(&r, &rft, &rfid, &rgLast);
 					if (rft == TC_STOP || r.error)
 						break;
 					if (rfid == 1 && rft == TC_LIST)	/* columns */
 					{
 						int			cet;
-						uint32		cn = ColumnarThriftListHeader(&r, &cet);
+						uint32		cn = PgColumnarThriftListHeader(&r, &cet);
 						uint32		ci;
 
 						rg->chunks = palloc0(sizeof(PqChunk) * Max(cn, 1));
@@ -625,14 +625,14 @@ parse_file_metadata(const uint8 *buf, size_t len, PqFile *pf)
 							parse_column_chunk(&r, &rg->chunks[ci]);
 					}
 					else if (rfid == 3)		/* num_rows */
-						rg->num_rows = ColumnarThriftZigzag(&r);
+						rg->num_rows = PgColumnarThriftZigzag(&r);
 					else
-						ColumnarThriftSkip(&r, rft);
+						PgColumnarThriftSkip(&r, rft);
 				}
 			}
 		}
 		else
-			ColumnarThriftSkip(&r, ft);
+			PgColumnarThriftSkip(&r, ft);
 	}
 
 	if (r.error || pf->nelems < 1)
@@ -1285,7 +1285,7 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		if (!v2)
@@ -1293,13 +1293,13 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 			switch (fid)
 			{
 				case 1:
-					h->num_values = (int) ColumnarThriftZigzag(r);
+					h->num_values = (int) PgColumnarThriftZigzag(r);
 					break;
 				case 2:
-					h->encoding = (int) ColumnarThriftZigzag(r);
+					h->encoding = (int) PgColumnarThriftZigzag(r);
 					break;
 				default:
-					ColumnarThriftSkip(r, ft);
+					PgColumnarThriftSkip(r, ft);
 					break;
 			}
 		}
@@ -1308,22 +1308,22 @@ parse_data_page_header(TCReader *r, PqPageHeader *h, bool v2)
 			switch (fid)
 			{
 				case 1:
-					h->num_values = (int) ColumnarThriftZigzag(r);
+					h->num_values = (int) PgColumnarThriftZigzag(r);
 					break;
 				case 4:
-					h->encoding = (int) ColumnarThriftZigzag(r);
+					h->encoding = (int) PgColumnarThriftZigzag(r);
 					break;
 				case 5:
-					h->def_levels_len = (int) ColumnarThriftZigzag(r);
+					h->def_levels_len = (int) PgColumnarThriftZigzag(r);
 					break;
 				case 6:
-					h->rep_levels_len = (int) ColumnarThriftZigzag(r);
+					h->rep_levels_len = (int) PgColumnarThriftZigzag(r);
 					break;
 				case 7:
 					h->is_compressed = (ft == TC_BOOL_TRUE);
 					break;
 				default:
-					ColumnarThriftSkip(r, ft);
+					PgColumnarThriftSkip(r, ft);
 					break;
 			}
 		}
@@ -1343,19 +1343,19 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 		int			ft,
 					fid;
 
-		ColumnarThriftField(r, &ft, &fid, &lastId);
+		PgColumnarThriftField(r, &ft, &fid, &lastId);
 		if (ft == TC_STOP || r->error)
 			break;
 		switch (fid)
 		{
 			case 1:
-				h->type = (int) ColumnarThriftZigzag(r);
+				h->type = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 2:
-				h->uncompressed_size = (int) ColumnarThriftZigzag(r);
+				h->uncompressed_size = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 3:
-				h->compressed_size = (int) ColumnarThriftZigzag(r);
+				h->compressed_size = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 5:				/* DataPageHeader (v1) */
 				parse_data_page_header(r, h, false);
@@ -1369,13 +1369,13 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 						int			dft,
 									dfid;
 
-						ColumnarThriftField(r, &dft, &dfid, &dl);
+						PgColumnarThriftField(r, &dft, &dfid, &dl);
 						if (dft == TC_STOP || r->error)
 							break;
 						if (dfid == 1)
-							h->num_values = (int) ColumnarThriftZigzag(r);
+							h->num_values = (int) PgColumnarThriftZigzag(r);
 						else
-							ColumnarThriftSkip(r, dft);
+							PgColumnarThriftSkip(r, dft);
 					}
 					break;
 				}
@@ -1383,7 +1383,7 @@ parse_page_header(TCReader *r, PqPageHeader *h)
 				parse_data_page_header(r, h, true);
 				break;
 			default:
-				ColumnarThriftSkip(r, ft);
+				PgColumnarThriftSkip(r, ft);
 				break;
 		}
 	}
@@ -1687,7 +1687,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 			const uint8 *end;
 			int			i;
 
-			if (!ColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
+			if (!PgColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
 							   h.uncompressed_size, &dec, &db, &dblen))
 				return false;
 			dictCount = h.num_values;
@@ -1755,7 +1755,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					size_t		vusize = (h.uncompressed_size > levLen)
 						? (size_t) (h.uncompressed_size - levLen) : 0;
 
-					if (!ColumnarParquetDecompress(ch->codec, vraw, vrawlen, vusize,
+					if (!PgColumnarParquetDecompress(ch->codec, vraw, vrawlen, vusize,
 									   &dec, &valbuf, &vallen))
 						return false;
 				}
@@ -1771,7 +1771,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 				size_t		pblen;
 				size_t		off = 0;
 
-				if (!ColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
+				if (!PgColumnarParquetDecompress(ch->codec, praw, h.compressed_size,
 								   h.uncompressed_size, &dec, &pb, &pblen))
 					return false;
 				/* v1: repetition levels first, then definition levels, both
@@ -2017,7 +2017,7 @@ pq_want_phys_for(Oid typid, const PqSchemaCol *sc)
 
 /*
  * Infer the PostgreSQL column type a Parquet leaf should map to. This is the
- * inverse of the exporter's parquet_kind_for_type (columnar_parquet.c): it reads
+ * inverse of the exporter's parquet_kind_for_type (pgcolumnar_parquet.c): it reads
  * the physical type plus the ConvertedType annotation, so a round-tripped file
  * reports the source column types. It is tolerant of files other writers produce
  * (both the millis and micros time/timestamp variants, INT_8/INT_32 widths) so
@@ -2561,7 +2561,7 @@ typedef struct PqInsertSinkArg
 {
 	Relation	rel;
 	CommandId	cid;
-	ColumnarIndexInsertState *indexes;	/* NULL when the table has none */
+	PgColumnarIndexInsertState *indexes;	/* NULL when the table has none */
 }			PqInsertSinkArg;
 
 static void
@@ -2579,9 +2579,9 @@ pq_insert_sink(TupleTableSlot *slot, void *arg)
 	 * assigned.
 	 */
 	if (a->indexes != NULL)
-		ColumnarIndexInsertRow(a->indexes, a->rel, slot->tts_values,
+		PgColumnarIndexInsertRow(a->indexes, a->rel, slot->tts_values,
 							   slot->tts_isnull,
-							   ColumnarItemPointerToRowNumber(&slot->tts_tid));
+							   PgColumnarItemPointerToRowNumber(&slot->tts_tid));
 }
 
 static void
@@ -2885,7 +2885,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
  * pgcolumnar.import_parquet(rel regclass, path text) -> bigint
  */
 Datum
-columnar_import_parquet(PG_FUNCTION_ARGS)
+pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -2912,8 +2912,8 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 
 	sinkarg.rel = rel;
 	sinkarg.cid = GetCurrentCommandId(true);
-	sinkarg.indexes = ColumnarRelationHasIndexes(rel)
-		? ColumnarIndexInsertBegin(rel, true) : NULL;
+	sinkarg.indexes = PgColumnarRelationHasIndexes(rel)
+		? PgColumnarIndexInsertBegin(rel, true) : NULL;
 	/* insert every resolved file's rows; the per-file decode is bounded by
 	 * fileCtx. Each file is bound against the target's descriptor, so a directory
 	 * whose files disagree with the table errors rather than importing garbage. */
@@ -2932,7 +2932,7 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
 	MemoryContextDelete(fileCtx);
 
 	if (sinkarg.indexes != NULL)
-		ColumnarIndexInsertEnd(sinkarg.indexes);
+		PgColumnarIndexInsertEnd(sinkarg.indexes);
 
 	ExecDropSingleTupleTableSlot(slot);
 	/*
@@ -2964,7 +2964,7 @@ columnar_import_parquet(PG_FUNCTION_ARGS)
  * materialize-mode SRF.
  */
 Datum
-columnar_read_parquet(PG_FUNCTION_ARGS)
+pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -3040,7 +3040,7 @@ columnar_read_parquet(PG_FUNCTION_ARGS)
  * files are reported as their flattened leaf columns.
  */
 Datum
-columnar_parquet_schema(PG_FUNCTION_ARGS)
+pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -3808,11 +3808,11 @@ pqfdw_compute_skip(ForeignScanState *node, PqFile *pf,
 			 * btree family will do: a given operator means the same comparison
 			 * in every family that lists it.
 			 */
-			interp = ColumnarGetOpInterpretation(op->opno);
+			interp = PgColumnarGetOpInterpretation(op->opno);
 			foreach(ic, interp)
 			{
-				ColumnarOpInterpretation *o = (ColumnarOpInterpretation *) lfirst(ic);
-				int			s = ColumnarOpInterpStrategy(o);
+				PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+				int			s = PgColumnarOpInterpStrategy(o);
 
 				if (s >= BTLessStrategyNumber && s <= BTGreaterStrategyNumber)
 				{

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parquet_codec.h
+ * pgcolumnar_parquet_codec.h
  *		Parquet data-page decompression.
  *
  * One entry point that turns a compressed page into bytes, dispatching on the
@@ -30,7 +30,7 @@
  * false on malformed input, on a codec this build cannot decode, and on any
  * length that disagrees with the page header.
  */
-extern bool ColumnarParquetDecompress(int codec, const uint8 *src, size_t srclen,
+extern bool PgColumnarParquetDecompress(int codec, const uint8 *src, size_t srclen,
 									  size_t usize, StringInfo scratch,
 									  const uint8 **out, size_t *outlen);
 

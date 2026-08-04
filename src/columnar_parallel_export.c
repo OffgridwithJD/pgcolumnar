@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parallel_export.c
+ * pgcolumnar_parallel_export.c
  *		pgcolumnar.parallel_export_parquet: parallel Parquet export.
  *
  * N read-only background workers each write a disjoint slice of the source to
@@ -22,7 +22,7 @@
  *	   the dispatcher ships the oid-sorted leaf list so workers do not re-derive
  *	   it from the live catalog (which a concurrent ATTACH could desynchronise);
  *	 - a single columnar table: split by row-group index ranges; each worker
- *	   restricts its read to its slice via ColumnarReadRestrictToGroups.
+ *	   restricts its read to its slice via PgColumnarReadRestrictToGroups.
  *
  * Cleanroom: public PostgreSQL APIs and this project's own code only.
  *
@@ -334,8 +334,8 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 		if (hdr->single_table)
 		{
 			Relation	rel = table_open(hdr->relid, AccessShareLock);
-			List	   *groups = ColumnarReadRowGroupList(hdr->storageId,
-														  ColumnarCatalogSnapshot(snap));
+			List	   *groups = PgColumnarReadRowGroupList(hdr->storageId,
+														  PgColumnarCatalogSnapshot(snap));
 			int			ntake = me->endIdx - me->startIdx;
 			/* always non-NULL, so an empty slice restricts to nothing (not all) */
 			uint64	   *gnos = palloc(sizeof(uint64) * Max(ntake, 1));
@@ -353,7 +353,7 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 				}
 				idx++;
 			}
-			rows = ColumnarWriteParquetFile(rel, snap, me->filepath, gnos, k);
+			rows = PgColumnarWriteParquetFile(rel, snap, me->filepath, gnos, k);
 			table_close(rel, AccessShareLock);
 		}
 		else
@@ -371,7 +371,7 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 				char		fp[MAXPGPATH];
 
 				snprintf(fp, sizeof(fp), "%s/part-%04d.parquet", hdr->dirpath, i);
-				rows += ColumnarWriteParquetFile(part, snap, fp, NULL, 0);
+				rows += PgColumnarWriteParquetFile(part, snap, fp, NULL, 0);
 				table_close(part, AccessShareLock);
 				MemoryContextSwitchTo(old);
 				MemoryContextDelete(pctx);
@@ -405,13 +405,13 @@ pgcolumnar_parallel_export_worker(Datum main_arg)
 }
 
 /*
- * columnar_parallel_export_parquet
+ * pgcolumnar_parallel_export_parquet
  *		SQL: pgcolumnar.parallel_export_parquet(target regclass, path text,
  *											    workers int DEFAULT NULL) -> bigint.
  */
-PG_FUNCTION_INFO_V1(columnar_parallel_export_parquet);
+PG_FUNCTION_INFO_V1(pgcolumnar_parallel_export_parquet);
 Datum
-columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
+pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *dir;
@@ -497,7 +497,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 		{
 			Relation	part = table_open(leafoids[i], AccessShareLock);
 
-			if (!ColumnarIsColumnarRelation(leafoids[i]))
+			if (!PgColumnarIsColumnarRelation(leafoids[i]))
 			{
 				char		nm[NAMEDATALEN];
 
@@ -507,7 +507,7 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("partition \"%s\" is not a columnar table", nm)));
 			}
-			ColumnarParquetCheckExportable(part);
+			PgColumnarParquetCheckExportable(part);
 			table_close(part, AccessShareLock);
 		}
 		single_table = false;
@@ -515,13 +515,13 @@ columnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 		if (workers > npart)
 			workers = npart;
 	}
-	else if (ColumnarIsColumnarRelation(relid))
+	else if (PgColumnarIsColumnarRelation(relid))
 	{
 		List	   *groups;
 
-		ColumnarParquetCheckExportable(rel);
-		storageId = ColumnarStorageId(rel);
-		groups = ColumnarReadRowGroupList(storageId, ColumnarCatalogSnapshot(snap));
+		PgColumnarParquetCheckExportable(rel);
+		storageId = PgColumnarStorageId(rel);
+		groups = PgColumnarReadRowGroupList(storageId, PgColumnarCatalogSnapshot(snap));
 		ntasks = list_length(groups);
 		single_table = true;
 		if (workers > Max(ntasks, 1))

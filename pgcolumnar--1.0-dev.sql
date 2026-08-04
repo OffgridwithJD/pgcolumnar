@@ -277,7 +277,7 @@ CREATE INDEX free_space_fit
 CREATE FUNCTION pgcolumnar.columnar_handler(internal)
 	RETURNS table_am_handler
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_handler';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_handler';
 
 CREATE ACCESS METHOD pgcolumnar
 	TYPE TABLE
@@ -492,7 +492,7 @@ COMMENT ON FUNCTION pgcolumnar.reset_options(regclass, bool, bool, bool, bool, b
 CREATE FUNCTION pgcolumnar.get_storage_id(rel regclass)
 	RETURNS bigint
 	LANGUAGE C STABLE STRICT
-	AS 'MODULE_PATHNAME', 'columnar_relation_storageid';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_relation_storageid';
 
 COMMENT ON FUNCTION pgcolumnar.get_storage_id(regclass)
 	IS 'storage id linking a columnar table to its metadata rows';
@@ -504,7 +504,7 @@ CREATE FUNCTION pgcolumnar.add_projection(
 	sort_key text[] DEFAULT '{}')
 	RETURNS void
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_add_projection';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_add_projection';
 
 COMMENT ON FUNCTION pgcolumnar.add_projection(regclass, text, text[], text[])
 	IS 'declare a physical projection: a named column subset sorted on sort_key (gap 26)';
@@ -512,7 +512,7 @@ COMMENT ON FUNCTION pgcolumnar.add_projection(regclass, text, text[], text[])
 CREATE FUNCTION pgcolumnar.drop_projection(rel regclass, name text)
 	RETURNS void
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_drop_projection';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_drop_projection';
 
 COMMENT ON FUNCTION pgcolumnar.drop_projection(regclass, text)
 	IS 'drop a declared projection and free its storage (gap 26)';
@@ -572,7 +572,7 @@ COMMENT ON FUNCTION pgcolumnar.rebuild_projections(regclass)
 CREATE FUNCTION pgcolumnar.read_projection(rel regclass, name text)
 	RETURNS SETOF text
 	LANGUAGE C STABLE
-	AS 'MODULE_PATHNAME', 'columnar_read_projection';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_read_projection';
 
 COMMENT ON FUNCTION pgcolumnar.read_projection(regclass, text)
 	IS 'read a projection''s stored columns (live rows), joined by | -- verification/debug (gap 26)';
@@ -580,7 +580,7 @@ COMMENT ON FUNCTION pgcolumnar.read_projection(regclass, text)
 CREATE FUNCTION pgcolumnar.reconstruct_via_projection(rel regclass, name text)
 	RETURNS SETOF text
 	LANGUAGE C STABLE
-	AS 'MODULE_PATHNAME', 'columnar_reconstruct_via_projection';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_reconstruct_via_projection';
 
 COMMENT ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text)
 	IS 'read all live rows via a projection, reconstructing non-covered columns from the base by row number (gap 26)';
@@ -707,7 +707,7 @@ COMMENT ON FUNCTION pgcolumnar.sort_status(regclass)
 CREATE FUNCTION pgcolumnar.vacuum(tablename regclass, stripe_count int DEFAULT 0)
 	RETURNS void
 	LANGUAGE C STRICT
-	AS 'MODULE_PATHNAME', 'columnar_vacuum';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_vacuum';
 
 COMMENT ON FUNCTION pgcolumnar.vacuum(regclass, int)
 	IS 'compact a columnar table by combining stripes and reclaiming deleted rows';
@@ -717,7 +717,7 @@ CREATE FUNCTION pgcolumnar.vacuum_sorted(
 	VARIADIC sort_columns name[])
 	RETURNS void
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_vacuum_sorted';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_vacuum_sorted';
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
 	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text (unlike the numeric-only Z-order cluster()). One-shot: not auto-maintained.';
@@ -732,7 +732,7 @@ COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
 CREATE FUNCTION pgcolumnar.vacuum_sorted(tablename regclass)
 	RETURNS void
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_vacuum_sorted';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_vacuum_sorted';
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass)
 	IS 'apply the table''s declared sort_by key from set_options (#288); errors if none is declared. Equivalent to a bare CLUSTER re-applying a remembered index.';
@@ -742,7 +742,7 @@ CREATE FUNCTION pgcolumnar.cluster(
 	VARIADIC columns name[])
 	RETURNS void
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_cluster';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_cluster';
 
 COMMENT ON FUNCTION pgcolumnar.cluster(regclass, name[])
 	IS 'eager reorg: rewrite a columnar table with rows ordered by the Z-order space-filling curve over the given columns. Holds AccessExclusiveLock like CLUSTER/VACUUM FULL; the online incremental path is Phase F3';
@@ -750,7 +750,7 @@ COMMENT ON FUNCTION pgcolumnar.cluster(regclass, name[])
 CREATE FUNCTION pgcolumnar.compact(tablename regclass)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_compact';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_compact';
 
 COMMENT ON FUNCTION pgcolumnar.compact(regclass)
 	IS 'lazy online compaction: retire row groups that are fully deleted, dropping their metadata so scans skip them. Holds only ShareUpdateExclusiveLock (concurrent reads and writes). Returns the number of groups retired (Phase F3a)';
@@ -758,7 +758,7 @@ COMMENT ON FUNCTION pgcolumnar.compact(regclass)
 CREATE FUNCTION pgcolumnar.truncate(tablename regclass)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_truncate';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_truncate';
 
 COMMENT ON FUNCTION pgcolumnar.truncate(regclass)
 	IS 'physical end-truncation: return trailing reclaimed blocks to the OS. Best-effort -- takes AccessExclusiveLock conditionally for the brief physical step and returns 0 without waiting if the table is busy. Only removes space freed before the oldest-xmin horizon. Gated by pgcolumnar.enable_end_truncation. Returns the number of blocks truncated (Phase F)';
@@ -769,7 +769,7 @@ CREATE FUNCTION pgcolumnar.compact_rewrite(
 	max_groups int DEFAULT 0)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_compact_rewrite';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_compact_rewrite';
 
 COMMENT ON FUNCTION pgcolumnar.compact_rewrite(regclass, float8, int)
 	IS 'lazy online space reclaim: rewrite partially-deleted row groups (deleted fraction >= min_deleted_fraction) to drop their dead rows, under ShareUpdateExclusiveLock (concurrent reads and writes). Returns the number of groups rewritten (Phase F3b)';
@@ -779,7 +779,7 @@ CREATE FUNCTION pgcolumnar.recluster(
 	VARIADIC columns name[])
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_recluster';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_recluster';
 
 COMMENT ON FUNCTION pgcolumnar.recluster(regclass, name[])
 	IS 'lazy online reclustering: re-establish global Z-order clustering over the given columns under ShareUpdateExclusiveLock (concurrent reads and writes), unlike the eager cluster() which holds AccessExclusiveLock. Returns the number of groups reclustered (Phase F3c)';
@@ -787,7 +787,7 @@ COMMENT ON FUNCTION pgcolumnar.recluster(regclass, name[])
 CREATE FUNCTION pgcolumnar.export_arrow(rel regclass, path text)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_export_arrow';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_export_arrow';
 
 COMMENT ON FUNCTION pgcolumnar.export_arrow(regclass, text)
 	IS 'export a columnar table to an Arrow IPC stream file; returns rows written';
@@ -795,7 +795,7 @@ COMMENT ON FUNCTION pgcolumnar.export_arrow(regclass, text)
 CREATE FUNCTION pgcolumnar.export_parquet(rel regclass, path text)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_export_parquet';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_export_parquet';
 
 COMMENT ON FUNCTION pgcolumnar.export_parquet(regclass, text)
 	IS 'export a columnar table to a Parquet file; returns rows written';
@@ -804,7 +804,7 @@ CREATE FUNCTION pgcolumnar.parallel_export_parquet(target regclass, path text,
 												   workers int DEFAULT NULL)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_parallel_export_parquet';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_parallel_export_parquet';
 
 COMMENT ON FUNCTION pgcolumnar.parallel_export_parquet(regclass, text, int)
 	IS 'parallel Parquet export using read-only background workers into a directory readable by pgcolumnar.read_parquet: a single columnar table split by row-group ranges, or a partitioned columnar table one file per partition; returns rows written (#300)';
@@ -812,7 +812,7 @@ COMMENT ON FUNCTION pgcolumnar.parallel_export_parquet(regclass, text, int)
 CREATE FUNCTION pgcolumnar.import_arrow(rel regclass, path text)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_import_arrow';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_import_arrow';
 
 COMMENT ON FUNCTION pgcolumnar.import_arrow(regclass, text)
 	IS 'insert rows from an Arrow IPC stream file into a columnar table; returns rows inserted';
@@ -820,7 +820,7 @@ COMMENT ON FUNCTION pgcolumnar.import_arrow(regclass, text)
 CREATE FUNCTION pgcolumnar.import_parquet(rel regclass, path text)
 	RETURNS bigint
 	LANGUAGE C STRICT
-	AS 'MODULE_PATHNAME', 'columnar_import_parquet';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_import_parquet';
 
 COMMENT ON FUNCTION pgcolumnar.import_parquet(regclass, text)
 	IS 'insert rows from a Parquet file, directory, or glob into a table; returns rows inserted (gap 27)';
@@ -828,7 +828,7 @@ COMMENT ON FUNCTION pgcolumnar.import_parquet(regclass, text)
 CREATE FUNCTION pgcolumnar.parquet_schema(path text)
 	RETURNS TABLE(column_name text, data_type text, nullable boolean)
 	LANGUAGE C STRICT
-	AS 'MODULE_PATHNAME', 'columnar_parquet_schema';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_parquet_schema';
 
 COMMENT ON FUNCTION pgcolumnar.parquet_schema(text)
 	IS 'report the leaf columns of a Parquet file and the PostgreSQL type each maps to; for a directory or glob, of its first file (Phase G scan core)';
@@ -836,7 +836,7 @@ COMMENT ON FUNCTION pgcolumnar.parquet_schema(text)
 CREATE FUNCTION pgcolumnar.read_parquet(path text)
 	RETURNS SETOF record
 	LANGUAGE C STRICT
-	AS 'MODULE_PATHNAME', 'columnar_read_parquet';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_read_parquet';
 
 COMMENT ON FUNCTION pgcolumnar.read_parquet(text)
 	IS 'read a Parquet file, directory, or glob in place as a set of rows; requires a column definition list covering every leaf column, e.g. SELECT * FROM pgcolumnar.read_parquet(path) AS t(id int, name text) (Phase G)';
@@ -872,7 +872,7 @@ COMMENT ON FOREIGN DATA WRAPPER pgcolumnar_parquet
 CREATE FUNCTION pgcolumnar.vm_selftest(rel regclass, blk int)
 	RETURNS boolean
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_vm_selftest';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_vm_selftest';
 
 COMMENT ON FUNCTION pgcolumnar.vm_selftest(regclass, int)
 	IS 'gap 28 phase-1 self-test: set a VM-fork all-visible bit and read it back';
@@ -880,7 +880,7 @@ COMMENT ON FUNCTION pgcolumnar.vm_selftest(regclass, int)
 CREATE FUNCTION pgcolumnar.vm_is_visible(rel regclass, blk int)
 	RETURNS boolean
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_vm_is_visible';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_vm_is_visible';
 
 COMMENT ON FUNCTION pgcolumnar.vm_is_visible(regclass, int)
 	IS 'gap 28: is the synthetic block marked all-visible in the VM fork?';
@@ -927,7 +927,7 @@ COMMENT ON FUNCTION pgcolumnar.vacuum_full(name, real, int)
 CREATE FUNCTION pgcolumnar.file_split_offsets(path text, workers int)
 	RETURNS bigint[]
 	LANGUAGE C STRICT
-	AS 'MODULE_PATHNAME', 'columnar_file_split_offsets';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_file_split_offsets';
 
 COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text, int)
 	IS 'byte offsets that split a COPY text-format file into N record-aligned ranges (#300)';
@@ -956,7 +956,7 @@ CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 										 workers int DEFAULT NULL)
 	RETURNS bigint
 	LANGUAGE C
-	AS 'MODULE_PATHNAME', 'columnar_parallel_copy';
+	AS 'MODULE_PATHNAME', 'pgcolumnar_parallel_copy';
 
 COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
 	IS 'atomic parallel bulk load of a COPY text file into a columnar table using background workers: a single columnar table (any row order), or a RANGE-partitioned columnar table sorted by the partition key with one distinct partition set per worker (#300)';

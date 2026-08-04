@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_visibilitymap.c
+ * pgcolumnar_visibilitymap.c
  *		Visibility-map fork maintenance for pgColumnar index-only scans
  *		(gap 28 direction 1, phase 1: the load-bearing prototype).
  *
@@ -46,8 +46,8 @@
 #include "storage/procarray.h"
 #include "utils/rel.h"
 
-PG_FUNCTION_INFO_V1(columnar_vm_selftest);
-PG_FUNCTION_INFO_V1(columnar_vm_is_visible);
+PG_FUNCTION_INFO_V1(pgcolumnar_vm_selftest);
+PG_FUNCTION_INFO_V1(pgcolumnar_vm_is_visible);
 
 /*
  * Visibility-map on-disk layout. These mirror the private macros in
@@ -67,14 +67,14 @@ PG_FUNCTION_INFO_V1(columnar_vm_is_visible);
 	(((x) % COLUMNAR_VM_BLOCKS_PER_BYTE) * COLUMNAR_VM_BITS_PER_BLOCK)
 
 /*
- * ColumnarVMSetVisible
+ * PgColumnarVMSetVisible
  *		Mark the synthetic block `blk` all-visible in the relation's VM fork,
  *		WAL-logged. Idempotent: a no-op if the bit is already set. This writes
  *		only the VM fork -- there is no heap page to flag -- which is why it does
  *		not go through visibilitymap_set().
  */
 void
-ColumnarVMSetVisible(Relation rel, BlockNumber blk)
+PgColumnarVMSetVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;
 	Page		page;
@@ -108,12 +108,12 @@ ColumnarVMSetVisible(Relation rel, BlockNumber blk)
 }
 
 /*
- * ColumnarVMClearVisible
+ * PgColumnarVMClearVisible
  *		Clear the all-visible (and all-frozen) bits for `blk`, WAL-logged. Used
  *		by write paths so a modified range is never reported all-visible.
  */
 void
-ColumnarVMClearVisible(Relation rel, BlockNumber blk)
+PgColumnarVMClearVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;
 	Page		page;
@@ -153,28 +153,28 @@ ColumnarVMClearVisible(Relation rel, BlockNumber blk)
 }
 
 /*
- * ColumnarVMClearForRow
+ * PgColumnarVMClearForRow
  *		Clear the all-visible bit for the synthetic block that holds `rowNumber`.
- *		The block is computed the same way ColumnarRowNumberToItemPointer derives
+ *		The block is computed the same way PgColumnarRowNumberToItemPointer derives
  *		a TID block, so it matches the block the index-only-scan executor probes.
  *		Called by every write path (insert/delete/update) so a modified block is
  *		never left all-visible. Cheap when no bit is set (a short-circuit read).
  */
 void
-ColumnarVMClearForRow(Relation rel, uint64 rowNumber)
+PgColumnarVMClearForRow(Relation rel, uint64 rowNumber)
 {
 	BlockNumber blk = (BlockNumber) (rowNumber / COLUMNAR_VALID_ITEMPOINTER_OFFSETS);
 
-	ColumnarVMClearVisible(rel, blk);
+	PgColumnarVMClearVisible(rel, blk);
 }
 
 /*
- * ColumnarVMIsVisible
+ * PgColumnarVMIsVisible
  *		True if `blk` is marked all-visible in the VM fork. Thin wrapper over the
  *		stock reader (the same call the index-only-scan executor makes).
  */
 bool
-ColumnarVMIsVisible(Relation rel, BlockNumber blk)
+PgColumnarVMIsVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;
 	uint8		status = visibilitymap_get_status(rel, blk, &vmbuf);
@@ -188,8 +188,8 @@ ColumnarVMIsVisible(Relation rel, BlockNumber blk)
 static int
 rowrange_cmp(const void *a, const void *b)
 {
-	uint64		fa = ((const ColumnarRowRange *) a)->firstRowNumber;
-	uint64		fb = ((const ColumnarRowRange *) b)->firstRowNumber;
+	uint64		fa = ((const PgColumnarRowRange *) a)->firstRowNumber;
+	uint64		fb = ((const PgColumnarRowRange *) b)->firstRowNumber;
 
 	if (fa < fb)
 		return -1;
@@ -199,7 +199,7 @@ rowrange_cmp(const void *a, const void *b)
 }
 
 /*
- * ColumnarVMSetVisibleForRelation
+ * PgColumnarVMSetVisibleForRelation
  *		Lazy vacuum step (gap 28 phase 3): mark all-visible chunk groups in the
  *		VM fork. Computes the all-visible groups (stripe committed past the
  *		oldest-xmin horizon, no committed-or-in-progress deletes), merges
@@ -211,25 +211,25 @@ rowrange_cmp(const void *a, const void *b)
  *		and clear-on-write removes any bit for a row changed after this runs.
  */
 void
-ColumnarVMSetVisibleForRelation(Relation rel)
+PgColumnarVMSetVisibleForRelation(Relation rel)
 {
-	uint64		storageId = ColumnarStorageId(rel);
-	TransactionId oldestXmin = ColumnarOldestXmin(rel);
-	List	   *groups = ColumnarComputeAllVisibleGroups(storageId, oldestXmin);
+	uint64		storageId = PgColumnarStorageId(rel);
+	TransactionId oldestXmin = PgColumnarOldestXmin(rel);
+	List	   *groups = PgColumnarComputeAllVisibleGroups(storageId, oldestXmin);
 	uint64		K = COLUMNAR_VALID_ITEMPOINTER_OFFSETS;
 	int			n = list_length(groups);
-	ColumnarRowRange *arr;
+	PgColumnarRowRange *arr;
 	ListCell   *lc;
 	int			i;
 
 	if (n == 0)
 		return;
 
-	arr = palloc(sizeof(ColumnarRowRange) * n);
+	arr = palloc(sizeof(PgColumnarRowRange) * n);
 	i = 0;
 	foreach(lc, groups)
-		arr[i++] = *(ColumnarRowRange *) lfirst(lc);
-	qsort(arr, n, sizeof(ColumnarRowRange), rowrange_cmp);
+		arr[i++] = *(PgColumnarRowRange *) lfirst(lc);
+	qsort(arr, n, sizeof(PgColumnarRowRange), rowrange_cmp);
 
 	i = 0;
 	while (i < n)
@@ -254,7 +254,7 @@ ColumnarVMSetVisibleForRelation(Relation rel)
 		b = (BlockNumber) ((lo + K - 1) / K);
 		bend = (BlockNumber) (hi / K);
 		for (; b < bend; b++)
-			ColumnarVMSetVisible(rel, b);
+			PgColumnarVMSetVisible(rel, b);
 
 		i = m;
 	}
@@ -263,7 +263,7 @@ ColumnarVMSetVisibleForRelation(Relation rel)
 }
 
 /*
- * columnar_vm_selftest(rel regclass, blk int) -> bool
+ * pgcolumnar_vm_selftest(rel regclass, blk int) -> bool
  *		Phase-1 proof: set the all-visible bit for a synthetic block on a
  *		columnar relation, then read it back through the backend's own
  *		visibilitymap_get_status. Returns true iff the round trip succeeds,
@@ -271,7 +271,7 @@ ColumnarVMSetVisibleForRelation(Relation rel)
  *		reader the index-only-scan executor uses.
  */
 Datum
-columnar_vm_selftest(PG_FUNCTION_ARGS)
+pgcolumnar_vm_selftest(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	BlockNumber blk = (BlockNumber) PG_GETARG_INT32(1);
@@ -281,9 +281,9 @@ columnar_vm_selftest(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, RowExclusiveLock);
 
-	before = ColumnarVMIsVisible(rel, blk);
-	ColumnarVMSetVisible(rel, blk);
-	after = ColumnarVMIsVisible(rel, blk);
+	before = PgColumnarVMIsVisible(rel, blk);
+	PgColumnarVMSetVisible(rel, blk);
+	after = PgColumnarVMIsVisible(rel, blk);
 
 	table_close(rel, RowExclusiveLock);
 
@@ -292,18 +292,18 @@ columnar_vm_selftest(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_vm_is_visible(rel regclass, blk int) -> bool
+ * pgcolumnar_vm_is_visible(rel regclass, blk int) -> bool
  *		Read-only probe: is the synthetic block marked all-visible in the VM
  *		fork? Used by the phase-3 tests to check that lazy vacuum sets bits for
  *		all-visible groups and clear-on-write removes them for modified ones.
  */
 Datum
-columnar_vm_is_visible(PG_FUNCTION_ARGS)
+pgcolumnar_vm_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	BlockNumber blk = (BlockNumber) PG_GETARG_INT32(1);
 	Relation	rel = table_open(relid, AccessShareLock);
-	bool		vis = ColumnarVMIsVisible(rel, blk);
+	bool		vis = PgColumnarVMIsVisible(rel, blk);
 
 	table_close(rel, AccessShareLock);
 	PG_RETURN_BOOL(vis);

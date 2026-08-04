@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_storage.c
+ * pgcolumnar_storage.c
  *		Physical storage layer for pgColumnar: metapage, the logical-to-
  *		physical byte mapping, and the append-only reservation model.
  *
@@ -35,30 +35,30 @@
 /* the metapage struct lives right after the page header on block 0 */
 #define COLUMNAR_METAPAGE_BLOCKNO 0
 #define COLUMNAR_EMPTY_BLOCKNO 1
-#define ColumnarMetapagePointer(page) ((ColumnarMetapage *) PageGetContents(page))
+#define PgColumnarMetapagePointer(page) ((PgColumnarMetapage *) PageGetContents(page))
 
 /*
- * Stream/prefetch the block reads in ColumnarReadLogicalData via the read
+ * Stream/prefetch the block reads in PgColumnarReadLogicalData via the read
  * stream API (PostgreSQL 17+), which lets the PostgreSQL 18 asynchronous I/O
  * subsystem read ahead. On by default; off falls back to synchronous ReadBuffer.
  * On PostgreSQL 16 and earlier the streaming path is compiled out and this GUC
  * has no effect.
  */
-bool		columnar_enable_read_stream = true;
+bool		pgcolumnar_enable_read_stream = true;
 
 #if PG_VERSION_NUM >= 170000
 /* contiguous ascending block range for the read stream callback */
-typedef struct ColumnarBlockRange
+typedef struct PgColumnarBlockRange
 {
 	BlockNumber next;
 	BlockNumber last;
-}			ColumnarBlockRange;
+}			PgColumnarBlockRange;
 
 static BlockNumber
-columnar_read_stream_next(ReadStream *stream, void *private_data,
+pgcolumnar_read_stream_next(ReadStream *stream, void *private_data,
 						  void *per_buffer_data)
 {
-	ColumnarBlockRange *range = (ColumnarBlockRange *) private_data;
+	PgColumnarBlockRange *range = (PgColumnarBlockRange *) private_data;
 
 	if (range->next > range->last)
 		return InvalidBlockNumber;
@@ -67,7 +67,7 @@ columnar_read_stream_next(ReadStream *stream, void *private_data,
 #endif
 
 /*
- * ColumnarWriteNewMetapage
+ * PgColumnarWriteNewMetapage
  *		Initialize a freshly created relation's storage: block 0 holds the
  *		metapage with the initial reserved values from spec 3, block 1 is
  *		reserved and left empty. Written with a WAL full-page image and an
@@ -75,17 +75,17 @@ columnar_read_stream_next(ReadStream *stream, void *private_data,
  *		buffers here.
  */
 void
-ColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
+PgColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
 						 SMgrRelation srel, char persistence,
 						 uint64 storageId)
 {
-	Page		page = ColumnarAllocPage();
-	ColumnarMetapage *meta;
+	Page		page = PgColumnarAllocPage();
+	PgColumnarMetapage *meta;
 	bool		needsWAL = (persistence == RELPERSISTENCE_PERMANENT);
 
 	/* block 0: metapage */
 	PageInit(page, BLCKSZ, 0);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 	meta->versionMajor = COLUMNAR_VERSION_MAJOR;
 	meta->versionMinor = COLUMNAR_VERSION_MINOR;
 	meta->storageId = storageId;
@@ -94,7 +94,7 @@ ColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
 	meta->reservedOffset = COLUMNAR_FIRST_LOGICAL_OFFSET;
 	meta->unloggedReset = false;
 	((PageHeader) page)->pd_lower =
-		((char *) meta - (char *) page) + sizeof(ColumnarMetapage);
+		((char *) meta - (char *) page) + sizeof(PgColumnarMetapage);
 
 	if (needsWAL)
 		log_newpage(&COLUMNAR_SMGR_LOCATOR(srel), MAIN_FORKNUM,
@@ -116,11 +116,11 @@ ColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
 }
 
 /*
- * ColumnarReadMetapage
+ * PgColumnarReadMetapage
  *		Read the metapage of an existing relation into *meta.
  */
 void
-ColumnarReadMetapage(Relation rel, ColumnarMetapage *meta)
+PgColumnarReadMetapage(Relation rel, PgColumnarMetapage *meta)
 {
 	Buffer		buffer;
 	Page		page;
@@ -128,7 +128,7 @@ ColumnarReadMetapage(Relation rel, ColumnarMetapage *meta)
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = BufferGetPage(buffer);
-	memcpy(meta, ColumnarMetapagePointer(page), sizeof(ColumnarMetapage));
+	memcpy(meta, PgColumnarMetapagePointer(page), sizeof(PgColumnarMetapage));
 	UnlockReleaseBuffer(buffer);
 
 	if (meta->versionMajor != COLUMNAR_VERSION_MAJOR)
@@ -139,16 +139,16 @@ ColumnarReadMetapage(Relation rel, ColumnarMetapage *meta)
 }
 
 uint64
-ColumnarStorageId(Relation rel)
+PgColumnarStorageId(Relation rel)
 {
-	ColumnarMetapage meta;
+	PgColumnarMetapage meta;
 
-	ColumnarReadMetapage(rel, &meta);
+	PgColumnarReadMetapage(rel, &meta);
 	return meta.storageId;
 }
 
 /*
- * ColumnarReserveRowNumbers
+ * PgColumnarReserveRowNumbers
  *		Reserve a stripe id and a contiguous run of "rowCount" row numbers by
  *		advancing the metapage's reservedStripeId and reservedRowNumber marks
  *		(spec 2.2, 6). Returns the reserved stripe id and the first row number
@@ -159,24 +159,24 @@ ColumnarStorageId(Relation rel)
  *		at insert time. That is what lets an index carry a correct TID for a
  *		freshly inserted row (spec 6, 9). The byte offset is reserved
  *		separately, at flush, once the stripe's size is known
- *		(ColumnarReserveOffset). Row numbers not used by a short stripe are
+ *		(PgColumnarReserveOffset). Row numbers not used by a short stripe are
  *		simply left as a gap; row numbers need only be unique and stable.
  *
  *		Serialized by the exclusive lock on the metapage buffer; no relation
  *		extension lock is needed here because no data pages are extended.
  */
 void
-ColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
+PgColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
 						  uint64 *stripeId, uint64 *firstRowNumber)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	*stripeId = meta->reservedStripeId;
 	*firstRowNumber = meta->reservedRowNumber;
@@ -198,28 +198,28 @@ ColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
 }
 
 /*
- * ColumnarReserveOffset
+ * PgColumnarReserveOffset
  *		Reserve a page-aligned logical byte range of "dataLength" bytes for a
  *		stripe's data and return its file offset (spec 2.1, 2.2). New
  *		reservations start on a fresh page.
  *
  *		The caller must already hold the relation extension lock and must
- *		write the reserved data immediately (via ColumnarWriteLogicalData)
+ *		write the reserved data immediately (via PgColumnarWriteLogicalData)
  *		before releasing it, so that reservation is serialized and the P_NEW
  *		extends match the reserved blocks.
  */
 void
-ColumnarReserveOffset(Relation rel, uint64 dataLength, uint64 *fileOffset)
+PgColumnarReserveOffset(Relation rel, uint64 dataLength, uint64 *fileOffset)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 	uint64		alignedOffset;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	/* align the start of this reservation up to a page boundary */
 	alignedOffset = ((meta->reservedOffset + COLUMNAR_BYTES_PER_PAGE - 1) /
@@ -242,7 +242,7 @@ ColumnarReserveOffset(Relation rel, uint64 dataLength, uint64 *fileOffset)
 }
 
 /*
- * ColumnarAdvanceReservedOffset
+ * PgColumnarAdvanceReservedOffset
  *		Increase the metapage highwater by addBytes without writing any data,
  *		leaving a gap between the physical EOF and the new highwater. This is a
  *		test hook for the gap-tolerant write path (it deliberately produces the
@@ -250,16 +250,16 @@ ColumnarReserveOffset(Relation rel, uint64 dataLength, uint64 *fileOffset)
  *		Increase-only, so it can never make the highwater overlap live data.
  */
 void
-ColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes)
+PgColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	meta->reservedOffset += addBytes;
 
@@ -277,24 +277,24 @@ ColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes)
 }
 
 /*
- * ColumnarDebugSetMetapageVersion
+ * PgColumnarDebugSetMetapageVersion
  *		Test-only: overwrite the metapage's stored physical format version. Reads
- *		go through ColumnarReadMetapage, which rejects a version it does not
+ *		go through PgColumnarReadMetapage, which rejects a version it does not
  *		understand; this lets a test plant a bad version and confirm that guard
  *		fires cleanly. Reachable only via the SQL binding the format suite
  *		creates, never from the shipped catalog.
  */
 void
-ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor, uint32 versionMinor)
+PgColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor, uint32 versionMinor)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	meta->versionMajor = versionMajor;
 	meta->versionMinor = versionMinor;
@@ -313,7 +313,7 @@ ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor, uint32 versio
 }
 
 /*
- * ColumnarSetReservedOffset
+ * PgColumnarSetReservedOffset
  *		Lower the metapage highwater to newOffset (physical end-truncation). The
  *		caller has computed newOffset as the end of all live data and holds an
  *		exclusive lock on the relation, so no reservation can race. Future
@@ -321,16 +321,16 @@ ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor, uint32 versio
  *		the (now truncated) EOF. It is an error to raise the highwater here.
  */
 void
-ColumnarSetReservedOffset(Relation rel, uint64 newOffset)
+PgColumnarSetReservedOffset(Relation rel, uint64 newOffset)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	Assert(newOffset <= meta->reservedOffset);
 	meta->reservedOffset = newOffset;
@@ -349,7 +349,7 @@ ColumnarSetReservedOffset(Relation rel, uint64 newOffset)
 }
 
 /*
- * ColumnarTruncateMainFork
+ * PgColumnarTruncateMainFork
  *		Physically truncate the relation's MAIN fork to newnblocks, returning the
  *		trailing blocks to the OS (physical end-truncation). Scoped to the main
  *		fork only: the visibility-map fork is indexed by row-number-derived blocks,
@@ -361,7 +361,7 @@ ColumnarSetReservedOffset(Relation rel, uint64 newOffset)
  *		range.
  */
 void
-ColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks)
+PgColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks)
 {
 	SMgrRelation srel = RelationGetSmgr(rel);
 	ForkNumber	fork = MAIN_FORKNUM;
@@ -414,7 +414,7 @@ ColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks)
 }
 
 /*
- * ColumnarWriteLogicalData
+ * PgColumnarWriteLogicalData
  *		Write a contiguous logical byte range starting at a page-aligned
  *		logical offset, splitting it across the physical pages it maps to
  *		(spec 2.1). Blocks past the current end of the relation are extended;
@@ -431,7 +431,7 @@ ColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks)
  *		relation extension lock, so the P_NEW extensions here are serialized.
  */
 void
-ColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
+PgColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
 						 char *data, uint64 length)
 {
 	uint64		L = logicalOffset;
@@ -521,12 +521,12 @@ ColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
 }
 
 /*
- * ColumnarReadLogicalData
+ * PgColumnarReadLogicalData
  *		Read a contiguous logical byte range into dest by walking the pages
  *		it maps to (spec 2.1).
  */
 void
-ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
+PgColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 						char *dest, uint64 length)
 {
 	uint64		L = logicalOffset;
@@ -537,7 +537,7 @@ ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 		return;
 
 #if PG_VERSION_NUM >= 170000
-	if (columnar_enable_read_stream)
+	if (pgcolumnar_enable_read_stream)
 	{
 		/*
 		 * The blocks map to a contiguous ascending range, so a read stream can
@@ -546,7 +546,7 @@ ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 		 * so the same L/pageOffset walk drives the copy; the buffers are share-
 		 * locked here just as the synchronous path does.
 		 */
-		ColumnarBlockRange range;
+		PgColumnarBlockRange range;
 		ReadStream *stream;
 
 		range.next = (BlockNumber) (L / COLUMNAR_BYTES_PER_PAGE);
@@ -554,7 +554,7 @@ ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 
 		stream = read_stream_begin_relation(READ_STREAM_SEQUENTIAL, NULL, rel,
 											MAIN_FORKNUM,
-											columnar_read_stream_next, &range, 0);
+											pgcolumnar_read_stream_next, &range, 0);
 
 		while (remaining > 0)
 		{
@@ -615,21 +615,21 @@ ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 }
 
 /*
- * ColumnarResetMetapage
+ * PgColumnarResetMetapage
  *		Reset the reserved high-water marks to their initial values, keeping
  *		the storage id. Used by non-transactional truncate.
  */
 void
-ColumnarResetMetapage(Relation rel)
+PgColumnarResetMetapage(Relation rel)
 {
 	Buffer		buffer;
 	Page		page;
-	ColumnarMetapage *meta;
+	PgColumnarMetapage *meta;
 
 	buffer = ReadBuffer(rel, COLUMNAR_METAPAGE_BLOCKNO);
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
 	page = BufferGetPage(buffer);
-	meta = ColumnarMetapagePointer(page);
+	meta = PgColumnarMetapagePointer(page);
 
 	meta->reservedStripeId = 1;
 	meta->reservedRowNumber = COLUMNAR_FIRST_ROW_NUMBER;
@@ -652,7 +652,7 @@ ColumnarResetMetapage(Relation rel)
  * Row-number <-> item-pointer mapping (spec 6). Row number 0 is invalid.
  */
 void
-ColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid)
+PgColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid)
 {
 	BlockNumber blockno;
 	OffsetNumber offset;
@@ -665,7 +665,7 @@ ColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid)
 }
 
 uint64
-ColumnarItemPointerToRowNumber(ItemPointer tid)
+PgColumnarItemPointerToRowNumber(ItemPointer tid)
 {
 	BlockNumber blockno = ItemPointerGetBlockNumber(tid);
 	OffsetNumber offset = ItemPointerGetOffsetNumber(tid);

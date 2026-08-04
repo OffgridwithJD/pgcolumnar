@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_arrow.c
+ * pgcolumnar_arrow.c
  *		Arrow IPC stream export for pgColumnar (gap 27, piece 1).
  *
  *		pgcolumnar.export_arrow(rel regclass, path text) writes a columnar table
@@ -52,8 +52,8 @@
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 
-PG_FUNCTION_INFO_V1(columnar_export_arrow);
-PG_FUNCTION_INFO_V1(columnar_import_arrow);
+PG_FUNCTION_INFO_V1(pgcolumnar_export_arrow);
+PG_FUNCTION_INFO_V1(pgcolumnar_import_arrow);
 
 /* one RecordBatch per this many rows */
 #define ARROW_BATCH_ROWS 16384
@@ -158,7 +158,7 @@ numeric_to_int128(Datum numd, int scale, __int128 *out)
 
 /* ---- Arrow Type table for one column; returns tag via *typetag ---- */
 static uint32
-fb_arrow_type(FBB *b, ArrowKind kind, int precision, int scale, uint8 *typetag)
+pgc_fb_arrow_type(FBB *b, ArrowKind kind, int precision, int scale, uint8 *typetag)
 {
 	switch (kind)
 	{
@@ -168,80 +168,80 @@ fb_arrow_type(FBB *b, ArrowKind kind, int precision, int scale, uint8 *typetag)
 			{
 				int32		bits = (kind == A_INT16) ? 16 : (kind == A_INT32) ? 32 : 64;
 
-				fb_start(b, 2);
-				fb_add_i32(b, 0, bits, 0);	/* bitWidth */
-				fb_add_bool(b, 1, true, false); /* is_signed */
+				pgc_fb_start(b, 2);
+				pgc_fb_add_i32(b, 0, bits, 0);	/* bitWidth */
+				pgc_fb_add_bool(b, 1, true, false); /* is_signed */
 				*typetag = ARROW_TYPE_Int;
-				return fb_end(b);
+				return pgc_fb_end(b);
 			}
 		case A_FLOAT32:
 		case A_FLOAT64:
-			fb_start(b, 1);
-			fb_add_i16(b, 0, (kind == A_FLOAT32) ? 1 : 2, 0);	/* SINGLE/DOUBLE */
+			pgc_fb_start(b, 1);
+			pgc_fb_add_i16(b, 0, (kind == A_FLOAT32) ? 1 : 2, 0);	/* SINGLE/DOUBLE */
 			*typetag = ARROW_TYPE_FloatingPoint;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_BOOL:
-			fb_start(b, 0);
+			pgc_fb_start(b, 0);
 			*typetag = ARROW_TYPE_Bool;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_UTF8:
-			fb_start(b, 0);
+			pgc_fb_start(b, 0);
 			*typetag = ARROW_TYPE_Utf8;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_BINARY:
-			fb_start(b, 0);
+			pgc_fb_start(b, 0);
 			*typetag = ARROW_TYPE_Binary;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_DATE32:
 			/* Date { unit: DateUnit = MILLISECOND (1) }; want DAY (0) */
-			fb_start(b, 1);
-			fb_add_i16(b, 0, 0, 1);
+			pgc_fb_start(b, 1);
+			pgc_fb_add_i16(b, 0, 0, 1);
 			*typetag = ARROW_TYPE_Date;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_TIME64:
 			/* Time { unit: TimeUnit = MILLISECOND (1); bitWidth: int = 32 } */
-			fb_start(b, 2);
-			fb_add_i16(b, 0, 2, 1);		/* MICROSECOND */
-			fb_add_i32(b, 1, 64, 32);
+			pgc_fb_start(b, 2);
+			pgc_fb_add_i16(b, 0, 2, 1);		/* MICROSECOND */
+			pgc_fb_add_i32(b, 1, 64, 32);
 			*typetag = ARROW_TYPE_Time;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_TIMESTAMP:
 		case A_TIMESTAMPTZ:
 			{
 				uint32		tzOff = 0;
 
 				if (kind == A_TIMESTAMPTZ)
-					tzOff = fb_create_string(b, "UTC");
+					tzOff = pgc_fb_create_string(b, "UTC");
 				/* Timestamp { unit: TimeUnit = SECOND (0); timezone: string } */
-				fb_start(b, 2);
-				fb_add_i16(b, 0, 2, 0);		/* MICROSECOND */
-				fb_add_offset(b, 1, tzOff);
+				pgc_fb_start(b, 2);
+				pgc_fb_add_i16(b, 0, 2, 0);		/* MICROSECOND */
+				pgc_fb_add_offset(b, 1, tzOff);
 				*typetag = ARROW_TYPE_Timestamp;
-				return fb_end(b);
+				return pgc_fb_end(b);
 			}
 		case A_UUID:
 			/* FixedSizeBinary { byteWidth: int } */
-			fb_start(b, 1);
-			fb_add_i32(b, 0, 16, 0);
+			pgc_fb_start(b, 1);
+			pgc_fb_add_i32(b, 0, 16, 0);
 			*typetag = ARROW_TYPE_FixedSizeBinary;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_DECIMAL128:
 			/* Decimal { precision: int; scale: int; bitWidth: int = 128 } */
-			fb_start(b, 3);
-			fb_add_i32(b, 0, precision, 0);
-			fb_add_i32(b, 1, scale, 0);
+			pgc_fb_start(b, 3);
+			pgc_fb_add_i32(b, 0, precision, 0);
+			pgc_fb_add_i32(b, 1, scale, 0);
 			*typetag = ARROW_TYPE_Decimal;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_LIST:
 			/* List {} -- the element type is carried in the Field's children */
-			fb_start(b, 0);
+			pgc_fb_start(b, 0);
 			*typetag = ARROW_TYPE_List;
-			return fb_end(b);
+			return pgc_fb_end(b);
 		case A_STRUCT:
 			/* Struct_ {} -- the field types are the Field's children */
-			fb_start(b, 0);
+			pgc_fb_start(b, 0);
 			*typetag = ARROW_TYPE_Struct;
-			return fb_end(b);
+			return pgc_fb_end(b);
 	}
 	*typetag = 0;
 	return 0;					/* unreachable */
@@ -809,7 +809,7 @@ arrow_emit_buffers(StringInfo body, ArrowCol *c,
 static uint32
 arrow_build_field(FBB *b, ArrowCol *c)
 {
-	uint32		nameOff = fb_create_string(b, c->name ? c->name : "");
+	uint32		nameOff = pgc_fb_create_string(b, c->name ? c->name : "");
 	uint8		typetag;
 	uint32		typeOff;
 	uint32		childrenVec = 0;
@@ -821,22 +821,22 @@ arrow_build_field(FBB *b, ArrowCol *c)
 		childOff = palloc(sizeof(uint32) * c->nchildren);
 		for (i = 0; i < c->nchildren; i++)
 			childOff[i] = arrow_build_field(b, &c->children[i]);
-		fb_start_vector(b, 4, c->nchildren, 4);
+		pgc_fb_start_vector(b, 4, c->nchildren, 4);
 		for (i = c->nchildren - 1; i >= 0; i--)
-			fb_push_uoffset(b, childOff[i]);
-		childrenVec = fb_end_vector(b, c->nchildren);
+			pgc_fb_push_uoffset(b, childOff[i]);
+		childrenVec = pgc_fb_end_vector(b, c->nchildren);
 	}
 
-	typeOff = fb_arrow_type(b, c->kind, c->precision, c->scale, &typetag);
+	typeOff = pgc_fb_arrow_type(b, c->kind, c->precision, c->scale, &typetag);
 
-	fb_start(b, 7);
-	fb_add_offset(b, 0, nameOff);	/* name */
-	fb_add_bool(b, 1, true, false); /* nullable */
-	fb_add_u8(b, 2, typetag, 0);	/* type_type */
-	fb_add_offset(b, 3, typeOff);	/* type */
+	pgc_fb_start(b, 7);
+	pgc_fb_add_offset(b, 0, nameOff);	/* name */
+	pgc_fb_add_bool(b, 1, true, false); /* nullable */
+	pgc_fb_add_u8(b, 2, typetag, 0);	/* type_type */
+	pgc_fb_add_offset(b, 3, typeOff);	/* type */
 	if (c->nchildren > 0)
-		fb_add_offset(b, 5, childrenVec);	/* children (Field slot 5) */
-	return fb_end(b);
+		pgc_fb_add_offset(b, 5, childrenVec);	/* children (Field slot 5) */
+	return pgc_fb_end(b);
 }
 
 /* build one RecordBatch (metadata + body) and write it */
@@ -883,41 +883,41 @@ write_record_batch(FILE *f, ArrowCol *cols, int ncols, int64 nrows)
 	}
 
 	/* ---- RecordBatch metadata flatbuffer ---- */
-	fb_init(&b);
+	pgc_fb_init(&b);
 
 	/* nodes vector: [FieldNode{length,null_count}] structs, 16B/8-align */
-	fb_start_vector(&b, 16, nnodes, 8);
+	pgc_fb_start_vector(&b, 16, nnodes, 8);
 	for (i = nnodes - 1; i >= 0; i--)
 	{
-		fb_prep(&b, 8, 0);
-		fb_place(&b, &nodeNull[i], 8);	/* null_count (higher) */
-		fb_place(&b, &nodeLen[i], 8);	/* length (lower) */
+		pgc_fb_prep(&b, 8, 0);
+		pgc_fb_place(&b, &nodeNull[i], 8);	/* null_count (higher) */
+		pgc_fb_place(&b, &nodeLen[i], 8);	/* length (lower) */
 	}
-	nodesVec = fb_end_vector(&b, nnodes);
+	nodesVec = pgc_fb_end_vector(&b, nnodes);
 
 	/* buffers vector: [Buffer{offset,length}] structs */
-	fb_start_vector(&b, 16, nbuf, 8);
+	pgc_fb_start_vector(&b, 16, nbuf, 8);
 	for (i = nbuf - 1; i >= 0; i--)
 	{
-		fb_prep(&b, 8, 0);
-		fb_place(&b, &bufLen[i], 8); /* length (higher) */
-		fb_place(&b, &bufOff[i], 8); /* offset (lower) */
+		pgc_fb_prep(&b, 8, 0);
+		pgc_fb_place(&b, &bufLen[i], 8); /* length (higher) */
+		pgc_fb_place(&b, &bufOff[i], 8); /* offset (lower) */
 	}
-	bufsVec = fb_end_vector(&b, nbuf);
+	bufsVec = pgc_fb_end_vector(&b, nbuf);
 
-	fb_start(&b, 4);
-	fb_add_i64(&b, 0, nrows, 0);
-	fb_add_offset(&b, 1, nodesVec);
-	fb_add_offset(&b, 2, bufsVec);
-	rbOff = fb_end(&b);
+	pgc_fb_start(&b, 4);
+	pgc_fb_add_i64(&b, 0, nrows, 0);
+	pgc_fb_add_offset(&b, 1, nodesVec);
+	pgc_fb_add_offset(&b, 2, bufsVec);
+	rbOff = pgc_fb_end(&b);
 
-	fb_start(&b, 5);
-	fb_add_i16(&b, 0, ARROW_METADATA_V5, 0);
-	fb_add_u8(&b, 1, ARROW_MSG_RecordBatch, 0);
-	fb_add_offset(&b, 2, rbOff);
-	fb_add_i64(&b, 3, body.len, 0); /* bodyLength */
-	msgOff = fb_end(&b);
-	fb_finish(&b, msgOff);
+	pgc_fb_start(&b, 5);
+	pgc_fb_add_i16(&b, 0, ARROW_METADATA_V5, 0);
+	pgc_fb_add_u8(&b, 1, ARROW_MSG_RecordBatch, 0);
+	pgc_fb_add_offset(&b, 2, rbOff);
+	pgc_fb_add_i64(&b, 3, body.len, 0); /* bodyLength */
+	msgOff = pgc_fb_end(&b);
+	pgc_fb_finish(&b, msgOff);
 
 	/* ---- write encapsulated message ---- */
 	metaLen = b.tail;
@@ -940,13 +940,13 @@ write_record_batch(FILE *f, ArrowCol *cols, int ncols, int64 nrows)
 }
 
 /*
- * columnar_export_arrow
+ * pgcolumnar_export_arrow
  *		SQL: pgcolumnar.export_arrow(rel regclass, path text) -> bigint.
  *		Write a columnar table to an Arrow IPC stream file; returns the number
  *		of rows written.
  */
 Datum
-columnar_export_arrow(PG_FUNCTION_ARGS)
+pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	text	   *pathText;
@@ -956,7 +956,7 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 	int			ncols;
 	ArrowCol   *cols;
 	Snapshot	snapshot;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	Datum	   *values;
 	bool	   *nulls;
 	uint64		rowNumber;
@@ -987,7 +987,7 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 	path = text_to_cstring(pathText);
 
 	rel = table_open(relid, AccessShareLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessShareLock);
 		ereport(ERROR,
@@ -1045,25 +1045,25 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 
 	/* ---- Schema message ---- */
 	fieldOff = palloc(sizeof(uint32) * ncols);
-	fb_init(&b);
+	pgc_fb_init(&b);
 	for (i = 0; i < ncols; i++)
 		fieldOff[i] = arrow_build_field(&b, &cols[i]);
-	fb_start_vector(&b, 4, ncols, 4);
+	pgc_fb_start_vector(&b, 4, ncols, 4);
 	for (i = ncols - 1; i >= 0; i--)
-		fb_push_uoffset(&b, fieldOff[i]);
-	vec = fb_end_vector(&b, ncols);
+		pgc_fb_push_uoffset(&b, fieldOff[i]);
+	vec = pgc_fb_end_vector(&b, ncols);
 
-	fb_start(&b, 4);
+	pgc_fb_start(&b, 4);
 	/* endianness Little=0 is the default, so omit slot 0 */
-	fb_add_offset(&b, 1, vec);	/* fields */
-	schemaOff = fb_end(&b);
+	pgc_fb_add_offset(&b, 1, vec);	/* fields */
+	schemaOff = pgc_fb_end(&b);
 
-	fb_start(&b, 5);
-	fb_add_i16(&b, 0, ARROW_METADATA_V5, 0);
-	fb_add_u8(&b, 1, ARROW_MSG_Schema, 0);
-	fb_add_offset(&b, 2, schemaOff);
-	msgOff = fb_end(&b);
-	fb_finish(&b, msgOff);
+	pgc_fb_start(&b, 5);
+	pgc_fb_add_i16(&b, 0, ARROW_METADATA_V5, 0);
+	pgc_fb_add_u8(&b, 1, ARROW_MSG_Schema, 0);
+	pgc_fb_add_offset(&b, 2, schemaOff);
+	msgOff = pgc_fb_end(&b);
+	pgc_fb_finish(&b, msgOff);
 
 	{
 		uint32		cont = 0xFFFFFFFF;
@@ -1089,9 +1089,9 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 	nulls = palloc(sizeof(bool) * ncols);
 
 	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
-	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	readState = PgColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
 
-	while (ColumnarReadNextRow(readState, values, nulls, &rowNumber))
+	while (PgColumnarReadNextRow(readState, values, nulls, &rowNumber))
 	{
 		CHECK_FOR_INTERRUPTS();
 		for (i = 0; i < ncols; i++)
@@ -1110,7 +1110,7 @@ columnar_export_arrow(PG_FUNCTION_ARGS)
 			batchRows = 0;
 		}
 	}
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 
 	if (batchRows > 0)
 	{
@@ -1205,7 +1205,7 @@ fbr_i64(const uint8 *b, uint32 len, uint32 pos)
 
 /* absolute position of field `i` of the table at `tab`, or 0 if absent */
 static uint32
-fb_field(const uint8 *b, uint32 len, uint32 tab, int i)
+pgc_fb_field(const uint8 *b, uint32 len, uint32 tab, int i)
 {
 	int32		soff = fbr_i32(b, len, tab);
 	int64		vt = (int64) tab - soff;
@@ -1226,7 +1226,7 @@ fb_field(const uint8 *b, uint32 len, uint32 tab, int i)
 
 /* follow the uoffset stored at `pos` to the object it points at */
 static uint32
-fb_indirect(const uint8 *b, uint32 len, uint32 pos)
+pgc_fb_indirect(const uint8 *b, uint32 len, uint32 pos)
 {
 	return pos + fbr_u32(b, len, pos);
 }
@@ -1726,13 +1726,13 @@ imp_check_bounds(ImpNode *n, const uint8 *body, const int64 *bufOff,
 }
 
 /*
- * columnar_import_arrow
+ * pgcolumnar_import_arrow
  *		SQL: pgcolumnar.import_arrow(rel regclass, path text) -> bigint.
  *		Insert the rows of an Arrow IPC stream file into a columnar table;
  *		returns the number of rows inserted.
  */
 Datum
-columnar_import_arrow(PG_FUNCTION_ARGS)
+pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *path;
@@ -1743,7 +1743,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 	int			totalBuffers = 0;
 	FILE	   *f;
 	TupleTableSlot *slot;
-	ColumnarIndexInsertState *indexes;
+	PgColumnarIndexInsertState *indexes;
 	CommandId	cid;
 	MemoryContext rowCtx;
 	int64		total = 0;
@@ -1763,7 +1763,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	rel = table_open(relid, RowExclusiveLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, RowExclusiveLock);
 		ereport(ERROR,
@@ -1812,8 +1812,8 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 
 	slot = table_slot_create(rel, NULL);
 	cid = GetCurrentCommandId(true);
-	indexes = ColumnarRelationHasIndexes(rel)
-		? ColumnarIndexInsertBegin(rel, true) : NULL;
+	indexes = PgColumnarRelationHasIndexes(rel)
+		? PgColumnarIndexInsertBegin(rel, true) : NULL;
 
 	/*
 	 * Per-row scratch context. Reconstructing a nested value (array/composite)
@@ -1855,12 +1855,12 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 		if (fread(meta, 1, metaLen, f) != metaLen)
 			IMPORT_CORRUPT("truncated metadata");
 
-		msg = fb_indirect(meta, metaLen, 0);
-		pos = fb_field(meta, metaLen, msg, 1);	/* header_type (u8) */
+		msg = pgc_fb_indirect(meta, metaLen, 0);
+		pos = pgc_fb_field(meta, metaLen, msg, 1);	/* header_type (u8) */
 		headerType = pos ? fbr_u8(meta, metaLen, pos) : 0;
-		pos = fb_field(meta, metaLen, msg, 2);	/* header (offset) */
-		hdr = pos ? fb_indirect(meta, metaLen, pos) : 0;
-		pos = fb_field(meta, metaLen, msg, 3);	/* bodyLength (i64) */
+		pos = pgc_fb_field(meta, metaLen, msg, 2);	/* header (offset) */
+		hdr = pos ? pgc_fb_indirect(meta, metaLen, pos) : 0;
+		pos = pgc_fb_field(meta, metaLen, msg, 3);	/* bodyLength (i64) */
 		bodyLength = pos ? fbr_i64(meta, metaLen, pos) : 0;
 		if (bodyLength < 0)
 			IMPORT_CORRUPT("negative body length");
@@ -1874,9 +1874,9 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 
 		if (headerType == ARROW_MSG_Schema)
 		{
-			uint32		fieldsVecPos = hdr ? fb_field(meta, metaLen, hdr, 1) : 0;
+			uint32		fieldsVecPos = hdr ? pgc_fb_field(meta, metaLen, hdr, 1) : 0;
 			uint32		fieldsVec = fieldsVecPos ?
-				fb_indirect(meta, metaLen, fieldsVecPos) : 0;
+				pgc_fb_indirect(meta, metaLen, fieldsVecPos) : 0;
 			uint32		nfields = fieldsVec ? fbr_u32(meta, metaLen, fieldsVec) : 0;
 
 			if ((int) nfields != ncols)
@@ -1898,16 +1898,16 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 				IMPORT_CORRUPT("RecordBatch before Schema");
 			if (!hdr)
 				IMPORT_CORRUPT("missing RecordBatch header");
-			if (fb_field(meta, metaLen, hdr, 3) != 0)
+			if (pgc_fb_field(meta, metaLen, hdr, 3) != 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("columnar.import_arrow does not support compressed Arrow bodies")));
 
-			pos = fb_field(meta, metaLen, hdr, 0);	/* length */
+			pos = pgc_fb_field(meta, metaLen, hdr, 0);	/* length */
 			nrows = pos ? fbr_i64(meta, metaLen, pos) : 0;
-			nodesVecPos = fb_field(meta, metaLen, hdr, 1);
-			buffersVecPos = fb_field(meta, metaLen, hdr, 2);
-			buffersVec = buffersVecPos ? fb_indirect(meta, metaLen, buffersVecPos) : 0;
+			nodesVecPos = pgc_fb_field(meta, metaLen, hdr, 1);
+			buffersVecPos = pgc_fb_field(meta, metaLen, hdr, 2);
+			buffersVec = buffersVecPos ? pgc_fb_indirect(meta, metaLen, buffersVecPos) : 0;
 			nbuffers = buffersVec ? fbr_u32(meta, metaLen, buffersVec) : 0;
 			(void) nodesVecPos;
 
@@ -1968,9 +1968,9 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 					 * (issue #153). tts_tid carries the assigned row number.
 					 */
 					if (indexes != NULL)
-						ColumnarIndexInsertRow(indexes, rel, slot->tts_values,
+						PgColumnarIndexInsertRow(indexes, rel, slot->tts_values,
 											   slot->tts_isnull,
-											   ColumnarItemPointerToRowNumber(&slot->tts_tid));
+											   PgColumnarItemPointerToRowNumber(&slot->tts_tid));
 					MemoryContextSwitchTo(oldCtx);
 					MemoryContextReset(rowCtx);
 					total++;
@@ -1993,7 +1993,7 @@ columnar_import_arrow(PG_FUNCTION_ARGS)
 	FreeFile(f);
 	MemoryContextDelete(rowCtx);
 	if (indexes != NULL)
-		ColumnarIndexInsertEnd(indexes);
+		PgColumnarIndexInsertEnd(indexes);
 
 	ExecDropSingleTupleTableSlot(slot);
 	/*

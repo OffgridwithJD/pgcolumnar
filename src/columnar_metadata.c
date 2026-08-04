@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_metadata.c
+ * pgcolumnar_metadata.c
  *		Access to the "columnar" metadata catalog tables and the storage-id
  *		sequence (spec 7). Most metadata are ordinary heap tables keyed by
  *		storage id (the options and projection_declaration tables are keyed by
@@ -118,17 +118,17 @@
 #define Anum_delete_vector_deleted_count 4
 #define Natts_delete_vector 4
 
-static Oid	columnar_schema_oid(void);
+static Oid	pgcolumnar_schema_oid(void);
 static Relation open_columnar_table(const char *name, LOCKMODE lockmode);
-static Oid	columnar_index_oid(const char *name);
+static Oid	pgcolumnar_index_oid(const char *name);
 
 /*
- * columnar_schema_oid
+ * pgcolumnar_schema_oid
  *		OID of the "columnar" schema. It always exists once the extension is
  *		installed.
  */
 static Oid
-columnar_schema_oid(void)
+pgcolumnar_schema_oid(void)
 {
 	return get_namespace_oid(COLUMNAR_SCHEMA_NAME, false);
 }
@@ -136,7 +136,7 @@ columnar_schema_oid(void)
 static Relation
 open_columnar_table(const char *name, LOCKMODE lockmode)
 {
-	Oid			nspOid = columnar_schema_oid();
+	Oid			nspOid = pgcolumnar_schema_oid();
 	Oid			relOid = get_relname_relid(name, nspOid);
 
 	if (!OidIsValid(relOid))
@@ -149,26 +149,26 @@ open_columnar_table(const char *name, LOCKMODE lockmode)
 }
 
 /*
- * columnar_index_oid
+ * pgcolumnar_index_oid
  *		The OID of one of the metadata indexes, by name. Returns InvalidOid when
  *		it cannot be resolved, which callers pass through to systable_beginscan
  *		as indexOK = false so the lookup degrades to a heap scan rather than
  *		failing.
  */
 static Oid
-columnar_index_oid(const char *name)
+pgcolumnar_index_oid(const char *name)
 {
-	return get_relname_relid(name, columnar_schema_oid());
+	return get_relname_relid(name, pgcolumnar_schema_oid());
 }
 
 /*
- * ColumnarNextStorageId
+ * PgColumnarNextStorageId
  *		Draw the next value from pgcolumnar.storageid_seq (spec 3, 7.6).
  */
 uint64
-ColumnarNextStorageId(void)
+PgColumnarNextStorageId(void)
 {
-	Oid			nspOid = columnar_schema_oid();
+	Oid			nspOid = pgcolumnar_schema_oid();
 	Oid			seqOid = get_relname_relid("storageid_seq", nspOid);
 	int64		value;
 
@@ -182,7 +182,7 @@ ColumnarNextStorageId(void)
 }
 
 /*
- * ColumnarCatalogSnapshot
+ * PgColumnarCatalogSnapshot
  *		Return a snapshot for reading the columnar metadata catalog that also
  *		sees this transaction's own writes made in the current command (spec 9).
  *		curcid only affects visibility of the current transaction's own tuples,
@@ -190,7 +190,7 @@ ColumnarNextStorageId(void)
  *		other transactions.
  */
 Snapshot
-ColumnarCatalogSnapshot(Snapshot base)
+PgColumnarCatalogSnapshot(Snapshot base)
 {
 	Snapshot	copy;
 	CommandId	now;
@@ -223,7 +223,7 @@ ColumnarCatalogSnapshot(Snapshot base)
 
 
 /*
- * ColumnarComputeAllVisibleGroups
+ * PgColumnarComputeAllVisibleGroups
  *		Return the chunk groups that are all-visible to every snapshot (gap 28
  *		phase 3): the covering stripe's insert xid is frozen or precedes
  *		`oldestXmin` (so every current/future snapshot sees the insert), and the
@@ -231,10 +231,10 @@ ColumnarCatalogSnapshot(Snapshot base)
  *		under a dirty snapshot so a group being modified concurrently is excluded;
  *		combined with clear-on-write (which removes a bit for any later
  *		delete/insert), this keeps a set bit from ever covering a modified row.
- *		Returns a List of ColumnarRowRange * (one per all-visible group).
+ *		Returns a List of PgColumnarRowRange * (one per all-visible group).
  */
 List *
-ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
+PgColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
 	TupleDesc	gtd = RelationGetDescr(grel);
@@ -272,7 +272,7 @@ ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 		List	   *rmList;
 		ListCell   *lc;
 		bool		hasDelete = false;
-		ColumnarRowRange *r;
+		PgColumnarRowRange *r;
 
 		if (TransactionIdIsNormal(xmin) &&
 			!TransactionIdPrecedes(xmin, oldestXmin))
@@ -287,7 +287,7 @@ ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 		if (rowCount == 0)
 			continue;
 
-		rmList = ColumnarReadDeleteVectorList(storageId, groupNumber, &dirty);
+		rmList = PgColumnarReadDeleteVectorList(storageId, groupNumber, &dirty);
 		foreach(lc, rmList)
 		{
 			if (((DeleteVectorMetadata *) lfirst(lc))->deletedCount > 0)
@@ -299,7 +299,7 @@ ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 		if (hasDelete)
 			continue;
 
-		r = palloc(sizeof(ColumnarRowRange));
+		r = palloc(sizeof(PgColumnarRowRange));
 		r->firstRowNumber = firstRow;
 		r->rowCount = rowCount;
 		ranges = lappend(ranges, r);
@@ -312,7 +312,7 @@ ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 }
 
 /*
- * ColumnarComputeFullyDeletedGroups
+ * PgColumnarComputeFullyDeletedGroups
  *		Return the group numbers of row groups every one of whose rows is deleted
  *		as-of oldestXmin -- i.e. the group's catalog row and every delete on it
  *		committed before oldestXmin, so every live snapshot agrees the group is
@@ -323,7 +323,7 @@ ColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
  *		catalog version via heap MVCC. Returns a List of palloc'd uint64.
  */
 List *
-ColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
+PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
 	TupleDesc	gtd = RelationGetDescr(grel);
@@ -461,7 +461,7 @@ read_row_group_range(uint64 storageId, uint64 groupNumber,
 }
 
 /* physical reclaim: split freed ranges on allocate and coalesce on free */
-bool		columnar_reclaim_coalesce = true;
+bool		pgcolumnar_reclaim_coalesce = true;
 
 /* insert one free_space row (offset, length page-aligned, freed at freedXid) */
 static void
@@ -508,7 +508,7 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 	uint64		origEnd = off + len;
 	TransactionId freedXid = GetCurrentTransactionId();
 
-	if (columnar_reclaim_coalesce)
+	if (pgcolumnar_reclaim_coalesce)
 	{
 		Snapshot	snap = RegisterSnapshot(GetLatestSnapshot());
 		ScanKeyData key[1];
@@ -570,13 +570,13 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 	}
 
 	insert_free_space_row(rel, td, storageId, off, len, freedXid);
-	if (columnar_reclaim_coalesce)
+	if (pgcolumnar_reclaim_coalesce)
 		CommandCounterIncrement();
 	table_close(rel, RowExclusiveLock);
 }
 
 /*
- * ColumnarRetireGroup
+ * PgColumnarRetireGroup
  *		Drop all catalog rows for one row group (row_group, column_chunk,
  *		zone_map, bloom, delete_vector) in the current transaction (Phase F3a). The
  *		storage row is left intact. Heap MVCC on these deletes keeps the group
@@ -586,7 +586,7 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
  *		The caller must have verified the group is fully deleted as-of oldestXmin.
  */
 void
-ColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
+PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 {
 	uint64		fileOffset = 0;
 	uint64		byteLength = 0;
@@ -609,7 +609,7 @@ ColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 }
 
 /*
- * ColumnarAllocateFreeSpace
+ * PgColumnarAllocateFreeSpace
  *		Try to satisfy a data reservation of dataLength bytes from a previously
  *		freed range (Phase F physical reclaim). Returns true and sets *fileOffset
  *		to a page-aligned freed range that is large enough AND whose freeing
@@ -619,7 +619,7 @@ ColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
  *		so no two callers race for the same row.
  */
 bool
-ColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
+PgColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
 						  TransactionId oldestXmin, uint64 *fileOffset)
 {
 	Relation	rel = open_columnar_table("free_space", RowExclusiveLock);
@@ -677,7 +677,7 @@ ColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
 		 * same oldest-xmin gate still applies). Without this the tail of an
 		 * oversized freed range would leak until its group is re-freed.
 		 */
-		if (columnar_reclaim_coalesce)
+		if (pgcolumnar_reclaim_coalesce)
 		{
 			uint64		allocLen = COLUMNAR_PAGE_ROUND_UP(dataLength);
 
@@ -721,7 +721,7 @@ reclaim_range_cmp(const void *a, const void *b)
 }
 
 /*
- * ColumnarCheckFreeSpaceNoOverlap
+ * PgColumnarCheckFreeSpaceNoOverlap
  *		Assert-only invariant check for physical reclaim: a storage's live
  *		row-group footprints (data rounded up to whole pages) and its free_space
  *		ranges must not overlap. An overlap would mean a reused block was handed
@@ -729,7 +729,7 @@ reclaim_range_cmp(const void *a, const void *b)
  *		the end of the online maintenance operations in assert builds.
  */
 void
-ColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
+PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 {
 	Relation	rg;
 	Relation	fs;
@@ -814,7 +814,7 @@ ColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 #endif							/* USE_ASSERT_CHECKING */
 
 /*
- * ColumnarTrailingFreeSpaceSafe
+ * PgColumnarTrailingFreeSpaceSafe
  *		Physical end-truncation guard: return false if any free_space row for this
  *		storage at or above liveEnd was freed at a transaction the oldest-xmin
  *		horizon has NOT passed. Such a row is a recently retired group whose bytes
@@ -824,7 +824,7 @@ ColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
  *		the tail safe to drop.
  */
 bool
-ColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
+PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 							  TransactionId oldestXmin)
 {
 	Relation	rel = open_columnar_table("free_space", AccessShareLock);
@@ -862,14 +862,14 @@ ColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 }
 
 /*
- * ColumnarDeleteFreeSpaceAtOrAbove
+ * PgColumnarDeleteFreeSpaceAtOrAbove
  *		Physical end-truncation: drop every free_space row for this storage whose
  *		offset is at or above liveEnd. Those ranges are being physically removed
  *		from the file, so they must no longer appear as reusable space. The caller
  *		holds AccessExclusiveLock and has verified the tail is safe.
  */
 void
-ColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd)
+PgColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd)
 {
 	Relation	rel = open_columnar_table("free_space", RowExclusiveLock);
 	TupleDesc	td = RelationGetDescr(rel);
@@ -930,7 +930,7 @@ static void
 collect_footprints(uint64 storageId, Snapshot snap, FootRange **foots,
 				   int *nf, int *capf)
 {
-	List	   *rgs = ColumnarReadRowGroupList(storageId, snap);
+	List	   *rgs = PgColumnarReadRowGroupList(storageId, snap);
 	ListCell   *lc;
 
 	foreach(lc, rgs)
@@ -973,7 +973,7 @@ range_overlaps_footprint(uint64 start, uint64 end, FootRange *foots, int nf)
 }
 
 /*
- * ColumnarReconcileFreeList
+ * PgColumnarReconcileFreeList
  *		Delete any free_space row (for the base or any projection storage of this
  *		relation) that overlaps a LIVE row-group footprint as-of the latest
  *		committed state.
@@ -988,15 +988,15 @@ range_overlaps_footprint(uint64 start, uint64 end, FootRange *foots, int nf)
  *		with the trailing free rows restored; a later insert then places a live
  *		group over one of those ranges. Running this at the start of every reuse
  *		(compact_rewrite, recluster), under ShareUpdateExclusiveLock and before any
- *		ColumnarAllocateFreeSpace, drops such an entry before it can be handed out
+ *		PgColumnarAllocateFreeSpace, drops such an entry before it can be handed out
  *		on top of a live group. Inserts never reuse, so no stale entry is consumed
  *		between the crash and the next reuse.
  */
 void
-ColumnarReconcileFreeList(Relation dataRel)
+PgColumnarReconcileFreeList(Relation dataRel)
 {
-	uint64		base = ColumnarStorageId(dataRel);
-	List	   *projs = ColumnarListProjections(base);
+	uint64		base = PgColumnarStorageId(dataRel);
+	List	   *projs = PgColumnarListProjections(base);
 	ListCell   *lc;
 	Snapshot	snap;
 	FootRange  *foots;
@@ -1012,7 +1012,7 @@ ColumnarReconcileFreeList(Relation dataRel)
 
 	/* live footprints and the storage id set (base + distinct projections). Store
 	 * storage ids as heap uint64s, not stuffed into pointers, so an id > 2^32 is
-	 * safe on 32-bit builds (matches columnar_end_truncation_storages). */
+	 * safe on 32-bit builds (matches pgcolumnar_end_truncation_storages). */
 	collect_footprints(base, snap, &foots, &nf, &capf);
 	{
 		uint64	   *s = palloc(sizeof(uint64));
@@ -1022,7 +1022,7 @@ ColumnarReconcileFreeList(Relation dataRel)
 	}
 	foreach(lc, projs)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (p->projStorageId != base)
 		{
@@ -1083,23 +1083,23 @@ ColumnarReconcileFreeList(Relation dataRel)
 }
 
 /*
- * ColumnarRetireFullyDeletedGroups
+ * PgColumnarRetireFullyDeletedGroups
  *		Online compaction (Phase F3a, lazy path): retire every row group that is
  *		fully deleted as-of oldestXmin. Safe under ShareUpdateExclusiveLock,
  *		concurrent with readers and writers. Returns the number of groups retired.
  */
 int64
-ColumnarRetireFullyDeletedGroups(Relation rel)
+PgColumnarRetireFullyDeletedGroups(Relation rel)
 {
-	uint64		storageId = ColumnarStorageId(rel);
-	TransactionId oldestXmin = ColumnarOldestXmin(rel);
-	List	   *groups = ColumnarComputeFullyDeletedGroups(storageId, oldestXmin);
+	uint64		storageId = PgColumnarStorageId(rel);
+	TransactionId oldestXmin = PgColumnarOldestXmin(rel);
+	List	   *groups = PgColumnarComputeFullyDeletedGroups(storageId, oldestXmin);
 	ListCell   *lc;
 	int64		retired = 0;
 
 	foreach(lc, groups)
 	{
-		ColumnarRetireGroup(storageId, *(uint64 *) lfirst(lc));
+		PgColumnarRetireGroup(storageId, *(uint64 *) lfirst(lc));
 		retired++;
 	}
 	return retired;
@@ -1108,12 +1108,12 @@ ColumnarRetireFullyDeletedGroups(Relation rel)
 
 
 /*
- * ColumnarReadDeleteVectorList
+ * PgColumnarReadDeleteVectorList
  *		Read all delete_vector rows for a stripe (spec 7.5). Returns a list of
  *		DeleteVectorMetadata* allocated in the current memory context.
  */
 List *
-ColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId, Snapshot snapshot)
+PgColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("delete_vector", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1163,14 +1163,14 @@ ColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId, Snapshot snapsho
 }
 
 /*
- * ColumnarStorageHasDeleteVector
+ * PgColumnarStorageHasDeleteVector
  *		True when the storage has any delete_vector row, i.e. at least one delete has
  *		been recorded. Used to decide whether the native zone-map-only aggregate
  *		is valid (it is only correct when no rows are deleted) or must fall back to
  *		a delete-applying scan (D6b).
  */
 bool
-ColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot)
+PgColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("delete_vector", AccessShareLock);
 	ScanKeyData key[1];
@@ -1218,7 +1218,7 @@ delete_vector_chunk_lock_key(uint64 storageId, uint64 stripeId, int chunkId)
 /*
  * delete_vector_lock_chunk_group
  *		Take a transaction-scoped exclusive lock covering one chunk group's
- *		delete_vector tuple, so that the read-modify-write in ColumnarUpsertDeleteVector
+ *		delete_vector tuple, so that the read-modify-write in PgColumnarUpsertDeleteVector
  *		serializes against any concurrent deleter or updater touching the SAME
  *		chunk group, while deletes to different chunk groups still proceed
  *		concurrently. The lock is held until this transaction ends (commit or
@@ -1247,11 +1247,11 @@ delete_vector_lock_chunk_group(uint64 storageId, uint64 stripeId, int chunkId)
 }
 
 /*
- * ColumnarUpsertDeleteVector
+ * PgColumnarUpsertDeleteVector
  *		Insert or replace the delete_vector row for one chunk group, identified by
  *		(storage_id, group_number). If a row already exists it is replaced with the
  *		merged bitmap carried in rm; otherwise a fresh row is inserted. Used at
- *		flush of the in-memory delete buffer (columnar_delete_vector.c), at most
+ *		flush of the in-memory delete buffer (pgcolumnar_delete_vector.c), at most
  *		once per chunk group per flush, so a single heap tuple is never updated
  *		twice in the same command.
  *
@@ -1287,20 +1287,20 @@ row_group_exists(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 }
 
 /*
- * ColumnarLockChunkGroup
+ * PgColumnarLockChunkGroup
  *		Take the transaction-scoped advisory lock for one chunk group (the whole
- *		row group, chunk id 0), the same lock ColumnarUpsertDeleteVector takes. Used by
+ *		row group, chunk id 0), the same lock PgColumnarUpsertDeleteVector takes. Used by
  *		online compaction (Phase F3b) so a rewrite of a group serializes with
  *		concurrent deletes to that group.
  */
 void
-ColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber)
+PgColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber)
 {
 	delete_vector_lock_chunk_group(storageId, groupNumber, 0);
 }
 
 void
-ColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
+PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 {
 	Relation	rel;
 	TupleDesc	tupdesc;
@@ -1332,13 +1332,13 @@ ColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 		bool		exists;
 
 		/*
-		 * Latest committed state, with curcid advanced (ColumnarCatalogSnapshot)
+		 * Latest committed state, with curcid advanced (PgColumnarCatalogSnapshot)
 		 * so a group this same transaction just flushed (pending writes flush
 		 * before delete vectors at pre-commit) is visible and does not look retired.
 		 * A group retired by a concurrent COMMITTED rewrite is gone here.
 		 */
 		PushActiveSnapshot(GetLatestSnapshot());
-		latest = ColumnarCatalogSnapshot(GetActiveSnapshot());
+		latest = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 		exists = row_group_exists(storageId, rm->groupNumber, latest);
 		PopActiveSnapshot();
 		if (!exists)
@@ -1415,7 +1415,7 @@ ColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 }
 
 /*
- * ColumnarDeleteMetadata
+ * PgColumnarDeleteMetadata
  *		Remove every metadata row for a storage id. Used when a columnar
  *		table is dropped or truncated.
  */
@@ -1440,7 +1440,7 @@ delete_rows_by_storage_id(const char *tableName, AttrNumber storageAttno,
 }
 
 void
-ColumnarDeleteMetadata(uint64 storageId)
+PgColumnarDeleteMetadata(uint64 storageId)
 {
 	delete_rows_by_storage_id("delete_vector", Anum_delete_vector_storage_id, storageId);
 	/* native format catalog (PGCN v1); no-op rows for 2.2-line tables */
@@ -1455,20 +1455,20 @@ ColumnarDeleteMetadata(uint64 storageId)
 /*
  * Opt-in, default off. Set for its own session by a pgcolumnar.parallel_copy
  * loader (backing the pgcolumnar.bulk_parallel_writer GUC, registered in
- * _PG_init) so ColumnarInsertNativeStorageRow can skip the storage-row creation
+ * _PG_init) so PgColumnarInsertNativeStorageRow can skip the storage-row creation
  * advisory lock when the row already exists committed. Ordinary writes never set
  * it, so the default write path is unchanged.
  */
-bool		columnar_bulk_parallel_writer = false;
+bool		pgcolumnar_bulk_parallel_writer = false;
 
 /*
- * ColumnarInsertNativeStorageRow, ColumnarInsertRowGroupRow,
- * ColumnarInsertColumnChunkRow
+ * PgColumnarInsertNativeStorageRow, PgColumnarInsertRowGroupRow,
+ * PgColumnarInsertColumnChunkRow
  *		Record the native-format catalog rows (PGCN v1, native spec 11). Called
  *		by the native writer's flush. The 2.2-line writer does not use these.
  */
 void
-ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
+PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 {
 	Relation	rel = open_columnar_table("storage", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1496,7 +1496,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	 */
 	/*
 	 * Bulk-parallel fast path (opt-in, default off). A pgcolumnar.parallel_copy
-	 * loader sets columnar_bulk_parallel_writer for its own session; when the
+	 * loader sets pgcolumnar_bulk_parallel_writer for its own session; when the
 	 * storage row already exists in the latest committed state we skip the advisory
 	 * lock entirely and return. That lock exists ONLY to serialize the first-writer
 	 * creation race -- once the row is committed there is nothing to wait for -- and
@@ -1507,10 +1507,10 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	 * table's storage concurrently and 2PC-safely. Every ordinary write leaves the
 	 * flag false and takes the unchanged path below.
 	 */
-	if (columnar_bulk_parallel_writer)
+	if (pgcolumnar_bulk_parallel_writer)
 	{
 		PushActiveSnapshot(GetLatestSnapshot());
-		snapshot = ColumnarCatalogSnapshot(GetActiveSnapshot());
+		snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 		ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) s->storageId));
 		scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
@@ -1533,7 +1533,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	/*
 	 * Re-check under the lock against a fresh snapshot so the loser of a
 	 * cross-transaction race sees the winner's just-committed row (GetLatestSnapshot),
-	 * with curcid advanced (ColumnarCatalogSnapshot) so a second flush in this same
+	 * with curcid advanced (PgColumnarCatalogSnapshot) so a second flush in this same
 	 * transaction still sees the row this transaction already inserted. The latest
 	 * snapshot must be pushed active before it drives a heap visibility check:
 	 * PostgreSQL 18 asserts a scan snapshot is registered or active
@@ -1541,7 +1541,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	 * count. Pop it once the existence scan is done.
 	 */
 	PushActiveSnapshot(GetLatestSnapshot());
-	snapshot = ColumnarCatalogSnapshot(GetActiveSnapshot());
+	snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) s->storageId));
 	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
@@ -1562,7 +1562,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	values[Anum_native_storage_row_group_limit - 1] = Int32GetDatum(s->rowGroupLimit);
 	/*
 	 * A new storage starts unordered. An ordering rewrite sets this afterwards
-	 * (ColumnarSetSortedThrough); an unsorted one leaves it NULL, which is what
+	 * (PgColumnarSetSortedThrough); an unsorted one leaves it NULL, which is what
 	 * makes a rewrite reset the sort state with no invalidation step.
 	 */
 	nulls[Anum_native_storage_sorted_through - 1] = true;
@@ -1575,7 +1575,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 }
 
 /*
- * ColumnarSetSortedThrough
+ * PgColumnarSetSortedThrough
  *		Record the row group number the last ordering rewrite ended at, so a
  *		reader can tell how much of the layout is still ordered (issue #301).
  *
@@ -1594,7 +1594,7 @@ ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
  *		groups and reports no decay.
  */
 void
-ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
+PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
 {
 	Relation	rel;
 	TupleDesc	tupdesc;
@@ -1645,10 +1645,10 @@ ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
 }
 
 /*
- * ColumnarCheckNativeFormatVersion
+ * PgColumnarCheckNativeFormatVersion
  *		Reject a native data format version this build does not understand, before
  *		any bytes are decoded (issue #240). The physical metapage version is checked
- *		separately when the metapage is read (ColumnarReadMetapage); this is the
+ *		separately when the metapage is read (PgColumnarReadMetapage); this is the
  *		independent data-format stamp (pgcolumnar.storage.format_version), so a
  *		future PGCN version that changes the encoding while keeping the metapage
  *		layout is caught here rather than silently misread.
@@ -1659,7 +1659,7 @@ ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
  *		nothing is left open across the error.
  */
 void
-ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
+PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
 {
 	Relation	rel = open_columnar_table("storage", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1701,7 +1701,7 @@ ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
 }
 
 void
-ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg)
+PgColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg)
 {
 	Relation	rel = open_columnar_table("row_group", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1726,7 +1726,7 @@ ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg)
 }
 
 void
-ColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc)
+PgColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc)
 {
 	Relation	rel = open_columnar_table("column_chunk", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1757,13 +1757,13 @@ ColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc)
 }
 
 /*
- * ColumnarInsertZoneMapRow
+ * PgColumnarInsertZoneMapRow
  *		Record one native zone-map row (Small Materialized Aggregate) for a vector
  *		or for a whole column chunk (native spec 7.1, Phase D5). Called by the
  *		native writer's flush.
  */
 void
-ColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z)
+PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z)
 {
 	Relation	rel = open_columnar_table("zone_map", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1813,11 +1813,11 @@ ColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z)
 }
 
 /*
- * ColumnarInsertBloomRow
+ * PgColumnarInsertBloomRow
  *		Record one per-column-chunk bloom filter (native spec 7.2, Phase D5b).
  */
 void
-ColumnarInsertBloomRow(const NativeBloomMetadata *b)
+PgColumnarInsertBloomRow(const NativeBloomMetadata *b)
 {
 	Relation	rel = open_columnar_table("bloom", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1844,13 +1844,13 @@ ColumnarInsertBloomRow(const NativeBloomMetadata *b)
 }
 
 /*
- * ColumnarReadBloomList
+ * PgColumnarReadBloomList
  *		The per-column-chunk bloom filters of one row group (native spec 7.2,
  *		Phase D5b). The caller indexes the result by column_index; the filter
  *		bytes are copied into the current memory context.
  */
 List *
-ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
+PgColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("bloom", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1864,7 +1864,7 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_bloom_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	idxOid = columnar_index_oid("bloom_pkey");
+	idxOid = pgcolumnar_index_oid("bloom_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -1895,7 +1895,7 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 }
 
 /*
- * ColumnarReadBloomForColumn
+ * PgColumnarReadBloomForColumn
  *		One column's bloom filter for one row group, or NULL when it has none
  *		(issue #314).
  *
@@ -1907,7 +1907,7 @@ ColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
  *		column reads most of what it fetches for nothing.
  */
 NativeBloomMetadata *
-ColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
+PgColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
 						   int columnIndex, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("bloom", AccessShareLock);
@@ -1924,7 +1924,7 @@ ColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
 	ScanKeyInit(&key[2], Anum_bloom_column_index, BTEqualStrategyNumber,
 				F_INT2EQ, Int16GetDatum((int16) columnIndex));
-	idxOid = columnar_index_oid("bloom_pkey");
+	idxOid = pgcolumnar_index_oid("bloom_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
 							  3, key);
 	tuple = systable_getnext(scan);
@@ -1954,14 +1954,14 @@ ColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
 }
 
 /*
- * ColumnarReadZoneMapVectors
+ * PgColumnarReadZoneMapVectors
  *		The per-vector zone maps (vector_index >= 0) of one row group, for
  *		per-vector skipping (native spec 7.1, Phase D5b). Only min/max and the
  *		vector/column indices are needed by the caller. The min/max bytes are
  *		copied into the current memory context.
  */
 List *
-ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
+PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1975,7 +1975,7 @@ ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snapsh
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	idxOid = columnar_index_oid("zone_map_pkey");
+	idxOid = pgcolumnar_index_oid("zone_map_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -2044,11 +2044,11 @@ row_group_cmp(const ListCell *a, const ListCell *b)
 }
 
 /*
- * ColumnarReadRowGroupList
+ * PgColumnarReadRowGroupList
  *		The native row groups of a storage, ordered by group number.
  */
 List *
-ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
+PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("row_group", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2056,7 +2056,7 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 	SysScanDesc scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
-	Oid			rgIdx = columnar_index_oid("row_group_pkey");
+	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
 
 	ScanKeyInit(&key[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
@@ -2065,12 +2065,12 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 	 * rather than a heap scan of every storage's row groups in the database.
 	 *
 	 * This read is on the unique-check path: _bt_check_unique() reaches it
-	 * through columnar_index_fetch_tuple() under its own on-stack SnapshotDirty
+	 * through pgcolumnar_index_fetch_tuple() under its own on-stack SnapshotDirty
 	 * and reads xmin/xmax back out afterwards. A bare index scan here once
 	 * spun the check forever (test/unique_conc.sh scenario 7): when this storage
 	 * has nothing flushed the scan matches no rows, HeapTupleSatisfiesDirty()
 	 * never runs, and the uninitialised out-fields are read as a phantom xact to
-	 * wait on. columnar_index_fetch_tuple() now resets those fields before the
+	 * wait on. pgcolumnar_index_fetch_tuple() now resets those fields before the
 	 * fetch, the way HeapTupleSatisfiesDirty() does for a heap row, so the index
 	 * scan is safe: an in-progress group still sets xmin here and the check waits
 	 * on the real inserter.
@@ -2102,13 +2102,13 @@ ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot)
 }
 
 /*
- * ColumnarReadColumnChunkList
+ * PgColumnarReadColumnChunkList
  *		The native column chunks of one row group. The caller indexes the result
  *		by column_index; the encoding descriptor bytes are copied into the
  *		current memory context.
  */
 List *
-ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
+PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("column_chunk", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2122,7 +2122,7 @@ ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snaps
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_column_chunk_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	idxOid = columnar_index_oid("column_chunk_pkey");
+	idxOid = pgcolumnar_index_oid("column_chunk_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -2162,14 +2162,14 @@ ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot snaps
 }
 
 /*
- * ColumnarReadZoneMapList
+ * PgColumnarReadZoneMapList
  *		The whole-chunk zone maps (vector_index -1) of one row group, for group
  *		skipping (native spec 7.1, Phase D5b). The caller indexes the result by
  *		column_index; the minimum/maximum bytes are copied into the current memory
  *		context. Per-vector rows (vector_index >= 0) are skipped by this reader.
  */
 List *
-ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
+PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
 	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2183,7 +2183,7 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	idxOid = columnar_index_oid("zone_map_pkey");
+	idxOid = pgcolumnar_index_oid("zone_map_pkey");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
@@ -2250,12 +2250,12 @@ ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
  * ------------------------------------------------------------------------- */
 
 /*
- * columnar_compression_from_name
+ * pgcolumnar_compression_from_name
  *		Map a compression codec name to its code (spec 5). Returns -1 for an
  *		unrecognized name so the caller can fall back to the instance default.
  */
 static int
-columnar_compression_from_name(const char *name)
+pgcolumnar_compression_from_name(const char *name)
 {
 	if (strcmp(name, "none") == 0)
 		return COLUMNAR_COMPRESSION_NONE;
@@ -2269,7 +2269,7 @@ columnar_compression_from_name(const char *name)
 }
 
 /*
- * ColumnarReadOptions
+ * PgColumnarReadOptions
  *		Load the per-table options row for a relation (spec 7.4) into *opts,
  *		setting a per-field "set" flag for each column that is present (not
  *		SQL NULL). Returns true when a row exists. The catalog is read with a
@@ -2277,7 +2277,7 @@ columnar_compression_from_name(const char *name)
  *		take effect for subsequent writes (spec 9).
  */
 bool
-ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
+PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts)
 {
 	Relation	rel = open_columnar_table("options", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2288,10 +2288,10 @@ ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
 	Snapshot	snapshot;
 	bool		found = false;
 
-	memset(opts, 0, sizeof(ColumnarOptions));
+	memset(opts, 0, sizeof(PgColumnarOptions));
 
 	base = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
-	snapshot = ColumnarCatalogSnapshot(base);
+	snapshot = PgColumnarCatalogSnapshot(base);
 
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
@@ -2328,7 +2328,7 @@ ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
 		d = heap_getattr(tuple, Anum_options_compression, tupdesc, &isnull);
 		if (!isnull)
 		{
-			int			code = columnar_compression_from_name(NameStr(*DatumGetName(d)));
+			int			code = pgcolumnar_compression_from_name(NameStr(*DatumGetName(d)));
 
 			if (code >= 0)
 			{
@@ -2369,18 +2369,18 @@ ColumnarReadOptions(Oid relid, ColumnarOptions *opts)
 
 
 /*
- * ColumnarReadSortBy
+ * PgColumnarReadSortBy
  *		Load the declared sort_by column names for a relation (#288) from
  *		pgcolumnar.options. Returns a List of pstrdup'd column-name strings in
  *		the caller's memory context, or NIL when no sort key is declared (no
  *		options row, or sort_by is SQL NULL, or the array is empty). Stored as
  *		column NAMES, not attnums, so it survives dump/restore; the caller
  *		resolves the names to attnums and validates them each apply. Read with
- *		the same command-id-advanced snapshot as ColumnarReadOptions so a
+ *		the same command-id-advanced snapshot as PgColumnarReadOptions so a
  *		sort_by set earlier in this transaction is visible.
  */
 List *
-ColumnarReadSortBy(Oid relid)
+PgColumnarReadSortBy(Oid relid)
 {
 	Relation	rel = open_columnar_table("options", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2392,7 +2392,7 @@ ColumnarReadSortBy(Oid relid)
 	List	   *names = NIL;
 
 	base = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
-	snapshot = ColumnarCatalogSnapshot(base);
+	snapshot = PgColumnarCatalogSnapshot(base);
 
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
@@ -2431,13 +2431,13 @@ ColumnarReadSortBy(Oid relid)
 
 
 /*
- * ColumnarDeleteOptions
+ * PgColumnarDeleteOptions
  *		Remove a relation's per-table options row, called when the table is
  *		dropped. The options table is keyed by regclass (relation oid), not by
- *		storage id, so it is cleaned up separately from ColumnarDeleteMetadata.
+ *		storage id, so it is cleaned up separately from PgColumnarDeleteMetadata.
  */
 void
-ColumnarDeleteOptions(Oid relid)
+PgColumnarDeleteOptions(Oid relid)
 {
 	Relation	rel = open_columnar_table("options", RowExclusiveLock);
 	ScanKeyData key[1];
@@ -2456,12 +2456,12 @@ ColumnarDeleteOptions(Oid relid)
 }
 
 /*
- * ColumnarIsColumnarRelation
+ * PgColumnarIsColumnarRelation
  *		Whether a relation uses the columnar table access method. The access
  *		method oid is resolved once and cached.
  */
 bool
-ColumnarIsColumnarRelation(Oid relid)
+PgColumnarIsColumnarRelation(Oid relid)
 {
 	static Oid	columnarAmOid = InvalidOid;
 
@@ -2519,8 +2519,8 @@ int16_array_from_datum(Datum d, int *len)
 static int
 projection_cmp(const ListCell *a, const ListCell *b)
 {
-	const ColumnarProjection *pa = (const ColumnarProjection *) lfirst(a);
-	const ColumnarProjection *pb = (const ColumnarProjection *) lfirst(b);
+	const PgColumnarProjection *pa = (const PgColumnarProjection *) lfirst(a);
+	const PgColumnarProjection *pb = (const PgColumnarProjection *) lfirst(b);
 
 	if (pa->projectionId < pb->projectionId)
 		return -1;
@@ -2530,7 +2530,7 @@ projection_cmp(const ListCell *a, const ListCell *b)
 }
 
 void
-ColumnarInsertProjectionRow(const ColumnarProjection *proj)
+PgColumnarInsertProjectionRow(const PgColumnarProjection *proj)
 {
 	Relation	rel = open_columnar_table("projection", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2559,7 +2559,7 @@ ColumnarInsertProjectionRow(const ColumnarProjection *proj)
 }
 
 /*
- * ColumnarRecordProjectionDeclaration
+ * PgColumnarRecordProjectionDeclaration
  *		Record the intent behind a projection: which relation, which name, and
  *		which columns by NAME rather than by attnum (#266).
  *
@@ -2573,7 +2573,7 @@ ColumnarInsertProjectionRow(const ColumnarProjection *proj)
  *		not leave two declarations behind.
  */
 void
-ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
+PgColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 									ArrayType *columns, ArrayType *sortKey)
 {
 	Relation	rel;
@@ -2582,7 +2582,7 @@ ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 	bool		nulls[Natts_projection_declaration];
 	HeapTuple	tuple;
 
-	ColumnarDeleteProjectionDeclaration(relid, name);
+	PgColumnarDeleteProjectionDeclaration(relid, name);
 
 	rel = open_columnar_table("projection_declaration", RowExclusiveLock);
 	tupdesc = RelationGetDescr(rel);
@@ -2603,12 +2603,12 @@ ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 }
 
 /*
- * ColumnarDeleteProjectionDeclaration
+ * PgColumnarDeleteProjectionDeclaration
  *		Forget the declaration for one projection. Called when it is dropped, and
  *		before recording a replacement.
  */
 void
-ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
+PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 {
 	Relation	rel = open_columnar_table("projection_declaration",
 										  RowExclusiveLock);
@@ -2637,7 +2637,7 @@ ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 }
 
 /*
- * ColumnarDeleteProjectionDeclarationsForRel
+ * PgColumnarDeleteProjectionDeclarationsForRel
  *		Forget every declaration for a relation. Called when the relation is
  *		dropped (#304).
  *
@@ -2649,7 +2649,7 @@ ColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
  *		the same hook; this catalog needs the same treatment.
  */
 void
-ColumnarDeleteProjectionDeclarationsForRel(Oid relid)
+PgColumnarDeleteProjectionDeclarationsForRel(Oid relid)
 {
 	Relation	rel = open_columnar_table("projection_declaration",
 										  RowExclusiveLock);
@@ -2670,7 +2670,7 @@ ColumnarDeleteProjectionDeclarationsForRel(Oid relid)
 }
 
 List *
-ColumnarListProjections(uint64 storageId)
+PgColumnarListProjections(uint64 storageId)
 {
 	Relation	rel = open_columnar_table("projection", AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2687,7 +2687,7 @@ ColumnarListProjections(uint64 storageId)
 	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
-		ColumnarProjection *p = palloc0(sizeof(ColumnarProjection));
+		PgColumnarProjection *p = palloc0(sizeof(PgColumnarProjection));
 		bool		isnull;
 		Datum		d;
 
@@ -2713,7 +2713,7 @@ ColumnarListProjections(uint64 storageId)
 }
 
 void
-ColumnarDeleteProjectionRow(uint64 storageId, int projectionId)
+PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId)
 {
 	Relation	rel = open_columnar_table("projection", RowExclusiveLock);
 	ScanKeyData key[2];

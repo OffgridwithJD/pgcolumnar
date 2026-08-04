@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_index.c
+ * pgcolumnar_index.c
  *		Index maintenance for callers that insert rows without an executor.
  *
  * PostgreSQL puts index maintenance in the executor, not in the table access
@@ -10,7 +10,7 @@
  * the indexes silently stop describing the table and an index scan returns rows
  * that are not there and misses rows that are.
  *
- * Two callers are in that position: the online rewrite in columnar_vacuum.c,
+ * Two callers are in that position: the online rewrite in pgcolumnar_vacuum.c,
  * which moves live rows into fresh groups, and the Arrow and Parquet importers,
  * which load rows from a file. The importers did not maintain indexes at all
  * (issue #153): an index scan over an imported table returned nothing, and a
@@ -72,7 +72,7 @@
 #include "nodes/parsenodes.h"
 
 /*
- * ColumnarIndexInsertBegin
+ * PgColumnarIndexInsertBegin
  *		Prepare to maintain the relation's indexes for a run of inserted rows.
  *
  * enforceConstraints selects the route: an importer gets the executor's index
@@ -81,10 +81,10 @@
  * insertion, and -- when enforcing -- must keep holding it until commit, since
  * a deferred constraint queued here is fired after the caller has returned.
  */
-ColumnarIndexInsertState *
-ColumnarIndexInsertBegin(Relation rel, bool enforceConstraints)
+PgColumnarIndexInsertState *
+PgColumnarIndexInsertBegin(Relation rel, bool enforceConstraints)
 {
-	ColumnarIndexInsertState *st = palloc0(sizeof(ColumnarIndexInsertState));
+	PgColumnarIndexInsertState *st = palloc0(sizeof(PgColumnarIndexInsertState));
 	List	   *oids;
 	int			cap;
 	ListCell   *lc;
@@ -154,7 +154,7 @@ ColumnarIndexInsertBegin(Relation rel, bool enforceConstraints)
 		 * double insert.
 		 *
 		 * Not reachable through CREATE INDEX CONCURRENTLY today, because
-		 * columnar_index_validate_scan is unsupported and the build fails
+		 * pgcolumnar_index_validate_scan is unsupported and the build fails
 		 * before the index becomes valid. It is reachable as debris: a failed
 		 * concurrent build leaves the index ready but invalid until someone
 		 * drops or reindexes it, and in that state an ordinary INSERT
@@ -178,12 +178,12 @@ ColumnarIndexInsertBegin(Relation rel, bool enforceConstraints)
 }
 
 /*
- * ColumnarIndexInsertRow
+ * PgColumnarIndexInsertRow
  *		Put one row into every open index, under the row number's synthetic item
  *		pointer.
  */
 void
-ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
+PgColumnarIndexInsertRow(PgColumnarIndexInsertState *st, Relation rel,
 					   Datum *values, bool *isnull, uint64 rowNumber)
 {
 	int			natts = RelationGetDescr(rel)->natts;
@@ -194,7 +194,7 @@ ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
 	if (!st->enforcing && st->n == 0)
 		return;
 
-	ColumnarRowNumberToItemPointer(rowNumber, &tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &tid);
 
 	ExecClearTuple(st->slot);
 	memcpy(st->slot->tts_values, values, natts * sizeof(Datum));
@@ -246,12 +246,12 @@ ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
 }
 
 /*
- * ColumnarIndexInsertEnd
+ * PgColumnarIndexInsertEnd
  *		Close the indexes and free the state. The locks are held until the end of
  *		the transaction, as index_close with RowExclusiveLock leaves them.
  */
 void
-ColumnarIndexInsertEnd(ColumnarIndexInsertState *st)
+PgColumnarIndexInsertEnd(PgColumnarIndexInsertState *st)
 {
 	int			i;
 
@@ -279,12 +279,12 @@ ColumnarIndexInsertEnd(ColumnarIndexInsertState *st)
 }
 
 /*
- * ColumnarRelationHasIndexes
+ * PgColumnarRelationHasIndexes
  *		Does this relation have any index at all? Used by the importers to skip
  *		the machinery entirely on the common bulk-load-into-a-bare-table case.
  */
 bool
-ColumnarRelationHasIndexes(Relation rel)
+PgColumnarRelationHasIndexes(Relation rel)
 {
 	return RelationGetIndexList(rel) != NIL;
 }

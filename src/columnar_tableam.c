@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_tableam.c
+ * pgcolumnar_tableam.c
  *		Table access method handler for pgColumnar and extension glue:
  *		GUCs, the pre-commit flush hook, and drop-time metadata cleanup.
  *
@@ -56,19 +56,19 @@
 PG_MODULE_MAGIC;
 
 /* GUC-backed instance defaults (spec 8.3) */
-int			columnar_stripe_row_limit = 150000;
-int			columnar_chunk_group_row_limit = 10000;
-int			columnar_encoding_sample_rows = 2048;
+int			pgcolumnar_stripe_row_limit = 150000;
+int			pgcolumnar_chunk_group_row_limit = 10000;
+int			pgcolumnar_encoding_sample_rows = 2048;
 
-int			columnar_compression = COLUMNAR_COMPRESSION_ZSTD;
-int			columnar_compression_level = 3;
-int			columnar_fsst_min_gain_percent = 5;
-bool		columnar_enable_qual_pushdown = true;
-bool		columnar_enable_column_projection = true;
-bool		columnar_enable_bloom_filter = true;
+int			pgcolumnar_compression = COLUMNAR_COMPRESSION_ZSTD;
+int			pgcolumnar_compression_level = 3;
+int			pgcolumnar_fsst_min_gain_percent = 5;
+bool		pgcolumnar_enable_qual_pushdown = true;
+bool		pgcolumnar_enable_column_projection = true;
+bool		pgcolumnar_enable_bloom_filter = true;
 
 /* value set for columnar.compression (spec 5, 8.3) */
-static const struct config_enum_entry columnar_compression_options[] = {
+static const struct config_enum_entry pgcolumnar_compression_options[] = {
 	{"none", COLUMNAR_COMPRESSION_NONE, false},
 	{"pglz", COLUMNAR_COMPRESSION_PGLZ, false},
 	{"lz4", COLUMNAR_COMPRESSION_LZ4, false},
@@ -77,7 +77,7 @@ static const struct config_enum_entry columnar_compression_options[] = {
 };
 
 /* forward declaration of the AM routine so hooks can compare against it */
-static const TableAmRoutine columnar_am_methods;
+static const TableAmRoutine pgcolumnar_am_methods;
 
 static object_access_hook_type prev_object_access_hook = NULL;
 static ProcessUtility_hook_type prev_process_utility_hook = NULL;
@@ -89,7 +89,7 @@ static get_relation_info_hook_type prev_get_relation_info_hook = NULL;
 #endif
 
 /* cached OID of the "columnar" table access method (index-only-scan hook) */
-static Oid	columnar_am_oid_cache = InvalidOid;
+static Oid	pgcolumnar_am_oid_cache = InvalidOid;
 
 /* our scan descriptor wraps the base scan and the reader state */
 /*
@@ -114,7 +114,7 @@ static Oid	columnar_am_oid_cache = InvalidOid;
  * whole of every group core touches, which is what defeats the clustering trap.
  * A row is offered by exactly one block, so no row can be sampled twice.
  */
-typedef struct ColumnarAnalyzeState
+typedef struct PgColumnarAnalyzeState
 {
 	List	   *rowGroups;		/* NativeRowGroupMetadata *, in row order */
 	Snapshot	metaSnapshot;
@@ -142,18 +142,18 @@ typedef struct ColumnarAnalyzeState
 	 * target was lowered, because the work is per row offered rather than per row
 	 * kept.
 	 */
-	ColumnarReadState *rs;		/* NULL until the first slice with rows */
+	PgColumnarReadState *rs;		/* NULL until the first slice with rows */
 	uint64		rsGroup;		/* group number rs is restricted to */
 	bool		rsHavePending;	/* pendingRow/values hold an unconsumed row */
 	uint64		pendingRow;
 	Datum	   *pendingValues;
 	bool	   *pendingNulls;
-} ColumnarAnalyzeState;
+} PgColumnarAnalyzeState;
 
-typedef struct ColumnarScanDescData
+typedef struct PgColumnarScanDescData
 {
 	TableScanDescData rs_base;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 
 	/*
 	 * The context the scan descriptor itself was allocated in. The read state
@@ -162,11 +162,11 @@ typedef struct ColumnarScanDescData
 	 * instead and outlives the row that triggered it.
 	 */
 	MemoryContext scanContext;
-	ColumnarAnalyzeState *analyzeState;
-} ColumnarScanDescData;
-typedef struct ColumnarScanDescData *ColumnarScanDesc;
+	PgColumnarAnalyzeState *analyzeState;
+} PgColumnarScanDescData;
+typedef struct PgColumnarScanDescData *PgColumnarScanDesc;
 
-PG_FUNCTION_INFO_V1(columnar_handler);
+PG_FUNCTION_INFO_V1(pgcolumnar_handler);
 
 /* -------------------------------------------------------------------------
  * slot / scan callbacks
@@ -204,7 +204,7 @@ PG_FUNCTION_INFO_V1(columnar_handler);
  * slot_getsomeattrs never calls it. The full suite is run on an assert-enabled
  * build to keep that reasoning honest.
  */
-static TupleTableSlotOps ColumnarSlotOps;
+static TupleTableSlotOps PgColumnarSlotOps;
 
 /*
  * A slot that can defer its decode (issue #157).
@@ -225,7 +225,7 @@ static TupleTableSlotOps ColumnarSlotOps;
  * ExecStoreVirtualTuple, which sets tts_nvalid to the full count, so getsomeattrs
  * is never reached for those and their behaviour is unchanged.
  */
-typedef struct ColumnarSlot
+typedef struct PgColumnarSlot
 {
 	/*
 	 * VirtualTupleTableSlot, not TupleTableSlot, and it must come first. Every
@@ -242,18 +242,18 @@ typedef struct ColumnarSlot
 	Relation	rel;
 	Snapshot	snapshot;
 	uint64		rowNumber;
-} ColumnarSlot;
+} PgColumnarSlot;
 
 /*
  * The fields above must sit past everything the inherited callbacks touch. If
  * VirtualTupleTableSlot ever grows, this fails to compile rather than silently
  * aliasing.
  */
-StaticAssertDecl(offsetof(ColumnarSlot, deferred) >= sizeof(VirtualTupleTableSlot),
+StaticAssertDecl(offsetof(PgColumnarSlot, deferred) >= sizeof(VirtualTupleTableSlot),
 				 "ColumnarSlot fields must not overlap VirtualTupleTableSlot");
 
 /*
- * columnar_slot_decode_upto
+ * pgcolumnar_slot_decode_upto
  *		Materialise attributes 0 .. natts-1 of a deferred slot.
  *
  *		Decodes a prefix because that is what slot_getsomeattrs asks for, and the
@@ -261,9 +261,9 @@ StaticAssertDecl(offsetof(ColumnarSlot, deferred) >= sizeof(VirtualTupleTableSlo
  *		column 2 of 41 decodes two columns, not forty-one.
  */
 static void
-columnar_slot_decode_upto(TupleTableSlot *slot, int natts)
+pgcolumnar_slot_decode_upto(TupleTableSlot *slot, int natts)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 	Bitmapset  *needed = NULL;
 	int			i;
 
@@ -279,10 +279,10 @@ columnar_slot_decode_upto(TupleTableSlot *slot, int natts)
 	 * reconstructs the whole row, which is correct if not lazy, and it is bounded
 	 * by what one transaction has buffered.
 	 */
-	if (!ColumnarReadRowByNumberCols(cslot->rel, cslot->snapshot,
+	if (!PgColumnarReadRowByNumberCols(cslot->rel, cslot->snapshot,
 									 cslot->rowNumber, slot->tts_values,
 									 slot->tts_isnull, needed))
-		(void) ColumnarBufferedRowByNumber(cslot->rel, cslot->rowNumber,
+		(void) PgColumnarBufferedRowByNumber(cslot->rel, cslot->rowNumber,
 										   slot->tts_values, slot->tts_isnull);
 
 	bms_free(needed);
@@ -297,9 +297,9 @@ columnar_slot_decode_upto(TupleTableSlot *slot, int natts)
 }
 
 static void
-columnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
+pgcolumnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 
 	if (!cslot->deferred)
 	{
@@ -311,7 +311,7 @@ columnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
 		elog(ERROR, "getsomeattrs on a columnar slot that was filled eagerly");
 	}
 
-	columnar_slot_decode_upto(slot, natts);
+	pgcolumnar_slot_decode_upto(slot, natts);
 }
 
 /*
@@ -319,24 +319,24 @@ columnar_slot_getsomeattrs(TupleTableSlot *slot, int natts)
  * -- has to finish the decode first.
  */
 static void
-columnar_slot_force_full(TupleTableSlot *slot)
+pgcolumnar_slot_force_full(TupleTableSlot *slot)
 {
-	ColumnarSlot *cslot;
+	PgColumnarSlot *cslot;
 
 	/*
 	 * Callers hand us slots that are not ours. copyslot in particular takes a
 	 * source of any type -- the executor copies an ordinary virtual slot into a
-	 * columnar one on every INSERT -- and casting that to ColumnarSlot reads
+	 * columnar one on every INSERT -- and casting that to PgColumnarSlot reads
 	 * past the end of it, so the deferred flag is whatever happened to be in
 	 * the next word and the relation pointer behind it is garbage. That is a
 	 * segfault on the plainest INSERT there is, which is how it was found.
 	 */
-	if (slot->tts_ops != &ColumnarSlotOps)
+	if (slot->tts_ops != &PgColumnarSlotOps)
 		return;
 
-	cslot = (ColumnarSlot *) slot;
+	cslot = (PgColumnarSlot *) slot;
 	if (cslot->deferred && slot->tts_nvalid < slot->tts_tupleDescriptor->natts)
-		columnar_slot_decode_upto(slot, slot->tts_tupleDescriptor->natts);
+		pgcolumnar_slot_decode_upto(slot, slot->tts_tupleDescriptor->natts);
 }
 
 /*
@@ -345,9 +345,9 @@ columnar_slot_force_full(TupleTableSlot *slot)
  * are there.
  */
 static void
-columnar_slot_init(TupleTableSlot *slot)
+pgcolumnar_slot_init(TupleTableSlot *slot)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 
 	TTSOpsVirtual.init(slot);
 	cslot->deferred = false;
@@ -357,11 +357,11 @@ columnar_slot_init(TupleTableSlot *slot)
 }
 
 static void
-columnar_slot_clear(TupleTableSlot *slot)
+pgcolumnar_slot_clear(TupleTableSlot *slot)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 
-	Assert(slot->tts_ops == &ColumnarSlotOps);
+	Assert(slot->tts_ops == &PgColumnarSlotOps);
 	cslot->deferred = false;
 	cslot->rel = NULL;
 	cslot->snapshot = NULL;
@@ -370,37 +370,37 @@ columnar_slot_clear(TupleTableSlot *slot)
 }
 
 static void
-columnar_slot_materialize(TupleTableSlot *slot)
+pgcolumnar_slot_materialize(TupleTableSlot *slot)
 {
-	columnar_slot_force_full(slot);
+	pgcolumnar_slot_force_full(slot);
 	TTSOpsVirtual.materialize(slot);
 }
 
 static void
-columnar_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
+pgcolumnar_slot_copyslot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 {
-	columnar_slot_force_full(srcslot);
+	pgcolumnar_slot_force_full(srcslot);
 	TTSOpsVirtual.copyslot(dstslot, srcslot);
 }
 
 static MinimalTuple
-columnar_slot_copy_minimal_tuple(COLUMNAR_COPY_MINIMAL_TUPLE_ARGS)
+pgcolumnar_slot_copy_minimal_tuple(COLUMNAR_COPY_MINIMAL_TUPLE_ARGS)
 {
-	columnar_slot_force_full(slot);
+	pgcolumnar_slot_force_full(slot);
 	return TTSOpsVirtual.copy_minimal_tuple
 		COLUMNAR_COPY_MINIMAL_TUPLE_FWD(slot);
 }
 
 /*
- * ColumnarSlotStoreDeferred
+ * PgColumnarSlotStoreDeferred
  *		Point the slot at a row without decoding it. The caller has already
  *		established that the row is visible.
  */
 static void
-ColumnarSlotStoreDeferred(TupleTableSlot *slot, Relation rel,
+PgColumnarSlotStoreDeferred(TupleTableSlot *slot, Relation rel,
 						  Snapshot snapshot, uint64 rowNumber)
 {
-	ColumnarSlot *cslot = (ColumnarSlot *) slot;
+	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 
 	ExecClearTuple(slot);
 	cslot->deferred = true;
@@ -413,13 +413,13 @@ ColumnarSlotStoreDeferred(TupleTableSlot *slot, Relation rel,
 }
 
 static HeapTuple
-columnar_slot_copy_heap_tuple(TupleTableSlot *slot)
+pgcolumnar_slot_copy_heap_tuple(TupleTableSlot *slot)
 {
 	HeapTuple	tuple;
 
 	Assert(!TTS_EMPTY(slot));
 
-	columnar_slot_force_full(slot);
+	pgcolumnar_slot_force_full(slot);
 
 	tuple = heap_form_tuple(slot->tts_tupleDescriptor,
 							slot->tts_values, slot->tts_isnull);
@@ -430,30 +430,30 @@ columnar_slot_copy_heap_tuple(TupleTableSlot *slot)
 }
 
 static const TupleTableSlotOps *
-columnar_slot_callbacks(Relation relation)
+pgcolumnar_slot_callbacks(Relation relation)
 {
-	return &ColumnarSlotOps;
+	return &PgColumnarSlotOps;
 }
 
 static TableScanDesc
-columnar_scan_begin(Relation rel, Snapshot snapshot, int nkeys,
+pgcolumnar_scan_begin(Relation rel, Snapshot snapshot, int nkeys,
 					ScanKey key, ParallelTableScanDesc pscan, uint32 flags)
 {
-	ColumnarScanDesc scan;
+	PgColumnarScanDesc scan;
 
 	RelationIncrementReferenceCount(rel);
 
 	/*
 	 * Persist any data and delete marks written earlier in this transaction so
 	 * they reach the catalog before this scan reads it. The reader consults the
-	 * catalog with a command-id-advanced snapshot (ColumnarCatalogSnapshot), so
+	 * catalog with a command-id-advanced snapshot (PgColumnarCatalogSnapshot), so
 	 * these become visible to this same scan: same-transaction read-your-writes
 	 * (spec 9).
 	 */
-	ColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
-	scan = (ColumnarScanDesc) palloc0(sizeof(ColumnarScanDescData));
+	scan = (PgColumnarScanDesc) palloc0(sizeof(PgColumnarScanDescData));
 	scan->rs_base.rs_rd = rel;
 	scan->rs_base.rs_snapshot = snapshot;
 	scan->rs_base.rs_nkeys = nkeys;
@@ -488,7 +488,7 @@ columnar_scan_begin(Relation rel, Snapshot snapshot, int nkeys,
 }
 
 /*
- * columnar_scan_read_state
+ * pgcolumnar_scan_read_state
  *		The scan's reader, built on first use against the descriptor the caller
  *		is asking for.
  *
@@ -500,19 +500,19 @@ columnar_scan_begin(Relation rel, Snapshot snapshot, int nkeys,
  *
  * The read state is allocated in the context the scan descriptor itself lives
  * in. The current context on first use is usually a per-tuple one that is reset
- * before the scan ends, and ColumnarEndRead then frees an already-freed pointer.
+ * before the scan ends, and PgColumnarEndRead then frees an already-freed pointer.
  */
-static ColumnarReadState *
-columnar_scan_read_state(ColumnarScanDesc scan, TupleDesc tupdesc)
+static PgColumnarReadState *
+pgcolumnar_scan_read_state(PgColumnarScanDesc scan, TupleDesc tupdesc)
 {
 	if (scan->readState == NULL)
 	{
 		MemoryContext oldContext = MemoryContextSwitchTo(scan->scanContext);
 
 		scan->readState =
-			ColumnarBeginReadWithStorage(scan->rs_base.rs_rd,
+			PgColumnarBeginReadWithStorage(scan->rs_base.rs_rd,
 										 scan->rs_base.rs_snapshot,
-										 ColumnarStorageId(scan->rs_base.rs_rd),
+										 PgColumnarStorageId(scan->rs_base.rs_rd),
 										 tupdesc,
 										 scan->rs_base.rs_parallel, NULL,
 										 scan->rs_base.rs_nkeys,
@@ -524,17 +524,17 @@ columnar_scan_read_state(ColumnarScanDesc scan, TupleDesc tupdesc)
 }
 
 static void
-columnar_scan_end(TableScanDesc sscan)
+pgcolumnar_scan_end(TableScanDesc sscan)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
 
 	if (scan->readState != NULL)
-		ColumnarEndRead(scan->readState);
+		PgColumnarEndRead(scan->readState);
 
 	if (scan->analyzeState != NULL)
 	{
 		if (scan->analyzeState->rs != NULL)
-			ColumnarEndRead(scan->analyzeState->rs);
+			PgColumnarEndRead(scan->analyzeState->rs);
 		MemoryContextDelete(scan->analyzeState->cx);
 	}
 
@@ -547,48 +547,48 @@ columnar_scan_end(TableScanDesc sscan)
 }
 
 static void
-columnar_scan_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
+pgcolumnar_scan_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 					 bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
 
 	if (scan->readState != NULL)
-		ColumnarRescanRead(scan->readState);
+		PgColumnarRescanRead(scan->readState);
 }
 
 static bool
-columnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
+pgcolumnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
 						  TupleTableSlot *slot)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
 	uint64		rowNumber;
 
 	ExecClearTuple(slot);
 
-	if (!ColumnarReadNextRow(columnar_scan_read_state(scan,
+	if (!PgColumnarReadNextRow(pgcolumnar_scan_read_state(scan,
 													 slot->tts_tupleDescriptor),
 							 slot->tts_values, slot->tts_isnull, &rowNumber))
 		return false;
 
 	ExecStoreVirtualTuple(slot);
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
 
 	return true;
 }
 
 /* -------------------------------------------------------------------------
- * parallel scan: single-worker claim (see columnar_reader.c)
+ * parallel scan: single-worker claim (see pgcolumnar_reader.c)
  * ------------------------------------------------------------------------- */
 
 static Size
-columnar_parallelscan_estimate(Relation rel)
+pgcolumnar_parallelscan_estimate(Relation rel)
 {
 	return sizeof(ParallelBlockTableScanDescData);
 }
 
 static Size
-columnar_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
+pgcolumnar_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 {
 	ParallelBlockTableScanDesc bpscan = (ParallelBlockTableScanDesc) pscan;
 
@@ -603,7 +603,7 @@ columnar_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 }
 
 static void
-columnar_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
+pgcolumnar_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
 	ParallelBlockTableScanDesc bpscan = (ParallelBlockTableScanDesc) pscan;
 
@@ -615,11 +615,11 @@ columnar_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
  * ------------------------------------------------------------------------- */
 
 static void
-columnar_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
+pgcolumnar_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
 					  COLUMNAR_TABLE_OPTIONS options,
 					  struct BulkInsertStateData *bistate)
 {
-	ColumnarWriteState *writeState = ColumnarGetWriteState(rel);
+	PgColumnarWriteState *writeState = PgColumnarGetWriteState(rel);
 	uint64		rowNumber;
 
 	slot_getallattrs(slot);
@@ -629,13 +629,13 @@ columnar_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
 	 * the executor runs its btree uniqueness check on this row, so the check
 	 * runs only after any conflicting transaction has committed and flushed.
 	 */
-	ColumnarLockUniqueKeys(rel, slot);
+	PgColumnarLockUniqueKeys(rel, slot);
 
-	rowNumber = ColumnarWriteRow(writeState, rel, slot->tts_values,
+	rowNumber = PgColumnarWriteRow(writeState, rel, slot->tts_values,
 								 slot->tts_isnull);
 
 	/* fan the row out to every additional projection of this table (gap 26) */
-	ColumnarProjectionFanoutRow(rel, writeState, rowNumber, slot->tts_values,
+	PgColumnarProjectionFanoutRow(rel, writeState, rowNumber, slot->tts_values,
 								slot->tts_isnull);
 
 	/*
@@ -643,23 +643,23 @@ columnar_tuple_insert(Relation rel, TupleTableSlot *slot, CommandId cid,
 	 * index-only scan never skips the fetch for a block that just changed
 	 * (gap 28). A no-op unless a prior vacuum had marked the block visible.
 	 */
-	ColumnarVMClearForRow(rel, rowNumber);
+	PgColumnarVMClearForRow(rel, rowNumber);
 
 	/*
 	 * Publish the row's synthetic item pointer (spec 6) so the executor can
 	 * insert correct (index value, TID) entries into any indexes on this
 	 * relation and enforce unique constraints (spec 9).
 	 */
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 }
 
 static void
-columnar_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
+pgcolumnar_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
 					  CommandId cid, COLUMNAR_TABLE_OPTIONS options,
 					  struct BulkInsertStateData *bistate)
 {
-	ColumnarWriteState *writeState = ColumnarGetWriteState(rel);
+	PgColumnarWriteState *writeState = PgColumnarGetWriteState(rel);
 	int			i;
 
 	for (i = 0; i < nslots; i++)
@@ -667,27 +667,27 @@ columnar_multi_insert(Relation rel, TupleTableSlot **slots, int nslots,
 		uint64		rowNumber;
 
 		slot_getallattrs(slots[i]);
-		ColumnarLockUniqueKeys(rel, slots[i]);	/* issue #5 */
-		rowNumber = ColumnarWriteRow(writeState, rel, slots[i]->tts_values,
+		PgColumnarLockUniqueKeys(rel, slots[i]);	/* issue #5 */
+		rowNumber = PgColumnarWriteRow(writeState, rel, slots[i]->tts_values,
 									 slots[i]->tts_isnull);
-		ColumnarProjectionFanoutRow(rel, writeState, rowNumber,
+		PgColumnarProjectionFanoutRow(rel, writeState, rowNumber,
 									slots[i]->tts_values, slots[i]->tts_isnull);
-		ColumnarVMClearForRow(rel, rowNumber);	/* gap 28: block changed */
-		ColumnarRowNumberToItemPointer(rowNumber, &slots[i]->tts_tid);
+		PgColumnarVMClearForRow(rel, rowNumber);	/* gap 28: block changed */
+		PgColumnarRowNumberToItemPointer(rowNumber, &slots[i]->tts_tid);
 		slots[i]->tts_tableOid = RelationGetRelid(rel);
 	}
 }
 
 static void
-columnar_finish_bulk_insert(Relation rel, COLUMNAR_TABLE_OPTIONS options)
+pgcolumnar_finish_bulk_insert(Relation rel, COLUMNAR_TABLE_OPTIONS options)
 {
 	/*
 	 * End of a bulk-load path (COPY, CREATE TABLE AS, ALTER TABLE rewrite).
 	 * Flush now, under this operation's subtransaction, so the buffer never
 	 * spans a later statement or savepoint boundary (spec 9).
 	 */
-	ColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
+	PgColumnarFlushDeleteVectorForRelation(rel);
 }
 
 /* -------------------------------------------------------------------------
@@ -695,7 +695,7 @@ columnar_finish_bulk_insert(Relation rel, COLUMNAR_TABLE_OPTIONS options)
  * ------------------------------------------------------------------------- */
 
 static void
-columnar_relation_set_new_filelocator(Relation rel,
+pgcolumnar_relation_set_new_filelocator(Relation rel,
 									  const RelFileLocator *newrlocator,
 									  char persistence,
 									  TransactionId *freezeXid,
@@ -712,19 +712,19 @@ columnar_relation_set_new_filelocator(Relation rel,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("unlogged columnar tables are not supported")));
 
-	srel = ColumnarRelationCreateStorage(*newrlocator, persistence);
-	storageId = ColumnarNextStorageId();
-	ColumnarWriteNewMetapage(newrlocator, srel, persistence, storageId);
+	srel = PgColumnarRelationCreateStorage(*newrlocator, persistence);
+	storageId = PgColumnarNextStorageId();
+	PgColumnarWriteNewMetapage(newrlocator, srel, persistence, storageId);
 }
 
 static void
-columnar_relation_nontransactional_truncate(Relation rel)
+pgcolumnar_relation_nontransactional_truncate(Relation rel)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 
-	ColumnarDeleteMetadata(storageId);
+	PgColumnarDeleteMetadata(storageId);
 	RelationTruncate(rel, 2);
-	ColumnarResetMetapage(rel);
+	PgColumnarResetMetapage(rel);
 }
 
 /* -------------------------------------------------------------------------
@@ -732,7 +732,7 @@ columnar_relation_nontransactional_truncate(Relation rel)
  * ------------------------------------------------------------------------- */
 
 static uint64
-columnar_relation_size(Relation rel, ForkNumber forkNumber)
+pgcolumnar_relation_size(Relation rel, ForkNumber forkNumber)
 {
 	SMgrRelation srel = RelationGetSmgr(rel);
 
@@ -748,19 +748,19 @@ columnar_relation_size(Relation rel, ForkNumber forkNumber)
 }
 
 static bool
-columnar_relation_needs_toast_table(Relation rel)
+pgcolumnar_relation_needs_toast_table(Relation rel)
 {
 	/* the writer detoasts and stores values inline in the value stream */
 	return false;
 }
 
 static void
-columnar_relation_estimate_size(Relation rel, int32 *attr_widths,
+pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 								BlockNumber *pages, double *tuples,
 								double *allvisfrac)
 {
 	BlockNumber nblocks = RelationGetNumberOfBlocks(rel);
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	Snapshot	snapshot;
 	List	   *rowGroupList;
 	ListCell   *lc;
@@ -773,7 +773,7 @@ columnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 	 * planner from mis-costing scans (spec 6, 9).
 	 */
 	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
-	rowGroupList = ColumnarReadRowGroupList(storageId, ColumnarCatalogSnapshot(snapshot));
+	rowGroupList = PgColumnarReadRowGroupList(storageId, PgColumnarCatalogSnapshot(snapshot));
 
 	foreach(lc, rowGroupList)
 		liveRows += (double) ((NativeRowGroupMetadata *) lfirst(lc))->rowCount;
@@ -784,28 +784,28 @@ columnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 }
 
 /*
- * columnar_analyze_state
+ * pgcolumnar_analyze_state
  *		The sampling state for this scan, built on first use. The row group list
  *		is read once: ANALYZE holds ShareUpdateExclusiveLock, so no group is added
  *		or retired under us, and re-reading it per block would put a catalog scan
  *		in the middle of the sample loop.
  */
-static ColumnarAnalyzeState *
-columnar_analyze_state(ColumnarScanDesc scan)
+static PgColumnarAnalyzeState *
+pgcolumnar_analyze_state(PgColumnarScanDesc scan)
 {
-	ColumnarAnalyzeState *st = scan->analyzeState;
+	PgColumnarAnalyzeState *st = scan->analyzeState;
 	Relation	rel = scan->rs_base.rs_rd;
 	MemoryContext oldContext;
 
 	if (st != NULL)
 		return st;
 
-	st = palloc0(sizeof(ColumnarAnalyzeState));
+	st = palloc0(sizeof(PgColumnarAnalyzeState));
 	st->cx = AllocSetContextCreate(CurrentMemoryContext, "columnar analyze",
 								   ALLOCSET_DEFAULT_SIZES);
 	oldContext = MemoryContextSwitchTo(st->cx);
-	st->metaSnapshot = ColumnarCatalogSnapshot(scan->rs_base.rs_snapshot);
-	st->rowGroups = ColumnarReadRowGroupList(ColumnarStorageId(rel),
+	st->metaSnapshot = PgColumnarCatalogSnapshot(scan->rs_base.rs_snapshot);
+	st->rowGroups = PgColumnarReadRowGroupList(PgColumnarStorageId(rel),
 											 st->metaSnapshot);
 	st->values = palloc(sizeof(Datum) * RelationGetDescr(rel)->natts);
 	st->nulls = palloc(sizeof(bool) * RelationGetDescr(rel)->natts);
@@ -818,7 +818,7 @@ columnar_analyze_state(ColumnarScanDesc scan)
 }
 
 /*
- * columnar_analyze_set_slice
+ * pgcolumnar_analyze_set_slice
  *		Point the sampler at the rows a physical block stands for.
  *
  *		The block's logical byte offset locates the row group it falls in; its
@@ -830,7 +830,7 @@ columnar_analyze_state(ColumnarScanDesc scan)
  *		as visited and offers nothing.
  */
 static void
-columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
+pgcolumnar_analyze_set_slice(PgColumnarAnalyzeState *st, BlockNumber blockno)
 {
 	uint64		logicalOffset;
 	ListCell   *lc;
@@ -903,17 +903,17 @@ columnar_analyze_set_slice(ColumnarAnalyzeState *st, BlockNumber blockno)
 
 /*
  * The block comes from a read stream from PG17 and as a plain BlockNumber
- * before that. columnar_compat.h supplies the parameter list and splits at the
+ * before that. pgcolumnar_compat.h supplies the parameter list and splits at the
  * same major; these two must agree, and when they did not, PG17 took the
  * pre-17 branch and failed to compile on a `blockno` its signature does not
  * have.
  */
 #if PG_VERSION_NUM >= 170000
 static bool
-columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
+pgcolumnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
 {
-	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
-	ColumnarAnalyzeState *st = columnar_analyze_state(cscan);
+	PgColumnarScanDesc cscan = (PgColumnarScanDesc) scan;
+	PgColumnarAnalyzeState *st = pgcolumnar_analyze_state(cscan);
 	Buffer		buf = read_stream_next_buffer(stream, NULL);
 
 	if (!BufferIsValid(buf))
@@ -925,26 +925,26 @@ columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
 	 * for are read through the fetch path instead. Release the pin at once rather
 	 * than holding it across the tuple loop as heap does.
 	 */
-	columnar_analyze_set_slice(st, BufferGetBlockNumber(buf));
+	pgcolumnar_analyze_set_slice(st, BufferGetBlockNumber(buf));
 	ReleaseBuffer(buf);
 	return true;
 }
 #else
 static bool
-columnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
+pgcolumnar_scan_analyze_next_block(COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS)
 {
-	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
+	PgColumnarScanDesc cscan = (PgColumnarScanDesc) scan;
 
-	columnar_analyze_set_slice(columnar_analyze_state(cscan), blockno);
+	pgcolumnar_analyze_set_slice(pgcolumnar_analyze_state(cscan), blockno);
 	return true;
 }
 #endif
 
 static bool
-columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
+pgcolumnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 {
-	ColumnarScanDesc cscan = (ColumnarScanDesc) scan;
-	ColumnarAnalyzeState *st = columnar_analyze_state(cscan);
+	PgColumnarScanDesc cscan = (PgColumnarScanDesc) scan;
+	PgColumnarAnalyzeState *st = pgcolumnar_analyze_state(cscan);
 	Relation	rel = scan->rs_rd;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	uint64		sliceEnd = st->sliceFirstRow + st->sliceRows;
@@ -959,9 +959,9 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 		MemoryContext oldContext = MemoryContextSwitchTo(st->cx);
 
 		if (st->rs != NULL)
-			ColumnarEndRead(st->rs);
-		st->rs = ColumnarBeginRead(rel, scan->rs_snapshot, NULL, NULL, 0, NULL);
-		ColumnarReadRestrictToGroups(st->rs, &st->sliceGroup, 1);
+			PgColumnarEndRead(st->rs);
+		st->rs = PgColumnarBeginRead(rel, scan->rs_snapshot, NULL, NULL, 0, NULL);
+		PgColumnarReadRestrictToGroups(st->rs, &st->sliceGroup, 1);
 		st->rsGroup = st->sliceGroup;
 		st->rsHavePending = false;
 		MemoryContextSwitchTo(oldContext);
@@ -981,7 +981,7 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 				   sizeof(Datum) * tupdesc->natts);
 			memcpy(st->nulls, st->pendingNulls, sizeof(bool) * tupdesc->natts);
 		}
-		else if (!ColumnarReadNextRow(st->rs, st->values, st->nulls, &rowNumber))
+		else if (!PgColumnarReadNextRow(st->rs, st->values, st->nulls, &rowNumber))
 		{
 			/*
 			 * The group is exhausted. Any rows of this slice not returned were
@@ -1034,7 +1034,7 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 		 * is monotonic, so this is what makes the sorted order the physical order
 		 * -- which in turn is what makes the correlation statistic mean anything.
 		 */
-		ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+		PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 
 		*liverows += 1;
 		return true;
@@ -1044,7 +1044,7 @@ columnar_scan_analyze_next_tuple(COLUMNAR_ANALYZE_NEXT_TUPLE_ARGS)
 /* VACUUM: mark all-visible groups in the VM fork and retire fully-deleted
  * groups online, both under ShareUpdateExclusiveLock */
 static void
-columnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
+pgcolumnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 						 BufferAccessStrategy bstrategy)
 {
 	/*
@@ -1055,7 +1055,7 @@ columnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 	 * concurrent with readers and writers. The space-reclaiming rewrite stays in
 	 * columnar.vacuum (AccessExclusiveLock, the VACUUM-FULL analog).
 	 */
-	ColumnarVMSetVisibleForRelation(rel);
+	PgColumnarVMSetVisibleForRelation(rel);
 
 	/*
 	 * Online compaction (Phase F3a): retire row groups that are fully deleted
@@ -1065,7 +1065,7 @@ columnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 	 * so a plain VACUUM / autovacuum reclaims fully-deleted groups online without
 	 * the AccessExclusiveLock rewrite.
 	 */
-	ColumnarRetireFullyDeletedGroups(rel);
+	PgColumnarRetireFullyDeletedGroups(rel);
 }
 
 /* -------------------------------------------------------------------------
@@ -1079,33 +1079,33 @@ columnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 					feature)))
 
 /* our index-fetch descriptor is just the base plus nothing extra */
-typedef struct ColumnarIndexFetchData
+typedef struct PgColumnarIndexFetchData
 {
 	IndexFetchTableData xs_base;
-} ColumnarIndexFetchData;
+} PgColumnarIndexFetchData;
 
 static struct IndexFetchTableData *
-columnar_index_fetch_begin(COLUMNAR_INDEX_FETCH_BEGIN_ARGS)
+pgcolumnar_index_fetch_begin(COLUMNAR_INDEX_FETCH_BEGIN_ARGS)
 {
-	ColumnarIndexFetchData *scan = palloc0(sizeof(ColumnarIndexFetchData));
+	PgColumnarIndexFetchData *scan = palloc0(sizeof(PgColumnarIndexFetchData));
 
 	scan->xs_base.rel = rel;
 	return &scan->xs_base;
 }
 
 static void
-columnar_index_fetch_reset(struct IndexFetchTableData *scan)
+pgcolumnar_index_fetch_reset(struct IndexFetchTableData *scan)
 {
 }
 
 static void
-columnar_index_fetch_end(struct IndexFetchTableData *scan)
+pgcolumnar_index_fetch_end(struct IndexFetchTableData *scan)
 {
 	pfree(scan);
 }
 
 /*
- * columnar_index_fetch_tuple
+ * pgcolumnar_index_fetch_tuple
  *		Fetch the columnar row addressed by an index item pointer (spec 6) into
  *		the slot. Returns false when the row is marked deleted in the delete vector
  *		or does not exist, so an index scan never returns a deleted row and a
@@ -1120,12 +1120,12 @@ columnar_index_fetch_end(struct IndexFetchTableData *scan)
  *		check path).
  */
 static bool
-columnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
+pgcolumnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
 						   Snapshot snapshot, TupleTableSlot *slot,
 						   bool *call_again, bool *all_dead)
 {
 	Relation	rel = scan->rel;
-	uint64		rowNumber = ColumnarItemPointerToRowNumber(tid);
+	uint64		rowNumber = PgColumnarItemPointerToRowNumber(tid);
 
 	/* columnar rows are 1:1 with item pointers: no chain, never dead here */
 	*call_again = false;
@@ -1161,31 +1161,31 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *scan, ItemPointer tid,
 	 * transaction's write buffer, and that reader reconstructs whole rows, so it
 	 * is stored eagerly.
 	 */
-	if (ColumnarRowIsLive(rel, snapshot, rowNumber))
-		ColumnarSlotStoreDeferred(slot, rel, snapshot, rowNumber);
-	else if (ColumnarBufferedRowByNumber(rel, rowNumber,
+	if (PgColumnarRowIsLive(rel, snapshot, rowNumber))
+		PgColumnarSlotStoreDeferred(slot, rel, snapshot, rowNumber);
+	else if (PgColumnarBufferedRowByNumber(rel, rowNumber,
 										 slot->tts_values, slot->tts_isnull))
 		ExecStoreVirtualTuple(slot);
 	else
 		return false;
 
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 
 	return true;
 }
 
 /*
- * columnar_tuple_fetch_row_version
+ * pgcolumnar_tuple_fetch_row_version
  *		Fetch the row addressed by tid into slot (spec 6). Used by UPDATE, which
  *		re-fetches the old row by its item pointer. Returns false when the row
  *		does not exist or is marked deleted.
  */
 static bool
-columnar_tuple_fetch_row_version(Relation rel, ItemPointer tid,
+pgcolumnar_tuple_fetch_row_version(Relation rel, ItemPointer tid,
 								 Snapshot snapshot, TupleTableSlot *slot)
 {
-	uint64		rowNumber = ColumnarItemPointerToRowNumber(tid);
+	uint64		rowNumber = PgColumnarItemPointerToRowNumber(tid);
 
 	ExecClearTuple(slot);
 
@@ -1210,33 +1210,33 @@ columnar_tuple_fetch_row_version(Relation rel, ItemPointer tid,
 	 * partial stripe to satisfy a read would fragment storage for the sake of
 	 * data already in hand.
 	 */
-	if (!ColumnarReadRowByNumber(rel, snapshot, rowNumber,
+	if (!PgColumnarReadRowByNumber(rel, snapshot, rowNumber,
 								 slot->tts_values, slot->tts_isnull) &&
-		!ColumnarBufferedRowByNumber(rel, rowNumber,
+		!PgColumnarBufferedRowByNumber(rel, rowNumber,
 									 slot->tts_values, slot->tts_isnull))
 		return false;
 
 	ExecStoreVirtualTuple(slot);
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 
 	return true;
 }
 
 static bool
-columnar_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+pgcolumnar_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 {
 	return true;
 }
 
 static void
-columnar_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid)
+pgcolumnar_tuple_get_latest_tid(TableScanDesc scan, ItemPointer tid)
 {
 	COLUMNAR_UNSUPPORTED("get latest tid");
 }
 
 static bool
-columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
+pgcolumnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 								  Snapshot snapshot)
 {
 	/* stripes are visible per their metadata snapshot; slots are visible */
@@ -1244,9 +1244,9 @@ columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 }
 
 /*
- * columnar_index_delete_tuples
+ * pgcolumnar_index_delete_tuples
  *		Opportunistic index tuple deletion. An index entry is deletable exactly
- *		when its row is no longer visible, i.e. ColumnarReadRowByNumber cannot
+ *		when its row is no longer visible, i.e. PgColumnarReadRowByNumber cannot
  *		return it (deleted via the delete vector). Reporting deletability by actual
  *		liveness is required for correctness: nbtree's deletion pass (including
  *		bottom-up deletion of duplicate keys, which a same-key UPDATE produces)
@@ -1266,14 +1266,14 @@ columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
  * correct and always-safe answer.
  */
 static TransactionId
-columnar_compute_xid_horizon_for_tuples(Relation rel, ItemPointerData *tids,
+pgcolumnar_compute_xid_horizon_for_tuples(Relation rel, ItemPointerData *tids,
 										int nitems)
 {
 	return InvalidTransactionId;
 }
 #else
 static TransactionId
-columnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
+pgcolumnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
 	Snapshot	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot()
 		: GetTransactionSnapshot();
@@ -1282,16 +1282,16 @@ columnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 	for (i = 0; i < delstate->ndeltids; i++)
 	{
 		uint64		rowNumber =
-			ColumnarItemPointerToRowNumber(&delstate->deltids[i].tid);
+			PgColumnarItemPointerToRowNumber(&delstate->deltids[i].tid);
 
 		/*
-		 * Only liveness matters here, and ColumnarRowIsLive decodes nothing to
+		 * Only liveness matters here, and PgColumnarRowIsLive decodes nothing to
 		 * answer it. This used to reconstruct every column of the row and then
 		 * free the result unread, once per candidate index tuple, on a path
 		 * nbtree drives during deletion (issue #157).
 		 */
 		delstate->status[delstate->deltids[i].id].knowndeletable =
-			!ColumnarRowIsLive(rel, snapshot, rowNumber);
+			!PgColumnarRowIsLive(rel, snapshot, rowNumber);
 	}
 
 	return InvalidTransactionId;
@@ -1299,7 +1299,7 @@ columnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 #endif
 
 static void
-columnar_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
+pgcolumnar_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
 								  CommandId cid, COLUMNAR_TABLE_OPTIONS options,
 								  struct BulkInsertStateData *bistate,
 								  uint32 specToken)
@@ -1308,29 +1308,29 @@ columnar_tuple_insert_speculative(Relation rel, TupleTableSlot *slot,
 }
 
 static void
-columnar_tuple_complete_speculative(Relation rel, TupleTableSlot *slot,
+pgcolumnar_tuple_complete_speculative(Relation rel, TupleTableSlot *slot,
 									uint32 specToken, bool succeeded)
 {
 	COLUMNAR_UNSUPPORTED("speculative insert");
 }
 
 /*
- * columnar_tuple_delete
+ * pgcolumnar_tuple_delete
  *		Mark the row addressed by tid as deleted in the delete vector (spec 9). The
  *		stripe is not rewritten. The tid is the synthetic item pointer the scan
  *		produced, which maps back to the row number.
  */
 static TM_Result
-columnar_tuple_delete(COLUMNAR_TUPLE_DELETE_ARGS)
+pgcolumnar_tuple_delete(COLUMNAR_TUPLE_DELETE_ARGS)
 {
-	uint64		rowNumber = ColumnarItemPointerToRowNumber(tid);
+	uint64		rowNumber = PgColumnarItemPointerToRowNumber(tid);
 
-	ColumnarMarkRowDeleted(rel, rowNumber);
+	PgColumnarMarkRowDeleted(rel, rowNumber);
 	return TM_Ok;
 }
 
 /*
- * columnar_tuple_update
+ * pgcolumnar_tuple_update
  *		Update is delete-plus-insert (spec 9): mark the old row deleted in the
  *		delete vector and append the new tuple as a fresh row with a new row number.
  *		The new row's item pointer is published on the slot and index
@@ -1339,24 +1339,24 @@ columnar_tuple_delete(COLUMNAR_TUPLE_DELETE_ARGS)
  *		row is now marked deleted (spec 6, 9).
  */
 static TM_Result
-columnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
+pgcolumnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 {
-	uint64		oldRowNumber = ColumnarItemPointerToRowNumber(otid);
-	ColumnarWriteState *writeState;
+	uint64		oldRowNumber = PgColumnarItemPointerToRowNumber(otid);
+	PgColumnarWriteState *writeState;
 	uint64		rowNumber;
 
-	ColumnarMarkRowDeleted(rel, oldRowNumber);
+	PgColumnarMarkRowDeleted(rel, oldRowNumber);
 
-	writeState = ColumnarGetWriteState(rel);
+	writeState = PgColumnarGetWriteState(rel);
 	slot_getallattrs(slot);
 
 	/* the new row version is a fresh insert: serialize its unique keys too */
-	ColumnarLockUniqueKeys(rel, slot);		/* issue #5 */
+	PgColumnarLockUniqueKeys(rel, slot);		/* issue #5 */
 
-	rowNumber = ColumnarWriteRow(writeState, rel, slot->tts_values,
+	rowNumber = PgColumnarWriteRow(writeState, rel, slot->tts_values,
 								 slot->tts_isnull);
 
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
 
 	*lockmode = LockTupleExclusive;
@@ -1365,7 +1365,7 @@ columnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 }
 
 static TM_Result
-columnar_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
+pgcolumnar_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 					TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 					LockWaitPolicy wait_policy, uint8 flags,
 					TM_FailureData *tmfd)
@@ -1375,19 +1375,19 @@ columnar_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 }
 
 static void
-columnar_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
+pgcolumnar_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
 {
 	COLUMNAR_UNSUPPORTED("relation copy (ALTER TABLE SET TABLESPACE)");
 }
 
 static void
-columnar_relation_copy_for_cluster(COLUMNAR_COPY_FOR_CLUSTER_ARGS)
+pgcolumnar_relation_copy_for_cluster(COLUMNAR_COPY_FOR_CLUSTER_ARGS)
 {
 	COLUMNAR_UNSUPPORTED("CLUSTER / VACUUM FULL");
 }
 
 /*
- * columnar_index_build_range_scan
+ * pgcolumnar_index_build_range_scan
  *		Scan every live row of the columnar table and hand it to the index
  *		build callback, so CREATE INDEX (btree or hash) works over a columnar
  *		table (spec 9). Deleted rows (delete vector) are skipped by the reader, so
@@ -1400,14 +1400,14 @@ columnar_relation_copy_for_cluster(COLUMNAR_COPY_FOR_CLUSTER_ARGS)
  *		included in the build.
  */
 static double
-columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
+pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 								struct IndexInfo *index_info, bool allow_sync,
 								bool anyvisible, bool progress,
 								BlockNumber start_blockno, BlockNumber numblocks,
 								IndexBuildCallback callback, void *callback_state,
 								TableScanDesc scan)
 {
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	bool		ownReadState;
 	EState	   *estate;
 	ExprContext *econtext;
@@ -1424,8 +1424,8 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 				 errmsg("columnar: partial-range index build is not supported")));
 
 	/* persist buffered rows and delete marks so the build sees them (spec 9) */
-	ColumnarFlushWriteStateForRelation(RelationGetRelid(table_rel));
-	ColumnarFlushDeleteVectorForRelation(table_rel);
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(table_rel));
+	PgColumnarFlushDeleteVectorForRelation(table_rel);
 
 	estate = CreateExecutorState();
 	econtext = GetPerTupleExprContext(estate);
@@ -1439,7 +1439,7 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	 * Obtain the reader. A parallel index build passes the TableScanDesc it
 	 * opened with table_beginscan_parallel; that scan already holds a reader
 	 * bound to the shared parallel scan, whose single-participant claim (see
-	 * columnar_read_start) makes exactly one participant read the whole table.
+	 * pgcolumnar_read_start) makes exactly one participant read the whole table.
 	 * We must read through that reader, not a private one: a private full-table
 	 * reader in every participant would index every row once per participant,
 	 * producing duplicate (key, TID) entries. When no scan is supplied (a serial
@@ -1455,7 +1455,7 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		 * indexing what the table is now, not what an in-flight rewrite is
 		 * converting away from.
 		 */
-		readState = columnar_scan_read_state((ColumnarScanDesc) scan,
+		readState = pgcolumnar_scan_read_state((PgColumnarScanDesc) scan,
 											 RelationGetDescr(table_rel));
 		ownReadState = false;
 	}
@@ -1468,7 +1468,7 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		else
 			snapshot = GetTransactionSnapshot();
 
-		readState = ColumnarBeginRead(table_rel, snapshot, NULL, NULL, 0, NULL);
+		readState = PgColumnarBeginRead(table_rel, snapshot, NULL, NULL, 0, NULL);
 		ownReadState = true;
 	}
 
@@ -1477,7 +1477,7 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		CHECK_FOR_INTERRUPTS();
 
 		ExecClearTuple(slot);
-		if (!ColumnarReadNextRow(readState, slot->tts_values, slot->tts_isnull,
+		if (!PgColumnarReadNextRow(readState, slot->tts_values, slot->tts_isnull,
 								 &rowNumber))
 			break;
 		ExecStoreVirtualTuple(slot);
@@ -1491,14 +1491,14 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 
 		FormIndexDatum(index_info, slot, estate, indexValues, indexNulls);
 
-		ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+		PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 
 		callback(index_rel, &slot->tts_tid, indexValues, indexNulls, true,
 				 callback_state);
 	}
 
 	if (ownReadState)
-		ColumnarEndRead(readState);
+		PgColumnarEndRead(readState);
 	ExecDropSingleTupleTableSlot(slot);
 	FreeExecutorState(estate);
 
@@ -1506,9 +1506,9 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	 * The table AM contract makes index_build_range_scan the owner of a scan the
 	 * caller supplied: it must end it, exactly as heapam_index_build_range_scan
 	 * calls table_endscan on the passed scan whether or not it created the scan
-	 * itself. columnar_scan_begin took a relation reference (and, for a worker,
+	 * itself. pgcolumnar_scan_begin took a relation reference (and, for a worker,
 	 * a registered snapshot) and created the reader used above; table_endscan
-	 * runs columnar_scan_end, which ends that reader and releases the reference.
+	 * runs pgcolumnar_scan_end, which ends that reader and releases the reference.
 	 * Omitting this leaked one relation reference per build participant, which
 	 * surfaced at commit as "resource was not closed: relation".
 	 */
@@ -1519,7 +1519,7 @@ columnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 }
 
 static void
-columnar_index_validate_scan(Relation table_rel, Relation index_rel,
+pgcolumnar_index_validate_scan(Relation table_rel, Relation index_rel,
 							 struct IndexInfo *index_info, Snapshot snapshot,
 							 struct ValidateIndexState *state)
 {
@@ -1527,7 +1527,7 @@ columnar_index_validate_scan(Relation table_rel, Relation index_rel,
 }
 
 static bool
-columnar_scan_sample_next_block(TableScanDesc scan,
+pgcolumnar_scan_sample_next_block(TableScanDesc scan,
 								struct SampleScanState *scanstate)
 {
 	COLUMNAR_UNSUPPORTED("TABLESAMPLE");
@@ -1535,7 +1535,7 @@ columnar_scan_sample_next_block(TableScanDesc scan,
 }
 
 static bool
-columnar_scan_sample_next_tuple(TableScanDesc scan,
+pgcolumnar_scan_sample_next_tuple(TableScanDesc scan,
 								struct SampleScanState *scanstate,
 								TupleTableSlot *slot)
 {
@@ -1547,67 +1547,67 @@ columnar_scan_sample_next_tuple(TableScanDesc scan,
  * the routine
  * ------------------------------------------------------------------------- */
 
-static const TableAmRoutine columnar_am_methods = {
+static const TableAmRoutine pgcolumnar_am_methods = {
 	.type = T_TableAmRoutine,
 
-	.slot_callbacks = columnar_slot_callbacks,
+	.slot_callbacks = pgcolumnar_slot_callbacks,
 
-	.scan_begin = columnar_scan_begin,
-	.scan_end = columnar_scan_end,
-	.scan_rescan = columnar_scan_rescan,
-	.scan_getnextslot = columnar_scan_getnextslot,
+	.scan_begin = pgcolumnar_scan_begin,
+	.scan_end = pgcolumnar_scan_end,
+	.scan_rescan = pgcolumnar_scan_rescan,
+	.scan_getnextslot = pgcolumnar_scan_getnextslot,
 
-	.parallelscan_estimate = columnar_parallelscan_estimate,
-	.parallelscan_initialize = columnar_parallelscan_initialize,
-	.parallelscan_reinitialize = columnar_parallelscan_reinitialize,
+	.parallelscan_estimate = pgcolumnar_parallelscan_estimate,
+	.parallelscan_initialize = pgcolumnar_parallelscan_initialize,
+	.parallelscan_reinitialize = pgcolumnar_parallelscan_reinitialize,
 
-	.index_fetch_begin = columnar_index_fetch_begin,
-	.index_fetch_reset = columnar_index_fetch_reset,
-	.index_fetch_end = columnar_index_fetch_end,
-	.index_fetch_tuple = columnar_index_fetch_tuple,
+	.index_fetch_begin = pgcolumnar_index_fetch_begin,
+	.index_fetch_reset = pgcolumnar_index_fetch_reset,
+	.index_fetch_end = pgcolumnar_index_fetch_end,
+	.index_fetch_tuple = pgcolumnar_index_fetch_tuple,
 
-	.tuple_fetch_row_version = columnar_tuple_fetch_row_version,
-	.tuple_tid_valid = columnar_tuple_tid_valid,
-	.tuple_get_latest_tid = columnar_tuple_get_latest_tid,
-	.tuple_satisfies_snapshot = columnar_tuple_satisfies_snapshot,
+	.tuple_fetch_row_version = pgcolumnar_tuple_fetch_row_version,
+	.tuple_tid_valid = pgcolumnar_tuple_tid_valid,
+	.tuple_get_latest_tid = pgcolumnar_tuple_get_latest_tid,
+	.tuple_satisfies_snapshot = pgcolumnar_tuple_satisfies_snapshot,
 #if PG_VERSION_NUM < 140000
-	.COLUMNAR_AM_INDEX_DELETE_FIELD = columnar_compute_xid_horizon_for_tuples,
+	.COLUMNAR_AM_INDEX_DELETE_FIELD = pgcolumnar_compute_xid_horizon_for_tuples,
 #else
-	.COLUMNAR_AM_INDEX_DELETE_FIELD = columnar_index_delete_tuples,
+	.COLUMNAR_AM_INDEX_DELETE_FIELD = pgcolumnar_index_delete_tuples,
 #endif
 
-	.tuple_insert = columnar_tuple_insert,
-	.tuple_insert_speculative = columnar_tuple_insert_speculative,
-	.tuple_complete_speculative = columnar_tuple_complete_speculative,
-	.multi_insert = columnar_multi_insert,
-	.tuple_delete = columnar_tuple_delete,
-	.tuple_update = columnar_tuple_update,
-	.tuple_lock = columnar_tuple_lock,
-	.finish_bulk_insert = columnar_finish_bulk_insert,
+	.tuple_insert = pgcolumnar_tuple_insert,
+	.tuple_insert_speculative = pgcolumnar_tuple_insert_speculative,
+	.tuple_complete_speculative = pgcolumnar_tuple_complete_speculative,
+	.multi_insert = pgcolumnar_multi_insert,
+	.tuple_delete = pgcolumnar_tuple_delete,
+	.tuple_update = pgcolumnar_tuple_update,
+	.tuple_lock = pgcolumnar_tuple_lock,
+	.finish_bulk_insert = pgcolumnar_finish_bulk_insert,
 
-	.COLUMNAR_AM_SET_NEW_FILE_FIELD = columnar_relation_set_new_filelocator,
-	.relation_nontransactional_truncate = columnar_relation_nontransactional_truncate,
-	.relation_copy_data = columnar_relation_copy_data,
-	.relation_copy_for_cluster = columnar_relation_copy_for_cluster,
-	.relation_vacuum = columnar_relation_vacuum,
-	.scan_analyze_next_block = columnar_scan_analyze_next_block,
-	.scan_analyze_next_tuple = columnar_scan_analyze_next_tuple,
-	.index_build_range_scan = columnar_index_build_range_scan,
-	.index_validate_scan = columnar_index_validate_scan,
+	.COLUMNAR_AM_SET_NEW_FILE_FIELD = pgcolumnar_relation_set_new_filelocator,
+	.relation_nontransactional_truncate = pgcolumnar_relation_nontransactional_truncate,
+	.relation_copy_data = pgcolumnar_relation_copy_data,
+	.relation_copy_for_cluster = pgcolumnar_relation_copy_for_cluster,
+	.relation_vacuum = pgcolumnar_relation_vacuum,
+	.scan_analyze_next_block = pgcolumnar_scan_analyze_next_block,
+	.scan_analyze_next_tuple = pgcolumnar_scan_analyze_next_tuple,
+	.index_build_range_scan = pgcolumnar_index_build_range_scan,
+	.index_validate_scan = pgcolumnar_index_validate_scan,
 
-	.relation_size = columnar_relation_size,
-	.relation_needs_toast_table = columnar_relation_needs_toast_table,
+	.relation_size = pgcolumnar_relation_size,
+	.relation_needs_toast_table = pgcolumnar_relation_needs_toast_table,
 
-	.relation_estimate_size = columnar_relation_estimate_size,
+	.relation_estimate_size = pgcolumnar_relation_estimate_size,
 
-	.scan_sample_next_block = columnar_scan_sample_next_block,
-	.scan_sample_next_tuple = columnar_scan_sample_next_tuple,
+	.scan_sample_next_block = pgcolumnar_scan_sample_next_block,
+	.scan_sample_next_tuple = pgcolumnar_scan_sample_next_tuple,
 };
 
 Datum
-columnar_handler(PG_FUNCTION_ARGS)
+pgcolumnar_handler(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_POINTER(&columnar_am_methods);
+	PG_RETURN_POINTER(&pgcolumnar_am_methods);
 }
 
 /* -------------------------------------------------------------------------
@@ -1615,23 +1615,23 @@ columnar_handler(PG_FUNCTION_ARGS)
  * ------------------------------------------------------------------------- */
 
 static void
-columnar_xact_callback(XactEvent event, void *arg)
+pgcolumnar_xact_callback(XactEvent event, void *arg)
 {
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
 		case XACT_EVENT_PREPARE:
-			ColumnarFlushAllPendingWrites();
-			ColumnarFlushAllDeleteVectors();
+			PgColumnarFlushAllPendingWrites();
+			PgColumnarFlushAllDeleteVectors();
 			break;
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_ABORT:
 		case XACT_EVENT_PARALLEL_COMMIT:
 		case XACT_EVENT_PARALLEL_ABORT:
-			ColumnarDiscardAllPendingWrites();
-			ColumnarDiscardAllDeleteVectors();
-			ColumnarDiscardFetchCache();
+			PgColumnarDiscardAllPendingWrites();
+			PgColumnarDiscardAllDeleteVectors();
+			PgColumnarDiscardFetchCache();
 			break;
 		default:
 			break;
@@ -1643,18 +1643,18 @@ columnar_xact_callback(XactEvent event, void *arg)
  * ------------------------------------------------------------------------- */
 
 static void
-columnar_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+pgcolumnar_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 						  SubTransactionId parentSubid, void *arg)
 {
 	switch (event)
 	{
 		case SUBXACT_EVENT_ABORT_SUB:
-			ColumnarWriteStateDiscardSubXact(mySubid);
-			ColumnarDeleteVectorDiscardSubXact(mySubid);
+			PgColumnarWriteStateDiscardSubXact(mySubid);
+			PgColumnarDeleteVectorDiscardSubXact(mySubid);
 			break;
 		case SUBXACT_EVENT_COMMIT_SUB:
-			ColumnarWriteStatePromoteSubXact(mySubid, parentSubid);
-			ColumnarDeleteVectorPromoteSubXact(mySubid, parentSubid);
+			PgColumnarWriteStatePromoteSubXact(mySubid, parentSubid);
+			PgColumnarDeleteVectorPromoteSubXact(mySubid, parentSubid);
 			break;
 		default:
 			break;
@@ -1674,15 +1674,15 @@ columnar_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
  * ------------------------------------------------------------------------- */
 
 static void
-columnar_executor_end(QueryDesc *queryDesc)
+pgcolumnar_executor_end(QueryDesc *queryDesc)
 {
 	if (prev_executor_end_hook)
 		prev_executor_end_hook(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
 
-	ColumnarFlushAllPendingWrites();
-	ColumnarFlushAllDeleteVectors();
+	PgColumnarFlushAllPendingWrites();
+	PgColumnarFlushAllDeleteVectors();
 
 	/*
 	 * The fetch cache is scoped to a statement, so release it here rather than
@@ -1690,7 +1690,7 @@ columnar_executor_end(QueryDesc *queryDesc)
 	 * slot pins them for the rest of the transaction, and a session sitting idle
 	 * in transaction after one UPDATE holds them indefinitely.
 	 */
-	ColumnarDiscardFetchCache();
+	PgColumnarDiscardFetchCache();
 }
 
 /* -------------------------------------------------------------------------
@@ -1699,7 +1699,7 @@ columnar_executor_end(QueryDesc *queryDesc)
  * ------------------------------------------------------------------------- */
 
 /*
- * columnar_reject_fk_to_columnar
+ * pgcolumnar_reject_fk_to_columnar
  *		Raise on a foreign key whose referenced side is a columnar table.
  *
  * The referential-integrity check reads the referenced row with FOR KEY SHARE,
@@ -1726,7 +1726,7 @@ columnar_executor_end(QueryDesc *queryDesc)
  * through the ordinary insert path.
  */
 static void
-columnar_reject_fk_to_columnar(Oid constraintId)
+pgcolumnar_reject_fk_to_columnar(Oid constraintId)
 {
 	Relation	conRel;
 	SysScanDesc scan;
@@ -1763,7 +1763,7 @@ columnar_reject_fk_to_columnar(Oid constraintId)
 	if (get_rel_relkind(referenced) != RELKIND_RELATION)
 		return;
 
-	if (ColumnarIsColumnarRelation(referenced))
+	if (PgColumnarIsColumnarRelation(referenced))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot create a foreign key referencing columnar table \"%s\"",
@@ -1775,14 +1775,14 @@ columnar_reject_fk_to_columnar(Oid constraintId)
 }
 
 /*
- * columnar_am_is_columnar
+ * pgcolumnar_am_is_columnar
  *		Does this table access method oid resolve to this extension's routine?
  *
  * By handler identity rather than by name, so a second name for the same access
  * method is still recognised.
  */
 static bool
-columnar_am_is_columnar(Oid amoid)
+pgcolumnar_am_is_columnar(Oid amoid)
 {
 	HeapTuple	tup;
 	Form_pg_am	amform;
@@ -1810,15 +1810,15 @@ columnar_am_is_columnar(Oid amoid)
 	}
 	ReleaseSysCache(tup);
 
-	return GetTableAmRoutine(handler) == &columnar_am_methods;
+	return GetTableAmRoutine(handler) == &pgcolumnar_am_methods;
 }
 
 /*
- * columnar_fk_referencing
+ * pgcolumnar_fk_referencing
  *		Name of some foreign key whose referenced side is relid, or NULL.
  */
 static char *
-columnar_fk_referencing(Oid relid)
+pgcolumnar_fk_referencing(Oid relid)
 {
 	Relation	conRel;
 	SysScanDesc scan;
@@ -1852,11 +1852,11 @@ columnar_fk_referencing(Oid relid)
 }
 
 /*
- * columnar_reject_set_am_to_columnar
+ * pgcolumnar_reject_set_am_to_columnar
  *		Refuse ALTER TABLE ... SET ACCESS METHOD to columnar when the relation is
  *		the referenced side of a foreign key.
  *
- * columnar_reject_fk_to_columnar closes this door where the constraint is
+ * pgcolumnar_reject_fk_to_columnar closes this door where the constraint is
  * created. The same unusable configuration is reachable from the other end, by
  * making the referenced table columnar after the constraint already exists:
  *
@@ -1883,7 +1883,7 @@ columnar_fk_referencing(Oid relid)
  * every supported major it executes this same statement.
  */
 static void
-columnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
+pgcolumnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
 {
 	Oid			relid;
 	ListCell   *lc;
@@ -1934,10 +1934,10 @@ columnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
 		/* SET ACCESS METHOD DEFAULT leaves the name unset (PG17+) */
 		amname = cmd->name ? cmd->name : default_table_access_method;
 
-		if (!columnar_am_is_columnar(get_table_am_oid(amname, true)))
+		if (!pgcolumnar_am_is_columnar(get_table_am_oid(amname, true)))
 			continue;
 
-		conname = columnar_fk_referencing(relid);
+		conname = pgcolumnar_fk_referencing(relid);
 		if (conname == NULL)
 			continue;
 
@@ -1954,7 +1954,7 @@ columnar_reject_set_am_to_columnar(AlterTableStmt *stmt)
 }
 
 static void
-columnar_process_utility(PlannedStmt *pstmt, const char *queryString,
+pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 						 bool readOnlyTree, ProcessUtilityContext context,
 						 ParamListInfo params, QueryEnvironment *queryEnv,
 						 DestReceiver *dest, QueryCompletion *qc)
@@ -1963,7 +1963,7 @@ columnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 
 	/* read-only inspection, so readOnlyTree needs no copy of the tree */
 	if (parsetree != NULL && IsA(parsetree, AlterTableStmt))
-		columnar_reject_set_am_to_columnar((AlterTableStmt *) parsetree);
+		pgcolumnar_reject_set_am_to_columnar((AlterTableStmt *) parsetree);
 
 	if (prev_process_utility_hook)
 		prev_process_utility_hook(pstmt, queryString, readOnlyTree, context,
@@ -1974,14 +1974,14 @@ columnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 }
 
 static void
-columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
+pgcolumnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 					   int subId, void *arg)
 {
 	if (prev_object_access_hook)
 		prev_object_access_hook(access, classId, objectId, subId, arg);
 
 	if (access == OAT_POST_CREATE && classId == ConstraintRelationId)
-		columnar_reject_fk_to_columnar(objectId);
+		pgcolumnar_reject_fk_to_columnar(objectId);
 
 	if (access == OAT_DROP && classId == RelationRelationId && subId == 0)
 	{
@@ -1993,10 +1993,10 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 		/* DROP already holds AccessExclusiveLock on the relation */
 		rel = relation_open(objectId, NoLock);
 
-		if (rel->rd_tableam == &columnar_am_methods)
+		if (rel->rd_tableam == &pgcolumnar_am_methods)
 		{
-			uint64		storageId = ColumnarStorageId(rel);
-			List	   *projs = ColumnarListProjections(storageId);
+			uint64		storageId = PgColumnarStorageId(rel);
+			List	   *projs = PgColumnarListProjections(storageId);
 			ListCell   *lc;
 
 			/*
@@ -2005,20 +2005,20 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 			 * projection's row groups, chunks, zone maps and bloom filters
 			 * behind with no relation to reach them from: metadata for a table
 			 * that no longer exists, accumulating one projection's worth per
-			 * drop. This is the same loop columnar_vacuum.c runs when it
+			 * drop. This is the same loop pgcolumnar_vacuum.c runs when it
 			 * rewrites into fresh storage.
 			 */
 			foreach(lc, projs)
 			{
-				ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+				PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 				if (p->projStorageId != storageId)
-					ColumnarDeleteMetadata(p->projStorageId);
-				ColumnarDeleteProjectionRow(storageId, p->projectionId);
+					PgColumnarDeleteMetadata(p->projStorageId);
+				PgColumnarDeleteProjectionRow(storageId, p->projectionId);
 			}
 
-			ColumnarDeleteMetadata(storageId);
-			ColumnarDeleteOptions(objectId);
+			PgColumnarDeleteMetadata(storageId);
+			PgColumnarDeleteOptions(objectId);
 			/*
 			 * And the projection declarations, for the same reason and in the
 			 * same place (#304). A declaration left behind holds a regclass that
@@ -2026,7 +2026,7 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
 			 * rebuild_projections() aborts on, taking every other table in the
 			 * database with it.
 			 */
-			ColumnarDeleteProjectionDeclarationsForRel(objectId);
+			PgColumnarDeleteProjectionDeclarationsForRel(objectId);
 		}
 
 		relation_close(rel, NoLock);
@@ -2052,13 +2052,13 @@ columnar_object_access(ObjectAccessType access, Oid classId, Oid objectId,
  * ------------------------------------------------------------------------- */
 
 static bool
-columnar_relation_is_columnar(Oid relid)
+pgcolumnar_relation_is_columnar(Oid relid)
 {
-	if (columnar_am_oid_cache == InvalidOid)
-		columnar_am_oid_cache = get_am_oid("pgcolumnar", true);
+	if (pgcolumnar_am_oid_cache == InvalidOid)
+		pgcolumnar_am_oid_cache = get_am_oid("pgcolumnar", true);
 
-	return OidIsValid(columnar_am_oid_cache) &&
-		get_rel_relam(relid) == columnar_am_oid_cache;
+	return OidIsValid(pgcolumnar_am_oid_cache) &&
+		get_rel_relam(relid) == pgcolumnar_am_oid_cache;
 }
 
 /* GUC: when on, allow the planner to build index-only-scan paths for columnar
@@ -2067,22 +2067,22 @@ columnar_relation_is_columnar(Oid relid)
  * horizon accounts for open snapshots and every write clears the bit, both
  * WAL-logged), and a not-all-visible block always falls back to the
  * snapshot-checked fetch, so results are correct regardless. */
-bool		columnar_enable_index_only_scan = true;
+bool		pgcolumnar_enable_index_only_scan = true;
 
 /* clear the "can return" flags of every index on a columnar relation */
 static void
-columnar_forbid_index_only_scan(Oid relid, RelOptInfo *rel)
+pgcolumnar_forbid_index_only_scan(Oid relid, RelOptInfo *rel)
 {
 	ListCell   *lc;
 
 	/* when index-only scans are enabled, leave the index canreturn flags intact
 	 * so the planner may choose an IOS; the VM fork (set by lazy vacuum) drives
 	 * whether the executor skips the fetch, and a not-all-visible block still
-	 * falls back to columnar_index_fetch_tuple, so results are always correct. */
-	if (columnar_enable_index_only_scan)
+	 * falls back to pgcolumnar_index_fetch_tuple, so results are always correct. */
+	if (pgcolumnar_enable_index_only_scan)
 		return;
 
-	if (!OidIsValid(relid) || !columnar_relation_is_columnar(relid))
+	if (!OidIsValid(relid) || !pgcolumnar_relation_is_columnar(relid))
 		return;
 
 	foreach(lc, rel->indexlist)
@@ -2100,24 +2100,24 @@ columnar_forbid_index_only_scan(Oid relid, RelOptInfo *rel)
 
 #if PG_VERSION_NUM >= 190000
 static void
-columnar_build_simple_rel(PlannerInfo *root, RelOptInfo *rel,
+pgcolumnar_build_simple_rel(PlannerInfo *root, RelOptInfo *rel,
 						  RangeTblEntry *rte)
 {
 	if (prev_build_simple_rel_hook)
 		prev_build_simple_rel_hook(root, rel, rte);
 
 	if (rte->rtekind == RTE_RELATION)
-		columnar_forbid_index_only_scan(rte->relid, rel);
+		pgcolumnar_forbid_index_only_scan(rte->relid, rel);
 }
 #else
 static void
-columnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
+pgcolumnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
 						   bool inhparent, RelOptInfo *rel)
 {
 	if (prev_get_relation_info_hook)
 		prev_get_relation_info_hook(root, relationObjectId, inhparent, rel);
 
-	columnar_forbid_index_only_scan(relationObjectId, rel);
+	pgcolumnar_forbid_index_only_scan(relationObjectId, rel);
 }
 #endif
 
@@ -2130,22 +2130,22 @@ _PG_init(void)
 {
 	/*
 	 * Virtual slot behaviour, except that a copied heap tuple keeps the slot's
-	 * item pointer. See the comment on columnar_slot_copy_heap_tuple.
+	 * item pointer. See the comment on pgcolumnar_slot_copy_heap_tuple.
 	 */
-	ColumnarSlotOps = TTSOpsVirtual;
-	ColumnarSlotOps.base_slot_size = sizeof(ColumnarSlot);
-	ColumnarSlotOps.copy_heap_tuple = columnar_slot_copy_heap_tuple;
-	ColumnarSlotOps.init = columnar_slot_init;
-	ColumnarSlotOps.getsomeattrs = columnar_slot_getsomeattrs;
-	ColumnarSlotOps.clear = columnar_slot_clear;
-	ColumnarSlotOps.materialize = columnar_slot_materialize;
-	ColumnarSlotOps.copyslot = columnar_slot_copyslot;
-	ColumnarSlotOps.copy_minimal_tuple = columnar_slot_copy_minimal_tuple;
+	PgColumnarSlotOps = TTSOpsVirtual;
+	PgColumnarSlotOps.base_slot_size = sizeof(PgColumnarSlot);
+	PgColumnarSlotOps.copy_heap_tuple = pgcolumnar_slot_copy_heap_tuple;
+	PgColumnarSlotOps.init = pgcolumnar_slot_init;
+	PgColumnarSlotOps.getsomeattrs = pgcolumnar_slot_getsomeattrs;
+	PgColumnarSlotOps.clear = pgcolumnar_slot_clear;
+	PgColumnarSlotOps.materialize = pgcolumnar_slot_materialize;
+	PgColumnarSlotOps.copyslot = pgcolumnar_slot_copyslot;
+	PgColumnarSlotOps.copy_minimal_tuple = pgcolumnar_slot_copy_minimal_tuple;
 
 	DefineCustomIntVariable("pgcolumnar.stripe_row_limit",
 							"Maximum number of rows per stripe.",
 							NULL,
-							&columnar_stripe_row_limit,
+							&pgcolumnar_stripe_row_limit,
 							150000,
 							1000, INT_MAX,
 							PGC_USERSET,
@@ -2155,7 +2155,7 @@ _PG_init(void)
 	DefineCustomIntVariable("pgcolumnar.chunk_group_row_limit",
 							"Maximum number of rows per chunk group.",
 							NULL,
-							&columnar_chunk_group_row_limit,
+							&pgcolumnar_chunk_group_row_limit,
 							10000,
 							100, INT_MAX,
 							PGC_USERSET,
@@ -2171,7 +2171,7 @@ _PG_init(void)
 							"value below 128 is treated as 0, because a sample that "
 							"small cannot rank candidates: every candidate's fixed "
 							"header would exceed the sample itself.",
-							&columnar_encoding_sample_rows,
+							&pgcolumnar_encoding_sample_rows,
 							2048,
 							0, INT_MAX,
 							PGC_USERSET,
@@ -2181,9 +2181,9 @@ _PG_init(void)
 	DefineCustomEnumVariable("pgcolumnar.compression",
 							 "Default compression codec for new chunks.",
 							 NULL,
-							 &columnar_compression,
+							 &pgcolumnar_compression,
 							 COLUMNAR_COMPRESSION_ZSTD,
-							 columnar_compression_options,
+							 pgcolumnar_compression_options,
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
@@ -2191,7 +2191,7 @@ _PG_init(void)
 	DefineCustomIntVariable("pgcolumnar.compression_level",
 							"Compression level for the zstd codec.",
 							NULL,
-							&columnar_compression_level,
+							&pgcolumnar_compression_level,
 							3,
 							1, 22,
 							PGC_USERSET,
@@ -2212,7 +2212,7 @@ _PG_init(void)
 							"and saves roughly a third of their load time; where FSST "
 							"wins clearly it changes nothing. Set to 0 to keep FSST on "
 							"any win at all.",
-							&columnar_fsst_min_gain_percent,
+							&pgcolumnar_fsst_min_gain_percent,
 							5,
 							0, 99,
 							PGC_USERSET,
@@ -2222,7 +2222,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_qual_pushdown",
 							 "Push scan qualifiers down for chunk-group skipping.",
 							 NULL,
-							 &columnar_enable_qual_pushdown,
+							 &pgcolumnar_enable_qual_pushdown,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2234,7 +2234,7 @@ _PG_init(void)
 							 "read and decoded, as before the projection was honored. "
 							 "Provided as an escape hatch and as the A/B oracle the "
 							 "projection tests compare against.",
-							 &columnar_enable_column_projection,
+							 &pgcolumnar_enable_column_projection,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2243,7 +2243,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_custom_scan",
 							 "Use the columnar custom scan path for columnar tables.",
 							 NULL,
-							 &columnar_enable_custom_scan,
+							 &pgcolumnar_enable_custom_scan,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2252,7 +2252,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_vectorization",
 							 "Use the vectorized aggregate fast path.",
 							 NULL,
-							 &columnar_enable_vectorization,
+							 &pgcolumnar_enable_vectorization,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2261,7 +2261,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_group_vectorization",
 							 "Use the vectorized aggregate fast path for GROUP BY queries.",
 							 NULL,
-							 &columnar_enable_group_vectorization,
+							 &pgcolumnar_enable_group_vectorization,
 							 false,
 							 PGC_USERSET,
 							 0,
@@ -2272,7 +2272,7 @@ _PG_init(void)
 							 "aggregates with a filter or sum/avg over "
 							 "int8/float/numeric.",
 							 NULL,
-							 &columnar_enable_ungrouped_vector_agg,
+							 &pgcolumnar_enable_ungrouped_vector_agg,
 							 false,
 							 PGC_USERSET,
 							 0,
@@ -2283,7 +2283,7 @@ _PG_init(void)
 							 "each worker folds distinct row groups and emits a partial "
 							 "aggregate a core Finalize combines.",
 							 NULL,
-							 &columnar_enable_parallel_vector_agg,
+							 &pgcolumnar_enable_parallel_vector_agg,
 							 false,
 							 PGC_USERSET,
 							 0,
@@ -2296,7 +2296,7 @@ _PG_init(void)
 							"not the planner's estimate: over the cap the query errors "
 							"rather than falling back, since the plan is fixed by then. "
 							"Raise it, or turn off pgcolumnar.enable_group_vectorization.",
-							&columnar_groupagg_max_groups,
+							&pgcolumnar_groupagg_max_groups,
 							1000000, 1, INT_MAX,
 							PGC_USERSET,
 							0,
@@ -2305,7 +2305,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_bloom_filter",
 							 "Skip chunk groups on equality using per-chunk bloom filters.",
 							 NULL,
-							 &columnar_enable_bloom_filter,
+							 &pgcolumnar_enable_bloom_filter,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2316,7 +2316,7 @@ _PG_init(void)
 							 "adjacent freed ranges, so compaction reclaims space "
 							 "under fragmentation. Off reverts to whole-range reuse.",
 							 NULL,
-							 &columnar_reclaim_coalesce,
+							 &pgcolumnar_reclaim_coalesce,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2327,7 +2327,7 @@ _PG_init(void)
 							 "trailing reclaimed blocks to the OS. Off (the default) "
 							 "makes truncate() a no-op.",
 							 NULL,
-							 &columnar_enable_end_truncation,
+							 &pgcolumnar_enable_end_truncation,
 							 false,
 							 PGC_SUSET,
 							 0,
@@ -2336,7 +2336,7 @@ _PG_init(void)
 	DefineCustomBoolVariable("pgcolumnar.enable_read_stream",
 							 "Prefetch block reads with the read stream API (PostgreSQL 17+).",
 							 NULL,
-							 &columnar_enable_read_stream,
+							 &pgcolumnar_enable_read_stream,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2347,7 +2347,7 @@ _PG_init(void)
 							 "visibility-map fork (gap 28). On by default; set off to force "
 							 "a plain index scan.",
 							 NULL,
-							 &columnar_enable_index_only_scan,
+							 &pgcolumnar_enable_index_only_scan,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2357,7 +2357,7 @@ _PG_init(void)
 							 "Let the planner scan a covering projection instead of the "
 							 "base table when one serves the query better (gap 26).",
 							 NULL,
-							 &columnar_enable_projection_scan,
+							 &pgcolumnar_enable_projection_scan,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2370,7 +2370,7 @@ _PG_init(void)
 							 "lives in, so an unclustered ordered index scan can cost far "
 							 "more than core's per-page estimate. Off restores the "
 							 "unpenalized planner behaviour.",
-							 &columnar_enable_index_fetch_penalty,
+							 &pgcolumnar_enable_index_fetch_penalty,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2385,7 +2385,7 @@ _PG_init(void)
 							 "when the creation lock guards nothing, so an ordinary write still "
 							 "behaves correctly. Off by default leaves the write path unchanged.",
 							 NULL,
-							 &columnar_bulk_parallel_writer,
+							 &pgcolumnar_bulk_parallel_writer,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -2397,7 +2397,7 @@ _PG_init(void)
 							 "index key so overlapping same-key inserts conflict "
 							 "correctly (issue #5). Turning it off restores the "
 							 "prior racy behavior.",
-							 &columnar_enable_unique_lock,
+							 &pgcolumnar_enable_unique_lock,
 							 true,
 							 PGC_USERSET,
 							 0,
@@ -2414,7 +2414,7 @@ _PG_init(void)
 							"backends inserting the same key must compute the "
 							"same bucket, which they only do when they agree on "
 							"this value.",
-							&columnar_unique_lock_buckets,
+							&pgcolumnar_unique_lock_buckets,
 							128,
 							1, 1048576,
 							PGC_POSTMASTER,
@@ -2423,17 +2423,17 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved("pgcolumnar");
 
-	RegisterXactCallback(columnar_xact_callback, NULL);
-	RegisterSubXactCallback(columnar_subxact_callback, NULL);
+	RegisterXactCallback(pgcolumnar_xact_callback, NULL);
+	RegisterSubXactCallback(pgcolumnar_subxact_callback, NULL);
 
 	prev_object_access_hook = object_access_hook;
-	object_access_hook = columnar_object_access;
+	object_access_hook = pgcolumnar_object_access;
 
 	prev_process_utility_hook = ProcessUtility_hook;
-	ProcessUtility_hook = columnar_process_utility;
+	ProcessUtility_hook = pgcolumnar_process_utility;
 
 	prev_executor_end_hook = ExecutorEnd_hook;
-	ExecutorEnd_hook = columnar_executor_end;
+	ExecutorEnd_hook = pgcolumnar_executor_end;
 
 	/*
 	 * Forbid index-only scans on columnar tables. PG19 replaced
@@ -2442,18 +2442,18 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 190000
 	prev_build_simple_rel_hook = build_simple_rel_hook;
-	build_simple_rel_hook = columnar_build_simple_rel;
+	build_simple_rel_hook = pgcolumnar_build_simple_rel;
 #else
 	prev_get_relation_info_hook = get_relation_info_hook;
-	get_relation_info_hook = columnar_get_relation_info;
+	get_relation_info_hook = pgcolumnar_get_relation_info;
 #endif
 
 	/* register the custom scan provider and install the pathlist hook */
-	ColumnarCustomScanInit();
+	PgColumnarCustomScanInit();
 
 	/* install the vectorized-aggregate upper-path hook (spec 9) */
-	ColumnarVectorInit();
+	PgColumnarVectorInit();
 
 	/* register the unique-index cache invalidation callback (issue #5) */
-	ColumnarUniqueInit();
+	PgColumnarUniqueInit();
 }

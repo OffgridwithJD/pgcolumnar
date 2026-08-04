@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_write_state.c
+ * pgcolumnar_write_state.c
  *		The columnar writer: batch rows into chunk groups and stripes, and
  *		flush a stripe (data pages + catalog rows) when it fills or at
  *		transaction pre-commit (spec 4, 9).
@@ -73,21 +73,21 @@
  * predicate could take the shortcut, because it does not build stored bounds
  * that a later scan trusts; this one does, so it cannot.
  */
-typedef enum ColumnarFastCmp
+typedef enum PgColumnarFastCmp
 {
 	COLUMNAR_FASTCMP_NONE = 0,
 	COLUMNAR_FASTCMP_I16,
 	COLUMNAR_FASTCMP_I32,
 	COLUMNAR_FASTCMP_I64
-} ColumnarFastCmp;
+} PgColumnarFastCmp;
 
 /* per-column, per-write-state facts needed for the min/max skip list */
-typedef struct ColumnarColumnDef
+typedef struct PgColumnarColumnDef
 {
 	bool		orderable;		/* type has a default btree comparison proc */
 	FmgrInfo	cmpFn;			/* the comparison proc, when orderable */
 	Oid			collation;		/* collation to compare under */
-	ColumnarFastCmp fastCmp;	/* direct comparison, when the type allows */
+	PgColumnarFastCmp fastCmp;	/* direct comparison, when the type allows */
 
 	/*
 	 * int2/int4 column: its exact sum fits an int64 accumulator, so the zone map
@@ -104,7 +104,7 @@ typedef struct ColumnarColumnDef
 	bool		bloomable;
 	FmgrInfo	hashFn;
 	Oid			hashCollation;	/* collation to hash under (InvalidOid if none) */
-} ColumnarColumnDef;
+} PgColumnarColumnDef;
 
 /* one column's two streams within one chunk group */
 typedef struct ColumnChunkBuffer
@@ -146,7 +146,7 @@ typedef struct ChunkGroupBuffer
 	ColumnChunkBuffer *columns;		/* array [natts] */
 } ChunkGroupBuffer;
 
-struct ColumnarWriteState
+struct PgColumnarWriteState
 {
 	Oid			relid;
 	SubTransactionId subid;			/* subtransaction that owns the buffer */
@@ -159,7 +159,7 @@ struct ColumnarWriteState
 	bool		bloomEnabled;		/* columnar.enable_bloom_filter at open time */
 	int			encodeEffort;		/* per-table encode_effort at open time */
 	uint64		storageId;
-	ColumnarColumnDef *colDefs;		/* array [natts], in writeContext */
+	PgColumnarColumnDef *colDefs;		/* array [natts], in writeContext */
 
 	MemoryContext writeContext;		/* lives for the transaction */
 	MemoryContext stripeContext;	/* reset after each stripe flush */
@@ -204,28 +204,28 @@ struct ColumnarWriteState
 	 * lookup that builds the list.
 	 */
 	bool		projInited;
-	List	   *projWriters;	/* list of ColumnarProjWriter * */
+	List	   *projWriters;	/* list of PgColumnarProjWriter * */
 };
 
-/* per-backend registry of pending write states, in ColumnarWriteContext */
-static MemoryContext ColumnarWriteContext = NULL;
-static List *ColumnarWriteStates = NIL;
+/* per-backend registry of pending write states, in PgColumnarWriteContext */
+static MemoryContext PgColumnarWriteContext = NULL;
+static List *PgColumnarWriteStates = NIL;
 
-static void columnar_flush_row_group(ColumnarWriteState *writeState);
-static void flush_ws_projections(ColumnarWriteState *writeState);
-static ChunkGroupBuffer *columnar_start_chunk_group(ColumnarWriteState *writeState);
+static void pgcolumnar_flush_row_group(PgColumnarWriteState *writeState);
+static void flush_ws_projections(PgColumnarWriteState *writeState);
+static ChunkGroupBuffer *pgcolumnar_start_chunk_group(PgColumnarWriteState *writeState);
 static uint64 *grow_uint64_array(uint64 *arr, int oldSize, int newSize);
-static void columnar_init_col_defs(ColumnarWriteState *writeState);
+static void pgcolumnar_init_col_defs(PgColumnarWriteState *writeState);
 
 /*
- * columnar_cmp_value
+ * pgcolumnar_cmp_value
  *		Compare two values of a column under its ordering, taking the direct
  *		route when the type allows one and fmgr otherwise. The integer kinds
  *		reproduce their btree comparison exactly, so which route is taken can
  *		never change the answer.
  */
 static inline int32
-columnar_cmp_value(ColumnarColumnDef *def, Datum a, Datum b)
+pgcolumnar_cmp_value(PgColumnarColumnDef *def, Datum a, Datum b)
 {
 	switch (def->fastCmp)
 	{
@@ -258,18 +258,18 @@ columnar_cmp_value(ColumnarColumnDef *def, Datum a, Datum b)
 }
 
 /*
- * columnar_init_col_defs
+ * pgcolumnar_init_col_defs
  *		Allocate and fill writeState->colDefs: for each column, resolve the btree
  *		comparison proc (for the per-chunk min/max skip list, spec 7.2) and the
  *		hash proc (for the per-chunk bloom filter, I7). Shared by the base writer
  *		and the projection writer so both carry skip metadata.
  */
 static void
-columnar_init_col_defs(ColumnarWriteState *writeState)
+pgcolumnar_init_col_defs(PgColumnarWriteState *writeState)
 {
 	int			c;
 
-	writeState->colDefs = palloc0(sizeof(ColumnarColumnDef) * writeState->natts);
+	writeState->colDefs = palloc0(sizeof(PgColumnarColumnDef) * writeState->natts);
 
 	for (c = 0; c < writeState->natts; c++)
 	{
@@ -286,7 +286,7 @@ columnar_init_col_defs(ColumnarWriteState *writeState)
 		{
 			writeState->colDefs[c].orderable = true;
 			fmgr_info_copy(&writeState->colDefs[c].cmpFn,
-						   &tce->cmp_proc_finfo, ColumnarWriteContext);
+						   &tce->cmp_proc_finfo, PgColumnarWriteContext);
 			writeState->colDefs[c].collation = att->attcollation;
 
 			/*
@@ -327,38 +327,38 @@ columnar_init_col_defs(ColumnarWriteState *writeState)
 		 */
 		if (writeState->bloomEnabled &&
 			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
-			ColumnarCollationIsDeterministic(att->attcollation))
+			PgColumnarCollationIsDeterministic(att->attcollation))
 		{
 			writeState->colDefs[c].bloomable = true;
 			fmgr_info_copy(&writeState->colDefs[c].hashFn,
-						   &tce->hash_proc_finfo, ColumnarWriteContext);
+						   &tce->hash_proc_finfo, PgColumnarWriteContext);
 			writeState->colDefs[c].hashCollation = att->attcollation;
 		}
 	}
 }
 
 /*
- * ColumnarWriteStateStripeCount
+ * PgColumnarWriteStateStripeCount
  *		How many stripe reservations this write state has taken so far (#311).
  *
  *		A caller that wants to know which groups IT wrote records this before
- *		its writes and takes the tail afterwards, because ColumnarGetWriteState
+ *		its writes and takes the tail afterwards, because PgColumnarGetWriteState
  *		can hand back a state that already holds another statement's entries.
  */
 int
-ColumnarWriteStateStripeCount(ColumnarWriteState *ws)
+PgColumnarWriteStateStripeCount(PgColumnarWriteState *ws)
 {
 	return ws->nReservedStripeIds;
 }
 
 /*
- * ColumnarWriteStateStripeIds
+ * PgColumnarWriteStateStripeIds
  *		The stripe ids this write state has reserved, in reservation order.
  *		Points at the write state's own array, which stays valid until the
  *		transaction ends.
  */
 uint64 *
-ColumnarWriteStateStripeIds(ColumnarWriteState *ws, int *n)
+PgColumnarWriteStateStripeIds(PgColumnarWriteState *ws, int *n)
 {
 	*n = ws->nReservedStripeIds;
 	return ws->reservedStripeIds;
@@ -378,17 +378,17 @@ grow_uint64_array(uint64 *arr, int oldSize, int newSize)
 }
 
 /*
- * ColumnarGetWriteState
+ * PgColumnarGetWriteState
  *		Find or create the pending write state for a relation.
  */
-ColumnarWriteState *
-ColumnarGetWriteState(Relation rel)
+PgColumnarWriteState *
+PgColumnarGetWriteState(Relation rel)
 {
 	Oid			relid = RelationGetRelid(rel);
 	SubTransactionId subid = GetCurrentSubTransactionId();
 	ListCell   *lc;
 	MemoryContext oldContext;
-	ColumnarWriteState *writeState;
+	PgColumnarWriteState *writeState;
 
 	/*
 	 * A write state is keyed by (relation, subtransaction) so that a buffer
@@ -396,9 +396,9 @@ ColumnarGetWriteState(Relation rel)
 	 * rollback of a subtransaction a simple matter of dropping its buffers
 	 * (spec 9).
 	 */
-	foreach(lc, ColumnarWriteStates)
+	foreach(lc, PgColumnarWriteStates)
 	{
-		writeState = (ColumnarWriteState *) lfirst(lc);
+		writeState = (PgColumnarWriteState *) lfirst(lc);
 		if (writeState->relid != relid || writeState->subid != subid)
 			continue;
 
@@ -418,23 +418,23 @@ ColumnarGetWriteState(Relation rel)
 			return writeState;
 
 		if (writeState->stripeRowCount > 0)
-			columnar_flush_row_group(writeState);
+			pgcolumnar_flush_row_group(writeState);
 		flush_ws_projections(writeState);
 
-		oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
-		ColumnarWriteStates = list_delete_ptr(ColumnarWriteStates, writeState);
+		oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
+		PgColumnarWriteStates = list_delete_ptr(PgColumnarWriteStates, writeState);
 		MemoryContextSwitchTo(oldContext);
 		break;
 	}
 
-	if (ColumnarWriteContext == NULL)
-		ColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
+	if (PgColumnarWriteContext == NULL)
+		PgColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
 													 "columnar write",
 													 ALLOCSET_DEFAULT_SIZES);
 
-	oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
+	oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
 
-	writeState = palloc0(sizeof(ColumnarWriteState));
+	writeState = palloc0(sizeof(PgColumnarWriteState));
 	writeState->relid = relid;
 	writeState->subid = subid;
 	/* CopyConstr (not CopyEntry) so attgenerated is preserved: the flush skips
@@ -442,19 +442,19 @@ ColumnarGetWriteState(Relation rel)
 	 * CreateTupleDescCopy would clear. */
 	writeState->tupdesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
 	writeState->natts = writeState->tupdesc->natts;
-	writeState->stripeRowLimit = columnar_stripe_row_limit;
-	writeState->chunkGroupRowLimit = columnar_chunk_group_row_limit;
-	writeState->compressionType = columnar_compression;
-	writeState->compressionLevel = columnar_compression_level;
+	writeState->stripeRowLimit = pgcolumnar_stripe_row_limit;
+	writeState->chunkGroupRowLimit = pgcolumnar_chunk_group_row_limit;
+	writeState->compressionType = pgcolumnar_compression;
+	writeState->compressionLevel = pgcolumnar_compression_level;
 
 	/*
 	 * Whether to build bloom filters at all, captured here with the other
 	 * write-time settings rather than consulted per row, so one stripe is
 	 * written under one decision.
 	 */
-	writeState->bloomEnabled = columnar_enable_bloom_filter;
+	writeState->bloomEnabled = pgcolumnar_enable_bloom_filter;
 	writeState->encodeEffort = COLUMNAR_ENCODE_EFFORT_FULL;
-	writeState->storageId = ColumnarStorageId(rel);
+	writeState->storageId = PgColumnarStorageId(rel);
 
 	/*
 	 * Per-table options (spec 7.4) override the instance-wide GUC defaults for
@@ -463,9 +463,9 @@ ColumnarGetWriteState(Relation rel)
 	 * inserts (spec 9).
 	 */
 	{
-		ColumnarOptions opts;
+		PgColumnarOptions opts;
 
-		if (ColumnarReadOptions(relid, &opts))
+		if (PgColumnarReadOptions(relid, &opts))
 		{
 			if (opts.stripeRowLimitSet)
 				writeState->stripeRowLimit = opts.stripeRowLimit;
@@ -480,12 +480,12 @@ ColumnarGetWriteState(Relation rel)
 		}
 	}
 
-	columnar_init_col_defs(writeState);
+	pgcolumnar_init_col_defs(writeState);
 
-	writeState->stripeContext = AllocSetContextCreate(ColumnarWriteContext,
+	writeState->stripeContext = AllocSetContextCreate(PgColumnarWriteContext,
 													  "columnar stripe",
 													  ALLOCSET_DEFAULT_SIZES);
-	writeState->writeContext = ColumnarWriteContext;
+	writeState->writeContext = PgColumnarWriteContext;
 	writeState->chunkGroups = NIL;
 	writeState->currentGroup = NULL;
 	writeState->stripeRowCount = 0;
@@ -496,7 +496,7 @@ ColumnarGetWriteState(Relation rel)
 	writeState->nReservedStripeIds = 0;
 	writeState->reservedStripeIdsSize = 0;
 
-	ColumnarWriteStates = lappend(ColumnarWriteStates, writeState);
+	PgColumnarWriteStates = lappend(PgColumnarWriteStates, writeState);
 
 	MemoryContextSwitchTo(oldContext);
 
@@ -504,31 +504,31 @@ ColumnarGetWriteState(Relation rel)
 }
 
 /*
- * ColumnarEnsureStorageRow
+ * PgColumnarEnsureStorageRow
  *		Create the native storage catalog row for `rel` if it does not exist,
  *		with exactly the metadata a normal flush would record. Used by
  *		pgcolumnar.parallel_copy's coordinator to pre-create and commit the storage
  *		row before launching concurrent loaders, so each loader (with
- *		columnar_bulk_parallel_writer set) sees it committed and skips the
- *		storage-row creation lock. Idempotent -- ColumnarInsertNativeStorageRow
+ *		pgcolumnar_bulk_parallel_writer set) sees it committed and skips the
+ *		storage-row creation lock. Idempotent -- PgColumnarInsertNativeStorageRow
  *		returns if the row already exists.
  */
 void
-ColumnarEnsureStorageRow(Relation rel)
+PgColumnarEnsureStorageRow(Relation rel)
 {
 	NativeStorageMetadata s;
-	ColumnarOptions opts;
-	int			stripeRowLimit = columnar_stripe_row_limit;
+	PgColumnarOptions opts;
+	int			stripeRowLimit = pgcolumnar_stripe_row_limit;
 
-	if (ColumnarReadOptions(RelationGetRelid(rel), &opts) && opts.stripeRowLimitSet)
+	if (PgColumnarReadOptions(RelationGetRelid(rel), &opts) && opts.stripeRowLimitSet)
 		stripeRowLimit = opts.stripeRowLimit;
 
-	s.storageId = ColumnarStorageId(rel);
+	s.storageId = PgColumnarStorageId(rel);
 	s.relationOid = RelationGetRelid(rel);
 	s.formatVersion = COLUMNAR_NATIVE_VERSION_MAJOR;
 	s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
 	s.rowGroupLimit = stripeRowLimit;
-	ColumnarInsertNativeStorageRow(&s);
+	PgColumnarInsertNativeStorageRow(&s);
 }
 
 /*
@@ -592,7 +592,7 @@ buffered_build_offsets(ColumnChunkBuffer *col, Form_pg_attribute att,
 		 * Bounded by chunk_group_row_limit, which is user-settable, so this pass
 		 * is a cancellation point for the same reason the decoders are. It is
 		 * also on the unique-check fetch path, which had no interrupt check at
-		 * all before #220 and still has none below columnar_fetch_row.
+		 * all before #220 and still has none below pgcolumnar_fetch_row.
 		 */
 		CHECK_FOR_INTERRUPTS();
 
@@ -600,19 +600,19 @@ buffered_build_offsets(ColumnChunkBuffer *col, Form_pg_attribute att,
 			(uint32) (cursor - col->valueStream.data);
 
 		if (col->existsStream.data[i])
-			(void) ColumnarDecodeValue(att, &cursor, scratch);
+			(void) PgColumnarDecodeValue(att, &cursor, scratch);
 	}
 
 	MemoryContextDelete(scratch);
 }
 
 /*
- * columnar_start_chunk_group
+ * pgcolumnar_start_chunk_group
  *		Begin a new chunk group inside the current stripe, allocated in the
  *		stripe memory context.
  */
 static ChunkGroupBuffer *
-columnar_start_chunk_group(ColumnarWriteState *writeState)
+pgcolumnar_start_chunk_group(PgColumnarWriteState *writeState)
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(writeState->stripeContext);
 	ChunkGroupBuffer *group = palloc0(sizeof(ChunkGroupBuffer));
@@ -636,14 +636,14 @@ columnar_start_chunk_group(ColumnarWriteState *writeState)
 }
 
 /*
- * ColumnarWriteRow
+ * PgColumnarWriteRow
  *		Append one row to the current stripe, opening a new chunk group when
  *		the current one is full and flushing the stripe when it reaches the
  *		stripe row limit. Returns the stable 1-based row number assigned to the
  *		row (spec 6), so the caller can set the row's item pointer for indexing.
  */
 uint64
-ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
+PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 				 Datum *values, bool *nulls)
 {
 	ChunkGroupBuffer *group = writeState->currentGroup;
@@ -660,7 +660,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 	 */
 	if (!writeState->haveReservation)
 	{
-		ColumnarReserveRowNumbers(rel, (uint64) writeState->stripeRowLimit,
+		PgColumnarReserveRowNumbers(rel, (uint64) writeState->stripeRowLimit,
 								  &writeState->stripeId,
 								  &writeState->stripeFirstRowNumber);
 		writeState->haveReservation = true;
@@ -693,7 +693,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 
 	if (group == NULL ||
 		group->rowCount >= (uint64) writeState->chunkGroupRowLimit)
-		group = columnar_start_chunk_group(writeState);
+		group = pgcolumnar_start_chunk_group(writeState);
 
 	for (c = 0; c < writeState->natts; c++)
 	{
@@ -715,7 +715,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 		else
 		{
 			appendStringInfoChar(&col->existsStream, 1);
-			ColumnarEncodeValue(&col->valueStream, att, values[c]);
+			PgColumnarEncodeValue(&col->valueStream, att, values[c]);
 			col->valueCount++;
 
 			/* accumulate the value's hash for the per-chunk bloom filter (I7) */
@@ -738,7 +738,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 			/* maintain the per-chunk min/max for orderable types */
 			if (writeState->colDefs[c].orderable)
 			{
-				ColumnarColumnDef *def = &writeState->colDefs[c];
+				PgColumnarColumnDef *def = &writeState->colDefs[c];
 				MemoryContext oldContext =
 					MemoryContextSwitchTo(writeState->stripeContext);
 
@@ -760,7 +760,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 					 * of a serial or timestamp column produces -- cost one
 					 * comparison per value instead of two.
 					 */
-					int32		cmpMax = columnar_cmp_value(def, values[c],
+					int32		cmpMax = pgcolumnar_cmp_value(def, values[c],
 														   col->maxValue);
 
 					if (cmpMax > 0)
@@ -770,7 +770,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 						col->maxValue = datumCopy(values[c], att->attbyval,
 												  att->attlen);
 					}
-					else if (columnar_cmp_value(def, values[c],
+					else if (pgcolumnar_cmp_value(def, values[c],
 												col->minValue) < 0)
 					{
 						if (!att->attbyval)
@@ -789,13 +789,13 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
 	writeState->stripeRowCount++;
 
 	if (writeState->stripeRowCount >= (uint64) writeState->stripeRowLimit)
-		columnar_flush_row_group(writeState);
+		pgcolumnar_flush_row_group(writeState);
 
 	return rowNumber;
 }
 
 /*
- * ColumnarBufferedRowByNumber
+ * PgColumnarBufferedRowByNumber
  *		Reconstruct a single row that is still held in an unflushed write buffer,
  *		addressed by its row number (spec 6). Returns true and fills values/nulls
  *		(by-reference values copied into the current memory context) when the row
@@ -809,16 +809,16 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
  *		to call while the caller holds an index buffer lock.
  */
 bool
-ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
+PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 							Datum *values, bool *nulls)
 {
 	Oid			relid = RelationGetRelid(rel);
 	MemoryContext target = CurrentMemoryContext;
 	ListCell   *lc;
 
-	foreach(lc, ColumnarWriteStates)
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *ws = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *ws = (PgColumnarWriteState *) lfirst(lc);
 		uint64		offset;
 		uint64		accumulated;
 		ListCell   *glc;
@@ -876,7 +876,7 @@ ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 
 				if (existsBytes[posInGroup])
 				{
-					values[c] = ColumnarDecodeValue(att, &cursor, target);
+					values[c] = PgColumnarDecodeValue(att, &cursor, target);
 					nulls[c] = false;
 				}
 				else
@@ -894,7 +894,7 @@ ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 }
 
 /*
- * columnar_flush_row_group
+ * pgcolumnar_flush_row_group
  *		Native-format (PGCN v1) flush. Lay out the accumulated rows as one row
  *		group: each column is a column chunk of [validity bitmap][values], where
  *		the validity bitmap is one bit per row (LSB-first) and the values are the
@@ -905,7 +905,7 @@ ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
  *		column_chunk, zone_map, bloom).
  */
 static void
-columnar_flush_row_group(ColumnarWriteState *writeState)
+pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 {
 	MemoryContext flushContext;
 	MemoryContext oldContext;
@@ -988,7 +988,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 		char	   *finalData;
 		uint32		finalLen;
 		int			blockCodec = COLUMNAR_COMPRESSION_NONE;
-		ColumnarColumnDef *def = &writeState->colDefs[c];
+		PgColumnarColumnDef *def = &writeState->colDefs[c];
 		int			vec = 0;
 		bool		chunkHasMinMax = false;
 		Datum		chunkMin = (Datum) 0;
@@ -1090,8 +1090,8 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			 */
 			if (corpus.len > 0 &&
 				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
-				!ColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
-				ColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
+				!PgColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
+				PgColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
 
 			/*
@@ -1112,7 +1112,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			 * imprecise but inverted, so no margin on the sample would be safe.
 			 */
 			if (fsstTable != NULL &&
-				!ColumnarFsstHelpsCompressed(corpus.data, (uint32) corpus.len,
+				!PgColumnarFsstHelpsCompressed(corpus.data, (uint32) corpus.len,
 											 fsstTable, fsstTableLen,
 											 writeState->compressionType,
 											 writeState->compressionLevel))
@@ -1137,7 +1137,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			uint32		entryValueCount;
 			uint32		entryRawLen;
 
-			encType = ColumnarEncodeChunk(col->valueStream.data,
+			encType = PgColumnarEncodeChunk(col->valueStream.data,
 										  col->valueStream.len, att,
 										  col->valueCount, fsstTable, fsstTableLen,
 										  &encData, &encLen);
@@ -1178,8 +1178,8 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 
 					initStringInfo(&mn);
 					initStringInfo(&mx);
-					ColumnarEncodeValue(&mn, att, col->minValue);
-					ColumnarEncodeValue(&mx, att, col->maxValue);
+					PgColumnarEncodeValue(&mn, att, col->minValue);
+					PgColumnarEncodeValue(&mx, att, col->maxValue);
 					z->hasMinMax = true;
 					z->minimum = mn.data;
 					z->minimumLen = (uint32) mn.len;
@@ -1249,8 +1249,8 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 
 				initStringInfo(&mn);
 				initStringInfo(&mx);
-				ColumnarEncodeValue(&mn, att, chunkMin);
-				ColumnarEncodeValue(&mx, att, chunkMax);
+				PgColumnarEncodeValue(&mn, att, chunkMin);
+				PgColumnarEncodeValue(&mx, att, chunkMax);
 				z->hasMinMax = true;
 				z->minimum = mn.data;
 				z->minimumLen = (uint32) mn.len;
@@ -1279,7 +1279,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 										   col->hashBuf.len);
 			}
 			if (hashes.len > 0 &&
-				ColumnarBloomBuild((const uint32 *) hashes.data,
+				PgColumnarBloomBuild((const uint32 *) hashes.data,
 								   hashes.len / sizeof(uint32),
 								   &bloom, &bloomLen))
 			{
@@ -1305,7 +1305,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 			int			usedType;
 			int			usedLevel;
 
-			ColumnarCompressValueStream(encoded->data, encoded->len,
+			PgColumnarCompressValueStream(encoded->data, encoded->len,
 										writeState->compressionType,
 										writeState->compressionLevel,
 										&compData, &compLen,
@@ -1343,14 +1343,14 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 	reusedOffset = false;
 	if (dataLength > 0 &&
 		CheckRelationLockedByMe(rel, ShareUpdateExclusiveLock, false))
-		reusedOffset = ColumnarAllocateFreeSpace(ColumnarStorageId(rel), dataLength,
-												 ColumnarOldestXmin(rel), &fileOffset);
+		reusedOffset = PgColumnarAllocateFreeSpace(PgColumnarStorageId(rel), dataLength,
+												 PgColumnarOldestXmin(rel), &fileOffset);
 
 	LockRelationForExtension(rel, ExclusiveLock);
 	if (!reusedOffset)
-		ColumnarReserveOffset(rel, dataLength, &fileOffset);
+		PgColumnarReserveOffset(rel, dataLength, &fileOffset);
 	if (dataLength > 0)
-		ColumnarWriteLogicalData(rel, fileOffset, data->data, dataLength);
+		PgColumnarWriteLogicalData(rel, fileOffset, data->data, dataLength);
 	UnlockRelationForExtension(rel, ExclusiveLock);
 
 	{
@@ -1361,7 +1361,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 		s.formatVersion = COLUMNAR_NATIVE_VERSION_MAJOR;
 		s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
 		s.rowGroupLimit = writeState->stripeRowLimit;
-		ColumnarInsertNativeStorageRow(&s);
+		PgColumnarInsertNativeStorageRow(&s);
 	}
 	{
 		NativeRowGroupMetadata rg;
@@ -1372,7 +1372,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 		rg.rowCount = rowCount;
 		rg.byteLength = dataLength;
 		rg.firstRowNumber = writeState->stripeFirstRowNumber;
-		ColumnarInsertRowGroupRow(&rg);
+		PgColumnarInsertRowGroupRow(&rg);
 	}
 	for (c = 0; c < natts; c++)
 	{
@@ -1391,12 +1391,12 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
 		cc.blockCodec = chunkBlockCodec[c];
 		cc.pageOffset = fileOffset + chunkOffset[c];
 		cc.pageLength = chunkLength[c];
-		ColumnarInsertColumnChunkRow(&cc);
+		PgColumnarInsertColumnChunkRow(&cc);
 	}
 	foreach(lc, zoneRows)
-		ColumnarInsertZoneMapRow((NativeZoneMapMetadata *) lfirst(lc));
+		PgColumnarInsertZoneMapRow((NativeZoneMapMetadata *) lfirst(lc));
 	foreach(lc, bloomRows)
-		ColumnarInsertBloomRow((NativeBloomMetadata *) lfirst(lc));
+		PgColumnarInsertBloomRow((NativeBloomMetadata *) lfirst(lc));
 
 	table_close(rel, RowExclusiveLock);
 
@@ -1421,7 +1421,7 @@ columnar_flush_row_group(ColumnarWriteState *writeState)
  * table's relation file and row-number space. On insert, the projected columns
  * plus the base row number are buffered; at flush the batch is sorted on the
  * projection's sort key and written as a stripe to the projection's storage,
- * reusing the base stripe encoder (ColumnarWriteRow + columnar_flush_row_group).
+ * reusing the base stripe encoder (PgColumnarWriteRow + pgcolumnar_flush_row_group).
  * The base row number is stored as a leading int8 column so the projection can
  * be joined back to the base; deletes/visibility come from the base delete_vector, so
  * only INSERT fans out (see design/gaps/26-IMPL-projections-phase2-plan.md).
@@ -1434,7 +1434,7 @@ typedef struct ProjRow
 	bool	   *nulls;
 } ProjRow;
 
-typedef struct ColumnarProjWriter
+typedef struct PgColumnarProjWriter
 {
 	uint64		projStorageId;
 	int			ncols;			/* number of projection columns (K) */
@@ -1455,14 +1455,14 @@ typedef struct ColumnarProjWriter
 	int			nrows;
 	MemoryContext ctx;			/* persists: struct arrays, projTupdesc */
 	MemoryContext rowCtx;		/* reset after each stripe flush: row datums */
-	ColumnarWriteState *innerWs;	/* reused stripe encoder for this projection */
-} ColumnarProjWriter;
+	PgColumnarWriteState *innerWs;	/* reused stripe encoder for this projection */
+} PgColumnarProjWriter;
 /*
- * ColumnarWriteStateProjStripeIds
+ * PgColumnarWriteStateProjStripeIds
  *		The stripe ids this write state's projection fan-out drew (#345).
  *
  *		A projection writes through its own inner write state but reserves from
- *		the BASE relation's stripe counter, because ColumnarWriteRow is called
+ *		the BASE relation's stripe counter, because PgColumnarWriteRow is called
  *		with the base relation (see flush_proj_writer). Its groups are recorded
  *		under the projection's own storage id, so they never appear in the base
  *		relation's row group list.
@@ -1478,7 +1478,7 @@ typedef struct ColumnarProjWriter
  *		state has no projection writers.
  */
 uint64 *
-ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n)
+PgColumnarWriteStateProjStripeIds(PgColumnarWriteState *ws, int *n)
 {
 	ListCell   *lc;
 	uint64	   *ids = NULL;
@@ -1491,7 +1491,7 @@ ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n)
 
 	foreach(lc, ws->projWriters)
 	{
-		ColumnarProjWriter *w = (ColumnarProjWriter *) lfirst(lc);
+		PgColumnarProjWriter *w = (PgColumnarProjWriter *) lfirst(lc);
 
 		if (w->innerWs != NULL)
 			total += w->innerWs->nReservedStripeIds;
@@ -1502,7 +1502,7 @@ ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n)
 	ids = (uint64 *) palloc(sizeof(uint64) * total);
 	foreach(lc, ws->projWriters)
 	{
-		ColumnarProjWriter *w = (ColumnarProjWriter *) lfirst(lc);
+		PgColumnarProjWriter *w = (PgColumnarProjWriter *) lfirst(lc);
 		int			i;
 
 		if (w->innerWs == NULL)
@@ -1516,28 +1516,28 @@ ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n)
 
 
 /*
- * columnar_build_write_state
+ * pgcolumnar_build_write_state
  *		Allocate a standalone stripe encoder for the given tuple descriptor and
- *		storage id, not registered in ColumnarWriteStates. Used for a
+ *		storage id, not registered in PgColumnarWriteStates. Used for a
  *		projection's inner writer; carries the same per-chunk min/max and bloom
  *		skip metadata as the base writer so a sorted projection gives tight
  *		min/max ranges for the planner (gap 26).
  */
-static ColumnarWriteState *
-columnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
+static PgColumnarWriteState *
+pgcolumnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
 						   int stripeRowLimit, int chunkGroupRowLimit,
 						   int compType, int compLevel)
 {
 	MemoryContext oldContext;
-	ColumnarWriteState *ws;
+	PgColumnarWriteState *ws;
 
-	if (ColumnarWriteContext == NULL)
-		ColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
+	if (PgColumnarWriteContext == NULL)
+		PgColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
 													 "columnar write",
 													 ALLOCSET_DEFAULT_SIZES);
-	oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
+	oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
 
-	ws = palloc0(sizeof(ColumnarWriteState));
+	ws = palloc0(sizeof(PgColumnarWriteState));
 	ws->relid = relid;
 	ws->subid = GetCurrentSubTransactionId();
 	ws->tupdesc = CreateTupleDescCopy(srcTupdesc);
@@ -1552,7 +1552,7 @@ columnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
 	 * relation. Leaving this unset would zero it, silently dropping bloom
 	 * filters from projections while the setting was on.
 	 */
-	ws->bloomEnabled = columnar_enable_bloom_filter;
+	ws->bloomEnabled = pgcolumnar_enable_bloom_filter;
 
 	/*
 	 * And under the same encode_effort as its base, for the same reason: a
@@ -1561,17 +1561,17 @@ columnar_build_write_state(Oid relid, TupleDesc srcTupdesc, uint64 storageId,
 	 */
 	ws->encodeEffort = COLUMNAR_ENCODE_EFFORT_FULL;
 	{
-		ColumnarOptions opts;
+		PgColumnarOptions opts;
 
-		if (ColumnarReadOptions(relid, &opts) && opts.encodeEffortSet)
+		if (PgColumnarReadOptions(relid, &opts) && opts.encodeEffortSet)
 			ws->encodeEffort = opts.encodeEffort;
 	}
 	ws->storageId = storageId;
-	columnar_init_col_defs(ws);	/* min/max + bloom skip metadata for projections */
-	ws->stripeContext = AllocSetContextCreate(ColumnarWriteContext,
+	pgcolumnar_init_col_defs(ws);	/* min/max + bloom skip metadata for projections */
+	ws->stripeContext = AllocSetContextCreate(PgColumnarWriteContext,
 											  "columnar proj stripe",
 											  ALLOCSET_DEFAULT_SIZES);
-	ws->writeContext = ColumnarWriteContext;
+	ws->writeContext = PgColumnarWriteContext;
 	ws->chunkGroups = NIL;
 	ws->currentGroup = NULL;
 	ws->stripeRowCount = 0;
@@ -1587,7 +1587,7 @@ proj_row_cmp(const void *a, const void *b, void *arg)
 {
 	const ProjRow *ra = (const ProjRow *) a;
 	const ProjRow *rb = (const ProjRow *) b;
-	ColumnarProjWriter *w = (ColumnarProjWriter *) arg;
+	PgColumnarProjWriter *w = (PgColumnarProjWriter *) arg;
 	int			i;
 
 	for (i = 0; i < w->nsort; i++)
@@ -1617,7 +1617,7 @@ proj_row_cmp(const void *a, const void *b, void *arg)
  *		stripe to the projection's storage, then reset the buffer.
  */
 static void
-flush_proj_writer(ColumnarProjWriter *w, Relation tableRel)
+flush_proj_writer(PgColumnarProjWriter *w, Relation tableRel)
 {
 	int			i;
 
@@ -1628,17 +1628,17 @@ flush_proj_writer(ColumnarProjWriter *w, Relation tableRel)
 		qsort_arg(w->rows, w->nrows, sizeof(ProjRow), proj_row_cmp, w);
 
 	if (w->innerWs == NULL)
-		w->innerWs = columnar_build_write_state(RelationGetRelid(tableRel),
+		w->innerWs = pgcolumnar_build_write_state(RelationGetRelid(tableRel),
 												w->projTupdesc, w->projStorageId,
 												w->stripeRowLimit,
 												w->chunkGroupRowLimit,
 												w->compType, w->compLevel);
 
 	for (i = 0; i < w->nrows; i++)
-		ColumnarWriteRow(w->innerWs, tableRel, w->rows[i].values, w->rows[i].nulls);
+		PgColumnarWriteRow(w->innerWs, tableRel, w->rows[i].values, w->rows[i].nulls);
 
 	if (w->innerWs->stripeRowCount > 0)
-		columnar_flush_row_group(w->innerWs);
+		pgcolumnar_flush_row_group(w->innerWs);
 
 	MemoryContextReset(w->rowCtx);
 	w->nrows = 0;
@@ -1646,24 +1646,24 @@ flush_proj_writer(ColumnarProjWriter *w, Relation tableRel)
 
 /*
  * build_proj_writer
- *		Construct a ColumnarProjWriter for one projection catalog row.
+ *		Construct a PgColumnarProjWriter for one projection catalog row.
  */
-static ColumnarProjWriter *
-build_proj_writer(Relation rel, const ColumnarProjection *proj,
+static PgColumnarProjWriter *
+build_proj_writer(Relation rel, const PgColumnarProjection *proj,
 				  int stripeRowLimit, int chunkGroupRowLimit,
 				  int compType, int compLevel)
 {
 	TupleDesc	tableDesc = RelationGetDescr(rel);
 	MemoryContext ctx;
 	MemoryContext oldContext;
-	ColumnarProjWriter *w;
+	PgColumnarProjWriter *w;
 	int			i;
 
-	ctx = AllocSetContextCreate(ColumnarWriteContext, "columnar proj writer",
+	ctx = AllocSetContextCreate(PgColumnarWriteContext, "columnar proj writer",
 								ALLOCSET_DEFAULT_SIZES);
 	oldContext = MemoryContextSwitchTo(ctx);
 
-	w = palloc0(sizeof(ColumnarProjWriter));
+	w = palloc0(sizeof(PgColumnarProjWriter));
 	w->projStorageId = proj->projStorageId;
 	w->ncols = proj->columnsLen;
 	w->stripeRowLimit = stripeRowLimit;
@@ -1734,7 +1734,7 @@ build_proj_writer(Relation rel, const ColumnarProjection *proj,
  *		insert fan-out and the add-projection back-fill.
  */
 static void
-append_proj_row(ColumnarProjWriter *w, Relation rel, TupleDesc tableDesc,
+append_proj_row(PgColumnarProjWriter *w, Relation rel, TupleDesc tableDesc,
 				uint64 rowNumber, Datum *values, bool *nulls)
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(w->rowCtx);
@@ -1770,14 +1770,14 @@ append_proj_row(ColumnarProjWriter *w, Relation rel, TupleDesc tableDesc,
 }
 
 /*
- * ColumnarProjectionFanoutRow
+ * PgColumnarProjectionFanoutRow
  *		Buffer a freshly inserted row into each additional projection of the
- *		relation. rowNumber is the base row number returned by ColumnarWriteRow.
+ *		relation. rowNumber is the base row number returned by PgColumnarWriteRow.
  *		The projection writers hang off the base write state, so they share its
  *		(relid, subid) lifecycle.
  */
 void
-ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,
+PgColumnarProjectionFanoutRow(Relation rel, PgColumnarWriteState *baseWs,
 							uint64 rowNumber, Datum *values, bool *nulls)
 {
 	TupleDesc	tableDesc = RelationGetDescr(rel);
@@ -1785,13 +1785,13 @@ ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,
 
 	if (!baseWs->projInited)
 	{
-		List	   *projs = ColumnarListProjections(baseWs->storageId);
-		MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
+		List	   *projs = PgColumnarListProjections(baseWs->storageId);
+		MemoryContext oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
 		ListCell   *pc;
 
 		foreach(pc, projs)
 		{
-			ColumnarProjection *p = (ColumnarProjection *) lfirst(pc);
+			PgColumnarProjection *p = (PgColumnarProjection *) lfirst(pc);
 
 			if (p->projectionId == 0)
 				continue;		/* base projection is the table itself */
@@ -1810,12 +1810,12 @@ ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,
 		return;
 
 	foreach(lc, baseWs->projWriters)
-		append_proj_row((ColumnarProjWriter *) lfirst(lc), rel, tableDesc,
+		append_proj_row((PgColumnarProjWriter *) lfirst(lc), rel, tableDesc,
 						rowNumber, values, nulls);
 }
 
 /*
- * ColumnarBackfillProjection
+ * PgColumnarBackfillProjection
  *		Populate a newly declared projection from the table's existing live rows
  *		(gap 26): scan the base and buffer-sort-flush each row into the
  *		projection's storage. Called by add_projection so a projection added to a
@@ -1823,28 +1823,28 @@ ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,
  *		concurrent writers (ShareLock) so no row is missed.
  */
 void
-ColumnarBackfillProjection(Relation rel, const ColumnarProjection *proj)
+PgColumnarBackfillProjection(Relation rel, const PgColumnarProjection *proj)
 {
 	TupleDesc	tableDesc = RelationGetDescr(rel);
 	Oid			relid = RelationGetRelid(rel);
-	int			stripeRowLimit = columnar_stripe_row_limit;
-	int			chunkGroupRowLimit = columnar_chunk_group_row_limit;
-	int			compType = columnar_compression;
-	int			compLevel = columnar_compression_level;
-	ColumnarOptions opts;
-	ColumnarProjWriter *w;
-	ColumnarReadState *readState;
+	int			stripeRowLimit = pgcolumnar_stripe_row_limit;
+	int			chunkGroupRowLimit = pgcolumnar_chunk_group_row_limit;
+	int			compType = pgcolumnar_compression;
+	int			compLevel = pgcolumnar_compression_level;
+	PgColumnarOptions opts;
+	PgColumnarProjWriter *w;
+	PgColumnarReadState *readState;
 	Snapshot	snapshot;
 	Datum	   *values;
 	bool	   *nulls;
 	uint64		rowNumber;
 
-	if (ColumnarWriteContext == NULL)
-		ColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
+	if (PgColumnarWriteContext == NULL)
+		PgColumnarWriteContext = AllocSetContextCreate(TopTransactionContext,
 													 "columnar write",
 													 ALLOCSET_DEFAULT_SIZES);
 
-	if (ColumnarReadOptions(relid, &opts))
+	if (PgColumnarReadOptions(relid, &opts))
 	{
 		if (opts.stripeRowLimitSet)
 			stripeRowLimit = opts.stripeRowLimit;
@@ -1857,8 +1857,8 @@ ColumnarBackfillProjection(Relation rel, const ColumnarProjection *proj)
 	}
 
 	/* flush any pending base writes so the scan sees this transaction's rows */
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
 	w = build_proj_writer(rel, proj, stripeRowLimit, chunkGroupRowLimit,
 						  compType, compLevel);
@@ -1867,58 +1867,58 @@ ColumnarBackfillProjection(Relation rel, const ColumnarProjection *proj)
 	values = palloc(sizeof(Datum) * tableDesc->natts);
 	nulls = palloc(sizeof(bool) * tableDesc->natts);
 
-	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
-	while (ColumnarReadNextRow(readState, values, nulls, &rowNumber))
+	readState = PgColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	while (PgColumnarReadNextRow(readState, values, nulls, &rowNumber))
 		append_proj_row(w, rel, tableDesc, rowNumber, values, nulls);
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 
 	flush_proj_writer(w, rel);
 }
 
 /* Flush all projection writers hanging off a base write state. */
 static void
-flush_ws_projections(ColumnarWriteState *ws)
+flush_ws_projections(PgColumnarWriteState *ws)
 {
 	ListCell   *lc;
 	Relation	rel;
 	bool		any = false;
 
 	foreach(lc, ws->projWriters)
-		if (((ColumnarProjWriter *) lfirst(lc))->nrows > 0)
+		if (((PgColumnarProjWriter *) lfirst(lc))->nrows > 0)
 			any = true;
 	if (!any)
 		return;
 
 	rel = table_open(ws->relid, RowExclusiveLock);
 	foreach(lc, ws->projWriters)
-		flush_proj_writer((ColumnarProjWriter *) lfirst(lc), rel);
+		flush_proj_writer((PgColumnarProjWriter *) lfirst(lc), rel);
 	table_close(rel, RowExclusiveLock);
 }
 
 /*
- * ColumnarFlushWriteStateForRelation
+ * PgColumnarFlushWriteStateForRelation
  *		Flush any pending partial stripe for a single relation. Used at scan
  *		start so data written earlier in this transaction is persisted.
  */
 void
-ColumnarFlushWriteStateForRelation(Oid relid)
+PgColumnarFlushWriteStateForRelation(Oid relid)
 {
 	ListCell   *lc;
 
-	foreach(lc, ColumnarWriteStates)
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *writeState = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
 		if (writeState->relid != relid)
 			continue;
 		if (writeState->stripeRowCount > 0)
-			columnar_flush_row_group(writeState);
+			pgcolumnar_flush_row_group(writeState);
 		flush_ws_projections(writeState);
 	}
 }
 
 /*
- * ColumnarForgetWriteStateForRelation
+ * PgColumnarForgetWriteStateForRelation
  *		Drop the cached write state for a relation without flushing it. Used
  *		after the relation's storage is swapped (columnar.vacuum): the cached
  *		state holds the old storage id, so it must be discarded and a fresh one
@@ -1926,102 +1926,102 @@ ColumnarFlushWriteStateForRelation(Oid relid)
  *		buffered rows still needed persisting.
  */
 void
-ColumnarForgetWriteStateForRelation(Oid relid)
+PgColumnarForgetWriteStateForRelation(Oid relid)
 {
 	List	   *kept = NIL;
 	ListCell   *lc;
 	MemoryContext oldContext;
 
-	if (ColumnarWriteStates == NIL)
+	if (PgColumnarWriteStates == NIL)
 		return;
 
-	oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
-	foreach(lc, ColumnarWriteStates)
+	oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *writeState = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
 		if (writeState->relid != relid)
 			kept = lappend(kept, writeState);
 	}
 	MemoryContextSwitchTo(oldContext);
 
-	ColumnarWriteStates = kept;
+	PgColumnarWriteStates = kept;
 }
 
 /*
- * ColumnarFlushAllPendingWrites
+ * PgColumnarFlushAllPendingWrites
  *		Flush every pending write state. Called at transaction pre-commit.
  */
 void
-ColumnarFlushAllPendingWrites(void)
+PgColumnarFlushAllPendingWrites(void)
 {
 	ListCell   *lc;
 
-	foreach(lc, ColumnarWriteStates)
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *writeState = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
-		columnar_flush_row_group(writeState);
+		pgcolumnar_flush_row_group(writeState);
 		flush_ws_projections(writeState);
 	}
 }
 
 /*
- * ColumnarDiscardAllPendingWrites
+ * PgColumnarDiscardAllPendingWrites
  *		Forget all pending write states. The backing memory is freed with the
  *		transaction context, so we only clear our static references.
  */
 void
-ColumnarDiscardAllPendingWrites(void)
+PgColumnarDiscardAllPendingWrites(void)
 {
-	ColumnarWriteStates = NIL;
-	ColumnarWriteContext = NULL;
+	PgColumnarWriteStates = NIL;
+	PgColumnarWriteContext = NULL;
 }
 
 /*
- * ColumnarWriteStateDiscardSubXact
+ * PgColumnarWriteStateDiscardSubXact
  *		Drop buffered (unflushed) writes made in an aborting subtransaction.
  *		Stripes already flushed by that subtransaction are made invisible by
  *		the subtransaction abort itself (their catalog rows), so only the
  *		in-memory buffers need discarding here (spec 9).
  */
 void
-ColumnarWriteStateDiscardSubXact(SubTransactionId subid)
+PgColumnarWriteStateDiscardSubXact(SubTransactionId subid)
 {
 	List	   *kept = NIL;
 	ListCell   *lc;
 	MemoryContext oldContext;
 
-	if (ColumnarWriteStates == NIL)
+	if (PgColumnarWriteStates == NIL)
 		return;
 
-	oldContext = MemoryContextSwitchTo(ColumnarWriteContext);
-	foreach(lc, ColumnarWriteStates)
+	oldContext = MemoryContextSwitchTo(PgColumnarWriteContext);
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *writeState = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
 		if (writeState->subid != subid)
 			kept = lappend(kept, writeState);
 	}
 	MemoryContextSwitchTo(oldContext);
 
-	ColumnarWriteStates = kept;
+	PgColumnarWriteStates = kept;
 }
 
 /*
- * ColumnarWriteStatePromoteSubXact
+ * PgColumnarWriteStatePromoteSubXact
  *		On subtransaction commit, reassign its buffered writes to the parent so
  *		they are flushed when the parent (eventually the top transaction)
  *		commits.
  */
 void
-ColumnarWriteStatePromoteSubXact(SubTransactionId subid, SubTransactionId parent)
+PgColumnarWriteStatePromoteSubXact(SubTransactionId subid, SubTransactionId parent)
 {
 	ListCell   *lc;
 
-	foreach(lc, ColumnarWriteStates)
+	foreach(lc, PgColumnarWriteStates)
 	{
-		ColumnarWriteState *writeState = (ColumnarWriteState *) lfirst(lc);
+		PgColumnarWriteState *writeState = (PgColumnarWriteState *) lfirst(lc);
 
 		if (writeState->subid == subid)
 			writeState->subid = parent;

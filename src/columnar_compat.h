@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_compat.h
+ * pgcolumnar_compat.h
  *		PostgreSQL major-version compatibility shims for pgColumnar.
  *
  * pgColumnar keeps a single source tree that builds on PostgreSQL 13 through
@@ -72,10 +72,10 @@
 #include "utils/lsyscache.h"
 
 #if PG_VERSION_NUM >= 180000
-#define ColumnarOpInterpretation OpIndexInterpretation
-#define ColumnarGetOpInterpretation(opno) get_op_index_interpretation(opno)
+#define PgColumnarOpInterpretation OpIndexInterpretation
+#define PgColumnarGetOpInterpretation(opno) get_op_index_interpretation(opno)
 static inline int
-ColumnarOpInterpStrategy(const OpIndexInterpretation *o)
+PgColumnarOpInterpStrategy(const OpIndexInterpretation *o)
 {
 	switch (o->cmptype)
 	{
@@ -94,10 +94,10 @@ ColumnarOpInterpStrategy(const OpIndexInterpretation *o)
 	}
 }
 #else
-#define ColumnarOpInterpretation OpBtreeInterpretation
-#define ColumnarGetOpInterpretation(opno) get_op_btree_interpretation(opno)
+#define PgColumnarOpInterpretation OpBtreeInterpretation
+#define PgColumnarGetOpInterpretation(opno) get_op_btree_interpretation(opno)
 static inline int
-ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
+PgColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
 {
 	return o->strategy;
 }
@@ -122,10 +122,10 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * only (locator, persistence). Heap passes true, and so do we.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM < 150000
-#define ColumnarRelationCreateStorage(loc, persistence) \
+#define PgColumnarRelationCreateStorage(loc, persistence) \
 	RelationCreateStorage((loc), (persistence))
 #else
-#define ColumnarRelationCreateStorage(loc, persistence) \
+#define PgColumnarRelationCreateStorage(loc, persistence) \
 	RelationCreateStorage((loc), (persistence), true)
 #endif
 
@@ -134,7 +134,7 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * index_delete_tuples(Relation, TM_IndexDeleteOp *) in PG14+. In PG13 the slot
  * was compute_xid_horizon_for_tuples(Relation, ItemPointerData *, int). The two
  * take different arguments, so the callback itself is compiled per major (see
- * columnar_tableam.c); this macro only selects the struct field name.
+ * pgcolumnar_tableam.c); this macro only selects the struct field name.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM < 140000
 #define COLUMNAR_AM_INDEX_DELETE_FIELD compute_xid_horizon_for_tuples
@@ -156,15 +156,15 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
 /* -------------------------------------------------------------------------
  * tuple_update() reports which indexes to maintain through a pointer whose
  * target changed from bool (PG13-15) to the TU_UpdateIndexes enum (PG16+). We
- * want "maintain all indexes", which is true / TU_All. ColumnarUpdateIndexes is
+ * want "maintain all indexes", which is true / TU_All. PgColumnarUpdateIndexes is
  * a macro (not a typedef) so the enum name is not referenced until the .c file
  * has already included access/tableam.h, which defines it.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM < 160000
-#define ColumnarUpdateIndexes bool
+#define PgColumnarUpdateIndexes bool
 #define COLUMNAR_TU_ALL true
 #else
-#define ColumnarUpdateIndexes TU_UpdateIndexes
+#define PgColumnarUpdateIndexes TU_UpdateIndexes
 #define COLUMNAR_TU_ALL TU_All
 #endif
 
@@ -198,13 +198,13 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
 	Relation rel, ItemPointer otid, TupleTableSlot *slot, CommandId cid, \
 	uint32 options, Snapshot snapshot, Snapshot crosscheck, bool wait, \
 	TM_FailureData *tmfd, LockTupleMode *lockmode, \
-	ColumnarUpdateIndexes *update_indexes
+	PgColumnarUpdateIndexes *update_indexes
 #else
 #define COLUMNAR_TUPLE_UPDATE_ARGS \
 	Relation rel, ItemPointer otid, TupleTableSlot *slot, CommandId cid, \
 	Snapshot snapshot, Snapshot crosscheck, bool wait, \
 	TM_FailureData *tmfd, LockTupleMode *lockmode, \
-	ColumnarUpdateIndexes *update_indexes
+	PgColumnarUpdateIndexes *update_indexes
 #endif
 
 /* -------------------------------------------------------------------------
@@ -252,7 +252,7 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * scan_analyze_next_block() took (BlockNumber, BufferAccessStrategy) through
  * PG16 and (ReadStream *) from PG17 (the read-stream ANALYZE rework). Pre-17
  * has no ReadStream type. The callback is compiled per major in
- * columnar_tableam.c; this macro supplies its parameter list.
+ * pgcolumnar_tableam.c; this macro supplies its parameter list.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM < 170000
 #define COLUMNAR_ANALYZE_NEXT_BLOCK_ARGS \
@@ -267,7 +267,7 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * argument in PG18. An access method supplying its own slot operations has to
  * match the struct exactly, so the wrapper is declared and forwarded through
  * these two macros. Keep the boundary here in step with the callback in
- * columnar_tableam.c; when the analyze block callback's guard drifted from the
+ * pgcolumnar_tableam.c; when the analyze block callback's guard drifted from the
  * macro that supplies its parameters, PG17 stopped compiling.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM >= 180000
@@ -294,9 +294,9 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * snapshot. Callers include "storage/procarray.h".
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM >= 140000
-#define ColumnarOldestXmin(rel) GetOldestNonRemovableTransactionId(rel)
+#define PgColumnarOldestXmin(rel) GetOldestNonRemovableTransactionId(rel)
 #else
-#define ColumnarOldestXmin(rel) GetOldestXmin((rel), PROCARRAY_FLAGS_VACUUM)
+#define PgColumnarOldestXmin(rel) GetOldestXmin((rel), PROCARRAY_FLAGS_VACUUM)
 #endif
 
 /* -------------------------------------------------------------------------
@@ -306,9 +306,9 @@ ColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
  * smgrextend require on those majors.
  * ------------------------------------------------------------------------- */
 #if PG_VERSION_NUM < 160000
-#define ColumnarAllocPage() ((Page) palloc0(BLCKSZ))
+#define PgColumnarAllocPage() ((Page) palloc0(BLCKSZ))
 #else
-#define ColumnarAllocPage() \
+#define PgColumnarAllocPage() \
 	((Page) palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, MCXT_ALLOC_ZERO))
 #endif
 
@@ -380,7 +380,7 @@ extern void _PG_init(void);
 #include "catalog/index.h"
 
 static inline void
-ColumnarReindexRelation(Oid relid, int flags)
+PgColumnarReindexRelation(Oid relid, int flags)
 {
 #if PG_VERSION_NUM < 140000
 	reindex_relation(relid, flags, 0);

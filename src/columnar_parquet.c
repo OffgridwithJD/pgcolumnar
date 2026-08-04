@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parquet.c
+ * pgcolumnar_parquet.c
  *		Parquet file export for pgColumnar (gap 27, piece 2).
  *
  *		pgcolumnar.export_parquet(rel regclass, path text) writes a columnar table
@@ -47,7 +47,7 @@
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 
-PG_FUNCTION_INFO_V1(columnar_export_parquet);
+PG_FUNCTION_INFO_V1(pgcolumnar_export_parquet);
 
 #define PARQUET_ROWGROUP_ROWS 65536
 
@@ -531,7 +531,7 @@ build_rle_levels(StringInfo out, const uint8 *levels, int64 n, int bit_width)
 	int32		len;
 
 	initStringInfo(&h);
-	ColumnarThriftPutVarint(&h, (uint64) ((ngroups << 1) | 1));	/* one bit-packed run */
+	PgColumnarThriftPutVarint(&h, (uint64) ((ngroups << 1) | 1));	/* one bit-packed run */
 	for (i = 0; i < n; i++)
 	{
 		uint32		v = levels[i];
@@ -594,17 +594,17 @@ write_page_header(StringInfo out, int64 nrows, int32 body_size)
 	int16		dlast = 0;
 
 	/* PageHeader */
-	ColumnarThriftPutI32Field(out, &last, 1, 0);			/* type = DATA_PAGE */
-	ColumnarThriftPutI32Field(out, &last, 2, body_size); /* uncompressed_page_size */
-	ColumnarThriftPutI32Field(out, &last, 3, body_size); /* compressed_page_size */
+	PgColumnarThriftPutI32Field(out, &last, 1, 0);			/* type = DATA_PAGE */
+	PgColumnarThriftPutI32Field(out, &last, 2, body_size); /* uncompressed_page_size */
+	PgColumnarThriftPutI32Field(out, &last, 3, body_size); /* compressed_page_size */
 	/* field 5: data_page_header (struct) */
-	ColumnarThriftPutField(out, &last, 5, TC_STRUCT);
-	ColumnarThriftPutI32Field(out, &dlast, 1, (int32) nrows); /* num_values */
-	ColumnarThriftPutI32Field(out, &dlast, 2, PQ_ENC_PLAIN);	/* encoding */
-	ColumnarThriftPutI32Field(out, &dlast, 3, PQ_ENC_RLE);	/* def level encoding */
-	ColumnarThriftPutI32Field(out, &dlast, 4, PQ_ENC_RLE);	/* rep level encoding */
-	ColumnarThriftPutStop(out);								/* end data_page_header */
-	ColumnarThriftPutStop(out);								/* end PageHeader */
+	PgColumnarThriftPutField(out, &last, 5, TC_STRUCT);
+	PgColumnarThriftPutI32Field(out, &dlast, 1, (int32) nrows); /* num_values */
+	PgColumnarThriftPutI32Field(out, &dlast, 2, PQ_ENC_PLAIN);	/* encoding */
+	PgColumnarThriftPutI32Field(out, &dlast, 3, PQ_ENC_RLE);	/* def level encoding */
+	PgColumnarThriftPutI32Field(out, &dlast, 4, PQ_ENC_RLE);	/* rep level encoding */
+	PgColumnarThriftPutStop(out);								/* end data_page_header */
+	PgColumnarThriftPutStop(out);								/* end PageHeader */
 }
 
 /* ---- FileMetaData footer ---- */
@@ -613,9 +613,9 @@ write_schema_element_root(StringInfo b, int ncols)
 {
 	int16		last = 0;
 
-	ColumnarThriftPutStringField(b, &last, 4, "schema", 6);	/* name */
-	ColumnarThriftPutI32Field(b, &last, 5, ncols);			/* num_children */
-	ColumnarThriftPutStop(b);
+	PgColumnarThriftPutStringField(b, &last, 4, "schema", 6);	/* name */
+	PgColumnarThriftPutI32Field(b, &last, 5, ncols);			/* num_children */
+	PgColumnarThriftPutStop(b);
 }
 
 /* one leaf SchemaElement (a primitive) */
@@ -624,19 +624,19 @@ write_schema_leaf(StringInfo b, const char *name, PqLeaf *leaf, int repetition)
 {
 	int16		last = 0;
 
-	ColumnarThriftPutI32Field(b, &last, 1, leaf->ptype);	/* type */
+	PgColumnarThriftPutI32Field(b, &last, 1, leaf->ptype);	/* type */
 	if (leaf->ptype == PQ_FIXED_LEN_BYTE_ARRAY)
-		ColumnarThriftPutI32Field(b, &last, 2, leaf->typeLength);
-	ColumnarThriftPutI32Field(b, &last, 3, repetition);
-	ColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
+		PgColumnarThriftPutI32Field(b, &last, 2, leaf->typeLength);
+	PgColumnarThriftPutI32Field(b, &last, 3, repetition);
+	PgColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
 	if (leaf->convType >= 0)
-		ColumnarThriftPutI32Field(b, &last, 6, leaf->convType);
+		PgColumnarThriftPutI32Field(b, &last, 6, leaf->convType);
 	if (leaf->convType == PQ_CT_DECIMAL)
 	{
-		ColumnarThriftPutI32Field(b, &last, 7, leaf->scale);
-		ColumnarThriftPutI32Field(b, &last, 8, leaf->precision);
+		PgColumnarThriftPutI32Field(b, &last, 7, leaf->scale);
+		PgColumnarThriftPutI32Field(b, &last, 8, leaf->precision);
 	}
-	ColumnarThriftPutStop(b);
+	PgColumnarThriftPutStop(b);
 }
 
 /* one group SchemaElement (no physical type; has num_children) */
@@ -646,12 +646,12 @@ write_schema_group(StringInfo b, const char *name, int repetition,
 {
 	int16		last = 0;
 
-	ColumnarThriftPutI32Field(b, &last, 3, repetition);
-	ColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
-	ColumnarThriftPutI32Field(b, &last, 5, num_children);
+	PgColumnarThriftPutI32Field(b, &last, 3, repetition);
+	PgColumnarThriftPutStringField(b, &last, 4, name, (int) strlen(name));
+	PgColumnarThriftPutI32Field(b, &last, 5, num_children);
 	if (convType >= 0)
-		ColumnarThriftPutI32Field(b, &last, 6, convType);
-	ColumnarThriftPutStop(b);
+		PgColumnarThriftPutI32Field(b, &last, 6, convType);
+	PgColumnarThriftPutStop(b);
 }
 
 /* number of SchemaElements a top column contributes (excluding the root) */
@@ -711,27 +711,27 @@ write_column_chunk(StringInfo b, PqLeaf *c, PqColMeta *m)
 	int16		mlast = 0;
 	int			p;
 
-	ColumnarThriftPutI64Field(b, &last, 2, m->dataPageOffset);	/* file_offset */
-	ColumnarThriftPutField(b, &last, 3, TC_STRUCT);				/* meta_data */
-	ColumnarThriftPutI32Field(b, &mlast, 1, c->ptype);			/* type */
-	ColumnarThriftPutField(b, &mlast, 2, TC_LIST);				/* encodings [PLAIN, RLE] */
-	ColumnarThriftPutListHeader(b, 2, TC_I32);
-	ColumnarThriftPutZigzag32(b, PQ_ENC_PLAIN);
-	ColumnarThriftPutZigzag32(b, PQ_ENC_RLE);
-	ColumnarThriftPutField(b, &mlast, 3, TC_LIST);				/* path_in_schema */
-	ColumnarThriftPutListHeader(b, c->pathlen, TC_BINARY);
+	PgColumnarThriftPutI64Field(b, &last, 2, m->dataPageOffset);	/* file_offset */
+	PgColumnarThriftPutField(b, &last, 3, TC_STRUCT);				/* meta_data */
+	PgColumnarThriftPutI32Field(b, &mlast, 1, c->ptype);			/* type */
+	PgColumnarThriftPutField(b, &mlast, 2, TC_LIST);				/* encodings [PLAIN, RLE] */
+	PgColumnarThriftPutListHeader(b, 2, TC_I32);
+	PgColumnarThriftPutZigzag32(b, PQ_ENC_PLAIN);
+	PgColumnarThriftPutZigzag32(b, PQ_ENC_RLE);
+	PgColumnarThriftPutField(b, &mlast, 3, TC_LIST);				/* path_in_schema */
+	PgColumnarThriftPutListHeader(b, c->pathlen, TC_BINARY);
 	for (p = 0; p < c->pathlen; p++)
 	{
-		ColumnarThriftPutVarint(b, (uint64) strlen(c->path[p]));
+		PgColumnarThriftPutVarint(b, (uint64) strlen(c->path[p]));
 		appendBinaryStringInfo(b, c->path[p], strlen(c->path[p]));
 	}
-	ColumnarThriftPutI32Field(b, &mlast, 4, 0);					/* codec = UNCOMPRESSED */
-	ColumnarThriftPutI64Field(b, &mlast, 5, m->numValues);		/* num_values */
-	ColumnarThriftPutI64Field(b, &mlast, 6, m->totalSize);		/* total_uncompressed_size */
-	ColumnarThriftPutI64Field(b, &mlast, 7, m->totalSize);		/* total_compressed_size */
-	ColumnarThriftPutI64Field(b, &mlast, 9, m->dataPageOffset);	/* data_page_offset */
-	ColumnarThriftPutStop(b);										/* end ColumnMetaData */
-	ColumnarThriftPutStop(b);										/* end ColumnChunk */
+	PgColumnarThriftPutI32Field(b, &mlast, 4, 0);					/* codec = UNCOMPRESSED */
+	PgColumnarThriftPutI64Field(b, &mlast, 5, m->numValues);		/* num_values */
+	PgColumnarThriftPutI64Field(b, &mlast, 6, m->totalSize);		/* total_uncompressed_size */
+	PgColumnarThriftPutI64Field(b, &mlast, 7, m->totalSize);		/* total_compressed_size */
+	PgColumnarThriftPutI64Field(b, &mlast, 9, m->dataPageOffset);	/* data_page_offset */
+	PgColumnarThriftPutStop(b);										/* end ColumnMetaData */
+	PgColumnarThriftPutStop(b);										/* end ColumnChunk */
 }
 
 static void
@@ -740,13 +740,13 @@ write_row_group(StringInfo b, PqLeaf *leaves, int nleaves, PqRowGroup *rg)
 	int16		last = 0;
 	int			i;
 
-	ColumnarThriftPutField(b, &last, 1, TC_LIST);					/* columns */
-	ColumnarThriftPutListHeader(b, nleaves, TC_STRUCT);
+	PgColumnarThriftPutField(b, &last, 1, TC_LIST);					/* columns */
+	PgColumnarThriftPutListHeader(b, nleaves, TC_STRUCT);
 	for (i = 0; i < nleaves; i++)
 		write_column_chunk(b, &leaves[i], &rg->cols[i]);
-	ColumnarThriftPutI64Field(b, &last, 2, rg->totalByteSize);
-	ColumnarThriftPutI64Field(b, &last, 3, rg->numRows);
-	ColumnarThriftPutStop(b);
+	PgColumnarThriftPutI64Field(b, &last, 2, rg->totalByteSize);
+	PgColumnarThriftPutI64Field(b, &last, 3, rg->numRows);
+	PgColumnarThriftPutStop(b);
 }
 
 /* initialize a scalar leaf for a given type; *ok=false if unsupported */
@@ -886,13 +886,13 @@ build_top_column(TopColumn *tc, const char *name, Oid typid, int32 typmod,
 }
 
 /*
- * ColumnarParquetCheckExportable
+ * PgColumnarParquetCheckExportable
  *		Ereport if rel cannot be exported to Parquet (a dropped column, or a
  *		column type the writer does not support). Lets the parallel exporter fail
  *		fast in the dispatcher, before it opens files or spawns workers.
  */
 void
-ColumnarParquetCheckExportable(Relation rel)
+PgColumnarParquetCheckExportable(Relation rel)
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			ntop = tupdesc->natts;
@@ -933,16 +933,16 @@ ColumnarParquetCheckExportable(Relation rel)
 }
 
 /*
- * ColumnarWriteParquetFile
+ * PgColumnarWriteParquetFile
  *		Write rel's live rows to a Parquet file at filepath, under snapshot.
  *		When restrictGroups is non-NULL, only those row groups are written (the
  *		parallel exporter gives each worker a disjoint group slice). Returns rows
  *		written. The caller owns rel (kept open) and the snapshot; on error this
  *		ereports and the resource owner releases the lock. Shared by the serial
- *		columnar_export_parquet and the parallel exporter.
+ *		pgcolumnar_export_parquet and the parallel exporter.
  */
 int64
-ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
+PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 						 const uint64 *restrictGroups, int nRestrictGroups)
 {
 	TupleDesc	tupdesc;
@@ -951,7 +951,7 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 	PqLeaf	   *leaves;
 	int			nleaves = 0;
 	int			totalLeaves = 0;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	Datum	   *values;
 	bool	   *nulls;
 	uint64		rowNumber;
@@ -1010,7 +1010,7 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 	values = palloc(sizeof(Datum) * ntop);
 	nulls = palloc(sizeof(bool) * ntop);
 
-	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	readState = PgColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
 	/*
 	 * NULL restrictGroups means no restriction (the whole table). A non-NULL
 	 * list restricts to exactly those groups, so an empty list (nRestrictGroups
@@ -1019,11 +1019,11 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 	 * earlier version did -- the entire table.
 	 */
 	if (restrictGroups != NULL)
-		ColumnarReadRestrictToGroups(readState, restrictGroups, nRestrictGroups);
+		PgColumnarReadRestrictToGroups(readState, restrictGroups, nRestrictGroups);
 
 	for (;;)
 	{
-		bool		got = ColumnarReadNextRow(readState, values, nulls, &rowNumber);
+		bool		got = PgColumnarReadNextRow(readState, values, nulls, &rowNumber);
 
 		if (got)
 		{
@@ -1081,7 +1081,7 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 		if (!got)
 			break;
 	}
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 
 	/* ---- FileMetaData footer ---- */
 	{
@@ -1094,21 +1094,21 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 			nschema += schema_count_for_top(&tops[i]);
 
 		initStringInfo(&fmd);
-		ColumnarThriftPutI32Field(&fmd, &last, 1, 1);	/* version */
+		PgColumnarThriftPutI32Field(&fmd, &last, 1, 1);	/* version */
 		/* schema list (2): root + the (possibly nested) elements per column */
-		ColumnarThriftPutField(&fmd, &last, 2, TC_LIST);
-		ColumnarThriftPutListHeader(&fmd, nschema, TC_STRUCT);
+		PgColumnarThriftPutField(&fmd, &last, 2, TC_LIST);
+		PgColumnarThriftPutListHeader(&fmd, nschema, TC_STRUCT);
 		write_schema_element_root(&fmd, ntop);
 		for (i = 0; i < ntop; i++)
 			write_top_schema(&fmd, &tops[i], leaves);
-		ColumnarThriftPutI64Field(&fmd, &last, 3, total);	/* num_rows */
+		PgColumnarThriftPutI64Field(&fmd, &last, 3, total);	/* num_rows */
 		/* row_groups list (4) */
-		ColumnarThriftPutField(&fmd, &last, 4, TC_LIST);
-		ColumnarThriftPutListHeader(&fmd, nrgs, TC_STRUCT);
+		PgColumnarThriftPutField(&fmd, &last, 4, TC_LIST);
+		PgColumnarThriftPutListHeader(&fmd, nrgs, TC_STRUCT);
 		for (i = 0; i < nrgs; i++)
 			write_row_group(&fmd, leaves, nleaves, &rgs[i]);
-		ColumnarThriftPutStringField(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
-		ColumnarThriftPutStop(&fmd);
+		PgColumnarThriftPutStringField(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
+		PgColumnarThriftPutStop(&fmd);
 
 		fwrite(fmd.data, 1, fmd.len, f);
 		footerLen = fmd.len;
@@ -1126,12 +1126,12 @@ ColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath,
 }
 
 /*
- * columnar_export_parquet
+ * pgcolumnar_export_parquet
  *		SQL: pgcolumnar.export_parquet(rel regclass, path text) -> bigint.
- *		Thin wrapper over ColumnarWriteParquetFile for the whole table.
+ *		Thin wrapper over PgColumnarWriteParquetFile for the whole table.
  */
 Datum
-columnar_export_parquet(PG_FUNCTION_ARGS)
+pgcolumnar_export_parquet(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *path;
@@ -1152,7 +1152,7 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 	rel = table_open(relid, AccessShareLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessShareLock);
 		ereport(ERROR,
@@ -1162,7 +1162,7 @@ columnar_export_parquet(PG_FUNCTION_ARGS)
 	}
 
 	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
-	total = ColumnarWriteParquetFile(rel, snapshot, path, NULL, 0);
+	total = PgColumnarWriteParquetFile(rel, snapshot, path, NULL, 0);
 
 	table_close(rel, AccessShareLock);
 	PG_RETURN_INT64(total);
