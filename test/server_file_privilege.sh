@@ -37,7 +37,12 @@ set -uo pipefail
 export PGC_EXTRA_CONF=$'max_prepared_transactions=4\nmax_worker_processes=8'
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-SQLFILE="$(dirname "${BASH_SOURCE[0]}")/../pgcolumnar--1.0-dev.sql"
+# Derived from the control file, not hardcoded. This broke once when the install script
+# was renamed for a version bump, and a hardcoded name would break again at the next one.
+_root="$(dirname "${BASH_SOURCE[0]}")/.."
+_ver=$(grep -oE "default_version = '[^']+'" "$_root/pgcolumnar.control" | sed "s/.*'\(.*\)'/\1/")
+SQLFILE="$_root/pgcolumnar--$_ver.sql"
+[ -f "$SQLFILE" ] || { echo "FAIL  install script $SQLFILE not found"; exit 1; }
 nope="/tmp/pgc_sfp_does_not_exist.parquet"
 out="$PGC_WORKDIR/sfp_out"
 outdir="$PGC_WORKDIR/sfp_dir"
