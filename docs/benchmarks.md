@@ -374,8 +374,9 @@ columns. The data is loaded byte for byte the same way into each engine.
 The bench host has 16 vCPU and 62 GB. Each engine uses the configuration its own
 users would choose:
 
-- pgColumnar: columnar scan, storage in load order, which is time ascending. One
-  btree on `(hostname, time DESC)`.
+- pgColumnar: columnar scan, storage in load order. One btree on
+  `(hostname, time DESC)`. The load order is not sorted on either key: the measured
+  correlation with physical order is 0.013 for `time` and -0.004 for `hostname`.
 - TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time`
   descending. One btree on `(hostname, time DESC)`, and the `(time DESC)` index that
   `create_hypertable` makes, which gives 53 chunk indexes below them.
@@ -464,14 +465,40 @@ across workers. q1, q2 and q3 improve by about five times. q5 and q6 move from b
 heap to ahead of it. The serial table is a measure of the storage format. The parallel
 table is closer to what an installation gets.
 
-**TimescaleDB leads every query that filters one host.** Its columnstore segments by
-`hostname`, so it reads one segment and not the table. pgColumnar stores rows in load
-order, so its zone maps do not skip on `hostname`. A pgColumnar table that is clustered
-on the filter key closes that gap, at the cost of the queries that read all hosts.
+**TimescaleDB is faster than pgColumnar on every query it completes.** That is the
+first thing to take from these tables. In serial it leads by 1.6 times on q4 and q5, and by
+2.1 times on q8. It leads by 2.7 times on q7 and 6.5 times on q6. On q1, q2 and q3 it
+leads by 101, 442 and 679 times. Against heap, pgColumnar wins q4, q5, q6 and q8 by 20
+to 50 percent. It loses q1, q2, q3 and q7.
 
-**pgColumnar leads the wide aggregate shapes with workers.** q5 reads ten metrics for
-all hosts, and q6 scans the table with one filter. pgColumnar is first on both, and q6
-is 2,294 ms against Citus at 8,242 ms.
+**pgColumnar is first on q5 and q6 in the parallel table for one reason: TimescaleDB
+fails there.** Its parallel arm cannot run on this host. The method above records it.
+Where TimescaleDB does run, in serial, it is ahead on both of those queries. Read
+those two cells as "faster than heap and Citus", and not as a win over TimescaleDB.
+
+**Why the one-host queries are so far apart.** pgColumnar skips nothing. Measured on
+q2, with `EXPLAIN (ANALYZE)`:
+
+```
+Columnar Chunk Groups Total: 667
+Columnar Chunk Groups Read: 667
+Columnar Chunk Groups Removed by Filter: 0
+Rows Removed by Filter: 99995680
+```
+
+It reads all 667 row groups and filters 99,995,680 rows to return 4,320. The zone maps cannot help,
+because neither key is sorted in the stored order. Every stripe holds all 4,000 hosts.
+The minimum and maximum `hostname` of each group therefore covers the whole set.
+TimescaleDB answers the same query in about 2 milliseconds. It excludes all but one
+chunk on time, then reads one `hostname` segment through an index.
+
+**So this table measures pgColumnar in the layout that suits it least.** A user with
+this shape would cluster the table on `hostname`. That is what
+TimescaleDB's `segmentby` does for it. That configuration is not measured here. Do not
+read the gap on q1, q2 and q3 as a property of columnar storage until it is. The table
+does show the layout-independent part. pgColumnar reads fewer columns than heap and
+wins the wide scan-bound aggregates. It also stores the same rows in 6,590 MB against
+heap's 22 GB.
 
 **q7 was a planner defect and is now fixed.** The earlier record of this page reported
 133,759 ms for q7 in serial. The cost model charged an index path for the rows the
