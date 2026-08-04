@@ -374,10 +374,20 @@ columns. The data is loaded byte for byte the same way into each engine.
 The bench host has 16 vCPU and 62 GB. Each engine uses the configuration its own
 users would choose:
 
-- pgColumnar: columnar scan, storage in load order, which is time ascending.
-- TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time` descending.
-- heap: sequential scan with the secondary indexes a heap user would build.
-- Citus: single node, columnar storage.
+- pgColumnar: columnar scan, storage in load order, which is time ascending. One
+  btree on `(hostname, time DESC)`.
+- TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time`
+  descending. One btree on `(hostname, time DESC)`, and the `(time DESC)` index that
+  `create_hypertable` makes, which gives 53 chunk indexes below them.
+- heap: sequential scan with the secondary indexes a heap user would build. One btree
+  on `(hostname, time DESC)`.
+- Citus: single node, columnar storage. One btree on `(hostname, time DESC)`.
+
+All four therefore carry the same `(hostname, time DESC)` index, and TimescaleDB
+carries one more. The index set is given per engine because it decides some of these
+rows. q7 on pgColumnar is 767 ms because a skip scan reads that index. The
+same query on the un-indexed table in the parallel-scan section below full-scans and
+sorts.
 
 The full method follows the storage table.
 
