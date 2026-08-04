@@ -87,6 +87,19 @@ if [ "$EXPLICIT" = 0 ] && [ ! -d "$SRCDIR/.git" ]; then
 	exit 2
 fi
 
+# A value that looks like a path but is not there is a wrong path, not a ref. Falling
+# through to the ref branch would answer a question about directories with an error about
+# git checkouts, which is the kind of message that costs someone an afternoon.
+case "$OLD_SRC" in
+	*/*)
+		if [ ! -d "$OLD_SRC" ]; then
+			echo "  FAIL  $OLD_SRC looks like a path and is not a directory."
+			echo "        Give a checked-out source tree of the previous release."
+			exit 1
+		fi
+		;;
+esac
+
 # Directory form: a path to an already-checked-out old tree needs no git at all.
 if [ -d "$OLD_SRC" ]; then
 	[ -f "$OLD_SRC/Makefile" ] || { echo "  FAIL  $OLD_SRC has no Makefile"; exit 1; }
