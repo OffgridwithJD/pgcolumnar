@@ -22,11 +22,19 @@ These environment variables control the harnesses:
 - `BENCH_DUCKDB`. Set it to 1 to add a DuckDB comparison, if `duckdb` is on
   `PATH`.
 
-The numbers below come from one full run of all three harnesses on 2026-07-27, at
-commit `7a9c9f7`. The conditions were PostgreSQL 17.10 non-assert, 6,000,000
-rows, an 8-column table, the median of 5 repetitions, 8 cores and 24 GB of
-memory. The read stream harness used 18.4 with io_uring. Raw output is in
+The numbers below come from one full run of `bench/run_bench.sh` on 2026-08-04, at
+commit `eb5c7ef`. The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
+an 8-column table, the median of 5 repetitions, 8 cores and 12 GB of memory.
+
+The previous record of this section was 2026-07-27 at commit `7a9c9f7`, on
+PostgreSQL 17.10 and a machine with 24 GB. The harness itself did not change
+between the two runs. The major version and the machine did, so read the ratios
+and not the absolute values. The old raw output is in
 [../bench/sample_output_all_2026_07_27.txt](https://github.com/jdatcmd/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
+
+The read stream section is not re-measured. It needs a PostgreSQL 18 build with
+`--with-liburing`, and no such build exists on this machine. Its numbers are from
+the earlier run and say so.
 The Cross-engine comparison and the parallel sections are a separate, larger run.
 It ran on the bench host, at up to 100,000,000 rows, dated 2026-08-02. Each of
 those sections states its own method.
@@ -73,25 +81,25 @@ Heap versus columnar (zstd), median milliseconds:
 
 | query | heap | columnar | heap / columnar |
 | --- | --- | --- | --- |
-| count(*) full table | 254.28 | 0.02 | 12714 |
-| sum/avg over one int column | 379.89 | 0.56 | 678 |
-| filtered agg, min/max-skippable range | 268.96 | 90.70 | 2.97 |
-| projection: 3 of 8 cols, 1% filter | 232.83 | 85.83 | 2.71 |
-| point lookup by indexed id | 0.01 | 1251.88 | 0.00 |
+| count(*) full table | 172.13 | 0.02 | 8607 |
+| sum/avg over one int column | 258.99 | 0.41 | 632 |
+| filtered agg, min/max-skippable range | 205.78 | 11.19 | 18.4 |
+| projection: 3 of 8 cols, 1% filter | 229.85 | 10.85 | 21.2 |
+| point lookup by indexed id | 0.01 | 15.64 | 0.00 |
 
 `count(*)` and the ungrouped aggregates are answered from row-group metadata
 without decoding column data, which is why they are microseconds rather than
 milliseconds.
 
-**The point lookup number is a regression and not a property of the design.**
-The investigation is
-[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171). The previous run recorded 23.75 ms for the same query on the
-same machine. Two facts are known. First, the cause is not the
-lazy-decoding slot. An A/B test across that merge, on a table without statistics,
-gives 16.42 ms before and 13.73 ms after. Second, the difference between that
-test and this harness is that the harness runs `ANALYZE` on the table first. So the planner is choosing differently once
-statistics exist, and choosing worse. Treat the row as a bug report rather than a
-measurement of the fetch path.
+The point lookup was a regression when the previous version of this page was
+written, at 1251.88 ms, and it was reported as
+[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171). That issue is
+closed. The planner chose a full columnar scan for a point lookup once statistics
+existed. It now keeps the index, and the same query takes 15.64 ms.
+
+The filtered aggregate and the projection query also changed by about 8 times.
+Column projection is the cause. A columnar scan reads only the columns that a
+query references (issue #339).
 
 One point stays true in each case. A single-row fetch must find and decode the
 row inside its row group. Columnar storage therefore suits scans and aggregates.
@@ -128,14 +136,26 @@ single run for the delete:
 
 | operation | heap | columnar | columnar / heap |
 | --- | --- | --- | --- |
-| UPDATE single row by id | 0.02 ms | 0.22 ms | 11 |
-| UPDATE 1000 rows, ids in row order | 3.81 ms | 14.28 ms | 3.8 |
-| UPDATE 1000 rows, ids scattered | 43.15 ms | 147.89 ms | 3.4 |
-| DELETE 1000 rows by id range | 0.5 ms | 14.7 ms | 29 |
+| UPDATE single row by id | 0.01 ms | 71.73 ms | 7173 |
+| UPDATE 1000 rows, ids in row order | 2.38 ms | 84.47 ms | 35 |
+| UPDATE 1000 rows, ids scattered | 28.51 ms | 78.98 ms | 2.8 |
+| DELETE 1000 rows by id range | 0.3 ms | 73.6 ms | 245 |
 
-Row-ordered access does better than scattered because consecutive fetches stay
-inside one row group, which the statement-scoped decoded-group cache serves
-without re-decoding.
+The columnar cost is close to the same for one row and for 1000. A write to a
+columnar table marks the old row and appends a new one, and the row group is the
+unit of that work. The count of rows that are reached therefore matters much less
+than it does for heap. This is why the ratio against heap falls as the number of
+rows rises: heap pays per row, and columnar pays per row group.
+
+Read the ratio for the scattered case and not the ratio for one row. A single-row
+update is the shape that columnar storage is worst at, and the table says so.
+
+**A note on the previous record of this table.** It reported 0.22 ms for the
+single-row update. That figure could not be reproduced on the current machine
+with the current build or with the build it was taken at. The two builds were compared directly, on
+one machine and one major version, with an equivalent single-row update. Commit
+`7a9c9f7` gives 162 ms. Commit `eb5c7ef` gives 19 ms. The mutation path is faster than it was, and the earlier 0.22 ms is not a
+baseline that this run failed to meet.
 
 The delete figure was the weakest number in this document, at 1509 ms. At that
 time, to reach a row, the code went through each earlier row in the group. Both
@@ -149,14 +169,18 @@ Vectorization on versus off (columnar zstd, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sum/avg over int | 0.51 | 1392.60 | 2731 |
-| filtered agg (range) | 92.12 | 90.32 | 0.98 |
+| sum/avg over int | 0.45 | 270.29 | 601 |
+| filtered agg (range) | 8.59 | 8.41 | 0.98 |
+
+The "off" column is much faster than in the previous record, at 270 ms against
+1392 ms. Column projection (issue #339) is the reason. The path that does not
+vectorize now also reads fewer columns.
 
 Index-only scan on versus off (covering range count, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| covering count, id range (~2%) | 7.53 | 698.95 | 93 |
+| covering count, id range (~2%) | 4.97 | 526.69 | 106 |
 
 The "off" column is the fetch-by-row path with no other work. It therefore
 isolates the cost of that path and the effect of #143. This shape was 200.9 s
@@ -167,18 +191,18 @@ Projection scan on versus off (covering scan on a scattered sort key, median ms)
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sortk, val where sortk in ~0.1% range | 191.41 | 635.35 | 3.32 |
+| sortk, val where sortk in ~0.1% range | 132.47 | 209.48 | 1.58 |
 
 Sorted storage (`pgcolumnar.vacuum_sorted`), narrow range scan on a key not
 correlated with insert order, median ms:
 
 | state | ms |
 | --- | --- |
-| before vacuum_sorted | 364.13 |
-| after vacuum_sorted | 47.72 |
+| before vacuum_sorted | 255.16 |
+| after vacuum_sorted | 1.61 |
 
 Compression `none` against `zstd`, for the columnar table only: 40 MB against
-5.95 MB. The scan latency does not change, at 0.52 ms against 0.52 ms. The
+5.95 MB. The scan latency does not change, at 0.41 ms against 0.40 ms. The
 encoded stream is already small, and the aggregates do not read it.
 
 ## Parallel bulk ingest
@@ -233,15 +257,15 @@ Export, 6,000,000 rows, 5 columns:
 
 | format | ms | file size | M rows/s |
 | --- | --- | --- | --- |
-| arrow | 1008.6 | 186 MB | 5.9 |
-| parquet | 1100.2 | 186 MB | 5.5 |
+| arrow | 704.0 | 186 MB | 8.5 |
+| parquet | 763.0 | 186 MB | 7.9 |
 
 Import, 6,000,000 rows, 5 columns:
 
 | format | ms | M rows/s |
 | --- | --- | --- |
-| arrow | 17721.5 | 0.3 |
-| parquet | 17762.5 | 0.3 |
+| arrow | 4037.3 | 1.5 |
+| parquet | 4468.1 | 1.3 |
 
 Import is about 18x slower than export, and the reason is not the import code.
 A separate measurement shows this. `import_arrow` costs 12,150 ms. An
