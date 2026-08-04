@@ -250,7 +250,7 @@ typedef struct PgColumnarSlot
  * aliasing.
  */
 StaticAssertDecl(offsetof(PgColumnarSlot, deferred) >= sizeof(VirtualTupleTableSlot),
-				 "ColumnarSlot fields must not overlap VirtualTupleTableSlot");
+				 "PgColumnarSlot fields must not overlap VirtualTupleTableSlot");
 
 /*
  * pgcolumnar_slot_decode_upto
