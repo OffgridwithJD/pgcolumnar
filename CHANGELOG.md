@@ -2,12 +2,36 @@
 
 All notable changes to pgColumnar are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). pgColumnar is
-pre-release; the version marker is `1.0-dev`, recorded in `VERSION`. New tables
-are written in the native on-disk format, PGCN v1. Everything below is
-unreleased. For the forward-looking plan see
+pre-release; the version marker is `1.0-alpha`, recorded in `VERSION`. New tables
+are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-## [Unreleased]
+The extension's own `default_version` is still `1.0-dev`. That is deliberate: it
+governs `ALTER EXTENSION UPDATE`, and moving it needs an upgrade script that does
+not exist yet. `SELECT extversion FROM pg_extension` therefore reports `1.0-dev`
+on a 1.0-alpha build.
+
+## [1.0-alpha] - 2026-08-04
+
+First tagged release. Everything below shipped in it.
+
+### Known limitations
+
+- The grouped vectorized aggregate's parallel arm is declined on shapes with an
+  expression grouping key, because the core Finalize is priced off a group estimate
+  that can be 25x to 42x wrong (#369). Both settings involved are off by default.
+- The by-row-number fetch cache is bounded by `4 x (cap + retained position indexes
+  + groupBuffer)` rather than `4 x cap`. On a table of many wide varlena columns one
+  entry measured 62 MB against a 32 MB cap (#364). Releasing the position indexes
+  with the decoded stream holds the bound but costs 47% in time, so this design
+  keeps the speed and records the trade.
+- The index-fetch penalty is bounded by a multiple of one full scan rather than
+  modelled against the consumer, so a plan that stops early inherits more of it than
+  it should (#376). The bound keeps the penalty steering correctly on every shape
+  measured; the model is post-alpha work.
+- Point lookups remain slower than heap, and the cost of a fetch grows with table
+  width, because an index fetch decodes the attribute prefix up to the highest
+  column the query reads. See `docs/limitations.md`.
 
 ### Added
 
