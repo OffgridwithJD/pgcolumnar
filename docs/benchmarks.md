@@ -626,8 +626,8 @@ what columnar storage is usually bought for, and this page says nothing about
 them. Not that we do badly on them. We have not measured them. See #401.
 
 Joins themselves work. A columnar table joins a heap table in either direction,
-and a columnar table, under hash, merge and nested-loop strategies, returning the
-same rows as the all-heap equivalent, with column projection surviving the join so
+and joins another columnar table. Hash, merge and nested-loop strategies all return
+the same rows as the all-heap equivalent. Column projection survives the join, so
 the columnar side reads only the columns the join and the target list need. What is
 absent is a measurement of how fast that is, not evidence that it works.
 
