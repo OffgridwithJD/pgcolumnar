@@ -24,7 +24,74 @@ unreleased. For the forward-looking plan see
   count up to the physical core count. It landed in two parts, partition-parallel
   (#323) and single-table (#324). See docs/user-guide.md and docs/benchmarks.md.
 
+- Column projection reads only the columns a query references, and is **on by
+  default** (#339, `pgcolumnar.enable_column_projection`). A columnar scan
+  previously decoded every column of every row group it touched regardless of the
+  query's target list, which discards the main advantage of the storage format on
+  wide tables. Measured on a 100M-row 21-column fixture, a single-column
+  aggregate improved 6.9x. The gain is smaller on grouped queries, which also read
+  their grouping keys: 1.24x, 1.13x and 3.13x on three TSBS-shaped grouped
+  aggregates. Turning the setting off restores the previous behavior.
+
+- Vectorized aggregates, all **off by default** and opt-in while they are proven:
+
+  - `pgcolumnar.enable_ungrouped_vector_agg` folds a plain `SELECT agg(col) FROM t`
+    over the decoded column buffer instead of one Datum tuple per row (#337).
+  - `pgcolumnar.enable_parallel_vector_agg` makes that fold parallel-aware (#343),
+    extended to integer sum and average partials (#346), and to grouped
+    aggregates (#366). Each worker claims distinct row groups through a shared
+    counter and emits per-worker transition state that a core Finalize combines.
+  - `pgcolumnar.enable_group_vectorization` answers `GROUP BY` from a vectorized
+    grouped node (#321). `pgcolumnar.groupagg_max_groups` caps its hash table and
+    errors with guidance rather than growing without bound.
+
+  These remain off by default because plan selection for them is not settled: a
+  grouped query with an expression grouping key such as `date_trunc()` can decline
+  the parallel path on a group-count estimate that is 25x to 42x wrong (#369).
+
+- `pgcolumnar.enable_index_fetch_penalty`, **on by default** (#355), prices the
+  per-row heap fetch of an index or bitmap path on a columnar table. A columnar
+  fetch decodes the row group the row lives in, while core prices it as a page or
+  two, so an unclustered ordering column made an index scan look cheap and then
+  run for minutes decoding the table many times over. The penalty counts the
+  distinct row groups the fetches force, interpolating on the square of the
+  leading-key correlation. Turning it off restores the previous planner behavior.
+
 ### Changed
+
+- The fetch cache holds the columns that fit rather than dropping a whole entry
+  when it exceeds its size cap (#359). An entry one byte over the 32 MB cap was
+  not retained at all, so every fetch re-read the row group and re-decoded every
+  column it touched. On a 100M-row fixture that was 2,833 ms at four aggregated
+  columns and 134,147 ms at five, flat on either side of the step. Each column now
+  decodes into its own context and the one that crosses the cap is released after
+  its value is read, so exceeding the cap costs the overflow fraction rather than
+  everything. An earlier fix moved the decode scratch out of the cached entry,
+  shrinking entries about 3x (#353). A group whose raw bytes alone exceed the cap
+  is still dropped whole.
+
+- The index-fetch penalty is applied before the columnar path is offered to the
+  planner, not after (#362). `add_path` frees a path it judges dominated, so a
+  columnar path offered while the index paths still carried un-penalized costs was
+  discarded, and raising those costs afterwards changed what `EXPLAIN` printed
+  with nothing left to switch to. The planner chose an index scan it priced at
+  13,954,742 over a columnar path it priced at 589,348, running 224 seconds where
+  the columnar path runs 4.7. Two related defects were fixed with it: the parallel
+  columnar path was conditional on a sequential scan surviving `add_path`, so it
+  did not exist on exactly the selective queries where it was needed, and the
+  projection path read the base path's cost after `add_path` may have freed it.
+
+- The grouped vectorized aggregate path is charged for the folding it does (#349),
+  `cpu_operator_cost` per input row per aggregate. It previously priced itself
+  just above the scan it performs, which made it unpriceable against: every
+  competing plan paid a per-row aggregation cost and this one paid none, so it won
+  by construction, including against a parallel plan several times faster. That
+  cost about 1.9x on a full-scan `GROUP BY` with few groups.
+
+- The vectorized batch fold pushes scan keys, so it no longer forfeits zone-map
+  row-group pruning (#349). The fold opened its reader with no predicates, so no
+  group skipping occurred: on a clustered fixture with a selective predicate it
+  read 200 of 200 row groups where the ordinary path read 2.
 
 - Server-file functions now gate on the `pg_read_server_files` and
   `pg_write_server_files` roles instead of `superuser()` (#330), matching core
