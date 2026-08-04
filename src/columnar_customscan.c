@@ -727,6 +727,40 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 }
 
 /*
+ * How far above one full scan a fetching index path may be priced (issue #376).
+ * See columnar_penalize_index_fetches for why this is a bound rather than a
+ * better model, and for the two measurements that fix the window it sits in.
+ */
+#define COLUMNAR_INDEX_FETCH_PENALTY_MAX_SCANS	20.0
+
+/*
+ * columnar_full_scan_cost
+ *		What one full scan of this relation costs.
+ *
+ *		The seqscan's own number when core still has one, and the same work priced
+ *		directly when it does not -- add_path frees the seqscan whenever an index
+ *		path dominates it, which is exactly the selective queries. One definition,
+ *		two callers: the columnar path's own cost and the bound on the fetch
+ *		penalty below.
+ */
+static Cost
+columnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
+{
+	QualCost	qcost;
+	double		ntuples;
+	Cost		run;
+
+	if (seqpath != NULL)
+		return seqpath->total_cost;
+
+	qcost = rel->baserestrictcost;
+	ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
+	run = seq_page_cost * (double) rel->pages;
+	run += (cpu_tuple_cost + qcost.per_tuple) * ntuples;
+	return qcost.startup + run;
+}
+
+/*
  * columnar_path_order_cmp
  *		Order two paths the way add_path keeps rel->pathlist ordered.
  *
@@ -784,10 +818,12 @@ columnar_path_order_cmp(const ListCell *a, const ListCell *b)
  *		planner models by fractioning (total - startup).
  */
 static void
-columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
+columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
+								Cost fullScanCost)
 {
 	int			nproj;
 	double		decodedWidth;
+	Cost		cap;
 	bool		mutated = false;
 	ListCell   *lc;
 
@@ -795,6 +831,39 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
 		return;
 
 	columnar_scan_decode_shape(rel, rti, relid, &nproj, &decodedWidth);
+
+	/*
+	 * The penalty is bounded by a multiple of one full scan (issue #376).
+	 *
+	 * The model prices a fetch as a row-group decode and multiplies by the rows
+	 * the path returns. That is right when the plan above consumes the whole
+	 * path, and it over-counts without limit when the plan above stops early: a
+	 * DISTINCT ON reads one row per group, and a skip scan over the index reads
+	 * 3,998 rows of 100,000,000. The un-bounded penalty reached 502,598,685,066
+	 * on that query -- 207,000 times the un-penalized path -- so even the 1/25000
+	 * of it that the skip scan fractions to still lost to a full scan and a sort.
+	 * Measured: 44,058 ms for the plan chosen, 769 ms for the one refused.
+	 *
+	 * Why bound rather than model it better: the two cases cannot be told apart
+	 * from this hook. Both have a leading-key correlation of about zero. What
+	 * differs is which groups the fetched rows land in, and that is not knowable
+	 * before the consumer exists. Measured both ways on the same shape -- a
+	 * consumer that reads every row makes the penalty right by 36x (4,710 ms
+	 * against 170,965), and one that stops early makes it wrong by 57x.
+	 *
+	 * Past some multiple of a full scan the number stops carrying information a
+	 * planner can use. Any path priced above the scan already loses to it, so
+	 * further inflation only harms a consumer that fractions the path. The bound
+	 * keeps the direction and drops the part that only does damage.
+	 *
+	 * The multiple is empirical, not derived. It is chosen to sit inside a window
+	 * both measurements agree on: the early-stopping case needs the penalty cut by
+	 * at least 1.45x, and the read-everything case tolerates roughly 16,000x
+	 * before it picks the wrong plan. Twenty is near the conservative end of that
+	 * window, so the penalty keeps steering where it was steering correctly.
+	 * test/analyze_stats.sh pins both directions.
+	 */
+	cap = COLUMNAR_INDEX_FETCH_PENALTY_MAX_SCANS * fullScanCost;
 
 	foreach(lc, rel->pathlist)
 	{
@@ -818,6 +887,15 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
 											   decodedWidth, true);
 		}
 		/* T_IndexOnlyScan and the custom scans do no heap fetch */
+
+		/* never price a fetching path above the bound (issue #376) */
+		if (add > 0.0 && cap > 0.0)
+		{
+			if (p->total_cost >= cap)
+				add = 0.0;
+			else if (p->total_cost + add > cap)
+				add = cap - p->total_cost;
+		}
 
 		if (add > 0.0)
 		{
@@ -897,7 +975,8 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * doing this after the add_path calls meant the columnar path was judged
 	 * against index costs that had not yet been penalized, and freed.
 	 */
-	columnar_penalize_index_fetches(rel, rti, rte->relid);
+	columnar_penalize_index_fetches(rel, rti, rte->relid,
+								   columnar_full_scan_cost(rel, seqpath));
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
@@ -930,23 +1009,9 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * That is issue #171: a point lookup went from 23.75 ms to 1251.88 ms the
 	 * moment the table had statistics. Regression-tested in test/analyze_stats.sh.
 	 */
-	if (seqpath != NULL)
-	{
-		cpath->path.startup_cost = seqpath->startup_cost;
-		cpath->path.total_cost = seqpath->total_cost;
-	}
-	else
-	{
-		QualCost	qcost = rel->baserestrictcost;
-		double		ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
-		Cost		run;
-
-		run = seq_page_cost * (double) rel->pages;
-		run += (cpu_tuple_cost + qcost.per_tuple) * ntuples;
-
-		cpath->path.startup_cost = qcost.startup;
-		cpath->path.total_cost = qcost.startup + run;
-	}
+	cpath->path.startup_cost = (seqpath != NULL) ? seqpath->startup_cost
+		: rel->baserestrictcost.startup;
+	cpath->path.total_cost = columnar_full_scan_cost(rel, seqpath);
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
