@@ -28,6 +28,12 @@ PG_CONFIG=${1:-pg_config}
 OLD_REF=${2:-v1.0-alpha}
 SRCDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+# The cluster binds a port, so it must come from the band portlib.sh carves BELOW the
+# kernel's ephemeral range, probed rather than assumed free. Picking out of the
+# ephemeral range means the kernel can hand the same port to something else between
+# the choice and the bind. harness_selftest enforces this, and caught it here.
+. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
+
 command -v "$PG_CONFIG" >/dev/null 2>&1 || { echo "FATAL: $PG_CONFIG not found"; exit 1; }
 BINDIR=$($PG_CONFIG --bindir)
 SHAREDIR=$($PG_CONFIG --sharedir)
@@ -35,7 +41,7 @@ PGMAJ=$($PG_CONFIG --version | grep -oE '[0-9]+' | head -1)
 
 TMP=$(mktemp -d /tmp/pgc-extupg.XXXXXX)
 DATA=$TMP/data
-PORT=$(( 55000 + RANDOM % 8000 ))
+PORT=$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" "$$")
 LOG=$TMP/server.log
 fail=0
 

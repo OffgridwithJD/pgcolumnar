@@ -110,6 +110,49 @@ To install a new build of the extension:
 
 1. Run `make install` with the same `PG_CONFIG`.
 2. Start the server again, so that it loads the new library.
+3. Run `ALTER EXTENSION pgcolumnar UPDATE;` **in every database that has the
+   extension**.
+
+Step 3 is not optional, and it is easy to miss because nothing prompts for it.
+The first two steps replace the shared library. The third updates the catalog to
+match it.
+
+```sql
+-- in each database that ran CREATE EXTENSION pgcolumnar
+ALTER EXTENSION pgcolumnar UPDATE;
+SELECT extversion FROM pg_extension WHERE extname = 'pgcolumnar';
+```
+
+To find the databases that need it:
+
+```sql
+SELECT datname FROM pg_database WHERE datallowconn
+  AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcolumnar');
+```
+
+### If you skipped step 3
+
+Every function the extension installs records the name of a C symbol. When those
+names change between builds, the recorded names no longer resolve, and the
+extension stops working until the catalog is updated. Reading an existing
+columnar table then fails:
+
+```
+ERROR:  could not find function "columnar_handler" in file ".../pgcolumnar.so"
+```
+
+The fix is step 3. Run `ALTER EXTENSION pgcolumnar UPDATE;` in that database and
+the error goes away. **Your data is not affected.** The tables are intact and no
+conversion happens. Only the catalog entry is stale.
+
+Do not run `DROP EXTENSION`. It removes your columnar tables with it.
+
+### Upgrading from 1.0-dev to 1.0-alpha
+
+This release renames the extension's C symbols into the `pgcolumnar` namespace,
+so that two extensions named `columnar` can be loaded without colliding. That is
+the change step 3 applies. The SQL you write does not change. Function names,
+settings and table syntax are all the same.
 
 The source records the on-disk format version. The specification also records it,
 in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
