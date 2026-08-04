@@ -17,15 +17,24 @@
 # second gate beside the matrix, run explicitly.
 #
 # Usage:
-#   test/extension_upgrade.sh [PG_CONFIG] [OLD_REF]
+#   test/extension_upgrade.sh [PG_CONFIG] [OLD_REF_OR_DIR]
 #
-# OLD_REF defaults to the previous release, and may be any ref that still has the old
-# link names. The old build is made in a throwaway clone, so the working tree is never
-# checked out from under the caller.
+# The second argument is either a git ref or a path to an already-checked-out source
+# tree. A ref defaults to the previous release and is built in a throwaway clone, so the
+# working tree is never checked out from under the caller.
+#
+# The directory form exists because the container dev loop copies the tree WITHOUT .git
+# (see docs/testing.md), so the ref form cannot work there. Point it at a second copy of
+# the old source instead:
+#
+#   test/extension_upgrade.sh /usr/local/pg18a/bin/pg_config /root/pgcolumnar-1.0-alpha
+#
+# Requires a real checkout with tags when the ref form is used. That is a precondition,
+# not a bug, and it is reported as one.
 set -uo pipefail
 
 PG_CONFIG=${1:-pg_config}
-OLD_REF=${2:-v1.0-alpha}
+OLD_SRC=${2:-v1.0-alpha}
 SRCDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # The cluster binds a port, so it must come from the band portlib.sh carves BELOW the
@@ -54,19 +63,34 @@ trap cleanup EXIT
 runpg () { runuser -u postgres -- "$@"; }
 q () { runpg "$BINDIR/psql" -h /tmp -p "$PORT" -d extupg -X -Atc "$1" 2>&1; }
 
-echo "== extension_upgrade: PG$PGMAJ, old ref $OLD_REF"
+echo "== extension_upgrade: PG$PGMAJ, old $OLD_SRC"
 
 # ---- 1. build and install the old extension, from a throwaway clone ------------------
-# A missing ref must fail, not skip. This gate is invoked deliberately, and a skip that
-# exits 0 would let it go inert the moment someone clones without tags. That is the same
-# shape as the bug it exists to catch: everything green, nothing checked.
-if ! git -C "$SRCDIR" rev-parse --verify -q "$OLD_REF^{commit}" >/dev/null 2>&1; then
-	echo "  FAIL  $OLD_REF is not present. Fetch tags, or pass an explicit ref:"
-	echo "        git fetch --tags && test/extension_upgrade.sh $PG_CONFIG <ref>"
-	exit 1
+# Directory form first: a path to an already-checked-out old tree needs no git at all.
+if [ -d "$OLD_SRC" ]; then
+	[ -f "$OLD_SRC/Makefile" ] || { echo "  FAIL  $OLD_SRC has no Makefile"; exit 1; }
+	cp -a "$OLD_SRC" "$TMP/old" || { echo "FATAL: could not copy $OLD_SRC"; exit 1; }
+	echo "  old source: directory $OLD_SRC"
+else
+	# A missing ref must fail, not skip. This gate is invoked deliberately, and a skip
+	# that exits 0 would let it go inert the moment someone clones without tags. That is
+	# the same shape as the bug it exists to catch: everything green, nothing checked.
+	if [ ! -d "$SRCDIR/.git" ]; then
+		echo "  FAIL  $SRCDIR is not a git checkout, so the ref form cannot work here."
+		echo "        The container loop copies the tree without .git. Pass a directory:"
+		echo "        test/extension_upgrade.sh $PG_CONFIG /path/to/old/source"
+		exit 1
+	fi
+	if ! git -C "$SRCDIR" rev-parse --verify -q "$OLD_SRC^{commit}" >/dev/null 2>&1; then
+		echo "  FAIL  $OLD_SRC is not present. Fetch tags, or pass an explicit ref or dir:"
+		echo "        git fetch --tags && test/extension_upgrade.sh $PG_CONFIG <ref>"
+		exit 1
+	fi
+	git clone -q --shared "$SRCDIR" "$TMP/old" || { echo "FATAL: clone failed"; exit 1; }
+	git -C "$TMP/old" checkout -q --detach "$OLD_SRC" \
+		|| { echo "FATAL: checkout $OLD_SRC failed"; exit 1; }
+	echo "  old source: ref $OLD_SRC"
 fi
-git clone -q --shared "$SRCDIR" "$TMP/old" || { echo "FATAL: clone failed"; exit 1; }
-git -C "$TMP/old" checkout -q --detach "$OLD_REF" || { echo "FATAL: checkout $OLD_REF failed"; exit 1; }
 make -C "$TMP/old" PG_CONFIG="$PG_CONFIG" clean >/dev/null 2>&1
 make -C "$TMP/old" PG_CONFIG="$PG_CONFIG" -j"$(nproc)" >"$TMP/build_old.log" 2>&1 \
 	|| { echo "FAIL  old build"; tail -20 "$TMP/build_old.log"; exit 1; }

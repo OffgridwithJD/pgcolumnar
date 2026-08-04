@@ -167,6 +167,39 @@ rather than per-PR because of its cost, and not because it is optional. A claim
 in the documentation with only a suite that nobody runs behind it is how coverage
 becomes stale without notice.
 
+## Extension upgrade
+
+`PGC_RUN_UPGRADE=1` also runs `test/extension_upgrade.sh`, once, against the first
+major in the list. It covers a different upgrade from the one above: not a new
+PostgreSQL major, but a new build of pgColumnar on the same one.
+
+Every function the extension installs records the name of a C symbol. When a build
+changes those names, the recorded names stop resolving, and the extension is inert
+until `ALTER EXTENSION pgcolumnar UPDATE` runs. A build cannot see that, and neither can a suite that
+creates the extension from scratch. That is why it needs its own gate.
+
+The suite installs the previous release and creates a columnar table with rows in it.
+It then installs the tree under test over the top and runs the update. Reads, writes,
+table creation and a maintenance call must all still work.
+
+It also asserts that every C function owned by the extension has a link name inside the
+`pgcolumnar` namespace. That catches the next rename as well as the last one.
+
+It builds the old version, so it needs to be told where to find it. Given a git ref
+it builds from a throwaway clone, which needs a checkout with tags:
+
+```sh
+git fetch --tags
+test/extension_upgrade.sh /usr/local/pg18/bin/pg_config v1.0-alpha
+```
+
+The container loop copies the tree without `.git`, so the ref form cannot work there.
+Pass a directory holding the old source instead:
+
+```sh
+test/extension_upgrade.sh /usr/local/pg18/bin/pg_config /root/pgcolumnar-1.0-alpha
+```
+
 ## make installcheck
 
 The conventional entry point for a PostgreSQL extension:
