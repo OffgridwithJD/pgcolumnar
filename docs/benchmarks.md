@@ -614,16 +614,32 @@ both are larger than anything in it:
 The point lookup is the one number that moved the wrong way, and it moved a long
 way. See the note above it.
 
+## What this page does not measure
+
+**Every query on this page reads one table.** The TSBS workload is time-series
+shaped. All eight of its queries are a scan, a filter and an aggregate over a
+single relation. None of them joins.
+
+So the join-heavy analytical shapes are absent: star schemas, fact tables joined
+to dimensions, and the selective-dimension-join pattern. Those are a large part of
+what columnar storage is usually bought for, and this page says nothing about
+them. Not that we do badly on them. We have not measured them. See #401.
+
+Read the conclusions below as being about single-table scan and aggregate work,
+because that is the evidence behind them.
+
 ## Reading the results
 
-Columnar wins on analytic shapes: aggregates answered from metadata, filtered
-aggregates that minimum, maximum and bloom skipping can prune, wide-table
-projections, and index-only covering scans. The size reduction comes mostly from
+Columnar wins on the analytic shapes measured here. Those are aggregates answered
+from metadata, filtered aggregates that minimum, maximum and bloom skipping can
+prune, wide-table projections, and index-only covering scans. The size reduction comes mostly from
 the encoding layer before zstd. Vectorization adds a large further speedup on
 aggregates, and storing a table sorted on its range key improves skipping.
 
 Heap is better for single-row fetches and for deletes, and by a large margin in
 both. On a table with deletes, the aggregate advantage is not present until a
 vacuum runs.
-Columnar is the wrong choice for write-heavy OLTP and the right choice for
-scan-heavy and aggregate-heavy analytics over wide, append-mostly tables.
+Columnar is the wrong choice for write-heavy OLTP. It is the right choice for
+scan-heavy and aggregate-heavy analytics over wide, append-mostly tables, on the
+single-table shapes measured here. Whether that holds once a join is involved is
+an open question and not a claim this page supports.
