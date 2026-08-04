@@ -438,4 +438,48 @@ check "the penalty is applied before the columnar path is offered, so it can sti
 		&& echo yes || echo "no ($(printf '%s' "$plan_sel_on" | head -1))")" \
 	"yes"
 
+# --- 8. the decode is the attribute prefix, not the emitted columns (#363) -------
+#
+# The checks above vary how many rows a plan fetches. This varies *which column* it
+# references, holding everything else fixed -- same row count, same emitted width,
+# same plan shape. The deferred index-fetch slot decodes the attribute prefix
+# 0..max-referenced (columnar_tableam.c, columnar_slot_decode_upto), so referencing
+# a late column decodes every column before it.
+#
+# Sizing that decode from rel->reltarget->width cannot see the difference: it is
+# identical for the two queries below. Measured on the 100M-era fixture, same 300
+# fetched rows, same emitted width, same plan: max(a1) 975 ms, max(a10) 194,798 ms.
+#
+# Here a1's prefix decodes ~15 MB per group and stays under the fetch cache cap,
+# while a10's decodes ~156 MB and does not. So the early column should keep its
+# index and the late one should not. On a build that sizes from the emitted width
+# the two are indistinguishable and this check fails.
+O363_ROWS=${PGC_O363_ROWS:-150000}
+psql_run "DROP TABLE IF EXISTS o363;
+	CREATE TABLE o363 (id int, a1 text, a2 text, a3 text, a4 text, a5 text,
+	                   a6 text, a7 text, a8 text, a9 text, a10 text)
+		USING pgcolumnar;
+	INSERT INTO o363 SELECT g, repeat('a',100), repeat('b',100), repeat('c',100),
+		repeat('d',100), repeat('e',100), repeat('f',100), repeat('g',100),
+		repeat('h',100), repeat('i',100), repeat('j',100)
+		FROM generate_series(1, $O363_ROWS) g;
+	CREATE INDEX o363_id ON o363 (id);
+	ANALYZE o363;" >/dev/null
+
+plan_early="$(plan_of "${ord_setup} EXPLAIN (COSTS off)
+	SELECT max(a1) FROM o363 WHERE id BETWEEN 1 AND 2000;")"
+echo "-- max(a1), prefix is 2 columns: $(printf '%s' "$plan_early" | grep -m1 -E 'Scan|Sort')"
+check "an early column's short decode prefix leaves it on the index (#363)" \
+	"$(grep -q 'Index Scan using o363_id' <<<"$plan_early" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_early" | head -1))")" \
+	"yes"
+
+plan_late="$(plan_of "${ord_setup} EXPLAIN (COSTS off)
+	SELECT max(a10) FROM o363 WHERE id BETWEEN 1 AND 2000;")"
+echo "-- max(a10), prefix is 11 columns: $(printf '%s' "$plan_late" | grep -m1 -E 'Scan|Sort')"
+check "a late column's wide decode prefix costs it off the index (#363)" \
+	"$(  ! grep -q 'Index Scan using o363_id' <<<"$plan_late" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_late" | head -1))")" \
+	"yes"
+
 pgc_summary
