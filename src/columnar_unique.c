@@ -1,20 +1,20 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_unique.c
+ * pgcolumnar_unique.c
  *		Concurrent unique-key insert serialization for pgColumnar (issue #5).
  *
  * A columnar row's data is invisible to other backends until its stripe is
  * flushed at statement end, but its btree index entry (with the eagerly
  * reserved synthetic TID) is written immediately. PostgreSQL's dirty-snapshot
  * uniqueness check (_bt_check_unique -> table_index_fetch_tuple_check) resolves
- * that TID through columnar_index_fetch_tuple, which returns false for a row
+ * that TID through pgcolumnar_index_fetch_tuple, which returns false for a row
  * still buffered in another backend's private write state. So two transactions
  * inserting the same unique key in overlapping windows can both miss the
  * conflict and both commit (see design/ISSUE_5_ANALYSIS.md, section A).
  *
  * The fix here serializes inserters of the SAME unique key. Before a row is
  * handed back to the executor's index maintenance, the table AM insert paths
- * call ColumnarLockUniqueKeys, which takes a transaction-scoped advisory lock
+ * call PgColumnarLockUniqueKeys, which takes a transaction-scoped advisory lock
  * (the same SET_LOCKTAG_ADVISORY primitive used by the issue #4 delete_vector lock)
  * keyed by the row's unique key value(s). Because the lock is held to commit,
  * when a second inserter finally acquires it the first inserter has either
@@ -55,8 +55,8 @@
 #include "utils/typcache.h"
 
 /* GUCs (spec 8.3): default on, bounded bucket count to bound the lock budget */
-bool		columnar_enable_unique_lock = true;
-int			columnar_unique_lock_buckets = 128;
+bool		pgcolumnar_enable_unique_lock = true;
+int			pgcolumnar_unique_lock_buckets = 128;
 
 /*
  * Advisory-lock discriminator in locktag_field4. The issue #4 delete_vector lock
@@ -116,7 +116,7 @@ static HTAB *RelUniqueCache = NULL;
  * (an invalidation on an index carries the index's relid, not the table's).
  */
 static void
-columnar_unique_invalidate(Datum arg, Oid relid)
+pgcolumnar_unique_invalidate(Datum arg, Oid relid)
 {
 	HASH_SEQ_STATUS status;
 	RelUniqueCacheEntry *entry;
@@ -136,7 +136,7 @@ columnar_unique_invalidate(Datum arg, Oid relid)
 }
 
 static void
-columnar_unique_cache_init(void)
+pgcolumnar_unique_cache_init(void)
 {
 	HASHCTL		ctl;
 
@@ -160,7 +160,7 @@ columnar_unique_cache_init(void)
  * no hash support.
  */
 static bool
-columnar_key_col_hash(Relation indexRel, int c, MemoryContext cxt,
+pgcolumnar_key_col_hash(Relation indexRel, int c, MemoryContext cxt,
 					  UniqueKeyCol *out)
 {
 	Oid			keyType = indexRel->rd_opcintype[c];
@@ -191,7 +191,7 @@ columnar_key_col_hash(Relation indexRel, int c, MemoryContext cxt,
 
 /* Build (or rebuild) the cache entry for rel. */
 static RelUniqueCacheEntry *
-columnar_unique_build(Relation rel)
+pgcolumnar_unique_build(Relation rel)
 {
 	Oid			relid = RelationGetRelid(rel);
 	MemoryContext cxt;
@@ -202,7 +202,7 @@ columnar_unique_build(Relation rel)
 	int			nIndexes = 0;
 	bool		found;
 
-	columnar_unique_cache_init();
+	pgcolumnar_unique_cache_init();
 
 	cxt = AllocSetContextCreate(CacheMemoryContext,
 								"columnar unique index info",
@@ -254,7 +254,7 @@ columnar_unique_build(Relation rel)
 
 		for (c = 0; c < uidx->nKeyCols; c++)
 		{
-			if (!columnar_key_col_hash(indexRel, c, cxt, &uidx->cols[c]))
+			if (!pgcolumnar_key_col_hash(indexRel, c, cxt, &uidx->cols[c]))
 			{
 				uidx->coarse = true;
 				break;
@@ -290,7 +290,7 @@ columnar_unique_build(Relation rel)
 }
 
 static RelUniqueCacheEntry *
-columnar_unique_lookup(Relation rel)
+pgcolumnar_unique_lookup(Relation rel)
 {
 	Oid			relid = RelationGetRelid(rel);
 	RelUniqueCacheEntry *entry = NULL;
@@ -301,7 +301,7 @@ columnar_unique_lookup(Relation rel)
 	if (entry != NULL)
 		return entry;
 
-	return columnar_unique_build(rel);
+	return pgcolumnar_unique_build(rel);
 }
 
 /* -------------------------------------------------------------------------
@@ -310,7 +310,7 @@ columnar_unique_lookup(Relation rel)
 
 /* splitmix64/murmur3 finalizer, matching delete_vector_chunk_lock_key */
 static inline uint64
-columnar_hash_finalize(uint64 h)
+pgcolumnar_hash_finalize(uint64 h)
 {
 	h ^= h >> 33;
 	h *= UINT64CONST(0xff51afd7ed558ccd);
@@ -321,7 +321,7 @@ columnar_hash_finalize(uint64 h)
 }
 
 static void
-columnar_acquire_key_lock(Oid indexOid, uint32 bucket)
+pgcolumnar_acquire_key_lock(Oid indexOid, uint32 bucket)
 {
 	LOCKTAG		tag;
 
@@ -333,7 +333,7 @@ columnar_acquire_key_lock(Oid indexOid, uint32 bucket)
 }
 
 /*
- * ColumnarLockUniqueKeys
+ * PgColumnarLockUniqueKeys
  *		For a row about to be inserted into rel (through the table AM), take a
  *		transaction-scoped advisory lock for each applicable unique index's key,
  *		so a concurrent inserter of an equal key serializes behind this one until
@@ -353,7 +353,7 @@ columnar_acquire_key_lock(Oid indexOid, uint32 bucket)
  *		    coarse per-index lock (over-serializes, always correct).
  */
 void
-ColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot)
+PgColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot)
 {
 	RelUniqueCacheEntry *entry;
 	ExprContext *econtext;
@@ -361,14 +361,14 @@ ColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot)
 	uint32		numBuckets;
 	int			i;
 
-	if (!columnar_enable_unique_lock)
+	if (!pgcolumnar_enable_unique_lock)
 		return;
 
-	entry = columnar_unique_lookup(rel);
+	entry = pgcolumnar_unique_lookup(rel);
 	if (entry->nIndexes == 0)
 		return;
 
-	numBuckets = (uint32) Max(1, columnar_unique_lock_buckets);
+	numBuckets = (uint32) Max(1, pgcolumnar_unique_lock_buckets);
 
 	econtext = GetPerTupleExprContext(entry->estate);
 	saveScanTuple = econtext->ecxt_scantuple;
@@ -434,25 +434,25 @@ ColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot)
 				combined = (combined ^ (uint64) h) * COLUMNAR_FNV_PRIME;
 			}
 
-			combined = columnar_hash_finalize(combined);
+			combined = pgcolumnar_hash_finalize(combined);
 			bucket = (uint32) (combined % (uint64) numBuckets);
 		}
 
 		MemoryContextSwitchTo(oldcxt);
 
-		columnar_acquire_key_lock(uidx->indexOid, bucket);
+		pgcolumnar_acquire_key_lock(uidx->indexOid, bucket);
 	}
 
 	econtext->ecxt_scantuple = saveScanTuple;
 }
 
 /*
- * ColumnarUniqueInit
+ * PgColumnarUniqueInit
  *		Register the relcache invalidation callback that keeps the per-relation
  *		unique-index cache coherent across DDL. Called once from _PG_init.
  */
 void
-ColumnarUniqueInit(void)
+PgColumnarUniqueInit(void)
 {
-	CacheRegisterRelcacheCallback(columnar_unique_invalidate, (Datum) 0);
+	CacheRegisterRelcacheCallback(pgcolumnar_unique_invalidate, (Datum) 0);
 }

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vector.c
+ * pgcolumnar_vector.c
  *		Vectorized execution for pgColumnar (spec 9): a column-at-a-time filter
  *		and vectorized aggregates over decoded chunk-group arrays.
  *
@@ -23,8 +23,8 @@
  * tests can assert that equality.
  *
  * The aggregate custom scan reuses the same registered CustomScanMethods as the
- * base custom scan (so both show as "Custom Scan (ColumnarScan)"); the shared
- * create-state callback in columnar_customscan.c dispatches to the aggregate
+ * base custom scan (so both show as "Custom Scan (PgColumnarScan)"); the shared
+ * create-state callback in pgcolumnar_customscan.c dispatches to the aggregate
  * variant when the plan is a scanrelid==0 upper node.
  *
  * Independent MIT implementation built from
@@ -82,17 +82,17 @@
 #include "utils/typcache.h"
 
 /* GUC: use the vectorized aggregate path (spec 8.3 scan control) */
-bool		columnar_enable_vectorization = true;
+bool		pgcolumnar_enable_vectorization = true;
 
 /*
  * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
  * grouped path is built out incrementally; the ungrouped path is unaffected.
  * groupagg_max_groups caps the ACTUAL group count at execution time; exceeding
- * it raises an error (see columnar_groupagg_lookup) rather than routing to core
+ * it raises an error (see pgcolumnar_groupagg_lookup) rather than routing to core
  * HashAgg. It is not a plan-time gate.
  */
-bool		columnar_enable_group_vectorization = false;
-int			columnar_groupagg_max_groups = 1000000;
+bool		pgcolumnar_enable_group_vectorization = false;
+int			pgcolumnar_groupagg_max_groups = 1000000;
 
 /*
  * GUC: extend the ungrouped vectorized aggregate to the shapes a zone map cannot
@@ -101,7 +101,7 @@ int			columnar_groupagg_max_groups = 1000000;
  * over the columnar scan instead. Default off while the path is proven and
  * benchmarked; the metadata-answerable no-filter path is unaffected.
  */
-bool		columnar_enable_ungrouped_vector_agg = false;
+bool		pgcolumnar_enable_ungrouped_vector_agg = false;
 
 /*
  * GUC: make the ungrouped vectorized batch fold parallel-aware (#289 phase 5/6).
@@ -112,7 +112,7 @@ bool		columnar_enable_ungrouped_vector_agg = false;
  * the batch-eligible count/sum/avg-float shapes take the parallel arm; everything
  * else keeps the serial node or the ordinary parallel core Agg.
  */
-bool		columnar_enable_parallel_vector_agg = false;
+bool		pgcolumnar_enable_parallel_vector_agg = false;
 
 /* -------------------------------------------------------------------------
  * shared column-at-a-time filter
@@ -124,18 +124,18 @@ bool		columnar_enable_parallel_vector_agg = false;
  * an array of these. The machinery that evaluated them over a decoded chunk
  * group had no call site and is deleted (issue #200).
  */
-typedef struct ColumnarVecPredicate
+typedef struct PgColumnarVecPredicate
 {
 	int			attidx;			/* 0-based column index */
 	bool		varOnLeft;		/* column op const, else const op column */
 	FmgrInfo	opFn;			/* the operator function (returns bool) */
 	Datum		constValue;
 	Oid			collation;
-} ColumnarVecPredicate;
+} PgColumnarVecPredicate;
 
 
 /*
- * columnar_clause_to_predicate
+ * pgcolumnar_clause_to_predicate
  *		Turn one "column op const" (or "const op column") clause into a predicate
  *		we can evaluate row by row. Requires a strict boolean operator and a
  *		non-null constant, so that a null column value or a failed comparison
@@ -143,8 +143,8 @@ typedef struct ColumnarVecPredicate
  *		other clause.
  */
 static bool
-columnar_clause_to_predicate(Node *clause, Index scanrelid, TupleDesc tupdesc,
-							 ColumnarVecPredicate *pred)
+pgcolumnar_clause_to_predicate(Node *clause, Index scanrelid, TupleDesc tupdesc,
+							 PgColumnarVecPredicate *pred)
 {
 	OpExpr	   *op;
 	Node	   *leftop;
@@ -204,7 +204,7 @@ columnar_clause_to_predicate(Node *clause, Index scanrelid, TupleDesc tupdesc,
 }
 
 static void
-ColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
+PgColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
 							  int *nconvertible, bool *allConvertible)
 {
 	ListCell   *lc;
@@ -217,9 +217,9 @@ ColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
 
 	foreach(lc, qual)
 	{
-		ColumnarVecPredicate scratch;
+		PgColumnarVecPredicate scratch;
 
-		if (columnar_clause_to_predicate((Node *) lfirst(lc), scanrelid, tupdesc,
+		if (pgcolumnar_clause_to_predicate((Node *) lfirst(lc), scanrelid, tupdesc,
 										 &scratch))
 			n++;
 		else
@@ -236,7 +236,7 @@ ColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
  * in the tree; both are deleted (issue #200). Recoverable from history if a
  * filtered aggregate path is ever built. What should not be recovered with them is their gating, which
  * was none: the scalar path's predicates are gated on
- * pgcolumnar.enable_qual_pushdown inside ColumnarBeginRead and these never were,
+ * pgcolumnar.enable_qual_pushdown inside PgColumnarBeginRead and these never were,
  * so wiring them up as they stood would have filtered rows while EXPLAIN
  * reported no pushdown at all.
  */
@@ -246,7 +246,7 @@ ColumnarCountConvertibleQuals(List *qual, Index scanrelid, TupleDesc tupdesc,
  * vectorized aggregate: classification
  * ------------------------------------------------------------------------- */
 
-typedef enum ColumnarAggKind
+typedef enum PgColumnarAggKind
 {
 	COLUMNAR_AGG_COUNT_STAR,
 	COLUMNAR_AGG_COUNT_COL,
@@ -256,7 +256,7 @@ typedef enum ColumnarAggKind
 	COLUMNAR_AGG_MAX,
 	/*
 	 * Extended kinds used by the grouped path and the ungrouped scan-fold path
-	 * (#289). The metadata-fold path (columnar_fill_native_metadata_agg) still
+	 * (#289). The metadata-fold path (pgcolumnar_fill_native_metadata_agg) still
 	 * never produces these: a query using one is routed to scan-fold instead.
 	 */
 	COLUMNAR_AGG_SUM_INT8,		/* sum(int8) -> numeric */
@@ -265,11 +265,11 @@ typedef enum ColumnarAggKind
 	COLUMNAR_AGG_AVG_INT8,		/* avg(int8) -> numeric */
 	COLUMNAR_AGG_AVG_FLOAT,		/* avg(float4/float8) -> float8 */
 	COLUMNAR_AGG_AVG_NUMERIC	/* avg(numeric) -> numeric */
-} ColumnarAggKind;
+} PgColumnarAggKind;
 
-typedef struct ColumnarAggSpec
+typedef struct PgColumnarAggSpec
 {
-	ColumnarAggKind kind;
+	PgColumnarAggKind kind;
 	int			attidx;			/* 0-based column, or -1 for count(*) */
 	Oid			inputType;		/* column type (min/max/sum/avg) */
 
@@ -288,10 +288,10 @@ typedef struct ColumnarAggSpec
 	float8		fsxx;			/* avg(float): Youngs-Cramer Sxx, for overflow parity */
 	Datum		nsum;			/* numeric running total (in resultContext) */
 	bool		nsumSet;		/* nsum initialized */
-} ColumnarAggSpec;
+} PgColumnarAggSpec;
 
 /*
- * columnar_classify_aggref
+ * pgcolumnar_classify_aggref
  *		Decide whether an Aggref is one we can compute vectorized, and if so fill
  *		its spec. expectedVarno is the scan relation's range-table index at plan
  *		time (to check the argument Var), or a negative value at execution time
@@ -299,8 +299,8 @@ typedef struct ColumnarAggSpec
  *		scalar fallback.
  */
 static bool
-columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
-						 bool allowPartial, ColumnarAggSpec *spec)
+pgcolumnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
+						 bool allowPartial, PgColumnarAggSpec *spec)
 {
 	char	   *name;
 	Oid			nsp;
@@ -427,7 +427,7 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
 }
 
 /*
- * columnar_group_key_unsupported_walker
+ * pgcolumnar_group_key_unsupported_walker
  *		Reject any node in a candidate GROUP BY key the grouped path cannot
  *		evaluate against a bare base-relation slot: aggregates, grouping-set
  *		constructs, window functions, sublinks/subplans, external parameters,
@@ -437,7 +437,7 @@ columnar_classify_aggref(Aggref *agg, int expectedVarno, bool allowExtended,
  *		to the volatility and varno checks the caller also applies.
  */
 static bool
-columnar_group_key_unsupported_walker(Node *node, void *context)
+pgcolumnar_group_key_unsupported_walker(Node *node, void *context)
 {
 	if (node == NULL)
 		return false;
@@ -465,12 +465,12 @@ columnar_group_key_unsupported_walker(Node *node, void *context)
 			break;
 	}
 
-	return expression_tree_walker(node, columnar_group_key_unsupported_walker,
+	return expression_tree_walker(node, pgcolumnar_group_key_unsupported_walker,
 								  context);
 }
 
 /*
- * columnar_classify_group_keys
+ * pgcolumnar_classify_group_keys
  *		Decide whether every GROUP BY key can be computed and grouped by the
  *		grouped vectorized path, and if so return copies of the key expressions
  *		(original varnos, one per grouping column). A key must be computable from
@@ -481,7 +481,7 @@ columnar_group_key_unsupported_walker(Node *node, void *context)
  *		false (add no path, run the ordinary Agg) on anything unsupported.
  */
 static bool
-columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
+pgcolumnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
 							 List **keysOut)
 {
 	Query	   *parse = root->parse;
@@ -512,7 +512,7 @@ columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
 			return false;
 		if (expression_returns_set(expr))
 			return false;
-		if (columnar_group_key_unsupported_walker(expr, NULL))
+		if (pgcolumnar_group_key_unsupported_walker(expr, NULL))
 			return false;
 
 		type = exprType(expr);
@@ -524,7 +524,7 @@ columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
 			return false;
 		if (!OidIsValid(tce->eq_opr_finfo.fn_oid))
 			return false;
-		if (OidIsValid(coll) && !ColumnarCollationIsDeterministic(coll))
+		if (OidIsValid(coll) && !PgColumnarCollationIsDeterministic(coll))
 			return false;
 
 		keys = lappend(keys, copyObject(expr));
@@ -540,7 +540,7 @@ columnar_classify_group_keys(PlannerInfo *root, RelOptInfo *input_rel,
  * vectorized aggregate: executor state
  * ------------------------------------------------------------------------- */
 
-typedef struct ColumnarAggScanState
+typedef struct PgColumnarAggScanState
 {
 	CustomScanState css;
 
@@ -548,7 +548,7 @@ typedef struct ColumnarAggScanState
 	List	   *quals;			/* restriction clauses (original varnos) */
 	Index		scanrelid;		/* their range-table index */
 
-	ColumnarAggSpec *specs;
+	PgColumnarAggSpec *specs;
 	int			naggs;
 
 	int			npreds;			/* pushed-down predicate count, for EXPLAIN */
@@ -593,16 +593,16 @@ typedef struct ColumnarAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		groupsTotal;
-} ColumnarAggScanState;
+} PgColumnarAggScanState;
 
-static const CustomExecMethods columnar_agg_exec_methods;
-static const CustomExecMethods columnar_agg_parallel_exec_methods;
+static const CustomExecMethods pgcolumnar_agg_exec_methods;
+static const CustomExecMethods pgcolumnar_agg_parallel_exec_methods;
 
 /* -------------------------------------------------------------------------
  * grouped vectorized aggregate (#289): executor state
  *
  * Fires for SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys> over a
- * single columnar relation. The reader (ColumnarReadNextRow) applies WHERE
+ * single columnar relation. The reader (PgColumnarReadNextRow) applies WHERE
  * pushdown for group/vector skipping; each surviving row is rechecked against
  * the full WHERE, its group keys are evaluated, and it is scattered into an
  * open-addressing hash table whose per-group accumulators fold in scan order --
@@ -611,7 +611,7 @@ static const CustomExecMethods columnar_agg_parallel_exec_methods;
  * scale, and deterministic-collation text all group exactly as core does.
  * ------------------------------------------------------------------------- */
 
-typedef struct ColumnarGroupKey
+typedef struct PgColumnarGroupKey
 {
 	Expr	   *expr;			/* key expression (original varnos) */
 	ExprState  *exprState;		/* evaluates it against the base slot */
@@ -621,18 +621,18 @@ typedef struct ColumnarGroupKey
 	bool		byval;
 	FmgrInfo	hashFn;			/* type hash function */
 	FmgrInfo	eqFn;			/* type equality operator function */
-} ColumnarGroupKey;
+} PgColumnarGroupKey;
 
-typedef struct ColumnarGroupEntry
+typedef struct PgColumnarGroupEntry
 {
 	uint32		hash;
 	bool		used;
 	Datum	   *keys;			/* nkeys key values, in keyContext */
 	bool	   *keyNulls;		/* nkeys null flags */
-	ColumnarAggSpec *specs;		/* naggs accumulators, in specContext */
-} ColumnarGroupEntry;
+	PgColumnarAggSpec *specs;		/* naggs accumulators, in specContext */
+} PgColumnarGroupEntry;
 
-typedef struct ColumnarGroupAggScanState
+typedef struct PgColumnarGroupAggScanState
 {
 	CustomScanState css;
 
@@ -641,10 +641,10 @@ typedef struct ColumnarGroupAggScanState
 	Index		scanrelid;		/* their range-table index */
 
 	int			nkeys;
-	ColumnarGroupKey *keys;
+	PgColumnarGroupKey *keys;
 
 	int			naggs;
-	ColumnarAggSpec *aggTemplate;	/* classified once; copied per new group */
+	PgColumnarAggSpec *aggTemplate;	/* classified once; copied per new group */
 
 	int			nout;			/* output tuple width */
 	int		   *outMap;			/* per output pos: >=0 key index, else agg -(v)-1 */
@@ -653,10 +653,10 @@ typedef struct ColumnarGroupAggScanState
 	TupleTableSlot *baseSlot;	/* holds each read row for key/qual eval */
 	ExprState  *whereState;		/* residual WHERE recheck, or NULL */
 
-	ColumnarGroupEntry *entries;	/* open-addressing table (power-of-two) */
+	PgColumnarGroupEntry *entries;	/* open-addressing table (power-of-two) */
 	int			capacity;
 	int			nGroups;
-	int			maxGroups;		/* GUC cap enforced at execution (columnar_groupagg_lookup) */
+	int			maxGroups;		/* GUC cap enforced at execution (pgcolumnar_groupagg_lookup) */
 
 	MemoryContext keyContext;	/* copied key Datums */
 	MemoryContext specContext;	/* per-group specs + running min/max/numeric */
@@ -686,13 +686,13 @@ typedef struct ColumnarGroupAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		groupsTotal;
-} ColumnarGroupAggScanState;
+} PgColumnarGroupAggScanState;
 
-static const CustomExecMethods columnar_groupagg_exec_methods;
-static const CustomExecMethods columnar_groupagg_parallel_exec_methods;
-static void ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
+static const CustomExecMethods pgcolumnar_groupagg_exec_methods;
+static const CustomExecMethods pgcolumnar_groupagg_parallel_exec_methods;
+static void PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 									RelOptInfo *output_rel, void *extra);
-static bool columnar_batch_shape_eligible(ColumnarAggScanState *state,
+static bool pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state,
 										  TupleDesc tupdesc, ScanKey *keysOut,
 										  int *nkeysOut);
 
@@ -701,7 +701,7 @@ static bool columnar_batch_shape_eligible(ColumnarAggScanState *state,
  * ------------------------------------------------------------------------- */
 
 static Plan *
-ColumnarPlanAggPath(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
+PgColumnarPlanAggPath(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 					List *tlist, List *clauses, List *custom_plans)
 {
 	CustomScan *cscan = makeNode(CustomScan);
@@ -714,29 +714,29 @@ ColumnarPlanAggPath(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	cscan->custom_exprs = NIL;
 	cscan->custom_private = best_path->custom_private;
 	cscan->custom_scan_tlist = tlist;	/* defines the output tuple shape */
-	cscan->methods = &columnar_scan_methods;	/* shared registered methods */
+	cscan->methods = &pgcolumnar_scan_methods;	/* shared registered methods */
 
 	return &cscan->scan.plan;
 }
 
-static const CustomPathMethods columnar_agg_path_methods = {
+static const CustomPathMethods pgcolumnar_agg_path_methods = {
 	.CustomName = "ColumnarAgg",
-	.PlanCustomPath = ColumnarPlanAggPath,
+	.PlanCustomPath = PgColumnarPlanAggPath,
 	.ReparameterizeCustomPathByChild = NULL,
 };
 
 static create_upper_paths_hook_type prev_create_upper_paths_hook = NULL;
 
 /*
- * columnar_agg_metadata_answerable
+ * pgcolumnar_agg_metadata_answerable
  *		True when this aggregate kind is answerable from whole-chunk zone maps
  *		with no data scan: count, count(col), sum/avg over int2/int4 (the zone
  *		stores an int sum), min and max. The extended kinds (sum/avg over
  *		int8/float/numeric) are not, so a query using one must scan and fold. See
- *		columnar_fill_native_metadata_agg.
+ *		pgcolumnar_fill_native_metadata_agg.
  */
 static bool
-columnar_agg_metadata_answerable(ColumnarAggKind kind)
+pgcolumnar_agg_metadata_answerable(PgColumnarAggKind kind)
 {
 	switch (kind)
 	{
@@ -759,7 +759,7 @@ columnar_agg_metadata_answerable(ColumnarAggKind kind)
 }
 
 /*
- * columnar_parallel_agg_ok
+ * pgcolumnar_parallel_agg_ok
  *		Kinds whose transition state is a plain, non-internal value the batch fold
  *		already holds and a core Finalize can combine (#289 phase 5/6): count(*),
  *		count(col), and sum/avg over int2/int4/float4/float8. The transition types:
@@ -769,7 +769,7 @@ columnar_agg_metadata_answerable(ColumnarAggKind kind)
  *		and stay on the serial node or the ordinary core Agg.
  */
 static bool
-columnar_parallel_agg_ok(ColumnarAggKind kind)
+pgcolumnar_parallel_agg_ok(PgColumnarAggKind kind)
 {
 	switch (kind)
 	{
@@ -786,15 +786,15 @@ columnar_parallel_agg_ok(ColumnarAggKind kind)
 }
 
 /*
- * ColumnarCreateUpperPaths
- *		create_upper_paths_hook: for a plain SELECT agg(col) FROM columnar_table
+ * PgColumnarCreateUpperPaths
+ *		create_upper_paths_hook: for a plain SELECT agg(col) FROM pgcolumnar_table
  *		[WHERE simple quals] with no grouping or HAVING, add a custom path that
  *		computes the aggregates vectorized. Every aggregate, column type and
  *		filter clause must be fully supported, or we add nothing and the ordinary
  *		Agg plan runs, so results are never at risk.
  */
 static void
-ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
+PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 						 RelOptInfo *input_rel, RelOptInfo *output_rel,
 						 void *extra)
 {
@@ -805,7 +805,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	ListCell   *lc;
 	int			naggs;
 	int			i;
-	ColumnarAggSpec *specs;
+	PgColumnarAggSpec *specs;
 	List	   *quals;
 	int			npreds;
 	bool		allConvertible;
@@ -819,7 +819,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
-	if (!columnar_enable_vectorization || !columnar_enable_custom_scan)
+	if (!pgcolumnar_enable_vectorization || !pgcolumnar_enable_custom_scan)
 		return;
 
 	if (!parse->hasAggs)
@@ -835,14 +835,14 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		parse->havingQual != NULL || parse->distinctClause != NIL ||
 		parse->hasWindowFuncs || parse->hasTargetSRFs)
 	{
-		if (columnar_enable_group_vectorization &&
+		if (pgcolumnar_enable_group_vectorization &&
 			parse->groupClause != NIL &&
 			parse->groupingSets == NIL &&
 			parse->havingQual == NULL &&
 			parse->distinctClause == NIL &&
 			!parse->hasWindowFuncs &&
 			!parse->hasTargetSRFs)
-			ColumnarTryGroupAggPath(root, input_rel, output_rel, extra);
+			PgColumnarTryGroupAggPath(root, input_rel, output_rel, extra);
 		return;
 	}
 
@@ -860,7 +860,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	if (rte == NULL || rte->rtekind != RTE_RELATION ||
 		rte->relkind != RELKIND_RELATION)
 		return;
-	if (!OidIsValid(rte->relid) || !ColumnarIsColumnarRelation(rte->relid))
+	if (!OidIsValid(rte->relid) || !PgColumnarIsColumnarRelation(rte->relid))
 		return;
 	relid = rte->relid;
 
@@ -868,7 +868,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	naggs = list_length(tlist);
 	if (naggs == 0)
 		return;
-	specs = (ColumnarAggSpec *) palloc0(sizeof(ColumnarAggSpec) * naggs);
+	specs = (PgColumnarAggSpec *) palloc0(sizeof(PgColumnarAggSpec) * naggs);
 	i = 0;
 	foreach(lc, tlist)
 	{
@@ -876,7 +876,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 
 		if (!IsA(expr, Aggref))
 			return;
-		if (!columnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
+		if (!pgcolumnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
 									  true, false, &specs[i]))
 			return;
 		i++;
@@ -893,7 +893,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 
 	needsScan = (quals != NIL);
 	for (i = 0; i < naggs; i++)
-		if (!columnar_agg_metadata_answerable(specs[i].kind))
+		if (!pgcolumnar_agg_metadata_answerable(specs[i].kind))
 			needsScan = true;
 
 	if (needsScan)
@@ -907,7 +907,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		Bitmapset  *whereAtts = NULL;
 		int			m = -1;
 
-		if (!columnar_enable_ungrouped_vector_agg)
+		if (!pgcolumnar_enable_ungrouped_vector_agg)
 			return;
 
 		/*
@@ -937,7 +937,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		Relation	rel = table_open(relid, AccessShareLock);
 		TupleDesc	tupdesc = RelationGetDescr(rel);
 
-		ColumnarCountConvertibleQuals(quals, input_rel->relid, tupdesc,
+		PgColumnarCountConvertibleQuals(quals, input_rel->relid, tupdesc,
 									  &npreds, &allConvertible);
 		table_close(rel, AccessShareLock);
 		if (!allConvertible)
@@ -1007,8 +1007,8 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	}
 	else
 	{
-		ColumnarOptions opts;
-		int			limit = columnar_stripe_row_limit;
+		PgColumnarOptions opts;
+		int			limit = pgcolumnar_stripe_row_limit;
 		double		rows = input_rel->tuples;
 		double		ngroups;
 		double		dirtyFraction = 0.0;
@@ -1024,7 +1024,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		 * model getting a right answer, and it stops being harmless as soon as the
 		 * clamp is not what decides.
 		 */
-		if (ColumnarReadOptions(relid, &opts) &&
+		if (PgColumnarReadOptions(relid, &opts) &&
 			opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
 			limit = opts.stripeRowLimit;
 		if (limit <= 0)
@@ -1057,8 +1057,8 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		{
 			Relation	frel = table_open(relid, AccessShareLock);
 
-			if (ColumnarStorageHasDeleteVector(ColumnarStorageId(frel),
-											   ColumnarCatalogSnapshot(snap)))
+			if (PgColumnarStorageHasDeleteVector(PgColumnarStorageId(frel),
+											   PgColumnarCatalogSnapshot(snap)))
 				dirtyFraction = 0.25;
 			table_close(frel, AccessShareLock);
 		}
@@ -1092,12 +1092,12 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 				   copyObject(quals),
 				   makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
 							 ObjectIdGetDatum(relid), false, true));
-	cpath->methods = &columnar_agg_path_methods;
+	cpath->methods = &pgcolumnar_agg_path_methods;
 
 	/*
 	 * Parallel arm (#289 phase 5/6). When the shape is one whose transition state
 	 * the fold already holds and can be combined by a core Finalize
-	 * (columnar_parallel_agg_ok), and the base relation has a partial (parallel)
+	 * (pgcolumnar_parallel_agg_ok), and the base relation has a partial (parallel)
 	 * path, add a parallel-aware partial version of this node under Gather ->
 	 * Finalize Aggregate. Each worker claims distinct row groups through the shared
 	 * gap-23 counter and emits one per-worker transition-state tuple; the core
@@ -1110,7 +1110,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	 * cheap Gather cost by #133, would wrongly out-cost the genuinely parallel
 	 * plan. Opt-in while it is proven and benchmarked.
 	 */
-	if (needsScan && columnar_enable_parallel_vector_agg)
+	if (needsScan && pgcolumnar_enable_parallel_vector_agg)
 	{
 		GroupPathExtraData *gpe = (GroupPathExtraData *) extra;
 		bool		parallelOk = (gpe != NULL &&
@@ -1120,7 +1120,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 								  input_rel->partial_pathlist != NIL);
 
 		for (i = 0; parallelOk && i < naggs; i++)
-			if (!columnar_parallel_agg_ok(specs[i].kind))
+			if (!pgcolumnar_parallel_agg_ok(specs[i].kind))
 				parallelOk = false;
 
 		if (parallelOk)
@@ -1175,7 +1175,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 							   copyObject(quals),
 							   makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
 										 ObjectIdGetDatum(relid), false, true));
-				ppath->methods = &columnar_agg_path_methods;
+				ppath->methods = &pgcolumnar_agg_path_methods;
 
 				/*
 				 * Gather this partial node directly rather than add_partial_path'ing
@@ -1202,7 +1202,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 }
 
 /*
- * columnar_groupagg_outmap
+ * pgcolumnar_groupagg_outmap
  *		Map one target list onto this node's output: per position, the group-key
  *		index (>= 0) or the aggregate index encoded as -(index + 1). False when an
  *		entry is neither a supported aggregate nor a bare reference to a group key,
@@ -1216,7 +1216,7 @@ ColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
  *		allowPartial admits the INITIAL_SERIAL aggrefs of the second.
  */
 static bool
-columnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
+pgcolumnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
 						 bool allowPartial, List **outMapOut, int *naggsOut)
 {
 	List	   *outMap = NIL;
@@ -1229,9 +1229,9 @@ columnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
 
 		if (IsA(oexpr, Aggref))
 		{
-			ColumnarAggSpec spec;
+			PgColumnarAggSpec spec;
 
-			if (!columnar_classify_aggref((Aggref *) oexpr, (int) scanrelid,
+			if (!pgcolumnar_classify_aggref((Aggref *) oexpr, (int) scanrelid,
 										  true, allowPartial, &spec))
 				return false;
 			outMap = lappend(outMap, makeInteger(-(aggIdx + 1)));
@@ -1274,13 +1274,13 @@ columnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
 }
 
 /*
- * ColumnarTryGroupAggPath
+ * PgColumnarTryGroupAggPath
  *		Add a grouped vectorized aggregate path (#289) when the query is one we
  *		can answer exactly: a single columnar base relation, an optional WHERE,
  *		every output entry either a supported aggregate or a bare reference to a
  *		supported GROUP BY key. On anything unsupported it adds nothing and the
  *		ordinary Agg plan runs. The group-count cap is enforced only at
- *		execution (columnar_groupagg_lookup).
+ *		execution (pgcolumnar_groupagg_lookup).
  *
  *		When the shape also qualifies for the parallel arm (#349) this adds
  *		Finalize HashAggregate -> Gather -> parallel-aware partial node instead of
@@ -1288,7 +1288,7 @@ columnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
  *		displacing a parallel plan with a single-threaded one.
  */
 static void
-ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
+PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 						RelOptInfo *output_rel, void *extra)
 {
 	RangeTblEntry *rte;
@@ -1324,12 +1324,12 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 */
 	if (rte->inh)
 		return;
-	if (!OidIsValid(rte->relid) || !ColumnarIsColumnarRelation(rte->relid))
+	if (!OidIsValid(rte->relid) || !PgColumnarIsColumnarRelation(rte->relid))
 		return;
 	relid = rte->relid;
 
 	/* every GROUP BY key must be one we can evaluate and group exactly */
-	if (!columnar_classify_group_keys(root, input_rel, &groupKeys))
+	if (!pgcolumnar_classify_group_keys(root, input_rel, &groupKeys))
 		return;
 
 	/*
@@ -1337,7 +1337,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * one of the group keys. An output expression built on top of a key (a
 	 * function of a grouping column) is not handled here and forces the fallback.
 	 */
-	if (!columnar_groupagg_outmap(output_rel->reltarget->exprs, groupKeys,
+	if (!pgcolumnar_groupagg_outmap(output_rel->reltarget->exprs, groupKeys,
 								  input_rel->relid, false, &outMap, &naggs))
 		return;
 
@@ -1349,7 +1349,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * path on exactly the large tables it helps. The unbounded-hash-table guard
 	 * is the execution-time cap on the actual group count
 	 * (pgcolumnar.groupagg_max_groups), which errors with guidance -- see
-	 * columnar_groupagg_lookup -- rather than silently declining the feature.
+	 * pgcolumnar_groupagg_lookup -- rather than silently declining the feature.
 	 */
 	groupExprs = groupKeys;
 	dNumGroups = estimate_num_groups(root, groupExprs,
@@ -1439,7 +1439,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		 * Nothing serial survived, which is the common case rather than the rare
 		 * one: add_path drops the serial columnar scan once a Gather over the
 		 * partial path dominates it. Cost the scan this node performs directly,
-		 * the same way ColumnarSetRelPathlist costs its own fallback, instead of
+		 * the same way PgColumnarSetRelPathlist costs its own fallback, instead of
 		 * borrowing whatever path happened to survive.
 		 */
 		QualCost	qcost = input_rel->baserestrictcost;
@@ -1529,7 +1529,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 							 ObjectIdGetDatum(relid), false, true),
 				   groupKeys,
 				   outMap);
-	cpath->methods = &columnar_agg_path_methods;
+	cpath->methods = &pgcolumnar_agg_path_methods;
 
 	/*
 	 * Parallel arm (#349). The serial node above folds vectors instead of
@@ -1544,7 +1544,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * tuple per group. A core Finalize re-aggregates across workers by key,
 	 * exactly as it does for an ordinary parallel grouped aggregate.
 	 */
-	if (columnar_enable_parallel_vector_agg)
+	if (pgcolumnar_enable_parallel_vector_agg)
 	{
 		GroupPathExtraData *gpe = (GroupPathExtraData *) extra;
 		bool		parallelOk = (gpe != NULL &&
@@ -1561,16 +1561,16 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		 */
 		foreach(lc, output_rel->reltarget->exprs)
 		{
-			ColumnarAggSpec spec;
+			PgColumnarAggSpec spec;
 
 			if (!parallelOk)
 				break;
 			if (!IsA(lfirst(lc), Aggref))
 				continue;
-			if (!columnar_classify_aggref((Aggref *) lfirst(lc),
+			if (!pgcolumnar_classify_aggref((Aggref *) lfirst(lc),
 										  (int) input_rel->relid, true, false,
 										  &spec) ||
-				!columnar_parallel_agg_ok(spec.kind))
+				!pgcolumnar_parallel_agg_ok(spec.kind))
 				parallelOk = false;
 		}
 
@@ -1604,7 +1604,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 			 */
 			if (partialScan != NULL && partialScan->parallel_workers >= 1 &&
 				pgr->reltarget != NULL &&
-				columnar_groupagg_outmap(pgr->reltarget->exprs, groupKeys,
+				pgcolumnar_groupagg_outmap(pgr->reltarget->exprs, groupKeys,
 										 input_rel->relid, true,
 										 &partialMap, &partialAggs))
 			{
@@ -1649,7 +1649,7 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 										 ObjectIdGetDatum(relid), false, true),
 							   groupKeys,
 							   partialMap);
-				ppath->methods = &columnar_agg_path_methods;
+				ppath->methods = &pgcolumnar_agg_path_methods;
 
 				/*
 				 * Gather this partial node directly rather than add_partial_path'ing
@@ -1698,10 +1698,10 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
  * ------------------------------------------------------------------------- */
 
 Node *
-ColumnarCreateAggScanState(CustomScan *cscan)
+PgColumnarCreateAggScanState(CustomScan *cscan)
 {
-	ColumnarAggScanState *state =
-		(ColumnarAggScanState *) palloc0(sizeof(ColumnarAggScanState));
+	PgColumnarAggScanState *state =
+		(PgColumnarAggScanState *) palloc0(sizeof(PgColumnarAggScanState));
 	int			naggs = list_length(cscan->custom_scan_tlist);
 	ListCell   *lc;
 	int			i = 0;
@@ -1730,19 +1730,19 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 			state->isPartial = true;
 	}
 	state->css.methods = state->isPartial
-		? &columnar_agg_parallel_exec_methods
-		: &columnar_agg_exec_methods;
+		? &pgcolumnar_agg_parallel_exec_methods
+		: &pgcolumnar_agg_exec_methods;
 
 	/* rebuild the aggregate specs from the output tuple's aggregates */
 	state->naggs = naggs;
-	state->specs = (ColumnarAggSpec *) palloc0(sizeof(ColumnarAggSpec) * naggs);
+	state->specs = (PgColumnarAggSpec *) palloc0(sizeof(PgColumnarAggSpec) * naggs);
 	foreach(lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
 
 		/* classified successfully at plan time; -1 skips the varno check.
 		 * allowPartial accepts the partial arm's INITIAL_SERIAL aggrefs. */
-		(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
+		(void) pgcolumnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
 										&state->specs[i]);
 		i++;
 	}
@@ -1750,20 +1750,20 @@ ColumnarCreateAggScanState(CustomScan *cscan)
 	/*
 	 * Scan-fold mode (#289) matches the planner's routing: a residual filter, or
 	 * any aggregate a zone map cannot answer. The metadata-answerable no-filter
-	 * case keeps the zone-map path in ColumnarExecAggScan.
+	 * case keeps the zone-map path in PgColumnarExecAggScan.
 	 */
 	state->scanFold = (state->quals != NIL);
 	for (i = 0; i < naggs; i++)
-		if (!columnar_agg_metadata_answerable(state->specs[i].kind))
+		if (!pgcolumnar_agg_metadata_answerable(state->specs[i].kind))
 			state->scanFold = true;
 
 	return (Node *) state;
 }
 
 static void
-ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
+PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 	Relation	rel;
 	TupleDesc	tupdesc;
 	bool		allConvertible;
@@ -1784,7 +1784,7 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (state->scanFold)
 		state->batchEligible =
-			columnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
+			pgcolumnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
@@ -1794,20 +1794,20 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 
 	/*
 	 * Guard the native format version before folding any aggregate (#240). The
-	 * plain read path checks it in ColumnarBeginReadWithStorage, but the
+	 * plain read path checks it in PgColumnarBeginReadWithStorage, but the
 	 * zone-map-only aggregate path answers count/min/max from metadata without
 	 * ever opening a read state, so the check must also sit here -- otherwise an
 	 * unsupported-format table answers from bytes this build may not decode
-	 * correctly. ColumnarStorageId reads the metapage, so its version is checked
+	 * correctly. PgColumnarStorageId reads the metapage, so its version is checked
 	 * here too.
 	 */
-	ColumnarCheckNativeFormatVersion(ColumnarStorageId(rel),
+	PgColumnarCheckNativeFormatVersion(PgColumnarStorageId(rel),
 									 RelationGetRelationName(rel));
 
 	/* finish setting up min/max comparison info now that we have the tupdesc */
 	for (a = 0; a < state->naggs; a++)
 	{
-		ColumnarAggSpec *spec = &state->specs[a];
+		PgColumnarAggSpec *spec = &state->specs[a];
 
 		if (spec->kind == COLUMNAR_AGG_MIN || spec->kind == COLUMNAR_AGG_MAX)
 		{
@@ -1834,7 +1834,7 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 * stops being true without anyone noticing. Computing it costs one walk of
 	 * an empty list.
 	 */
-	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
 								  &state->npreds, &allConvertible);
 
 	/*
@@ -1883,7 +1883,7 @@ ColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
  * arithmetic is bit-for-bit what float4pl/float8pl compute.
  */
 static inline float8
-columnar_float8_pl(float8 a, float8 b)
+pgcolumnar_float8_pl(float8 a, float8 b)
 {
 	float8		r = a + b;
 
@@ -1895,7 +1895,7 @@ columnar_float8_pl(float8 a, float8 b)
 }
 
 static inline float4
-columnar_float4_pl(float4 a, float4 b)
+pgcolumnar_float4_pl(float4 a, float4 b)
 {
 	float4		r = a + b;
 
@@ -1907,13 +1907,13 @@ columnar_float4_pl(float4 a, float4 b)
 }
 
 /*
- * columnar_apply_one
+ * pgcolumnar_apply_one
  *		Fold one value (or a null) into an aggregate accumulator. This is the
  *		reference per-row semantics, shared by the ungrouped scan path
- *		(columnar_native_scan_agg) and the grouped path (columnar_groupagg_build).
+ *		(pgcolumnar_native_scan_agg) and the grouped path (pgcolumnar_groupagg_build).
  */
 static void
-columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
+pgcolumnar_apply_one(MemoryContext resultContext, PgColumnarAggSpec *spec,
 				   Datum val, bool isnull)
 {
 	switch (spec->kind)
@@ -1969,10 +1969,10 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 						? (float8) DatumGetFloat4(val)
 						: DatumGetFloat8(val);
 				else if (spec->inputType == FLOAT4OID)
-					spec->fsum = (float8) columnar_float4_pl((float4) spec->fsum,
+					spec->fsum = (float8) pgcolumnar_float4_pl((float4) spec->fsum,
 															 DatumGetFloat4(val));
 				else
-					spec->fsum = columnar_float8_pl(spec->fsum,
+					spec->fsum = pgcolumnar_float8_pl(spec->fsum,
 													DatumGetFloat8(val));
 				spec->sawValue = true;
 			}
@@ -2098,7 +2098,7 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
 
 
 /*
- * columnar_agg_emit_partial
+ * pgcolumnar_agg_emit_partial
  *		A parallel partial node (#289 phase 5/6) emits each aggregate's transition
  *		state, not its finalized value, for a core Finalize Aggregate to combine.
  *		The transition types match core's own partial aggregate exactly, so
@@ -2107,7 +2107,7 @@ columnar_apply_one(MemoryContext resultContext, ColumnarAggSpec *spec,
  *		re-derives and re-checks the Youngs-Cramer Sxx we pass through.
  */
 static Datum
-columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
+pgcolumnar_agg_emit_partial(PgColumnarAggSpec *spec, bool *isnull)
 {
 	*isnull = false;
 
@@ -2198,7 +2198,7 @@ columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
 
 			/*
 			 * The parallel arm is gated to the kinds above
-			 * (columnar_parallel_agg_ok), so this is unreachable; fail loudly rather
+			 * (pgcolumnar_parallel_agg_ok), so this is unreachable; fail loudly rather
 			 * than emit a value of the wrong transition type.
 			 */
 			elog(ERROR, "columnar parallel partial: unsupported aggregate kind %d",
@@ -2208,12 +2208,12 @@ columnar_agg_emit_partial(ColumnarAggSpec *spec, bool *isnull)
 }
 
 /*
- * columnar_agg_finalize
+ * pgcolumnar_agg_finalize
  *		Turn one accumulator into its output Datum, reproducing PostgreSQL's
  *		aggregate result types and empty-input behaviour exactly.
  */
 static Datum
-columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
+pgcolumnar_agg_finalize(PgColumnarAggSpec *spec, bool *isnull)
 {
 	*isnull = false;
 
@@ -2302,7 +2302,7 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
 }
 
 /*
- * columnar_group_deleted_count
+ * pgcolumnar_group_deleted_count
  *		How many of this row group's rows are deleted, under the given catalog
  *		snapshot. A group can have several delete_vector rows, whose bitmaps
  *		overlap, so they are OR'd before counting rather than summed -- summing
@@ -2311,7 +2311,7 @@ columnar_agg_finalize(ColumnarAggSpec *spec, bool *isnull)
  *		Bits past the group's row count are ignored.
  */
 static uint64
-columnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
+pgcolumnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
 							 Snapshot snap)
 {
 	uint32		want = (uint32) ((rg->rowCount + 7) / 8);
@@ -2321,7 +2321,7 @@ columnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
 	uint64		deleted = 0;
 	uint32		b;
 
-	rml = ColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
+	rml = PgColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
 	if (rml == NIL)
 		return 0;
 
@@ -2356,7 +2356,7 @@ columnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
 }
 
 /*
- * columnar_fill_native_metadata_agg
+ * pgcolumnar_fill_native_metadata_agg
  *		Answer an ungrouped, unfiltered aggregate over a native (PGCN v1) table
  *		from its whole-chunk zone maps (native spec 7.1, D5b): count(*) from
  *		row-group row counts, count(col) and the avg count from value_count, sum
@@ -2379,7 +2379,7 @@ columnar_group_deleted_count(uint64 storageId, NativeRowGroupMetadata *rg,
  *		data pages even when the group has deletes.
  */
 static uint64 *
-columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
+pgcolumnar_fill_native_metadata_agg(PgColumnarAggScanState *state, int *ndirty)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	Relation	rel;
@@ -2410,11 +2410,11 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 		}
 	}
 
-	ColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushWriteStateForRelation(state->relid);
 	rel = table_open(state->relid, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
-	snap = ColumnarCatalogSnapshot(estate->es_snapshot);
-	storageId = ColumnarStorageId(rel);
+	snap = PgColumnarCatalogSnapshot(estate->es_snapshot);
+	storageId = PgColumnarStorageId(rel);
 
 	/*
 	 * One storage-wide probe first. When nothing is deleted no group can have
@@ -2422,9 +2422,9 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 	 * keeps a clean table at exactly the catalog traffic it had before this
 	 * change, which for a count(*) is the row group list and nothing else.
 	 */
-	anyDeletes = ColumnarStorageHasDeleteVector(storageId, snap);
+	anyDeletes = PgColumnarStorageHasDeleteVector(storageId, snap);
 
-	groups = ColumnarReadRowGroupList(storageId, snap);
+	groups = PgColumnarReadRowGroupList(storageId, snap);
 	dirty = palloc(sizeof(uint64) * (list_length(groups) > 0
 									 ? list_length(groups) : 1));
 	*ndirty = 0;
@@ -2437,7 +2437,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 		int			a;
 
 		if (anyDeletes)
-			deleted = columnar_group_deleted_count(storageId, rg, snap);
+			deleted = pgcolumnar_group_deleted_count(storageId, rg, snap);
 
 		if (deleted > 0)
 		{
@@ -2464,7 +2464,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 
 		if (needZones)
 		{
-			List	   *zones = ColumnarReadZoneMapList(storageId,
+			List	   *zones = PgColumnarReadZoneMapList(storageId,
 														rg->groupNumber, snap);
 			ListCell   *zc;
 
@@ -2520,7 +2520,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 
 		for (a = 0; a < state->naggs; a++)
 		{
-			ColumnarAggSpec *spec = &state->specs[a];
+			PgColumnarAggSpec *spec = &state->specs[a];
 			NativeZoneMapMetadata *z =
 				(byCol != NULL && spec->attidx >= 0 &&
 				 spec->attidx < tupdesc->natts)
@@ -2562,7 +2562,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
 							MemoryContextSwitchTo(state->resultContext);
 						char	   *cur = (spec->kind == COLUMNAR_AGG_MIN)
 							? (char *) z->minimum : (char *) z->maximum;
-						Datum		v = ColumnarDecodeValue(att, &cur,
+						Datum		v = PgColumnarDecodeValue(att, &cur,
 														state->resultContext);
 
 						if (!spec->sawValue)
@@ -2608,7 +2608,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
  * once per row. For a full-scan ungrouped aggregate that per-row tax is the whole
  * cost. The batch fold instead walks each loaded group's packed value streams,
  * evaluates a pushable WHERE inline, and folds each surviving value through the
- * same columnar_apply_one -- so accumulators are byte-identical to the row path,
+ * same pgcolumnar_apply_one -- so accumulators are byte-identical to the row path,
  * floats included -- with none of the per-row Datum, context, or executor cost.
  * It runs only when every aggregate and the whole WHERE are batch-eligible; a
  * false return means it folded nothing and the caller runs the always-correct
@@ -2619,7 +2619,7 @@ columnar_fill_native_metadata_agg(ColumnarAggScanState *state, int *ndirty)
  * -0.0 == 0.0, matching float8_cmp_internal so an inline compare equals the
  * operator ExecQual would call. */
 static inline int
-columnar_batch_float_cmp(double a, double b)
+pgcolumnar_batch_float_cmp(double a, double b)
 {
 	if (isnan(a))
 		return isnan(b) ? 0 : 1;
@@ -2631,7 +2631,7 @@ columnar_batch_float_cmp(double a, double b)
 /* Whether one fixed-width numeric column value (known non-null) satisfies one
  * btree scan key. */
 static bool
-columnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
+pgcolumnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
 {
 	int			c;
 
@@ -2644,9 +2644,9 @@ columnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
 		case INT8OID:
 			{ int64 a = DatumGetInt64(val), b = DatumGetInt64(arg); c = (a < b) ? -1 : (a > b) ? 1 : 0; break; }
 		case FLOAT4OID:
-			c = columnar_batch_float_cmp((double) DatumGetFloat4(val), (double) DatumGetFloat4(arg)); break;
+			c = pgcolumnar_batch_float_cmp((double) DatumGetFloat4(val), (double) DatumGetFloat4(arg)); break;
 		case FLOAT8OID:
-			c = columnar_batch_float_cmp(DatumGetFloat8(val), DatumGetFloat8(arg)); break;
+			c = pgcolumnar_batch_float_cmp(DatumGetFloat8(val), DatumGetFloat8(arg)); break;
 		default:
 			return false;
 	}
@@ -2663,17 +2663,17 @@ columnar_batch_key_pass(Oid coltype, Datum val, StrategyNumber strat, Datum arg)
 
 /* A fixed-width by-value numeric column type the batch fold can read directly. */
 static bool
-columnar_batch_type_ok(Oid typ)
+pgcolumnar_batch_type_ok(Oid typ)
 {
 	return typ == INT2OID || typ == INT4OID || typ == INT8OID ||
 		typ == FLOAT4OID || typ == FLOAT8OID;
 }
 
-/* An aggregate kind the batch fold accumulates (folded via columnar_apply_one
+/* An aggregate kind the batch fold accumulates (folded via pgcolumnar_apply_one
  * over a fixed-width by-value numeric column, or count). int8/numeric sum/avg and
  * min/max stay on the row path. */
 static bool
-columnar_batch_agg_ok(ColumnarAggKind kind)
+pgcolumnar_batch_agg_ok(PgColumnarAggKind kind)
 {
 	switch (kind)
 	{
@@ -2690,7 +2690,7 @@ columnar_batch_agg_ok(ColumnarAggKind kind)
 }
 
 /*
- * columnar_batch_shape_eligible
+ * pgcolumnar_batch_shape_eligible
  *		Whether this aggregate's shape can use the batch fold: every aggregate is
  *		batch-accumulable, the whole WHERE converts to scan keys (no residual), and
  *		every key is a supported btree comparison on a batch-readable column. When
@@ -2699,7 +2699,7 @@ columnar_batch_agg_ok(ColumnarAggKind kind)
  *		Begin can report it in EXPLAIN before execution.
  */
 static bool
-columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
+pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc,
 							  ScanKey *keysOut, int *nkeysOut)
 {
 	ScanKey		keys;
@@ -2711,15 +2711,15 @@ columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
 	bool		ok = true;
 
 	for (a = 0; a < state->naggs; a++)
-		if (!columnar_batch_agg_ok(state->specs[a].kind))
+		if (!pgcolumnar_batch_agg_ok(state->specs[a].kind))
 			return false;
 
-	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
 								  &npred, &allConvertible);
 	if (!allConvertible)
 		return false;
 
-	keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
+	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
 	for (k = 0; k < nkeys; k++)
 	{
 		ScanKey		key = &keys[k];
@@ -2729,7 +2729,7 @@ columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
 		if (key->sk_flags != 0 || attidx < 0 || attidx >= tupdesc->natts)
 			{ ok = false; break; }
 		coltype = TupleDescAttr(tupdesc, attidx)->atttypid;
-		if (!columnar_batch_type_ok(coltype))
+		if (!pgcolumnar_batch_type_ok(coltype))
 			{ ok = false; break; }
 		if (key->sk_subtype != InvalidOid && key->sk_subtype != coltype)
 			{ ok = false; break; }
@@ -2750,14 +2750,14 @@ columnar_batch_shape_eligible(ColumnarAggScanState *state, TupleDesc tupdesc,
 
 /* Reset the accumulators to their initial state (for a clean fall-back). */
 static void
-columnar_agg_specs_reset(ColumnarAggScanState *state)
+pgcolumnar_agg_specs_reset(PgColumnarAggScanState *state)
 {
 	int			a;
 
 	MemoryContextReset(state->resultContext);
 	for (a = 0; a < state->naggs; a++)
 	{
-		ColumnarAggSpec *spec = &state->specs[a];
+		PgColumnarAggSpec *spec = &state->specs[a];
 
 		spec->count = 0;
 		spec->sum = 0;
@@ -2771,13 +2771,13 @@ columnar_agg_specs_reset(ColumnarAggScanState *state)
 }
 
 /*
- * columnar_native_batch_fold
+ * pgcolumnar_native_batch_fold
  *		Fold the whole scan column-at-a-time. Returns false (having folded and
  *		reset nothing that the caller cannot redo) when the shape is not eligible
  *		or a group is missing a needed column, so the caller runs the row path.
  */
 static bool
-columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
+pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 						   TupleDesc tupdesc)
 {
 	EState	   *estate = state->css.ss.ps.state;
@@ -2787,7 +2787,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 	int			k;
 	int			col;
 	int			natts = tupdesc->natts;
-	ColumnarReadState *rs;
+	PgColumnarReadState *rs;
 	const char **cvalidity = (const char **) palloc0(sizeof(char *) * natts);
 	const char **cpacked = (const char **) palloc0(sizeof(char *) * natts);
 	int16	   *cattlen = (int16 *) palloc0(sizeof(int16) * natts);
@@ -2796,7 +2796,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
 	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
 
-	if (!columnar_batch_shape_eligible(state, tupdesc, &keys, &nkeys))
+	if (!pgcolumnar_batch_shape_eligible(state, tupdesc, &keys, &nkeys))
 		return false;
 
 	col = -1;
@@ -2814,11 +2814,11 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 	 *
 	 * Per-vector skipping WITHIN a surviving group is a separate refinement the
 	 * fold does not take: it would need to step the present index past a skipped
-	 * vector. That is safe to leave out because columnar_native_load_group builds
+	 * vector. That is safe to leave out because pgcolumnar_native_load_group builds
 	 * the packed present-value stream whole regardless of the skip vector, so
 	 * walking all rows and advancing the present index over each is correct.
 	 */
-	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
+	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
 						   nkeys, keys);
 
 	/*
@@ -2830,14 +2830,14 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 	 * InitializeDSM callback runs even leader-only), so a NULL here is a bug.
 	 */
 	if (state->parallelCounter != NULL)
-		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
+		PgColumnarReadSetParallelCounter(rs, state->parallelCounter);
 	else if (state->isPartial)
 	{
-		ColumnarEndRead(rs);
+		PgColumnarEndRead(rs);
 		elog(ERROR, "parallel columnar aggregate ran without a shared group counter");
 	}
 
-	while (ColumnarReadFoldNextGroup(rs))
+	while (PgColumnarReadFoldNextGroup(rs))
 	{
 		uint64		nrows;
 		const char *dmask;
@@ -2847,7 +2847,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 		int			vcount;
 		uint64		r;
 
-		ColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
+		PgColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
 								  &skipVec, &vecStart, &vcount);
 
 		for (col = 0; col < natts; col++)
@@ -2860,7 +2860,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 			cpresent[col] = 0;
 			if (!cneeded[col])
 				continue;
-			if (!ColumnarReadFoldColumn(rs, col, &vbits, &pk, &al, &vrl))
+			if (!PgColumnarReadFoldColumn(rs, col, &vbits, &pk, &al, &vrl))
 			{
 				/*
 				 * The column is absent from this group (a later ADD COLUMN). The
@@ -2874,8 +2874,8 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 				 * cleanly rather than return a wrong answer. Rare (an old row group
 				 * predating an ADD COLUMN); turn the parallel GUC off for the table.
 				 */
-				ColumnarEndRead(rs);
-				columnar_agg_specs_reset(state);
+				PgColumnarEndRead(rs);
+				pgcolumnar_agg_specs_reset(state);
 				if (state->isPartial)
 					elog(ERROR, "parallel columnar aggregate cannot fold a relation "
 						 "with a column added after some row groups; "
@@ -2921,7 +2921,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 				int			attidx = key->sk_attno - 1;
 
 				if (cisnull[attidx] ||
-					!columnar_batch_key_pass(TupleDescAttr(tupdesc, attidx)->atttypid,
+					!pgcolumnar_batch_key_pass(TupleDescAttr(tupdesc, attidx)->atttypid,
 											 cval[attidx], key->sk_strategy,
 											 key->sk_argument))
 				{
@@ -2934,29 +2934,29 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
 
 			for (a = 0; a < state->naggs; a++)
 			{
-				ColumnarAggSpec *spec = &state->specs[a];
+				PgColumnarAggSpec *spec = &state->specs[a];
 
 				if (spec->attidx >= 0)
-					columnar_apply_one(state->resultContext, spec,
+					pgcolumnar_apply_one(state->resultContext, spec,
 									   cval[spec->attidx], cisnull[spec->attidx]);
 				else
-					columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
+					pgcolumnar_apply_one(state->resultContext, spec, (Datum) 0, true);
 			}
 		}
 	}
 
-	ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
 	state->haveStats = true;
 	state->batchFolded = true;
-	ColumnarEndRead(rs);
+	PgColumnarEndRead(rs);
 	return true;
 }
 
 /*
- * columnar_native_scan_agg
+ * pgcolumnar_native_scan_agg
  *		Fold an ungrouped, unfiltered aggregate over a native table by scanning it
- *		one row at a time (ColumnarReadNextRow applies the delete mask), for the
+ *		one row at a time (PgColumnarReadNextRow applies the delete mask), for the
  *		case where the zone-map-only path cannot be used because the storage has
  *		deletes (D6b). No quals: the upper-path hook only adds the native agg path
  *		when there is no filter.
@@ -2966,7 +2966,7 @@ columnar_native_batch_fold(ColumnarAggScanState *state, Relation rel,
  *		already folded from their zone maps by the caller.
  */
 static void
-columnar_native_scan_agg(ColumnarAggScanState *state,
+pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 						 const uint64 *restrictGroups, int nRestrictGroups)
 {
 	EState	   *estate = state->css.ss.ps.state;
@@ -2974,7 +2974,7 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 	Relation	rel = table_open(state->relid, AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	Bitmapset  *projected;
-	ColumnarReadState *rs;
+	PgColumnarReadState *rs;
 	ScanKey		keys = NULL;
 	int			nScanKeys = 0;
 	Datum	   *values = (Datum *) palloc(sizeof(Datum) * tupdesc->natts);
@@ -2999,8 +2999,8 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 			projected = bms_make_singleton(0);	/* count(*) only: one column */
 	}
 
-	ColumnarFlushWriteStateForRelation(state->relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
 	/*
 	 * Batch fold when the shape allows it (#289): the whole scan folds
@@ -3009,7 +3009,7 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 	 * row path.
 	 */
 	if (state->scanFold && restrictGroups == NULL &&
-		columnar_native_batch_fold(state, rel, tupdesc))
+		pgcolumnar_native_batch_fold(state, rel, tupdesc))
 	{
 		table_close(rel, AccessShareLock);
 		return;
@@ -3017,7 +3017,7 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 
 	/*
 	 * The row path reached here because the shape is not batch-foldable (e.g. a
-	 * NULL test or a non-btree filter): columnar_native_batch_fold returned false
+	 * NULL test or a non-btree filter): pgcolumnar_native_batch_fold returned false
 	 * before claiming any group, so the shared counter is untouched and a parallel
 	 * partial node can fold correctly here too -- each worker just claims distinct
 	 * groups through the same atomic and applies the WHERE recheck per row. (The
@@ -3027,21 +3027,21 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 
 	/* push the WHERE down for group and vector pruning; the recheck is exact */
 	if (state->scanFold && state->quals != NIL)
-		keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc,
+		keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc,
 									 &nScanKeys);
 
-	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, projected,
+	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, projected,
 						   nScanKeys, keys);
 	if (state->parallelCounter != NULL)
-		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
+		PgColumnarReadSetParallelCounter(rs, state->parallelCounter);
 	if (restrictGroups != NULL)
-		ColumnarReadRestrictToGroups(rs, restrictGroups, nRestrictGroups);
+		PgColumnarReadRestrictToGroups(rs, restrictGroups, nRestrictGroups);
 
 	/* columns outside the projection stay null in the recheck slot */
 	if (state->whereState != NULL)
 		memset(state->baseSlot->tts_isnull, true, sizeof(bool) * tupdesc->natts);
 
-	while (ColumnarReadNextRow(rs, values, nulls, &rowNumber))
+	while (PgColumnarReadNextRow(rs, values, nulls, &rowNumber))
 	{
 		/*
 		 * Recheck the whole WHERE per row: the scan keys only prune groups and
@@ -3066,31 +3066,31 @@ columnar_native_scan_agg(ColumnarAggScanState *state,
 
 		for (a = 0; a < state->naggs; a++)
 		{
-			ColumnarAggSpec *spec = &state->specs[a];
+			PgColumnarAggSpec *spec = &state->specs[a];
 
 			if (spec->attidx >= 0)
-				columnar_apply_one(state->resultContext, spec,
+				pgcolumnar_apply_one(state->resultContext, spec,
 								   values[spec->attidx], nulls[spec->attidx]);
 			else
-				columnar_apply_one(state->resultContext, spec, (Datum) 0, true);
+				pgcolumnar_apply_one(state->resultContext, spec, (Datum) 0, true);
 		}
 	}
 
 	if (state->scanFold)
 	{
-		ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+		PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 						  &state->groupsTotal);
 		state->haveStats = true;
 	}
 
-	ColumnarEndRead(rs);
+	PgColumnarEndRead(rs);
 	table_close(rel, AccessShareLock);
 }
 
 static TupleTableSlot *
-ColumnarExecAggScan(CustomScanState *node)
+PgColumnarExecAggScan(CustomScanState *node)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 	TupleTableSlot *scanSlot = node->ss.ss_ScanTupleSlot;
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	TupleTableSlot *result;
@@ -3116,24 +3116,24 @@ ColumnarExecAggScan(CustomScanState *node)
 	 * a zone map that counts the rows this transaction has already removed.
 	 */
 	frel = table_open(state->relid, AccessShareLock);
-	ColumnarFlushWriteStateForRelation(state->relid);
-	ColumnarFlushDeleteVectorForRelation(frel);
+	PgColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushDeleteVectorForRelation(frel);
 	table_close(frel, AccessShareLock);
 
 	if (state->scanFold)
 	{
 		/*
 		 * A filter, or a sum/avg no zone map answers (#289): scan every row once
-		 * and fold it. columnar_native_scan_agg builds the scan keys, rechecks the
+		 * and fold it. pgcolumnar_native_scan_agg builds the scan keys, rechecks the
 		 * WHERE, and captures the EXPLAIN stats.
 		 */
-		columnar_native_scan_agg(state, NULL, 0);
+		pgcolumnar_native_scan_agg(state, NULL, 0);
 	}
 	else
 	{
-		dirtyGroups = columnar_fill_native_metadata_agg(state, &nDirtyGroups);
+		dirtyGroups = pgcolumnar_fill_native_metadata_agg(state, &nDirtyGroups);
 		if (nDirtyGroups > 0)
-			columnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
+			pgcolumnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
 		state->haveStats = false;
 	}
 
@@ -3145,8 +3145,8 @@ ColumnarExecAggScan(CustomScanState *node)
 	ExecClearTuple(scanSlot);
 	for (a = 0; a < state->naggs; a++)
 		scanSlot->tts_values[a] = state->isPartial
-			? columnar_agg_emit_partial(&state->specs[a], &scanSlot->tts_isnull[a])
-			: columnar_agg_finalize(&state->specs[a], &scanSlot->tts_isnull[a]);
+			? pgcolumnar_agg_emit_partial(&state->specs[a], &scanSlot->tts_isnull[a])
+			: pgcolumnar_agg_finalize(&state->specs[a], &scanSlot->tts_isnull[a]);
 	ExecStoreVirtualTuple(scanSlot);
 
 	/*
@@ -3166,21 +3166,21 @@ ColumnarExecAggScan(CustomScanState *node)
 }
 
 static void
-ColumnarEndAggScan(CustomScanState *node)
+PgColumnarEndAggScan(CustomScanState *node)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 
 	if (state->baseSlot != NULL)
 		ExecDropSingleTupleTableSlot(state->baseSlot);
 	state->baseSlot = NULL;
-	/* the reader is ended inside ColumnarExecAggScan; the memory contexts are
+	/* the reader is ended inside PgColumnarExecAggScan; the memory contexts are
 	 * children of es_query_cxt and freed with it */
 }
 
 static void
-ColumnarReScanAggScan(CustomScanState *node)
+PgColumnarReScanAggScan(CustomScanState *node)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 	int			a;
 
 	state->done = false;
@@ -3189,7 +3189,7 @@ ColumnarReScanAggScan(CustomScanState *node)
 	MemoryContextReset(state->resultContext);
 	for (a = 0; a < state->naggs; a++)
 	{
-		ColumnarAggSpec *spec = &state->specs[a];
+		PgColumnarAggSpec *spec = &state->specs[a];
 
 		spec->count = 0;
 		spec->sum = 0;
@@ -3210,9 +3210,9 @@ ColumnarReScanAggScan(CustomScanState *node)
 }
 
 static void
-ColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *es)
+PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
@@ -3233,13 +3233,13 @@ ColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 }
 
-static const CustomExecMethods columnar_agg_exec_methods = {
+static const CustomExecMethods pgcolumnar_agg_exec_methods = {
 	.CustomName = "ColumnarScan",
-	.BeginCustomScan = ColumnarBeginAggScan,
-	.ExecCustomScan = ColumnarExecAggScan,
-	.EndCustomScan = ColumnarEndAggScan,
-	.ReScanCustomScan = ColumnarReScanAggScan,
-	.ExplainCustomScan = ColumnarExplainAggScan,
+	.BeginCustomScan = PgColumnarBeginAggScan,
+	.ExecCustomScan = PgColumnarExecAggScan,
+	.EndCustomScan = PgColumnarEndAggScan,
+	.ReScanCustomScan = PgColumnarReScanAggScan,
+	.ExplainCustomScan = PgColumnarExplainAggScan,
 };
 
 /* -------------------------------------------------------------------------
@@ -3251,20 +3251,20 @@ static const CustomExecMethods columnar_agg_exec_methods = {
  * and passes its address as `coordinate` to the DSM/worker init callbacks. Our
  * agg node opens its reader lazily during Exec, strictly after both DSM-init and
  * Worker-init, so the callbacks only need to record the counter on the state;
- * ColumnarBeginRead wiring happens at fold time.
+ * PgColumnarBeginRead wiring happens at fold time.
  * ------------------------------------------------------------------------- */
 
 static Size
-ColumnarEstimateDSMAggScan(CustomScanState *node, ParallelContext *pcxt)
+PgColumnarEstimateDSMAggScan(CustomScanState *node, ParallelContext *pcxt)
 {
 	return sizeof(pg_atomic_uint32);
 }
 
 static void
-ColumnarInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
 							 void *coordinate)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	pg_atomic_init_u32(counter, 0);
@@ -3277,17 +3277,17 @@ ColumnarInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
 	 * rows the leader deleted earlier in this transaction. The Exec-time flush in
 	 * every backend then only ever flushes its own (empty) buffers.
 	 */
-	ColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushWriteStateForRelation(state->relid);
 	{
 		Relation	frel = table_open(state->relid, AccessShareLock);
 
-		ColumnarFlushDeleteVectorForRelation(frel);
+		PgColumnarFlushDeleteVectorForRelation(frel);
 		table_close(frel, AccessShareLock);
 	}
 }
 
 static void
-ColumnarReInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarReInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
 							   void *coordinate)
 {
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
@@ -3297,26 +3297,26 @@ ColumnarReInitializeDSMAggScan(CustomScanState *node, ParallelContext *pcxt,
 }
 
 static void
-ColumnarInitializeWorkerAggScan(CustomScanState *node, shm_toc *toc,
+PgColumnarInitializeWorkerAggScan(CustomScanState *node, shm_toc *toc,
 								void *coordinate)
 {
-	ColumnarAggScanState *state = (ColumnarAggScanState *) node;
+	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	state->parallelCounter = counter;
 }
 
-static const CustomExecMethods columnar_agg_parallel_exec_methods = {
+static const CustomExecMethods pgcolumnar_agg_parallel_exec_methods = {
 	.CustomName = "ColumnarScan",
-	.BeginCustomScan = ColumnarBeginAggScan,
-	.ExecCustomScan = ColumnarExecAggScan,
-	.EndCustomScan = ColumnarEndAggScan,
-	.ReScanCustomScan = ColumnarReScanAggScan,
-	.ExplainCustomScan = ColumnarExplainAggScan,
-	.EstimateDSMCustomScan = ColumnarEstimateDSMAggScan,
-	.InitializeDSMCustomScan = ColumnarInitializeDSMAggScan,
-	.ReInitializeDSMCustomScan = ColumnarReInitializeDSMAggScan,
-	.InitializeWorkerCustomScan = ColumnarInitializeWorkerAggScan,
+	.BeginCustomScan = PgColumnarBeginAggScan,
+	.ExecCustomScan = PgColumnarExecAggScan,
+	.EndCustomScan = PgColumnarEndAggScan,
+	.ReScanCustomScan = PgColumnarReScanAggScan,
+	.ExplainCustomScan = PgColumnarExplainAggScan,
+	.EstimateDSMCustomScan = PgColumnarEstimateDSMAggScan,
+	.InitializeDSMCustomScan = PgColumnarInitializeDSMAggScan,
+	.ReInitializeDSMCustomScan = PgColumnarReInitializeDSMAggScan,
+	.InitializeWorkerCustomScan = PgColumnarInitializeWorkerAggScan,
 };
 
 /* -------------------------------------------------------------------------
@@ -3324,10 +3324,10 @@ static const CustomExecMethods columnar_agg_parallel_exec_methods = {
  * ------------------------------------------------------------------------- */
 
 Node *
-ColumnarCreateGroupAggScanState(CustomScan *cscan)
+PgColumnarCreateGroupAggScanState(CustomScan *cscan)
 {
-	ColumnarGroupAggScanState *state =
-		(ColumnarGroupAggScanState *) palloc0(sizeof(ColumnarGroupAggScanState));
+	PgColumnarGroupAggScanState *state =
+		(PgColumnarGroupAggScanState *) palloc0(sizeof(PgColumnarGroupAggScanState));
 	List	   *groupKeys;
 	List	   *outMapList;
 	ListCell   *lc;
@@ -3354,8 +3354,8 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 			state->isPartial = true;
 	}
 	state->css.methods = state->isPartial
-		? &columnar_groupagg_parallel_exec_methods
-		: &columnar_groupagg_exec_methods;
+		? &pgcolumnar_groupagg_parallel_exec_methods
+		: &pgcolumnar_groupagg_exec_methods;
 
 	/* custom_private: rti, quals, relid, group-key exprs, output map (length 5) */
 	state->scanrelid = (Index) intVal(linitial(cscan->custom_private));
@@ -3366,8 +3366,8 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 	outMapList = (List *) list_nth(cscan->custom_private, 4);
 
 	state->nkeys = list_length(groupKeys);
-	state->keys = (ColumnarGroupKey *)
-		palloc0(sizeof(ColumnarGroupKey) * Max(state->nkeys, 1));
+	state->keys = (PgColumnarGroupKey *)
+		palloc0(sizeof(PgColumnarGroupKey) * Max(state->nkeys, 1));
 	i = 0;
 	foreach(lc, groupKeys)
 		state->keys[i++].expr = (Expr *) lfirst(lc);
@@ -3377,8 +3377,8 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 		if (IsA(((TargetEntry *) lfirst(lc))->expr, Aggref))
 			naggs++;
 	state->naggs = naggs;
-	state->aggTemplate = (ColumnarAggSpec *)
-		palloc0(sizeof(ColumnarAggSpec) * Max(naggs, 1));
+	state->aggTemplate = (PgColumnarAggSpec *)
+		palloc0(sizeof(PgColumnarAggSpec) * Max(naggs, 1));
 	i = 0;
 	foreach(lc, cscan->custom_scan_tlist)
 	{
@@ -3387,7 +3387,7 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 		if (IsA(tle->expr, Aggref))
 		{
 			/* allowPartial accepts the parallel arm's INITIAL_SERIAL aggrefs */
-			(void) columnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
+			(void) pgcolumnar_classify_aggref((Aggref *) tle->expr, -1, true, true,
 											&state->aggTemplate[i]);
 			i++;
 		}
@@ -3399,7 +3399,7 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 	foreach(lc, outMapList)
 		state->outMap[i++] = intVal(lfirst(lc));
 
-	state->maxGroups = columnar_groupagg_max_groups;
+	state->maxGroups = pgcolumnar_groupagg_max_groups;
 	state->capacity = 0;
 	state->nGroups = 0;
 	state->entries = NULL;
@@ -3408,9 +3408,9 @@ ColumnarCreateGroupAggScanState(CustomScan *cscan)
 }
 
 static void
-ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
+PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 	Relation	rel;
 	TupleDesc	basedesc;
 	Bitmapset  *proj = NULL;
@@ -3444,7 +3444,7 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	 * Count pushable filters for EXPLAIN before the EXPLAIN-only early return, so
 	 * a plain EXPLAIN reports the real pushed-down filter count instead of 0.
 	 */
-	ColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
+	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
 								  &state->npreds, &allConvertible);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -3454,7 +3454,7 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/* guard the native format before decoding any value (#240) */
-	ColumnarCheckNativeFormatVersion(ColumnarStorageId(rel),
+	PgColumnarCheckNativeFormatVersion(PgColumnarStorageId(rel),
 									 RelationGetRelationName(rel));
 
 	/* a virtual slot holding each read row for key and qual evaluation */
@@ -3464,7 +3464,7 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	/* group-key ExprStates and their hash/equality machinery */
 	for (k = 0; k < state->nkeys; k++)
 	{
-		ColumnarGroupKey *key = &state->keys[k];
+		PgColumnarGroupKey *key = &state->keys[k];
 		Oid			type = exprType((Node *) key->expr);
 		TypeCacheEntry *tce = lookup_type_cache(type,
 												TYPECACHE_HASH_PROC_FINFO |
@@ -3487,7 +3487,7 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	/* finish min/max comparison setup on the per-agg template */
 	for (a = 0; a < state->naggs; a++)
 	{
-		ColumnarAggSpec *spec = &state->aggTemplate[a];
+		PgColumnarAggSpec *spec = &state->aggTemplate[a];
 
 		if (spec->kind == COLUMNAR_AGG_MIN || spec->kind == COLUMNAR_AGG_MAX)
 		{
@@ -3525,14 +3525,14 @@ ColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 }
 
 /*
- * columnar_groupagg_keys_equal
+ * pgcolumnar_groupagg_keys_equal
  *		Whether a probing row's keys match a stored group's, by SQL grouping
  *		semantics: two nulls are equal, and non-nulls compare with the key type's
  *		equality operator (with collation) -- exactly how core groups.
  */
 static bool
-columnar_groupagg_keys_equal(ColumnarGroupAggScanState *state,
-							 ColumnarGroupEntry *e,
+pgcolumnar_groupagg_keys_equal(PgColumnarGroupAggScanState *state,
+							 PgColumnarGroupEntry *e,
 							 Datum *keyvals, bool *keynulls)
 {
 	int			k;
@@ -3552,17 +3552,17 @@ columnar_groupagg_keys_equal(ColumnarGroupAggScanState *state,
 }
 
 /*
- * columnar_groupagg_grow
+ * pgcolumnar_groupagg_grow
  *		Double the open-addressing table and reinsert live entries. Entry structs
  *		(and the key/spec pointers they carry) move by value; the pointed-at key
  *		Datums and accumulators stay put in their own contexts.
  */
 static void
-columnar_groupagg_grow(ColumnarGroupAggScanState *state)
+pgcolumnar_groupagg_grow(PgColumnarGroupAggScanState *state)
 {
 	int			oldCap = state->capacity;
 	int			newCap = (oldCap <= 0) ? 1024 : oldCap * 2;
-	ColumnarGroupEntry *newEntries;
+	PgColumnarGroupEntry *newEntries;
 	MemoryContext old;
 	int			i;
 
@@ -3578,15 +3578,15 @@ columnar_groupagg_grow(ColumnarGroupAggScanState *state)
 	 * via pgcolumnar.groupagg_max_groups.
 	 */
 	old = MemoryContextSwitchTo(state->hashContext);
-	newEntries = (ColumnarGroupEntry *)
+	newEntries = (PgColumnarGroupEntry *)
 		MemoryContextAllocExtended(state->hashContext,
-								   sizeof(ColumnarGroupEntry) * (Size) newCap,
+								   sizeof(PgColumnarGroupEntry) * (Size) newCap,
 								   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	MemoryContextSwitchTo(old);
 
 	for (i = 0; i < oldCap; i++)
 	{
-		ColumnarGroupEntry *e = &state->entries[i];
+		PgColumnarGroupEntry *e = &state->entries[i];
 		uint32		idx;
 
 		if (!e->used)
@@ -3604,23 +3604,23 @@ columnar_groupagg_grow(ColumnarGroupAggScanState *state)
 }
 
 /*
- * columnar_groupagg_lookup
+ * pgcolumnar_groupagg_lookup
  *		Find the group for this row's keys, inserting a fresh one (with the key
  *		Datums copied into keyContext and accumulators seeded from the template)
  *		when it is new.
  */
-static ColumnarGroupEntry *
-columnar_groupagg_lookup(ColumnarGroupAggScanState *state,
+static PgColumnarGroupEntry *
+pgcolumnar_groupagg_lookup(PgColumnarGroupAggScanState *state,
 						 Datum *keyvals, bool *keynulls)
 {
 	uint32		hash = 0;
 	uint32		idx;
 	int			k;
-	ColumnarGroupEntry *e;
+	PgColumnarGroupEntry *e;
 
 	/* grow before probing so the index is computed against the final table */
 	if ((int64) (state->nGroups + 1) * 10 >= (int64) state->capacity * 7)
-		columnar_groupagg_grow(state);
+		pgcolumnar_groupagg_grow(state);
 
 	for (k = 0; k < state->nkeys; k++)
 	{
@@ -3642,7 +3642,7 @@ columnar_groupagg_lookup(ColumnarGroupAggScanState *state,
 		if (!e->used)
 			break;
 		if (e->hash == hash &&
-			columnar_groupagg_keys_equal(state, e, keyvals, keynulls))
+			pgcolumnar_groupagg_keys_equal(state, e, keyvals, keynulls))
 			return e;
 		idx = (idx + 1) & (uint32) (state->capacity - 1);
 	}
@@ -3682,10 +3682,10 @@ columnar_groupagg_lookup(ColumnarGroupAggScanState *state,
 	{
 		MemoryContext oldc = MemoryContextSwitchTo(state->specContext);
 
-		e->specs = (ColumnarAggSpec *)
-			palloc(sizeof(ColumnarAggSpec) * Max(state->naggs, 1));
+		e->specs = (PgColumnarAggSpec *)
+			palloc(sizeof(PgColumnarAggSpec) * Max(state->naggs, 1));
 		memcpy(e->specs, state->aggTemplate,
-			   sizeof(ColumnarAggSpec) * state->naggs);
+			   sizeof(PgColumnarAggSpec) * state->naggs);
 		MemoryContextSwitchTo(oldc);
 	}
 	state->nGroups++;
@@ -3693,14 +3693,14 @@ columnar_groupagg_lookup(ColumnarGroupAggScanState *state,
 }
 
 /*
- * columnar_groupagg_build
+ * pgcolumnar_groupagg_build
  *		Scan the relation once and fold every surviving row into its group. The
  *		reader prunes groups and vectors with the pushed-down WHERE; each row is
  *		rechecked against the whole WHERE, its keys evaluated, and its values
  *		folded in scan order so accumulators match the scalar Agg byte for byte.
  */
 static void
-columnar_groupagg_build(ColumnarGroupAggScanState *state)
+pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 {
 	EState	   *estate = state->css.ss.ps.state;
 	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
@@ -3711,17 +3711,17 @@ columnar_groupagg_build(ColumnarGroupAggScanState *state)
 	bool	   *nulls = (bool *) palloc(sizeof(bool) * natts);
 	Datum	   *keyvals = (Datum *) palloc(sizeof(Datum) * Max(state->nkeys, 1));
 	bool	   *keynulls = (bool *) palloc(sizeof(bool) * Max(state->nkeys, 1));
-	ColumnarReadState *rs;
+	PgColumnarReadState *rs;
 	ScanKey		keys;
 	int			nScanKeys = 0;
 	uint64		rowNumber;
 
-	ColumnarFlushWriteStateForRelation(state->relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
-	keys = ColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
+	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
 								 &nScanKeys);
-	rs = ColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
+	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
 						   nScanKeys, keys);
 
 	/*
@@ -3731,17 +3731,17 @@ columnar_groupagg_build(ColumnarGroupAggScanState *state)
 	 * case the reader walks every group as before.
 	 */
 	if (state->parallelCounter != NULL)
-		ColumnarReadSetParallelCounter(rs, state->parallelCounter);
+		PgColumnarReadSetParallelCounter(rs, state->parallelCounter);
 
 	/* columns outside the projection stay null in the base slot */
 	memset(state->baseSlot->tts_isnull, true, sizeof(bool) * natts);
 
-	while (ColumnarReadNextRow(rs, values, nulls, &rowNumber))
+	while (PgColumnarReadNextRow(rs, values, nulls, &rowNumber))
 	{
 		int			x;
 		int			k;
 		int			a;
-		ColumnarGroupEntry *e;
+		PgColumnarGroupEntry *e;
 
 		ResetExprContext(econtext);
 
@@ -3770,46 +3770,46 @@ columnar_groupagg_build(ColumnarGroupAggScanState *state)
 			keyvals[k] = ExecEvalExprSwitchContext(state->keys[k].exprState,
 												   econtext, &keynulls[k]);
 
-		e = columnar_groupagg_lookup(state, keyvals, keynulls);
+		e = pgcolumnar_groupagg_lookup(state, keyvals, keynulls);
 
 		/* fold this row's values into the group's accumulators */
 		for (a = 0; a < state->naggs; a++)
 		{
-			ColumnarAggSpec *spec = &e->specs[a];
+			PgColumnarAggSpec *spec = &e->specs[a];
 
 			if (spec->attidx >= 0)
-				columnar_apply_one(state->specContext, spec,
+				pgcolumnar_apply_one(state->specContext, spec,
 								   values[spec->attidx], nulls[spec->attidx]);
 			else
-				columnar_apply_one(state->specContext, spec, (Datum) 0, true);
+				pgcolumnar_apply_one(state->specContext, spec, (Datum) 0, true);
 		}
 	}
 
-	ColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
 	state->haveStats = true;
 
-	ColumnarEndRead(rs);
+	PgColumnarEndRead(rs);
 	table_close(rel, AccessShareLock);
 }
 
 static TupleTableSlot *
-ColumnarExecGroupAggScan(CustomScanState *node)
+PgColumnarExecGroupAggScan(CustomScanState *node)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 	TupleTableSlot *scanSlot = node->ss.ss_ScanTupleSlot;
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 
 	if (!state->started)
 	{
-		columnar_groupagg_build(state);
+		pgcolumnar_groupagg_build(state);
 		state->started = true;
 		state->emitPos = 0;
 	}
 
 	while (state->emitPos < state->capacity)
 	{
-		ColumnarGroupEntry *e = &state->entries[state->emitPos++];
+		PgColumnarGroupEntry *e = &state->entries[state->emitPos++];
 		int			p;
 
 		if (!e->used)
@@ -3839,9 +3839,9 @@ ColumnarExecGroupAggScan(CustomScanState *node)
 				 * expects -- not one empty group.
 				 */
 				scanSlot->tts_values[p] = state->isPartial
-					? columnar_agg_emit_partial(&e->specs[a],
+					? pgcolumnar_agg_emit_partial(&e->specs[a],
 											   &scanSlot->tts_isnull[p])
-					: columnar_agg_finalize(&e->specs[a],
+					: pgcolumnar_agg_finalize(&e->specs[a],
 											&scanSlot->tts_isnull[p]);
 			}
 		}
@@ -3859,9 +3859,9 @@ ColumnarExecGroupAggScan(CustomScanState *node)
 }
 
 static void
-ColumnarEndGroupAggScan(CustomScanState *node)
+PgColumnarEndGroupAggScan(CustomScanState *node)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 
 	if (state->baseSlot != NULL)
 		ExecDropSingleTupleTableSlot(state->baseSlot);
@@ -3870,9 +3870,9 @@ ColumnarEndGroupAggScan(CustomScanState *node)
 }
 
 static void
-ColumnarReScanGroupAggScan(CustomScanState *node)
+PgColumnarReScanGroupAggScan(CustomScanState *node)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 
 	state->started = false;
 	state->emitPos = 0;
@@ -3886,10 +3886,10 @@ ColumnarReScanGroupAggScan(CustomScanState *node)
 }
 
 static void
-ColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
+PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 							ExplainState *es)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 
 	ExplainPropertyInteger("Columnar Vectorized Group Keys", NULL,
 						   state->nkeys, es);
@@ -3909,13 +3909,13 @@ ColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 	}
 }
 
-static const CustomExecMethods columnar_groupagg_exec_methods = {
+static const CustomExecMethods pgcolumnar_groupagg_exec_methods = {
 	.CustomName = "ColumnarScan",
-	.BeginCustomScan = ColumnarBeginGroupAggScan,
-	.ExecCustomScan = ColumnarExecGroupAggScan,
-	.EndCustomScan = ColumnarEndGroupAggScan,
-	.ReScanCustomScan = ColumnarReScanGroupAggScan,
-	.ExplainCustomScan = ColumnarExplainGroupAggScan,
+	.BeginCustomScan = PgColumnarBeginGroupAggScan,
+	.ExecCustomScan = PgColumnarExecGroupAggScan,
+	.EndCustomScan = PgColumnarEndGroupAggScan,
+	.ReScanCustomScan = PgColumnarReScanGroupAggScan,
+	.ExplainCustomScan = PgColumnarExplainGroupAggScan,
 };
 
 /* -------------------------------------------------------------------------
@@ -3924,23 +3924,23 @@ static const CustomExecMethods columnar_groupagg_exec_methods = {
  * The same shared pg_atomic_uint32 the ungrouped partial node uses (gap 23),
  * handing out row-group indices so each worker folds distinct groups. These
  * mirror the ungrouped four and cannot share their bodies: those cast the node
- * to ColumnarAggScanState, and the grouped node is a different struct.
+ * to PgColumnarAggScanState, and the grouped node is a different struct.
  *
  * The grouped node opens its reader lazily in Exec, strictly after both DSM-init
  * and Worker-init, so the callbacks need only record the counter on the state.
  * ------------------------------------------------------------------------- */
 
 static Size
-ColumnarEstimateDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt)
+PgColumnarEstimateDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt)
 {
 	return sizeof(pg_atomic_uint32);
 }
 
 static void
-ColumnarInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
 								  void *coordinate)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	pg_atomic_init_u32(counter, 0);
@@ -3961,17 +3961,17 @@ ColumnarInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
 	 * a future path that reaches here with unflushed state would silently give
 	 * workers a stale view; no test covers its removal, and none claims to.
 	 */
-	ColumnarFlushWriteStateForRelation(state->relid);
+	PgColumnarFlushWriteStateForRelation(state->relid);
 	{
 		Relation	frel = table_open(state->relid, AccessShareLock);
 
-		ColumnarFlushDeleteVectorForRelation(frel);
+		PgColumnarFlushDeleteVectorForRelation(frel);
 		table_close(frel, AccessShareLock);
 	}
 }
 
 static void
-ColumnarReInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarReInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt,
 									void *coordinate)
 {
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
@@ -3981,26 +3981,26 @@ ColumnarReInitializeDSMGroupAggScan(CustomScanState *node, ParallelContext *pcxt
 }
 
 static void
-ColumnarInitializeWorkerGroupAggScan(CustomScanState *node, shm_toc *toc,
+PgColumnarInitializeWorkerGroupAggScan(CustomScanState *node, shm_toc *toc,
 									 void *coordinate)
 {
-	ColumnarGroupAggScanState *state = (ColumnarGroupAggScanState *) node;
+	PgColumnarGroupAggScanState *state = (PgColumnarGroupAggScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	state->parallelCounter = counter;
 }
 
-static const CustomExecMethods columnar_groupagg_parallel_exec_methods = {
+static const CustomExecMethods pgcolumnar_groupagg_parallel_exec_methods = {
 	.CustomName = "ColumnarScan",
-	.BeginCustomScan = ColumnarBeginGroupAggScan,
-	.ExecCustomScan = ColumnarExecGroupAggScan,
-	.EndCustomScan = ColumnarEndGroupAggScan,
-	.ReScanCustomScan = ColumnarReScanGroupAggScan,
-	.ExplainCustomScan = ColumnarExplainGroupAggScan,
-	.EstimateDSMCustomScan = ColumnarEstimateDSMGroupAggScan,
-	.InitializeDSMCustomScan = ColumnarInitializeDSMGroupAggScan,
-	.ReInitializeDSMCustomScan = ColumnarReInitializeDSMGroupAggScan,
-	.InitializeWorkerCustomScan = ColumnarInitializeWorkerGroupAggScan,
+	.BeginCustomScan = PgColumnarBeginGroupAggScan,
+	.ExecCustomScan = PgColumnarExecGroupAggScan,
+	.EndCustomScan = PgColumnarEndGroupAggScan,
+	.ReScanCustomScan = PgColumnarReScanGroupAggScan,
+	.ExplainCustomScan = PgColumnarExplainGroupAggScan,
+	.EstimateDSMCustomScan = PgColumnarEstimateDSMGroupAggScan,
+	.InitializeDSMCustomScan = PgColumnarInitializeDSMGroupAggScan,
+	.ReInitializeDSMCustomScan = PgColumnarReInitializeDSMGroupAggScan,
+	.InitializeWorkerCustomScan = PgColumnarInitializeWorkerGroupAggScan,
 };
 
 /* -------------------------------------------------------------------------
@@ -4008,8 +4008,8 @@ static const CustomExecMethods columnar_groupagg_parallel_exec_methods = {
  * ------------------------------------------------------------------------- */
 
 void
-ColumnarVectorInit(void)
+PgColumnarVectorInit(void)
 {
 	prev_create_upper_paths_hook = create_upper_paths_hook;
-	create_upper_paths_hook = ColumnarCreateUpperPaths;
+	create_upper_paths_hook = PgColumnarCreateUpperPaths;
 }

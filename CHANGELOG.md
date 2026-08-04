@@ -6,10 +6,40 @@ pre-release; the version marker is `1.0-alpha`, recorded in `VERSION`. New table
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's own `default_version` is still `1.0-dev`. That is deliberate: it
-governs `ALTER EXTENSION UPDATE`, and moving it needs an upgrade script that does
-not exist yet. `SELECT extversion FROM pg_extension` therefore reports `1.0-dev`
-on a 1.0-alpha build.
+The extension's `default_version` is `1.0-alpha`, and an upgrade script ships with
+it. Older notes in this file describe `default_version` as pinned at `1.0-dev`,
+which was true until that script existed.
+
+## [Unreleased]
+
+### Changed
+
+- The extension's exported C symbols are namespaced under `pgcolumnar` (#382).
+  Two extensions that both call themselves `columnar` could define the same
+  symbol. `columnar_handler` and `columnar_relation_storageid` collided with
+  Citus columnar. Four settings variables such as `columnar_stripe_row_limit`
+  also shared names with the same settings there. That case binds one library's
+  setting to the other's storage.
+- `default_version` moves from `1.0-dev` to `1.0-alpha`, so
+  `SELECT extversion FROM pg_extension` now agrees with `VERSION`.
+
+### Upgrading
+
+**Run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the
+extension, after installing this build.**
+
+The rename moves the C symbol names that each installed function recorded when it
+was created. Replace the shared library without this step and those records
+point at symbols the new library does not export. The extension then stops
+working until the catalog is updated. Reading an existing columnar table fails
+with `could not find function "columnar_handler"`.
+
+Nothing happens to your data, and no conversion runs. The upgrade replaces
+catalog entries only, and keeps each function's identity, so the access method
+binding and every dependency survive. The SQL you write does not change.
+
+See [Upgrade](docs/installation.md#upgrade) for the commands, including how to
+list the databases that need it.
 
 ## [1.0-alpha] - 2026-08-04
 

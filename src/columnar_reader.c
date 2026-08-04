@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_reader.c
+ * pgcolumnar_reader.c
  *		The columnar reader: a sequential scan that reads all columns of all
  *		stripes and reconstructs rows (spec 4, 6). Also holds the value-stream
  *		codec shared with the writer.
@@ -49,7 +49,7 @@ typedef struct SkipPredicate
 	Oid			hashCollation;
 } SkipPredicate;
 
-struct ColumnarReadState
+struct PgColumnarReadState
 {
 	Relation	rel;
 	Snapshot	snapshot;
@@ -161,13 +161,13 @@ struct ColumnarReadState
 	MemoryContext skipContext;		/* scratch for skip-list evaluation */
 };
 
-static void columnar_build_predicates(ColumnarReadState *readState,
+static void pgcolumnar_build_predicates(PgColumnarReadState *readState,
 									  int nkeys, ScanKey keys);
-static int64 columnar_next_group_index(ColumnarReadState *readState);
+static int64 pgcolumnar_next_group_index(PgColumnarReadState *readState);
 
 /* qsort comparator for the row group restriction set */
 static int
-columnar_uint64_cmp(const void *a, const void *b)
+pgcolumnar_uint64_cmp(const void *a, const void *b)
 {
 	uint64		x = *(const uint64 *) a;
 	uint64		y = *(const uint64 *) b;
@@ -176,13 +176,13 @@ columnar_uint64_cmp(const void *a, const void *b)
 }
 
 /*
- * columnar_group_is_restricted_in
+ * pgcolumnar_group_is_restricted_in
  *		Is this group number in the read state's restriction set? Binary search
- *		over the sorted array set by ColumnarReadRestrictToGroups. Only called
+ *		over the sorted array set by PgColumnarReadRestrictToGroups. Only called
  *		when restrictGroups is non-NULL.
  */
 static bool
-columnar_group_is_restricted_in(ColumnarReadState *rs, uint64 groupNumber)
+pgcolumnar_group_is_restricted_in(PgColumnarReadState *rs, uint64 groupNumber)
 {
 	int			lo = 0;
 	int			hi = rs->numRestrictGroups - 1;
@@ -206,13 +206,13 @@ columnar_group_is_restricted_in(ColumnarReadState *rs, uint64 groupNumber)
  * ------------------------------------------------------------------------- */
 
 /*
- * ColumnarEncodeValue
+ * PgColumnarEncodeValue
  *		Append a non-null value to a column's value stream. Fixed-length
  *		values are stored as their raw bytes; varlena values are detoasted
  *		and stored with a full 4-byte header so the reader can size them.
  */
 void
-ColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
+PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 {
 	if (att->attbyval)
 	{
@@ -245,13 +245,13 @@ ColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 }
 
 /*
- * ColumnarDecodeValue
+ * PgColumnarDecodeValue
  *		Read one value from a column's value stream, advancing *cursor.
  *		By-reference values are copied into targetContext so they outlive the
  *		stripe buffer's next reset.
  */
 Datum
-ColumnarDecodeValue(Form_pg_attribute att, char **cursor,
+PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 					MemoryContext targetContext)
 {
 	char	   *p = *cursor;
@@ -272,7 +272,7 @@ ColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 	}
 	else
 	{
-		Size		len = ColumnarVarSizeAnyUnaligned(p);
+		Size		len = PgColumnarVarSizeAnyUnaligned(p);
 		char	   *copy = MemoryContextAlloc(targetContext, len);
 
 		memcpy(copy, p, len);
@@ -287,23 +287,23 @@ ColumnarDecodeValue(Form_pg_attribute att, char **cursor,
  * sequential scan
  * ------------------------------------------------------------------------- */
 
-ColumnarReadState *
-ColumnarBeginRead(Relation rel, Snapshot snapshot,
+PgColumnarReadState *
+PgColumnarBeginRead(Relation rel, Snapshot snapshot,
 				  ParallelTableScanDesc parallelScan,
 				  Bitmapset *projectedColumns, int nkeys, ScanKey keys)
 {
-	return ColumnarBeginReadWithStorage(rel, snapshot, ColumnarStorageId(rel),
+	return PgColumnarBeginReadWithStorage(rel, snapshot, PgColumnarStorageId(rel),
 										RelationGetDescr(rel), parallelScan,
 										projectedColumns, nkeys, keys);
 }
 
-ColumnarReadState *
-ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
+PgColumnarReadState *
+PgColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 							 uint64 storageId, TupleDesc tupdesc,
 							 ParallelTableScanDesc parallelScan,
 							 Bitmapset *projectedColumns, int nkeys, ScanKey keys)
 {
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	MemoryContext readContext;
 	MemoryContext oldContext;
 
@@ -312,10 +312,10 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 										ALLOCSET_DEFAULT_SIZES);
 	oldContext = MemoryContextSwitchTo(readContext);
 
-	readState = palloc0(sizeof(ColumnarReadState));
+	readState = palloc0(sizeof(PgColumnarReadState));
 	readState->rel = rel;
 	readState->snapshot = snapshot;
-	readState->metaSnapshot = ColumnarCatalogSnapshot(snapshot);
+	readState->metaSnapshot = PgColumnarCatalogSnapshot(snapshot);
 	readState->tupdesc = tupdesc;
 	readState->natts = readState->tupdesc->natts;
 	readState->storageId = storageId;
@@ -323,10 +323,10 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 	/*
 	 * Reject a native data format version this build does not understand before
 	 * any bytes are decoded (#240). The metapage version was already checked when
-	 * ColumnarStorageId read the metapage; this is the independent data-format
+	 * PgColumnarStorageId read the metapage; this is the independent data-format
 	 * stamp, catching a future encoding change that keeps the metapage layout.
 	 */
-	ColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
+	PgColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
 
 	/*
 	 * Resolve each column's missing value once, for stripes that predate an
@@ -348,13 +348,13 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 
 	/*
 	 * Flatten the projection (#338). A NULL bitmap means "all columns" -- that is
-	 * how columnar_projected_columns reports a whole-row Var, any system column,
+	 * how pgcolumnar_projected_columns reports a whole-row Var, any system column,
 	 * and a query referencing no column at all (count(*)), and it is what every
 	 * caller that does not compute a projection passes.
 	 */
 	readState->colWanted = palloc(sizeof(bool) * readState->natts);
 	readState->allColumnsWanted = (projectedColumns == NULL ||
-								   !columnar_enable_column_projection);
+								   !pgcolumnar_enable_column_projection);
 	{
 		int			pc;
 
@@ -380,8 +380,8 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 												   "columnar read skip",
 												   ALLOCSET_DEFAULT_SIZES);
 
-	if (columnar_enable_qual_pushdown)
-		columnar_build_predicates(readState, nkeys, keys);
+	if (pgcolumnar_enable_qual_pushdown)
+		pgcolumnar_build_predicates(readState, nkeys, keys);
 
 	MemoryContextSwitchTo(oldContext);
 	return readState;
@@ -389,14 +389,14 @@ ColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 
 
 /*
- * columnar_build_predicates
+ * pgcolumnar_build_predicates
  *		Translate the scan's ScanKeys into skip predicates for chunk-group
  *		filtering (spec 9). Only simple, same-type btree comparison keys on an
  *		orderable column are used; anything else is ignored, so skipping stays
  *		conservative. Runs in readContext.
  */
 static void
-columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
+pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey keys)
 {
 	int			i;
 	int			n = 0;
@@ -448,13 +448,13 @@ columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
 		 * For an equality predicate on a hashable column with a safe collation,
 		 * enable the bloom-filter probe (I7, gap 25), matching how the filter was
 		 * built. The scan key already matches the column collation (a
-		 * differently collated predicate is not pushed; see ColumnarBuildScanKeys),
+		 * differently collated predicate is not pushed; see PgColumnarBuildScanKeys),
 		 * so hashing the constant under the column collation is consistent.
 		 */
 		readState->predicates[n].hasHash = false;
 		if (key->sk_strategy == BTEqualStrategyNumber &&
 			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
-			ColumnarCollationIsDeterministic(att->attcollation))
+			PgColumnarCollationIsDeterministic(att->attcollation))
 		{
 			readState->predicates[n].hasHash = true;
 			fmgr_info_copy(&readState->predicates[n].hashFn,
@@ -468,7 +468,7 @@ columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
 }
 
 /*
- * columnar_group_can_match
+ * pgcolumnar_group_can_match
  *		Decide whether a chunk group could contain a row satisfying every
  *		pushed-down predicate, using the stored per-chunk min/max (spec 9). A
  *		return of false means the group can be skipped. Missing min/max, or a
@@ -476,7 +476,7 @@ columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
  */
 
 /*
- * columnar_setup_group
+ * pgcolumnar_setup_group
  *		Position on a chunk group: decompress each projected column's value
  *		stream into the group context and point the column cursors at the
  *		decompressed bytes and the (uncompressed) exists bytes. Non-projected
@@ -484,7 +484,7 @@ columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
  */
 
 /*
- * columnar_position_group
+ * pgcolumnar_position_group
  *		Advance from the current groupIndex to the next chunk group that could
  *		match the pushed-down predicates, skipping groups whose min/max rule
  *		them out (spec 9). Returns true when positioned on a readable group,
@@ -492,19 +492,19 @@ columnar_build_predicates(ColumnarReadState *readState, int nkeys, ScanKey keys)
  */
 
 /*
- * columnar_load_stripe
+ * pgcolumnar_load_stripe
  *		Read a stripe's metadata and data into memory and position at its
  *		first chunk group.
  */
 
 /*
- * columnar_read_start
+ * pgcolumnar_read_start
  *		Lazily load the stripe list on the first fetch. For a parallel scan a
  *		single worker claims the whole scan and the others see it exhausted,
  *		which is a correct (if not parallel-accelerated) behaviour.
  */
 static void
-columnar_read_start(ColumnarReadState *readState)
+pgcolumnar_read_start(PgColumnarReadState *readState)
 {
 	if (readState->started)
 		return;
@@ -526,7 +526,7 @@ columnar_read_start(ColumnarReadState *readState)
 		MemoryContext oldContext = MemoryContextSwitchTo(readState->readContext);
 
 		readState->rowGroupList =
-			ColumnarReadRowGroupList(readState->storageId,
+			PgColumnarReadRowGroupList(readState->storageId,
 									 readState->metaSnapshot);
 		readState->rowGroupIndex = 0;
 		MemoryContextSwitchTo(oldContext);
@@ -534,18 +534,18 @@ columnar_read_start(ColumnarReadState *readState)
 }
 
 /*
- * columnar_native_decode_chunk
+ * pgcolumnar_native_decode_chunk
  *		Reconstruct a native column chunk's raw present-value stream (D4) from its
  *		encoding descriptor. The on-disk values region is the per-1024-value-vector
  *		encoded streams concatenated, optionally block-compressed as a whole. This
- *		reverses the block codec, then decodes each vector with ColumnarDecodeChunk
+ *		reverses the block codec, then decodes each vector with PgColumnarDecodeChunk
  *		into one raw buffer byte-identical to what the writer buffered, so the
  *		per-row producer walks it exactly as it walks the D2b baseline. Allocated
  *		in the group context. The descriptor lengths are cross-checked so a corrupt
  *		chunk cannot drive a decoder past its buffers.
  */
 static char *
-columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
+pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 							 char *values, uint32 valuesLen,
 							 const char *desc, uint32 descLen, int blockCodec,
 							 uint32 **outVecRawLen, int *outVecCount)
@@ -622,7 +622,7 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 
 	/* reverse the block codec to recover the concatenated encoded region */
 	if (blockCodec != COLUMNAR_COMPRESSION_NONE)
-		encRegion = ColumnarDecompressValueStream(values, valuesLen, blockCodec,
+		encRegion = PgColumnarDecompressValueStream(values, valuesLen, blockCodec,
 												  (uint32) encTotal,
 												  decodeScratch);
 	else
@@ -657,7 +657,7 @@ columnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		vecRawLen[v] = rawLen;
 		if (rawLen > 0)
 		{
-			char	   *rawVec = ColumnarDecodeChunk(encCursor, encLen, encType,
+			char	   *rawVec = PgColumnarDecodeChunk(encCursor, encLen, encType,
 													 att, valueCount, rawLen,
 													 sharedTable, sharedTableLen,
 													 decodeScratch);
@@ -700,9 +700,9 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 		return false;
 
 	cur = (char *) z->minimum;
-	minv = ColumnarDecodeValue(att, &cur, cx);
+	minv = PgColumnarDecodeValue(att, &cur, cx);
 	cur = (char *) z->maximum;
-	maxv = ColumnarDecodeValue(att, &cur, cx);
+	maxv = PgColumnarDecodeValue(att, &cur, cx);
 
 	switch (pred->strategy)
 	{
@@ -734,16 +734,16 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 }
 
 /*
- * columnar_native_group_can_match
+ * pgcolumnar_native_group_can_match
  *		Decide whether a native row group could hold a row satisfying every
  *		pushed-down predicate, using its whole-chunk zone maps (native spec 7.1,
  *		Phase D5b). Returns false when the group can be skipped. Mirrors the 2.2
- *		columnar_group_can_match, reading min/max from pgcolumnar.zone_map instead
+ *		pgcolumnar_group_can_match, reading min/max from pgcolumnar.zone_map instead
  *		of the 2.2 chunk catalog. A missing or non-orderable zone map is treated
  *		conservatively as "may match". Runs in rs->skipContext (caller-reset).
  */
 static bool
-columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
+pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 {
 	List	   *zones;
 	NativeZoneMapMetadata **byCol;
@@ -755,7 +755,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 	if (rs->numPredicates == 0)
 		return true;
 
-	zones = ColumnarReadZoneMapList(rs->storageId, groupNumber, rs->metaSnapshot);
+	zones = PgColumnarReadZoneMapList(rs->storageId, groupNumber, rs->metaSnapshot);
 	byCol = palloc0(sizeof(NativeZoneMapMetadata *) * rs->natts);
 	foreach(lc, zones)
 	{
@@ -779,7 +779,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 		 * columns that min/max cannot.
 		 */
 		if (pred->strategy == BTEqualStrategyNumber &&
-			columnar_enable_bloom_filter && pred->hasHash)
+			pgcolumnar_enable_bloom_filter && pred->hasHash)
 		{
 			NativeBloomMetadata *b;
 
@@ -811,7 +811,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 			if (!bloomLookedUp[pred->attidx])
 			{
 				byColBloom[pred->attidx] =
-					ColumnarReadBloomForColumn(rs->storageId, groupNumber,
+					PgColumnarReadBloomForColumn(rs->storageId, groupNumber,
 											   pred->attidx, rs->metaSnapshot);
 				bloomLookedUp[pred->attidx] = true;
 			}
@@ -823,7 +823,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 					FunctionCall1Coll(&pred->hashFn, pred->hashCollation,
 									  pred->compareValue));
 
-				if (!ColumnarBloomProbe(b->filter, b->filterLen, h))
+				if (!PgColumnarBloomProbe(b->filter, b->filterLen, h))
 					return false;
 			}
 		}
@@ -833,7 +833,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
 }
 
 /*
- * columnar_native_build_skipvec
+ * pgcolumnar_native_build_skipvec
  *		Build the per-vector skip flags for a loaded row group (native spec 7.1,
  *		Phase D5b): vector v is skipped when any predicate's per-vector zone map
  *		proves no row in it can match. Also fills rs->nativeVecStart with the
@@ -844,7 +844,7 @@ columnar_native_group_can_match(ColumnarReadState *rs, uint64 groupNumber)
  *		min/max in rs->skipContext.
  */
 static void
-columnar_native_build_skipvec(ColumnarReadState *rs, uint64 groupNumber, int vecCount)
+pgcolumnar_native_build_skipvec(PgColumnarReadState *rs, uint64 groupNumber, int vecCount)
 {
 	List	   *zones;
 	NativeZoneMapMetadata ***byColVec;
@@ -863,7 +863,7 @@ columnar_native_build_skipvec(ColumnarReadState *rs, uint64 groupNumber, int vec
 	if (rs->numPredicates == 0 || vecCount <= 0)
 		return;
 
-	zones = ColumnarReadZoneMapVectors(rs->storageId, groupNumber, rs->metaSnapshot);
+	zones = PgColumnarReadZoneMapVectors(rs->storageId, groupNumber, rs->metaSnapshot);
 	if (zones == NIL)
 		return;					/* legacy: no per-vector zone maps */
 
@@ -921,21 +921,21 @@ columnar_native_build_skipvec(ColumnarReadState *rs, uint64 groupNumber, int vec
 }
 
 /* a half-open span of the row group's bytes, used to build coalesced reads */
-typedef struct ColumnarByteRange
+typedef struct PgColumnarByteRange
 {
 	uint64		start;
 	uint64		end;
-} ColumnarByteRange;
+} PgColumnarByteRange;
 
 /*
- * columnar_byte_range_cmp
+ * pgcolumnar_byte_range_cmp
  *		Order byte ranges by start offset, so adjacent ones can be coalesced.
  */
 static int
-columnar_byte_range_cmp(const void *a, const void *b)
+pgcolumnar_byte_range_cmp(const void *a, const void *b)
 {
-	uint64		sa = ((const ColumnarByteRange *) a)->start;
-	uint64		sb = ((const ColumnarByteRange *) b)->start;
+	uint64		sa = ((const PgColumnarByteRange *) a)->start;
+	uint64		sb = ((const PgColumnarByteRange *) b)->start;
 
 	if (sa < sb)
 		return -1;
@@ -945,21 +945,21 @@ columnar_byte_range_cmp(const void *a, const void *b)
 }
 
 /*
- * columnar_native_read_projected
+ * pgcolumnar_native_read_projected
  *		Read only the byte ranges the projected columns occupy (#338), rather
  *		than the whole row group.
  *
  *		Ranges that touch or overlap in the file are coalesced, so a projection
  *		covering neighbouring columns costs one read rather than one per column.
- *		Chunks are written column-major (columnar_write_state.c), so in practice
+ *		Chunks are written column-major (pgcolumnar_write_state.c), so in practice
  *		a projection is a small number of runs. Everything lands at its natural
  *		offset inside the full-size group buffer, leaving the rest untouched.
  */
 static void
-columnar_native_read_projected(ColumnarReadState *rs,
+pgcolumnar_native_read_projected(PgColumnarReadState *rs,
 							   NativeRowGroupMetadata *rg, List *chunks)
 {
-	ColumnarByteRange *ranges;
+	PgColumnarByteRange *ranges;
 	uint64		groupEnd = rg->fileOffset + rg->byteLength;
 	uint64		minStart = groupEnd;
 	uint64		maxEnd = rg->fileOffset;
@@ -971,8 +971,8 @@ columnar_native_read_projected(ColumnarReadState *rs,
 	if (chunks == NIL)
 		return;
 
-	ranges = (ColumnarByteRange *)
-		palloc(sizeof(ColumnarByteRange) * list_length(chunks));
+	ranges = (PgColumnarByteRange *)
+		palloc(sizeof(PgColumnarByteRange) * list_length(chunks));
 
 	foreach(lc, chunks)
 	{
@@ -1052,7 +1052,7 @@ columnar_native_read_projected(ColumnarReadState *rs,
 	if (n == 0)
 		return;
 
-	qsort(ranges, n, sizeof(ColumnarByteRange), columnar_byte_range_cmp);
+	qsort(ranges, n, sizeof(PgColumnarByteRange), pgcolumnar_byte_range_cmp);
 
 	for (i = 0; i < n;)
 	{
@@ -1067,7 +1067,7 @@ columnar_native_read_projected(ColumnarReadState *rs,
 			j++;
 		}
 
-		ColumnarReadLogicalData(rs->rel, start,
+		PgColumnarReadLogicalData(rs->rel, start,
 								rs->nativeBuffer + (start - rg->fileOffset),
 								end - start);
 		i = j;
@@ -1077,7 +1077,7 @@ columnar_native_read_projected(ColumnarReadState *rs,
 }
 
 /*
- * columnar_native_load_group
+ * pgcolumnar_native_load_group
  *		Load the next native row group (PGCN v1, Phase D3): read the bytes of the
  *		projected columns into the group context and set each such column's
  *		validity-bitmap pointer and values cursor. Row groups the zone maps prove
@@ -1089,7 +1089,7 @@ columnar_native_read_projected(ColumnarReadState *rs,
  *		left unmaterialised and the row loop emits NULL for them.
  */
 static bool
-columnar_native_load_group(ColumnarReadState *rs)
+pgcolumnar_native_load_group(PgColumnarReadState *rs)
 {
 	MemoryContext oldContext;
 	NativeRowGroupMetadata *rg;
@@ -1102,7 +1102,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 	/*
 	 * Claim the next row group and advance past any the zone maps rule out
 	 * (native spec 7.1). Under a parallel custom scan each worker claims distinct
-	 * groups from the shared counter (columnar_next_group_index), so a group is
+	 * groups from the shared counter (pgcolumnar_next_group_index), so a group is
 	 * read by exactly one backend; serially it walks rowGroupIndex. Without the
 	 * counter every worker read every group and a parallel scan returned each row
 	 * once per participating backend (D6e).
@@ -1110,7 +1110,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 	rg = NULL;
 	for (;;)
 	{
-		int64		gi = columnar_next_group_index(rs);
+		int64		gi = pgcolumnar_next_group_index(rs);
 		bool		match = true;
 
 		if (gi < 0)
@@ -1118,14 +1118,14 @@ columnar_native_load_group(ColumnarReadState *rs)
 
 		rg = (NativeRowGroupMetadata *) list_nth(rs->rowGroupList, (int) gi);
 		if (rs->restrictGroups != NULL &&
-			!columnar_group_is_restricted_in(rs, rg->groupNumber))
+			!pgcolumnar_group_is_restricted_in(rs, rg->groupNumber))
 			match = false;
 		else if (rs->numPredicates > 0)
 		{
 			MemoryContext old = MemoryContextSwitchTo(rs->skipContext);
 
 			MemoryContextReset(rs->skipContext);
-			match = columnar_native_group_can_match(rs, rg->groupNumber);
+			match = pgcolumnar_native_group_can_match(rs, rg->groupNumber);
 			MemoryContextSwitchTo(old);
 		}
 		if (match)
@@ -1145,7 +1145,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 	 * per-column byte ranges the projected read needs. It is a catalog read and
 	 * touches none of the group's data pages.
 	 */
-	chunks = ColumnarReadColumnChunkList(rs->storageId, rg->groupNumber,
+	chunks = PgColumnarReadColumnChunkList(rs->storageId, rg->groupNumber,
 										 rs->metaSnapshot);
 
 	/*
@@ -1159,10 +1159,10 @@ columnar_native_load_group(ColumnarReadState *rs)
 	if (rg->byteLength > 0)
 	{
 		if (rs->allColumnsWanted)
-			ColumnarReadLogicalData(rs->rel, rg->fileOffset, rs->nativeBuffer,
+			PgColumnarReadLogicalData(rs->rel, rg->fileOffset, rs->nativeBuffer,
 									rg->byteLength);
 		else
-			columnar_native_read_projected(rs, rg, chunks);
+			pgcolumnar_native_read_projected(rs, rg, chunks);
 	}
 
 	rs->nativeValidity = palloc0(sizeof(char *) * rs->natts);
@@ -1211,7 +1211,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 
 			/* D4: reconstruct the raw present-value stream from the descriptor */
 			rs->nativeValueCursor[cc->columnIndex] =
-				columnar_native_decode_chunk(rs->groupContext, att, base + validityBytes,
+				pgcolumnar_native_decode_chunk(rs->groupContext, att, base + validityBytes,
 											 (uint32) (cc->pageLength - validityBytes),
 											 cc->encodingDescriptor,
 											 cc->encodingDescriptorLen,
@@ -1228,7 +1228,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 	 * vector boundaries line up); a legacy baseline chunk disables it.
 	 */
 	if (allDescriptor)
-		columnar_native_build_skipvec(rs, rg->groupNumber, maxVecCount);
+		pgcolumnar_native_build_skipvec(rs, rg->groupNumber, maxVecCount);
 	else
 	{
 		rs->nativeSkipVec = NULL;
@@ -1240,12 +1240,12 @@ columnar_native_load_group(ColumnarReadState *rs)
 	/*
 	 * Native delete visibility (D6b): combine this group's row-mask rows (keyed
 	 * by group number, one bit per row-in-group) into a single delete mask that
-	 * columnar_native_next_row consults to skip deleted rows.
+	 * pgcolumnar_native_next_row consults to skip deleted rows.
 	 */
 	rs->nativeDeleteMask = NULL;
 	rs->nativeDeleteMaskLen = 0;
 	{
-		List	   *maskList = ColumnarReadDeleteVectorList(rs->storageId,
+		List	   *maskList = PgColumnarReadDeleteVectorList(rs->storageId,
 													   rg->groupNumber,
 													   rs->metaSnapshot);
 		ListCell   *mlc;
@@ -1276,7 +1276,7 @@ columnar_native_load_group(ColumnarReadState *rs)
 }
 
 /*
- * columnar_native_skip_current_vector
+ * pgcolumnar_native_skip_current_vector
  *		Per-vector skipping (native spec 7.1, D5b): when rowInGroup sits at the
  *		start of a vector the zone maps rule out, step each column's value cursor
  *		past that vector's decoded bytes and jump rowInGroup to the next vector,
@@ -1284,7 +1284,7 @@ columnar_native_load_group(ColumnarReadState *rs)
  *		caller re-checks bounds), false when the current row must be emitted.
  */
 static bool
-columnar_native_skip_current_vector(ColumnarReadState *rs)
+pgcolumnar_native_skip_current_vector(PgColumnarReadState *rs)
 {
 	int			v = rs->nativeCurVec;
 	int			V = rs->nativeVectorCount;
@@ -1309,14 +1309,14 @@ columnar_native_skip_current_vector(ColumnarReadState *rs)
 }
 
 /*
- * columnar_native_next_row
+ * pgcolumnar_native_next_row
  *		Native-format sequential row production (Phase D3). Decodes one row from
  *		the current row group, reconstructing each column from its validity bit
  *		and, when present, the next value on its cursor. Vectors the zone maps rule
  *		out are stepped over without decoding (Phase D5b).
  */
 static bool
-columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
+pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 						 uint64 *rowNumber)
 {
 	MemoryContext oldContext;
@@ -1341,7 +1341,7 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 
 		if (rs->nativeGroup == NULL || rs->rowInGroup >= rs->groupRowCount)
 		{
-			if (!columnar_native_load_group(rs))
+			if (!pgcolumnar_native_load_group(rs))
 			{
 				rs->exhausted = true;
 				return false;
@@ -1349,7 +1349,7 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 		}
 
 		if (rs->nativeSkipVec != NULL &&
-			columnar_native_skip_current_vector(rs))
+			pgcolumnar_native_skip_current_vector(rs))
 			continue;			/* stepped past a ruled-out vector; re-check */
 
 		/*
@@ -1394,7 +1394,7 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 			{
 				/*
 				 * Fast path (#289): inline the attbyval decode. This is exactly
-				 * what ColumnarDecodeValue does for a by-value type -- one
+				 * what PgColumnarDecodeValue does for a by-value type -- one
 				 * fetch_att and advance attlen -- but skips the out-of-line call
 				 * and its own attbyval branch, which is the per-row decode
 				 * dispatch #289 profiled as hot. It works for both baseline and
@@ -1411,7 +1411,7 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 					rs->nativeValueCursor[c] = p + att->attlen;
 				}
 				else
-					values[c] = ColumnarDecodeValue(att,
+					values[c] = PgColumnarDecodeValue(att,
 													&rs->nativeValueCursor[c],
 													rs->rowContext);
 				nulls[c] = false;
@@ -1441,37 +1441,37 @@ columnar_native_next_row(ColumnarReadState *rs, Datum *values, bool *nulls,
 }
 
 bool
-ColumnarReadNextRow(ColumnarReadState *readState, Datum *values, bool *nulls,
+PgColumnarReadNextRow(PgColumnarReadState *readState, Datum *values, bool *nulls,
 					uint64 *rowNumber)
 {
-	columnar_read_start(readState);
-	return columnar_native_next_row(readState, values, nulls, rowNumber);
+	pgcolumnar_read_start(readState);
+	return pgcolumnar_native_next_row(readState, values, nulls, rowNumber);
 }
 
 /* -------------------------------------------------------------------------
  * Batch-fold accessors (#289)
  *
  * These expose the current loaded group's decoded buffer so an ungrouped
- * aggregate can fold it column-at-a-time, without columnar_native_next_row
+ * aggregate can fold it column-at-a-time, without pgcolumnar_native_next_row
  * producing one Datum tuple per row. Correctness is the caller's: it must walk
  * each column's validity bitmap to map a row to its packed value (nulls have no
  * slot), honor the delete mask, and step the per-column present index past a
  * ruled-out vector. Only fixed-width by-value columns can be read this way; the
- * caller checks that from the tuple descriptor before using ColumnarReadFoldColumn.
+ * caller checks that from the tuple descriptor before using PgColumnarReadFoldColumn.
  * ------------------------------------------------------------------------- */
 
 /*
  * Advance to the next row group to fold, loading it (and honoring restrict,
- * parallel and zone-map group skipping via columnar_native_load_group). Returns
+ * parallel and zone-map group skipping via pgcolumnar_native_load_group). Returns
  * false at end of scan; on true, the accessors below describe the loaded group.
  */
 bool
-ColumnarReadFoldNextGroup(ColumnarReadState *readState)
+PgColumnarReadFoldNextGroup(PgColumnarReadState *readState)
 {
-	columnar_read_start(readState);
+	pgcolumnar_read_start(readState);
 	if (readState->exhausted)
 		return false;
-	if (!columnar_native_load_group(readState))
+	if (!pgcolumnar_native_load_group(readState))
 	{
 		readState->exhausted = true;
 		return false;
@@ -1487,7 +1487,7 @@ ColumnarReadFoldNextGroup(ColumnarReadState *readState)
  * the vector count.
  */
 void
-ColumnarReadFoldGroupInfo(ColumnarReadState *readState, uint64 *nrows,
+PgColumnarReadFoldGroupInfo(PgColumnarReadState *readState, uint64 *nrows,
 						  const char **deleteMask, uint32 *deleteMaskLen,
 						  const bool **skipVec, const uint32 **vecStart,
 						  int *vectorCount)
@@ -1509,7 +1509,7 @@ ColumnarReadFoldGroupInfo(ColumnarReadState *readState, uint64 *nrows,
  * COLUMN); the caller then folds it from the missing value or falls back.
  */
 bool
-ColumnarReadFoldColumn(ColumnarReadState *readState, int attidx,
+PgColumnarReadFoldColumn(PgColumnarReadState *readState, int attidx,
 					   const char **validity, const char **packed,
 					   int16 *attlen, const uint32 **vecRawLen)
 {
@@ -1526,14 +1526,14 @@ ColumnarReadFoldColumn(ColumnarReadState *readState, int attidx,
 }
 
 /*
- * columnar_next_group_index
+ * pgcolumnar_next_group_index
  *		The next native row group to scan, or -1 when none remain. The native
- *		counterpart of columnar_next_stripe_index: a parallel custom scan claims
+ *		counterpart of pgcolumnar_next_stripe_index: a parallel custom scan claims
  *		it from the shared atomic so each worker reads distinct row groups (gap
  *		23, D6e); a serial scan walks rowGroupIndex.
  */
 static int64
-columnar_next_group_index(ColumnarReadState *readState)
+pgcolumnar_next_group_index(PgColumnarReadState *readState)
 {
 	int			ngroups = list_length(readState->rowGroupList);
 	uint32		gi;
@@ -1547,26 +1547,26 @@ columnar_next_group_index(ColumnarReadState *readState)
 }
 
 void
-ColumnarReadSetParallelCounter(ColumnarReadState *readState,
+PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
 							   pg_atomic_uint32 *counter)
 {
 	readState->parallelCounter = counter;
 }
 
 /*
- * ColumnarReadRestrictToGroups
+ * PgColumnarReadRestrictToGroups
  *		Restrict this scan to the given row group numbers (issue #149). Groups
  *		outside the set are skipped in the claim loop, so their bytes are never
  *		read and their column chunks never decoded. The array is copied into the
  *		read state's own context and sorted there, so the caller may free its own.
  *
- *		Must be called before the first ColumnarReadNextRow. Passing ngroups == 0
+ *		Must be called before the first PgColumnarReadNextRow. Passing ngroups == 0
  *		makes the scan return no rows, which is the honest reading of "restrict to
  *		nothing" and is what the aggregate path relies on when every group is
  *		clean.
  */
 void
-ColumnarReadRestrictToGroups(ColumnarReadState *readState,
+PgColumnarReadRestrictToGroups(PgColumnarReadState *readState,
 							 const uint64 *groupNumbers, int ngroups)
 {
 	MemoryContext oldContext;
@@ -1582,7 +1582,7 @@ ColumnarReadRestrictToGroups(ColumnarReadState *readState,
 		memcpy(readState->restrictGroups, groupNumbers,
 			   sizeof(uint64) * ngroups);
 		qsort(readState->restrictGroups, ngroups, sizeof(uint64),
-			  columnar_uint64_cmp);
+			  pgcolumnar_uint64_cmp);
 	}
 	MemoryContextSwitchTo(oldContext);
 }
@@ -1592,7 +1592,7 @@ ColumnarReadRestrictToGroups(ColumnarReadState *readState,
  * row number for deletion/visibility. The cache reads the base row-group list
  * and delete vectors once (at the scan's snapshot) into memory, then answers each
  * test with a binary search over row groups plus a bitmap probe. Consistent
- * with the scan's fixed snapshot, the same way ColumnarBeginRead reads those
+ * with the scan's fixed snapshot, the same way PgColumnarBeginRead reads those
  * lists once at begin.
  * ------------------------------------------------------------------------- */
 typedef struct LiveStripeEntry
@@ -1605,7 +1605,7 @@ typedef struct LiveStripeEntry
 	uint32	   *maskLens;		/* [chunkGroupCount] */
 } LiveStripeEntry;
 
-struct ColumnarLivenessCache
+struct PgColumnarLivenessCache
 {
 	LiveStripeEntry *stripes;	/* sorted ascending by firstRowNumber */
 	int			nstripes;
@@ -1625,17 +1625,17 @@ livestripe_cmp(const void *a, const void *b)
 	return 0;
 }
 
-ColumnarLivenessCache *
-ColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
+PgColumnarLivenessCache *
+PgColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 {
-	uint64		storageId = ColumnarStorageId(rel);
-	Snapshot	metaSnapshot = ColumnarCatalogSnapshot(snapshot);
+	uint64		storageId = PgColumnarStorageId(rel);
+	Snapshot	metaSnapshot = PgColumnarCatalogSnapshot(snapshot);
 	MemoryContext ctx = AllocSetContextCreate(CurrentMemoryContext,
 											  "columnar liveness cache",
 											  ALLOCSET_DEFAULT_SIZES);
 	MemoryContext oldContext = MemoryContextSwitchTo(ctx);
-	List	   *rgList = ColumnarReadRowGroupList(storageId, metaSnapshot);
-	ColumnarLivenessCache *cache = palloc0(sizeof(ColumnarLivenessCache));
+	List	   *rgList = PgColumnarReadRowGroupList(storageId, metaSnapshot);
+	PgColumnarLivenessCache *cache = palloc0(sizeof(PgColumnarLivenessCache));
 	ListCell   *lc;
 	int			i = 0;
 
@@ -1643,7 +1643,7 @@ ColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 	 * Each native row group is one liveness entry with a single whole-group
 	 * delete mask (the delete vector is keyed by group number, chunk id 0). Modeling
 	 * it as chunkGroupCount 1 with chunkRowCount == rowCount makes the shared
-	 * ColumnarLivenessCacheIsLive map every row to chunk 0.
+	 * PgColumnarLivenessCacheIsLive map every row to chunk 0.
 	 */
 	cache->ctx = ctx;
 	cache->nstripes = list_length(rgList);
@@ -1664,7 +1664,7 @@ ColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 		e->masks = palloc0(sizeof(char *) * 1);
 		e->maskLens = palloc0(sizeof(uint32) * 1);
 
-		rml = ColumnarReadDeleteVectorList(storageId, rg->groupNumber, metaSnapshot);
+		rml = PgColumnarReadDeleteVectorList(storageId, rg->groupNumber, metaSnapshot);
 		foreach(mc, rml)
 		{
 			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mc);
@@ -1691,7 +1691,7 @@ ColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 }
 
 bool
-ColumnarLivenessCacheIsLive(ColumnarLivenessCache *cache, uint64 rowNumber)
+PgColumnarLivenessCacheIsLive(PgColumnarLivenessCache *cache, uint64 rowNumber)
 {
 	int			lo = 0;
 	int			hi = cache->nstripes - 1;
@@ -1724,14 +1724,14 @@ ColumnarLivenessCacheIsLive(ColumnarLivenessCache *cache, uint64 rowNumber)
 }
 
 void
-ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
+PgColumnarFreeLivenessCache(PgColumnarLivenessCache *cache)
 {
 	if (cache != NULL)
 		MemoryContextDelete(cache->ctx);
 }
 
 /*
- * ColumnarReadRowByNumber
+ * PgColumnarReadRowByNumber
  *		Fetch a single row addressed by its row number (spec 6). Used by the
  *		table AM's fetch-by-tid callback (UPDATE re-fetches the old row). Reads
  *		only the one chunk group that holds the row and decodes each column up
@@ -1742,7 +1742,7 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
 /* -------------------------------------------------------------------------
  * Statement-scoped decoded row-group cache (issue #143).
  *
- * ColumnarReadRowByNumber() read and decoded a whole row group to return one
+ * PgColumnarReadRowByNumber() read and decoded a whole row group to return one
  * row, so fetching N rows out of one group cost N times the group: measured at
  * 878 ms for 5,000 rows, 4,452 ms for 10,000 and 19,211 ms for 20,000, all in a
  * single group. Every index scan, bitmap scan, and index-driven UPDATE or DELETE
@@ -1773,7 +1773,7 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  * decoded column values are held here.
  *
  * Entries live in contexts under TopTransactionContext, so an abort or commit
- * frees them without a hook; ColumnarDiscardFetchCache() clears the descriptors
+ * frees them without a hook; PgColumnarDiscardFetchCache() clears the descriptors
  * to match.
  * ------------------------------------------------------------------------- */
 
@@ -1804,7 +1804,7 @@ ColumnarFreeLivenessCache(ColumnarLivenessCache *cache)
  * crossing the cap costs the overflow fraction rather than everything.
  */
 
-typedef struct ColumnarFetchGroup
+typedef struct PgColumnarFetchGroup
 {
 	MemoryContext cx;			/* holds every pointer below; NULL when free */
 	uint64		storageId;
@@ -1855,18 +1855,18 @@ typedef struct ColumnarFetchGroup
 	MemoryContext *colCx;		/* [natts] */
 	bool	   *overflow;		/* [natts] */
 	uint64		lastUsed;
-}			ColumnarFetchGroup;
+}			PgColumnarFetchGroup;
 
-static ColumnarFetchGroup columnarFetchCache[COLUMNAR_FETCH_CACHE_ENTRIES];
+static PgColumnarFetchGroup columnarFetchCache[COLUMNAR_FETCH_CACHE_ENTRIES];
 static uint64 columnarFetchClock = 0;
 
 /*
  * Memoized native-format-version validation for the by-row-number fetch path
- * (#240). columnar_fetch_row runs once per row, so checking the storage's
+ * (#240). pgcolumnar_fetch_row runs once per row, so checking the storage's
  * format_version against a catalog row on every call would be a per-row systable
  * scan on a hot path. The value is immutable for a storage, so one check per
  * (command, storageId) is enough; this single slot is cleared in
- * ColumnarDiscardFetchCache, the same command/transaction boundary the fetch
+ * PgColumnarDiscardFetchCache, the same command/transaction boundary the fetch
  * cache resets on.
  */
 static uint64 columnarFetchFmtOkStorageId = 0;
@@ -1877,7 +1877,7 @@ static bool columnarFetchFmtOk = false;
 #define COLUMNAR_RANK_BLOCK_BYTES (COLUMNAR_RANK_BLOCK_ROWS / 8)
 
 /*
- * columnar_build_rank_prefix
+ * pgcolumnar_build_rank_prefix
  *		Cumulative count of set validity bits at each 64-row boundary, so the
  *		number of present values before an arbitrary row can be had without
  *		walking to it. Entry b counts the bits below row b * 64; the array has one
@@ -1887,7 +1887,7 @@ static bool columnarFetchFmtOk = false;
  *		chunk does not hold.
  */
 static uint32 *
-columnar_build_rank_prefix(const char *vbits, uint64 rowCount)
+pgcolumnar_build_rank_prefix(const char *vbits, uint64 rowCount)
 {
 	uint64		nblocks = (rowCount + COLUMNAR_RANK_BLOCK_ROWS - 1) /
 		COLUMNAR_RANK_BLOCK_ROWS;
@@ -1921,13 +1921,13 @@ columnar_build_rank_prefix(const char *vbits, uint64 rowCount)
 }
 
 /*
- * columnar_rank_before
+ * pgcolumnar_rank_before
  *		How many values are present in this column before row `row` of the group.
  *		The block prefix plus at most eight byte lookups, in place of a loop over
  *		every earlier row.
  */
 static inline uint64
-columnar_rank_before(const char *vbits, const uint32 *prefix, uint64 row)
+pgcolumnar_rank_before(const char *vbits, const uint32 *prefix, uint64 row)
 {
 	uint64		blk = row / COLUMNAR_RANK_BLOCK_ROWS;
 	uint64		rank = prefix[blk];
@@ -1944,14 +1944,14 @@ columnar_rank_before(const char *vbits, const uint32 *prefix, uint64 row)
 }
 
 /*
- * columnar_build_val_offsets
+ * pgcolumnar_build_val_offsets
  *		Byte offset of every present value in a decoded varying-length stream.
  *		One pass over the values, paid once per column per cached group, in place
  *		of a partial pass on every fetch. Fixed-length columns never call this:
  *		their k-th value is at k * attlen and needs no table.
  */
 static uint32 *
-columnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
+pgcolumnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
 {
 	uint32	   *offsets = (uint32 *) palloc(sizeof(uint32) * (nvalues + 1));
 	char	   *cursor = rawBuf;
@@ -1960,7 +1960,7 @@ columnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
 	for (k = 0; k < nvalues; k++)
 	{
 		offsets[k] = (uint32) (cursor - rawBuf);
-		cursor += ColumnarVarSizeAnyUnaligned(cursor);
+		cursor += PgColumnarVarSizeAnyUnaligned(cursor);
 
 		/*
 		 * A chunk holds as many values as chunk_group_row_limit allows, which is
@@ -1977,7 +1977,7 @@ columnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
 
 /* drop one entry and everything it holds */
 static void
-columnar_fetch_entry_reset(ColumnarFetchGroup *e)
+pgcolumnar_fetch_entry_reset(PgColumnarFetchGroup *e)
 {
 	if (e->cx != NULL)
 		MemoryContextDelete(e->cx);
@@ -1985,13 +1985,13 @@ columnar_fetch_entry_reset(ColumnarFetchGroup *e)
 }
 
 /*
- * ColumnarDiscardFetchCache
+ * PgColumnarDiscardFetchCache
  *		Forget every cached group. The contexts hang off TopTransactionContext
  *		and are already gone by the time this runs at transaction end, so this
  *		only clears the descriptors that pointed at them.
  */
 void
-ColumnarDiscardFetchCache(void)
+PgColumnarDiscardFetchCache(void)
 {
 	memset(columnarFetchCache, 0, sizeof(columnarFetchCache));
 	columnarFetchClock = 0;
@@ -2003,18 +2003,18 @@ ColumnarDiscardFetchCache(void)
  * Returns NULL when nothing should be cached, in which case the caller decodes
  * into its own scratch context exactly as before.
  */
-static ColumnarFetchGroup *
-columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
+static PgColumnarFetchGroup *
+pgcolumnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
 {
 	CommandId	cid = GetCurrentCommandId(false);
-	ColumnarFetchGroup *victim = NULL;
+	PgColumnarFetchGroup *victim = NULL;
 	int			i;
 
 	*hit = false;
 
 	for (i = 0; i < COLUMNAR_FETCH_CACHE_ENTRIES; i++)
 	{
-		ColumnarFetchGroup *e = &columnarFetchCache[i];
+		PgColumnarFetchGroup *e = &columnarFetchCache[i];
 
 		if (e->cx == NULL)
 		{
@@ -2025,7 +2025,7 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
 		/* an entry from an earlier command can never be used again */
 		if (e->cid != cid)
 		{
-			columnar_fetch_entry_reset(e);
+			pgcolumnar_fetch_entry_reset(e);
 			if (victim == NULL)
 				victim = e;
 			continue;
@@ -2049,7 +2049,7 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
 				oldest = columnarFetchCache[i].lastUsed;
 				victim = &columnarFetchCache[i];
 			}
-		columnar_fetch_entry_reset(victim);
+		pgcolumnar_fetch_entry_reset(victim);
 	}
 
 	victim->cx = AllocSetContextCreate(TopTransactionContext,
@@ -2063,7 +2063,7 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
 }
 
 /*
- * columnar_fetch_row
+ * pgcolumnar_fetch_row
  *		Shared worker behind the three fetch entry points below.
  *
  *		Which columns to decode is said two ways, and deliberately not one.
@@ -2080,11 +2080,11 @@ columnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
  *		without touching the group's bytes at all.
  */
 static bool
-columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
+pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 				   Datum *values, bool *nulls, bool allColumns,
 				   Bitmapset *needed, bool wantValues)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			natts = tupdesc->natts;
 	MemoryContext target = CurrentMemoryContext;
@@ -2093,7 +2093,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	Snapshot	metaSnapshot;
 	List	   *rgList;
 	NativeRowGroupMetadata *rg = NULL;
-	ColumnarFetchGroup *entry;
+	PgColumnarFetchGroup *entry;
 	bool		hit;
 	int			validityBytes;
 	uint64		rowInGrp;
@@ -2101,9 +2101,9 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	int			c;
 
 	/*
-	 * columnar_fetch_row is called once per item pointer by the executor -- per
+	 * pgcolumnar_fetch_row is called once per item pointer by the executor -- per
 	 * row on an index or bitmap scan, and per duplicate by _bt_check_unique()
-	 * while it holds the index page (see columnar_metadata.c). None of those
+	 * while it holds the index page (see pgcolumnar_metadata.c). None of those
 	 * callers checks for interrupts between fetches, and each fetch reads the
 	 * row-group list out of the catalog, so a statement that fetches many rows
 	 * spends its whole time in here. Without a check the loop is uncancellable
@@ -2116,7 +2116,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	/*
 	 * Reject a native format_version this build does not understand before
 	 * decoding any bytes (#240). The scan-open paths check this in
-	 * ColumnarBeginReadWithStorage / ColumnarBeginAggScan, but the by-row-number
+	 * PgColumnarBeginReadWithStorage / PgColumnarBeginAggScan, but the by-row-number
 	 * fetch path -- an index scan returning a decoded column, UPDATE re-fetching
 	 * the old row, and the vacuum row reader -- reaches neither. Only an actual
 	 * decode is guarded (wantValues); a visibility-only probe decodes nothing and
@@ -2126,7 +2126,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	if (wantValues &&
 		!(columnarFetchFmtOk && columnarFetchFmtOkStorageId == storageId))
 	{
-		ColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
+		PgColumnarCheckNativeFormatVersion(storageId, RelationGetRelationName(rel));
 		columnarFetchFmtOkStorageId = storageId;
 		columnarFetchFmtOk = true;
 	}
@@ -2135,7 +2135,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 								ALLOCSET_SMALL_SIZES);
 	oldContext = MemoryContextSwitchTo(tmp);
 
-	metaSnapshot = ColumnarCatalogSnapshot(snapshot);
+	metaSnapshot = PgColumnarCatalogSnapshot(snapshot);
 
 	/*
 	 * Native (PGCN v1) fetch-by-row-number: find the row group covering the row
@@ -2146,7 +2146,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * The row-group list is read per fetch and deliberately not cached: a group
 	 * flushed earlier in this same statement has to become visible here.
 	 */
-	rgList = ColumnarReadRowGroupList(storageId, metaSnapshot);
+	rgList = PgColumnarReadRowGroupList(storageId, metaSnapshot);
 	foreach(nlc, rgList)
 	{
 		NativeRowGroupMetadata *g = (NativeRowGroupMetadata *) lfirst(nlc);
@@ -2183,11 +2183,11 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	}
 	else
 	{
-		List	   *maskList = ColumnarReadDeleteVectorList(storageId,
+		List	   *maskList = PgColumnarReadDeleteVectorList(storageId,
 													   rg->groupNumber,
 													   metaSnapshot);
 		ListCell   *mlc;
-		bool		deleted = ColumnarDeleteVectorBufferedDeleted(rel, rowNumber);
+		bool		deleted = PgColumnarDeleteVectorBufferedDeleted(rel, rowNumber);
 
 		foreach(mlc, maskList)
 		{
@@ -2223,7 +2223,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * statement-scoped cache above. A miss fills the entry; a hit skips the read
 	 * and the decode entirely.
 	 */
-	entry = columnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+	entry = pgcolumnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
 
 	/*
 	 * The geometry the entry was filled with has to match the group just read
@@ -2241,8 +2241,8 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		 entry->fileOffset != rg->fileOffset ||
 		 entry->natts != natts))
 	{
-		columnar_fetch_entry_reset(entry);
-		entry = columnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+		pgcolumnar_fetch_entry_reset(entry);
+		entry = pgcolumnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
 		Assert(!hit);
 	}
 
@@ -2265,10 +2265,10 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		MemoryContextSwitchTo(tmp);
 
 		if (rg->byteLength > 0)
-			ColumnarReadLogicalData(rel, rg->fileOffset, entry->groupBuffer,
+			PgColumnarReadLogicalData(rel, rg->fileOffset, entry->groupBuffer,
 									rg->byteLength);
 
-		nchunks = ColumnarReadColumnChunkList(storageId, rg->groupNumber,
+		nchunks = PgColumnarReadColumnChunkList(storageId, rg->groupNumber,
 											  metaSnapshot);
 		foreach(nlc, nchunks)
 		{
@@ -2384,7 +2384,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 				rawBuf = base + validityBytes;
 			else
 				rawBuf =
-					columnar_native_decode_chunk(decCx, att,
+					pgcolumnar_native_decode_chunk(decCx, att,
 												 base + validityBytes,
 												 (uint32) (cc->pageLength - validityBytes),
 												 cc->encodingDescriptor,
@@ -2409,7 +2409,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			{
 				MemoryContext idxOld = MemoryContextSwitchTo(entry->cx);
 
-				entry->rankPrefix[c] = columnar_build_rank_prefix(vbits,
+				entry->rankPrefix[c] = pgcolumnar_build_rank_prefix(vbits,
 																 entry->rowCount);
 				if (att->attlen < 0)
 				{
@@ -2418,7 +2418,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 						COLUMNAR_RANK_BLOCK_ROWS;
 
 					entry->valOffset[c] =
-						columnar_build_val_offsets(att, rawBuf,
+						pgcolumnar_build_val_offsets(att, rawBuf,
 												   entry->rankPrefix[c][nblocks]);
 				}
 				MemoryContextSwitchTo(idxOld);
@@ -2439,14 +2439,14 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		 * how far into the group the row is, which is what made a cache hit
 		 * proportional to the row's position before.
 		 */
-		present = columnar_rank_before(vbits, entry->rankPrefix[c], rowInGrp);
+		present = pgcolumnar_rank_before(vbits, entry->rankPrefix[c], rowInGrp);
 
 		if (att->attlen > 0)
 			cursor = rawBuf + present * (uint64) att->attlen;
 		else
 			cursor = rawBuf + entry->valOffset[c][present];
 
-		values[c] = ColumnarDecodeValue(att, &cursor, target);
+		values[c] = PgColumnarDecodeValue(att, &cursor, target);
 		nulls[c] = false;
 
 		/*
@@ -2464,7 +2464,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		 *
 		 * It is safe because nothing handed back points into the column: the
 		 * value returned was copied into the caller's context by the
-		 * ColumnarDecodeValue call immediately above, and the position indexes
+		 * PgColumnarDecodeValue call immediately above, and the position indexes
 		 * live in entry->cx rather than in the column's own context.
 		 */
 		if (justDecoded && entry->colCx[c] != NULL &&
@@ -2509,7 +2509,7 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * of keeping them.
 	 */
 	if (rg->byteLength > COLUMNAR_FETCH_CACHE_MAX_BYTES)
-		columnar_fetch_entry_reset(entry);
+		pgcolumnar_fetch_entry_reset(entry);
 
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextDelete(tmp);
@@ -2517,24 +2517,24 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 }
 
 /*
- * ColumnarReadRowByNumber
+ * PgColumnarReadRowByNumber
  *		Reconstruct every column of the row addressed by a row number. False when
  *		the row is not visible.
  */
 bool
-ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
+PgColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
 						Datum *values, bool *nulls)
 {
-	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
+	return pgcolumnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
 							  true, NULL, true);
 }
 
 /*
- * ColumnarReadRowByNumberCols
+ * PgColumnarReadRowByNumberCols
  *		Decode exactly the columns in `needed`; every other column reads as null.
  *		An empty or NULL set therefore decodes nothing, which is what it says
  *		rather than a silent "everything" -- for every column, call
- *		ColumnarReadRowByNumber, which takes no set and cannot be misread.
+ *		PgColumnarReadRowByNumber, which takes no set and cannot be misread.
  *
  *		Decoding every column whatever the caller wanted is not merely wasted
  *		work on a wide table. The decoded bytes are measured against the fetch
@@ -2543,30 +2543,30 @@ ColumnarReadRowByNumber(Relation rel, Snapshot snapshot, uint64 rowNumber,
  *		remove (issue #157).
  */
 bool
-ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot, uint64 rowNumber,
+PgColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot, uint64 rowNumber,
 							Datum *values, bool *nulls, Bitmapset *needed)
 {
-	return columnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
+	return pgcolumnar_fetch_row(rel, snapshot, rowNumber, values, nulls,
 							  false, needed, true);
 }
 
 /*
- * ColumnarRowIsLive
+ * PgColumnarRowIsLive
  *		Is the row visible? Decodes nothing.
  *
- *		columnar_index_delete_tuples asks exactly this, once per candidate index
+ *		pgcolumnar_index_delete_tuples asks exactly this, once per candidate index
  *		tuple on a path nbtree drives during deletion, and answered it by
  *		reconstructing every column and freeing the result unread.
  */
 bool
-ColumnarRowIsLive(Relation rel, Snapshot snapshot, uint64 rowNumber)
+PgColumnarRowIsLive(Relation rel, Snapshot snapshot, uint64 rowNumber)
 {
-	return columnar_fetch_row(rel, snapshot, rowNumber, NULL, NULL,
+	return pgcolumnar_fetch_row(rel, snapshot, rowNumber, NULL, NULL,
 							  false, NULL, false);
 }
 
 void
-ColumnarRescanRead(ColumnarReadState *readState)
+PgColumnarRescanRead(PgColumnarReadState *readState)
 {
 	MemoryContextReset(readState->stripeContext);
 	readState->started = false;
@@ -2589,18 +2589,18 @@ ColumnarRescanRead(ColumnarReadState *readState)
 }
 
 void
-ColumnarEndRead(ColumnarReadState *readState)
+PgColumnarEndRead(PgColumnarReadState *readState)
 {
 	MemoryContextDelete(readState->readContext);
 }
 
 /*
- * ColumnarReadStats
+ * PgColumnarReadStats
  *		Report how many chunk groups the scan has read versus skipped by the
  *		min/max skip lists (spec 9). Used by the custom scan's EXPLAIN output.
  */
 void
-ColumnarReadStats(ColumnarReadState *readState, uint64 *groupsRead,
+PgColumnarReadStats(PgColumnarReadState *readState, uint64 *groupsRead,
 				  uint64 *groupsSkipped, uint64 *groupsTotal)
 {
 	*groupsRead = readState->groupsRead;
@@ -2609,12 +2609,12 @@ ColumnarReadStats(ColumnarReadState *readState, uint64 *groupsRead,
 }
 
 /*
- * ColumnarVectorsSkipped
+ * PgColumnarVectorsSkipped
  *		How many 1024-value vectors the native scan skipped within read row groups
  *		via per-vector zone maps (native spec 7.1, D5b). Used by EXPLAIN.
  */
 uint64
-ColumnarVectorsSkipped(ColumnarReadState *readState)
+PgColumnarVectorsSkipped(PgColumnarReadState *readState)
 {
 	return readState->vectorsSkipped;
 }

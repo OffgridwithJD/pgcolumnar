@@ -2,7 +2,7 @@
 #
 # The FSST keep/drop cost margin (#155, #271).
 #
-# ColumnarFsstHelpsCompressed used to keep FSST on any compressed win at all,
+# PgColumnarFsstHelpsCompressed used to keep FSST on any compressed win at all,
 # however small, and the per-vector FSST encode is a dominant cost of a text or
 # varlena load. pgcolumnar.fsst_min_gain_percent requires the win to clear a
 # margin before FSST is kept.

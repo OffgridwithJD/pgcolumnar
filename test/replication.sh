@@ -446,7 +446,7 @@ psql_run "SELECT pgcolumnar.compact('r');" >/dev/null 2>&1
 sync_or_fail "sync 6"
 check "compact replays identically" "$(hash_standby r)" "$(hash_primary r)"
 
-# ColumnarTruncateMainFork is the one direct XLogInsert in the tree
+# PgColumnarTruncateMainFork is the one direct XLogInsert in the tree
 # (RM_SMGR_ID / XLOG_SMGR_TRUNCATE). wal_envelope.sh asserts the envelope around
 # it by reading the source; nothing has ever executed the record, let alone
 # replayed it.

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_bloom.c
+ * pgcolumnar_bloom.c
  *		Per-chunk bloom filters for equality chunk-group skipping (I7).
  *
  * min/max skip lists (spec 7.2) prune equality predicates only when the probed
@@ -28,14 +28,14 @@
 #include "utils/syscache.h"
 
 /*
- * ColumnarCollationIsDeterministic
+ * PgColumnarCollationIsDeterministic
  *		Whether a bloom filter is safe for this collation: InvalidOid (a
  *		non-collatable type) and deterministic collations qualify; a
  *		nondeterministic collation does not, since equal values need not be
  *		byte-identical and would hash inconsistently.
  */
 bool
-ColumnarCollationIsDeterministic(Oid collid)
+PgColumnarCollationIsDeterministic(Oid collid)
 {
 	HeapTuple	tp;
 	bool		result = true;
@@ -77,12 +77,12 @@ bloom_hashes(uint32 h, uint32 *h1, uint32 *h2)
 }
 
 /*
- * ColumnarBloomBuild
+ * PgColumnarBloomBuild
  *		Build a filter over n precomputed value hashes. Returns false (no filter)
  *		when n is too small for a filter to be worthwhile.
  */
 bool
-ColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
+PgColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
 {
 	uint32		nbits;
 	uint32		nbytes;
@@ -142,13 +142,13 @@ ColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
 }
 
 /*
- * ColumnarBloomProbe
+ * PgColumnarBloomProbe
  *		Return true when the hash may be present (all k bits set), false when it
  *		is definitely absent. A malformed/empty filter conservatively returns
  *		true (never skips wrongly).
  */
 bool
-ColumnarBloomProbe(const char *bloom, uint32 bloomLen, uint32 hash)
+PgColumnarBloomProbe(const char *bloom, uint32 bloomLen, uint32 hash)
 {
 	uint32		nbits;
 	uint8		k;

@@ -2,7 +2,7 @@
 #
 # pgColumnar fetch-by-row-number cache (issue #143).
 #
-# ColumnarReadRowByNumber() used to read and decode a whole row group per row
+# PgColumnarReadRowByNumber() used to read and decode a whole row group per row
 # returned, so fetching N rows out of one group cost N times the group. A
 # statement-scoped cache of the decoded group removes the repeat.
 #
@@ -94,7 +94,7 @@ check "a hit re-checks the group geometry it was filled with" \
 	"$(grep -cE 'entry->fileOffset != rg->fileOffset' "$SRC/columnar_reader.c")" "1"
 
 check "the cache is released at executor end, not only at transaction end" \
-	"$(grep -c 'ColumnarDiscardFetchCache' "$SRC/columnar_tableam.c")" "2"
+	"$(grep -c 'PgColumnarDiscardFetchCache' "$SRC/columnar_tableam.c")" "2"
 
 # --- #353: a wide group's decode scratch must not blow the fetch cap ----------
 # The by-row-number decode allocated its intermediates -- the decompressed region

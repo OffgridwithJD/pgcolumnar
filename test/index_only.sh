@@ -59,7 +59,7 @@ check "iv row count" "$(q "SELECT count(*) FROM iv;")" "50000"
 # Freshly written groups are never all-visible until a vacuum runs.
 check "before vacuum: block 50 not all-visible" "$(q "SELECT pgcolumnar.vm_is_visible('iv', 50);")" "f"
 
-# Plain VACUUM (ShareUpdateExclusiveLock) drives columnar_relation_vacuum, which
+# Plain VACUUM (ShareUpdateExclusiveLock) drives pgcolumnar_relation_vacuum, which
 # marks the all-visible groups.
 psql_run "VACUUM iv;"
 check "after vacuum: block 10 all-visible"  "$(q "SELECT pgcolumnar.vm_is_visible('iv', 10);")"  "t"

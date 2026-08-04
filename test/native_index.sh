@@ -2,7 +2,7 @@
 #
 # pgColumnar native fetch-by-row-number (Phase D6a): index scan, bitmap scan and
 # unique/primary-key enforcement on a native-format (PGCN v1) table. All route
-# through ColumnarReadRowByNumber, which before D6a had only a 2.2 path (index
+# through PgColumnarReadRowByNumber, which before D6a had only a 2.2 path (index
 # scans returned 0 rows, unique was silently unenforced). This suite proves parity
 # with a heap mirror under a forced index path. Index-only scan (visibility map)
 # is D6c; native projection storage is D6d; delete/update is D6b.
@@ -26,7 +26,7 @@ check "row count" "$(q 'SELECT count(*) FROM n;')" "8000"
 # Force the index path (seqscan off) in a single session (two -c, quiet so the SET
 # tag is not printed), and confirm scalar results match the heap oracle. Filtered
 # aggregates fall back from the zone-map path to an index scan that fetches each
-# row via ColumnarReadRowByNumber.
+# row via PgColumnarReadRowByNumber.
 iscan() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 		-d "$PGC_DB" -q -At -c "SET enable_seqscan=off" -c "$1" 2>/dev/null

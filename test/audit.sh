@@ -29,7 +29,7 @@
 #      group yet; if that fetch cannot answer, _bt_doinsert retries forever.
 #      Cheap standalone cover for what unique_conc scenario 7 exercises.
 #   4. CREATE INDEX must not leak a relation reference. A parallel index build
-#      opens a TableScanDesc per participant through columnar_scan_begin (which
+#      opens a TableScanDesc per participant through pgcolumnar_scan_begin (which
 #      takes a relation reference); the index_build_range_scan callback owns that
 #      scan and must end it, or each participant leaks a reference that surfaces
 #      at transaction commit as "resource was not closed: relation". The callback

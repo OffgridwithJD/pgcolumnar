@@ -3,8 +3,8 @@
 # pgColumnar: EXPLAIN must report the pushdown the scan performs, not the
 # pushdown the planner offered it (#191).
 #
-# columnar_enable_qual_pushdown gates columnar_build_predicates in
-# ColumnarBeginRead, so with the setting off the reader builds no predicates and
+# pgcolumnar_enable_qual_pushdown gates pgcolumnar_build_predicates in
+# PgColumnarBeginRead, so with the setting off the reader builds no predicates and
 # skips no chunk groups. cstate->nScanKeys is the planner's count and does not
 # move, so EXPLAIN reported the same "Columnar Pushed-Down Filters: 1" either
 # way -- telling someone who had just turned the setting off to test a theory

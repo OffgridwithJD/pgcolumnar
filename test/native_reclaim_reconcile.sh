@@ -4,7 +4,7 @@
 # transactional, so normal retirement is atomic. The one seam is physical
 # end-truncation: a crash in its narrow window can leave a free_space row that
 # overlaps a live group (the highwater was lowered but the row's delete rolled
-# back, and a later insert placed a live group there). ColumnarReconcileFreeList
+# back, and a later insert placed a live group there). PgColumnarReconcileFreeList
 # runs at the start of every reuse op (compact_rewrite, recluster) and drops any
 # free_space row overlapping a live row-group footprint, so it cannot be handed
 # out on top of a live group.

@@ -16,7 +16,7 @@
 #
 # Prove it works the way #224 asks: undo the fix it guards and confirm this gate
 # goes red while the ordinary matrix stays green. Undo it in its TRUE pre-#225
-# form -- delete the ColumnarVarSizeAnyUnaligned helper and restore VARSIZE_ANY at
+# form -- delete the PgColumnarVarSizeAnyUnaligned helper and restore VARSIZE_ANY at
 # the three call sites (columnar_encoding.c, columnar_reader.c x2). That reports
 # the misalignment (about 20 of the 23 suites, at columnar_encoding.c:1135).
 # Do NOT instead rewrite the helper's body to the cast while keeping the inline

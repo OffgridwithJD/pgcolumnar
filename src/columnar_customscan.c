@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_customscan.c
+ * pgcolumnar_customscan.c
  *		Planner and executor integration for pgColumnar (spec 8.3, 9).
  *
  * A set_rel_pathlist_hook replaces the sequential-scan path of a columnar
@@ -60,19 +60,19 @@
 #include "utils/typcache.h"
 
 /* GUC: use the columnar custom scan path (spec 8.3) */
-bool		columnar_enable_custom_scan = true;
+bool		pgcolumnar_enable_custom_scan = true;
 /* GUC: let the planner scan a covering projection instead of the base (gap 26) */
-bool		columnar_enable_projection_scan = true;
+bool		pgcolumnar_enable_projection_scan = true;
 /* GUC: price a columnar index scan's per-row heap fetch (#355) */
-bool		columnar_enable_index_fetch_penalty = true;
+bool		pgcolumnar_enable_index_fetch_penalty = true;
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook = NULL;
 
 /* our executor-time scan state embeds CustomScanState as its first field */
-typedef struct ColumnarCustomScanState
+typedef struct PgColumnarCustomScanState
 {
 	CustomScanState css;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	Bitmapset  *projectedColumns;	/* 0-based; NULL means all columns */
 	ScanKey		scanKeys;
 	int			nScanKeys;
@@ -97,63 +97,63 @@ typedef struct ColumnarCustomScanState
 	int		   *projColMap;			/* base attno-1 -> index into projValues, or -1 */
 	Datum	   *projValues;			/* scratch, length K+1 (index 0 = rownumber) */
 	bool	   *projNulls;
-	ColumnarLivenessCache *livenessCache;	/* cached base liveness for the scan */
-} ColumnarCustomScanState;
+	PgColumnarLivenessCache *livenessCache;	/* cached base liveness for the scan */
+} PgColumnarCustomScanState;
 
 /* path -> plan */
-static Plan *ColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
+static Plan *PgColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
 									CustomPath *best_path, List *tlist,
 									List *clauses, List *custom_plans);
 
 /* plan -> scan state (dispatches base vs vectorized-aggregate) */
-static Node *ColumnarCreateScanState(CustomScan *cscan);
-static Node *ColumnarCreateBaseScanState(CustomScan *cscan);
+static Node *PgColumnarCreateScanState(CustomScan *cscan);
+static Node *PgColumnarCreateBaseScanState(CustomScan *cscan);
 
 /* executor callbacks */
-static void ColumnarBeginCustomScan(CustomScanState *node, EState *estate,
+static void PgColumnarBeginCustomScan(CustomScanState *node, EState *estate,
 									int eflags);
-static TupleTableSlot *ColumnarExecCustomScan(CustomScanState *node);
-static void ColumnarEndCustomScan(CustomScanState *node);
-static void ColumnarReScanCustomScan(CustomScanState *node);
-static Size ColumnarEstimateDSMCustomScan(CustomScanState *node,
+static TupleTableSlot *PgColumnarExecCustomScan(CustomScanState *node);
+static void PgColumnarEndCustomScan(CustomScanState *node);
+static void PgColumnarReScanCustomScan(CustomScanState *node);
+static Size PgColumnarEstimateDSMCustomScan(CustomScanState *node,
 										  ParallelContext *pcxt);
-static void ColumnarInitializeDSMCustomScan(CustomScanState *node,
+static void PgColumnarInitializeDSMCustomScan(CustomScanState *node,
 											ParallelContext *pcxt,
 											void *coordinate);
-static void ColumnarReInitializeDSMCustomScan(CustomScanState *node,
+static void PgColumnarReInitializeDSMCustomScan(CustomScanState *node,
 											  ParallelContext *pcxt,
 											  void *coordinate);
-static void ColumnarInitializeWorkerCustomScan(CustomScanState *node,
+static void PgColumnarInitializeWorkerCustomScan(CustomScanState *node,
 											   shm_toc *toc, void *coordinate);
-static void ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
+static void PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 									  ExplainState *es);
 
 /* ExecScan helpers */
-static TupleTableSlot *ColumnarScanNext(ScanState *ss);
-static bool ColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot);
+static TupleTableSlot *PgColumnarScanNext(ScanState *ss);
+static bool PgColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot);
 
-static const CustomPathMethods columnar_path_methods = {
+static const CustomPathMethods pgcolumnar_path_methods = {
 	.CustomName = "ColumnarScan",
-	.PlanCustomPath = ColumnarPlanCustomPath,
+	.PlanCustomPath = PgColumnarPlanCustomPath,
 	.ReparameterizeCustomPathByChild = NULL,
 };
 
-const CustomScanMethods columnar_scan_methods = {
+const CustomScanMethods pgcolumnar_scan_methods = {
 	.CustomName = "ColumnarScan",
-	.CreateCustomScanState = ColumnarCreateScanState,
+	.CreateCustomScanState = PgColumnarCreateScanState,
 };
 
-static const CustomExecMethods columnar_exec_methods = {
+static const CustomExecMethods pgcolumnar_exec_methods = {
 	.CustomName = "ColumnarScan",
-	.BeginCustomScan = ColumnarBeginCustomScan,
-	.ExecCustomScan = ColumnarExecCustomScan,
-	.EndCustomScan = ColumnarEndCustomScan,
-	.ReScanCustomScan = ColumnarReScanCustomScan,
-	.EstimateDSMCustomScan = ColumnarEstimateDSMCustomScan,
-	.InitializeDSMCustomScan = ColumnarInitializeDSMCustomScan,
-	.ReInitializeDSMCustomScan = ColumnarReInitializeDSMCustomScan,
-	.InitializeWorkerCustomScan = ColumnarInitializeWorkerCustomScan,
-	.ExplainCustomScan = ColumnarExplainCustomScan,
+	.BeginCustomScan = PgColumnarBeginCustomScan,
+	.ExecCustomScan = PgColumnarExecCustomScan,
+	.EndCustomScan = PgColumnarEndCustomScan,
+	.ReScanCustomScan = PgColumnarReScanCustomScan,
+	.EstimateDSMCustomScan = PgColumnarEstimateDSMCustomScan,
+	.InitializeDSMCustomScan = PgColumnarInitializeDSMCustomScan,
+	.ReInitializeDSMCustomScan = PgColumnarReInitializeDSMCustomScan,
+	.InitializeWorkerCustomScan = PgColumnarInitializeWorkerCustomScan,
+	.ExplainCustomScan = PgColumnarExplainCustomScan,
 };
 
 /* -------------------------------------------------------------------------
@@ -161,7 +161,7 @@ static const CustomExecMethods columnar_exec_methods = {
  * ------------------------------------------------------------------------- */
 
 /*
- * columnar_projected_columns
+ * pgcolumnar_projected_columns
  *		Build the 0-based set of columns the plan actually references, from the
  *		Vars in its target list and its restriction clauses. Returns NULL when
  *		a whole-row or system column is requested, meaning "all columns", so the
@@ -170,7 +170,7 @@ static const CustomExecMethods columnar_exec_methods = {
  *		(spec 9).
  */
 static Bitmapset *
-columnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
+pgcolumnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
 {
 	Bitmapset  *needed = NULL;
 	Bitmapset  *projected = NULL;
@@ -211,12 +211,12 @@ columnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
 }
 
 /*
- * columnar_commute_strategy
+ * pgcolumnar_commute_strategy
  *		The btree comparison strategy for "value op column" given the strategy
  *		for "column op value", used when the constant is on the left.
  */
 static StrategyNumber
-columnar_commute_strategy(StrategyNumber s)
+pgcolumnar_commute_strategy(StrategyNumber s)
 {
 	switch (s)
 	{
@@ -236,7 +236,7 @@ columnar_commute_strategy(StrategyNumber s)
 }
 
 /*
- * columnar_clause_to_scankey
+ * pgcolumnar_clause_to_scankey
  *		Translate a single restriction clause of the form "column op const"
  *		(or "const op column") into a scan key for chunk-group skipping, when
  *		op is a btree comparison operator in the column type's default btree
@@ -245,7 +245,7 @@ columnar_commute_strategy(StrategyNumber s)
  *		executor still applies them as a filter, so results are unaffected.
  */
 static bool
-columnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
+pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 						   ScanKey key)
 {
 	OpExpr	   *op;
@@ -294,7 +294,7 @@ columnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 
 	/*
 	 * The stored per-chunk min/max are ordered under the column's own
-	 * collation (that is what the writer used, columnar_write_state.c), and the
+	 * collation (that is what the writer used, pgcolumnar_write_state.c), and the
 	 * reader evaluates the skip under that same collation. Only push a
 	 * predicate whose comparison uses that collation; otherwise a differently
 	 * collated comparison (for example an explicit COLLATE in the query) could
@@ -315,12 +315,12 @@ columnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	if (strat == InvalidStrategy)
 		return false;
 	if (!varOnLeft)
-		strat = columnar_commute_strategy(strat);
+		strat = pgcolumnar_commute_strategy(strat);
 	if (strat == InvalidStrategy)
 		return false;
 
 	/*
-	 * Fill the scan key directly. The reader (columnar_build_predicates) uses
+	 * Fill the scan key directly. The reader (pgcolumnar_build_predicates) uses
 	 * sk_attno, sk_strategy, sk_subtype and sk_argument, and looks up the
 	 * column type's own comparison proc; it never calls sk_func, so we leave
 	 * that zeroed rather than build one for a possibly-cross-type operator.
@@ -337,13 +337,13 @@ columnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 }
 
 /*
- * ColumnarBuildScanKeys
+ * PgColumnarBuildScanKeys
  *		Build the scan-key array for chunk-group skipping from a plan's
  *		restriction clauses (spec 9). Clauses that are not simple comparisons
- *		are skipped. Shared with the vectorized aggregate (columnar_vector.c).
+ *		are skipped. Shared with the vectorized aggregate (pgcolumnar_vector.c).
  */
 ScanKey
-ColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
+PgColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 					  int *nkeys)
 {
 	ScanKey		keys;
@@ -357,7 +357,7 @@ ColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 	keys = (ScanKey) palloc0(sizeof(ScanKeyData) * list_length(qual));
 	foreach(lc, qual)
 	{
-		if (columnar_clause_to_scankey((Node *) lfirst(lc), scanrelid, tupdesc,
+		if (pgcolumnar_clause_to_scankey((Node *) lfirst(lc), scanrelid, tupdesc,
 									   &keys[n]))
 			n++;
 	}
@@ -367,14 +367,14 @@ ColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 }
 
 /*
- * ColumnarPlanCustomPath
+ * PgColumnarPlanCustomPath
  *		Convert the CustomPath to a CustomScan plan node. The restriction
  *		clauses become the scan's qual so the executor re-applies them (this is
  *		what makes chunk-group skipping safe); custom_scan_tlist stays NIL so
  *		the scan tuple is the full base-relation rowtype.
  */
 static Plan *
-ColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
+PgColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
 					   CustomPath *best_path, List *tlist,
 					   List *clauses, List *custom_plans)
 {
@@ -389,13 +389,13 @@ ColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
 	/* carry the chosen projection name (gap 26), if any, into the plan */
 	cscan->custom_private = best_path->custom_private;
 	cscan->custom_scan_tlist = NIL;
-	cscan->methods = &columnar_scan_methods;
+	cscan->methods = &pgcolumnar_scan_methods;
 
 	return &cscan->scan.plan;
 }
 
 /*
- * columnar_choose_projection
+ * pgcolumnar_choose_projection
  *		Pick a projection that serves this scan better than the base: it must
  *		cover every referenced column (so no base reconstruction is needed at
  *		scan time) and its leading sort column must appear in a restriction
@@ -404,7 +404,7 @@ ColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
  *		reference disqualifies a projection scan.
  */
 static char *
-columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
+pgcolumnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 {
 	uint64		storageId;
 	Relation	r;
@@ -417,16 +417,16 @@ columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 	int			x;
 	bool		haveAdditional = false;
 
-	if (!columnar_enable_projection_scan)
+	if (!pgcolumnar_enable_projection_scan)
 		return NULL;
 
 	r = table_open(relid, AccessShareLock);
-	storageId = ColumnarStorageId(r);
+	storageId = PgColumnarStorageId(r);
 	table_close(r, AccessShareLock);
 
-	projs = ColumnarListProjections(storageId);
+	projs = PgColumnarListProjections(storageId);
 	foreach(lc, projs)
-		if (((ColumnarProjection *) lfirst(lc))->projectionId > 0)
+		if (((PgColumnarProjection *) lfirst(lc))->projectionId > 0)
 			haveAdditional = true;
 	if (!haveAdditional)
 		return NULL;
@@ -447,7 +447,7 @@ columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 
 	foreach(lc, projs)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 		bool		covers = true;
 		bool		skips;
 		int			y;
@@ -494,7 +494,7 @@ columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 }
 
 /*
- * columnar_index_correlation
+ * pgcolumnar_index_correlation
  *		|correlation| of the index's leading key against heap (row-number) order,
  *		read from pg_statistic exactly as btcostestimate does (selfuncs.c). A value
  *		near 1 means rows an ordered index scan visits are already clustered into a
@@ -507,7 +507,7 @@ columnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
  * key, no ANALYZE, no correlation slot.
  */
 static double
-columnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
+pgcolumnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
 {
 	AttrNumber	attno;
 	Oid			sortop;
@@ -549,14 +549,14 @@ columnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
 }
 
 /*
- * columnar_scan_decode_shape
+ * pgcolumnar_scan_decode_shape
  *		How much a by-row-number fetch of this rel actually decodes: the number of
  *		columns and their summed width.
  *
  *		Not the columns the scan emits. The deferred index-fetch slot decodes the
  *		attribute *prefix* 0..max-referenced, because slot_getsomeattrs asks for a
- *		prefix and cannot ask for a set (columnar_tableam.c,
- *		columnar_slot_decode_upto). A query referencing only a late column therefore
+ *		prefix and cannot ask for a set (pgcolumnar_tableam.c,
+ *		pgcolumnar_slot_decode_upto). A query referencing only a late column therefore
  *		decodes every column before it, and sizing this from reltarget -- the
  *		emitted columns -- understates the decode by the ratio of the prefix to the
  *		projection (issue #363).
@@ -571,7 +571,7 @@ columnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
  *		unreferenced columns in the prefix are not in reltarget at all.
  */
 static void
-columnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
+pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
 						   int *nprefix, double *prefixWidth)
 {
 	Bitmapset  *attrs = NULL;
@@ -636,11 +636,11 @@ columnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
 }
 
 /*
- * columnar_index_fetch_penalty
+ * pgcolumnar_index_fetch_penalty
  *		extra cost to add to a heap-fetching columnar index scan for the row-group
  *		decodes its per-row fetches force. Core's cost_index prices a heap fetch as
  *		a page or two; a columnar fetch decodes the whole row group the row lives in
- *		(columnar_reader.c, ColumnarReadRowByNumber), which is why the planner picks
+ *		(pgcolumnar_reader.c, PgColumnarReadRowByNumber), which is why the planner picks
  *		an index scan for an unclustered ORDER BY and then runs for minutes (#355).
  *
  * A statement-scoped cache (issue #143) means a group is decoded once per scan, not
@@ -663,10 +663,10 @@ columnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
  * decode of R rows across the columns the scan needs.
  */
 static Cost
-columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
+pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 							 int nproj, double decodedWidth, bool tid_ordered)
 {
-	double		R = (double) columnar_stripe_row_limit;
+	double		R = (double) pgcolumnar_stripe_row_limit;
 	double		N = (rel->tuples > 0) ? rel->tuples : rows;
 	double		n_groups,
 				pages_per_stripe,
@@ -728,13 +728,13 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 
 /*
  * How far above one full scan a fetching index path may be priced (issue #376).
- * See columnar_penalize_index_fetches for why this is a bound rather than a
+ * See pgcolumnar_penalize_index_fetches for why this is a bound rather than a
  * better model, and for the two measurements that fix the window it sits in.
  */
 #define COLUMNAR_INDEX_FETCH_PENALTY_MAX_SCANS	20.0
 
 /*
- * columnar_full_scan_cost
+ * pgcolumnar_full_scan_cost
  *		What one full scan of this relation costs.
  *
  *		The seqscan's own number when core still has one, and the same work priced
@@ -744,7 +744,7 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
  *		penalty below.
  */
 static Cost
-columnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
+pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
 {
 	QualCost	qcost;
 	double		ntuples;
@@ -761,7 +761,7 @@ columnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
 }
 
 /*
- * columnar_path_order_cmp
+ * pgcolumnar_path_order_cmp
  *		Order two paths the way add_path keeps rel->pathlist ordered.
  *
  *		PG18 sorts by disabled_nodes and then total_cost; before that there is no
@@ -770,7 +770,7 @@ columnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
  *		wrong key, so it is spelled out per version rather than assumed.
  */
 static int
-columnar_path_order_cmp(const ListCell *a, const ListCell *b)
+pgcolumnar_path_order_cmp(const ListCell *a, const ListCell *b)
 {
 	const Path *pa = (const Path *) lfirst(a);
 	const Path *pb = (const Path *) lfirst(b);
@@ -787,7 +787,7 @@ columnar_path_order_cmp(const ListCell *a, const ListCell *b)
 }
 
 /*
- * columnar_penalize_index_fetches
+ * pgcolumnar_penalize_index_fetches
  *		Price the per-row heap fetch of the surviving index and bitmap paths
  *		(#355), and restore the ordering add_path expects.
  *
@@ -818,7 +818,7 @@ columnar_path_order_cmp(const ListCell *a, const ListCell *b)
  *		planner models by fractioning (total - startup).
  */
 static void
-columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
+pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 								Cost fullScanCost)
 {
 	int			nproj;
@@ -827,10 +827,10 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 	bool		mutated = false;
 	ListCell   *lc;
 
-	if (!columnar_enable_index_fetch_penalty)
+	if (!pgcolumnar_enable_index_fetch_penalty)
 		return;
 
-	columnar_scan_decode_shape(rel, rti, relid, &nproj, &decodedWidth);
+	pgcolumnar_scan_decode_shape(rel, rti, relid, &nproj, &decodedWidth);
 
 	/*
 	 * The penalty is bounded by a multiple of one full scan (issue #376).
@@ -875,15 +875,15 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 		if (p->pathtype == T_IndexScan)
 		{
 			IndexPath  *ip = castNode(IndexPath, p);
-			double		rho = columnar_index_correlation(ip->indexinfo, relid);
+			double		rho = pgcolumnar_index_correlation(ip->indexinfo, relid);
 
-			add = columnar_index_fetch_penalty(rel, p->rows, rho, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, p->rows, rho, nproj,
 											   decodedWidth, false);
 		}
 		else if (p->pathtype == T_BitmapHeapScan)
 		{
 			/* a bitmap heap scan fetches in TID (row-number) order */
-			add = columnar_index_fetch_penalty(rel, p->rows, 1.0, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, p->rows, 1.0, nproj,
 											   decodedWidth, true);
 		}
 		/* T_IndexOnlyScan and the custom scans do no heap fetch */
@@ -905,11 +905,11 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 	}
 
 	if (mutated)
-		list_sort(rel->pathlist, columnar_path_order_cmp);
+		list_sort(rel->pathlist, pgcolumnar_path_order_cmp);
 }
 
 /*
- * ColumnarSetRelPathlist
+ * PgColumnarSetRelPathlist
  *		set_rel_pathlist_hook: for a columnar base relation, replace the
  *		sequential-scan path with the columnar custom scan and drop parallel
  *		paths. Index and bitmap paths are left in place, so ordinary index
@@ -918,7 +918,7 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
  *		steers the planner to an index scan exactly as before.
  */
 static void
-ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
+PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 					   RangeTblEntry *rte)
 {
 	CustomPath *cpath;
@@ -931,20 +931,20 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	if (prev_set_rel_pathlist_hook)
 		prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
-	if (!columnar_enable_custom_scan)
+	if (!pgcolumnar_enable_custom_scan)
 		return;
 	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION)
 		return;
 	if (rel->reloptkind != RELOPT_BASEREL)
 		return;
-	if (!OidIsValid(rte->relid) || !ColumnarIsColumnarRelation(rte->relid))
+	if (!OidIsValid(rte->relid) || !PgColumnarIsColumnarRelation(rte->relid))
 		return;
 
 	/*
-	 * The custom scan is the scalar per-row path (ColumnarReadNextRow), so
+	 * The custom scan is the scalar per-row path (PgColumnarReadNextRow), so
 	 * pushed-down predicates drive zone-map row-group and per-vector skipping
 	 * (native spec 7.1). Ungrouped aggregates are answered from the zone maps by
-	 * the separate aggregate path (columnar_vector.c).
+	 * the separate aggregate path (pgcolumnar_vector.c).
 	 */
 
 	/* find a non-parameterized seqscan path to inherit its costs from */
@@ -975,8 +975,8 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * doing this after the add_path calls meant the columnar path was judged
 	 * against index costs that had not yet been penalized, and freed.
 	 */
-	columnar_penalize_index_fetches(rel, rti, rte->relid,
-								   columnar_full_scan_cost(rel, seqpath));
+	pgcolumnar_penalize_index_fetches(rel, rti, rte->relid,
+								   pgcolumnar_full_scan_cost(rel, seqpath));
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
@@ -1011,7 +1011,7 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	cpath->path.startup_cost = (seqpath != NULL) ? seqpath->startup_cost
 		: rel->baserestrictcost.startup;
-	cpath->path.total_cost = columnar_full_scan_cost(rel, seqpath);
+	cpath->path.total_cost = pgcolumnar_full_scan_cost(rel, seqpath);
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
@@ -1025,7 +1025,7 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	cpath->custom_restrictinfo = rel->baserestrictinfo;
 #endif
-	cpath->methods = &columnar_path_methods;
+	cpath->methods = &pgcolumnar_path_methods;
 
 	/*
 	 * Keep the costs before offering the path. add_path FREES a path it judges
@@ -1049,7 +1049,7 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * result is correct whichever path wins (the executor re-applies the qual).
 	 */
 	{
-		char	   *projName = columnar_choose_projection(root, rel, rte->relid);
+		char	   *projName = pgcolumnar_choose_projection(root, rel, rte->relid);
 
 		if (projName != NULL)
 		{
@@ -1079,7 +1079,7 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 #if PG_VERSION_NUM >= 170000
 			ppath->custom_restrictinfo = rel->baserestrictinfo;
 #endif
-			ppath->methods = &columnar_path_methods;
+			ppath->methods = &pgcolumnar_path_methods;
 
 			add_path(rel, &ppath->path);
 		}
@@ -1135,7 +1135,7 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 #if PG_VERSION_NUM >= 170000
 			ppath->custom_restrictinfo = rel->baserestrictinfo;
 #endif
-			ppath->methods = &columnar_path_methods;
+			ppath->methods = &pgcolumnar_path_methods;
 			add_partial_path(rel, &ppath->path);
 		}
 	}
@@ -1146,13 +1146,13 @@ ColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
  * ------------------------------------------------------------------------- */
 
 /*
- * ColumnarCreateScanState
+ * PgColumnarCreateScanState
  *		Shared create-state callback for the one registered CustomScanMethods. A
  *		scanrelid==0 plan is the vectorized aggregate upper node; anything else
  *		is a base-relation columnar scan.
  */
 static Node *
-ColumnarCreateScanState(CustomScan *cscan)
+PgColumnarCreateScanState(CustomScan *cscan)
 {
 	if (cscan->scan.scanrelid == 0)
 	{
@@ -1163,28 +1163,28 @@ ColumnarCreateScanState(CustomScan *cscan)
 		 * path carries length 3.
 		 */
 		if (list_length(cscan->custom_private) == 5)
-			return ColumnarCreateGroupAggScanState(cscan);
-		return ColumnarCreateAggScanState(cscan);
+			return PgColumnarCreateGroupAggScanState(cscan);
+		return PgColumnarCreateAggScanState(cscan);
 	}
 
-	return ColumnarCreateBaseScanState(cscan);
+	return PgColumnarCreateBaseScanState(cscan);
 }
 
 static Node *
-ColumnarCreateBaseScanState(CustomScan *cscan)
+PgColumnarCreateBaseScanState(CustomScan *cscan)
 {
-	ColumnarCustomScanState *cstate =
-		(ColumnarCustomScanState *) palloc0(sizeof(ColumnarCustomScanState));
+	PgColumnarCustomScanState *cstate =
+		(PgColumnarCustomScanState *) palloc0(sizeof(PgColumnarCustomScanState));
 
 	cstate->css.ss.ps.type = T_CustomScanState;
-	cstate->css.methods = &columnar_exec_methods;
+	cstate->css.methods = &pgcolumnar_exec_methods;
 
 	return (Node *) cstate;
 }
 
 /* the projection name the planner chose, or NULL for a base scan (gap 26) */
 static char *
-columnar_chosen_projection(CustomScan *cscan)
+pgcolumnar_chosen_projection(CustomScan *cscan)
 {
 	if (cscan->custom_private == NIL)
 		return NULL;
@@ -1192,7 +1192,7 @@ columnar_chosen_projection(CustomScan *cscan)
 }
 
 /*
- * columnar_setup_projection_scan
+ * pgcolumnar_setup_projection_scan
  *		Open a read on the named projection's storage with a synthetic
  *		[rownumber, cols...] descriptor, build the base<->projection column map,
  *		and translate the pushed-down scan keys to the projection's attnums so the
@@ -1202,13 +1202,13 @@ columnar_chosen_projection(CustomScan *cscan)
  *		since planning.
  */
 static void
-columnar_setup_projection_scan(ColumnarCustomScanState *cstate, Relation rel,
+pgcolumnar_setup_projection_scan(PgColumnarCustomScanState *cstate, Relation rel,
 							   Snapshot snapshot, const char *projName)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	TupleDesc	tableDesc = RelationGetDescr(rel);
-	List	   *projs = ColumnarListProjections(storageId);
-	ColumnarProjection *proj = NULL;
+	List	   *projs = PgColumnarListProjections(storageId);
+	PgColumnarProjection *proj = NULL;
 	ListCell   *lc;
 	TupleDesc	projTupdesc;
 	ScanKey		projKeys = NULL;
@@ -1217,7 +1217,7 @@ columnar_setup_projection_scan(ColumnarCustomScanState *cstate, Relation rel,
 
 	foreach(lc, projs)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (p->projectionId > 0 && strcmp(p->name, projName) == 0)
 		{
@@ -1227,7 +1227,7 @@ columnar_setup_projection_scan(ColumnarCustomScanState *cstate, Relation rel,
 	}
 	if (proj == NULL)
 	{
-		cstate->readState = ColumnarBeginRead(rel, snapshot, NULL,
+		cstate->readState = PgColumnarBeginRead(rel, snapshot, NULL,
 											  cstate->projectedColumns,
 											  cstate->nScanKeys, cstate->scanKeys);
 		return;
@@ -1268,20 +1268,20 @@ columnar_setup_projection_scan(ColumnarCustomScanState *cstate, Relation rel,
 		}
 	}
 
-	cstate->readState = ColumnarBeginReadWithStorage(rel, snapshot,
+	cstate->readState = PgColumnarBeginReadWithStorage(rel, snapshot,
 													 proj->projStorageId,
 													 projTupdesc, NULL, NULL,
 													 nProjKeys, projKeys);
 	/* cache base liveness once so the per-row deletion test is a binary search,
 	 * not a per-row catalog scan */
-	cstate->livenessCache = ColumnarBuildLivenessCache(rel, snapshot);
+	cstate->livenessCache = PgColumnarBuildLivenessCache(rel, snapshot);
 	cstate->projScan = true;
 }
 
 static void
-ColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
+PgColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	rel = node->ss.ss_currentRelation;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1294,13 +1294,13 @@ ColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 	 * touches the catalog and data pages, is skipped when we will not execute.
 	 */
 	cstate->projectedColumns =
-		columnar_projected_columns(cscan, tupdesc->natts, &cstate->nProjected);
+		pgcolumnar_projected_columns(cscan, tupdesc->natts, &cstate->nProjected);
 	cstate->scanKeys =
-		ColumnarBuildScanKeys(cscan->scan.plan.qual, cscan->scan.scanrelid,
+		PgColumnarBuildScanKeys(cscan->scan.plan.qual, cscan->scan.scanrelid,
 							  tupdesc, &cstate->nScanKeys);
 
 	/* the projection the planner chose (gap 26); reported by EXPLAIN */
-	cstate->projName = columnar_chosen_projection(cscan);
+	cstate->projName = pgcolumnar_chosen_projection(cscan);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
@@ -1310,36 +1310,36 @@ ColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 	 * reader's catalog snapshot sees them (read-your-writes, spec 9), matching
 	 * the table AM's own scan_begin.
 	 */
-	ColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
 	if (cstate->projName != NULL)
 	{
 		/* gap 26: read a covering projection instead of the base. */
-		columnar_setup_projection_scan(cstate, rel, estate->es_snapshot,
+		pgcolumnar_setup_projection_scan(cstate, rel, estate->es_snapshot,
 									   cstate->projName);
 		if (!cstate->projScan)
 			cstate->projName = NULL;	/* projection vanished; base fallback */
 	}
 	else
 	{
-		cstate->readState = ColumnarBeginRead(rel, estate->es_snapshot, NULL,
+		cstate->readState = PgColumnarBeginRead(rel, estate->es_snapshot, NULL,
 											  cstate->projectedColumns,
 											  cstate->nScanKeys, cstate->scanKeys);
 	}
 }
 
 /*
- * ColumnarScanNext
+ * PgColumnarScanNext
  *		ExecScan access method: fetch the next columnar row into the scan slot.
  *		The row's synthetic item pointer (spec 6) is stored on the slot so an
  *		UPDATE/DELETE above the scan can identify the row by its ctid.
  */
 
 static TupleTableSlot *
-columnar_projection_scan_next(ScanState *ss)
+pgcolumnar_projection_scan_next(ScanState *ss)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) ss;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) ss;
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 	Relation	rel = ss->ss_currentRelation;
 	int			natts = cstate->nTotalColumns;
@@ -1350,14 +1350,14 @@ columnar_projection_scan_next(ScanState *ss)
 		uint64		baseRow;
 		int			c;
 
-		if (!ColumnarReadNextRow(cstate->readState, cstate->projValues,
+		if (!PgColumnarReadNextRow(cstate->readState, cstate->projValues,
 								 cstate->projNulls, &projRowNum))
 			return NULL;
 
 		/* deletes/visibility come from the base (gap 26): the projection stores
 		 * no delete vector, so filter by the stored base row number via the cache */
 		baseRow = (uint64) DatumGetInt64(cstate->projValues[0]);
-		if (!ColumnarLivenessCacheIsLive(cstate->livenessCache, baseRow))
+		if (!PgColumnarLivenessCacheIsLive(cstate->livenessCache, baseRow))
 			continue;
 
 		ExecClearTuple(slot);
@@ -1377,60 +1377,60 @@ columnar_projection_scan_next(ScanState *ss)
 			}
 		}
 		ExecStoreVirtualTuple(slot);
-		ColumnarRowNumberToItemPointer(baseRow, &slot->tts_tid);
+		PgColumnarRowNumberToItemPointer(baseRow, &slot->tts_tid);
 		slot->tts_tableOid = RelationGetRelid(rel);
 		return slot;
 	}
 }
 
 static TupleTableSlot *
-ColumnarScanNext(ScanState *ss)
+PgColumnarScanNext(ScanState *ss)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) ss;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) ss;
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 	uint64		rowNumber;
 
 	if (cstate->projScan)
-		return columnar_projection_scan_next(ss);
+		return pgcolumnar_projection_scan_next(ss);
 
 	ExecClearTuple(slot);
 
-	if (!ColumnarReadNextRow(cstate->readState, slot->tts_values,
+	if (!PgColumnarReadNextRow(cstate->readState, slot->tts_values,
 							 slot->tts_isnull, &rowNumber))
 		return NULL;
 
 	ExecStoreVirtualTuple(slot);
-	ColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
+	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(ss->ss_currentRelation);
 
 	return slot;
 }
 
 static bool
-ColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot)
+PgColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot)
 {
 	return true;
 }
 
 static TupleTableSlot *
-ColumnarExecCustomScan(CustomScanState *node)
+PgColumnarExecCustomScan(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) ColumnarScanNext,
-					(ExecScanRecheckMtd) ColumnarScanRecheck);
+					(ExecScanAccessMtd) PgColumnarScanNext,
+					(ExecScanRecheckMtd) PgColumnarScanRecheck);
 }
 
 static void
-ColumnarReScanCustomScan(CustomScanState *node)
+PgColumnarReScanCustomScan(CustomScanState *node)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 
 	if (cstate->readState != NULL)
 	{
-		ColumnarRescanRead(cstate->readState);
+		PgColumnarRescanRead(cstate->readState);
 		/* a parallel rescan keeps sharing the same stripe counter */
 		if (cstate->parallelCounter != NULL)
-			ColumnarReadSetParallelCounter(cstate->readState,
+			PgColumnarReadSetParallelCounter(cstate->readState,
 										   cstate->parallelCounter);
 	}
 
@@ -1445,26 +1445,26 @@ ColumnarReScanCustomScan(CustomScanState *node)
  * ------------------------------------------------------------------------- */
 
 static Size
-ColumnarEstimateDSMCustomScan(CustomScanState *node, ParallelContext *pcxt)
+PgColumnarEstimateDSMCustomScan(CustomScanState *node, ParallelContext *pcxt)
 {
 	return sizeof(pg_atomic_uint32);
 }
 
 static void
-ColumnarInitializeDSMCustomScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarInitializeDSMCustomScan(CustomScanState *node, ParallelContext *pcxt,
 								void *coordinate)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	pg_atomic_init_u32(counter, 0);
 	cstate->parallelCounter = counter;
 	if (cstate->readState != NULL)
-		ColumnarReadSetParallelCounter(cstate->readState, counter);
+		PgColumnarReadSetParallelCounter(cstate->readState, counter);
 }
 
 static void
-ColumnarReInitializeDSMCustomScan(CustomScanState *node, ParallelContext *pcxt,
+PgColumnarReInitializeDSMCustomScan(CustomScanState *node, ParallelContext *pcxt,
 								  void *coordinate)
 {
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
@@ -1473,39 +1473,39 @@ ColumnarReInitializeDSMCustomScan(CustomScanState *node, ParallelContext *pcxt,
 }
 
 static void
-ColumnarInitializeWorkerCustomScan(CustomScanState *node, shm_toc *toc,
+PgColumnarInitializeWorkerCustomScan(CustomScanState *node, shm_toc *toc,
 								   void *coordinate)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 	pg_atomic_uint32 *counter = (pg_atomic_uint32 *) coordinate;
 
 	cstate->parallelCounter = counter;
 	if (cstate->readState != NULL)
-		ColumnarReadSetParallelCounter(cstate->readState, counter);
+		PgColumnarReadSetParallelCounter(cstate->readState, counter);
 }
 
 static void
-ColumnarEndCustomScan(CustomScanState *node)
+PgColumnarEndCustomScan(CustomScanState *node)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 
 	if (cstate->readState != NULL)
 	{
-		ColumnarEndRead(cstate->readState);
+		PgColumnarEndRead(cstate->readState);
 		cstate->readState = NULL;
 	}
 	if (cstate->livenessCache != NULL)
 	{
-		ColumnarFreeLivenessCache(cstate->livenessCache);
+		PgColumnarFreeLivenessCache(cstate->livenessCache);
 		cstate->livenessCache = NULL;
 	}
 }
 
 static void
-ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
+PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 						  ExplainState *es)
 {
-	ColumnarCustomScanState *cstate = (ColumnarCustomScanState *) node;
+	PgColumnarCustomScanState *cstate = (PgColumnarCustomScanState *) node;
 
 	if (cstate->projName != NULL)
 		ExplainPropertyText("Columnar Projection", cstate->projName, es);
@@ -1518,8 +1518,8 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 	 * Report what the scan pushes down, not what the planner handed it.
 	 *
 	 * cstate->nScanKeys is the count the planner produced, and it is the same
-	 * whether or not pushdown is enabled. But columnar_enable_qual_pushdown
-	 * gates columnar_build_predicates in ColumnarBeginRead, so with the setting
+	 * whether or not pushdown is enabled. But pgcolumnar_enable_qual_pushdown
+	 * gates pgcolumnar_build_predicates in PgColumnarBeginRead, so with the setting
 	 * off the reader builds no predicates and skips no chunk groups: nothing is
 	 * pushed down in any sense the scan acts on. Someone turning the setting off
 	 * to test a theory, and checking EXPLAIN to confirm it took effect, was told
@@ -1530,7 +1530,7 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 	 * so this one line meant something different from all of its neighbours.
 	 */
 	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
-						   columnar_enable_qual_pushdown ? cstate->nScanKeys : 0,
+						   pgcolumnar_enable_qual_pushdown ? cstate->nScanKeys : 0,
 						   es);
 
 	if (cstate->readState != NULL)
@@ -1539,7 +1539,7 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		uint64		groupsSkipped = 0;
 		uint64		groupsTotal = 0;
 
-		ColumnarReadStats(cstate->readState, &groupsRead, &groupsSkipped,
+		PgColumnarReadStats(cstate->readState, &groupsRead, &groupsSkipped,
 						  &groupsTotal);
 
 		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
@@ -1549,7 +1549,7 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
 							   (int64) groupsSkipped, es);
 		ExplainPropertyInteger("Columnar Vectors Skipped", NULL,
-							   (int64) ColumnarVectorsSkipped(cstate->readState), es);
+							   (int64) PgColumnarVectorsSkipped(cstate->readState), es);
 	}
 }
 
@@ -1558,10 +1558,10 @@ ColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
  * ------------------------------------------------------------------------- */
 
 void
-ColumnarCustomScanInit(void)
+PgColumnarCustomScanInit(void)
 {
-	RegisterCustomScanMethods(&columnar_scan_methods);
+	RegisterCustomScanMethods(&pgcolumnar_scan_methods);
 
 	prev_set_rel_pathlist_hook = set_rel_pathlist_hook;
-	set_rel_pathlist_hook = ColumnarSetRelPathlist;
+	set_rel_pathlist_hook = PgColumnarSetRelPathlist;
 }

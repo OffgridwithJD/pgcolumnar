@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_projection.c
+ * pgcolumnar_projection.c
  *		DDL for multiple physical projections (gap 26, format 2.2).
  *
  * A projection is a named, ordered subset of a table's columns stored as its
@@ -8,7 +8,7 @@
  * identity space (the C-Store model; see design/gaps/26-*). The catalog
  * (pgcolumnar.projection) and the add/drop DDL are provided here: declaring a
  * projection allocates its storage id, records the catalog row, and back-fills
- * the projection's storage from existing rows (ColumnarBackfillProjection). Read
+ * the projection's storage from existing rows (PgColumnarBackfillProjection). Read
  * paths (read_projection, reconstruct_via_projection) are also provided.
  *
  * projection_id 0 is the implicit base projection (all live columns, insert
@@ -34,9 +34,9 @@
 #include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
-PG_FUNCTION_INFO_V1(columnar_add_projection);
-PG_FUNCTION_INFO_V1(columnar_drop_projection);
-PG_FUNCTION_INFO_V1(columnar_read_projection);
+PG_FUNCTION_INFO_V1(pgcolumnar_add_projection);
+PG_FUNCTION_INFO_V1(pgcolumnar_drop_projection);
+PG_FUNCTION_INFO_V1(pgcolumnar_read_projection);
 
 /*
  * Collect the live (non-dropped) attribute numbers of a relation, in attnum
@@ -118,11 +118,11 @@ static void
 record_base_projection(Relation rel, uint64 storageId, List *existing)
 {
 	ListCell   *lc;
-	ColumnarProjection base;
+	PgColumnarProjection base;
 
 	foreach(lc, existing)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (p->projectionId == 0)
 			return;
@@ -136,7 +136,7 @@ record_base_projection(Relation rel, uint64 storageId, List *existing)
 	base.sortKey = NULL;
 	base.sortKeyLen = 0;
 	base.columns = live_attnums(rel, &base.columnsLen);
-	ColumnarInsertProjectionRow(&base);
+	PgColumnarInsertProjectionRow(&base);
 }
 
 /*
@@ -144,7 +144,7 @@ record_base_projection(Relation rel, uint64 storageId, List *existing)
  *		Declare a projection: a named column subset sorted on sort_key.
  */
 Datum
-columnar_add_projection(PG_FUNCTION_ARGS)
+pgcolumnar_add_projection(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *projname;
@@ -154,7 +154,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	uint64		storageId;
 	List	   *existing;
 	ListCell   *lc;
-	ColumnarProjection proj;
+	PgColumnarProjection proj;
 	int			nextId = 1;
 	int			i,
 				j;
@@ -169,7 +169,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	colsArr = PG_GETARG_ARRAYTYPE_P(2);
 	sortArr = PG_ARGISNULL(3) ? NULL : PG_GETARG_ARRAYTYPE_P(3);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table",
@@ -191,13 +191,13 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	 * unaffected. (A CONCURRENTLY variant is future work.)
 	 */
 	rel = table_open(relid, ShareLock);
-	ColumnarRequireTableOwner(rel);
-	storageId = ColumnarStorageId(rel);
+	PgColumnarRequireTableOwner(rel);
+	storageId = PgColumnarStorageId(rel);
 
-	existing = ColumnarListProjections(storageId);
+	existing = PgColumnarListProjections(storageId);
 	record_base_projection(rel, storageId, existing);
 	/* re-read so the base row is included when picking the next id / name check */
-	existing = ColumnarListProjections(storageId);
+	existing = PgColumnarListProjections(storageId);
 
 	memset(&proj, 0, sizeof(proj));
 	proj.storageId = storageId;
@@ -232,7 +232,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	/* name must be unique for this table; next id is max + 1 */
 	foreach(lc, existing)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (strcmp(p->name, projname) == 0)
 			ereport(ERROR,
@@ -244,11 +244,11 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	}
 
 	proj.projectionId = nextId;
-	proj.projStorageId = ColumnarNextStorageId();
-	ColumnarInsertProjectionRow(&proj);
+	proj.projStorageId = PgColumnarNextStorageId();
+	PgColumnarInsertProjectionRow(&proj);
 
 	/* populate the projection from the table's existing rows (gap 26 back-fill) */
-	ColumnarBackfillProjection(rel, &proj);
+	PgColumnarBackfillProjection(rel, &proj);
 
 	/*
 	 * Record the declaration behind it, by relation and column name, so a dump
@@ -256,7 +256,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
 	 * (#266). Written here rather than in the SQL binding so that a projection
 	 * cannot come into existence without one.
 	 */
-	ColumnarRecordProjectionDeclaration(relid, projname, colsArr,
+	PgColumnarRecordProjectionDeclaration(relid, projname, colsArr,
 										sortArr ? sortArr :
 										construct_empty_array(TEXTOID));
 
@@ -269,7 +269,7 @@ columnar_add_projection(PG_FUNCTION_ARGS)
  *		Drop a declared projection. The base projection cannot be dropped.
  */
 Datum
-columnar_drop_projection(PG_FUNCTION_ARGS)
+pgcolumnar_drop_projection(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *projname;
@@ -288,20 +288,20 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	projname = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table",
 						get_rel_name(relid))));
 
 	rel = table_open(relid, ShareUpdateExclusiveLock);
-	ColumnarRequireTableOwner(rel);
-	storageId = ColumnarStorageId(rel);
-	existing = ColumnarListProjections(storageId);
+	PgColumnarRequireTableOwner(rel);
+	storageId = PgColumnarStorageId(rel);
+	existing = PgColumnarListProjections(storageId);
 
 	foreach(lc, existing)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (strcmp(p->name, projname) == 0)
 		{
@@ -331,11 +331,11 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
 	 * deleted.
 	 */
 	if (targetStorageId != storageId)
-		ColumnarDeleteMetadata(targetStorageId);
-	ColumnarDeleteProjectionRow(storageId, targetId);
+		PgColumnarDeleteMetadata(targetStorageId);
+	PgColumnarDeleteProjectionRow(storageId, targetId);
 
 	/* and forget the declaration, so a later rebuild does not resurrect it (#266) */
-	ColumnarDeleteProjectionDeclaration(relid, projname);
+	PgColumnarDeleteProjectionDeclaration(relid, projname);
 
 	table_close(rel, ShareUpdateExclusiveLock);
 	PG_RETURN_VOID();
@@ -351,7 +351,7 @@ columnar_drop_projection(PG_FUNCTION_ARGS)
  *		flushed first so rows written earlier in this transaction are visible.
  */
 Datum
-columnar_read_projection(PG_FUNCTION_ARGS)
+pgcolumnar_read_projection(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *projname;
@@ -360,7 +360,7 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 	uint64		storageId;
 	List	   *projs;
 	ListCell   *lc;
-	ColumnarProjection *proj = NULL;
+	PgColumnarProjection *proj = NULL;
 	TupleDesc	projTupdesc;
 	TupleDesc	retdesc;
 	Tuplestorestate *tupstore;
@@ -369,7 +369,7 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 	int			ncols;
 	int			i;
 	Snapshot	snap;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	Datum	   *rvals;
 	bool	   *rnulls;
 	uint64		projRowNum;
@@ -387,20 +387,20 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("set-valued function called in context that cannot accept a set")));
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table", get_rel_name(relid))));
 
 	rel = table_open(relid, AccessShareLock);
 	/* persist pending base + projection writes so this read sees them */
-	ColumnarFlushWriteStateForRelation(relid);
-	storageId = ColumnarStorageId(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	storageId = PgColumnarStorageId(rel);
 
-	projs = ColumnarListProjections(storageId);
+	projs = PgColumnarListProjections(storageId);
 	foreach(lc, projs)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (strcmp(p->name, projname) == 0)
 		{
@@ -448,10 +448,10 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 	snap = GetActiveSnapshot();
 	rvals = palloc(sizeof(Datum) * (ncols + 1));
 	rnulls = palloc(sizeof(bool) * (ncols + 1));
-	readState = ColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
+	readState = PgColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
 											 projTupdesc, NULL, NULL, 0, NULL);
 
-	while (ColumnarReadNextRow(readState, rvals, rnulls, &projRowNum))
+	while (PgColumnarReadNextRow(readState, rvals, rnulls, &projRowNum))
 	{
 		uint64		baseRow = (uint64) DatumGetInt64(rvals[0]);
 		StringInfoData buf;
@@ -464,7 +464,7 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 		 * base row to answer that decoded every column and threw all of it away
 		 * (issue #157).
 		 */
-		if (!ColumnarRowIsLive(rel, snap, baseRow))
+		if (!PgColumnarRowIsLive(rel, snap, baseRow))
 			continue;
 
 		initStringInfo(&buf);
@@ -484,7 +484,7 @@ columnar_read_projection(PG_FUNCTION_ARGS)
 		pfree(buf.data);
 	}
 
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 	table_close(rel, AccessShareLock);
 
 	return (Datum) 0;
@@ -500,9 +500,9 @@ columnar_read_projection(PG_FUNCTION_ARGS)
  *		does not cover every referenced column. All live table columns are
  *		rendered by their output functions and joined by '|'.
  */
-PG_FUNCTION_INFO_V1(columnar_reconstruct_via_projection);
+PG_FUNCTION_INFO_V1(pgcolumnar_reconstruct_via_projection);
 Datum
-columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
+pgcolumnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	char	   *projname;
@@ -512,7 +512,7 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	uint64		storageId;
 	List	   *projs;
 	ListCell   *lc;
-	ColumnarProjection *proj = NULL;
+	PgColumnarProjection *proj = NULL;
 	TupleDesc	projTupdesc;
 	TupleDesc	retdesc;
 	Tuplestorestate *tupstore;
@@ -523,7 +523,7 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	int			tnatts;
 	int			i;
 	Snapshot	snap;
-	ColumnarReadState *readState;
+	PgColumnarReadState *readState;
 	Datum	   *rvals;
 	bool	   *rnulls;
 	Datum	   *basevals;
@@ -544,21 +544,21 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("set-valued function called in context that cannot accept a set")));
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table", get_rel_name(relid))));
 
 	rel = table_open(relid, AccessShareLock);
-	ColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushWriteStateForRelation(relid);
 	tableDesc = RelationGetDescr(rel);
 	tnatts = tableDesc->natts;
-	storageId = ColumnarStorageId(rel);
+	storageId = PgColumnarStorageId(rel);
 
-	projs = ColumnarListProjections(storageId);
+	projs = PgColumnarListProjections(storageId);
 	foreach(lc, projs)
 	{
-		ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 		if (strcmp(p->name, projname) == 0)
 		{
@@ -637,10 +637,10 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 			uncovered = bms_add_member(uncovered, i);
 	}
 
-	readState = ColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
+	readState = PgColumnarBeginReadWithStorage(rel, snap, proj->projStorageId,
 											 projTupdesc, NULL, NULL, 0, NULL);
 
-	while (ColumnarReadNextRow(readState, rvals, rnulls, &projRowNum))
+	while (PgColumnarReadNextRow(readState, rvals, rnulls, &projRowNum))
 	{
 		uint64		baseRow = (uint64) DatumGetInt64(rvals[0]);
 		StringInfoData buf;
@@ -649,7 +649,7 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 		bool		first = true;
 
 		/* fetch the base row: liveness, and only the columns not covered */
-		if (!ColumnarReadRowByNumberCols(rel, snap, baseRow, basevals,
+		if (!PgColumnarReadRowByNumberCols(rel, snap, baseRow, basevals,
 										 basenulls, uncovered))
 			continue;
 
@@ -688,7 +688,7 @@ columnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 		pfree(buf.data);
 	}
 
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 	table_close(rel, AccessShareLock);
 
 	return (Datum) 0;

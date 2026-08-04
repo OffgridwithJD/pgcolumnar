@@ -10,7 +10,7 @@
 #     a malformed file makes the backend raise an ERROR, never die.
 #
 # That is the property #210 broke. A crafted footer reached unbounded recursion
-# in ColumnarThriftSkip, and a crafted schema chain reached a second one in
+# in PgColumnarThriftSkip, and a crafted schema chain reached a second one in
 # walk_schema, either of which takes down the whole cluster rather than the
 # session. Both were found by reading code. This suite is the machine that was
 # missing.

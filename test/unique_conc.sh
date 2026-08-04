@@ -7,7 +7,7 @@
 # synthetic TID) is written immediately. So while transaction T1's inserting
 # statement is still in flight (row buffered, not flushed), a second transaction
 # T2 inserting the SAME key finds T1's index entry but cannot resolve the row:
-# columnar_index_fetch_tuple returns false for a row still in T1's private write
+# pgcolumnar_index_fetch_tuple returns false for a row still in T1's private write
 # buffer. The btree dirty-snapshot uniqueness check then treats the entry as dead
 # and T2 inserts a duplicate -- two live rows with the same unique key.
 #

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vacuum.c
+ * pgcolumnar_vacuum.c
  *		Compaction, statistics, and storage-id lookup functions for pgColumnar
  *		(spec 8.2, 9). columnar.vacuum rewrites a columnar table's live rows
  *		into fresh, full stripes: this combines many small stripes into few and
@@ -49,30 +49,30 @@
 #include "utils/tuplestore.h"
 #include "utils/typcache.h"
 
-PG_FUNCTION_INFO_V1(columnar_relation_storageid);
-PG_FUNCTION_INFO_V1(columnar_vacuum);
-PG_FUNCTION_INFO_V1(columnar_vacuum_sorted);
-PG_FUNCTION_INFO_V1(columnar_cluster);
-PG_FUNCTION_INFO_V1(columnar_compact);
-PG_FUNCTION_INFO_V1(columnar_compact_rewrite);
-PG_FUNCTION_INFO_V1(columnar_recluster);
-PG_FUNCTION_INFO_V1(columnar_truncate);
-PG_FUNCTION_INFO_V1(columnar_debug_advance_reserved_offset);
-PG_FUNCTION_INFO_V1(columnar_debug_set_metapage_version);
+PG_FUNCTION_INFO_V1(pgcolumnar_relation_storageid);
+PG_FUNCTION_INFO_V1(pgcolumnar_vacuum);
+PG_FUNCTION_INFO_V1(pgcolumnar_vacuum_sorted);
+PG_FUNCTION_INFO_V1(pgcolumnar_cluster);
+PG_FUNCTION_INFO_V1(pgcolumnar_compact);
+PG_FUNCTION_INFO_V1(pgcolumnar_compact_rewrite);
+PG_FUNCTION_INFO_V1(pgcolumnar_recluster);
+PG_FUNCTION_INFO_V1(pgcolumnar_truncate);
+PG_FUNCTION_INFO_V1(pgcolumnar_debug_advance_reserved_offset);
+PG_FUNCTION_INFO_V1(pgcolumnar_debug_set_metapage_version);
 
 /* physical end-truncation opt-in (GUC), registered in _PG_init. Default off
  * until the abort/crash path is fully hardened and matrix-validated. */
-bool		columnar_enable_end_truncation = false;
+bool		pgcolumnar_enable_end_truncation = false;
 
 /*
- * ColumnarRequireTableOwner
+ * PgColumnarRequireTableOwner
  *		Error unless the current user owns the relation (superusers pass). Every
  *		maintenance and projection-DDL function gates on this: they rewrite data,
  *		reclaim space, or take strong locks (truncate takes AccessExclusiveLock),
  *		so they must be owner-only, like VACUUM and CLUSTER.
  */
 void
-ColumnarRequireTableOwner(Relation rel)
+PgColumnarRequireTableOwner(Relation rel)
 {
 	if (!COLUMNAR_TABLE_OWNERCHECK(RelationGetRelid(rel)))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
@@ -106,7 +106,7 @@ uint64_cmp(const void *a, const void *b)
  * rests on the protocol in design/PHASE_F3B_PLAN.md: the rewrite serializes with
  * deleters on the per-chunk-group advisory lock, and a delete that races a
  * rewrite of its group is aborted with a serialization failure by the
- * conflict check in ColumnarUpsertDeleteVector.
+ * conflict check in PgColumnarUpsertDeleteVector.
  * ------------------------------------------------------------------------- */
 
 /* the relation's ready indexes, opened once for a rewrite pass */
@@ -116,37 +116,37 @@ uint64_cmp(const void *a, const void *b)
  * on rel and has opened the indexes in ris.
  */
 static int64
-rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
+rewrite_one_group(Relation rel, PgColumnarIndexInsertState *ris, uint64 storageId,
 				  uint64 groupNumber, uint64 firstRow, uint64 rowCount)
 {
 	Oid			relid = RelationGetRelid(rel);
 	int			natts = RelationGetDescr(rel)->natts;
 	Datum	   *values = palloc(natts * sizeof(Datum));
 	bool	   *isnull = palloc(natts * sizeof(bool));
-	ColumnarWriteState *ws;
+	PgColumnarWriteState *ws;
 	Snapshot	snap;
-	ColumnarReadState *rs;
+	PgColumnarReadState *rs;
 	uint64		oldRn;
 	int64		moved = 0;
 
-	/* serialize with concurrent deleters to this group (see ColumnarUpsertDeleteVector) */
-	ColumnarLockChunkGroup(storageId, groupNumber);
+	/* serialize with concurrent deleters to this group (see PgColumnarUpsertDeleteVector) */
+	PgColumnarLockChunkGroup(storageId, groupNumber);
 
 	/* Read the group's live set under a snapshot taken after the lock, so every
 	 * delete committed before the lock is reflected. Register it (not just push
 	 * active): the reader derives a catalog snapshot copy from it, in
-	 * ColumnarCatalogSnapshot, that must inherit a nonzero regd_count for PG18's
+	 * PgColumnarCatalogSnapshot, that must inherit a nonzero regd_count for PG18's
 	 * heap-visibility assertion, which a merely-active GetLatestSnapshot does not
 	 * provide. */
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	PushActiveSnapshot(snap);
 
-	ws = ColumnarGetWriteState(rel);
+	ws = PgColumnarGetWriteState(rel);
 
 	/*
 	 * Stream the group rather than fetching its rows one at a time.
 	 *
-	 * ColumnarReadRowByNumber decodes the whole group to return one value and
+	 * PgColumnarReadRowByNumber decodes the whole group to return one value and
 	 * relies on the fetch cache to make the next call cheap. That cache holds
 	 * only what fits under COLUMNAR_FETCH_CACHE_MAX_BYTES, so a group whose
 	 * decoded form exceeds the cap re-decodes the columns that did not fit, once
@@ -167,27 +167,27 @@ rewrite_one_group(Relation rel, ColumnarIndexInsertState *ris, uint64 storageId,
 	 * ANALYZE's sampler was moved off the same per-row fetch for the same
 	 * reason.
 	 */
-	rs = ColumnarBeginRead(rel, snap, NULL, NULL, 0, NULL);
-	ColumnarReadRestrictToGroups(rs, &groupNumber, 1);
+	rs = PgColumnarBeginRead(rel, snap, NULL, NULL, 0, NULL);
+	PgColumnarReadRestrictToGroups(rs, &groupNumber, 1);
 
-	while (ColumnarReadNextRow(rs, values, isnull, &oldRn))
+	while (PgColumnarReadNextRow(rs, values, isnull, &oldRn))
 	{
 		uint64		newRn;
 
 		CHECK_FOR_INTERRUPTS();
 
-		newRn = ColumnarWriteRow(ws, rel, values, isnull);
-		ColumnarProjectionFanoutRow(rel, ws, newRn, values, isnull);
-		ColumnarIndexInsertRow(ris, rel, values, isnull, newRn);
+		newRn = PgColumnarWriteRow(ws, rel, values, isnull);
+		PgColumnarProjectionFanoutRow(rel, ws, newRn, values, isnull);
+		PgColumnarIndexInsertRow(ris, rel, values, isnull, newRn);
 		moved++;
 	}
 
-	ColumnarEndRead(rs);
-	ColumnarFlushWriteStateForRelation(relid);
+	PgColumnarEndRead(rs);
+	PgColumnarFlushWriteStateForRelation(relid);
 
 	/* atomically (same transaction) the new group is now in the catalog; drop the
 	 * old one. Heap MVCC keeps the old group readable to older snapshots. */
-	ColumnarRetireGroup(storageId, groupNumber);
+	PgColumnarRetireGroup(storageId, groupNumber);
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snap);
@@ -205,35 +205,35 @@ typedef struct RewriteCandidate
 } RewriteCandidate;
 
 /*
- * columnar_rewrite_partial_groups
+ * pgcolumnar_rewrite_partial_groups
  *		Rewrite up to maxGroups groups whose deleted fraction is at least
  *		minDeletedFraction (and which are not fully dead -- F3a handles those).
  *		maxGroups <= 0 means all. Returns the number of groups rewritten.
  */
 static int64
-columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
+pgcolumnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 								int maxGroups)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	Oid			relid = RelationGetRelid(rel);
 	Snapshot	snap;
 	List	   *rgList;
 	ListCell   *lc;
 	List	   *cands = NIL;
-	ColumnarIndexInsertState *ris;
+	PgColumnarIndexInsertState *ris;
 	int64		rewritten = 0;
 
 	/* persist own pending work so the group list and deletes are current */
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
 	/* drop any free_space row overlapping a live group (the residual of a crash
 	 * in end-truncation's narrow window) before reusing anything */
-	ColumnarReconcileFreeList(rel);
+	PgColumnarReconcileFreeList(rel);
 
 	/* collect candidate groups first (do not mutate the catalog mid-scan) */
 	snap = RegisterSnapshot(GetLatestSnapshot());
-	rgList = ColumnarReadRowGroupList(storageId, snap);
+	rgList = PgColumnarReadRowGroupList(storageId, snap);
 	foreach(lc, rgList)
 	{
 		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
@@ -243,7 +243,7 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 
 		if (rg->rowCount == 0)
 			continue;
-		rmList = ColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
+		rmList = PgColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
 		foreach(lc2, rmList)
 			deleted += ((DeleteVectorMetadata *) lfirst(lc2))->deletedCount;
 
@@ -264,7 +264,7 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 	if (cands == NIL)
 		return 0;
 
-	ris = ColumnarIndexInsertBegin(rel, false);
+	ris = PgColumnarIndexInsertBegin(rel, false);
 	foreach(lc, cands)
 	{
 		RewriteCandidate *c = (RewriteCandidate *) lfirst(lc);
@@ -275,14 +275,14 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
 						  c->firstRow, c->rowCount);
 		rewritten++;
 	}
-	ColumnarIndexInsertEnd(ris);
+	PgColumnarIndexInsertEnd(ris);
 
 	COLUMNAR_ASSERT_NO_OVERLAP(storageId);
 	return rewritten;
 }
 
 /*
- * columnar_compact_rewrite
+ * pgcolumnar_compact_rewrite
  *		SQL: pgcolumnar.compact_rewrite(tablename regclass,
  *			 min_deleted_fraction float8 default 0.2, max_groups int default 0).
  *		The lazy online space-reclaiming path (Phase F3b): rewrite partially
@@ -314,7 +314,7 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
  *		An earlier version marked only an upper bound and tried to exclude the
  *		below case by requiring the lowest live group to equal ours[0]. That
  *		could not work (#342): the group list was read under the rewrite's own
- *		snapshot, taken before it read a row, and ColumnarCatalogSnapshot only
+ *		snapshot, taken before it read a row, and PgColumnarCatalogSnapshot only
  *		advances curcid rather than refreshing xmin/xmax, so a concurrent
  *		inserter's group was invisible to the check whenever it committed. A
  *		foreign group written just before the rewrite's first reservation was
@@ -327,10 +327,10 @@ columnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
  */
 static void
 record_online_sorted_extent(Relation rel, uint64 storageId,
-							ColumnarWriteState *writeState, int stripeMark)
+							PgColumnarWriteState *writeState, int stripeMark)
 {
 	int			nAll;
-	uint64	   *all = ColumnarWriteStateStripeIds(writeState, &nAll);
+	uint64	   *all = PgColumnarWriteStateStripeIds(writeState, &nAll);
 	int			nOurs = nAll - stripeMark;
 	uint64	   *ours;
 	uint64		runEnd;
@@ -354,7 +354,7 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 
 	{
 		int			nProj = 0;
-		uint64	   *projIds = ColumnarWriteStateProjStripeIds(writeState, &nProj);
+		uint64	   *projIds = PgColumnarWriteStateProjStripeIds(writeState, &nProj);
 
 		if (nProj > 0)
 		{
@@ -387,12 +387,12 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 		runEnd = ours[i];
 	}
 
-	ColumnarSetSortedExtent(storageId, (int64) ours[0], (int64) runEnd);
+	PgColumnarSetSortedExtent(storageId, (int64) ours[0], (int64) runEnd);
 	pfree(ours);
 }
 
 /*
- * columnar_recluster_online
+ * pgcolumnar_recluster_online
  *		Re-establish global Z-order clustering over the relation's live rows
  *		online (Phase F3c): read all live rows under a snapshot taken after
  *		advisory-locking every group, Morton-sort them, write them back as fresh
@@ -402,9 +402,9 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
  *		conflict protocol. Returns the number of groups retired.
  */
 static int64
-columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
+pgcolumnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	Oid			relid = RelationGetRelid(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			natts = tupdesc->natts;
@@ -425,23 +425,23 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	Oid			byteaLt;
 	Oid			sortColl = InvalidOid;
 	bool		nullsFirst = false;
-	ColumnarReadState *readState;
-	ColumnarWriteState *writeState;
-	ColumnarIndexInsertState *ris;
+	PgColumnarReadState *readState;
+	PgColumnarWriteState *writeState;
+	PgColumnarIndexInsertState *ris;
 	uint64		rowNumber;
 	int			stripeMark;
 
 	/* persist own pending work so the group list and deletes are current */
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
 	/* drop any free_space row overlapping a live group (the residual of a crash
 	 * in end-truncation's narrow window) before reusing anything */
-	ColumnarReconcileFreeList(rel);
+	PgColumnarReconcileFreeList(rel);
 
 	/* capture the current groups (retired at the end, after the new ones exist) */
 	listSnap = RegisterSnapshot(GetLatestSnapshot());
-	rgList = ColumnarReadRowGroupList(storageId, listSnap);
+	rgList = PgColumnarReadRowGroupList(storageId, listSnap);
 	oldGroups = palloc(sizeof(uint64) * (list_length(rgList) > 0 ? list_length(rgList) : 1));
 	foreach(lc, rgList)
 	{
@@ -463,7 +463,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	/* lock every group in ascending order (deadlock-safe), held to commit */
 	qsort(oldGroups, nGroups, sizeof(uint64), uint64_cmp);
 	for (i = 0; i < nGroups; i++)
-		ColumnarLockChunkGroup(storageId, oldGroups[i]);
+		PgColumnarLockChunkGroup(storageId, oldGroups[i]);
 
 	/* read all live rows into a Morton-keyed tuplesort (as in eager cluster).
 	 * Register the snapshot (not just push active) so the catalog snapshot copies
@@ -492,8 +492,8 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	putSlot = MakeSingleTupleTableSlot(augdesc, &TTSOpsVirtual);
 	augSlot = MakeSingleTupleTableSlot(augdesc, &TTSOpsMinimalTuple);
 
-	readState = ColumnarBeginRead(rel, snap, NULL, NULL, 0, NULL);
-	while (ColumnarReadNextRow(readState, readSlot->tts_values,
+	readState = PgColumnarBeginRead(rel, snap, NULL, NULL, 0, NULL);
+	while (PgColumnarReadNextRow(readState, readSlot->tts_values,
 							   readSlot->tts_isnull, &rowNumber))
 	{
 		bytea	   *zkey;
@@ -509,41 +509,41 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 		tuplesort_puttupleslot(tsort, putSlot);
 		ExecClearTuple(putSlot);
 	}
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 	ExecDropSingleTupleTableSlot(readSlot);
 	ExecDropSingleTupleTableSlot(putSlot);
 	tuplesort_performsort(tsort);
 
 	/* write the sorted rows back as fresh groups, with online index maintenance */
-	ris = ColumnarIndexInsertBegin(rel, false);
-	writeState = ColumnarGetWriteState(rel);
+	ris = PgColumnarIndexInsertBegin(rel, false);
+	writeState = PgColumnarGetWriteState(rel);
 	/*
 	 * Note where this rewrite's own stripe reservations begin (#311). The write
 	 * state can already hold entries from earlier work in this transaction, so
 	 * only the tail from here on belongs to us.
 	 */
-	stripeMark = ColumnarWriteStateStripeCount(writeState);
+	stripeMark = PgColumnarWriteStateStripeCount(writeState);
 	while (tuplesort_gettupleslot(tsort, true, false, augSlot, NULL))
 	{
 		uint64		newRn;
 
 		CHECK_FOR_INTERRUPTS();
 		slot_getallattrs(augSlot);
-		newRn = ColumnarWriteRow(writeState, rel, augSlot->tts_values,
+		newRn = PgColumnarWriteRow(writeState, rel, augSlot->tts_values,
 								 augSlot->tts_isnull);
-		ColumnarProjectionFanoutRow(rel, writeState, newRn, augSlot->tts_values,
+		PgColumnarProjectionFanoutRow(rel, writeState, newRn, augSlot->tts_values,
 									augSlot->tts_isnull);
-		ColumnarIndexInsertRow(ris, rel, augSlot->tts_values,
+		PgColumnarIndexInsertRow(ris, rel, augSlot->tts_values,
 							   augSlot->tts_isnull, newRn);
 	}
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarIndexInsertEnd(ris);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarIndexInsertEnd(ris);
 	tuplesort_end(tsort);
 	ExecDropSingleTupleTableSlot(augSlot);
 
 	/* retire the old groups; heap MVCC keeps them readable to older snapshots */
 	for (i = 0; i < nGroups; i++)
-		ColumnarRetireGroup(storageId, oldGroups[i]);
+		PgColumnarRetireGroup(storageId, oldGroups[i]);
 
 	/* record how far the reordered run reaches (#311) */
 	record_online_sorted_extent(rel, storageId, writeState, stripeMark);
@@ -557,7 +557,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 }
 
 /*
- * columnar_recluster
+ * pgcolumnar_recluster
  *		SQL: pgcolumnar.recluster(tablename regclass, VARIADIC columns name[]).
  *		The lazy online counterpart to cluster(): re-establish global Z-order
  *		clustering under ShareUpdateExclusiveLock (concurrent reads and writes),
@@ -565,7 +565,7 @@ columnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
  *		number of groups reclustered.
  */
 Datum
-columnar_recluster(PG_FUNCTION_ARGS)
+pgcolumnar_recluster(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	ArrayType  *colArray;
@@ -602,7 +602,7 @@ columnar_recluster(PG_FUNCTION_ARGS)
 	/* the lazy lock: concurrent reads and writes during the recluster */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, ShareUpdateExclusiveLock);
 		ereport(ERROR,
@@ -611,7 +611,7 @@ columnar_recluster(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
 	tupdesc = RelationGetDescr(rel);
 	atts = palloc(ncols * sizeof(AttrNumber));
@@ -654,14 +654,14 @@ columnar_recluster(PG_FUNCTION_ARGS)
 		atts[i] = attno;
 	}
 
-	reclustered = columnar_recluster_online(rel, ncols, atts);
+	reclustered = pgcolumnar_recluster_online(rel, ncols, atts);
 
 	table_close(rel, NoLock);
 	PG_RETURN_INT64(reclustered);
 }
 
 Datum
-columnar_compact_rewrite(PG_FUNCTION_ARGS)
+pgcolumnar_compact_rewrite(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	double		minFrac = PG_ARGISNULL(1) ? 0.2 : PG_GETARG_FLOAT8(1);
@@ -680,7 +680,7 @@ columnar_compact_rewrite(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, ShareUpdateExclusiveLock);
 		ereport(ERROR,
@@ -689,9 +689,9 @@ columnar_compact_rewrite(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
-	rewritten = columnar_rewrite_partial_groups(rel, minFrac, maxGroups);
+	rewritten = pgcolumnar_rewrite_partial_groups(rel, minFrac, maxGroups);
 
 	table_close(rel, NoLock);
 	PG_RETURN_INT64(rewritten);
@@ -828,13 +828,13 @@ cluster_zorder_key(Datum *values, bool *isnull, AttrNumber *atts, int ncols,
 }
 
 /*
- * columnar_relation_storageid
+ * pgcolumnar_relation_storageid
  *		SQL: columnar.get_storage_id(regclass) -> bigint. Reads the relation's
  *		metapage and returns its storage id (spec 3), so SQL-level functions
  *		such as columnar.stats can join the metadata catalog by storage id.
  */
 Datum
-columnar_relation_storageid(PG_FUNCTION_ARGS)
+pgcolumnar_relation_storageid(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
@@ -844,7 +844,7 @@ columnar_relation_storageid(PG_FUNCTION_ARGS)
 	if (rel == NULL)
 		PG_RETURN_NULL();
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		relation_close(rel, AccessShareLock);
 		ereport(ERROR,
@@ -853,7 +853,7 @@ columnar_relation_storageid(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	storageId = ColumnarStorageId(rel);
+	storageId = PgColumnarStorageId(rel);
 	relation_close(rel, AccessShareLock);
 
 	PG_RETURN_INT64((int64) storageId);
@@ -875,15 +875,15 @@ columnar_relation_storageid(PG_FUNCTION_ARGS)
 static void
 record_sorted_extent(Relation rel)
 {
-	uint64		storageId = ColumnarStorageId(rel);
+	uint64		storageId = PgColumnarStorageId(rel);
 	List	   *groups;
 	uint64		lastGroup = 0;
 	uint64		firstGroup = 0;
 	bool		haveGroup = false;
 	ListCell   *lc;
 
-	groups = ColumnarReadRowGroupList(storageId,
-									  ColumnarCatalogSnapshot(GetActiveSnapshot()));
+	groups = PgColumnarReadRowGroupList(storageId,
+									  PgColumnarCatalogSnapshot(GetActiveSnapshot()));
 	foreach(lc, groups)
 	{
 		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
@@ -897,11 +897,11 @@ record_sorted_extent(Relation rel)
 	list_free_deep(groups);
 
 	if (haveGroup)
-		ColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup);
+		PgColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup);
 }
 
 /*
- * columnar_compact_relation
+ * pgcolumnar_compact_relation
  *		Rewrite every live row of a columnar relation into fresh stripes. The
  *		relation is already open with AccessExclusiveLock.
  *
@@ -913,14 +913,14 @@ record_sorted_extent(Relation rel)
  *		auto-maintained, so rows inserted afterward append in insert order.
  */
 static void
-columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
+pgcolumnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 {
 	Oid			relid = RelationGetRelid(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	uint64		oldStorageId;
 	Snapshot	snapshot;
-	ColumnarReadState *readState;
-	ColumnarWriteState *writeState;
+	PgColumnarReadState *readState;
+	PgColumnarWriteState *writeState;
 	Tuplestorestate *tstore = NULL;
 	Tuplesortstate *tsort = NULL;
 	TupleTableSlot *readSlot;
@@ -930,10 +930,10 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	List	   *oldProjs;
 
 	/* persist any pending work so the read below sees it (spec 9) */
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
-	oldStorageId = ColumnarStorageId(rel);
+	oldStorageId = PgColumnarStorageId(rel);
 
 	/*
 	 * Capture the table's projections (gap 26) before the storage swap. Compaction
@@ -941,7 +941,7 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * compacted base; we re-record the definitions under the new storage id below
 	 * and the rewrite loop re-fans-out every live row into them.
 	 */
-	oldProjs = ColumnarListProjections(oldStorageId);
+	oldProjs = PgColumnarListProjections(oldStorageId);
 
 	/*
 	 * Take the read snapshot AFTER the AccessExclusiveLock the caller already
@@ -950,7 +950,7 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * pre-lock snapshot's in-progress set, so it would be invisible to the row
 	 * enumeration below and silently discarded by the relfilenode swap -- data
 	 * loss. A fresh GetLatestSnapshot sees every commit as of now. Register it
-	 * (not merely push active): ColumnarBeginRead derives a ColumnarCatalogSnapshot
+	 * (not merely push active): PgColumnarBeginRead derives a PgColumnarCatalogSnapshot
 	 * copy that must inherit a nonzero regd_count for PG18's heap-visibility
 	 * assertion, exactly as the sibling rewrite/retire paths document.
 	 */
@@ -1002,8 +1002,8 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	readSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	writeSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 
-	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
-	while (ColumnarReadNextRow(readState, readSlot->tts_values,
+	readState = PgColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	while (PgColumnarReadNextRow(readState, readSlot->tts_values,
 							   readSlot->tts_isnull, &rowNumber))
 	{
 		CHECK_FOR_INTERRUPTS();
@@ -1014,7 +1014,7 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 			tuplestore_puttupleslot(tstore, readSlot);
 		ExecClearTuple(readSlot);
 	}
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 	ExecDropSingleTupleTableSlot(readSlot);
 
 	if (tsort != NULL)
@@ -1027,8 +1027,8 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * still points at the old storage id) and remove the old metadata rows.
 	 */
 	RelationSetNewRelfilenumber(rel, rel->rd_rel->relpersistence);
-	ColumnarForgetWriteStateForRelation(relid);
-	ColumnarDeleteMetadata(oldStorageId);
+	PgColumnarForgetWriteStateForRelation(relid);
+	PgColumnarDeleteMetadata(oldStorageId);
 
 	/*
 	 * Realign projections to the compacted base (gap 26): drop each old
@@ -1040,31 +1040,31 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 */
 	if (oldProjs != NIL)
 	{
-		uint64		newStorageId = ColumnarStorageId(rel);
+		uint64		newStorageId = PgColumnarStorageId(rel);
 		ListCell   *lc;
 
 		foreach(lc, oldProjs)
 		{
-			ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+			PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 			if (p->projStorageId != oldStorageId)
-				ColumnarDeleteMetadata(p->projStorageId);
-			ColumnarDeleteProjectionRow(oldStorageId, p->projectionId);
+				PgColumnarDeleteMetadata(p->projStorageId);
+			PgColumnarDeleteProjectionRow(oldStorageId, p->projectionId);
 		}
 		foreach(lc, oldProjs)
 		{
-			ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
-			ColumnarProjection np = *p;
+			PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
+			PgColumnarProjection np = *p;
 
 			np.storageId = newStorageId;
 			np.projStorageId = (p->projectionId == 0) ? newStorageId
-				: ColumnarNextStorageId();
-			ColumnarInsertProjectionRow(&np);
+				: PgColumnarNextStorageId();
+			PgColumnarInsertProjectionRow(&np);
 		}
 	}
 
 	/* write the live rows back into the fresh storage, in sorted order if any */
-	writeState = ColumnarGetWriteState(rel);
+	writeState = PgColumnarGetWriteState(rel);
 	if (tsort != NULL)
 	{
 		while (tuplesort_gettupleslot(tsort, true, false, writeSlot, NULL))
@@ -1073,9 +1073,9 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 
 			CHECK_FOR_INTERRUPTS();
 			slot_getallattrs(writeSlot);
-			newRowNumber = ColumnarWriteRow(writeState, rel, writeSlot->tts_values,
+			newRowNumber = PgColumnarWriteRow(writeState, rel, writeSlot->tts_values,
 											writeSlot->tts_isnull);
-			ColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
+			PgColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
 										writeSlot->tts_values, writeSlot->tts_isnull);
 			ExecClearTuple(writeSlot);
 		}
@@ -1088,14 +1088,14 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 
 			CHECK_FOR_INTERRUPTS();
 			slot_getallattrs(writeSlot);
-			newRowNumber = ColumnarWriteRow(writeState, rel, writeSlot->tts_values,
+			newRowNumber = PgColumnarWriteRow(writeState, rel, writeSlot->tts_values,
 											writeSlot->tts_isnull);
-			ColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
+			PgColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
 										writeSlot->tts_values, writeSlot->tts_isnull);
 			ExecClearTuple(writeSlot);
 		}
 	}
-	ColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushWriteStateForRelation(relid);
 
 	/*
 	 * A sorted rewrite leaves the whole relation ordered, so record its extent.
@@ -1117,22 +1117,22 @@ columnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * their synthetic item pointers (spec 6). A relation with no indexes is a
 	 * no-op here.
 	 */
-	ColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
+	PgColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snapshot);
 }
 
 /*
- * columnar_compact_relation_zorder
+ * pgcolumnar_compact_relation_zorder
  *		Rewrite every live row of a columnar relation ordered by the Z-order
  *		(Morton) code over atts[0..ncols-1] (Phase F2). Mirrors
- *		columnar_compact_relation, but sorts by a computed key carried as a
+ *		pgcolumnar_compact_relation, but sorts by a computed key carried as a
  *		trailing bytea column of an augmented tuple, so the sort still spills to
  *		disk through tuplesort. The relation is already open AccessExclusiveLock.
  */
 static void
-columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
+pgcolumnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 {
 	Oid			relid = RelationGetRelid(rel);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -1140,8 +1140,8 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	AttrNumber	zAtt = (AttrNumber) (natts + 1);
 	uint64		oldStorageId;
 	Snapshot	snapshot;
-	ColumnarReadState *readState;
-	ColumnarWriteState *writeState;
+	PgColumnarReadState *readState;
+	PgColumnarWriteState *writeState;
 	Tuplesortstate *tsort;
 	TupleDesc	augdesc;
 	TupleTableSlot *readSlot;
@@ -1156,15 +1156,15 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	int			i;
 
 	/* persist pending work so the read below sees it (spec 9) */
-	ColumnarFlushWriteStateForRelation(relid);
-	ColumnarFlushDeleteVectorForRelation(rel);
+	PgColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushDeleteVectorForRelation(rel);
 
-	oldStorageId = ColumnarStorageId(rel);
-	oldProjs = ColumnarListProjections(oldStorageId);
+	oldStorageId = PgColumnarStorageId(rel);
+	oldProjs = PgColumnarListProjections(oldStorageId);
 	/* fresh snapshot AFTER the AccessExclusiveLock, not the caller's pre-lock one,
 	 * so a row group committed during the lock wait is copied rather than dropped
 	 * by the swap (#295); registered for PG18's catalog-snapshot regd_count. Same
-	 * reasoning as columnar_compact_relation. */
+	 * reasoning as pgcolumnar_compact_relation. */
 	snapshot = RegisterSnapshot(GetLatestSnapshot());
 	PushActiveSnapshot(snapshot);
 
@@ -1190,8 +1190,8 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	putSlot = MakeSingleTupleTableSlot(augdesc, &TTSOpsVirtual);
 	augSlot = MakeSingleTupleTableSlot(augdesc, &TTSOpsMinimalTuple);
 
-	readState = ColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
-	while (ColumnarReadNextRow(readState, readSlot->tts_values,
+	readState = PgColumnarBeginRead(rel, snapshot, NULL, NULL, 0, NULL);
+	while (PgColumnarReadNextRow(readState, readSlot->tts_values,
 							   readSlot->tts_isnull, &rowNumber))
 	{
 		bytea	   *zkey;
@@ -1207,57 +1207,57 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 		tuplesort_puttupleslot(tsort, putSlot);
 		ExecClearTuple(putSlot);
 	}
-	ColumnarEndRead(readState);
+	PgColumnarEndRead(readState);
 	ExecDropSingleTupleTableSlot(readSlot);
 	ExecDropSingleTupleTableSlot(putSlot);
 	tuplesort_performsort(tsort);
 
 	/* swap to fresh storage and drop old metadata (as in compact_relation) */
 	RelationSetNewRelfilenumber(rel, rel->rd_rel->relpersistence);
-	ColumnarForgetWriteStateForRelation(relid);
-	ColumnarDeleteMetadata(oldStorageId);
+	PgColumnarForgetWriteStateForRelation(relid);
+	PgColumnarDeleteMetadata(oldStorageId);
 
 	/* realign projections to the compacted base (as in compact_relation) */
 	if (oldProjs != NIL)
 	{
-		uint64		newStorageId = ColumnarStorageId(rel);
+		uint64		newStorageId = PgColumnarStorageId(rel);
 		ListCell   *lc;
 
 		foreach(lc, oldProjs)
 		{
-			ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
+			PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
 
 			if (p->projStorageId != oldStorageId)
-				ColumnarDeleteMetadata(p->projStorageId);
-			ColumnarDeleteProjectionRow(oldStorageId, p->projectionId);
+				PgColumnarDeleteMetadata(p->projStorageId);
+			PgColumnarDeleteProjectionRow(oldStorageId, p->projectionId);
 		}
 		foreach(lc, oldProjs)
 		{
-			ColumnarProjection *p = (ColumnarProjection *) lfirst(lc);
-			ColumnarProjection np = *p;
+			PgColumnarProjection *p = (PgColumnarProjection *) lfirst(lc);
+			PgColumnarProjection np = *p;
 
 			np.storageId = newStorageId;
 			np.projStorageId = (p->projectionId == 0) ? newStorageId
-				: ColumnarNextStorageId();
-			ColumnarInsertProjectionRow(&np);
+				: PgColumnarNextStorageId();
+			PgColumnarInsertProjectionRow(&np);
 		}
 	}
 
 	/* write the live rows back in Z-order; the trailing key column is ignored */
-	writeState = ColumnarGetWriteState(rel);
+	writeState = PgColumnarGetWriteState(rel);
 	while (tuplesort_gettupleslot(tsort, true, false, augSlot, NULL))
 	{
 		uint64		newRowNumber;
 
 		CHECK_FOR_INTERRUPTS();
 		slot_getallattrs(augSlot);
-		newRowNumber = ColumnarWriteRow(writeState, rel, augSlot->tts_values,
+		newRowNumber = PgColumnarWriteRow(writeState, rel, augSlot->tts_values,
 										augSlot->tts_isnull);
-		ColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
+		PgColumnarProjectionFanoutRow(rel, writeState, newRowNumber,
 									augSlot->tts_values, augSlot->tts_isnull);
 		ExecClearTuple(augSlot);
 	}
-	ColumnarFlushWriteStateForRelation(relid);
+	PgColumnarFlushWriteStateForRelation(relid);
 
 	/* Z-order is an order, so the same extent applies (see record_sorted_extent). */
 	record_sorted_extent(rel);
@@ -1265,14 +1265,14 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	tuplesort_end(tsort);
 	ExecDropSingleTupleTableSlot(augSlot);
 
-	ColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
+	PgColumnarReindexRelation(relid, REINDEX_REL_PROCESS_TOAST);
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snapshot);
 }
 
 /*
- * columnar_vacuum
+ * pgcolumnar_vacuum
  *		SQL: columnar.vacuum(tablename regclass, stripe_count int default 0).
  *		Compacts a columnar table by combining its stripes and reclaiming the
  *		space of deleted rows (spec 8.2, 9). stripe_count is accepted for
@@ -1281,14 +1281,14 @@ columnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
  *		recent stripes" contract.
  */
 Datum
-columnar_vacuum(PG_FUNCTION_ARGS)
+pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
 
 	rel = table_open(relid, AccessExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessExclusiveLock);
 		ereport(ERROR,
@@ -1297,9 +1297,9 @@ columnar_vacuum(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
-	columnar_compact_relation(rel, 0, NULL);
+	pgcolumnar_compact_relation(rel, 0, NULL);
 
 	/* keep the lock until end of transaction */
 	table_close(rel, NoLock);
@@ -1308,7 +1308,7 @@ columnar_vacuum(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_vacuum_sorted
+ * pgcolumnar_vacuum_sorted
  *		SQL: columnar.vacuum_sorted(tablename regclass, VARIADIC sort_columns name[]).
  *		Like columnar.vacuum, but rewrites the live rows physically sorted
  *		ascending / NULLS LAST on the named columns, in order (gap 26, piece 1).
@@ -1324,7 +1324,7 @@ columnar_vacuum(PG_FUNCTION_ARGS)
  *		cluster() path is numeric-only.
  */
 Datum
-columnar_vacuum_sorted(PG_FUNCTION_ARGS)
+pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	Relation	rel;
@@ -1344,7 +1344,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, AccessExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessExclusiveLock);
 		ereport(ERROR,
@@ -1353,7 +1353,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
 	/*
 	 * Collect the sort-column names. Explicit columns win; when none are given
@@ -1387,7 +1387,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 
 	if (colNames == NIL)
 	{
-		colNames = ColumnarReadSortBy(relid);
+		colNames = PgColumnarReadSortBy(relid);
 		fromPersisted = true;
 	}
 
@@ -1452,7 +1452,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 		sortAtts[i++] = attno;
 	}
 
-	columnar_compact_relation(rel, ncols, sortAtts);
+	pgcolumnar_compact_relation(rel, ncols, sortAtts);
 
 	/* keep the lock until end of transaction */
 	table_close(rel, NoLock);
@@ -1461,7 +1461,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_cluster
+ * pgcolumnar_cluster
  *		SQL: pgcolumnar.cluster(tablename regclass, VARIADIC columns name[]).
  *		Physically reorders a columnar table by the Z-order (Morton) space-filling
  *		curve over the named columns (Phase F2, spec 9). Unlike vacuum_sorted's
@@ -1479,7 +1479,7 @@ columnar_vacuum_sorted(PG_FUNCTION_ARGS)
  *		path.
  */
 Datum
-columnar_cluster(PG_FUNCTION_ARGS)
+pgcolumnar_cluster(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	ArrayType  *colArray;
@@ -1514,7 +1514,7 @@ columnar_cluster(PG_FUNCTION_ARGS)
 
 	rel = table_open(relid, AccessExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, AccessExclusiveLock);
 		ereport(ERROR,
@@ -1523,7 +1523,7 @@ columnar_cluster(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
 	tupdesc = RelationGetDescr(rel);
 	atts = palloc(ncols * sizeof(AttrNumber));
@@ -1569,7 +1569,7 @@ columnar_cluster(PG_FUNCTION_ARGS)
 		atts[i] = attno;
 	}
 
-	columnar_compact_relation_zorder(rel, ncols, atts);
+	pgcolumnar_compact_relation_zorder(rel, ncols, atts);
 
 	/* keep the lock until end of transaction */
 	table_close(rel, NoLock);
@@ -1578,7 +1578,7 @@ columnar_cluster(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_compact
+ * pgcolumnar_compact
  *		SQL: pgcolumnar.compact(tablename regclass) -> bigint. The LAZY / online
  *		maintenance path (Phase F3a): retire every row group that is fully deleted
  *		as-of the oldest-xmin horizon, dropping its catalog rows so scans no longer
@@ -1590,7 +1590,7 @@ columnar_cluster(PG_FUNCTION_ARGS)
  *		Phase F3b.
  */
 Datum
-columnar_compact(PG_FUNCTION_ARGS)
+pgcolumnar_compact(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
@@ -1604,7 +1604,7 @@ columnar_compact(PG_FUNCTION_ARGS)
 	/* the lazy lock: concurrent reads and writes are allowed during compaction */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, ShareUpdateExclusiveLock);
 		ereport(ERROR,
@@ -1613,15 +1613,15 @@ columnar_compact(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
 	/* self-heal a truncate crash-residual so the no-overlap assert holds eagerly,
-	 * even though compact does not reuse (see ColumnarReconcileFreeList) */
-	ColumnarReconcileFreeList(rel);
+	 * even though compact does not reuse (see PgColumnarReconcileFreeList) */
+	PgColumnarReconcileFreeList(rel);
 
-	retired = ColumnarRetireFullyDeletedGroups(rel);
+	retired = PgColumnarRetireFullyDeletedGroups(rel);
 
-	COLUMNAR_ASSERT_NO_OVERLAP(ColumnarStorageId(rel));
+	COLUMNAR_ASSERT_NO_OVERLAP(PgColumnarStorageId(rel));
 
 	/* keep the lock until end of transaction */
 	table_close(rel, NoLock);
@@ -1630,16 +1630,16 @@ columnar_compact(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_end_truncation_storages
+ * pgcolumnar_end_truncation_storages
  *		Collect the distinct storage ids that share this relation's file: the base
  *		storage plus every projection's own storage. Returns a list of palloc'd
  *		uint64. All must be considered when computing the safe truncation point,
  *		because they all place data in the one shared file.
  */
 static List *
-columnar_end_truncation_storages(uint64 base)
+pgcolumnar_end_truncation_storages(uint64 base)
 {
-	List	   *projs = ColumnarListProjections(base);
+	List	   *projs = PgColumnarListProjections(base);
 	List	   *result = NIL;
 	ListCell   *lc;
 	uint64	   *b = palloc(sizeof(uint64));
@@ -1649,7 +1649,7 @@ columnar_end_truncation_storages(uint64 base)
 
 	foreach(lc, projs)
 	{
-		ColumnarProjection *pr = (ColumnarProjection *) lfirst(lc);
+		PgColumnarProjection *pr = (PgColumnarProjection *) lfirst(lc);
 		ListCell   *rc;
 		bool		dup = false;
 
@@ -1671,7 +1671,7 @@ columnar_end_truncation_storages(uint64 base)
 }
 
 /*
- * columnar_do_end_truncation
+ * pgcolumnar_do_end_truncation
  *		Compute the safe truncation point and, if the trailing region is entirely
  *		reclaimable, physically shrink the main fork. The caller holds
  *		AccessExclusiveLock, so no reader or writer is concurrent. Returns the
@@ -1691,7 +1691,7 @@ columnar_end_truncation_storages(uint64 base)
  *		window (after the truncate, before the highwater is lowered) leaves
  *		"highwater still high + free_space restored + file short", which the
  *		gap-tolerant write path self-heals. The function also runs outside a
- *		transaction block (see columnar_truncate), so a user ROLLBACK cannot land
+ *		transaction block (see pgcolumnar_truncate), so a user ROLLBACK cannot land
  *		in the residual window between lowering the highwater and commit; and it
  *		first purges any free_space row at or above the current highwater, which
  *		under the exclusive lock is stale by definition and would otherwise be the
@@ -1699,20 +1699,20 @@ columnar_end_truncation_storages(uint64 base)
  *		live groups, none of which are in the truncated region.
  */
 static int64
-columnar_do_end_truncation(Relation rel)
+pgcolumnar_do_end_truncation(Relation rel)
 {
-	uint64		base = ColumnarStorageId(rel);
-	TransactionId oldestXmin = ColumnarOldestXmin(rel);
-	List	   *storages = columnar_end_truncation_storages(base);
+	uint64		base = PgColumnarStorageId(rel);
+	TransactionId oldestXmin = PgColumnarOldestXmin(rel);
+	List	   *storages = pgcolumnar_end_truncation_storages(base);
 	ListCell   *lc;
 	uint64		liveEnd = COLUMNAR_FIRST_LOGICAL_OFFSET;
-	ColumnarMetapage meta;
+	PgColumnarMetapage meta;
 	uint64		highwater;
 	Snapshot	snap;
 	BlockNumber oldnblocks;
 	BlockNumber truncBlock;
 
-	ColumnarReadMetapage(rel, &meta);
+	PgColumnarReadMetapage(rel, &meta);
 	highwater = meta.reservedOffset;
 
 	/*
@@ -1725,15 +1725,15 @@ columnar_do_end_truncation(Relation rel)
 	 * the end-of-run no-overlap assert valid.
 	 */
 	foreach(lc, storages)
-		ColumnarDeleteFreeSpaceAtOrAbove(*(uint64 *) lfirst(lc), highwater);
-	ColumnarReconcileFreeList(rel);
+		PgColumnarDeleteFreeSpaceAtOrAbove(*(uint64 *) lfirst(lc), highwater);
+	PgColumnarReconcileFreeList(rel);
 
 	/* highest live-data end across all storages, in the latest committed state */
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	foreach(lc, storages)
 	{
 		uint64		sid = *(uint64 *) lfirst(lc);
-		List	   *rgs = ColumnarReadRowGroupList(sid, snap);
+		List	   *rgs = PgColumnarReadRowGroupList(sid, snap);
 		ListCell   *g;
 
 		foreach(g, rgs)
@@ -1756,16 +1756,16 @@ columnar_do_end_truncation(Relation rel)
 
 	/* the trailing region must be entirely behind the oldest-xmin horizon */
 	foreach(lc, storages)
-		if (!ColumnarTrailingFreeSpaceSafe(*(uint64 *) lfirst(lc), liveEnd,
+		if (!PgColumnarTrailingFreeSpaceSafe(*(uint64 *) lfirst(lc), liveEnd,
 										   oldestXmin))
 			return 0;			/* a recent retirement is in the tail; retry later */
 
 	/* drop the trailing free ranges, shrink the file, THEN lower the highwater */
 	foreach(lc, storages)
-		ColumnarDeleteFreeSpaceAtOrAbove(*(uint64 *) lfirst(lc), liveEnd);
+		PgColumnarDeleteFreeSpaceAtOrAbove(*(uint64 *) lfirst(lc), liveEnd);
 	CommandCounterIncrement();
-	ColumnarTruncateMainFork(rel, truncBlock);
-	ColumnarSetReservedOffset(rel, liveEnd);
+	PgColumnarTruncateMainFork(rel, truncBlock);
+	PgColumnarSetReservedOffset(rel, liveEnd);
 
 	/* stale offset-keyed cache entries for this relation must go */
 	CacheInvalidateRelcacheByRelid(RelationGetRelid(rel));
@@ -1775,7 +1775,7 @@ columnar_do_end_truncation(Relation rel)
 }
 
 /*
- * columnar_truncate
+ * pgcolumnar_truncate
  *		SQL: pgcolumnar.truncate(regclass) -> bigint (blocks returned to the OS).
  *		Physically shrinks a columnar table's file by dropping trailing blocks that
  *		reclaim has freed. Opt-in (gated by pgcolumnar.enable_end_truncation) and
@@ -1784,7 +1784,7 @@ columnar_do_end_truncation(Relation rel)
  *		0 without waiting if the table is busy, so it never blocks concurrent load.
  */
 Datum
-columnar_truncate(PG_FUNCTION_ARGS)
+pgcolumnar_truncate(PG_FUNCTION_ARGS)
 {
 	Oid			relid;
 	Relation	rel;
@@ -1813,7 +1813,7 @@ columnar_truncate(PG_FUNCTION_ARGS)
 
 	/* serialize with other lazy maintenance (compact/recluster also take SUEL) */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, ShareUpdateExclusiveLock);
 		ereport(ERROR,
@@ -1822,11 +1822,11 @@ columnar_truncate(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarRequireTableOwner(rel);
+	PgColumnarRequireTableOwner(rel);
 
-	if (columnar_enable_end_truncation &&
+	if (pgcolumnar_enable_end_truncation &&
 		ConditionalLockRelation(rel, AccessExclusiveLock))
-		result = columnar_do_end_truncation(rel);
+		result = pgcolumnar_do_end_truncation(rel);
 
 	/* keep the locks until end of transaction */
 	table_close(rel, NoLock);
@@ -1834,14 +1834,14 @@ columnar_truncate(PG_FUNCTION_ARGS)
 }
 
 /*
- * columnar_debug_advance_reserved_offset
+ * pgcolumnar_debug_advance_reserved_offset
  *		SQL test hook: advance a columnar table's write highwater by N pages
  *		without writing data, leaving a gap between the physical EOF and the
  *		highwater so the next write exercises the gap-tolerant path. Not bound in
  *		the shipped catalog; the gap test creates the SQL binding itself.
  */
 Datum
-columnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
+pgcolumnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	int32		npages = PG_GETARG_INT32(1);
@@ -1853,7 +1853,7 @@ columnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
 				 errmsg("npages must be non-negative")));
 
 	rel = table_open(relid, RowExclusiveLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, RowExclusiveLock);
 		ereport(ERROR,
@@ -1862,21 +1862,21 @@ columnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarAdvanceReservedOffset(rel, (uint64) npages * COLUMNAR_BYTES_PER_PAGE);
+	PgColumnarAdvanceReservedOffset(rel, (uint64) npages * COLUMNAR_BYTES_PER_PAGE);
 
 	table_close(rel, NoLock);
 	PG_RETURN_VOID();
 }
 
 /*
- * columnar_debug_set_metapage_version
+ * pgcolumnar_debug_set_metapage_version
  *		Test hook: overwrite a columnar table's stored metapage format version so
  *		a subsequent read exercises the unsupported-version rejection in
- *		ColumnarReadMetapage. Not bound in the shipped catalog; the format suite
+ *		PgColumnarReadMetapage. Not bound in the shipped catalog; the format suite
  *		creates the binding when it needs it (like the advance helper above).
  */
 Datum
-columnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
+pgcolumnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	int32		major = PG_GETARG_INT32(1);
@@ -1884,7 +1884,7 @@ columnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
 	Relation	rel;
 
 	rel = table_open(relid, RowExclusiveLock);
-	if (!ColumnarIsColumnarRelation(relid))
+	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, RowExclusiveLock);
 		ereport(ERROR,
@@ -1893,7 +1893,7 @@ columnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
 						RelationGetRelationName(rel))));
 	}
 
-	ColumnarDebugSetMetapageVersion(rel, (uint32) major, (uint32) minor);
+	PgColumnarDebugSetMetapageVersion(rel, (uint32) major, (uint32) minor);
 
 	table_close(rel, NoLock);
 	PG_RETURN_VOID();

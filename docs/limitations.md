@@ -89,16 +89,28 @@ A physical copy does not replace the source across a version change.
 
 The same posture covers the extension's own catalog, not only the on-disk data
 format. The install script of a build defines the `pgcolumnar` catalog tables for a fresh
-`CREATE EXTENSION`. The pre-release ships no `ALTER EXTENSION UPDATE` scripts, so
-there is no in-place catalog migration either.
+`CREATE EXTENSION`. An `ALTER EXTENSION UPDATE` script ships when a build needs one.
+The 1.0-dev to 1.0-alpha script is the first.
 
-You can replace the shared library and the SQL script, and then restart, without
-a new `CREATE EXTENSION`. This can leave a catalog table without a column that a
-newer build needs. For example, `sort_by` was added to `pgcolumnar.options`. A function that
+**Replacing the shared library is not sufficient on its own.** After installing a new
+build, run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the extension.
+The library and the catalog have to agree, and only that command updates the catalog.
+
+Skipping it can leave the catalog describing the previous build. Each installed function
+records the name of a C symbol. 1.0-alpha moved those names, so an un-updated catalog
+names symbols the new library does not export. Reading an existing columnar table then
+fails with `could not find function "columnar_handler"`. The data is untouched, and the
+command above fixes it. See [Upgrade](installation.md#upgrade).
+
+A catalog can also lack a column that a newer build needs, where no upgrade script covers
+the gap. For example, `sort_by` was added to `pgcolumnar.options`. A function that
 uses that column fails against an `options` table that an older build created.
 
-Across an incompatible build, recreate the extension with `DROP EXTENSION` and
-`CREATE EXTENSION`, and load the data again. Do not replace the files in place. A
+Across an incompatible build, meaning one where no upgrade script covers the change,
+recreate the extension with `DROP EXTENSION` and `CREATE EXTENSION`, and load the data
+again. This is not the remedy for the un-updated catalog described above, where
+`ALTER EXTENSION pgcolumnar UPDATE` is enough. `DROP EXTENSION` removes your columnar
+tables with it. Do not replace the files in place. A
 dump that exists still restores into a newer build. `pg_dump` writes an explicit
 column list for the configuration tables of the extension, and a new column takes
 its default of NULL.

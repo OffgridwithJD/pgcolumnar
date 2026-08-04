@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_compression.c
+ * pgcolumnar_compression.c
  *		Value-stream compression codecs for pgColumnar (spec 5): none, pglz,
  *		lz4, and zstd. Each chunk's value stream is compressed independently.
  *		If a codec does not shrink the data, or the codec is not built into
@@ -29,12 +29,12 @@
 #endif
 
 /*
- * ColumnarCodecAvailable
+ * PgColumnarCodecAvailable
  *		Whether a compression type can be produced by this binary. none and
  *		pglz are always available; lz4 and zstd depend on the build.
  */
 bool
-ColumnarCodecAvailable(int compressionType)
+PgColumnarCodecAvailable(int compressionType)
 {
 	switch (compressionType)
 	{
@@ -114,7 +114,7 @@ try_zstd(const char *raw, uint32 rawLen, char *dest, size_t destCap, int level)
 #endif
 
 /*
- * ColumnarCompressValueStream
+ * PgColumnarCompressValueStream
  *		Compress rawLen bytes at raw using the requested codec at the given
  *		level. On success at shrinking the data, returns a palloc'd buffer in
  *		*outData with its length in *outLen and the codec actually used in
@@ -125,7 +125,7 @@ try_zstd(const char *raw, uint32 rawLen, char *dest, size_t destCap, int level)
  *		The output is always allocated in the current memory context.
  */
 void
-ColumnarCompressValueStream(const char *raw, uint32 rawLen,
+PgColumnarCompressValueStream(const char *raw, uint32 rawLen,
 							int requestedType, int level,
 							char **outData, uint32 *outLen,
 							int *usedType, int *usedLevel)
@@ -227,14 +227,14 @@ ColumnarCompressValueStream(const char *raw, uint32 rawLen,
 }
 
 /*
- * ColumnarDecompressValueStream
+ * PgColumnarDecompressValueStream
  *		Decompress compLen bytes at comp of the given codec into a fresh buffer
  *		of rawLen bytes allocated in targetContext, and return it. For type
  *		none the bytes are copied. Errors out if the codec is not built in or
  *		the decoded length does not match rawLen.
  */
 char *
-ColumnarDecompressValueStream(const char *comp, uint32 compLen,
+PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
 							  int compressionType, uint32 rawLen,
 							  MemoryContext targetContext)
 {

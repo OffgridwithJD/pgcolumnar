@@ -2,12 +2,12 @@
 #
 # Regression for #295: compaction must not drop rows committed by another
 # transaction while it waited for (or before it took) its read snapshot.
-# columnar_compact_relation used the caller's pre-lock statement snapshot, so a
+# pgcolumnar_compact_relation used the caller's pre-lock statement snapshot, so a
 # row group committed after that snapshot was invisible to the rewrite and was
 # destroyed by the relfilenode swap. The fix takes a fresh snapshot after the
 # lock. Here session B pins a REPEATABLE READ snapshot, session A commits 100
 # rows, then B runs the maintenance op: all 150 rows must survive.
-# Covers vacuum() and vacuum_sorted() (columnar_compact_relation) and cluster()
+# Covers vacuum() and vacuum_sorted() (pgcolumnar_compact_relation) and cluster()
 # (its Z-order twin). Written fresh for pgColumnar.
 #
 # Usage:  test/native_vacuum_race.sh [PG_CONFIG]

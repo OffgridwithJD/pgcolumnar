@@ -1,13 +1,13 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_parquet_format.h
+ * pgcolumnar_parquet_format.h
  *		Parquet and Thrift compact-protocol constants, shared by the reader and
  *		the writer.
  *
  * These are values defined by the file format, not by this implementation, so
  * there is exactly one correct value for each and both directions must agree on
- * it. They were previously declared twice, once in columnar_parquet.c and once
- * in columnar_parquet_reader.c, with 21 names in common. The values did agree,
+ * it. They were previously declared twice, once in pgcolumnar_parquet.c and once
+ * in pgcolumnar_parquet_reader.c, with 21 names in common. The values did agree,
  * but nothing made them: a writer and a reader that disagree on a type code
  * produce a file that is silently wrong rather than one that fails to parse,
  * which is the worst shape a defect can take here.

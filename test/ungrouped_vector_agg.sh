@@ -6,7 +6,7 @@
 # zone map cannot answer -- one with a WHERE filter, or sum/avg over
 # int8/float/numeric -- to a single-pass scan-fold node instead of the row-wise
 # core Agg. This suite proves the new path returns byte-for-byte what core Agg
-# returns (the fold reuses columnar_apply_one in scan order, so floats match
+# returns (the fold reuses pgcolumnar_apply_one in scan order, so floats match
 # exactly), across types, nulls, filters, empty and all-null inputs; and it
 # ASSERTS THE PREMISE that the new path actually runs with the GUC on and does
 # not with it off, so the A/B is never vacuous.

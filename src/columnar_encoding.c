@@ -1,16 +1,16 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_encoding.c
+ * pgcolumnar_encoding.c
  *		Lightweight, type-aware value-stream encodings (I1) and the
  *		compression-block abstraction they implement (I2).
  *
  * The encoding layer sits between the raw serialized value stream that the
- * writer builds (a packed sequence of ColumnarEncodeValue outputs, spec 4) and
- * the general-purpose block codec (columnar_compression.c, spec 5). An encoding
+ * writer builds (a packed sequence of PgColumnarEncodeValue outputs, spec 4) and
+ * the general-purpose block codec (pgcolumnar_compression.c, spec 5). An encoding
  * is a reversible transform of the raw value-stream BYTES: encode(raw) -> a
  * smaller encoded buffer, and decode(encoded) -> the byte-identical raw stream.
  * Because decode reconstructs the exact raw stream, every downstream consumer
- * (per-value ColumnarDecodeValue, the vectorized group decoder, the min/max
+ * (per-value PgColumnarDecodeValue, the vectorized group decoder, the min/max
  * skip list) is unchanged; only the flush and load paths gain one step.
  *
  * The techniques come from the public column-store literature (see
@@ -1162,7 +1162,7 @@ decode_alp(const char *enc, uint32 encLen, int w, uint32 n, uint32 rawLen,
 
 #define DICT_MAX_DISTINCT 1024
 
-static inline uint64 columnar_fnv1a(const char *p, uint32 n);
+static inline uint64 pgcolumnar_fnv1a(const char *p, uint32 n);
 
 static bool
 encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
@@ -1197,8 +1197,8 @@ encode_dict(const char *raw, uint32 rawLen, Form_pg_attribute att, uint32 n,
 	{
 		const char *vp = raw + pos;
 		uint32		vlen = (w > 0) ? (uint32) w
-			: ColumnarVarSizeAnyUnaligned(vp);
-		uint64		h = columnar_fnv1a(vp, vlen);
+			: PgColumnarVarSizeAnyUnaligned(vp);
+		uint64		h = pgcolumnar_fnv1a(vp, vlen);
 		uint32		s = (uint32) (h & (DICT_HASH_SLOTS - 1));
 		int			code = -1;
 
@@ -1708,7 +1708,7 @@ fsst_deserialize_table(const char *p, uint32 len, FsstTable *t)
  * probe below. Our own trivial implementation of the public FNV-1a formula, used
  * only to bucket values while counting distinct ones. */
 static inline uint64
-columnar_fnv1a(const char *p, uint32 n)
+pgcolumnar_fnv1a(const char *p, uint32 n)
 {
 	uint64		h = UINT64CONST(1469598103934665603);
 	uint32		i;
@@ -1722,7 +1722,7 @@ columnar_fnv1a(const char *p, uint32 n)
 }
 
 /*
- * ColumnarFsstDictWins
+ * PgColumnarFsstDictWins
  *		Cheap pre-check for the FSST table build (issue #155): would dictionary
  *		encoding win outright, making the costly FSST symbol-table build wasted
  *		work? FSST is only attempted per vector when a cheaper encoding has not
@@ -1737,7 +1737,7 @@ columnar_fnv1a(const char *p, uint32 n)
  *		This is our own heuristic; FSST is the public scheme (VLDB 2020).
  */
 bool
-ColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
+PgColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
 {
 	/* Open-addressing set of value hashes, capacity a power of two comfortably
 	 * above the distinct cap so the load factor at the early-exit stays low. */
@@ -1750,14 +1750,14 @@ ColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
 	memset(used, 0, sizeof(used));
 	while (pos < corpusLen)
 	{
-		uint32		vlen = ColumnarVarSizeAnyUnaligned(corpus + pos);
+		uint32		vlen = PgColumnarVarSizeAnyUnaligned(corpus + pos);
 		uint64		h;
 		uint32		s;
 
 		if (vlen == 0 || pos + vlen > corpusLen)
 			return false;		/* malformed run: let the caller build normally */
 
-		h = columnar_fnv1a(corpus + pos, vlen);
+		h = pgcolumnar_fnv1a(corpus + pos, vlen);
 		s = (uint32) (h & (FSST_CARD_SLOTS - 1));
 		while (used[s] && slot[s] != h)
 			s = (s + 1) & (FSST_CARD_SLOTS - 1);
@@ -1774,13 +1774,13 @@ ColumnarFsstDictWins(const char *corpus, uint32 corpusLen)
 }
 
 /*
- * ColumnarFsstBuildChunkTable
+ * PgColumnarFsstBuildChunkTable
  *		Build one FSST symbol table for a whole column chunk (E3b). The expensive
  *		iterative table build runs once here; the serialized table is handed back
  *		to be stored once per chunk and reused by every FSST vector.
  */
 bool
-ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
+PgColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
 							Form_pg_attribute att, char **tableOut,
 							uint32 *tableLenOut)
 {
@@ -1809,7 +1809,7 @@ ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
  * the raw length: the shared table's bytes are amortized across the chunk and
  * not charged here, so FSST wins per vector whenever the codes are smaller.
  *
- * That test is only meaningful once ColumnarFsstHelpsCompressed has decided the
+ * That test is only meaningful once PgColumnarFsstHelpsCompressed has decided the
  * chunk should use FSST at all; it is what charges the table and what compares
  * against the compressed size actually written. See the comment on it below.
  */
@@ -1873,7 +1873,7 @@ encode_fsst_shared(const char *raw, uint32 rawLen, const char *table,
  * Would FSST still pay once the block compressor has had its turn?
  *
  * The per-vector win test above compares encoded lengths, but the bytes that
- * reach disk are compressed afterwards (columnar_write_state.c compresses the
+ * reach disk are compressed afterwards (pgcolumnar_write_state.c compresses the
  * whole encoded stream). Those are different objectives, and for some shapes
  * they disagree sharply: FSST turns highly repetitive text into a stream of
  * high-entropy codes, which is smaller than the text but far less compressible
@@ -1894,7 +1894,7 @@ encode_fsst_shared(const char *raw, uint32 rawLen, const char *table,
  * the per-vector encode is then skipped for every vector in the chunk.
  */
 bool
-ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
+PgColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 							const char *table, uint32 tableLen,
 							int compressionType, int compressionLevel)
 {
@@ -1918,10 +1918,10 @@ ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 	if (!encode_fsst_shared(corpus, corpusLen, table, tableLen, &codes, &codesLen))
 		return false;
 
-	ColumnarCompressValueStream(corpus, corpusLen, compressionType,
+	PgColumnarCompressValueStream(corpus, corpusLen, compressionType,
 								compressionLevel, &plainComp, &plainCompLen,
 								&usedType, &usedLevel);
-	ColumnarCompressValueStream(codes, codesLen, compressionType,
+	PgColumnarCompressValueStream(codes, codesLen, compressionType,
 								compressionLevel, &codesComp, &codesCompLen,
 								&usedType, &usedLevel);
 
@@ -1935,7 +1935,7 @@ ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 	 * cannot underflow when plainCompLen is small.
 	 */
 	helps = (((uint64) codesCompLen + tableLen) * 100
-			 < (uint64) plainCompLen * (uint64) (100 - columnar_fsst_min_gain_percent));
+			 < (uint64) plainCompLen * (uint64) (100 - pgcolumnar_fsst_min_gain_percent));
 
 	pfree(codes);
 	if (plainComp)
@@ -2026,7 +2026,7 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
  * ------------------------------------------------------------------------- */
 
 void
-ColumnarBlockReaderInit(ColumnarBlockReader *br, const char *raw,
+PgColumnarBlockReaderInit(PgColumnarBlockReader *br, const char *raw,
 						uint64 valueCount, int width)
 {
 	br->raw = raw;
@@ -2036,7 +2036,7 @@ ColumnarBlockReaderInit(ColumnarBlockReader *br, const char *raw,
 }
 
 bool
-ColumnarBlockNextRun(ColumnarBlockReader *br, const char **valBytes,
+PgColumnarBlockNextRun(PgColumnarBlockReader *br, const char **valBytes,
 					 uint64 *runLen)
 {
 	const char *v;
@@ -2058,7 +2058,7 @@ ColumnarBlockNextRun(ColumnarBlockReader *br, const char **valBytes,
 }
 
 const char *
-ColumnarEncodingName(int encodingType)
+PgColumnarEncodingName(int encodingType)
 {
 	switch (encodingType)
 	{
@@ -2161,7 +2161,7 @@ build_sample(const char *raw, int w, uint32 n, uint32 want, uint32 *sampleN)
 }
 
 /*
- * ColumnarEncodeChunk
+ * PgColumnarEncodeChunk
  *		Choose and apply the best lightweight encoding for one chunk's raw value
  *		stream. Returns the encoding code used and sets out and outLen to the
  *		encoded buffer. When no encoding beats the raw size, returns NONE and
@@ -2183,7 +2183,7 @@ build_sample(const char *raw, int w, uint32 n, uint32 want, uint32 *sampleN)
  *		candidate.
  */
 int
-ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
+PgColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 					uint64 valueCount, const char *fsstTable, uint32 fsstTableLen,
 					char **out, uint32 *outLen)
 {
@@ -2211,11 +2211,11 @@ ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 	 * cheap next to the three it replaces. With sampling off, or a chunk too
 	 * small to sample, every candidate is applied as before.
 	 */
-	if (w > 0 && columnar_encoding_sample_rows >= ENCODE_SAMPLE_MIN)
+	if (w > 0 && pgcolumnar_encoding_sample_rows >= ENCODE_SAMPLE_MIN)
 	{
 		uint32		sampleN = 0;
 		char	   *sample = build_sample(raw, w, n,
-										  (uint32) columnar_encoding_sample_rows,
+										  (uint32) pgcolumnar_encoding_sample_rows,
 										  &sampleN);
 
 		if (sample != NULL)
@@ -2428,12 +2428,12 @@ ColumnarEncodeChunk(const char *raw, uint32 rawLen, Form_pg_attribute att,
 }
 
 /*
- * ColumnarDecodeChunk
+ * PgColumnarDecodeChunk
  *		Reverse an encoding, reconstructing the byte-identical raw value stream
  *		in cx. For NONE, returns the input pointer unchanged (no copy).
  */
 char *
-ColumnarDecodeChunk(const char *enc, uint32 encLen, int encodingType,
+PgColumnarDecodeChunk(const char *enc, uint32 encLen, int encodingType,
 					Form_pg_attribute att, uint64 valueCount, uint32 rawLen,
 					const char *fsstTable, uint32 fsstTableLen,
 					MemoryContext cx)
@@ -2622,10 +2622,10 @@ selftest_rand(uint64 *state)
 	return z ^ (z >> 31);
 }
 
-PG_FUNCTION_INFO_V1(columnar_debug_encoding_selftest);
+PG_FUNCTION_INFO_V1(pgcolumnar_debug_encoding_selftest);
 
 Datum
-columnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
+pgcolumnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	retdesc;

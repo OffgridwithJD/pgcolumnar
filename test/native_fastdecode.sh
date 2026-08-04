@@ -2,11 +2,11 @@
 #
 # pgColumnar #289: fast decode of attbyval fixed-width columns.
 #
-# The read path inlines the by-value decode in columnar_native_next_row: for an
-# attbyval column it does the same fetch_att + advance ColumnarDecodeValue does,
+# The read path inlines the by-value decode in pgcolumnar_native_next_row: for an
+# attbyval column it does the same fetch_att + advance PgColumnarDecodeValue does,
 # but without the out-of-line call and its own attbyval branch (the per-row
 # decode dispatch #289 profiled as hot). By-reference (uuid) and varlena (text,
-# numeric) columns keep the ColumnarDecodeValue path and serve as controls. This
+# numeric) columns keep the PgColumnarDecodeValue path and serve as controls. This
 # test proves the inlined values are identical to the call path across every
 # byval fixed type, every NULL pattern, every encoding, per-vector skipping,
 # deletes and ADD COLUMN, plus adversarial bit patterns.

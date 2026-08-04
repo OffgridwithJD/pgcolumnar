@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_thrift.h
+ * pgcolumnar_thrift.h
  *		Thrift compact-protocol reader and writer.
  *
  * The protocol is the container Parquet uses for its file metadata, and nothing
@@ -33,24 +33,24 @@ typedef struct TCReader
 	bool		error;
 } TCReader;
 
-extern uint64 ColumnarThriftVarint(TCReader *r);
-extern int64 ColumnarThriftZigzag(TCReader *r);
-extern const uint8 *ColumnarThriftBytes(TCReader *r, uint32 *outlen);
-extern void ColumnarThriftField(TCReader *r, int *ftype, int *fid, int *lastId);
-extern void ColumnarThriftSkip(TCReader *r, int ftype);
-extern uint32 ColumnarThriftListHeader(TCReader *r, int *etype);
+extern uint64 PgColumnarThriftVarint(TCReader *r);
+extern int64 PgColumnarThriftZigzag(TCReader *r);
+extern const uint8 *PgColumnarThriftBytes(TCReader *r, uint32 *outlen);
+extern void PgColumnarThriftField(TCReader *r, int *ftype, int *fid, int *lastId);
+extern void PgColumnarThriftSkip(TCReader *r, int ftype);
+extern uint32 PgColumnarThriftListHeader(TCReader *r, int *etype);
 
 /* ---- writer: appends into a StringInfo ---- */
 
-extern void ColumnarThriftPutVarint(StringInfo b, uint64 v);
-extern void ColumnarThriftPutZigzag32(StringInfo b, int32 v);
-extern void ColumnarThriftPutZigzag64(StringInfo b, int64 v);
-extern void ColumnarThriftPutField(StringInfo b, int16 *lastId, int16 id, int type);
-extern void ColumnarThriftPutI32Field(StringInfo b, int16 *lastId, int16 id, int32 v);
-extern void ColumnarThriftPutI64Field(StringInfo b, int16 *lastId, int16 id, int64 v);
-extern void ColumnarThriftPutStringField(StringInfo b, int16 *lastId, int16 id,
+extern void PgColumnarThriftPutVarint(StringInfo b, uint64 v);
+extern void PgColumnarThriftPutZigzag32(StringInfo b, int32 v);
+extern void PgColumnarThriftPutZigzag64(StringInfo b, int64 v);
+extern void PgColumnarThriftPutField(StringInfo b, int16 *lastId, int16 id, int type);
+extern void PgColumnarThriftPutI32Field(StringInfo b, int16 *lastId, int16 id, int32 v);
+extern void PgColumnarThriftPutI64Field(StringInfo b, int16 *lastId, int16 id, int64 v);
+extern void PgColumnarThriftPutStringField(StringInfo b, int16 *lastId, int16 id,
 										 const char *s, int len);
-extern void ColumnarThriftPutListHeader(StringInfo b, int size, int elemType);
-extern void ColumnarThriftPutStop(StringInfo b);
+extern void PgColumnarThriftPutListHeader(StringInfo b, int size, int elemType);
+extern void PgColumnarThriftPutStop(StringInfo b);
 
 #endif							/* PGCOLUMNAR_THRIFT_H */

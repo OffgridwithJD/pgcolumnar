@@ -95,13 +95,13 @@ check "compact_rewrite holds no AccessExclusiveLock" "${locks##*|}" "0"
 # ---------------------------------------------------------------------------
 # What makes the statement-scoped fetch cache safe (#143, #148).
 #
-# ColumnarReadRowByNumber caches a decoded row group keyed by
+# PgColumnarReadRowByNumber caches a decoded row group keyed by
 # (storage_id, group_number). That is only sound because such a pair is never
 # re-served with different bytes, which rests on two allocator properties rather
 # than on any locking:
 #
 #   group numbers come from the monotonic metapage counter reserved in
-#   ColumnarReserveRowNumbers (meta->reservedStripeId += 1), never from the
+#   PgColumnarReserveRowNumbers (meta->reservedStripeId += 1), never from the
 #   catalog maximum, so retiring a group does not free its number for reuse;
 #
 #   a rewrite writes into freshly allocated storage rather than over the old.

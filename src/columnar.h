@@ -84,7 +84,7 @@
 
 /*
  * Round a logical byte length up to a whole number of pages. Every reservation
- * (ColumnarReserveOffset) starts on a page boundary and the next one starts on
+ * (PgColumnarReserveOffset) starts on a page boundary and the next one starts on
  * the next page boundary, so a group's on-disk footprint is its data length
  * rounded up to a page. Physical reclaim keeps free ranges page-aligned in both
  * offset and length by working in these footprints.
@@ -114,7 +114,7 @@
 /*
  * Value-stream encoding codes (I1, format 2.1). An encoding is a reversible
  * transform of the raw value-stream bytes, applied before block compression on
- * write and reversed after decompression on read (columnar_encoding.c).
+ * write and reversed after decompression on read (pgcolumnar_encoding.c).
  */
 #define COLUMNAR_ENCODING_NONE 0
 #define COLUMNAR_ENCODING_RLE 1		/* run-length of a fixed-width value */
@@ -146,7 +146,7 @@
 #define COLUMNAR_ENCODE_EFFORT_FULL 0
 #define COLUMNAR_ENCODE_EFFORT_FAST 1
 
-typedef struct ColumnarOptions
+typedef struct PgColumnarOptions
 {
 	bool		chunkGroupRowLimitSet;
 	int			chunkGroupRowLimit;
@@ -158,47 +158,47 @@ typedef struct ColumnarOptions
 	int			compressionLevel;
 	bool		encodeEffortSet;
 	int			encodeEffort;		/* one of COLUMNAR_ENCODE_EFFORT_* */
-} ColumnarOptions;
+} PgColumnarOptions;
 
 /* GUC-backed instance defaults (spec 8.3) */
-extern int columnar_stripe_row_limit;
-extern int columnar_chunk_group_row_limit;
-extern int columnar_encoding_sample_rows;
-extern int columnar_compression;		/* one of COLUMNAR_COMPRESSION_* */
-extern int columnar_compression_level;	/* zstd level */
-extern int columnar_fsst_min_gain_percent;	/* min compressed FSST win to keep it (#155) */
-extern bool columnar_enable_qual_pushdown;
-extern bool columnar_enable_column_projection;
-extern bool columnar_enable_custom_scan;
-extern bool columnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
+extern int pgcolumnar_stripe_row_limit;
+extern int pgcolumnar_chunk_group_row_limit;
+extern int pgcolumnar_encoding_sample_rows;
+extern int pgcolumnar_compression;		/* one of COLUMNAR_COMPRESSION_* */
+extern int pgcolumnar_compression_level;	/* zstd level */
+extern int pgcolumnar_fsst_min_gain_percent;	/* min compressed FSST win to keep it (#155) */
+extern bool pgcolumnar_enable_qual_pushdown;
+extern bool pgcolumnar_enable_column_projection;
+extern bool pgcolumnar_enable_custom_scan;
+extern bool pgcolumnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 
 /* Phase 6 GUCs (spec 8.3) */
-extern bool columnar_enable_vectorization;	/* vectorized aggregate path */
-extern bool columnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#289) */
-extern bool columnar_enable_ungrouped_vector_agg;	/* filtered/extended ungrouped agg (#289) */
-extern bool columnar_enable_parallel_vector_agg;	/* parallel-aware ungrouped batch fold (#289 phase 5/6) */
-extern int columnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
-extern bool columnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
-extern bool columnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
-extern bool columnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
-extern bool columnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
-extern bool columnar_enable_index_fetch_penalty;	/* price a columnar index scan's per-row fetch (#355) */
+extern bool pgcolumnar_enable_vectorization;	/* vectorized aggregate path */
+extern bool pgcolumnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#289) */
+extern bool pgcolumnar_enable_ungrouped_vector_agg;	/* filtered/extended ungrouped agg (#289) */
+extern bool pgcolumnar_enable_parallel_vector_agg;	/* parallel-aware ungrouped batch fold (#289 phase 5/6) */
+extern int pgcolumnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
+extern bool pgcolumnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
+extern bool pgcolumnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
+extern bool pgcolumnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
+extern bool pgcolumnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
+extern bool pgcolumnar_enable_index_fetch_penalty;	/* price a columnar index scan's per-row fetch (#355) */
 
 /*
- * Statement-scoped by-row-number fetch cache cap (columnar_reader.c). Named here
+ * Statement-scoped by-row-number fetch cache cap (pgcolumnar_reader.c). Named here
  * so the index-fetch cost model (#355) can tell when a stripe is too wide to be
  * retained across fetches and must be treated as re-decoded per row.
  */
 #define COLUMNAR_FETCH_CACHE_MAX_BYTES	(32 * 1024 * 1024)
 
 /* issue #5: concurrent unique-key insert serialization */
-extern bool columnar_enable_unique_lock;	/* serialize same-key inserters */
-extern int columnar_unique_lock_buckets;	/* advisory-lock buckets per index */
+extern bool pgcolumnar_enable_unique_lock;	/* serialize same-key inserters */
+extern int pgcolumnar_unique_lock_buckets;	/* advisory-lock buckets per index */
 
 /* -------------------------------------------------------------------------
  * Metapage (spec 3)
  * ------------------------------------------------------------------------- */
-typedef struct ColumnarMetapage
+typedef struct PgColumnarMetapage
 {
 	uint32		versionMajor;
 	uint32		versionMinor;
@@ -207,7 +207,7 @@ typedef struct ColumnarMetapage
 	uint64		reservedRowNumber;
 	uint64		reservedOffset;
 	bool		unloggedReset;
-} ColumnarMetapage;
+} PgColumnarMetapage;
 
 
 
@@ -251,7 +251,7 @@ typedef struct NativeColumnChunkMetadata
  * One pgcolumnar.zone_map row (native spec 7.1, Phase D5): a Small Materialized
  * Aggregate for one vector of a column chunk (vectorIndex 0-based) or for the
  * whole column chunk (vectorIndex -1). minimum and maximum are the column's
- * value serialized with ColumnarEncodeValue (NULL when the type has no btree
+ * value serialized with PgColumnarEncodeValue (NULL when the type has no btree
  * ordering); sum is a numeric Datum (D5a leaves it unset, hasSum false; the
  * zone-map-only aggregate that consumes it lands in D5b). value_count and
  * null_count are always present.
@@ -263,7 +263,7 @@ typedef struct NativeZoneMapMetadata
 	int			columnIndex;
 	int			vectorIndex;		/* 0-based vector; -1 for the whole chunk */
 	bool		hasMinMax;
-	const char *minimum;			/* ColumnarEncodeValue bytes, when hasMinMax */
+	const char *minimum;			/* PgColumnarEncodeValue bytes, when hasMinMax */
 	uint32		minimumLen;
 	const char *maximum;
 	uint32		maximumLen;
@@ -276,7 +276,7 @@ typedef struct NativeZoneMapMetadata
 /*
  * One pgcolumnar.bloom row (native spec 7.2, Phase D5b): a per-column-chunk bloom
  * filter over the chunk's hashable values, for equality skipping on unsorted
- * columns. filter is the ColumnarBloomBuild byte image.
+ * columns. filter is the PgColumnarBloomBuild byte image.
  */
 typedef struct NativeBloomMetadata
 {
@@ -309,7 +309,7 @@ typedef struct DeleteVectorMetadata
  * projectionId 0 is the implicit base projection. attnums are 1-based; sortKey
  * attnums are a subset of columns.
  */
-typedef struct ColumnarProjection
+typedef struct PgColumnarProjection
 {
 	uint64		storageId;			/* the table's base storage id */
 	int			projectionId;		/* 0 = base, 1..N additional */
@@ -319,51 +319,51 @@ typedef struct ColumnarProjection
 	int			sortKeyLen;
 	int16	   *columns;			/* stored attnums, columnsLen entries */
 	int			columnsLen;
-} ColumnarProjection;
+} PgColumnarProjection;
 
 
 /* -------------------------------------------------------------------------
- * storage layer (columnar_storage.c)
+ * storage layer (pgcolumnar_storage.c)
  * ------------------------------------------------------------------------- */
 struct SMgrRelationData;
 
-extern void ColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
+extern void PgColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
 									 struct SMgrRelationData *srel,
 									 char persistence, uint64 storageId);
-extern void ColumnarReadMetapage(Relation rel, ColumnarMetapage *meta);
-extern uint64 ColumnarStorageId(Relation rel);
-extern void ColumnarEnsureStorageRow(Relation rel);	/* pre-create storage row (#300 parallel_copy) */
-extern void ColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
+extern void PgColumnarReadMetapage(Relation rel, PgColumnarMetapage *meta);
+extern uint64 PgColumnarStorageId(Relation rel);
+extern void PgColumnarEnsureStorageRow(Relation rel);	/* pre-create storage row (#300 parallel_copy) */
+extern void PgColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
 									  uint64 *stripeId, uint64 *firstRowNumber);
-extern void ColumnarReserveOffset(Relation rel, uint64 dataLength,
+extern void PgColumnarReserveOffset(Relation rel, uint64 dataLength,
 								  uint64 *fileOffset);
-extern void ColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes);
-extern void ColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor,
+extern void PgColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes);
+extern void PgColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor,
 											uint32 versionMinor);
-extern void ColumnarSetReservedOffset(Relation rel, uint64 newOffset);
-extern void ColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks);
-extern void ColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
+extern void PgColumnarSetReservedOffset(Relation rel, uint64 newOffset);
+extern void PgColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks);
+extern void PgColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
 									 char *data, uint64 length);
-extern void ColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
+extern void PgColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
 									char *dest, uint64 length);
-extern void ColumnarResetMetapage(Relation rel);
+extern void PgColumnarResetMetapage(Relation rel);
 
 /* row number <-> item pointer (spec 6) */
-extern void ColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid);
-extern uint64 ColumnarItemPointerToRowNumber(ItemPointer tid);
+extern void PgColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid);
+extern uint64 PgColumnarItemPointerToRowNumber(ItemPointer tid);
 
 /* -------------------------------------------------------------------------
- * visibility map for index-only scans (columnar_visibilitymap.c, gap 28)
+ * visibility map for index-only scans (pgcolumnar_visibilitymap.c, gap 28)
  * ------------------------------------------------------------------------- */
-extern void ColumnarVMSetVisible(Relation rel, BlockNumber blk);
-extern void ColumnarVMClearVisible(Relation rel, BlockNumber blk);
-extern void ColumnarVMClearForRow(Relation rel, uint64 rowNumber);
-extern bool ColumnarVMIsVisible(Relation rel, BlockNumber blk);
-extern void ColumnarVMSetVisibleForRelation(Relation rel);
-extern void ColumnarDiscardFetchCache(void);
+extern void PgColumnarVMSetVisible(Relation rel, BlockNumber blk);
+extern void PgColumnarVMClearVisible(Relation rel, BlockNumber blk);
+extern void PgColumnarVMClearForRow(Relation rel, uint64 rowNumber);
+extern bool PgColumnarVMIsVisible(Relation rel, BlockNumber blk);
+extern void PgColumnarVMSetVisibleForRelation(Relation rel);
+extern void PgColumnarDiscardFetchCache(void);
 
 /* index maintenance for callers that insert rows without an executor (#153) */
-typedef struct ColumnarIndexInsertState
+typedef struct PgColumnarIndexInsertState
 {
 	EState	   *estate;
 	TupleTableSlot *slot;
@@ -384,55 +384,55 @@ typedef struct ColumnarIndexInsertState
 	Relation   *rels;
 	IndexInfo **infos;
 	ExprState **predicates;		/* partial-index predicate, or NULL */
-} ColumnarIndexInsertState;
+} PgColumnarIndexInsertState;
 
 /*
  * enforceConstraints is fixed for the life of the state rather than passed per
  * row, because it selects which of the two routes above is built: an importer
  * enforces for every row it inserts and a rewrite enforces for none.
  */
-extern ColumnarIndexInsertState *ColumnarIndexInsertBegin(Relation rel,
+extern PgColumnarIndexInsertState *PgColumnarIndexInsertBegin(Relation rel,
 														  bool enforceConstraints);
-extern void ColumnarIndexInsertRow(ColumnarIndexInsertState *st, Relation rel,
+extern void PgColumnarIndexInsertRow(PgColumnarIndexInsertState *st, Relation rel,
 								   Datum *values, bool *isnull,
 								   uint64 rowNumber);
-extern void ColumnarIndexInsertEnd(ColumnarIndexInsertState *st);
-extern bool ColumnarRelationHasIndexes(Relation rel);
+extern void PgColumnarIndexInsertEnd(PgColumnarIndexInsertState *st);
+extern bool PgColumnarRelationHasIndexes(Relation rel);
 
 
 /* a contiguous run of all-visible row numbers (gap 28 phase 3) */
-typedef struct ColumnarRowRange
+typedef struct PgColumnarRowRange
 {
 	uint64		firstRowNumber;
 	uint64		rowCount;
-}			ColumnarRowRange;
+}			PgColumnarRowRange;
 
 /* row groups every one of whose rows is deleted as-of oldestXmin. Returns a
  * List of palloc'd uint64 group numbers. */
-extern List *ColumnarComputeFullyDeletedGroups(uint64 storageId,
+extern List *PgColumnarComputeFullyDeletedGroups(uint64 storageId,
 											   TransactionId oldestXmin);
-extern void ColumnarRetireGroup(uint64 storageId, uint64 groupNumber);
-extern int64 ColumnarRetireFullyDeletedGroups(Relation rel);
-extern void ColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber);
-extern bool ColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
+extern void PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber);
+extern int64 PgColumnarRetireFullyDeletedGroups(Relation rel);
+extern void PgColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber);
+extern bool PgColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
 									  TransactionId oldestXmin, uint64 *fileOffset);
-extern bool ColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
+extern bool PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 										  TransactionId oldestXmin);
-extern void ColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd);
-extern void ColumnarReconcileFreeList(Relation dataRel);
+extern void PgColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd);
+extern void PgColumnarReconcileFreeList(Relation dataRel);
 /* all-visible chunk-group row ranges: stripe committed past the horizon and no
- * deletes (committed or in-progress). Returns a List of ColumnarRowRange *. */
-extern List *ColumnarComputeAllVisibleGroups(uint64 storageId,
+ * deletes (committed or in-progress). Returns a List of PgColumnarRowRange *. */
+extern List *PgColumnarComputeAllVisibleGroups(uint64 storageId,
 											 TransactionId oldestXmin);
 
 /* physical reclaim: split freed ranges on allocate and coalesce on free (GUC) */
-extern bool columnar_reclaim_coalesce;
+extern bool pgcolumnar_reclaim_coalesce;
 
 /* physical end-truncation opt-in (GUC) */
-extern bool columnar_enable_end_truncation;
+extern bool pgcolumnar_enable_end_truncation;
 
 /* error unless the current user owns the relation (maintenance/DDL gate) */
-extern void ColumnarRequireTableOwner(Relation rel);
+extern void PgColumnarRequireTableOwner(Relation rel);
 
 /*
  * Assert-only invariant: a storage's live row-group footprints and its
@@ -440,64 +440,64 @@ extern void ColumnarRequireTableOwner(Relation rel);
  * called only in assert builds (the version matrix builds with asserts).
  */
 #ifdef USE_ASSERT_CHECKING
-extern void ColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
-#define COLUMNAR_ASSERT_NO_OVERLAP(sid) ColumnarCheckFreeSpaceNoOverlap(sid)
+extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
+#define COLUMNAR_ASSERT_NO_OVERLAP(sid) PgColumnarCheckFreeSpaceNoOverlap(sid)
 #else
 #define COLUMNAR_ASSERT_NO_OVERLAP(sid) ((void) 0)
 #endif
 
 /* -------------------------------------------------------------------------
- * metadata layer (columnar_metadata.c)
+ * metadata layer (pgcolumnar_metadata.c)
  * ------------------------------------------------------------------------- */
-extern uint64 ColumnarNextStorageId(void);
-extern void ColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
-extern void ColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
+extern uint64 PgColumnarNextStorageId(void);
+extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
+extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
 									int64 lastGroup);
-extern void ColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
-extern void ColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
-extern void ColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc);
-extern void ColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z);
-extern void ColumnarInsertBloomRow(const NativeBloomMetadata *b);
-extern List *ColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
-extern List *ColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber,
+extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
+extern void PgColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
+extern void PgColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc);
+extern void PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z);
+extern void PgColumnarInsertBloomRow(const NativeBloomMetadata *b);
+extern List *PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
+extern List *PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber,
 										 Snapshot snapshot);
-extern List *ColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
+extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
 									 Snapshot snapshot);
-extern List *ColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
+extern List *PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
 										Snapshot snapshot);
-extern List *ColumnarReadBloomList(uint64 storageId, uint64 groupNumber,
+extern List *PgColumnarReadBloomList(uint64 storageId, uint64 groupNumber,
 								   Snapshot snapshot);
-extern NativeBloomMetadata *ColumnarReadBloomForColumn(uint64 storageId,
+extern NativeBloomMetadata *PgColumnarReadBloomForColumn(uint64 storageId,
 													   uint64 groupNumber,
 													   int columnIndex,
 													   Snapshot snapshot);
-extern void ColumnarDeleteMetadata(uint64 storageId);
+extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */
-extern bool ColumnarReadOptions(Oid relid, ColumnarOptions *opts);
-extern void ColumnarDeleteOptions(Oid relid);
+extern bool PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts);
+extern void PgColumnarDeleteOptions(Oid relid);
 
 /* declared physical sort key (#288); List of pstrdup'd column names, NIL if
  * none is declared. Names (not attnums) so the value survives dump/restore. */
-extern List *ColumnarReadSortBy(Oid relid);
+extern List *PgColumnarReadSortBy(Oid relid);
 
-/* projection catalog (gap 26, format 2.2). List entries are ColumnarProjection*
+/* projection catalog (gap 26, format 2.2). List entries are PgColumnarProjection*
  * palloc'd in the current context, ordered by projection_id. */
-extern List *ColumnarListProjections(uint64 storageId);
-extern void ColumnarInsertProjectionRow(const ColumnarProjection *proj);
+extern List *PgColumnarListProjections(uint64 storageId);
+extern void PgColumnarInsertProjectionRow(const PgColumnarProjection *proj);
 /* The dumpable declaration behind a projection, keyed by regclass and stored as
  * column names so a dump and restore can carry it (#266). */
-extern void ColumnarRecordProjectionDeclaration(Oid relid, const char *name,
+extern void PgColumnarRecordProjectionDeclaration(Oid relid, const char *name,
 												ArrayType *columns,
 												ArrayType *sortKey);
-extern void ColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
+extern void PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
 /* Every declaration for a relation, for the drop hook: a dropped table must not
  * leave rows behind whose regclass no longer resolves (#304). */
-extern void ColumnarDeleteProjectionDeclarationsForRel(Oid relid);
-extern void ColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
+extern void PgColumnarDeleteProjectionDeclarationsForRel(Oid relid);
+extern void PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
 
 /* whether a relation uses the columnar table access method */
-extern bool ColumnarIsColumnarRelation(Oid relid);
+extern bool PgColumnarIsColumnarRelation(Oid relid);
 
 /*
  * A snapshot suitable for reading the columnar metadata catalog during a scan
@@ -509,113 +509,113 @@ extern bool ColumnarIsColumnarRelation(Oid relid);
  * MVCC snapshot. The result is palloc'd in the current context and shares the
  * base snapshot's arrays, so the base must outlive it.
  */
-extern Snapshot ColumnarCatalogSnapshot(Snapshot base);
+extern Snapshot PgColumnarCatalogSnapshot(Snapshot base);
 
 /* delete_vector catalog access (spec 7.5) */
-extern List *ColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId,
+extern List *PgColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId,
 									 Snapshot snapshot);
-extern bool ColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot);
-extern void ColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm);
+extern bool PgColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot);
+extern void PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm);
 
 /* -------------------------------------------------------------------------
- * writer (columnar_write_state.c)
+ * writer (pgcolumnar_write_state.c)
  * ------------------------------------------------------------------------- */
-typedef struct ColumnarWriteState ColumnarWriteState;
+typedef struct PgColumnarWriteState PgColumnarWriteState;
 
-extern ColumnarWriteState *ColumnarGetWriteState(Relation rel);
-extern int ColumnarWriteStateStripeCount(ColumnarWriteState *ws);
-extern uint64 *ColumnarWriteStateStripeIds(ColumnarWriteState *ws, int *n);
-extern uint64 *ColumnarWriteStateProjStripeIds(ColumnarWriteState *ws, int *n);
-extern uint64 ColumnarWriteRow(ColumnarWriteState *writeState, Relation rel,
+extern PgColumnarWriteState *PgColumnarGetWriteState(Relation rel);
+extern int PgColumnarWriteStateStripeCount(PgColumnarWriteState *ws);
+extern uint64 *PgColumnarWriteStateStripeIds(PgColumnarWriteState *ws, int *n);
+extern uint64 *PgColumnarWriteStateProjStripeIds(PgColumnarWriteState *ws, int *n);
+extern uint64 PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 							   Datum *values, bool *nulls);
-extern void ColumnarProjectionFanoutRow(Relation rel, ColumnarWriteState *baseWs,
+extern void PgColumnarProjectionFanoutRow(Relation rel, PgColumnarWriteState *baseWs,
 										uint64 rowNumber, Datum *values,
 										bool *nulls);
-extern void ColumnarBackfillProjection(Relation rel,
-									   const ColumnarProjection *proj);
-extern bool ColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
+extern void PgColumnarBackfillProjection(Relation rel,
+									   const PgColumnarProjection *proj);
+extern bool PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 										Datum *values, bool *nulls);
-extern void ColumnarFlushWriteStateForRelation(Oid relid);
-extern void ColumnarForgetWriteStateForRelation(Oid relid);
-extern void ColumnarFlushAllPendingWrites(void);
-extern void ColumnarDiscardAllPendingWrites(void);
-extern void ColumnarWriteStateDiscardSubXact(SubTransactionId subid);
-extern void ColumnarWriteStatePromoteSubXact(SubTransactionId subid,
+extern void PgColumnarFlushWriteStateForRelation(Oid relid);
+extern void PgColumnarForgetWriteStateForRelation(Oid relid);
+extern void PgColumnarFlushAllPendingWrites(void);
+extern void PgColumnarDiscardAllPendingWrites(void);
+extern void PgColumnarWriteStateDiscardSubXact(SubTransactionId subid);
+extern void PgColumnarWriteStatePromoteSubXact(SubTransactionId subid,
 											 SubTransactionId parent);
 
 /* -------------------------------------------------------------------------
- * delete vector / delete tracking (columnar_delete_vector.c, spec 7.5, 9)
+ * delete vector / delete tracking (pgcolumnar_delete_vector.c, spec 7.5, 9)
  * ------------------------------------------------------------------------- */
-extern void ColumnarMarkRowDeleted(Relation rel, uint64 rowNumber);
-extern bool ColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber);
-extern void ColumnarFlushDeleteVectorForRelation(Relation rel);
-extern void ColumnarFlushAllDeleteVectors(void);
-extern void ColumnarDiscardAllDeleteVectors(void);
-extern void ColumnarDeleteVectorDiscardSubXact(SubTransactionId subid);
-extern void ColumnarDeleteVectorPromoteSubXact(SubTransactionId subid,
+extern void PgColumnarMarkRowDeleted(Relation rel, uint64 rowNumber);
+extern bool PgColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber);
+extern void PgColumnarFlushDeleteVectorForRelation(Relation rel);
+extern void PgColumnarFlushAllDeleteVectors(void);
+extern void PgColumnarDiscardAllDeleteVectors(void);
+extern void PgColumnarDeleteVectorDiscardSubXact(SubTransactionId subid);
+extern void PgColumnarDeleteVectorPromoteSubXact(SubTransactionId subid,
 										  SubTransactionId parent);
 
 /* -------------------------------------------------------------------------
- * reader (columnar_reader.c)
+ * reader (pgcolumnar_reader.c)
  * ------------------------------------------------------------------------- */
-typedef struct ColumnarReadState ColumnarReadState;
+typedef struct PgColumnarReadState PgColumnarReadState;
 
-extern ColumnarReadState *ColumnarBeginRead(Relation rel, Snapshot snapshot,
+extern PgColumnarReadState *PgColumnarBeginRead(Relation rel, Snapshot snapshot,
 											ParallelTableScanDesc parallelScan,
 											Bitmapset *projectedColumns,
 											int nkeys, ScanKey keys);
-/* like ColumnarBeginRead but reads an explicit storage id with an explicit
+/* like PgColumnarBeginRead but reads an explicit storage id with an explicit
  * tuple descriptor -- used to read a projection's storage (gap 26) */
-extern ColumnarReadState *ColumnarBeginReadWithStorage(Relation rel,
+extern PgColumnarReadState *PgColumnarBeginReadWithStorage(Relation rel,
 													   Snapshot snapshot,
 													   uint64 storageId,
 													   TupleDesc tupdesc,
 													   ParallelTableScanDesc parallelScan,
 													   Bitmapset *projectedColumns,
 													   int nkeys, ScanKey keys);
-extern bool ColumnarReadNextRow(ColumnarReadState *readState,
+extern bool PgColumnarReadNextRow(PgColumnarReadState *readState,
 								Datum *values, bool *nulls,
 								uint64 *rowNumber);
-extern void ColumnarRescanRead(ColumnarReadState *readState);
-extern void ColumnarEndRead(ColumnarReadState *readState);
+extern void PgColumnarRescanRead(PgColumnarReadState *readState);
+extern void PgColumnarEndRead(PgColumnarReadState *readState);
 
 /*
  * Batch-fold accessors (#289): expose the current loaded group's decoded buffer
  * so an ungrouped aggregate can fold it column-at-a-time instead of one Datum
- * tuple per row. See the block comment in columnar_reader.c for the contract.
+ * tuple per row. See the block comment in pgcolumnar_reader.c for the contract.
  */
-extern bool ColumnarReadFoldNextGroup(ColumnarReadState *readState);
-extern void ColumnarReadFoldGroupInfo(ColumnarReadState *readState, uint64 *nrows,
+extern bool PgColumnarReadFoldNextGroup(PgColumnarReadState *readState);
+extern void PgColumnarReadFoldGroupInfo(PgColumnarReadState *readState, uint64 *nrows,
 									  const char **deleteMask, uint32 *deleteMaskLen,
 									  const bool **skipVec, const uint32 **vecStart,
 									  int *vectorCount);
-extern bool ColumnarReadFoldColumn(ColumnarReadState *readState, int attidx,
+extern bool PgColumnarReadFoldColumn(PgColumnarReadState *readState, int attidx,
 								   const char **validity, const char **packed,
 								   int16 *attlen, const uint32 **vecRawLen);
 
 /*
  * Restrict a scan to a set of row groups (issue #149). Groups outside the set
  * are skipped without their bytes being read. Must be called before the first
- * ColumnarReadNextRow; ngroups == 0 makes the scan return no rows.
+ * PgColumnarReadNextRow; ngroups == 0 makes the scan return no rows.
  */
-extern void ColumnarReadRestrictToGroups(ColumnarReadState *readState,
+extern void PgColumnarReadRestrictToGroups(PgColumnarReadState *readState,
 										 const uint64 *groupNumbers,
 										 int ngroups);
 
 /* Parquet export helpers, shared by the serial and parallel exporters
- * (src/columnar_parquet.c). */
-extern int64 ColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
+ * (src/pgcolumnar_parquet.c). */
+extern int64 PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
 									  const char *filepath,
 									  const uint64 *restrictGroups,
 									  int nRestrictGroups);
-extern void ColumnarParquetCheckExportable(Relation rel);
+extern void PgColumnarParquetCheckExportable(Relation rel);
 
 /*
  * Parallel scan (gap 23): point the read state at a shared atomic that hands out
  * stripe indices, so several workers scanning the same relation each claim
  * distinct stripes. Set by the custom scan's DSM init callbacks.
  */
-extern void ColumnarReadSetParallelCounter(ColumnarReadState *readState,
+extern void PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
 										   pg_atomic_uint32 *counter);
 
 /*
@@ -623,26 +623,26 @@ extern void ColumnarReadSetParallelCounter(ColumnarReadState *readState,
  * scan's EXPLAIN output to show how many chunk groups the min/max skip lists
  * removed. total = read + skipped over the groups the scan has reached.
  */
-extern void ColumnarReadStats(ColumnarReadState *readState,
+extern void PgColumnarReadStats(PgColumnarReadState *readState,
 							  uint64 *groupsRead, uint64 *groupsSkipped,
 							  uint64 *groupsTotal);
-extern uint64 ColumnarVectorsSkipped(ColumnarReadState *readState);
+extern uint64 PgColumnarVectorsSkipped(PgColumnarReadState *readState);
 
 /* cached base-liveness for a projection scan (gap 26): build once per scan,
  * probe per row with a binary search instead of a per-row catalog scan */
-typedef struct ColumnarLivenessCache ColumnarLivenessCache;
-extern ColumnarLivenessCache *ColumnarBuildLivenessCache(Relation rel,
+typedef struct PgColumnarLivenessCache PgColumnarLivenessCache;
+extern PgColumnarLivenessCache *PgColumnarBuildLivenessCache(Relation rel,
 														 Snapshot snapshot);
-extern bool ColumnarLivenessCacheIsLive(ColumnarLivenessCache *cache,
+extern bool PgColumnarLivenessCacheIsLive(PgColumnarLivenessCache *cache,
 										uint64 rowNumber);
-extern void ColumnarFreeLivenessCache(ColumnarLivenessCache *cache);
+extern void PgColumnarFreeLivenessCache(PgColumnarLivenessCache *cache);
 /*
  * Fetch a single row by its 1-based row number (spec 6), for the table AM's
  * fetch-by-tid callback used by UPDATE. Fills values/nulls (by-reference values
  * are allocated in the current memory context) and returns true when the row
  * exists and is not marked deleted in the delete vector.
  */
-extern bool ColumnarReadRowByNumber(Relation rel, Snapshot snapshot,
+extern bool PgColumnarReadRowByNumber(Relation rel, Snapshot snapshot,
 									uint64 rowNumber, Datum *values, bool *nulls);
 
 /*
@@ -651,93 +651,93 @@ extern bool ColumnarReadRowByNumber(Relation rel, Snapshot snapshot,
  * this deliberately has no "NULL means all" convention, because a Bitmapset
  * cannot distinguish empty from NULL, so a caller whose computed set came out
  * empty would silently get the opposite of what it asked for. For every column
- * call ColumnarReadRowByNumber, which takes no set.
+ * call PgColumnarReadRowByNumber, which takes no set.
  *
  * Decoding every column regardless makes a wide table exceed the fetch cache's
  * size cap, so the entry is dropped after every fetch and the group is decoded
  * again for the next row (issue #157).
  */
-extern bool ColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot,
+extern bool PgColumnarReadRowByNumberCols(Relation rel, Snapshot snapshot,
 										uint64 rowNumber, Datum *values,
 										bool *nulls, Bitmapset *needed);
 
 /* Is the row visible? Decodes nothing. */
-extern bool ColumnarRowIsLive(Relation rel, Snapshot snapshot,
+extern bool PgColumnarRowIsLive(Relation rel, Snapshot snapshot,
 							  uint64 rowNumber);
 
 /* -------------------------------------------------------------------------
- * Decoded chunk group (columnar_vector.c aggregate path)
+ * Decoded chunk group (pgcolumnar_vector.c aggregate path)
  *
- * A ColumnarVector is one decoded chunk group: for each projected column, the
+ * A PgColumnarVector is one decoded chunk group: for each projected column, the
  * whole group's values and null flags as flat arrays, plus the per-row deleted
  * flag resolved from the delete vector. The vectorized aggregate builds a selection
  * vector over it; the scan itself is the scalar per-row
- * reader (ColumnarReadNextRow).
+ * reader (PgColumnarReadNextRow).
  * ------------------------------------------------------------------------- */
-typedef struct ColumnarVector
+typedef struct PgColumnarVector
 {
 	uint64		nrows;			/* rows in this chunk group */
 	uint64		firstRowNumber; /* row number of local row 0 */
 	Datum	  **values;			/* [natts]; values[c] is Datum[nrows] or NULL */
 	bool	  **isnull;			/* [natts]; isnull[c] is bool[nrows] or NULL */
 	bool	   *deleted;		/* [nrows]; true when row-mask-deleted */
-} ColumnarVector;
+} PgColumnarVector;
 
 /* value stream encode/decode shared by writer and reader */
-extern void ColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
+extern void PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
 								Datum value);
-extern Datum ColumnarDecodeValue(Form_pg_attribute att, char **cursor,
+extern Datum PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 								 MemoryContext targetContext);
 
 /* -------------------------------------------------------------------------
- * lightweight value-stream encodings (columnar_encoding.c, I1)
+ * lightweight value-stream encodings (pgcolumnar_encoding.c, I1)
  * ------------------------------------------------------------------------- */
-extern int ColumnarEncodeChunk(const char *raw, uint32 rawLen,
+extern int PgColumnarEncodeChunk(const char *raw, uint32 rawLen,
 							   Form_pg_attribute att, uint64 valueCount,
 							   const char *fsstTable, uint32 fsstTableLen,
 							   char **out, uint32 *outLen);
-extern char *ColumnarDecodeChunk(const char *enc, uint32 encLen,
+extern char *PgColumnarDecodeChunk(const char *enc, uint32 encLen,
 								 int encodingType, Form_pg_attribute att,
 								 uint64 valueCount, uint32 rawLen,
 								 const char *fsstTable, uint32 fsstTableLen,
 								 MemoryContext cx);
-extern const char *ColumnarEncodingName(int encodingType);
+extern const char *PgColumnarEncodingName(int encodingType);
 
 /*
  * Build one FSST symbol table for a whole column chunk from a sample of its
  * concatenated varlena value streams (E3b). Returns true and sets *tableOut /
  * *tableLenOut (palloc'd, serialized as [uint8 nSym][ nSym x (uint8 len, bytes)])
  * when a table was built; false for non-varlena columns or when no useful table
- * exists. The table is passed back into ColumnarEncodeChunk / ColumnarDecodeChunk
+ * exists. The table is passed back into PgColumnarEncodeChunk / PgColumnarDecodeChunk
  * as fsstTable so the per-vector build cost is paid once per chunk.
  */
-extern bool ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
+extern bool PgColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
 										Form_pg_attribute att,
 										char **tableOut, uint32 *tableLenOut);
 /* Cheap distinct-count pre-check: true when dictionary encoding wins outright, so
  * the costly FSST table build can be skipped with byte-identical output (#155). */
-extern bool ColumnarFsstDictWins(const char *corpus, uint32 corpusLen);
+extern bool PgColumnarFsstDictWins(const char *corpus, uint32 corpusLen);
 
 /*
  * True when encoding the chunk with the table just built is still a win after
  * the block compressor runs over the result, judged on the same sample the
- * table was trained on. The per-vector test inside ColumnarEncodeChunk compares
+ * table was trained on. The per-vector test inside PgColumnarEncodeChunk compares
  * uncompressed lengths, which is the wrong objective when a codec is configured:
  * FSST codes are smaller than repetitive text but much less compressible, so
  * FSST can win every vector and still enlarge the chunk. Callers pass NULL for
  * fsstTable when this returns false.
  */
-extern bool ColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
+extern bool PgColumnarFsstHelpsCompressed(const char *corpus, uint32 corpusLen,
 										const char *table, uint32 tableLen,
 										int compressionType,
 										int compressionLevel);
 
 /* -------------------------------------------------------------------------
- * per-chunk bloom filters (columnar_bloom.c, I7)
+ * per-chunk bloom filters (pgcolumnar_bloom.c, I7)
  * ------------------------------------------------------------------------- */
-extern bool ColumnarBloomBuild(const uint32 *hashes, uint32 n,
+extern bool PgColumnarBloomBuild(const uint32 *hashes, uint32 n,
 							   char **out, uint32 *outLen);
-extern bool ColumnarBloomProbe(const char *bloom, uint32 bloomLen, uint32 hash);
+extern bool PgColumnarBloomProbe(const char *bloom, uint32 bloomLen, uint32 hash);
 
 /*
  * True when a column of the given collation can carry a bloom filter (I7/gap 25):
@@ -745,10 +745,10 @@ extern bool ColumnarBloomProbe(const char *bloom, uint32 bloomLen, uint32 hash);
  * values are byte-identical and hash consistently between build and probe.
  * Nondeterministic collations return false and are left unbloomed.
  */
-extern bool ColumnarCollationIsDeterministic(Oid collid);
+extern bool PgColumnarCollationIsDeterministic(Oid collid);
 
 /* -------------------------------------------------------------------------
- * compression-block run iterator (columnar_encoding.c, I2)
+ * compression-block run iterator (pgcolumnar_encoding.c, I2)
  *
  * Exposes a column chunk's (non-null) values as a sequence of (value, run
  * length) pairs so operators run once per run instead of once per row (I3
@@ -756,15 +756,15 @@ extern bool ColumnarCollationIsDeterministic(Oid collid);
  * adjacent equal fixed-width values, so a repetitive or run-length-encoded
  * column yields long runs. Fixed-width columns only.
  * ------------------------------------------------------------------------- */
-typedef struct ColumnarBlockReader
+typedef struct PgColumnarBlockReader
 {
 	const char *raw;			/* raw value stream (packed fixed-width values) */
 	uint64		valueCount;		/* number of values in the stream */
 	int			width;			/* bytes per value (attlen) */
 	uint64		pos;			/* next value index */
-} ColumnarBlockReader;
+} PgColumnarBlockReader;
 
-extern void ColumnarBlockReaderInit(ColumnarBlockReader *br, const char *raw,
+extern void PgColumnarBlockReaderInit(PgColumnarBlockReader *br, const char *raw,
 									uint64 valueCount, int width);
 
 /*
@@ -772,65 +772,65 @@ extern void ColumnarBlockReaderInit(ColumnarBlockReader *br, const char *raw,
  * while the underlying stream is), *runLen is how many consecutive values equal
  * it. Returns false at end of stream.
  */
-extern bool ColumnarBlockNextRun(ColumnarBlockReader *br,
+extern bool PgColumnarBlockNextRun(PgColumnarBlockReader *br,
 								 const char **valBytes, uint64 *runLen);
 
 /* -------------------------------------------------------------------------
- * compression (columnar_compression.c, spec 5)
+ * compression (pgcolumnar_compression.c, spec 5)
  * ------------------------------------------------------------------------- */
-extern bool ColumnarCodecAvailable(int compressionType);
-extern void ColumnarCompressValueStream(const char *raw, uint32 rawLen,
+extern bool PgColumnarCodecAvailable(int compressionType);
+extern void PgColumnarCompressValueStream(const char *raw, uint32 rawLen,
 										int requestedType, int level,
 										char **outData, uint32 *outLen,
 										int *usedType, int *usedLevel);
-extern char *ColumnarDecompressValueStream(const char *comp, uint32 compLen,
+extern char *PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
 										   int compressionType, uint32 rawLen,
 										   MemoryContext targetContext);
 
 
 /* -------------------------------------------------------------------------
- * concurrent unique-key insert serialization (columnar_unique.c, issue #5)
+ * concurrent unique-key insert serialization (pgcolumnar_unique.c, issue #5)
  *
  * Before an inserted row is handed to the executor's index maintenance, the
- * table AM insert paths call ColumnarLockUniqueKeys to take a transaction-
+ * table AM insert paths call PgColumnarLockUniqueKeys to take a transaction-
  * scoped advisory lock per applicable unique index key, so a concurrent
  * inserter of an equal key serializes behind this transaction until it commits
  * (and has therefore flushed its row), at which point the ordinary btree
- * uniqueness check catches the duplicate. See columnar_unique.c.
+ * uniqueness check catches the duplicate. See pgcolumnar_unique.c.
  * ------------------------------------------------------------------------- */
-extern void ColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot);
-extern void ColumnarUniqueInit(void);
+extern void PgColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot);
+extern void PgColumnarUniqueInit(void);
 
 /* -------------------------------------------------------------------------
- * planner integration (columnar_customscan.c, spec 8.3, 9)
+ * planner integration (pgcolumnar_customscan.c, spec 8.3, 9)
  * ------------------------------------------------------------------------- */
-extern void ColumnarCustomScanInit(void);
+extern void PgColumnarCustomScanInit(void);
 
 /*
  * The single registered CustomScanMethods, shared by the base custom scan and
  * the vectorized aggregate. The create-state callback dispatches on scanrelid:
  * a scanrelid==0 upper node is the vectorized aggregate.
  */
-extern const CustomScanMethods columnar_scan_methods;
-extern Node *ColumnarCreateAggScanState(CustomScan *cscan);
-extern Node *ColumnarCreateGroupAggScanState(CustomScan *cscan);
+extern const CustomScanMethods pgcolumnar_scan_methods;
+extern Node *PgColumnarCreateAggScanState(CustomScan *cscan);
+extern Node *PgColumnarCreateGroupAggScanState(CustomScan *cscan);
 
 /*
  * Build the chunk-group skip scan keys from a plan's restriction clauses.
  * Shared by the base custom scan and the vectorized aggregate (spec 9). Clauses
  * that are not simple "column op const" comparisons are ignored.
  */
-extern ScanKey ColumnarBuildScanKeys(List *qual, Index scanrelid,
+extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
 									 TupleDesc tupdesc, int *nkeys);
 
 /* -------------------------------------------------------------------------
- * vectorized aggregation and filtering (columnar_vector.c, spec 9)
+ * vectorized aggregation and filtering (pgcolumnar_vector.c, spec 9)
  * ------------------------------------------------------------------------- */
-extern void ColumnarVectorInit(void);
+extern void PgColumnarVectorInit(void);
 
 /*
  * The vectorized predicate machinery that used to be declared here is private to
- * columnar_vector.c. ColumnarVecRowPasses and ColumnarVecSelect were exported
+ * pgcolumnar_vector.c. PgColumnarVecRowPasses and PgColumnarVecSelect were exported
  * with no call site anywhere in the tree and are gone; see issue #200. What
  * remains of it is a convertibility probe the planner uses, and it has no
  * business outside that file.
@@ -869,7 +869,7 @@ extern void ColumnarVectorInit(void);
  * duplicating.
  */
 static inline uint32
-ColumnarVarSizeAnyUnaligned(const char *p)
+PgColumnarVarSizeAnyUnaligned(const char *p)
 {
 	uint32		hdr;
 

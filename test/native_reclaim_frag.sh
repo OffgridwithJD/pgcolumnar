@@ -12,7 +12,7 @@
 #     GUC on they collapse to FEWER free_space rows than with it off (direct,
 #     deterministic evidence the coalesce path runs); and
 #   * coalesce is never worse than whole-range reuse for the final file size.
-# The assert-build no-overlap validator (ColumnarCheckFreeSpaceNoOverlap) runs at
+# The assert-build no-overlap validator (PgColumnarCheckFreeSpaceNoOverlap) runs at
 # the end of every compaction here, so this also exercises the tiling invariant
 # on variable-size ranges.
 #
