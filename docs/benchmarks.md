@@ -489,7 +489,7 @@ Rows Removed by Filter: 99995680
 It reads all 667 row groups and filters 99,995,680 rows to return 4,320. The zone maps cannot help,
 because neither key is sorted in the stored order. Every stripe holds all 4,000 hosts.
 The minimum and maximum `hostname` of each group therefore covers the whole set.
-TimescaleDB answers the same query in about 2 milliseconds. It excludes all but one
+TimescaleDB answers the same query in 5 milliseconds. It excludes all but one
 chunk on time, then reads one `hostname` segment through an index.
 
 **So this table measures pgColumnar in the layout that suits it least.** A user with
