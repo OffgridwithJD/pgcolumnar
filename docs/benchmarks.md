@@ -625,6 +625,12 @@ to dimensions, and the selective-dimension-join pattern. Those are a large part 
 what columnar storage is usually bought for, and this page says nothing about
 them. Not that we do badly on them. We have not measured them. See #401.
 
+Joins themselves work. A columnar table joins a heap table in either direction,
+and a columnar table, under hash, merge and nested-loop strategies, returning the
+same rows as the all-heap equivalent, with column projection surviving the join so
+the columnar side reads only the columns the join and the target list need. What is
+absent is a measurement of how fast that is, not evidence that it works.
+
 Read the conclusions below as being about single-table scan and aggregate work,
 because that is the evidence behind them.
 
