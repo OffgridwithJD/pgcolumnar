@@ -3,7 +3,7 @@
 # pgColumnar physical reclaim, repeated compact_rewrite cycles (Phase F).
 #
 # Regression guard for the free-space allocator self-conflict fixed in PR #84:
-# ColumnarAllocateFreeSpace consumed a free_space row without a
+# PgColumnarAllocateFreeSpace consumed a free_space row without a
 # CommandCounterIncrement, so a compact_rewrite that wrote MORE THAN ONE group in
 # one command (many allocations) re-selected the just-consumed row and died with
 # "tuple already updated by self". It only fires once reusable free space exists

@@ -109,8 +109,8 @@ check "the stride is not so large that a check never lands" \
 # leave a whole group load or a whole run of skipped rows uninterruptible.
 RD="$SRC/columnar_reader.c"
 check "the group load checks for interrupts per column chunk" \
-	"$(awk '/^columnar_native_load_group\(/,/^}/' "$RD" | grep -c 'CHECK_FOR_INTERRUPTS')" "1"
+	"$(awk '/^pgcolumnar_native_load_group\(/,/^}/' "$RD" | grep -c 'CHECK_FOR_INTERRUPTS')" "1"
 check "the row loop checks for interrupts" \
-	"$(awk '/^columnar_native_next_row\(/,/^}/' "$RD" | grep -c 'CHECK_FOR_INTERRUPTS')" "1"
+	"$(awk '/^pgcolumnar_native_next_row\(/,/^}/' "$RD" | grep -c 'CHECK_FOR_INTERRUPTS')" "1"
 
 pgc_summary

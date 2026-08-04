@@ -228,7 +228,7 @@ check "doubling the row group does not double the cost of the same fetches" \
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
 check "the rank comes from a prefix rather than a loop over earlier rows" \
-	"$(grep -c 'present = columnar_rank_before' "$SRC/columnar_reader.c")" "1"
+	"$(grep -c 'present = pgcolumnar_rank_before' "$SRC/columnar_reader.c")" "1"
 
 check "a varying-length column reaches its value through an offset table" \
 	"$(grep -c 'entry->valOffset\[c\]\[present\]' "$SRC/columnar_reader.c")" "1"

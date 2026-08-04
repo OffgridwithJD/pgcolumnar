@@ -2,7 +2,7 @@
 #
 # pgColumnar: a rewrite must read each group once, not once per row (#196).
 #
-# rewrite_one_group used ColumnarReadRowByNumber for every row. That call
+# rewrite_one_group used PgColumnarReadRowByNumber for every row. That call
 # decodes the whole group to return one value and depends on the fetch cache to
 # make the next call cheap -- and the cache drops any group whose decoded form
 # exceeds COLUMNAR_FETCH_CACHE_MAX_BYTES, after every fetch. So a group over the

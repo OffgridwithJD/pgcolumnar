@@ -16,7 +16,7 @@
 #   2. clang, not gcc. This looks like a free choice and is not. The defect this
 #      gate exists to catch (#225) is a 4-byte varlena header read at an unaligned
 #      address, and the read sits behind a 1-byte-header branch that tests the same
-#      byte (ColumnarVarSizeAnyUnaligned). gcc's -fsanitize=alignment silently
+#      byte (PgColumnarVarSizeAnyUnaligned). gcc's -fsanitize=alignment silently
 #      drops the check on that guarded load at -O1 -- verified: the load happens
 #      45,000 times on a low-cardinality-text INSERT, gcc reports none, clang
 #      reports it. A gcc build here would run clean and prove nothing, which is the

@@ -334,7 +334,7 @@ check "ANALYZE on a wide table is not many times a full scan of it" \
 # by number, and each fetch decodes the whole row group the row lives in. When the
 # ordering column is unclustered those rows are scattered across every group, so the
 # scan decodes the table many times over -- but core prices the fetch as a page or
-# two and picks the index to avoid a sort. columnar_index_fetch_penalty adds the
+# two and picks the index to avoid a sort. pgcolumnar_index_fetch_penalty adds the
 # decode cost, so a sort over the scan wins instead. Measured on the bench, an
 # unclustered ORDER BY that took minutes on the index dropped to seconds once it
 # sorted.
@@ -443,7 +443,7 @@ check "the penalty is applied before the columnar path is offered, so it can sti
 # The checks above vary how many rows a plan fetches. This varies *which column* it
 # references, holding everything else fixed -- same row count, same emitted width,
 # same plan shape. The deferred index-fetch slot decodes the attribute prefix
-# 0..max-referenced (columnar_tableam.c, columnar_slot_decode_upto), so referencing
+# 0..max-referenced (columnar_tableam.c, pgcolumnar_slot_decode_upto), so referencing
 # a late column decodes every column before it.
 #
 # Sizing that decode from rel->reltarget->width cannot see the difference: it is

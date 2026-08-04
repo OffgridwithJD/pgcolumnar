@@ -2,7 +2,7 @@
 #
 # pgColumnar fetch-path interrupt guard (#212).
 #
-# columnar_fetch_row is reached once per candidate item pointer by
+# pgcolumnar_fetch_row is reached once per candidate item pointer by
 # _bt_check_unique() during a unique INSERT, and each call reads the row-group
 # list out of the catalog. Before #212 that path had no CHECK_FOR_INTERRUPTS --
 # the three checks already in columnar_reader.c are all on the scan/decode path,
@@ -30,21 +30,21 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
-# The body of columnar_fetch_row, from its definition to its closing brace.
-body="$(awk '/^columnar_fetch_row\(/{p=1} p{print} p&&/^}/{exit}' "$SRC/columnar_reader.c")"
+# The body of pgcolumnar_fetch_row, from its definition to its closing brace.
+body="$(awk '/^pgcolumnar_fetch_row\(/{p=1} p{print} p&&/^}/{exit}' "$SRC/columnar_reader.c")"
 
 # The guard has to be in this function, not merely in the file. The interrupt
 # checks elsewhere in columnar_reader.c are on the scan/decode path, which the
 # unique liveness fetch never enters, so counting the file would pass vacuously.
-check "columnar_fetch_row carries an interrupt check" \
+check "pgcolumnar_fetch_row carries an interrupt check" \
 	"$(printf '%s\n' "$body" | grep -c 'CHECK_FOR_INTERRUPTS' | awk '{print ($1>=1)?"yes":"no"}')" \
 	"yes"
 
 # And it has to run before the per-fetch catalog read it guards, or the fetch
 # does its work before ever reaching a cancellation point -- which is the state
-# #212 was in. Assert the check precedes the ColumnarReadRowGroupList call.
+# #212 was in. Assert the check precedes the PgColumnarReadRowGroupList call.
 cfi_line="$(printf '%s\n' "$body" | grep -n 'CHECK_FOR_INTERRUPTS' | head -1 | cut -d: -f1)"
-rgl_line="$(printf '%s\n' "$body" | grep -n 'ColumnarReadRowGroupList' | head -1 | cut -d: -f1)"
+rgl_line="$(printf '%s\n' "$body" | grep -n 'PgColumnarReadRowGroupList' | head -1 | cut -d: -f1)"
 check "the interrupt check precedes the per-fetch catalog read" \
 	"$( [ -n "$cfi_line" ] && [ -n "$rgl_line" ] && [ "$cfi_line" -lt "$rgl_line" ] && echo yes || echo no )" \
 	"yes"

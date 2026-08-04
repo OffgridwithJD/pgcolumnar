@@ -4,7 +4,7 @@
 #
 # The grouped path fires for SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY
 # <keys> over one columnar relation. It reads each surviving row with
-# ColumnarReadNextRow (WHERE pushed down for group/vector skipping), rechecks the
+# PgColumnarReadNextRow (WHERE pushed down for group/vector skipping), rechecks the
 # full WHERE, evaluates the group keys, and scatters the row into an
 # open-addressing hash table whose per-group accumulators fold in scan order.
 #

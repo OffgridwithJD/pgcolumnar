@@ -11,7 +11,7 @@
 # The two recursions are independent and each needs its own guard -- one does not
 # cover the other, because they are reached at different points:
 #
-#   1. ColumnarThriftSkip recurses through nested structs (and lists of structs).
+#   1. PgColumnarThriftSkip recurses through nested structs (and lists of structs).
 #      Every unrecognised metadata field is skipped through it, so it is reached
 #      straight from the footer bytes, before any schema is interpreted. A footer
 #      that is just N struct openers nests N deep.
@@ -24,7 +24,7 @@
 # Both are guarded with check_stack_depth(), which turns the crash into a caught
 # ERROR (SQLSTATE 54001, statement_too_complex). That each guard is load-bearing
 # for its own vector was proven by removal at the depths that actually overflow an
-# 8 MB stack: with only the ColumnarThriftSkip guard present a schema chain still
+# 8 MB stack: with only the PgColumnarThriftSkip guard present a schema chain still
 # SIGSEGVs, and with only the walk_schema guard present a nested-struct footer
 # still SIGSEGVs.
 #
@@ -71,7 +71,7 @@ def wrap(meta):
 
 # Vector 1: N nested struct openers. 0x1c is a compact-protocol field header
 # meaning (delta 1, type TC_STRUCT) -- "open a struct". N of them nest N deep
-# through ColumnarThriftSkip. This never parses a schema; it crashes on the
+# through PgColumnarThriftSkip. This never parses a schema; it crashes on the
 # top-level field skip.
 def nested(n):
     return wrap(b'\x1c' * n)

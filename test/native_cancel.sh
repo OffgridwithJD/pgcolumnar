@@ -4,7 +4,7 @@
 #
 # The executor checks for interrupts once per tuple it receives, which is no help
 # while a scan is doing work without producing a tuple. The expensive case is
-# loading a row group: columnar_native_load_group() reads and decodes every
+# loading a row group: pgcolumnar_native_load_group() reads and decodes every
 # column chunk of the group before the row loop can iterate once, and a vector
 # holds up to pgcolumnar.chunk_group_row_limit values, which is user-settable and
 # unbounded. Without interrupt checks inside that load, statement_timeout,
@@ -82,7 +82,7 @@ check "the short timeout is what fired" \
 # Which guard this actually proves, established by removing each one rather than
 # from the description above: it is COLUMNAR_DECODE_INTERRUPT in
 # columnar_encoding.c, the per-value decode-loop check on a 65536 stride, not the
-# per-column-chunk CHECK_FOR_INTERRUPTS in columnar_native_load_group(). Deleting
+# per-column-chunk CHECK_FOR_INTERRUPTS in pgcolumnar_native_load_group(). Deleting
 # the per-chunk check leaves this suite green, because a two-column group reaches
 # it only twice; disabling the decode-loop macro makes cancel converge on full
 # (151 ms against 150) and fails this check, which is the behaviour the paragraph

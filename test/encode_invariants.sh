@@ -47,7 +47,7 @@ ROWS="${PGC_ENCINV_ROWS:-4096}"
 # directly and compares each against a reference implementation of the algorithm
 # it replaced, which is the promise the rewrites actually made: the same bytes.
 psql_run "CREATE FUNCTION pgcolumnar.debug_encoding_selftest()
-  RETURNS SETOF text AS 'pgcolumnar', 'columnar_debug_encoding_selftest'
+  RETURNS SETOF text AS 'pgcolumnar', 'pgcolumnar_debug_encoding_selftest'
   LANGUAGE C;" >/dev/null 2>&1
 
 selftest="$(q "SELECT * FROM pgcolumnar.debug_encoding_selftest();")"

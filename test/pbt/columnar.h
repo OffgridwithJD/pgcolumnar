@@ -24,30 +24,30 @@
 #define PG_UINT32_MAX 0xFFFFFFFFU
 #endif
 
-typedef struct ColumnarBlockReader
+typedef struct PgColumnarBlockReader
 {
 	const char *raw;
 	uint64		valueCount;
 	int			width;
 	uint64		pos;
-} ColumnarBlockReader;
+} PgColumnarBlockReader;
 
-extern int ColumnarEncodeChunk(const char *raw, uint32 rawLen,
+extern int PgColumnarEncodeChunk(const char *raw, uint32 rawLen,
 							   Form_pg_attribute att, uint64 valueCount,
 							   const char *fsstTable, uint32 fsstTableLen,
 							   char **out, uint32 *outLen);
-extern char *ColumnarDecodeChunk(const char *enc, uint32 encLen,
+extern char *PgColumnarDecodeChunk(const char *enc, uint32 encLen,
 								 int encodingType, Form_pg_attribute att,
 								 uint64 valueCount, uint32 rawLen,
 								 const char *fsstTable, uint32 fsstTableLen,
 								 MemoryContext cx);
-extern bool ColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
+extern bool PgColumnarFsstBuildChunkTable(const char *corpus, uint32 corpusLen,
 										Form_pg_attribute att,
 										char **tableOut, uint32 *tableLenOut);
-extern const char *ColumnarEncodingName(int encodingType);
-extern void ColumnarBlockReaderInit(ColumnarBlockReader *br, const char *raw,
+extern const char *PgColumnarEncodingName(int encodingType);
+extern void PgColumnarBlockReaderInit(PgColumnarBlockReader *br, const char *raw,
 									uint64 valueCount, int width);
-extern bool ColumnarBlockNextRun(ColumnarBlockReader *br,
+extern bool PgColumnarBlockNextRun(PgColumnarBlockReader *br,
 								 const char **valBytes, uint64 *runLen);
 
 #endif							/* PGCOLUMNAR_PBT_COLUMNAR_H */

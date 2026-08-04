@@ -100,7 +100,7 @@ both "a multi-row insert fires once per row with the right values" 2
 #      disk before any trigger runs
 #   2. the first trigger's fetch therefore succeeds, and its body runs
 #   3. the body is itself a statement, and pgColumnar's ExecutorEnd hook calls
-#      ColumnarFlushAllPendingWrites when it ends -- flushing the outer INSERT's
+#      PgColumnarFlushAllPendingWrites when it ends -- flushing the outer INSERT's
 #      remaining buffered rows
 #   4. every later fetch then finds its row on disk
 #

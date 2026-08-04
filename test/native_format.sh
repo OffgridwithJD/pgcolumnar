@@ -5,7 +5,7 @@
 # Two layers carry a version. The native data format stamps a major version into
 # pgcolumnar.storage.format_version (PGCN v1); the physical metapage stamps
 # versionMajor/versionMinor into block 0. Only the metapage version is checked on
-# read -- ColumnarReadMetapage rejects a version it does not understand -- so that
+# read -- PgColumnarReadMetapage rejects a version it does not understand -- so that
 # guard is the thing standing between a future, incompatible layout and a silent
 # misread of old bytes. This suite pins both stamps and proves the guard fires.
 #
@@ -14,7 +14,7 @@
 #      accidental bump goes red here rather than shipping unnoticed;
 #   2. a metapage version this build does not understand is REJECTED with a clean
 #      error and a surviving backend -- not misread as valid data. A test-only
-#      hook (columnar_debug_set_metapage_version, bound here rather than shipped,
+#      hook (pgcolumnar_debug_set_metapage_version, bound here rather than shipped,
 #      like the gap suite's advance hook) plants the bad version;
 #   3. within a version, a diverse-typed table round-trips byte-for-byte against a
 #      heap mirror, so "same version" genuinely means "same data back".
@@ -29,7 +29,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 # Bind the internal test hook (deliberately not in the shipped catalog): it
 # overwrites the metapage version so we can confirm the read-side guard.
 psql_run "CREATE FUNCTION pgcolumnar.debug_set_metapage_version(regclass, int, int)
-  RETURNS void AS 'pgcolumnar', 'columnar_debug_set_metapage_version'
+  RETURNS void AS 'pgcolumnar', 'pgcolumnar_debug_set_metapage_version'
   LANGUAGE C;"
 
 # Error text (stderr) of a failing statement; empty when it succeeds. Used to
@@ -71,7 +71,7 @@ check "table reads at the version this build wrote" "$(q 'SELECT count(*) FROM b
 
 # Pin the metapage major -- the version that is actually enforced on read, and
 # the one this suite exists to guard (format_version above is stamped but not
-# checked). ColumnarReadMetapage rejects on versionMajor != COLUMNAR_VERSION_MAJOR,
+# checked). PgColumnarReadMetapage rejects on versionMajor != COLUMNAR_VERSION_MAJOR,
 # so re-stamping the current major must be a no-op the read accepts. Bump
 # COLUMNAR_VERSION_MAJOR by accident and this goes red; on a deliberate bump,
 # change the 2 below in the same commit.
@@ -95,7 +95,7 @@ check "backend survives the rejection" "$(q 'SELECT 1;')" "1"
 # --- 4: native format_version is now enforced on read too (#240 decision) -----
 # The metapage version above guards the physical layout; format_version is the
 # independent data-format stamp. It used to be written and never read; it is now a
-# read-side guard (ColumnarCheckNativeFormatVersion at scan open), so a future
+# read-side guard (PgColumnarCheckNativeFormatVersion at scan open), so a future
 # PGCN version that keeps the metapage layout but changes the encoding is rejected
 # rather than misread. A catalog UPDATE stands in for that future version -- the
 # value is read from pgcolumnar.storage, so no on-disk bytes need forging.
@@ -106,8 +106,8 @@ check "table reads at native format_version 1" "$(q 'SELECT count(*) FROM fv;')"
 fvsid="$(storage_id_of fv)"
 psql_run "UPDATE pgcolumnar.storage SET format_version = 99 WHERE storage_id = $fvsid;"
 # Three decode shapes must all reject. A seq scan opens a read state
-# (ColumnarBeginReadWithStorage); the zone-map-only aggregate answers from metadata
-# without one (ColumnarBeginAggScan); and an index-scan fetch of a non-key column
+# (PgColumnarBeginReadWithStorage); the zone-map-only aggregate answers from metadata
+# without one (PgColumnarBeginAggScan); and an index-scan fetch of a non-key column
 # decodes through the by-row-number fetch path, which reaches neither scan-open
 # guard -- it is the case the first cut missed. All are keyed to the same catalog
 # UPDATE standing in for a future format version.

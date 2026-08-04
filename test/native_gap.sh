@@ -7,7 +7,7 @@
 # leaves (the file was shortened but the highwater was not). A write whose target
 # block is beyond EOF must fill the gap with empty pages and succeed, so the state
 # self-heals on the next write. This suite forces that state with a test-only hook
-# (columnar_debug_advance_reserved_offset, bound here rather than shipped) and
+# (pgcolumnar_debug_advance_reserved_offset, bound here rather than shipped) and
 # asserts writes across the gap succeed, data stays correct against a heap mirror,
 # the file physically materializes the gap, and the table is fully usable after.
 #
@@ -20,7 +20,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 # bind the internal test hook (deliberately not in the shipped catalog).
 psql_run "CREATE FUNCTION pgcolumnar.debug_advance_reserved_offset(regclass, int)
-  RETURNS void AS 'pgcolumnar', 'columnar_debug_advance_reserved_offset'
+  RETURNS void AS 'pgcolumnar', 'pgcolumnar_debug_advance_reserved_offset'
   LANGUAGE C;"
 
 psql_run "CREATE TABLE h (id int, v text);"

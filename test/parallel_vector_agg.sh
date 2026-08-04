@@ -218,7 +218,7 @@ check "grouped few-groups-many-workers: parallel == serial (#349)" "$GW_VEC" "$G
 # require the parallel answer to match the serial one.
 #
 # What this does NOT establish, measured rather than assumed: it does not prove
-# the leader-side flush in ColumnarInitializeDSMGroupAggScan. Removing that flush
+# the leader-side flush in PgColumnarInitializeDSMGroupAggScan. Removing that flush
 # -- and the ungrouped one this is modelled on -- leaves both H2 checks green,
 # with in-transaction INSERT and DELETE and a confirmed parallel plan, because
 # the write and delete buffers are already flushed at the command boundary before

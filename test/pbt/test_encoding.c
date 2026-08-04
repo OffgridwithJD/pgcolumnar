@@ -3,7 +3,7 @@
  * standalone against the test/pbt PostgreSQL shim.
  *
  * The governing property is round-trip: for any raw value stream,
- * ColumnarDecodeChunk(ColumnarEncodeChunk(raw)) reproduces the exact bytes. It
+ * PgColumnarDecodeChunk(PgColumnarEncodeChunk(raw)) reproduces the exact bytes. It
  * is exercised over randomized data shaped to hit each encoding (constant,
  * alternating, monotonic, clustered, low-cardinality, runs, random) across all
  * fixed widths, floats (gorilla), and varlena (dict), plus explicit boundary
@@ -64,8 +64,8 @@ check_fixed(int w, Oid typid, uint32 n, const char *raw)
 	att.attbyval = true;
 	att.atttypid = typid;
 
-	code = ColumnarEncodeChunk(raw, rawLen, &att, n, NULL, 0, &enc, &encLen);
-	dec = ColumnarDecodeChunk(enc, encLen, code, &att, n, rawLen, NULL, 0, NULL);
+	code = PgColumnarEncodeChunk(raw, rawLen, &att, n, NULL, 0, &enc, &encLen);
+	dec = PgColumnarDecodeChunk(enc, encLen, code, &att, n, rawLen, NULL, 0, NULL);
 	checks++;
 
 	if (rawLen > 0 && memcmp(dec, raw, rawLen) != 0)
@@ -73,7 +73,7 @@ check_fixed(int w, Oid typid, uint32 n, const char *raw)
 		failures++;
 		fprintf(stderr,
 				"FAIL fixed w=%d typid=%u n=%u code=%s(%d) encLen=%u\n",
-				w, typid, n, ColumnarEncodingName(code), code, encLen);
+				w, typid, n, PgColumnarEncodingName(code), code, encLen);
 	}
 }
 
@@ -272,20 +272,20 @@ gen_varlena(uint32 n, int shape)
 	{
 		char	   *tbl = NULL;
 		uint32		tblLen = 0;
-		bool		haveTbl = ColumnarFsstBuildChunkTable(s.data, (uint32) s.len,
+		bool		haveTbl = PgColumnarFsstBuildChunkTable(s.data, (uint32) s.len,
 														  &att, &tbl, &tblLen);
 
-		code = ColumnarEncodeChunk(s.data, (uint32) s.len, &att, n,
+		code = PgColumnarEncodeChunk(s.data, (uint32) s.len, &att, n,
 								   haveTbl ? tbl : NULL, haveTbl ? tblLen : 0,
 								   &enc, &encLen);
-		dec = ColumnarDecodeChunk(enc, encLen, code, &att, n, (uint32) s.len,
+		dec = PgColumnarDecodeChunk(enc, encLen, code, &att, n, (uint32) s.len,
 								  haveTbl ? tbl : NULL, haveTbl ? tblLen : 0, NULL);
 		checks++;
 		if (s.len > 0 && memcmp(dec, s.data, s.len) != 0)
 		{
 			failures++;
 			fprintf(stderr, "FAIL varlena n=%u code=%s rawLen=%d\n",
-					n, ColumnarEncodingName(code), s.len);
+					n, PgColumnarEncodingName(code), s.len);
 		}
 		if (haveTbl)
 			free(tbl);

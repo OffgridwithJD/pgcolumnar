@@ -59,12 +59,12 @@ check "every other WAL emitter is a core full-page-image helper" \
 # ---- 2. the envelope around the one direct record ---------------------------
 
 FN="$SRC/columnar_storage.c"
-# line range of ColumnarTruncateMainFork: its header to the next top-level function
-start="$(grep -n '^ColumnarTruncateMainFork(' "$FN" | cut -d: -f1)"
+# line range of PgColumnarTruncateMainFork: its header to the next top-level function
+start="$(grep -n '^PgColumnarTruncateMainFork(' "$FN" | cut -d: -f1)"
 end="$(awk -v s="$start" 'NR > s && /^[A-Za-z_][A-Za-z0-9_]*\(/ {print NR; exit}' "$FN")"
 [ -z "$end" ] && end="$(wc -l < "$FN")"
 
-check "ColumnarTruncateMainFork was found" "$([ -n "$start" ] && echo yes || echo no)" "yes"
+check "PgColumnarTruncateMainFork was found" "$([ -n "$start" ] && echo yes || echo no)" "yes"
 
 # Line number of the first line inside the function that CONTAINS the literal
 # string, or empty.
