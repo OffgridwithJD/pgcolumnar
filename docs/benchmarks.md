@@ -521,14 +521,22 @@ hosts.
 all hosts, and q6 scans the table with one filter. pgColumnar is first on both, and
 q6 is 2,324 ms against Citus at 8,394 ms.
 
-**q7 is a regression and not a property of the format.** The planner declines an index
-scan that this query wants. The cost model charges the index path for the rows the
-path returns, and not for the rows the query reads. A `DISTINCT ON` reads one row
-per host. The same query runs in **769 ms** with
+**q7 measures a planner defect and not the storage format.** The planner declines an
+index scan that this query wants. The cost model charges the index path for the rows
+the path returns, and not for the rows the query reads. A `DISTINCT ON` reads one row
+per host. This is [issue #376](https://github.com/jdatcmd/pgcolumnar/issues/376).
+
+The row above is what this host gives, and this host loads TimescaleDB. That matters,
+because TimescaleDB supplies a skip scan, and a skip scan is the consumer that reads
+one row per host. The same query gives **769 ms** with
 `pgcolumnar.enable_index_fetch_penalty = off`, against 44,058 ms with the default.
-This is [issue #376](https://github.com/jdatcmd/pgcolumnar/issues/376). Do not read
-the q7 row as a measure of columnar storage. Citus is slow on this shape for its own
-reasons, at 124,740 ms serial.
+
+An installation without such an extension does not meet this. PostgreSQL has no node that reads part
+of an index path and then prices itself again. Such an installation takes the other
+plan, and the penalty is correct for it. Which extensions are loaded is part of what a
+user gets, which is why the row is given rather than removed.
+
+Citus is slow on this shape for its own reasons, at 124,740 ms serial.
 
 #### Queries
 
