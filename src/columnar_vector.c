@@ -1301,6 +1301,8 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	int			naggs = 0;
 	double		dNumGroups;
 	Path	   *cheapest;
+	Cost		serialScanCost = 0.0;
+	double		serialScanRows = 0.0;
 	CustomPath *cpath;
 
 	/* a single columnar base relation with no joins */
@@ -1392,6 +1394,25 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * cheapest overall path may be an index scan, but this node always performs a
 	 * full columnar scan, so pricing it from an index scan would understate it.
 	 * Take the cheapest non-index path (the columnar custom or sequential scan).
+	 *
+	 * A *parallel* path is excluded for the same reason and it is not hypothetical
+	 * (issue #369). By the time this hook runs, `generate_useful_gather_paths` has
+	 * put a Gather over the columnar partial path into `input_rel->pathlist`, and
+	 * `add_path` has dropped the serial columnar path it dominates -- so the
+	 * cheapest surviving non-index path is routinely the *Gather*, whose cost is
+	 * the scan divided across workers. Pricing a node that runs single-threaded
+	 * from it understates the scan by the worker count.
+	 *
+	 * Measured on a 2M-row fixture: the pathlist held only a GatherPath at 15,026
+	 * and a GatherMergePath at 103,771, no serial scan at all. The serial grouped
+	 * node was priced from the 15,026, against a true serial scan of ~60,104. That
+	 * made it unbeatable by any honestly-costed parallel plan, which is why the
+	 * parallel arm added in #366 was declined on shapes where it runs 3.9x faster.
+	 *
+	 * Skipping parallel paths usually leaves nothing, so the fallback below costs
+	 * the serial scan directly rather than borrowing a surviving path. That also
+	 * removes the dependence on which paths happened to survive `add_path`, which
+	 * is the same fragility #362 was.
 	 */
 	cheapest = NULL;
 	foreach(lc, input_rel->pathlist)
@@ -1401,12 +1422,36 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		if (p->pathtype == T_IndexScan || p->pathtype == T_IndexOnlyScan ||
 			p->pathtype == T_BitmapHeapScan)
 			continue;
+		if (p->parallel_aware || p->parallel_workers > 0 ||
+			IsA(p, GatherPath) || IsA(p, GatherMergePath))
+			continue;
 		if (cheapest == NULL || p->total_cost < cheapest->total_cost)
 			cheapest = p;
 	}
-	if (cheapest == NULL)
-		cheapest = input_rel->cheapest_total_path;
-	if (cheapest == NULL)
+	if (cheapest != NULL)
+	{
+		serialScanCost = cheapest->total_cost;
+		serialScanRows = cheapest->rows;
+	}
+	else
+	{
+		/*
+		 * Nothing serial survived, which is the common case rather than the rare
+		 * one: add_path drops the serial columnar scan once a Gather over the
+		 * partial path dominates it. Cost the scan this node performs directly,
+		 * the same way ColumnarSetRelPathlist costs its own fallback, instead of
+		 * borrowing whatever path happened to survive.
+		 */
+		QualCost	qcost = input_rel->baserestrictcost;
+		double		ntuples = (input_rel->tuples >= 0) ? input_rel->tuples
+			: input_rel->rows;
+
+		serialScanCost = qcost.startup +
+			seq_page_cost * (double) input_rel->pages +
+			(cpu_tuple_cost + qcost.per_tuple) * ntuples;
+		serialScanRows = (ntuples > 0) ? ntuples : input_rel->rows;
+	}
+	if (serialScanCost <= 0.0)
 		return;
 
 	cpath = makeNode(CustomPath);
@@ -1458,8 +1503,8 @@ ColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * is no cheap partial start-up.
 	 */
 	{
-		Cost		cost = cheapest->total_cost + cpu_tuple_cost +
-			cpu_operator_cost * cheapest->rows * (naggs > 0 ? naggs : 1);
+		Cost		cost = serialScanCost + cpu_tuple_cost +
+			cpu_operator_cost * serialScanRows * (naggs > 0 ? naggs : 1);
 
 		cpath->path.startup_cost = cost;
 		cpath->path.total_cost = cost;
