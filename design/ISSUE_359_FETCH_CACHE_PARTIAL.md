@@ -70,17 +70,45 @@ A stable resident set of `k` of `n` columns re-decodes `n - k` per fetch. That i
 the proportionality the issue asks for, and it is why "retain what fits" has to
 mean *first-fit, then stop*, not *keep the hottest*.
 
-### Memory bound is preserved
+### Memory bound — as designed, and as it actually turned out
 
-Today the entry transiently exceeds the cap (it is measured after the fetch that
-filled it) and is then dropped. Under this design the entry transiently exceeds
-the cap by one column's decoded stream and is then trimmed back under it, so
-steady-state residency is still <= cap per entry, 4 entries.
+**As designed.** The entry transiently exceeds the cap by one column's decoded
+stream and is then trimmed back under it, so steady-state residency is <= cap per
+entry, 4 entries. If `groupBuffer` *alone* exceeds the cap, every column overflows
+and the entry would hold an unbounded raw buffer, so that case is guarded
+explicitly by not caching the entry at all.
 
-One new case: if `groupBuffer` *alone* exceeds the cap, every column overflows
-and the entry would hold an unbounded raw buffer. Guard that explicitly — do not
-cache the entry at all in that case, which is exactly today's behaviour and keeps
-the bound at 4 x cap.
+**Correction (issue #364).** That is not the bound this achieves, and the claim
+"keeps the bound at 4 x cap" was wrong. The per-column release trims the decoded
+*streams*. It cannot trim `rankPrefix` and `valOffset`, which stay in the entry
+context deliberately so a released column keeps constant-time row reach.
+`valOffset` is four bytes per value per varlena column, ~600 KB per column at the
+default `stripe_row_limit`, so enough varlena columns put the retained indexes
+alone over the cap — after which every newly decoded column is released
+immediately and the entry stops shrinking.
+
+Measured on 150,000 rows x 60 `text` columns, forced index scan over 200 rows:
+
+```
+columnar fetch column | n=2 | total=18 MB     <- the columns that stayed resident
+columnar fetch group  | n=1 | total=44 MB     <- groupBuffer + retained indexes
+ALL columnar fetch contexts total: 62 MB      <- against a 32 MB cap
+```
+
+The real bound is `4 x (cap + retained position indexes + groupBuffer)`. On that
+shape the speedup is also only 1.14x (127,699 ms against 145,132 ms before this
+design), because almost everything overflows.
+
+Releasing `valOffset` alongside the stream was built and measured, and is a worse
+trade: it holds the bound (62 MB -> 28 MB) at a cost of 47% in time
+(127,699 ms -> 187,521 ms). Rebuilding offsets is a second O(values) walk on every
+fetch, not a constant factor on a decode that was happening anyway. The retained
+indexes are what make an overflowed column cheap on its next fetch.
+
+The bound and the speed are in genuine tension on wide varlena tables: holding
+offsets for 60 varlena columns at a 150,000-row group needs ~34 MB and does not fit
+in a 32 MB cap. This design chooses the speed; #364 records the trade rather than
+pretending the bound holds.
 
 ### Two details that will bite
 

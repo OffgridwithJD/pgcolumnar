@@ -2479,12 +2479,34 @@ columnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	}
 
 	/*
-	 * The per-column release above trims the entry back under the cap, so the
-	 * entry is bounded by it -- except in one case it cannot help: a group whose
-	 * *raw* bytes alone exceed the cap. Every column would overflow and the entry
-	 * would still pin groupBuffer, so four such entries could hold arbitrarily
-	 * much. Drop the entry whole there, which is what this path did for every
-	 * oversized group before, and keeps the cache bounded by 4 x the cap.
+	 * Drop the entry whole when the group's *raw* bytes alone exceed the cap:
+	 * every column would overflow and the entry would still pin groupBuffer, so
+	 * four such entries could hold arbitrarily much.
+	 *
+	 * This does NOT make the cache bounded by 4 x the cap, and #359 said it did.
+	 * Correcting that here rather than leaving it, because it is the kind of claim
+	 * a later change gets designed against (issue #364).
+	 *
+	 * The per-column release trims the *decoded streams* back under the cap. It
+	 * cannot trim what is not releasable: rankPrefix and valOffset stay in the
+	 * entry context by design, so a released column keeps its position indexes.
+	 * valOffset is four bytes per value per varlena column -- ~600 KB per column
+	 * at the default stripe_row_limit -- and enough varlena columns puts the
+	 * retained indexes alone over the cap, at which point every newly decoded
+	 * column is released immediately and the entry stops shrinking.
+	 *
+	 * Measured on 150,000 rows x 60 text columns: one entry held 62 MB against a
+	 * 32 MB cap (44 MB of it retained indexes plus groupBuffer, 18 MB in the two
+	 * columns that stayed resident). The real bound is
+	 *
+	 *     4 x (cap + retained position indexes + groupBuffer)
+	 *
+	 * Releasing valOffset with the stream was tried and is worse: it holds the
+	 * bound (62 MB -> 28 MB) but costs 47% in time (127.7 s -> 187.5 s), because
+	 * rebuilding offsets is a second walk of the value stream on every fetch
+	 * rather than a constant factor on the decode. The retained indexes are what
+	 * makes an overflowed column cheap on its next fetch, which is the whole point
+	 * of keeping them.
 	 */
 	if (rg->byteLength > COLUMNAR_FETCH_CACHE_MAX_BYTES)
 		columnar_fetch_entry_reset(entry);
