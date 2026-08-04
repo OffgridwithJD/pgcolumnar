@@ -51,9 +51,13 @@ q () { runpg "$BINDIR/psql" -h /tmp -p "$PORT" -d extupg -X -Atc "$1" 2>&1; }
 echo "== extension_upgrade: PG$PGMAJ, old ref $OLD_REF"
 
 # ---- 1. build and install the old extension, from a throwaway clone ------------------
-if ! git -C "$SRCDIR" rev-parse --verify -q "$OLD_REF^{commit}" >/dev/null; then
-	echo "  SKIP  $OLD_REF is not present in this repository"
-	exit 0
+# A missing ref must fail, not skip. This gate is invoked deliberately, and a skip that
+# exits 0 would let it go inert the moment someone clones without tags. That is the same
+# shape as the bug it exists to catch: everything green, nothing checked.
+if ! git -C "$SRCDIR" rev-parse --verify -q "$OLD_REF^{commit}" >/dev/null 2>&1; then
+	echo "  FAIL  $OLD_REF is not present. Fetch tags, or pass an explicit ref:"
+	echo "        git fetch --tags && test/extension_upgrade.sh $PG_CONFIG <ref>"
+	exit 1
 fi
 git clone -q --shared "$SRCDIR" "$TMP/old" || { echo "FATAL: clone failed"; exit 1; }
 git -C "$TMP/old" checkout -q --detach "$OLD_REF" || { echo "FATAL: checkout $OLD_REF failed"; exit 1; }
