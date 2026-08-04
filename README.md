@@ -9,7 +9,7 @@
 
 <a href="docs/installation.md"><img src="badges/postgresql.svg" alt="PostgreSQL 15-18 (+19 beta)"></a>
 <a href="LICENSE"><img src="badges/license.svg" alt="License: MIT"></a>
-<a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-dev"></a>
+<a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-alpha"></a>
 <a href="docs/limitations.md#release-status"><img src="badges/status.svg" alt="Status: pre-release"></a>
 
 <p><strong><a href="https://commandprompt.github.io/pgcolumnar/">Read the documentation at commandprompt.github.io/pgcolumnar</a></strong></p>
@@ -24,7 +24,8 @@ append-mostly data.
 pgColumnar builds from one source tree on PostgreSQL 15 through 18, with 19
 validated against 19beta2, and is
 licensed under the [MIT License](LICENSE). It is [pre-release](docs/limitations.md#release-status); the version marker
-is `1.0-dev`, recorded in `VERSION`. A table `USING pgcolumnar` is stored in the
+is `1.0-alpha`, recorded in `VERSION`. The extension's own `default_version` is still
+`1.0-dev`, so `SELECT extversion FROM pg_extension` reports that. A table `USING pgcolumnar` is stored in the
 native on-disk format, PGCN v1.
 
 ## Documentation
