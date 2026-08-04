@@ -229,7 +229,7 @@ defect on the other. The suites that would show it must run.
 
 **On documentation changes** (`.github/workflows/docs.yml`): builds and publishes
 the site at
-[jdatcmd.github.io/pgcolumnar](https://jdatcmd.github.io/pgcolumnar/).
+[commandprompt.github.io/pgcolumnar](https://commandprompt.github.io/pgcolumnar/).
 
 PostgreSQL 19 cannot be installed in CI: PGDG does not package it in stable,
 testing or snapshot. It is compiled there anyway, from source, and the build stays

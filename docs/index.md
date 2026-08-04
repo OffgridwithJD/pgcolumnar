@@ -59,8 +59,8 @@ WAL, replication, indexes, `COPY`, and `pg_dump`. The extension adds:
 The documents above are for users and administrators. The design and format
 specifications are separate:
 
-- [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md):
+- [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md):
   on-disk format and SQL interface specification.
 - [ARCHITECTURE.md](ARCHITECTURE.md): source layout and how the pieces connect.
-- [../design/ROADMAP.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/ROADMAP.md): completed work and remaining items.
-- [../PROVENANCE.md](https://github.com/jdatcmd/pgcolumnar/blob/main/PROVENANCE.md): clean-room implementation method.
+- [../design/ROADMAP.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/ROADMAP.md): completed work and remaining items.
+- [../PROVENANCE.md](https://github.com/commandprompt/pgcolumnar/blob/main/PROVENANCE.md): clean-room implementation method.

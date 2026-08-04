@@ -112,7 +112,7 @@ To install a new build of the extension:
 2. Start the server again, so that it loads the new library.
 
 The source records the on-disk format version. The specification also records it,
-in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
+in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
 A build that keeps the same format version reads the tables that earlier builds
 of that version wrote. A conversion is not necessary.
 

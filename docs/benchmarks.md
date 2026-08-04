@@ -30,7 +30,7 @@ The previous record of this section was 2026-07-27 at commit `7a9c9f7`, on
 PostgreSQL 17.10 and a machine with 24 GB. The harness itself did not change
 between the two runs. The major version and the machine did, so read the ratios
 and not the absolute values. The old raw output is in
-[../bench/sample_output_all_2026_07_27.txt](https://github.com/jdatcmd/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
+[../bench/sample_output_all_2026_07_27.txt](https://github.com/commandprompt/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
 
 The read stream section is not re-measured. It needs a PostgreSQL 18 build with
 `--with-liburing`, and no such build exists on this machine. Its numbers are from
@@ -93,7 +93,7 @@ milliseconds.
 
 The point lookup was a regression when the previous version of this page was
 written, at 1251.88 ms, and it was reported as
-[issue #171](https://github.com/jdatcmd/pgcolumnar/issues/171). That issue is
+[issue #171](https://github.com/commandprompt/pgcolumnar/issues/171). That issue is
 closed. The planner chose a full columnar scan for a point lookup once statistics
 existed. It now keeps the index, and the same query takes 11.90 ms.
 
@@ -126,7 +126,7 @@ needs the data.
 
 This behaviour used to apply to the whole storage. One deleted row then put
 `count(*)` at 222 ms and `min/max` at 317 ms, instead of the figures above
-([issue #149](https://github.com/jdatcmd/pgcolumnar/issues/149), fixed). Vacuuming
+([issue #149](https://github.com/commandprompt/pgcolumnar/issues/149), fixed). Vacuuming
 still helps, since it returns the dirty group to the clean path.
 
 ## Mutation
@@ -159,7 +159,7 @@ baseline that this run failed to meet.
 
 The delete figure was the weakest number in this document, at 1509 ms. At that
 time, to reach a row, the code went through each earlier row in the group. Both
-halves of [issue #143](https://github.com/jdatcmd/pgcolumnar/issues/143) are now
+halves of [issue #143](https://github.com/commandprompt/pgcolumnar/issues/143) are now
 complete. The code decodes the group one time and keeps it in a cache. It then
 reaches the value of a row by rank, and not by a walk. Deleting 1000 rows costs 22.8 ms rather than 1509.
 
@@ -275,7 +275,7 @@ costs 1,415 ms, 11% of the import. The other 89% is the write path, which is als
 4.9x slower than a heap insert of the same rows.
 
 So the target is bulk load in general rather than the interop path. Tracked as
-[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155) with a plan in
+[issue #155](https://github.com/commandprompt/pgcolumnar/issues/155) with a plan in
 `design/IMPORT_THROUGHPUT_PLAN.md`.
 
 The plan gives the cost to the transposition between rows and columns. Both
@@ -289,7 +289,7 @@ shapes measured, it also produced storage that is identical byte for byte. `enco
 trade per table.
 
 Index maintenance is not in this path at all, which is a correctness bug rather
-than a cost: see [issue #153](https://github.com/jdatcmd/pgcolumnar/issues/153).
+than a cost: see [issue #153](https://github.com/commandprompt/pgcolumnar/issues/153).
 
 Nested round-trip, 1,000,000 rows, one `int[3]` array column and one composite
 column:
@@ -479,9 +479,9 @@ path returns, and not for the rows the query reads. A `DISTINCT ON` reads one ro
 host. The model therefore priced the index path far above every
 alternative. No consumer could recover it, not even one that reads 3,998 rows of
 100,000,000. That is
-[issue #376](https://github.com/jdatcmd/pgcolumnar/issues/376), found by this
+[issue #376](https://github.com/commandprompt/pgcolumnar/issues/376), found by this
 benchmark pass and fixed in
-[#378](https://github.com/jdatcmd/pgcolumnar/pull/378), which bounds the penalty at a
+[#378](https://github.com/commandprompt/pgcolumnar/pull/378), which bounds the penalty at a
 multiple of one scan. The query now takes 767 ms.
 
 Citus is slow on this shape for its own reasons, at 124,537 ms.
