@@ -482,4 +482,34 @@ check "a late column's wide decode prefix costs it off the index (#363)" \
 		|| echo "no ($(printf '%s' "$plan_late" | head -1))")" \
 	"yes"
 
+# --- 9. the penalty is bounded by a multiple of one scan (#376) ------------------
+#
+# The checks above assert direction. This one asserts magnitude, because #376 is not
+# a wrong direction but an unbounded one.
+#
+# The model prices a fetch as a row-group decode times the rows the path returns.
+# That is right when the plan above reads the whole path, and unbounded when it stops
+# early. On the 100M fixture the penalty reached 502,598,685,066 against an
+# un-penalized 2,427,872 -- 207,000x. A consumer reading 3,998 rows of 100,000,000
+# still lost to a full scan and a sort: 44,058 ms taken against 769 ms refused.
+#
+# A LIMIT is the shape core can show. Ten rows cost ten fetches, which is far less
+# than sorting the table, so the index is the right plan. Before the bound the
+# penalty was large enough to refuse it even for ten rows.
+plan_lim="$(plan_of "${ord_setup} EXPLAIN (COSTS off)
+	SELECT * FROM o355 ORDER BY scat LIMIT 10;")"
+echo "-- ORDER BY scat LIMIT 10, penalty on: $(printf '%s' "$plan_lim" | grep -m1 -E 'Scan|Sort')"
+check "a small LIMIT still reaches the index through the fetch penalty (#376)" \
+	"$(grep -q 'Index Scan using o355_scat' <<<"$plan_lim" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_lim" | head -1))")" \
+	"yes"
+
+# and the same query without a LIMIT must still be refused the index, so the bound
+# has not simply switched the penalty off
+plan_nolim="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o355 ORDER BY scat;")"
+check "the bound does not disable the penalty for a full ordered read (#376)" \
+	"$(  grep -qE 'Sort' <<<"$plan_nolim" && ! grep -q 'Index Scan using o355_scat' <<<"$plan_nolim" \
+		&& echo yes || echo "no ($(printf '%s' "$plan_nolim" | head -1))")" \
+	"yes"
+
 pgc_summary
