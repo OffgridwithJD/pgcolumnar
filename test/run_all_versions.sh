@@ -528,6 +528,52 @@ if [ "${PGC_RUN_UPGRADE:-0}" = 1 ]; then
 		SUMMARY+=("FAIL   upgrade (no runnable pair)")
 		overall=1
 	fi
+
+	# Extension upgrade, on the same opt-in switch and for the same reason.
+	# test/extension_upgrade.sh had pg_upgrade's exemption from the registration
+	# check without pg_upgrade's invocation, so nothing ran it (#396). A guard
+	# nobody runs is the failure mode #257 existed to close, and it matters more
+	# here: the break it catches is invisible until a user upgrades.
+	#
+	# One major is enough, so this runs once against the first config rather than
+	# per pair. It builds the previous release from a throwaway clone, so it needs
+	# a checkout with tags.
+	_ex="${CONFIGS[0]}"
+	if [ -x "$_ex" ]; then
+		_exmaj="$("$_ex" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+		_exlog="$(mktemp "/tmp/pgcolumnar-extupgrade-${_exmaj}.XXXXXX.log")"
+		# The suite builds a previous release, so it has to be told where to find one.
+		# PGC_UPGRADE_OLD_SRC carries a directory through, which is the only form that
+		# works where the tree has no .git, and the documented container loop is exactly
+		# that. Without it the suite falls back to a ref and cannot build one there.
+		bash "$SRCDIR/test/extension_upgrade.sh" "$_ex" \
+			${PGC_UPGRADE_OLD_SRC:+"$PGC_UPGRADE_OLD_SRC"} >"$_exlog" 2>&1
+		_exrc=$?
+		# Exit 2 is "the environment could not supply an old source", which is not a
+		# product failure. It is reported as SKIP and not as PASS, because a gate that
+		# reports green having run nothing is the defect this suite was written for.
+		if [ "$_exrc" = 0 ]; then
+			echo "  PASS  extension_upgrade PG$_exmaj"
+			SUMMARY+=("PASS   extension_upgrade PG$_exmaj")
+			rm -f "$_exlog"
+		elif [ "$_exrc" = 2 ]; then
+			echo "  SKIP  extension_upgrade PG$_exmaj"
+			grep -E '^\s*(SKIP|  )' "$_exlog" | sed 's/^/      /'
+			SUMMARY+=("SKIP   extension_upgrade PG$_exmaj")
+			rm -f "$_exlog"
+		else
+			echo "  FAIL  extension_upgrade PG$_exmaj"
+			grep -E '^\s*FAIL' "$_exlog" | sed 's/^/      >> /'
+			tail -30 "$_exlog" | sed 's/^/      /'
+			echo "      full log: $_exlog"
+			SUMMARY+=("FAIL   extension_upgrade PG$_exmaj")
+			overall=1
+		fi
+	else
+		echo "  FAIL  PGC_RUN_UPGRADE=1 but no runnable pg_config for extension_upgrade"
+		SUMMARY+=("FAIL   extension_upgrade (no runnable pg_config)")
+		overall=1
+	fi
 fi
 
 echo
