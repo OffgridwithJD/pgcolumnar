@@ -59,6 +59,10 @@ disk. It never changes the values that a table returns.
 | `pgcolumnar.groupagg_max_groups` | integer | `1000000` | Cap on the group count the grouped vectorized aggregate builds. Over the cap the query errors. Range 1 to INT_MAX. |
 | `pgcolumnar.enable_bloom_filter` | boolean | `on` | Skip chunk groups on equality filters using per-chunk bloom filters. |
 | `pgcolumnar.enable_read_stream` | boolean | `on` | Prefetch block reads with the read stream API. Effective on PostgreSQL 17 and later. |
+| `pgcolumnar.enable_ungrouped_vector_agg` | boolean | `off` | Answer an ungrouped aggregate (`count`, `sum`, `avg`, `min`, `max` with no `GROUP BY`) with a batch fold over decoded vectors instead of row-at-a-time. Off by default. |
+| `pgcolumnar.enable_parallel_vector_agg` | boolean | `off` | Let the ungrouped batch fold run as a parallel partial aggregate under `Gather`, each worker folding its own row groups. Requires `pgcolumnar.enable_ungrouped_vector_agg`. Off by default. |
+| `pgcolumnar.enable_column_projection` | boolean | `on` | Read only the columns a query references rather than every column of the row group. |
+| `pgcolumnar.enable_index_fetch_penalty` | boolean | `on` | Charge a columnar index scan for the row-group decode its per-row heap fetches force, so the planner does not treat a columnar fetch as if it were a heap page read. Set to `off` to restore the pre-1.0-alpha planner behaviour. |
 
 ### Index-only scan and projections
 
@@ -80,6 +84,15 @@ disk. It never changes the values that a table returns.
 | --- | --- | --- | --- |
 | `pgcolumnar.enable_unique_insert_lock` | boolean | `on` | Serialize concurrent inserts of the same unique-index key with a transaction-scoped advisory lock, so overlapping same-key inserts conflict correctly. |
 | `pgcolumnar.unique_lock_buckets` | integer | `128` | Advisory-lock buckets per unique index. Bounds how many advisory locks a transaction holds per unique index. Equal keys always share a bucket; unrelated keys may share one, which only over-serializes. Range 1 to 1048576. Settable only at server start: the bucket is part of the lock tag, so backends that disagree on this value would not serialize against each other. |
+
+### Internal settings
+
+One setting is registered but is not a tuning knob. It is listed here because it
+appears in `pg_settings` and a reader who finds it there deserves an answer.
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pgcolumnar.bulk_parallel_writer` | boolean | `off` | Internal. Set by `pgcolumnar.parallel_copy` loader workers so they skip the storage-row creation lock when the row already exists committed, which is what lets several atomic writers load one table at once. Marked `GUC_NOT_IN_SAMPLE`; leave it alone. Setting it by hand is safe but pointless: the skip only fires when the storage row is already committed, which is exactly when the lock guards nothing. |
 
 ## Per-table storage options
 

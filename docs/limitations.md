@@ -140,12 +140,21 @@ only. The rest of the extension runs on any architecture PostgreSQL supports.
   operate, but they mark the rows and do not rewrite the data. Only
   `pgcolumnar.vacuum` makes the space available again.
 - Point lookups are slower than heap, but much less slow than before. A fetch by
-  item pointer finds the group of the row. It decodes only the columns that the
-  executor asks for, and it keeps the decoded group for the rest of the
-  statement. The cost therefore no longer increases with the width of the table,
-  or with the position of the row in its group. Heap is still faster for a
-  single-row fetch. Bloom filters make an equality scan faster, because they skip
-  row groups. They do not help a fetch by item pointer.
+  item pointer finds the group of the row, and it keeps the decoded group for the
+  rest of the statement. The cost no longer increases with the position of the row
+  in its group. Heap is still faster for a single-row fetch. Bloom filters make an
+  equality scan faster, because they skip row groups. They do not help a fetch by
+  item pointer.
+- **The cost of a fetch does increase with the width of the table.** There are two
+  causes and both are easy to meet. An index fetch decodes the columns from the
+  first one up to the highest-numbered column that the query reads. It does not
+  decode only the columns that it reads. A query that reads one late column
+  therefore decodes every column before it. The second cause is the size limit on
+  the decoded columns that the statement keeps. The columns that do not fit are
+  decoded again on each fetch. A table of many wide text columns meets both
+  conditions. One measurement shows the effect. On a table of ten text columns,
+  with the same rows and the same plan, a query on the first column took 975 ms.
+  A query on the tenth column took 194,798 ms.
 - A bulk `UPDATE` or `DELETE` through an index no longer costs the number of rows
   multiplied by the row group size. It still costs several times more than heap.
   The reason is that each changed row is marked and written again, and not
@@ -237,8 +246,10 @@ row-group data, such as the metapage and the space that is reserved but not
 written. These blocks count as visited, but they give no rows. The planner does
 not use that figure for columnar tables.
 
-`ANALYZE` samples the rows through the fetch path and not by block. It therefore
-costs more on a columnar table than on a heap of the same size.
+`ANALYZE` costs more on a columnar table than on a heap of the same size. The
+sampler offers every row of every block that it visits, so the cost follows the
+rows offered and not the rows kept. It reads those rows with a reader that is
+restricted to one row group, and not through the fetch-by-row-number path.
 
 `TABLESAMPLE` is unsupported and says so: it raises an error rather than
 returning no rows.
