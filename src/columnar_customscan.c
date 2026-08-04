@@ -549,25 +549,90 @@ columnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
 }
 
 /*
- * columnar_scan_nproj
- *		number of distinct base-relation columns a scan of this rel has to
- *		materialize: the ones in the output target plus the ones in the
- *		restriction clauses. Used to size the per-group decode cost, since the
- *		fetch decodes a column at a time. Never returns less than 1.
+ * columnar_scan_decode_shape
+ *		How much a by-row-number fetch of this rel actually decodes: the number of
+ *		columns and their summed width.
+ *
+ *		Not the columns the scan emits. The deferred index-fetch slot decodes the
+ *		attribute *prefix* 0..max-referenced, because slot_getsomeattrs asks for a
+ *		prefix and cannot ask for a set (columnar_tableam.c,
+ *		columnar_slot_decode_upto). A query referencing only a late column therefore
+ *		decodes every column before it, and sizing this from reltarget -- the
+ *		emitted columns -- understates the decode by the ratio of the prefix to the
+ *		projection (issue #363).
+ *
+ *		Measured on a ten-text-column table, same 300 fetched rows, same emitted
+ *		width, same plan: max(a1) 975 ms against max(a10) 194,798 ms. The two sit on
+ *		opposite sides of the fetch cache cap while reltarget->width is identical
+ *		for both, so the cap-crossing branch below could not tell them apart.
+ *
+ *		Widths come from pg_statistic where ANALYZE has run and from the type's
+ *		average width otherwise, the way set_rel_width does it, because the
+ *		unreferenced columns in the prefix are not in reltarget at all.
  */
-static int
-columnar_scan_nproj(RelOptInfo *rel, Index rti)
+static void
+columnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
+						   int *nprefix, double *prefixWidth)
 {
 	Bitmapset  *attrs = NULL;
 	ListCell   *lc;
-	int			n;
+	int			maxatt = 0;
+	int			x;
+	double		width = 0.0;
+	int			i;
 
 	pull_varattnos((Node *) rel->reltarget->exprs, rti, &attrs);
 	foreach(lc, rel->baserestrictinfo)
 		pull_varattnos((Node *) lfirst_node(RestrictInfo, lc)->clause, rti, &attrs);
-	n = bms_num_members(attrs);
+
+	x = -1;
+	while ((x = bms_next_member(attrs, x)) >= 0)
+	{
+		AttrNumber	att = x + FirstLowInvalidHeapAttributeNumber;
+
+		/*
+		 * A whole-row reference reads every column, so the prefix is the whole
+		 * tuple. System columns cost no decode and are ignored.
+		 */
+		if (att == InvalidAttrNumber)
+		{
+			maxatt = rel->max_attr;
+			break;
+		}
+		if (att > maxatt)
+			maxatt = att;
+	}
 	bms_free(attrs);
-	return (n > 0) ? n : 1;
+
+	if (maxatt < 1)
+	{
+		*nprefix = 1;
+		*prefixWidth = (rel->reltarget->width > 0) ? rel->reltarget->width : 1.0;
+		return;
+	}
+
+	for (i = 1; i <= maxatt; i++)
+	{
+		int32		w = get_attavgwidth(relid, i);
+
+		if (w <= 0)
+		{
+			Oid			typid;
+			int32		typmod;
+			Oid			collid;
+
+			get_atttypetypmodcoll(relid, i, &typid, &typmod, &collid);
+
+			/* a dropped column occupies its place in the prefix but decodes nothing */
+			if (!OidIsValid(typid))
+				continue;
+			w = get_typavgwidth(typid, typmod);
+		}
+		width += (double) w;
+	}
+
+	*nprefix = maxatt;
+	*prefixWidth = (width > 0.0) ? width : 1.0;
 }
 
 /*
@@ -599,7 +664,7 @@ columnar_scan_nproj(RelOptInfo *rel, Index rti)
  */
 static Cost
 columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
-							 int nproj, bool tid_ordered)
+							 int nproj, double decodedWidth, bool tid_ordered)
 {
 	double		R = (double) columnar_stripe_row_limit;
 	double		N = (rel->tuples > 0) ? rel->tuples : rows;
@@ -647,7 +712,7 @@ columnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 	 * it the same way: blend between decoding each group once and decoding one
 	 * per fetch, by how much of the decoded group does not fit.
 	 */
-	decoded_width = (double) rel->reltarget->width * R;
+	decoded_width = decodedWidth * R;
 	if (decoded_width > (double) COLUMNAR_FETCH_CACHE_MAX_BYTES)
 	{
 		double		resident = (double) COLUMNAR_FETCH_CACHE_MAX_BYTES /
@@ -722,13 +787,14 @@ static void
 columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
 {
 	int			nproj;
+	double		decodedWidth;
 	bool		mutated = false;
 	ListCell   *lc;
 
 	if (!columnar_enable_index_fetch_penalty)
 		return;
 
-	nproj = columnar_scan_nproj(rel, rti);
+	columnar_scan_decode_shape(rel, rti, relid, &nproj, &decodedWidth);
 
 	foreach(lc, rel->pathlist)
 	{
@@ -742,12 +808,14 @@ columnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid)
 			IndexPath  *ip = castNode(IndexPath, p);
 			double		rho = columnar_index_correlation(ip->indexinfo, relid);
 
-			add = columnar_index_fetch_penalty(rel, p->rows, rho, nproj, false);
+			add = columnar_index_fetch_penalty(rel, p->rows, rho, nproj,
+											   decodedWidth, false);
 		}
 		else if (p->pathtype == T_BitmapHeapScan)
 		{
 			/* a bitmap heap scan fetches in TID (row-number) order */
-			add = columnar_index_fetch_penalty(rel, p->rows, 1.0, nproj, true);
+			add = columnar_index_fetch_penalty(rel, p->rows, 1.0, nproj,
+											   decodedWidth, true);
 		}
 		/* T_IndexOnlyScan and the custom scans do no heap fetch */
 
