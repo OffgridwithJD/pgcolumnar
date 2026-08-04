@@ -12,7 +12,7 @@
 <a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-dev"></a>
 <a href="docs/limitations.md#release-status"><img src="badges/status.svg" alt="Status: pre-release"></a>
 
-<p><strong><a href="https://jdatcmd.github.io/pgcolumnar/">Read the documentation at jdatcmd.github.io/pgcolumnar</a></strong></p>
+<p><strong><a href="https://commandprompt.github.io/pgcolumnar/">Read the documentation at commandprompt.github.io/pgcolumnar</a></strong></p>
 
 </div>
 
@@ -30,7 +30,7 @@ native on-disk format, PGCN v1.
 ## Documentation
 
 The full documentation is published at
-**[jdatcmd.github.io/pgcolumnar](https://jdatcmd.github.io/pgcolumnar/)**. The
+**[commandprompt.github.io/pgcolumnar](https://commandprompt.github.io/pgcolumnar/)**. The
 same pages are in this repository under `docs/`:
 
 | | |

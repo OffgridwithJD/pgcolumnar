@@ -35,7 +35,7 @@ jobs:
     name: suites (PG ${{ matrix.pg }}, ${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar'
     strategy:
       fail-fast: false
       # The full packaged matrix on x86_64, and the current major on aarch64.
@@ -114,7 +114,7 @@ jobs:
     name: sanitizer gate (ASAN+UBSAN)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar'
     env:
       PG_VERSION: "18.4"
       SAN_PREFIX: /home/runner/pg_san
@@ -233,7 +233,7 @@ jobs:
     name: coverage report (PG 18)
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: github.event_name == 'workflow_dispatch' || github.repository == 'jdatcmd/pgcolumnar'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar'
     steps:
       - uses: actions/checkout@v4
 

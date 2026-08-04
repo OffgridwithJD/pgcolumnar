@@ -1,10 +1,10 @@
 site_name: pgColumnar
 site_description: Analytic column storage for PostgreSQL, built as a native table access method.
-site_url: https://jdatcmd.github.io/pgcolumnar/
+site_url: https://commandprompt.github.io/pgcolumnar/
 site_author: pgColumnar contributors
 
-repo_url: https://github.com/jdatcmd/pgcolumnar
-repo_name: jdatcmd/pgcolumnar
+repo_url: https://github.com/commandprompt/pgcolumnar
+repo_name: commandprompt/pgcolumnar
 edit_uri: edit/main/docs/
 
 copyright: >
@@ -57,7 +57,7 @@ extra_css:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/jdatcmd/pgcolumnar
+      link: https://github.com/commandprompt/pgcolumnar
       name: pgColumnar on GitHub
   generator: false
 

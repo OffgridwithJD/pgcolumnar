@@ -14,20 +14,20 @@ for data that cannot be reloaded.
 The hardening that was tracked before a first alpha is complete. The
 Parquet and Arrow parsers, which this project wrote, are fuzzed, both by byte mutation and by structural
 mutation of the container format
-([issue #214](https://github.com/jdatcmd/pgcolumnar/issues/214)). The boundary for
+([issue #214](https://github.com/commandprompt/pgcolumnar/issues/214)). The boundary for
 untrusted input files is stated and tested
-([issue #216](https://github.com/jdatcmd/pgcolumnar/issues/216)). The blast radius
+([issue #216](https://github.com/commandprompt/pgcolumnar/issues/216)). The blast radius
 of a single backend crash is asserted and documented
-([issue #217](https://github.com/jdatcmd/pgcolumnar/issues/217)). The build checks the on-disk format version
+([issue #217](https://github.com/commandprompt/pgcolumnar/issues/217)). The build checks the on-disk format version
 on read. It does not only stamp the version on write
-([issue #240](https://github.com/jdatcmd/pgcolumnar/issues/240)). A gate covers
+([issue #240](https://github.com/commandprompt/pgcolumnar/issues/240)). A gate covers
 cross-major `pg_upgrade`. Before, only a suite that nobody ran covered it
-([issue #257](https://github.com/jdatcmd/pgcolumnar/issues/257)).
+([issue #257](https://github.com/commandprompt/pgcolumnar/issues/257)).
 
 What that testing does not cover is worth stating alongside it. Every result
 recorded in this repository comes from x86_64. The suites have not been run on
 aarch64 or on a big-endian platform
-([issue #242](https://github.com/jdatcmd/pgcolumnar/issues/242)).
+([issue #242](https://github.com/commandprompt/pgcolumnar/issues/242)).
 
 Unaligned reads are one class that a reader could expect to differ by
 architecture. The tests cover that class on each architecture. The sanitizer gate
@@ -192,7 +192,7 @@ the same rows. There is no import-specific overhead; the cost is the columnar
 write path either way.
 
 Work on load throughput is tracked in
-[issue #155](https://github.com/jdatcmd/pgcolumnar/issues/155). One realized lever
+[issue #155](https://github.com/commandprompt/pgcolumnar/issues/155). One realized lever
 is [`pgcolumnar.parallel_copy`](#parallel-bulk-ingest). It loads a text file
 across several cores at once.
 

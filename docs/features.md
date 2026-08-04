@@ -10,7 +10,7 @@ settings see the [configuration reference](configuration.md); for constraints se
 - Column-oriented storage in the relation's main fork, so the buffer manager,
   WAL, and page checksums apply. Data is stored in the native format, PGCN v1,
   specified in
-  [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/jdatcmd/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
+  [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
 - The writer selects the value encoding for each vector. It estimates each
   candidate on a strided sample and then applies only the best two. It does not
   apply each candidate to the whole vector. On a load of 6,000,000 rows this
