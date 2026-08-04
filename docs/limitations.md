@@ -2,11 +2,11 @@
 
 ## Release status
 
-pgColumnar is pre-release. The version marker is `1.0-dev`, recorded in `VERSION`,
-and there has been no tagged release.
+pgColumnar is pre-release. The version marker is `1.0-alpha`, recorded in `VERSION`,
+and `v1.0-alpha` is tagged and published as a pre-release.
 
-Until there is, treat a columnar table as reloadable and keep the source the data
-was loaded from. The extension is appropriate today for evaluation, for analytical
+An alpha is still an alpha: treat a columnar table as reloadable and keep the source
+the data was loaded from. The extension is appropriate today for evaluation, for analytical
 tables that can be rebuilt from an external source, and for development, testing,
 and measurement. It is not yet recommended for a production system of record or
 for data that cannot be reloaded.
