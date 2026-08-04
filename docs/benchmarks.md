@@ -36,8 +36,8 @@ The read stream section is not re-measured. It needs a PostgreSQL 18 build with
 `--with-liburing`, and no such build exists on this machine. Its numbers are from
 the earlier run and say so.
 The Cross-engine comparison and the parallel sections are a separate, larger run.
-It ran on the bench host, at up to 100,000,000 rows, dated 2026-08-02. Each of
-those sections states its own method.
+It ran on the bench host, at up to 100,000,000 rows, dated 2026-08-04, at the same
+commit `eb5c7ef`. Each of those sections states its own method.
 They show the shape of the trade and not a precise score. The dataset is
 synthetic. It mixes column shapes that suit different encodings, and it does this
 deliberately. A table of fully random values will therefore look worse, and a
@@ -371,20 +371,15 @@ suite. This section is a separate, larger run. It compares pgColumnar with heap,
 TimescaleDB, and Citus on the TSBS `cpu` workload, at 100,000,000 rows across 21
 columns. The data is loaded byte for byte the same way into each engine.
 
-Method: the bench host, 16 vCPU and 62 GB, PostgreSQL 18.4 non-assert, on
-2026-08-02 at the current `main` plus the export feature. Each engine has the box
-to itself. Latency is client-observed, one cold run after a restart with the
-cache dropped, then the median of three warm runs, interleaved per query. Each
-engine uses the configuration its own users would choose:
+The bench host has 16 vCPU and 62 GB. Each engine uses the configuration its own
+users would choose:
 
 - pgColumnar: columnar scan, storage in load order, which is time ascending.
 - TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time` descending.
 - heap: sequential scan with the secondary indexes a heap user would build.
-- Citus: single node, columnar storage, sharded.
+- Citus: single node, columnar storage.
 
-The query engines run serial (`max_parallel_workers_per_gather = 0`). That
-isolates the storage and scan path. It is not pgColumnar at its ceiling. The
-parallel scan below adds about four times on these same shapes.
+The full method follows the storage table.
 
 ### Cross-engine storage
 
@@ -393,93 +388,147 @@ Total relation size, including indexes, for the 100,000,000 rows:
 | engine | size | smaller than heap |
 | --- | --- | --- |
 | heap | 22 GB | 1.0x |
-| TimescaleDB columnstore | 7.8 GB | 2.8x |
-| pgColumnar (zstd) | 6.4 GB | 3.4x |
+| pgColumnar (zstd) | 6,590 MB | 3.4x |
+| TimescaleDB columnstore | 7,975 MB | 2.8x |
+| Citus columnar | 8,147 MB | 2.8x |
 
-pgColumnar is the smallest of the four. The encoding layer does most of this, and
-zstd compounds it, as the [Storage](#storage) section shows in detail.
+pgColumnar is the smallest of the four.
 
 ### Cross-engine query latency
 
-Measured on 2026-08-03 against `main` at commit `00290d7`, on the same
-100,000,000-row fixture. This is a new run, not a correction of the previous
-table row by row. The earlier figures were taken before column projection landed (issue #338,
-fixed in #339). Every query then read and decoded every column of the table,
-whatever it referenced. The queries behind those figures were also not recorded.
-The two runs cannot be compared line by line.
+Method, stated so that it can be repeated. Read it before the numbers.
 
-Method for this run, stated so it can be repeated:
+**The data.** All four engines hold the same 100,000,000 rows. The rows come from
+one generated TSBS file. Each engine loaded that same file. The row count was
+verified in each engine before the measurement.
 
-- All three engines hold the same 100,000,000 rows, verified before measuring.
-- `cpu_pgc` and `cpu_heap` each carry a `(hostname, time DESC)` btree.
-  TimescaleDB carries the equivalent index on its chunks.
-- pgColumnar and heap run with `max_parallel_workers_per_gather = 4`.
-  TimescaleDB runs serial, because its parallel path fails on this host with
-  `could not read blocks 0..0`. That fault is not caused by pgColumnar: it
-  persists with every pgColumnar planner hook disabled, and the chunks use the
-  heap access method.
-- pgColumnar figures are given twice: with default settings, and with
-  `enable_ungrouped_vector_agg`, `enable_parallel_vector_agg` and
-  `enable_group_vectorization` all on. Those three default to off.
-- Warm, `EXPLAIN (ANALYZE)` execution time, after one warm-up run.
-- Citus was not re-measured and is omitted rather than carried forward from a
-  run whose configuration is unknown.
+**The indexes.** Every engine carries a `(hostname, time DESC)` btree. TimescaleDB
+also carries the `(time DESC)` index that `create_hypertable` makes. Citus columnar
+accepts a btree, so the four are comparable on this point. This is stated for a
+reason. An index difference is invisible in a table of times. An engine without an
+index that the others have looks worse, and the cause is not the storage format.
 
-Milliseconds:
+**The settings.** `work_mem` is 256MB in every engine. This is a tuned value. The
+PostgreSQL default is 4MB. The value is stated because it changes which engine the
+table favors. A plan that sorts spills to disk at a low `work_mem`. The same plan
+does not spill at a high one. A plan that spills is much slower and much less
+stable. Both servers use the same tuned configuration.
 
-| query | shape | pgColumnar | pgColumnar, all options on | heap | TimescaleDB (serial) |
-| --- | --- | --- | --- | --- | --- |
-| q1 | one host, 1 hour | 10335 | 10253 | 6 | 0 |
-| q2 | one host, 12 hours | 123546 | 119534 | 8 | 1 |
-| q3 | one host, 12 hours, 5 aggregates | 161972 | 156701 | 8 | 2 |
-| q4 | all hosts, 12 hours, group by host | 7322 | 7863 | 13912 | 4515 |
-| q5 | all hosts, 12 hours, 10 aggregates | 16443 | 28494 | 17378 | 9576 |
-| q6 | full scan, one value filter | 2292 | 1592 | 9083 | 6956 |
-| q7 | last point per host | 368 | 365 | 31 | 196 |
-| q8 | top 20 by max | 5153 | 5124 | 8715 | 10171 |
+**The spill.** The temporary blocks that each query reads and writes are recorded
+next to each time. A measurement of a plan that spills has a large spread between
+runs. One earlier measurement of this kind moved by 1.43 times with every setting
+held constant. That made a difference of 1.73 times impossible to interpret
+afterwards (issue #358). Any arm that spills was measured again.
 
-The SQL is given at the end of this section. The previous table did not record
-it, which is the main reason its numbers cannot be checked.
+**The parallelism.** Every query was measured twice. The first run sets
+`max_parallel_workers_per_gather` to 0. The second sets it to 4. The serial number
+shows what the storage format does. The parallel number shows what a user gets.
+These are different. After the planner change in issue #362, the difference between
+them can be a different plan and not only a different speed.
 
-Results were verified against heap per query. Counts and `max` aggregates match
-exactly. Averages agree to within 2.9e-15 relative difference. The residual is float
-reassociation across parallel workers. Every group present in one engine is
-present in the other.
+**The protocol.** The engines are interleaved for each query. No engine is always
+the one that is measured first on a cold cache. Each engine gets a cold execution
+after a restart of its server and a drop of the operating system cache. Five warm
+executions follow. The tables give the median of the five warm runs. The cold
+numbers are given separately.
 
-**q1 to q3 are a defect, not a storage property.** They filter on one host and
-return 360, 4,320 and 4,320 rows. Both engines take the same `Index Scan` plan on the equivalent index.
-pgColumnar costs about 28.7 milliseconds per row returned. That cost is flat
-across a twelve-fold change in row count. The cause is
-[issue #353](https://github.com/jdatcmd/pgcolumnar/issues/353). The default
-`stripe_row_limit` of 150,000 puts a table this wide over the 32 MB fetch cache
-limit. Every fetch by row number then decodes the whole row group again. Lowering
-`stripe_row_limit` to 100,000 on the same data takes the same query from 32.98 to
-0.177 milliseconds per row. Until that is fixed, a table that serves selective
-point queries through an index should be created with a smaller
-`stripe_row_limit`.
+**The servers.** pgColumnar, TimescaleDB and heap share one server. Citus needs a
+different `shared_preload_libraries`, so it runs in a second server. The second
+server is on the same host and uses the same tuned settings. A cold run restarts
+the server that holds the engine which is measured.
 
-[Issue #355](https://github.com/jdatcmd/pgcolumnar/issues/355) compounds it.
-The planner will choose an index scan over a columnar table to obtain ordering.
-It does that because the per-row fetch cost is not modelled. That is why these queries should
-not be read as a measure of the storage format.
+**TimescaleDB and parallel workers.** TimescaleDB cannot run the parallel arm on
+this host. A query that gets a parallel plan fails:
 
-**pgColumnar leads on the scan-bound shapes.** q4, q6 and q8 read a large part of
-the table. pgColumnar is ahead of heap on all three, and ahead of TimescaleDB on
-q6 and q8. q6 in particular is 1592 ms against TimescaleDB's 6956 ms, where the
-earlier table recorded 81966 ms against 1771 ms. Column projection accounts for
-most of that change: on this fixture it alone takes q6 from 45094 ms to 6491 ms.
+```
+ERROR:  could not read blocks 0..0 in file "base/16384/3708169": read only 0 of 8192 bytes
+CONTEXT:  parallel worker
+```
 
-**The optional vectorization is not uniformly a win.** It helps q6, at 2292 ms
-down to 1592 ms. It leaves q1, q3, q7 and q8 unchanged. It costs on q5, 16443 ms
-up to 28494 ms, which is not yet explained and is tracked in
-[issue #349](https://github.com/jdatcmd/pgcolumnar/issues/349). This is why those
-settings default to off.
+The earlier version of this page reported the same fault. This run confirms it and
+adds detail. The failure is per query and not per engine. q1, q2 and q3 are served
+by an index, take no parallel plan, and give the same result at both settings. q4
+and q5 take a parallel plan and fail.
 
-**TimescaleDB leads on the host-filtered queries** for the reason given before:
-its columnstore segments by `hostname`, so it reads one segment. pgColumnar
-stores in load order, so its zone maps do not skip on `hostname`. Clustering a
-pgColumnar table on the filter key addresses that, at the cost of the all-host
-queries.
+The table records those cells as a failure. It does not record the time that the
+failed statement reported. A statement that fails still prints a time, and
+that time is small. An error therefore looks like a very fast query if nothing
+checks for it.
+
+Measured on 2026-08-04 against `main` at commit `eb5c7ef`, on the 100,000,000-row
+fixture. The numbers are the median of five warm runs.
+
+Serial, `max_parallel_workers_per_gather = 0`:
+
+| query | shape | pgColumnar | TimescaleDB | heap | Citus |
+| --- | --- | ---: | ---: | ---: | ---: |
+| q1 | one host, 1 hour | 400 | 4 | 4 | 279 |
+| q2 | one host, 12 hours | 2,253 | 5 | 12 | 1,896 |
+| q3 | one host, 12 hours, 5 aggregates | 4,141 | 7 | 14 | 3,386 |
+| q4 | all hosts, 12 hours, group by host | 8,517 | 5,465 | 9,810 | 7,398 |
+| q5 | all hosts, 12 hours, 10 aggregates | 16,950 | 10,512 | 28,437 | 15,639 |
+| q6 | full scan, one value filter | 11,199 | 1,734 | 14,692 | 8,123 |
+| q7 | last point per host | 133,759 | 295 | 46 | 124,740 |
+| q8 | top 20 by max | 15,639 | 7,583 | 19,857 | 14,440 |
+
+Parallel, `max_parallel_workers_per_gather = 4`:
+
+| query | pgColumnar | TimescaleDB | heap | Citus |
+| --- | ---: | ---: | ---: | ---: |
+| q1 | 73 | 4 | 4 | 275 |
+| q2 | 494 | 5 | 12 | 1,954 |
+| q3 | 861 | 6 | 13 | 3,344 |
+| q4 | 8,128 | fails | 9,936 | 7,580 |
+| q5 | **11,908** | fails | 26,963 | 17,454 |
+| q6 | **2,324** | fails | 3,374 | 8,394 |
+| q7 | 44,058 | 302 | 47 | 127,796 |
+| q8 | 15,958 | fails | 20,420 | 14,635 |
+
+**Spill.** Most cells use no temporary disk at `work_mem = 256MB`. Five do, and they
+are all in the two heaviest shapes:
+
+| cell | temp blocks read / written | node |
+| --- | ---: | --- |
+| q7, pgColumnar, serial | 1,022,514 / 1,022,568 | Sort |
+| q7, Citus, serial | 1,022,514 / 1,022,568 | Sort |
+| q7, Citus, parallel | 1,022,514 / 1,022,568 | Sort |
+| q7, pgColumnar, parallel | 1,533,774 / 1,533,849 | Gather Merge |
+| q5, pgColumnar, parallel | 721,569 / 721,584 | GroupAggregate |
+
+A plan that spills can be unstable between runs, which is why each cell is the median
+of five. On this host the spilling cells were **not** the unstable ones. Their spread
+between the fastest and slowest of the five runs is 1.03 to 1.04 times. The widest
+spread in either table is q5 on heap in serial, at **1.18 times**, and that cell does
+not spill at all. Every other cell is inside 1.05 times.
+
+Do not read that as "spill does not matter". It matters at a small `work_mem`, where
+the same shape has been measured swinging 1.43 times with every setting held constant.
+It says that at this setting, on this host, the sort had enough memory for the spill to
+be sequential and cheap.
+
+**Parallel workers are what pgColumnar gains most from.** The scan divides cleanly
+across workers. q1, q2 and q3 improve by about five times. q5 and q6 move from behind
+heap to ahead of it. The serial table is a measure of the storage format. The
+parallel table is closer to what an installation gets.
+
+**TimescaleDB leads on every query that filters one host.** Its columnstore segments
+by `hostname`, so it reads one segment and not the table. pgColumnar stores rows in
+load order, so its zone maps do not skip on `hostname`. A pgColumnar table that is
+clustered on the filter key closes that gap, at the cost of the queries that read all
+hosts.
+
+**pgColumnar leads the wide aggregate shapes with workers.** q5 reads ten metrics for
+all hosts, and q6 scans the table with one filter. pgColumnar is first on both, and
+q6 is 2,324 ms against Citus at 8,394 ms.
+
+**q7 is a regression and not a property of the format.** The planner declines an index
+scan that this query wants. The cost model charges the index path for the rows the
+path returns, and not for the rows the query reads. A `DISTINCT ON` reads one row
+per host. The same query runs in **769 ms** with
+`pgcolumnar.enable_index_fetch_penalty = off`, against 44,058 ms with the default.
+This is [issue #376](https://github.com/jdatcmd/pgcolumnar/issues/376). Do not read
+the q7 row as a measure of columnar storage. Citus is slow on this shape for its own
+reasons, at 124,740 ms serial.
 
 #### Queries
 
