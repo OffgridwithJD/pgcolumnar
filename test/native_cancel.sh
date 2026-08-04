@@ -65,8 +65,34 @@ check "the short timeout is what fired" \
 
 # Without interrupt checks in the load path the timeout cannot fire until the
 # load finishes, so cancel and full converge. With them it fires during the load.
+#
+# The yardstick is the window between the two outcomes, not a bare fraction of
+# `full`. `cancel` cannot go below the timeout itself, so `full / 2` is only a
+# real threshold while `full` is comfortably more than twice the timeout: at
+# full=155 it leaves 27 ms of headroom above a 50 ms floor, and PG17 measured
+# 64-82 ms against PG18's stable 63-64, failing two runs in three on hardware
+# where the cancel worked correctly every time. That is a threshold reporting the
+# box, not the guard.
+#
+# What the guard actually distinguishes: cancel fires *during* the load (just
+# after the timeout) or only *after* it (converging on `full`). So require cancel
+# to land in the lower half of the interval between those two, which is
+# self-calibrating in both directions and cannot be squeezed by a fast box.
+#
+# Which guard this actually proves, established by removing each one rather than
+# from the description above: it is COLUMNAR_DECODE_INTERRUPT in
+# columnar_encoding.c, the per-value decode-loop check on a 65536 stride, not the
+# per-column-chunk CHECK_FOR_INTERRUPTS in columnar_native_load_group(). Deleting
+# the per-chunk check leaves this suite green, because a two-column group reaches
+# it only twice; disabling the decode-loop macro makes cancel converge on full
+# (151 ms against 150) and fails this check, which is the behaviour the paragraph
+# above predicts. Stated so the next person does not remove the cheap guard on the
+# strength of a green run here.
+TIMEOUT_MS=50
+limit=$(( TIMEOUT_MS + (full - TIMEOUT_MS) / 2 ))
 check_timing "cancel arrives well before the load completes" \
-	"$( [ "$cancel" -lt $(( full / 2 )) ] && echo yes || echo "no (cancel=${cancel}ms full=${full}ms)")" \
+	"$( [ "$full" -gt $(( TIMEOUT_MS * 2 )) ] && [ "$cancel" -lt "$limit" ] && echo yes ||
+	    echo "no (cancel=${cancel}ms full=${full}ms limit=${limit}ms)")" \
 	"yes"
 
 pgc_summary
