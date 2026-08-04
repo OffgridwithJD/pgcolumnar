@@ -67,6 +67,7 @@ if ! git -C "$SRCDIR" rev-parse --verify -q "$OLD_REF^{commit}" >/dev/null 2>&1;
 fi
 git clone -q --shared "$SRCDIR" "$TMP/old" || { echo "FATAL: clone failed"; exit 1; }
 git -C "$TMP/old" checkout -q --detach "$OLD_REF" || { echo "FATAL: checkout $OLD_REF failed"; exit 1; }
+make -C "$TMP/old" PG_CONFIG="$PG_CONFIG" clean >/dev/null 2>&1
 make -C "$TMP/old" PG_CONFIG="$PG_CONFIG" -j"$(nproc)" >"$TMP/build_old.log" 2>&1 \
 	|| { echo "FAIL  old build"; tail -20 "$TMP/build_old.log"; exit 1; }
 make -C "$TMP/old" PG_CONFIG="$PG_CONFIG" install >/dev/null 2>&1 \
@@ -92,11 +93,20 @@ echo "  old install: $before_rows rows, extversion $old_ver"
 [ "$before_rows" = "1000" ] || { echo "FAIL  old install did not store rows"; exit 1; }
 
 # ---- 2. install the tree under test over it, library and scripts ---------------------
+# Clean first. This tree may have last been built against another major, and make
+# would happily relink those objects into a .so this server cannot load. That is how
+# this gate first failed: a pg19 build silently relinked for pg18, the postmaster
+# refused to start, and every check below reported a connection error instead.
+make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" clean >/dev/null 2>&1
 make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" -j"$(nproc)" >"$TMP/build_new.log" 2>&1 \
 	|| { echo "FAIL  new build"; tail -20 "$TMP/build_new.log"; exit 1; }
 make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" install >/dev/null 2>&1 \
 	|| { echo "FAIL  new install"; exit 1; }
-runpg "$BINDIR/pg_ctl" -D "$DATA" -l "$LOG" -w restart >/dev/null 2>&1
+if ! runpg "$BINDIR/pg_ctl" -D "$DATA" -l "$LOG" -w restart >/dev/null 2>&1; then
+	echo "  FAIL  server did not come back after installing the new build"
+	tail -15 "$LOG"
+	exit 1
+fi
 
 # ---- 3. upgrade, and require that it be available at all ----------------------------
 # If the link names did not move, nothing is broken here and the upgrade is a no-op. If
