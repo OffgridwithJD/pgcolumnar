@@ -1783,8 +1783,39 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 * return so a plain EXPLAIN reports whether the batch fold will run.
 	 */
 	if (state->scanFold)
+	{
+		Bitmapset  *proj = NULL;
+		int			x;
+
+		/*
+		 * Build the projected set BEFORE deciding eligibility, because eligibility
+		 * now depends on it: the fold gathers every projected column and needs each
+		 * one fixed width (#423). It used to be built after the EXPLAIN-only return,
+		 * so a plain EXPLAIN decided eligibility against an empty set and reported
+		 * "Columnar Batch Fold: yes" for a shape that falls back at execution.
+		 *
+		 * Only the set moves. baseSlot and whereState stay below the EXPLAIN return,
+		 * since an EXPLAIN-only node must not initialise executor state.
+		 */
+		pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
+		x = -1;
+		while ((x = bms_next_member(proj, x)) >= 0)
+		{
+			AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
+
+			if (attno > 0)
+				state->projected = bms_add_member(state->projected, attno - 1);
+		}
+		for (a = 0; a < state->naggs; a++)
+			if (state->specs[a].attidx >= 0)
+				state->projected = bms_add_member(state->projected,
+												  state->specs[a].attidx);
+		if (state->projected == NULL)
+			state->projected = bms_make_singleton(0);
+
 		state->batchEligible =
 			pgcolumnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
+	}
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
@@ -1845,30 +1876,12 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (state->scanFold)
 	{
-		Bitmapset  *proj = NULL;
-		int			x;
-
 		state->baseSlot = MakeSingleTupleTableSlot(CreateTupleDescCopy(tupdesc),
 												   &TTSOpsVirtual);
 		state->whereState = (state->quals != NIL)
 			? ExecInitQual(state->quals, &node->ss.ps)
 			: NULL;
 
-		pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
-		x = -1;
-		while ((x = bms_next_member(proj, x)) >= 0)
-		{
-			AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
-
-			if (attno > 0)
-				state->projected = bms_add_member(state->projected, attno - 1);
-		}
-		for (a = 0; a < state->naggs; a++)
-			if (state->specs[a].attidx >= 0)
-				state->projected = bms_add_member(state->projected,
-												  state->specs[a].attidx);
-		if (state->projected == NULL)
-			state->projected = bms_make_singleton(0);
 	}
 
 	table_close(rel, AccessShareLock);
@@ -2718,6 +2731,38 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 								  &npred, &allConvertible);
 	if (!allConvertible)
 		return false;
+
+	/*
+	 * Every column the fold will GATHER must be fixed width (#423).
+	 *
+	 * The gather does pointer arithmetic on attlen:
+	 *
+	 *     cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+	 *                           true, cattlen[col]);
+	 *
+	 * A varlena has attlen -1, so the offset is multiplied by -1 and fetch_att is
+	 * asked for a byval of length -1, which raises "unsupported byval length: -1".
+	 *
+	 * The type check below is not this check and cannot stand in for it. It walks
+	 * the SCAN KEYS and asks whether each type is comparable, while the gather
+	 * walks state->projected and needs to know whether each type is fixed width.
+	 * A text column filtered with LIKE is in projected and not in the keys, since
+	 * LIKE is not a pushable scan key, so it reached the gather unchecked. That is
+	 * exactly ClickBench q21, SELECT COUNT(*) FROM hits WHERE URL LIKE '%google%'.
+	 *
+	 * Falling back to the row path is what the ADD COLUMN case already does.
+	 */
+	{
+		int			c = -1;
+
+		while ((c = bms_next_member(state->projected, c)) >= 0)
+		{
+			if (c < 0 || c >= tupdesc->natts)
+				continue;
+			if (TupleDescAttr(tupdesc, c)->attlen <= 0)
+				return false;
+		}
+	}
 
 	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
 	for (k = 0; k < nkeys; k++)

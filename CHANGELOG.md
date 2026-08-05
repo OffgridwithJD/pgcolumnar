@@ -97,6 +97,18 @@ which was true until that script existed.
   `CREATE PUBLICATION ... WITH (publish = 'insert')`, which does work. See
   [Limitations](docs/limitations.md).
 
+- The ungrouped vectorized aggregate no longer errors on a varlena filter
+  column (#423). `SELECT count(*) FROM t WHERE s LIKE '%x%'` raised
+  "unsupported byval length: -1" with
+  `pgcolumnar.enable_ungrouped_vector_agg` on. The batch fold gathers each
+  projected column with pointer arithmetic on `attlen`, which is -1 for a
+  varlena, so the offset and the fetch were both wrong. The eligibility check
+  walked the scan keys and asked whether each type was comparable, while the
+  gather walks the projected set and needs each type fixed width. A text column
+  filtered with `LIKE` is projected and is not a scan key, so it arrived
+  unchecked. Such a shape now falls back to the row path, which is what the
+  ALTER TABLE ADD COLUMN case already did. This was ClickBench q21.
+
 ### Upgrading
 
 **Run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the
