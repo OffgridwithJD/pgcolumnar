@@ -14,6 +14,18 @@ which was true until that script existed.
 
 ### Changed
 
+- `CREATE TABLE ... USING pgcolumnar AS SELECT` no longer fails when the source
+  plan is parallel (#387). The storage-row creation path re-checked for an
+  existing row against `GetLatestSnapshot()`, which raises "cannot update
+  SecondarySnapshot during a parallel operation" inside parallel mode, and CTAS
+  runs its whole executor in parallel mode whenever the source plan is parallel.
+  That is the default for any source large enough to be worth loading, so bulk
+  creating a columnar table from existing data failed on every supported major.
+  The lock and the fresh snapshot are now skipped when the relation was created
+  by the current transaction, because no other session can see it and the
+  first-writer race they defend against cannot happen. A committed table
+  first-written by two sessions at once is unaffected and still serializes.
+
 - The extension's exported C symbols are namespaced under `pgcolumnar` (#382).
   Two extensions that both call themselves `columnar` could define the same
   symbol. `columnar_handler` and `columnar_relation_storageid` collided with
