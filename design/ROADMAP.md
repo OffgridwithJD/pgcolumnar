@@ -43,6 +43,12 @@ matrix. Gap specifications are in [gaps/](gaps/).
 
 ## Remaining
 
+**Object storage, read and write.** Parquet and Iceberg data normally live on S3, GCS
+or ADLS, and we read local files only. This is a prerequisite for #388 rather than a
+parallel feature. Reads are #393, writes are #394. It was previously recorded only in
+`PHASE_G_EXTERNAL_PARQUET_PLAN.md` under a heading reading "open decisions", which is
+why nobody found it.
+
 Ordered by value-to-effort. **Gap 27 (Arrow/Parquet interop) is fully complete**:
 export and import, flat and nested, for both Arrow and Parquet, all self-contained
 (no libarrow/libparquet dependency) and matrix-gated. See

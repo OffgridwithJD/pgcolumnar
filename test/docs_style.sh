@@ -66,6 +66,12 @@ check "and it actually examined the documents" \
 	"$([ "$n" -ge 10 ] && echo yes || echo "no (examined $n)")" "yes"
 
 # CHANGELOG.md: dash characters only. See the scope note above.
+# The roadmap has to stay reachable. It went unfound once because the only routes to it
+# were a raw GitHub link and a line in the changelog (#395). A page that is not in the nav
+# is not published, and nothing else would notice.
+nav_roadmap=$(grep -c "roadmap.md" "$SRCDIR/mkdocs.yml" || true)
+check "the roadmap is in the documentation nav" "$([ "$nav_roadmap" -ge 1 ] && echo yes || echo no)" "yes"
+
 dashes=$(grep -c '—\|–' "$SRCDIR/CHANGELOG.md" || true)
 check "CHANGELOG.md carries no em or en dash" "$dashes" "0"
 

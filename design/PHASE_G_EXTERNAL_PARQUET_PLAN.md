@@ -1,9 +1,14 @@
 # Phase G: read external Parquet in place (design, for review)
 
-Status: proposed, not implemented. This is a large net-new capability, not a
-correctness-critical change to existing storage, so it is written up for review
-and a surface decision before code. Parquet first; ORC and the table formats
-(Iceberg, Delta) are follow-on phases that build on the same scan core.
+Status: **shipped** (external Parquet read, the FDW surface, projection and predicate
+pushdown, multi-file and partition pruning). Kept as the design record.
+
+**Superseded by `design/ROADMAP.md` for anything still outstanding.** This document
+describes the state at the time it was written and its open questions have been
+answered or moved. Do not plan from it.
+
+Parquet first; ORC and the table formats (Iceberg, Delta) are follow-on phases that
+build on the same scan core. Iceberg is #388.
 
 ## Goal
 
@@ -165,11 +170,13 @@ partitions from predicates on those columns.
 ## Open decisions for review
 
 - Confirm building **both** surfaces (this document assumes yes).
-- File access scope: DECIDED (2026-07-23) -- local filesystem first. Object storage
-  (S3 and S3-compatible such as MinIO, plus GCS/Azure) is a future todo behind the
-  same path/URL option: an `s3://bucket/key` path resolves through an object-store
-  reader while `/path/file.parquet` reads the local FS. The scan core is unchanged
-  either way because both just hand it bytes.
+- File access scope: DECIDED (2026-07-23) -- local filesystem first. **Object storage
+  is now tracked as outstanding work in `design/ROADMAP.md`, and as #393 (reads) and
+  #394 (writes).** It is not recorded here any more, because a decided item that is
+  also outstanding work does not belong under a heading called "open decisions".
+  Note for anyone reading the original wording: it said the scan core is unchanged
+  because both paths just hand it bytes. That is true of the core and understates the
+  work. See #393.
 - Whether the function's column list is always caller-supplied (`AS (...)`) or we
   also provide a fixed-shape `read_parquet(path, columns jsonb)` convenience.
   Recommend caller-supplied `AS`, matching every other record-returning function,
