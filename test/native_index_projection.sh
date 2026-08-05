@@ -100,11 +100,58 @@ agree "expression index agrees"                     "(k + k2) BETWEEN 300 AND 30
 agree "partial index agrees on its subset"          "k2 > 100 AND k < 5000"          "k"
 agree "text expression index agrees"                "length(c1) = 83"                "k"
 
+# The PARALLEL build, which is the default path for any table of consequential size and
+# was the one left unprojected.
+#
+# index_build_range_scan gets its reader two ways. A serial build opens its own, and
+# every participant of a parallel build (leader included) arrives with the shared
+# TableScanDesc, whose reader came through the table-AM scan interface with nowhere to
+# carry a projection. Projecting only the serial branch reads every column exactly when
+# it costs most.
+#
+# This is not a tuning corner. Measured on this fixture at 1.5M rows of incompressible
+# text, 459 MB on disk, with every parallel GUC at its default, core chose workers and
+# the build took the parallel branch. Forcing it here only keeps the assertion cheap.
+#
+# Serial-branch-only projection scores 568 ms against heap's 563 ms on the parallel arm,
+# and 71 ms on the serial arm: the wall clock alone reads as "fixed" if you measure the
+# serial arm, which is why the branch is named in the DEBUG1 line and asserted here.
+PAR="SET max_parallel_maintenance_workers=4; SET min_parallel_table_scan_size='0';
+     SET maintenance_work_mem='256MB';"
+
+branch() {  # $1 index name, $2 SET clauses, $3 CREATE INDEX -> "<branch> <n> of <m>"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-c "SET client_min_messages=debug1; $2" -c "$3" 2>&1 \
+		| grep -oE "(parallel|serial) index build on \"$1\" projecting [0-9]+ of [0-9]+" \
+		| sed -E 's/ index build on .* projecting / /' | head -1
+}
+
+# Assert the PREMISE first. If core declines to go parallel here, the next check would
+# pass by reading the serial branch and prove nothing about the one under test.
+check "forcing parallel maintenance workers does reach the parallel branch" \
+	"$(branch w_par "$PAR" 'CREATE INDEX w_par ON w (k)' | cut -d' ' -f1)" "parallel"
+check "a parallel build projects one column of twenty, not all twenty" \
+	"$(branch w_par2 "$PAR" 'CREATE INDEX w_par2 ON w (k2)')" "parallel 1 of 20"
+check "a parallel expression build projects its expression's columns" \
+	"$(branch w_pare "$PAR" 'CREATE INDEX w_pare ON w ((k + k2))')" "parallel 2 of 20"
+check "a parallel partial build projects the predicate's columns too" \
+	"$(branch w_parp "$PAR" 'CREATE INDEX w_parp ON w (k) WHERE k2 > 100')" "parallel 2 of 20"
+check "the serial branch is still reached when workers are refused" \
+	"$(branch w_ser 'SET max_parallel_maintenance_workers=0;' \
+		'CREATE INDEX w_ser ON w (k2)' | cut -d' ' -f1)" "serial"
+
+# Every participant reads through one shared reader, so an under-projected or
+# double-counted parallel build shows up as wrong or duplicated index entries.
+agree "parallel-built index agrees with a sequential scan" "k2 BETWEEN 2000 AND 19998" "k2"
+check "parallel-built index returns each row once" \
+	"$(qset 'SET enable_seqscan=off; SET enable_bitmapscan=off' \
+		'SELECT count(*) FROM w WHERE k2 BETWEEN 2 AND 2000')" "1000"
+
 # amcheck where available. The skip must be visible: a check that reports nothing is
 # indistinguishable from a check that passes, which is what this file is about.
 if psql_run "CREATE EXTENSION IF NOT EXISTS amcheck;" >/dev/null 2>&1 &&
 	[ "$(q "SELECT count(*) FROM pg_proc WHERE proname='bt_index_check'")" != "0" ]; then
-	for ix in w_k w_k12 w_c18 w_expr w_part w_len; do
+	for ix in w_k w_k12 w_c18 w_expr w_part w_len w_par w_par2 w_pare w_parp w_ser; do
 		out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 			-d "$PGC_DB" -c "SELECT bt_index_check('$ix'::regclass)" 2>&1)
 		check "bt_index_check($ix)" \
