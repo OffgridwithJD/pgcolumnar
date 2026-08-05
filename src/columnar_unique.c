@@ -58,12 +58,6 @@
 bool		pgcolumnar_enable_unique_lock = true;
 int			pgcolumnar_unique_lock_buckets = 128;
 
-/*
- * Advisory-lock discriminator in locktag_field4. The issue #4 delete_vector lock
- * uses 1; the unique-key lock uses 2 so the two lock spaces never false-share.
- */
-#define COLUMNAR_UNIQUE_LOCK_CLASS 2
-
 /* 64-bit FNV-1a basis/prime, matching delete_vector_chunk_lock_key's mixer */
 #define COLUMNAR_FNV_OFFSET UINT64CONST(1469598103934665603)
 #define COLUMNAR_FNV_PRIME  UINT64CONST(1099511628211)
@@ -326,7 +320,7 @@ pgcolumnar_acquire_key_lock(Oid indexOid, uint32 bucket)
 	LOCKTAG		tag;
 
 	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId, (uint32) indexOid, bucket,
-						 COLUMNAR_UNIQUE_LOCK_CLASS);
+						 PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY);
 
 	(void) LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
 					   false /* wait */ );
