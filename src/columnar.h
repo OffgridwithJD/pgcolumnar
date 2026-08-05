@@ -451,6 +451,10 @@ extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * ------------------------------------------------------------------------- */
 extern uint64 PgColumnarNextStorageId(void);
 extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
+
+/* projection: needed attnos (pull_varattnos form) -> the reader's 0-based set */
+extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
+											   int *nProjected);
 extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
 									int64 lastGroup);
 extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);

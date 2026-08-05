@@ -29,6 +29,7 @@
 #include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "nodes/pathnodes.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/plancat.h"
 #include "port/atomics.h"
@@ -1490,7 +1491,60 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		else
 			snapshot = GetTransactionSnapshot();
 
-		readState = PgColumnarBeginRead(table_rel, snapshot, NULL, NULL, 0, NULL);
+		/*
+		 * Project. The columns this build needs are all in our own arguments and
+		 * we were throwing them away, so a one-column index on a wide table
+		 * decoded every column (#413).
+		 *
+		 * Three sources, and missing any of them reads unset slot values:
+		 *   ii_IndexAttrNumbers  the key columns
+		 *   ii_Expressions       an expression index references more
+		 *   ii_Predicate         a partial index evaluates against more
+		 *
+		 * PgColumnarProjectionFromAttnos returns NULL for "every column", which
+		 * covers a whole-row or system-column reference, and is what the custom
+		 * scan already does with the same escapes.
+		 */
+		{
+			Bitmapset  *needed = NULL;
+			Bitmapset  *projected;
+			int			nProjected = 0;
+			int			i;
+
+			for (i = 0; i < index_info->ii_NumIndexAttrs; i++)
+			{
+				AttrNumber	attno = index_info->ii_IndexAttrNumbers[i];
+
+				/* 0 marks an expression column; Vars come from ii_Expressions */
+				if (attno != 0)
+					needed = bms_add_member(needed,
+											attno - FirstLowInvalidHeapAttributeNumber);
+			}
+			pull_varattnos((Node *) index_info->ii_Expressions, 1, &needed);
+			pull_varattnos((Node *) index_info->ii_Predicate, 1, &needed);
+
+			projected =
+				PgColumnarProjectionFromAttnos(needed,
+											 RelationGetDescr(table_rel)->natts,
+											 &nProjected);
+
+			/*
+			 * Say what was projected, so a test can assert the projection
+			 * NARROWED rather than infer it from a stopwatch. A fix here that
+			 * silently did nothing would pass every correctness check and a
+			 * wall-clock check on a quiet machine, which is the failure mode
+			 * this projection is being added to avoid.
+			 *
+			 * DEBUG1, so it costs nothing at the default log level.
+			 */
+			elog(DEBUG1,
+				 "columnar: index build on \"%s\" projecting %d of %d columns",
+				 RelationGetRelationName(index_rel), nProjected,
+				 RelationGetDescr(table_rel)->natts);
+
+			readState = PgColumnarBeginRead(table_rel, snapshot, NULL,
+										  projected, 0, NULL);
+		}
 		ownReadState = true;
 	}
 
