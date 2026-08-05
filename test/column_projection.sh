@@ -33,7 +33,8 @@ bufs() {  # bufs <on|off> <sql>
 		-d "$PGC_DB" -Atq -c "$NOPAR" -c "SET $GUC=$1" \
 		-c "EXPLAIN (ANALYZE, BUFFERS) $2" 2>&1 |
 		grep -m1 -oE 'Buffers: shared[^)]*' |
-		grep -oE '(hit|read)=[0-9]+' | cut -d= -f2 | paste -sd+ | bc
+		grep -oE '(hit|read)=[0-9]+' | cut -d= -f2 |
+		awk '{ n += $1 } END { print n + 0 }'
 }
 
 # The core oracle: projection on must equal projection off, byte for byte.
@@ -94,13 +95,16 @@ check "premise: columnar and heap hold the same rows" \
 # thing.
 B_ON="$(bufs on  "SELECT sum(v) FROM t")"
 B_OFF="$(bufs off "SELECT sum(v) FROM t")"
+# This premise exists because the ratio below means nothing on a tiny read. It
+# now also catches a missing measurement: bufs() sums with awk and yields 0
+# rather than the empty string bc left behind when it was not installed (#418).
 check "premise: the unprojected read is large enough to measure (off: $B_OFF)" \
-	"$([ "$B_OFF" -gt 1000 ] && echo yes || echo no)" yes
+	"$([ "${B_OFF:-0}" -gt 1000 ] && echo yes || echo no)" yes
 # One float8 column out of fourteen. A third is far above the ideal ~1/14 and
 # far below the 1.0 a broken projection would give, so it fails on a regression
 # without tracking encoding-ratio drift.
-check "one column costs less than a third of reading all of them (on: $B_ON, off: $B_OFF)" \
-	"$([ "$B_ON" -lt $((B_OFF / 3)) ] && echo yes || echo no)" yes
+check_ratio "one column costs less than a third of reading all of them" \
+	"$B_ON" "$B_OFF" 0.333
 
 # A qual-only column must be read (it is filtered on) even though it is never
 # emitted -- if it were skipped the filter would silently match nothing.
@@ -113,8 +117,10 @@ check "qual-only column still produces the right count" \
 # count(*) metadata path, which reads no columns at all and would make this
 # check pass for the wrong reason.
 B_ALL="$(bufs on "SELECT count(*) FROM (SELECT t.* FROM t OFFSET 0) s")"
-check "SELECT * reads as much as projection-off does ($B_ALL vs $B_OFF)" \
-	"$([ "$B_ALL" -gt $((B_OFF * 8 / 10)) ] && echo yes || echo no)" yes
+# Inverted, so the same helper carries it: projection-off over SELECT * must not
+# exceed 1.25, which is "SELECT * costs at least 80 percent of projection-off".
+check_ratio "SELECT * reads as much as projection-off does" \
+	"$B_OFF" "$B_ALL" 1.25
 
 # ---- 2. it is faithful ------------------------------------------------------
 ab "single column agg"         "SELECT sum(v) FROM t"

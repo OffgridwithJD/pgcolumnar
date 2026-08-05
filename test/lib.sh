@@ -309,6 +309,109 @@ check() {
 	fi
 }
 
+# ---- assertions that refuse to compare a measurement nobody took ------------
+#
+# check "$label" "$a" "$b" with both sides empty compares "" with "" and prints
+# PASS (#418). Every way a measurement goes missing produces exactly that: a
+# tool that is not installed, a grep that matched no line, a psql against a
+# cluster that is down, a substitution that expanded to nothing. The suite then
+# reports success for a number nobody has.
+#
+# This is not hypothetical and it is not rare. column_projection.sh piped its
+# buffer count through bc, bc was absent on one machine, and both sides came
+# back empty. It failed there only because one side happened to be non-empty.
+# Two green checks were produced the same day that measured nothing at all.
+#
+# So: a measurement must look like a number before it is compared, and the
+# failure says which side was not one. "got [] want []" is the message that cost
+# the time.
+
+# Integer or decimal, optional leading sign. Deliberately strict: an empty
+# string, a psql error message, and "no" are all not numbers.
+pgc_is_number() {	# $1 -> 0 when $1 is a number
+	local v="${1#-}"
+	v="${v#+}"
+	case "$v" in
+		'' | . | *[!0-9.]* | *.*.*) return 1 ;;
+	esac
+	return 0
+}
+
+# check_num LABEL GOT WANT -- check, with both sides required to be numbers.
+check_num() {
+	local name="$1" got="$2" want="$3"
+	if ! pgc_is_number "$got" || ! pgc_is_number "$want"; then
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		echo "FAIL  $name: not a measurement, so nothing was compared:" \
+			"got [$got] want [$want]"
+		return 1
+	fi
+	check "$name" "$got" "$want"
+}
+
+# check_ratio LABEL A B MAX -- assert A divided by B is at most MAX.
+#
+# awk rather than bc, on purpose. bc is not part of a base install and its
+# absence is what produced the empty measurement in the first place; awk is
+# required by POSIX and is present wherever these suites can run at all.
+#
+# Zero on EITHER side is refused, not only the denominator.
+#
+# The first version of this checked only the denominator while this comment
+# claimed both. The same commit changed column_projection.sh's bufs() to sum with
+# awk, which returns 0 where it used to return the empty string, and that
+# converted a failure mode this helper rejects into one it accepted: a projected
+# read touching no buffers gives a ratio of 0.00, inside any bound, and passes.
+# #418 moved rather than closed, inside the very check that started it.
+#
+# A zero numerator is "the thing we measured cost nothing", which is nearly
+# always "the thing we measured did not happen". A call site that genuinely needs
+# to permit zero should say so under its own name rather than get it by default.
+check_ratio() {	# $1 label, $2 a, $3 b, $4 max
+	local name="$1" a="$2" b="$3" max="$4" ratio
+
+	if ! pgc_is_number "$a" || ! pgc_is_number "$b" || ! pgc_is_number "$max"; then
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		echo "FAIL  $name: not a measurement, so no ratio was formed:" \
+			"a=[$a] b=[$b] max=[$max]"
+		return 1
+	fi
+	if [ "$(awk -v x="$a" -v y="$b" 'BEGIN { print (x + 0 == 0 || y + 0 == 0) ? "yes" : "no" }')" = yes ]; then
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		echo "FAIL  $name: a side of the ratio is zero, so nothing was measured:" \
+			"a=[$a] b=[$b]"
+		return 1
+	fi
+	ratio="$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.2f", a / b }')"
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	if [ "$(awk -v r="$ratio" -v m="$max" 'BEGIN { print (r <= m) ? "yes" : "no" }')" = yes ]; then
+		echo "PASS  $name (${ratio}x, bound ${max}x, from a=$a b=$b)"
+	else
+		echo "FAIL  $name: ${ratio}x exceeds the ${max}x bound (a=$a b=$b)"
+		PGC_FAIL=1
+	fi
+}
+
+# pgc_require_tools TOOL... -- one clear line at the top, rather than an empty
+# string three checks later. A suite that needs a tool it does not have has not
+# been skipped; it has been silently narrowed.
+pgc_require_tools() {
+	local t missing=""
+	for t in "$@"; do
+		command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+	done
+	if [ -n "$missing" ]; then
+		echo "FAIL  the tools this suite measures with are missing:$missing"
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		return 1
+	fi
+	return 0
+}
+
 # A check whose subject is a wall-clock ratio.
 #
 # PGC_SKIP_TIMING exists because a shared runner cannot hold a ratio still, and

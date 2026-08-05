@@ -159,8 +159,15 @@ pgcolumnar_relation_copy_for_cluster(...)
 So "pgColumnar already implements that callback" was true of the symbol and false of
 the behaviour. Measured on 19beta2: `REPACK`, `REPACK ... USING INDEX`,
 `REPACK (VERBOSE)`, `CLUSTER` and `VACUUM FULL` all raise, while `REPACK` succeeds on
-a heap table on the same build. `REPACK (CONCURRENTLY)` on a table with a primary key
-also succeeds on heap and raises on columnar.
+a heap table on the same build.
+
+`REPACK (CONCURRENTLY)` is the syntax, not `REPACK CONCURRENTLY`, and that form is ours
+too. This needs two fixtures to state correctly, and with only one it reads the wrong
+way round. On a table with **no identity index**, PostgreSQL refuses both access methods
+before the AM is ever reached, which an early reading of this mistook for "not
+columnar-specific". With a **primary key** and `wal_level=logical`, heap succeeds and
+columnar raises our error. That difference is the whole claim. The columnar table is
+undamaged afterwards.
 
 The supported route is `pgcolumnar.vacuum()` and `pgcolumnar.vacuum_sorted()`.
 

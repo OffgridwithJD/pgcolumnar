@@ -1383,7 +1383,29 @@ pgcolumnar_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
 static void
 pgcolumnar_relation_copy_for_cluster(COLUMNAR_COPY_FOR_CLUSTER_ARGS)
 {
-	COLUMNAR_UNSUPPORTED("CLUSTER / VACUUM FULL");
+	/*
+	 * Name every command that reaches here, and name them per major (#399).
+	 *
+	 * PostgreSQL 19 adds REPACK, which replaces CLUSTER and VACUUM FULL and
+	 * dispatches through this same callback. A 19 user who types REPACK was
+	 * previously told "CLUSTER / VACUUM FULL is not supported yet", naming two
+	 * commands they did not type and, on 19, the superseded ones. The error
+	 * should describe what the user asked for.
+	 *
+	 * The hint matters more than the message: the operation is available, under
+	 * a different name. pgcolumnar.vacuum() reclaims space and the ordering
+	 * functions cluster, so this is a spelling difference rather than a missing
+	 * capability, and the error is where someone will look for that.
+	 */
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+#if PG_VERSION_NUM >= 190000
+			 errmsg("columnar: REPACK, CLUSTER and VACUUM FULL are not supported yet"),
+#else
+			 errmsg("columnar: CLUSTER and VACUUM FULL are not supported yet"),
+#endif
+			 errhint("Use pgcolumnar.vacuum() to reclaim space, or "
+					 "pgcolumnar.vacuum_sorted() to rewrite in sorted order.")));
 }
 
 /*

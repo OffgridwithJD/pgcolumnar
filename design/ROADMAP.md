@@ -43,6 +43,12 @@ matrix. Gap specifications are in [gaps/](gaps/).
 
 ## Remaining
 
+**Object storage, read and write.** Parquet and Iceberg data normally live on S3, GCS
+or ADLS, and we read local files only. This is a prerequisite for #388 rather than a
+parallel feature. Reads are #393, writes are #394. It was previously recorded only in
+`PHASE_G_EXTERNAL_PARQUET_PLAN.md` under a heading reading "open decisions", which is
+why nobody found it.
+
 Ordered by value-to-effort. **Gap 27 (Arrow/Parquet interop) is fully complete**:
 export and import, flat and nested, for both Arrow and Parquet, all self-contained
 (no libarrow/libparquet dependency) and matrix-gated. See
@@ -244,14 +250,16 @@ preserve the 15-19 matrix. Detail and sources in
 [POSTGRESQL_VERSION_ADOPTION.md](POSTGRESQL_VERSION_ADOPTION.md):
 
 - Read stream / AIO in the scan — shipped, see the Done table.
-- Virtual generated columns (PostgreSQL 18): confirm read-time generation on a
-  columnar table and add differential coverage.
-- Temporal constraints (`WITHOUT OVERLAPS` in 18, `FOR PORTION OF` in 19): verify
-  enforcement and add coverage.
-- REPACK (PostgreSQL 19): investigate whether concurrent, lower-lock compaction is
-  reachable through the table AM.
+- Virtual generated columns (PostgreSQL 18) — done, covered by
+  `test/generated_columns.sh`. Stored and virtual columns both read correctly on a
+  columnar table, and a virtual column has no chunk written for it at all
+  (`columnar_write_state.c` skips `attgenerated == 'v'`), which the same suite pins.
+- Temporal constraints (`WITHOUT OVERLAPS` in 18, `FOR PORTION OF` in 19) — done,
+  covered by `test/temporal.sh` against the heap oracle, `FOR PORTION OF` gated to 19.
+- REPACK (PostgreSQL 19) — investigated, and the answer was no. It does not work on a
+  columnar table, and the error now says so (#399, #409). Not a remaining item.
 - Optimizer statistics injection (PostgreSQL 18) and a btree skip-scan benchmark
-  line: smaller follow-ups.
+  line: smaller follow-ups, still open with no measurement.
 
 ## Test-harness follow-up
 

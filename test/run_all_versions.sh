@@ -208,7 +208,7 @@ SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SUITES=(harness_selftest docs_style smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
 	differential recovery replication native_backend_crash fuzz fuzz_parquet fuzz_arrow hardening concurrent_diff parallel sorted_projection \
 	arrow_export parquet_export read_stream corruption \
-	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_setting bloom_lazy native_vecskip native_index native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection isolation)
+	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_setting bloom_lazy native_vecskip native_index native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection isolation)
 
 # Default matrix: one assert-enabled pg_config per major, 15 through 19.
 DEFAULT_CONFIGS=(
@@ -338,12 +338,18 @@ runs_alone() {
 	esac
 }
 
+# How many majors were actually built and run. A matrix that ran nothing is not
+# a matrix that passed, and until #418 it said "ALL VERSIONS PASSED" and exited
+# 0 when every configured pg_config was missing. See the summary block.
+VERSIONS_RUN=0
+
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
 		echo "SKIP  $pgc (not executable)"
 		SUMMARY+=("SKIP   $pgc")
 		continue
 	fi
+	VERSIONS_RUN=$((VERSIONS_RUN + 1))
 
 	ver="$("$pgc" --version)"
 	major="$(echo "$ver" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
@@ -581,9 +587,31 @@ echo "===================== MATRIX SUMMARY ============================"
 for line in "${SUMMARY[@]}"; do
 	echo "  $line"
 done
+echo "  versions run: $VERSIONS_RUN of ${#CONFIGS[@]} configured"
 echo "================================================================"
+
+# A run that built nothing is not a pass (#418).
+#
+# The default list names /usr/local/pg15 through /usr/local/pg19. On a box whose
+# assert builds are pg15a through pg19a, every entry misses, each prints one
+# SKIP line, and this block used to print ALL VERSIONS PASSED and exit 0. That
+# output then gets pasted into a pull request as the gate. It is the same defect
+# as check "" "" one level up, and it is worse, because this is the line people
+# read instead of the checks.
+#
+# Reported rather than merely counted, because the count is what nobody looks at.
+if [ "$VERSIONS_RUN" = 0 ]; then
+	echo "NO VERSIONS RAN: every configured pg_config was missing or not executable."
+	echo "  configured: ${CONFIGS[*]}"
+	echo "  Pass the pg_configs this box has, e.g. test/run_all_versions.sh /usr/local/pg18a/bin/pg_config"
+	exit 1
+fi
 if [ "$overall" = 0 ]; then
-	echo "ALL VERSIONS PASSED"
+	if [ "$VERSIONS_RUN" -lt "${#CONFIGS[@]}" ]; then
+		echo "VERSIONS RUN PASSED ($VERSIONS_RUN of ${#CONFIGS[@]}; the rest were skipped)"
+	else
+		echo "ALL VERSIONS PASSED"
+	fi
 else
 	echo "SOME VERSIONS FAILED"
 fi
