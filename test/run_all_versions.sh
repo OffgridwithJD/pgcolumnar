@@ -338,12 +338,18 @@ runs_alone() {
 	esac
 }
 
+# How many majors were actually built and run. A matrix that ran nothing is not
+# a matrix that passed, and until #418 it said "ALL VERSIONS PASSED" and exited
+# 0 when every configured pg_config was missing. See the summary block.
+VERSIONS_RUN=0
+
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
 		echo "SKIP  $pgc (not executable)"
 		SUMMARY+=("SKIP   $pgc")
 		continue
 	fi
+	VERSIONS_RUN=$((VERSIONS_RUN + 1))
 
 	ver="$("$pgc" --version)"
 	major="$(echo "$ver" | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
@@ -581,9 +587,31 @@ echo "===================== MATRIX SUMMARY ============================"
 for line in "${SUMMARY[@]}"; do
 	echo "  $line"
 done
+echo "  versions run: $VERSIONS_RUN of ${#CONFIGS[@]} configured"
 echo "================================================================"
+
+# A run that built nothing is not a pass (#418).
+#
+# The default list names /usr/local/pg15 through /usr/local/pg19. On a box whose
+# assert builds are pg15a through pg19a, every entry misses, each prints one
+# SKIP line, and this block used to print ALL VERSIONS PASSED and exit 0. That
+# output then gets pasted into a pull request as the gate. It is the same defect
+# as check "" "" one level up, and it is worse, because this is the line people
+# read instead of the checks.
+#
+# Reported rather than merely counted, because the count is what nobody looks at.
+if [ "$VERSIONS_RUN" = 0 ]; then
+	echo "NO VERSIONS RAN: every configured pg_config was missing or not executable."
+	echo "  configured: ${CONFIGS[*]}"
+	echo "  Pass the pg_configs this box has, e.g. test/run_all_versions.sh /usr/local/pg18a/bin/pg_config"
+	exit 1
+fi
 if [ "$overall" = 0 ]; then
-	echo "ALL VERSIONS PASSED"
+	if [ "$VERSIONS_RUN" -lt "${#CONFIGS[@]}" ]; then
+		echo "VERSIONS RUN PASSED ($VERSIONS_RUN of ${#CONFIGS[@]}; the rest were skipped)"
+	else
+		echo "ALL VERSIONS PASSED"
+	fi
 else
 	echo "SOME VERSIONS FAILED"
 fi

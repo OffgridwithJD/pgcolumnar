@@ -48,6 +48,25 @@
 
 set -euo pipefail
 
+# set -e aborts this suite at the first unguarded failure, and the verdict block
+# is at the bottom. So an abort ends the run non-zero having printed neither a
+# FAIL line nor AUDIT TEST FAILED, and every check below the abort silently did
+# not run (#418).
+#
+# Observed: a CREATE TABLE carrying COLLATE "en_US" on a box where that locale
+# is not generated killed this suite partway through. The runner recorded
+# audit=FAIL, correctly, and the output showed five PASS lines, one ERROR, and
+# no verdict at all, which reads like a suite that stopped for no reason.
+#
+# The trap says which it was. It does not change the exit status, and it does
+# not turn an abort into a pass; it stops an abort from being mistaken for a
+# short run that went fine.
+AUDIT_REACHED_END=0
+trap 'rc=$?; if [ "$AUDIT_REACHED_END" = 0 ]; then
+	echo; echo "AUDIT TEST ABORTED (exit $rc) before reaching its verdict.";
+	echo "The checks after the failing command did not run.";
+fi' EXIT
+
 . "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"
 
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
@@ -285,6 +304,7 @@ check "same-statement duplicate inserted nothing" \
 q "DROP TABLE ss_dup;" >/dev/null
 
 echo
+AUDIT_REACHED_END=1
 if [ "$fail" = "0" ]; then
 	echo "AUDIT TEST PASSED"
 else
