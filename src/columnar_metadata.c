@@ -1467,6 +1467,41 @@ bool		pgcolumnar_bulk_parallel_writer = false;
  *		Record the native-format catalog rows (PGCN v1, native spec 11). Called
  *		by the native writer's flush. The 2.2-line writer does not use these.
  */
+/*
+ * columnar_relation_is_new_in_xact
+ *		Was this relation created by the transaction that is now writing to it?
+ *
+ *		rd_createSubid is set while a relation's creating (sub)transaction is
+ *		still uncommitted and cleared at commit, so a true answer means no other
+ *		session can see the relation yet. That is the exact condition under which
+ *		the first-writer race below cannot happen: there is no second writer.
+ *
+ *		Deliberately NOT rd_newRelfilelocatorSubid. A relation rewritten by this
+ *		transaction (TRUNCATE, CLUSTER, ALTER TABLE) is still visible to other
+ *		sessions in its previous form, so another backend can be writing to it and
+ *		the race is live. Only creation makes a relation invisible.
+ *
+ *		Opened with NoLock: the caller is mid-write and already holds a lock on
+ *		this relation, and taking another here would be lock traffic on the hot
+ *		flush path for a relcache field.
+ */
+static bool
+columnar_relation_is_new_in_xact(Oid relid)
+{
+	Relation	rel;
+	bool		isNew;
+
+	if (!OidIsValid(relid))
+		return false;
+
+	rel = RelationIdGetRelation(relid);
+	if (!RelationIsValid(rel))
+		return false;
+	isNew = (rel->rd_createSubid != InvalidSubTransactionId);
+	RelationClose(rel);
+	return isNew;
+}
+
 void
 PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 {
@@ -1524,6 +1559,44 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 		}
 	}
 
+	/*
+	 * A relation this transaction created cannot be seen by anyone else, so the
+	 * first-writer race the lock below defends against cannot happen, and the
+	 * fresh snapshot that detects it is not needed either (issue #387).
+	 *
+	 * That matters beyond saving work: GetLatestSnapshot() raises "cannot update
+	 * SecondarySnapshot during a parallel operation" under IsInParallelMode(),
+	 * and CREATE TABLE ... USING pgcolumnar AS SELECT runs the whole executor in
+	 * parallel mode whenever the source plan is parallel, which is the default at
+	 * any size worth loading. So this path failed outright on every major.
+	 *
+	 * The condition is creation, NOT parallel mode. Being in parallel mode says
+	 * nothing about whether a second writer exists; a committed, empty columnar
+	 * table can be first-written by two sessions at once, and skipping the lock
+	 * there would restore the storage_pkey failure the concurrent differential
+	 * suite found. Invisibility is what makes it safe.
+	 *
+	 * The existence check is still needed, because the writer calls this on every
+	 * row-group flush and it must stay idempotent. It reads the active snapshot
+	 * with curcid advanced, which sees this transaction's own earlier insert and
+	 * touches no global snapshot state.
+	 */
+	if (columnar_relation_is_new_in_xact(s->relationOid) && ActiveSnapshotSet())
+	{
+		snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
+		ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+					F_INT8EQ, Int64GetDatum((int64) s->storageId));
+		scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+		exists = HeapTupleIsValid(systable_getnext(scan));
+		systable_endscan(scan);
+		if (exists)
+		{
+			table_close(rel, RowExclusiveLock);
+			return;
+		}
+		goto insert_row;
+	}
+
 	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
 						 (uint32) (s->storageId >> 32),
 						 (uint32) (s->storageId & 0xFFFFFFFF), 2);
@@ -1554,6 +1627,7 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 		return;
 	}
 
+insert_row:
 	memset(nulls, false, sizeof(nulls));
 	values[Anum_native_storage_storage_id - 1] = Int64GetDatum((int64) s->storageId);
 	values[Anum_native_storage_relation_oid - 1] = ObjectIdGetDatum(s->relationOid);
