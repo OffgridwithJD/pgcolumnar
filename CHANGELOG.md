@@ -19,7 +19,9 @@ which was true until that script existed.
   copy-for-cluster path, which pgColumnar does not implement, so a 19 user who
   typed `REPACK` was told that `CLUSTER / VACUUM FULL` was unsupported: two
   commands they had not typed, and on 19 the superseded ones. The message now
-  names the command and hints at `pgcolumnar.vacuum()`, which does the work.
+  names the command and hints at `pgcolumnar.vacuum()`, which does the work. This
+  covers `REPACK (CONCURRENTLY)` too: given a table with an identity index, where
+  PostgreSQL will run it, heap succeeds and a columnar table is refused.
 
 - The extension's exported C symbols are namespaced under `pgcolumnar` (#382).
   Two extensions that both call themselves `columnar` could define the same

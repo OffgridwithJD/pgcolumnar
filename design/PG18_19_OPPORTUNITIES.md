@@ -104,7 +104,11 @@ extension)" and "Allow ReadStream to be consumed as raw block numbers".
   Measured on 19beta2: `REPACK`, `REPACK ... USING INDEX`, `REPACK (VERBOSE)`,
   `CLUSTER` and `VACUUM FULL` all raise, while `REPACK` succeeds on a heap table on
   the same build. `REPACK CONCURRENTLY` is not the syntax; it is
-  `REPACK (CONCURRENTLY)`, and that form fails on heap too, so it is not ours.
+  `REPACK (CONCURRENTLY)`. That form **is** ours: on a fixture with no identity index
+  both access methods are refused by PostgreSQL before the AM is reached, which is
+  what an early reading of this mistook for "not columnar-specific". With a primary
+  key and `wal_level=logical`, heap succeeds and columnar raises our error. The
+  columnar table is undamaged afterwards.
   Pinned by `test/native_repack.sh`. The supported route is `pgcolumnar.vacuum()`.
 
 ## 6. Optimizer statistics injection (PostgreSQL 18)

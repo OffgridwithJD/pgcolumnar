@@ -19,8 +19,14 @@
 # should be rewritten to assert success. That is the intended signal.
 #
 # The heap control is not decoration. Without it, "REPACK fails here" cannot be
-# told apart from "REPACK does not work on this build at all", which matters for
-# REPACK (CONCURRENTLY), whose failure is not columnar-specific.
+# told apart from "REPACK does not work on this build at all".
+#
+# REPACK (CONCURRENTLY) needs two fixtures for the same reason, and the first
+# version of this suite got it wrong. Without an identity index both access
+# methods are refused before the AM is reached, so asserting that failure alone
+# passes for a reason that has nothing to do with us, and would keep passing if
+# our behaviour changed. With a primary key and wal_level=logical, heap succeeds
+# and columnar raises our error, so the concurrent form IS a columnar behaviour.
 #
 # Usage:  test/native_repack.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -28,6 +34,13 @@
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# REPACK (CONCURRENTLY) needs logical decoding of the relation's changes, so the
+# cluster must be able to provide it. Without this the concurrent form fails for a
+# reason that has nothing to do with the access method.
+PGC_EXTRA_CONF="wal_level=logical
+max_locks_per_transaction=1024
+max_wal_senders=10
+max_replication_slots=10"
 pgc_setup "${1:-/usr/local/pg19/bin/pg_config}"
 
 # Version gate, and it must be VISIBLE. A suite that silently passes on 15 to 18
@@ -73,13 +86,49 @@ check "CLUSTER errors the same way" \
 check "VACUUM FULL errors the same way" \
 	"$(case "$(err_of 'VACUUM FULL rp;')" in *"not supported"*) echo yes ;; *) echo no ;; esac)" "yes"
 
-# REPACK (CONCURRENTLY) fails on heap too on this build, so it is recorded rather
-# than attributed to us. "REPACK CONCURRENTLY" without parentheses is not syntax.
-c_col="$(err_of 'REPACK (CONCURRENTLY) rp;')"
-c_heap="$(err_of 'REPACK (CONCURRENTLY) rp_heap;')"
-check "REPACK (CONCURRENTLY) fails on columnar and on heap alike, so it is not ours" \
-	"$( [ -n "$c_col" ] && [ -n "$c_heap" ] && echo yes || echo "no (col=[$c_col] heap=[$c_heap])")" \
+# ---- REPACK (CONCURRENTLY), which needs two fixtures to mean anything ---------
+# "REPACK CONCURRENTLY" without parentheses is not syntax; it is an option.
+#
+# The concurrent form has a precondition: the relation needs an identity index. On
+# a table without one BOTH access methods fail, and the failure says so. Asserting
+# only that is a trap, because the assertion passes for the wrong reason and would
+# keep passing if the columnar behaviour changed. It is kept below, labelled as
+# what it is, and paired with a fixture that MEETS the precondition.
+# The distinction is the assertion: without an identity index the error is
+# PostgreSQL's own precondition ("cannot execute REPACK (CONCURRENTLY) on
+# relation"), raised before the access method is consulted. With one, below, the
+# error is ours. Two different failures that a single "it errors" check would
+# conflate.
+nopk="$(err_of 'REPACK (CONCURRENTLY) rp;')"
+check "without an identity index it is refused by PostgreSQL, not by us" \
+	"$(case "$nopk" in
+		*"not supported"*)          echo "no (ours: $nopk)" ;;
+		*"cannot execute REPACK"*)  echo yes ;;
+		*)                          echo "no ($nopk)" ;;
+	esac)" \
 	"yes"
+
+psql_run "CREATE TABLE rp_pk (id int PRIMARY KEY, v text) USING pgcolumnar;
+	INSERT INTO rp_pk SELECT g, 'x'||g FROM generate_series(1,$ROWS) g;
+	CREATE TABLE rp_pk_heap (id int PRIMARY KEY, v text);
+	INSERT INTO rp_pk_heap SELECT g, 'x'||g FROM generate_series(1,$ROWS) g;"
+pk_rows="$(q 'SELECT count(*) FROM rp_pk')"
+pk_hash="$(q "SELECT md5(string_agg(id::text||':'||v, ',' ORDER BY id)) FROM rp_pk")"
+
+# With the precondition met, heap succeeds. So the concurrent form IS reachable on
+# this build, and a columnar failure is ours rather than a missing primary key.
+check "control: with an identity index, REPACK (CONCURRENTLY) succeeds on heap" \
+	"$(psql_run 'REPACK (CONCURRENTLY) rp_pk_heap;' 2>&1 | grep -c 'ERROR' || true)" "0"
+
+c_pk="$(err_of 'REPACK (CONCURRENTLY) rp_pk;')"
+check "and on a columnar table it raises OUR error, so it is a columnar behaviour" \
+	"$(case "$c_pk" in *"not supported"*) echo yes ;; *) echo "no ($c_pk)" ;; esac)" "yes"
+
+# A half-finished concurrent rewrite would be the bad outcome. It does not happen.
+check "the columnar table is undamaged after the refused concurrent repack: rows" \
+	"$(q 'SELECT count(*) FROM rp_pk')" "$pk_rows"
+check "the columnar table is undamaged after the refused concurrent repack: content" \
+	"$(q "SELECT md5(string_agg(id::text||':'||v, ',' ORDER BY id)) FROM rp_pk")" "$pk_hash"
 
 # ---- the control: the same command works on heap -----------------------------
 check "control: REPACK works on a heap table on this build" \
