@@ -104,8 +104,11 @@ jobs:
           # rather than only hashed, so an empty one is visible in the log
           # instead of silently hashing to a constant.
           echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
-          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
+          # Both inputs must be non-empty; see ci.yml's build job for why a
+          # placeholder instead of a failure is how this protection goes missing.
           test -n "$v"
+          test -n "${ImageOS:-}"
+          h=$(printf '%s\n%s\n' "$ImageOS" "$v" | md5sum | cut -c1-12)
           echo "k=$h" >> "$GITHUB_OUTPUT"
           echo "cache key hash: $h"
 
@@ -345,8 +348,11 @@ jobs:
           # rather than only hashed, so an empty one is visible in the log
           # instead of silently hashing to a constant.
           echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
-          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
+          # Both inputs must be non-empty; see ci.yml's build job for why a
+          # placeholder instead of a failure is how this protection goes missing.
           test -n "$v"
+          test -n "${ImageOS:-}"
+          h=$(printf '%s\n%s\n' "$ImageOS" "$v" | md5sum | cut -c1-12)
           echo "k=$h" >> "$GITHUB_OUTPUT"
           echo "cache key hash: $h"
 

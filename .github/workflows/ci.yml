@@ -112,10 +112,14 @@ jobs:
           # rather than only hashed, so an empty one is visible in the log
           # instead of silently hashing to a constant.
           echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
-          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
-          # A hash of nothing is a constant, which would silently restore the
-          # frozen key this step exists to remove.
+          # Both inputs must be non-empty. A hash of nothing is a constant, and a
+          # constant silently restores the frozen key this step exists to remove.
+          # An empty ImageOS is how the runner-image protection went missing the
+          # first time, and folding in a placeholder instead of failing is how it
+          # would go missing again.
           test -n "$v"
+          test -n "${ImageOS:-}"
+          h=$(printf '%s\n%s\n' "$ImageOS" "$v" | md5sum | cut -c1-12)
           echo "k=$h" >> "$GITHUB_OUTPUT"
           echo "cache key hash: $h"
 
@@ -339,10 +343,14 @@ jobs:
           # rather than only hashed, so an empty one is visible in the log
           # instead of silently hashing to a constant.
           echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
-          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
-          # A hash of nothing is a constant, which would silently restore the
-          # frozen key this step exists to remove.
+          # Both inputs must be non-empty. A hash of nothing is a constant, and a
+          # constant silently restores the frozen key this step exists to remove.
+          # An empty ImageOS is how the runner-image protection went missing the
+          # first time, and folding in a placeholder instead of failing is how it
+          # would go missing again.
           test -n "$v"
+          test -n "${ImageOS:-}"
+          h=$(printf '%s\n%s\n' "$ImageOS" "$v" | md5sum | cut -c1-12)
           echo "k=$h" >> "$GITHUB_OUTPUT"
           echo "cache key hash: $h"
 
