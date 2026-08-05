@@ -38,8 +38,8 @@
 #   S4  wide projection under a join, does the join force decoding of columns
 #       nothing needs
 #
-# Arms: heap, pgColumnar, and TimescaleDB when it is installed. A missing
-# TimescaleDB is announced, never silently skipped.
+# Arms: heap and pgColumnar. See the BENCH_ARMS note below for why TimescaleDB is
+# not one of them.
 #
 # ---------------------------------------------------------------------------
 # Usage
@@ -51,7 +51,14 @@
 #   BENCH_REPS      timed repetitions, median reported     (default 3)
 #   BENCH_PORT      throwaway cluster port                 (default 55471)
 #   BENCH_SHAPES    quantised,random                       (default both)
-#   BENCH_ARMS      heap,columnar,timescale                (default heap,columnar)
+#   BENCH_ARMS      heap,columnar                          (default heap,columnar)
+#
+# A TimescaleDB arm is NOT offered. It needs create_hypertable plus the
+# columnstore conversion, and until #428 is fixed a parallel query over a
+# compressed hypertable fails outright when pgcolumnar is loaded, so the arm
+# could only ever run serially and would not be a fair comparison. The flag is
+# absent rather than accepting a value that would have built a plain heap table
+# and labelled it TimescaleDB.
 #   BENCH_KEEP      1 to leave the cluster up afterwards   (default 0)
 #
 # Run on an idle machine against a non-assert build. Written fresh for
@@ -91,15 +98,6 @@ NCPU=$(nproc)
 # TimescaleDB has to be preloaded before the cluster starts, so decide here.
 # A requested arm whose library is absent is announced, never silently dropped.
 PRELOAD=pgcolumnar
-case ",$ARMS," in
-	*,timescale,*)
-		if [ -f "$("$PG_CONFIG" --pkglibdir)/timescaledb.so" ]; then
-			PRELOAD="timescaledb,pgcolumnar"
-		else
-			note "SKIP   the timescale arm was asked for and timescaledb.so is not installed"
-			ARMS="${ARMS//timescale/}"; ARMS="${ARMS//,,/,}"; ARMS="${ARMS%,}"; ARMS="${ARMS#,}"
-		fi ;;
-esac
 MEMGB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
 cat >> "$PGDATA/postgresql.conf" <<CONF
 shared_preload_libraries = '$PRELOAD'
