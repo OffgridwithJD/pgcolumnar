@@ -110,4 +110,5 @@ nav:
       - SQL reference: sql-reference.md
       - Limitations & compatibility: limitations.md
   - Development:
+      - Roadmap: roadmap.md
       - Testing: testing.md
