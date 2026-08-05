@@ -65,13 +65,21 @@ n=$(echo "$out" | grep -c '^  ok' || true)
 check "and it actually examined the documents" \
 	"$([ "$n" -ge 10 ] && echo yes || echo "no (examined $n)")" "yes"
 
-# CHANGELOG.md: dash characters only. See the scope note above.
 # The roadmap has to stay reachable. It went unfound once because the only routes to it
 # were a raw GitHub link and a line in the changelog (#395). A page that is not in the nav
 # is not published, and nothing else would notice.
+#
+# Reachability is two facts, so both are asserted. The nav check alone passes when the
+# PAGE is deleted and the entry is kept, which is a broken link rather than reachability.
+# That case is also caught by "mkdocs build --strict" in docs.yml, which fails on a nav
+# entry pointing at nothing. Half a property here and half in a workflow is how the
+# missing half goes unnoticed, so both halves are stated here.
 nav_roadmap=$(grep -c "roadmap.md" "$SRCDIR/mkdocs.yml" || true)
 check "the roadmap is in the documentation nav" "$([ "$nav_roadmap" -ge 1 ] && echo yes || echo no)" "yes"
+check "and the page that nav entry points at exists" \
+	"$([ -f "$SRCDIR/docs/roadmap.md" ] && echo yes || echo no)" "yes"
 
+# CHANGELOG.md: dash characters only. See the scope note above.
 dashes=$(grep -c '—\|–' "$SRCDIR/CHANGELOG.md" || true)
 check "CHANGELOG.md carries no em or en dash" "$dashes" "0"
 
