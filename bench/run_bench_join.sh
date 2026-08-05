@@ -89,6 +89,45 @@ require() {  # require <description> <got> <want>
 	return 0
 }
 
+# Ratio of two timings, or "-" when either side is missing.
+#
+# Testing the CONCATENATION "$a$b" only catches BOTH sides missing. One empty
+# side concatenates to a non-empty string, falls through, and divides:
+#
+#   heap=[1500] col=[    ]  ->  0.00   reads as a 100 percent win
+#   heap=[    ] col=[ 800]  ->  inf
+#
+# 0.00 is the dangerous one, in a table whose whole purpose is to be quoted
+# somewhere without the run log beside it. Same class as #418, and timed()
+# returns empty on any path the ERROR branch does not catch: a cancelled query,
+# a lost connection, or psql changing its timing format.
+#
+# test/lib.sh has check_ratio for suites. This is bench/, which does not source
+# the test harness, so the guard lives here and is self-tested below.
+ratio() {  # ratio <numerator> <denominator> -> "n.nn" or "-"
+	case "$1" in '' | *ERR*) echo '-'; return ;; esac
+	case "$2" in '' | *ERR*) echo '-'; return ;; esac
+	if [ "$(awk -v x="$2" 'BEGIN { print (x + 0 == 0) ? 1 : 0 }')" = 1 ]; then
+		echo '-'; return
+	fi
+	awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a / b }'
+}
+
+# Prove the guard rejects what it claims to, before any number is printed. A
+# ratio helper that silently passes a half-empty pair is worse than none, and
+# this is the third time this shape has appeared in my own work today.
+ratio_selftest() {
+	local bad=0 got
+	got=$(ratio "" "800");    [ "$got" = "-" ] || { echo "FATAL ratio() accepted an empty numerator"; bad=1; }
+	got=$(ratio "1500" "");   [ "$got" = "-" ] || { echo "FATAL ratio() accepted an empty denominator"; bad=1; }
+	got=$(ratio "1500" "0");  [ "$got" = "-" ] || { echo "FATAL ratio() divided by zero"; bad=1; }
+	got=$(ratio "ERR" "800"); [ "$got" = "-" ] || { echo "FATAL ratio() accepted ERR"; bad=1; }
+	got=$(ratio "800" "1600");[ "$got" = "0.50" ] || { echo "FATAL ratio() got $got for 800/1600"; bad=1; }
+	[ "$bad" = 0 ] || exit 1
+	note "   ratio guard self-test: ok"
+}
+ratio_selftest
+
 note "== join benchmark, $SCALE fact rows, $REPS reps, shapes [$SHAPES], arms [$ARMS]"
 note "   $("$PG_CONFIG" --version)"
 
@@ -288,11 +327,7 @@ for shape in "${SHAPE_A[@]}"; do
 	for shp in $SHAPE_IDS; do
 		h="${MS["$shape:$shp:heap"]:-}"
 		c="${MS["$shape:$shp:columnar"]:-}"
-		r="-"
-		case "$h$c" in
-			*ERR*|"") ;;
-			*) r=$(awk -v a="$c" -v b="$h" 'BEGIN { printf "%.2f", a / b }') ;;
-		esac
+		r=$(ratio "$c" "$h")
 		printf '%-4s %-32s %12s %12s %10s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r"
 	done
 	hs=$($P -c "SELECT pg_total_relation_size('$(fact_name heap $shape)')")
