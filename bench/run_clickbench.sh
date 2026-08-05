@@ -12,11 +12,25 @@
 # What this script does NOT contain, on purpose
 # ---------------------------------------------------------------------------
 #
-# The ClickBench schema and its 43 queries are not copied into this repository.
-# PROVENANCE.md says "Do not copy its test files or its expected output", and a
-# benchmark definition from another project is that. It is fetched from upstream
-# at run time, into the data directory, and never into the tree. Our comparison
-# oracle is the heap arm of this same run, not anybody else's expected output.
+# The ClickBench schema and its 43 queries are not copied into this repository,
+# and there are two separate reasons. Either one is sufficient.
+#
+# ClickBench is licensed CC BY-NC-SA 4.0. It is NOT Apache-2.0; that is
+# ClickHouse the database, in a different repository, and an earlier revision of
+# this comment had it wrong. NonCommercial and ShareAlike are restrictions the
+# MIT license this project ships under does not carry, so an in-tree copy would
+# put material into an MIT distribution that downstream users cannot use on MIT
+# terms. PROVENANCE.md opens by saying the project is built clean-room so that it
+# "can be released under the MIT License".
+#
+# And PROVENANCE.md says "Do not copy its test files or its expected output", and
+# a benchmark definition from another project is that.
+#
+# So it is fetched from upstream at run time, into the data directory, and never
+# into the tree. Feeding it to psql unmodified is use rather than copying, which
+# PROVENANCE.md already draws a line around: "Running a program is not copying
+# it." Our comparison oracle is the heap arm of this same run, not anybody
+# else's expected output.
 #
 # The numbers this produces are comparable to published ClickBench results only
 # to the extent the protocol below matches theirs. Where it deviates, it says so

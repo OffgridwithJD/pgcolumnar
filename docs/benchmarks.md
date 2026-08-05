@@ -667,9 +667,11 @@ matrix. Nothing downloads until you ask for it.
 PGC_CB_ROWS=10000000 bench/run_clickbench.sh /path/to/pg18n/bin/pg_config
 ```
 
-The schema and the queries are not stored in this repository. The harness fetches
-them from upstream at run time. Our comparison oracle is the heap arm of the same
-run.
+The schema and the queries are not stored in this repository. ClickBench is
+licensed CC BY-NC-SA 4.0, and NonCommercial and ShareAlike are restrictions this
+project's MIT license does not carry. The harness fetches the definition from
+upstream at run time and copies nothing. Our comparison oracle is the heap arm of
+the same run.
 
 The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is

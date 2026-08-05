@@ -544,3 +544,17 @@ oracle, so none changes query results.
   (E2 FSST, F mutation and clustering, G interop) branch off `main` directly and
   land as matrix-gated PRs into `main`; the `re-origination` integration branch is
   retired. No upstream source consulted at any point.
+- 2026-08-05. ClickBench benchmark runner added (`bench/run_clickbench.sh`, issue
+  #421). ClickBench is licensed **CC BY-NC-SA 4.0**, not Apache-2.0, which an
+  earlier note on that issue stated incorrectly; `ClickHouse/ClickHouse` is
+  Apache-2.0 and `ClickHouse/ClickBench` is not. Nothing from it is copied into
+  this repository. The runner fetches `postgresql/create.sql` and
+  `postgresql/queries.sql` from upstream at run time, into the benchmark data
+  directory, and feeds them to `psql` unmodified. The comparison oracle is the
+  heap arm of the same run, not any upstream expected output. Owner decided on
+  2026-08-05 to keep the run-time fetch rather than take a durable in-tree copy,
+  after the license was corrected. The measured numbers published in
+  `docs/benchmarks.md` are our own, produced on our own hardware. The dataset
+  (`hits.tsv.gz`) is downloaded for local measurement and is not redistributed;
+  its own licensing is unestablished and it must not be added to the tree without
+  one.
