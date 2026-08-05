@@ -737,8 +737,14 @@ chunk groups that hold the candidates.
 queries are `GROUP BY`. So a default run measures this engine with its main
 analytical accelerator disabled.
 
-The harness therefore runs a third arm with both turned on. The result does not
-support turning them on by default:
+The harness therefore runs a third arm with them turned on. Read that arm as "these
+GUCs are set" and not as "the grouped node ran". On this dataset the planner
+declines the grouped node on most shapes. Measured on the same table, it is
+declined at 5,727, 18,344 and 49,511 groups, and chosen only at 4,906,030, where
+it then ties. So the differences below cannot be attributed to it. See issue
+#369.
+
+The result does not support turning these settings on by default:
 
 | query | default | accelerated |
 | --- | ---: | ---: |
@@ -749,9 +755,12 @@ support turning them on by default:
 | q31 | 0.96x | **1.48x** |
 | q15 | 0.84x | **0.92x** |
 
-Three queries improve and three get worse. `q18` more than doubles its time. This
-is measured on one shape at one scale, and it is a reason to investigate rather
-than a conclusion. See issue #369.
+Three queries improve and three get worse. This is a reason to investigate rather
+than a conclusion, and one caution belongs with it. For `q18` and `q31` the plan
+is **identical** with these settings on and off. Their rows are therefore run to
+run variation, and not an effect of the settings. They are left in the table
+because removing the rows that embarrass a reading is how a benchmark page stops
+being trustworthy.
 
 One query, `q21`, fails outright with the accelerations on. It is
 `COUNT(*) WHERE URL LIKE '%google%'`, and it raises

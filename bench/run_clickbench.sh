@@ -351,6 +351,21 @@ if printf '%s\n' "${ARMS[@]}" | grep -q columnar_tuned; then
 	uplan=$($PSQL -At -c "EXPLAIN (COSTS OFF) SELECT CounterID, count(*) FROM hits_col GROUP BY CounterID" 2>&1)
 	require "the default arm does not, so the two arms differ" \
 		"$(grep -qi 'Vectorized' <<<"$uplan" && echo no || echo yes)" "yes" || fail=1
+
+	# The two markers are NOT the same thing, and the check above cannot tell them
+	# apart. "Columnar Vectorized Aggregates" is printed for the ungrouped fold as
+	# well, so a bare grep for "Vectorized" is satisfied by the ungrouped
+	# acceleration alone, and the GROUPED one may never engage.
+	#
+	# That matters because the tuned arm sets three GUCs at once. Anyone reading
+	# the table below will attribute a difference to the grouped aggregate, and on
+	# this dataset the planner declines it on most shapes: measured on the same
+	# table, it is declined at 5,727, 18,344 and 49,511 groups, and chosen only at
+	# 4,906,030 (#369). So the arm is labelled by what it SETS and the grouped
+	# marker is reported separately, rather than being implied.
+	gk=$(grep -ci 'Vectorized Group Keys' <<<"$vplan")
+	note "   grouped-aggregate marker on the probe shape: $([ "$gk" -gt 0 ] && echo present || echo ABSENT)"
+	note "   so the tuned arm means 'these three GUCs set', not 'the grouped node ran'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -383,6 +398,18 @@ run_one() {  # run_one <arm> <sql>
 	fi
 	ms=$(grep -oE 'Time: [0-9.]+ ms' <<<"$out" | tail -1 | grep -oE '[0-9.]+')
 	printf '%s\n' "${ms:-ERR}"
+}
+
+# Did the GROUPED vectorized node actually run for this query on this arm? A
+# difference in the table means nothing about that node unless it engaged, and on
+# this dataset it usually does not (#369).
+grouped_engaged() {  # grouped_engaged <arm> <sql>
+	local arm="$1" tbl
+	tbl=$(arm_table "$arm")
+	env "$BINDIR/psql" -h /tmp -p "$CB_PORT" -U postgres -d clickbench -X -At \
+		-c "$(arm_settings "$arm")" \
+		-c "EXPLAIN (COSTS OFF) ${2//FROM hits/FROM $tbl}" 2>&1 |
+		grep -qi 'Vectorized Group Keys' && echo yes || echo no
 }
 
 declare -A COLD HOT ERRS
