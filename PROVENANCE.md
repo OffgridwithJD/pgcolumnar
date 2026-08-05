@@ -551,9 +551,11 @@ oracle, so none changes query results.
   this repository. The runner fetches `postgresql/create.sql` and
   `postgresql/queries.sql` from upstream at run time, into the benchmark data
   directory, and feeds them to `psql` unmodified. The comparison oracle is the
-  heap arm of the same run, not any upstream expected output. Owner decided on
-  2026-08-05 to keep the run-time fetch rather than take a durable in-tree copy,
-  after the license was corrected. The measured numbers published in
+  heap arm of the same run, not any upstream expected output. **Proposed
+  2026-08-05: keep the run-time fetch rather than take a durable in-tree copy.
+  Owner decision pending, and the NonCommercial term's effect on publishing
+  benchmark numbers is a separate question that a run-time fetch does not
+  address.** The measured numbers published in
   `docs/benchmarks.md` are our own, produced on our own hardware. The dataset
   (`hits.tsv.gz`) is downloaded for local measurement and is not redistributed;
   its own licensing is unestablished and it must not be added to the tree without

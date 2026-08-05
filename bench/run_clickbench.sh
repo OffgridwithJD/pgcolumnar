@@ -118,6 +118,25 @@ CB_MAXGROUPS="${PGC_CB_MAXGROUPS:-200000000}"
 CB_URL_BASE="https://raw.githubusercontent.com/ClickHouse/ClickBench/main/postgresql"
 CB_TSV_URL="https://datasets.clickhouse.com/hits_compatible/hits.tsv.gz"
 
+# Ratio of two timings, or "-" when either side is missing.
+#
+# Testing the CONCATENATION "$a$b" only catches BOTH sides missing. One empty
+# side concatenates to a non-empty string and divides, giving 0.00 or inf. 0.00
+# is the dangerous one: it reads as a 100 percent win in a table meant to be
+# quoted without the run log beside it. Same class as #418.
+ratio() {  # ratio <numerator> <denominator> -> "n.nn" or "-"
+	case "$1" in '' | *ERR*) echo '-'; return ;; esac
+	case "$2" in '' | *ERR*) echo '-'; return ;; esac
+	if [ "$(awk -v x="$2" 'BEGIN { print (x + 0 == 0) ? 1 : 0 }')" = 1 ]; then
+		echo '-'; return
+	fi
+	awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a / b }'
+}
+# Proved before any number is printed.
+[ "$(ratio '' 800)" = '-' ] && [ "$(ratio 1500 '')" = '-' ] && [ "$(ratio 1500 0)" = '-' ] \
+	&& [ "$(ratio ERR 800)" = '-' ] && [ "$(ratio 800 1600)" = '0.50' ] \
+	|| { echo "FATAL the ratio guard does not reject what it claims to"; exit 1; }
+
 fail=0
 note() { printf '%s\n' "$*"; }
 die()  { printf 'FATAL  %s\n' "$*" >&2; exit 1; }
@@ -491,16 +510,12 @@ for q in $(seq 1 "$qn"); do
 	h="${HOT["$q:heap"]:-}"
 	c="${HOT["$q:columnar"]:-}"
 	tu="${HOT["$q:columnar_tuned"]:-}"
-	case "$h$c" in
-		*ERR*|"") ;;
-		*) r1=$(awk -v a="$c" -v b="$h" 'BEGIN { printf "%.2f", a / b }')
-		   if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ]; then
-			   wins=$((wins + 1)); else losses=$((losses + 1)); fi ;;
-	esac
-	case "$h$tu" in
-		*ERR*|"") ;;
-		*) r2=$(awk -v a="$tu" -v b="$h" 'BEGIN { printf "%.2f", a / b }') ;;
-	esac
+	r1=$(ratio "$c" "$h")
+	if [ "$r1" != "-" ]; then
+		if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ]; then
+			wins=$((wins + 1)); else losses=$((losses + 1)); fi
+	fi
+	r2=$(ratio "$tu" "$h")
 	printf ' %10s %10s\n' "$r1" "$r2"
 done
 echo
