@@ -356,9 +356,18 @@ check_num() {
 # absence is what produced the empty measurement in the first place; awk is
 # required by POSIX and is present wherever these suites can run at all.
 #
-# A zero denominator is not a ratio. A zero numerator is reported rather than
-# passed, because "the thing we measured cost nothing" is nearly always "the
-# thing we measured did not happen", which is the same defect one layer down.
+# Zero on EITHER side is refused, not only the denominator.
+#
+# The first version of this checked only the denominator while this comment
+# claimed both. The same commit changed column_projection.sh's bufs() to sum with
+# awk, which returns 0 where it used to return the empty string, and that
+# converted a failure mode this helper rejects into one it accepted: a projected
+# read touching no buffers gives a ratio of 0.00, inside any bound, and passes.
+# #418 moved rather than closed, inside the very check that started it.
+#
+# A zero numerator is "the thing we measured cost nothing", which is nearly
+# always "the thing we measured did not happen". A call site that genuinely needs
+# to permit zero should say so under its own name rather than get it by default.
 check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 	local name="$1" a="$2" b="$3" max="$4" ratio
 
@@ -369,10 +378,10 @@ check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 			"a=[$a] b=[$b] max=[$max]"
 		return 1
 	fi
-	if [ "$(awk -v x="$b" 'BEGIN { print (x + 0 == 0) ? "yes" : "no" }')" = yes ]; then
+	if [ "$(awk -v x="$a" -v y="$b" 'BEGIN { print (x + 0 == 0 || y + 0 == 0) ? "yes" : "no" }')" = yes ]; then
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
-		echo "FAIL  $name: the denominator is zero, so there is no ratio:" \
+		echo "FAIL  $name: a side of the ratio is zero, so nothing was measured:" \
 			"a=[$a] b=[$b]"
 		return 1
 	fi

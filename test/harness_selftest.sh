@@ -289,6 +289,11 @@ check "check_ratio refuses an empty measurement" \
 	"$(_probe check_ratio "empty" "" "100" "0.5")" "1"
 check "check_ratio refuses a zero denominator rather than dividing by it" \
 	"$(_probe check_ratio "zero denom" "10" "0" "0.5")" "1"
+# The numerator matters as much, and for a while this helper only checked the
+# denominator while its comment claimed both. A measurement of zero is inside
+# every bound, so it passed.
+check "check_ratio refuses a zero numerator, which is inside every bound" \
+	"$(_probe check_ratio "zero numerator" "0" "100" "0.5")" "1"
 check "check_ratio passes a ratio inside its bound" \
 	"$(_probe check_ratio "inside" "10" "100" "0.5")" "0"
 check "check_ratio fails a ratio outside its bound" \
