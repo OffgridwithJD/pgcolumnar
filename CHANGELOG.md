@@ -14,6 +14,14 @@ which was true until that script existed.
 
 ### Changed
 
+- The unsupported-rewrite error names `REPACK` on PostgreSQL 19 (#399). `REPACK`
+  replaces `CLUSTER` and `VACUUM FULL` in 19 and dispatches through the same
+  copy-for-cluster path, which pgColumnar does not implement, so a 19 user who
+  typed `REPACK` was told that `CLUSTER / VACUUM FULL` was unsupported: two
+  commands they had not typed, and on 19 the superseded ones. The message now
+  names the command and hints at `pgcolumnar.vacuum()`, which does the work. This
+  covers `REPACK (CONCURRENTLY)` too: given a table with an identity index, where
+  PostgreSQL will run it, heap succeeds and a columnar table is refused.
 - `CREATE TABLE ... USING pgcolumnar AS SELECT` no longer fails when the source
   plan is parallel (#387). The storage-row creation path re-checked for an
   existing row against `GetLatestSnapshot()`, which raises "cannot update
