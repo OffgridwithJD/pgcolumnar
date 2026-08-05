@@ -87,6 +87,15 @@ check "partial index finds the row inside its predicate" \
 
 # The oracle, depending on nothing but PostgreSQL. Compare the FULL ordered result of a
 # forced index scan against a forced seq scan.
+#
+# Both sides must be a real md5. A down cluster, an errored query or a predicate that
+# matches nothing all yield "", and `check "" ""` compares nothing with nothing and
+# prints PASS (#418). This oracle is the strongest assertion in the file, so it is the
+# worst one to have silently comparing two empty strings.
+#
+# Local guard on purpose. #418 proposes `check_num` in `test/lib.sh` and
+# @ChronicallyJD owns it; this file should adopt that helper when it lands and drop
+# the check below.
 agree() {  # $1 label, $2 predicate, $3 selected expression
 	local viaix viaseq
 	viaix=$(qset "SET enable_seqscan=off; SET enable_bitmapscan=off" \
@@ -95,6 +104,11 @@ agree() {  # $1 label, $2 predicate, $3 selected expression
 	viaseq=$(qset "SET enable_indexscan=off; SET enable_bitmapscan=off; SET enable_indexonlyscan=off" \
 	              "SELECT md5(string_agg(t::text, ',' ORDER BY t))
 	                 FROM (SELECT $3 AS t FROM w WHERE $2) s")
+	if ! grep -qE '^[0-9a-f]{32}$' <<<"$viaix" || ! grep -qE '^[0-9a-f]{32}$' <<<"$viaseq"; then
+		check "$1 (both sides must be a real result, not empty)" \
+			"index=[$viaix] seq=[$viaseq]" "two md5 hashes"
+		return
+	fi
 	check "$1" "$viaix" "$viaseq"
 }
 agree "plain index agrees with a sequential scan"   "k BETWEEN 1000 AND 9999"        "k"
