@@ -1583,6 +1583,30 @@ PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
  *
  *		A NULL set means "all columns", matching PgColumnarBeginRead.
  */
+/*
+ * PgColumnarReadProjectedCount
+ *		How many columns this reader will actually decode.
+ *
+ *		Read from colWanted, the field the group loader consults, so a caller
+ *		reporting a projection reports what the reader WILL DO rather than what
+ *		the caller computed and may have failed to apply. That distinction is
+ *		the whole point: a projection computed and then dropped on the floor is
+ *		exactly the bug this accessor exists to make visible (#413).
+ */
+int
+PgColumnarReadProjectedCount(PgColumnarReadState *readState)
+{
+	int			pc;
+	int			n = 0;
+
+	for (pc = 0; pc < readState->natts; pc++)
+	{
+		if (readState->colWanted[pc])
+			n++;
+	}
+	return n;
+}
+
 void
 PgColumnarReadSetProjection(PgColumnarReadState *readState,
 							Bitmapset *projectedColumns)

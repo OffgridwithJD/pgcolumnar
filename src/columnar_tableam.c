@@ -1507,25 +1507,15 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		pull_varattnos((Node *) index_info->ii_Expressions, 1, &needed);
 		pull_varattnos((Node *) index_info->ii_Predicate, 1, &needed);
 
+		/*
+		 * nProjected is a required out-parameter, not the number we report.
+		 * The DEBUG1 line below reads the count off the reader instead; see
+		 * the comment there for why.
+		 */
 		projected = PgColumnarProjectionFromAttnos(needed,
 												 RelationGetDescr(table_rel)->natts,
 												 &nProjected);
 	}
-
-	/*
-	 * Say what was projected, and which reader it was applied to, so a test can
-	 * assert the projection NARROWED rather than infer it from a stopwatch. A
-	 * fix here that silently did nothing would pass every correctness check and
-	 * a wall-clock check on a quiet machine, which is the failure mode this
-	 * projection is being added to avoid.
-	 *
-	 * DEBUG1, so it costs nothing at the default log level.
-	 */
-	elog(DEBUG1,
-		 "columnar: %s index build on \"%s\" projecting %d of %d columns",
-		 scan != NULL ? "parallel" : "serial",
-		 RelationGetRelationName(index_rel), nProjected,
-		 RelationGetDescr(table_rel)->natts);
 
 	if (scan != NULL)
 	{
@@ -1563,6 +1553,27 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 									  projected, 0, NULL);
 		ownReadState = true;
 	}
+
+	/*
+	 * Say which branch ran and how wide the reader it produced will actually
+	 * read, so a test can assert the projection NARROWED rather than infer it
+	 * from a stopwatch. A fix that silently did nothing would pass every
+	 * correctness check, and a wall-clock check on a quiet machine, which is
+	 * the failure mode this projection is being added to avoid.
+	 *
+	 * The count comes from the READER, not from nProjected. Reporting what we
+	 * computed would keep printing "1 of 20" if the parallel branch stopped
+	 * applying it, and the assertion guarding that branch would pass while the
+	 * build read every column. Reporting what the reader will decode cannot.
+	 *
+	 * DEBUG1, so it costs nothing at the default log level.
+	 */
+	elog(DEBUG1,
+		 "columnar: %s index build on \"%s\" projecting %d of %d columns",
+		 scan != NULL ? "parallel" : "serial",
+		 RelationGetRelationName(index_rel),
+		 PgColumnarReadProjectedCount(readState),
+		 RelationGetDescr(table_rel)->natts);
 
 	while (true)
 	{

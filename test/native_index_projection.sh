@@ -21,6 +21,9 @@
 #     evaluates against unset slot values, which is a wrong answer and not a slow one.
 #  3. a forced index scan and a forced seq scan agree over the FULL ordered result.
 #     Point lookups can be satisfied by an index that is wrong for keys nobody asked for.
+#  4. the PARALLEL build projects as well. Its reader arrives through the table-AM scan
+#     interface, which carries no projection, and it is the branch core takes by default
+#     for any table of consequential size. See the section below for the measurements.
 #
 # amcheck runs where the build has contrib and skips VISIBLY where it does not. Source
 # builds have no contrib, and a silent skip is the defect this file exists to prevent.
