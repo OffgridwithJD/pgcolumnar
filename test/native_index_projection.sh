@@ -93,9 +93,9 @@ check "partial index finds the row inside its predicate" \
 # prints PASS (#418). This oracle is the strongest assertion in the file, so it is the
 # worst one to have silently comparing two empty strings.
 #
-# Local guard on purpose. #418 proposes `check_num` in `test/lib.sh` and
-# @ChronicallyJD owns it; this file should adopt that helper when it lands and drop
-# the check below.
+# The emptiness half is `check_text` in `test/lib.sh` now (#418, #422), so this file no
+# longer carries its own version of it. The shape half stays here: an md5 is 32 hex
+# characters, and this file knows that where the shared helper only knows "not empty".
 agree() {  # $1 label, $2 predicate, $3 selected expression
 	local viaix viaseq
 	viaix=$(qset "SET enable_seqscan=off; SET enable_bitmapscan=off" \
@@ -105,11 +105,11 @@ agree() {  # $1 label, $2 predicate, $3 selected expression
 	              "SELECT md5(string_agg(t::text, ',' ORDER BY t))
 	                 FROM (SELECT $3 AS t FROM w WHERE $2) s")
 	if ! grep -qE '^[0-9a-f]{32}$' <<<"$viaix" || ! grep -qE '^[0-9a-f]{32}$' <<<"$viaseq"; then
-		check "$1 (both sides must be a real result, not empty)" \
+		check "$1 (both sides must be a real md5, not empty or an error)" \
 			"index=[$viaix] seq=[$viaseq]" "two md5 hashes"
 		return
 	fi
-	check "$1" "$viaix" "$viaseq"
+	check_text "$1" "$viaix" "$viaseq"
 }
 agree "plain index agrees with a sequential scan"   "k BETWEEN 1000 AND 9999"        "k"
 agree "late-column index agrees"                    "c18 > repeat('x',80)||'99000'"  "k"
