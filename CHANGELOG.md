@@ -42,6 +42,18 @@ which was true until that script existed.
   setting to the other's storage.
 - `default_version` moves from `1.0-dev` to `1.0-alpha`, so
   `SELECT extversion FROM pg_extension` now agrees with `VERSION`.
+- `CREATE INDEX` decodes only the columns the index needs (#413). The index
+  build received an `IndexInfo` carrying the key columns and the expression and
+  predicate trees, and discarded it, so a one-column index on a wide table read
+  every column. Both readers are now projected: the one a serial build opens for
+  itself, and the shared scan a parallel build arrives with, which comes through
+  the table-access-method scan interface and has nowhere to carry a projection.
+  The parallel branch is not a corner case. With every parallel setting left at
+  its default, a 1.5 million row table of incompressible text, 459 MB on disk,
+  is built in parallel, so that is the branch a table of consequential size
+  takes. On 300,000 rows of 20 columns on PostgreSQL 18, a one-column index
+  drops from 568 ms to 73 ms with workers allowed, against 563 ms for the same
+  index on a heap table.
 
 ### Upgrading
 

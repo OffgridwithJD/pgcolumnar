@@ -451,6 +451,10 @@ extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * ------------------------------------------------------------------------- */
 extern uint64 PgColumnarNextStorageId(void);
 extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
+
+/* projection: needed attnos (pull_varattnos form) -> the reader's 0-based set */
+extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
+											   int *nProjected);
 extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
 									int64 lastGroup);
 extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
@@ -609,6 +613,18 @@ extern int64 PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
 									  const uint64 *restrictGroups,
 									  int nRestrictGroups);
 extern void PgColumnarParquetCheckExportable(Relation rel);
+
+/*
+ * Column projection on an already-opened reader (#413). The table-AM scan
+ * interface has nowhere to carry a projection, so a reader obtained through it
+ * reads every column; a caller that knows better narrows it here, before the
+ * first read. PgColumnarReadProjectedCount reports what the reader WILL decode,
+ * read off colWanted, so a caller reporting a projection cannot report one it
+ * failed to apply.
+ */
+extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
+										Bitmapset *projectedColumns);
+extern int	PgColumnarReadProjectedCount(PgColumnarReadState *readState);
 
 /*
  * Parallel scan (gap 23): point the read state at a shared atomic that hands out

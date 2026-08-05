@@ -29,6 +29,7 @@
 #include "executor/tuptable.h"
 #include "miscadmin.h"
 #include "nodes/pathnodes.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/plancat.h"
 #include "port/atomics.h"
@@ -1431,6 +1432,8 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 {
 	PgColumnarReadState *readState;
 	bool		ownReadState;
+	Bitmapset  *projected;
+	int			nProjected = 0;
 	EState	   *estate;
 	ExprContext *econtext;
 	ExprState  *predicate;
@@ -1470,6 +1473,50 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 	 * snapshot. The reader advances the command id internally for
 	 * read-your-writes.
 	 */
+	/*
+	 * Project. The columns this build needs are all in our own arguments and we
+	 * were throwing them away, so a one-column index on a wide table decoded
+	 * every column (#413).
+	 *
+	 * Three sources, and missing any of them reads unset slot values:
+	 *   ii_IndexAttrNumbers  the key columns
+	 *   ii_Expressions       an expression index references more
+	 *   ii_Predicate         a partial index evaluates against more
+	 *
+	 * PgColumnarProjectionFromAttnos returns NULL for "every column", which
+	 * covers a whole-row or system-column reference, and is what the custom scan
+	 * already does with the same escapes.
+	 *
+	 * Computed before the branch because BOTH readers need it. Every
+	 * participant in a parallel build computes the same set from the same
+	 * IndexInfo, so they agree without having to communicate.
+	 */
+	{
+		Bitmapset  *needed = NULL;
+		int			i;
+
+		for (i = 0; i < index_info->ii_NumIndexAttrs; i++)
+		{
+			AttrNumber	attno = index_info->ii_IndexAttrNumbers[i];
+
+			/* 0 marks an expression column; Vars come from ii_Expressions */
+			if (attno != 0)
+				needed = bms_add_member(needed,
+										attno - FirstLowInvalidHeapAttributeNumber);
+		}
+		pull_varattnos((Node *) index_info->ii_Expressions, 1, &needed);
+		pull_varattnos((Node *) index_info->ii_Predicate, 1, &needed);
+
+		/*
+		 * nProjected is a required out-parameter, not the number we report.
+		 * The DEBUG1 line below reads the count off the reader instead; see
+		 * the comment there for why.
+		 */
+		projected = PgColumnarProjectionFromAttnos(needed,
+												 RelationGetDescr(table_rel)->natts,
+												 &nProjected);
+	}
+
 	if (scan != NULL)
 	{
 		/*
@@ -1479,6 +1526,18 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		 */
 		readState = pgcolumnar_scan_read_state((PgColumnarScanDesc) scan,
 											 RelationGetDescr(table_rel));
+
+		/*
+		 * This reader was opened through the table-AM scan interface, which has
+		 * nowhere to carry a projection, so it would decode every column. We
+		 * know better here, so narrow it before the first read.
+		 *
+		 * This branch is not hypothetical and it is not the rare case: with
+		 * parallel maintenance workers available, EVERY participant including
+		 * the leader arrives here, and the serial branch below never runs. Fix
+		 * only the serial branch and a parallel build stays unprojected.
+		 */
+		PgColumnarReadSetProjection(readState, projected);
 		ownReadState = false;
 	}
 	else
@@ -1490,9 +1549,31 @@ pgcolumnar_index_build_range_scan(Relation table_rel, Relation index_rel,
 		else
 			snapshot = GetTransactionSnapshot();
 
-		readState = PgColumnarBeginRead(table_rel, snapshot, NULL, NULL, 0, NULL);
+		readState = PgColumnarBeginRead(table_rel, snapshot, NULL,
+									  projected, 0, NULL);
 		ownReadState = true;
 	}
+
+	/*
+	 * Say which branch ran and how wide the reader it produced will actually
+	 * read, so a test can assert the projection NARROWED rather than infer it
+	 * from a stopwatch. A fix that silently did nothing would pass every
+	 * correctness check, and a wall-clock check on a quiet machine, which is
+	 * the failure mode this projection is being added to avoid.
+	 *
+	 * The count comes from the READER, not from nProjected. Reporting what we
+	 * computed would keep printing "1 of 20" if the parallel branch stopped
+	 * applying it, and the assertion guarding that branch would pass while the
+	 * build read every column. Reporting what the reader will decode cannot.
+	 *
+	 * DEBUG1, so it costs nothing at the default log level.
+	 */
+	elog(DEBUG1,
+		 "columnar: %s index build on \"%s\" projecting %d of %d columns",
+		 scan != NULL ? "parallel" : "serial",
+		 RelationGetRelationName(index_rel),
+		 PgColumnarReadProjectedCount(readState),
+		 RelationGetDescr(table_rel)->natts);
 
 	while (true)
 	{
