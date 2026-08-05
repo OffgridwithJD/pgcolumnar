@@ -96,7 +96,8 @@
 #   PGC_CB_ROWS     row prefix, or "all" for the full table   (default 10000000)
 #   PGC_CB_DATA     where hits.tsv.gz and the fetched SQL live (default /srv/clickbench)
 #   PGC_CB_TRIES    runs per query per arm                     (default 3)
-#   PGC_CB_ARMS     comma list from heap,columnar,columnar_tuned (default all)
+#   PGC_CB_ARMS     comma list from heap,columnar,columnar_tuned,citus,duckdb
+#                   (default heap,columnar,columnar_tuned)
 #   PGC_CB_PORT     port for the throwaway cluster             (default 58900)
 #   PGC_CB_PGDATA   data directory for it                      (default $PGC_CB_DATA/pgdata)
 #   PGC_CB_KEEP     1 to leave the cluster running afterwards  (default 0)
@@ -227,6 +228,11 @@ require "the extracted TSV is not empty" "$([ "$TSV_ROWS" -gt 0 ] && echo yes ||
 # ---------------------------------------------------------------------------
 note "== cluster"
 MEMKB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+# citus_columnar must be preloaded before the cluster starts. Both extensions
+# registering a custom scan named ColumnarScan used to make this combination
+# refuse to start outright (#428); #429 renamed ours, so the arm is possible.
+CB_PRELOAD=pgcolumnar
+case ",$CB_ARMS," in *,citus,*) CB_PRELOAD="citus_columnar,pgcolumnar" ;; esac
 NCPU=$(nproc)
 SHARED_MB=$(( MEMKB / 1024 / 4 ))
 CACHE_MB=$(( MEMKB / 1024 * 3 / 4 ))
@@ -239,7 +245,7 @@ fi
 # Settings follow the shape the upstream PostgreSQL entry uses, scaled to this
 # machine. They are applied to every arm equally, so they cannot favour one.
 cat >> "$CB_PGDATA/postgresql.conf" <<CONF
-shared_preload_libraries = 'pgcolumnar'
+shared_preload_libraries = '$CB_PRELOAD'
 port = $CB_PORT
 shared_buffers = ${SHARED_MB}MB
 effective_cache_size = ${CACHE_MB}MB
@@ -264,6 +270,12 @@ trap cleanup EXIT
 "$BINDIR/createdb" -h /tmp -p "$CB_PORT" -U postgres clickbench >/dev/null 2>&1
 $PSQL -c "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null 2>&1 \
 	|| die "could not create the extension"
+case ",$CB_ARMS," in *,citus,*)
+	$PSQL -c "CREATE EXTENSION IF NOT EXISTS citus_columnar;" >/dev/null 2>&1 \
+		|| die "the citus arm was asked for and citus_columnar will not install"
+	require "citus columnar registers its access method" \
+		"$($PSQL -At -c "SELECT count(*) FROM pg_am WHERE amname='columnar' AND amtype='t'")" "1" ;;
+esac
 EXTVER=$($PSQL -At -c "SELECT extversion FROM pg_extension WHERE extname='pgcolumnar'")
 require "the extension is installed" "$([ -n "$EXTVER" ] && echo yes || echo no)" "yes" || exit 1
 note "   pgcolumnar $EXTVER on port $CB_PORT"
@@ -279,7 +291,11 @@ ddl_for() {  # ddl_for <table> <using clause or empty>
 		sed -e "\$s/;\s*\$/ $2;/"
 }
 arm_table() {  # arm -> table name
-	case "$1" in heap) echo hits_heap ;; *) echo hits_col ;; esac
+	case "$1" in
+		heap)  echo hits_heap ;;
+		citus) echo hits_citus ;;
+		*)     echo hits_col ;;
+	esac
 }
 arm_settings() {  # arm -> SET statements applied per session
 	case "$1" in
@@ -297,6 +313,8 @@ declare -A LOAD_S SIZE_B ROWS
 
 note "== load"
 for arm in "${ARMS[@]}"; do
+	# duckdb is not a table in this cluster; it is loaded separately below.
+	[ "$arm" = duckdb ] && continue
 	tbl=$(arm_table "$arm")
 	# columnar and columnar_tuned share one table: they differ only in session
 	# settings, and loading it twice would double the load time for nothing.
@@ -307,8 +325,9 @@ for arm in "${ARMS[@]}"; do
 		continue
 	fi
 	case "$arm" in
-		heap) using="" ;;
-		*)    using="USING pgcolumnar" ;;
+		heap)   using="" ;;
+		citus)  using="USING columnar" ;;
+		*)      using="USING pgcolumnar" ;;
 	esac
 	$PSQL -c "DROP TABLE IF EXISTS $tbl;" >/dev/null 2>&1
 	ddl_for "$tbl" "$using" | $PSQL -v ON_ERROR_STOP=1 >/dev/null 2>"$CB_DATA/ddl.$arm.err"
@@ -328,6 +347,36 @@ for arm in "${ARMS[@]}"; do
 	note "   $arm: ${LOAD_S[$arm]}s, ${ROWS[$arm]} rows, ${SIZE_B[$arm]} bytes"
 done
 
+# ---------------------------------------------------------------------------
+# The DuckDB arm, which is not a table in this cluster
+# ---------------------------------------------------------------------------
+# A PERSISTENT database file, never :memory:. In memory DuckDB is not being asked
+# the same question as an engine that has to durably store what it loaded, and
+# the comparison would not be fair.
+#
+# The ClickBench PostgreSQL DDL parses in DuckDB unmodified, so the arm runs the
+# same 105 columns and the same 43 queries from the same TSV.
+#
+# NULLSTR matters: DuckDB reads an empty CSV field as NULL, ClickBench's TSV uses
+# empty strings for empty text, and every column is NOT NULL. Without it the load
+# fails on hits.Title and leaves an EMPTY table, and the queries then all "run"
+# while measuring nothing.
+DUCK_DB="$CB_DATA/clickbench.duckdb"
+if printf '%s\n' "${ARMS[@]}" | grep -qx duckdb; then
+	command -v duckdb >/dev/null 2>&1 || die "the duckdb arm was asked for and duckdb is not on PATH"
+	note "== loading duckdb (persistent file, not in memory)"
+	rm -f "$DUCK_DB" "$DUCK_DB.wal"
+	duckdb "$DUCK_DB" ".read $CB_DATA/create.sql" >/dev/null 2>&1
+	t0=$(date +%s.%N)
+	duckdb "$DUCK_DB" "COPY hits FROM '$TSV' (DELIMITER '\t', HEADER false, QUOTE '', ESCAPE '', NULLSTR '\\N');" \
+		> "$CB_DATA/load.duckdb.log" 2>&1 || { tail -3 "$CB_DATA/load.duckdb.log"; die "duckdb load failed"; }
+	t1=$(date +%s.%N)
+	LOAD_S[duckdb]=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+	ROWS[duckdb]=$(duckdb "$DUCK_DB" -noheader -list 'SELECT count(*) FROM hits' 2>/dev/null)
+	SIZE_B[duckdb]=$(stat -c%s "$DUCK_DB")
+	note "   duckdb: ${LOAD_S[duckdb]}s, ${ROWS[duckdb]} rows, ${SIZE_B[duckdb]} bytes"
+fi
+
 # Every arm must hold the same rows as the file. A load that silently dropped
 # rows makes every query below faster and wrong.
 for arm in "${ARMS[@]}"; do
@@ -337,6 +386,7 @@ done
 # The schema is the one upstream publishes, asked of the database rather than of
 # a regular expression over their file.
 for arm in "${ARMS[@]}"; do
+	[ "$arm" = duckdb ] && continue
 	tbl=$(arm_table "$arm")
 	n=$($PSQL -At -c "SELECT count(*) FROM pg_attribute WHERE attrelid='$tbl'::regclass AND attnum > 0 AND NOT attisdropped")
 	require "$tbl has $CB_EXPECT_COLS columns" "$n" "$CB_EXPECT_COLS" || fail=1
@@ -366,7 +416,7 @@ require "the sample spans many counters, not a handful" \
 # The columnar arm must actually be reading through the columnar scan. If the
 # planner falls back, this measures PostgreSQL reading columnar storage badly
 # and reports it as a columnar result.
-if printf '%s\n' "${ARMS[@]}" | grep -q columnar; then
+if printf '%s\n' "${ARMS[@]}" | grep -qx columnar; then
 	plan=$($PSQL -At -c "EXPLAIN (COSTS OFF) SELECT count(*) FROM hits_col WHERE CounterID = 62" 2>&1)
 	require "the columnar arm plans a columnar scan" \
 		"$(grep -qi 'columnar' <<<"$plan" && echo yes || echo no)" "yes" || fail=1
@@ -375,7 +425,7 @@ fi
 # And the tuned arm must actually be vectorizing. EXPLAIN prints the same node
 # name, Custom Scan (ColumnarScan), whether or not the aggregate is vectorized,
 # so the node name cannot tell them apart. The property line can.
-if printf '%s\n' "${ARMS[@]}" | grep -q columnar_tuned; then
+if printf '%s\n' "${ARMS[@]}" | grep -qx columnar_tuned; then
 	vplan=$($PSQL -At -c "$(arm_settings columnar_tuned)
 		EXPLAIN (COSTS OFF) SELECT CounterID, count(*) FROM hits_col GROUP BY CounterID" 2>&1)
 	require "the tuned arm plans a vectorized aggregate" \
@@ -419,7 +469,24 @@ drop_caches() {
 
 # Run one query once and return its milliseconds, or ERR.
 run_one() {  # run_one <arm> <sql>
-	local arm="$1" sql="$2" tbl out ms
+	local arm="$1" sql="$2" tbl out ms t0 t1
+
+	if [ "$arm" = duckdb ]; then
+		# duckdb's CLI has no \timing, so time the process. That includes
+		# process start, which is tens of milliseconds and is stated rather
+		# than hidden; it matters only for the very fastest queries.
+		t0=$(date +%s.%N)
+		out=$(duckdb "$DUCK_DB" -noheader -list "$sql" 2>&1)
+		t1=$(date +%s.%N)
+		if grep -qiE '^(Error|Parser Error|Binder Error|Catalog Error)' <<<"$out"; then
+			printf 'ERR\n'
+			printf '%s\n' "$out" | head -1 >> "$CB_DATA/query_errors.log"
+			return
+		fi
+		awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f\n", (b - a) * 1000 }'
+		return
+	fi
+
 	tbl=$(arm_table "$arm")
 	out=$(env PGOPTIONS="" "$BINDIR/psql" -h /tmp -p "$CB_PORT" -U postgres -d clickbench -X -t \
 		-c "$(arm_settings "$arm")" -c '\timing on' \
@@ -491,6 +558,10 @@ require "every query in the file ran" "$qn" "$NQUERIES" || fail=1
 echo
 echo "================= CLICKBENCH, pgColumnar $EXTVER ================="
 echo "tag: lukewarm-cold-run (page cache dropped, server not restarted per query)"
+printf '%s\n' "${ARMS[@]}" | grep -qx duckdb && \
+	echo "duckdb: PERSISTENT database file, not :memory:, so it stores what it loaded like the others"
+printf '%s\n' "${ARMS[@]}" | grep -qx citus && \
+	echo "citus:  citus_columnar USING columnar, co-loaded with pgcolumnar (possible since #429)"
 echo "rows: $TSV_ROWS    tries: $CB_TRIES    host: $(nproc) cores, $(( MEMKB / 1024 / 1024 )) GB"
 echo
 printf '%-16s %12s %16s %10s\n' arm 'load (s)' 'size (bytes)' 'errors'
