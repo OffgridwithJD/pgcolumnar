@@ -133,18 +133,18 @@ static TupleTableSlot *PgColumnarScanNext(ScanState *ss);
 static bool PgColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot);
 
 static const CustomPathMethods pgcolumnar_path_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.PlanCustomPath = PgColumnarPlanCustomPath,
 	.ReparameterizeCustomPathByChild = NULL,
 };
 
 const CustomScanMethods pgcolumnar_scan_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.CreateCustomScanState = PgColumnarCreateScanState,
 };
 
 static const CustomExecMethods pgcolumnar_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginCustomScan,
 	.ExecCustomScan = PgColumnarExecCustomScan,
 	.EndCustomScan = PgColumnarEndCustomScan,

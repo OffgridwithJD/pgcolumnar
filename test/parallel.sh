@@ -31,10 +31,14 @@ setg parallel_setup_cost 0
 setg parallel_tuple_cost 0
 setg min_parallel_table_scan_size 0
 
-# A row-returning scan should plan a Gather over a parallel ColumnarScan.
+# A row-returning scan should plan a Gather over a parallel PgColumnarScan.
 plan="$(q "EXPLAIN (COSTS off) SELECT id, v FROM t_col WHERE k = 5;")"
 check "parallel plan has Gather"        "$(echo "$plan" | grep -c -i 'Gather')" "1"
-check "parallel plan has ColumnarScan"  "$(echo "$plan" | grep -c -i 'ColumnarScan')" "1"
+# The full node name as EXPLAIN prints it, not a substring of it. A bare
+# 'ColumnarScan' also matches 'PgColumnarScan', so this check passed both before
+# and after the #428 rename without ever asserting which name was in the plan.
+check "parallel plan has PgColumnarScan" \
+	"$(echo "$plan" | grep -c 'Custom Scan (PgColumnarScan)')" "1"
 
 # Results must match the heap oracle under the parallel plan.
 diff_query "par filtered scan"  "SELECT id, v, t FROM %T WHERE k = 7"
