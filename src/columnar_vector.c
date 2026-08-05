@@ -720,7 +720,7 @@ PgColumnarPlanAggPath(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 }
 
 static const CustomPathMethods pgcolumnar_agg_path_methods = {
-	.CustomName = "ColumnarAgg",
+	.CustomName = "PgColumnarAgg",
 	.PlanCustomPath = PgColumnarPlanAggPath,
 	.ReparameterizeCustomPathByChild = NULL,
 };
@@ -3234,7 +3234,7 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 }
 
 static const CustomExecMethods pgcolumnar_agg_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginAggScan,
 	.ExecCustomScan = PgColumnarExecAggScan,
 	.EndCustomScan = PgColumnarEndAggScan,
@@ -3307,7 +3307,7 @@ PgColumnarInitializeWorkerAggScan(CustomScanState *node, shm_toc *toc,
 }
 
 static const CustomExecMethods pgcolumnar_agg_parallel_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginAggScan,
 	.ExecCustomScan = PgColumnarExecAggScan,
 	.EndCustomScan = PgColumnarEndAggScan,
@@ -3910,7 +3910,7 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 }
 
 static const CustomExecMethods pgcolumnar_groupagg_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginGroupAggScan,
 	.ExecCustomScan = PgColumnarExecGroupAggScan,
 	.EndCustomScan = PgColumnarEndGroupAggScan,
@@ -3991,7 +3991,7 @@ PgColumnarInitializeWorkerGroupAggScan(CustomScanState *node, shm_toc *toc,
 }
 
 static const CustomExecMethods pgcolumnar_groupagg_parallel_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginGroupAggScan,
 	.ExecCustomScan = PgColumnarExecGroupAggScan,
 	.EndCustomScan = PgColumnarEndGroupAggScan,

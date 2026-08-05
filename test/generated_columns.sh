@@ -80,7 +80,7 @@ if [ "$major" -ge 18 ]; then
 	mism="$(q "SELECT count(*) FROM gv_col WHERE b <> a * 2 OR c <> 'r' || a;")"
 	check "virtual generated: recomputed correctly" "$mism" "0"
 
-	# Write-path optimization (PG18_19_OPPORTUNITIES.md item 2): a virtual generated
+	# Write-path optimization (POSTGRESQL_VERSION_ADOPTION.md item 2): a virtual generated
 	# column is computed on read and never stored, so pgColumnar writes NO column
 	# chunk for it (b, c = column_index 1, 2), while the base column a (index 0) is
 	# stored. The reader returns the column's missing value (NULL) for the absent

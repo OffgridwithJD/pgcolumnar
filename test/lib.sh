@@ -337,6 +337,33 @@ pgc_is_number() {	# $1 -> 0 when $1 is a number
 	return 0
 }
 
+# check_text LABEL GOT WANT -- check, with both sides required to be non-empty.
+#
+# check_num covers a measurement that is a NUMBER. Plenty of oracles are not: an
+# md5 over an ordered result, a plan node name, a returned string. check_num
+# rejects those outright -- it refuses two identical md5 hashes, because an md5
+# is not a number -- so a suite comparing one has nothing to reach for and falls
+# back to plain check, where "" equals "" and prints PASS (#418).
+#
+# That is the same defect, on the larger half: 35 places in this tree compare an
+# md5(string_agg(...)) oracle, and every one of them is a down cluster or an
+# errored query away from comparing nothing with nothing.
+#
+# Deliberately weaker than check_num: it asserts presence, not shape. A caller
+# that knows the shape should say so, and native_index_projection.sh's agree()
+# additionally requires 32 hex characters before it trusts either side.
+check_text() {
+	local name="$1" got="$2" want="$3"
+	if [ -z "$got" ] || [ -z "$want" ]; then
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		echo "FAIL  $name: a side is empty, so nothing was compared:" \
+			"got [$got] want [$want]"
+		return 1
+	fi
+	check "$name" "$got" "$want"
+}
+
 # check_num LABEL GOT WANT -- check, with both sides required to be numbers.
 check_num() {
 	local name="$1" got="$2" want="$3"

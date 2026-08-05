@@ -21,7 +21,7 @@ matrix. Gap specifications are in [gaps/](gaps/).
 | Corrupt-input decode/reader hardening | SECURITY_AUDIT.md |
 | Arrow/Parquet export type coverage (date/time/timestamp/uuid/numeric/json) | gaps/27-IMPL-export-type-coverage.md |
 | Arrow IPC import (`pgcolumnar.import_arrow`) | gap 27 |
-| PG18/19 coverage: generated columns, temporal constraints; REPACK investigated | PG18_19_OPPORTUNITIES.md |
+| PG18/19 coverage: generated columns, temporal constraints. REPACK investigated, and the conclusion was wrong: it does not work (#399) | POSTGRESQL_VERSION_ADOPTION.md |
 | Full index-only scan (visibility-map fork, lazy vacuum, default on) | gap 28 |
 | Multiple projections (C-Store): catalog, write fan-out, planner scan, vacuum, back-fill | gap 26 piece 2 |
 | Arrow/Parquet nested export (arrays → List, composite → Struct/group) | gap 27 |
@@ -247,7 +247,7 @@ are directions to investigate and spec, not validated recommendations:
 
 Features new in PostgreSQL 17-19 that pgColumnar can use, all version-gated to
 preserve the 15-19 matrix. Detail and sources in
-[PG18_19_OPPORTUNITIES.md](PG18_19_OPPORTUNITIES.md):
+[POSTGRESQL_VERSION_ADOPTION.md](POSTGRESQL_VERSION_ADOPTION.md):
 
 - Read stream / AIO in the scan — shipped, see the Done table.
 - Virtual generated columns (PostgreSQL 18) — done, covered by

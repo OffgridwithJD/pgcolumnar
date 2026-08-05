@@ -133,18 +133,18 @@ static TupleTableSlot *PgColumnarScanNext(ScanState *ss);
 static bool PgColumnarScanRecheck(ScanState *ss, TupleTableSlot *slot);
 
 static const CustomPathMethods pgcolumnar_path_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.PlanCustomPath = PgColumnarPlanCustomPath,
 	.ReparameterizeCustomPathByChild = NULL,
 };
 
 const CustomScanMethods pgcolumnar_scan_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.CreateCustomScanState = PgColumnarCreateScanState,
 };
 
 static const CustomExecMethods pgcolumnar_exec_methods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "PgColumnarScan",
 	.BeginCustomScan = PgColumnarBeginCustomScan,
 	.ExecCustomScan = PgColumnarExecCustomScan,
 	.EndCustomScan = PgColumnarEndCustomScan,
@@ -169,16 +169,22 @@ static const CustomExecMethods pgcolumnar_exec_methods = {
  *		carry a ctid system Var). This is the projection pushed into the reader
  *		(spec 9).
  */
-static Bitmapset *
-pgcolumnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
+/*
+ * PgColumnarProjectionFromAttnos
+ *		Turn a set of needed attribute numbers, in pull_varattnos' offset form,
+ *		into the reader's 0-based projection. Returns NULL for "read every
+ *		column", which is what a system column, a whole-row Var, or an empty set
+ *		all mean.
+ *
+ *		Shared because index_build_range_scan needs the same computation over a
+ *		different source (#413): its columns come from IndexInfo rather than from
+ *		a plan. The escapes are the interesting part and are worth having once.
+ */
+Bitmapset *
+PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts, int *nProjected)
 {
-	Bitmapset  *needed = NULL;
 	Bitmapset  *projected = NULL;
-	Index		scanrelid = cscan->scan.scanrelid;
 	int			attno;
-
-	pull_varattnos((Node *) cscan->scan.plan.targetlist, scanrelid, &needed);
-	pull_varattnos((Node *) cscan->scan.plan.qual, scanrelid, &needed);
 
 	/* a system column or whole-row Var forces reading every column */
 	for (attno = FirstLowInvalidHeapAttributeNumber + 1; attno <= 0; attno++)
@@ -209,6 +215,19 @@ pgcolumnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
 	*nProjected = bms_num_members(projected);
 	return projected;
 }
+
+static Bitmapset *
+pgcolumnar_projected_columns(CustomScan *cscan, int natts, int *nProjected)
+{
+	Bitmapset  *needed = NULL;
+	Index		scanrelid = cscan->scan.scanrelid;
+
+	pull_varattnos((Node *) cscan->scan.plan.targetlist, scanrelid, &needed);
+	pull_varattnos((Node *) cscan->scan.plan.qual, scanrelid, &needed);
+
+	return PgColumnarProjectionFromAttnos(needed, natts, nProjected);
+}
+
 
 /*
  * pgcolumnar_commute_strategy

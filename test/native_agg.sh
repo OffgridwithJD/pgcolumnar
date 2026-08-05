@@ -6,7 +6,7 @@
 # counts, count(col) from value_count, sum/avg(int2,int4) from the zone sum, and
 # min/max from the zone min/max. This suite proves the answers equal a heap oracle
 # across the supported aggregates, nulls and an empty table; that the metadata path
-# is actually taken (EXPLAIN shows the ColumnarAgg node with no data scan); and
+# is actually taken (EXPLAIN shows the PgColumnarAgg node with no data scan); and
 # that a filtered or unsupported aggregate falls back and is still correct.
 #
 # Usage:  test/native_agg.sh [PG_CONFIG]
