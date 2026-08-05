@@ -59,6 +59,11 @@ There are two distinct operations, and the difference matters:
 - **`pgcolumnar.vacuum`** (a function) rewrites the table, combining row groups and
   reclaiming space held by deleted and updated rows.
 
+**`pgcolumnar.vacuum` holds `AccessExclusiveLock` for its whole run.** It rewrites
+the relation, so reads and writes on that table stop until it finishes. Treat it as
+a maintenance window on a large table, not as a routine command. The online
+functions below reclaim space without stopping anything. Use them first.
+
 Run `pgcolumnar.vacuum` after bulk deletes or updates, or after many small load
 transactions have produced many small row groups:
 
@@ -67,7 +72,9 @@ SELECT pgcolumnar.vacuum('events');
 ```
 
 To store rows sorted on a column so range filters on it skip more row groups,
-use `pgcolumnar.vacuum_sorted`:
+use `pgcolumnar.vacuum_sorted`. It also rewrites the relation and also holds
+`AccessExclusiveLock` for its whole run. `pgcolumnar.recluster` does the same
+reordering online:
 
 ```sql
 SELECT pgcolumnar.vacuum_sorted('events', 'customer_id');
@@ -105,6 +112,28 @@ results. They change only the order of the physical storage.
 
 Leave autovacuum on. It maintains visibility-map bits and statistics for columnar
 tables. Schedule `pgcolumnar.vacuum` separately based on delete and update volume.
+
+### Which maintenance functions stop the table
+
+Every maintenance function is one of two kinds. The kind is set by whether it
+rewrites the relation:
+
+| function | lock | table available during it |
+| --- | --- | --- |
+| `pgcolumnar.vacuum` | `AccessExclusiveLock` | no |
+| `pgcolumnar.vacuum_sorted` | `AccessExclusiveLock` | no |
+| `pgcolumnar.cluster` | `AccessExclusiveLock` | no |
+| `pgcolumnar.compact` | `ShareUpdateExclusiveLock` | yes |
+| `pgcolumnar.compact_rewrite` | `ShareUpdateExclusiveLock` | yes |
+| `pgcolumnar.recluster` | `ShareUpdateExclusiveLock` | yes |
+| `pgcolumnar.truncate` | `ShareUpdateExclusiveLock`, plus a conditional `AccessExclusiveLock` | yes |
+| standard `VACUUM` and autovacuum | `ShareUpdateExclusiveLock` | yes |
+
+The three that rewrite need the exclusive lock because they replace the file. The
+others work in place and run beside your queries.
+
+Schedule the exclusive three in a maintenance window. Anything that runs
+unattended, such as a cron entry, should call the online ones.
 
 ### Online maintenance and disk reclaim
 
