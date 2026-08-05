@@ -6,7 +6,7 @@ Adopt the PostgreSQL read stream API (PostgreSQL 17+) for the columnar block
 reads so the PostgreSQL 18 asynchronous I/O subsystem prefetches chunk blocks
 during a scan. Falls back to the current synchronous path on PostgreSQL 13-16.
 No on-disk or SQL-surface change; results are unchanged. See
-[../PG18_19_OPPORTUNITIES.md](../PG18_19_OPPORTUNITIES.md) item 1.
+[../POSTGRESQL_VERSION_ADOPTION.md](../POSTGRESQL_VERSION_ADOPTION.md) item 1.
 
 ## Current state
 
