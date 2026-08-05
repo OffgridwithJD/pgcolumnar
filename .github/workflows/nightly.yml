@@ -67,8 +67,15 @@ jobs:
       # in a median of 25s (#386). Caching the debs removes the download on a
       # hit, and a miss degrades to exactly what happens today.
       #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      # The runner image is folded into the hash below, not into the literal key.
+      # A new image can bring a different LLVM major, and a key that ignored it
+      # would serve debs for the wrong one. It was in the literal key as
+      # ${{ env.ImageOS }} and expanded to NOTHING every time: ImageOS is a
+      # runner environment variable, and the env context only carries variables
+      # set by the workflow, job, or step. The observed key was
+      # apt-pgdev-codecs-pg15-Linux-X64--v1, with an empty component between the
+      # two dashes. The shell in the hash step can see $ImageOS; an expression
+      # context cannot.
       - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
@@ -92,19 +99,24 @@ jobs:
           v=$(apt-cache policy \
                 postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
                 liblz4-dev libzstd-dev zlib1g-dev python3-pip \
-              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+              | awk '/Candidate:/ {print $2}' | sort)
+          # $ImageOS, from the shell, where it actually has a value. Reported
+          # rather than only hashed, so an empty one is visible in the log
+          # instead of silently hashing to a constant.
+          echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
+          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
           test -n "$v"
-          echo "k=$v" >> "$GITHUB_OUTPUT"
-          echo "resolved candidate versions hash: $v"
+          echo "k=$h" >> "$GITHUB_OUTPUT"
+          echo "cache key hash: $h"
 
       - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
         id: apt-nightly
         uses: actions/cache@v4
         with:
           path: ~/apt-archives
-          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.aptkey.outputs.k }}-v3
           restore-keys: |
-            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
         run: |
@@ -296,8 +308,15 @@ jobs:
       # in a median of 25s (#386). Caching the debs removes the download on a
       # hit, and a miss degrades to exactly what happens today.
       #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      # The runner image is folded into the hash below, not into the literal key.
+      # A new image can bring a different LLVM major, and a key that ignored it
+      # would serve debs for the wrong one. It was in the literal key as
+      # ${{ env.ImageOS }} and expanded to NOTHING every time: ImageOS is a
+      # runner environment variable, and the env context only carries variables
+      # set by the workflow, job, or step. The observed key was
+      # apt-pgdev-codecs-pg15-Linux-X64--v1, with an empty component between the
+      # two dashes. The shell in the hash step can see $ImageOS; an expression
+      # context cannot.
       - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
@@ -321,19 +340,24 @@ jobs:
           v=$(apt-cache policy \
                 postgresql-18 postgresql-server-dev-18 \
                 liblz4-dev libzstd-dev zlib1g-dev python3-pip lcov \
-              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+              | awk '/Candidate:/ {print $2}' | sort)
+          # $ImageOS, from the shell, where it actually has a value. Reported
+          # rather than only hashed, so an empty one is visible in the log
+          # instead of silently hashing to a constant.
+          echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
+          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
           test -n "$v"
-          echo "k=$v" >> "$GITHUB_OUTPUT"
-          echo "resolved candidate versions hash: $v"
+          echo "k=$h" >> "$GITHUB_OUTPUT"
+          echo "cache key hash: $h"
 
       - name: Cache the PostgreSQL 18, codec headers, lcov, and pyarrow packages
         id: apt-coverage
         uses: actions/cache@v4
         with:
           path: ~/apt-archives
-          key: apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          key: apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ steps.aptkey.outputs.k }}-v3
           restore-keys: |
-            apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+            apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install PostgreSQL 18, codec headers, lcov, and pyarrow
         run: |

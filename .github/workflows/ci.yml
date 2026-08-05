@@ -107,12 +107,17 @@ jobs:
           v=$(apt-cache policy \
                 postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
                 liblz4-dev libzstd-dev zlib1g-dev \
-              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+              | awk '/Candidate:/ {print $2}' | sort)
+          # $ImageOS, from the shell, where it actually has a value. Reported
+          # rather than only hashed, so an empty one is visible in the log
+          # instead of silently hashing to a constant.
+          echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
+          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
           # A hash of nothing is a constant, which would silently restore the
           # frozen key this step exists to remove.
           test -n "$v"
-          echo "k=$v" >> "$GITHUB_OUTPUT"
-          echo "resolved candidate versions hash: $v"
+          echo "k=$h" >> "$GITHUB_OUTPUT"
+          echo "cache key hash: $h"
 
       # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
       # postgresql-server-dev-N depends on. That download is what stalls: every
@@ -120,16 +125,23 @@ jobs:
       # in a median of 25s (#386). Caching the debs removes the download on a
       # hit, and a miss degrades to exactly what happens today.
       #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      # The runner image is folded into the hash below, not into the literal key.
+      # A new image can bring a different LLVM major, and a key that ignored it
+      # would serve debs for the wrong one. It was in the literal key as
+      # ${{ env.ImageOS }} and expanded to NOTHING every time: ImageOS is a
+      # runner environment variable, and the env context only carries variables
+      # set by the workflow, job, or step. The observed key was
+      # apt-pgdev-codecs-pg15-Linux-X64--v1, with an empty component between the
+      # two dashes. The shell in the hash step can see $ImageOS; an expression
+      # context cannot.
       - name: Cache the PostgreSQL ${{ matrix.pg }} and codec headers packages
         id: apt-build
         uses: actions/cache@v4
         with:
           path: ~/apt-archives
-          key: apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          key: apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.aptkey.outputs.k }}-v3
           restore-keys: |
-            apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+            apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install PostgreSQL ${{ matrix.pg }} and codec headers
         run: |
@@ -322,12 +334,17 @@ jobs:
           v=$(apt-cache policy \
                 postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
                 liblz4-dev libzstd-dev zlib1g-dev python3-pip \
-              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+              | awk '/Candidate:/ {print $2}' | sort)
+          # $ImageOS, from the shell, where it actually has a value. Reported
+          # rather than only hashed, so an empty one is visible in the log
+          # instead of silently hashing to a constant.
+          echo "runner image: ${ImageOS:-<empty>}   candidates:"; echo "$v" | sed 's/^/  /'
+          h=$(printf '%s\n%s\n' "${ImageOS:-}" "$v" | md5sum | cut -c1-12)
           # A hash of nothing is a constant, which would silently restore the
           # frozen key this step exists to remove.
           test -n "$v"
-          echo "k=$v" >> "$GITHUB_OUTPUT"
-          echo "resolved candidate versions hash: $v"
+          echo "k=$h" >> "$GITHUB_OUTPUT"
+          echo "cache key hash: $h"
 
       # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
       # postgresql-server-dev-N depends on. That download is what stalls: every
@@ -335,16 +352,23 @@ jobs:
       # in a median of 25s (#386). Caching the debs removes the download on a
       # hit, and a miss degrades to exactly what happens today.
       #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      # The runner image is folded into the hash below, not into the literal key.
+      # A new image can bring a different LLVM major, and a key that ignored it
+      # would serve debs for the wrong one. It was in the literal key as
+      # ${{ env.ImageOS }} and expanded to NOTHING every time: ImageOS is a
+      # runner environment variable, and the env context only carries variables
+      # set by the workflow, job, or step. The observed key was
+      # apt-pgdev-codecs-pg15-Linux-X64--v1, with an empty component between the
+      # two dashes. The shell in the hash step can see $ImageOS; an expression
+      # context cannot.
       - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
         id: apt-suites
         uses: actions/cache@v4
         with:
           path: ~/apt-archives
-          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.aptkey.outputs.k }}-v3
           restore-keys: |
-            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
         run: |
