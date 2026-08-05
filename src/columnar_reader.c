@@ -1554,18 +1554,6 @@ PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
 }
 
 /*
- * PgColumnarReadRestrictToGroups
- *		Restrict this scan to the given row group numbers (issue #149). Groups
- *		outside the set are skipped in the claim loop, so their bytes are never
- *		read and their column chunks never decoded. The array is copied into the
- *		read state's own context and sorted there, so the caller may free its own.
- *
- *		Must be called before the first PgColumnarReadNextRow. Passing ngroups == 0
- *		makes the scan return no rows, which is the honest reading of "restrict to
- *		nothing" and is what the aggregate path relies on when every group is
- *		clean.
- */
-/*
  * PgColumnarReadSetProjection
  *		Narrow an already-opened reader to a set of columns (issue #413).
  *
@@ -1583,6 +1571,36 @@ PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
  *
  *		A NULL set means "all columns", matching PgColumnarBeginRead.
  */
+void
+PgColumnarReadSetProjection(PgColumnarReadState *readState,
+							Bitmapset *projectedColumns)
+{
+	int			pc;
+	MemoryContext old;
+
+	Assert(!readState->started);
+	if (readState->started)
+		return;
+
+	/*
+	 * Copy into the read state's own context, not the caller's. Nothing reads
+	 * this field after the setter today, so this is consistency rather than a
+	 * fixed bug -- PgColumnarBeginRead builds the same field in readContext and
+	 * PgColumnarReadRestrictToGroups says so in its own comment. A field owned by
+	 * two different contexts depending on which function set it is a trap for
+	 * whoever reads it next.
+	 */
+	old = MemoryContextSwitchTo(readState->readContext);
+	bms_free(readState->projectedColumns);
+	readState->projectedColumns = bms_copy(projectedColumns);
+	MemoryContextSwitchTo(old);
+	readState->allColumnsWanted = (projectedColumns == NULL ||
+								   !pgcolumnar_enable_column_projection);
+	for (pc = 0; pc < readState->natts; pc++)
+		readState->colWanted[pc] = readState->allColumnsWanted ||
+			bms_is_member(pc, projectedColumns);
+}
+
 /*
  * PgColumnarReadProjectedCount
  *		How many columns this reader will actually decode.
@@ -1607,25 +1625,18 @@ PgColumnarReadProjectedCount(PgColumnarReadState *readState)
 	return n;
 }
 
-void
-PgColumnarReadSetProjection(PgColumnarReadState *readState,
-							Bitmapset *projectedColumns)
-{
-	int			pc;
-
-	Assert(!readState->started);
-	if (readState->started)
-		return;
-
-	bms_free(readState->projectedColumns);
-	readState->projectedColumns = bms_copy(projectedColumns);
-	readState->allColumnsWanted = (projectedColumns == NULL ||
-								   !pgcolumnar_enable_column_projection);
-	for (pc = 0; pc < readState->natts; pc++)
-		readState->colWanted[pc] = readState->allColumnsWanted ||
-			bms_is_member(pc, projectedColumns);
-}
-
+/*
+ * PgColumnarReadRestrictToGroups
+ *		Restrict this scan to the given row group numbers (issue #149). Groups
+ *		outside the set are skipped in the claim loop, so their bytes are never
+ *		read and their column chunks never decoded. The array is copied into the
+ *		read state's own context and sorted there, so the caller may free its own.
+ *
+ *		Must be called before the first PgColumnarReadNextRow. Passing ngroups == 0
+ *		makes the scan return no rows, which is the honest reading of "restrict to
+ *		nothing" and is what the aggregate path relies on when every group is
+ *		clean.
+ */
 void
 PgColumnarReadRestrictToGroups(PgColumnarReadState *readState,
 							 const uint64 *groupNumbers, int ngroups)

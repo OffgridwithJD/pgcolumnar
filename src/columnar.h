@@ -615,13 +615,22 @@ extern int64 PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
 extern void PgColumnarParquetCheckExportable(Relation rel);
 
 /*
+ * Column projection on an already-opened reader (#413). The table-AM scan
+ * interface has nowhere to carry a projection, so a reader obtained through it
+ * reads every column; a caller that knows better narrows it here, before the
+ * first read. PgColumnarReadProjectedCount reports what the reader WILL decode,
+ * read off colWanted, so a caller reporting a projection cannot report one it
+ * failed to apply.
+ */
+extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
+										Bitmapset *projectedColumns);
+extern int	PgColumnarReadProjectedCount(PgColumnarReadState *readState);
+
+/*
  * Parallel scan (gap 23): point the read state at a shared atomic that hands out
  * stripe indices, so several workers scanning the same relation each claim
  * distinct stripes. Set by the custom scan's DSM init callbacks.
  */
-extern int PgColumnarReadProjectedCount(PgColumnarReadState *readState);
-extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
-						Bitmapset *projectedColumns);
 extern void PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
 										   pg_atomic_uint32 *counter);
 

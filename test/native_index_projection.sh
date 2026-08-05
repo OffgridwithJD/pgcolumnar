@@ -153,12 +153,31 @@ check "a parallel expression build projects its expression's columns" \
 	"$(branch w_pare "$PAR" 'CREATE INDEX w_pare ON w ((k + k2))')" "parallel 2 of 20"
 check "a parallel partial build projects the predicate's columns too" \
 	"$(branch w_parp "$PAR" 'CREATE INDEX w_parp ON w (k) WHERE k2 > 100')" "parallel 2 of 20"
+#
+# On c17, NOT on k2. A serially built index on k2 would sit beside the parallel-built
+# w_par2 covering the same column, and the planner is free to pick either, so the two
+# oracles below would silently validate the serial build. This check only has to show
+# the serial branch is still reachable, so it goes on a column no oracle reads.
 check "the serial branch is still reached when workers are refused" \
 	"$(branch w_ser 'SET max_parallel_maintenance_workers=0;' \
-		'CREATE INDEX w_ser ON w (k2)' | cut -d' ' -f1)" "serial"
+		'CREATE INDEX w_ser ON w (c17)' | cut -d' ' -f1)" "serial"
 
 # Every participant reads through one shared reader, so an under-projected or
 # double-counted parallel build shows up as wrong or duplicated index entries.
+#
+# Assert the premise first. "The index scan agrees with the seq scan" proves nothing
+# about a parallel build unless the scan actually uses the parallel-built index, and
+# nothing in the query text guarantees that: it names a column, not an index.
+# qset ends in `tail -1`, which would keep only the last plan line, so read the whole
+# EXPLAIN directly.
+usesix() {  # $1 = query -> the index name the plan scans
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-At -q -c "SET enable_seqscan=off; SET enable_bitmapscan=off;" \
+		-c "EXPLAIN (COSTS OFF) $1" 2>/dev/null \
+		| grep -oE 'using [a-z0-9_]+' | head -1 | cut -d' ' -f2
+}
+check "the oracle below really reads the parallel-built index" \
+	"$(usesix 'SELECT k2 FROM w WHERE k2 BETWEEN 2000 AND 19998')" "w_par2"
 agree "parallel-built index agrees with a sequential scan" "k2 BETWEEN 2000 AND 19998" "k2"
 check "parallel-built index returns each row once" \
 	"$(qset 'SET enable_seqscan=off; SET enable_bitmapscan=off' \
