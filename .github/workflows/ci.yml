@@ -64,6 +64,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
+      # postgresql-server-dev-N depends on. That download is what stalls: every
+      # failure of this step sat at the 600s bound while every success finished
+      # in a median of 25s (#386). Caching the debs removes the download on a
+      # hit, and a miss degrades to exactly what happens today.
+      #
+      # ImageOS is in the key because a new runner image can bring a different
+      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      - name: Cache the PostgreSQL ${{ matrix.pg }} and codec headers packages
+        id: apt-build
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
+
       - name: Install PostgreSQL ${{ matrix.pg }} and codec headers
         run: |
           set -euo pipefail
@@ -81,9 +96,21 @@ jobs:
           # Acquire retries cover a flaky mirror; the outer timeout keeps a
           # wedged one from consuming the whole job budget.
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
-          sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+          mkdir -p "$HOME/apt-archives/partial"
+          sudo timeout 600 apt-get -o Acquire::Retries=5 \
+            -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
             postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
-            liblz4-dev libzstd-dev zlib1g-dev
+            liblz4-dev libzstd-dev zlib1g-dev 2>&1 | tee /tmp/apt-install.log
+          # A cache that populates but never hits looks identical in the log to one
+          # that works: the job is simply still slow. So assert it. On a hit,
+          # apt must not have fetched anything over the network.
+          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          if [ "${{ steps.apt-build.outputs.cache-hit }}" = "true" ] \
+             && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
+            echo "::error::apt cache reported a hit but packages were downloaded anyway"
+            grep -E '^Get:[0-9]+ https?://' /tmp/apt-install.log
+            exit 1
+          fi
 
       - name: Build, treating warnings as failures
         run: |
@@ -215,6 +242,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
+      # postgresql-server-dev-N depends on. That download is what stalls: every
+      # failure of this step sat at the 600s bound while every success finished
+      # in a median of 25s (#386). Caching the debs removes the download on a
+      # hit, and a miss degrades to exactly what happens today.
+      #
+      # ImageOS is in the key because a new runner image can bring a different
+      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
+        id: apt-suites
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
+
       - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
         run: |
           set -euo pipefail
@@ -232,9 +274,11 @@ jobs:
           # Acquire retries cover a flaky mirror; the outer timeout keeps a
           # wedged one from consuming the whole job budget.
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
-          sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+          mkdir -p "$HOME/apt-archives/partial"
+          sudo timeout 600 apt-get -o Acquire::Retries=5 \
+            -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
             postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
-            liblz4-dev libzstd-dev zlib1g-dev python3-pip
+            liblz4-dev libzstd-dev zlib1g-dev python3-pip 2>&1 | tee /tmp/apt-install.log
           # The Arrow and Parquet suites use pyarrow as an independent reader and
           # skip themselves without it, which would be a silent loss of coverage.
           # Installed with sudo on purpose. The suites run under sudo, so the
@@ -244,6 +288,16 @@ jobs:
           # while skipping themselves.
           sudo pip3 install --break-system-packages --quiet pyarrow \
             || sudo pip3 install --quiet pyarrow
+          # A cache that populates but never hits looks identical in the log to one
+          # that works: the job is simply still slow. So assert it. On a hit,
+          # apt must not have fetched anything over the network.
+          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          if [ "${{ steps.apt-suites.outputs.cache-hit }}" = "true" ] \
+             && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
+            echo "::error::apt cache reported a hit but packages were downloaded anyway"
+            grep -E '^Get:[0-9]+ https?://' /tmp/apt-install.log
+            exit 1
+          fi
 
       - name: Confirm pyarrow is importable by the suites' interpreter
         # Installing pyarrow and having the suites SEE it are different facts. The
