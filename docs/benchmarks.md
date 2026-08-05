@@ -375,8 +375,9 @@ The bench host has 16 vCPU and 62 GB. Each engine uses the configuration its own
 users would choose:
 
 - pgColumnar: columnar scan, storage in load order. One btree on
-  `(hostname, time DESC)`. The load order is not sorted on either key: the measured
-  correlation with physical order is 0.013 for `time` and -0.004 for `hostname`.
+  `(hostname, time DESC)`. The load order is not globally sorted on either key. It is
+  locally ordered on `time`, which is what matters for skipping. See
+  [what prunes and what does not](#what-prunes-and-what-does-not).
 - TimescaleDB: compressed columnstore, segmented by `hostname`, ordered by `time`
   descending. One btree on `(hostname, time DESC)`, and the `(time DESC)` index that
   `create_hypertable` makes, which gives 53 chunk indexes below them.
@@ -481,16 +482,54 @@ q2, with `EXPLAIN (ANALYZE)`:
 
 ```
 Columnar Chunk Groups Total: 667
-Columnar Chunk Groups Read: 667
-Columnar Chunk Groups Removed by Filter: 0
-Rows Removed by Filter: 99995680
+Columnar Chunk Groups Read: 118
+Columnar Chunk Groups Removed by Filter: 549
+Columnar Vectors Skipped: 40
+Rows Removed by Filter: 17295680
 ```
 
-It reads all 667 row groups and filters 99,995,680 rows to return 4,320. The zone maps cannot help,
-because neither key is sorted in the stored order. Every stripe holds all 4,000 hosts.
-The minimum and maximum `hostname` of each group therefore covers the whole set.
+The two predicates behave differently, and only one of them is the problem. Running each
+alone on the same table:
+
+| predicate | groups read | groups removed | time |
+| --- | ---: | ---: | ---: |
+| `hostname` only | 667 of 667 | 0 | 10,791 ms |
+| `time` only | 118 of 667 | 549 | 2,415 ms |
+| both, as q2 | 118 of 667 | 549 | 2,238 ms |
+
+**Time pruning already removes 82 percent of the row groups. Hostname removes none.**
+The zone maps are working. The gap is a `hostname` clustering failure, not a zone-map
+failure.
+
+The catalog says why. Every one of the 667 groups records the same minimum and the same
+maximum for `hostname`. Every group holds all 4,000 hosts, so no group can be ruled out.
+
+For `time` the picture is the opposite. A group spans about 6 minutes on average, which
+is **0.30 percent** of the table's 2 day 21 hour range.
+
 TimescaleDB answers the same query in 5 milliseconds. It excludes all but one
-chunk on time, then reads one `hostname` segment through an index.
+chunk on time, then reads one `hostname` segment through an index. It is the second half
+that we lack, not the first.
+
+### What prunes and what does not
+
+An earlier version of this page argued from `pg_stats.correlation`, which reads 0.0133
+for `time` and -0.0036 for `hostname`, and concluded that neither key was ordered. The
+conclusion was wrong for `time`, and the instrument was the reason.
+
+`correlation` measures how a column's values track physical row order **across the whole
+relation**. Zone-map skipping does not depend on that. It depends on whether each
+**group's** minimum and maximum are narrow against the predicate, which is a local
+property.
+
+This table is the case that separates them. Its groups are individually tight on `time`,
+about 6 minutes each. But the sequence of groups is rotated rather than ascending, with
+group 1 beginning at 14:00:10 and group 663 at 13:31:00. A whole-relation correlation is
+therefore near zero. Skipping still removes 549 groups of 667.
+
+**So do not infer pruning from `correlation`.** The instrument that answers the question
+is `Columnar Chunk Groups Removed by Filter` in `EXPLAIN (ANALYZE)`. Run one predicate at
+a time, because a conjunction hides which half is doing the work.
 
 **So this table measures pgColumnar in the layout that suits it least.** A user with
 this shape would cluster the table on `hostname`. That is what
