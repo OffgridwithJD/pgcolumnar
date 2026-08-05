@@ -28,6 +28,7 @@
 #include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "replication/logicalworker.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -1371,6 +1372,39 @@ pgcolumnar_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 					LockWaitPolicy wait_policy, uint8 flags,
 					TM_FailureData *tmfd)
 {
+	/*
+	 * A logical replication apply worker reaches this on the first streamed
+	 * UPDATE or DELETE, and the generic message leaves it looking like a
+	 * transient fault (#435).
+	 *
+	 * It is not transient and it is not bounded. Core takes a tuple lock for
+	 * every apply of an UPDATE or a DELETE (FindReplTupleInLocalRel passes
+	 * LockTupleExclusive on both the index and the sequential path), so there
+	 * is no lock-free apply to fall back to. And the apply worker deliberately
+	 * does NOT advance the replication origin when a transaction fails, to
+	 * avoid losing it, so the same transaction is re-sent forever: measured at
+	 * one error every 5 seconds, indefinitely, with every INSERT queued behind
+	 * it never applying.
+	 *
+	 * So the subscription is wedged permanently, and the only diagnostic is a
+	 * message about row locking, which is not what the user was doing. Name the
+	 * situation and the way out instead. INSERT-only publications work: initial
+	 * sync and streamed INSERTs use COPY and table_tuple_insert, neither of
+	 * which takes a tuple lock.
+	 */
+	if (IsLogicalWorker())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: logical replication cannot apply UPDATE or DELETE "
+						"to a columnar table"),
+				 errdetail("Applying an UPDATE or a DELETE requires a row lock, which "
+						   "columnar storage does not support. The subscription will "
+						   "retry this transaction indefinitely and no later change "
+						   "will be applied."),
+				 errhint("Publish inserts only, with "
+						 "CREATE PUBLICATION ... WITH (publish = 'insert'), or "
+						 "replicate into a heap table.")));
+
 	COLUMNAR_UNSUPPORTED("row locking");
 	return TM_Ok;
 }

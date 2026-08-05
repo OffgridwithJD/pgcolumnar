@@ -478,6 +478,29 @@ The results therefore never depend on the pushdown.
   of the table. Filter
   the `pgcolumnar` schema out of any publication.
 
+  A columnar table can be the **target** of logical replication, with one
+  restriction. An INSERT-only publication works end to end. The initial table
+  sync and streamed inserts both use paths that take no row lock. A heap table
+  on the publisher can therefore be mirrored into a columnar table on the
+  subscriber. This suits append-only fact tables and event logs.
+
+  A publication that carries UPDATE or DELETE does not work, and the failure is
+  permanent rather than temporary. Applying either one requires a row lock,
+  which columnar storage does not support. PostgreSQL does not advance the
+  replication origin when a transaction fails to apply. The subscription
+  therefore retries the same transaction indefinitely, roughly every five
+  seconds. No later change is applied and the mirror stops at that point.
+
+  Create the publication with `publish = 'insert'` when the target is columnar.
+
+  ```sql
+  CREATE PUBLICATION p FOR TABLE t WITH (publish = 'insert');
+  ```
+
+  Updates and deletes are then skipped by design and the subscription keeps
+  running. If a subscription is already wedged, the error in the subscriber log
+  names this restriction and the option above.
+
   To capture changes from a columnar table today, use a row trigger that writes
   to a heap table and decode that. The recipe is in
   [user-guide.md](user-guide.md#capture-changes-for-replication-or-cdc).
