@@ -18,8 +18,8 @@ date it was written. A note without one has not been checked.
 | item | state |
 | --- | --- |
 | 1. Read stream and AIO | **shipped**, `pgcolumnar.enable_read_stream` (gap 29) |
-| 2. Virtual generated columns | covered by `test/generated_columns.sh` |
-| 3. Temporal constraints | covered by `test/temporal.sh` |
+| 2. Virtual generated columns | **done**, read and storage both, `test/generated_columns.sh` |
+| 3. Temporal constraints | **done**, `test/temporal.sh` |
 | 4. btree skip scan | open, no measurement |
 | 5. REPACK | **investigated and the conclusion was wrong**, see below (#399) |
 | 6. Statistics injection | open, no measurement |
@@ -81,7 +81,9 @@ our handler directly.
   from the stripe/chunk catalog, which is exactly the case the read stream (and
   `read_stream_next_block` for callers that compute their own block numbers) is
   built for. On PostgreSQL 18 this gets AIO prefetch for free; on 17 it gets
-  posix_fadvise-based prefetch; on 13-16 it falls back to the current path.
+  posix_fadvise-based prefetch; on 15-16 it falls back to the current path. (The
+  matrix is 15 through 19. An earlier revision said 13-16, from before 13 and 14
+  were dropped.)
 - **Effort / risk.** Medium. The API shape has moved between 17, 18, and 19, so
   the adoption must be behind a compat shim and validated on each major. Risk is
   confined to the read path and covered by the differential/recovery suites.
@@ -98,24 +100,37 @@ our handler directly.
   coverage (columnar vs heap) for stored and virtual generated columns on
   PostgreSQL 18+. Likely handled at the executor level, but it is unverified.
 - **Effort.** Small (a correctness check plus a test), version-gated to 18+.
-- **Verified (`test/generated_columns.sh`).** Stored and virtual generated
-  columns both read correctly on a columnar table across the matrix; the executor
-  recomputes the virtual value on read, so values match the heap oracle and the
-  generation expression. One finding: pgColumnar currently *materializes an
-  all-null chunk* for a virtual generated column at insert rather than skipping
-  its storage. The read-time value overrides it, so this is a storage
-  inefficiency, not a correctness problem. Skipping the write for
-  `attgenerated = 'v'` columns (and returning NULL for them from the reader) is a
-  worthwhile future write-path optimization; it needs matching reader/vacuum
-  changes and its own coverage, so it is not bundled here.
+- **Done, and verified by `test/generated_columns.sh`** (status as of 2026-08-05).
+  Stored and virtual generated columns both read correctly on a columnar table
+  across the matrix. The executor recomputes the virtual value on read, so values
+  match the heap oracle and match the generation expression applied to the base
+  column.
+- The storage half is done as well. `columnar_write_state.c` skips
+  `attgenerated == 'v'` and writes no chunk at all, `columnar_vacuum.c` matches,
+  and the reader returns the column's missing value (NULL) for the absent chunk,
+  which the executor then overwrites. Shipped 2026-07-22 in "Skip storage for
+  virtual generated columns". The suite pins both directions: no chunk for the
+  virtual columns, a chunk still present for the base column.
+- An earlier revision of this document listed that skip as a *worthwhile future
+  write-path optimization*. It had already shipped, and the suite this document
+  cites as its evidence asserts the opposite of the claim, three lines from the
+  comment naming this item. That is the same failure the rename is for: a status
+  note that was true when written, carried forward under a name that says it is
+  current. Hence the date above.
 
 ## 3. Temporal constraints (PostgreSQL 18 `WITHOUT OVERLAPS`, PostgreSQL 19 `FOR PORTION OF`)
 
 - PostgreSQL 18 allows non-overlapping PRIMARY KEY/UNIQUE (`WITHOUT OVERLAPS`) and
   temporal foreign keys (`PERIOD`); PostgreSQL 19 adds `FOR PORTION OF` updates.
 - **Relevance.** These run through the index and constraint machinery pgColumnar
-  already integrates with. Verify enforcement on a columnar table and add
-  coverage; do not assume it works. Effort small, version-gated.
+  already integrates with.
+- **Done, and verified by `test/temporal.sh`** (status as of 2026-08-05). A
+  `WITHOUT OVERLAPS` primary key on a columnar table holds the same contents as
+  its heap twin and rejects the same overlapping rows. `FOR PORTION OF` produces
+  the same result set, gated to PostgreSQL 19 and visibly skipped below it.
+- This item did not get a Verified bullet when item 2 did, so the status table
+  above said covered while the body still said go and verify it. The table was
+  right. The gap was in this file, not in the coverage.
 
 ## 4. btree skip scan (PostgreSQL 18)
 
