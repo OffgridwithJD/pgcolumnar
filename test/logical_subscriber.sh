@@ -129,6 +129,26 @@ done
 check "it retries rather than giving up, so the subscription is wedged" \
 	"$([ "$(log_has 'logical replication cannot apply UPDATE or DELETE')" -ge 2 ] && echo yes || echo no)" "yes"
 
+# ---- 3. the gate must not widen -------------------------------------------
+# The replication message is selected by IsLogicalWorker(). Everything else that takes a
+# row lock must keep the generic message, or a user running SELECT ... FOR UPDATE gets
+# told about a subscription they do not have. This is the check that fails if someone
+# later drops the gate.
+# On a COLUMNAR table, which src on the publisher is not: it is the heap source. Asserting
+# a columnar-specific message against a heap table is how the first version of this check
+# passed nothing and failed for the wrong reason.
+psql_run "CREATE TABLE lk (id int primary key, v text) USING pgcolumnar;
+	INSERT INTO lk VALUES (1, 'a');" >/dev/null 2>&1
+check "premise: the lock fixture really is columnar" \
+	"$(q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='lk'")" "pgcolumnar"
+for lk in "FOR UPDATE" "FOR SHARE" "FOR NO KEY UPDATE"; do
+	out=$(psql_run "SELECT * FROM lk WHERE id = 1 $lk" 2>&1)
+	check "an ordinary SELECT ... $lk keeps the generic message" \
+		"$(grep -c 'row locking is not supported' <<<"$out")" "1"
+	check "an ordinary SELECT ... $lk is not told about replication" \
+		"$(grep -c 'logical replication cannot apply' <<<"$out")" "0"
+done
+
 SUB "DROP SUBSCRIPTION s_ins;" >/dev/null 2>&1
 SUB "DROP SUBSCRIPTION s_all;" >/dev/null 2>&1
 pgc_summary
