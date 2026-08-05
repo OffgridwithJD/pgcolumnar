@@ -85,6 +85,18 @@ which was true until that script existed.
   drops from 568 ms to 73 ms with workers allowed, against 563 ms for the same
   index on a heap table.
 
+- Logical replication into a columnar table says what is wrong and how to
+  proceed (#435). Applying an UPDATE or a DELETE takes a row lock, which
+  columnar storage does not support, so the apply worker raised "columnar: row
+  locking is not supported yet". That names something the user was not doing.
+  PostgreSQL takes that lock for every applied UPDATE and DELETE and has no
+  lock-free path, and it does not advance the replication origin when a
+  transaction fails, so the subscription retries the same transaction for as
+  long as it runs and no later change is applied. The error now names logical
+  replication, says the retry is unbounded, and points at
+  `CREATE PUBLICATION ... WITH (publish = 'insert')`, which does work. See
+  [Limitations](docs/limitations.md).
+
 ### Upgrading
 
 **Run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the
