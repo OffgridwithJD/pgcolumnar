@@ -120,10 +120,10 @@ q "CREATE TABLE t (a int, b text, c int) USING pgcolumnar;" >/dev/null
 q "SELECT pgcolumnar.set_options('t', stripe_row_limit => 10000);" >/dev/null
 q "INSERT INTO t SELECT g, 'r'||g, g%7 FROM generate_series(1,50000) g;" >/dev/null
 assert_plan "plain select uses custom scan" \
-	"EXPLAIN (COSTS OFF) SELECT * FROM t;" "Custom Scan (ColumnarScan)" "Seq Scan"
+	"EXPLAIN (COSTS OFF) SELECT * FROM t;" "Custom Scan (PgColumnarScan)" "Seq Scan"
 assert_plan "filtered select uses custom scan" \
 	"EXPLAIN (COSTS OFF) SELECT a FROM t WHERE a = 12345;" \
-	"Custom Scan (ColumnarScan)" "Seq Scan"
+	"Custom Scan (PgColumnarScan)" "Seq Scan"
 
 # ---------------------------------------------------------------------------
 # Qual pushdown: a filtered scan skips chunk groups the min/max rule out.
@@ -260,10 +260,10 @@ check "vacuum_full keeps data" "$(q "SELECT count(*) FROM t;")" "50000"
 echo "-- default plan is the serial custom scan"
 assert_plan "columnar default uses custom scan, not seqscan" \
 	"EXPLAIN (COSTS OFF) SELECT count(*) FROM t;" \
-	"Custom Scan (ColumnarScan)" "Seq Scan"
+	"Custom Scan (PgColumnarScan)" "Seq Scan"
 assert_plan "columnar default plan is not parallel" \
 	"EXPLAIN (COSTS OFF) SELECT count(*) FROM t;" \
-	"Custom Scan (ColumnarScan)" "Gather"
+	"Custom Scan (PgColumnarScan)" "Gather"
 
 # ---------------------------------------------------------------------------
 # Disabling the custom scan falls back cleanly to a sequential scan.

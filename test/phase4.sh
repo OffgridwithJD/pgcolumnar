@@ -229,12 +229,12 @@ else
 fi
 check "covering value"    "$(q 'SET enable_seqscan=off; SELECT a FROM ios WHERE a = 100;')" "100"
 # a full-table scan is still available when index/bitmap scans are disabled.
-# As of phase 5 the columnar full scan is the custom scan (ColumnarScan); with
+# As of phase 5 the columnar full scan is the custom scan (PgColumnarScan); with
 # the custom scan disabled it is a plain sequential scan. Either is acceptable.
 assert_plan_seq() {
 	local plan
 	plan="$(run_pg "$PSQL -c \"SET enable_indexscan=off; SET enable_bitmapscan=off; EXPLAIN (COSTS OFF) SELECT * FROM ios WHERE a = 100;\"")"
-	if echo "$plan" | grep -qE "Seq Scan|Custom Scan \(ColumnarScan\)"; then
+	if echo "$plan" | grep -qE "Seq Scan|Custom Scan \(PgColumnarScan\)"; then
 		echo "PASS  full-table scan available"
 	else
 		echo "FAIL  full-table scan available: $plan"; fail=1

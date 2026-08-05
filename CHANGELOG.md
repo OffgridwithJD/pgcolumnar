@@ -12,6 +12,36 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Fixed
+
+- Renamed the custom scan node from `ColumnarScan` to `PgColumnarScan`, and the
+  custom path from `ColumnarAgg` to `PgColumnarAgg` (#428). `ColumnarScan` is
+  also registered by **Citus columnar** and by **TimescaleDB 2.29**.
+  PostgreSQL's registry is one hash table keyed on that name, so two extensions
+  cannot both hold it. Neither failure needed a pgColumnar table; our presence
+  in `shared_preload_libraries` was enough.
+
+  With **Citus columnar** the server refused to start at all, in either load
+  order:
+
+      FATAL:  extensible node type "ColumnarScan" already exists
+
+  With **TimescaleDB** there was no startup error and serial queries returned
+  correct results. TimescaleDB checks the registry first and silently skips
+  registering when the name is taken, so a parallel worker then resolved
+  TimescaleDB's node through pgColumnar's callbacks, and any parallel query over
+  a columnstore hypertable failed with
+  `could not read blocks 0..0 in file ...`. That is the more dangerous of the
+  two, because nothing announces it.
+
+  **This changes `EXPLAIN` output.** Plans that read `Custom Scan (ColumnarScan)`
+  now read `Custom Scan (PgColumnarScan)`. Anything parsing plan text for the old
+  name must be updated. The `Columnar ...` property lines, such as
+  `Columnar Projected Columns`, are a different namespace and are unchanged.
+  `ColumnarAgg` never appeared in `EXPLAIN`: it names a `CustomPathMethods`, and
+  the planned node carries the scan's methods (`columnar_vector.c:717`), so that
+  half of the rename is hygiene rather than a visible change.
+
 ### Changed
 
 - The unsupported-rewrite error names `REPACK` on PostgreSQL 19 (#399). `REPACK`
