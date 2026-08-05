@@ -268,8 +268,10 @@ returning no rows.
 
 ## Vacuum and compaction
 
-- `VACUUM FULL` and `CLUSTER` are not supported on a columnar table; the
-  copy-for-cluster path raises an error. Use `pgcolumnar.vacuum` or
+- `REPACK`, `VACUUM FULL` and `CLUSTER` are not supported on a columnar table; the
+  copy-for-cluster path raises an error. `REPACK` arrives in PostgreSQL 19 and
+  replaces the other two, and it dispatches through the same path, so it is
+  refused for the same reason. Use `pgcolumnar.vacuum` or
   `pgcolumnar.vacuum_full` instead.
 - `pgcolumnar.vacuum` always rewrites the whole relation into full row groups. It
   accepts a `stripe_count` argument for compatibility with the interface, but it

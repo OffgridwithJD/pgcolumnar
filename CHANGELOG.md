@@ -14,6 +14,13 @@ which was true until that script existed.
 
 ### Changed
 
+- The unsupported-rewrite error names `REPACK` on PostgreSQL 19 (#399). `REPACK`
+  replaces `CLUSTER` and `VACUUM FULL` in 19 and dispatches through the same
+  copy-for-cluster path, which pgColumnar does not implement, so a 19 user who
+  typed `REPACK` was told that `CLUSTER / VACUUM FULL` was unsupported: two
+  commands they had not typed, and on 19 the superseded ones. The message now
+  names the command and hints at `pgcolumnar.vacuum()`, which does the work.
+
 - The extension's exported C symbols are namespaced under `pgcolumnar` (#382).
   Two extensions that both call themselves `columnar` could define the same
   symbol. `columnar_handler` and `columnar_relation_storageid` collided with
