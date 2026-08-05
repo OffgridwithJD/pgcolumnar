@@ -69,14 +69,7 @@ jobs:
       #
       # ImageOS is in the key because a new runner image can bring a different
       # LLVM major, and a key that ignored it would serve debs for the wrong one.
-      - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
-        id: apt-nightly
-        uses: actions/cache@v4
-        with:
-          path: ~/apt-archives
-          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
-
-      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
+      - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -88,6 +81,34 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      # See ci.yml's build job for why the key hashes the resolved versions: a
+      # fixed key freezes the archives, and the next routine PGDG minor then
+      # turns the download assertion below into a false red.
+      - name: Derive the cache key from the versions apt will install
+        id: aptkey
+        run: |
+          set -euo pipefail
+          v=$(apt-cache policy \
+                postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
+                liblz4-dev libzstd-dev zlib1g-dev python3-pip \
+              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+          test -n "$v"
+          echo "k=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved candidate versions hash: $v"
+
+      - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
+        id: apt-nightly
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          restore-keys: |
+            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+
+      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
+        run: |
+          set -euo pipefail
           mkdir -p "$HOME/apt-archives/partial"
           sudo timeout 600 apt-get -o Acquire::Retries=5 \
             -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
@@ -97,10 +118,15 @@ jobs:
           # per-PR workflow documents applies here too.
           sudo pip3 install --break-system-packages --quiet pyarrow \
             || sudo pip3 install --quiet pyarrow
+          # Not "|| true": a failed chown means the save fails, the cache is
+          # never populated, there is never a hit, and the assertion below never
+          # fires because it is gated on a hit. See ci.yml for the long form.
+          sudo chown -R "$USER" "$HOME/apt-archives"
+          test -r "$HOME/apt-archives"
           # A cache that populates but never hits looks identical in the log to one
-          # that works: the job is simply still slow. So assert it. On a hit,
-          # apt must not have fetched anything over the network.
-          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          # that works: the job is simply still slow. So assert it. On an exact
+          # hit, apt must not have fetched anything over the network. A
+          # restore-keys prefix match reports false here and is meant to.
           if [ "${{ steps.apt-nightly.outputs.cache-hit }}" = "true" ] \
              && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
             echo "::error::apt cache reported a hit but packages were downloaded anyway"
@@ -272,14 +298,7 @@ jobs:
       #
       # ImageOS is in the key because a new runner image can bring a different
       # LLVM major, and a key that ignored it would serve debs for the wrong one.
-      - name: Cache the PostgreSQL 18, codec headers, lcov, and pyarrow packages
-        id: apt-coverage
-        uses: actions/cache@v4
-        with:
-          path: ~/apt-archives
-          key: apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
-
-      - name: Install PostgreSQL 18, codec headers, lcov, and pyarrow
+      - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -291,6 +310,34 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      # See ci.yml's build job for why the key hashes the resolved versions: a
+      # fixed key freezes the archives, and the next routine PGDG minor then
+      # turns the download assertion below into a false red.
+      - name: Derive the cache key from the versions apt will install
+        id: aptkey
+        run: |
+          set -euo pipefail
+          v=$(apt-cache policy \
+                postgresql-18 postgresql-server-dev-18 \
+                liblz4-dev libzstd-dev zlib1g-dev python3-pip lcov \
+              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+          test -n "$v"
+          echo "k=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved candidate versions hash: $v"
+
+      - name: Cache the PostgreSQL 18, codec headers, lcov, and pyarrow packages
+        id: apt-coverage
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          restore-keys: |
+            apt-pgdev-codecs-lcov-pyarrow-pg18-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+
+      - name: Install PostgreSQL 18, codec headers, lcov, and pyarrow
+        run: |
+          set -euo pipefail
           mkdir -p "$HOME/apt-archives/partial"
           sudo timeout 600 apt-get -o Acquire::Retries=5 \
             -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
@@ -302,10 +349,15 @@ jobs:
           sudo pip3 install --break-system-packages --quiet pyarrow \
             || sudo pip3 install --quiet pyarrow
           sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
+          # Not "|| true": a failed chown means the save fails, the cache is
+          # never populated, there is never a hit, and the assertion below never
+          # fires because it is gated on a hit. See ci.yml for the long form.
+          sudo chown -R "$USER" "$HOME/apt-archives"
+          test -r "$HOME/apt-archives"
           # A cache that populates but never hits looks identical in the log to one
-          # that works: the job is simply still slow. So assert it. On a hit,
-          # apt must not have fetched anything over the network.
-          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          # that works: the job is simply still slow. So assert it. On an exact
+          # hit, apt must not have fetched anything over the network. A
+          # restore-keys prefix match reports false here and is meant to.
           if [ "${{ steps.apt-coverage.outputs.cache-hit }}" = "true" ] \
              && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
             echo "::error::apt cache reported a hit but packages were downloaded anyway"

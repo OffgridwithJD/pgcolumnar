@@ -64,22 +64,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
-      # postgresql-server-dev-N depends on. That download is what stalls: every
-      # failure of this step sat at the 600s bound while every success finished
-      # in a median of 25s (#386). Caching the debs removes the download on a
-      # hit, and a miss degrades to exactly what happens today.
-      #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
-      - name: Cache the PostgreSQL ${{ matrix.pg }} and codec headers packages
-        id: apt-build
-        uses: actions/cache@v4
-        with:
-          path: ~/apt-archives
-          key: apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
-
-      - name: Install PostgreSQL ${{ matrix.pg }} and codec headers
+      # The repository and the package lists first, on their own, because the
+      # cache key below is derived from the versions apt resolves and cannot be
+      # computed before the lists exist.
+      - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -96,15 +84,76 @@ jobs:
           # Acquire retries cover a flaky mirror; the outer timeout keeps a
           # wedged one from consuming the whole job budget.
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      # The key has to track the package VERSIONS and not only their names.
+      #
+      # actions/cache skips its save step on an exact-key hit, so a fixed key
+      # freezes the archives until a human edits it. On the day PGDG publishes a
+      # new minor, the cache hits with the old debs, apt resolves to the new
+      # ones and downloads them, and the assertion below sees a hit together
+      # with a download and fails the job. Every entry in the matrix goes red on
+      # a routine upstream release, and stays red until someone bumps the key by
+      # hand. That is a false red on a monthly timer.
+      #
+      # Hashing the resolved candidate versions makes an upstream bump a new
+      # key: it misses, downloads, and saves. The restore-keys prefix still
+      # seeds it from the previous archives, so only the changed debs are
+      # fetched. An exact hit then genuinely means nothing should be
+      # downloaded, which is the property worth asserting.
+      - name: Derive the cache key from the versions apt will install
+        id: aptkey
+        run: |
+          set -euo pipefail
+          v=$(apt-cache policy \
+                postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
+                liblz4-dev libzstd-dev zlib1g-dev \
+              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+          # A hash of nothing is a constant, which would silently restore the
+          # frozen key this step exists to remove.
+          test -n "$v"
+          echo "k=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved candidate versions hash: $v"
+
+      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
+      # postgresql-server-dev-N depends on. That download is what stalls: every
+      # failure of this step sat at the 600s bound while every success finished
+      # in a median of 25s (#386). Caching the debs removes the download on a
+      # hit, and a miss degrades to exactly what happens today.
+      #
+      # ImageOS is in the key because a new runner image can bring a different
+      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      - name: Cache the PostgreSQL ${{ matrix.pg }} and codec headers packages
+        id: apt-build
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          restore-keys: |
+            apt-pgdev-codecs-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+
+      - name: Install PostgreSQL ${{ matrix.pg }} and codec headers
+        run: |
+          set -euo pipefail
           mkdir -p "$HOME/apt-archives/partial"
           sudo timeout 600 apt-get -o Acquire::Retries=5 \
             -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
             postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
             liblz4-dev libzstd-dev zlib1g-dev 2>&1 | tee /tmp/apt-install.log
+          # apt downloads as _apt, so the debs and partial/ are not owned by the
+          # runner user and the post-job save cannot read them. This is not
+          # allowed to fail quietly. A failed chown means the save fails, the
+          # cache is never populated, there is never a hit, and the assertion
+          # below never fires, because it is gated on a hit. Permanently slow
+          # and permanently green is the failure this whole step is about.
+          sudo chown -R "$USER" "$HOME/apt-archives"
+          test -r "$HOME/apt-archives"
           # A cache that populates but never hits looks identical in the log to one
-          # that works: the job is simply still slow. So assert it. On a hit,
-          # apt must not have fetched anything over the network.
-          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          # that works: the job is simply still slow. So assert it. On an exact
+          # hit, apt must not have fetched anything over the network.
+          #
+          # A restore-keys prefix match reports cache-hit false, so a partial
+          # restore that downloads the changed debs is not caught here. That is
+          # correct: it is supposed to download them.
           if [ "${{ steps.apt-build.outputs.cache-hit }}" = "true" ] \
              && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
             echo "::error::apt cache reported a hit but packages were downloaded anyway"
@@ -242,22 +291,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
-      # postgresql-server-dev-N depends on. That download is what stalls: every
-      # failure of this step sat at the 600s bound while every success finished
-      # in a median of 25s (#386). Caching the debs removes the download on a
-      # hit, and a miss degrades to exactly what happens today.
-      #
-      # ImageOS is in the key because a new runner image can bring a different
-      # LLVM major, and a key that ignored it would serve debs for the wrong one.
-      - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
-        id: apt-suites
-        uses: actions/cache@v4
-        with:
-          path: ~/apt-archives
-          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-v1
-
-      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
+      # The repository and the package lists first, on their own, because the
+      # cache key below is derived from the versions apt resolves and cannot be
+      # computed before the lists exist.
+      - name: Add the PGDG repository and refresh the package lists
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -274,6 +311,44 @@ jobs:
           # Acquire retries cover a flaky mirror; the outer timeout keeps a
           # wedged one from consuming the whole job budget.
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      # See the build job for why the key hashes the resolved versions: a fixed
+      # key freezes the archives, and the next routine PGDG minor then turns the
+      # download assertion below into a false red across the whole matrix.
+      - name: Derive the cache key from the versions apt will install
+        id: aptkey
+        run: |
+          set -euo pipefail
+          v=$(apt-cache policy \
+                postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
+                liblz4-dev libzstd-dev zlib1g-dev python3-pip \
+              | awk '/Candidate:/ {print $2}' | sort | md5sum | cut -c1-12)
+          # A hash of nothing is a constant, which would silently restore the
+          # frozen key this step exists to remove.
+          test -n "$v"
+          echo "k=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved candidate versions hash: $v"
+
+      # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
+      # postgresql-server-dev-N depends on. That download is what stalls: every
+      # failure of this step sat at the 600s bound while every success finished
+      # in a median of 25s (#386). Caching the debs removes the download on a
+      # hit, and a miss degrades to exactly what happens today.
+      #
+      # ImageOS is in the key because a new runner image can bring a different
+      # LLVM major, and a key that ignored it would serve debs for the wrong one.
+      - name: Cache the PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow packages
+        id: apt-suites
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ steps.aptkey.outputs.k }}-v2
+          restore-keys: |
+            apt-pgdev-codecs-pyarrow-pg${{ matrix.pg }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-
+
+      - name: Install PostgreSQL ${{ matrix.pg }}, codec headers, and pyarrow
+        run: |
+          set -euo pipefail
           mkdir -p "$HOME/apt-archives/partial"
           sudo timeout 600 apt-get -o Acquire::Retries=5 \
             -o Dir::Cache::archives="$HOME/apt-archives" install -y --no-install-recommends \
@@ -288,10 +363,21 @@ jobs:
           # while skipping themselves.
           sudo pip3 install --break-system-packages --quiet pyarrow \
             || sudo pip3 install --quiet pyarrow
+          # apt downloads as _apt, so the debs and partial/ are not owned by the
+          # runner user and the post-job save cannot read them. This is not
+          # allowed to fail quietly. A failed chown means the save fails, the
+          # cache is never populated, there is never a hit, and the assertion
+          # below never fires, because it is gated on a hit. Permanently slow
+          # and permanently green is the failure this whole step is about.
+          sudo chown -R "$USER" "$HOME/apt-archives"
+          test -r "$HOME/apt-archives"
           # A cache that populates but never hits looks identical in the log to one
-          # that works: the job is simply still slow. So assert it. On a hit,
-          # apt must not have fetched anything over the network.
-          sudo chown -R "$USER" "$HOME/apt-archives" || true
+          # that works: the job is simply still slow. So assert it. On an exact
+          # hit, apt must not have fetched anything over the network.
+          #
+          # A restore-keys prefix match reports cache-hit false, so a partial
+          # restore that downloads the changed debs is not caught here. That is
+          # correct: it is supposed to download them.
           if [ "${{ steps.apt-suites.outputs.cache-hit }}" = "true" ] \
              && grep -qE '^Get:[0-9]+ https?://' /tmp/apt-install.log; then
             echo "::error::apt cache reported a hit but packages were downloaded anyway"
