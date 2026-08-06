@@ -14,9 +14,15 @@
 # btree_gist is CONTRIB. A PGDG package ships it with postgresql-N, so CI has it. A
 # source build configured without contrib does not, and this suite then asserts nothing.
 # It reported PASSED while doing so until #447, and the local five-major matrix was
-# claiming temporal coverage on every major while running it on one. Build and install
-# contrib/btree_gist against each source tree, or read the SKIPPED line and know what it
-# means.
+# claiming temporal coverage on every major while running it on one.
+#
+# Since #448 a missing btree_gist FAILS rather than skips, because the box cannot gate
+# this suite and a pass would claim coverage nobody has. Build and install
+# contrib/btree_gist against each source tree, or set PGC_ALLOW_MISSING_BTREE_GIST=1 to
+# run knowingly without it, which reports SKIPPED and keeps the loss visible.
+#
+# A skip on 15, 16 and 17 is different and is correct: WITHOUT OVERLAPS does not exist
+# there, so there is nothing to gate.
 #
 # Usage:  test/temporal.sh [PG_CONFIG]
 #
