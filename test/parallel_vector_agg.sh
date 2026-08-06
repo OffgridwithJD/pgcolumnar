@@ -3,10 +3,10 @@
 # pgColumnar parallel-aware ungrouped vectorized aggregate (#289 phase 5/6).
 #
 # pgcolumnar.enable_parallel_vector_agg makes the ungrouped batch fold
-# parallel-aware: a parallel partial ColumnarAgg under a core Gather + Finalize.
+# parallel-aware: a parallel partial PgColumnarAgg under a core Gather + Finalize.
 # Each worker claims distinct row groups through the shared gap-23 counter and
 # emits per-worker transition state the Finalize combines. This suite proves:
-#   (1) the plan Finalize Aggregate -> Gather -> parallel partial ColumnarAgg is
+#   (1) the plan Finalize Aggregate -> Gather -> parallel partial PgColumnarAgg is
 #       ACTUALLY chosen with the GUC on and parallelism enabled (premise);
 #   (2) count(*) is exact vs a serial oracle;
 #   (3) avg/sum over float4/float8 match core's OWN parallel aggregate within
@@ -172,7 +172,7 @@ check "premise: grouped Finalize HashAggregate present (#349)" \
    "$(printf '%s' "$GEA" | grep -qi 'Finalize HashAggregate' && echo y || echo n)" y
 # OUR grouped node, and it is the parallel-aware one.
 check "premise: the partial grouped node is under the Gather (#349)" \
-   "$(printf '%s' "$GEA" | grep -qi 'Parallel Custom Scan (ColumnarScan)' &&
+   "$(printf '%s' "$GEA" | grep -qi 'Parallel Custom Scan (PgColumnarScan)' &&
       printf '%s' "$GEA" | grep -qi 'Columnar Vectorized Group Keys' && echo y || echo n)" y
 # Planned is not launched: a leader-only run would satisfy every value check
 # below while never exercising a worker. Assert launch AND our node together, so

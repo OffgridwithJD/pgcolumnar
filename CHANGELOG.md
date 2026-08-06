@@ -12,6 +12,36 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Fixed
+
+- Renamed the custom scan node from `ColumnarScan` to `PgColumnarScan`, and the
+  custom path from `ColumnarAgg` to `PgColumnarAgg` (#428). `ColumnarScan` is
+  also registered by **Citus columnar** and by **TimescaleDB 2.29**.
+  PostgreSQL's registry is one hash table keyed on that name, so two extensions
+  cannot both hold it. Neither failure needed a pgColumnar table; our presence
+  in `shared_preload_libraries` was enough.
+
+  With **Citus columnar** the server refused to start at all, in either load
+  order:
+
+      FATAL:  extensible node type "ColumnarScan" already exists
+
+  With **TimescaleDB** there was no startup error and serial queries returned
+  correct results. TimescaleDB checks the registry first and silently skips
+  registering when the name is taken, so a parallel worker then resolved
+  TimescaleDB's node through pgColumnar's callbacks, and any parallel query over
+  a columnstore hypertable failed with
+  `could not read blocks 0..0 in file ...`. That is the more dangerous of the
+  two, because nothing announces it.
+
+  **This changes `EXPLAIN` output.** Plans that read `Custom Scan (ColumnarScan)`
+  now read `Custom Scan (PgColumnarScan)`. Anything parsing plan text for the old
+  name must be updated. The `Columnar ...` property lines, such as
+  `Columnar Projected Columns`, are a different namespace and are unchanged.
+  `ColumnarAgg` never appeared in `EXPLAIN`: it names a `CustomPathMethods`, and
+  the planned node carries the scan's methods (`columnar_vector.c:717`), so that
+  half of the rename is hygiene rather than a visible change.
+
 ### Changed
 
 - The unsupported-rewrite error names `REPACK` on PostgreSQL 19 (#399). `REPACK`
@@ -42,6 +72,30 @@ which was true until that script existed.
   setting to the other's storage.
 - `default_version` moves from `1.0-dev` to `1.0-alpha`, so
   `SELECT extversion FROM pg_extension` now agrees with `VERSION`.
+- `CREATE INDEX` decodes only the columns the index needs (#413). The index
+  build received an `IndexInfo` carrying the key columns and the expression and
+  predicate trees, and discarded it, so a one-column index on a wide table read
+  every column. Both readers are now projected: the one a serial build opens for
+  itself, and the shared scan a parallel build arrives with, which comes through
+  the table-access-method scan interface and has nowhere to carry a projection.
+  The parallel branch is not a corner case. With every parallel setting left at
+  its default, a 1.5 million row table of incompressible text, 459 MB on disk,
+  is built in parallel, so that is the branch a table of consequential size
+  takes. On 300,000 rows of 20 columns on PostgreSQL 18, a one-column index
+  drops from 568 ms to 73 ms with workers allowed, against 563 ms for the same
+  index on a heap table.
+
+- Logical replication into a columnar table says what is wrong and how to
+  proceed (#435). Applying an UPDATE or a DELETE takes a row lock, which
+  columnar storage does not support, so the apply worker raised "columnar: row
+  locking is not supported yet". That names something the user was not doing.
+  PostgreSQL takes that lock for every applied UPDATE and DELETE and has no
+  lock-free path, and it does not advance the replication origin when a
+  transaction fails, so the subscription retries the same transaction for as
+  long as it runs and no later change is applied. The error now names logical
+  replication, says the retry is unbounded, and points at
+  `CREATE PUBLICATION ... WITH (publish = 'insert')`, which does work. See
+  [Limitations](docs/limitations.md).
 
 ### Upgrading
 

@@ -1554,6 +1554,78 @@ PgColumnarReadSetParallelCounter(PgColumnarReadState *readState,
 }
 
 /*
+ * PgColumnarReadSetProjection
+ *		Narrow an already-opened reader to a set of columns (issue #413).
+ *
+ *		The table-AM scan interface has nowhere to put a projection, so a reader
+ *		opened through pgcolumnar_scan_begin reads every column. A caller that
+ *		does know which columns it needs -- an index build knows, from IndexInfo
+ *		-- can say so here instead.
+ *
+ *		Only legal before the first read. colWanted drives what the group loader
+ *		decodes, and a group already loaded under a wider projection would be
+ *		reused under a narrower one, so changing it mid-scan would silently
+ *		return unset values rather than fail. The caller is expected to do this
+ *		immediately after obtaining the reader; the assertion states the rule and
+ *		the early return keeps a release build honest.
+ *
+ *		A NULL set means "all columns", matching PgColumnarBeginRead.
+ */
+void
+PgColumnarReadSetProjection(PgColumnarReadState *readState,
+							Bitmapset *projectedColumns)
+{
+	int			pc;
+	MemoryContext old;
+
+	Assert(!readState->started);
+	if (readState->started)
+		return;
+
+	/*
+	 * Copy into the read state's own context, not the caller's. Nothing reads
+	 * this field after the setter today, so this is consistency rather than a
+	 * fixed bug -- PgColumnarBeginRead builds the same field in readContext and
+	 * PgColumnarReadRestrictToGroups says so in its own comment. A field owned by
+	 * two different contexts depending on which function set it is a trap for
+	 * whoever reads it next.
+	 */
+	old = MemoryContextSwitchTo(readState->readContext);
+	bms_free(readState->projectedColumns);
+	readState->projectedColumns = bms_copy(projectedColumns);
+	MemoryContextSwitchTo(old);
+	readState->allColumnsWanted = (projectedColumns == NULL ||
+								   !pgcolumnar_enable_column_projection);
+	for (pc = 0; pc < readState->natts; pc++)
+		readState->colWanted[pc] = readState->allColumnsWanted ||
+			bms_is_member(pc, projectedColumns);
+}
+
+/*
+ * PgColumnarReadProjectedCount
+ *		How many columns this reader will actually decode.
+ *
+ *		Read from colWanted, the field the group loader consults, so a caller
+ *		reporting a projection reports what the reader WILL DO rather than what
+ *		the caller computed and may have failed to apply. That distinction is
+ *		the whole point: a projection computed and then dropped on the floor is
+ *		exactly the bug this accessor exists to make visible (#413).
+ */
+int
+PgColumnarReadProjectedCount(PgColumnarReadState *readState)
+{
+	int			pc;
+	int			n = 0;
+
+	for (pc = 0; pc < readState->natts; pc++)
+	{
+		if (readState->colWanted[pc])
+			n++;
+	}
+	return n;
+}
+
+/*
  * PgColumnarReadRestrictToGroups
  *		Restrict this scan to the given row group numbers (issue #149). Groups
  *		outside the set are skipped in the claim loop, so their bytes are never

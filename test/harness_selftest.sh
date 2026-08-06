@@ -285,6 +285,17 @@ check "check_num still fails two unequal numbers" \
 check "check_num accepts a decimal and a sign" \
 	"$(_probe check_num "decimal" "-1.5" "-1.5")" "0"
 
+check "check_text refuses two empty strings, where plain check passes" \
+	"$(_probe check_text "empty vs empty" "" "")" "1"
+check "check_text refuses one empty side" \
+	"$(_probe check_text "one empty" "abc" "")" "1"
+check "check_text compares two md5 hashes, which check_num cannot" \
+	"$(_probe check_text "md5" "9dd4e461268c8034f5c8564e155c67a6" "9dd4e461268c8034f5c8564e155c67a6")" "0"
+check "check_text still fails two different strings" \
+	"$(_probe check_text "differ" "abc" "def")" "1"
+check "check_num refuses an md5, which is why check_text exists" \
+	"$(_probe check_num "md5" "9dd4e461268c8034f5c8564e155c67a6" "9dd4e461268c8034f5c8564e155c67a6")" "1"
+
 check "check_ratio refuses an empty measurement" \
 	"$(_probe check_ratio "empty" "" "100" "0.5")" "1"
 check "check_ratio refuses a zero denominator rather than dividing by it" \

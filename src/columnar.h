@@ -451,6 +451,10 @@ extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * ------------------------------------------------------------------------- */
 extern uint64 PgColumnarNextStorageId(void);
 extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
+
+/* projection: needed attnos (pull_varattnos form) -> the reader's 0-based set */
+extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
+											   int *nProjected);
 extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
 									int64 lastGroup);
 extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
@@ -609,6 +613,18 @@ extern int64 PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot,
 									  const uint64 *restrictGroups,
 									  int nRestrictGroups);
 extern void PgColumnarParquetCheckExportable(Relation rel);
+
+/*
+ * Column projection on an already-opened reader (#413). The table-AM scan
+ * interface has nowhere to carry a projection, so a reader obtained through it
+ * reads every column; a caller that knows better narrows it here, before the
+ * first read. PgColumnarReadProjectedCount reports what the reader WILL decode,
+ * read off colWanted, so a caller reporting a projection cannot report one it
+ * failed to apply.
+ */
+extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
+										Bitmapset *projectedColumns);
+extern int	PgColumnarReadProjectedCount(PgColumnarReadState *readState);
 
 /*
  * Parallel scan (gap 23): point the read state at a shared atomic that hands out
@@ -787,6 +803,36 @@ extern char *PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
 										   int compressionType, uint32 rawLen,
 										   MemoryContext targetContext);
 
+
+/* -------------------------------------------------------------------------
+ * advisory-lock classes (issue #430)
+ *
+ * locktag_field4 discriminates advisory lock spaces, and PostgreSQL's own
+ * SQL-callable functions already own two values. From lockfuncs.c:
+ *
+ *     field4: 1 if using an int8 key, 2 if using 2 int4 keys
+ *
+ * so pg_advisory_lock(bigint) is class 1 and pg_advisory_lock(int4, int4) is
+ * class 2, and NOTHING ELSE reachable from SQL sets this field. We used to use
+ * 1 and 2, which made our internal locks bit-identical to a user's: the
+ * unique-key lock was exactly pg_advisory_lock(indexOid, bucket). An
+ * application holding that tag blocked our inserts, and we blocked it, silently
+ * and with no bad query to point at.
+ *
+ * Any value above 2 is unreachable from SQL, so these three cannot be taken by
+ * an application at all. They are distinct from each other as well, which is
+ * what the previous comment in pgcolumnar_unique.c wanted and did not achieve:
+ * there were three uses across two classes, and the storage-row lock shared
+ * class 2 with the unique-key lock.
+ *
+ * These values are part of the on-the-wire lock protocol between backends, so
+ * two backends running different builds would not exclude each other. That is a
+ * restart rather than a rolling upgrade, which this extension already requires
+ * because it loads through shared_preload_libraries.
+ * ------------------------------------------------------------------------- */
+#define PGCOLUMNAR_LOCKCLASS_DELETE_VECTOR	101
+#define PGCOLUMNAR_LOCKCLASS_STORAGE_ROW	102
+#define PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY		103
 
 /* -------------------------------------------------------------------------
  * concurrent unique-key insert serialization (pgcolumnar_unique.c, issue #5)

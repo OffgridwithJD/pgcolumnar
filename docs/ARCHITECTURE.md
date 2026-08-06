@@ -190,7 +190,7 @@ reader (projection pushdown), and translates simple `column op const` clauses
 into scan keys so the reader's zone maps remove row groups and vectors that
 cannot match (qual pushdown). The executor always re-applies the full
 restriction clauses as a filter, so skipping never changes results. The scan is
-the scalar per-row path (`ColumnarScanNext`). Through a `create_upper_paths_hook`
+the scalar per-row path (`PgColumnarScanNext`). Through a `create_upper_paths_hook`
 the module adds the vectorized aggregate path for a supported
 `SELECT agg(col) FROM t [WHERE ...]`. EXPLAIN reporting (projected columns, and
 under ANALYZE the row groups and vectors read versus skipped) lives here.

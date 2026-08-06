@@ -433,7 +433,7 @@ check "without the penalty a selective scattered condition takes the index (#362
 plan_sel_on="$(plan_of "${ord_setup} EXPLAIN (COSTS off) SELECT * FROM o362 WHERE h = 7;")"
 echo "-- selective h = 7, penalty on: $(printf '%s' "$plan_sel_on" | grep -m1 -E 'Scan|Sort')"
 check "the penalty is applied before the columnar path is offered, so it can still win (#362)" \
-	"$(  grep -q 'Custom Scan (ColumnarScan)' <<<"$plan_sel_on" \
+	"$(  grep -q 'Custom Scan (PgColumnarScan)' <<<"$plan_sel_on" \
 		&& ! grep -q 'Index Scan using o362_h' <<<"$plan_sel_on" \
 		&& echo yes || echo "no ($(printf '%s' "$plan_sel_on" | head -1))")" \
 	"yes"

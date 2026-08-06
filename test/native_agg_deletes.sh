@@ -177,7 +177,7 @@ check "a dirty group is scanned without scanning the clean ones" \
 # and the path is still the one being measured
 plan="$(q "EXPLAIN (COSTS off) SELECT count(*) FROM ad_t;" | head -1)"
 check "the metadata aggregate path is still chosen with a row deleted" \
-	"$(case "$plan" in *ColumnarScan*) echo yes ;; *) echo "no ($plan)" ;; esac)" \
+	"$(case "$plan" in *"Custom Scan (PgColumnarScan)"*) echo yes ;; *) echo "no ($plan)" ;; esac)" \
 	"yes"
 
 pgc_summary

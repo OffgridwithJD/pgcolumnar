@@ -1240,7 +1240,8 @@ delete_vector_lock_chunk_group(uint64 storageId, uint64 stripeId, int chunkId)
 	uint64		key = delete_vector_chunk_lock_key(storageId, stripeId, chunkId);
 
 	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
-						 (uint32) (key >> 32), (uint32) (key & 0xFFFFFFFF), 1);
+						 (uint32) (key >> 32), (uint32) (key & 0xFFFFFFFF),
+						 PGCOLUMNAR_LOCKCLASS_DELETE_VECTOR);
 
 	(void) LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
 					   false /* wait */ );
@@ -1599,7 +1600,8 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 
 	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
 						 (uint32) (s->storageId >> 32),
-						 (uint32) (s->storageId & 0xFFFFFFFF), 2);
+						 (uint32) (s->storageId & 0xFFFFFFFF),
+						 PGCOLUMNAR_LOCKCLASS_STORAGE_ROW);
 	(void) LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
 					   false /* wait */ );
 
