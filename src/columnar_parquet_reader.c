@@ -18,6 +18,7 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_objstore.h"
 #include "columnar_parquet_format.h"
 #include "columnar_thrift.h"
 #include "columnar_parquet_codec.h"
@@ -1504,6 +1505,34 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 
 	memset(src, 0, sizeof(*src));
 	src->path = path;
+
+	/*
+	 * A remote path is not a filename (#393). Without this, AllocateFile reports
+	 * "No such file or directory" for s3://bucket/key, which is true of the
+	 * filesystem and useless to the reader.
+	 *
+	 * The module is loaded here and only here, on the first remote read. An
+	 * installation without it reaches the same error as an unsupported scheme,
+	 * which is the intended behaviour rather than a degradation: local files are
+	 * unaffected either way.
+	 */
+	if (PgColumnarPathIsRemote(path))
+	{
+		const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+
+		if (api == NULL || !api->handles_url(path))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: reading \"%s\" is not supported", path),
+					 errdetail("Object storage support is not available in this "
+							   "build."),
+					 errhint("Use a local filesystem path.")));
+		/* the remote source is wired in the next commit */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: object storage is not implemented yet")));
+	}
+
 	src->f = AllocateFile(path, PG_BINARY_R);
 	if (src->f == NULL)
 		ereport(ERROR,
