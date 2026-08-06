@@ -372,4 +372,47 @@ check "premise: the grouped path is costed at all (non-empty estimate)" \
 check "ten aggregates cost more than one (#349)" \
 	"$( [ "$C10" -gt "$C1" ] 2>/dev/null && echo yes || echo no )" yes
 
+# ---- the group-estimate bound (#369) ---------------------------------------
+#
+# estimate_num_groups cannot see through a function. For date_trunc('minute', ts) it falls
+# back to the timestamp column's ndistinct, which is near the row count: 19,996,000 against
+# 720 actual on the 20M fixture. That number is charged twice on the parallel arm, by the
+# Gather and by the Finalize, and not at all on the serial node, so the serial node won by
+# construction on shapes where the arm is 4x faster.
+#
+# Three things are asserted, and the middle one is the one that matters:
+#   1 the bound is ACCURATE, not merely smaller: 722 is floor(12h/1min) + 2
+#   2 an INFORMED estimate is untouched, asserted as bit-identical rather than "still fast"
+#   3 a query with no Const bound on the key gets no bound from us
+psql_run "CREATE TABLE gb (ts timestamptz, host text, v float8) USING pgcolumnar;
+	INSERT INTO gb SELECT '2026-01-01'::timestamptz + (g * interval '2160 microseconds'),
+	  'h'||(g % 4000), random()*100 FROM generate_series(1,300000) g;
+	ANALYZE gb;" >/dev/null 2>&1
+GB="SET pgcolumnar.enable_group_vectorization=on;
+    SET pgcolumnar.enable_parallel_vector_agg=on; SET max_parallel_workers_per_gather=4;"
+gbest() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -At -q -c "$GB" -c "EXPLAIN (COSTS ON) $1" 2>&1 |
+	grep -oE "rows=[0-9]+" | head -1 | cut -d= -f2; }
+
+# The window is 300000 * 2160us = 648s = 10.8 minutes, so 11 buckets plus the two
+# partials the bound allows.
+W="WHERE ts >= '2026-01-01' AND ts < '2026-01-01 00:10:48'"
+check "the bound is accurate for a truncating time key, not just smaller" \
+	"$(gbest "SELECT date_trunc('minute', ts) b, avg(v) FROM gb $W GROUP BY b")" "12"
+check "and it is an UPPER bound: the true group count is at or below it" \
+	"$([ "$(q "SELECT count(*) FROM (SELECT date_trunc('minute', ts) FROM gb $W GROUP BY 1) z")" -le 12 ] && echo yes || echo no)" "yes"
+
+# The informed case. A plain Var has statistics, so examine_variable reports informed and
+# the substitution must not run at all. Bit-identical, not merely still fast.
+plain_before=$(gbest "SELECT host, avg(v) FROM gb GROUP BY host")
+check "an informed estimate (plain column) is not replaced" \
+	"$([ "$plain_before" -ge 3900 ] && [ "$plain_before" -le 4100 ] && echo yes || echo no)" "yes"
+
+# No Const bound on the key means no range, so no bound. The estimate stays whatever core
+# produced; asserting it is LARGE is the point, since a bound would have shrunk it.
+check "a truncating key with no range bound gets no bound from us" \
+	"$([ "$(gbest "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
+check "a non-time expression key gets no bound either" \
+	"$([ "$(gbest "SELECT upper(host) b, avg(v) FROM gb GROUP BY b")" -gt 100 ] && echo yes || echo no)" "yes"
+
 pgc_summary

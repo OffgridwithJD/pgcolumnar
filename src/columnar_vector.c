@@ -69,6 +69,8 @@
 #include "optimizer/tlist.h"
 #include "utils/array.h"
 #include "access/sysattr.h"
+#include "utils/fmgroids.h"
+#include "utils/timestamp.h"
 #include "utils/selfuncs.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
@@ -1287,6 +1289,187 @@ pgcolumnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
  *		the serial node, so the vectorized fold runs across workers rather than
  *		displacing a parallel plan with a single-threaded one.
  */
+/*
+ * pgcolumnar_truncating_time_bound
+ *		Upper bound on the distinct values of date_trunc(unit, ts) over the rows
+ *		this scan will read, or 0 when we cannot bound it (#369).
+ *
+ *		Truncation is a step function, so the number of distinct outputs cannot
+ *		exceed the number of buckets the input range spans. Two partial buckets
+ *		are possible, one at each end, hence the +2.
+ *
+ *		The range comes only from Const btree comparisons on that same Var in the
+ *		relation's baserestrictinfo, because those describe the rows actually
+ *		scanned. Anything less certain gives no bound rather than a guess: this
+ *		value is used to make a plan cheaper, so an under-estimate would
+ *		under-price the arm and under-size the Finalize's hash table.
+ */
+static double
+pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
+							   Node *expr)
+{
+	FuncExpr   *f = (FuncExpr *) expr;
+	Const	   *unit;
+	Var		   *tsvar;
+	char	   *unitstr;
+	double		width;
+	bool		havelo = false,
+				havehi = false;
+	double		lo = 0,
+				hi = 0;
+	ListCell   *lc;
+
+	if (!IsA(expr, FuncExpr))
+		return 0.0;
+	f = (FuncExpr *) expr;
+	/* date_trunc(text, timestamp[tz]) and its 3-arg timezone form */
+	if (list_length(f->args) < 2 || list_length(f->args) > 3)
+		return 0.0;
+	if (!IsA(linitial(f->args), Const))
+		return 0.0;
+	unit = (Const *) linitial(f->args);
+	if (unit->consttype != TEXTOID || unit->constisnull)
+		return 0.0;
+	if (!IsA(lsecond(f->args), Var))
+		return 0.0;
+	tsvar = (Var *) lsecond(f->args);
+	if (tsvar->varno != input_rel->relid || tsvar->varlevelsup != 0)
+		return 0.0;
+	if (tsvar->vartype != TIMESTAMPOID && tsvar->vartype != TIMESTAMPTZOID)
+		return 0.0;
+
+	/* bucket width in microseconds, which is the timestamp unit */
+	unitstr = TextDatumGetCString(unit->constvalue);
+	if (pg_strcasecmp(unitstr, "microseconds") == 0)		width = 1;
+	else if (pg_strcasecmp(unitstr, "milliseconds") == 0)	width = 1000;
+	else if (pg_strcasecmp(unitstr, "second") == 0)			width = USECS_PER_SEC;
+	else if (pg_strcasecmp(unitstr, "minute") == 0)			width = USECS_PER_MINUTE;
+	else if (pg_strcasecmp(unitstr, "hour") == 0)			width = USECS_PER_HOUR;
+	else if (pg_strcasecmp(unitstr, "day") == 0)			width = (double) USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "week") == 0)			width = 7.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "month") == 0)			width = 28.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "quarter") == 0)		width = 89.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "year") == 0)			width = 365.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "decade") == 0)			width = 3650.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "century") == 0)		width = 36500.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "millennium") == 0)		width = 365000.0 * USECS_PER_DAY;
+	else return 0.0;
+	/*
+	 * month, quarter and year use their SHORTEST possible length above, so the
+	 * bucket count is over-estimated rather than under-estimated. This must stay
+	 * an upper bound.
+	 */
+
+	foreach(lc, input_rel->baserestrictinfo)
+	{
+		RestrictInfo *ri = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *l,
+				   *r;
+		Const	   *c;
+		double		v;
+		bool		varonleft;
+
+		if (!IsA(ri->clause, OpExpr))
+			continue;
+		op = (OpExpr *) ri->clause;
+		if (list_length(op->args) != 2)
+			continue;
+		l = (Node *) linitial(op->args);
+		r = (Node *) lsecond(op->args);
+		if (IsA(l, Var) && IsA(r, Const) && ((Var *) l)->varattno == tsvar->varattno)
+		{ varonleft = true; c = (Const *) r; }
+		else if (IsA(r, Var) && IsA(l, Const) && ((Var *) r)->varattno == tsvar->varattno)
+		{ varonleft = false; c = (Const *) l; }
+		else
+			continue;
+		if (c->constisnull ||
+			(c->consttype != TIMESTAMPOID && c->consttype != TIMESTAMPTZOID))
+			continue;
+
+		v = (double) DatumGetTimestamp(c->constvalue);
+		switch (get_oprrest(op->opno))
+		{
+			case F_SCALARLTSEL:
+			case F_SCALARLESEL:
+				if (varonleft) { hi = havehi ? Min(hi, v) : v; havehi = true; }
+				else		   { lo = havelo ? Max(lo, v) : v; havelo = true; }
+				break;
+			case F_SCALARGTSEL:
+			case F_SCALARGESEL:
+				if (varonleft) { lo = havelo ? Max(lo, v) : v; havelo = true; }
+				else		   { hi = havehi ? Min(hi, v) : v; havehi = true; }
+				break;
+			default:
+				break;
+		}
+	}
+
+	if (!havelo || !havehi || hi <= lo)
+		return 0.0;
+	return floor((hi - lo) / width) + 2.0;
+}
+
+/*
+ * pgcolumnar_group_estimate_bound
+ *		An upper bound on the group count, for the case where the planner had
+ *		nothing to estimate from (#369). Returns 0 when no bound applies.
+ *
+ *		The gate first. If EVERY grouping expression is informed, we return 0 and
+ *		change nothing. "Informed" is core's own test, from examine_variable: a
+ *		statsTuple, or a unique index. A plain Var is informed. So is an
+ *		expression carrying CREATE STATISTICS ON (expr), or an expression index.
+ *		Those outrank anything we could infer and G3, whose key is a plain column,
+ *		never reaches the substitution at all.
+ *
+ *		Then the bound. Only one shape is handled, and deliberately: a truncating
+ *		time function over a single Var, which is the shape that produced the
+ *		27,772x inflation. The bucket count over the scanned range is a true upper
+ *		bound on the distinct values the expression can take, plus one partial
+ *		bucket at each end.
+ *
+ *		The range comes from Const btree bounds on that Var in the relation's own
+ *		baserestrictinfo, which describe the rows this scan will actually read.
+ *		A query with no such bound gets no bound from us.
+ */
+static double
+pgcolumnar_group_estimate_bound(PlannerInfo *root, RelOptInfo *input_rel,
+							  List *groupExprs)
+{
+	ListCell   *lc;
+	double		bound = 1.0;
+
+	if (groupExprs == NIL)
+		return 0.0;
+
+	foreach(lc, groupExprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		VariableStatData vardata;
+		bool		informed;
+		double		one;
+
+		/*
+		 * Core's own question: does anything actually know about this expression?
+		 * If so, leave the estimate entirely alone.
+		 */
+		examine_variable(root, expr, 0, &vardata);
+		informed = (HeapTupleIsValid(vardata.statsTuple) || vardata.isunique);
+		ReleaseVariableStats(vardata);
+		if (informed)
+			return 0.0;
+
+		one = pgcolumnar_truncating_time_bound(root, input_rel, expr);
+		if (one <= 0.0)
+			return 0.0;		/* one unbounded key and the product is unbounded */
+
+		bound *= one;
+		if (bound >= (double) INT_MAX)
+			return 0.0;
+	}
+	return bound;
+}
+
 static void
 PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 						RelOptInfo *output_rel, void *extra)
@@ -1355,6 +1538,38 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	dNumGroups = estimate_num_groups(root, groupExprs,
 									 input_rel->rows > 0 ? input_rel->rows : 1.0,
 									 NULL, NULL);
+
+	/*
+	 * Bound the estimate when the planner had nothing to estimate FROM (#369).
+	 *
+	 * estimate_num_groups cannot see through a function. For date_trunc('minute',
+	 * ts) it falls back to the underlying column's ndistinct, which for a
+	 * high-cardinality timestamp is close to the row count: measured 19,996,000
+	 * against 720 actual, 27,772x.
+	 *
+	 * That number is charged TWICE on the parallel arm, once by the Gather as
+	 * parallel_tuple_cost * rows and again by the Finalize's per-group terms, and
+	 * not at all on the serial node, which is priced per input row. So the serial
+	 * node wins by construction on exactly the shapes where the parallel arm is
+	 * measured 4.3x faster (G1) and 3.5x faster (G2).
+	 *
+	 * The gate is core's own test for "is this estimate informed", from
+	 * clausesel.c's use of examine_variable: a statsTuple or a unique index means
+	 * somebody measured this expression, and we leave it alone. That covers a
+	 * plain Var, an expression index, and a user's CREATE STATISTICS ON (expr),
+	 * all of which outrank anything we could infer.
+	 *
+	 * Only when nothing is informed do we substitute an upper bound, and only ever
+	 * downward: Min() cannot raise an estimate, so a shape we get wrong is priced
+	 * no worse than it is today.
+	 */
+	{
+		double		bound = pgcolumnar_group_estimate_bound(root, input_rel,
+														  groupExprs);
+
+		if (bound > 0.0 && bound < dNumGroups)
+			dNumGroups = Max(1.0, bound);
+	}
 
 	/*
 	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time
