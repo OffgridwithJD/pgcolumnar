@@ -102,6 +102,12 @@ run_plan() {  # run_plan <settings> <sql> -> "<node> <ms>"
 		printf '%s\t\n' "${node:-unknown}"
 		return
 	fi
+	# Warm first, then measure. The three plans are timed in a fixed order, so
+	# without this the chosen plan pays a cold cache and both alternatives run
+	# warm against a 3x bound -- the ordering alone could push a healthy ratio
+	# over it. The discarded run also populates shared buffers for the timed one.
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "SET statement_timeout='${PLAN_TIMEOUT}s';" -c "$1" -c "$2" >/dev/null 2>&1
 	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 		-d "$PGC_DB" -Atq -c "SET statement_timeout='${PLAN_TIMEOUT}s';" -c "$1" -c '\timing on' -c "$2" 2>&1)
 	if grep -qiE 'timeout|canceling' <<<"$out"; then
@@ -154,6 +160,11 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 	for i in 1 2; do
 		eval "cand_n=\$n$i; cand_m=\$m$i"
 		case "${cand_m:-}" in '' | TIMEOUT | unknown) continue ;; esac
+		# An arm whose forcing did not change the plan is the CHOSEN plan run
+		# again, not an alternative. The premise above only requires ONE arm to
+		# differ, so without this the minimum could be the chosen plan's own warm
+		# re-run and the ratio would measure cache warmth.
+		[ "$cand_n" = "$cnode" ] && continue
 		if [ -z "$best" ] || [ "$(awk -v a="$cand_m" -v b="$best" 'BEGIN{print (a<b)?1:0}')" = 1 ]; then
 			best="$cand_m"; bnode="$cand_n"
 		fi
