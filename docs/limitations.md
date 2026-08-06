@@ -144,8 +144,18 @@ Three behaviors depend on the major:
 
 ## Host architecture
 
-The Arrow and Parquet import and export functions run on little-endian hosts
-only. The rest of the extension runs on any architecture PostgreSQL supports.
+The suites run and pass on x86_64 and on aarch64. The Arrow and Parquet import
+and export functions run on little-endian hosts only.
+
+The code runs on any architecture PostgreSQL supports. A data directory does not
+move between architectures of different byte order. The native format stores each
+multi-byte value in host byte order. The format specification states this. PostgreSQL's own heap format follows the same rule, so a columnar table
+is no more restricted than the rest of the cluster.
+
+A move to a big-endian host is not supported and is not tested. The format does
+not record the byte order of the host that wrote it. A read therefore has no
+check that could refuse such a move. See
+[Backup and restore](administration.md#backup-and-restore).
 
 ## Workload and access patterns
 
