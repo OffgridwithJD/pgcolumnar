@@ -551,22 +551,11 @@ oracle, so none changes query results.
   this repository. The runner fetches `postgresql/create.sql` and
   `postgresql/queries.sql` from upstream at run time, into the benchmark data
   directory, and feeds them to `psql` unmodified. The comparison oracle is the
-  heap arm of the same run, not any upstream expected output. **Decided
-  2026-08-06 by the owner: keep the run-time fetch rather than take a durable
-  in-tree copy, so the benchmark tracks the current upstream definition.** The
-  runner therefore re-fetches on every run; a cached copy is used only under
-  `PGC_CB_OFFLINE=1`, which announces itself in the output, and each run prints
-  the SHA-256 of the two fetched files so a published number can be tied to the
-  definition it came from.
-
-  On the **NonCommercial** term, also decided 2026-08-06 by the owner: pgColumnar
-  is an open-source project rather than a commercial product, so publishing
-  measurements taken with a CC BY-NC-SA benchmark is considered acceptable use.
-  Recorded as the owner's determination and its reasoning, not as settled law:
-  the term restricts use "primarily intended for or directed toward commercial
-  advantage" rather than products as such, and no legal opinion was sought. It is
-  written down here so it can be revisited rather than re-derived. The measured
-  numbers published in
+  heap arm of the same run, not any upstream expected output. **Proposed
+  2026-08-05: keep the run-time fetch rather than take a durable in-tree copy.
+  Owner decision pending, and the NonCommercial term's effect on publishing
+  benchmark numbers is a separate question that a run-time fetch does not
+  address.** The measured numbers published in
   `docs/benchmarks.md` are our own, produced on our own hardware. The dataset
   (`hits.tsv.gz`) is downloaded for local measurement and is not redistributed;
   its own licensing is unestablished and it must not be added to the tree without
