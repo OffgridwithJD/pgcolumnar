@@ -1415,21 +1415,45 @@ decode_plain_bools(const uint8 *buf, size_t buflen, int n, Datum *out)
  * scan of this file. Page bytes are read as they are needed, so peak memory does
  * not scale with the file.
  */
-typedef struct PqSource
+/*
+ * A Parquet byte source (#393).
+ *
+ * Every read of a Parquet file in this reader goes through pq_source_read, which
+ * is a positional read whose callers have already bounded the offset. That makes
+ * it the one seam a remote source has to replace, and the reason object storage
+ * touches three functions rather than the reader.
+ *
+ * `ops` dispatches. The local implementation is the code that was here before and
+ * behaves identically; a remote one lives in a separate, non-preloaded module so
+ * that nothing an object-store client links is mapped into the postmaster. See
+ * PqObjStoreApi.
+ */
+typedef struct PqSource PqSource;
+
+typedef struct PqSourceOps
 {
-	FILE	   *f;				/* AllocateFile handle (buffered) */
+	const char *name;			/* for error messages: "file", "s3", ... */
+	void		(*read) (PqSource *src, int64 off, void *buf, size_t n);
+	void		(*close) (PqSource *src);
+} PqSourceOps;
+
+struct PqSource
+{
+	const PqSourceOps *ops;		/* NULL means the local file implementation */
+	FILE	   *f;				/* AllocateFile handle (buffered), local only */
+	void	   *priv;			/* remote implementation's own state */
 	const char *path;			/* for error messages; palloc'd by the caller */
 	int64		len;			/* file length in bytes */
 	uint8	   *meta;			/* serialized footer metadata */
 	uint32		metalen;
-} PqSource;
+};
 
 /*
  * Read `n` bytes at `off` into `buf`. Every caller has already bounded `off` and
  * `n` against src->len; this reports the I/O failure that is left.
  */
 static void
-pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
+pq_source_read_local(PqSource *src, int64 off, void *buf, size_t n)
 {
 	Assert(off >= 0 && n <= (size_t) (src->len - off));
 	if (fseeko(src->f, (off_t) off, SEEK_SET) != 0)
@@ -1452,6 +1476,20 @@ pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
 				 errmsg("unexpected end of file in \"%s\"", src->path)));
 	}
 }
+
+/*
+ * The dispatcher every caller uses. Local sources keep the exact path they had
+ * before this existed: ops NULL means the FILE * implementation above.
+ */
+static void
+pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
+{
+	if (src->ops != NULL)
+		src->ops->read(src, off, buf, n);
+	else
+		pq_source_read_local(src, off, buf, n);
+}
+
 
 /*
  * Open a Parquet file and parse its footer. Reads the two magics and the footer,
@@ -1520,7 +1558,7 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 }
 
 static void
-pq_source_close(PqSource *src)
+pq_source_close_local(PqSource *src)
 {
 	if (src->f != NULL)
 	{
@@ -1528,6 +1566,16 @@ pq_source_close(PqSource *src)
 		src->f = NULL;
 	}
 }
+
+static void
+pq_source_close(PqSource *src)
+{
+	if (src->ops != NULL)
+		src->ops->close(src);
+	else
+		pq_source_close_local(src);
+}
+
 
 /*
  * Page headers are small thrift structures, but a v2 header can carry column
