@@ -653,16 +653,81 @@ both are larger than anything in it:
 The point lookup is the one number that moved the wrong way, and it moved a long
 way. See the note above it.
 
+## Joins
+
+Every other query on this page reads one table. Star schemas and dimension joins
+are a large part of what columnar storage is bought for, so `bench/run_bench_join.sh`
+measures them.
+
+```sh
+BENCH_SCALE=20000000 bench/run_bench_join.sh /path/to/pg18n/bin/pg_config
+```
+
+The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
+non-assert, 16 cores, 20,000,000 fact rows, serial execution and the median of
+three repetitions. The fact table has eight metric columns. The dimensions are
+heap tables in both arms, which is the realistic deployment.
+
+The data shape is an arm rather than an assumption. `quantised` rounds each metric
+to two decimals, which is what an instrument reports. `random` stores raw
+`random()`, which has maximum entropy and cannot be compressed. An earlier
+measurement of these shapes used `random()` without noticing, and reported a gap
+that was much larger than the realistic one.
+
+### Realistic data
+
+| shape | heap | columnar | columnar over heap |
+| --- | ---: | ---: | ---: |
+| no join, the control | 1,536.8 ms | 820.2 ms | **0.53x** |
+| selective dimension join | 1,952.3 ms | 2,655.6 ms | 1.36x |
+| unselective join | 3,152.8 ms | 3,694.1 ms | 1.17x |
+| multi-dimension star | 6,560.8 ms | 6,936.6 ms | 1.06x |
+| wide projection under a join | 2,293.0 ms | 6,821.8 ms | 2.98x |
+| total relation size | 2,185,166,848 B | 307,109,888 B | 0.141x |
+
+### Incompressible data
+
+| shape | heap | columnar | columnar over heap |
+| --- | ---: | ---: | ---: |
+| no join, the control | 1,533.6 ms | 1,912.0 ms | 1.25x |
+| selective dimension join | 1,968.6 ms | 3,957.4 ms | 2.01x |
+| unselective join | 3,161.9 ms | 4,990.6 ms | 1.58x |
+| multi-dimension star | 6,581.0 ms | 8,176.0 ms | 1.24x |
+| wide projection under a join | 2,311.6 ms | 16,269.1 ms | 7.04x |
+| total relation size | 2,185,166,848 B | 1,306,492,928 B | 0.598x |
+
+### What the control says
+
+Read the first two rows of the first table together. **Without a join we are 1.87
+times faster. Add a join and we are 1.36 times slower.** The rows are the same,
+the bytes are the same, and the encoding is the same.
+
+The reason is structural. Our vectorized aggregate only sits directly above our
+scan. Put a join between the scan and the aggregate and it cannot apply. We
+then compete row at a time, against a format built for exactly that. The harness asserts
+this rather than describing it. It fails the run if the control is not vectorized,
+and it fails the run if the join arm is.
+
+So a join does not cost us through the join itself. It costs us by disabling the
+thing we are fast at.
+
+### What the two data shapes say
+
+Compressibility is a second and separate effect. On incompressible data we lose
+even with no join at all, and the wide projection shape goes from 2.98x to 7.04x.
+Storage goes from 7.1 times smaller to 1.7 times smaller.
+
+Neither effect explains the other. Both are real.
+
 ## What this page does not measure
 
 **Every query on this page reads one table.** The TSBS workload is time-series
 shaped. All eight of its queries are a scan, a filter and an aggregate over a
 single relation. None of them joins.
 
-So the join-heavy analytical shapes are absent: star schemas, fact tables joined
-to dimensions, and the selective-dimension-join pattern. Those are a large part of
-what columnar storage is usually bought for, and this page says nothing about
-them. Not that we do badly on them. We have not measured them. See #401.
+The join-heavy analytical shapes are measured separately, in the Joins section
+above, on a fixture built for them. That section is the evidence about star
+schemas and dimension joins. This section is about the TSBS numbers only.
 
 Joins themselves work. A columnar table joins a heap table in either direction,
 and joins another columnar table. Hash, merge and nested-loop strategies all return
