@@ -421,6 +421,25 @@ psql_run "CREATE FUNCTION gb_hi_card(t text, s timestamptz) RETURNS text AS
 check "a lookalike function with the same signature gets NO bound" \
 	"$([ "$(gbest "SELECT gb_hi_card('minute', ts) b, avg(v) FROM gb $W GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
 
+# A MIXED timestamp/timestamptz predicate must get no bound. PostgreSQL has cross-type
+# operators, so the Const stays bare and reaches the extraction instead of being wrapped in
+# a cast. Both are int64 microseconds on different scales, wall clock against UTC, so under
+# a non-UTC TimeZone the range would be computed across the offset. Measured with a
+# discriminating fixture: core's own estimate is six figures here, so "bound applied" and
+# "no bound" cannot be confused.
+psql_run "CREATE TABLE gbm (ts timestamptz, v float8) USING pgcolumnar;
+	INSERT INTO gbm SELECT '2026-01-01 00:00:00+00'::timestamptz + (g * interval '86400 microseconds'),
+	  random() FROM generate_series(1,200000) g; ANALYZE gbm;" >/dev/null 2>&1
+gbmest() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -At -q -c "SET TimeZone='Asia/Kolkata';" -c "$GB" \
+	-c "EXPLAIN (COSTS ON) $1" 2>&1 | grep -oE "rows=[0-9]+" | head -1 | cut -d= -f2; }
+check "a mixed timestamp/timestamptz predicate gets NO bound" \
+	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
+	   WHERE ts >= timestamp '2026-01-01 00:00' AND ts < timestamp '2026-01-01 12:00' GROUP BY b")" -gt 50000 ] && echo yes || echo no)" "yes"
+check "while a matching-type predicate still gets one" \
+	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
+	   WHERE ts >= timestamptz '2026-01-01 00:00+00' AND ts < timestamptz '2026-01-01 12:00+00' GROUP BY b")" -lt 5000 ] && echo yes || echo no)" "yes"
+
 check "a non-time expression key gets no bound either" \
 	"$([ "$(gbest "SELECT upper(host) b, avg(v) FROM gb GROUP BY b")" -gt 100 ] && echo yes || echo no)" "yes"
 

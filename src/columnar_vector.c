@@ -1407,8 +1407,22 @@ pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 		{ varonleft = false; c = (Const *) l; }
 		else
 			continue;
-		if (c->constisnull ||
-			(c->consttype != TIMESTAMPOID && c->consttype != TIMESTAMPTZOID))
+		/*
+		 * The Const's type must MATCH the Var's, not merely be one of the two
+		 * timestamp types.
+		 *
+		 * PostgreSQL has cross-type operators for timestamp and timestamptz, so a
+		 * mixed predicate keeps a bare Const and reaches this loop rather than
+		 * being wrapped in a cast. Both are int64 microseconds and
+		 * DatumGetTimestamp reads either, but they are on different scales: a
+		 * naive timestamp is wall clock and a timestamptz is UTC. Under a
+		 * non-UTC TimeZone the range would be computed across that offset and the
+		 * bound would be wrong, in whichever direction the offset points.
+		 *
+		 * Converting is possible and is not worth it here: no bound is always
+		 * safe, and this is an optimisation.
+		 */
+		if (c->constisnull || c->consttype != tsvar->vartype)
 			continue;
 
 		v = (double) DatumGetTimestamp(c->constvalue);
