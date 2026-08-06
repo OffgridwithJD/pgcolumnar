@@ -155,10 +155,16 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 		return
 	fi
 
-	best=""; bnode=""
+	best=""; bnode=""; slowalt=""
 	# Node and time kept in separate variables rather than re-split from a string.
 	for i in 1 2; do
 		eval "cand_n=\$n$i; cand_m=\$m$i"
+		# An alternative that timed out is not a missing alternative. Remember it:
+		# the two look identical to the ratio below (neither yields a number) but
+		# they are opposite results, and the report has to say which happened.
+		if [ "${cand_m:-}" = TIMEOUT ] && [ "$cand_n" != "$cnode" ]; then
+			slowalt="$cand_n"
+		fi
 		case "${cand_m:-}" in '' | TIMEOUT | unknown) continue ;; esac
 		# An arm whose forcing did not change the plan is the CHOSEN plan run
 		# again, not an alternative. The premise above only requires ONE arm to
@@ -183,6 +189,21 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 	# instead. If nothing can be forced away from the chosen plan, the plan that
 	# won had better be ours.
 	if [ -z "$best" ]; then
+		# Two ways to arrive here, and they are not the same result.
+		#
+		# An alternative was forced and TIMED OUT. That is the strongest outcome
+		# the suite can produce -- the declined plan is at least PLAN_TIMEOUT
+		# against the chosen plan's milliseconds -- but it yields no number, so
+		# the ratio above cannot express it. Reporting it as "nothing could be
+		# forced" reads as "there was nothing to compare", which is the opposite
+		# of what happened, and hides that the ratio bound went untested.
+		if [ -n "$slowalt" ]; then
+			check "[$label] the forced alternative ($slowalt) did not finish in ${PLAN_TIMEOUT}s, so the chosen plan is far better" \
+				"$(case "$cnode" in 'Custom Scan'*) echo yes ;; *) echo "no ($cnode)" ;; esac)" "yes"
+			return
+		fi
+		# Genuinely nothing different could be forced. There is no ratio to
+		# assert, so assert the outcome: the plan that won had better be ours.
 		check "[$label] nothing could be forced, so the chosen plan must be the custom scan" \
 			"$(case "$cnode" in 'Custom Scan'*) echo yes ;; *) echo "no ($cnode)" ;; esac)" "yes"
 		return
