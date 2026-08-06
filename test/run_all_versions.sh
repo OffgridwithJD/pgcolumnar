@@ -480,6 +480,17 @@ for pgc in "${CONFIGS[@]}"; do
 			# is how the replication failures stayed unreadable.
 			tail -60 "$builddir/${s}.log" | sed 's/^/      /'
 			results+="$s=FAIL "
+			# A failed suite RAN. Counting only passes here made the tally
+			# contradict itself in the one case that matters. The five-major
+			# matrix reported
+			#
+			#     PG19  suites that ran: 121 of 122 (skipped: 0)
+			#
+			# with temporal failing: 121 + 0 is not 122, and the failing suite was
+			# in neither bucket of the count that exists to say what ran. Four
+			# majors hid it, because a tally only disagrees with itself once
+			# something actually fails.
+			suites_ran=$((suites_ran + 1))
 			verfail=1
 		fi
 	done
