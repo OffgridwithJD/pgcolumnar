@@ -169,10 +169,24 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 			best="$cand_m"; bnode="$cand_n"
 		fi
 	done
-	# A plan we could not identify is not an alternative we can judge against.
-	check "premise: [$label] at least one alternative produced a timing" \
-		"$([ -n "$best" ] && echo yes || echo no)" "yes"
-	[ -n "$best" ] || return
+	# No alternative could be forced.
+	#
+	# This was a failing premise, and that was wrong in the direction that matters.
+	# Once #434 is fixed the custom scan is priced correctly, wins outright, and
+	# forcing yields nothing to compare against -- so the EXPECTED state after the
+	# fix made the suite red. Reported by the reviewer, who ran it against the fix
+	# rather than against the bug.
+	#
+	# Treating it as a plain pass is the other wrong answer: after the fix that is
+	# the normal case for these shapes, so the suite would fall silent on exactly
+	# what it exists to watch. There is no ratio to assert, so assert the outcome
+	# instead. If nothing can be forced away from the chosen plan, the plan that
+	# won had better be ours.
+	if [ -z "$best" ]; then
+		check "[$label] nothing could be forced, so the chosen plan must be the custom scan" \
+			"$(case "$cnode" in 'Custom Scan'*) echo yes ;; *) echo "no ($cnode)" ;; esac)" "yes"
+		return
+	fi
 
 	if [ "$cms" = TIMEOUT ]; then
 		check "[$label] the chosen plan finished within ${PLAN_TIMEOUT}s" "no" "yes"
