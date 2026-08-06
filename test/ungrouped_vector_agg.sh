@@ -143,4 +143,59 @@ check "fold prunes the same groups the row path does" "$FOLD_REMOVED" "$(removed
 ab "clustered filtered agg on==off" "SELECT count(*)::text || '|' || coalesce(sum(y)::text,'z') FROM cl WHERE x > 490000"
 
 check "server still up" "$(q "SELECT 1")" 1
+# ---- varlena columns must not reach the batch fold's gather (#423) ---------
+#
+# The gather does pointer arithmetic on attlen:
+#
+#     cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col], true, cattlen[col])
+#
+# A varlena has attlen -1, so this raised "unsupported byval length: -1". The old
+# eligibility check walked the SCAN KEYS and asked whether each type was comparable; the
+# gather walks the PROJECTED set and needs each type fixed width. A text column filtered
+# with LIKE is projected and is not a scan key, so it arrived unchecked. That is
+# ClickBench q21.
+#
+# Both halves are asserted: the answer is right, AND the plan says it fell back. A fix
+# that returned the right answer while EXPLAIN still claimed "Batch Fold: yes" would be
+# reporting something the execution does not do.
+# uuid and name are the cases a reader assumes are covered once "varlena" is named. They
+# are FIXED WIDTH (16 and 64) and BY REFERENCE, so they pass a width test and still fail:
+# the gather hardcodes attbyval = true. uuid is ordinary in event-log shapes.
+psql_run "CREATE TABLE vfold (i int, s text, uid uuid, nm name) USING pgcolumnar;
+	INSERT INTO vfold SELECT g, 'abc'||g, gen_random_uuid(), ('n'||g)::name
+	  FROM generate_series(1,200000) g;
+	CREATE TABLE vfoldh (i int, s text, uid uuid, nm name);
+	INSERT INTO vfoldh SELECT * FROM vfold;" >/dev/null 2>&1
+check "premise: uuid is fixed width but NOT by value, which is the whole point" \
+	"$(q "SELECT attlen||'/'||attbyval FROM pg_attribute
+	      WHERE attrelid='vfold'::regclass AND attname='uid'")" "16/false"
+check "premise: the varlena fixture really is columnar" \
+	"$(q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vfold'")" "pgcolumnar"
+
+VAGG="SET pgcolumnar.enable_ungrouped_vector_agg=on;"
+vq() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+	-At -q -c "$VAGG" -c "$1" 2>&1 | tail -1; }
+fold_of() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+	-At -q -c "$VAGG" -c "EXPLAIN (COSTS OFF) $1" 2>&1 | grep -oE "Columnar Batch Fold: [a-z]+" | head -1; }
+
+for shape in "count(*) FROM vfold WHERE s LIKE '%9%'" \
+             "count(*) FROM vfold WHERE i > 100 AND s LIKE '%9%'" \
+             "sum(i) FROM vfold WHERE s LIKE '%9%'" \
+             "count(*) FROM vfold WHERE s = 'abc7'" \
+             "count(*) FROM vfold WHERE length(s) > 4" \
+             "count(uid) FROM vfold WHERE i > 100" \
+             "count(nm) FROM vfold WHERE i > 100"; do
+	check_text "a varlena shape agrees with heap: ${shape:0:38}" \
+		"$(vq "SELECT $shape")" "$(q "SELECT ${shape//vfold/vfoldh}")"
+done
+
+check "a fixed-width filter still uses the batch fold" \
+	"$(fold_of "SELECT count(*) FROM vfold WHERE i > 100")" "Columnar Batch Fold: yes"
+check "a varlena filter falls back, and EXPLAIN says so" \
+	"$(fold_of "SELECT count(*) FROM vfold WHERE s LIKE '%9%'")" "Columnar Batch Fold: no"
+check "a fixed-width BY-REFERENCE column also falls back (uuid)" \
+	"$(fold_of "SELECT count(uid) FROM vfold WHERE i > 100")" "Columnar Batch Fold: no"
+check "and name, which is 64 bytes by reference" \
+	"$(fold_of "SELECT count(nm) FROM vfold WHERE i > 100")" "Columnar Batch Fold: no"
+
 pgc_summary

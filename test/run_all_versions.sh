@@ -440,7 +440,10 @@ for pgc in "${CONFIGS[@]}"; do
 		# its assertions untrustworthy, only slower.
 		if [ "${PGC_SKIP_TIMING:-0}" = 1 ] && is_timing_suite "$s"; then
 			echo "  SKIP  $s (PGC_SKIP_TIMING)"
-			echo 0 >"$builddir/${s}.rc"
+			# 2, not 0. This suite did not run, and since #447 the collector has
+			# a state that says so. Recording it as a pass was the same lie the
+			# zero-check suites were telling, just written by the driver.
+			echo 2 >"$builddir/${s}.rc"
 			continue
 		fi
 		port=$((BASE_PORT++))
@@ -450,10 +453,24 @@ for pgc in "${CONFIGS[@]}"; do
 	done
 
 	# collect results in suite order for a stable, readable summary
+	suites_ran=0
+	suites_skipped=0
+	skipped_names=""
 	for s in "${SUITES[@]}"; do
-		if [ "$(cat "$builddir/${s}.rc" 2>/dev/null)" = 0 ]; then
+		_rc="$(cat "$builddir/${s}.rc" 2>/dev/null)"
+		if [ "$_rc" = 0 ]; then
 			echo "  PASS  $s"
 			results+="$s=PASS "
+			suites_ran=$((suites_ran + 1))
+		elif [ "$_rc" = 2 ]; then
+			# Exit 2 is pgc_summary's third state: the suite ran no checks (#447).
+			# Not a pass, because it asserted nothing. Not a failure, because a
+			# major without the feature and a box without an optional dependency
+			# are both supported. Counted, so the total below can say so.
+			echo "  SKIP  $s (ran no checks)"
+			results+="$s=SKIP "
+			suites_skipped=$((suites_skipped + 1))
+			skipped_names="$skipped_names $s"
 		else
 			echo "  FAIL  $s"
 			# The failing check first, then the tail. A suite that prints a
@@ -469,14 +486,41 @@ for pgc in "${CONFIGS[@]}"; do
 			# is how the replication failures stayed unreadable.
 			tail -60 "$builddir/${s}.log" | sed 's/^/      /'
 			results+="$s=FAIL "
+			# A failed suite RAN. Counting only passes here made the tally
+			# contradict itself in the one case that matters. The five-major
+			# matrix reported
+			#
+			#     PG19  suites that ran: 121 of 122 (skipped: 0)
+			#
+			# with temporal failing: 121 + 0 is not 122, and the failing suite was
+			# in neither bucket of the count that exists to say what ran. Four
+			# majors hid it, because a tally only disagrees with itself once
+			# something actually fails.
+			suites_ran=$((suites_ran + 1))
 			verfail=1
 		fi
 	done
 
+	# How many suites actually asserted something, said out loud (#447).
+	#
+	# #422 added this one level up, after a matrix reported ALL VERSIONS PASSED
+	# having run none of them. The same hole existed per-suite: fifteen suites
+	# report a verdict without running a check when pyarrow is absent, and the old
+	# per-version line counted them among the passes. A count that includes suites
+	# nobody ran is the thing this project keeps having to unlearn.
+	echo "  suites that ran: $suites_ran of ${#SUITES[@]} (skipped: $suites_skipped)"
+	if [ "$suites_skipped" != 0 ]; then
+		echo "  skipped:${skipped_names}"
+	fi
+	if [ "$suites_ran" = 0 ]; then
+		echo "  NO SUITES RAN on PG$major, which is not a pass"
+		verfail=1
+	fi
+
 	if [ "$verfail" = 0 ]; then
-		SUMMARY+=("PASS   PG$major  ${results}")
+		SUMMARY+=("PASS   PG$major  ($suites_ran ran, $suites_skipped skipped)  ${results}")
 	else
-		SUMMARY+=("FAIL   PG$major  ${results}")
+		SUMMARY+=("FAIL   PG$major  ($suites_ran ran, $suites_skipped skipped)  ${results}")
 		overall=1
 	fi
 	rm -rf "$builddir"

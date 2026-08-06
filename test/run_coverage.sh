@@ -78,17 +78,23 @@ lcov --directory "$SRCDIR/src" --zerocounters >/dev/null 2>&1
 . "$SRCDIR/test/portlib.sh"
 port="$(pgc_pick_port)"
 
-pass=0; fail=0; failed=""
+pass=0; fail=0; failed=""; skip=0; skipped=""
 for s in $SUITES; do
 	port=$((port + 1))
-	if PGC_SKIP_BUILD=1 PGC_PORT="$port" \
-		bash "$SRCDIR/test/${s}.sh" "$PGC" >"$OUT/${s}.log" 2>&1; then
+	PGC_SKIP_BUILD=1 PGC_PORT="$port" \
+		bash "$SRCDIR/test/${s}.sh" "$PGC" >"$OUT/${s}.log" 2>&1
+	rc=$?
+	if [ "$rc" = 0 ]; then
 		pass=$((pass + 1))
+	elif [ "$rc" = 2 ]; then
+		# Ran no checks (#447). It contributed no coverage either, so counting it
+		# as a pass overstates what this report measured.
+		skip=$((skip + 1)); skipped="$skipped $s"
 	else
 		fail=$((fail + 1)); failed="$failed $s"
 	fi
 done
-echo "-- suites: $pass passed, $fail failed${failed:+ ($failed)}"
+echo "-- suites: $pass passed, $fail failed${failed:+ ($failed)}, $skip skipped${skipped:+ ($skipped)}"
 
 echo "-- collect"
 lcov --directory "$SRCDIR/src" --capture --output-file "$OUT/coverage.info" \

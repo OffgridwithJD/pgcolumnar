@@ -136,6 +136,47 @@ All suites pass on PostgreSQL 15 through 19. PostgreSQL 19 is validated against
 19beta2; revalidation against the final PostgreSQL 19 release is pending that
 release.
 
+**A suite has three outcomes, and two of them are not failures.** Read which one
+you got before deciding whether something is wrong.
+
+| outcome | exit | when |
+| --- | :-: | --- |
+| `PASSED` | 0 | the suite ran its checks and they held |
+| `SKIPPED (ran no checks)` | 2 | the feature under test does not exist on this major |
+| `FAILED` | 1 | a check failed, **or** a tool the suite measures with is missing |
+
+The matrix prints `suites that ran: n of m (skipped: k)` for each major, and names
+the skipped suites. A skip counts in `k`, not in `n`.
+
+**A missing dependency fails rather than skips, and that is deliberate.** The box
+cannot gate that suite. Reporting a pass would claim coverage nobody has. Two
+dependencies come from outside this repository:
+
+| suite | needs | where it comes from |
+| --- | --- | --- |
+| the Arrow and Parquet suites | `pyarrow` | `pip install pyarrow`, as the user the suites run as |
+| `temporal.sh` | `btree_gist` | PostgreSQL **contrib**. A PGDG package ships it; a source build configured without contrib does not |
+
+Build and install `contrib/btree_gist` against each source tree when the matrix
+runs against source builds. To run knowingly without a dependency, waive it:
+
+```sh
+PGC_ALLOW_MISSING_BTREE_GIST=1 test/temporal.sh /path/to/pg_config
+PGC_ALLOW_MISSING=1            test/run_all_versions.sh
+```
+
+A waived suite reports `SKIPPED` and exits 2, so the coverage loss stays visible
+in the skipped count rather than becoming a pass.
+
+Measured on PostgreSQL 18, one suite, four configurations:
+
+| configuration | exit | verdict |
+| --- | :-: | --- |
+| `btree_gist` present | 0 | `PASSED`, 5 checks |
+| `btree_gist` absent | 1 | `FAILED` |
+| `btree_gist` absent, waived | 2 | `SKIPPED` |
+| PostgreSQL 17, feature absent | 2 | `SKIPPED (ran no checks)` |
+
 ## Cross-major upgrade
 
 `pg_upgrade` is the path that a user takes to a new major. It is also the point
