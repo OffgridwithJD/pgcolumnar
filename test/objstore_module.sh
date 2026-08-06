@@ -100,15 +100,33 @@ check_num "a relative path is not mistaken for a URL" \
 # .away; a second run would then move the stand-in to .away, overwriting the only
 # real copy with 19 bytes of garbage. That destroys the installation, and running
 # alone does not prevent it because the two runs are sequential.
-if [ -e "$MOD.away" ]; then
-	echo "FAIL  $MOD.away exists, so an earlier run was interrupted mid-move."
-	echo "      Restore it by hand:  mv '$MOD.away' '$MOD'"
+for stash in "$MOD.away" "$MOD.probe"; do
+	[ -e "$stash" ] || continue
+	echo "FAIL  $stash exists, so an earlier run was interrupted mid-move."
+	echo "      Restore it by hand:  mv '$stash' '$MOD'"
 	echo "      Continuing would overwrite the real module with this run's stand-in."
 	PGC_CHECKS=$((PGC_CHECKS + 1))
 	PGC_FAIL=1
 	pgc_summary
 	exit 1
-fi
+done
+
+# Armed BEFORE the writability probe below, which is itself a move. The first
+# version armed it after, leaving a two-syscall window in which an interrupt left
+# the real module at $MOD.probe with nothing at $MOD: restore_module knew only
+# .away, so the next run sailed past the start guard, found no module to move,
+# and reported SKIP on an installation that was itself broken and stayed broken
+# until somebody noticed the .probe file. Same shape as the defect this suite was
+# written to catch, one move earlier. Both suffixes are handled here and above.
+restore_module() {
+	local stash
+	for stash in "$MOD.away" "$MOD.probe"; do
+		[ -e "$stash" ] || continue
+		rm -f "$MOD"
+		mv "$stash" "$MOD"
+	done
+}
+trap restore_module EXIT INT TERM
 
 if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
 	echo "SKIP  cannot move $MOD, so the absent and broken paths are untested here"
@@ -116,15 +134,6 @@ if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
 	exit 0
 fi
 mv "$MOD.probe" "$MOD" 2>/dev/null
-
-# The module is moved aside twice below. Put it back on ANY exit, including the
-# interrupt that leaves the state the guard above refuses to start on.
-restore_module() {
-	[ -e "$MOD.away" ] || return 0
-	rm -f "$MOD"
-	mv "$MOD.away" "$MOD"
-}
-trap restore_module EXIT INT TERM
 
 # ---- present, absent, and broken must be three DIFFERENT reports ---------------
 #
