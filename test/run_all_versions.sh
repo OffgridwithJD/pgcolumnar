@@ -331,9 +331,15 @@ is_timing_suite() {
 # PGC_SKIP_TIMING drops those in CI and replication must still run there. Serial
 # and skipped are different properties and were one list until this suite needed
 # one without the other.
+# planner_choice_quality wants the same split, the other way around from
+# replication. Its subject is a wall-clock ratio, so it cannot run beside five
+# others and mean anything. But it is deliberately not in is_timing_suite: its
+# premises are plan-shape assertions, and those are worth running in CI. Under
+# PGC_SKIP_TIMING the suite drops the ratios itself, through check_timing, and
+# does not execute the timed queries at all.
 runs_alone() {
 	case "$1" in
-		replication) return 0 ;;
+		replication|planner_choice_quality) return 0 ;;
 		*) is_timing_suite "$1" ;;
 	esac
 }
