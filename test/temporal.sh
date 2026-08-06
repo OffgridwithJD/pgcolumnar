@@ -11,6 +11,13 @@
 # same result set. WITHOUT OVERLAPS needs a GiST index over the scalar key part,
 # so btree_gist must be available; the suite skips with a note if it is not.
 #
+# btree_gist is CONTRIB. A PGDG package ships it with postgresql-N, so CI has it. A
+# source build configured without contrib does not, and this suite then asserts nothing.
+# It reported PASSED while doing so until #447, and the local five-major matrix was
+# claiming temporal coverage on every major while running it on one. Build and install
+# contrib/btree_gist against each source tree, or read the SKIPPED line and know what it
+# means.
+#
 # Usage:  test/temporal.sh [PG_CONFIG]
 #
 # Written fresh for pgColumnar; it does not reuse any upstream test file.

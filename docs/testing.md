@@ -136,6 +136,25 @@ All suites pass on PostgreSQL 15 through 19. PostgreSQL 19 is validated against
 19beta2; revalidation against the final PostgreSQL 19 release is pending that
 release.
 
+**Read the skipped count, not only the verdict.** A suite that runs no checks
+reports `SKIPPED (ran no checks)`. The matrix also prints how many suites ran on
+each major. A suite skips for two very different reasons. Only one of them is
+expected. The feature under test may not exist on that major, which is correct.
+Or a tool the suite measures with is missing, which means real coverage was lost
+and the run does not say so anywhere else.
+
+Two dependencies cause the second kind, and both come from outside this
+repository:
+
+| suite | needs | where it comes from |
+| --- | --- | --- |
+| the Arrow and Parquet suites | `pyarrow` | `pip install pyarrow`, as the user the suites run as |
+| `temporal.sh` | `btree_gist` | PostgreSQL **contrib**. A PGDG package ships it; a source build configured without contrib does not |
+
+Build and install `contrib/btree_gist` against each source tree when the matrix
+runs against source builds. Until that was done, `temporal.sh` asserted nothing
+on four of five majors and reported success (#447).
+
 ## Cross-major upgrade
 
 `pg_upgrade` is the path that a user takes to a new major. It is also the point
