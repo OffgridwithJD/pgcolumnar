@@ -97,6 +97,22 @@ which was true until that script existed.
   `CREATE PUBLICATION ... WITH (publish = 'insert')`, which does work. See
   [Limitations](docs/limitations.md).
 
+- The grouped vectorized aggregate's parallel arm is no longer declined on a
+  truncating time key (#369). `estimate_num_groups` cannot see through a
+  function, so for `date_trunc('minute', ts)` it falls back to the timestamp
+  column's distinct count, which measured 19,996,000 against 720 actual. That
+  number is charged twice on the parallel arm, once by the Gather for tuples it
+  believes it must ship and again by the Finalize, and not at all on the serial
+  node, which is priced per input row. The serial node therefore won by
+  construction on the shapes where the parallel arm is fastest. The estimate is
+  now bounded by the number of buckets the scanned time range can span, and only
+  when the planner had nothing to estimate from. A plain column, an expression
+  index and a user's `CREATE STATISTICS ON (expr)` all count as informed and are
+  left alone. Measured on 20 million rows: a one-aggregate windowed query goes
+  from 2,017 ms to 497 ms and a ten-aggregate one from 4,687 ms to 1,146 ms,
+  while a plain-column key keeps a bit-identical estimate and its existing plan.
+  Both settings involved are still off by default.
+
 ### Upgrading
 
 **Run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the
