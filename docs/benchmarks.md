@@ -653,16 +653,197 @@ both are larger than anything in it:
 The point lookup is the one number that moved the wrong way, and it moved a long
 way. See the note above it.
 
+## Joins
+
+Every other query on this page reads one table. Star schemas and dimension joins
+are a large part of what columnar storage is bought for, so `bench/run_bench_join.sh`
+measures them.
+
+```sh
+BENCH_SCALE=20000000 bench/run_bench_join.sh /path/to/pg18n/bin/pg_config
+```
+
+The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
+non-assert, 16 cores, 20,000,000 fact rows, serial execution and the median of
+three repetitions. The fact table has eight metric columns. The dimensions are
+heap tables in both arms, which is the realistic deployment.
+
+The data shape is an arm rather than an assumption. `quantised` rounds each metric
+to two decimals, which is what an instrument reports. `random` stores raw
+`random()`, which has maximum entropy and cannot be compressed. An earlier
+measurement of these shapes used `random()` without noticing, and reported a gap
+that was much larger than the realistic one.
+
+### Realistic data
+
+| shape | heap | columnar | columnar over heap |
+| --- | ---: | ---: | ---: |
+| no join, the control | 1,536.8 ms | 820.2 ms | **0.53x** |
+| selective dimension join | 1,952.3 ms | 2,655.6 ms | 1.36x |
+| unselective join | 3,152.8 ms | 3,694.1 ms | 1.17x |
+| multi-dimension star | 6,560.8 ms | 6,936.6 ms | 1.06x |
+| wide projection under a join | 2,293.0 ms | 6,821.8 ms | 2.98x |
+| total relation size | 2,185,166,848 B | 307,109,888 B | 0.141x |
+
+### Incompressible data
+
+| shape | heap | columnar | columnar over heap |
+| --- | ---: | ---: | ---: |
+| no join, the control | 1,533.6 ms | 1,912.0 ms | 1.25x |
+| selective dimension join | 1,968.6 ms | 3,957.4 ms | 2.01x |
+| unselective join | 3,161.9 ms | 4,990.6 ms | 1.58x |
+| multi-dimension star | 6,581.0 ms | 8,176.0 ms | 1.24x |
+| wide projection under a join | 2,311.6 ms | 16,269.1 ms | 7.04x |
+| total relation size | 2,185,166,848 B | 1,306,492,928 B | 0.598x |
+
+### What the control says
+
+Read the first two rows of the first table together. **Without a join we are 1.87
+times faster. Add a join and we are 1.36 times slower.** The rows are the same,
+the bytes are the same, and the encoding is the same.
+
+The reason is structural. Our vectorized aggregate only sits directly above our
+scan. Put a join between the scan and the aggregate and it cannot apply. We
+then compete row at a time, against a format built for exactly that. The harness asserts
+this rather than describing it. It fails the run if the control is not vectorized,
+and it fails the run if the join arm is.
+
+So a join does not cost us through the join itself. It costs us by disabling the
+thing we are fast at.
+
+### What the two data shapes say
+
+Compressibility is a second and separate effect. On incompressible data we lose
+even with no join at all, and the wide projection shape goes from 2.98x to 7.04x.
+Storage goes from 7.1 times smaller to 1.7 times smaller.
+
+Neither effect explains the other. Both are real.
+
+## ClickBench
+
+[ClickBench](https://github.com/ClickHouse/ClickBench/) is a published analytics
+benchmark. It is one table of 105 columns and 43 queries. Most of the queries are
+a filter, a `GROUP BY` and an `ORDER BY LIMIT`. It is the shape this engine is
+built for, which is why it is worth measuring rather than assuming.
+
+Run it with `bench/run_clickbench.sh`. It is optional and it is not in the test
+matrix. Nothing downloads until you ask for it.
+
+```sh
+PGC_CB_ROWS=10000000 bench/run_clickbench.sh /path/to/pg18n/bin/pg_config
+```
+
+The schema and the queries are not stored in this repository. ClickBench is
+licensed CC BY-NC-SA 4.0, and NonCommercial and ShareAlike are restrictions this
+project's MIT license does not carry. The harness fetches the definition from
+upstream at run time and copies nothing. Our comparison oracle is the heap arm of
+the same run.
+
+The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
+non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
+every ninth row of the real 100 million row table. The reported time is the best
+of two hot runs, which is what ClickBench reports.
+
+### Why the sample is every ninth row and not the first eleven million
+
+`hits.tsv` is ordered. Measured on the real file:
+
+| sample | distinct EventDate | distinct CounterID |
+| --- | ---: | ---: |
+| first 1,000,000 rows | 1 | 7 |
+| every 100th row | 17 | 4,220 |
+
+A prefix does not scale this benchmark down. It replaces it. Every `GROUP BY`
+collapses to a handful of groups, every date range hits one day, and the storage
+clusters perfectly on the filtered columns. That flatters columnar storage
+heavily. The harness therefore samples with a stride, and it fails the run if the
+loaded sample is degenerate.
+
+### Storage and load
+
+| arm | load | total relation size |
+| --- | ---: | ---: |
+| heap | 141.7 s | 7,818,592,256 bytes |
+| columnar | 544.0 s | 1,478,000,640 bytes |
+
+Columnar storage is 5.3 times smaller. It loads 3.8 times slower. Both figures
+are part of a published ClickBench result, so both are here.
+
+### Query latency
+
+Columnar is faster on 32 of the 43 queries and slower on 11.
+
+The largest wins, as heap time divided by columnar time:
+
+| query | shape | faster by |
+| --- | --- | ---: |
+| q1 | `COUNT(*)` | 358x |
+| q3 | `SUM`, `COUNT`, `AVG` of three integer columns | 27x |
+| q41, q42 | `GROUP BY` a URL prefix, with a filter | 25x |
+| q7 | `MIN` and `MAX` of a date | 24x |
+| q20 | `COUNT(*)` with a `LIKE` on a short column | 16x |
+
+The largest losses, as columnar time divided by heap time:
+
+| query | shape | slower by |
+| --- | --- | ---: |
+| q24 | `SearchPhrase LIKE`, `ORDER BY EventTime LIMIT 10` | 11.6x |
+| q23 | `SELECT *` of every column, `ORDER BY EventTime LIMIT 10` | 3.2x |
+| q21 | `COUNT(*) WHERE URL LIKE '%google%'` | 2.2x |
+| q28 | `GROUP BY` a normalised URL, with `HAVING` | 2.2x |
+| q22 | `SearchPhrase LIKE`, `ORDER BY EventTime LIMIT 10` | 1.8x |
+
+Every loss reads wide text and returns few rows. `q23` selects all 105 columns,
+so there is no projection to make. `q24` and `q22` sort a large intermediate to
+return ten rows. A row store reads one row and stops. A column store decodes the
+chunk groups that hold the candidates.
+
+### The accelerations are off by default, and turning them on is not a clear win
+
+`pgcolumnar.enable_group_vectorization` and
+`pgcolumnar.enable_ungrouped_vector_agg` both default to off. About 35 of the 43
+queries are `GROUP BY`. So a default run measures this engine with its main
+analytical accelerator disabled.
+
+The harness therefore runs a third arm with them turned on. Read that arm as "these
+GUCs are set" and not as "the grouped node ran". On this dataset the planner
+declines the grouped node on most shapes. Measured on the same table, it is
+declined at 5,727, 18,344 and 49,511 groups, and chosen only at 4,906,030, where
+it then ties. So the differences below cannot be attributed to it. See issue
+#369.
+
+The result does not support turning these settings on by default:
+
+| query | default | accelerated |
+| --- | ---: | ---: |
+| q2 | 0.55x | **0.19x** |
+| q17 | 0.56x | **0.41x** |
+| q19 | 0.98x | **0.84x** |
+| q18 | 1.01x | **2.17x** |
+| q31 | 0.96x | **1.48x** |
+| q15 | 0.84x | **0.92x** |
+
+Three queries improve and three get worse. This is a reason to investigate rather
+than a conclusion, and one caution belongs with it. For `q18` and `q31` the plan
+is **identical** with these settings on and off. Their rows are therefore run to
+run variation, and not an effect of the settings. They are left in the table
+because removing the rows that embarrass a reading is how a benchmark page stops
+being trustworthy.
+
+One query, `q21`, fails outright with the accelerations on. It is
+`COUNT(*) WHERE URL LIKE '%google%'`, and it raises
+`ERROR: unsupported byval length: -1`. That is issue #423. The harness reports a
+failed query and does not drop it.
+
 ## What this page does not measure
 
 **Every query on this page reads one table.** The TSBS workload is time-series
 shaped. All eight of its queries are a scan, a filter and an aggregate over a
 single relation. None of them joins.
 
-So the join-heavy analytical shapes are absent: star schemas, fact tables joined
-to dimensions, and the selective-dimension-join pattern. Those are a large part of
-what columnar storage is usually bought for, and this page says nothing about
-them. Not that we do badly on them. We have not measured them. See #401.
+The join-heavy analytical shapes are measured separately, in the Joins section
+above, on a fixture built for them. That section is the evidence about star
+schemas and dimension joins. This section is about the TSBS numbers only.
 
 Joins themselves work. A columnar table joins a heap table in either direction,
 and joins another columnar table. Hash, merge and nested-loop strategies all return

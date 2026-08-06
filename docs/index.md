@@ -43,6 +43,30 @@ row updates and deletes, and for point lookups that return whole rows.
 pgColumnar supports updates, deletes, and indexes, but its storage layout is
 built for append-mostly data. See [Limitations and compatibility](limitations.md).
 
+### When not to use pgColumnar
+
+The clearest case against columnar storage is a table whose bytes are mostly one
+large value per row. An independent validation measured this on 2026-08-05, on a
+2,000,000 row ledger table. Each row held 1 KiB of incompressible data. The
+figures below are theirs.
+
+| operation | heap | pgColumnar | |
+| --- | ---: | ---: | --- |
+| point lookup by indexed uuid | 1.0 ms | 203 ms | 200x slower |
+| ordered 100,000 row full-row segment | 42 ms | 998 ms | 24x slower |
+| full-table full-row export scan | 630 ms | 1747 ms | 2.8x slower |
+| bulk `INSERT ... SELECT` of 2M rows | 19.9 s | 42.6 s | 2.1x slower |
+| table size | 2604 MB | 2051 MB | 1.27x smaller |
+| narrow `GROUP BY` aggregate | 266 ms | 115 ms | **2.3x faster** |
+
+Read the last two rows with the others. Columnar storage still wins the narrow
+aggregate, which is what it is for. It wins little on size, because only about a
+quarter of the bytes are the kind that compress. Every row-wise operation loses.
+
+Use heap when most of your bytes are one large value per row. Use heap when point
+lookups are the main access pattern. Use pgColumnar when queries read a few
+columns out of many.
+
 ## How it fits together
 
 A columnar table is an ordinary PostgreSQL relation. It works with transactions,
