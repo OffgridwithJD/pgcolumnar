@@ -48,8 +48,7 @@ pgc_setup "${1:-/usr/local/pg19/bin/pg_config}"
 srv="$(q 'SHOW server_version_num')"
 if [ "${srv:-0}" -lt 190000 ]; then
 	echo "SKIP  REPACK requires PostgreSQL 19 (server_version_num=$srv)"
-	echo "native_repack.sh: SKIPPED"
-	exit 0
+	pgc_summary
 fi
 
 ROWS=${PGC_REPACK_ROWS:-20000}

@@ -83,6 +83,7 @@ SUITES="${PGC_SAN_SUITES:-smoke native_writer native_roundtrip native_encoding \
 
 echo "-- running the subset under ASAN+UBSAN (fatal)"
 fail=0
+skipped=0
 ran=0
 for s in $SUITES; do
 	if [ ! -f "test/$s.sh" ]; then
@@ -96,7 +97,14 @@ for s in $SUITES; do
 	# A sanitizer report reaches here two ways: the backend aborts (SIGABRT, so the
 	# suite's own crash checks or a nonzero rc), or the text appears in the output.
 	san="$(printf '%s' "$out" | grep -icE 'runtime error:|AddressSanitizer|UndefinedBehaviorSanitizer|SUMMARY: .*Sanitizer|terminated by signal 6')"
-	if [ "$rc" != 0 ] || [ "$san" != 0 ]; then
+	if [ "$rc" = 2 ] && [ "$san" = 0 ]; then
+		# pgc_summary's skipped state (#447): the suite ran no checks. Five of
+		# this runner's default subset are pyarrow-gated, so on a sanitizer image
+		# without pyarrow this is the difference between "no sanitizer findings"
+		# and "nothing was sanitized".
+		skipped=$((skipped + 1))
+		echo "  SKIP  $s  (ran no checks)"
+	elif [ "$rc" != 0 ] || [ "$san" != 0 ]; then
 		fail=$((fail + 1))
 		echo "  FAIL  $s  (rc=$rc, sanitizer_lines=$san)"
 		printf '%s\n' "$out" | grep -iE 'runtime error:|AddressSanitizer|SUMMARY: .*Sanitizer|FAIL' | head -4 | sed 's/^/        /'
@@ -105,10 +113,16 @@ for s in $SUITES; do
 	fi
 done
 
-echo "-- $ran suites under sanitizers, $fail failed"
-if [ "$fail" = 0 ]; then
-	echo "SANITIZER GATE PASSED"
-else
+echo "-- $ran suites under sanitizers, $fail failed, $skipped ran no checks"
+if [ "$fail" != 0 ]; then
 	echo "SANITIZER GATE FAILED"
+elif [ "$skipped" = "$ran" ]; then
+	# Every suite skipped means nothing was sanitized. Five of the default subset
+	# are pyarrow-gated, so an image without pyarrow could otherwise report the
+	# gate passed having exercised no decode path at all (#447).
+	echo "SANITIZER GATE RAN NOTHING, which is not a pass"
+	fail=1
+else
+	echo "SANITIZER GATE PASSED"
 fi
 exit "$fail"

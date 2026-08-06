@@ -30,9 +30,7 @@ if [ "$major" -lt 18 ]; then
 fi
 
 if ! psql_run "CREATE EXTENSION IF NOT EXISTS btree_gist;" >/dev/null 2>&1; then
-	echo "-- btree_gist not available; skipping temporal-constraint verification"
-	pgc_summary
-	exit 0
+	pgc_skip btree_gist "btree_gist not available; temporal constraints need it"
 fi
 
 # expect_ok / expect_err run the same statement against heap and columnar and

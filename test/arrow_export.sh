@@ -22,9 +22,7 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 if ! python3 -c 'import pyarrow' 2>/dev/null; then
-	echo "-- pyarrow not available; skipping Arrow export verification"
-	pgc_summary
-	exit 0
+	pgc_skip pyarrow "pyarrow not available; skipping Arrow export verification"
 fi
 
 expect_error() {

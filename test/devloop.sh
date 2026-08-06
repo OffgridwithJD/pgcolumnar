@@ -66,8 +66,11 @@ for s in "$@"; do
 	# clusters did. Sourced rather than duplicated as literals -- an earlier
 	# version of this comment claimed the literals were checked against the band
 	# elsewhere, and no such check existed.
-	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
-		bash "test/${s}.sh" "$PGC"; then
+	PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
+		bash "test/${s}.sh" "$PGC"
+	_rc=$?
+	# 2 is pgc_summary's skipped state (#447), not a failure.
+	if [ "$_rc" != 0 ] && [ "$_rc" != 2 ]; then
 		rc=1
 	fi
 done
