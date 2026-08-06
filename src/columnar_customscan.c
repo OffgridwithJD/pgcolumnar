@@ -28,6 +28,7 @@
 
 #include <math.h>
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "access/relation.h"
 #include "access/relscan.h"
@@ -1128,8 +1129,87 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	if (rel->consider_parallel)
 	{
-		int			workers = compute_parallel_worker(rel, rel->pages, -1,
-													  max_parallel_workers_per_gather);
+		int			workers;
+		BlockNumber workPages = rel->pages;
+
+		/*
+		 * Size the scan from the WORK, not from the bytes on disk (#451).
+		 *
+		 * compute_parallel_worker() walks a log3 ladder over relpages, which is a
+		 * fair proxy for heap: a heap page is a fixed amount of deform. Ours is
+		 * not. A columnar page holds compressed bytes that must be decompressed
+		 * before anything can use them, so it is MORE work than a heap page and
+		 * we report fewer of them. Handing relpages to that ladder therefore
+		 * grants fewer workers the better we compress, and a future encoding win
+		 * would silently cost parallelism.
+		 *
+		 * Measured on ClickBench, same 11.1M rows both sides: relpages 180,418
+		 * against heap's 937,344, giving 5 workers where heap got 7, with no cap
+		 * binding.
+		 *
+		 * So estimate the pages this data would occupy uncompressed, which is
+		 * what a heap of the same rows reports and therefore what makes the two
+		 * comparable. Full row width rather than the projection's: heap's
+		 * relpages does not shrink because a query selects two columns, and a
+		 * degree that moved with the target list would make the same table
+		 * parallelise differently per query.
+		 *
+		 * Never below rel->pages. This may only correct an under-estimate of the
+		 * work; it must not talk the planner down.
+		 */
+		if (rel->tuples > 0 && rte != NULL && OidIsValid(rte->relid))
+		{
+			int32		rowWidth = 0;
+			AttrNumber	attno;
+
+			/*
+			 * get_attavgwidth, not rel->attr_widths. attr_widths carries only the
+			 * attributes THIS QUERY references, so `SELECT count(*) WHERE k = 5`
+			 * reports one int and the estimate lands below rel->pages, leaving
+			 * the degree untouched. That was the first version of this and it
+			 * changed nothing at all. The relation's width does not depend on
+			 * which columns a query happens to read, and neither does heap's
+			 * relpages, which is what this has to be comparable with.
+			 */
+			for (attno = 1; attno <= rel->max_attr; attno++)
+			{
+				int32		w = get_attavgwidth(rte->relid, attno);
+
+				if (w > 0)
+					rowWidth += w;
+			}
+
+			if (rowWidth > 0)
+			{
+				/*
+				 * Per-tuple overhead, because the ladder is calibrated on HEAP
+				 * pages and the input therefore has to be in heap-equivalent
+				 * ones. This is a unit conversion, not a fudge: the constants are
+				 * PostgreSQL's own, and without them the estimate is short by the
+				 * header a heap page carries and a column chunk does not.
+				 *
+				 * Measured on the fixture: 59 bytes of column data per row
+				 * against 93 on disk in the heap, so 34 unaccounted, of which 28
+				 * is exactly this and the rest is body alignment.
+				 *
+				 * We do not literally pay a tuple header, and that is not the
+				 * question. The question is how much work this scan is relative
+				 * to the heap scan the ladder was tuned against, and decompressing
+				 * a column chunk is not cheaper than deforming the tuple it
+				 * replaces.
+				 */
+				double		perRow = (double) rowWidth +
+					MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData);
+				double		bytes = rel->tuples * perRow;
+				double		pages = ceil(bytes / (double) BLCKSZ);
+
+				if (pages > (double) workPages)
+					workPages = (BlockNumber) Min(pages, (double) MaxBlockNumber);
+			}
+		}
+
+		workers = compute_parallel_worker(rel, workPages, -1,
+										  max_parallel_workers_per_gather);
 
 		if (workers > 0)
 		{
