@@ -69,8 +69,9 @@ for s in "$@"; do
 	PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
 		bash "test/${s}.sh" "$PGC"
 	_rc=$?
-	# 2 is pgc_summary's skipped state (#447), not a failure.
-	if [ "$_rc" != 0 ] && [ "$_rc" != 2 ]; then
+	# 66 is pgc_summary's skipped state, not a failure. Not 2: bash returns 2 on
+	# a parse error, so treating 2 as a skip hides a broken suite file.
+	if [ "$_rc" != 0 ] && [ "$_rc" != 66 ]; then
 		rc=1
 	fi
 done

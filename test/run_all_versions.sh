@@ -208,7 +208,7 @@ SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SUITES=(harness_selftest docs_style smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
 	differential recovery replication native_backend_crash fuzz fuzz_parquet fuzz_arrow hardening concurrent_diff parallel sorted_projection \
 	arrow_export parquet_export read_stream corruption \
-	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report zonemap_cost native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_setting bloom_lazy native_vecskip native_index native_index_projection native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection advisory_lock_class logical_subscriber isolation)
+	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report zonemap_cost native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_setting bloom_lazy native_vecskip native_index native_index_projection native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_bigcap native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection advisory_lock_class logical_subscriber isolation)
 
 # Default matrix: one assert-enabled pg_config per major, 15 through 19.
 DEFAULT_CONFIGS=(
@@ -434,10 +434,15 @@ for pgc in "${CONFIGS[@]}"; do
 		# its assertions untrustworthy, only slower.
 		if [ "${PGC_SKIP_TIMING:-0}" = 1 ] && is_timing_suite "$s"; then
 			echo "  SKIP  $s (PGC_SKIP_TIMING)"
-			# 2, not 0. This suite did not run, and since #447 the collector has
-			# a state that says so. Recording it as a pass was the same lie the
-			# zero-check suites were telling, just written by the driver.
-			echo 2 >"$builddir/${s}.rc"
+			# 66, not 0. This suite did not run, and the collector has a state
+			# that says so. Recording it as a pass was the same lie the zero-check
+			# suites were telling, just written by the driver.
+			#
+			# The log is written too, because the collector requires the marker as
+			# well as the status: this branch never executes the suite, so nothing
+			# else would produce one and the run would be classified a failure.
+			echo 66 >"$builddir/${s}.rc"
+			echo "$s.sh: SKIPPED (ran no checks)" >"$builddir/${s}.log"
 			continue
 		fi
 		port=$((BASE_PORT++))
@@ -456,7 +461,7 @@ for pgc in "${CONFIGS[@]}"; do
 			echo "  PASS  $s"
 			results+="$s=PASS "
 			suites_ran=$((suites_ran + 1))
-		elif [ "$_rc" = 2 ]; then
+		elif [ "$_rc" = 66 ] && grep -q 'SKIPPED (ran no checks)' "$builddir/${s}.log" 2>/dev/null; then
 			# Exit 2 is pgc_summary's third state: the suite ran no checks (#447).
 			# Not a pass, because it asserted nothing. Not a failure, because a
 			# major without the feature and a box without an optional dependency
