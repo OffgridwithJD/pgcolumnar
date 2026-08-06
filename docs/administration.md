@@ -49,6 +49,27 @@ range filters but hold less data per vector. `pgcolumnar.stripe_row_limit` (defa
 table with `pgcolumnar.set_options` when a specific access pattern
 calls for it, and measure the result.
 
+`pgcolumnar.stripe_row_limit` is the setting that governs the cost of a fetch by
+index. A fetch decodes the row group that holds the row. A large row group makes
+each fetch expensive. Lower this setting for a table that takes many point
+lookups. `pgcolumnar.chunk_group_row_limit` does not change this cost. Use
+`stripe_row_limit` for this, not `chunk_group_row_limit`.
+
+Measured on 500,000 rows of 1 KiB incompressible data, which is the shape where
+the effect is largest:
+
+| `stripe_row_limit` | total size | point lookup | full aggregate scan |
+| --- | ---: | ---: | ---: |
+| 150000 (default) | 527.0 MB | 244.1 ms | 38.7 ms |
+| 50000 | 527.1 MB | 80.0 ms | 37.9 ms |
+| 10000 | 527.3 MB | 18.5 ms | 35.4 ms |
+| 2000 | 529.4 MB | 5.6 ms | 37.9 ms |
+
+The cost of a smaller row group is small on this data. Size grows by 0.4 percent
+at 2000 rows. Scan throughput does not change. There is a floor, so do not go
+lower than needed. A selective range query was slower at 2000 rows than at 10000.
+A smaller row group makes more metadata to read.
+
 ## Compaction and vacuum
 
 There are two distinct operations, and the difference matters:
@@ -259,6 +280,14 @@ A columnar table is an ordinary WAL-logged relation.
 
 Install and preload the extension on any server that restores or replicates a
 columnar table, because reading the table requires the access method.
+
+A physical copy moves between hosts of the same byte order. The native format
+stores integers in host byte order, which the format specification states. This
+is the same rule that PostgreSQL's own heap format follows, so a columnar table is
+no more restricted than the rest of the cluster. An independent validation on
+2026-08-05 moved a data directory from x86_64 to aarch64 and read it correctly.
+Both of those are little-endian. A move to a big-endian host is not supported and
+is not tested.
 
 ## Security
 

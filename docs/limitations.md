@@ -24,9 +24,10 @@ on read. It does not only stamp the version on write
 cross-major `pg_upgrade`. Before, only a suite that nobody ran covered it
 ([issue #257](https://github.com/commandprompt/pgcolumnar/issues/257)).
 
-What that testing does not cover is worth stating alongside it. Every result
-recorded in this repository comes from x86_64. The suites have not been run on
-aarch64 or on a big-endian platform
+What that testing does not cover is worth stating alongside it. The suites run
+and pass on aarch64. An independent validation on 2026-08-05 ran the full gate on
+a Graviton3 host. Every suite passed, and the per-suite result was the same as the
+x86_64 run. The suites have still not been run on a big-endian platform
 ([issue #242](https://github.com/commandprompt/pgcolumnar/issues/242)).
 
 Unaligned reads are one class that a reader could expect to differ by
@@ -35,11 +36,11 @@ builds with the clang address checks and undefined-behaviour checks. These repor
 a misaligned load on any host. That gate exists because the project found and
 fixed such a read one time.
 
-What stays untested on another architecture is what a sanitizer on x86_64 cannot
-see. Memory ordering is the main item. x86_64 puts stores in a more strict order
-than aarch64. Thus a missing barrier in concurrent code can be invisible on one
-architecture and a defect on the other. Another architecture is untested. It is
-not known to be broken. Give it that status when you build there.
+What stays hard to cover is what a sanitizer on x86_64 cannot see. Memory
+ordering is the main item. x86_64 puts stores in a more strict order than aarch64.
+Thus a missing barrier in concurrent code can be invisible on one architecture and
+a defect on the other. The aarch64 gate runs the concurrency and isolation suites
+on real hardware. That is evidence. It is not a proof.
 
 PostgreSQL 19 coverage is against 19beta2, not a final release.
 
@@ -143,8 +144,18 @@ Three behaviors depend on the major:
 
 ## Host architecture
 
-The Arrow and Parquet import and export functions run on little-endian hosts
-only. The rest of the extension runs on any architecture PostgreSQL supports.
+The suites run and pass on x86_64 and on aarch64. The Arrow and Parquet import
+and export functions run on little-endian hosts only.
+
+The code runs on any architecture PostgreSQL supports. A data directory does not
+move between architectures of different byte order. The native format stores each
+multi-byte value in host byte order. The format specification states this. PostgreSQL's own heap format follows the same rule, so a columnar table
+is no more restricted than the rest of the cluster.
+
+A move to a big-endian host is not supported and is not tested. The format does
+not record the byte order of the host that wrote it. A read therefore has no
+check that could refuse such a move. See
+[Backup and restore](administration.md#backup-and-restore).
 
 ## Workload and access patterns
 
