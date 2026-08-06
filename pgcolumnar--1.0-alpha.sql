@@ -982,9 +982,9 @@ COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
  * an opt-in accelerator for wide tables and, like pgcolumnar.vacuum(), nothing
  * schedules it: see #415.
  *
- * This first form collects null_frac only, taken exactly from the zone maps
- * rather than sampled. n_distinct, MCVs and histogram bounds still need a sample
- * and are not collected here yet.
+ * Collected so far: null_frac exactly from the zone maps (metadata only, no data
+ * read), and n_distinct exactly by reading one column. MCVs and histogram bounds
+ * still need a sample and are not collected here yet.
  */
 CREATE FUNCTION pgcolumnar.analyze(rel regclass, columns text[] DEFAULT NULL)
 	RETURNS void
@@ -994,6 +994,9 @@ DECLARE
 	sid       bigint;
 	att       record;
 	nullfrac  double precision;
+	ndistinct bigint;
+	totalrows bigint;
+	ndstat    double precision;
 	seen      integer := 0;
 	unknown   text;
 	schname   text;
@@ -1080,6 +1083,42 @@ BEGIN
 		CONTINUE WHEN nullfrac IS NULL;	/* no zone map rows: nothing exact to say */
 
 		/*
+		 * n_distinct, exactly, by reading this column and nothing else. This is
+		 * the whole point of the function: on the 3M x 20 fixture a projected
+		 * single-column read costs 268 ms where core's whole-table sample costs
+		 * 6,302 ms, because core's fixed 30,000-row sample lands in every row
+		 * group and so decodes every column of the table.
+		 *
+		 * count(DISTINCT) ignores NULLs, which is what n_distinct means.
+		 */
+		EXECUTE format('SELECT count(DISTINCT %I)::bigint, count(*)::bigint FROM %I.%I',
+					   att.attname, schname, relnm)
+			INTO ndistinct, totalrows;
+
+		/*
+		 * Core's own convention, and the sign is load-bearing: positive is an
+		 * absolute count, negative is the negated fraction of rows. analyze.c
+		 * switches to the fraction once the distinct count passes 10% of the
+		 * rows, on the grounds that such a column's cardinality tracks the table
+		 * size rather than sitting at a fixed value. Mirror it rather than always
+		 * writing the absolute count, or a column that is unique today reads as
+		 * having a fixed cardinality once the table grows.
+		 *
+		 * Getting this backwards does not raise -- it produces plausible wrong
+		 * estimates -- so it is asserted in test/analyze_function.sh against a
+		 * fixture pinned to the absolute-count side of the rule.
+		 */
+		IF totalrows > 0 THEN
+			IF ndistinct::double precision > 0.1 * totalrows::double precision THEN
+				ndstat := -(ndistinct::double precision / totalrows::double precision);
+			ELSE
+				ndstat := ndistinct::double precision;
+			END IF;
+		ELSE
+			ndstat := 0;
+		END IF;
+
+		/*
 		 * The casts are load-bearing. pg_restore_attribute_stats takes VARIADIC
 		 * "any", so a mistyped argument is a WARNING and the value is dropped,
 		 * not an error: attname must be text (attname is `name`) and null_frac
@@ -1091,7 +1130,8 @@ BEGIN
 			'relname', relnm,
 			'attname', att.attname::text,
 			'inherited', false,
-			'null_frac', nullfrac::real);
+			'null_frac', nullfrac::real,
+			'n_distinct', ndstat::real);
 
 		seen := seen + 1;
 	END LOOP;

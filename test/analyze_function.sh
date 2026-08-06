@@ -28,8 +28,9 @@
 # This suite is about the function, not the AM sampler. test/analyze_stats.sh
 # covers the sampler (#154) and stays the correctness path for plain ANALYZE.
 #
-# Slice 1 asserts one thing: null_frac comes from the zone maps and is EXACT,
-# where core's is sampled and is not.
+# Slice 1 asserts null_frac comes from the zone maps and is EXACT where core's
+# is sampled. Slice 2 asserts n_distinct is exact from reading ONE column, which
+# is the claim the whole issue rests on.
 #
 # Usage:  test/analyze_function.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -85,6 +86,10 @@ check_num "premise: the fixture is exactly one-in-ten NULL" "$true_nullfrac" "0.
 
 psql_run "ANALYZE af_c;" >/dev/null
 core_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
+# Captured BEFORE our call, because our call overwrites them. Reading these
+# afterwards would compare our own output against itself.
+core_ndistinct_before="$(q "SELECT n_distinct FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
+core_correlation_before="$(q "SELECT correlation FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
 
 if ! pgc_is_number "$core_nullfrac"; then
 	check_num "premise: core ANALYZE produced a null_frac to compare against" \
@@ -111,27 +116,60 @@ ours_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND 
 check_num "pgcolumnar.analyze() reports null_frac exactly, from the zone maps" \
 	"$ours_nullfrac" "0.1"
 
-# --- check 2: it must not destroy the statistics it does not compute -----------
+# --- check 2: n_distinct is exact, from reading one column --------------------
 #
-# pg_restore_attribute_stats is a RESTORE api: it is designed to reinstate a whole
-# attribute's statistics from a dump, so kinds not named in the call may be
-# cleared rather than left alone. That matters here, because this slice collects
-# null_frac and nothing else. An accelerator that yields an exact null_frac while
-# discarding n_distinct and the MCV list makes plans worse, not better -- and it
-# would do so silently, since nothing errors.
+# This is the slice the whole issue rests on. null_frac above is metadata only;
+# n_distinct requires actually reading the column, and the case for a function is
+# that reading ONE column of a wide table is cheap where core's whole-table
+# sample is not: 268 ms against 6,302 ms on the 3M x 20 fixture.
 #
-# So: n_distinct must survive the call. If this fails, the minimal implementation
-# is a regression and slice 1 is not done, whatever the check above says.
+# Exactness is the observable that a sampled implementation cannot fake, which is
+# why it is what gets asserted. Core's own convention is mirrored: an absolute
+# count normally, a negated fraction once the distinct count passes 10% of the
+# rows (analyze.c does exactly this, on the grounds that such a column's
+# cardinality scales with the table rather than sitting at a fixed value).
 
-core_ndistinct="$(q "SELECT n_distinct FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
-echo "-- n_distinct after our call = ${core_ndistinct:-<none>}"
+true_ndistinct="$(q "SELECT count(DISTINCT k) FROM af_c")"
+check_num "premise: the fixture has the cardinality this check compares against" \
+	"$true_ndistinct" "45001"
+
+# Under 10% of 500,000 rows, so core's rule keeps this a positive absolute count
+# rather than a negated fraction. If ROWS is ever lowered past 450,010 this flips
+# sign and the check below needs to expect the fraction instead.
+check "premise: the fixture stays on the absolute-count side of core's 10% rule" \
+	"$(awk -v d="$true_ndistinct" -v n="$ROWS" 'BEGIN { print (d > 0.1 * n) ? "no (fraction side)" : "yes" }')" \
+	"yes"
+
+check "premise: core's sampled n_distinct is not exact, so this check can discriminate" \
+	"$(awk -v c="$core_ndistinct_before" -v t="$true_ndistinct" \
+		'BEGIN { print (c == t) ? "no (sample landed exactly on truth; check is vacuous)" : "yes" }')" \
+	"yes"
+echo "-- core sampled n_distinct = $core_ndistinct_before, truth = $true_ndistinct"
+
+ours_ndistinct="$(q "SELECT n_distinct FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
+check_num "pgcolumnar.analyze() reports n_distinct exactly, from one column" \
+	"$ours_ndistinct" "$true_ndistinct"
+
+# --- check 3: it must not destroy the statistics it does not compute -----------
+#
+# pg_restore_attribute_stats is a RESTORE api: it reinstates a whole attribute's
+# statistics from a dump, so kinds not named in the call could be cleared rather
+# than left alone. An accelerator that produces an exact null_frac and n_distinct
+# while discarding everything else makes plans worse, not better, and does it
+# silently because nothing errors.
+#
+# This watched n_distinct in slice 1. Slice 2 computes n_distinct, so it now
+# watches correlation -- a statistic core collects and we still do not. Keeping it
+# pointed at something we write would make it assert nothing.
+
+ours_correlation="$(q "SELECT correlation FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
+echo "-- correlation before=${core_correlation_before:-<none>} after=${ours_correlation:-<none>}"
 
 check "pgcolumnar.analyze() leaves the statistics it does not compute in place" \
-	"$(if pgc_is_number "$core_ndistinct" \
-		&& [ "$(awk -v v="$core_ndistinct" 'BEGIN { print (v + 0 == 0) ? "zero" : "nonzero" }')" = nonzero ]; then
+	"$(if pgc_is_number "$ours_correlation" && pgc_is_number "$core_correlation_before"; then
 			echo yes
 		else
-			echo "no (n_distinct is now [${core_ndistinct:-<null>}])"
+			echo "no (correlation was [${core_correlation_before:-<null>}], is now [${ours_correlation:-<null>}])"
 		fi)" \
 	"yes"
 
