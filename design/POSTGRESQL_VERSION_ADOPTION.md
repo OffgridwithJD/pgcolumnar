@@ -19,7 +19,7 @@ date it was written. A note without one has not been checked.
 | --- | --- |
 | 1. Read stream and AIO | **shipped**, `pgcolumnar.enable_read_stream` (gap 29) |
 | 2. Virtual generated columns | **done**, read and storage both, `test/generated_columns.sh` |
-| 3. Temporal constraints | **done**, `test/temporal.sh` |
+| 3. Temporal constraints | **done** on 18 and 19, `test/temporal.sh`. Needs contrib `btree_gist`; without it the suite fails rather than passing quietly (#447, #448) |
 | 4. btree skip scan | open, no measurement |
 | 5. REPACK | **investigated and the conclusion was wrong**, see below (#399) |
 | 6. Statistics injection | open, no measurement |
