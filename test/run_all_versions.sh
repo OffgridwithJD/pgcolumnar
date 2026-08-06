@@ -434,10 +434,15 @@ for pgc in "${CONFIGS[@]}"; do
 		# its assertions untrustworthy, only slower.
 		if [ "${PGC_SKIP_TIMING:-0}" = 1 ] && is_timing_suite "$s"; then
 			echo "  SKIP  $s (PGC_SKIP_TIMING)"
-			# 2, not 0. This suite did not run, and since #447 the collector has
-			# a state that says so. Recording it as a pass was the same lie the
-			# zero-check suites were telling, just written by the driver.
-			echo 2 >"$builddir/${s}.rc"
+			# 66, not 0. This suite did not run, and the collector has a state
+			# that says so. Recording it as a pass was the same lie the zero-check
+			# suites were telling, just written by the driver.
+			#
+			# The log is written too, because the collector requires the marker as
+			# well as the status: this branch never executes the suite, so nothing
+			# else would produce one and the run would be classified a failure.
+			echo 66 >"$builddir/${s}.rc"
+			echo "$s.sh: SKIPPED (ran no checks)" >"$builddir/${s}.log"
 			continue
 		fi
 		port=$((BASE_PORT++))
@@ -456,7 +461,7 @@ for pgc in "${CONFIGS[@]}"; do
 			echo "  PASS  $s"
 			results+="$s=PASS "
 			suites_ran=$((suites_ran + 1))
-		elif [ "$_rc" = 2 ]; then
+		elif [ "$_rc" = 66 ] && grep -q 'SKIPPED (ran no checks)' "$builddir/${s}.log" 2>/dev/null; then
 			# Exit 2 is pgc_summary's third state: the suite ran no checks (#447).
 			# Not a pass, because it asserted nothing. Not a failure, because a
 			# major without the feature and a box without an optional dependency
