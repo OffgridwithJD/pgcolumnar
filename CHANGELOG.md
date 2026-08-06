@@ -104,10 +104,12 @@ which was true until that script existed.
   projected column with pointer arithmetic on `attlen`, which is -1 for a
   varlena, so the offset and the fetch were both wrong. The eligibility check
   walked the scan keys and asked whether each type was comparable, while the
-  gather walks the projected set and needs each type fixed width. A text column
-  filtered with `LIKE` is projected and is not a scan key, so it arrived
-  unchecked. Such a shape now falls back to the row path, which is what the
-  ALTER TABLE ADD COLUMN case already did. This was ClickBench q21.
+  gather walks the projected set and needs each type passed by value. A text
+  column filtered with `LIKE` is projected and is not a scan key, so it arrived
+  unchecked. `uuid` and `name` failed the same way for a different reason: both
+  are fixed width, 16 and 64 bytes, but passed by reference, and the gather
+  hardcodes by-value. Such a shape now falls back to the row path, which is what
+  the ALTER TABLE ADD COLUMN case already did. This was ClickBench q21.
 
 ### Upgrading
 

@@ -158,10 +158,17 @@ check "server still up" "$(q "SELECT 1")" 1
 # Both halves are asserted: the answer is right, AND the plan says it fell back. A fix
 # that returned the right answer while EXPLAIN still claimed "Batch Fold: yes" would be
 # reporting something the execution does not do.
-psql_run "CREATE TABLE vfold (i int, s text) USING pgcolumnar;
-	INSERT INTO vfold SELECT g, 'abc'||g FROM generate_series(1,200000) g;
-	CREATE TABLE vfoldh (i int, s text);
+# uuid and name are the cases a reader assumes are covered once "varlena" is named. They
+# are FIXED WIDTH (16 and 64) and BY REFERENCE, so they pass a width test and still fail:
+# the gather hardcodes attbyval = true. uuid is ordinary in event-log shapes.
+psql_run "CREATE TABLE vfold (i int, s text, uid uuid, nm name) USING pgcolumnar;
+	INSERT INTO vfold SELECT g, 'abc'||g, gen_random_uuid(), ('n'||g)::name
+	  FROM generate_series(1,200000) g;
+	CREATE TABLE vfoldh (i int, s text, uid uuid, nm name);
 	INSERT INTO vfoldh SELECT * FROM vfold;" >/dev/null 2>&1
+check "premise: uuid is fixed width but NOT by value, which is the whole point" \
+	"$(q "SELECT attlen||'/'||attbyval FROM pg_attribute
+	      WHERE attrelid='vfold'::regclass AND attname='uid'")" "16/false"
 check "premise: the varlena fixture really is columnar" \
 	"$(q "SELECT amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vfold'")" "pgcolumnar"
 
@@ -175,7 +182,9 @@ for shape in "count(*) FROM vfold WHERE s LIKE '%9%'" \
              "count(*) FROM vfold WHERE i > 100 AND s LIKE '%9%'" \
              "sum(i) FROM vfold WHERE s LIKE '%9%'" \
              "count(*) FROM vfold WHERE s = 'abc7'" \
-             "count(*) FROM vfold WHERE length(s) > 4"; do
+             "count(*) FROM vfold WHERE length(s) > 4" \
+             "count(uid) FROM vfold WHERE i > 100" \
+             "count(nm) FROM vfold WHERE i > 100"; do
 	check_text "a varlena shape agrees with heap: ${shape:0:38}" \
 		"$(vq "SELECT $shape")" "$(q "SELECT ${shape//vfold/vfoldh}")"
 done
@@ -184,5 +193,9 @@ check "a fixed-width filter still uses the batch fold" \
 	"$(fold_of "SELECT count(*) FROM vfold WHERE i > 100")" "Columnar Batch Fold: yes"
 check "a varlena filter falls back, and EXPLAIN says so" \
 	"$(fold_of "SELECT count(*) FROM vfold WHERE s LIKE '%9%'")" "Columnar Batch Fold: no"
+check "a fixed-width BY-REFERENCE column also falls back (uuid)" \
+	"$(fold_of "SELECT count(uid) FROM vfold WHERE i > 100")" "Columnar Batch Fold: no"
+check "and name, which is 64 bytes by reference" \
+	"$(fold_of "SELECT count(nm) FROM vfold WHERE i > 100")" "Columnar Batch Fold: no"
 
 pgc_summary

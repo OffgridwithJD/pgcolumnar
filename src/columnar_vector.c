@@ -2733,15 +2733,25 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		return false;
 
 	/*
-	 * Every column the fold will GATHER must be fixed width (#423).
+	 * Every column the fold will GATHER must be passed BY VALUE (#423).
 	 *
-	 * The gather does pointer arithmetic on attlen:
+	 * The gather does pointer arithmetic on attlen and hardcodes attbyval:
 	 *
 	 *     cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
 	 *                           true, cattlen[col]);
+	 *                           ^^^^ not the column's real attbyval
 	 *
-	 * A varlena has attlen -1, so the offset is multiplied by -1 and fetch_att is
-	 * asked for a byval of length -1, which raises "unsupported byval length: -1".
+	 * So the requirement is not "fixed width", which was this guard's first and
+	 * wrong form. A varlena has attlen -1 and fails on the arithmetic. But a
+	 * FIXED-WIDTH BY-REFERENCE type passes an attlen > 0 test and still fails,
+	 * because fetch_att will not pass 16 or 64 bytes by value: uuid is attlen 16
+	 * and name is attlen 64, and both raised "unsupported byval length: 16" and
+	 * "... 64" while EXPLAIN still reported the fold as engaged.
+	 *
+	 * attbyval is the property the gather actually depends on, and it implies
+	 * attlen is 1, 2, 4 or 8, so it subsumes the width test rather than adding
+	 * to it. uuid in particular is ordinary in the event-log shapes this fold
+	 * targets.
 	 *
 	 * The type check below is not this check and cannot stand in for it. It walks
 	 * the SCAN KEYS and asks whether each type is comparable, while the gather
@@ -2759,7 +2769,7 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		{
 			if (c < 0 || c >= tupdesc->natts)
 				continue;
-			if (TupleDescAttr(tupdesc, c)->attlen <= 0)
+			if (!TupleDescAttr(tupdesc, c)->attbyval)
 				return false;
 		}
 	}
