@@ -30,6 +30,22 @@
 PGC_FAIL=0
 PGC_CHECKS=0
 
+# The status pgc_summary uses for "ran no checks".
+#
+# NOT 2. #448 used 2 and that was wrong: 2 is a status suites already produce for
+# unrelated reasons. bash exits 2 on a parse error in the suite file (verified),
+# and the suites that run under `set -euo pipefail` -- smoke, phase2 through
+# phase6, audit -- abort with whatever status the failing command returned, so a
+# dead postmaster or a typo became "ran no checks" and every runner reported the
+# major green. That is precisely the lie #447 was opened to remove, relocated one
+# layer down.
+#
+# 66 is not produced by bash (1, 2, 126, 127, 128+n), by psql (1, 2, 3), or by
+# make. It cannot be made collision-proof -- `set -e` propagates any status an
+# aborting command returns -- so the runners ALSO require the SKIPPED line in the
+# log before believing it. Two independent signals, because one was not enough.
+PGC_EXIT_SKIPPED=66
+
 # ---- cluster identity helpers ----------------------------------------------
 
 # Normalize a directory for comparison. `cd && pwd -P` is POSIX; realpath -m is
@@ -639,7 +655,7 @@ pgc_summary() {
 	fi
 	if [ "$PGC_CHECKS" = "0" ]; then
 		echo "$(basename "$0"): SKIPPED (ran no checks)"
-		exit 2
+		exit $PGC_EXIT_SKIPPED
 	fi
 	echo "$(basename "$0"): PASSED"
 	exit 0
