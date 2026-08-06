@@ -571,12 +571,50 @@ chunk_group_count() {
 
 # ---- summary ---------------------------------------------------------------
 
+# A suite that could not run, because an optional capability is absent.
+#
+# Announces the skip, and honours PGC_REQUIRE_<CAP>=1 so a gate box can demand a
+# capability rather than silently losing its coverage. isolation.sh has had this
+# exact shape for one capability since it was written (PGC_REQUIRE_ISOLATION,
+# which CI sets); this generalises that convention instead of inventing a second.
+#
+# Ends the suite, because there is nothing after the guard to run.
+pgc_skip() {  # pgc_skip <capability> <message>
+	local cap req val
+	cap="$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
+	req="PGC_REQUIRE_$cap"
+	val="${!req:-0}"
+	if [ "$val" = 1 ]; then
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		echo "FAIL  $2 (and $req=1 demands it)"
+	else
+		echo "SKIP  $2"
+	fi
+	pgc_summary
+}
+
+# Three states, not two (#447).
+#
+# The verdict used to be a function of PGC_FAIL alone, and PGC_CHECKS was printed
+# and never read. So a suite that asserted NOTHING printed PASSED and exited 0,
+# indistinguishable from one that ran four hundred checks. Fifteen suites do that
+# whenever pyarrow is absent, which is how an entire Parquet and Arrow surface,
+# including both fuzzers, can leave a run with every line still saying PASSED.
+#
+# A suite that ran no checks did not pass. It is also not a failure: PostgreSQL 15
+# genuinely has no WITHOUT OVERLAPS to test, and a developer box without an
+# optional dependency is a supported configuration rather than a defect. Making
+# those red is the "a red everyone knows to ignore is a red nobody reads" failure
+# this tree keeps arguing against.
+#
+# So skipped is its own exit code. 0 passed, 1 failed, 2 ran nothing. The drivers
+# count 2 separately and report how many suites actually ran, which is what #422
+# did one level up for how many VERSIONS actually ran.
 pgc_summary() {
 	echo
 	echo "checks run: $PGC_CHECKS"
-	if [ "$PGC_FAIL" = "0" ]; then
-		echo "$(basename "$0"): PASSED"
-	else
+	if [ "$PGC_FAIL" != "0" ]; then
 		echo "$(basename "$0"): FAILED"
 		# A source-shape suite (wal_envelope, decode_interrupts) never calls
 		# pgc_setup, so there is no cluster and no log. Without this guard the
@@ -586,6 +624,12 @@ pgc_summary() {
 			echo "---- server log tail ----"
 			pgc_pg "tail -40 '$PGC_LOGFILE'" 2>/dev/null || true
 		fi
+		exit 1
 	fi
-	exit $PGC_FAIL
+	if [ "$PGC_CHECKS" = "0" ]; then
+		echo "$(basename "$0"): SKIPPED (ran no checks)"
+		exit 2
+	fi
+	echo "$(basename "$0"): PASSED"
+	exit 0
 }
