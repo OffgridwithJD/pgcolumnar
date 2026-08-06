@@ -47,17 +47,38 @@ PgColumnarObjStoreGet(void)
 
 	if (objstore_tried)
 		return objstore_api;
-	objstore_tried = true;
 
 	/*
-	 * load_external_function with error_on_fail = false, so an installation
-	 * without the module reports an unsupported scheme rather than failing to
-	 * load. $libdir is resolved by the server, so the module is found wherever
-	 * the main library was installed.
+	 * signalNotFound = false suppresses a missing SYMBOL. It does NOT suppress a
+	 * missing LIBRARY: internal_load_library raises before the symbol lookup
+	 * happens, so that argument never gets a say and the caller sees
+	 * 'could not access file "pgcolumnar_objstore"'. An installation without the
+	 * module is a supported configuration, not an error, so catch it.
+	 *
+	 * Only the load is inside the PG_TRY, so nothing else is swallowed.
+	 *
+	 * objstore_tried is set AFTER the attempt, not before. Setting it first looks
+	 * equivalent and is not: the ereport unwinds past the assignment while the
+	 * static keeps its new value, so the FIRST remote read of a session reported
+	 * the raw load failure and every later one reported the documented message.
+	 * Two identical queries in one session gave two different errors, and the
+	 * second was the plausible-looking one.
 	 */
-	init = (PgColumnarObjStoreInitFn)
-		load_external_function("$libdir/pgcolumnar_objstore",
-							   "pgcolumnar_objstore_init", false, NULL);
+	init = NULL;
+	PG_TRY();
+	{
+		init = (PgColumnarObjStoreInitFn)
+			load_external_function("$libdir/pgcolumnar_objstore",
+								   "pgcolumnar_objstore_init", false, NULL);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		init = NULL;
+	}
+	PG_END_TRY();
+
+	objstore_tried = true;
 	if (init == NULL)
 		return NULL;
 

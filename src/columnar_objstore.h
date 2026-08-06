@@ -15,9 +15,13 @@
  * and a separate distribution package. This follows that shape.
  *
  * The module is loaded with load_external_function on the first read of a remote
- * path and never before. A build or an install without it is fully functional
- * for local files, and reports a remote path as unsupported rather than failing
- * to load.
+ * path and never before. A build or an install without it is fully functional for
+ * local files.
+ *
+ * A missing module reports the remote path as unsupported. That needs a PG_TRY in
+ * the loader and not just signalNotFound = false, because signalNotFound
+ * suppresses a missing SYMBOL while a missing LIBRARY is raised earlier, by
+ * internal_load_library, before the symbol lookup happens.
  *
  * VERSIONING. Bump PGCOLUMNAR_OBJSTORE_ABI whenever the meaning or the order of
  * anything below changes. The loader refuses a mismatch, because the failure it

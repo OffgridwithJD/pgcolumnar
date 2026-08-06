@@ -48,4 +48,41 @@ check "a local path still works" "$(q 'SELECT count(*) FROM lp')" "3"
 check "a relative path is not mistaken for a URL" \
 	"$(psql_run "SELECT * FROM pgcolumnar.read_parquet('/nonexistent/x.parquet') AS (a int)" 2>&1 |
 	   grep -c 'No such file or directory\|could not open')" "1"
+# ---- the module ABSENT, which is a supported configuration --------------------
+#
+# Two things this asserts, both of which were wrong before:
+#
+#  1 a missing module must report the remote path as unsupported, not
+#    'could not access file "pgcolumnar_objstore"'. signalNotFound = false
+#    suppresses a missing SYMBOL; a missing LIBRARY is raised earlier by
+#    internal_load_library and needs a PG_TRY.
+#
+#  2 the SAME query must give the SAME error twice in one session. The cache flag
+#    used to be set before the load, so the ereport unwound past the assignment
+#    while the static kept its new value: the first read reported the raw load
+#    failure and every later one reported the documented message. Two identical
+#    queries, one session, two different errors, the second one plausible.
+#
+# Both reads run in ONE psql session on purpose. Separate sessions cannot see it.
+Q="SELECT * FROM pgcolumnar.read_parquet('s3://bucket/key.parquet') AS (a int)"
+two_reads() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-At -q -c "$Q" -c "$Q" 2>&1
+}
+MOD="$LIBDIR/pgcolumnar_objstore.so"
+
+both=$(two_reads)
+check "with the module present, both reads report the same thing" \
+	"$(grep -c 'is not implemented yet\|is not supported' <<<"$both")" "2"
+
+pgc_pg "mv '$MOD' '$MOD.away'" >/dev/null 2>&1
+absent=$(two_reads)
+pgc_pg "mv '$MOD.away' '$MOD'" >/dev/null 2>&1
+check "premise: the module really was absent for that run" \
+	"$(pgc_pg "test -f '$MOD' && echo restored || echo MISSING")" "restored"
+check "with the module absent, neither read leaks the loader's own error" \
+	"$(grep -c 'could not access file' <<<"$absent")" "0"
+check "and both reads report the SAME unsupported error" \
+	"$(grep -c 'is not supported' <<<"$absent")" "2"
+
 pgc_summary
