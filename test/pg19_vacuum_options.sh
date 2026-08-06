@@ -34,8 +34,7 @@ pgc_setup "${1:-/usr/local/pg19/bin/pg_config}"
 srv="$(q 'SHOW server_version_num')"
 if [ "${srv:-0}" -lt 190000 ]; then
 	echo "SKIP  parallel autovacuum requires PostgreSQL 19 (server_version_num=$srv)"
-	echo "pg19_vacuum_options.sh: SKIPPED"
-	exit 0
+	pgc_summary
 fi
 
 ROWS=${PGC_AV_ROWS:-100000}
