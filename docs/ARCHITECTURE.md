@@ -320,12 +320,14 @@ outside the buffer, an incorrect value, or work without a bound.
 Each of those guards has a crafted-file test verified to fail when that specific
 guard is removed; `test/mutate_guard.py` is the harness that does the removing.
 
-Every read of a Parquet file goes through one positional read, `pq_source_read`,
-whose callers have already bounded the offset. That is the seam a non-local byte
-source replaces, and it is why reading from object storage touches three
-functions rather than the reader. The seam dispatches through a vtable that is
-never null: the local file path is an implementation like any other, so the
-dispatch is exercised by every Parquet test in the suite rather than only by the
+Every read of a Parquet file goes through one positional read, `pq_source_read`.
+Its callers have already bounded the offset. That is the seam a non-local byte
+source replaces, and it is why object storage touches three functions rather
+than the reader.
+
+The seam dispatches through a vtable that is never null. The local file path is
+an implementation like any other, not a case the dispatcher tests for. Every
+Parquet test in the suite therefore exercises the dispatch, rather than only the
 first remote source to arrive.
 
 ### columnar_objstore.c
@@ -334,40 +336,44 @@ that knows the module exists. Object storage lives in a **separate, non-preloade
 shared library**, `pgcolumnar_objstore`, built from `objstore/`.
 
 The reason is measured rather than stylistic. pgColumnar loads through
-`shared_preload_libraries`, so everything it links is mapped into the postmaster
-and inherited by every backend through `fork`, whether or not any query ever
-reads a remote file. libcurl alone resolves to 30 shared objects against this
-extension's 4, including two TLS implementations, and an OpenSSL-linked client
-would bring a TLS stack into a postmaster that may have none. PostgreSQL made the
-same call for its own libcurl dependency: configure default off, a separate
-library, runtime `dlopen` behind a frozen ABI, and a separate package.
+`shared_preload_libraries`. Everything it links is therefore mapped into the
+postmaster and inherited by every backend through `fork`, whether or not any
+query reads a remote file. libcurl alone resolves to 30 shared objects against
+this extension's 4, including two TLS implementations. An OpenSSL-linked client
+would bring a TLS stack into a postmaster that may have none.
+
+PostgreSQL made the same call for its own libcurl dependency. That shape is
+configure default off, a separate library, runtime `dlopen` behind a frozen ABI,
+and a separate package.
 
 The module is loaded with `load_external_function` on the first read of a remote
 path and never before. A build or an install without it is fully functional for
-local files; a remote path then reports that the module is not installed, which
+local files. A remote path then reports that the module is not installed. That
 is a different report from a scheme the installed module does not handle, because
-those ask the operator for different things.
+the two ask the operator for different things.
 
 The ABI is frozen in `columnar_objstore.h` and version-checked on load. A
-mismatch is refused rather than called through, since a stale module and a new
-main library agree on the symbol name and disagree on the struct.
+mismatch is refused rather than called through. A stale module and a new main
+library agree on the symbol name and disagree on the struct.
 
-Two ordering constraints in the loader are load-bearing and are each covered by a
-test. A missing library is raised by `internal_load_library` before the symbol
-lookup, so `signalNotFound = false` never gets a say and the miss needs a
-`PG_TRY`. And "already tried" is recorded only after the attempt completes, with
-nothing that can raise between the assignment and its return: setting it first
-lets an `ereport` unwind past the assignment while the static keeps its new value,
-so the first remote read of a session reports one error and every later one
-reports a different, more plausible-looking one.
+Two ordering constraints in the loader are load-bearing, and each has a test.
 
-Missing and corrupt cannot be told apart by SQLSTATE: `internal_load_library`
+A missing library is raised by `internal_load_library` before the symbol lookup.
+So `signalNotFound = false` never gets a say, and the miss needs a `PG_TRY`.
+
+"Already tried" is recorded only after the attempt completes, with nothing that
+can raise between the assignment and its return. Setting it first lets an
+`ereport` unwind past the assignment while the static keeps its new value. The
+first remote read of a session then reports one error, and every later one
+reports a different and more plausible error.
+
+Missing and corrupt cannot be told apart by SQLSTATE. `internal_load_library`
 uses `errcode_for_file_access()` for both the `stat` failure and the `dlopen`
 failure, so both arrive as 58P01. The discriminator is file presence.
 
 Object storage reads **exact object keys**. A glob metacharacter in a remote path
-is refused rather than expanded, because expanding one needs a LIST call whose
-paged response would be a third hand-rolled parser over input an outside party
+is refused rather than expanded. Expanding one needs a LIST call, and its paged
+response would be a third parser written here for input an outside party
 controls.
 
 ### columnar_visibilitymap.c
