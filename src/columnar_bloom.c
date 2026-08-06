@@ -68,6 +68,76 @@ next_pow2(uint32 x)
 	return p;
 }
 
+/*
+ * How many DISTINCT hashes are in the array (#467).
+ *
+ * A filter used to be sized from the value count, which is the stripe's row
+ * count, so every bloomable column of every stripe got the same
+ * next_pow2(n * BLOOM_BITS_PER_VALUE) bits whatever its cardinality: a column
+ * with five distinct values got the 256 KB filter a unique column got. Measured
+ * on 2M ClickBench rows that was 19.3x over-provisioned, 361 MB of filters
+ * against a 262 MB table, and 29 percent of load time.
+ *
+ * A bloom filter's membership set IS its distinct set, so sizing from the
+ * distinct count is a size and time change and not a semantic one: a filter
+ * built over distinct hashes answers every probe exactly as the old one did.
+ *
+ * Open addressing over a power-of-two table at load factor <= 0.5, which is what
+ * keeps the probe sequence short; the table is transient and freed before this
+ * returns. Hash 0 cannot be stored in a zeroed table because it is
+ * indistinguishable from an empty slot, so it is counted separately rather than
+ * given a sentinel -- one branch, and no value is excluded from the filter.
+ */
+static uint32
+bloom_distinct_count(const uint32 *hashes, uint32 n)
+{
+	uint32	   *tab;
+	uint32		cap;
+	uint32		mask;
+	uint32		distinct = 0;
+	bool		sawZero = false;
+	uint32		i;
+
+	/* Two slots per value, rounded up, so the table stays half empty. */
+	cap = 1;
+	while ((uint64) cap < (uint64) n * 2 && cap < (1u << 30))
+		cap <<= 1;
+	mask = cap - 1;
+	tab = (uint32 *) palloc0((Size) cap * sizeof(uint32));
+
+	for (i = 0; i < n; i++)
+	{
+		uint32		h = hashes[i];
+		uint32		slot;
+
+		if (h == 0)
+		{
+			if (!sawZero)
+			{
+				sawZero = true;
+				distinct++;
+			}
+			continue;
+		}
+
+		slot = h & mask;
+		while (tab[slot] != 0)
+		{
+			if (tab[slot] == h)
+				break;
+			slot = (slot + 1) & mask;
+		}
+		if (tab[slot] == 0)
+		{
+			tab[slot] = h;
+			distinct++;
+		}
+	}
+
+	pfree(tab);
+	return distinct;
+}
+
 /* two derived hashes for double hashing; h2 forced odd for full coverage */
 static inline void
 bloom_hashes(uint32 h, uint32 *h1, uint32 *h2)
@@ -91,28 +161,47 @@ PgColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
 	unsigned char *bits;
 	uint8		k = BLOOM_K;
 	uint32		i;
+	uint32		d;				/* distinct hashes; what the filter is sized for */
 
 	if (n < 64)
 		return false;			/* min/max and per-group scan suffice */
 
 	/*
-	 * Refuse to build a filter the cap cannot size properly. A filter is stored
-	 * per stripe, so n grows with pgcolumnar.stripe_row_limit (a USERSET GUC and
-	 * a reloption); once n * BLOOM_BITS_PER_VALUE exceeds BLOOM_MAX_BITS,
-	 * next_pow2 clamps and the bits-per-value falls below the ~10 this k was
-	 * chosen for. The filter then saturates: at four times the default stripe
-	 * limit almost every bit is set, so the probe answers "may be present" for
-	 * everything while still costing 256 KB per column per stripe to store and
-	 * read. No filter is better than one that never skips, and the reader
+	 * Sizing is from the DISTINCT count, not the value count (#467). See
+	 * bloom_distinct_count above for why that is equivalent rather than a
+	 * trade-off.
+	 *
+	 * The `n < 64` guard above deliberately stays on the VALUE count. It means
+	 * "this chunk is too small to be worth a filter at all", which is a statement
+	 * about the chunk and not about its cardinality. Moving it to the distinct
+	 * count would drop the filter entirely from every low-cardinality column --
+	 * 68 of 105 on the ClickBench fixture -- and those are exactly the columns
+	 * where an equality probe skips best: if the value is not among the five
+	 * present, the whole group goes. A 64-bit filter costs 8 bytes.
+	 */
+	d = bloom_distinct_count(hashes, n);
+
+	/*
+	 * Refuse to build a filter the cap cannot size properly. Once
+	 * d * BLOOM_BITS_PER_VALUE exceeds BLOOM_MAX_BITS, next_pow2 clamps and the
+	 * bits-per-value falls below the ~10 this k was chosen for. The filter then
+	 * saturates: almost every bit is set, so the probe answers "may be present"
+	 * for everything while still costing 256 KB per column per stripe to store
+	 * and read. No filter is better than one that never skips, and the reader
 	 * already treats an absent filter as "may match".
 	 *
+	 * This tests the DISTINCT count now. It used to test n, which refused a
+	 * filter to a large stripe of low-cardinality data for a problem that data
+	 * does not have: the saturation this guards against is a function of how many
+	 * distinct values compete for the bits, not how many times they repeat.
+	 *
 	 * This also keeps the multiply below in range: past this point it would
-	 * overflow uint32 for a large enough n.
+	 * overflow uint32 for a large enough d.
 	 */
-	if ((uint64) n * BLOOM_BITS_PER_VALUE > BLOOM_MAX_BITS)
+	if ((uint64) d * BLOOM_BITS_PER_VALUE > BLOOM_MAX_BITS)
 		return false;
 
-	nbits = next_pow2(n * BLOOM_BITS_PER_VALUE);
+	nbits = next_pow2(d * BLOOM_BITS_PER_VALUE);
 	nbytes = nbits / 8;
 	total = sizeof(uint32) + sizeof(uint8) + nbytes;
 
