@@ -780,6 +780,187 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
 }
 
 /*
+ * pgcolumnar_restriction_correlation
+ *		The strongest column correlation among the restriction clauses that a
+ *		zone map can prune on, as |rho| in [0, 1]. Zero when nothing qualifies.
+ *
+ *		Only `Var op Const` on an ordered, fixed-width type counts, because that
+ *		is what the reader's row-group skip actually evaluates: it compares the
+ *		constant against the chunk's stored minimum and maximum. A LIKE, an
+ *		expression key or a join clause prunes nothing, and counting one here
+ *		would discount a scan that does the full work (#426 is the open issue for
+ *		text predicates; until it lands they must not be priced as if they prune).
+ */
+static double
+pgcolumnar_restriction_correlation(RelOptInfo *rel, Oid heapRelid)
+{
+	ListCell   *lc;
+	double		best = 0.0;
+
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *leftop;
+		Node	   *rightop;
+		Var		   *var;
+		HeapTuple	st;
+		AttStatsSlot sslot;
+		Oid			sortop;
+
+		if (!IsA(rinfo->clause, OpExpr))
+			continue;
+		op = (OpExpr *) rinfo->clause;
+		if (list_length(op->args) != 2)
+			continue;
+		leftop = (Node *) linitial(op->args);
+		rightop = (Node *) lsecond(op->args);
+
+		/* Var on one side, Const on the other; either order. */
+		if (IsA(leftop, Var) && IsA(rightop, Const))
+			var = (Var *) leftop;
+		else if (IsA(rightop, Var) && IsA(leftop, Const))
+			var = (Var *) rightop;
+		else
+			continue;
+
+		if (var->varno != rel->relid || var->varattno <= 0)
+			continue;
+		/* A zone map stores min and max of a fixed-width ordered value. */
+		if (get_typlen(var->vartype) <= 0 || !get_typbyval(var->vartype))
+			continue;
+
+		/*
+		 * The type's default btree "<", which is the operator ANALYZE keys the
+		 * correlation slot on. Asked of the type cache rather than derived from
+		 * the clause's own operator: get_ordering_op_for_equality_op took two
+		 * arguments through PG17 and three later, and this needs no more than
+		 * the default ordering in any of those majors.
+		 */
+		{
+			TypeCacheEntry *tc = lookup_type_cache(var->vartype,
+												   TYPECACHE_LT_OPR);
+
+			if (tc == NULL || !OidIsValid(tc->lt_opr))
+				continue;
+			sortop = tc->lt_opr;
+		}
+
+		st = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(heapRelid),
+							 Int16GetDatum(var->varattno), BoolGetDatum(false));
+		if (!HeapTupleIsValid(st))
+			continue;
+		if (get_attstatsslot(&sslot, st, STATISTIC_KIND_CORRELATION, sortop,
+							 ATTSTATSSLOT_NUMBERS))
+		{
+			if (sslot.nnumbers == 1)
+			{
+				double		corr = fabs(sslot.numbers[0]);
+
+				if (corr > best)
+					best = corr;
+			}
+			free_attstatsslot(&sslot);
+		}
+		ReleaseSysCache(st);
+	}
+
+	return (best > 1.0) ? 1.0 : best;
+}
+
+/*
+ * pgcolumnar_zonemap_survival
+ *		The fraction of the relation a restricted columnar scan must actually
+ *		read, in (0, 1]. One means no pruning is expected.
+ *
+ *		The scan skips a row group whose stored minimum and maximum prove the
+ *		restriction cannot match, so what it reads is decided by how the matching
+ *		values are LAID OUT, not only by how many there are. Perfectly clustered,
+ *		a predicate selecting a fraction s of the rows touches about s of the
+ *		groups. Perfectly scattered, every group holds the full value range and
+ *		nothing prunes at all.
+ *
+ *		Interpolating on rho^2 is the same relation and the same curve the index
+ *		fetch penalty uses above. It has to be: the penalty says a clustered index
+ *		fetch decodes few groups, and this says a clustered restriction skips many
+ *		groups. Those are one physical fact, and pricing them on two different
+ *		curves is how the planner ends up preferring a plan it also believes is
+ *		expensive.
+ *
+ *		Why this exists (#434). Without it the columnar path is quoted at its
+ *		worst case while an index scan on the same relation is quoted at its best,
+ *		so the planner picked a plan that ran 11.6x slower than one it declined:
+ *		index scan priced 12,407 and ran 500 ms, custom scan priced 17,326 and ran
+ *		43 ms, on a correlated bigint key with 80% of rows excluded.
+ *
+ *		The floor is not decoration. Issue #171 was a full scan priced at 1.00
+ *		beating an index scan priced at 174.29, which turned a point lookup into
+ *		1251.88 ms; a discount with no floor is the same defect with a different
+ *		multiplier. Never discount below one row group's share, because a scan
+ *		that matches anything at all must read the group the match is in.
+ */
+static double
+pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
+{
+	double		sel;
+	double		rho;
+	double		survival;
+	double		floorFrac;
+	double		groups;
+
+	if (rel->baserestrictinfo == NIL || rel->tuples <= 0)
+		return 1.0;
+
+	rho = pgcolumnar_restriction_correlation(rel, heapRelid);
+	if (rho <= 0.0)
+		return 1.0;
+
+	sel = rel->rows / rel->tuples;
+	if (sel < 0.0)
+		sel = 0.0;
+	if (sel >= 1.0)
+		return 1.0;
+
+	survival = sel + (1.0 - rho * rho) * (1.0 - sel);
+
+	/*
+	 * One row group's share, from the group size THIS TABLE was written with.
+	 *
+	 * The first version read pgcolumnar_stripe_row_limit, the GUC, on the
+	 * reasoning that a catalog lookup at plan time would be paid by every query.
+	 * The reasoning was right and the value was wrong: stripe_row_limit is a
+	 * per-table option that overrides the GUC, and it is the one that decides how
+	 * many groups exist. On a table written at 10,000 rows per group with the GUC
+	 * left at its default, this computed 2 groups where there were 20, so the
+	 * floor came out at 0.5 and clamped every case. The formula above never ran:
+	 * sel = 0.053 with rho = 1 was reported as a survival of 0.5. Measured with
+	 * the function instrumented, because reading it off the plan looked like the
+	 * model working.
+	 *
+	 * The lookup is placed after the early returns above, so it happens only when
+	 * a discount is actually about to be applied -- a relation with no prunable
+	 * restriction never pays for it. That is once per baserel per plan, against a
+	 * cost model that is otherwise wrong by an order of magnitude.
+	 */
+	{
+		PgColumnarOptions opts;
+		int			limit = pgcolumnar_stripe_row_limit;
+
+		if (PgColumnarReadOptions(heapRelid, &opts) &&
+			opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
+			limit = opts.stripeRowLimit;
+		if (limit <= 0)
+			return 1.0;
+		groups = ceil(rel->tuples / (double) limit);
+	}
+	floorFrac = (groups >= 1.0) ? (1.0 / groups) : 1.0;
+	if (survival < floorFrac)
+		survival = floorFrac;
+
+	return (survival > 1.0) ? 1.0 : survival;
+}
+
+/*
  * pgcolumnar_path_order_cmp
  *		Order two paths the way add_path keeps rel->pathlist ordered.
  *
@@ -1030,7 +1211,18 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 */
 	cpath->path.startup_cost = (seqpath != NULL) ? seqpath->startup_cost
 		: rel->baserestrictcost.startup;
-	cpath->path.total_cost = pgcolumnar_full_scan_cost(rel, seqpath);
+
+	/*
+	 * The run cost is scaled by what the zone maps leave to read (#434). Only
+	 * the run part: the startup is qual setup and is paid whatever gets skipped.
+	 */
+	{
+		Cost		full = pgcolumnar_full_scan_cost(rel, seqpath);
+		double		survival = pgcolumnar_zonemap_survival(rel, rte->relid);
+
+		cpath->path.total_cost = cpath->path.startup_cost +
+			(full - cpath->path.startup_cost) * survival;
+	}
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
