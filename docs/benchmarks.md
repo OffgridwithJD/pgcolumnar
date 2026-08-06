@@ -739,6 +739,28 @@ project's MIT license does not carry. The harness fetches the definition from
 upstream at run time and copies nothing. Our comparison oracle is the heap arm of
 the same run.
 
+The definition is re-fetched on every run, so the benchmark tracks the current
+upstream rather than a copy taken once. That means upstream can change what is
+measured between two runs, and a result is only comparable to another result
+taken against the same definition. Each run therefore prints the SHA-256 of both
+fetched files:
+
+```
+   definition: create.sql 42d28575fd59fb4a  queries.sql a7d6673357348ee9
+```
+
+Those are the real digests of upstream `main` as of 2026-08-06, 43 queries.
+
+Cite those beside any number taken from a run. `PGC_CB_OFFLINE=1` runs against
+the copy already on the machine, for a host with no network; it says so in the
+output, because a run against a stale definition is not comparable to one against
+the current definition.
+
+The table below predates the digest being recorded, so it cannot cite one. The
+run was on 2026-08-05 and upstream carried the digests above a day later, but
+that is an inference and not a measurement; the next run is the first that will
+state it.
+
 The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
 every ninth row of the real 100 million row table. The reported time is the best
