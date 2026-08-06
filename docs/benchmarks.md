@@ -739,6 +739,17 @@ project's MIT license does not carry. The harness fetches the definition from
 upstream at run time and copies nothing. Our comparison oracle is the heap arm of
 the same run.
 
+The definition is re-fetched on every run, so a result is only comparable to
+another taken against the same upstream definition.
+
+**These numbers are documentation, and the NonCommercial term governs what else
+they may be used for.** Publishing our own test results here is permitted: we
+measure to compare, and to catch our own regressions. Reusing them in promotional
+material, a corporate brochure, a sales deck or a paid advertisement is not, and
+producing the numbers ourselves does not change that, because the benchmark
+definition they came from is the licensed material. The full list of prohibited
+uses is in `PROVENANCE.md` beside the owner's determination of 2026-08-06.
+
 The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
 every ninth row of the real 100 million row table. The reported time is the best
