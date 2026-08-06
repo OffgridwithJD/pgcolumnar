@@ -85,4 +85,30 @@ check "with the module absent, neither read leaks the loader's own error" \
 check "and both reads report the SAME unsupported error" \
 	"$(grep -c 'is not supported' <<<"$absent")" "2"
 
+# ---- installed but BROKEN is not the same as not installed --------------------
+#
+# Only "not installed" is supported. A truncated library or a permission problem is the
+# operator's to fix, and reporting it as an unsupported scheme sends them elsewhere.
+#
+# TWO premises, because the first version of this test had neither and passed while doing
+# nothing:
+#   1 the module must actually BE corrupt during the run. Overwriting it in place fails
+#     silently: it is root-owned 0755 and this runs as postgres, which can write the
+#     DIRECTORY but not that file. So move it aside and CREATE a new one.
+#   2 the SQLSTATE cannot be used to tell the two cases apart. internal_load_library uses
+#     errcode_for_file_access() for both the stat failure and the dlopen failure, so
+#     missing and "file too short" both arrive as 58P01. Measured. The check is on file
+#     presence for that reason.
+pgc_pg "mv '$MOD' '$MOD.away' && printf 'not a shared object' > '$MOD'" >/dev/null 2>&1
+check "premise: the module really is corrupt for this run, not merely intended to be" \
+	"$(pgc_pg "stat -c %s '$MOD'" | tail -1)" "19"
+broken=$(two_reads)
+pgc_pg "rm -f '$MOD' && mv '$MOD.away' '$MOD'" >/dev/null 2>&1
+check "premise: the real module was restored afterwards" \
+	"$([ "$(pgc_pg "stat -c %s '$MOD'" | tail -1)" -gt 1000 ] && echo yes || echo no)" "yes"
+check "a broken module does NOT masquerade as an unsupported scheme" \
+	"$(grep -c 'is not supported' <<<"$broken")" "0"
+check "and the loader's own reason survives" \
+	"$([ "$(grep -ci 'could not load library' <<<"$broken")" -ge 1 ] && echo yes || echo no)" "yes"
+
 pgc_summary

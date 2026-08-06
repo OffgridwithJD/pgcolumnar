@@ -11,6 +11,8 @@
 
 #include "fmgr.h"
 #include "utils/elog.h"
+#include "miscadmin.h"
+#include <sys/stat.h>
 
 #include "columnar.h"
 #include "columnar_objstore.h"
@@ -23,6 +25,22 @@
  */
 static const PgColumnarObjStoreApi *objstore_api = NULL;
 static bool objstore_tried = false;
+
+/*
+ * Is the module file actually there? Resolves $libdir the way the server does,
+ * because the SQLSTATE cannot distinguish a missing library from a broken one.
+ */
+static bool
+objstore_module_present(void)
+{
+	char		libdir[MAXPGPATH];
+	char		path[MAXPGPATH];
+	struct stat st;
+
+	get_pkglib_path(my_exec_path, libdir);
+	snprintf(path, sizeof(path), "%s/pgcolumnar_objstore%s", libdir, DLSUFFIX);
+	return stat(path, &st) == 0;
+}
 
 bool
 PgColumnarPathIsRemote(const char *path)
@@ -44,6 +62,7 @@ PgColumnarObjStoreGet(void)
 {
 	PgColumnarObjStoreInitFn init;
 	const PgColumnarObjStoreApi *api;
+	MemoryContext loadcxt;
 
 	if (objstore_tried)
 		return objstore_api;
@@ -64,6 +83,7 @@ PgColumnarObjStoreGet(void)
 	 * Two identical queries in one session gave two different errors, and the
 	 * second was the plausible-looking one.
 	 */
+	loadcxt = CurrentMemoryContext;
 	init = NULL;
 	PG_TRY();
 	{
@@ -73,6 +93,31 @@ PgColumnarObjStoreGet(void)
 	}
 	PG_CATCH();
 	{
+		MemoryContext ecxt = MemoryContextSwitchTo(loadcxt);
+
+		/*
+		 * "Not installed" and "installed but broken" are different situations and
+		 * only the first is supported. Swallowing both reports a truncated
+		 * library or a permission problem as an unsupported scheme, which sends
+		 * the operator looking in the wrong place for a fault that is theirs.
+		 *
+		 * The SQLSTATE cannot tell them apart, which is the trap here and the
+		 * reason the first attempt at this was wrong. internal_load_library uses
+		 * errcode_for_file_access() for BOTH the stat failure and the dlopen
+		 * failure, so a missing file and "file too short" both arrive as
+		 * ERRCODE_UNDEFINED_FILE (58P01). Measured, not assumed.
+		 *
+		 * So ask the filesystem instead. Absent means not installed; present
+		 * means the load failed for a reason the operator needs to see, and the
+		 * original error is re-raised with its own message intact.
+		 */
+		if (objstore_module_present())
+		{
+			MemoryContextSwitchTo(ecxt);
+			PG_RE_THROW();
+		}
+
+		MemoryContextSwitchTo(ecxt);
 		FlushErrorState();
 		init = NULL;
 	}
