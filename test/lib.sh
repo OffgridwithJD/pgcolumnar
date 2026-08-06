@@ -571,26 +571,37 @@ chunk_group_count() {
 
 # ---- summary ---------------------------------------------------------------
 
-# A suite that could not run, because an optional capability is absent.
+# A dependency this suite needs is not installed.
 #
-# Announces the skip, and honours PGC_REQUIRE_<CAP>=1 so a gate box can demand a
-# capability rather than silently losing its coverage. isolation.sh has had this
-# exact shape for one capability since it was written (PGC_REQUIRE_ISOLATION,
-# which CI sets); this generalises that convention instead of inventing a second.
+# This FAILS, and that is the point. A skip is a red that nobody has to look at,
+# which is how fifteen suites came to report PASSED while asserting nothing, and
+# how temporal.sh has been green on PG18 without btree_gist. A box that cannot run
+# a suite is not a box that passed it.
 #
-# Ends the suite, because there is nothing after the guard to run.
+# The opt-out is explicit and per-capability, so a developer without pyarrow can
+# still work, and so the waiver is visible in the command rather than implied by
+# silence:
+#
+#     PGC_ALLOW_MISSING_PYARROW=1 test/native_parquet_units.sh
+#     PGC_ALLOW_MISSING=1         test/run_all_versions.sh
+#
+# Missing DEPENDENCY and not-applicable-to-this-MAJOR are different things and are
+# deliberately not the same code path. PostgreSQL 15 has no WITHOUT OVERLAPS to
+# test and no amount of installing will give it one, so those gates call
+# pgc_summary directly and report SKIPPED. Nothing is broken there. Here it is.
 pgc_skip() {  # pgc_skip <capability> <message>
-	local cap req val
+	local cap allow_one
 	cap="$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
-	req="PGC_REQUIRE_$cap"
-	val="${!req:-0}"
-	if [ "$val" = 1 ]; then
-		PGC_CHECKS=$((PGC_CHECKS + 1))
-		PGC_FAIL=1
-		echo "FAIL  $2 (and $req=1 demands it)"
-	else
-		echo "SKIP  $2"
+	allow_one="PGC_ALLOW_MISSING_$cap"
+	if [ "${PGC_ALLOW_MISSING:-0}" = 1 ] || [ "${!allow_one:-0}" = 1 ]; then
+		echo "SKIP  $2 (waived by $allow_one or PGC_ALLOW_MISSING)"
+		pgc_summary
 	fi
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1
+	echo "FAIL  $2"
+	echo "      A missing dependency is an environment defect, not a pass. Install"
+	echo "      it, or set $allow_one=1 to run knowingly without this coverage."
 	pgc_summary
 }
 
