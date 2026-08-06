@@ -334,6 +334,12 @@ is_timing_suite() {
 runs_alone() {
 	case "$1" in
 		replication) return 0 ;;
+		# objstore_module moves the INSTALLED module aside to test the
+		# not-installed and broken paths. That file is shared by every suite in
+		# the run, so doing it while others execute would break them, and the
+		# breakage would look like a defect in whichever suite happened to load
+		# the extension at the wrong moment.
+		objstore_module) return 0 ;;
 		*) is_timing_suite "$1" ;;
 	esac
 }

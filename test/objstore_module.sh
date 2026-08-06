@@ -48,6 +48,22 @@ check "a local path still works" "$(q 'SELECT count(*) FROM lp')" "3"
 check "a relative path is not mistaken for a URL" \
 	"$(psql_run "SELECT * FROM pgcolumnar.read_parquet('/nonexistent/x.parquet') AS (a int)" 2>&1 |
 	   grep -c 'No such file or directory\|could not open')" "1"
+MOD="$LIBDIR/pgcolumnar_objstore.so"
+# The arms below MOVE the installed module. That needs write permission on its
+# directory, which the suite has when it runs as the installing user and may not
+# otherwise. Skip visibly rather than fail: a suite that cannot perform its
+# manipulation has not found a defect, and a red gate here would be about the
+# environment.
+#
+# This suite also runs ALONE in the matrix, because the file it moves is shared with
+# every other suite in the run.
+if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
+	echo "SKIP  cannot move $MOD, so the absent and broken paths are untested here"
+	pgc_summary
+	exit 0
+fi
+mv "$MOD.probe" "$MOD" 2>/dev/null
+
 # ---- the module ABSENT, which is a supported configuration --------------------
 #
 # Two things this asserts, both of which were wrong before:
@@ -69,17 +85,16 @@ two_reads() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
 		-At -q -c "$Q" -c "$Q" 2>&1
 }
-MOD="$LIBDIR/pgcolumnar_objstore.so"
 
 both=$(two_reads)
 check "with the module present, both reads report the same thing" \
 	"$(grep -c 'is not implemented yet\|is not supported' <<<"$both")" "2"
 
-pgc_pg "mv '$MOD' '$MOD.away'" >/dev/null 2>&1
+mv "$MOD" "$MOD.away" 2>/dev/null
 absent=$(two_reads)
-pgc_pg "mv '$MOD.away' '$MOD'" >/dev/null 2>&1
+mv "$MOD.away" "$MOD" 2>/dev/null
 check "premise: the module really was absent for that run" \
-	"$(pgc_pg "test -f '$MOD' && echo restored || echo MISSING")" "restored"
+	"$([ -f "$MOD" ] && echo restored || echo MISSING)" "restored"
 check "with the module absent, neither read leaks the loader's own error" \
 	"$(grep -c 'could not access file' <<<"$absent")" "0"
 check "and both reads report the SAME unsupported error" \
@@ -99,13 +114,13 @@ check "and both reads report the SAME unsupported error" \
 #     errcode_for_file_access() for both the stat failure and the dlopen failure, so
 #     missing and "file too short" both arrive as 58P01. Measured. The check is on file
 #     presence for that reason.
-pgc_pg "mv '$MOD' '$MOD.away' && printf 'not a shared object' > '$MOD'" >/dev/null 2>&1
+mv "$MOD" "$MOD.away" 2>/dev/null && printf 'not a shared object' > "$MOD" 2>/dev/null
 check "premise: the module really is corrupt for this run, not merely intended to be" \
-	"$(pgc_pg "stat -c %s '$MOD'" | tail -1)" "19"
+	"$(stat -c %s "$MOD" 2>/dev/null)" "19"
 broken=$(two_reads)
-pgc_pg "rm -f '$MOD' && mv '$MOD.away' '$MOD'" >/dev/null 2>&1
+rm -f "$MOD" 2>/dev/null; mv "$MOD.away" "$MOD" 2>/dev/null
 check "premise: the real module was restored afterwards" \
-	"$([ "$(pgc_pg "stat -c %s '$MOD'" | tail -1)" -gt 1000 ] && echo yes || echo no)" "yes"
+	"$([ "$(stat -c %s "$MOD" 2>/dev/null || echo 0)" -gt 1000 ] && echo yes || echo no)" "yes"
 check "a broken module does NOT masquerade as an unsupported scheme" \
 	"$(grep -c 'is not supported' <<<"$broken")" "0"
 check "and the loader's own reason survives" \
