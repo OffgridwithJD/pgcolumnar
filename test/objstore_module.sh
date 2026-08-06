@@ -18,45 +18,98 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
+# nm reads the symbol tables the separation checks rest on; stat sizes the
+# stand-in module. Without this, a missing nm makes "the symbol is absent from
+# the main library" true for the wrong reason, which is the whole failure this
+# suite exists to catch, turned on itself.
+pgc_require_tools nm stat || { pgc_summary; exit 1; }
+
 LIBDIR="$("$PGC_PG_CONFIG" --pkglibdir 2>/dev/null || echo "")"
-[ -n "$LIBDIR" ] || LIBDIR="$(pgc_pg "pg_config --pkglibdir" | tr -d '\r')"
+[ -n "$LIBDIR" ] || LIBDIR="$(pgc_pg "pg_config --pkglibdir" | tail -1 | tr -d '\r')"
+MOD="$LIBDIR/pgcolumnar_objstore.so"
 
 check "the main library is installed" \
-	"$(pgc_pg "test -f '$LIBDIR/pgcolumnar.so' && echo yes || echo no")" "yes"
+	"$(pgc_pg "test -f '$LIBDIR/pgcolumnar.so' && echo yes || echo no" | tail -1)" "yes"
 check "the object-store module is installed BESIDE it, not inside it" \
-	"$(pgc_pg "test -f '$LIBDIR/pgcolumnar_objstore.so' && echo yes || echo no")" "yes"
+	"$(pgc_pg "test -f '$MOD' && echo yes || echo no" | tail -1)" "yes"
 
-# The property the design rests on. If someone adds the module's objects to the main
-# OBJS list, this is what notices.
-check "the module is a separate file, so nothing it links reaches the postmaster" \
-	"$(pgc_pg "readelf -d '$LIBDIR/pgcolumnar.so' | grep -c pgcolumnar_objstore" | tail -1)" "0"
-check "and the module exports its single entry point" \
-	"$(pgc_pg "nm -D --defined-only '$LIBDIR/pgcolumnar_objstore.so' | grep -c ' T pgcolumnar_objstore_init'")" "1"
+# ---- the separation the design rests on ---------------------------------------
+#
+# The question is whether the module's code is INSIDE the preloaded library. The
+# obvious check does not answer it: `readelf -d pgcolumnar.so | grep -c objstore`
+# counts DT_NEEDED entries, and the failure mode we care about -- someone adds
+# the module's objects to the main OBJS list -- links them STATICALLY and emits no
+# DT_NEEDED entry at all. That check reads 0 whether or not the mistake was made.
+# It also reads 0 when readelf is absent, or when the .so is not there.
+#
+# Ask about the symbol instead, as a PAIR. The entry point must be absent from
+# the main library and present in the module. A broken or missing instrument
+# fails the positive half, so the pair cannot go quiet the way a lone count of
+# zero can.
+check_num "the module's entry point is NOT inside the preloaded library" \
+	"$(pgc_pg "nm -D --defined-only '$LIBDIR/pgcolumnar.so' | grep -c pgcolumnar_objstore_init" | tail -1)" "0"
+check_num "positive control: it IS defined in the module, so nm really looked" \
+	"$(pgc_pg "nm -D --defined-only '$MOD' | grep -c ' T pgcolumnar_objstore_init'" | tail -1)" "1"
 
 # A remote path must report a remote error, from the reader, without a connection.
 for url in "s3://bucket/key.parquet" "gs://bucket/key.parquet" "https://host/key.parquet"; do
 	out=$(psql_run "SELECT * FROM pgcolumnar.read_parquet('$url') AS (a int)" 2>&1)
 	check "a $(cut -d: -f1 <<<"$url") URL reports an object-storage error, not a missing file" \
-		"$([ "$(grep -c 'object storage is not implemented\|is not supported' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
-	check "and does NOT report it as a missing file" \
+		"$([ "$(grep -c 'object storage is not implemented\|is not supported\|requires the object-store module' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
+	check_num "and does NOT report it as a missing file" \
 		"$(grep -c 'No such file or directory' <<<"$out")" "0"
+done
+
+# ---- a remote path must not be expanded against the local filesystem ----------
+#
+# pq_resolve_paths runs AHEAD of the byte source at every entry point, so before
+# #393's fix an s3:// key containing a glob metacharacter went to glob() against
+# the LOCAL filesystem and came back "no files match pattern". That is exactly the
+# filesystem-miss-for-a-remote-path report the byte source exists to remove,
+# arriving one layer above it. `*`, `?` and `[` are all legal in an S3 key, so
+# this is an ordinary key and not a crafted one.
+for pat in "s3://bucket/a*.parquet" "s3://bucket/a?.parquet" "s3://bucket/a[0-9].parquet"; do
+	out=$(psql_run "SELECT * FROM pgcolumnar.read_parquet('$pat') AS (a int)" 2>&1)
+	check "a glob character in an object key is refused as a pattern, not expanded" \
+		"$([ "$(grep -c 'cannot expand a pattern in the object-storage path' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
+	check_num "and it is NOT reported as a local filesystem miss" \
+		"$(grep -c 'no files match pattern\|matched no regular files' <<<"$out")" "0"
 done
 
 # A local path must be entirely unaffected, which is the regression this could cause.
 psql_run "CREATE TABLE lp (a int) USING pgcolumnar; INSERT INTO lp VALUES (1),(2),(3);" >/dev/null 2>&1
-check "a local path still works" "$(q 'SELECT count(*) FROM lp')" "3"
-check "a relative path is not mistaken for a URL" \
-	"$(psql_run "SELECT * FROM pgcolumnar.read_parquet('/nonexistent/x.parquet') AS (a int)" 2>&1 |
+check_num "a local path still works" "$(q 'SELECT count(*) FROM lp')" "3"
+# A RELATIVE path, which is what the label says. The previous version of this
+# passed an absolute one, so the case it named was never exercised.
+check_num "a relative path is not mistaken for a URL" \
+	"$(psql_run "SELECT * FROM pgcolumnar.read_parquet('nonexistent-dir/x.parquet') AS (a int)" 2>&1 |
 	   grep -c 'No such file or directory\|could not open')" "1"
-MOD="$LIBDIR/pgcolumnar_objstore.so"
-# The arms below MOVE the installed module. That needs write permission on its
-# directory, which the suite has when it runs as the installing user and may not
-# otherwise. Skip visibly rather than fail: a suite that cannot perform its
-# manipulation has not found a defect, and a red gate here would be about the
-# environment.
+
+# ---- everything below MOVES the installed module ------------------------------
+#
+# That needs write permission on its directory, which the suite has when it runs as
+# the installing user and may not otherwise. Skip visibly rather than fail: a suite
+# that cannot perform its manipulation has not found a defect, and a red gate here
+# would be about the environment.
 #
 # This suite also runs ALONE in the matrix, because the file it moves is shared with
 # every other suite in the run.
+#
+# Refuse to start on a leftover .away. An interrupt between the move and the restore
+# leaves this run's STAND-IN installed as the module and the real one parked at
+# .away; a second run would then move the stand-in to .away, overwriting the only
+# real copy with 19 bytes of garbage. That destroys the installation, and running
+# alone does not prevent it because the two runs are sequential.
+if [ -e "$MOD.away" ]; then
+	echo "FAIL  $MOD.away exists, so an earlier run was interrupted mid-move."
+	echo "      Restore it by hand:  mv '$MOD.away' '$MOD'"
+	echo "      Continuing would overwrite the real module with this run's stand-in."
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1
+	pgc_summary
+	exit 1
+fi
+
 if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
 	echo "SKIP  cannot move $MOD, so the absent and broken paths are untested here"
 	pgc_summary
@@ -64,11 +117,31 @@ if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
 fi
 mv "$MOD.probe" "$MOD" 2>/dev/null
 
-# ---- the module ABSENT, which is a supported configuration --------------------
+# The module is moved aside twice below. Put it back on ANY exit, including the
+# interrupt that leaves the state the guard above refuses to start on.
+restore_module() {
+	[ -e "$MOD.away" ] || return 0
+	rm -f "$MOD"
+	mv "$MOD.away" "$MOD"
+}
+trap restore_module EXIT INT TERM
+
+# ---- present, absent, and broken must be three DIFFERENT reports ---------------
 #
-# Two things this asserts, both of which were wrong before:
+# Three states, three messages, and the checks below are written so that each one
+# fails if the state it names is not the state that occurred.
 #
-#  1 a missing module must report the remote path as unsupported, not
+# The earlier version could not do that. A module that handles no scheme yet and a
+# module that is not installed at all both produced "is not supported", so the
+# absent arm passed whether or not the mv succeeded: deleting both mv lines left
+# every check green. That is why the loader now names the missing module
+# separately -- it is a real distinction for the operator ("install a package"
+# against "this build will never read that URL"), and it is what makes this arm
+# able to fail.
+#
+# What is still asserted here from before:
+#
+#  1 a missing module must report the remote path against the missing module, not
 #    'could not access file "pgcolumnar_objstore"'. signalNotFound = false
 #    suppresses a missing SYMBOL; a missing LIBRARY is raised earlier by
 #    internal_load_library and needs a PG_TRY.
@@ -87,18 +160,30 @@ two_reads() {
 }
 
 both=$(two_reads)
-check "with the module present, both reads report the same thing" \
-	"$(grep -c 'is not implemented yet\|is not supported' <<<"$both")" "2"
+check_num "with the module present, both reads report an unhandled scheme" \
+	"$(grep -c 'is not supported' <<<"$both")" "2"
+check_num "and neither claims the module is missing" \
+	"$(grep -c 'requires the object-store module' <<<"$both")" "0"
 
+# ---- the module ABSENT, which is a supported configuration --------------------
 mv "$MOD" "$MOD.away" 2>/dev/null
+# Recorded DURING the run, not after the restore. The previous premise ran after
+# the module was back and asserted it was present, so it could only fail if the
+# RESTORE failed -- it said nothing about the state the reads actually saw.
+absent_state=$([ -e "$MOD" ] && echo present || echo absent)
 absent=$(two_reads)
 mv "$MOD.away" "$MOD" 2>/dev/null
-check "premise: the module really was absent for that run" \
-	"$([ -f "$MOD" ] && echo restored || echo MISSING)" "restored"
-check "with the module absent, neither read leaks the loader's own error" \
+
+check "premise: the module really was absent while those two reads ran" \
+	"$absent_state" "absent"
+check "premise: and the real module is back afterwards" \
+	"$([ -e "$MOD" ] && echo yes || echo no)" "yes"
+check_num "with the module absent, neither read leaks the loader's own error" \
 	"$(grep -c 'could not access file' <<<"$absent")" "0"
-check "and both reads report the SAME unsupported error" \
-	"$(grep -c 'is not supported' <<<"$absent")" "2"
+check_num "both reads name the missing module, identically" \
+	"$(grep -c 'requires the object-store module' <<<"$absent")" "2"
+check_num "and neither downgrades it to an unhandled scheme" \
+	"$(grep -c 'is not supported' <<<"$absent")" "0"
 
 # ---- installed but BROKEN is not the same as not installed --------------------
 #
@@ -115,14 +200,16 @@ check "and both reads report the SAME unsupported error" \
 #     missing and "file too short" both arrive as 58P01. Measured. The check is on file
 #     presence for that reason.
 mv "$MOD" "$MOD.away" 2>/dev/null && printf 'not a shared object' > "$MOD" 2>/dev/null
-check "premise: the module really is corrupt for this run, not merely intended to be" \
+check_num "premise: the module really is corrupt for this run, not merely intended to be" \
 	"$(stat -c %s "$MOD" 2>/dev/null)" "19"
 broken=$(two_reads)
 rm -f "$MOD" 2>/dev/null; mv "$MOD.away" "$MOD" 2>/dev/null
 check "premise: the real module was restored afterwards" \
 	"$([ "$(stat -c %s "$MOD" 2>/dev/null || echo 0)" -gt 1000 ] && echo yes || echo no)" "yes"
-check "a broken module does NOT masquerade as an unsupported scheme" \
+check_num "a broken module does NOT masquerade as an unhandled scheme" \
 	"$(grep -c 'is not supported' <<<"$broken")" "0"
+check_num "nor as a module that was never installed" \
+	"$(grep -c 'requires the object-store module' <<<"$broken")" "0"
 check "and the loader's own reason survives" \
 	"$([ "$(grep -ci 'could not load library' <<<"$broken")" -ge 1 ] && echo yes || echo no)" "yes"
 
