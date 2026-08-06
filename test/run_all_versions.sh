@@ -339,7 +339,14 @@ is_timing_suite() {
 # does not execute the timed queries at all.
 runs_alone() {
 	case "$1" in
-		replication|planner_choice_quality) return 0 ;;
+		replication) return 0 ;;
+		# planner_choice_quality is serial only when it is going to MEASURE. Its
+		# subject is a wall-clock ratio, which cannot be taken beside five other
+		# suites -- but under PGC_SKIP_TIMING it asserts plan shapes only, and
+		# holding the serial phase for that costs the matrix a slot to protect a
+		# measurement nobody is taking. Unconditional serialisation here was a
+		# reviewer's finding, not a design choice.
+		planner_choice_quality) [ "${PGC_SKIP_TIMING:-0}" != 1 ] ;;
 		*) is_timing_suite "$1" ;;
 	esac
 }

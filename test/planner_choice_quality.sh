@@ -32,12 +32,18 @@
 #
 # PGC_SKIP_TIMING
 #
-# The ratios go through check_timing, so a shared runner skips them and still
-# runs the premises. The first version of this file only SAID that in this
-# comment and used check_ratio throughout, so the flag did nothing and the suite
-# went red on every pull request until #434 is fixed. Under the flag the timed
-# queries are also not executed at all: running them to discard the result would
-# cost the matrix minutes per major to measure something no check reads.
+# The ratio goes through check_ratio_timing, which lives in lib.sh and owns the
+# decision. This file does NOT branch on the flag to decide whether to assert.
+#
+# Two earlier versions got this wrong in the same way. The first only SAID the
+# flag was wired and used check_ratio throughout, so it did nothing. The second
+# branched on the flag here and called check_timing with two empty strings, which
+# is the "" vs "" compare lib.sh forbids, and which would have PASSED the suite's
+# central assertion had the two copies of the condition ever disagreed.
+#
+# Whether to MEASURE is still this file's business, because that is a cost
+# decision rather than an assertion: PGC_MEASURING below gates both the fixture
+# size and the execution of the timed queries.
 #
 # Usage:  test/planner_choice_quality.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -46,12 +52,22 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 PLAN_BOUND=${PGC_PLAN_BOUND:-3}
-ROWS=${PGC_PLANQ_ROWS:-200000}
+# The only read of PGC_SKIP_TIMING in this file, and it governs COST alone: how
+# big a fixture to build, and whether to execute the timed queries. Whether to
+# assert a ratio is check_ratio_timing's decision, in lib.sh.
+PGC_MEASURING=1
+[ "${PGC_SKIP_TIMING:-0}" = 1 ] && PGC_MEASURING=0
+ROWS=${PGC_PLAN_ROWS:-200000}
+# 200,000 wide rows is 12.8M md5() calls and ~205 MB, and none of it is needed to
+# read an EXPLAIN. When only the plan shapes are asserted, build a fixture sized
+# for that. Shortening the statement timeout did not address this cost; the
+# review asked about the suite's cost per major and this is where it lives.
+[ "$PGC_MEASURING" = 1 ] || ROWS=${PGC_PLAN_ROWS:-20000}
 # The finding is "23x slower", not "slower than two minutes". A long timeout only
 # buys a longer wait before the same verdict, on every major, for as long as the
 # bug exists.
 PLAN_TIMEOUT=${PGC_PLAN_TIMEOUT:-20}
-SKIP_TIMING=${PGC_SKIP_TIMING:-0}
+
 
 # The shape #433 and #434 are about: wide incompressible rows, an index on a
 # correlated key. The payload must not compress, or the row group stays under the
@@ -82,7 +98,7 @@ run_plan() {  # run_plan <settings> <sql> -> "<node> <ms>"
 		grep -oE 'Index Only Scan|Index Scan|Bitmap Heap Scan|Custom Scan \([A-Za-z]+\)|Seq Scan' | head -1)
 	# No execution under PGC_SKIP_TIMING. The plan name above comes from EXPLAIN,
 	# so every premise still holds; only the wall clock is unavailable.
-	if [ "$SKIP_TIMING" = 1 ]; then
+	if [ "$PGC_MEASURING" = 0 ]; then
 		printf '%s\t\n' "${node:-unknown}"
 		return
 	fi
@@ -102,7 +118,7 @@ run_plan() {  # run_plan <settings> <sql> -> "<node> <ms>"
 # The planner's choice against the best alternative it declined.
 choice_vs_best() {  # choice_vs_best <label> <sql>
 	local label="$1" sql="$2"
-	local chosen alt1 alt2 cnode cms best bnode
+	local cnode cms best bnode n1 m1 n2 m2 i cand_n cand_m
 
 	IFS=$'\t' read -r cnode cms <<<"$(run_plan "" "$sql")"
 	IFS=$'\t' read -r n1 m1 <<<"$(run_plan "SET enable_indexscan=off; SET enable_bitmapscan=off;" "$sql")"
@@ -122,12 +138,14 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 	check "premise: [$label] forcing produced a different plan" \
 		"$([ "$n1" != "$cnode" ] || [ "$n2" != "$cnode" ] && echo yes || echo "no (all $cnode)")" "yes"
 
-	# Everything below this line has a wall clock in it, including the timeout
-	# check: "did not finish in N seconds" is a statement about the runner as much
-	# as about the plan. check_timing announces the skip and does not count it as a
-	# pass, which is the contract the rest of the suite already follows.
-	if [ "$SKIP_TIMING" = 1 ]; then
-		check_timing "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative" "" ""
+	# Everything below this line has a wall clock in it. An absent timing is the
+	# signal, not a second reading of the flag: when nothing was executed there is
+	# no ratio to judge, and check_ratio_timing decides whether that is a skip or a
+	# failure. If the flag is set it announces a skip; if it is not, check_ratio
+	# rejects the empty side loudly. Either way this suite never asserts "" == "".
+	if [ -z "$cms" ]; then
+		check_ratio_timing "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative" \
+			"$cms" "" "$PLAN_BOUND"
 		return
 	fi
 
@@ -146,10 +164,10 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 	[ -n "$best" ] || return
 
 	if [ "$cms" = TIMEOUT ]; then
-		check "[$label] the chosen plan finished at all" "TIMEOUT after ${PLAN_TIMEOUT}s" "under the bound"
+		check "[$label] the chosen plan finished within ${PLAN_TIMEOUT}s" "no" "yes"
 		return
 	fi
-	check_ratio "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative ($bnode)" \
+	check_ratio_timing "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative ($bnode)" \
 		"$cms" "$best" "$PLAN_BOUND"
 }
 
