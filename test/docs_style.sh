@@ -79,6 +79,16 @@ check "the roadmap is in the documentation nav" "$([ "$nav_roadmap" -ge 1 ] && e
 check "and the page that nav entry points at exists" \
 	"$([ -f "$SRCDIR/docs/roadmap.md" ] && echo yes || echo no)" "yes"
 
+# Merge conflict markers. These reached main and were published: three of them sat
+# in docs/limitations.md under "Vacuum and compaction", and every other check in
+# this file passed with them there, because they are valid Markdown text.
+#
+# The STE checker reads prose and the nav check reads mkdocs.yml. Neither asks
+# whether the page is a coherent document. This does.
+conflicts=$(grep -rlE '^(<<<<<<< |>>>>>>> )' "$SRCDIR/docs" "$SRCDIR"/*.md 2>/dev/null | tr '\n' ' ')
+check "no document carries a merge conflict marker" \
+	"$([ -z "$conflicts" ] && echo none || echo "$conflicts")" "none"
+
 # CHANGELOG.md: dash characters only. See the scope note above.
 dashes=$(grep -c '—\|–' "$SRCDIR/CHANGELOG.md" || true)
 check "CHANGELOG.md carries no em or en dash" "$dashes" "0"

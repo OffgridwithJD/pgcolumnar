@@ -268,7 +268,6 @@ returning no rows.
 
 ## Vacuum and compaction
 
-<<<<<<< HEAD
 - `autovacuum_parallel_workers`, the per-table storage parameter PostgreSQL 19 adds
   for parallel autovacuum, is accepted on a columnar table and has no effect.
   pgColumnar implements its own vacuum, which marks the visibility map and retires
@@ -276,14 +275,10 @@ returning no rows.
   refused: storage-parameter validation belongs to PostgreSQL and is driven by the
   relation kind rather than by the access method. Setting it is harmless and
   pointless.
-- `VACUUM FULL` and `CLUSTER` are not supported on a columnar table; the
-  copy-for-cluster path raises an error. Use `pgcolumnar.vacuum` or
-=======
 - `REPACK`, `VACUUM FULL` and `CLUSTER` are not supported on a columnar table; the
   copy-for-cluster path raises an error. `REPACK` arrives in PostgreSQL 19 and
   replaces the other two, and it dispatches through the same path, so it is
   refused for the same reason. Use `pgcolumnar.vacuum` or
->>>>>>> origin/main
   `pgcolumnar.vacuum_full` instead.
 - `pgcolumnar.vacuum` always rewrites the whole relation into full row groups. It
   accepts a `stripe_count` argument for compatibility with the interface, but it
