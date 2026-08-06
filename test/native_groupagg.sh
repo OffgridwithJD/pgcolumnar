@@ -412,6 +412,15 @@ check "an informed estimate (plain column) is not replaced" \
 # produced; asserting it is LARGE is the point, since a bound would have shrunk it.
 check "a truncating key with no range bound gets no bound from us" \
 	"$([ "$(gbest "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
+# A user function with date_trunc's SHAPE must not get date_trunc's BOUND. PL/pgSQL
+# because an SQL function would be inlined and lose the shape. Matching on shape alone
+# estimated this at 722 against 499,999 actual, a 692x UNDER-estimate, which is the
+# direction that under-prices the arm and under-sizes the Finalize's hash table.
+psql_run "CREATE FUNCTION gb_hi_card(t text, s timestamptz) RETURNS text AS
+	\$\$ BEGIN RETURN t || md5(s::text); END \$\$ LANGUAGE plpgsql IMMUTABLE;" >/dev/null 2>&1
+check "a lookalike function with the same signature gets NO bound" \
+	"$([ "$(gbest "SELECT gb_hi_card('minute', ts) b, avg(v) FROM gb $W GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
+
 check "a non-time expression key gets no bound either" \
 	"$([ "$(gbest "SELECT upper(host) b, avg(v) FROM gb GROUP BY b")" -gt 100 ] && echo yes || echo no)" "yes"
 

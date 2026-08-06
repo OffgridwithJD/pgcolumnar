@@ -1322,7 +1322,31 @@ pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 	if (!IsA(expr, FuncExpr))
 		return 0.0;
 	f = (FuncExpr *) expr;
-	/* date_trunc(text, timestamp[tz]) and its 3-arg timezone form */
+
+	/*
+	 * Match the FUNCTION, not its shape.
+	 *
+	 * Matching on shape alone -- a FuncExpr of two or three args with a text
+	 * Const and a timestamp Var -- accepts any user function declared
+	 * (text, timestamp), and then applies a truncation bound to something that
+	 * does not truncate. Measured: a deliberately high-cardinality
+	 * hi_card(text, timestamp) over 500k rows was estimated at 722 against
+	 * 499,999 actual, a 692x UNDER-estimate, where core had it very nearly right
+	 * at 499,900 before the substitution replaced it.
+	 *
+	 * Under-estimating is the direction that does damage. It under-prices the arm
+	 * and under-sizes the Finalize's hash table into avoidable spill, which is
+	 * the opposite of what this change exists to do.
+	 *
+	 * These oids are identical on 15 through 19. The interval form is excluded
+	 * deliberately: its argument is a duration rather than a point in time, so a
+	 * range on it does not describe a scanned window.
+	 */
+	if (f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMP &&
+		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ &&
+		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ_TEXT)
+		return 0.0;
+
 	if (list_length(f->args) < 2 || list_length(f->args) > 3)
 		return 0.0;
 	if (!IsA(linitial(f->args), Const))
