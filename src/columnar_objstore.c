@@ -123,9 +123,25 @@ PgColumnarObjStoreGet(void)
 	}
 	PG_END_TRY();
 
-	objstore_tried = true;
+	/*
+	 * The flag is set on each return path below, never once up here, and nothing
+	 * that can raise sits between an assignment and its return.
+	 *
+	 * This is the same trap as the one above, one step later. init() is a call
+	 * into a separately built library: it can raise, and if the flag were already
+	 * set the unwind would leave the verdict cached as "tried, nothing found", so
+	 * the first remote read of a session would report init()'s error and every
+	 * later one would report "requires the object-store module" — the same two
+	 * identical queries, two different errors, the plausible one second. It is
+	 * latent while init() only returns a pointer to a static struct. It stops
+	 * being latent the moment the module has anything to set up, which is the
+	 * commit after this one.
+	 */
 	if (init == NULL)
+	{
+		objstore_tried = true;
 		return NULL;
+	}
 
 	api = init();
 
@@ -143,9 +159,11 @@ PgColumnarObjStoreGet(void)
 						   PGCOLUMNAR_OBJSTORE_ABI),
 				 errhint("Reinstall pgcolumnar_objstore from the same build as "
 						 "pgcolumnar.")));
+		objstore_tried = true;
 		return NULL;
 	}
 
 	objstore_api = api;
+	objstore_tried = true;
 	return objstore_api;
 }
