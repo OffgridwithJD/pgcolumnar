@@ -751,15 +751,16 @@ fetched files:
 
 Those are the real digests of upstream `main` as of 2026-08-06, 43 queries.
 
-Cite those beside any number taken from a run. `PGC_CB_OFFLINE=1` runs against
-the copy already on the machine, for a host with no network; it says so in the
-output, because a run against a stale definition is not comparable to one against
-the current definition.
+Cite those beside any number taken from a run.
+
+`PGC_CB_OFFLINE=1` runs against the copy already on the machine, for a host with
+no network. It says so in the output. A run against a stale definition is not
+comparable to one against the current definition.
 
 The table below predates the digest being recorded, so it cannot cite one. The
-run was on 2026-08-05 and upstream carried the digests above a day later, but
-that is an inference and not a measurement; the next run is the first that will
-state it.
+run was on 2026-08-05, and upstream carried the digests above a day later. That
+is an inference and not a measurement. The next run is the first that will state
+it.
 
 The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
