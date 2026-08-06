@@ -25,6 +25,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_collation.h"
+#include "lib/hyperloglog.h"
 #include "utils/syscache.h"
 
 /*
@@ -69,73 +70,58 @@ next_pow2(uint32 x)
 }
 
 /*
- * How many DISTINCT hashes are in the array (#467).
+ * Roughly how many DISTINCT hashes are in the array (#467).
  *
  * A filter used to be sized from the value count, which is the stripe's row
  * count, so every bloomable column of every stripe got the same
  * next_pow2(n * BLOOM_BITS_PER_VALUE) bits whatever its cardinality: a column
- * with five distinct values got the 256 KB filter a unique column got. Measured
- * on 2M ClickBench rows that was 19.3x over-provisioned, 361 MB of filters
- * against a 262 MB table, and 29 percent of load time.
+ * with five distinct values got the same 256 KB filter a unique column got.
  *
  * A bloom filter's membership set IS its distinct set, so sizing from the
- * distinct count is a size and time change and not a semantic one: a filter
- * built over distinct hashes answers every probe exactly as the old one did.
+ * distinct count is a size change and not a semantic one: the filter answers
+ * every probe as the old one did.
  *
- * Open addressing over a power-of-two table at load factor <= 0.5, which is what
- * keeps the probe sequence short; the table is transient and freed before this
- * returns. Hash 0 cannot be stored in a zeroed table because it is
- * indistinguishable from an empty slot, so it is counted separately rather than
- * given a sentinel -- one branch, and no value is excluded from the filter.
+ * ESTIMATED, not counted, and the estimate is core's own hyperLogLog. That is
+ * deliberate on three grounds:
+ *
+ *  - Its state is ~1 KB whatever n is. An exact count needs a table proportional
+ *    to n, and the first version of this had one: it ran BEFORE the
+ *    BLOOM_MAX_BITS refusal below, so it allocated on exactly the large stripes
+ *    that refusal exists to short-circuit. Above 67,108,864 values in a group
+ *    the palloc0 passed MaxAllocSize and the load ERRORed where it had
+ *    succeeded before. Fixed state removes the failure mode rather than
+ *    reordering around it.
+ *  - The result only has to be good enough to pick a power of two. next_pow2
+ *    quantises the answer, so an error of a few percent almost never changes the
+ *    size chosen, and when it does it moves it by one step.
+ *  - It cannot cause a wrong answer. Under-estimating d gives a smaller filter,
+ *    which raises the FALSE POSITIVE rate: a probe says "may be present" and the
+ *    reader decodes a group it could have skipped. False negatives are what would
+ *    break a query, and those are impossible here because every value in the
+ *    chunk still has its k bits set below, whatever nbits came out.
+ *
+ * hyperLogLog wants a well-distributed hash; these are the type's hash opclass
+ * output, which is what it is built for.
  */
 static uint32
-bloom_distinct_count(const uint32 *hashes, uint32 n)
+bloom_distinct_estimate(const uint32 *hashes, uint32 n)
 {
-	uint32	   *tab;
-	uint32		cap;
-	uint32		mask;
-	uint32		distinct = 0;
-	bool		sawZero = false;
+	hyperLogLogState hll;
+	double		est;
 	uint32		i;
 
-	/* Two slots per value, rounded up, so the table stays half empty. */
-	cap = 1;
-	while ((uint64) cap < (uint64) n * 2 && cap < (1u << 30))
-		cap <<= 1;
-	mask = cap - 1;
-	tab = (uint32 *) palloc0((Size) cap * sizeof(uint32));
-
+	/* 1.6% standard error, ~1 KB of state; far inside a power of two. */
+	initHyperLogLogError(&hll, 0.016);
 	for (i = 0; i < n; i++)
-	{
-		uint32		h = hashes[i];
-		uint32		slot;
+		addHyperLogLog(&hll, hashes[i]);
+	est = estimateHyperLogLog(&hll);
+	freeHyperLogLog(&hll);
 
-		if (h == 0)
-		{
-			if (!sawZero)
-			{
-				sawZero = true;
-				distinct++;
-			}
-			continue;
-		}
-
-		slot = h & mask;
-		while (tab[slot] != 0)
-		{
-			if (tab[slot] == h)
-				break;
-			slot = (slot + 1) & mask;
-		}
-		if (tab[slot] == 0)
-		{
-			tab[slot] = h;
-			distinct++;
-		}
-	}
-
-	pfree(tab);
-	return distinct;
+	if (est < 1.0)
+		est = 1.0;
+	if (est > (double) n)
+		est = (double) n;		/* never more distinct than there are values */
+	return (uint32) est;
 }
 
 /* two derived hashes for double hashing; h2 forced odd for full coverage */
@@ -168,18 +154,18 @@ PgColumnarBloomBuild(const uint32 *hashes, uint32 n, char **out, uint32 *outLen)
 
 	/*
 	 * Sizing is from the DISTINCT count, not the value count (#467). See
-	 * bloom_distinct_count above for why that is equivalent rather than a
-	 * trade-off.
+	 * bloom_distinct_estimate above for why that is equivalent rather than a
+	 * trade-off, and why it is estimated.
 	 *
 	 * The `n < 64` guard above deliberately stays on the VALUE count. It means
 	 * "this chunk is too small to be worth a filter at all", which is a statement
 	 * about the chunk and not about its cardinality. Moving it to the distinct
-	 * count would drop the filter entirely from every low-cardinality column --
-	 * 68 of 105 on the ClickBench fixture -- and those are exactly the columns
-	 * where an equality probe skips best: if the value is not among the five
-	 * present, the whole group goes. A 64-bit filter costs 8 bytes.
+	 * count would drop the filter entirely from every low-cardinality column, and
+	 * those are exactly where an equality probe skips best: if the probed value is
+	 * not among the few present, the whole group goes. A 64-bit filter costs 8
+	 * bytes.
 	 */
-	d = bloom_distinct_count(hashes, n);
+	d = bloom_distinct_estimate(hashes, n);
 
 	/*
 	 * Refuse to build a filter the cap cannot size properly. Once
