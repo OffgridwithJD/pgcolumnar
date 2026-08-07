@@ -189,9 +189,25 @@ not_a_suite() {
 # Ask the runner, rather than parsing its source. stderr is dropped because a
 # runner carrying the stray-name mistake reports "command not found" on the way
 # past it, which is the diagnosis and not this function's output.
+#
+# Asked ONCE, for the real runner, and cached. The checks below call this inside
+# two loops over every test file, so the first version forked a fresh bash 250-odd
+# times. Under a six-way matrix that is slow and, worse, fragile: a transient
+# failure to fork returns an empty list, and an empty list reads as "that suite is
+# unregistered". It did exactly that in the #473 matrix, failing on PG16 and PG17
+# with four names each, different names each time, while PG15/18/19 passed. An
+# intermittent red naming innocent suites is the worst kind, so the premise below
+# makes an empty answer say what it is.
+_SUITE_LIST="$(bash "$RUNNER" --list-suites 2>/dev/null)"
+check "premise: the runner answered --list-suites, so the two checks below mean something" \
+	"$([ -n "$_SUITE_LIST" ] && echo yes || echo "no (empty)")" "yes"
+
 listed_suites() {
-	local _r="${1:-$RUNNER}"
-	bash "$_r" --list-suites 2>/dev/null
+	if [ $# -gt 0 ]; then
+		bash "$1" --list-suites 2>/dev/null
+	else
+		printf '%s\n' "$_SUITE_LIST"
+	fi
 }
 
 # ---- the list must be read the way the RUNNER reads it ----------------------
