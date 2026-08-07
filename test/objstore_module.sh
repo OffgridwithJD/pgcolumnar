@@ -162,7 +162,15 @@ restore_module() {
 		mv "$stash" "$MOD"
 	done
 }
-trap restore_module EXIT INT TERM
+# Chained, not replacing. pgc_setup installs `trap pgc_teardown EXIT`, and a bare
+# `trap restore_module EXIT` overwrites it: the module came back but the cluster
+# was never stopped and its workdir never removed. Every run of this suite then
+# left a live postmaster holding a port. Measured at 32 orphaned postmasters from
+# one matrix plus one gate, which is enough to exhaust the port band -- and a
+# suite that cannot get a port fails with 8 start attempts, which reads exactly
+# like a real red. replication.sh's sb_teardown already chains this way.
+objstore_teardown() { restore_module; pgc_teardown; }
+trap objstore_teardown EXIT INT TERM
 
 if ! mv "$MOD" "$MOD.probe" 2>/dev/null; then
 	echo "SKIP  cannot move $MOD, so the absent and broken paths are untested here"
