@@ -95,13 +95,13 @@ for e in "${entry_points[@]}"; do
 	# 1. no role -> refused, and the error names the role (reached the gate)
 	reply="$(run_as t_none "$sql")"
 	check "no role is refused by the $role gate: $label" \
-		"$(printf '%s' "$reply" | grep -qi "$role" && echo yes || echo no)" "yes"
+		"$(grep -qi "$role" <<<"$reply" && echo yes || echo no)" "yes"
 
 	# 2. with the role -> past the gate (no role name in the output)
 	rm -rf "$out".parquet "$out".arrow "$outdir" 2>/dev/null || true
 	preply="$(run_as t_priv "$sql")"
 	check "the $role role gets past the gate: $label" \
-		"$(printf '%s' "$preply" | grep -qi "$role" && echo yes || echo no)" "no"
+		"$(grep -qi "$role" <<<"$preply" && echo yes || echo no)" "no"
 done
 
 # coverage: every SQL function that declares a file-path argument must be listed

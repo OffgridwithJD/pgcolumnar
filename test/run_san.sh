@@ -98,7 +98,7 @@ for s in $SUITES; do
 	# suite's own crash checks or a nonzero rc), or the text appears in the output.
 	san="$(printf '%s' "$out" | grep -icE 'runtime error:|AddressSanitizer|UndefinedBehaviorSanitizer|SUMMARY: .*Sanitizer|terminated by signal 6')"
 	if [ "$rc" = 66 ] && [ "$san" = 0 ] && \
-	   printf '%s' "$out" | grep -q 'SKIPPED (ran no checks)'; then
+	   grep -q 'SKIPPED (ran no checks)' <<<"$out"; then
 		# pgc_summary's skipped state: the suite ran no checks.
 		#
 		# This does NOT cover the pyarrow-gated suites, and an earlier version of

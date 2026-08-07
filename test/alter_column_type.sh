@@ -55,7 +55,7 @@ conv() {  # label, column type, value expression, alter clause
 	err="$(psql_run "ALTER TABLE $c ALTER COLUMN v TYPE $4;" 2>&1 || true)"
 	psql_run "ALTER TABLE $h ALTER COLUMN v TYPE $4;" >/dev/null 2>&1
 
-	if echo "$err" | grep -qiE "corrupt encoded chunk|server closed|terminated"; then
+	if grep -qiE "corrupt encoded chunk|server closed|terminated" <<<"$err"; then
 		check "$1" "failed: $(echo "$err" | grep -oiE 'corrupt encoded chunk[^\"]*|server closed' | head -1)" "ok"
 		return
 	fi

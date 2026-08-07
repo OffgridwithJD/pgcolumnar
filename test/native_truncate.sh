@@ -84,7 +84,7 @@ psql_run "SELECT pgcolumnar.compact('n');"
 before_guard="$(size)"
 errout="$(raw "BEGIN; SELECT pgcolumnar.truncate('n'); ROLLBACK;")"
 check "truncate refused inside a transaction block" \
-	"$(printf '%s' "$errout" | grep -qi 'cannot run inside a transaction block' && echo yes || echo no)" "yes"
+	"$(grep -qi 'cannot run inside a transaction block' <<<"$errout" && echo yes || echo no)" "yes"
 check "file unchanged after refused in-txn truncate" "$(size)" "$before_guard"
 check "parity after refused in-txn truncate" "$(hash_n)" "$(hash_h)"
 

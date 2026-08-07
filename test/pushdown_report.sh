@@ -50,7 +50,7 @@ field() { echo "$1" | grep -oE "$2: [0-9]+" | head -1 | grep -oE '[0-9]+$'; }
 # positive grep for the node's marker is a stronger test than an absence test,
 # because a plan that fell back to a seq scan has no Columnar lines to be absent.
 is_scalar_scan() {
-	echo "$1" | grep -q 'Columnar Projected Columns' && echo yes || echo no
+	grep -q 'Columnar Projected Columns' <<<"$1" && echo yes || echo no
 }
 
 on="$(plan on)"
@@ -236,7 +236,7 @@ aggplan() {  # aggplan <guc> <sql>
 	   SET $1 = on;
 	   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $2;"
 }
-has() { echo "$1" | grep -q "$2" && echo yes || echo no; }
+has() { grep -q "$2" <<<"$1" && echo yes || echo no; }
 
 UAGG=pgcolumnar.enable_ungrouped_vector_agg
 u_usable="$(aggplan $UAGG "SELECT count(*), sum(plain) FROM pdr_u WHERE plain > $((ROWS - 10000))")"

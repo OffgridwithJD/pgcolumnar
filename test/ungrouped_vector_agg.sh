@@ -65,18 +65,18 @@ psql_run "DROP TABLE IF EXISTS t;
 P_ON="$(plan on  "SELECT count(*), sum(v), avg(v) FROM t WHERE v > 0")"
 P_OFF="$(plan off "SELECT count(*), sum(v), avg(v) FROM t WHERE v > 0")"
 check "premise: vectorized agg node used when GUC on" \
-	"$(printf '%s' "$P_ON"  | grep -qi 'Columnar Vectorized Aggregates' && echo yes || echo no)" yes
+	"$(grep -qi 'Columnar Vectorized Aggregates' <<<"$P_ON" && echo yes || echo no)" yes
 check "premise: core Agg (no vectorized node) when GUC off" \
-	"$(printf '%s' "$P_OFF" | grep -qi 'Columnar Vectorized Aggregates' && echo yes || echo no)" no
+	"$(grep -qi 'Columnar Vectorized Aggregates' <<<"$P_OFF" && echo yes || echo no)" no
 check "premise: the filter is pushed into the scan (EXPLAIN shows it)" \
-	"$(printf '%s' "$P_ON"  | grep -qi 'Columnar Pushed-Down Filters' && echo yes || echo no)" yes
+	"$(grep -qi 'Columnar Pushed-Down Filters' <<<"$P_ON" && echo yes || echo no)" yes
 # batch fold: an all-eligible shape (float sum/avg/count + numeric filter) folds
 # column-at-a-time; an ineligible aggregate (min/max) falls back to the row path.
 check "premise: eligible shape uses the batch fold" \
-	"$(printf '%s' "$P_ON"  | grep -qi 'Batch Fold: yes' && echo yes || echo no)" yes
+	"$(grep -qi 'Batch Fold: yes' <<<"$P_ON" && echo yes || echo no)" yes
 P_MM="$(plan on "SELECT min(v), max(v) FROM t WHERE k > 5")"
 check "premise: min/max falls back off the batch fold" \
-	"$(printf '%s' "$P_MM" | grep -qi 'Batch Fold: no' && echo yes || echo no)" yes
+	"$(grep -qi 'Batch Fold: no' <<<"$P_MM" && echo yes || echo no)" yes
 
 # ---- filtered aggregates over each type (the q6 shape) -----------------------
 ab "filtered float sum"        "SELECT sum(v)::text            FROM t WHERE k > 500"

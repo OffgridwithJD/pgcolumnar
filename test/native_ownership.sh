@@ -31,7 +31,7 @@ refused() {
 	local out
 	out="$(as_alice "SELECT pgcolumnar.$1;")"
 	check "non-owner refused: ${1%%(*}" \
-		"$(printf '%s' "$out" | grep -qi 'must be owner' && echo yes || echo "no")" "yes"
+		"$(grep -qi 'must be owner' <<<"$out" && echo yes || echo "no")" "yes"
 }
 
 refused "compact('n')"

@@ -528,7 +528,7 @@ ctl_q "CREATE TABLE s_ss (k int) USING pgcolumnar;" >/dev/null
 ctl_q "CREATE UNIQUE INDEX s_ss_uidx ON s_ss (k);" >/dev/null
 ss_err="$(run_pg "$SPSQL -c \"INSERT INTO s_ss SELECT 7 FROM generate_series(1,2);\" 2>&1" )"
 check "7 same-statement duplicate raises unique_violation" \
-	"$(echo "$ss_err" | grep -qF 's_ss_uidx' && echo yes || echo no)" "yes"
+	"$(grep -qF 's_ss_uidx' <<<"$ss_err" && echo yes || echo no)" "yes"
 check "7 same-statement duplicate inserted no rows" \
 	"$(ctl_q "SELECT count(*) FROM s_ss;")" "0"
 

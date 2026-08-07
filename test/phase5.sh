@@ -92,7 +92,7 @@ assert_plan() {
 	local name="$1" sql="$2" want="$3" notwant="${4:-}"
 	local plan
 	plan="$(run_pg "$PSQL -c \"$sql\"")"
-	if echo "$plan" | grep -q "$want" && { [ -z "$notwant" ] || ! echo "$plan" | grep -q "$notwant"; }; then
+	if grep -q "$want" <<<"$plan" && { [ -z "$notwant" ] || ! grep -q "$notwant" <<<"$plan"; }; then
 		echo "PASS  $name"
 	else
 		echo "FAIL  $name: plan was:"

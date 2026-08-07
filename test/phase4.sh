@@ -94,7 +94,7 @@ assert_plan() {
 	# be costed below the index scan; turning it off makes the planner pick the
 	# index scan so the plan shape can be asserted.
 	plan="$(run_pg "$PSQL -c \"SET enable_seqscan=off; SET pgcolumnar.enable_custom_scan=off; EXPLAIN (COSTS OFF) $sql\"")"
-	if echo "$plan" | grep -q "$want" && ! echo "$plan" | grep -q "$notwant"; then
+	if grep -q "$want" <<<"$plan" && ! grep -q "$notwant" <<<"$plan"; then
 		echo "PASS  $name: $(echo "$plan" | grep -E 'Scan' | head -1 | sed 's/^ *//')"
 	else
 		echo "FAIL  $name: plan was:"
@@ -222,7 +222,7 @@ q "CREATE INDEX ios_a_idx ON ios (a);" >/dev/null
 # With index-only scans disabled, a covering query falls back to an Index Scan.
 # The custom scan is turned off so the planner picks the index scan (see assert_plan).
 iosoff_plan="$(run_pg "$PSQL -c \"SET pgcolumnar.enable_index_only_scan=off; SET enable_seqscan=off; SET pgcolumnar.enable_custom_scan=off; EXPLAIN (COSTS OFF) SELECT a FROM ios WHERE a = 100;\"")"
-if echo "$iosoff_plan" | grep -q "Index Scan" && ! echo "$iosoff_plan" | grep -q "Index Only Scan"; then
+if grep -q "Index Scan" <<<"$iosoff_plan" && ! grep -q "Index Only Scan" <<<"$iosoff_plan"; then
 	echo "PASS  IOS off: plain index scan"
 else
 	echo "FAIL  IOS off: plain index scan: plan was:"; echo "$iosoff_plan" | sed 's/^/        /'; fail=1
@@ -234,7 +234,7 @@ check "covering value"    "$(q 'SET enable_seqscan=off; SELECT a FROM ios WHERE 
 assert_plan_seq() {
 	local plan
 	plan="$(run_pg "$PSQL -c \"SET enable_indexscan=off; SET enable_bitmapscan=off; EXPLAIN (COSTS OFF) SELECT * FROM ios WHERE a = 100;\"")"
-	if echo "$plan" | grep -qE "Seq Scan|Custom Scan \(PgColumnarScan\)"; then
+	if grep -qE "Seq Scan|Custom Scan \(PgColumnarScan\)" <<<"$plan"; then
 		echo "PASS  full-table scan available"
 	else
 		echo "FAIL  full-table scan available: $plan"; fail=1

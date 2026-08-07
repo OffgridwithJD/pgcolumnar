@@ -232,7 +232,7 @@ oc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 		SET enable_hashagg=off; SET enable_sort=off;
 		SET pgcolumnar.groupagg_max_groups=100;
 		SELECT g, count(*) FROM t_col GROUP BY g" 2>&1 || true)"
-n_err="$(printf '%s' "$oc_out" | grep -q 'groupagg_max_groups' && echo yes || echo no)"
+n_err="$(grep -q 'groupagg_max_groups' <<<"$oc_out" && echo yes || echo no)"
 check "over-cap stops with a groupagg_max_groups error" "$n_err" yes
 diff_query "oracle exact: default cap runs the high-cardinality key" \
 	"SELECT g, count(*), sum(i4) FROM %T GROUP BY g"
@@ -323,7 +323,7 @@ ov_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 	-d "$PGC_DB" -Atc "SET pgcolumnar.enable_group_vectorization=on;
 		SELECT k, avg(d) FROM ov_col GROUP BY k" 2>&1 || true)"
 check "avg(float8) overflow errors like core" \
-	"$(printf '%s' "$ov_out" | grep -qi 'out of range' && echo yes || echo no)" yes
+	"$(grep -qi 'out of range' <<<"$ov_out" && echo yes || echo no)" yes
 
 # ---- 8. degenerate inputs --------------------------------------------------
 
