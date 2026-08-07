@@ -61,7 +61,18 @@ pgc_pg "initdb -D '$SUB_DIR' -A trust" >/dev/null 2>&1
   pgc_pg "printf 'port=%s\nlisten_addresses=%s\nwal_level=logical\nmax_locks_per_transaction=256\nshared_preload_libraries=%s\n' \
 	'$SUB_PORT' \"'127.0.0.1'\" \"'pgcolumnar'\" >> '$SUB_DIR/postgresql.conf'"
 pgc_pg "pg_ctl -D '$SUB_DIR' -l '$SUB_LOG' start -w" >/dev/null 2>&1
-sub_cleanup() { pgc_pg "pg_ctl -D '$SUB_DIR' -m immediate stop" >/dev/null 2>&1 || true; }
+# Ends in pgc_teardown, which is not optional. pgc_setup installs
+# `trap pgc_teardown EXIT`, and a second `trap ... EXIT` REPLACES it rather than
+# adding to it, so this used to stop the subscriber and leave the publisher
+# cluster running: measured at one orphaned postmaster per run, from a box with
+# none. Orphans hold ports, the band is finite, and a suite that cannot get one
+# fails after 8 start attempts with "could not create any TCP/IP sockets" -- a red
+# that is indistinguishable from a real one and lands on whichever suite drew that
+# port. replication.sh's sb_teardown has always chained this way (#470).
+sub_cleanup() {
+	pgc_pg "pg_ctl -D '$SUB_DIR' -m immediate stop" >/dev/null 2>&1 || true
+	pgc_teardown
+}
 trap sub_cleanup EXIT
 
 SUB() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$SUB_PORT" -U postgres \
