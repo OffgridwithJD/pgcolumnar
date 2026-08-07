@@ -982,28 +982,47 @@ COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
  * an opt-in accelerator for wide tables and, like pgcolumnar.vacuum(), nothing
  * schedules it: see #415.
  *
- * Collected so far: null_frac exactly from the zone maps (metadata only, no data
- * read), and n_distinct exactly by reading one column. MCVs and histogram bounds
- * still need a sample and are not collected here yet.
+ * Collected so far, all of it exact rather than sampled: null_frac from the zone
+ * maps (metadata only, no data read), n_distinct from reading one column, and
+ * from that same read the most-common values with their frequencies and a
+ * histogram of what remains once those are excluded.
+ *
+ * "Exact" is the whole difference and it is not a refinement of core's numbers.
+ * Core samples 30,000 rows, so a value held by one row in 500,000 is missed
+ * entirely and every range estimate above the sampled maximum collapses; a
+ * frequency is right to about three digits rather than exactly. Reading the
+ * column removes the sampling error rather than reducing it -- which is also why
+ * core's own significance filter for the most-common list does not apply here,
+ * as analyze_mcv_list() says itself at analyze.c:2995.
  */
 CREATE FUNCTION pgcolumnar.analyze(rel regclass, columns text[] DEFAULT NULL)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $$
 DECLARE
-	sid       bigint;
-	att       record;
-	nullfrac  double precision;
-	ndistinct bigint;
-	totalrows bigint;
-	ndstat    double precision;
-	hist      text;
-	-- One fewer than the number of bounds, matching core's default_statistics_target.
-	nbuckets  integer := current_setting('default_statistics_target')::integer;
-	seen      integer := 0;
-	unknown   text;
-	schname   text;
-	relnm     text;
+	sid        bigint;
+	att        record;
+	nullfrac   double precision;
+	ndistinct  bigint;
+	totalrows  bigint;
+	ndstat     double precision;
+	hist       text;
+	mcvvals    text;
+	mcvfreqs   real[];
+	orderable  boolean;
+	nmcv       integer;
+	nremaining bigint;
+	nfrac      integer;
+	-- The per-column target, resolved inside the loop. attstattarget is NULL when
+	-- the column has never been given one, and core reads that as "use the global
+	-- default" (analyze.c:1065 with :1897). A zero means do not collect at all.
+	deftarget  integer := current_setting('default_statistics_target')::integer;
+	nbuckets   integer;
+	seen       integer := 0;
+	disabled   integer := 0;
+	unknown    text;
+	schname    text;
+	relnm      text;
 BEGIN
 	/*
 	 * Writing statistics uses pg_restore_attribute_stats, which core added in
@@ -1059,12 +1078,32 @@ BEGIN
 	END IF;
 
 	FOR att IN
-		SELECT a.attname, a.attnum, a.atttypid
+		SELECT a.attname, a.attnum, a.atttypid, a.attstattarget
 			FROM pg_attribute a
 			WHERE a.attrelid = rel AND a.attnum > 0 AND NOT a.attisdropped
 			  AND (columns IS NULL OR a.attname = ANY (columns))
 			ORDER BY a.attnum
 	LOOP
+		/*
+		 * The per-column statistics target, which is core's rule and not the
+		 * global setting:
+		 *
+		 *     attstattarget = isnull ? -1 : DatumGetInt16(dat);   analyze.c:1065
+		 *     if (attstattarget == 0) return NULL;                        :1070
+		 *     if (stats->attstattarget < 0)                               :1897
+		 *         stats->attstattarget = default_statistics_target;
+		 *
+		 * Zero means the DBA turned this column off, and honouring it is not
+		 * optional: writing statistics for such a column overrides an explicit
+		 * instruction and hands the planner numbers somebody disabled. Reading
+		 * the global default for every column, as this function did, ignored
+		 * ALTER TABLE ... SET STATISTICS entirely.
+		 */
+		IF att.attstattarget = 0 THEN
+			disabled := disabled + 1;
+			CONTINUE;
+		END IF;
+		nbuckets := coalesce(att.attstattarget, deftarget);
 		/*
 		 * null_frac, exactly. value_count counts the values present and
 		 * null_count those absent, so the denominator is their sum rather than
@@ -1122,6 +1161,67 @@ BEGIN
 		END IF;
 
 		/*
+		 * Whether this type can be ordered at all. Hoisted out of the histogram
+		 * test below because the most-common-value list needs the same answer:
+		 * both order by the column, and a type with no btree opclass has no
+		 * histogram in core either.
+		 */
+		orderable := EXISTS (SELECT 1 FROM pg_catalog.pg_type t
+							 JOIN pg_catalog.pg_opclass oc ON oc.opcintype = t.oid
+							 JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+							 WHERE t.oid = att.atttypid AND am.amname = 'btree');
+
+		/*
+		 * most_common_vals and most_common_freqs (#414 slice 3b).
+		 *
+		 * The selection rule is core's, and reading a complete column removes
+		 * most of it. analyze_mcv_list() opens with
+		 *
+		 *     if (samplerows == totalrows || totalrows <= 1.0)
+		 *         return num_mcv;                        -- analyze.c:2995
+		 *
+		 * so the entire significance filter -- a continuity-corrected Wald
+		 * interval over a hypergeometric variance -- is skipped when the whole
+		 * table was read. That machinery exists to judge whether a SAMPLE
+		 * frequency can be trusted; we do not sample, so the question does not
+		 * arise and core's own answer is to keep the list. What remains:
+		 *
+		 *   only values appearing more than once are eligible  analyze.c:2549
+		 *   the top default_statistics_target of those, by count analyze.c:2552
+		 *   frequency = count / TOTAL rows, nulls included     analyze.c:2720
+		 *
+		 * That last one is the one that fails quietly. Dividing by the non-null
+		 * count instead scales every frequency by 1/(1-null_frac): still ordered,
+		 * still summing to less than one, still plausible, and wrong everywhere
+		 * the column has nulls. test/analyze_function.sh pins it with a fixture
+		 * that is one-tenth null, so the two denominators cannot agree.
+		 *
+		 * HAVING count(*) > 1 also reproduces core's unique-column case without a
+		 * branch: when nothing repeats the aggregate is empty, array_agg returns
+		 * NULL, and no MCV list is written -- which is what core does at
+		 * analyze.c:2588 when nmultiple is zero.
+		 *
+		 * array_agg(...)::text rather than string_agg builds the array literal
+		 * through the type's own output function, so quoting, embedded commas and
+		 * braces are correct for text columns instead of being hand-assembled.
+		 */
+		mcvvals := NULL;
+		mcvfreqs := NULL;
+		IF orderable THEN
+			EXECUTE format(
+				'SELECT array_agg(v ORDER BY c DESC, v)::text,
+						array_agg((c::double precision / %s::double precision)::real
+								  ORDER BY c DESC, v)
+				   FROM (SELECT %I AS v, count(*)::bigint AS c
+						   FROM %I.%I WHERE %I IS NOT NULL
+						  GROUP BY 1 HAVING count(*) > 1
+						  ORDER BY count(*) DESC, 1
+						  LIMIT %s) t',
+				totalrows, att.attname, schname, relnm, att.attname, nbuckets)
+				INTO mcvvals, mcvfreqs;
+		END IF;
+
+		/*
 		 * histogram_bounds, whose ends are exact because the read is complete
 		 * (#414 slice 3).
 		 *
@@ -1137,33 +1237,62 @@ BEGIN
 		 * Only for types that can be ordered. A column with no btree ordering
 		 * has no histogram in core either, and ORDER BY would simply fail.
 		 *
-		 * Skipped when the column holds fewer distinct values than buckets: core
-		 * emits no histogram there because the most-common-value list already
-		 * describes the column completely, and writing one anyway would be a
-		 * shape core never produces.
+		 * The most-common values are EXCLUDED, which core does at analyze.c:2744
+		 * and :2768-2799 by collapsing them out of the sorted array before
+		 * building buckets. Keeping them in counts them twice in selectivity:
+		 * eqsel takes the value's frequency from the MCV list, and the range
+		 * estimators count it again inside whichever bucket holds it. Nothing
+		 * raises -- the estimates are simply inflated for the values a skewed
+		 * column repeats most, which is where estimates matter.
 		 *
-		 * NOTE, and it bounds what this slice claims: core EXCLUDES
-		 * most-common-values from the histogram. This function does not write
-		 * most-common-values at all, so there is nothing here to double-count
-		 * and the two are consistent as written. Writing both without that
-		 * exclusion would over-count those values in selectivity, which is why
-		 * most_common_vals is a separate slice and not a line added here.
+		 * The population and the bucket count therefore both shrink, and both
+		 * have to. Core sizes the histogram from what is LEFT:
+		 *
+		 *     num_hist = ndistinct - num_mcv;
+		 *     if (num_hist > num_bins) num_hist = num_bins + 1;
+		 *     if (num_hist >= 2) { ... }              -- analyze.c:2744-2747
+		 *
+		 * so it emits between 2 and num_bins+1 bounds and none at all below two.
+		 * Asking percentile_disc for a fixed default_statistics_target+1
+		 * fractions regardless would repeat values once the remaining population
+		 * is smaller than that -- a 150-distinct column with 100 most-common
+		 * values has 50 left and would get 101 bounds, most of them duplicates.
+		 * A histogram with repeated bounds describes buckets holding no rows,
+		 * which is a shape core never emits.
 		 */
+		nmcv := coalesce(array_length(mcvfreqs, 1), 0);
+		nremaining := ndistinct - nmcv;
+
 		hist := NULL;
 		IF att.attnum > 0
-		   AND EXISTS (SELECT 1 FROM pg_catalog.pg_type t
-					   JOIN pg_catalog.pg_opclass oc ON oc.opcintype = t.oid
-					   JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
-					   WHERE t.oid = att.atttypid AND am.amname = 'btree')
-		   AND ndistinct > nbuckets
+		   AND orderable
+		   AND nremaining >= 2
 		THEN
+			/*
+			 * least(nbuckets, nremaining - 1) fractions, so the bound count is
+			 * least(nbuckets + 1, nremaining): core's cap, reached from below.
+			 */
+			nfrac := least(nbuckets, nremaining - 1);
+
+			/*
+			 * The exclusion is a literal list rather than a re-aggregation. The
+			 * alternative -- recomputing the most-common set in a subquery -- is
+			 * a third full pass over a column this function exists to read once,
+			 * and it can disagree with the list actually written if the tie-break
+			 * ever differs. format_type gives the element type without a typmod,
+			 * which is what the array literal must be parsed against.
+			 */
 			EXECUTE format(
 				'SELECT percentile_disc(
 						 (SELECT array_agg(i::double precision / %s ORDER BY i)
 							FROM generate_series(0, %s) i))
 					   WITHIN GROUP (ORDER BY %I)::text
-				   FROM %I.%I WHERE %I IS NOT NULL',
-				nbuckets, nbuckets, att.attname, schname, relnm, att.attname)
+				   FROM %I.%I WHERE %I IS NOT NULL %s',
+				nfrac, nfrac, att.attname, schname, relnm, att.attname,
+				CASE WHEN mcvvals IS NULL THEN ''
+					 ELSE format('AND %I <> ALL (%L::%s[])', att.attname, mcvvals,
+								 format_type(att.atttypid, NULL))
+				END)
 				INTO hist;
 		END IF;
 
@@ -1174,32 +1303,46 @@ BEGIN
 		 * must be real (the division yields double precision). Without these the
 		 * call "succeeds" having stored nothing.
 		 *
-		 * histogram_bounds is passed as text, which is what the function takes:
-		 * it parses the array literal against the column's own type.
+		 * histogram_bounds and most_common_vals are passed as text, which is what
+		 * the function takes (attribute_stats.c:70,72): it parses each array
+		 * literal against the column's own type. most_common_freqs is real[]
+		 * (:71) -- a float8[] there is dropped with a WARNING, not an error.
+		 *
+		 * One call with typed NULLs rather than a branch per combination. A NULL
+		 * argument is not written: each statistic is gated on PG_ARGISNULL
+		 * (:162-163 for the MCV pair), so a typed NULL and an omitted argument
+		 * mean the same thing. Four optional statistics would otherwise be
+		 * sixteen call sites. The NULLs must still be TYPED -- an untyped NULL
+		 * reaches VARIADIC "any" as `unknown` and is the mistyped-argument case
+		 * these casts exist to avoid.
+		 *
+		 * most_common_vals and most_common_freqs are a pair: supplying one
+		 * without the other is a WARNING and drops both (stats_check_arg_pair,
+		 * :265). They are computed together above, so they are null together.
 		 */
-		IF hist IS NULL THEN
-			PERFORM pg_catalog.pg_restore_attribute_stats(
-				'schemaname', schname,
-				'relname', relnm,
-				'attname', att.attname::text,
-				'inherited', false,
-				'null_frac', nullfrac::real,
-				'n_distinct', ndstat::real);
-		ELSE
-			PERFORM pg_catalog.pg_restore_attribute_stats(
-				'schemaname', schname,
-				'relname', relnm,
-				'attname', att.attname::text,
-				'inherited', false,
-				'null_frac', nullfrac::real,
-				'n_distinct', ndstat::real,
-				'histogram_bounds', hist);
-		END IF;
+		PERFORM pg_catalog.pg_restore_attribute_stats(
+			'schemaname', schname,
+			'relname', relnm,
+			'attname', att.attname::text,
+			'inherited', false,
+			'null_frac', nullfrac::real,
+			'n_distinct', ndstat::real,
+			'most_common_vals', mcvvals::text,
+			'most_common_freqs', mcvfreqs::real[],
+			'histogram_bounds', hist::text);
 
 		seen := seen + 1;
 	END LOOP;
 
-	IF seen = 0 THEN
+	/*
+	 * Collecting nothing is an error only when nothing ASKED us not to. A column
+	 * at SET STATISTICS 0 is an instruction, and core does not raise for
+	 * `ANALYZE t (col)` when col is disabled -- it collects nothing and returns.
+	 * Without the second term this guard turned that instruction into an error
+	 * whose hint blamed missing row groups, which is a different fault entirely
+	 * and would send somebody looking at the storage.
+	 */
+	IF seen = 0 AND disabled = 0 THEN
 		RAISE EXCEPTION 'pgcolumnar.analyze(): collected statistics for no columns of %', rel::text
 			USING HINT = 'the table may have no written row groups yet';
 	END IF;

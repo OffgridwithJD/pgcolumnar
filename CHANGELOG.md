@@ -12,7 +12,44 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Added
+
+- `pgcolumnar.analyze()` now collects `most_common_vals` and `most_common_freqs`,
+  and excludes those values from `histogram_bounds` (#414). Frequencies are exact
+  counts over the total row count rather than sample estimates. PostgreSQL 18 and
+  later, which is where `pg_restore_attribute_stats` exists; earlier majors raise
+  and should use `ANALYZE`.
+
+  The selection rule is PostgreSQL's own. `analyze_mcv_list()` keeps the entire
+  list when the whole table was read instead of applying its significance filter,
+  because that filter exists to judge sample frequencies. Reading the column makes
+  the values eligible on count alone, matching what core would store given the
+  same information.
+
+  Excluding most-common values from the histogram is required rather than
+  cosmetic: keeping them counts those values twice in selectivity, once from the
+  most-common list and again inside the bucket that holds them.
+
+- `test/analyze_differential.sh`, which compares the statistics `pgcolumnar.analyze()`
+  writes against the shape PostgreSQL's own `ANALYZE` produces across five column
+  types. `pg_restore_attribute_stats` takes `VARIADIC "any"` and responds to a
+  mistyped argument with a warning rather than an error, so a statistic can be
+  dropped while the call reports success. Values cannot be the comparison, since
+  exact and sampled statistics differ by design, so the suite compares the
+  operator, collation and presence of each statistic kind, and verifies every
+  stored value against an independent count.
+
 ### Fixed
+
+- `pgcolumnar.analyze()` now honours the per-column statistics target set by
+  `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS` (#414). It read the global
+  `default_statistics_target` for every column, so a column given its own target
+  was sized by the global setting instead. A target of zero means the column is
+  not to be analysed at all, and is now respected rather than overridden.
+
+  Requesting only zero-target columns no longer raises. The function reported
+  that it had collected statistics for no columns, with a hint about missing row
+  groups, which pointed at storage for what was a deliberate setting.
 
 - Renamed the custom scan node from `ColumnarScan` to `PgColumnarScan`, and the
   custom path from `ColumnarAgg` to `PgColumnarAgg` (#428). `ColumnarScan` is
