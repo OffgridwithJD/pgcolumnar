@@ -77,9 +77,10 @@ fi
 # sample is what makes the sampled estimate inexact, which slice 1 depends on.
 
 psql_run "DROP TABLE IF EXISTS af_c;
-	CREATE TABLE af_c (k int, skew int, cat int, pad1 text, pad2 text, pad3 text) USING pgcolumnar;
+	CREATE TABLE af_c (k int, k7 int, skew int, cat int, pad1 text, pad2 text, pad3 text) USING pgcolumnar;
 	INSERT INTO af_c SELECT
 		CASE WHEN g % 10 = 0 THEN NULL ELSE g % 45001 END,
+		CASE WHEN g % 7 = 0 THEN NULL ELSE g END,
 		CASE WHEN g = 1 THEN 1000000 ELSE g % 100000 END,
 		CASE WHEN g % 10 = 0  THEN NULL
 			 WHEN g <= 100000 THEN 7
@@ -98,16 +99,38 @@ true_nullfrac="$(q "SELECT round(count(*) FILTER (WHERE k IS NULL)::numeric / co
 	FROM af_c")"
 check_num "premise: the fixture is exactly one-in-ten NULL" "$true_nullfrac" "0.100000"
 
-# --- premise 2: core's sampled null_frac is NOT exact --------------------------
+# --- premise 2: core CANNOT report the truth, by arithmetic rather than by luck -
 #
-# This is the premise that makes the slice-1 check mean something. If core's
-# sample happened to land on the truth, then "exact" and "sampled" are the same
-# number here, and an implementation that merely called core ANALYZE would pass.
-# The test would be vacuous in precisely the way a green suite hides.
+# The premise this replaces required core's SAMPLED null_frac to differ from the
+# truth, and failed the whole suite as "vacuous" when it did not. That is a real
+# concern implemented with the wrong instrument, and it cost a matrix run (#487).
 #
-# So assert the two differ BEFORE asserting ours is the exact one. If this fails,
-# the fixture is not discriminating and the suite is reporting nothing -- rerun
-# or raise PGC_ANALYZE_ROWS rather than trusting a pass below it.
+# The concern is right: if core's number and the exact number are the same here,
+# an implementation that merely called core ANALYZE would pass, and the check
+# would be vacuous in precisely the way a green suite hides.
+#
+# The instrument was wrong because it gated on a random draw. k is NULL for one
+# row in ten, so core's sampled null_frac is (nulls drawn)/30000 and the truth is
+# 0.1 = 3000/30000 -- a value core hits whenever its sample lands on its own mode.
+# That is the single most likely outcome, about 0.8% of runs, one in 130. It came
+# up on PG19 and reported a suite that measures correctly as broken.
+#
+# This is the same mistake #475 removed from the histogram slice below, where
+# "core misses the outlier" is now printed rather than asserted, for the same
+# reason: it is probabilistic and it is not a property of our code.
+#
+# So the premise is restated as something true by CONSTRUCTION. k7 is NULL for
+# one row in seven, so the truth is 71428/500000 = 0.142856, and core's estimate
+# is always (a whole number of sampled rows)/30000. There is no whole number k
+# with k/30000 = 0.142856: it would need k = 4285.68. Core therefore cannot
+# report this fraction whatever it draws, and the discrimination no longer
+# depends on luck at all.
+#
+# Measured, three consecutive core runs on this fixture: 0.1442, 0.1425 and
+# 0.13893333, which are 4326/30000, 4275/30000 and 4168/30000. Ours: 0.142856.
+#
+# Both facts the argument rests on are asserted below rather than assumed,
+# because if either changes the premise silently becomes decorative.
 
 psql_run "ANALYZE af_c;" >/dev/null
 core_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
@@ -116,16 +139,46 @@ core_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND 
 core_ndistinct_before="$(q "SELECT n_distinct FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
 core_correlation_before="$(q "SELECT correlation FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
 
-if ! pgc_is_number "$core_nullfrac"; then
-	check_num "premise: core ANALYZE produced a null_frac to compare against" \
-		"$core_nullfrac" "a number"
-else
-	check "premise: core's sampled null_frac differs from the truth, so this suite can discriminate" \
-		"$(awk -v c="$core_nullfrac" -v t="$true_nullfrac" \
-			'BEGIN { print (c == t) ? "no (sample landed exactly on truth; suite is vacuous)" : "yes" }')" \
-		"yes"
-	echo "-- core sampled null_frac = $core_nullfrac, truth = $true_nullfrac"
-fi
+check "premise: core ANALYZE produced a null_frac at all, so the numbers below exist" \
+	"$(pgc_is_number "$core_nullfrac" && echo yes || echo "no (got [${core_nullfrac:-<none>}])")" \
+	"yes"
+
+true_nullfrac7="$(q "SELECT round(count(*) FILTER (WHERE k7 IS NULL)::numeric / count(*), 6)
+	FROM af_c")"
+check_num "premise: the k7 fixture is exactly one row in seven NULL" \
+	"$true_nullfrac7" "0.142856"
+
+# Core's sample is 300 * the column's EFFECTIVE statistics target. Read it rather
+# than writing 30000, so a server configured differently fails the arithmetic
+# below honestly instead of having it quietly stop applying.
+#
+# Per column, not the global default. attstattarget overrides
+# default_statistics_target, and reading the global one is a mistake this suite
+# has already made once: slice 3b found the histogram honouring the global
+# default so that ALTER TABLE ... SET STATISTICS did nothing. Written against the
+# global default here, a per-column target large enough to make core read the
+# whole table would leave this premise reporting a 30,000-row sample while core
+# censused, and the contradiction would surface two checks later as a confusing
+# failure instead of here as a clear one. Verified by forcing exactly that.
+core_sample_rows=$(( $(q "SELECT 300 * coalesce(nullif(attstattarget, -1),
+		current_setting('default_statistics_target')::int)
+	FROM pg_attribute
+	WHERE attrelid = 'af_c'::regclass AND attname = 'k7'") ))
+check "premise: core samples fewer rows than the table holds, so its number is an estimate" \
+	"$([ "$core_sample_rows" -lt "$ROWS" ] && echo yes \
+		|| echo "no (sample $core_sample_rows covers all $ROWS rows)")" "yes"
+
+check "premise: and no whole number of sampled rows gives that fraction, so core cannot report it" \
+	"$(awk -v t="$true_nullfrac7" -v n="$core_sample_rows" \
+		'BEGIN { p = t * n; print (p == int(p)) ? "no (" p " is a whole number of rows)" : "yes" }')" \
+	"yes"
+
+core_nullfrac7="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k7'")"
+
+# Printed, not asserted. Whether core's draw for k happened to land on 0.1 is a
+# fact about a random sample, not about this extension, and gating on it is what
+# #487 was.
+echo "-- core sampled null_frac: k = $core_nullfrac (truth $true_nullfrac), k7 = $core_nullfrac7 (truth $true_nullfrac7)"
 
 # --- check 1: pgcolumnar.analyze() gives the EXACT null_frac -------------------
 #
@@ -140,6 +193,24 @@ ours_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND 
 
 check_num "pgcolumnar.analyze() reports null_frac exactly, from the zone maps" \
 	"$ours_nullfrac" "0.1"
+
+# The same claim on the column core cannot express. This is the one that carries
+# the weight: 0.1 is a number a sampler reaches whenever it is lucky, and
+# 0.142856 is not a number a 30,000-row sample can produce at all. A pass here
+# cannot be a coincidence and cannot be core's own answer wearing our name.
+psql_run "SELECT pgcolumnar.analyze('af_c'::regclass, ARRAY['k7']);" >/dev/null
+ours_nullfrac7="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k7'")"
+
+check_num "and exactly for a fraction core's sample cannot express" \
+	"$ours_nullfrac7" "0.142856"
+
+# The negative half, stated separately: core's own number for that column must
+# NOT be the truth. If this ever passes by matching, the arithmetic premise above
+# is wrong and everything resting on it needs rereading.
+check "and core's own number for it is not the truth, as the arithmetic requires" \
+	"$(awk -v c="$core_nullfrac7" -v t="$true_nullfrac7" \
+		'BEGIN { print (c == t) ? "no (core reported the exact truth)" : "yes" }')" \
+	"yes"
 
 # --- check 2: n_distinct is exact, from reading one column --------------------
 #
@@ -165,11 +236,16 @@ check "premise: the fixture stays on the absolute-count side of core's 10% rule"
 	"$(awk -v d="$true_ndistinct" -v n="$ROWS" 'BEGIN { print (d > 0.1 * n) ? "no (fraction side)" : "yes" }')" \
 	"yes"
 
-check "premise: core's sampled n_distinct is not exact, so this check can discriminate" \
-	"$(awk -v c="$core_ndistinct_before" -v t="$true_ndistinct" \
-		'BEGIN { print (c == t) ? "no (sample landed exactly on truth; check is vacuous)" : "yes" }')" \
-	"yes"
-echo "-- core sampled n_distinct = $core_ndistinct_before, truth = $true_ndistinct"
+# Printed rather than asserted, for the reason given at premise 2 (#487): whether
+# core's sampled n_distinct happens to land on 45001 is a property of a random
+# draw. It is far less likely here than the null_frac case was, because a sampled
+# distinct estimate comes out of a formula rather than off a binomial's mode, but
+# "much less likely" is still the wrong thing to gate a suite on.
+#
+# What makes the check below discriminating is not core being wrong. It is that
+# the expected value comes from an independent SELECT count(DISTINCT k) over the
+# table, which is not how the function computes it.
+echo "-- core sampled n_distinct = ${core_ndistinct_before:-<none>}, truth = $true_ndistinct"
 
 ours_ndistinct="$(q "SELECT n_distinct FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
 check_num "pgcolumnar.analyze() reports n_distinct exactly, from one column" \
