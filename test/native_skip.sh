@@ -20,11 +20,17 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 # 20480 rows, 2048-row groups -> 10 row groups with contiguous, non-overlapping
 # id ranges (group k holds ids k*2048+1 .. (k+1)*2048), so range and equality
 # predicates on id are highly skippable.
-GEN="SELECT g, (g * 10)::bigint, 'lbl-' || (g % 100)
+GEN="SELECT g, (g * 10)::bigint, 'lbl-' || (g % 100),
+         g::nsk_acct4, (g * 10)::nsk_acct8
   FROM generate_series(1, 20480) g"
 
-psql_run "CREATE TABLE h (id int, k bigint, label text);"
-psql_run "CREATE TABLE n (id int, k bigint, label text) USING pgcolumnar;"
+# d4 and d8 are domains over int and bigint holding the same values as id and k.
+# A domain is ordinary modelling, and it must prune exactly as its base type does
+# (#483).
+psql_run "CREATE DOMAIN nsk_acct4 AS int;"
+psql_run "CREATE DOMAIN nsk_acct8 AS bigint;"
+psql_run "CREATE TABLE h (id int, k bigint, label text, d4 nsk_acct4, d8 nsk_acct8);"
+psql_run "CREATE TABLE n (id int, k bigint, label text, d4 nsk_acct4, d8 nsk_acct8) USING pgcolumnar;"
 psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 2048, chunk_group_row_limit => 1024);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
@@ -87,6 +93,63 @@ check "bigint vs integer literal returns the same rows as heap (#477)" \
 
 check "and it skips groups, which the cast version already did (#477)" \
 	"$(gt0 "$(skipped 'SELECT id FROM n WHERE k BETWEEN 100000 AND 101000')")" "yes"
+
+# ---- a domain column must prune like its base type (#483) --------------------
+#
+# Found while building #479's fixture, which needed a predicate the reader could
+# not use. This was that predicate, and it should not have been one.
+#
+# pgcolumnar_clause_to_scankey and pgcolumnar_make_predicates resolved a domain
+# differently, so the key passed the first and was dropped by the second. The key
+# is built because lookup_type_cache reaches GetDefaultOpClass, which resolves a
+# domain to its base type, so the domain finds integer_ops and a valid strategy.
+# It was then dropped because the column type is the domain while sk_subtype is
+# the base type, making the key cross-type, and integer_ops has no ordering proc
+# for (domain, int4). #478's fallback is right for a genuinely uncomparable pair
+# and a domain is not one.
+#
+# Measured before the fix, same values in one table, 20 groups: int and bigint
+# pruned 19, a domain over either pruned 0, and all three reported
+# "Columnar Pushed-Down Filters: 1". Ordinary SQL silently reading the whole
+# table.
+#
+# Parity first, and not as decoration. Comparing a domain's stored values with
+# the wrong comparison proc risks a WRONG answer, not a slow one, so rows are
+# asserted before skipping in every arm below.
+check "domain over int returns the same rows as heap (#483)" \
+	"$(pgc_set_hash 'SELECT id FROM n WHERE d4 BETWEEN 5000 AND 5100')" \
+	"$(pgc_set_hash 'SELECT id FROM h WHERE d4 BETWEEN 5000 AND 5100')"
+check "and it skips groups, as the same predicate on int does (#483)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE d4 BETWEEN 5000 AND 5100')")" "yes"
+
+check "domain over bigint returns the same rows as heap (#483)" \
+	"$(pgc_set_hash 'SELECT id FROM n WHERE d8 BETWEEN 100000 AND 101000')" \
+	"$(pgc_set_hash 'SELECT id FROM h WHERE d8 BETWEEN 100000 AND 101000')"
+check "and it skips groups too (#483)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE d8 BETWEEN 100000 AND 101000')")" "yes"
+
+# One-sided and equality take different branches of native_zone_excludes, and
+# equality additionally gates the bloom probe, which is where a wrong answer
+# would come from if the domain resolved to a different hash than the writer used.
+check "one-sided domain predicate skips groups (#483)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE d4 > 15000')")" "yes"
+check "one-sided domain parity" \
+	"$(q 'SELECT count(*) FROM n WHERE d4 > 15000;')" \
+	"$(q 'SELECT count(*) FROM h WHERE d4 > 15000;')"
+
+check "domain equality skips groups (#483)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE d4 = 12345')")" "yes"
+check "domain equality parity" \
+	"$(q 'SELECT count(*) FROM n WHERE d4 = 12345;')" \
+	"$(q 'SELECT count(*) FROM h WHERE d4 = 12345;')"
+
+# An absent value must still come back empty. This is the arm a wrong bloom probe
+# breaks: the filter hashes the values the writer stored, and a probe that hashed
+# under a different type would skip a group that holds the row.
+check "domain equality on an absent value returns nothing" \
+	"$(q 'SELECT count(*) FROM n WHERE d4 = 20481;')" "0"
+check "domain equality on a present boundary value finds it" \
+	"$(q 'SELECT count(*) FROM n WHERE d4 = 20480;')" "1"
 
 # One-sided and equality too, because they take different branches of
 # native_zone_excludes and equality additionally gates the bloom probe.

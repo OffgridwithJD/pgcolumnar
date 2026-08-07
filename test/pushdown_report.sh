@@ -128,8 +128,8 @@ check "two quals report two pushed-down filters" \
 # --- 6. a filter that is pushed down but cannot exclude anything (#479) ---------
 #
 # "Columnar Pushed-Down Filters" counts the scan keys the reader was HANDED.
-# The reader then converts each into a skip predicate and can drop it -- and a
-# dropped key excludes no chunk group at all, while the line above still reports
+# The reader then converts each into a skip predicate and can drop one, and a
+# dropped key excludes no chunk group at all while the line above still reports
 # it as pushed down. That is how #477 stayed invisible for a year: a bigint
 # column against a bare integer literal reported
 #
@@ -138,68 +138,108 @@ check "two quals report two pushed-down filters" \
 #
 # which reads as "pushdown works, this predicate is just not selective" and
 # actually meant "the predicate was never usable". test/zonemap_cost.sh sat in
-# exactly that state for its whole life, and #460's cost discount was validated
-# against it.
+# exactly that state for its whole life.
 #
-# "Columnar Usable Skip Predicates" is the second number: how many predicates
-# the reader built and can exclude with. The two together say which case you are
-# in.
+# "Columnar Usable Skip Predicates" is the second number: how many predicates the
+# reader built and can exclude with. The two together say which case you are in.
 #
-# The fixture is a DOMAIN column, which the issue's own Test section did not
-# propose and which is the shape that survives #478. A domain resolves to its
-# base type in GetDefaultOpClass, so pgcolumnar_clause_to_scankey finds a btree
-# opfamily and a strategy and builds the key; but in pgcolumnar_make_predicates
-# the column type is the domain while the constant's type is the base, so the
-# key is cross-type, and integer_ops has no BTORDER proc for (domain, int4).
-# #478's fallback drops it. Ordinary SQL, and it prunes nothing.
+# THE UNUSABLE ARM IS CONSTRUCTED, AND HAS TO BE. This suite first used a domain
+# column, which was unusable because of a defect (#483) rather than by nature.
+# That defect is fixed, so a domain now prunes exactly as its base type does and
+# is no use here. Nothing in core replaces it: asked directly, the catalog has NO
+# cross-type btree operator lacking an ordering proc for its pair, which the
+# premise below asserts rather than assumes.
 #
-# (The fixture the issue DOES propose -- a same-type predicate on a column with
-# no btree comparison -- cannot show this at all: clause_to_scankey rejects such
-# a column outright, so no scan key is built and both numbers read 0.)
+# So the condition is built on purpose, out of one operator and one opfamily
+# entry, and it reproduces precisely the shape #477 had in production: a
+# cross-type btree operator whose family has no BTORDER proc for the pair, so
+# pgcolumnar_clause_to_scankey builds a key and pgcolumnar_make_predicates drops
+# it.
 #
-# Both columns hold the same values in the same table, so the two arms differ
-# only in the declared type of the column being compared: the physical layout,
-# the row groups and their min/max are identical by construction.
+# Two details are load-bearing and were each found by the fixture failing:
+#
+#   The right-hand type must be NON-COLLATABLE. With `text` on the right, the
+#   operator's inputcollid is the default collation while a bigint column's
+#   attcollation is 0, and clause_to_scankey refuses the clause on that mismatch
+#   before any key is built. Both counters then read 0 and there is nothing to
+#   tell apart. `oid` has no collation, so the clause survives that guard.
+#
+#   The function must NOT be inlinable. Written in SQL it was inlined, and the
+#   qual the planner handed the scan was the built-in `>` against a bigint
+#   constant, which prunes perfectly well. The EXPLAIN said
+#   `Filter: (dz.b > '190000'::bigint)` and the arm quietly tested nothing.
+#   plpgsql is not inlined.
 psql_run "DROP TABLE IF EXISTS pdr_u;
-	DROP DOMAIN IF EXISTS pdr_acct;
-	CREATE DOMAIN pdr_acct AS int;
-	CREATE TABLE pdr_u (plain int, dom pdr_acct) USING pgcolumnar;
+	CREATE TABLE pdr_u (plain int, b bigint) USING pgcolumnar;
 	SELECT pgcolumnar.set_options('pdr_u', stripe_row_limit => 10000);" >/dev/null
-psql_run "INSERT INTO pdr_u
-	SELECT g, g::pdr_acct FROM generate_series(1, $ROWS) g;" >/dev/null
+psql_run "INSERT INTO pdr_u SELECT g, g FROM generate_series(1, $ROWS) g;" >/dev/null
 
-uplan() {  # uplan <column>
+cat > "$PGC_SQLDIR/pdr_unusable.sql" <<'SQL'
+CREATE FUNCTION pdr_gt_oid(bigint, oid) RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE AS $b$ BEGIN RETURN $1 > ($2::bigint); END $b$;
+CREATE OPERATOR >>> (LEFTARG = bigint, RIGHTARG = oid, FUNCTION = pdr_gt_oid);
+ALTER OPERATOR FAMILY integer_ops USING btree ADD OPERATOR 5 >>> (bigint, oid);
+SQL
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -At -f "$PGC_SQLDIR/pdr_unusable.sql" >/dev/null 2>&1
+
+# The premise the whole section rests on: the family really has no ordering proc
+# for this pair, which is WHY the reader must drop the key. Without this, "0
+# usable" could be any other cause and the section would be naming the wrong one.
+check "premise: integer_ops has no ordering proc for (bigint, oid)" \
+	"$(q "SELECT count(*) FROM pg_amproc ap
+		JOIN pg_opfamily f ON f.oid = ap.amprocfamily
+		WHERE f.opfname = 'integer_ops'
+		  AND ap.amproclefttype = 'int8'::regtype
+		  AND ap.amprocrighttype = 'oid'::regtype
+		  AND ap.amprocnum = 1")" "0"
+
+# And the reason this had to be constructed at all. If core ever ships a
+# cross-type btree operator without an ordering proc, an ordinary fixture exists
+# again and this section should use it instead of the operator above.
+check "premise: and core has no such pair of its own, which is why this is built" \
+	"$(q "SELECT count(*) FROM pg_amop ao
+		JOIN pg_am am ON am.oid = ao.amopmethod AND am.amname = 'btree'
+		WHERE ao.amoplefttype <> ao.amoprighttype
+		  AND ao.amopstrategy BETWEEN 1 AND 5
+		  AND ao.amopfamily <> (SELECT oid FROM pg_opfamily WHERE opfname = 'integer_ops'
+		                        AND opfmethod = am.oid)
+		  AND NOT EXISTS (SELECT 1 FROM pg_amproc ap
+		                   WHERE ap.amprocfamily = ao.amopfamily
+		                     AND ap.amproclefttype = ao.amoplefttype
+		                     AND ap.amprocrighttype = ao.amoprighttype
+		                     AND ap.amprocnum = 1)")" "0"
+
+uplan() {  # uplan <qual>
 	q "SET pgcolumnar.enable_qual_pushdown = on;
 	   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-	   SELECT count(*) FROM pdr_u WHERE $1 > $((ROWS - 10000));"
+	   SELECT count(*) FROM pdr_u WHERE $1;"
 }
 
-usable="$(uplan plain)"
-unusable="$(uplan dom)"
+usable="$(uplan "plain > $((ROWS - 10000))")"
+unusable="$(uplan "b >>> $((ROWS - 10000))::oid")"
 
-# The node again, before any number is read out of either plan. Neither of these
-# queries is the one checked above and the planner is free to choose differently.
+# The node again, before any number is read out of either plan.
 check "the usable arm is a columnar custom scan" "$(is_scalar_scan "$usable")" "yes"
 check "the unusable arm is a columnar custom scan" "$(is_scalar_scan "$unusable")" "yes"
 
-# The premise that makes the whole section mean something: these two arms really
-# do prune differently. Without this, "1 usable" against "0 usable" could be two
-# labels on identical behaviour -- which is the #477 failure repeated one level
-# up, asserting a derived number with no physical fact under it.
+# The premise that makes the rest mean something: these two arms really do prune
+# differently. Without it, "1 usable" against "0 usable" could be two labels on
+# identical behaviour.
 check "the usable arm removes chunk groups" \
 	"$([ "$(field "$usable" 'Columnar Chunk Groups Removed by Filter')" -gt 0 ] \
 		&& echo yes || echo no)" "yes"
-# This one pins a KNOWN-WRONG behaviour deliberately. A domain column ought to
-# prune exactly as its base type does, and it does not (#483). This suite needs
-# some predicate the reader cannot use, and that is the only one available on
-# current main; when #483 is fixed, this check goes red and whoever fixed it must
-# supply a new unusable fixture rather than delete the section. Pinned as an
-# assertion and not an echo, because nobody reads a passing suite's output.
 check "the unusable arm removes none" \
 	"$(field "$unusable" 'Columnar Chunk Groups Removed by Filter')" "0"
 
-# Both are reported as pushed down. This is the defect: the old line alone
-# cannot tell these two plans apart.
+# A dropped predicate must cost speed and nothing else. The executor re-applies
+# the qual, so the answer is the same either way, and if it were not this suite
+# would be reporting a correctness bug as a reporting one.
+check "and the unusable arm still returns the right answer" \
+	"$(q "SELECT count(*) FROM pdr_u WHERE b >>> $((ROWS - 10000))::oid;")" "10000"
+
+# Both are reported as pushed down. This is the defect: the old line alone cannot
+# tell these two plans apart.
 check "both arms report the filter as pushed down" \
 	"$(field "$usable" 'Columnar Pushed-Down Filters')/$(field "$unusable" 'Columnar Pushed-Down Filters')" \
 	"1/1"
@@ -211,8 +251,8 @@ check "the unusable arm reports none" \
 	"$(field "$unusable" 'Columnar Usable Skip Predicates')" "0"
 
 # With pushdown off the reader builds no predicates at all, so the new line must
-# follow the setting too -- otherwise it would report a capability the run did
-# not have, which is the #191 complaint about the old line.
+# follow the setting too, or it would report a capability the run did not have,
+# which is the #191 complaint about the old line.
 check "pushdown off reports no usable skip predicates" \
 	"$(field "$off" 'Columnar Usable Skip Predicates')" "0"
 
@@ -221,26 +261,23 @@ check "pushdown off reports no usable skip predicates" \
 # "Columnar Pushed-Down Filters" is printed by three nodes, not one: the scalar
 # scan above, and both vectorized aggregate nodes, which fill it from
 # PgColumnarCountConvertibleQuals -- the same built-key count, with the same gap
-# under it. Measured on this same domain fixture before the fix, all three
-# reported "1" while removing 0 of 20 chunk groups.
-#
-# Leaving two of the three unfixed would make one line of plan text mean two
-# different things depending on which node ran, which is worse than the defect.
+# under it. Leaving two of the three unfixed would make one line of plan text
+# mean two different things depending on which node ran.
 #
 # Both nodes are opt-in, so each arm asserts its own node fired FIRST. Without
 # that, a query the node quietly declines falls back to core Agg over the scalar
-# scan -- which now reports the new line correctly, so the check would pass while
+# scan, which reports the new line correctly, so the check would pass while
 # testing the node it was written for not at all.
 aggplan() {  # aggplan <guc> <sql>
 	q "SET pgcolumnar.enable_qual_pushdown = on;
 	   SET $1 = on;
 	   EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $2;"
 }
-has() { grep -q "$2" <<<"$1" && echo yes || echo no; }
+has() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 
 UAGG=pgcolumnar.enable_ungrouped_vector_agg
-u_usable="$(aggplan $UAGG "SELECT count(*), sum(plain) FROM pdr_u WHERE plain > $((ROWS - 10000))")"
-u_unusable="$(aggplan $UAGG "SELECT count(*), sum(plain) FROM pdr_u WHERE dom > $((ROWS - 10000))")"
+u_usable="$(aggplan $UAGG "SELECT count(*), sum(b) FROM pdr_u WHERE plain > $((ROWS - 10000))")"
+u_unusable="$(aggplan $UAGG "SELECT count(*), sum(b) FROM pdr_u WHERE b >>> $((ROWS - 10000))::oid")"
 
 check "the ungrouped vectorized aggregate node ran (usable arm)" \
 	"$(has "$u_usable" 'Columnar Vectorized Aggregates')" "yes"
@@ -253,16 +290,28 @@ check "ungrouped: the usable arm removes chunk groups" \
 check "ungrouped: the unusable arm removes none" \
 	"$(field "$u_unusable" 'Columnar Chunk Groups Removed by Filter')" "0"
 
-check "ungrouped: both arms report the filter as pushed down" \
-	"$(field "$u_usable" 'Columnar Pushed-Down Filters')/$(field "$u_unusable" 'Columnar Pushed-Down Filters')" \
+# NOTE, and it is a finding rather than a detail: on these two nodes
+# "Columnar Pushed-Down Filters" is NOT the quantity the scalar node prints. It
+# comes from PgColumnarCountConvertibleQuals, which asks
+# pgcolumnar_clause_to_predicate (convertible to a VECTOR predicate), while the
+# scalar node counts pgcolumnar_clause_to_scankey results (scan keys). The two
+# tests do not accept the same clauses, so one label reports two different
+# quantities depending on which node ran. Filed separately; #479's own complaint
+# in a new place.
+#
+# The practical consequence here is that the constructed operator is not
+# convertible to a vector predicate either, so this arm reads 0 on BOTH counters
+# and cannot discriminate on these nodes the way it does on the scalar scan.
+# Asserted as what it is rather than dressed up as a comparison that works.
+check "ungrouped: the usable arm reports one of each, agreeing" \
+	"$(field "$u_usable" 'Columnar Pushed-Down Filters')/$(field "$u_usable" 'Columnar Usable Skip Predicates')" \
 	"1/1"
-check "ungrouped: and the usable skip predicates tell them apart" \
-	"$(field "$u_usable" 'Columnar Usable Skip Predicates')/$(field "$u_unusable" 'Columnar Usable Skip Predicates')" \
-	"1/0"
+check "ungrouped: and the unusable arm builds no skip predicate" \
+	"$(field "$u_unusable" 'Columnar Usable Skip Predicates')" "0"
 
 GAGG=pgcolumnar.enable_group_vectorization
-g_usable="$(aggplan $GAGG "SELECT dom, count(*) FROM pdr_u WHERE plain > $((ROWS - 10000)) GROUP BY 1")"
-g_unusable="$(aggplan $GAGG "SELECT plain, count(*) FROM pdr_u WHERE dom > $((ROWS - 10000)) GROUP BY 1")"
+g_usable="$(aggplan $GAGG "SELECT b, count(*) FROM pdr_u WHERE plain > $((ROWS - 10000)) GROUP BY 1")"
+g_unusable="$(aggplan $GAGG "SELECT plain, count(*) FROM pdr_u WHERE b >>> $((ROWS - 10000))::oid GROUP BY 1")"
 
 # "Columnar Vectorized Group Keys" is this node's own marker; no other node emits
 # it, so a positive grep proves the node rather than an absence a fallback would
@@ -278,11 +327,13 @@ check "grouped: the usable arm removes chunk groups" \
 check "grouped: the unusable arm removes none" \
 	"$(field "$g_unusable" 'Columnar Chunk Groups Removed by Filter')" "0"
 
-check "grouped: both arms report the filter as pushed down" \
-	"$(field "$g_usable" 'Columnar Pushed-Down Filters')/$(field "$g_unusable" 'Columnar Pushed-Down Filters')" \
+# Same caveat as the ungrouped node above: this label is a different quantity
+# here, so the arms assert agreement on the usable side and an absent skip
+# predicate on the unusable one, which is what is actually true.
+check "grouped: the usable arm reports one of each, agreeing" \
+	"$(field "$g_usable" 'Columnar Pushed-Down Filters')/$(field "$g_usable" 'Columnar Usable Skip Predicates')" \
 	"1/1"
-check "grouped: and the usable skip predicates tell them apart" \
-	"$(field "$g_usable" 'Columnar Usable Skip Predicates')/$(field "$g_unusable" 'Columnar Usable Skip Predicates')" \
-	"1/0"
+check "grouped: and the unusable arm builds no skip predicate" \
+	"$(field "$g_unusable" 'Columnar Usable Skip Predicates')" "0"
 
 pgc_summary
