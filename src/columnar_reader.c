@@ -393,22 +393,27 @@ PgColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 
 
 /*
- * pgcolumnar_build_predicates
- *		Translate the scan's ScanKeys into skip predicates for chunk-group
- *		filtering (spec 9). Only simple, same-type btree comparison keys on an
- *		orderable column are used; anything else is ignored, so skipping stays
- *		conservative. Runs in readContext.
+ * pgcolumnar_make_predicates
+ *		Translate ScanKeys into skip predicates for chunk-group filtering
+ *		(spec 9), into caller-provided storage. Only simple btree comparison keys
+ *		on an orderable column are used; anything else is ignored, so skipping
+ *		stays conservative. Returns how many were built.
+ *
+ *		Separate from the read state so the PLANNER can build the same predicates
+ *		to estimate how much a scan would prune (#461) without constructing a
+ *		scan. The planner and the executor must decide "can this group match" by
+ *		the same rule -- pricing a discount by one rule and taking it by another
+ *		is how a plan gets chosen for a saving it never realises.
  */
-static void
-pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey keys)
+static int
+pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
+						   TupleDesc tupdesc, int natts, MemoryContext cx)
 {
 	int			i;
 	int			n = 0;
 
 	if (nkeys <= 0 || keys == NULL)
-		return;
-
-	readState->predicates = palloc0(sizeof(SkipPredicate) * nkeys);
+		return 0;
 
 	for (i = 0; i < nkeys; i++)
 	{
@@ -423,14 +428,14 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 							 SK_ROW_END | SK_SEARCHNULL | SK_SEARCHNOTNULL |
 							 SK_ORDER_BY))
 			continue;
-		if (key->sk_attno < 1 || key->sk_attno > readState->natts)
+		if (key->sk_attno < 1 || key->sk_attno > natts)
 			continue;
 		if (key->sk_strategy < BTLessStrategyNumber ||
 			key->sk_strategy > BTGreaterStrategyNumber)
 			continue;
 
 		attidx = key->sk_attno - 1;
-		att = TupleDescAttr(readState->tupdesc, attidx);
+		att = TupleDescAttr(tupdesc, attidx);
 
 		crossType = (OidIsValid(key->sk_subtype) &&
 					 key->sk_subtype != att->atttypid);
@@ -475,17 +480,17 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 										key->sk_subtype, BTORDER_PROC);
 			if (!OidIsValid(cmpProc))
 				continue;
-			fmgr_info_cxt(cmpProc, &readState->predicates[n].cmpFn,
-						  readState->readContext);
+			fmgr_info_cxt(cmpProc, &out[n].cmpFn,
+						  cx);
 		}
 		else
-			fmgr_info_copy(&readState->predicates[n].cmpFn, &tce->cmp_proc_finfo,
-						   readState->readContext);
+			fmgr_info_copy(&out[n].cmpFn, &tce->cmp_proc_finfo,
+						   cx);
 
-		readState->predicates[n].attidx = attidx;
-		readState->predicates[n].strategy = key->sk_strategy;
-		readState->predicates[n].compareValue = key->sk_argument;
-		readState->predicates[n].collation = att->attcollation;
+		out[n].attidx = attidx;
+		out[n].strategy = key->sk_strategy;
+		out[n].compareValue = key->sk_argument;
+		out[n].collation = att->attcollation;
 
 		/*
 		 * For an equality predicate on a hashable column with a safe collation,
@@ -501,21 +506,39 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		 * ever conservative. Cross-type equality therefore keeps min/max pruning
 		 * and forgoes the bloom probe.
 		 */
-		readState->predicates[n].hasHash = false;
+		out[n].hasHash = false;
 		if (!crossType &&
 			key->sk_strategy == BTEqualStrategyNumber &&
 			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
 			PgColumnarCollationIsDeterministic(att->attcollation))
 		{
-			readState->predicates[n].hasHash = true;
-			fmgr_info_copy(&readState->predicates[n].hashFn,
-						   &tce->hash_proc_finfo, readState->readContext);
-			readState->predicates[n].hashCollation = att->attcollation;
+			out[n].hasHash = true;
+			fmgr_info_copy(&out[n].hashFn,
+						   &tce->hash_proc_finfo, cx);
+			out[n].hashCollation = att->attcollation;
 		}
 		n++;
 	}
 
-	readState->numPredicates = n;
+	return n;
+}
+
+/*
+ * pgcolumnar_build_predicates
+ *		Fill a read state's skip predicates from its scan keys. Runs in
+ *		readContext.
+ */
+static void
+pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey keys)
+{
+	if (nkeys <= 0 || keys == NULL)
+		return;
+
+	readState->predicates = palloc0(sizeof(SkipPredicate) * nkeys);
+	readState->numPredicates =
+		pgcolumnar_make_predicates(readState->predicates, nkeys, keys,
+								   readState->tupdesc, readState->natts,
+								   readState->readContext);
 }
 
 /*
@@ -891,6 +914,160 @@ pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 	}
 
 	return true;
+}
+
+/*
+ * PgColumnarEstimatePruneSurvival
+ *		The fraction of chunk groups a restricted scan would actually read, in
+ *		(0, 1], estimated from a bounded SAMPLE of the groups' zone maps. One
+ *		means nothing prunes; a missing or unusable predicate returns one.
+ *
+ *		Why this exists (#461). The cost model priced pruning from
+ *		pg_stats.correlation, and pruning does not follow correlation.
+ *		Correlation measures agreement between value order and physical order
+ *		across the WHOLE relation; a zone map only needs each GROUP's min and max
+ *		to be narrow, which is local. A table can be globally unsorted and locally
+ *		tight at once, and batch-loaded time-series data -- the shape this engine
+ *		is built for -- is exactly that. Measured on TSBS in #391: the `time`
+ *		column had correlation 0.0133 and removed 82 percent of chunk groups, so a
+ *		model reading rho^2 credited it with nothing. #381 made that mistake in
+ *		documentation and #391 corrected it; the planner then reintroduced it.
+ *
+ *		So this asks the question the reader will ask, using the reader's own
+ *		predicates and the reader's own min/max comparison, rather than inferring
+ *		prunability from a statistic that cannot see it. The error direction of a
+ *		proxy is unknowable; the error of a sample is just sampling error.
+ *
+ *		SAMPLED rather than exact, and the bound is the point. Evaluating every
+ *		group is O(groups) catalog reads on every plan, including plans the
+ *		planner discards -- 10,000 groups on a 100M-row table at the default group
+ *		size. A fixed sample is constant work whatever the table's size, and
+ *		costing does not need three digits: the decision this feeds is which of
+ *		two plans is cheaper, and the floor below already guards the case where
+ *		being wrong is expensive.
+ *
+ *		Group numbers are sampled evenly across [0, ngroups) rather than read from
+ *		the row-group list, because reading that list is the O(groups) cost being
+ *		avoided. A sampled number with no zone map rows (vacuumed away, or a stale
+ *		ngroups estimate) is not counted rather than counted as surviving, so a
+ *		sparse group space narrows the sample instead of biasing it toward 1.0.
+ *
+ *		The bloom filter is deliberately NOT consulted. Filters are among the
+ *		larger things in the catalog and reading them per sampled group would cost
+ *		more than the estimate is worth; min/max is the dominant effect and
+ *		ignoring bloom can only UNDER-credit, which prices the columnar scan high
+ *		and is the safe direction.
+ */
+double
+PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc, List *qual,
+								Index scanrelid, uint64 ngroups, int sampleTarget)
+{
+	ScanKey		keys;
+	int			nkeys = 0;
+	SkipPredicate *preds;
+	int			npreds;
+	Snapshot	snap;
+	MemoryContext cx;
+	MemoryContext old;
+	int			nsample;
+	int			i;
+	int			examined = 0;
+	int			survived = 0;
+	double		survival;
+
+	if (ngroups == 0 || tupdesc == NULL || qual == NIL)
+		return 1.0;
+	if (!pgcolumnar_enable_qual_pushdown)
+		return 1.0;
+
+	snap = GetActiveSnapshot();
+	if (snap == NULL)
+		return 1.0;
+
+	cx = AllocSetContextCreate(CurrentMemoryContext,
+							   "columnar prune estimate",
+							   ALLOCSET_SMALL_SIZES);
+	old = MemoryContextSwitchTo(cx);
+
+	keys = PgColumnarBuildScanKeys(qual, scanrelid, tupdesc, &nkeys);
+	if (nkeys <= 0)
+	{
+		MemoryContextSwitchTo(old);
+		MemoryContextDelete(cx);
+		return 1.0;
+	}
+
+	preds = palloc0(sizeof(SkipPredicate) * nkeys);
+	npreds = pgcolumnar_make_predicates(preds, nkeys, keys, tupdesc,
+										tupdesc->natts, cx);
+	if (npreds == 0)
+	{
+		MemoryContextSwitchTo(old);
+		MemoryContextDelete(cx);
+		return 1.0;
+	}
+
+	nsample = (ngroups < (uint64) sampleTarget) ? (int) ngroups : sampleTarget;
+	if (nsample <= 0)
+	{
+		MemoryContextSwitchTo(old);
+		MemoryContextDelete(cx);
+		return 1.0;
+	}
+
+	for (i = 0; i < nsample; i++)
+	{
+		uint64		g = (uint64) (((double) i * (double) ngroups) / (double) nsample);
+		List	   *zones;
+		NativeZoneMapMetadata **byCol;
+		ListCell   *lc;
+		bool		canMatch = true;
+		int			p;
+
+		CHECK_FOR_INTERRUPTS();
+
+		zones = PgColumnarReadZoneMapList(storageId, g, snap);
+		if (zones == NIL)
+			continue;			/* no such group: narrow the sample, do not bias it */
+
+		examined++;
+
+		byCol = palloc0(sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
+		foreach(lc, zones)
+		{
+			NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
+
+			if (z->columnIndex >= 0 && z->columnIndex < tupdesc->natts)
+				byCol[z->columnIndex] = z;
+		}
+
+		for (p = 0; p < npreds; p++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, preds[p].attidx);
+
+			if (native_zone_excludes(&preds[p], att, byCol[preds[p].attidx], cx))
+			{
+				canMatch = false;
+				break;
+			}
+		}
+
+		if (canMatch)
+			survived++;
+	}
+
+	MemoryContextSwitchTo(old);
+
+	/*
+	 * No group could be examined -- every sampled number was absent. That is a
+	 * failure to measure, not a measurement of "nothing prunes", so say the
+	 * conservative thing rather than inventing a discount.
+	 */
+	survival = (examined > 0) ? ((double) survived / (double) examined) : 1.0;
+
+	MemoryContextDelete(cx);
+
+	return survival;
 }
 
 /*

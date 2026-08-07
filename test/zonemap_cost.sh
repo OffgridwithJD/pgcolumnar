@@ -31,14 +31,44 @@ CUT=$((ROWS * 8 / 10))
 # Two tables, one query shape. `seq` ascends with physical order; `scat` is the
 # same values in an order uncorrelated with it, so its zone maps overlap and
 # prune nothing.
+# `saw` is the third shape, and it is the one correlation cannot see (#461).
+#
+# Correlation measures agreement between value order and physical order across
+# the WHOLE relation. Pruning is local: a group is skipped when its own min and
+# max rule the predicate out. A table can be globally unsorted and locally tight
+# at once, and that is not a corner case -- it is what batch-loaded time-series
+# data looks like, which is the shape this engine exists for.
+#
+# So each group of 10,000 rows covers one narrow band of the value range, and the
+# bands are handed out by (i * 9) mod 20, which is a permutation because 9 and 20
+# are coprime. Group spans come out 0-9999, 90000-99999, 180000-189999 and so on:
+# 5 percent of the range each, in an order that does not follow physical order.
+#
+# The multiplier is chosen, not decorative. Correlation of (i * m) mod 20 with i:
+#
+#     m = 7  ->  +0.3665      m = 9  ->  +0.0376      m = 19 ->  -0.7143
+#
+# m = 7 was the first version and it is the trap this issue is about: 0.3665
+# earns a partial rho^2 discount, so the check below would have PASSED without
+# any fix, for the wrong reason, on the exact defect under test. m = 9 lands at
+# 0.0376, next to the 0.0133 and 0.0463 measured on the TSBS `time` column in
+# #391 -- the case on the record.
+#
+# The within-group order is scrambled too ((g * 7919) mod 10000). Letting values
+# ascend inside a group adds correlation on top of the band ordering, and local
+# tightness only needs min and max to be narrow, never sorted.
+
 psql_run "DROP TABLE IF EXISTS zc;
-	CREATE TABLE zc (seq bigint, scat bigint, tag int, pad text) USING pgcolumnar;
+	CREATE TABLE zc (seq bigint, scat bigint, saw bigint, tag int, pad text) USING pgcolumnar;
 	SELECT pgcolumnar.set_options('zc', stripe_row_limit => 10000);
 	INSERT INTO zc
-	SELECT g, ((g * 7919) % $ROWS), g % 5, md5(g::text)
+	SELECT g, ((g * 7919) % $ROWS),
+	       ((((g - 1) / 10000) * 9) % 20) * 10000 + ((g * 7919) % 10000),
+	       g % 5, md5(g::text)
 	  FROM generate_series(1, $ROWS) g;
 	CREATE INDEX zc_seq ON zc (seq);
 	CREATE INDEX zc_scat ON zc (scat);
+	CREATE INDEX zc_saw ON zc (saw);
 	ANALYZE zc;" >/dev/null 2>&1
 
 check_num "premise: every row loaded" "$(q 'SELECT count(*) FROM zc')" "$ROWS"
@@ -132,6 +162,56 @@ check_num "premise: the scattered columnar cost is a measurement" \
 	"$([ -n "$SCAT_COL" ] && awk "BEGIN{exit !($SCAT_COL > 0)}" && echo 1 || echo 0)" "1"
 check_num "an uncorrelated restriction gets no pruning discount (#434)" \
 	"$(awk "BEGIN{print ($SCAT_COL > $SEQ_COL) ? 1 : 0}")" "1"
+
+# ---- #461: locally tight, globally uncorrelated -----------------------------
+#
+# The gap in the correlation model. Everything physical is measured before
+# anything about price is asserted, because "this column prunes" is the premise
+# the whole arm rests on, and re-deriving it from the model under test would make
+# the check tautological.
+
+CORR_SAW=$(q "SELECT round(abs(correlation)::numeric, 4) FROM pg_stats
+              WHERE tablename = 'zc' AND attname = 'saw'")
+SAW_REMOVED=$(removed_for saw)
+echo "-- sawtooth: |correlation| = ${CORR_SAW:-?}, groups removed = ${SAW_REMOVED:-?}"
+
+check_num "premise: the sawtooth column is uncorrelated, like TSBS time (#391)" \
+	"$([ -n "$CORR_SAW" ] && awk "BEGIN{exit !($CORR_SAW < 0.2)}" && echo 1 || echo 0)" "1"
+
+# The two premises together are the issue in one line: no correlation, and it
+# prunes anyway. Either alone proves nothing.
+check_num "premise: and it prunes as hard as the correlated column, measured" \
+	"$([ -n "$SAW_REMOVED" ] && [ -n "$SEQ_REMOVED" ] &&
+	   awk "BEGIN{exit !($SAW_REMOVED >= $SEQ_REMOVED)}" && echo 1 || echo 0)" "1"
+
+SAW_NODE=$(node_for saw)
+SAW_COL=$(cost_for saw "SET enable_indexscan=off; SET enable_bitmapscan=off;")
+SAW_IDX=$(cost_for saw "SET pgcolumnar.enable_custom_scan=off; SET enable_seqscan=off; SET enable_bitmapscan=off;")
+echo "-- sawtooth: chosen=$SAW_NODE  columnar=$SAW_COL  index=$SAW_IDX"
+
+check_num "premise: the sawtooth columnar cost is a measurement" \
+	"$([ -n "$SAW_COL" ] && awk "BEGIN{exit !($SAW_COL > 0)}" && echo 1 || echo 0)" "1"
+
+# The assertion. A column that demonstrably removes as many groups as the
+# correlated one must be priced like it, not like the one that removes none,
+# because correlation is not what the reader consults when it skips a group.
+#
+# A MARGIN, not merely "less than". Written as a bare `<` this check passed
+# before the fix existed, on 3215.33 against 3222.29 -- a 0.2 percent difference
+# that is rounding in the seq-page term, reported as a discount. The arm removes
+# 16 of 20 groups, so anything worth calling a discount is far larger than the
+# gap between two undiscounted prices.
+check_num "a demonstrably pruning restriction is discounted whatever its correlation (#461)" \
+	"$(awk "BEGIN{print ($SAW_COL < $SCAT_COL * 0.8) ? 1 : 0}")" "1"
+
+# Priced like what it physically resembles. Bounded rather than exact: the model
+# estimates from a sample of groups, so demanding equality with the correlated
+# arm would assert the sampler's precision rather than the behaviour.
+check_num "and priced close to the correlated arm it matches physically (#461)" \
+	"$(awk "BEGIN{print ($SAW_COL < $SEQ_COL * 1.5) ? 1 : 0}")" "1"
+
+check_text "and the planner picks the columnar scan for it" \
+	"$SAW_NODE" "Custom Scan (PgColumnarScan)"
 
 # ---- correctness, which the cost model may not change ----------------------
 check_text "the correlated query returns the same rows either way" \
