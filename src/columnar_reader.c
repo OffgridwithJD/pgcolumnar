@@ -421,6 +421,8 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 		int			attidx;
 		Form_pg_attribute att;
 		TypeCacheEntry *tce;
+		Oid			colType;
+		Oid			argType;
 		bool		crossType;
 
 		/* only plain "column op const" comparison keys are usable */
@@ -437,8 +439,42 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 		attidx = key->sk_attno - 1;
 		att = TupleDescAttr(tupdesc, attidx);
 
-		crossType = (OidIsValid(key->sk_subtype) &&
-					 key->sk_subtype != att->atttypid);
+		/*
+		 * Compare BASE types when deciding whether this key is cross-type
+		 * (#483).
+		 *
+		 * A domain is not a different type for comparison purposes: it shares
+		 * its base type's ordering, its comparison proc, and its physical
+		 * representation. But a column declared over a domain has the domain's
+		 * OID in atttypid while the constant beside it has the base type's, so
+		 * comparing the OIDs directly called every such key cross-type, and the
+		 * opfamily has no ordering proc for (domain, base). #478's fallback then
+		 * dropped the key, which is right for a genuinely uncomparable pair and
+		 * wrong here.
+		 *
+		 * The effect was that a domain column pruned NOTHING. Measured on
+		 * identical values in one table over 20 row groups: int and bigint each
+		 * removed 19 groups, a domain over either removed 0, and all three
+		 * reported the filter as pushed down. The answers stayed correct because
+		 * the executor re-applies the qual; the table was simply read whole.
+		 *
+		 * Both sides are resolved, not just the column, so that a domain
+		 * compared against a value of a DIFFERENT domain over the same base type
+		 * is also recognised as same-type rather than falling into the
+		 * opfamily lookup that has no entry for either OID.
+		 *
+		 * This changes no comparison semantics. The cmp and hash procs come from
+		 * lookup_type_cache(att->atttypid) below, which already resolves a domain
+		 * through GetDefaultOpClass to its base type's procs, and the WRITER
+		 * builds zone maps and bloom filters from that same expression
+		 * (columnar_write_state.c). Reader and writer therefore agree on the
+		 * ordering and the hash by construction, before and after this change.
+		 */
+		colType = getBaseType(att->atttypid);
+		argType = OidIsValid(key->sk_subtype)
+			? getBaseType(key->sk_subtype) : InvalidOid;
+
+		crossType = (OidIsValid(argType) && argType != colType);
 
 		tce = lookup_type_cache(att->atttypid,
 								TYPECACHE_CMP_PROC_FINFO |
@@ -469,15 +505,15 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 		 */
 		if (crossType)
 		{
-			Oid			opclass = GetDefaultOpClass(att->atttypid, BTREE_AM_OID);
+			Oid			opclass = GetDefaultOpClass(colType, BTREE_AM_OID);
 			Oid			opfamily;
 			Oid			cmpProc;
 
 			if (!OidIsValid(opclass))
 				continue;
 			opfamily = get_opclass_family(opclass);
-			cmpProc = get_opfamily_proc(opfamily, att->atttypid,
-										key->sk_subtype, BTORDER_PROC);
+			cmpProc = get_opfamily_proc(opfamily, colType, argType,
+										BTORDER_PROC);
 			if (!OidIsValid(cmpProc))
 				continue;
 			fmgr_info_cxt(cmpProc, &out[n].cmpFn,
