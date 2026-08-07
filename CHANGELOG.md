@@ -41,6 +41,24 @@ which was true until that script existed.
 
 ### Fixed
 
+- A `bigint` column compared against an unadorned integer literal now prunes
+  chunk groups (#477). The scan key was dropped because the column type's default
+  comparison function cannot take an `int4` argument, so predicates of the form
+  `bigint_column > 16000` read every chunk group while `bigint_column >
+  16000::bigint` pruned normally. The comparison function is now resolved for
+  both types from the column's btree operator family, which supplies exactly this
+  for the built-in numeric types. Where a family provides no such function the
+  key is still skipped, as before.
+
+  `EXPLAIN` did not show the difference. `Columnar Pushed-Down Filters` counts
+  scan keys given to the reader rather than predicates able to exclude a group,
+  so it reported the filter as pushed down while nothing was skipped.
+
+  The bloom filter probe remains disabled for cross-type equality. The filter
+  stores hashes of column-type values, so hashing a differently typed constant
+  would probe a slot that was never written and could skip a group holding
+  matching rows.
+
 - `pgcolumnar.analyze()` now honours the per-column statistics target set by
   `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS` (#414). It read the global
   `default_statistics_target` for every column, so a column given its own target

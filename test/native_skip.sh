@@ -57,13 +57,56 @@ check "equality result parity" \
 	"$(q 'SELECT count(*) FROM h WHERE id = 12345;')"
 check "equality skips groups" "$(gt0 "$(skipped 'SELECT id FROM n WHERE id = 12345')")" "yes"
 
-# Predicate on the bigint column (k = id*10) is equally skippable. The literals
-# are cast to bigint so the comparison is same-type: cross-type operators (int8
-# column vs int4 const) are deliberately not pushed down, on native as on 2.2.
+# Predicate on the bigint column (k = id*10) is equally skippable.
 check "bigint range parity" \
 	"$(pgc_set_hash 'SELECT id FROM n WHERE k BETWEEN 100000::bigint AND 101000::bigint')" \
 	"$(pgc_set_hash 'SELECT id FROM h WHERE k BETWEEN 100000::bigint AND 101000::bigint')"
 check "bigint range skips groups" "$(gt0 "$(skipped 'SELECT id FROM n WHERE k BETWEEN 100000::bigint AND 101000::bigint')")" "yes"
+
+# ---- the same predicate without the casts (#477) -----------------------------
+#
+# Those literals were cast to bigint so the comparison would be same-type, and
+# this comment used to say cross-type operators were "deliberately not pushed
+# down". They were not pushed down, and the consequence was not deliberate: an
+# int8 column compared against a bare integer literal skipped NOTHING, which is
+# what ordinary SQL looks like. Measured on identical data in two columns, one
+# int and one bigint: `idi > 16000` removed 7 groups of 10, `seq > 16000` removed
+# 0, and `seq > 16000::bigint` removed 7 again.
+#
+# EXPLAIN gave no way to see it. `Columnar Pushed-Down Filters` counts scan keys
+# handed to the reader, not predicates able to exclude anything, so it read 1
+# while zero groups were skipped. test/zonemap_cost.sh's correlated arm has been
+# in that state since it was written.
+#
+# The parity check is first and is not decoration: the risk in comparing an int8
+# column against an int4 constant is a WRONG answer, not a slow one, so rows come
+# before skipping in the order these are asserted.
+check "bigint vs integer literal returns the same rows as heap (#477)" \
+	"$(pgc_set_hash 'SELECT id FROM n WHERE k BETWEEN 100000 AND 101000')" \
+	"$(pgc_set_hash 'SELECT id FROM h WHERE k BETWEEN 100000 AND 101000')"
+
+check "and it skips groups, which the cast version already did (#477)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE k BETWEEN 100000 AND 101000')")" "yes"
+
+# One-sided and equality too, because they take different branches of
+# native_zone_excludes and equality additionally gates the bloom probe.
+check "one-sided bigint vs integer literal skips groups (#477)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE k > 150000')")" "yes"
+check "one-sided parity" \
+	"$(q 'SELECT count(*) FROM n WHERE k > 150000;')" \
+	"$(q 'SELECT count(*) FROM h WHERE k > 150000;')"
+
+check "bigint equality vs integer literal skips groups (#477)" \
+	"$(gt0 "$(skipped 'SELECT id FROM n WHERE k = 123450')")" "yes"
+check "bigint equality parity" \
+	"$(q 'SELECT count(*) FROM n WHERE k = 123450;')" \
+	"$(q 'SELECT count(*) FROM h WHERE k = 123450;')"
+
+# A value no row holds must still come back empty. Cross-type equality disables
+# the bloom probe (the filter hashes column-type values, so an int4 constant
+# would probe the wrong slot), so this rides on min/max alone.
+check "bigint equality on an absent value returns nothing" \
+	"$(q 'SELECT count(*) FROM n WHERE k = 123451;')" "0"
 
 # A predicate every group satisfies must skip nothing (correctness of the bound).
 check "non-selective scan skips nothing" "$(skipped 'SELECT id FROM n WHERE id > 0')" "0"

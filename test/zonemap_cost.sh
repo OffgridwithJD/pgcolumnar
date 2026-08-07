@@ -71,6 +71,41 @@ cost_for() {	# $1 = column, $2 = extra SETs
 		grep -oE 'cost=[0-9.]+\.\.[0-9.]+' | head -1 | sed 's/.*\.\.//'
 }
 
+# ---- the physical premise, which this suite asserted only in its title -------
+#
+# Everything below prices pruning. Nothing below checked that any pruning
+# happens, and for the whole life of this file none did (#477).
+#
+# `seq` is bigint and `$CUT` is a bare integer, so the scan key was cross-type
+# and the reader dropped it: zero chunk groups removed, on the arm whose entire
+# purpose is to be the one that prunes. The suite still passed, because a cost
+# relation between two priced plans is true or false regardless of whether the
+# physical effect being priced occurs. #460's discount was validated here.
+#
+# So the premise is now measured from the executor's own counter, before any
+# cost is compared. A discount for pruning that does not happen is not a
+# conservative error, it is a wrong price.
+removed_for() {	# $1 = column
+	psql_run "SET max_parallel_workers_per_gather=0;
+	          SET enable_indexscan=off; SET enable_bitmapscan=off;
+	          EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	          SELECT tag, count(*) FROM zc WHERE $1 > $CUT GROUP BY tag;" 2>/dev/null |
+		grep -oE 'Columnar Chunk Groups Removed by Filter: [0-9]+' |
+		grep -oE '[0-9]+$' | head -1
+}
+
+SEQ_REMOVED=$(removed_for seq)
+SCAT_REMOVED=$(removed_for scat)
+echo "-- groups removed: seq = ${SEQ_REMOVED:-?}, scat = ${SCAT_REMOVED:-?}"
+
+check_num "premise: the correlated arm actually removes chunk groups (#477)" \
+	"$([ -n "$SEQ_REMOVED" ] && awk "BEGIN{exit !($SEQ_REMOVED > 0)}" && echo 1 || echo 0)" "1"
+
+# And the control removes none, which is what makes the discount's absence there
+# meaningful rather than incidental.
+check_num "premise: and the scattered arm removes none, so the two differ physically" \
+	"$([ -n "$SCAT_REMOVED" ] && awk "BEGIN{exit !($SCAT_REMOVED == 0)}" && echo 1 || echo 0)" "1"
+
 # ---- the correlated arm: pruning is real, so it must be priced -------------
 SEQ_NODE=$(node_for seq)
 SEQ_COL=$(cost_for seq "SET enable_indexscan=off; SET enable_bitmapscan=off;")
