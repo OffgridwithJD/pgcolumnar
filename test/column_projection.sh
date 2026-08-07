@@ -195,4 +195,63 @@ check "parallel scan, qual on unselected column" \
 	"$(par "SELECT sum(v) FROM t WHERE k < 500")" \
 	"$(val on "SELECT sum(v) FROM h WHERE k < 500")"
 
+# ---- and the COST MODEL has to know it ---------------------------------------
+#
+# Everything above proves the scan skips the columns it does not need. None of it
+# asks whether the PLANNER knows that, and it did not: the columnar path inherits
+# the sequential scan's cost, which prices every page of the relation, so reading
+# one int column out of fourteen was quoted the same as reading all fourteen.
+#
+# That is not a rounding error on a columnar engine. Column projection is the
+# reason to store data this way at all, and a planner that cannot see it declines
+# the scan precisely where it wins biggest. Measured on a 200,000-row table with
+# a 2 KB payload: an index-only scan priced 15,521 and ran 373 ms, against a
+# columnar scan priced 27,682 that ran 8 ms -- the plan 44x faster was declined
+# because it was quoted as reading a relation it never touches.
+#
+# It stayed hidden because a second error cancelled it. The zone-map discount
+# read pg_stats.correlation and credited a correlated key with skipping half the
+# relation, on a table whose two chunk groups are both read (measured: "Chunk
+# Groups Removed by Filter: 0"). A fictional pruning discount of ~0.5 stood in
+# for the real width discount that was missing, and test/planner_choice_quality.sh
+# passed on the product of the two. #461 removes the fiction, which is why this
+# has to be priced properly first.
+#
+# The oracle is BUFFERS, measured above, not a re-derivation of the cost formula.
+# A cost model checked against its own arithmetic asserts nothing.
+
+# Cost of the columnar scan node itself, not the plan total: the aggregate above
+# it costs the same either way and would dilute the ratio.
+scan_cost() {	# $1 = sql
+	psql_run "SET max_parallel_workers_per_gather=0; EXPLAIN $1;" 2>/dev/null |
+		grep -E 'PgColumnar' | grep -oE 'cost=[0-9.]+\.\.[0-9.]+' |
+		head -1 | sed 's/.*\.\.//'
+}
+
+NARROW_SQL="SELECT count(id) FROM t"
+WIDE_SQL="SELECT count(id), count(txt), count(pad1), count(pad2), count(pad3),
+                 count(pad4), count(pad5), count(pad6), count(pad7), count(pad8) FROM t"
+
+NARROW_BUF=$(bufs on "$NARROW_SQL")
+WIDE_BUF=$(bufs on "$WIDE_SQL")
+NARROW_COST=$(scan_cost "$NARROW_SQL")
+WIDE_COST=$(scan_cost "$WIDE_SQL")
+echo "-- one column of fourteen: buffers $NARROW_BUF vs $WIDE_BUF, cost $NARROW_COST vs $WIDE_COST"
+
+# The physical premise. If the narrow read did not actually touch fewer buffers
+# there would be nothing for the cost model to reflect, and the check below would
+# be demanding a discount that is not owed.
+check_num "premise: the narrow projection really does read far fewer buffers" \
+	"$([ -n "$NARROW_BUF" ] && [ -n "$WIDE_BUF" ] &&
+	   awk "BEGIN{exit !($WIDE_BUF > 0 && $NARROW_BUF < $WIDE_BUF * 0.5)}" && echo 1 || echo 0)" "1"
+
+check_num "premise: both scan costs are measurements" \
+	"$([ -n "$NARROW_COST" ] && [ -n "$WIDE_COST" ] &&
+	   awk "BEGIN{exit !($NARROW_COST > 0 && $WIDE_COST > 0)}" && echo 1 || echo 0)" "1"
+
+# A margin, not a bare "<". Two undiscounted prices differ by rounding, and a
+# bare comparison would report that as the model working.
+check_num "the cost model prices a narrow projection below a wide one" \
+	"$(awk "BEGIN{print ($NARROW_COST < $WIDE_COST * 0.8) ? 1 : 0}")" "1"
+
 pgc_summary
