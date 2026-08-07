@@ -1425,4 +1425,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgcolumnar.analyze(regclass, text[])
-	IS 'collect per-column statistics by reading one column at a time, taking null_frac exactly from the zone maps rather than sampling (#414); core ANALYZE remains the correctness path and nothing schedules this, see #415';
+	IS 'collect per-column statistics by reading one column at a time rather than sampling every column (#414); null_frac, n_distinct and the most-common frequencies all come from that read, so they describe one population (#485); core ANALYZE remains the correctness path and nothing schedules this, see #415';
