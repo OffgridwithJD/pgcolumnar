@@ -644,6 +644,17 @@ extern void PgColumnarReadStats(PgColumnarReadState *readState,
 							  uint64 *groupsTotal);
 extern uint64 PgColumnarVectorsSkipped(PgColumnarReadState *readState);
 
+/*
+ * How many of the scan keys the reader was handed became skip predicates it can
+ * actually exclude a chunk group with (#479). Never larger than the scan-key
+ * count EXPLAIN reports as "Columnar Pushed-Down Filters", and smaller whenever
+ * pgcolumnar_make_predicates dropped a key -- a cross-type pair the opfamily has
+ * no ordering proc for, a strategy outside BTLess..BTGreater, a null-test or
+ * row-comparison key. Those keys are still counted as pushed down, and skip
+ * nothing.
+ */
+extern int	PgColumnarReadUsablePredicates(PgColumnarReadState *readState);
+
 /* cached base-liveness for a projection scan (gap 26): build once per scan,
  * probe per row with a binary search instead of a per-row catalog scan */
 typedef struct PgColumnarLivenessCache PgColumnarLivenessCache;

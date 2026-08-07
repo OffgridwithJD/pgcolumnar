@@ -595,6 +595,13 @@ typedef struct PgColumnarAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		groupsTotal;
+
+	/*
+	 * How many of npreds the reader could actually exclude a group with (#479).
+	 * Captured from the read state beside the counters above, because the read
+	 * state is ended before EXPLAIN runs. Meaningful only when haveStats.
+	 */
+	int			usablePreds;
 } PgColumnarAggScanState;
 
 static const CustomExecMethods pgcolumnar_agg_exec_methods;
@@ -688,6 +695,7 @@ typedef struct PgColumnarGroupAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		groupsTotal;
+	int			usablePreds;	/* of npreds, how many can exclude (#479) */
 } PgColumnarGroupAggScanState;
 
 static const CustomExecMethods pgcolumnar_groupagg_exec_methods;
@@ -3255,6 +3263,7 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 
 	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
+	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 	PgColumnarEndRead(rs);
@@ -3388,6 +3397,7 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 	{
 		PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 						  &state->groupsTotal);
+		state->usablePreds = PgColumnarReadUsablePredicates(rs);
 		state->haveStats = true;
 	}
 
@@ -3532,6 +3542,18 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 
 	if (state->haveStats)
 	{
+		/*
+		 * See PgColumnarExplainCustomScan: npreds above counts the quals that
+		 * became scan keys, this counts the ones the reader can exclude a chunk
+		 * group with, and only the pair distinguishes an unselective predicate
+		 * from an unusable one (#479). This node fills npreds from
+		 * PgColumnarCountConvertibleQuals, which is the same built-key count the
+		 * scalar node reports, so it has the same gap and needs the same second
+		 * number -- otherwise one line of plan text would mean two different
+		 * things depending on which node ran.
+		 */
+		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
+							   state->usablePreds, es);
 		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
 							   (int64) state->groupsTotal, es);
 		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
@@ -4095,6 +4117,7 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 
 	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
+	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->haveStats = true;
 
 	PgColumnarEndRead(rs);
@@ -4208,6 +4231,9 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 
 	if (state->haveStats)
 	{
+		/* of those, the ones that can exclude a chunk group (#479) */
+		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
+							   state->usablePreds, es);
 		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
 							   (int64) state->groupsTotal, es);
 		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,

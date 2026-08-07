@@ -14,6 +14,20 @@ which was true until that script existed.
 
 ### Added
 
+- `EXPLAIN (ANALYZE)` now reports `Columnar Usable Skip Predicates` beside
+  `Columnar Pushed-Down Filters` (#479). The existing line counts the filters the
+  scan was handed and is unchanged; the new one counts how many of those the
+  reader can actually skip chunk groups with. A filter whose types have no
+  ordering function for the pair is dropped by the reader and excludes nothing,
+  and until now the plan reported it as pushed down with no way to see the
+  difference. That is how #477 went unseen for a year, and how
+  `test/zonemap_cost.sh` validated a cost discount against a fixture that pruned
+  zero groups.
+
+  All three nodes that print the original line report the new one: the scalar
+  custom scan and both vectorized aggregate nodes. The new line needs `ANALYZE`,
+  since it describes what the scan built at execution.
+
 - `pgcolumnar.analyze()` now collects `most_common_vals` and `most_common_freqs`,
   and excludes those values from `histogram_bounds` (#414). Frequencies are exact
   counts over the total row count rather than sample estimates. PostgreSQL 18 and

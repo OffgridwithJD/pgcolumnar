@@ -1889,6 +1889,27 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		PgColumnarReadStats(cstate->readState, &groupsRead, &groupsSkipped,
 						  &groupsTotal);
 
+		/*
+		 * How many of those filters the reader can actually exclude a chunk
+		 * group with (#479). The line above counts the scan keys the scan was
+		 * GIVEN; pgcolumnar_make_predicates then drops any it cannot evaluate
+		 * against the stored min/max, and a dropped key skips nothing.
+		 *
+		 * Reported separately rather than replacing the line above, because the
+		 * two answer different questions and #191 shows both get asked: that one
+		 * says whether pgcolumnar.enable_qual_pushdown took effect, this one says
+		 * whether the predicates it pushed can prune. A single number cannot say
+		 * both, and saying only the first is how #477 stayed invisible for a
+		 * year -- "Pushed-Down Filters: 1" beside "Chunk Groups Removed by
+		 * Filter: 0" reads as an unselective predicate and meant an unusable one.
+		 *
+		 * No enable_qual_pushdown ternary here: with the setting off the reader
+		 * builds no predicates, so this is already 0. It describes the run.
+		 */
+		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
+							   PgColumnarReadUsablePredicates(cstate->readState),
+							   es);
+
 		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
 							   (int64) groupsTotal, es);
 		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,

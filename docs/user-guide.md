@@ -136,6 +136,36 @@ controlled by a setting in the [Configuration reference](configuration.md):
   avg, min, or max on a supported type.
 - `count(*)` answered from catalog metadata when there is no filter.
 
+#### Reading the filter counters
+
+`EXPLAIN (ANALYZE)` reports two counters for filters. They answer different
+questions and are read together:
+
+- `Columnar Pushed-Down Filters` is how many filters the scan was given. It
+  follows the `pgcolumnar.enable_qual_pushdown` setting.
+- `Columnar Usable Skip Predicates` is how many of those the scan can skip chunk
+  groups with. A filter is not usable when the two types being compared have no
+  ordering function for that pair. The scan then applies the filter to each row
+  and returns the same result, after it reads every group.
+
+```
+Columnar Pushed-Down Filters: 1
+Columnar Usable Skip Predicates: 0
+Columnar Chunk Groups Removed by Filter: 0
+```
+
+That plan read the whole table. The `1` and the `0` mean that the filter reached
+the scan and the scan could not use it. That is a different situation from a
+usable filter that matches most rows.
+
+When the two numbers are equal and no groups are removed, the filter is usable.
+The values are then spread across every group, so the scan can skip none of them.
+Cluster the table on that column with `pgcolumnar.cluster()` to change that
+result. See the [SQL reference](sql-reference.md).
+
+`Columnar Usable Skip Predicates` requires `ANALYZE`, because it reports what the
+scan built at execution. A plain `EXPLAIN` shows only the first counter.
+
 ### Point lookups and indexes
 
 Create indexes on columnar tables as usual:
