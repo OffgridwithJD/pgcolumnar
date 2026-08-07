@@ -762,13 +762,15 @@ run was on 2026-08-05, and upstream carried the digests above a day later. That
 is an inference and not a measurement. The next run is the first that will state
 it.
 
-**These numbers are documentation, and the NonCommercial term governs what else
-they may be used for.** Publishing our own test results here is permitted: we
-measure to compare, and to catch our own regressions. Reusing them in promotional
-material, a corporate brochure, a sales deck or a paid advertisement is not, and
-producing the numbers ourselves does not change that, because the benchmark
-definition they came from is the licensed material. The full list of prohibited
-uses is in `PROVENANCE.md` beside the owner's determination of 2026-08-06.
+**These numbers are documentation**, and the NonCommercial term governs their
+reuse. Publishing our own test results here is permitted. We measure to compare,
+and to catch our own regressions.
+
+Reuse in promotional material, a corporate brochure, a sales deck or a paid
+advertisement is not permitted. Producing the numbers ourselves does not change
+that. The benchmark definition they came from is the licensed material. The full
+list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
+of 2026-08-06.
 
 The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
