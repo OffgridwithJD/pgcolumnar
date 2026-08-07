@@ -28,6 +28,57 @@ LIBDIR="$("$PGC_PG_CONFIG" --pkglibdir 2>/dev/null || echo "")"
 [ -n "$LIBDIR" ] || LIBDIR="$(pgc_pg "pg_config --pkglibdir" | tail -1 | tr -d '\r')"
 MOD="$LIBDIR/pgcolumnar_objstore.so"
 
+# Recover from a stash left by an interrupted run, and decide which kind it is.
+#
+# An interrupt between a move and its restore leaves a .probe or .away behind. The
+# dangerous case is real: inside the broken-module arm below, this run's STAND-IN
+# is installed as the module and the real one is parked at .away, so a later run
+# that moved the stand-in aside would overwrite the only real copy with 19 bytes
+# of garbage and destroy the installation. Running alone does not prevent it,
+# because the two runs are sequential.
+#
+# But refusing on PRESENCE alone refuses forever. Every matrix leg runs
+# `make install`, so the ordinary leftover is debris sitting beside a module that
+# is already fine, and this suite then stays red on that major until somebody
+# moves a file by hand. On 2026-08-06 a .probe from 15:09 did exactly that to PG17
+# in a five-major matrix, while the other 119 suites passed.
+#
+# What tells the two apart is the module BESIDE the stash, not the stash. nm is
+# required above, so this discriminator cannot go quiet the way a bare -e test can.
+stash_is_debris() {
+	[ -e "$MOD" ] || return 1
+	[ "$(nm -D --defined-only "$MOD" 2>/dev/null |
+		grep -c ' T pgcolumnar_objstore_init')" -ge 1 ]
+}
+for stash in "$MOD.away" "$MOD.probe"; do
+	[ -e "$stash" ] || continue
+	if stash_is_debris; then
+		echo "NOTE  $stash was left by an interrupted run. The installed module is"
+		echo "      valid, so the stash is debris; removing it and continuing."
+		rm -f "$stash"
+		continue
+	fi
+	# Nothing valid is installed, so this stash is the only surviving copy. Put it
+	# back. The old advice was to do this by hand, which is why an interrupt on one
+	# run reddened every later run on that major until somebody read the message.
+	echo "NOTE  $stash was left by an interrupted run, and the module beside it is"
+	echo "      missing or not a module, so the stash is the only surviving copy."
+	echo "      Restoring it and continuing."
+	rm -f "$MOD"
+	mv "$stash" "$MOD"
+	# Restoring garbage is not recovery. If the stash was not a module either,
+	# every check below would run against a broken installation and report the
+	# confusing half of the truth, so stop here and say which file to look at.
+	if ! stash_is_debris; then
+		echo "FAIL  restored $stash to $MOD, but that is not a module either."
+		echo "      This installation needs 'make install' before the suite can run."
+		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_FAIL=1
+		pgc_summary
+		exit 1
+	fi
+done
+
 check "the main library is installed" \
 	"$(pgc_pg "test -f '$LIBDIR/pgcolumnar.so' && echo yes || echo no" | tail -1)" "yes"
 check "the object-store module is installed BESIDE it, not inside it" \
@@ -95,21 +146,6 @@ check_num "a relative path is not mistaken for a URL" \
 # This suite also runs ALONE in the matrix, because the file it moves is shared with
 # every other suite in the run.
 #
-# Refuse to start on a leftover .away. An interrupt between the move and the restore
-# leaves this run's STAND-IN installed as the module and the real one parked at
-# .away; a second run would then move the stand-in to .away, overwriting the only
-# real copy with 19 bytes of garbage. That destroys the installation, and running
-# alone does not prevent it because the two runs are sequential.
-for stash in "$MOD.away" "$MOD.probe"; do
-	[ -e "$stash" ] || continue
-	echo "FAIL  $stash exists, so an earlier run was interrupted mid-move."
-	echo "      Restore it by hand:  mv '$stash' '$MOD'"
-	echo "      Continuing would overwrite the real module with this run's stand-in."
-	PGC_CHECKS=$((PGC_CHECKS + 1))
-	PGC_FAIL=1
-	pgc_summary
-	exit 1
-done
 
 # Armed BEFORE the writability probe below, which is itself a move. The first
 # version armed it after, leaving a two-syscall window in which an interrupt left
