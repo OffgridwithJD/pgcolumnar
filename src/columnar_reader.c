@@ -17,10 +17,14 @@
 #include "fmgr.h"
 #include "access/detoast.h"
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/tupmacs.h"
 #include "access/xact.h"
+#include "catalog/pg_am.h"
+#include "commands/defrem.h"
 #include "miscadmin.h"
+#include "utils/lsyscache.h"
 #include "port/atomics.h"
 #include "port/pg_bitutils.h"
 #include "utils/memutils.h"
@@ -412,6 +416,7 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		int			attidx;
 		Form_pg_attribute att;
 		TypeCacheEntry *tce;
+		bool		crossType;
 
 		/* only plain "column op const" comparison keys are usable */
 		if (key->sk_flags & (SK_ISNULL | SK_ROW_HEADER | SK_ROW_MEMBER |
@@ -427,9 +432,8 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		attidx = key->sk_attno - 1;
 		att = TupleDescAttr(readState->tupdesc, attidx);
 
-		/* avoid cross-type comparisons that our column cmp proc cannot do */
-		if (OidIsValid(key->sk_subtype) && key->sk_subtype != att->atttypid)
-			continue;
+		crossType = (OidIsValid(key->sk_subtype) &&
+					 key->sk_subtype != att->atttypid);
 
 		tce = lookup_type_cache(att->atttypid,
 								TYPECACHE_CMP_PROC_FINFO |
@@ -437,11 +441,50 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		if (!OidIsValid(tce->cmp_proc_finfo.fn_oid))
 			continue;
 
+		/*
+		 * A cross-type key needs the comparison proc for the PAIR of types, not
+		 * the column type's default one (#477).
+		 *
+		 * This used to skip the key outright, with the comment "avoid cross-type
+		 * comparisons that our column cmp proc cannot do". That was correct about
+		 * the proc and wrong about the remedy: handing an int4 Datum to
+		 * btint8cmp would read a value that is not there, so refusing was right,
+		 * but refusing meant an int8 column compared against a bare integer
+		 * literal skipped NOTHING. Measured on identical data in two columns:
+		 * `idi > 16000` removed 7 chunk groups of 10, `seq > 16000` removed 0,
+		 * and `seq > 16000::bigint` removed 7. That is ordinary SQL, not an edge
+		 * case, and EXPLAIN still reported the filter as pushed down because that
+		 * counter counts scan keys rather than predicates able to exclude.
+		 *
+		 * btree opfamilies carry exactly this: integer_ops supplies btint84cmp
+		 * for (int8, int4). Ask the column's default opfamily for the ordering
+		 * proc over both types, and where it has none, keep skipping the key --
+		 * which is the old behaviour, still correct, now the fallback rather than
+		 * the rule.
+		 */
+		if (crossType)
+		{
+			Oid			opclass = GetDefaultOpClass(att->atttypid, BTREE_AM_OID);
+			Oid			opfamily;
+			Oid			cmpProc;
+
+			if (!OidIsValid(opclass))
+				continue;
+			opfamily = get_opclass_family(opclass);
+			cmpProc = get_opfamily_proc(opfamily, att->atttypid,
+										key->sk_subtype, BTORDER_PROC);
+			if (!OidIsValid(cmpProc))
+				continue;
+			fmgr_info_cxt(cmpProc, &readState->predicates[n].cmpFn,
+						  readState->readContext);
+		}
+		else
+			fmgr_info_copy(&readState->predicates[n].cmpFn, &tce->cmp_proc_finfo,
+						   readState->readContext);
+
 		readState->predicates[n].attidx = attidx;
 		readState->predicates[n].strategy = key->sk_strategy;
 		readState->predicates[n].compareValue = key->sk_argument;
-		fmgr_info_copy(&readState->predicates[n].cmpFn, &tce->cmp_proc_finfo,
-					   readState->readContext);
 		readState->predicates[n].collation = att->attcollation;
 
 		/*
@@ -450,9 +493,17 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		 * built. The scan key already matches the column collation (a
 		 * differently collated predicate is not pushed; see PgColumnarBuildScanKeys),
 		 * so hashing the constant under the column collation is consistent.
+		 *
+		 * NOT for a cross-type key (#477). The filter was built by hashing
+		 * COLUMN-type values, so hashing an int4 constant with the int8 hash proc
+		 * probes a slot the writer never set and the group is skipped although it
+		 * may hold the row: a wrong answer, where the min/max path above is only
+		 * ever conservative. Cross-type equality therefore keeps min/max pruning
+		 * and forgoes the bloom probe.
 		 */
 		readState->predicates[n].hasHash = false;
-		if (key->sk_strategy == BTEqualStrategyNumber &&
+		if (!crossType &&
+			key->sk_strategy == BTEqualStrategyNumber &&
 			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
 			PgColumnarCollationIsDeterministic(att->attcollation))
 		{
@@ -714,12 +765,22 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 			c1 = DatumGetInt32(FunctionCall2Coll(&pred->cmpFn, pred->collation,
 												 minv, pred->compareValue));
 			return (c1 > 0);
-		case BTEqualStrategyNumber: /* col = const : skip if const<min or const>max */
+		case BTEqualStrategyNumber: /* col = const : skip if min>const or max<const */
+
+			/*
+			 * Column first, constant second, like every other branch here.
+			 *
+			 * This read cmp(const, min) and cmp(const, max), which is equivalent
+			 * for a same-type proc and WRONG for a cross-type one (#477): the
+			 * argument order is part of a cross-type proc's signature, so
+			 * btint84cmp(int8, int4) handed (int4, int8) reads both operands from
+			 * the wrong widths. Same test, stated from the column's side.
+			 */
 			c1 = DatumGetInt32(FunctionCall2Coll(&pred->cmpFn, pred->collation,
-												 pred->compareValue, minv));
+												 minv, pred->compareValue));
 			c2 = DatumGetInt32(FunctionCall2Coll(&pred->cmpFn, pred->collation,
-												 pred->compareValue, maxv));
-			return (c1 < 0 || c2 > 0);
+												 maxv, pred->compareValue));
+			return (c1 > 0 || c2 < 0);
 		case BTGreaterEqualStrategyNumber:	/* col >= const : skip if max < const */
 			c2 = DatumGetInt32(FunctionCall2Coll(&pred->cmpFn, pred->collation,
 												 maxv, pred->compareValue));
