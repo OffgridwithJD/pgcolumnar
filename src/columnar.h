@@ -869,6 +869,19 @@ extern Node *PgColumnarCreateGroupAggScanState(CustomScan *cscan);
 extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
 									 TupleDesc tupdesc, int *nkeys);
 
+/*
+ * How many chunk groups the planner samples when estimating how much a
+ * restriction prunes (#461). Constant work per plan whatever the table's size:
+ * evaluating every group is O(groups) catalog reads on every plan, including
+ * plans that are discarded. Costing compares two plans, so it does not need
+ * three digits of precision.
+ */
+#define PGCOLUMNAR_PRUNE_SAMPLE_GROUPS 32
+
+extern double PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc,
+											List *qual, Index scanrelid,
+											uint64 ngroups, int sampleTarget);
+
 /* -------------------------------------------------------------------------
  * vectorized aggregation and filtering (pgcolumnar_vector.c, spec 9)
  * ------------------------------------------------------------------------- */

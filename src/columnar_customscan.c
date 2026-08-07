@@ -781,95 +781,6 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
 }
 
 /*
- * pgcolumnar_restriction_correlation
- *		The strongest column correlation among the restriction clauses that a
- *		zone map can prune on, as |rho| in [0, 1]. Zero when nothing qualifies.
- *
- *		Only `Var op Const` on an ordered, fixed-width type counts, because that
- *		is what the reader's row-group skip actually evaluates: it compares the
- *		constant against the chunk's stored minimum and maximum. A LIKE, an
- *		expression key or a join clause prunes nothing, and counting one here
- *		would discount a scan that does the full work (#426 is the open issue for
- *		text predicates; until it lands they must not be priced as if they prune).
- */
-static double
-pgcolumnar_restriction_correlation(RelOptInfo *rel, Oid heapRelid)
-{
-	ListCell   *lc;
-	double		best = 0.0;
-
-	foreach(lc, rel->baserestrictinfo)
-	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-		OpExpr	   *op;
-		Node	   *leftop;
-		Node	   *rightop;
-		Var		   *var;
-		HeapTuple	st;
-		AttStatsSlot sslot;
-		Oid			sortop;
-
-		if (!IsA(rinfo->clause, OpExpr))
-			continue;
-		op = (OpExpr *) rinfo->clause;
-		if (list_length(op->args) != 2)
-			continue;
-		leftop = (Node *) linitial(op->args);
-		rightop = (Node *) lsecond(op->args);
-
-		/* Var on one side, Const on the other; either order. */
-		if (IsA(leftop, Var) && IsA(rightop, Const))
-			var = (Var *) leftop;
-		else if (IsA(rightop, Var) && IsA(leftop, Const))
-			var = (Var *) rightop;
-		else
-			continue;
-
-		if (var->varno != rel->relid || var->varattno <= 0)
-			continue;
-		/* A zone map stores min and max of a fixed-width ordered value. */
-		if (get_typlen(var->vartype) <= 0 || !get_typbyval(var->vartype))
-			continue;
-
-		/*
-		 * The type's default btree "<", which is the operator ANALYZE keys the
-		 * correlation slot on. Asked of the type cache rather than derived from
-		 * the clause's own operator: get_ordering_op_for_equality_op took two
-		 * arguments through PG17 and three later, and this needs no more than
-		 * the default ordering in any of those majors.
-		 */
-		{
-			TypeCacheEntry *tc = lookup_type_cache(var->vartype,
-												   TYPECACHE_LT_OPR);
-
-			if (tc == NULL || !OidIsValid(tc->lt_opr))
-				continue;
-			sortop = tc->lt_opr;
-		}
-
-		st = SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(heapRelid),
-							 Int16GetDatum(var->varattno), BoolGetDatum(false));
-		if (!HeapTupleIsValid(st))
-			continue;
-		if (get_attstatsslot(&sslot, st, STATISTIC_KIND_CORRELATION, sortop,
-							 ATTSTATSSLOT_NUMBERS))
-		{
-			if (sslot.nnumbers == 1)
-			{
-				double		corr = fabs(sslot.numbers[0]);
-
-				if (corr > best)
-					best = corr;
-			}
-			free_attstatsslot(&sslot);
-		}
-		ReleaseSysCache(st);
-	}
-
-	return (best > 1.0) ? 1.0 : best;
-}
-
-/*
  * pgcolumnar_projected_width_fraction
  *		The share of a row's stored width this scan actually reads, in (0, 1].
  *		One means every column is referenced.
@@ -989,26 +900,12 @@ pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
 static double
 pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
 {
-	double		sel;
-	double		rho;
 	double		survival;
 	double		floorFrac;
 	double		groups;
 
 	if (rel->baserestrictinfo == NIL || rel->tuples <= 0)
 		return 1.0;
-
-	rho = pgcolumnar_restriction_correlation(rel, heapRelid);
-	if (rho <= 0.0)
-		return 1.0;
-
-	sel = rel->rows / rel->tuples;
-	if (sel < 0.0)
-		sel = 0.0;
-	if (sel >= 1.0)
-		return 1.0;
-
-	survival = sel + (1.0 - rho * rho) * (1.0 - sel);
 
 	/*
 	 * One row group's share, from the group size THIS TABLE was written with.
@@ -1040,6 +937,57 @@ pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
 			return 1.0;
 		groups = ceil(rel->tuples / (double) limit);
 	}
+	if (groups < 1.0)
+		return 1.0;
+
+	/*
+	 * Measure, rather than infer from correlation (#461).
+	 *
+	 * This read pg_stats.correlation and interpolated on rho^2. Correlation is a
+	 * GLOBAL agreement between value order and physical order; pruning is LOCAL,
+	 * needing only each group's own min and max to be narrow. The two come apart
+	 * exactly where this engine is aimed: batch-loaded time-series is globally
+	 * unsorted and locally tight, and #391 measured a TSBS `time` column with
+	 * correlation 0.0133 removing 82 percent of chunk groups. Under the old model
+	 * that column earned nothing. #381 made this same mistake in documentation and
+	 * #391 corrected it; the planner then reintroduced it.
+	 *
+	 * So ask the reader's question with the reader's own code: build the same skip
+	 * predicates and evaluate them against a bounded sample of the groups' zone
+	 * maps. A proxy's error direction is unknowable, a sample's is just sampling
+	 * error, and a discount taken by a different rule than the one that priced it
+	 * is how a plan gets chosen for a saving it never realises.
+	 */
+	{
+		Relation	r = table_open(heapRelid, AccessShareLock);
+
+		/*
+		 * extract_actual_clauses(..., false), NOT get_actual_clauses.
+		 *
+		 * get_actual_clauses carries Assert(!rinfo->pseudoconstant), and a
+		 * pseudoconstant qual is not exotic: `WHERE (SELECT false)` produces one,
+		 * as a one-time filter. On an assert-enabled build that took down two
+		 * native_groupagg checks with a bare QUERY_ERROR. Excluding them is also
+		 * right on the merits -- a one-time filter is evaluated once for the whole
+		 * scan and prunes no chunk group, so it has nothing to contribute here.
+		 */
+		survival = PgColumnarEstimatePruneSurvival(PgColumnarStorageId(r),
+												   RelationGetDescr(r),
+												   extract_actual_clauses(rel->baserestrictinfo,
+																		  false),
+												   rel->relid,
+												   (uint64) groups,
+												   PGCOLUMNAR_PRUNE_SAMPLE_GROUPS);
+		table_close(r, AccessShareLock);
+	}
+
+	/*
+	 * The floor is not decoration, and it matters more now than it did. A sample
+	 * that happens to hit only excluded groups reports a survival of zero, and a
+	 * scan matching anything at all must still read the group its match is in.
+	 * #171 was a full scan priced at 1.00 beating an index scan priced at 174.29,
+	 * turning a point lookup into 1251.88 ms.
+	 */
 	floorFrac = (groups >= 1.0) ? (1.0 / groups) : 1.0;
 	if (survival < floorFrac)
 		survival = floorFrac;
