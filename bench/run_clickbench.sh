@@ -161,7 +161,7 @@ PSQL="$BINDIR/psql -h /tmp -p $CB_PORT -U postgres -d clickbench -X -q"
 # 0. Preconditions, once, loudly
 # ---------------------------------------------------------------------------
 note "== preconditions"
-for t in curl awk zcat "$BINDIR/psql" "$BINDIR/initdb" "$BINDIR/pg_ctl"; do
+for t in curl awk zcat sha256sum cmp "$BINDIR/psql" "$BINDIR/initdb" "$BINDIR/pg_ctl"; do
 	command -v "$t" >/dev/null 2>&1 || [ -x "$t" ] || die "missing tool: $t"
 done
 mkdir -p "$CB_DATA" || die "cannot write $CB_DATA"
@@ -173,15 +173,63 @@ note "   rows:      $CB_ROWS    tries: $CB_TRIES    arms: $CB_ARMS"
 # 1. The definition, fetched rather than vendored
 # ---------------------------------------------------------------------------
 note "== fetching the ClickBench definition (not stored in this repository)"
+#
+# Re-fetched EVERY run, on purpose: the point of not vendoring the definition is
+# that the benchmark tracks upstream, and a cached copy silently pins it to
+# whatever was current the first time this ever ran on the machine. An earlier
+# version kept the cache when the file was merely present, so "fetched at run
+# time" was true once and false afterwards.
+#
+# PGC_CB_OFFLINE=1 keeps an existing copy without reaching the network, for a
+# machine that has none. It says so in the output, because a run against a stale
+# definition is not comparable to one against the current definition and the
+# difference must not be invisible in the log.
+#
+# curl gets --fail, and the fetched bytes are checked for the shape they are
+# supposed to have before they replace a good copy. Both matter, and the second
+# is not redundant:
+#
+#   -sSL without --fail treats HTTP 404 as SUCCESS. GitHub answers a bad path
+#   with a 21-byte "404: Not Found" body and a 404 status, so curl exited 0 and
+#   wrote that page over the real definition. `[ -s ]` was satisfied -- the page
+#   is not empty -- the digest was computed and printed, and the run continued
+#   against an error page. Measured while writing this, with a deliberately bad
+#   URL. The give-away was both files having the same digest.
+#
+# So: --fail rejects the status, the grep rejects a body that is not the file we
+# asked for, and neither replaces the existing copy until both pass.
 for f in create.sql queries.sql; do
-	if [ ! -s "$CB_DATA/$f" ]; then
-		curl -sSL --retry 3 --max-time 120 -o "$CB_DATA/$f" "$CB_URL_BASE/$f" \
-			|| die "could not fetch $f"
-		note "   fetched $f"
+	case "$f" in
+		create.sql)		shape='CREATE TABLE' ;;
+		queries.sql)	shape='SELECT' ;;
+	esac
+	if [ "${PGC_CB_OFFLINE:-0}" = 1 ]; then
+		[ -s "$CB_DATA/$f" ] || die "PGC_CB_OFFLINE=1 but $CB_DATA/$f is not there"
+		note "   OFFLINE: using the existing $f, which may not be current"
+	elif curl -fsSL --retry 3 --max-time 120 -o "$CB_DATA/$f.new" "$CB_URL_BASE/$f" \
+			&& [ -s "$CB_DATA/$f.new" ] \
+			&& grep -qi "$shape" "$CB_DATA/$f.new"; then
+		if [ -s "$CB_DATA/$f" ] && ! cmp -s "$CB_DATA/$f" "$CB_DATA/$f.new"; then
+			note "   fetched $f -- CHANGED since the last run on this machine"
+		else
+			note "   fetched $f"
+		fi
+		mv "$CB_DATA/$f.new" "$CB_DATA/$f"
 	else
-		note "   have $f already"
+		rm -f "$CB_DATA/$f.new"
+		die "could not fetch $f (set PGC_CB_OFFLINE=1 to run against the copy already here)"
 	fi
 done
+
+# The digest of what actually ran. A published number is only reproducible if the
+# definition it came from can be identified, and "fetched from main" does not
+# identify anything -- main moves. Cite these beside any result.
+CB_SHA_CREATE=$(sha256sum "$CB_DATA/create.sql" | cut -c1-16)
+CB_SHA_QUERIES=$(sha256sum "$CB_DATA/queries.sql" | cut -c1-16)
+note "   definition: create.sql $CB_SHA_CREATE  queries.sql $CB_SHA_QUERIES"
+require "the create.sql digest was computed" "${#CB_SHA_CREATE}" "16" || exit 1
+require "the queries.sql digest was computed" "${#CB_SHA_QUERIES}" "16" || exit 1
+
 NQUERIES=$(grep -c 'SELECT' "$CB_DATA/queries.sql")
 require "the query file holds 43 queries" "$NQUERIES" "43" || exit 1
 # The column count is asserted against the CREATED TABLE further down, not
