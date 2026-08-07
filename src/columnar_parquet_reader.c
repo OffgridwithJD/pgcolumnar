@@ -18,6 +18,7 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_objstore.h"
 #include "columnar_parquet_format.h"
 #include "columnar_thrift.h"
 #include "columnar_parquet_codec.h"
@@ -1407,29 +1408,54 @@ decode_plain_bools(const uint8 *buf, size_t buflen, int n, Datum *out)
 }
 
 /*
- * An open Parquet file, read on demand.
+ * An open Parquet file, read on demand, behind a byte source (#393).
  *
  * Only the footer is held: `meta` is the serialized file metadata, and the
  * parsed PqFile's chunk statistics (PqChunk.stat_min and stat_max) point into
  * it, so it must outlive every consumer of those pointers, which means the whole
  * scan of this file. Page bytes are read as they are needed, so peak memory does
  * not scale with the file.
+ *
+ * Every one of those reads goes through pq_source_read, a positional read whose
+ * callers have already bounded the offset. That makes it the one seam a remote
+ * source has to replace, and the reason object storage touches three functions
+ * rather than the reader.
+ *
+ * `ops` dispatches, and is never NULL: the local file path is an implementation
+ * like any other, not a fallback the dispatcher tests for. That is deliberate.
+ * A sentinel would leave the dispatch branch unexecuted by every existing test
+ * until a remote source appeared, so the seam would ship unproven and the first
+ * thing to exercise it would be network code. With pq_local_ops installed, every
+ * Parquet read in the suite runs through the vtable. A remote implementation
+ * lives in a separate, non-preloaded module so that nothing an object-store
+ * client links is mapped into the postmaster. See PgColumnarObjStoreApi.
  */
-typedef struct PqSource
+typedef struct PqSource PqSource;
+
+typedef struct PqSourceOps
 {
-	FILE	   *f;				/* AllocateFile handle (buffered) */
+	const char *name;			/* for error messages: "file", "s3", ... */
+	void		(*read) (PqSource *src, int64 off, void *buf, size_t n);
+	void		(*close) (PqSource *src);
+} PqSourceOps;
+
+struct PqSource
+{
+	const PqSourceOps *ops;		/* the implementation; never NULL once opened */
+	FILE	   *f;				/* AllocateFile handle (buffered), local only */
+	void	   *priv;			/* remote implementation's own state */
 	const char *path;			/* for error messages; palloc'd by the caller */
 	int64		len;			/* file length in bytes */
 	uint8	   *meta;			/* serialized footer metadata */
 	uint32		metalen;
-} PqSource;
+};
 
 /*
  * Read `n` bytes at `off` into `buf`. Every caller has already bounded `off` and
  * `n` against src->len; this reports the I/O failure that is left.
  */
 static void
-pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
+pq_source_read_local(PqSource *src, int64 off, void *buf, size_t n)
 {
 	Assert(off >= 0 && n <= (size_t) (src->len - off));
 	if (fseeko(src->f, (off_t) off, SEEK_SET) != 0)
@@ -1453,6 +1479,34 @@ pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
 	}
 }
 
+static void
+pq_source_close_local(PqSource *src)
+{
+	if (src->f != NULL)
+	{
+		FreeFile(src->f);
+		src->f = NULL;
+	}
+}
+
+/*
+ * The local file implementation. Named "file" because that is what appears in an
+ * error message beside "s3".
+ */
+static const PqSourceOps pq_local_ops = {
+	.name = "file",
+	.read = pq_source_read_local,
+	.close = pq_source_close_local,
+};
+
+/* The dispatchers every caller uses. */
+static void
+pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
+{
+	src->ops->read(src, off, buf, n);
+}
+
+
 /*
  * Open a Parquet file and parse its footer. Reads the two magics and the footer,
  * never the body. The error texts match what the whole-file reader raised, so a
@@ -1466,6 +1520,53 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 
 	memset(src, 0, sizeof(*src));
 	src->path = path;
+
+	/*
+	 * Set before anything below can raise, so an error path never leaves a
+	 * source whose dispatch table is NULL.
+	 */
+	src->ops = &pq_local_ops;
+
+	/*
+	 * A remote path is not a filename (#393). Without this, AllocateFile reports
+	 * "No such file or directory" for s3://bucket/key, which is true of the
+	 * filesystem and useless to the reader.
+	 *
+	 * The module is loaded here and only here, on the first remote read.
+	 *
+	 * The two failures below are REPORTED SEPARATELY, and that is not cosmetic.
+	 * They ask the operator for different things: one is "install a package",
+	 * the other is "this build will never read that URL". Collapsing them also
+	 * made the absent-module test inert, because a module that handles nothing
+	 * yet produces the same message as no module at all, so the arm that moves
+	 * the library aside passed whether or not the move succeeded.
+	 */
+	if (PgColumnarPathIsRemote(path))
+	{
+		const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+
+		if (api == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: reading \"%s\" requires the object-store module",
+							path),
+					 errdetail("Object storage support is a separate library, "
+							   "pgcolumnar_objstore, which is not installed."),
+					 errhint("Install the pgcolumnar object-store package, or "
+							 "use a local filesystem path.")));
+		if (!api->handles_url(path))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: reading \"%s\" is not supported", path),
+					 errdetail("The installed object-store module handles no "
+							   "such URL scheme."),
+					 errhint("Use a local filesystem path.")));
+		/* the remote source is wired in the next commit */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: object storage is not implemented yet")));
+	}
+
 	src->f = AllocateFile(path, PG_BINARY_R);
 	if (src->f == NULL)
 		ereport(ERROR,
@@ -1522,12 +1623,9 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 static void
 pq_source_close(PqSource *src)
 {
-	if (src->f != NULL)
-	{
-		FreeFile(src->f);
-		src->f = NULL;
-	}
+	src->ops->close(src);
 }
+
 
 /*
  * Page headers are small thrift structures, but a v2 header can carry column
@@ -2486,12 +2584,41 @@ pq_walk_dir(const char *path, int depth, List **files, int *skipped)
  *     the normal "could not open file" error for a genuine typo.
  * An empty directory or a non-matching glob is an error: the user named a set and
  * meant to read something. Returns a List of palloc'd cstrings.
+ *
+ * A REMOTE path is none of those things and must not reach any of them (#393).
+ * This runs ahead of pq_source_open at every entry point, so without the check
+ * below an s3:// key containing a glob metacharacter went to glob() against the
+ * LOCAL filesystem and came back "no files match pattern" — the filesystem-miss
+ * report for a remote path that the byte source exists to eliminate, arriving one
+ * layer above the byte source. `*`, `?` and `[` are all legal in an S3 key, so
+ * this is an ordinary key, not a crafted one.
  */
 static List *
 pq_resolve_paths(const char *path)
 {
 	struct stat st;
 	List	   *files = NIL;
+
+	if (PgColumnarPathIsRemote(path))
+	{
+		/*
+		 * v1 reads exact object keys. Expanding a pattern needs a LIST call,
+		 * whose paged XML or JSON response is a third hand-rolled parser over
+		 * input an outside party controls, which is the shape that produced #210
+		 * and #228. Refusing here is a decision, so it says so; treating the
+		 * metacharacter as a literal key byte would be the silent alternative
+		 * and would surprise anyone who typed a pattern on purpose.
+		 */
+		if (pq_has_glob_meta(path))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: cannot expand a pattern in the object-storage path \"%s\"",
+							path),
+					 errdetail("Patterns are expanded on the local filesystem "
+							   "only. Object storage is read by exact key."),
+					 errhint("Name each object explicitly.")));
+		return list_make1(pstrdup(path));
+	}
 
 	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
 	{
