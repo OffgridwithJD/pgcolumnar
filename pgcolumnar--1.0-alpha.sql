@@ -960,3 +960,251 @@ CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
 
 COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
 	IS 'atomic parallel bulk load of a COPY text file into a columnar table using background workers: a single columnar table (any row order), or a RANGE-partitioned columnar table sorted by the partition key with one distinct partition set per worker (#300)';
+
+/*
+ * Per-column statistics without reading the whole table (#414).
+ *
+ * Core ANALYZE decodes essentially the entire table. It samples a fixed 30,000
+ * rows, and on a table of any size those rows fall in every row group, so every
+ * group is decoded for every column. Measured on 3M rows x 20 columns, 1237 MB,
+ * serial: ANALYZE costs 6,302 ms against 7,680 ms to decode all nineteen text
+ * columns outright, while decoding just one column costs 268 ms.
+ *
+ * That cannot be recovered inside the table-AM callbacks, which is why this is a
+ * function. acquire_sample_rows copies whole tuples (ExecCopySlotHeapTuple), so
+ * the AM cannot decline to produce columns core is about to copy: ANALYZE of one
+ * named column costs 6,073 ms against 6,302 ms for all twenty, a 6% saving. Nor
+ * is there slack in which groups the sample touches -- at a tenth the
+ * chunk_group_row_limit the cost was unchanged, because a fixed-size sample
+ * touches proportionally more groups when they are smaller.
+ *
+ * Core ANALYZE remains the correctness path and is what autovacuum runs. This is
+ * an opt-in accelerator for wide tables and, like pgcolumnar.vacuum(), nothing
+ * schedules it: see #415.
+ *
+ * Collected so far: null_frac exactly from the zone maps (metadata only, no data
+ * read), and n_distinct exactly by reading one column. MCVs and histogram bounds
+ * still need a sample and are not collected here yet.
+ */
+CREATE FUNCTION pgcolumnar.analyze(rel regclass, columns text[] DEFAULT NULL)
+	RETURNS void
+	LANGUAGE plpgsql
+	AS $$
+DECLARE
+	sid       bigint;
+	att       record;
+	nullfrac  double precision;
+	ndistinct bigint;
+	totalrows bigint;
+	ndstat    double precision;
+	hist      text;
+	-- One fewer than the number of bounds, matching core's default_statistics_target.
+	nbuckets  integer := current_setting('default_statistics_target')::integer;
+	seen      integer := 0;
+	unknown   text;
+	schname   text;
+	relnm     text;
+BEGIN
+	/*
+	 * Writing statistics uses pg_restore_attribute_stats, which core added in
+	 * 18. On 15 to 17 this would mean writing pg_statistic directly, and the
+	 * risk there is in the values rather than the insert: stavalues is anyarray
+	 * and must carry the column's element type, typmod and collation; staop must
+	 * be the right operator for the stakind; stadistinct has a sign convention
+	 * that is easy to invert. Each of those produces plausible wrong estimates
+	 * rather than an error. Refuse clearly instead of failing obscurely inside
+	 * the call below.
+	 */
+	IF current_setting('server_version_num')::int < 180000 THEN
+		RAISE EXCEPTION 'pgcolumnar.analyze() requires PostgreSQL 18 or later'
+			USING DETAIL = 'it writes statistics through pg_restore_attribute_stats, which older majors do not have',
+				  HINT = 'use ANALYZE on this server';
+	END IF;
+
+	/*
+	 * pg_restore_attribute_stats identifies the column by schema and relation
+	 * NAME, not by regclass, and rejects a null schemaname. Resolve both from the
+	 * oid once rather than per column.
+	 */
+	SELECT n.nspname, c.relname INTO schname, relnm
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.oid = rel;
+
+	SELECT s.storage_id INTO sid
+		FROM pgcolumnar.storage s
+		WHERE s.relation_oid = rel;
+
+	IF sid IS NULL THEN
+		RAISE EXCEPTION 'pgcolumnar.analyze(): % has no columnar storage', rel::text
+			USING HINT = 'this function only applies to pgcolumnar tables that have been written to';
+	END IF;
+
+	/*
+	 * A named column that does not exist is a caller error, not a no-op. Silently
+	 * collecting nothing is the failure mode that looks exactly like success.
+	 */
+	IF columns IS NOT NULL THEN
+		SELECT c INTO unknown
+			FROM unnest(columns) AS c
+			WHERE NOT EXISTS (
+				SELECT 1 FROM pg_attribute a
+					WHERE a.attrelid = rel AND a.attname = c
+					  AND a.attnum > 0 AND NOT a.attisdropped)
+			LIMIT 1;
+		IF unknown IS NOT NULL THEN
+			RAISE EXCEPTION 'pgcolumnar.analyze(): column "%" does not exist in %',
+				unknown, rel::text;
+		END IF;
+	END IF;
+
+	FOR att IN
+		SELECT a.attname, a.attnum, a.atttypid
+			FROM pg_attribute a
+			WHERE a.attrelid = rel AND a.attnum > 0 AND NOT a.attisdropped
+			  AND (columns IS NULL OR a.attname = ANY (columns))
+			ORDER BY a.attnum
+	LOOP
+		/*
+		 * null_frac, exactly. value_count counts the values present and
+		 * null_count those absent, so the denominator is their sum rather than
+		 * value_count alone. vector_index = -1 is the whole-chunk aggregate;
+		 * summing the per-vector rows as well would double count.
+		 *
+		 * column_index is the 0-based attribute position. attnum is stable
+		 * across a dropped column, so attnum - 1 keeps pointing at the same
+		 * column after a DROP COLUMN.
+		 */
+		SELECT sum(z.null_count)::double precision
+				/ nullif(sum(z.value_count + z.null_count), 0)
+			INTO nullfrac
+			FROM pgcolumnar.zone_map z
+			WHERE z.storage_id = sid
+			  AND z.column_index = att.attnum - 1
+			  AND z.vector_index = -1;
+
+		CONTINUE WHEN nullfrac IS NULL;	/* no zone map rows: nothing exact to say */
+
+		/*
+		 * n_distinct, exactly, by reading this column and nothing else. This is
+		 * the whole point of the function: on the 3M x 20 fixture a projected
+		 * single-column read costs 268 ms where core's whole-table sample costs
+		 * 6,302 ms, because core's fixed 30,000-row sample lands in every row
+		 * group and so decodes every column of the table.
+		 *
+		 * count(DISTINCT) ignores NULLs, which is what n_distinct means.
+		 */
+		EXECUTE format('SELECT count(DISTINCT %I)::bigint, count(*)::bigint FROM %I.%I',
+					   att.attname, schname, relnm)
+			INTO ndistinct, totalrows;
+
+		/*
+		 * Core's own convention, and the sign is load-bearing: positive is an
+		 * absolute count, negative is the negated fraction of rows. analyze.c
+		 * switches to the fraction once the distinct count passes 10% of the
+		 * rows, on the grounds that such a column's cardinality tracks the table
+		 * size rather than sitting at a fixed value. Mirror it rather than always
+		 * writing the absolute count, or a column that is unique today reads as
+		 * having a fixed cardinality once the table grows.
+		 *
+		 * Getting this backwards does not raise -- it produces plausible wrong
+		 * estimates -- so it is asserted in test/analyze_function.sh against a
+		 * fixture pinned to the absolute-count side of the rule.
+		 */
+		IF totalrows > 0 THEN
+			IF ndistinct::double precision > 0.1 * totalrows::double precision THEN
+				ndstat := -(ndistinct::double precision / totalrows::double precision);
+			ELSE
+				ndstat := ndistinct::double precision;
+			END IF;
+		ELSE
+			ndstat := 0;
+		END IF;
+
+		/*
+		 * histogram_bounds, whose ends are exact because the read is complete
+		 * (#414 slice 3).
+		 *
+		 * percentile_disc over an array of fractions returns ACTUAL column
+		 * values, one per fraction, in a single ordered pass. Fraction 1.0 is
+		 * therefore the true maximum and 0.0 the true minimum, which is the
+		 * whole gain: core samples, so a value held by one row in 500,000 is
+		 * missed and every range estimate above the sampled maximum collapses.
+		 * percentile_cont would interpolate and invent values the column does
+		 * not contain, which is wrong for a histogram of stored data and wrong
+		 * for any non-numeric type.
+		 *
+		 * Only for types that can be ordered. A column with no btree ordering
+		 * has no histogram in core either, and ORDER BY would simply fail.
+		 *
+		 * Skipped when the column holds fewer distinct values than buckets: core
+		 * emits no histogram there because the most-common-value list already
+		 * describes the column completely, and writing one anyway would be a
+		 * shape core never produces.
+		 *
+		 * NOTE, and it bounds what this slice claims: core EXCLUDES
+		 * most-common-values from the histogram. This function does not write
+		 * most-common-values at all, so there is nothing here to double-count
+		 * and the two are consistent as written. Writing both without that
+		 * exclusion would over-count those values in selectivity, which is why
+		 * most_common_vals is a separate slice and not a line added here.
+		 */
+		hist := NULL;
+		IF att.attnum > 0
+		   AND EXISTS (SELECT 1 FROM pg_catalog.pg_type t
+					   JOIN pg_catalog.pg_opclass oc ON oc.opcintype = t.oid
+					   JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+					   WHERE t.oid = att.atttypid AND am.amname = 'btree')
+		   AND ndistinct > nbuckets
+		THEN
+			EXECUTE format(
+				'SELECT percentile_disc(
+						 (SELECT array_agg(i::double precision / %s ORDER BY i)
+							FROM generate_series(0, %s) i))
+					   WITHIN GROUP (ORDER BY %I)::text
+				   FROM %I.%I WHERE %I IS NOT NULL',
+				nbuckets, nbuckets, att.attname, schname, relnm, att.attname)
+				INTO hist;
+		END IF;
+
+		/*
+		 * The casts are load-bearing. pg_restore_attribute_stats takes VARIADIC
+		 * "any", so a mistyped argument is a WARNING and the value is dropped,
+		 * not an error: attname must be text (attname is `name`) and null_frac
+		 * must be real (the division yields double precision). Without these the
+		 * call "succeeds" having stored nothing.
+		 *
+		 * histogram_bounds is passed as text, which is what the function takes:
+		 * it parses the array literal against the column's own type.
+		 */
+		IF hist IS NULL THEN
+			PERFORM pg_catalog.pg_restore_attribute_stats(
+				'schemaname', schname,
+				'relname', relnm,
+				'attname', att.attname::text,
+				'inherited', false,
+				'null_frac', nullfrac::real,
+				'n_distinct', ndstat::real);
+		ELSE
+			PERFORM pg_catalog.pg_restore_attribute_stats(
+				'schemaname', schname,
+				'relname', relnm,
+				'attname', att.attname::text,
+				'inherited', false,
+				'null_frac', nullfrac::real,
+				'n_distinct', ndstat::real,
+				'histogram_bounds', hist);
+		END IF;
+
+		seen := seen + 1;
+	END LOOP;
+
+	IF seen = 0 THEN
+		RAISE EXCEPTION 'pgcolumnar.analyze(): collected statistics for no columns of %', rel::text
+			USING HINT = 'the table may have no written row groups yet';
+	END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION pgcolumnar.analyze(regclass, text[])
+	IS 'collect per-column statistics by reading one column at a time, taking null_frac exactly from the zone maps rather than sampling (#414); core ANALYZE remains the correctness path and nothing schedules this, see #415';
