@@ -982,10 +982,15 @@ COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int)
  * an opt-in accelerator for wide tables and, like pgcolumnar.vacuum(), nothing
  * schedules it: see #415.
  *
- * Collected so far, all of it exact rather than sampled: null_frac from the zone
- * maps (metadata only, no data read), n_distinct from reading one column, and
- * from that same read the most-common values with their frequencies and a
- * histogram of what remains once those are excluded.
+ * Collected so far, all of it exact rather than sampled, and all of it from ONE
+ * read of the column: null_frac, n_distinct, the most-common values with their
+ * frequencies, and a histogram of what remains once those are excluded.
+ *
+ * One read is the property that matters, not merely the source of each number.
+ * null_frac came from the zone maps until #485, which was cheaper and was wrong
+ * after a DELETE, because those counts describe what was written. Taking it from
+ * the same read as the rest is what makes every statistic here describe one
+ * population, which is the identity the planner's selectivity arithmetic needs.
  *
  * "Exact" is the whole difference and it is not a refinement of core's numbers.
  * Core samples 30,000 rows, so a value held by one row in 500,000 is missed
