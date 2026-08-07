@@ -28,9 +28,11 @@
 # This suite is about the function, not the AM sampler. test/analyze_stats.sh
 # covers the sampler (#154) and stays the correctness path for plain ANALYZE.
 #
-# Slice 1 asserts null_frac comes from the zone maps and is EXACT where core's
-# is sampled. Slice 2 asserts n_distinct is exact from reading ONE column, which
-# is the claim the whole issue rests on.
+# Slice 1 asserts null_frac is EXACT where core's is sampled. It came from the
+# zone maps until #485: those counts describe what was WRITTEN, so a DELETE left
+# the fraction normalised against rows the table no longer held. It now comes
+# from the same read as n_distinct. Slice 2 asserts n_distinct is exact from
+# reading ONE column, which is the claim the whole issue rests on.
 #
 # Usage:  test/analyze_function.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
