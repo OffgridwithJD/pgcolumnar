@@ -23,6 +23,154 @@
 
 set -uo pipefail
 
+# One name per line, and it must stay that way.
+#
+# This was a single backslash-continued line, so every pull request that adds a
+# suite edited the same line and any two of them conflicted by construction. It
+# happened four times in one day (#459 vs #462, #460 vs #462, #462 vs #468, and
+# #444 behind them) and four more times the night #446, #468 and #444 landed.
+#
+# The resolution was the dangerous part, not the conflict. Appending the new name
+# after the closing paren is valid shell that `bash -n` accepts, and it does not
+# merely leave a stray command: `NAME=value cmd` scopes the assignment to that
+# command, and an array literal is no exception, so `SUITES=(...) my_suite` leaves
+# SUITES UNSET and the matrix runs nothing at all. harness_selftest pins that (#469).
+#
+# One name per line means two pull requests adding two suites touch two different
+# lines and merge cleanly. Do not re-flow this into one line to save space.
+SUITES=(
+	harness_selftest
+	docs_style
+	smoke
+	phase2
+	phase3
+	phase4
+	phase5
+	phase6
+	audit
+	concurrency
+	unique_conc
+	differential
+	recovery
+	replication
+	native_backend_crash
+	fuzz
+	fuzz_parquet
+	fuzz_arrow
+	hardening
+	concurrent_diff
+	parallel
+	sorted_projection
+	arrow_export
+	parquet_export
+	read_stream
+	corruption
+	generated_columns
+	temporal
+	arrow_import
+	index_only
+	projections
+	arrow_nested
+	parquet_import
+	parquet_nested
+	arrow_nested_import
+	parquet_nested_import
+	native_writer
+	native_roundtrip
+	native_encoding
+	native_fastdecode
+	native_zonemap
+	write_minmax_fastpath
+	write_fsst_compressed
+	fsst_margin
+	encode_invariants
+	encode_effort
+	native_skip
+	pushdown_report
+	zonemap_cost
+	native_agg
+	native_agg_deletes
+	native_agg_addcolumn
+	native_groupagg
+	ungrouped_vector_agg
+	parallel_vector_agg
+	native_bloom
+	bloom_sizing
+	bloom_setting
+	bloom_lazy
+	native_vecskip
+	native_index
+	native_index_projection
+	native_fetch_position
+	native_dml
+	alter_column_type
+	native_ios
+	native_projection
+	native_cluster
+	pg19_vacuum_options
+	native_repack
+	native_compact
+	native_recluster
+	recluster_extent
+	native_vacuum_race
+	native_sort_by
+	sort_status
+	native_reclaim
+	native_ownership
+	drop_cleanup
+	pg_dump_roundtrip
+	native_reclaim_cycles
+	native_reclaim_frag
+	native_reclaim_reconcile
+	native_gap
+	native_format
+	native_truncate
+	native_rewrite
+	native_rewrite_conc
+	rewrite_group_scan
+	native_parquet_schema
+	native_read_parquet
+	native_parquet_fdw
+	native_parquet_pushdown
+	native_parquet_hardening
+	server_file_privilege
+	native_parquet_stack
+	native_parquet_units
+	native_parquet_flba
+	native_parquet_codecs
+	native_parquet_projection
+	native_parquet_multifile
+	native_parquet_streaming
+	native_parquet_partition
+	native_cancel
+	cancel_decode
+	wal_envelope
+	decode_interrupts
+	import_exclusion
+	import_deferred
+	parallel_copy
+	parallel_export_parquet
+	fk_referencing
+	row_triggers
+	native_lazy_slot
+	native_ctas
+	native_fetch_cache
+	native_fetch_bigcap
+	native_fetch_interrupt
+	analyze_stats
+	analyze_reltuples
+	native_fetch_projection
+	column_projection
+	advisory_lock_class
+	logical_subscriber
+	parallel_degree
+	planner_choice_quality
+	objstore_module
+	objstore_stash_recovery
+	isolation
+)
+
+
 # ---------------------------------------------------------------------------
 # Run from a private copy of this script, and refuse to run twice at once.
 #
@@ -52,6 +200,22 @@ PGC_RUN_LOCK="${PGC_RUN_LOCK:-/tmp/pgcolumnar-run_all_versions.lock}"
 # pattern misses it, and killing postmasters directly bypasses pg_ctl. This reads
 # the lock, signals the owner, and lets the owner's own trap stop the suites and
 # their clusters properly.
+# --list-suites: print the matrix's suite list, one name per line, then exit.
+#
+# It exists so that nothing has to parse this array a second time. A gate that
+# re-implements bash's array parsing in awk disagrees with bash on the very
+# mistake this array invites: a name after the closing paren is a stray COMMAND
+# to bash and a member to a text parser, so the gate passed while the suite
+# silently never ran. Asking the runner means there is one parser, bash's, and
+# no way for the two to drift.
+#
+# Handled BEFORE the run lock on purpose. harness_selftest calls this from
+# inside a running matrix, and taking the lock there would refuse to answer.
+if [ "${1:-}" = "--list-suites" ]; then
+	printf '%s\n' "${SUITES[@]}"
+	exit 0
+fi
+
 if [ "${1:-}" = "--stop" ]; then
 	if [ ! -e "$PGC_RUN_LOCK" ]; then
 		echo "no matrix run in progress (no lock at $PGC_RUN_LOCK)"
@@ -205,10 +369,6 @@ pgc_run_cleanup() {
 trap pgc_run_cleanup INT TERM
 
 SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-SUITES=(harness_selftest docs_style smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
-	differential recovery replication native_backend_crash fuzz fuzz_parquet fuzz_arrow hardening concurrent_diff parallel sorted_projection \
-	arrow_export parquet_export read_stream corruption \
-	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report zonemap_cost native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_sizing bloom_setting bloom_lazy native_vecskip native_index native_index_projection native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_bigcap native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection advisory_lock_class logical_subscriber parallel_degree planner_choice_quality objstore_module objstore_stash_recovery isolation)
 
 # Default matrix: one assert-enabled pg_config per major, 15 through 19.
 DEFAULT_CONFIGS=(
