@@ -5,16 +5,23 @@ vocabulary and the house rules, not the status. Read it before naming a
 function, a test, or an EXPLAIN line, so that new code says the same words the
 existing code says.
 
-Three documents outrank this one where they overlap, and each owns a different
+Other documents outrank this one where they overlap, and each owns a different
 question:
 
 | document | owns |
 | --- | --- |
 | `design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md` | what the format and the interface ARE |
-| `HANDOFF.md` | what has happened, what is in flight, what to pick up |
 | `design/ROADMAP.md` | what is planned |
+| `CHANGELOG.md` | what changed, per release |
 
 This file owns the words.
+
+There is also a `HANDOFF.md`, the running continuity record: what has happened,
+what is in flight, and what to pick up. **It is deliberately not in the
+repository.** It is excluded per clone through `.git/info/exclude`, so a fresh
+clone will not have one and nothing here should be written to depend on it. If
+you have it, read it; it is the single most useful file on the machine that has
+it.
 
 ## What this is
 
@@ -155,14 +162,25 @@ than a wrong algorithm.
 
 ## Building and running
 
-There is no PostgreSQL on the host. Build and test inside the container, against
-the read-only source mount, and never write build artifacts into the mount. The
-loop, the majors available, and the traps are in the `pgcolumnar-dev-loop`
-notes and in `HANDOFF.md`.
+An ordinary PGXS extension: `make PG_CONFIG=/path/to/pg_config` then
+`make install`, and a suite is `bash test/<name>.sh /path/to/pg_config`. Each
+suite stands up and tears down its own cluster, so nothing needs a server
+running first. `bash test/run_all_versions.sh <pg_config> ...` runs the matrix,
+taking one `pg_config` per major as positional arguments and defaulting to
+PostgreSQL 15 through 19 when given none.
 
-- Always pass `PG_CONFIG` to `make clean` as well as to `make`. Stale objects
+- **Always pass `PG_CONFIG` to `make clean` as well as to `make`.** Objects left
   from another major link an ABI-incompatible `.so`, and the symptom is an
-  `undefined symbol` at load time, which reads like a code defect and is not.
+  `undefined symbol` at load time, which reads like a code defect and is not. It
+  cost an hour on 2026-08-07, where five test runs produced no output because the
+  cluster never started.
+- Build out of the source tree, or clean between majors. A suite installs into
+  the prefix its `pg_config` names, so two majors sharing a prefix will overwrite
+  each other's `.so`.
+
+Where a development environment is containerised, or PostgreSQL is not on the
+host, that is a property of the machine rather than of the project, and belongs
+in local notes beside `HANDOFF.md` rather than here.
 - Cadence: PG18 and PG19 per pull request, the full PostgreSQL 15 through 19
   matrix per feature. The per-PR pair cannot see a version boundary below 18,
   which is exactly how #218 was missed.
