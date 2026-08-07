@@ -16,6 +16,24 @@ question:
 
 This file owns the words.
 
+**Where the spec and the shipped defaults disagree, the defaults are what you
+will observe.** The spec describes the native format as designed, and in two
+known places the code has not moved to meet it. Neither is a defect, and neither
+is going to announce itself:
+
+| the spec says | the code ships |
+| --- | --- |
+| a vector is a fixed 1024 values | a vector holds up to `pgcolumnar.chunk_group_row_limit` rows, default 10000 |
+| the row-group limit is 122880 rows, a multiple of the vector length | `pgcolumnar.stripe_row_limit`, default 150000 |
+
+The first is the sharper trap, because 1024 is not merely aspirational: it is
+written into the native storage catalog row as `vector_length` and then never
+read back by anything. A constant that is recorded and never consulted looks
+exactly like a constant that is enforced.
+
+Read the spec for intent and the code for behaviour. Where a fixture depends on
+one of these numbers, take it from the setting, not from the spec.
+
 There is also a `HANDOFF.md`, the running continuity record: what has happened,
 what is in flight, and what to pick up. **It is deliberately not in the
 repository.** It is excluded per clone through `.git/info/exclude`, so a fresh
