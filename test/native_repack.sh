@@ -46,10 +46,22 @@ pgc_setup "${1:-/usr/local/pg19/bin/pg_config}"
 # Version gate, and it must be VISIBLE. A suite that silently passes on 15 to 18
 # is the failure mode this project keeps finding.
 srv="$(q 'SHOW server_version_num')"
-if [ "${srv:-0}" -lt 190000 ]; then
+# An empty answer is a cluster that stopped talking, not PostgreSQL 18. ${srv:-0}
+# made those identical, so a dead postmaster reported SKIPPED and the major passed.
+#
+# The failure is raised only when it happens, rather than as a check that always
+# runs: a passing check would put PGC_CHECKS at 1, and this suite's whole verdict
+# on an older major depends on it being 0. Asserting the premise must not destroy
+# the skip it guards.
+if ! pgc_is_number "$srv"; then
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1
+	echo "FAIL  the server did not answer 'SHOW server_version_num': got [$srv]"
+	pgc_summary
+fi
+if [ "$srv" -lt 190000 ]; then
 	echo "SKIP  REPACK requires PostgreSQL 19 (server_version_num=$srv)"
-	echo "native_repack.sh: SKIPPED"
-	exit 0
+	pgc_summary
 fi
 
 ROWS=${PGC_REPACK_ROWS:-20000}

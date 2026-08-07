@@ -16,9 +16,7 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 if ! python3 -c 'import pyarrow.parquet' 2>/dev/null; then
-	echo "SKIP  pyarrow not available; codec suite needs it to write compressed files"
-	pgc_summary
-	exit 0
+	pgc_skip pyarrow "pyarrow not available; codec suite needs it to write compressed files"
 fi
 
 W="$PGC_WORKDIR"

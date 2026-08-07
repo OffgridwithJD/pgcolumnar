@@ -30,6 +30,22 @@
 PGC_FAIL=0
 PGC_CHECKS=0
 
+# The status pgc_summary uses for "ran no checks".
+#
+# NOT 2. #448 used 2 and that was wrong: 2 is a status suites already produce for
+# unrelated reasons. bash exits 2 on a parse error in the suite file (verified),
+# and the suites that run under `set -euo pipefail` -- smoke, phase2 through
+# phase6, audit -- abort with whatever status the failing command returned, so a
+# dead postmaster or a typo became "ran no checks" and every runner reported the
+# major green. That is precisely the lie #447 was opened to remove, relocated one
+# layer down.
+#
+# 66 is not produced by bash (1, 2, 126, 127, 128+n), by psql (1, 2, 3), or by
+# make. It cannot be made collision-proof -- `set -e` propagates any status an
+# aborting command returns -- so the runners ALSO require the SKIPPED line in the
+# log before believing it. Two independent signals, because one was not enough.
+PGC_EXIT_SKIPPED=66
+
 # ---- cluster identity helpers ----------------------------------------------
 
 # Normalize a directory for comparison. `cd && pwd -P` is POSIX; realpath -m is
@@ -591,12 +607,61 @@ chunk_group_count() {
 
 # ---- summary ---------------------------------------------------------------
 
+# A dependency this suite needs is not installed.
+#
+# This FAILS, and that is the point. A skip is a red that nobody has to look at,
+# which is how fifteen suites came to report PASSED while asserting nothing, and
+# how temporal.sh has been green on PG18 without btree_gist. A box that cannot run
+# a suite is not a box that passed it.
+#
+# The opt-out is explicit and per-capability, so a developer without pyarrow can
+# still work, and so the waiver is visible in the command rather than implied by
+# silence:
+#
+#     PGC_ALLOW_MISSING_PYARROW=1 test/native_parquet_units.sh
+#     PGC_ALLOW_MISSING=1         test/run_all_versions.sh
+#
+# Missing DEPENDENCY and not-applicable-to-this-MAJOR are different things and are
+# deliberately not the same code path. PostgreSQL 15 has no WITHOUT OVERLAPS to
+# test and no amount of installing will give it one, so those gates call
+# pgc_summary directly and report SKIPPED. Nothing is broken there. Here it is.
+pgc_skip() {  # pgc_skip <capability> <message>
+	local cap allow_one
+	cap="$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
+	allow_one="PGC_ALLOW_MISSING_$cap"
+	if [ "${PGC_ALLOW_MISSING:-0}" = 1 ] || [ "${!allow_one:-0}" = 1 ]; then
+		echo "SKIP  $2 (waived by $allow_one or PGC_ALLOW_MISSING)"
+		pgc_summary
+	fi
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1
+	echo "FAIL  $2"
+	echo "      A missing dependency is an environment defect, not a pass. Install"
+	echo "      it, or set $allow_one=1 to run knowingly without this coverage."
+	pgc_summary
+}
+
+# Three states, not two (#447).
+#
+# The verdict used to be a function of PGC_FAIL alone, and PGC_CHECKS was printed
+# and never read. So a suite that asserted NOTHING printed PASSED and exited 0,
+# indistinguishable from one that ran four hundred checks. Fifteen suites do that
+# whenever pyarrow is absent, which is how an entire Parquet and Arrow surface,
+# including both fuzzers, can leave a run with every line still saying PASSED.
+#
+# A suite that ran no checks did not pass. It is also not a failure: PostgreSQL 15
+# genuinely has no WITHOUT OVERLAPS to test, and a developer box without an
+# optional dependency is a supported configuration rather than a defect. Making
+# those red is the "a red everyone knows to ignore is a red nobody reads" failure
+# this tree keeps arguing against.
+#
+# So skipped is its own exit code. 0 passed, 1 failed, 2 ran nothing. The drivers
+# count 2 separately and report how many suites actually ran, which is what #422
+# did one level up for how many VERSIONS actually ran.
 pgc_summary() {
 	echo
 	echo "checks run: $PGC_CHECKS"
-	if [ "$PGC_FAIL" = "0" ]; then
-		echo "$(basename "$0"): PASSED"
-	else
+	if [ "$PGC_FAIL" != "0" ]; then
 		echo "$(basename "$0"): FAILED"
 		# A source-shape suite (wal_envelope, decode_interrupts) never calls
 		# pgc_setup, so there is no cluster and no log. Without this guard the
@@ -606,6 +671,12 @@ pgc_summary() {
 			echo "---- server log tail ----"
 			pgc_pg "tail -40 '$PGC_LOGFILE'" 2>/dev/null || true
 		fi
+		exit 1
 	fi
-	exit $PGC_FAIL
+	if [ "$PGC_CHECKS" = "0" ]; then
+		echo "$(basename "$0"): SKIPPED (ran no checks)"
+		exit $PGC_EXIT_SKIPPED
+	fi
+	echo "$(basename "$0"): PASSED"
+	exit 0
 }

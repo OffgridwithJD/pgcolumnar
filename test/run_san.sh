@@ -83,6 +83,7 @@ SUITES="${PGC_SAN_SUITES:-smoke native_writer native_roundtrip native_encoding \
 
 echo "-- running the subset under ASAN+UBSAN (fatal)"
 fail=0
+skipped=0
 ran=0
 for s in $SUITES; do
 	if [ ! -f "test/$s.sh" ]; then
@@ -96,7 +97,17 @@ for s in $SUITES; do
 	# A sanitizer report reaches here two ways: the backend aborts (SIGABRT, so the
 	# suite's own crash checks or a nonzero rc), or the text appears in the output.
 	san="$(printf '%s' "$out" | grep -icE 'runtime error:|AddressSanitizer|UndefinedBehaviorSanitizer|SUMMARY: .*Sanitizer|terminated by signal 6')"
-	if [ "$rc" != 0 ] || [ "$san" != 0 ]; then
+	if [ "$rc" = 66 ] && [ "$san" = 0 ] && \
+	   printf '%s' "$out" | grep -q 'SKIPPED (ran no checks)'; then
+		# pgc_summary's skipped state: the suite ran no checks.
+		#
+		# This does NOT cover the pyarrow-gated suites, and an earlier version of
+		# this comment claimed it did. Since a missing dependency FAILS, pgc_skip
+		# exits 1, not here. What reaches this branch is a suite with nothing to
+		# assert on this build, which is a different thing and a rarer one.
+		skipped=$((skipped + 1))
+		echo "  SKIP  $s  (ran no checks)"
+	elif [ "$rc" != 0 ] || [ "$san" != 0 ]; then
 		fail=$((fail + 1))
 		echo "  FAIL  $s  (rc=$rc, sanitizer_lines=$san)"
 		printf '%s\n' "$out" | grep -iE 'runtime error:|AddressSanitizer|SUMMARY: .*Sanitizer|FAIL' | head -4 | sed 's/^/        /'
@@ -105,10 +116,17 @@ for s in $SUITES; do
 	fi
 done
 
-echo "-- $ran suites under sanitizers, $fail failed"
-if [ "$fail" = 0 ]; then
-	echo "SANITIZER GATE PASSED"
-else
+echo "-- $ran suites under sanitizers, $fail failed, $skipped ran no checks"
+if [ "$fail" != 0 ]; then
 	echo "SANITIZER GATE FAILED"
+elif [ "$skipped" != 0 ]; then
+	# ANY skip, not just all of them. The previous form fired only when every
+	# suite skipped, so 22 of 23 skipped still printed PASSED -- a gate reporting
+	# on a surface it had almost entirely not exercised. A sanitizer run is worth
+	# what it covered, so an incomplete one is not a pass.
+	echo "SANITIZER GATE INCOMPLETE: $skipped of $ran suites ran no checks"
+	fail=1
+else
+	echo "SANITIZER GATE PASSED"
 fi
 exit "$fail"

@@ -41,8 +41,7 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 if ! python3 -c 'import pyarrow.parquet' 2>/dev/null; then
-	echo "SKIP  pyarrow not available; the Parquet fuzzer needs it to build seeds"
-	pgc_summary
+	pgc_skip pyarrow "pyarrow not available; the Parquet fuzzer needs it to build seeds"
 fi
 
 SEED="${PGC_SEED:-20260728}"

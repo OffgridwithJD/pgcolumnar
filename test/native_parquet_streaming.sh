@@ -22,9 +22,7 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 if ! python3 -c 'import pyarrow.parquet' 2>/dev/null; then
-	echo "SKIP  pyarrow not available; streaming suite needs it"
-	pgc_summary
-	exit 0
+	pgc_skip pyarrow "pyarrow not available; streaming suite needs it"
 fi
 
 W="$PGC_WORKDIR"
@@ -62,9 +60,12 @@ if os.path.getsize(big) != SIZE:
     sys.exit(4)
 PY
 then
-	echo "SKIP  could not build the oversized sparse file"
-	pgc_summary
-	exit 0
+	# An environment that cannot build the file is a box that cannot gate this
+	# suite, not a major without the feature. The pyarrow gate thirty lines above
+	# was converted and this one was missed, so a low-space or non-sparse
+	# filesystem quietly took the 1GB-palloc ceiling and the 1600MB-hole guard out
+	# of the run while the major still reported PASS.
+	pgc_skip sparse_file "could not build the oversized sparse file"
 fi
 
 # errtext QUERY -> the raised ERROR line, or "NO ERROR"

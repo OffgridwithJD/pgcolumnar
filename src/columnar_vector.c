@@ -69,6 +69,8 @@
 #include "optimizer/tlist.h"
 #include "utils/array.h"
 #include "access/sysattr.h"
+#include "utils/fmgroids.h"
+#include "utils/timestamp.h"
 #include "utils/selfuncs.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
@@ -1287,6 +1289,225 @@ pgcolumnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
  *		the serial node, so the vectorized fold runs across workers rather than
  *		displacing a parallel plan with a single-threaded one.
  */
+/*
+ * pgcolumnar_truncating_time_bound
+ *		Upper bound on the distinct values of date_trunc(unit, ts) over the rows
+ *		this scan will read, or 0 when we cannot bound it (#369).
+ *
+ *		Truncation is a step function, so the number of distinct outputs cannot
+ *		exceed the number of buckets the input range spans. Two partial buckets
+ *		are possible, one at each end, hence the +2.
+ *
+ *		The range comes only from Const btree comparisons on that same Var in the
+ *		relation's baserestrictinfo, because those describe the rows actually
+ *		scanned. Anything less certain gives no bound rather than a guess: this
+ *		value is used to make a plan cheaper, so an under-estimate would
+ *		under-price the arm and under-size the Finalize's hash table.
+ */
+static double
+pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
+							   Node *expr)
+{
+	FuncExpr   *f = (FuncExpr *) expr;
+	Const	   *unit;
+	Var		   *tsvar;
+	char	   *unitstr;
+	double		width;
+	bool		havelo = false,
+				havehi = false;
+	double		lo = 0,
+				hi = 0;
+	ListCell   *lc;
+
+	if (!IsA(expr, FuncExpr))
+		return 0.0;
+	f = (FuncExpr *) expr;
+
+	/*
+	 * Match the FUNCTION, not its shape.
+	 *
+	 * Matching on shape alone -- a FuncExpr of two or three args with a text
+	 * Const and a timestamp Var -- accepts any user function declared
+	 * (text, timestamp), and then applies a truncation bound to something that
+	 * does not truncate. Measured: a deliberately high-cardinality
+	 * hi_card(text, timestamp) over 500k rows was estimated at 722 against
+	 * 499,999 actual, a 692x UNDER-estimate, where core had it very nearly right
+	 * at 499,900 before the substitution replaced it.
+	 *
+	 * Under-estimating is the direction that does damage. It under-prices the arm
+	 * and under-sizes the Finalize's hash table into avoidable spill, which is
+	 * the opposite of what this change exists to do.
+	 *
+	 * These oids are identical on 15 through 19. The interval form is excluded
+	 * deliberately: its argument is a duration rather than a point in time, so a
+	 * range on it does not describe a scanned window.
+	 */
+	if (f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMP &&
+		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ &&
+		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ_TEXT)
+		return 0.0;
+
+	if (list_length(f->args) < 2 || list_length(f->args) > 3)
+		return 0.0;
+	if (!IsA(linitial(f->args), Const))
+		return 0.0;
+	unit = (Const *) linitial(f->args);
+	if (unit->consttype != TEXTOID || unit->constisnull)
+		return 0.0;
+	if (!IsA(lsecond(f->args), Var))
+		return 0.0;
+	tsvar = (Var *) lsecond(f->args);
+	if (tsvar->varno != input_rel->relid || tsvar->varlevelsup != 0)
+		return 0.0;
+	if (tsvar->vartype != TIMESTAMPOID && tsvar->vartype != TIMESTAMPTZOID)
+		return 0.0;
+
+	/* bucket width in microseconds, which is the timestamp unit */
+	unitstr = TextDatumGetCString(unit->constvalue);
+	if (pg_strcasecmp(unitstr, "microseconds") == 0)		width = 1;
+	else if (pg_strcasecmp(unitstr, "milliseconds") == 0)	width = 1000;
+	else if (pg_strcasecmp(unitstr, "second") == 0)			width = USECS_PER_SEC;
+	else if (pg_strcasecmp(unitstr, "minute") == 0)			width = USECS_PER_MINUTE;
+	else if (pg_strcasecmp(unitstr, "hour") == 0)			width = USECS_PER_HOUR;
+	else if (pg_strcasecmp(unitstr, "day") == 0)			width = (double) USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "week") == 0)			width = 7.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "month") == 0)			width = 28.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "quarter") == 0)		width = 89.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "year") == 0)			width = 365.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "decade") == 0)			width = 3650.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "century") == 0)		width = 36500.0 * USECS_PER_DAY;
+	else if (pg_strcasecmp(unitstr, "millennium") == 0)		width = 365000.0 * USECS_PER_DAY;
+	else return 0.0;
+	/*
+	 * month, quarter and year use their SHORTEST possible length above, so the
+	 * bucket count is over-estimated rather than under-estimated. This must stay
+	 * an upper bound.
+	 */
+
+	foreach(lc, input_rel->baserestrictinfo)
+	{
+		RestrictInfo *ri = lfirst_node(RestrictInfo, lc);
+		OpExpr	   *op;
+		Node	   *l,
+				   *r;
+		Const	   *c;
+		double		v;
+		bool		varonleft;
+
+		if (!IsA(ri->clause, OpExpr))
+			continue;
+		op = (OpExpr *) ri->clause;
+		if (list_length(op->args) != 2)
+			continue;
+		l = (Node *) linitial(op->args);
+		r = (Node *) lsecond(op->args);
+		if (IsA(l, Var) && IsA(r, Const) && ((Var *) l)->varattno == tsvar->varattno)
+		{ varonleft = true; c = (Const *) r; }
+		else if (IsA(r, Var) && IsA(l, Const) && ((Var *) r)->varattno == tsvar->varattno)
+		{ varonleft = false; c = (Const *) l; }
+		else
+			continue;
+		/*
+		 * The Const's type must MATCH the Var's, not merely be one of the two
+		 * timestamp types.
+		 *
+		 * PostgreSQL has cross-type operators for timestamp and timestamptz, so a
+		 * mixed predicate keeps a bare Const and reaches this loop rather than
+		 * being wrapped in a cast. Both are int64 microseconds and
+		 * DatumGetTimestamp reads either, but they are on different scales: a
+		 * naive timestamp is wall clock and a timestamptz is UTC. Under a
+		 * non-UTC TimeZone the range would be computed across that offset and the
+		 * bound would be wrong, in whichever direction the offset points.
+		 *
+		 * Converting is possible and is not worth it here: no bound is always
+		 * safe, and this is an optimisation.
+		 */
+		if (c->constisnull || c->consttype != tsvar->vartype)
+			continue;
+
+		v = (double) DatumGetTimestamp(c->constvalue);
+		switch (get_oprrest(op->opno))
+		{
+			case F_SCALARLTSEL:
+			case F_SCALARLESEL:
+				if (varonleft) { hi = havehi ? Min(hi, v) : v; havehi = true; }
+				else		   { lo = havelo ? Max(lo, v) : v; havelo = true; }
+				break;
+			case F_SCALARGTSEL:
+			case F_SCALARGESEL:
+				if (varonleft) { lo = havelo ? Max(lo, v) : v; havelo = true; }
+				else		   { hi = havehi ? Min(hi, v) : v; havehi = true; }
+				break;
+			default:
+				break;
+		}
+	}
+
+	if (!havelo || !havehi || hi <= lo)
+		return 0.0;
+	return floor((hi - lo) / width) + 2.0;
+}
+
+/*
+ * pgcolumnar_group_estimate_bound
+ *		An upper bound on the group count, for the case where the planner had
+ *		nothing to estimate from (#369). Returns 0 when no bound applies.
+ *
+ *		The gate first. If EVERY grouping expression is informed, we return 0 and
+ *		change nothing. "Informed" is core's own test, from examine_variable: a
+ *		statsTuple, or a unique index. A plain Var is informed. So is an
+ *		expression carrying CREATE STATISTICS ON (expr), or an expression index.
+ *		Those outrank anything we could infer and G3, whose key is a plain column,
+ *		never reaches the substitution at all.
+ *
+ *		Then the bound. Only one shape is handled, and deliberately: a truncating
+ *		time function over a single Var, which is the shape that produced the
+ *		27,772x inflation. The bucket count over the scanned range is a true upper
+ *		bound on the distinct values the expression can take, plus one partial
+ *		bucket at each end.
+ *
+ *		The range comes from Const btree bounds on that Var in the relation's own
+ *		baserestrictinfo, which describe the rows this scan will actually read.
+ *		A query with no such bound gets no bound from us.
+ */
+static double
+pgcolumnar_group_estimate_bound(PlannerInfo *root, RelOptInfo *input_rel,
+							  List *groupExprs)
+{
+	ListCell   *lc;
+	double		bound = 1.0;
+
+	if (groupExprs == NIL)
+		return 0.0;
+
+	foreach(lc, groupExprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		VariableStatData vardata;
+		bool		informed;
+		double		one;
+
+		/*
+		 * Core's own question: does anything actually know about this expression?
+		 * If so, leave the estimate entirely alone.
+		 */
+		examine_variable(root, expr, 0, &vardata);
+		informed = (HeapTupleIsValid(vardata.statsTuple) || vardata.isunique);
+		ReleaseVariableStats(vardata);
+		if (informed)
+			return 0.0;
+
+		one = pgcolumnar_truncating_time_bound(root, input_rel, expr);
+		if (one <= 0.0)
+			return 0.0;		/* one unbounded key and the product is unbounded */
+
+		bound *= one;
+		if (bound >= (double) INT_MAX)
+			return 0.0;
+	}
+	return bound;
+}
+
 static void
 PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 						RelOptInfo *output_rel, void *extra)
@@ -1355,6 +1576,38 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	dNumGroups = estimate_num_groups(root, groupExprs,
 									 input_rel->rows > 0 ? input_rel->rows : 1.0,
 									 NULL, NULL);
+
+	/*
+	 * Bound the estimate when the planner had nothing to estimate FROM (#369).
+	 *
+	 * estimate_num_groups cannot see through a function. For date_trunc('minute',
+	 * ts) it falls back to the underlying column's ndistinct, which for a
+	 * high-cardinality timestamp is close to the row count: measured 19,996,000
+	 * against 720 actual, 27,772x.
+	 *
+	 * That number is charged TWICE on the parallel arm, once by the Gather as
+	 * parallel_tuple_cost * rows and again by the Finalize's per-group terms, and
+	 * not at all on the serial node, which is priced per input row. So the serial
+	 * node wins by construction on exactly the shapes where the parallel arm is
+	 * measured 4.3x faster (G1) and 3.5x faster (G2).
+	 *
+	 * The gate is core's own test for "is this estimate informed", from
+	 * clausesel.c's use of examine_variable: a statsTuple or a unique index means
+	 * somebody measured this expression, and we leave it alone. That covers a
+	 * plain Var, an expression index, and a user's CREATE STATISTICS ON (expr),
+	 * all of which outrank anything we could infer.
+	 *
+	 * Only when nothing is informed do we substitute an upper bound, and only ever
+	 * downward: Min() cannot raise an estimate, so a shape we get wrong is priced
+	 * no worse than it is today.
+	 */
+	{
+		double		bound = pgcolumnar_group_estimate_bound(root, input_rel,
+														  groupExprs);
+
+		if (bound > 0.0 && bound < dNumGroups)
+			dNumGroups = Max(1.0, bound);
+	}
 
 	/*
 	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time
@@ -1783,8 +2036,39 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 * return so a plain EXPLAIN reports whether the batch fold will run.
 	 */
 	if (state->scanFold)
+	{
+		Bitmapset  *proj = NULL;
+		int			x;
+
+		/*
+		 * Build the projected set BEFORE deciding eligibility, because eligibility
+		 * now depends on it: the fold gathers every projected column and needs each
+		 * one fixed width (#423). It used to be built after the EXPLAIN-only return,
+		 * so a plain EXPLAIN decided eligibility against an empty set and reported
+		 * "Columnar Batch Fold: yes" for a shape that falls back at execution.
+		 *
+		 * Only the set moves. baseSlot and whereState stay below the EXPLAIN return,
+		 * since an EXPLAIN-only node must not initialise executor state.
+		 */
+		pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
+		x = -1;
+		while ((x = bms_next_member(proj, x)) >= 0)
+		{
+			AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
+
+			if (attno > 0)
+				state->projected = bms_add_member(state->projected, attno - 1);
+		}
+		for (a = 0; a < state->naggs; a++)
+			if (state->specs[a].attidx >= 0)
+				state->projected = bms_add_member(state->projected,
+												  state->specs[a].attidx);
+		if (state->projected == NULL)
+			state->projected = bms_make_singleton(0);
+
 		state->batchEligible =
 			pgcolumnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
+	}
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
@@ -1845,30 +2129,12 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (state->scanFold)
 	{
-		Bitmapset  *proj = NULL;
-		int			x;
-
 		state->baseSlot = MakeSingleTupleTableSlot(CreateTupleDescCopy(tupdesc),
 												   &TTSOpsVirtual);
 		state->whereState = (state->quals != NIL)
 			? ExecInitQual(state->quals, &node->ss.ps)
 			: NULL;
 
-		pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
-		x = -1;
-		while ((x = bms_next_member(proj, x)) >= 0)
-		{
-			AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
-
-			if (attno > 0)
-				state->projected = bms_add_member(state->projected, attno - 1);
-		}
-		for (a = 0; a < state->naggs; a++)
-			if (state->specs[a].attidx >= 0)
-				state->projected = bms_add_member(state->projected,
-												  state->specs[a].attidx);
-		if (state->projected == NULL)
-			state->projected = bms_make_singleton(0);
 	}
 
 	table_close(rel, AccessShareLock);
@@ -2718,6 +2984,48 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 								  &npred, &allConvertible);
 	if (!allConvertible)
 		return false;
+
+	/*
+	 * Every column the fold will GATHER must be passed BY VALUE (#423).
+	 *
+	 * The gather does pointer arithmetic on attlen and hardcodes attbyval:
+	 *
+	 *     cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+	 *                           true, cattlen[col]);
+	 *                           ^^^^ not the column's real attbyval
+	 *
+	 * So the requirement is not "fixed width", which was this guard's first and
+	 * wrong form. A varlena has attlen -1 and fails on the arithmetic. But a
+	 * FIXED-WIDTH BY-REFERENCE type passes an attlen > 0 test and still fails,
+	 * because fetch_att will not pass 16 or 64 bytes by value: uuid is attlen 16
+	 * and name is attlen 64, and both raised "unsupported byval length: 16" and
+	 * "... 64" while EXPLAIN still reported the fold as engaged.
+	 *
+	 * attbyval is the property the gather actually depends on, and it implies
+	 * attlen is 1, 2, 4 or 8, so it subsumes the width test rather than adding
+	 * to it. uuid in particular is ordinary in the event-log shapes this fold
+	 * targets.
+	 *
+	 * The type check below is not this check and cannot stand in for it. It walks
+	 * the SCAN KEYS and asks whether each type is comparable, while the gather
+	 * walks state->projected and needs to know whether each type is fixed width.
+	 * A text column filtered with LIKE is in projected and not in the keys, since
+	 * LIKE is not a pushable scan key, so it reached the gather unchecked. That is
+	 * exactly ClickBench q21, SELECT COUNT(*) FROM hits WHERE URL LIKE '%google%'.
+	 *
+	 * Falling back to the row path is what the ADD COLUMN case already does.
+	 */
+	{
+		int			c = -1;
+
+		while ((c = bms_next_member(state->projected, c)) >= 0)
+		{
+			if (c < 0 || c >= tupdesc->natts)
+				continue;
+			if (!TupleDescAttr(tupdesc, c)->attbyval)
+				return false;
+		}
+	}
 
 	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
 	for (k = 0; k < nkeys; k++)

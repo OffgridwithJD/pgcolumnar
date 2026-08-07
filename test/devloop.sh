@@ -66,8 +66,12 @@ for s in "$@"; do
 	# clusters did. Sourced rather than duplicated as literals -- an earlier
 	# version of this comment claimed the literals were checked against the band
 	# elsewhere, and no such check existed.
-	if ! PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
-		bash "test/${s}.sh" "$PGC"; then
+	PGC_SKIP_BUILD=1 PGC_PORT=$((PGC_PORT_LO + RANDOM % (PGC_PORT_HI - PGC_PORT_LO))) \
+		bash "test/${s}.sh" "$PGC"
+	_rc=$?
+	# 66 is pgc_summary's skipped state, not a failure. Not 2: bash returns 2 on
+	# a parse error, so treating 2 as a skip hides a broken suite file.
+	if [ "$_rc" != 0 ] && [ "$_rc" != 66 ]; then
 		rc=1
 	fi
 done
