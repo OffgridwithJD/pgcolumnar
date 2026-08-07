@@ -48,6 +48,7 @@ SUITES=(
 	arrow_nested
 	arrow_nested_import
 	audit
+	bench_guards
 	bloom_lazy
 	bloom_setting
 	bloom_sizing
