@@ -1012,6 +1012,10 @@ DECLARE
 	orderable  boolean;
 	nmcv       integer;
 	nremaining bigint;
+	nullcount  bigint;	/* live rows with no value, from the same read */
+	nonnull    bigint;	/* rows with a value, from the aggregation below */
+	mcvrows    bigint;	/* of those, the rows the MCV list holds */
+	nv         bigint;	/* the population the histogram is placed over */
 	nfrac      integer;
 	-- The per-column target, resolved inside the loop. attstattarget is NULL when
 	-- the column has never been given one, and core reads that as "use the global
@@ -1105,37 +1109,59 @@ BEGIN
 		END IF;
 		nbuckets := coalesce(att.attstattarget, deftarget);
 		/*
-		 * null_frac, exactly. value_count counts the values present and
-		 * null_count those absent, so the denominator is their sum rather than
-		 * value_count alone. vector_index = -1 is the whole-chunk aggregate;
-		 * summing the per-vector rows as well would double count.
+		 * Has this column been written yet? The zone maps answer that and
+		 * nothing else here.
+		 *
+		 * They used to answer null_frac as well --
+		 * sum(null_count) / sum(value_count + null_count) -- and that was wrong
+		 * after a DELETE. Those counts describe what was WRITTEN; deleting a row
+		 * marks it dead without rewriting them, so the denominator keeps counting
+		 * rows the table no longer holds. On 1,000 rows with 100 nulls, deleting
+		 * the 301 rows holding one value leaves a true null_frac of 0.1431 and a
+		 * zone-map null_frac of 0.1000, a 30% understatement that VACUUM does not
+		 * heal. Worse than the size of the error: null_frac came from the zone
+		 * maps while the most-common-value frequencies came from count(*), so the
+		 * two were normalised against different populations and
+		 * null_frac + sum(mcv_freqs) + rest = 1 -- the identity the planner's
+		 * selectivity arithmetic rests on -- silently stopped holding.
+		 *
+		 * So the fraction is taken from the same read as everything else below,
+		 * and the zone maps keep only the job they can still do exactly: telling
+		 * us whether there are any row groups at all.
 		 *
 		 * column_index is the 0-based attribute position. attnum is stable
 		 * across a dropped column, so attnum - 1 keeps pointing at the same
 		 * column after a DROP COLUMN.
 		 */
-		SELECT sum(z.null_count)::double precision
-				/ nullif(sum(z.value_count + z.null_count), 0)
-			INTO nullfrac
+		PERFORM 1
 			FROM pgcolumnar.zone_map z
 			WHERE z.storage_id = sid
 			  AND z.column_index = att.attnum - 1
 			  AND z.vector_index = -1;
 
-		CONTINUE WHEN nullfrac IS NULL;	/* no zone map rows: nothing exact to say */
+		CONTINUE WHEN NOT FOUND;	/* no zone map rows: nothing exact to say */
 
 		/*
-		 * n_distinct, exactly, by reading this column and nothing else. This is
-		 * the whole point of the function: on the 3M x 20 fixture a projected
-		 * single-column read costs 268 ms where core's whole-table sample costs
-		 * 6,302 ms, because core's fixed 30,000-row sample lands in every row
-		 * group and so decodes every column of the table.
+		 * n_distinct, the row count and the null count, by reading this column
+		 * and nothing else. This is the whole point of the function: on the
+		 * 3M x 20 fixture a projected single-column read costs 268 ms where
+		 * core's whole-table sample costs 6,302 ms, because core's fixed
+		 * 30,000-row sample lands in every row group and so decodes every column
+		 * of the table.
 		 *
-		 * count(DISTINCT) ignores NULLs, which is what n_distinct means.
+		 * count(DISTINCT) ignores NULLs, which is what n_distinct means. The
+		 * null count comes from the same scan so that it cannot disagree with the
+		 * denominator the frequencies below are divided by.
 		 */
-		EXECUTE format('SELECT count(DISTINCT %I)::bigint, count(*)::bigint FROM %I.%I',
-					   att.attname, schname, relnm)
-			INTO ndistinct, totalrows;
+		EXECUTE format('SELECT count(DISTINCT %I)::bigint, count(*)::bigint,'
+					   '       count(*) FILTER (WHERE %I IS NULL)::bigint'
+					   '  FROM %I.%I',
+					   att.attname, att.attname, schname, relnm)
+			INTO ndistinct, totalrows, nullcount;
+
+		nullfrac := CASE WHEN totalrows > 0
+						 THEN nullcount::double precision / totalrows::double precision
+						 ELSE 0 END;
 
 		/*
 		 * Core's own convention, and the sign is load-bearing: positive is an
@@ -1207,18 +1233,33 @@ BEGIN
 		 */
 		mcvvals := NULL;
 		mcvfreqs := NULL;
+		nonnull  := 0;
+		mcvrows  := 0;
 		IF orderable THEN
+			/*
+			 * The same aggregation, split into the full group and the most-common
+			 * slice of it, so it can also report how many ROWS each covers. The
+			 * histogram below is built over the non-null rows the MCV list does
+			 * NOT hold, and it has to know how many those are to place a bound at
+			 * a position rather than at a fraction.
+			 *
+			 * Both counts come from this one aggregation rather than from the zone
+			 * maps or a second scan, so the population the histogram is placed
+			 * over is by construction the population the MCV list was taken from.
+			 */
 			EXECUTE format(
-				'SELECT array_agg(v ORDER BY c DESC, v)::text,
-						array_agg((c::double precision / %s::double precision)::real
-								  ORDER BY c DESC, v)
-				   FROM (SELECT %I AS v, count(*)::bigint AS c
-						   FROM %I.%I WHERE %I IS NOT NULL
-						  GROUP BY 1 HAVING count(*) > 1
-						  ORDER BY count(*) DESC, 1
-						  LIMIT %s) t',
-				totalrows, att.attname, schname, relnm, att.attname, nbuckets)
-				INTO mcvvals, mcvfreqs;
+				'WITH g AS MATERIALIZED ('
+				'       SELECT %I AS v, count(*)::bigint AS c'
+				'         FROM %I.%I WHERE %I IS NOT NULL GROUP BY 1),'
+				'     m AS MATERIALIZED ('
+				'       SELECT v, c FROM g WHERE c > 1 ORDER BY c DESC, v LIMIT %s)'
+				'SELECT (SELECT array_agg(v ORDER BY c DESC, v)::text FROM m),'
+				'       (SELECT array_agg((c::double precision / %s::double precision)::real'
+				'                         ORDER BY c DESC, v) FROM m),'
+				'       (SELECT coalesce(sum(c), 0)::bigint FROM g),'
+				'       (SELECT coalesce(sum(c), 0)::bigint FROM m)',
+				att.attname, schname, relnm, att.attname, nbuckets, totalrows)
+				INTO mcvvals, mcvfreqs, nonnull, mcvrows;
 		END IF;
 
 		/*
@@ -1263,16 +1304,49 @@ BEGIN
 		nmcv := coalesce(array_length(mcvfreqs, 1), 0);
 		nremaining := ndistinct - nmcv;
 
+		nv := nonnull - mcvrows;
+
 		hist := NULL;
 		IF att.attnum > 0
 		   AND orderable
 		   AND nremaining >= 2
+		   AND nv > 1
 		THEN
 			/*
 			 * least(nbuckets, nremaining - 1) fractions, so the bound count is
 			 * least(nbuckets + 1, nremaining): core's cap, reached from below.
 			 */
 			nfrac := least(nbuckets, nremaining - 1);
+
+			/*
+			 * A bound is a POSITION, not a quantile, and the difference is not
+			 * academic. core's compute_scalar_stats places bound i at
+			 *
+			 *     values[floor(i * (nvals - 1) / (num_hist - 1))]
+			 *
+			 * among the rows left after the most-common values are removed.
+			 * percentile_disc resolves fraction p to index ceil(p * nv) - 1, which
+			 * is a different index whenever frac(i*nv/nfrac) is small, and a
+			 * different VALUE whenever that shift crosses a value boundary. On a
+			 * column with many rows per distinct value the two agree and the
+			 * distinction is invisible; on eleven distinct rows at a statistics
+			 * target of 3 they disagree at the third bound, 8 against 7.
+			 *
+			 * So ask percentile_disc for the fractions that resolve to core's
+			 * positions instead of for evenly spaced quantiles:
+			 *
+			 *     p_i = (floor(i * (nv - 1) / nfrac) + 0.5) / nv
+			 *
+			 * The half is load-bearing rather than decorative. The exact boundary
+			 * (T + 1)/nv is a double, and nv up to a few million leaves roughly
+			 * 1e-9 of slack in p*nv; landing a hair above T+1 makes ceil() return
+			 * T+2 and takes the NEXT value. Half a row of margin cannot be crossed
+			 * by that error, and any p in (T/nv, (T+1)/nv] resolves to T.
+			 *
+			 * nv is the count from the aggregation above, not a derived figure:
+			 * deriving it as totalrows minus a null_frac read off the zone maps
+			 * would put a rounded float in a position index.
+			 */
 
 			/*
 			 * The exclusion is a literal list rather than a re-aggregation. The
@@ -1284,11 +1358,12 @@ BEGIN
 			 */
 			EXECUTE format(
 				'SELECT percentile_disc(
-						 (SELECT array_agg(i::double precision / %s ORDER BY i)
+						 (SELECT array_agg(((floor(i::numeric * (%s - 1) / %s) + 0.5)
+											/ %s)::double precision ORDER BY i)
 							FROM generate_series(0, %s) i))
 					   WITHIN GROUP (ORDER BY %I)::text
 				   FROM %I.%I WHERE %I IS NOT NULL %s',
-				nfrac, nfrac, att.attname, schname, relnm, att.attname,
+				nv, nfrac, nv, nfrac, att.attname, schname, relnm, att.attname,
 				CASE WHEN mcvvals IS NULL THEN ''
 					 ELSE format('AND %I <> ALL (%L::%s[])', att.attname, mcvvals,
 								 format_type(att.atttypid, NULL))
