@@ -28,9 +28,11 @@
 # This suite is about the function, not the AM sampler. test/analyze_stats.sh
 # covers the sampler (#154) and stays the correctness path for plain ANALYZE.
 #
-# Slice 1 asserts null_frac comes from the zone maps and is EXACT where core's
-# is sampled. Slice 2 asserts n_distinct is exact from reading ONE column, which
-# is the claim the whole issue rests on.
+# Slice 1 asserts null_frac is EXACT where core's is sampled. It came from the
+# zone maps until #485: those counts describe what was WRITTEN, so a DELETE left
+# the fraction normalised against rows the table no longer held. It now comes
+# from the same read as n_distinct. Slice 2 asserts n_distinct is exact from
+# reading ONE column, which is the claim the whole issue rests on.
 #
 # Usage:  test/analyze_function.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -182,16 +184,20 @@ echo "-- core sampled null_frac: k = $core_nullfrac (truth $true_nullfrac), k7 =
 
 # --- check 1: pgcolumnar.analyze() gives the EXACT null_frac -------------------
 #
-# The zone maps already hold null_count and value_count per chunk, so this is a
-# metadata read: 11 ms on the 1237 MB fixture, against 6,302 ms for core ANALYZE.
-# Exactness is a by-product of that, not the reason for it -- the reason is the
-# 23.5x. But it is the cheapest thing to assert that a sampled implementation
-# cannot fake.
+# Exact because the column is read rather than sampled, which is the thing a
+# sampled implementation cannot fake.
+#
+# This used to come from the zone maps, which was cheaper -- a metadata read
+# rather than a scan -- and wrong after a DELETE (#485): those counts describe
+# what was WRITTEN, and deleting a row does not rewrite them. It now comes from
+# the same read as n_distinct, which costs nothing extra because that read
+# happens either way, and which cannot disagree with the denominator the
+# most-common frequencies are divided by. The delete case is checked below.
 
 psql_run "SELECT pgcolumnar.analyze('af_c'::regclass, ARRAY['k']);" >/dev/null
 ours_nullfrac="$(q "SELECT null_frac FROM pg_stats WHERE tablename = 'af_c' AND attname = 'k'")"
 
-check_num "pgcolumnar.analyze() reports null_frac exactly, from the zone maps" \
+check_num "pgcolumnar.analyze() reports null_frac exactly, from reading the column" \
 	"$ours_nullfrac" "0.1"
 
 # The same claim on the column core cannot express. This is the one that carries
@@ -634,5 +640,125 @@ check "a column at SET STATISTICS 0 is left alone, because that is what zero mea
 	"$(q "SELECT coalesce((SELECT 'wrote-' || attname FROM pg_stats
 		WHERE tablename = 'af_c' AND attname = 'pad1'), '<nothing>')")" \
 	"<nothing>"
+
+# --- histogram bounds are POSITIONS, not quantiles (#414 follow-on) -----------
+#
+# core's compute_scalar_stats places bound i at
+#
+#     values[floor(i * (nvals - 1) / (num_hist - 1))]
+#
+# among the rows left after the most-common values are removed. percentile_disc
+# resolves a fraction p to index ceil(p * nv) - 1, which is a different index and
+# therefore a different VALUE whenever the shift crosses a value boundary.
+#
+# The 500,000-row fixtures above cannot show the difference: with many rows per
+# distinct value a one-row shift lands on the same value, so both algorithms
+# agree and the check would pass either way. A fixture that cannot distinguish
+# the two implementations cannot test them. Eleven distinct rows at a statistics
+# target of 3 can:
+#
+#     nv = 11, nhist = 4, so the divisor is 3
+#     stride          i=2 -> floor(2*10/3) = 6 -> the 7th value = 7
+#     percentile_disc i=2 -> ceil(2*11/3)-1 = 7 -> the 8th value = 8
+#
+# The expectation is NOT taken from the implementation. It is computed by the
+# oracle below, straight from core's formula over row_number(), and it is also
+# hand-workable: the values are 1..11 each appearing once, so position p holds
+# value p+1 and the bounds are {1,4,7,11}. Two independent derivations that agree
+# with each other before either judges the code.
+psql_run "DROP TABLE IF EXISTS af_h11;
+	CREATE TABLE af_h11 (v int) USING pgcolumnar;
+	INSERT INTO af_h11 SELECT generate_series(1, 11);
+	ALTER TABLE af_h11 ALTER COLUMN v SET STATISTICS 3;" >/dev/null
+
+check_num "premise: the stride fixture has no repeated value, so no MCV is excluded" \
+	"$(q "SELECT count(*) FROM (SELECT v FROM af_h11 GROUP BY v HAVING count(*) > 1) t")" "0"
+
+h11_oracle="$(q "WITH nonmcv AS (
+			SELECT v, row_number() OVER (ORDER BY v) - 1 AS pos
+			  FROM af_h11 WHERE v IS NOT NULL),
+		     n AS (SELECT count(*)::bigint AS nv FROM nonmcv),
+		     p AS (SELECT floor(i::numeric * (n.nv - 1) / (4 - 1))::bigint AS pos
+			     FROM generate_series(0, 3) i, n)
+		SELECT (SELECT array_agg(v ORDER BY pos) FROM nonmcv
+			 WHERE pos IN (SELECT pos FROM p))::text")"
+
+# The oracle and the hand-worked figure are derived separately. If they ever
+# disagree the oracle is wrong, and nothing below it means anything.
+check "premise: the independent oracle agrees with the hand-worked bounds" \
+	"$h11_oracle" "{1,4,7,11}"
+
+psql_run "SELECT pgcolumnar.analyze('af_h11'::regclass, ARRAY['v']);" >/dev/null
+
+check "premise: a histogram was written, so the comparison below is not vacuous" \
+	"$(q "SELECT CASE WHEN histogram_bounds IS NULL THEN 'none' ELSE 'present' END
+		FROM pg_stats WHERE tablename = 'af_h11' AND attname = 'v'")" "present"
+
+check "histogram_bounds are core's positional stride, not evenly spaced quantiles" \
+	"$(q "SELECT histogram_bounds::text FROM pg_stats
+		WHERE tablename = 'af_h11' AND attname = 'v'")" "$h11_oracle"
+
+# --- null_frac describes the rows the table HOLDS (#485) ----------------------
+#
+# It used to come from the zone maps, which count what was written. A DELETE
+# marks rows dead without rewriting those counts, so the fraction stayed
+# normalised against a population the table no longer had -- and VACUUM did not
+# clear it.
+#
+# The consequence is worse than the size of the error. null_frac came from the
+# zone maps while the most-common frequencies came from count(*), so one
+# pg_stats row carried two statistics normalised against different populations
+# and null_frac + sum(mcv_freqs) + rest = 1 stopped holding. eqsel subtracts both
+# to price everything else, so the residual it computes went wrong by the
+# difference.
+#
+# 1,200 rows: 120 null, 300 holding 7, 300 holding 9, the rest unique. Deleting
+# the rows holding 9 leaves 900 rows and keeps 7 in the most-common list, so both
+# denominators are observable in the same written row.
+psql_run "DROP TABLE IF EXISTS af_del;
+	CREATE TABLE af_del (v int) USING pgcolumnar;
+	INSERT INTO af_del
+	SELECT CASE WHEN i % 10 = 0 THEN NULL
+		    WHEN i %  4 = 0 THEN 7
+		    WHEN i %  4 = 1 THEN 9
+		    ELSE 100000 + i END
+	  FROM generate_series(1, 1200) i;
+	DELETE FROM af_del WHERE v = 9;" >/dev/null
+
+check_num "premise: the delete left fewer live rows than the zone maps describe" \
+	"$(q "SELECT CASE WHEN (SELECT count(*) FROM af_del)
+			 < (SELECT sum(z.value_count + z.null_count)
+			      FROM pgcolumnar.zone_map z
+			      JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id
+			     WHERE s.relation_oid = 'af_del'::regclass
+			       AND z.column_index = 0 AND z.vector_index = -1)
+		     THEN 1 ELSE 0 END")" "1"
+
+psql_run "SELECT pgcolumnar.analyze('af_del'::regclass, ARRAY['v']);" >/dev/null
+
+# 120 nulls in 900 live rows. Against the zone maps this read 0.1.
+check "null_frac counts live rows, not rows a DELETE left behind" \
+	"$(q "SELECT round(null_frac::numeric, 6)::text FROM pg_stats
+		WHERE tablename = 'af_del' AND attname = 'v'")" "0.133333"
+
+check_num "premise: 7 survived the delete and is still a most-common value" \
+	"$(q "SELECT CASE WHEN most_common_vals::text::int[] @> ARRAY[7] THEN 1 ELSE 0 END
+		FROM pg_stats WHERE tablename = 'af_del' AND attname = 'v'")" "1"
+
+# The point of the pair: both statistics must imply the same table. Divide each
+# by the count it describes and the row count that falls out must be the real
+# one, from both directions.
+check "null_frac and the most-common frequencies agree on how many rows there are" \
+	"$(q "SELECT CASE WHEN
+		 round((SELECT count(*) FILTER (WHERE v IS NULL) FROM af_del)::numeric
+		       / nullif(null_frac::numeric, 0)) = (SELECT count(*) FROM af_del)
+	     AND round((SELECT count(*) FILTER (WHERE v = 7) FROM af_del)::numeric
+		       / nullif((most_common_freqs)[1]::numeric, 0)) = (SELECT count(*) FROM af_del)
+		THEN 'yes' ELSE 'no ('
+		     || round((SELECT count(*) FILTER (WHERE v IS NULL) FROM af_del)::numeric
+			      / nullif(null_frac::numeric, 0))::text || ' vs '
+		     || round((SELECT count(*) FILTER (WHERE v = 7) FROM af_del)::numeric
+			      / nullif((most_common_freqs)[1]::numeric, 0))::text || ')' END
+		FROM pg_stats WHERE tablename = 'af_del' AND attname = 'v'")" "yes"
 
 pgc_summary
