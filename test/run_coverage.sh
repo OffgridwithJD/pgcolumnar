@@ -81,12 +81,17 @@ port="$(pgc_pick_port)"
 pass=0; fail=0; failed=""; skip=0; skipped=""
 for s in $SUITES; do
 	port=$((port + 1))
-	PGC_SKIP_BUILD=1 PGC_PORT="$port" \
+	# PGC_SKIP_TIMING, because a --coverage build is instrumented and its wall
+	# clock means nothing. The wall-clock suites assert ratios and absolute
+	# timeouts; run here without the flag they fail for the instrumentation rather
+	# than for the code, and this runner discovers every test/*.sh including any
+	# added later. The matrix is where those numbers are taken.
+	PGC_SKIP_BUILD=1 PGC_SKIP_TIMING=1 PGC_PORT="$port" \
 		bash "$SRCDIR/test/${s}.sh" "$PGC" >"$OUT/${s}.log" 2>&1
 	rc=$?
 	if [ "$rc" = 0 ]; then
 		pass=$((pass + 1))
-	elif [ "$rc" = 2 ]; then
+	elif [ "$rc" = 66 ] && grep -q 'SKIPPED (ran no checks)' "$OUT/${s}.log" 2>/dev/null; then
 		# Ran no checks (#447). It contributed no coverage either, so counting it
 		# as a pass overstates what this report measured.
 		skip=$((skip + 1)); skipped="$skipped $s"
@@ -95,6 +100,13 @@ for s in $SUITES; do
 	fi
 done
 echo "-- suites: $pass passed, $fail failed${failed:+ ($failed)}, $skip skipped${skipped:+ ($skipped)}"
+# A coverage report built from nothing is not a coverage report. run_san grew this
+# guard and this runner did not, so its only verdict was "nothing failed" -- which
+# a box where every suite aborts satisfies perfectly.
+if [ "$pass" = 0 ]; then
+	echo "-- NO SUITE RAN, so this measures no coverage"
+	fail=$((fail + 1))
+fi
 
 echo "-- collect"
 lcov --directory "$SRCDIR/src" --capture --output-file "$OUT/coverage.info" \
