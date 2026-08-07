@@ -38,8 +38,8 @@ plan() {
 # The metadata aggregate path reports "Columnar Vectorized Aggregates: N" and has
 # no separate Aggregate node above a scan; a fallback plan has an Aggregate node
 # and no such line.
-has_aggnode() { echo "$1" | grep -q 'Columnar Vectorized Aggregates' && echo yes || echo no; }
-has_gather() { echo "$1" | grep -q 'Gather' && echo yes || echo no; }
+has_aggnode() { grep -q 'Columnar Vectorized Aggregates' <<<"$1" && echo yes || echo no; }
+has_gather() { grep -q 'Gather' <<<"$1" && echo yes || echo no; }
 
 # Same, with a parallel plan available: workers allowed, no setup charge, and no
 # minimum table size, since the suite runs with max_parallel_workers_per_gather=0

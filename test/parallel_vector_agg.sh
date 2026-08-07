@@ -48,13 +48,13 @@ q -c "DROP TABLE IF EXISTS t;
 # ---- premise: the parallel plan is actually chosen -------------------------
 PLAN="$(q -c "$PAR $UG $PP" -c "EXPLAIN (COSTS OFF) SELECT count(*), avg(v), sum(v) FROM t WHERE k < 700")"
 check "premise: Finalize Aggregate present" \
-   "$(printf '%s' "$PLAN" | grep -qi 'Finalize Aggregate' && echo y || echo n)" y
+   "$(grep -qi 'Finalize Aggregate' <<<"$PLAN" && echo y || echo n)" y
 check "premise: Gather present" \
-   "$(printf '%s' "$PLAN" | grep -qiE 'Gather' && echo y || echo n)" y
+   "$(grep -qiE 'Gather' <<<"$PLAN" && echo y || echo n)" y
 check "premise: the partial columnar agg node present" \
-   "$(printf '%s' "$PLAN" | grep -qi 'Columnar Vectorized Aggregates' && echo y || echo n)" y
+   "$(grep -qi 'Columnar Vectorized Aggregates' <<<"$PLAN" && echo y || echo n)" y
 check "premise: the partial runs the batch fold" \
-   "$(printf '%s' "$PLAN" | grep -qi 'Batch Fold: yes' && echo y || echo n)" y
+   "$(grep -qi 'Batch Fold: yes' <<<"$PLAN" && echo y || echo n)" y
 
 # ---- values: count exact, avg/sum vs core PARALLEL agg within tolerance -----
 CNT_VEC="$(q -c "$PAR $UG $PP" -c "SELECT count(*) FROM t WHERE k < 700")"
@@ -79,7 +79,7 @@ check "avg(w::float8) f4 ~= core parallel agg"    "$(reldiff 'avg(w)::float8')" 
 # equal the serial oracle EXACTLY, and the plan must be the parallel fold.
 PLAN_I="$(q -c "$PAR $UG $PP" -c "EXPLAIN (COSTS OFF) SELECT sum(k), avg(k) FROM t WHERE k < 700")"
 check "premise: int sum/avg takes the parallel fold" \
-   "$(printf '%s' "$PLAN_I" | grep -qiE 'Gather' && printf '%s' "$PLAN_I" | grep -qi 'Batch Fold: yes' && echo y || echo n)" y
+   "$(grep -qiE 'Gather' <<<"$PLAN_I" && grep -qi 'Batch Fold: yes' <<<"$PLAN_I" && echo y || echo n)" y
 IK_VEC="$(q -c "$PAR $UG $PP" -c "SELECT sum(k), avg(k) FROM t WHERE k < 700")"
 IK_SER="$(q -c "SET max_parallel_workers_per_gather=0;" -c "SELECT sum(k), avg(k) FROM t WHERE k < 700")"
 check "sum(k)+avg(k) int: parallel fold == serial (exact)" "$IK_VEC" "$IK_SER"
@@ -169,17 +169,17 @@ GEA="$(q -c "$PAR $GVP" -c "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF
 
 # A HashAggregate finalize, not core's GroupAggregate-over-Sort.
 check "premise: grouped Finalize HashAggregate present (#349)" \
-   "$(printf '%s' "$GEA" | grep -qi 'Finalize HashAggregate' && echo y || echo n)" y
+   "$(grep -qi 'Finalize HashAggregate' <<<"$GEA" && echo y || echo n)" y
 # OUR grouped node, and it is the parallel-aware one.
 check "premise: the partial grouped node is under the Gather (#349)" \
-   "$(printf '%s' "$GEA" | grep -qi 'Parallel Custom Scan (PgColumnarScan)' &&
-      printf '%s' "$GEA" | grep -qi 'Columnar Vectorized Group Keys' && echo y || echo n)" y
+   "$(grep -qi 'Parallel Custom Scan (PgColumnarScan)' <<<"$GEA" &&
+      grep -qi 'Columnar Vectorized Group Keys' <<<"$GEA" && echo y || echo n)" y
 # Planned is not launched: a leader-only run would satisfy every value check
 # below while never exercising a worker. Assert launch AND our node together, so
 # core's parallel plan cannot satisfy this on its own.
 check "premise: workers actually launched for OUR grouped node (#349)" \
-   "$(printf '%s' "$GEA" | grep -qiE 'Workers Launched: [1-9]' &&
-      printf '%s' "$GEA" | grep -qi 'Columnar Vectorized Group Keys' && echo y || echo n)" y
+   "$(grep -qiE 'Workers Launched: [1-9]' <<<"$GEA" &&
+      grep -qi 'Columnar Vectorized Group Keys' <<<"$GEA" && echo y || echo n)" y
 
 # Each participant emits its own partial per group, so the Gather carries a
 # MULTIPLE of the group count and the Finalize collapses it back. 50 groups with

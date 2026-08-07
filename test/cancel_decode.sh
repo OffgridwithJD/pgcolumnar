@@ -79,7 +79,7 @@ cancel_ms() {
 		c=$(date +%s%N)
 		out="$(raw "SET statement_timeout = 100; $(printf "$(QUERY "$t")")")"
 		d=$(date +%s%N)
-		echo "$out" | grep -qi "canceling statement" || { echo FAILED; return; }
+		grep -qi "canceling statement" <<<"$out" || { echo FAILED; return; }
 		ms=$(( (d - c) / 1000000 ))
 		[ -z "$best" ] || [ "$ms" -lt "$best" ] && best="$ms"
 	done

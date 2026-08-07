@@ -39,7 +39,7 @@ err_of() {
 expect_error() {
 	local label="$1" sql="$2" out
 	out="$(err_of "$sql")"
-	check "$label" "$(printf '%s' "$out" | grep -qi "ERROR" && echo error || echo ok)" error
+	check "$label" "$(grep -qi "ERROR" <<<"$out" && echo error || echo ok)" error
 }
 
 # ---- single columnar table: split by row-group ranges -----------------------

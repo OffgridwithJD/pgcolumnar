@@ -51,7 +51,7 @@ for r in 1 2 3 4 5; do
 		-d "$PGC_DB" -At -c "SELECT pgcolumnar.compact_rewrite('n', 0.02);" 2>&1)"
 	# a healthy call returns an integer group count; the bug returned an ERROR line
 	check "compact_rewrite cycle $r returns a count (no self-conflict)" \
-		"$(printf '%s' "$rw" | grep -Eq '^[0-9]+$' && echo ok || echo "bad:$rw")" "ok"
+		"$(grep -Eq '^[0-9]+$' <<<"$rw" && echo ok || echo "bad:$rw")" "ok"
 	check "parity after compact_rewrite cycle $r" "$(hash_n)" "$(hash_h)"
 	sizes[$r]="$(fsize)"
 done

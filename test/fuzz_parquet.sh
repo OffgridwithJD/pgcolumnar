@@ -191,8 +191,8 @@ run_stmt() {
 	rc=$?
 
 	# Never let a connection failure be read as a clean result again.
-	if echo "$out" | grep -qE 'could not connect|No such file or directory|Connection refused' &&
-	   ! echo "$out" | grep -q '^ERROR:'; then
+	if grep -qE 'could not connect|No such file or directory|Connection refused' <<<"$out" &&
+	   ! grep -q '^ERROR:' <<<"$out"; then
 		if ! wait_for_cluster; then
 			echo "  FATAL: cluster unreachable and did not return"
 			return 1
@@ -202,14 +202,14 @@ run_stmt() {
 	newlog="$(cat "$NEWLOG" 2>/dev/null)"
 
 	# A sanitizer report is a finding even when the statement then succeeds.
-	if echo "$newlog" | grep -qE 'AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer|LeakSanitizer'; then
+	if grep -qE 'AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer|LeakSanitizer' <<<"$newlog"; then
 		sanitizer=$((sanitizer + 1))
 		save_finding san "$seedfile" "$mutseed" "$stmt" "$newlog"
 		wait_for_cluster || return 1
 		return 1
 	fi
 
-	if echo "$newlog" | grep -qE 'was terminated by signal|server process .* exited with|crashed'; then
+	if grep -qE 'was terminated by signal|server process .* exited with|crashed' <<<"$newlog"; then
 		crashes=$((crashes + 1))
 		save_finding crash "$seedfile" "$mutseed" "$stmt" "$newlog"
 		wait_for_cluster || echo "  (cluster did not come back)"
@@ -225,20 +225,20 @@ run_stmt() {
 
 	# statement_timeout firing is a hang too: the decode did not finish in 20s
 	# on a file that is at most a few hundred kilobytes.
-	if echo "$out" | grep -q 'canceling statement due to statement timeout'; then
+	if grep -q 'canceling statement due to statement timeout' <<<"$out"; then
 		hangs=$((hangs + 1))
 		save_finding hang "$seedfile" "$mutseed" "$stmt" "$out"
 		return 1
 	fi
 
-	if echo "$out" | grep -qE 'server closed the connection unexpectedly|connection to server was lost|terminating connection'; then
+	if grep -qE 'server closed the connection unexpectedly|connection to server was lost|terminating connection' <<<"$out"; then
 		crashes=$((crashes + 1))
 		save_finding crash "$seedfile" "$mutseed" "$stmt" "$out"
 		wait_for_cluster || echo "  (cluster did not come back)"
 		return 1
 	fi
 
-	if echo "$out" | grep -q '^ERROR:'; then
+	if grep -q '^ERROR:' <<<"$out"; then
 		errors=$((errors + 1))
 	else
 		clean=$((clean + 1))

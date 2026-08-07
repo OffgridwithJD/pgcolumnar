@@ -190,7 +190,7 @@ check_reconstruct "$F_NONL" 4 "no trailing newline / 4 workers"
 err_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 	-d "$PGC_DB" -Atc "SELECT pgcolumnar.file_split_offsets('$F', 0)" 2>&1 || true)"
 check "workers < 1 is rejected" \
-	"$(printf '%s' "$err_out" | grep -qi "at least 1" && echo ok || echo no)" ok
+	"$(grep -qi "at least 1" <<<"$err_out" && echo ok || echo no)" ok
 
 # a directory is rejected, not reported as an 8-exabyte splittable file (regression
 # for the missing fstat/S_ISREG guard: lseek(SEEK_END) on a directory fd returns a
@@ -198,7 +198,7 @@ check "workers < 1 is rejected" \
 dir_err="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 	-d "$PGC_DB" -Atc "SELECT pgcolumnar.file_split_offsets('$DATADIR', 1)" 2>&1 || true)"
 check "file_split_offsets: a directory is rejected (not an 8-exabyte file)" \
-	"$(printf '%s' "$dir_err" | grep -qi "not a regular file" && echo ok || echo no)" ok
+	"$(grep -qi "not a regular file" <<<"$dir_err" && echo ok || echo no)" ok
 
 # ---- coordinator: pgcolumnar.parallel_copy (partition-parallel, atomic 2PC) ---
 # Each worker loads a DISTINCT partition (distinct storage id -> parallel AND
@@ -265,7 +265,7 @@ psql_run "DROP TABLE IF EXISTS t_txtkey CASCADE;
           CREATE TABLE t_txtkey_b PARTITION OF t_txtkey FOR VALUES FROM ('m') TO (MAXVALUE) USING pgcolumnar;" >/dev/null
 tk_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_txtkey'::regclass, '$F', 2)")"
 check "text partition key is rejected (not a crash)" \
-	"$(printf '%s' "$tk_err" | grep -qi "numeric or date/time" && echo ok || echo no)" ok
+	"$(grep -qi "numeric or date/time" <<<"$tk_err" && echo ok || echo no)" ok
 check "text partition key: server still up (no crash)" "$(q "SELECT 1")" 1
 
 # ---- key NOT in column 1, with a generated column before it -------------------
@@ -299,7 +299,7 @@ F_BADKEY="$DATADIR/badkey.txt"
 mkpart t_pcp 4
 bk_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F_BADKEY', 4)")"
 check "atomic: a bad partition-key value is rejected" \
-	"$(printf '%s' "$bk_err" | grep -qi 'invalid input syntax' && echo ok || echo no)" ok
+	"$(grep -qi 'invalid input syntax' <<<"$bk_err" && echo ok || echo no)" ok
 check "atomic: bad-key load leaves the target empty" "$(q "SELECT count(*) FROM t_pcp")" 0
 check "atomic: no prepared-transaction leak after bad-key" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
@@ -314,7 +314,7 @@ psql_run "DROP TABLE IF EXISTS t_gap CASCADE;
           CREATE TABLE t_gap_b PARTITION OF t_gap FOR VALUES FROM (3000) TO (MAXVALUE) USING pgcolumnar;" >/dev/null
 gap_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_gap'::regclass, '$F', 4)")"
 check "atomic: a loader failure fails the whole load" \
-	"$(printf '%s' "$gap_err" | grep -qiE 'no partition of relation|failed' && echo ok || echo no)" ok
+	"$(grep -qiE 'no partition of relation|failed' <<<"$gap_err" && echo ok || echo no)" ok
 check "atomic: loader-failure leaves the target empty (siblings rolled back)" \
 	"$(q "SELECT count(*) FROM t_gap")" 0
 check "atomic: no prepared-transaction leak after loader failure" \
@@ -327,7 +327,7 @@ shuf "$F" > "$F_SHUF"; [ "$(id -u)" = "0" ] && chown postgres "$F_SHUF"
 mkpart t_pcp 4
 shuf_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$F_SHUF', 4)")"
 check "unsorted input is rejected" \
-	"$(printf '%s' "$shuf_err" | grep -qi "not sorted" && echo ok || echo no)" ok
+	"$(grep -qi "not sorted" <<<"$shuf_err" && echo ok || echo no)" ok
 check "unsorted rejection loads nothing" "$(q "SELECT count(*) FROM t_pcp")" 0
 
 # ---- a DEFAULT partition is rejected (it could catch any worker's rows) -------
@@ -337,7 +337,7 @@ psql_run "DROP TABLE IF EXISTS t_def CASCADE;
           CREATE TABLE t_def_d PARTITION OF t_def DEFAULT USING pgcolumnar;" >/dev/null
 def_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_def'::regclass, '$F', 4)")"
 check "DEFAULT partition target is rejected" \
-	"$(printf '%s' "$def_err" | grep -qi "DEFAULT partition" && echo ok || echo no)" ok
+	"$(grep -qi "DEFAULT partition" <<<"$def_err" && echo ok || echo no)" ok
 
 # ---- the max_prepared_transactions guard fires up front ----------------------
 # max_prepared_transactions is 8 (set above); a target with more partitions than
@@ -345,14 +345,14 @@ check "DEFAULT partition target is rejected" \
 mkpart t_pcp10 10
 guard_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp10'::regclass, '$F', 10)")"
 check "max_prepared_transactions guard fires" \
-	"$(printf '%s' "$guard_err" | grep -qi "max_prepared_transactions" && echo ok || echo no)" ok
+	"$(grep -qi "max_prepared_transactions" <<<"$guard_err" && echo ok || echo no)" ok
 check "guard rejects before loading anything" "$(q "SELECT count(*) FROM t_pcp10")" 0
 
 # ---- a missing file errors cleanly -------------------------------------------
 mkpart t_pcp 4
 mf_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_pcp'::regclass, '$DATADIR/nope.txt', 2)")"
 check "missing file: errors, not crashes" \
-	"$(printf '%s' "$mf_err" | grep -qiE "could not (open|stat)|no such file|not a regular file" && echo ok || echo no)" ok
+	"$(grep -qiE "could not (open|stat)|no such file|not a regular file" <<<"$mf_err" && echo ok || echo no)" ok
 check "missing file: server still up (no worker crash)" "$(q "SELECT 1")" 1
 check "missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pcp")" 0
 
@@ -360,7 +360,7 @@ check "missing file: nothing loaded" "$(q "SELECT count(*) FROM t_pcp")" 0
 psql_run "DROP TABLE IF EXISTS t_heaptgt; CREATE TABLE t_heaptgt (id int, txt text);" >/dev/null
 nc_err="$(err_of "SELECT pgcolumnar.parallel_copy('t_heaptgt'::regclass, '$F', 2)")"
 check "non-columnar target is rejected" \
-	"$(printf '%s' "$nc_err" | grep -qi "not a pgcolumnar table" && echo ok || echo no)" ok
+	"$(grep -qi "not a pgcolumnar table" <<<"$nc_err" && echo ok || echo no)" ok
 
 # ---- single columnar table: workers write ONE storage concurrently -----------
 # The storage-row creation lock is skipped by the loaders (the coordinator
@@ -429,7 +429,7 @@ check "witness: no prepared-transaction leak" \
 psql_run "DROP TABLE IF EXISTS t_single; CREATE TABLE t_single (id int, txt text) USING pgcolumnar;" >/dev/null
 st_bad="$(err_of "SELECT pgcolumnar.parallel_copy('t_single'::regclass, '$F_BADKEY', 4)")"
 check "single table: a bad row fails the whole load" \
-	"$(printf '%s' "$st_bad" | grep -qiE 'invalid input syntax|failed' && echo ok || echo no)" ok
+	"$(grep -qiE 'invalid input syntax|failed' <<<"$st_bad" && echo ok || echo no)" ok
 check "single table: failed load leaves the target empty" "$(q "SELECT count(*) FROM t_single")" 0
 check "single table: no prepared-transaction leak after failure" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
