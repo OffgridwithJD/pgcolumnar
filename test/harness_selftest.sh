@@ -249,6 +249,29 @@ check "positive control: and it is a whole list, not one lucky line" \
 	"$([ "$(listed_suites | grep -c .)" -gt 50 ] && echo yes || echo no)" "yes"
 rm -f "$_fx"
 
+# ---- the list stays sorted, which is what actually stops the conflicts ------
+#
+# One name per line was not enough on its own. Measured, on this repository, by
+# branching twice and merging:
+#
+#   one line,     both additions on the same line          CONFLICT
+#   one per line, both appended at the end                 CONFLICT
+#   one per line + sorted, names far apart                 clean
+#   one per line + sorted, names that sort adjacently      CONFLICT
+#
+# Everyone appends at the end, which is the shape all four of #469's conflicts
+# had, so one-per-line alone would have left them all conflicting. Sorted gives a
+# new suite an insertion point decided by its NAME, so two unrelated additions
+# land in different places and merge. It is a large reduction and not a cure:
+# two names that sort next to each other still collide.
+#
+# This check is what keeps the property true. Without it the order decays the
+# first time somebody appends by hand, and the reduction quietly goes away.
+_sorted_expected="$(listed_suites | sort)"
+_sorted_actual="$(listed_suites)"
+check "the suite list is sorted, so two new suites land in different places" \
+	"$([ "$_sorted_actual" = "$_sorted_expected" ] && echo sorted || echo "not sorted")" "sorted"
+
 unregistered=""
 for f in "$TESTDIR"/*.sh; do
 	name="$(basename "$f" .sh)"
