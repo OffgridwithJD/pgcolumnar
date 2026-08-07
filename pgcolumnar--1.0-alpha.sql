@@ -997,6 +997,9 @@ DECLARE
 	ndistinct bigint;
 	totalrows bigint;
 	ndstat    double precision;
+	hist      text;
+	-- One fewer than the number of bounds, matching core's default_statistics_target.
+	nbuckets  integer := current_setting('default_statistics_target')::integer;
 	seen      integer := 0;
 	unknown   text;
 	schname   text;
@@ -1056,7 +1059,7 @@ BEGIN
 	END IF;
 
 	FOR att IN
-		SELECT a.attname, a.attnum
+		SELECT a.attname, a.attnum, a.atttypid
 			FROM pg_attribute a
 			WHERE a.attrelid = rel AND a.attnum > 0 AND NOT a.attisdropped
 			  AND (columns IS NULL OR a.attname = ANY (columns))
@@ -1119,19 +1122,79 @@ BEGIN
 		END IF;
 
 		/*
+		 * histogram_bounds, whose ends are exact because the read is complete
+		 * (#414 slice 3).
+		 *
+		 * percentile_disc over an array of fractions returns ACTUAL column
+		 * values, one per fraction, in a single ordered pass. Fraction 1.0 is
+		 * therefore the true maximum and 0.0 the true minimum, which is the
+		 * whole gain: core samples, so a value held by one row in 500,000 is
+		 * missed and every range estimate above the sampled maximum collapses.
+		 * percentile_cont would interpolate and invent values the column does
+		 * not contain, which is wrong for a histogram of stored data and wrong
+		 * for any non-numeric type.
+		 *
+		 * Only for types that can be ordered. A column with no btree ordering
+		 * has no histogram in core either, and ORDER BY would simply fail.
+		 *
+		 * Skipped when the column holds fewer distinct values than buckets: core
+		 * emits no histogram there because the most-common-value list already
+		 * describes the column completely, and writing one anyway would be a
+		 * shape core never produces.
+		 *
+		 * NOTE, and it bounds what this slice claims: core EXCLUDES
+		 * most-common-values from the histogram. This function does not write
+		 * most-common-values at all, so there is nothing here to double-count
+		 * and the two are consistent as written. Writing both without that
+		 * exclusion would over-count those values in selectivity, which is why
+		 * most_common_vals is a separate slice and not a line added here.
+		 */
+		hist := NULL;
+		IF att.attnum > 0
+		   AND EXISTS (SELECT 1 FROM pg_catalog.pg_type t
+					   JOIN pg_catalog.pg_opclass oc ON oc.opcintype = t.oid
+					   JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod
+					   WHERE t.oid = att.atttypid AND am.amname = 'btree')
+		   AND ndistinct > nbuckets
+		THEN
+			EXECUTE format(
+				'SELECT percentile_disc(
+						 (SELECT array_agg(i::double precision / %s ORDER BY i)
+							FROM generate_series(0, %s) i))
+					   WITHIN GROUP (ORDER BY %I)::text
+				   FROM %I.%I WHERE %I IS NOT NULL',
+				nbuckets, nbuckets, att.attname, schname, relnm, att.attname)
+				INTO hist;
+		END IF;
+
+		/*
 		 * The casts are load-bearing. pg_restore_attribute_stats takes VARIADIC
 		 * "any", so a mistyped argument is a WARNING and the value is dropped,
 		 * not an error: attname must be text (attname is `name`) and null_frac
 		 * must be real (the division yields double precision). Without these the
 		 * call "succeeds" having stored nothing.
+		 *
+		 * histogram_bounds is passed as text, which is what the function takes:
+		 * it parses the array literal against the column's own type.
 		 */
-		PERFORM pg_catalog.pg_restore_attribute_stats(
-			'schemaname', schname,
-			'relname', relnm,
-			'attname', att.attname::text,
-			'inherited', false,
-			'null_frac', nullfrac::real,
-			'n_distinct', ndstat::real);
+		IF hist IS NULL THEN
+			PERFORM pg_catalog.pg_restore_attribute_stats(
+				'schemaname', schname,
+				'relname', relnm,
+				'attname', att.attname::text,
+				'inherited', false,
+				'null_frac', nullfrac::real,
+				'n_distinct', ndstat::real);
+		ELSE
+			PERFORM pg_catalog.pg_restore_attribute_stats(
+				'schemaname', schname,
+				'relname', relnm,
+				'attname', att.attname::text,
+				'inherited', false,
+				'null_frac', nullfrac::real,
+				'n_distinct', ndstat::real,
+				'histogram_bounds', hist);
+		END IF;
 
 		seen := seen + 1;
 	END LOOP;

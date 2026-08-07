@@ -58,9 +58,10 @@ fi
 # sample is what makes the sampled estimate inexact, which slice 1 depends on.
 
 psql_run "DROP TABLE IF EXISTS af_c;
-	CREATE TABLE af_c (k int, pad1 text, pad2 text, pad3 text) USING pgcolumnar;
+	CREATE TABLE af_c (k int, skew int, pad1 text, pad2 text, pad3 text) USING pgcolumnar;
 	INSERT INTO af_c SELECT
 		CASE WHEN g % 10 = 0 THEN NULL ELSE g % 45001 END,
+		CASE WHEN g = 1 THEN 1000000 ELSE g % 100000 END,
 		md5(g::text), md5((g * 7)::text), md5((g * 13)::text)
 	FROM generate_series(1, $ROWS) g;" >/dev/null
 
@@ -172,5 +173,118 @@ check "pgcolumnar.analyze() leaves the statistics it does not compute in place" 
 			echo "no (correlation was [${core_correlation_before:-<null>}], is now [${ours_correlation:-<null>}])"
 		fi)" \
 	"yes"
+
+# ---- slice 3: histogram_bounds, whose top end is exact ------------------------
+#
+# `k` cannot test this. It is uniform over 0..45000, so core's 30,000-row sample
+# almost certainly hits both extremes and its bounds are already near-exact. A
+# check asserting "ours is exact where core's is not" would pass or fail on the
+# luck of the sample, which is three samples rather than three behaviours.
+#
+# `skew` is built so the extreme is genuinely rare: ONE row in 500,000 holds
+# 1,000,000 and every other row is under 100. Core's sample misses it with
+# near-certainty; a full read cannot. Four orders of magnitude is not a coin flip.
+#
+# It is also the case that matters. A range predicate above the sampled maximum
+# is exactly where the planner's estimate collapses.
+
+# Two fixture decisions, both forced by what core actually does.
+#
+# The ordinary values span 100,000 distinct rather than 100. With only 100
+# distinct values core stores every one as a most-common-value and emits NO
+# histogram at all, so the first version of this check compared against an empty
+# array and failed on its own premise rather than on the behaviour.
+#
+# And core's sample for this column is cut to 10 buckets (about 3,000 rows).
+# At the default target it samples 30,000 of 500,000 rows, which finds a
+# one-in-500,000 outlier about 6% of the time -- a check that fails one run in
+# sixteen for no defect. At 10 it is about 0.6%. That is small and it is not
+# zero: any discrimination against a SAMPLE is probabilistic, and pretending
+# otherwise would be the flaky-by-construction shape this fixture exists to
+# avoid. The premise below states the condition rather than assuming it.
+psql_run "ALTER TABLE af_c ALTER COLUMN skew SET STATISTICS 10;" >/dev/null
+
+true_skew_max="$(q "SELECT max(skew) FROM af_c")"
+check_num "premise: the outlier really is in the table" "$true_skew_max" "1000000"
+check_num "premise: and it really is one row in $ROWS" \
+	"$(q "SELECT count(*) FROM af_c WHERE skew = 1000000")" "1"
+
+psql_run "ANALYZE af_c;" >/dev/null
+core_hist_max="$(q "SELECT (histogram_bounds::text::int[])[array_length(histogram_bounds::text::int[], 1)]
+	FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")"
+echo "-- core sampled histogram max = ${core_hist_max:-<none>}, truth = $true_skew_max"
+
+# Reported, deliberately NOT asserted.
+#
+# "Core misses the outlier" cannot be a gate. It is probabilistic by definition,
+# and it also depends on how our own access method hands rows to the sampler, so
+# a red here would mean "the sample was lucky" and never "the code is wrong".
+# Measured both ways while writing this: core's histogram max came back 99,999 on
+# one run and 1,000,000 on the next, on identical data. Gating on that would have
+# been the flaky-by-construction shape this fixture was built to avoid.
+#
+# What IS asserted below is exactness, and it does not need core to be wrong: the
+# expected value comes from an independent SELECT max(), not from the code path
+# under test, so the check fails whenever our bounds are not the true ones.
+if pgc_is_number "$core_hist_max" && [ "$core_hist_max" -lt 200000 ]; then
+	echo "-- core missed the outlier this run, which is the case that motivates #414"
+else
+	echo "-- core happened to sample the outlier this run; exactness is asserted regardless"
+fi
+
+# Captured, not discarded. While writing this slice the function raised
+#
+#     ERROR:  record "att" has no field "atttypid"
+#
+# and the redirect swallowed it, so the call did nothing, pg_stats still held
+# core's numbers, and the failure presented as "our maximum is wrong" rather than
+# "our function did not run". The assertion caught it, but the diagnosis needed
+# the error, so the error is now a check of its own.
+skew_out="$(psql_run "SELECT pgcolumnar.analyze('af_c'::regclass, ARRAY['skew']);" 2>&1)"
+check_num "pgcolumnar.analyze() ran without raising, so the statistics below are its own" \
+	"$(grep -c 'ERROR' <<<"$skew_out")" "0"
+ours_hist="$(q "SELECT histogram_bounds::text::int[]
+	FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")"
+ours_hist_max="$(q "SELECT (histogram_bounds::text::int[])[array_length(histogram_bounds::text::int[], 1)]
+	FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")"
+echo "-- ours histogram max = ${ours_hist_max:-<none>}"
+
+check_num "pgcolumnar.analyze() puts the true maximum at the top of histogram_bounds" \
+	"${ours_hist_max:-<none>}" "$true_skew_max"
+
+# Both ends, not just the interesting one. A histogram whose top is right and
+# whose bottom is invented is still wrong, and percentile_disc returning real
+# column values is what makes both exact.
+check_num "and the true minimum at the bottom" \
+	"$(q "SELECT (histogram_bounds::text::int[])[1]
+		FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")" \
+	"$(q "SELECT min(skew) FROM af_c")"
+
+# percentile_disc returns values the column HOLDS. percentile_cont would
+# interpolate and invent ones it does not, which is wrong for a histogram of
+# stored data and impossible for a non-numeric type.
+check_num "every bound is a value the column actually holds" \
+	"$(q "SELECT count(*) FROM unnest((SELECT histogram_bounds::text::int[]
+			FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew')) b
+		WHERE NOT EXISTS (SELECT 1 FROM af_c WHERE skew = b)")" "0"
+
+# A histogram is an ordered ladder, not a pair of extremes. Asserting only the
+# last element would pass for an array of two values, which is not a histogram
+# and would ruin every estimate between the ends.
+check "and it is an ordered ladder rather than two extremes" \
+	"$(if pgc_is_number "$(q "SELECT array_length(histogram_bounds::text::int[], 1)
+			FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")" &&
+		 [ "$(q "SELECT array_length(histogram_bounds::text::int[], 1)
+			FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")" -ge 5 ]; then
+			echo yes
+		else
+			echo "no (length [$(q "SELECT array_length(histogram_bounds::text::int[], 1) FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")])"
+		fi)" "yes"
+
+check "and it is sorted ascending, which a histogram must be to be usable" \
+	"$(q "SELECT CASE WHEN histogram_bounds::text::int[] =
+			(SELECT array_agg(x ORDER BY x) FROM unnest(histogram_bounds::text::int[]) x)
+		THEN 'yes' ELSE 'no' END
+		FROM pg_stats WHERE tablename = 'af_c' AND attname = 'skew'")" "yes"
 
 pgc_summary

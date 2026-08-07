@@ -41,6 +41,7 @@ set -uo pipefail
 SUITES=(
 	advisory_lock_class
 	alter_column_type
+	analyze_function
 	analyze_reltuples
 	analyze_stats
 	arrow_export
