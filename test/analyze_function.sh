@@ -47,9 +47,28 @@ ROWS=${PGC_ANALYZE_ROWS:-500000}
 # version-support decision and not a detail (stavalues anyarray typing, staop,
 # stacoll, stadistinct's sign convention). Refuse rather than silently narrow:
 # pgc_skip fails by default and must be waived deliberately.
+#
+# A version gate, NOT pgc_skip. pgc_skip is for a missing DEPENDENCY, which is an
+# environment defect and fails by default so somebody installs the thing. A major
+# that does not ship pg_restore_attribute_stats is not a defect to fix: 15 to 17
+# genuinely lack it, the same way 15 lacks WITHOUT OVERLAPS. Using pgc_skip here
+# turned every PG17 CI run red the moment this suite was registered, which is a
+# red nobody can act on.
+#
+# So it reports SKIP and runs no checks, which pgc_summary turns into exit 2 and
+# the matrix records as SKIP rather than as a pass (#447).
+#
+# The major is asserted first. An unreadable version must not be mistaken for an
+# old one, or a broken environment would report SKIP and look supported.
+if ! pgc_is_number "${PGC_MAJOR:-}"; then
+	echo "FAIL  could not read the server major, so the gate below cannot be trusted: got [${PGC_MAJOR:-<none>}]"
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1
+	pgc_summary
+fi
 if [ "$PGC_MAJOR" -lt 18 ]; then
-	pgc_skip PG18_STATS_API \
-		"pgcolumnar.analyze() needs pg_restore_attribute_stats (PG18+); this server is $PGC_MAJOR"
+	echo "SKIP  pgcolumnar.analyze() needs pg_restore_attribute_stats (PG18+); this server is $PGC_MAJOR"
+	pgc_summary
 fi
 
 # --- fixture ------------------------------------------------------------------
