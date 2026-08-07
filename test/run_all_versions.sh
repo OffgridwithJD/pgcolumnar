@@ -208,7 +208,7 @@ SRCDIR="${PGC_RUN_SRCDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SUITES=(harness_selftest docs_style smoke phase2 phase3 phase4 phase5 phase6 audit concurrency unique_conc \
 	differential recovery replication native_backend_crash fuzz fuzz_parquet fuzz_arrow hardening concurrent_diff parallel sorted_projection \
 	arrow_export parquet_export read_stream corruption \
-	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report zonemap_cost native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_sizing bloom_setting bloom_lazy native_vecskip native_index native_index_projection native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_bigcap native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection advisory_lock_class logical_subscriber parallel_degree objstore_module objstore_stash_recovery isolation)
+	generated_columns temporal arrow_import index_only projections arrow_nested parquet_import parquet_nested arrow_nested_import parquet_nested_import native_writer native_roundtrip native_encoding native_fastdecode native_zonemap write_minmax_fastpath write_fsst_compressed fsst_margin encode_invariants encode_effort native_skip pushdown_report zonemap_cost native_agg native_agg_deletes native_agg_addcolumn native_groupagg ungrouped_vector_agg parallel_vector_agg native_bloom bloom_sizing bloom_setting bloom_lazy native_vecskip native_index native_index_projection native_fetch_position native_dml alter_column_type native_ios native_projection native_cluster pg19_vacuum_options native_repack native_compact native_recluster recluster_extent native_vacuum_race native_sort_by sort_status native_reclaim native_ownership drop_cleanup pg_dump_roundtrip native_reclaim_cycles native_reclaim_frag native_reclaim_reconcile native_gap native_format native_truncate native_rewrite native_rewrite_conc rewrite_group_scan native_parquet_schema native_read_parquet native_parquet_fdw native_parquet_pushdown native_parquet_hardening server_file_privilege native_parquet_stack native_parquet_units native_parquet_flba native_parquet_codecs native_parquet_projection native_parquet_multifile native_parquet_streaming native_parquet_partition native_cancel cancel_decode wal_envelope decode_interrupts import_exclusion import_deferred parallel_copy parallel_export_parquet fk_referencing row_triggers native_lazy_slot native_ctas native_fetch_cache native_fetch_bigcap native_fetch_interrupt analyze_stats analyze_reltuples native_fetch_projection column_projection advisory_lock_class logical_subscriber parallel_degree planner_choice_quality objstore_module objstore_stash_recovery isolation)
 
 # Default matrix: one assert-enabled pg_config per major, 15 through 19.
 DEFAULT_CONFIGS=(
@@ -311,6 +311,13 @@ declare -a SUMMARY
 is_timing_suite() {
 	case "$1" in
 		native_fetch_position|native_cancel|native_agg_deletes) return 0 ;;
+		# planner_choice_quality's only assertion is a wall-clock ratio. Left out
+		# of this list it still RAN under PGC_SKIP_TIMING, skipped the ratio, and
+		# reported PASS on the strength of its premises -- so a regression of #434
+		# would have been reported green by the suite that exists to catch it. A
+		# suite whose subject is dropped has not passed, and the driver already
+		# knows how to say that.
+		planner_choice_quality) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -331,6 +338,12 @@ is_timing_suite() {
 # PGC_SKIP_TIMING drops those in CI and replication must still run there. Serial
 # and skipped are different properties and were one list until this suite needed
 # one without the other.
+# planner_choice_quality wants the same split, the other way around from
+# replication. Its subject is a wall-clock ratio, so it cannot run beside five
+# others and mean anything. But it is deliberately not in is_timing_suite: its
+# premises are plan-shape assertions, and those are worth running in CI. Under
+# PGC_SKIP_TIMING the suite drops the ratios itself, through check_timing, and
+# does not execute the timed queries at all.
 runs_alone() {
 	case "$1" in
 		replication) return 0 ;;
