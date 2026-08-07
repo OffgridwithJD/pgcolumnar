@@ -115,6 +115,15 @@ CB_PORT="${PGC_CB_PORT:-58900}"
 CB_PGDATA="${PGC_CB_PGDATA:-$CB_DATA/pgdata}"
 CB_KEEP="${PGC_CB_KEEP:-0}"
 CB_MAXGROUPS="${PGC_CB_MAXGROUPS:-200000000}"
+# Workers for the parallel-load arm. 0 disables the arm entirely; the serial arm
+# is never affected. Reported ALONGSIDE the serial number, not instead of it:
+# serial COPY is the single-connection ingest path and parallel_copy is the bulk
+# path, and both are worth publishing (#465).
+CB_PCOPY_WORKERS="${PGC_CB_PCOPY_WORKERS:-16}"
+
+# The load guards live in their own file so the matrix can test them without the
+# 15 GB download this script needs. See test/bench_guards.sh.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cb_guards.sh"
 
 CB_URL_BASE="https://raw.githubusercontent.com/ClickHouse/ClickBench/main/postgresql"
 CB_TSV_URL="https://datasets.clickhouse.com/hits_compatible/hits.tsv.gz"
@@ -161,7 +170,7 @@ PSQL="$BINDIR/psql -h /tmp -p $CB_PORT -U postgres -d clickbench -X -q"
 # 0. Preconditions, once, loudly
 # ---------------------------------------------------------------------------
 note "== preconditions"
-for t in curl awk zcat "$BINDIR/psql" "$BINDIR/initdb" "$BINDIR/pg_ctl"; do
+for t in curl awk zcat sha256sum cmp "$BINDIR/psql" "$BINDIR/initdb" "$BINDIR/pg_ctl"; do
 	command -v "$t" >/dev/null 2>&1 || [ -x "$t" ] || die "missing tool: $t"
 done
 mkdir -p "$CB_DATA" || die "cannot write $CB_DATA"
@@ -173,15 +182,63 @@ note "   rows:      $CB_ROWS    tries: $CB_TRIES    arms: $CB_ARMS"
 # 1. The definition, fetched rather than vendored
 # ---------------------------------------------------------------------------
 note "== fetching the ClickBench definition (not stored in this repository)"
+#
+# Re-fetched EVERY run, on purpose: the point of not vendoring the definition is
+# that the benchmark tracks upstream, and a cached copy silently pins it to
+# whatever was current the first time this ever ran on the machine. An earlier
+# version kept the cache when the file was merely present, so "fetched at run
+# time" was true once and false afterwards.
+#
+# PGC_CB_OFFLINE=1 keeps an existing copy without reaching the network, for a
+# machine that has none. It says so in the output, because a run against a stale
+# definition is not comparable to one against the current definition and the
+# difference must not be invisible in the log.
+#
+# curl gets --fail, and the fetched bytes are checked for the shape they are
+# supposed to have before they replace a good copy. Both matter, and the second
+# is not redundant:
+#
+#   -sSL without --fail treats HTTP 404 as SUCCESS. GitHub answers a bad path
+#   with a 21-byte "404: Not Found" body and a 404 status, so curl exited 0 and
+#   wrote that page over the real definition. `[ -s ]` was satisfied -- the page
+#   is not empty -- the digest was computed and printed, and the run continued
+#   against an error page. Measured while writing this, with a deliberately bad
+#   URL. The give-away was both files having the same digest.
+#
+# So: --fail rejects the status, the grep rejects a body that is not the file we
+# asked for, and neither replaces the existing copy until both pass.
 for f in create.sql queries.sql; do
-	if [ ! -s "$CB_DATA/$f" ]; then
-		curl -sSL --retry 3 --max-time 120 -o "$CB_DATA/$f" "$CB_URL_BASE/$f" \
-			|| die "could not fetch $f"
-		note "   fetched $f"
+	case "$f" in
+		create.sql)		shape='CREATE TABLE' ;;
+		queries.sql)	shape='SELECT' ;;
+	esac
+	if [ "${PGC_CB_OFFLINE:-0}" = 1 ]; then
+		[ -s "$CB_DATA/$f" ] || die "PGC_CB_OFFLINE=1 but $CB_DATA/$f is not there"
+		note "   OFFLINE: using the existing $f, which may not be current"
+	elif curl -fsSL --retry 3 --max-time 120 -o "$CB_DATA/$f.new" "$CB_URL_BASE/$f" \
+			&& [ -s "$CB_DATA/$f.new" ] \
+			&& grep -qi "$shape" "$CB_DATA/$f.new"; then
+		if [ -s "$CB_DATA/$f" ] && ! cmp -s "$CB_DATA/$f" "$CB_DATA/$f.new"; then
+			note "   fetched $f -- CHANGED since the last run on this machine"
+		else
+			note "   fetched $f"
+		fi
+		mv "$CB_DATA/$f.new" "$CB_DATA/$f"
 	else
-		note "   have $f already"
+		rm -f "$CB_DATA/$f.new"
+		die "could not fetch $f (set PGC_CB_OFFLINE=1 to run against the copy already here)"
 	fi
 done
+
+# The digest of what actually ran. A published number is only reproducible if the
+# definition it came from can be identified, and "fetched from main" does not
+# identify anything -- main moves. Cite these beside any result.
+CB_SHA_CREATE=$(sha256sum "$CB_DATA/create.sql" | cut -c1-16)
+CB_SHA_QUERIES=$(sha256sum "$CB_DATA/queries.sql" | cut -c1-16)
+note "   definition: create.sql $CB_SHA_CREATE  queries.sql $CB_SHA_QUERIES"
+require "the create.sql digest was computed" "${#CB_SHA_CREATE}" "16" || exit 1
+require "the queries.sql digest was computed" "${#CB_SHA_QUERIES}" "16" || exit 1
+
 NQUERIES=$(grep -c 'SELECT' "$CB_DATA/queries.sql")
 require "the query file holds 43 queries" "$NQUERIES" "43" || exit 1
 # The column count is asserted against the CREATED TABLE further down, not
@@ -256,6 +313,10 @@ max_worker_processes = $(( NCPU + 15 ))
 max_parallel_workers = $NCPU
 max_parallel_workers_per_gather = $(( NCPU / 2 ))
 max_parallel_maintenance_workers = $(( NCPU / 2 ))
+# One prepared transaction per parallel_copy worker. The stock value is 0, which
+# makes every parallel arm fail on its first worker; the preflight below refuses
+# to start rather than let that be reported as a fast load (#465).
+max_prepared_transactions = $CB_PCOPY_WORKERS
 listen_addresses = ''
 unix_socket_directories = '/tmp'
 CONF
@@ -279,6 +340,22 @@ esac
 EXTVER=$($PSQL -At -c "SELECT extversion FROM pg_extension WHERE extname='pgcolumnar'")
 require "the extension is installed" "$([ -n "$EXTVER" ] && echo yes || echo no)" "yes" || exit 1
 note "   pgcolumnar $EXTVER on port $CB_PORT"
+
+# ---- preflight the parallel arm, before any row is loaded (#465) ------------
+#
+# max_prepared_transactions is PGC_POSTMASTER. Discovering it is too low during
+# the load means the run is already wasted, and the failure arrives as a
+# per-worker error in a load log rather than as its cause. So ask the RUNNING
+# cluster, not the file this script wrote, because an operator may be pointing it
+# at a cluster they tuned themselves.
+if [ "$CB_PCOPY_WORKERS" -gt 0 ]; then
+	CB_PREPARED=$($PSQL -At -c "SHOW max_prepared_transactions")
+	if ! cb_prepared_xacts_ok "$CB_PREPARED" "$CB_PCOPY_WORKERS"; then
+		cb_prepared_xacts_message "$CB_PREPARED" "$CB_PCOPY_WORKERS" >&2
+		die "the parallel arm cannot run; set PGC_CB_PCOPY_WORKERS=0 to skip it"
+	fi
+	note "   parallel arm: $CB_PCOPY_WORKERS workers, max_prepared_transactions=$CB_PREPARED"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. One table per arm, from the same fetched DDL
@@ -375,6 +452,54 @@ if printf '%s\n' "${ARMS[@]}" | grep -qx duckdb; then
 	ROWS[duckdb]=$(duckdb "$DUCK_DB" -noheader -list 'SELECT count(*) FROM hits' 2>/dev/null)
 	SIZE_B[duckdb]=$(stat -c%s "$DUCK_DB")
 	note "   duckdb: ${LOAD_S[duckdb]}s, ${ROWS[duckdb]} rows, ${SIZE_B[duckdb]} bytes"
+fi
+
+# ---- the parallel load arm, reported beside the serial one (#465) ----------
+#
+# Serial COPY is the single-connection ingest path; pgcolumnar.parallel_copy is
+# the bulk path. They measure different capabilities and both are published, so
+# this is an EXTRA table rather than a replacement for the serial number.
+#
+# It is deliberately not in ARMS: the 43 queries have nothing to say about a
+# table that exists only to be loaded, and running them would double the run for
+# no reading. That also means it needs its own row assertion, below, rather than
+# inheriting the one over ARMS.
+#
+# The load must fail LOUDLY. With max_prepared_transactions too low every worker
+# errors at once and the load returns in about no time, which reads as perfect
+# scaling: #465 records a harness that published 0.0s / 0.8s / 1.1s / 1.3s and
+# meant "every arm failed". The preflight above stops that before it starts, and
+# ON_ERROR_STOP plus the row check below stop it if it happens anyway.
+if [ "$CB_PCOPY_WORKERS" -gt 0 ] && [ -n "${ROWS[hits_col]:-}" ]; then
+	pc_tbl=hits_col_pcopy
+	$PSQL -c "DROP TABLE IF EXISTS $pc_tbl;" >/dev/null 2>&1
+	ddl_for "$pc_tbl" "USING pgcolumnar" | $PSQL -v ON_ERROR_STOP=1 >/dev/null 2>"$CB_DATA/ddl.pcopy.err"
+	if [ -s "$CB_DATA/ddl.pcopy.err" ]; then
+		head -5 "$CB_DATA/ddl.pcopy.err"; die "parallel arm DDL failed"
+	fi
+	t0=$(date +%s.%N)
+	$PSQL -v ON_ERROR_STOP=1 \
+		-c "SELECT pgcolumnar.parallel_copy('$pc_tbl'::regclass, '$TSV', $CB_PCOPY_WORKERS)" \
+		> "$CB_DATA/load.pcopy.log" 2>&1 \
+		|| { tail -10 "$CB_DATA/load.pcopy.log"; die "the parallel arm failed; it is not reported as a fast load"; }
+	$PSQL -c "VACUUM ANALYZE $pc_tbl;" >/dev/null 2>&1
+	t1=$(date +%s.%N)
+	LOAD_S[columnar_pcopy]=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+	ROWS[columnar_pcopy]=$($PSQL -At -c "SELECT count(*) FROM $pc_tbl")
+	SIZE_B[columnar_pcopy]=$($PSQL -At -c "SELECT pg_total_relation_size('$pc_tbl')")
+	note "   columnar_pcopy (${CB_PCOPY_WORKERS}w): ${LOAD_S[columnar_pcopy]}s, ${ROWS[columnar_pcopy]} rows, ${SIZE_B[columnar_pcopy]} bytes"
+
+	# The assertion that stops a failed parallel load being published as a fast
+	# one. cb_rows_ok refuses a missing count rather than comparing it, so a psql
+	# that died does not compare "" with "" and pass (#418).
+	if cb_rows_ok "${ROWS[columnar_pcopy]}" "$TSV_ROWS"; then
+		printf 'ok     premise: %s\n' "the parallel arm loaded every row of the file"
+	else
+		printf 'FAIL   premise: %s (got [%s] want [%s])\n' \
+			"the parallel arm loaded every row of the file" \
+			"${ROWS[columnar_pcopy]}" "$TSV_ROWS" >&2
+		fail=1
+	fi
 fi
 
 # Every arm must hold the same rows as the file. A load that silently dropped
@@ -568,6 +693,12 @@ printf '%-16s %12s %16s %10s\n' arm 'load (s)' 'size (bytes)' 'errors'
 for arm in "${ARMS[@]}"; do
 	printf '%-16s %12s %16s %10s\n' "$arm" "${LOAD_S[$arm]}" "${SIZE_B[$arm]}" "${ERRS[$arm]:-0}"
 done
+if [ -n "${LOAD_S[columnar_pcopy]:-}" ]; then
+	printf '%-16s %12s %16s %10s\n' "columnar_pcopy" \
+		"${LOAD_S[columnar_pcopy]}" "${SIZE_B[columnar_pcopy]}" "-"
+	printf '   parallel_copy with %s workers, beside the serial number above; both are the point\n' \
+		"$CB_PCOPY_WORKERS"
+fi
 echo
 echo "-- hot times, milliseconds. 'x' is columnar over heap; above 1.00 means we lose."
 printf '%-6s' query

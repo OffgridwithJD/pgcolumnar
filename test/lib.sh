@@ -480,6 +480,26 @@ check_timing() {
 	check "$name" "$got" "$want"
 }
 
+# A ratio check whose subject is a wall-clock ratio.
+#
+# check_timing does this for a scalar; a ratio needs its own entry point because
+# check_ratio takes a bound as well as two sides.
+#
+# It exists so that a suite never has to read PGC_SKIP_TIMING to decide whether
+# to ASSERT. planner_choice_quality did read it, branched on it, and then called
+# check_timing with two empty strings for got and want -- the "" vs "" compare
+# check_text and check_num were added to forbid (#418). That was safe only while
+# the suite's copy of the condition agreed with this file's, which is exactly the
+# coupling this helper removes. Deciding whether to MEASURE is still the suite's
+# business; deciding whether to assert is this file's.
+check_ratio_timing() {  # check_ratio_timing <name> <a> <b> <bound>
+	if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
+		echo "SKIP  $1 (PGC_SKIP_TIMING: wall-clock ratio)"
+		return 0
+	fi
+	check_ratio "$@"
+}
+
 # Is this query's plan the columnar custom scan?
 #
 # For a check that reads a counter out of EXPLAIN and asserts on it. Those

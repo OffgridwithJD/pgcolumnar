@@ -27,7 +27,8 @@ OBJS = \
 	src/columnar_projection.o \
 	src/columnar_parquet_reader.o \
 	src/columnar_parallel_copy.o \
-	src/columnar_parallel_export.o
+	src/columnar_parallel_export.o \
+	src/columnar_objstore.o
 
 EXTENSION = pgcolumnar
 DATA = pgcolumnar--1.0-alpha.sql pgcolumnar--1.0-dev--1.0-alpha.sql
@@ -113,3 +114,24 @@ PG_CFLAGS += -std=gnu17
 endif
 
 include $(PGXS)
+
+# The object-store module is a SEPARATE shared library, built and installed
+# alongside this one but never linked into it. See src/columnar_objstore.h: this
+# extension is preloaded, so anything it links reaches the postmaster.
+#
+# A build failure there must not be silent, so these do not use the `-` prefix.
+OBJSTORE_DIR = $(realpath $(dir $(firstword $(MAKEFILE_LIST))))/objstore
+
+all: objstore-all
+objstore-all:
+	$(MAKE) -C $(OBJSTORE_DIR) PG_CONFIG=$(PG_CONFIG) all
+
+install: objstore-install
+objstore-install:
+	$(MAKE) -C $(OBJSTORE_DIR) PG_CONFIG=$(PG_CONFIG) install
+
+clean: objstore-clean
+objstore-clean:
+	$(MAKE) -C $(OBJSTORE_DIR) PG_CONFIG=$(PG_CONFIG) clean
+
+.PHONY: objstore-all objstore-install objstore-clean

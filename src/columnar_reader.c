@@ -1886,7 +1886,19 @@ typedef struct PgColumnarFetchGroup
 	uint64		rowCount;
 	uint64		fileOffset;
 	int			natts;
-	char	   *groupBuffer;	/* the group's raw bytes */
+
+	/*
+	 * The validity bitmap of each touched column, read once and kept for as long
+	 * as the entry lives (#433). It is (rowCount + 7) / 8 bytes, ~1.2 KB at the
+	 * default stripe, and it is consulted on every fetch to decide whether the
+	 * row is null. Keeping it is what lets an overflowed column stay cheap: the
+	 * null test costs nothing, and only a non-null value pays for a re-read.
+	 *
+	 * There is deliberately no whole-group buffer here. Holding one was what
+	 * made the cap a cliff -- see the comment on the cap below.
+	 */
+	char	  **vbits;			/* [natts]; NULL until that column is touched */
+
 	NativeColumnChunkMetadata **ccForCol;	/* [natts] */
 	char	  **rawBuf;			/* [natts]; NULL until that column is decoded */
 
@@ -1912,8 +1924,9 @@ typedef struct PgColumnarFetchGroup
 	 *
 	 * colCx[c] holds column c's decoded stream, one child context per column so
 	 * a single column can be released without disturbing the rest of the entry.
-	 * It is NULL when the column is undecoded, and also when the column decodes
-	 * to a pointer into groupBuffer (baseline encoding allocates nothing).
+	 * It is NULL only when the column is undecoded. Every resident column has
+	 * one, baseline included: since #433 a baseline column's stream is its own
+	 * allocation rather than an interior pointer into a shared group buffer.
 	 *
 	 * overflow[c] marks a column that was decoded, did not fit, and was
 	 * released. Such a column decodes into per-fetch scratch from then on. The
@@ -2327,7 +2340,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->rowCount = rg->rowCount;
 		entry->fileOffset = rg->fileOffset;
 		entry->natts = natts;
-		entry->groupBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
+		entry->vbits = palloc0(sizeof(char *) * natts);
 		entry->ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
 		entry->rawBuf = palloc0(sizeof(char *) * natts);
 		entry->rankPrefix = palloc0(sizeof(uint32 *) * natts);
@@ -2336,10 +2349,12 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->overflow = palloc0(sizeof(bool) * natts);
 		MemoryContextSwitchTo(tmp);
 
-		if (rg->byteLength > 0)
-			PgColumnarReadLogicalData(rel, rg->fileOffset, entry->groupBuffer,
-									rg->byteLength);
-
+		/*
+		 * The group's bytes are NOT read here (#433). Each column chunk is an
+		 * independently addressable range -- NativeColumnChunkMetadata carries
+		 * pageOffset and pageLength -- so a column is read when it is first
+		 * touched and a column nobody projects is never read at all.
+		 */
 		nchunks = PgColumnarReadColumnChunkList(storageId, rg->groupNumber,
 											  metaSnapshot);
 		foreach(nlc, nchunks)
@@ -2387,7 +2402,6 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, c);
 		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
-		char	   *base;
 		char	   *vbits;
 		char	   *rawBuf;
 		char	   *cursor;
@@ -2413,8 +2427,22 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			continue;
 		}
 
-		base = entry->groupBuffer + (cc->pageOffset - entry->fileOffset);
-		vbits = base;
+		/*
+		 * The validity bitmap, read once for this column and then kept (#433).
+		 * It is small and it is consulted on every fetch, so an overflowed
+		 * column still answers "is this row null" without touching the group.
+		 */
+		if (entry->vbits[c] == NULL)
+		{
+			MemoryContext vOld = MemoryContextSwitchTo(entry->cx);
+
+			entry->vbits[c] = palloc(validityBytes > 0 ? validityBytes : 1);
+			MemoryContextSwitchTo(vOld);
+			if (validityBytes > 0)
+				PgColumnarReadLogicalData(rel, cc->pageOffset, entry->vbits[c],
+										validityBytes);
+		}
+		vbits = entry->vbits[c];
 		if (((vbits[rowInGrp >> 3] >> (rowInGrp & 7)) & 1) == 0)
 		{
 			values[c] = (Datum) 0;
@@ -2430,35 +2458,49 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		else
 		{
 			/*
-			 * A baseline chunk is not encoded, so its "decoded" stream is a
-			 * pointer into groupBuffer rather than an allocation. It costs the
-			 * entry nothing beyond the group bytes it already holds, so it is
-			 * always resident and is never a candidate for release below --
-			 * releasing it would mean freeing an interior pointer.
+			 * A baseline chunk is not encoded, so its stored bytes ARE its
+			 * value stream and rawBuf points straight at them. It therefore
+			 * needs its own releasable context like any other column: before
+			 * #433 it pointed into the shared group buffer, which is what made
+			 * it unreleasable and, in turn, what forced the whole-entry drop.
+			 *
+			 * For an encoded chunk the stored bytes are scratch. They are read
+			 * into the per-fetch context and decoded out of it, so the entry
+			 * never retains a raw stream it has already decoded.
 			 */
 			bool		baseline = (cc->encodingDescriptorLen == 1 &&
 									(uint8) cc->encodingDescriptor[0] ==
 									COLUMNAR_NATIVE_ENCDESC_BASELINE);
 			MemoryContext decCx;
 			MemoryContext decOld;
+			uint32		vlen = (uint32) (cc->pageLength - validityBytes);
+			char	   *vstream;
 
-			if (baseline)
-				decCx = entry->cx;
-			else if (entry->overflow[c])
+			if (entry->overflow[c])
 				decCx = tmp;	/* known not to fit: decode per fetch */
 			else
 				decCx = AllocSetContextCreate(entry->cx,
 											  "columnar fetch column",
 											  ALLOCSET_DEFAULT_SIZES);
 
+			/*
+			 * The value stream lives with the column when it IS the column's
+			 * data, and in scratch when it is only the input to a decode.
+			 */
+			decOld = MemoryContextSwitchTo(baseline ? decCx : tmp);
+			vstream = palloc(vlen > 0 ? vlen : 1);
+			MemoryContextSwitchTo(decOld);
+			if (vlen > 0)
+				PgColumnarReadLogicalData(rel, cc->pageOffset + validityBytes,
+										vstream, vlen);
+
 			decOld = MemoryContextSwitchTo(decCx);
 			if (baseline)
-				rawBuf = base + validityBytes;
+				rawBuf = vstream;
 			else
 				rawBuf =
 					pgcolumnar_native_decode_chunk(decCx, att,
-												 base + validityBytes,
-												 (uint32) (cc->pageLength - validityBytes),
+												 vstream, vlen,
 												 cc->encodingDescriptor,
 												 cc->encodingDescriptorLen,
 												 cc->blockCodec, NULL, NULL);
@@ -2499,7 +2541,14 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			if (decCx != tmp)
 			{
 				entry->rawBuf[c] = rawBuf;
-				entry->colCx[c] = baseline ? NULL : decCx;
+				/*
+				 * Baseline columns get a context too, now that their stream is
+				 * their own allocation rather than an interior pointer into a
+				 * shared group buffer. That makes every resident column
+				 * releasable, which is what lets the cap be enforced per column
+				 * with no whole-entry fallback (#433).
+				 */
+				entry->colCx[c] = decCx;
 			}
 			justDecoded = true;
 		}
@@ -2551,37 +2600,39 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	}
 
 	/*
-	 * Drop the entry whole when the group's *raw* bytes alone exceed the cap:
-	 * every column would overflow and the entry would still pin groupBuffer, so
-	 * four such entries could hold arbitrarily much.
+	 * There is no whole-entry drop here any more (#433).
 	 *
-	 * This does NOT make the cache bounded by 4 x the cap, and #359 said it did.
-	 * Correcting that here rather than leaving it, because it is the kind of claim
-	 * a later change gets designed against (issue #364).
+	 * There used to be: when the group's *raw* bytes alone exceeded the cap, the
+	 * entry was reset at the end of every fetch, because every column would
+	 * overflow and the entry would still pin the whole-group buffer, so four such
+	 * entries could hold arbitrarily much. The effect was a hit rate of zero by
+	 * construction above the cap -- populate, use once, discard -- so each fetched
+	 * row re-read and re-decoded the entire group. Measured at 9.65x the buffers
+	 * for ten rows against one, on a 42 MB group in perfect key order.
 	 *
-	 * The per-column release trims the *decoded streams* back under the cap. It
-	 * cannot trim what is not releasable: rankPrefix and valOffset stay in the
-	 * entry context by design, so a released column keeps its position indexes.
-	 * valOffset is four bytes per value per varlena column -- ~600 KB per column
-	 * at the default stripe_row_limit -- and enough varlena columns puts the
-	 * retained indexes alone over the cap, at which point every newly decoded
-	 * column is released immediately and the entry stops shrinking.
+	 * It also tested the group's raw stored size, so a narrow projection over a
+	 * wide group was dropped just the same. Selecting one int column cost the
+	 * same buffers as selecting the 8 KB text beside it.
 	 *
-	 * Measured on 150,000 rows x 60 text columns: one entry held 62 MB against a
-	 * 32 MB cap (44 MB of it retained indexes plus groupBuffer, 18 MB in the two
-	 * columns that stayed resident). The real bound is
+	 * Nothing needs defending against now. No allocation spans the group: each
+	 * column reads its own chunk, and every resident column has a releasable
+	 * context, so the per-column cap above is sufficient on its own. What the
+	 * entry retains is
 	 *
-	 *     4 x (cap + retained position indexes + groupBuffer)
+	 *     4 x (cap + retained position indexes + retained validity bitmaps)
 	 *
-	 * Releasing valOffset with the stream was tried and is worse: it holds the
-	 * bound (62 MB -> 28 MB) but costs 47% in time (127.7 s -> 187.5 s), because
-	 * rebuilding offsets is a second walk of the value stream on every fetch
-	 * rather than a constant factor on the decode. The retained indexes are what
-	 * makes an overflowed column cheap on its next fetch, which is the whole point
-	 * of keeping them.
+	 * where the validity bitmaps are (rowCount + 7) / 8 per touched column,
+	 * ~1.2 KB at the default stripe. The '+ groupBuffer' term that #359's
+	 * corrected comment had to carry is gone.
+	 *
+	 * rankPrefix and valOffset still stay in the entry context by design, so a
+	 * released column keeps its position indexes. Releasing valOffset with the
+	 * stream was tried under #359 and is worse: it holds the bound (62 MB ->
+	 * 28 MB) but costs 47% in time (127.7 s -> 187.5 s), because rebuilding
+	 * offsets is a second walk of the value stream on every fetch rather than a
+	 * constant factor on the decode. The retained indexes are what makes an
+	 * overflowed column cheap on its next fetch.
 	 */
-	if (rg->byteLength > COLUMNAR_FETCH_CACHE_MAX_BYTES)
-		pgcolumnar_fetch_entry_reset(entry);
 
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextDelete(tmp);
