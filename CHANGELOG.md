@@ -55,6 +55,43 @@ which was true until that script existed.
 
 ### Fixed
 
+- `pgcolumnar.analyze()` counts `null_frac` over live rows (#485). It came from
+  the zone maps, which record what was written, so a deleted row kept counting
+  toward the denominator until the table was rewritten. `VACUUM` did not correct
+  it. On 1,000 rows holding 100 nulls, deleting the 301 rows of one value left
+  `null_frac` at 0.100000 against a true 0.143062.
+
+  The size of the error is not the whole of it. `null_frac` came from the zone
+  maps while the most-common frequencies came from a live count, so one
+  `pg_stats` row carried two statistics normalised against different
+  populations: a `null_frac` implying 1,200 rows beside a frequency implying
+  900, with 900 actually present. `null_frac + sum(most_common_freqs) + rest =
+  1` stopped holding, and `eqsel` subtracts both when pricing everything else.
+
+  The null count now comes from the read the function already performs, so this
+  costs no extra pass. It does give up the "null_frac is a metadata read"
+  property claimed for #414 slice 1, which cost nothing in practice because the
+  function always goes on to read the column for `n_distinct`. A metadata-only
+  fast path would need a live-row count, which is that same read. Whether
+  `pgcolumnar.zone_map`'s counts should account for the delete vector, which
+  would also affect pruning, is a wider question and is not addressed.
+
+- A column declared over a domain now prunes chunk groups (#483). The scan key
+  was built and then dropped: a domain column carries the domain's type in
+  `pg_attribute` while the constant beside it carries the base type, so the
+  comparison looked cross-type, and an operator family has no comparison
+  function registered for a domain. Measured on identical values in one table
+  over 20 row groups, `int` and `bigint` each removed 19 groups and a domain
+  over either removed none, while all three reported the filter as pushed down.
+
+  Answers were never wrong, because the executor re-applies the qual. The cost
+  was reading the whole table on ordinary SQL. Both sides of the comparison are
+  now resolved to their base types, so a domain compared against a value of a
+  different domain over the same base type is also recognised. Ordering and
+  hashing are unchanged: the comparison and hash functions were already taken
+  from the column type's resolved entry, which is what the writer used to build
+  the zone maps and bloom filters.
+
 - A `bigint` column compared against an unadorned integer literal now prunes
   chunk groups (#477). The scan key was dropped because the column type's default
   comparison function cannot take an `int4` argument, so predicates of the form
@@ -112,6 +149,19 @@ which was true until that script existed.
   half of the rename is hygiene rather than a visible change.
 
 ### Changed
+
+- `pgcolumnar.analyze()` places `histogram_bounds` at PostgreSQL's own positions
+  (#414). The bounds were evenly spaced quantiles; core places bound i at
+  `values[floor(i * (nvals - 1) / (num_hist - 1))]` among the rows left after
+  the most-common values are removed, and `percentile_disc` resolves a fraction
+  to a different index whenever the two disagree.
+
+  **This changes the emitted array.** The length and both endpoints are the
+  same, so the exactness of the minimum and maximum is unaffected, but an
+  interior bound can move by one position. Both forms are valid equi-depth
+  histograms; core's is the one the planner's selectivity estimators were tuned
+  against. Anyone comparing `pg_stats` across this upgrade should expect
+  interior bounds to differ and that is intended, not a regression.
 
 - The unsupported-rewrite error names `REPACK` on PostgreSQL 19 (#399). `REPACK`
   replaces `CLUSTER` and `VACUUM FULL` in 19 and dispatches through the same
