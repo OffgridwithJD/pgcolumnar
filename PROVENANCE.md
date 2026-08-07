@@ -551,11 +551,38 @@ oracle, so none changes query results.
   this repository. The runner fetches `postgresql/create.sql` and
   `postgresql/queries.sql` from upstream at run time, into the benchmark data
   directory, and feeds them to `psql` unmodified. The comparison oracle is the
-  heap arm of the same run, not any upstream expected output. **Proposed
-  2026-08-05: keep the run-time fetch rather than take a durable in-tree copy.
-  Owner decision pending, and the NonCommercial term's effect on publishing
-  benchmark numbers is a separate question that a run-time fetch does not
-  address.** The measured numbers published in
+  heap arm of the same run, not any upstream expected output.
+
+  **Both open questions were decided by the owner on 2026-08-06.**
+
+  *Run-time fetch:* keep it, and re-fetch on every run rather than caching, so a
+  run measures the current upstream definition rather than whatever was current
+  the first time the harness ran on that machine.
+
+  *NonCommercial:* the owner read the licence and determined that **publishing our
+  own test results is permitted**. We measure to compare, not to sell. What the
+  term forbids, and what this project must therefore not do with ClickBench or
+  anything derived from it:
+
+  - selling copies of the material, or of a remix of it
+  - placing the material on a website or platform monetised by ads where the
+    primary goal is revenue generation
+  - using the material in promotional materials, corporate brochures, or paid
+    advertisements for a business
+  - charging a fee to access, download, or view a derivative work built on it
+
+  The third is the one to watch, because it is the one a well-meaning reader walks
+  into. The numbers in `docs/benchmarks.md` are documentation: they exist so a user
+  can decide whether this engine suits their workload, and so we can see our own
+  regressions. **Lifting them into a brochure, a sales deck, a conference booth
+  panel or a paid campaign is the prohibited use**, and the fact that we produced
+  the numbers ourselves does not change that, because the benchmark definition
+  they were produced with is the licensed material.
+
+  Recorded as the owner's determination and its reasoning. No legal opinion was
+  sought. It is written down so it can be revisited rather than re-derived.
+
+  The measured numbers published in
   `docs/benchmarks.md` are our own, produced on our own hardware. The dataset
   (`hits.tsv.gz`) is downloaded for local measurement and is not redistributed;
   its own licensing is unestablished and it must not be added to the tree without
