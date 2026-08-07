@@ -870,6 +870,92 @@ pgcolumnar_restriction_correlation(RelOptInfo *rel, Oid heapRelid)
 }
 
 /*
+ * pgcolumnar_projected_width_fraction
+ *		The share of a row's stored width this scan actually reads, in (0, 1].
+ *		One means every column is referenced.
+ *
+ *		A columnar scan decodes only the columns the query names (spec 9), which
+ *		is the reason to store data this way at all. The cost model did not know
+ *		it: the path inherits the sequential scan's cost, which prices every page
+ *		of the relation, so reading one int column out of fourteen was quoted the
+ *		same as reading all fourteen. Measured in test/column_projection.sh on
+ *		300,000 rows: 221 buffers against 2,671, priced 1391.08 against 1391.44.
+ *
+ *		The consequence is not a rounding error. On a 200,000-row table with a
+ *		2 KB payload, an index-only scan priced 15,521 ran 373 ms while the
+ *		columnar scan priced 27,682 ran 8 ms -- the plan 44x faster was declined
+ *		because it was quoted as reading a relation it never touches.
+ *
+ *		Width comes from ANALYZE's stored average where there is one, because a
+ *		varlena column's TYPE width says nothing useful (a text column is "we do
+ *		not know"), and the whole point here is the ratio between a fixed-width
+ *		key and a wide payload. get_typavgwidth is the fallback for a column
+ *		never analysed.
+ *
+ *		Both the target list and the restriction clauses count: a qual on a
+ *		column that is not selected still has to be decoded to be evaluated.
+ */
+static double
+pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
+{
+	Bitmapset  *needed = NULL;
+	Relation	r;
+	TupleDesc	tupdesc;
+	double		total = 0.0;
+	double		used = 0.0;
+	int			i;
+	ListCell   *lc;
+
+	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &needed);
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		pull_varattnos((Node *) rinfo->clause, rel->relid, &needed);
+	}
+
+	r = table_open(heapRelid, AccessShareLock);
+	tupdesc = RelationGetDescr(r);
+
+	for (i = 1; i <= tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i - 1);
+		int32		w;
+
+		if (att->attisdropped)
+			continue;
+
+		w = get_attavgwidth(heapRelid, att->attnum);
+		if (w <= 0)
+			w = get_typavgwidth(att->atttypid, att->atttypmod);
+		if (w <= 0)
+			w = 1;
+
+		total += w;
+		if (bms_is_member(i - FirstLowInvalidHeapAttributeNumber, needed))
+			used += w;
+	}
+
+	table_close(r, AccessShareLock);
+	bms_free(needed);
+
+	if (total <= 0.0)
+		return 1.0;
+
+	/*
+	 * A scan that names no column at all -- `SELECT count(*)` with no
+	 * restriction -- still reads something: the row count comes from metadata,
+	 * but nothing here should price a scan at zero. #171 is what a
+	 * floorless discount does: a full scan priced at 1.00 beat an index scan
+	 * priced at 174.29 and turned a point lookup into 1251.88 ms.
+	 */
+	if (used <= 0.0)
+		return 1.0;
+
+	return (used >= total) ? 1.0 : (used / total);
+}
+
+/*
  * pgcolumnar_zonemap_survival
  *		The fraction of the relation a restricted columnar scan must actually
  *		read, in (0, 1]. One means no pruning is expected.
@@ -1220,9 +1306,31 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	{
 		Cost		full = pgcolumnar_full_scan_cost(rel, seqpath);
 		double		survival = pgcolumnar_zonemap_survival(rel, rte->relid);
+		double		widthFrac = pgcolumnar_projected_width_fraction(rel, rte->relid);
+		Cost		pageCost = seq_page_cost * (double) rel->pages;
+		Cost		run = full - cpath->path.startup_cost;
 
-		cpath->path.total_cost = cpath->path.startup_cost +
-			(full - cpath->path.startup_cost) * survival;
+		/*
+		 * Only the page-read part scales with the projected width: the CPU terms
+		 * are per row and are paid whichever columns are decoded. Subtracting the
+		 * unread share of the I/O rather than scaling the whole run cost keeps a
+		 * narrow projection from being priced below the row-handling it still
+		 * does, which is the shape of #171.
+		 *
+		 * Guarded rather than assumed: rel->pages can exceed what the inherited
+		 * seqscan cost accounts for, and a negative run cost would make a full
+		 * scan free.
+		 */
+		if (pageCost > 0.0 && widthFrac < 1.0)
+		{
+			Cost		saved = pageCost * (1.0 - widthFrac);
+
+			if (saved > run)
+				saved = run;
+			run -= saved;
+		}
+
+		cpath->path.total_cost = cpath->path.startup_cost + run * survival;
 	}
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
