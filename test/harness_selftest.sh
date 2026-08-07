@@ -198,6 +198,28 @@ not_a_suite() {
 # with four names each, different names each time, while PG15/18/19 passed. An
 # intermittent red naming innocent suites is the worst kind, so the premise below
 # makes an empty answer say what it is.
+#
+# THAT DIAGNOSIS WAS WRONG, or at best incomplete, and the caching did not cure
+# the symptom it was written for. The real cause is this file's own `set -o
+# pipefail` meeting a reader that exits early:
+#
+#     listed_suites | grep -qx "$name"
+#
+# `grep -q` returns the moment it matches, which closes the pipe while printf is
+# still writing. printf then takes EPIPE and exits non-zero, and under pipefail
+# the PIPELINE reports that failure even though grep matched -- so a registered
+# suite is recorded as unregistered. It is a race between grep exiting and printf
+# finishing, which is why it never reproduces locally, why it names innocent
+# suites, and why it names DIFFERENT ones each run.
+#
+# Measured directly rather than reasoned about: 4,000 names, matching the first,
+# 200 attempts. With pipefail, 18 false negatives. Without it, 0. It surfaced
+# again on #476's CI (PG18) with "unregistered: parquet_nested_import" beside a
+# "printf: write error: Broken pipe" from line 209, on a run whose own summary
+# listed that suite as having passed.
+#
+# The fix is to stop piping. The membership test below is a case over the cached
+# string, which cannot lose a race it no longer runs.
 _SUITE_LIST="$(bash "$RUNNER" --list-suites 2>/dev/null)"
 check "premise: the runner answered --list-suites, so the two checks below mean something" \
 	"$([ -n "$_SUITE_LIST" ] && echo yes || echo "no (empty)")" "yes"
@@ -288,11 +310,46 @@ _sorted_actual="$(listed_suites)"
 check "the suite list is sorted, so two new suites land in different places" \
 	"$([ "$_sorted_actual" = "$_sorted_expected" ] && echo sorted || echo "not sorted")" "sorted"
 
+# A case over the cached list rather than `listed_suites | grep -qx`. The pipe
+# was the defect: grep -q returns on its match, printf takes EPIPE, and pipefail
+# turns that into a failed pipeline for a suite that IS registered. See the note
+# above line 201. Newlines around both sides make it a whole-line match, which is
+# what grep -x provided and what keeps a name from matching inside another.
+# Both directions first, because a membership test that always matched would make
+# the check below pass for every suite including genuinely unregistered ones --
+# which is the same green-by-construction failure the pipe version produced in
+# reverse. The replacement has to be shown to answer, not merely to stop failing.
+case $'\n'"$_SUITE_LIST"$'\n' in
+	*$'\n'isolation$'\n'*) _ctl_present=present ;;
+	*) _ctl_present=absent ;;
+esac
+check "positive control: the membership test finds a name that is registered" \
+	"$_ctl_present" "present"
+
+case $'\n'"$_SUITE_LIST"$'\n' in
+	*$'\n'no_such_suite_exists$'\n'*) _ctl_absent=present ;;
+	*) _ctl_absent=absent ;;
+esac
+check "negative control: and does not find one that is not" \
+	"$_ctl_absent" "absent"
+
+# A partial name must not match a whole entry, which is what grep -x guaranteed
+# and what the surrounding newlines preserve.
+case $'\n'"$_SUITE_LIST"$'\n' in
+	*$'\n'isolatio$'\n'*) _ctl_partial=present ;;
+	*) _ctl_partial=absent ;;
+esac
+check "and a prefix of a registered name is not treated as registered" \
+	"$_ctl_partial" "absent"
+
 unregistered=""
 for f in "$TESTDIR"/*.sh; do
 	name="$(basename "$f" .sh)"
 	not_a_suite "$name" && continue
-	listed_suites | grep -qx "$name" || unregistered="$unregistered $name"
+	case $'\n'"$_SUITE_LIST"$'\n' in
+		*$'\n'"$name"$'\n'*) ;;
+		*) unregistered="$unregistered $name" ;;
+	esac
 done
 check "every suite is registered in run_all_versions.sh" \
 	"$([ -z "$unregistered" ] && echo none || echo "unregistered:$unregistered")" "none"
