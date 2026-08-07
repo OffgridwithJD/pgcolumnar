@@ -2970,6 +2970,25 @@ PgColumnarReadStats(PgColumnarReadState *readState, uint64 *groupsRead,
 }
 
 /*
+ * PgColumnarReadUsablePredicates
+ *		How many skip predicates this read state built, which is how many of its
+ *		scan keys can exclude a chunk group. Used by EXPLAIN (#479).
+ *
+ *		pgcolumnar_make_predicates drops a key it cannot evaluate against the
+ *		stored min/max, and a dropped key excludes nothing -- but it is still
+ *		counted by "Columnar Pushed-Down Filters", which reports the keys the
+ *		scan was given. Reporting only that number is how #477 stayed invisible:
+ *		a bigint column against a bare integer literal read as a pushed-down
+ *		filter that simply was not selective, when in fact no group could ever
+ *		be skipped.
+ */
+int
+PgColumnarReadUsablePredicates(PgColumnarReadState *readState)
+{
+	return readState->numPredicates;
+}
+
+/*
  * PgColumnarVectorsSkipped
  *		How many 1024-value vectors the native scan skipped within read row groups
  *		via per-vector zone maps (native spec 7.1, D5b). Used by EXPLAIN.
