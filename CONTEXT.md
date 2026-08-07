@@ -45,8 +45,11 @@ Section 2 of the spec is authoritative. The short form:
   across all columns. A relation is a sequence of row groups. It is the write
   unit and the parallel-scan unit.
 - **Column chunk**: one column's data within one row group.
-- **Vector**: a fixed run of 1024 values inside a column chunk. The unit of
-  decode, of data skipping, and of vectorized execution.
+- **Vector**: a run of up to `pgcolumnar.chunk_group_row_limit` rows (default
+  10000) inside a column chunk. The unit of encoding, of data skipping within a
+  row group, and of vectorized execution. The native format fixes this at 1024
+  values; the classic path does not, and `Columnar Vectors Skipped` moves with
+  the setting.
 - **Page**: the on-disk container of one column chunk's encoded vectors. A
   contiguous byte range in the relation's main fork, which is why the buffer
   manager, WAL, and page checksums apply.
@@ -75,6 +78,31 @@ because it is user-facing and it is in dumps.
 **`chunk_group_row_limit` is a different setting and does not control the group
 counters.** It is "maximum number of rows per chunk group", default 10000, from
 the 1.0-dev lineage. Setting it does not change how many groups a scan reports.
+What it does size is the VECTOR, so it moves `Columnar Vectors Skipped` instead.
+Rebuilding the same 200,000 rows and running the same predicate:
+
+| `chunk_group_row_limit` | `Columnar Vectors Skipped` |
+| ---: | ---: |
+| 10000 | 4 |
+| 5000 | 8 |
+| 1024 | 39 |
+
+Each matches the arithmetic for the row group that is read: 50,000 rows at
+10,000 is 5 vectors with 4 below the predicate, at 5,000 it is 10 with 8 below,
+at 1,024 it is about 49 with 39 below. The 1,024 run also grows a
+`Rows Removed by Filter: 64` line, because 190,000 is not a multiple of 1024, so
+the straddling vector is decoded and filtered rather than skipped.
+
+**`projection` names two unrelated things.** A **projection** is the secondary
+physical ordering defined above. `pgcolumnar.enable_column_projection` and
+EXPLAIN's `Columnar Projected Columns` use the same word for reading only the
+columns a query references, which has nothing to do with it. Say **column
+projection** for the second and never the bare word.
+
+**Pruning and filtering are different outcomes, and a plan prints both.**
+`Chunk Groups Removed by Filter` and `Vectors Skipped` are work never done.
+`Rows Removed by Filter` is work done and thrown away. They appear on the same
+node, and which one moved tells you whether a predicate actually helped.
 
 **EXPLAIN's "Chunk Groups" counters count ROW GROUPS.** This is the one most
 likely to produce a wrong conclusion, so it is worth stating plainly.
