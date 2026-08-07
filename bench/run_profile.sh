@@ -179,6 +179,23 @@ echo "   table: $(q "SELECT pg_size_pretty(pg_table_size('p'))")"
 # this shape and this run, and the pid is asserted to differ from the last one.
 PREV_PID=""
 
+# Two counters, not one. #447 made a skip a status the harness owns, and #455 had
+# to fix that again a layer down when a single value collided with something
+# else; the lesson recorded from the pair was that one signal cannot be made
+# collision-proof. So a defect and an underpowered run are counted separately and
+# reported separately, and the exit code distinguishes them:
+#
+#   0  every requested shape produced a usable profile
+#   1  at least one shape FAILED (pid collision, or a shape name that does not exist)
+#   2  no shape failed, but at least one produced too few samples to attribute
+#
+# Without this a run in which every shape collided printed its FAIL lines, then
+# "profile complete", and exited 0 -- the summary claiming success while nothing
+# had been measured, which is the exact defect the rest of this script exists to
+# prevent.
+FAILED_SHAPES=""
+THIN_SHAPES=""
+
 profile_shape() {	# profile_shape <name> <sql>
 	local name="$1" sql="$2" pid="" i st samples marker deadline
 
@@ -219,7 +236,8 @@ SQLEOF
 		sleep 0.25
 	done
 	if [ -z "$pid" ]; then
-		echo "  SKIP: no backend running $marker appeared; nothing was profiled"
+		echo "  FAIL: no backend running $marker appeared; nothing was profiled"
+		FAILED_SHAPES="$FAILED_SHAPES $name"
 		return
 	fi
 
@@ -229,6 +247,7 @@ SQLEOF
 		echo "  FAIL: pid $pid already profiled for the previous shape."
 		echo "        The earlier backend outlived its window, so this would"
 		echo "        re-profile that query under this shape's name."
+		FAILED_SHAPES="$FAILED_SHAPES $name"
 		return
 	fi
 	PREV_PID="$pid"
@@ -245,8 +264,9 @@ SQLEOF
 	samples="${samples:-0}"
 	echo "  samples: $samples"
 	if [ "$samples" -lt 200 ]; then
-		echo "  SKIP: only $samples samples; too few to attribute. Raise PROFILE_SECS"
+		echo "  THIN: only $samples samples; too few to attribute. Raise PROFILE_SECS"
 		echo "        or PROFILE_SCALE rather than reading the percentages below."
+		THIN_SHAPES="$THIN_SHAPES $name"
 	else
 		echo
 		echo "  -- self time"
@@ -282,12 +302,29 @@ for shape in $SHAPES; do
 		sql_run "CREATE TABLE pw (id bigint, t text) USING pgcolumnar;" >/dev/null 2>&1
 		profile_shape ingest "INSERT INTO pw SELECT g, md5(g::text) FROM generate_series(1,200000) g" ;;
 	*)
-		echo "unknown shape: $shape" ;;
+		echo "FAIL: unknown shape '$shape'"
+		echo "      valid: decode filtered project ingest"
+		FAILED_SHAPES="$FAILED_SHAPES $shape"
+		;;
 	esac
 done
 
 echo
-echo "== profile complete =="
 echo "Event and unwind method are printed above and belong with any number taken"
 echo "from this run: a percentage is only comparable against another profile that"
 echo "sampled the same way."
+echo
+
+if [ -n "$FAILED_SHAPES" ]; then
+	echo "== profile FAILED =="
+	echo "   no usable profile for:$FAILED_SHAPES"
+	[ -n "$THIN_SHAPES" ] && echo "   too few samples for:$THIN_SHAPES"
+	exit 1
+fi
+if [ -n "$THIN_SHAPES" ]; then
+	echo "== profile INCOMPLETE =="
+	echo "   too few samples to attribute:$THIN_SHAPES"
+	echo "   Raise PROFILE_SECS or PROFILE_SCALE and re-run those shapes."
+	exit 2
+fi
+echo "== profile complete =="
