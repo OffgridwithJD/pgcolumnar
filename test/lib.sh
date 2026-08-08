@@ -117,18 +117,12 @@ pgc_setup() {
 	echo "version=$("$PGC_PG_CONFIG" --version)"
 	echo "workdir=$PGC_WORKDIR"
 
-	# The matrix runner builds and installs once per version and sets
-	# PGC_SKIP_BUILD so parallel suites do not each rebuild (a no-op relink) or
-	# race on writing the shared .so during "make install". A suite run on its own
-	# still builds and installs.
-	if [ -z "${PGC_SKIP_BUILD:-}" ]; then
-		echo "-- building"
-		make -C "$PGC_SRCDIR" PG_CONFIG="$PGC_PG_CONFIG" >/dev/null
-		echo "-- installing"
-		make -C "$PGC_SRCDIR" install PG_CONFIG="$PGC_PG_CONFIG" >/dev/null
-	fi
-
 	# initdb and pg_ctl cannot run as root; use postgres when we are root.
+	#
+	# Settled BEFORE the build, and before the trap below, because pgc_teardown
+	# reaches pg_ctl through pgc_pg, which expands PGC_RUNPG. Installing the trap
+	# while that array is still unset would turn any early failure into an
+	# unbound-variable error under `set -u` instead of a cleanup.
 	if [ "$(id -u)" = "0" ]; then
 		PGC_RUNPG=(runuser -u postgres --)
 		chown -R postgres "$PGC_WORKDIR"
@@ -137,7 +131,38 @@ pgc_setup() {
 		PGC_RUNPG=(env)
 	fi
 
+	# Armed here rather than after the build: the build below can exit, and
+	# between mktemp above and this line there is nothing to remove the workdir.
+	# Stopping a cluster that was never started is a no-op, so arming it early
+	# costs nothing and covers every failure path after the directory exists.
 	trap pgc_teardown EXIT
+
+	# The matrix runner builds and installs once per version and sets
+	# PGC_SKIP_BUILD so parallel suites do not each rebuild (a no-op relink) or
+	# race on writing the shared .so during "make install". A suite run on its own
+	# still builds and installs.
+	#
+	# Both steps are status-checked. lib.sh sets `set -uo pipefail` but not -e, so
+	# an unchecked make that fails to compile does not stop the suite: it carries
+	# on and runs every check against the PREVIOUSLY INSTALLED .so, then prints a
+	# full PASS/FAIL report for code that does not exist. That is indistinguishable
+	# from a real result, and it was caught only because someone fingerprinted the
+	# installed .so and saw the same hash either side of a source change that could
+	# not have produced it.
+	if [ -z "${PGC_SKIP_BUILD:-}" ]; then
+		echo "-- building"
+		if ! make -C "$PGC_SRCDIR" PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
+			echo "FATAL: the build failed, so there is nothing new to test" >&2
+			echo "       (refusing to report checks against the previously installed .so)" >&2
+			exit 1
+		fi
+		echo "-- installing"
+		if ! make -C "$PGC_SRCDIR" install PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
+			echo "FATAL: the install failed, so the .so under test is not the one just built" >&2
+			echo "       (refusing to report checks against the previously installed .so)" >&2
+			exit 1
+		fi
+	fi
 
 	echo "-- initdb"
 	pgc_pg "initdb -D '$PGC_PGDATA' -A trust" >/dev/null 2>&1
