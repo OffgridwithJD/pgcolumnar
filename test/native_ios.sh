@@ -43,6 +43,25 @@ check "index-only results match heap (all-visible)" \
 	"$(pgc_set_hash 'SELECT id FROM ios WHERE id BETWEEN 1000 AND 5000')" \
 	"$(pgc_set_hash 'SELECT id FROM ioh WHERE id BETWEEN 1000 AND 5000')"
 
+# --- the VM has to be recorded in the catalog, not only written (#507) --------
+#
+# The zero-fetch check above proves the VM fork is populated. That is not the
+# whole job: rel->allvisfrac is derived from pg_class.relallvisible, and core's
+# cost_index prices an index-only scan by it. A relation whose VM is full and
+# whose relallvisible is 0 is therefore priced as though every row needs a fetch,
+# and the planner declines the scan it should choose. Measured on 20,000,000
+# rows: the index-only scan ran 187.8 ms against the 361.4 ms plan preferred over
+# it, priced 48,117 against 24,628.
+#
+# The heap mirror is the oracle rather than a number written here, so this
+# asserts "the same thing core does for a heap on the same rows" rather than a
+# constant that would have to be maintained alongside the code it checks.
+psql_run "VACUUM ioh;"
+check "premise: core records all-visible pages for the heap mirror (#507 oracle)" \
+	"$(q "SELECT relallvisible > 0 FROM pg_class WHERE relname = 'ioh';")" "t"
+check "VACUUM records the all-visible pages in pg_class (#507)" \
+	"$(q "SELECT relallvisible > 0 FROM pg_class WHERE relname = 'ios';")" "t"
+
 # A delete clears the VM bit for the affected blocks; the scan falls back to the
 # fetch there and must never return a deleted row.
 psql_run "DELETE FROM ios WHERE id BETWEEN 2000 AND 2200;"

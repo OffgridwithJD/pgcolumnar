@@ -376,7 +376,7 @@ extern void PgColumnarVMSetVisible(Relation rel, BlockNumber blk);
 extern void PgColumnarVMClearVisible(Relation rel, BlockNumber blk);
 extern void PgColumnarVMClearForRow(Relation rel, uint64 rowNumber);
 extern bool PgColumnarVMIsVisible(Relation rel, BlockNumber blk);
-extern void PgColumnarVMSetVisibleForRelation(Relation rel);
+extern uint64 PgColumnarVMSetVisibleForRelation(Relation rel);
 extern void PgColumnarDiscardFetchCache(void);
 
 /* index maintenance for callers that insert rows without an executor (#153) */

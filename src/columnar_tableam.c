@@ -1058,7 +1058,51 @@ pgcolumnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 	 * concurrent with readers and writers. The space-reclaiming rewrite stays in
 	 * columnar.vacuum (AccessExclusiveLock, the VACUUM-FULL analog).
 	 */
-	PgColumnarVMSetVisibleForRelation(rel);
+	uint64		visibleRows = PgColumnarVMSetVisibleForRelation(rel);
+
+	/*
+	 * Record the result where the planner can see it (#507).
+	 *
+	 * Setting the VM bits is only half the job. rel->allvisfrac is derived from
+	 * pg_class.relallvisible, and core's cost_index prices an index-only scan by
+	 * it, so a relation whose VM is populated and whose relallvisible is 0 is
+	 * priced as though every row still needs a fetch. Measured on 20,000,000
+	 * rows: relallvisible stayed 0 where a heap on identical rows reached 186,914
+	 * of 186,916 pages, and the planner refused an index-only scan running
+	 * 187.8 ms in favour of one running 361.4 ms.
+	 *
+	 * Converted through the row count rather than counted in blocks, because the
+	 * VM is keyed by SYNTHETIC blocks (rowNumber / K) while relpages counts
+	 * stored pages -- 68,730 against 45,994 on that table. Core computes the
+	 * fraction as relallvisible / relpages, so the numerator has to be in
+	 * relpages units or the fraction exceeds 1 by arithmetic alone.
+	 *
+	 * relpages and reltuples are passed back unchanged: ANALYZE owns them, and a
+	 * VACUUM that also rewrote them would make the two commands fight over the
+	 * same fields. InvalidTransactionId and InvalidMultiXactId are core's own
+	 * idiom for "leave the horizons alone".
+	 */
+	if (visibleRows > 0 && rel->rd_rel->reltuples > 0 && rel->rd_rel->relpages > 0)
+	{
+		double		frac = (double) visibleRows / (double) rel->rd_rel->reltuples;
+		BlockNumber allvis;
+
+		if (frac > 1.0)
+			frac = 1.0;
+		/* truncating cast, not floor(): both are non-negative here, and this
+		 * needs no <math.h> in a file that otherwise wants none */
+		allvis = (BlockNumber) ((double) rel->rd_rel->relpages * frac);
+
+		COLUMNAR_VAC_UPDATE_RELSTATS(rel,
+									 rel->rd_rel->relpages,
+									 rel->rd_rel->reltuples,
+									 allvis,
+									 rel->rd_rel->relhasindex,
+									 InvalidTransactionId,
+									 InvalidMultiXactId,
+									 NULL, NULL,
+									 false);
+	}
 
 	/*
 	 * Online compaction (Phase F3a): retire row groups that are fully deleted
