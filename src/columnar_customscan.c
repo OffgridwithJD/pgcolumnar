@@ -680,7 +680,14 @@ pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
  * proportional rather than total, this branch should soften with it.)
  *
  * decode_per_group is one group's cost: its pages read once, plus the per-value
- * decode of R rows across the columns the scan needs.
+ * decode of R rows across the columns the scan needs -- at the same per-value
+ * price the sequential path pays, which is the only way the two can be compared
+ * (#503). They were not: this priced a decoded value at cpu_operator_cost while
+ * the sequential scan priced it at nothing, and once the sequential scan started
+ * paying the measured price and this did not, the penalty stopped keeping pace.
+ * A 20,000,000-row projection went from a 167 ms columnar scan to a 16,699 ms
+ * index scan -- 99.7x slower, and chosen deliberately, because the plan it
+ * replaced had become the expensive-looking one.
  */
 static Cost
 pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
@@ -707,7 +714,7 @@ pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
 	if (pages_per_stripe < 1)
 		pages_per_stripe = 1;
 	decode_per_group = seq_page_cost * pages_per_stripe
-		+ cpu_operator_cost * R * (double) nproj;
+		+ PgColumnarDecodeCost(R, nproj);
 
 	groups_min = ceil(rows / R);
 	groups_max = rows;
@@ -752,6 +759,63 @@ pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
  * better model, and for the two measurements that fix the window it sits in.
  */
 #define COLUMNAR_INDEX_FETCH_PENALTY_MAX_SCANS	20.0
+
+/*
+ * What decoding one stored value costs, in multiples of cpu_operator_cost
+ * (issue #503).
+ *
+ * This is a measurement, not a taste. Core's own model is well calibrated
+ * against the clock: on two 20,000,000-row heaps with different widths and
+ * different pruning, a seq scan came out at 411.0 and 410.4 cost units per
+ * millisecond of execution -- the same number twice, from a model nobody tuned
+ * for this box. The columnar path on the identical rows came out at 74.2 and
+ * 66.3. So the scan is priced at about a sixth of the rate everything it
+ * competes with is priced at, and the gap is decode: the estimate is dominated
+ * by an I/O term that compression keeps shrinking, while the work is CPU that
+ * compression does not reduce at all.
+ *
+ * Closing that gap needs 11.9 and 9.5 cpu_operator_cost per projected column
+ * per scanned row on those two shapes. Ten is the round number between them,
+ * and two shapes 25% apart is what fixes it -- this is a first-order
+ * correction, not a fourth digit.
+ *
+ *   unpruned  20M rows  columnar   393,840 in 5307.9 ms   heap 566,667 in 1378.7 ms
+ *   pruned   810k rows  columnar    11,161 in  168.2 ms   heap 486,915 in 1186.4 ms
+ *
+ * Per projected COLUMN and not per byte: the same constant fits a 73-byte row
+ * and a 41-byte row, because the inner loop costs what it costs per value
+ * (bitunpack extracts one bit at a time, #501) rather than per byte.
+ *
+ * Which is also why this number is not permanent. It prices today's decoder,
+ * and #501 would make that decoder several times faster; whoever lands it
+ * should re-measure this the same way -- one heap scan and one columnar scan
+ * over the same rows, cost divided by execution time -- rather than leave a
+ * constant standing that describes code that no longer exists.
+ */
+#define COLUMNAR_DECODE_COST_PER_VALUE	(10.0 * cpu_operator_cost)
+
+/*
+ * PgColumnarDecodeCost
+ *		What decoding ncols columns of ntuples rows costs.
+ *
+ * One definition, three callers, and that is the point. The scan cost is not
+ * written once: the custom path computes it here, the index-fetch penalty bounds
+ * itself against it, and the vectorized aggregate re-derives it from scratch
+ * when add_path has freed the serial path it would otherwise have read
+ * (columnar_vector.c). Adding the decode term to only the first of those is not
+ * a partial fix, it is a wrong one -- the aggregate's copy stayed cheap while
+ * the real path got dearer, and the serial grouped node started beating a
+ * parallel plan four times its speed. That regression is what this function
+ * exists to prevent: a caller that forgets the term now has to forget to call
+ * something, rather than merely fail to duplicate a line.
+ */
+Cost
+PgColumnarDecodeCost(double ntuples, int ncols)
+{
+	if (ntuples <= 0.0 || ncols <= 0)
+		return 0.0;
+	return COLUMNAR_DECODE_COST_PER_VALUE * (double) ncols * ntuples;
+}
 
 /*
  * pgcolumnar_full_scan_cost
@@ -805,13 +869,21 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
  *
  *		Both the target list and the restriction clauses count: a qual on a
  *		column that is not selected still has to be decoded to be evaluated.
+ *
+ *		*nproj, when asked for, is how many columns that is. It comes from here
+ *		rather than from a second walk because it is the same set: the columns
+ *		whose width is counted are exactly the columns that get decoded, and two
+ *		walks that could disagree about which those are is a bug waiting to be
+ *		written.
  */
 static double
-pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
+pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid, int *nproj)
 {
 	Bitmapset  *needed = NULL;
 	Relation	r;
 	TupleDesc	tupdesc;
+	int			ncols = 0;
+	int			nlive = 0;
 	double		total = 0.0;
 	double		used = 0.0;
 	int			i;
@@ -842,13 +914,28 @@ pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
 		if (w <= 0)
 			w = 1;
 
+		nlive++;
 		total += w;
 		if (bms_is_member(i - FirstLowInvalidHeapAttributeNumber, needed))
+		{
 			used += w;
+			ncols++;
+		}
 	}
 
 	table_close(r, AccessShareLock);
 	bms_free(needed);
+
+	if (nproj != NULL)
+	{
+		/*
+		 * A whole-row reference puts attribute 0 in the set and no individual
+		 * attnos, so the count comes back empty for a scan that in fact decodes
+		 * everything. Same shape as the width floor below, and the same reason:
+		 * nothing here may price a scan as decoding no columns.
+		 */
+		*nproj = (ncols > 0) ? ncols : nlive;
+	}
 
 	if (total <= 0.0)
 		return 1.0;
@@ -864,6 +951,25 @@ pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
 		return 1.0;
 
 	return (used >= total) ? 1.0 : (used / total);
+}
+
+/*
+ * PgColumnarProjectedColumns
+ *		How many columns a scan of this relation decodes.
+ *
+ * The count the decode cost is charged per, for callers outside this file that
+ * have the relation but not the width fraction it comes with. Deliberately the
+ * same walk: the columns whose width is counted are the columns that get
+ * decoded, and a second walk that could disagree about which those are is a bug
+ * waiting to be written.
+ */
+int
+PgColumnarProjectedColumns(RelOptInfo *rel, Oid heapRelid)
+{
+	int			nproj = 0;
+
+	(void) pgcolumnar_projected_width_fraction(rel, heapRelid, &nproj);
+	return nproj;
 }
 
 /*
@@ -1162,6 +1268,9 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Path	   *seqpath = NULL;
 	List	   *keep = NIL;
 	ListCell   *lc;
+	int			nproj;
+	double		widthFrac;
+	double		ntuples;
 
 	if (prev_set_rel_pathlist_hook)
 		prev_set_rel_pathlist_hook(root, rel, rti, rte);
@@ -1205,13 +1314,33 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	rel->partial_pathlist = NIL;
 
 	/*
+	 * The projection walk, once, above both users of it: the fetch penalty's
+	 * bound just below and the path's own cost further down. They are two
+	 * statements about the same scan, and they were free to disagree about how
+	 * many columns it decodes while each did its own walk.
+	 */
+	nproj = 0;
+	widthFrac = pgcolumnar_projected_width_fraction(rel, rte->relid, &nproj);
+	ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
+
+	/*
 	 * Price the index/bitmap fetches now, while the only paths in the list are
 	 * the ones core built, and before any columnar path is offered below. #362:
 	 * doing this after the add_path calls meant the columnar path was judged
 	 * against index costs that had not yet been penalized, and freed.
+	 *
+	 * The bound is a multiple of one full scan, so it has to be a multiple of
+	 * what one full scan actually costs -- decode included (#503). Leaving the
+	 * decode out of the bound while adding it to the path is not a smaller
+	 * change, it is an incoherent one: the scan gets dearer, the ceiling on the
+	 * index path does not move, and an unclustered ORDER BY goes straight back
+	 * to fetching per row, which is the minutes-long plan #355 exists to stop.
+	 * Measured, not predicted -- that is what the first version of this patch
+	 * did, and analyze_stats.sh failed on exactly those two checks.
 	 */
 	pgcolumnar_penalize_index_fetches(rel, rti, rte->relid,
-								   pgcolumnar_full_scan_cost(rel, seqpath));
+								   pgcolumnar_full_scan_cost(rel, seqpath) +
+								   PgColumnarDecodeCost(ntuples, nproj));
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
@@ -1254,7 +1383,6 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	{
 		Cost		full = pgcolumnar_full_scan_cost(rel, seqpath);
 		double		survival = pgcolumnar_zonemap_survival(rel, rte->relid);
-		double		widthFrac = pgcolumnar_projected_width_fraction(rel, rte->relid);
 		Cost		pageCost = seq_page_cost * (double) rel->pages;
 		Cost		run = full - cpath->path.startup_cost;
 
@@ -1277,6 +1405,29 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				saved = run;
 			run -= saved;
 		}
+
+		/*
+		 * Price the decode (#503).
+		 *
+		 * Everything above this line is heap-shaped: pages, cpu_tuple_cost, the
+		 * qual. None of it is what a columnar scan spends its time on. Profiling
+		 * the exact shape below puts bitunpack at 19-21% of self time with the
+		 * decode machinery around it on top, and the cost model had no term for
+		 * any of it -- so the better this extension compresses, the cheaper its
+		 * scan looks, while the decoding it must do is unchanged.
+		 *
+		 * Added AFTER the width subtraction and INSIDE the survival scaling,
+		 * both deliberately. After, because the subtraction is capped at the run
+		 * cost and would otherwise be free to eat a decode charge that has
+		 * nothing to do with unread pages. Inside, because a row group the zone
+		 * maps skip is never decoded -- this is the one term where pruning
+		 * genuinely removes the work rather than merely removing the bytes.
+		 *
+		 * Per scanned row, not per emitted row: without late materialization
+		 * (#452) every row in a surviving group is decoded whether or not the
+		 * qual keeps it.
+		 */
+		run += PgColumnarDecodeCost(ntuples, nproj);
 
 		cpath->path.total_cost = cpath->path.startup_cost + run * survival;
 	}

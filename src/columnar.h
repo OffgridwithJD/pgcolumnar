@@ -890,6 +890,20 @@ extern Node *PgColumnarCreateAggScanState(CustomScan *cscan);
 extern Node *PgColumnarCreateGroupAggScanState(CustomScan *cscan);
 
 /*
+ * The price of decoding, and the column count it is charged per (#503).
+ *
+ * Anything that estimates the cost of reading this storage has to include the
+ * decode, because that is what the reading costs -- the rest of the estimate is
+ * pages and per-row overhead inherited from a heap scan, and compression keeps
+ * shrinking the pages while the decoding stays exactly the same. Shared rather
+ * than duplicated: the aggregate path in columnar_vector.c re-derives the scan
+ * cost independently, and the one time these two disagreed, a serial node beat a
+ * parallel plan four times its speed.
+ */
+extern Cost PgColumnarDecodeCost(double ntuples, int ncols);
+extern int	PgColumnarProjectedColumns(RelOptInfo *rel, Oid heapRelid);
+
+/*
  * Build the chunk-group skip scan keys from a plan's restriction clauses.
  * Shared by the base custom scan and the vectorized aggregate (spec 9). Clauses
  * that are not simple "column op const" comparisons are ignored.

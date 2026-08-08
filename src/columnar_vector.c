@@ -1710,6 +1710,20 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		serialScanCost = qcost.startup +
 			seq_page_cost * (double) input_rel->pages +
 			(cpu_tuple_cost + qcost.per_tuple) * ntuples;
+
+		/*
+		 * Including the decode, which is what the scan this node performs
+		 * actually spends its time on (#503). Without it this fallback is a
+		 * cheaper copy of the same scan the path above is priced at, and the
+		 * cheaper copy wins: on an 800,000-row GROUP BY the serial grouped node
+		 * came out at 12,082 against a base scan really priced at 48,025, and
+		 * displaced a four-worker plan -- the exact 1.9x regression #349 was
+		 * fixed to stop, reintroduced through the back door of a duplicated
+		 * formula.
+		 */
+		serialScanCost += PgColumnarDecodeCost(ntuples,
+											   PgColumnarProjectedColumns(input_rel,
+																		  relid));
 		serialScanRows = (ntuples > 0) ? ntuples : input_rel->rows;
 	}
 	if (serialScanCost <= 0.0)
