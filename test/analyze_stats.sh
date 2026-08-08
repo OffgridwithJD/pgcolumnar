@@ -608,12 +608,16 @@ ios_gap() {  # (index scan) - (index only scan), the saving allvisfrac buys
 	# The other three merely stop a cheaper plan being chosen instead.
 	off="SET pgcolumnar.enable_custom_scan = off; SET enable_seqscan = off;
 	     SET enable_bitmapscan = off; SET pgcolumnar.enable_index_fetch_penalty = off;"
+	# The FULL cost, decimals included. Truncating to an integer here is what made
+	# the first version of this check fail in CI on PG17 at "grown 3296 above
+	# vacuumed 3295" -- a one-unit difference manufactured by rounding two
+	# independent subtractions, not by anything the code did.
 	ios="$(plan_of "$off EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
-		| grep -m1 'Index Only Scan' | sed -E 's/.*\.\.([0-9]+)\.[0-9]+.*/\1/')"
+		| grep -m1 'Index Only Scan' | sed -E 's/.*\.\.([0-9.]+).*/\1/')"
 	idx="$(plan_of "$off SET enable_indexonlyscan = off;
 		EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
-		| grep -m1 'Index Scan' | sed -E 's/.*\.\.([0-9]+)\.[0-9]+.*/\1/')"
-	[ -n "$idx" ] && [ -n "$ios" ] && echo $((idx - ios))
+		| grep -m1 'Index Scan' | sed -E 's/.*\.\.([0-9.]+).*/\1/')"
+	[ -n "$idx" ] && [ -n "$ios" ] && awk -v a="$idx" -v b="$ios" 'BEGIN{printf "%.2f", a - b}'
 }
 
 iosc_gap_a="$(ios_gap)"
@@ -636,12 +640,21 @@ check "premise: both estimates were taken (#507)" \
 # fraction is frozen and the saving inflates with the table. Measured on this
 # fixture: 3296 -> 3296 correct, 3296 -> 3752 with the stale divisor.
 #
-# One-sided deliberately. Equal-or-lower is what a live divisor gives and the
-# cancellation is only exact while the fetch estimate saturates the relation;
-# higher is what the stale one gives, and that is the direction that misprices.
+# One-sided deliberately: equal-or-lower is what a live divisor gives, higher is
+# what the stale one gives, and that is the direction that misprices.
+#
+# The tolerance is arithmetic rather than taste, and it exists because the first
+# version had none and failed in CI on PG17 at 3296 against 3295. The cancellation
+# is only EXACT while the fetch estimate saturates the relation; where it does not
+# quite, the two sides differ in their last fraction of a cost unit. So the noise
+# floor is order 1 unit in 3300, about 0.03%, while the defect this detects is
+# 3296 -> 3752, or 13.8%. Five percent sits two orders of magnitude above the
+# noise and nearly three below the signal -- it cannot be reached by rounding and
+# cannot hide the stale divisor.
+iosc_tol="$(awk -v a="${iosc_gap_a:-0}" 'BEGIN{printf "%.2f", a * 1.05}')"
 check "growth without vacuum does not inflate the all-visible saving (#507)" \
-	"$([ "${iosc_gap_b:-1}" -le "${iosc_gap_a:-0}" ] && echo yes \
-		|| echo "no (grown $iosc_gap_b above vacuumed $iosc_gap_a)")" \
+	"$(awk -v b="${iosc_gap_b:-1}" -v t="$iosc_tol" 'BEGIN{exit !(b <= t)}' && echo yes \
+		|| echo "no (grown $iosc_gap_b above vacuumed $iosc_gap_a, tolerance $iosc_tol)")" \
 	"yes"
 
 pgc_summary
