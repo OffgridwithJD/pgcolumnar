@@ -2219,6 +2219,7 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		uint64		groupsRead = 0;
 		uint64		groupsSkipped = 0;
 		uint64		groupsTotal = 0;
+		PgColumnarGroupStats gs;
 
 		PgColumnarReadStats(cstate->readState, &groupsRead, &groupsSkipped,
 						  &groupsTotal);
@@ -2240,8 +2241,6 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		 * No enable_qual_pushdown ternary here: with the setting off the reader
 		 * builds no predicates, so this is already 0. It describes the run.
 		 */
-		PgColumnarGroupStats gs;
-
 		gs.usableSkipPredicates = PgColumnarReadUsablePredicates(cstate->readState);
 		gs.groupsTotal = groupsTotal;
 		gs.groupsRead = groupsRead;
