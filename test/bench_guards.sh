@@ -102,6 +102,34 @@ check "a missing count is refused rather than compared with the expectation" \
 check "and a missing expectation is refused too" \
 	"$(cb_rows_ok 2000000 '' && echo ok || echo refused)" "refused"
 
+# ---- a report must not claim a cold run it did not perform (#506) ----------
+#
+# The old harness tested [ -w /proc/sys/vm/drop_caches ], fell back to sudo, and
+# otherwise did nothing at all, silently -- while the report printed the
+# lukewarm-cold-run tag unconditionally. An unprivileged container is exactly
+# such a host: the file belongs to a uid outside the namespace and refuses even
+# the container's own root. So the run published a protocol claim it had not met.
+#
+# The claim is the deliverable being guarded here, not the drop. Whether a given
+# kernel permits the drop is not something a matrix suite can decide; whether the
+# report is honest about what happened is pure arithmetic, and belongs here.
+tag_none="$(cb_cold_tag none 2>/dev/null)"
+# Assert the premise, because the negative check below is vacuous without it: an
+# absent cb_cold_tag yields an empty string, an empty string does not contain
+# "lukewarm-cold-run", and "the run was not called cold" therefore PASSES against
+# no implementation whatever. Seen, not reasoned about -- it passed exactly that
+# way on the first red run of this suite.
+check "premise: the guard exists and emitted a tag to judge" \
+	"$([ -n "$tag_none" ] && echo yes || echo no)" "yes"
+check "a host that could not drop the page cache is not called a cold run" \
+	"$(grep -qi 'lukewarm-cold-run' <<<"$tag_none" && echo claimed || echo not-claimed)" \
+	"not-claimed"
+# Matched case-sensitively and as WARM-RUN rather than as "warm": the string
+# "lukewarm-cold-run" contains "warm", so a loose match would pass on precisely
+# the wrong output this check exists to catch.
+check "and the tag says plainly that the run was warm" \
+	"$(grep -q 'WARM-RUN' <<<"$tag_none" && echo yes || echo no)" "yes"
+
 echo
 echo "checks run: $PGC_CHECKS"
 if [ "$PGC_FAIL" != 0 ]; then

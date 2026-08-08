@@ -729,12 +729,7 @@ require "every query in the file ran" "$qn" "$NQUERIES" || fail=1
 # ---------------------------------------------------------------------------
 echo
 echo "================= CLICKBENCH, pgColumnar $EXTVER ================="
-if [ "$CB_DROP_HOW" = none ]; then
-	echo "tag: WARM-RUN (page cache could NOT be dropped on this host; the first-try"
-	echo "     column is not a cold number and must not be quoted as one)"
-else
-	echo "tag: lukewarm-cold-run (page cache dropped, server not restarted per query)"
-fi
+cb_cold_tag "$CB_DROP_HOW"
 printf '%s\n' "${ARMS[@]}" | grep -qx duckdb && \
 	echo "duckdb: PERSISTENT database file, not :memory:, so it stores what it loaded like the others"
 printf '%s\n' "${ARMS[@]}" | grep -qx citus && \

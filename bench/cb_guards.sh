@@ -56,3 +56,33 @@ cb_rows_ok() {
 	case "$want" in '' | *[!0-9]*) return 1 ;; esac
 	[ "$got" = "$want" ]
 }
+
+# cb_cold_tag <drop_how>
+#
+# The protocol tag the report carries, decided from what the page-cache probe
+# actually achieved: "direct" or "sudo" if the drop was performed, anything else
+# if it was not.
+#
+# This exists as a guard rather than as an if/else in the report because the
+# claim is the thing worth testing and the drop is not: whether a given kernel
+# permits the drop cannot be decided by a matrix suite, while whether the report
+# is honest about what happened is pure arithmetic. #506 records the harness
+# printing the cold tag unconditionally, including on hosts where both drop
+# mechanisms had failed.
+#
+# Unknown and empty fall to the warm tag deliberately. A tag that cannot be
+# justified must not be the cold one, because the cold one is the claim that
+# gets quoted.
+cb_cold_tag() {
+	case "${1:-}" in
+		direct | sudo)
+			printf '%s\n' \
+				"tag: lukewarm-cold-run (page cache dropped, server not restarted per query)"
+			;;
+		*)
+			printf '%s\n' \
+				"tag: WARM-RUN (page cache could NOT be dropped on this host; the first-try" \
+				"     column is not a cold number and must not be quoted as one)"
+			;;
+	esac
+}
