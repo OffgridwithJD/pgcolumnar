@@ -803,6 +803,16 @@ pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 	 * Same derivation core uses for a heap: the recorded all-visible pages over
 	 * the pages we are reporting, clamped, since the two are read at different
 	 * moments and a relation that shrank between them could otherwise exceed one.
+	 *
+	 * The two ends deliberately use different page counts, and it is not an
+	 * oversight: vacuum scales the numerator by the CATALOG relpages when it
+	 * records it, and this divides by the LIVE block count at plan time. Heap has
+	 * the same property -- vac_update_relstats writes relallvisible against the
+	 * pages it counted, and estimate_rel_size divides by curpages -- and both
+	 * directions are safe. A relation that grew since its vacuum divides an old
+	 * numerator by a larger denominator, so the fraction decays exactly where the
+	 * new pages are the ones not yet all-visible; one that shrank is caught by
+	 * the clamp. test/analyze_stats.sh pins the growth direction.
 	 */
 	if (nblocks > 0 && rel->rd_rel->relallvisible > 0)
 	{
@@ -1448,6 +1458,28 @@ pgcolumnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 
 	rowNumber = PgColumnarWriteRow(writeState, rel, slot->tts_values,
 								 slot->tts_isnull);
+
+	/*
+	 * The new row version makes its block not all-visible, exactly as a plain
+	 * insert does (gap 28). This half of update-as-delete-plus-insert was the
+	 * only write path not clearing the bit, while PgColumnarVMClearForRow's own
+	 * contract says it is "called by every write path (insert/delete/update)".
+	 * PgColumnarMarkRowDeleted above covers the OLD row; this covers the new one.
+	 *
+	 * It is a no-op today, and that is the reason to write it rather than a
+	 * reason to leave it out. PgColumnarVMSetVisibleForRelation marks only blocks
+	 * lying ENTIRELY inside an all-visible run -- `bend = hi / K` with a
+	 * `b < bend` loop -- so the partly-filled block at the append frontier is
+	 * never marked, and an appended row can only land there or beyond. That
+	 * safety is a `<` in another file with nothing pointing at it: marking the
+	 * boundary block looks like a tightening, and whoever makes it would turn
+	 * this no-op into a stale all-visible bit on a block that just changed, which
+	 * an index-only scan reads as permission to skip the fetch.
+	 *
+	 * Cheap when no bit is set (a short-circuit read), and the insert path
+	 * already pays it per row.
+	 */
+	PgColumnarVMClearForRow(rel, rowNumber);
 
 	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
