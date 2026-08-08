@@ -2524,6 +2524,16 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomRealVariable("pgcolumnar.decode_cost_multiplier",
+							 "Cost of decoding one stored value, in multiples of cpu_operator_cost.",
+							 "Zero disables the decode term entirely, restoring the "
+							 "heap-shaped estimate that has no term for decode at all.",
+							 &pgcolumnar_decode_cost_multiplier,
+							 5.0, 0.0, 1000.0,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_vectorization",
 							 "Use the vectorized aggregate fast path.",
 							 NULL,

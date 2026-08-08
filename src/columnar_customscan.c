@@ -792,7 +792,18 @@ pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
  * over the same rows, cost divided by execution time -- rather than leave a
  * constant standing that describes code that no longer exists.
  */
-#define COLUMNAR_DECODE_COST_PER_VALUE	(10.0 * cpu_operator_cost)
+/*
+ * Settable, because the right value is a calibration question and the honest
+ * answer today is a window rather than a number: below about 4.7 the term is too
+ * small to move the plans it exists to move, and above about 6.4 it takes a
+ * full-table read off the columnar scan, which is the plan that should win there.
+ * A hardcoded constant hides that window from anyone whose data sits outside the
+ * shapes it was measured on.
+ */
+double		pgcolumnar_decode_cost_multiplier = 5.0;
+
+#define COLUMNAR_DECODE_COST_PER_VALUE \
+	(pgcolumnar_decode_cost_multiplier * cpu_operator_cost)
 
 /*
  * PgColumnarDecodeCost

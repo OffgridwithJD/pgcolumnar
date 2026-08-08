@@ -900,6 +900,7 @@ extern Node *PgColumnarCreateGroupAggScanState(CustomScan *cscan);
  * cost independently, and the one time these two disagreed, a serial node beat a
  * parallel plan four times its speed.
  */
+extern double pgcolumnar_decode_cost_multiplier;
 extern Cost PgColumnarDecodeCost(double ntuples, int ncols);
 extern int	PgColumnarProjectedColumns(RelOptInfo *rel, Oid heapRelid);
 

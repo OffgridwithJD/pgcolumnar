@@ -571,6 +571,40 @@ check "the all-visible fraction does not hand every query to the index (#507)" \
 		|| echo "no ($(printf '%s' "$plan_all" | head -1))")" \
 	"yes"
 
+# --- 10b. the scan is priced for the decode it performs (#503) -----------------
+#
+# The estimate was heap-shaped: pages, cpu_tuple_cost, the qual, and nothing for
+# decode -- which is where a columnar scan spends its time. So the scan looked
+# cheaper the better it compressed, and the planner declined faster plans against
+# it. Measured against the clock on identical 20,000,000-row data, a seq scan
+# prices at ~475 cost units per millisecond of execution and the columnar scan at
+# ~75: about a sixth of the rate of everything it competes with.
+#
+# The consequence at this suite's scale, on the fixture built above. The
+# index-only scan is the faster plan and was refused:
+#
+#   k <= 600000    chosen custom scan 101.6 ms, index-only scan 49.2 ms
+#   k <= 1000000   chosen custom scan 173.3 ms, index-only scan 79.9 ms
+#
+# so this asserts the choice rather than a cost, and the margin is 2.1x rather
+# than a rounding difference.
+plan_dec="$(plan_of "EXPLAIN (COSTS off) SELECT k, count(*) FROM iosc WHERE k <= 600000 GROUP BY k;")"
+check "a wide grouped read reaches the index-only scan (#503)" \
+	"$(grep -q 'Index Only Scan using iosc_k' <<<"$plan_dec" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_dec" | head -1))")" \
+	"yes"
+
+# The over-fire guard, and it is the one with teeth: a decode charge large enough
+# to make the columnar scan lose everywhere would send this to a FETCHING index
+# scan, which is the minutes-long plan #355 exists to prevent. The index covers k
+# alone, so selecting id too cannot be answered index-only, and the columnar scan
+# must still win.
+plan_cov="$(plan_of "EXPLAIN (COSTS off) SELECT id, k FROM iosc WHERE k <= 600000;")"
+check "a non-covered projection still takes the columnar scan (#503)" \
+	"$(grep -q 'Custom Scan (PgColumnarScan)' <<<"$plan_cov" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_cov" | head -1))")" \
+	"yes"
+
 # --- 11. the fraction is a fraction of the LIVE relation (#507) ----------------
 #
 # allvisfrac is relallvisible over the block count, and which block count decides
