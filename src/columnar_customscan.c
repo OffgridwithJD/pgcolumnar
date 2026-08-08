@@ -2091,6 +2091,44 @@ PgColumnarReScanCustomScan(CustomScanState *node)
 }
 
 /*
+ * PgColumnarCountScanKeys
+ *		How many of these quals become scan keys.
+ *
+ * The quantity "Columnar Pushed-Down Filters" names, for callers that need the
+ * number without the keys. The vectorized aggregates report it so that one label
+ * means one thing on every node (#493): they push down through their own
+ * convertibility test, which accepts a different set, and reporting that under
+ * the scalar node's label made the same line mean two quantities depending on a
+ * plan choice the reader did not make.
+ */
+int
+PgColumnarCountScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc)
+{
+	ScanKey		keys;
+	int			nkeys = 0;
+
+	keys = PgColumnarBuildScanKeys(qual, scanrelid, tupdesc, &nkeys);
+	if (keys != NULL)
+		pfree(keys);
+	return nkeys;
+}
+
+/*
+ * PgColumnarExplainVectorPredicates
+ *		What the vectorized filter can evaluate, which is a different question
+ *		from what a zone map can exclude with (#493).
+ *
+ * Its own line rather than sharing one: #479 settled that adding the second
+ * number beats redefining the first, and anything parsing the old line -- which
+ * is #191's whole signal -- keeps working.
+ */
+void
+PgColumnarExplainVectorPredicates(int64 npreds, ExplainState *es)
+{
+	ExplainPropertyInteger("Columnar Vector Predicates", NULL, npreds, es);
+}
+
+/*
  * PgColumnarExplainPushedDown
  *		How many quals the scan was GIVEN as scan keys.
  *

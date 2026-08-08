@@ -553,7 +553,8 @@ typedef struct PgColumnarAggScanState
 	PgColumnarAggSpec *specs;
 	int			naggs;
 
-	int			npreds;			/* pushed-down predicate count, for EXPLAIN */
+	int			npreds;			/* vector predicates, for EXPLAIN (#493) */
+	int			nscankeys;		/* scan keys, the shared label's quantity (#493) */
 
 	MemoryContext resultContext;	/* holds min/max running values */
 	bool		done;			/* the single result row was emitted */
@@ -691,6 +692,7 @@ typedef struct PgColumnarGroupAggScanState
 
 	/* EXPLAIN */
 	int			npreds;
+	int			nscankeys;
 	bool		haveStats;
 	uint64		groupsRead;
 	uint64		groupsSkipped;
@@ -2128,6 +2130,8 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
 								  &state->npreds, &allConvertible);
+	state->nscankeys = PgColumnarCountScanKeys(state->quals, state->scanrelid,
+											 tupdesc);
 
 	/*
 	 * Scan-fold mode reads and rechecks every surviving row (#289): a virtual
@@ -3534,7 +3538,8 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
-	PgColumnarExplainPushedDown(state->npreds, es);
+	PgColumnarExplainPushedDown(state->nscankeys, es);
+	PgColumnarExplainVectorPredicates(state->npreds, es);
 	if (state->scanFold)
 		ExplainPropertyText("Columnar Batch Fold",
 							state->batchEligible ? "yes" : "no", es);
@@ -3770,6 +3775,8 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, basedesc,
 								  &state->npreds, &allConvertible);
+	state->nscankeys = PgColumnarCountScanKeys(state->quals, state->scanrelid,
+											 basedesc);
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
@@ -4220,7 +4227,8 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 						   state->nkeys, es);
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
-	PgColumnarExplainPushedDown(state->npreds, es);
+	PgColumnarExplainPushedDown(state->nscankeys, es);
+	PgColumnarExplainVectorPredicates(state->npreds, es);
 
 	if (state->haveStats)
 	{

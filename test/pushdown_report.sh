@@ -290,14 +290,23 @@ check "ungrouped: the usable arm removes chunk groups" \
 check "ungrouped: the unusable arm removes none" \
 	"$(field "$u_unusable" 'Columnar Chunk Groups Removed by Filter')" "0"
 
-# NOTE, and it is a finding rather than a detail: on these two nodes
-# "Columnar Pushed-Down Filters" is NOT the quantity the scalar node prints. It
-# comes from PgColumnarCountConvertibleQuals, which asks
-# pgcolumnar_clause_to_predicate (convertible to a VECTOR predicate), while the
-# scalar node counts pgcolumnar_clause_to_scankey results (scan keys). The two
-# tests do not accept the same clauses, so one label reports two different
-# quantities depending on which node ran. Filed separately; #479's own complaint
-# in a new place.
+# One label, one quantity, on every node (#493).
+#
+# "Columnar Pushed-Down Filters" used to come from PgColumnarCountConvertibleQuals
+# on these two nodes -- quals convertible to a VECTOR predicate -- and from
+# pgcolumnar_clause_to_scankey on the scalar node. The two tests do not accept the
+# same clauses, so the same line reported two different quantities depending on a
+# plan choice the reader did not make: "Pushed-Down Filters went from 1 to 0" read
+# as a pushdown regression and could mean the planner switched to a vectorized
+# aggregate, which is usually a speedup.
+#
+# The remedy is #479's, which this issue is a repeat of: add the second number,
+# do not redefine the first. All three nodes now report scan keys under the old
+# label, and the vector-predicate count has its own line where it applies.
+#
+# The `>>>` operator below is the discriminator: it builds a scan key and is not
+# convertible to a vector predicate, so before the fix the scalar node said 1 and
+# these two said 0. Asserting the three agree is the whole of this issue.
 #
 # The practical consequence here is that the constructed operator is not
 # convertible to a vector predicate either, so this arm reads 0 on BOTH counters
@@ -363,5 +372,34 @@ for _line in "Columnar Pushed-Down Filters" \
 		"$(grep -rho "ExplainPropertyInteger(\"$_line\"" "$PGC_SRC_DIR" | wc -l | tr -d ' ')" \
 		"1"
 done
+
+# The three nodes, same table, same predicate, same label.
+pdr_scalar="$(q "SET pgcolumnar.enable_qual_pushdown = on;
+	SET pgcolumnar.enable_ungrouped_vector_agg = off;
+	SET pgcolumnar.enable_group_vectorization = off;
+	EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+	SELECT count(*), sum(b) FROM pdr_u WHERE b >>> $((ROWS - 10000))::oid;")"
+
+check "premise: the scalar arm really is the scalar scan (#493)" \
+	"$(has "$pdr_scalar" 'Columnar Projected Columns')" "yes"
+
+check "scalar and ungrouped agree on Pushed-Down Filters (#493)" \
+	"$(field "$u_unusable" 'Columnar Pushed-Down Filters')" \
+	"$(field "$pdr_scalar" 'Columnar Pushed-Down Filters')"
+check "scalar and grouped agree on Pushed-Down Filters (#493)" \
+	"$(field "$g_unusable" 'Columnar Pushed-Down Filters')" \
+	"$(field "$pdr_scalar" 'Columnar Pushed-Down Filters')"
+
+# and the quantity that used to be printed under that label still exists, under
+# its own name, on the nodes it applies to -- otherwise this trades one
+# asymmetry for a loss of information.
+check "the ungrouped node reports its vector-predicate count separately (#493)" \
+	"$(has "$u_unusable" 'Columnar Vector Predicates')" "yes"
+check "and it is the count that used to be mislabelled (#493)" \
+	"$(field "$u_unusable" 'Columnar Vector Predicates')" "0"
+
+check "exactly one emitter for \"Columnar Vector Predicates\" (#495)" \
+	"$(grep -rho "ExplainPropertyInteger(\"Columnar Vector Predicates\"" "$PGC_SRC_DIR" | wc -l | tr -d ' ')" \
+	"1"
 
 pgc_summary
