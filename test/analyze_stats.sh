@@ -602,6 +602,10 @@ check "the all-visible fraction does not hand every query to the index (#507)" \
 # T_IndexOnlyScan, so it would put a term in the gap that is not the fraction.
 ios_gap() {  # (index scan) - (index only scan), the saving allvisfrac buys
 	local off idx ios
+	# enable_index_fetch_penalty = off is NOT redundant setup and must not be
+	# tidied away: the penalty adds to T_IndexScan and not to T_IndexOnlyScan, so
+	# it lands inside the very gap this function measures and swamps the fraction.
+	# The other three merely stop a cheaper plan being chosen instead.
 	off="SET pgcolumnar.enable_custom_scan = off; SET enable_seqscan = off;
 	     SET enable_bitmapscan = off; SET pgcolumnar.enable_index_fetch_penalty = off;"
 	ios="$(plan_of "$off EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
