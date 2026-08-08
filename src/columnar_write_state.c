@@ -104,6 +104,16 @@ typedef struct PgColumnarColumnDef
 	bool		bloomable;
 	FmgrInfo	hashFn;
 	Oid			hashCollation;	/* collation to hash under (InvalidOid if none) */
+
+	/*
+	 * Cached FSST keep/drop verdict and how many row groups have reused it
+	 * (#472). COLUMNAR_FSST_UNKNOWN is the palloc0 default, so a fresh write
+	 * state always asks once. The cache lives exactly as long as the write
+	 * state, which is one statement: nothing is persisted and no on-disk
+	 * structure changes.
+	 */
+	int8		fsstVerdict;
+	int			fsstVerdictAge;
 } PgColumnarColumnDef;
 
 /* one column's two streams within one chunk group */
@@ -1046,6 +1056,8 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 		{
 			StringInfoData corpus;
 			uint32		sampleLen = 0;
+			PgColumnarColumnDef *def = &writeState->colDefs[c];
+			bool		reuseVerdict;
 
 			initStringInfo(&corpus);
 			foreach(lc, writeState->chunkGroups)
@@ -1088,8 +1100,19 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 			 * the keep/drop decision uses, and only skips when the dictionary is
 			 * viable and wins for every vector, so the stored bytes are identical.
 			 */
+			/*
+			 * Reuse this column's previous verdict when it is young enough
+			 * (#472). A HURTS verdict skips the build as well as the question,
+			 * since the vectors then take their ordinary encoding, which is
+			 * what a freshly taken HURTS would have produced.
+			 */
+			reuseVerdict = (pgcolumnar_fsst_verdict_reuse > 0 &&
+							def->fsstVerdict != COLUMNAR_FSST_UNKNOWN &&
+							def->fsstVerdictAge < pgcolumnar_fsst_verdict_reuse);
+
 			if (corpus.len > 0 &&
 				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
+				!(reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS) &&
 				!PgColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
 				PgColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
 											&fsstTable, &fsstTableLen);
@@ -1111,15 +1134,50 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 			 * the whole column it is 23% better -- a verdict that is not merely
 			 * imprecise but inverted, so no margin on the sample would be safe.
 			 */
-			if (fsstTable != NULL &&
-				!PgColumnarFsstHelpsCompressed(corpus.data, (uint32) corpus.len,
-											 fsstTable, fsstTableLen,
-											 writeState->compressionType,
-											 writeState->compressionLevel))
+			if (fsstTable != NULL)
 			{
-				pfree(fsstTable);
-				fsstTable = NULL;
-				fsstTableLen = 0;
+				bool		helps;
+
+				/*
+				 * A reused HELPS verdict still builds the table above, because
+				 * the table is trained on THIS row group's corpus and stored
+				 * with the chunk: reusing the table itself would change the
+				 * stored bytes. Only the whole-corpus question is skipped, and
+				 * that is the expensive half.
+				 */
+				if (reuseVerdict)
+				{
+					helps = (def->fsstVerdict == COLUMNAR_FSST_HELPS);
+					def->fsstVerdictAge++;
+				}
+				else
+				{
+					helps = PgColumnarFsstHelpsCompressed(corpus.data,
+														(uint32) corpus.len,
+														fsstTable, fsstTableLen,
+														writeState->compressionType,
+														writeState->compressionLevel);
+					def->fsstVerdict = helps ? COLUMNAR_FSST_HELPS
+						: COLUMNAR_FSST_HURTS;
+					def->fsstVerdictAge = 0;
+				}
+
+				if (!helps)
+				{
+					pfree(fsstTable);
+					fsstTable = NULL;
+					fsstTableLen = 0;
+				}
+			}
+			else if (reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS)
+			{
+				/*
+				 * The build was skipped on the strength of the cached verdict,
+				 * so this row group counts as a reuse too. Without this the age
+				 * would never advance on the common path and the bound would
+				 * never re-take the verdict.
+				 */
+				def->fsstVerdictAge++;
 			}
 
 			pfree(corpus.data);

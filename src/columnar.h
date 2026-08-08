@@ -167,6 +167,23 @@ extern int pgcolumnar_encoding_sample_rows;
 extern int pgcolumnar_compression;		/* one of COLUMNAR_COMPRESSION_* */
 extern int pgcolumnar_compression_level;	/* zstd level */
 extern int pgcolumnar_fsst_min_gain_percent;	/* min compressed FSST win to keep it (#155) */
+/*
+ * How many row groups may reuse a column's FSST keep/drop verdict before it is
+ * taken again (#472). 0 never reuses, which is the behaviour before that issue
+ * and what the byte-identical test arm compares against.
+ *
+ * Asking the question costs a whole-corpus FSST encode plus a compression pass,
+ * once per column per row group, because the answer cannot be sampled: on a
+ * training prefix FSST can look 24% worse while over the whole column it is 23%
+ * better. Measured at 41 to 47 percent of a text load, re-deriving a verdict
+ * that did not change across 20 row groups.
+ */
+extern int	pgcolumnar_fsst_verdict_reuse;
+
+/* a column's cached FSST verdict (#472) */
+#define COLUMNAR_FSST_UNKNOWN	0
+#define COLUMNAR_FSST_HELPS		1
+#define COLUMNAR_FSST_HURTS		2
 extern bool pgcolumnar_enable_qual_pushdown;
 extern bool pgcolumnar_enable_column_projection;
 extern bool pgcolumnar_enable_custom_scan;

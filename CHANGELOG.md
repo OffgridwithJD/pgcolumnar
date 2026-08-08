@@ -14,6 +14,27 @@ which was true until that script existed.
 
 ### Added
 
+- `pgcolumnar.fsst_verdict_reuse` caches a column's FSST keep/drop verdict for a
+  bounded number of row groups (#472). Default 16; `0` asks every time, which is
+  the behaviour before this setting existed.
+
+  Deciding whether an FSST symbol table pays for itself costs a whole-corpus
+  encode plus a compression pass, and the answer cannot be sampled: on a training
+  prefix FSST can look 24 percent worse while over the whole column it is 23
+  percent better. So it was asked once per column per row group, and for a column
+  whose data does not change character that re-derived the same answer for the
+  whole load. Measured at 2,000,000 rows in 20 row groups: 2482 ms of a 5319 ms
+  `md5` load and 843 ms of a 2081 ms email-shaped load, with the verdict identical
+  all 20 times.
+
+  A text load is about 2.5 times faster as a result, measured in-suite at 1623 ms
+  against 648 ms. Stored bytes are unchanged for a column whose verdict is stable,
+  which is asserted rather than assumed: the suite compares the encoding
+  descriptor, block codec and page length of every chunk. A column that changes
+  character mid-load is noticed within the bound.
+
+  Reuse is per statement. Nothing is persisted and no on-disk structure changes.
+
 - `EXPLAIN (ANALYZE)` now reports `Columnar Usable Skip Predicates` beside
   `Columnar Pushed-Down Filters` (#479). The existing line counts the filters the
   scan was handed and is unchanged; the new one counts how many of those the
