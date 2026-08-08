@@ -1316,7 +1316,22 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION)
 		return;
-	if (rel->reloptkind != RELOPT_BASEREL)
+	/*
+	 * A partition is RELOPT_OTHER_MEMBER_REL, not RELOPT_BASEREL, and excluding
+	 * it cost the custom scan entirely: no column projection, no zone-map
+	 * pruning, no index-fetch penalty, and a fall back to a sequential scan
+	 * through the table AM with nothing in the plan saying why (#436).
+	 *
+	 * Measured on 400,000 rows, same data and same predicate, partitioning the
+	 * only difference: 1.4 ms unpartitioned against 74.1 ms partitioned, 53x.
+	 *
+	 * Only these two kinds. The rest are joins, upper rels and dead rels, none of
+	 * which is a base relation this scan could read, and PgColumnarIsColumnarRelation
+	 * below still decides per relation -- so a heap partition beside a columnar
+	 * one is unaffected.
+	 */
+	if (rel->reloptkind != RELOPT_BASEREL &&
+		rel->reloptkind != RELOPT_OTHER_MEMBER_REL)
 		return;
 	if (!OidIsValid(rte->relid) || !PgColumnarIsColumnarRelation(rte->relid))
 		return;

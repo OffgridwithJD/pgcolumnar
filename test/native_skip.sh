@@ -384,4 +384,48 @@ else
 		"$(pgc_set_hash "SELECT t FROM hu WHERE t LIKE 'k00005000%'")"
 fi
 
+# ---- a columnar PARTITION must get the custom scan too (#436) ----------------
+#
+# set_rel_pathlist_hook returned early unless reloptkind was RELOPT_BASEREL, and a
+# partition is RELOPT_OTHER_MEMBER_REL -- so a partitioned columnar table lost the
+# custom scan entirely, and with it column projection, zone-map pruning and the
+# index-fetch penalty. It fell back to a sequential scan through the table AM and
+# nothing in the plan said why.
+#
+# Measured on 400,000 rows, same data and same predicate, partitioning the only
+# difference: 1.4 ms unpartitioned against 74.1 ms partitioned, 53x, with the
+# partitioned plan reading every row group and projecting every column.
+#
+# Parity first and not as decoration: the risk in a scan that never ran on this
+# relation shape is a WRONG answer, not a slow one.
+psql_run "CREATE TABLE nskp_h (id int, k int, label text);"
+psql_run "CREATE TABLE nskp (id int, k int, label text) PARTITION BY RANGE (id);"
+psql_run "CREATE TABLE nskp_1 PARTITION OF nskp FOR VALUES FROM (1) TO (10241)
+	USING pgcolumnar;"
+psql_run "CREATE TABLE nskp_2 PARTITION OF nskp FOR VALUES FROM (10241) TO (20481)
+	USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('nskp_1', stripe_row_limit => 2048, chunk_group_row_limit => 1024);"
+psql_run "SELECT pgcolumnar.set_options('nskp_2', stripe_row_limit => 2048, chunk_group_row_limit => 1024);"
+NSKP_GEN="SELECT g, g * 10, 'lbl-' || (g % 100) FROM generate_series(1, 20480) g"
+psql_run "INSERT INTO nskp_h $NSKP_GEN;"
+psql_run "INSERT INTO nskp $NSKP_GEN;"
+
+check "premise: both partitions are columnar (#436)" \
+	"$(q "SELECT count(*) FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+		  WHERE c.relname IN ('nskp_1','nskp_2') AND a.amname = 'pgcolumnar';")" "2"
+
+check "a partitioned columnar table returns the same rows as heap (#436)" \
+	"$(pgc_set_hash 'SELECT id, k, label FROM nskp WHERE id BETWEEN 5000 AND 5100')" \
+	"$(pgc_set_hash 'SELECT id, k, label FROM nskp_h WHERE id BETWEEN 5000 AND 5100')"
+
+check "a partition takes the columnar custom scan (#436)" \
+	"$(q "EXPLAIN (COSTS off) SELECT id FROM nskp WHERE id BETWEEN 5000 AND 5100;" \
+		| grep -c 'Custom Scan (PgColumnarScan)')" "1"
+
+# and the consequence the custom scan exists for: it prunes. A partition that got
+# the node but not the pruning would pass the check above and still read
+# everything.
+check "and it prunes row groups (#436)" \
+	"$(gt0 "$(skipped 'SELECT id FROM nskp WHERE id BETWEEN 5000 AND 5100')")" "yes"
+
 pgc_summary
