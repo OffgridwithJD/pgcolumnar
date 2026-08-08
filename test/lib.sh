@@ -87,6 +87,29 @@ pgc_cluster_is_ours() {
 
 # ---- setup / teardown ------------------------------------------------------
 
+# pgc_so_line
+#		One line naming the shared library the suites are about to exercise.
+#
+# Printed on every run, not only when something looks wrong, because the failure
+# it catches is invisible in a PASS/FAIL list: a suite reporting checks against a
+# binary nobody just built. Three separate instances in one session -- a compile
+# error the harness did not check (#508), a PGC_SKIP_BUILD run that skipped the
+# INSTALL and exercised a guard-removed leftover, and objects from another major
+# linked into a third -- all produced plausible results and all were one md5sum
+# from being obvious.
+#
+# It also makes a red-on-change proof self-evidencing: two arms that report the
+# same hash have proved nothing, whatever their check counts say.
+pgc_so_line() {
+	local so
+	so="$("$PGC_PG_CONFIG" --pkglibdir)/pgcolumnar.so"
+	if [ -r "$so" ]; then
+		echo "-- .so: $(md5sum "$so" | cut -c1-12) $so"
+	else
+		echo "-- .so: NOT PRESENT at $so"
+	fi
+}
+
 pgc_setup() {
 	PGC_PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 	PGC_BINDIR="$("$PGC_PG_CONFIG" --bindir)"
@@ -162,7 +185,17 @@ pgc_setup() {
 			echo "       (refusing to report checks against the previously installed .so)" >&2
 			exit 1
 		fi
+	else
+		# Named because the variable is not what it says. It reads as "skip the
+		# build" and means "skip the build AND the install, and test whatever is
+		# already installed" -- correct for the matrix, which installs once per
+		# major before setting it, and a trap for a person who has just edited
+		# source and run make by hand.
+		echo "-- PGC_SKIP_BUILD=1: not building AND NOT INSTALLING;"
+		echo "   whatever is already installed is what these checks measure"
 	fi
+
+	pgc_so_line
 
 	echo "-- initdb"
 	pgc_pg "initdb -D '$PGC_PGDATA' -A trust" >/dev/null 2>&1
