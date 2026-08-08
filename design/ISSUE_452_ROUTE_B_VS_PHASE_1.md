@@ -195,6 +195,39 @@ Note the codec buys **2.25x** on this table (3.33 GB to 1.48 GB) for 3.36% of
 this query's time. That is a good trade and an argument for keeping it, not
 against it.
 
+### Measured after 1a shipped: the 71% was 1a and 1b together, not 1a
+
+1a is implemented and measured on the same table, same box, interleaved, medians
+of 3, **with the postmaster restarted so the new `.so` was actually loaded** (the
+first attempt measured the old binary and reported plausible numbers; the premise
+check caught it):
+
+| query | 1a off | 1a on | saved |
+| --- | ---: | ---: | ---: |
+| q24 `SELECT *`, 105 columns | 6253 ms | **5184 ms** | **1069 ms, 17.1% (1.21x)** |
+| q21 `count(*)`, 1 column | 1378 ms | 1392 ms | none, as designed |
+
+q21 is unchanged because its qual column *is* its only projected column, so the
+`deferrable == 0` guard refuses the path. That the number does not move is the
+guard working, not the feature failing.
+
+**Why 1069 ms and not the 4265 ms this document predicted.** The prediction
+conflated two costs that turn out to be separable in the code:
+
+- `pgcolumnar_native_decode_chunk` decodes a **whole chunk** into a raw buffer at
+  group-load time, before any row is produced.
+- The per-row work 1a removes is only the copy **out of that raw buffer** into
+  the row context -- the `MemoryContextAlloc` plus memcpy per value.
+
+So **1a captures M and leaves E untouched.** The decode already happened. Getting
+E requires not decoding the vectors that hold no surviving row, which is exactly
+1b, and 1b now has a measured budget rather than an assumed one: roughly the
+3200 ms of q24 that 1a does not reach.
+
+This does not change the Route B decision -- D is still 202 ms and Route B still
+cannot exceed it -- but it does mean **1b is worth more than 1a was**, and the
+71% figure should be read as the pair, not as either one.
+
 ### Decision
 
 **Do Phase 1a then 1b. Defer Route B and do not spend the storage.** Re-measure D

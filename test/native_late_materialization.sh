@@ -115,4 +115,36 @@ nn_off=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgr
 	| tail -1)
 check_text "and the answers are the same with it off" "$nn_off" "$nh"
 
+# ---- a volatile qual must refuse the path entirely -------------------------
+#
+# ExecScan re-applies the node's qual to every row this returns, so a row that
+# survives has its qual evaluated twice. That is invisible for an immutable
+# expression and wrong for a volatile one, which is why Begin refuses the path.
+#
+# This check exists because nothing else reaches that guard: every other query in
+# this suite is immutable, so deleting contain_volatile_functions() would leave
+# the whole suite green. Same shape as the collation and divisor guards found
+# unreachable elsewhere today.
+#
+# random() < 2 is always true, so the rows are the ones the LIKE selects and the
+# heap mirror is still the oracle. It cannot be constant-folded away: volatile is
+# precisely what stops the planner doing that, which is what makes it a fixture.
+QV="SELECT * FROM n WHERE k LIKE '%${NEEDLE}%' AND random() < 2"
+QVH="SELECT * FROM h WHERE k LIKE '%${NEEDLE}%' AND random() < 2"
+
+vol_early=$(counter "Columnar Rows Filtered Before Materialization" "$QV")
+check_num "a volatile qual is refused the two-pass path" "${vol_early:-0}" "0"
+
+# And refusing it must not change the answer either.
+vh=$(scalar "SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM ($QVH) t;")
+vn=$(scalar "SELECT md5(string_agg(t::text, '|' ORDER BY id)) FROM ($QV) t;")
+check_text "and the volatile query still matches the heap mirror" "$vn" "$vh"
+
+# The premise that makes the check above mean something: the SAME query without
+# the volatile term does take the path. Without this, "0" would be satisfied by a
+# fixture that never qualified for late materialization at all.
+check_num "premise: the same shape without the volatile term does use it" \
+	"$(counter "Columnar Rows Filtered Before Materialization" "$Q")" \
+	"$((ROWS - n_match))"
+
 pgc_summary
