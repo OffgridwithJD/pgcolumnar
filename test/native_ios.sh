@@ -62,6 +62,35 @@ check "premise: core records all-visible pages for the heap mirror (#507 oracle)
 check "VACUUM records the all-visible pages in pg_class (#507)" \
 	"$(q "SELECT relallvisible > 0 FROM pg_class WHERE relname = 'ios';")" "t"
 
+# Non-zero is not the same as right, and the way this goes wrong is a unit error
+# rather than a logic one. The VM is keyed by SYNTHETIC blocks (rowNumber / K)
+# while relpages counts stored pages; on a 20,000,000-row table that is 68,730
+# against 45,994. Storing a block count would satisfy the check above and give
+# core an all-visible fraction of 1.49 to divide with.
+#
+# Premise first: relallvisible is meaningless if relpages is zero, and the
+# conversion is skipped entirely in that case, so a silent no-op would otherwise
+# reach the checks below as a division by zero rather than as a failure.
+check "premise: the relation has pages and rows to be a fraction of (#507)" \
+	"$(q "SELECT relpages > 0 AND reltuples > 0 FROM pg_class WHERE relname = 'ios';")" "t"
+
+# An upper bound that owes nothing to this implementation: a relation cannot
+# have more all-visible pages than pages. A synthetic block count is free to
+# exceed it, and on a large relation it does.
+check "the all-visible page count cannot exceed the relation (#507)" \
+	"$(q "SELECT relallvisible <= relpages FROM pg_class WHERE relname = 'ios';")" "t"
+
+# ...and a lower bound, because a fraction can be arithmetically sane and still
+# wrong. The heap mirror on identical rows is the oracle rather than a number
+# written here. Deliberately loose: our bits are set only for blocks lying
+# ENTIRELY within an all-visible run, so the partial block at each end stays
+# clear and the columnar fraction is legitimately a little under the heap's.
+# Half is far below that boundary loss and far above either failure mode -- a
+# wrong unit lands above the heap's fraction, a stray small value well under it.
+check "the all-visible fraction is most of the relation, as the heap's is (#507)" \
+	"$(q "SELECT (SELECT relallvisible::float8 / relpages FROM pg_class WHERE relname = 'ios')
+	          >= 0.5 * (SELECT relallvisible::float8 / relpages FROM pg_class WHERE relname = 'ioh');")" "t"
+
 # A delete clears the VM bit for the affected blocks; the scan falls back to the
 # fetch there and must never return a deleted row.
 psql_run "DELETE FROM ios WHERE id BETWEEN 2000 AND 2200;"

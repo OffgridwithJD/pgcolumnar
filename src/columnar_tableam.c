@@ -1087,6 +1087,24 @@ pgcolumnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 		double		frac = (double) visibleRows / (double) rel->rd_rel->reltuples;
 		BlockNumber allvis;
 
+		/*
+		 * When the clamp can bind, and why it is not hiding an overshoot.
+		 *
+		 * visibleRows counts rows in blocks lying ENTIRELY within an all-visible
+		 * run, so it is bounded by the true all-visible row count, which is
+		 * bounded by the true live row count. The denominator is not a count at
+		 * all -- reltuples is ANALYZE's estimate -- so the only way frac exceeds
+		 * one is that the estimate sits below the rows actually there. The clamp
+		 * therefore fires when the two inputs disagree, never when both are
+		 * accurate, and the value it produces in that case (every page
+		 * all-visible) is the right answer for a relation whose rows are all
+		 * visible. It cannot mask a miscounted numerator, because a numerator
+		 * that could overshoot on its own would have to count rows that do not
+		 * exist.
+		 *
+		 * test/native_ios.sh asserts the outcome either way: relallvisible must
+		 * not exceed relpages, and must still be most of the relation.
+		 */
 		if (frac > 1.0)
 			frac = 1.0;
 		/* truncating cast, not floor(): both are non-negative here, and this
