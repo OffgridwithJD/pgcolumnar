@@ -321,6 +321,28 @@ TSV_ROWS=$(wc -l < "$TSV")
 note "   $TSV: $TSV_ROWS rows, $TSV_BYTES bytes (stride $STRIDE)"
 require "the extracted TSV is not empty" "$([ "$TSV_ROWS" -gt 0 ] && echo yes || echo no)" "yes" || exit 1
 
+# The two ingest arms read this file as DIFFERENT users. `\copy` is client-side
+# and reads as whoever runs this script; pgcolumnar.parallel_copy reads it
+# server-side, through OpenTransientFile, as the user the postmaster runs as.
+# Where those differ -- which is exactly the root case handled above -- a file
+# the client reads happily can be refused to the server, and the refusal arrives
+# at the parallel arm, AFTER the decompress and after the serial arms have
+# loaded. That is the most expensive place in the run to discover it.
+#
+# Asserted as a fact about this file and this user, established by asking that
+# user, rather than inferred from a umask. Root's umask is 0022 on the bench and
+# the arms both read the file there today; a umask is a property of whichever
+# process created the file, and stays true only until the harness runs from cron
+# or from a shell someone configured differently.
+if [ "$CB_AS_ROOT" = 1 ]; then
+	require "the server user can read the extracted TSV" \
+		"$(runuser -u postgres -- test -r "$TSV" && echo yes || echo no)" "yes" || {
+		note "   $TSV is $(stat -c '%A %U:%G' "$TSV"), and the postmaster runs as postgres"
+		note "   pgcolumnar.parallel_copy reads it server-side, so the parallel arm would fail"
+		exit 1
+	}
+fi
+
 # ---------------------------------------------------------------------------
 # 3. A throwaway cluster, sized to this box
 # ---------------------------------------------------------------------------
