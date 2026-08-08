@@ -1056,7 +1056,9 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 		{
 			StringInfoData corpus;
 			uint32		sampleLen = 0;
-			PgColumnarColumnDef *def = &writeState->colDefs[c];
+			/* `def` is the enclosing block's, at the top of this per-column
+			 * loop. Re-declaring it here shadowed that one, which this project
+			 * builds with -Wshadow=compatible-local and treats as an error. */
 			bool		reuseVerdict;
 
 			initStringInfo(&corpus);
