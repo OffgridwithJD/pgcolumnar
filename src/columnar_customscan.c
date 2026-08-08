@@ -2075,6 +2075,50 @@ PgColumnarReScanCustomScan(CustomScanState *node)
 	ExecScanReScan(&node->ss);
 }
 
+/*
+ * PgColumnarExplainPushedDown
+ *		How many quals the scan was GIVEN as scan keys.
+ *
+ * Describes the PLAN, not the run, which is why it prints whether or not the
+ * scan read anything: someone who sets pgcolumnar.enable_qual_pushdown to test a
+ * theory and checks EXPLAIN to confirm it took effect was once told it had not
+ * (#191). Every other "Columnar ..." line describes the run.
+ */
+void
+PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es)
+{
+	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL, nfilters, es);
+}
+
+/*
+ * PgColumnarExplainGroupStats
+ *		What the scan actually did to chunk groups.
+ *
+ * "Usable Skip Predicates" is separate from the filter count above and both are
+ * needed (#479). That one says whether pushdown took effect; this one says
+ * whether the predicates it pushed can prune, because
+ * pgcolumnar_make_predicates drops any it cannot evaluate against the stored
+ * min/max and a dropped key skips nothing. A single number cannot say both, and
+ * saying only the first is how #477 stayed invisible for a year --
+ * "Pushed-Down Filters: 1" beside "Chunk Groups Removed by Filter: 0" reads as an
+ * unselective predicate and meant an unusable one.
+ *
+ * No enable_qual_pushdown ternary: with the setting off the reader builds no
+ * predicates, so this is already zero. It describes the run.
+ */
+void
+PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats, ExplainState *es)
+{
+	ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
+						   stats->usableSkipPredicates, es);
+	ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
+						   (int64) stats->groupsTotal, es);
+	ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
+						   (int64) stats->groupsRead, es);
+	ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
+						   (int64) stats->groupsRemoved, es);
+}
+
 /* -------------------------------------------------------------------------
  * parallel scan (gap 23): a shared atomic hands out stripe indices so several
  * workers scanning the same relation each claim distinct stripes. The custom
@@ -2167,9 +2211,8 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 	 * plan -- Projected Columns, Chunk Groups Total and the counters below it --
 	 * so this one line meant something different from all of its neighbours.
 	 */
-	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
-						   pgcolumnar_enable_qual_pushdown ? cstate->nScanKeys : 0,
-						   es);
+	PgColumnarExplainPushedDown(pgcolumnar_enable_qual_pushdown
+								? cstate->nScanKeys : 0, es);
 
 	if (cstate->readState != NULL)
 	{
@@ -2197,16 +2240,13 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		 * No enable_qual_pushdown ternary here: with the setting off the reader
 		 * builds no predicates, so this is already 0. It describes the run.
 		 */
-		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
-							   PgColumnarReadUsablePredicates(cstate->readState),
-							   es);
+		PgColumnarGroupStats gs;
 
-		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
-							   (int64) groupsTotal, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
-							   (int64) groupsRead, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
-							   (int64) groupsSkipped, es);
+		gs.usableSkipPredicates = PgColumnarReadUsablePredicates(cstate->readState);
+		gs.groupsTotal = groupsTotal;
+		gs.groupsRead = groupsRead;
+		gs.groupsRemoved = groupsSkipped;
+		PgColumnarExplainGroupStats(&gs, es);
 		ExplainPropertyInteger("Columnar Vectors Skipped", NULL,
 							   (int64) PgColumnarVectorsSkipped(cstate->readState), es);
 
