@@ -512,4 +512,63 @@ check "the bound does not disable the penalty for a full ordered read (#376)" \
 		&& echo yes || echo "no ($(printf '%s' "$plan_nolim" | head -1))")" \
 	"yes"
 
+# --- 10. a vacuumed table is priced with its all-visible pages (#507) ----------
+#
+# cost_index scales an index-only scan's heap-fetch estimate by
+# (1 - allvisfrac), and for a columnar relation allvisfrac arrives from this
+# extension's own relation_estimate_size callback -- core delegates, so that
+# callback is the only place the planner can learn it. It returned a hardcoded
+# zero, which prices every index-only scan as though it fetched every row.
+#
+# The checks are here rather than in native_ios.sh because this is a costing
+# question: native_ios.sh forces the plan with enable_custom_scan=off and
+# therefore cannot see a choice being made at all.
+#
+# Deliberately paired. "Takes the index-only scan" alone is satisfied by a
+# callback that reports everything all-visible unconditionally, which would be
+# the same defect with the sign flipped, so the second check holds a query where
+# the scan is genuinely cheaper and requires it to still win.
+IOSC_ROWS=${PGC_IOSC_ROWS:-300000}
+
+# k is deterministic -- the same (g * 48271) scatter o355 uses above -- because a
+# premise that moves with a random draw fails eventually and blames innocent
+# code (#487). The pad must not compress away: the effect turns on the relation
+# having pages for the fetch estimate to be a fraction of, and a constant string
+# costs almost none.
+psql_run "DROP TABLE IF EXISTS iosc;
+	CREATE TABLE iosc (id int, k int, pad text) USING pgcolumnar;
+	INSERT INTO iosc SELECT g, ((g::bigint * 48271) % 1000000)::int,
+		repeat(md5(g::text), 4) FROM generate_series(1, $IOSC_ROWS) g;
+	CREATE INDEX iosc_k ON iosc (k);
+	ANALYZE iosc;" >/dev/null
+psql_run "VACUUM iosc;" >/dev/null
+
+# Premise: the pricing question below is meaningless unless VACUUM actually
+# recorded all-visible pages, and that is a different mechanism from the one
+# under test -- it is asserted in native_ios.sh, and asserted again here because
+# this suite must not report a costing result that rests on it silently.
+check "premise: VACUUM recorded all-visible pages to price with (#507)" \
+	"$(q "SELECT relallvisible > 0 FROM pg_class WHERE relname = 'iosc';")" "t"
+check "premise: the selective range has its rows (#507)" \
+	"$(q 'SELECT count(*) FROM iosc WHERE k BETWEEN 0 AND 200000;')" "60003"
+
+# 60,003 of 300,000 rows: the index-only scan reads a fifth of the index and no
+# data at all, and beats the columnar scan 1,847 to 4,524 once its fetch estimate
+# is not inflated. Hardcoding allvisfrac to zero prices it at 5,143 and the
+# columnar scan wins instead.
+plan_ios="$(plan_of "EXPLAIN (COSTS off) SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;")"
+check "a vacuumed columnar table can reach an index-only scan (#507)" \
+	"$(grep -q 'Index Only Scan using iosc_k' <<<"$plan_ios" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_ios" | head -1))")" \
+	"yes"
+
+# ...and the other direction, so a callback that simply claims everything is
+# all-visible does not pass. Reading every row, the columnar scan is genuinely
+# the cheaper plan (4,524 against 9,312) and must still be chosen.
+plan_all="$(plan_of "EXPLAIN (COSTS off) SELECT k FROM iosc WHERE k BETWEEN 0 AND 1000000;")"
+check "the all-visible fraction does not hand every query to the index (#507)" \
+	"$(grep -q 'Custom Scan (PgColumnarScan)' <<<"$plan_all" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_all" | head -1))")" \
+	"yes"
+
 pgc_summary

@@ -783,7 +783,35 @@ pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 
 	*pages = Max(nblocks, 1);
 	*tuples = Max(liveRows, 0);
-	*allvisfrac = 0.0;
+
+	/*
+	 * The all-visible fraction, from the catalog rather than hardcoded (#507).
+	 *
+	 * This callback is the ONLY place the planner learns it: core's
+	 * estimate_rel_size delegates to the AM, so a hardcoded zero here overrides
+	 * pg_class entirely and no amount of VACUUM recording the truth can reach
+	 * cost_index. That is worth stating plainly because it is not visible from
+	 * either end -- the catalog looks right and the plan stays wrong, and a test
+	 * that asserts relallvisible is green while the defect is untouched.
+	 *
+	 * Zero is not a safe default here either. cost_index scales an index-only
+	 * scan's heap-fetch estimate by (1 - allvisfrac), so zero prices every
+	 * index-only scan as though it fetched every row -- on a 500,000-row fixture
+	 * that is the difference between an index-only scan priced 5,505 and the same
+	 * scan priced as high as 21,284, and it decides the plan.
+	 *
+	 * Same derivation core uses for a heap: the recorded all-visible pages over
+	 * the pages we are reporting, clamped, since the two are read at different
+	 * moments and a relation that shrank between them could otherwise exceed one.
+	 */
+	if (nblocks > 0 && rel->rd_rel->relallvisible > 0)
+	{
+		double		frac = (double) rel->rd_rel->relallvisible / (double) nblocks;
+
+		*allvisfrac = (frac > 1.0) ? 1.0 : frac;
+	}
+	else
+		*allvisfrac = 0.0;
 }
 
 /*
