@@ -60,6 +60,7 @@ PG_MODULE_MAGIC;
 /* GUC-backed instance defaults (spec 8.3) */
 int			pgcolumnar_stripe_row_limit = 150000;
 int			pgcolumnar_chunk_group_row_limit = 10000;
+int			pgcolumnar_fsst_verdict_reuse = 16;
 int			pgcolumnar_encoding_sample_rows = 2048;
 
 int			pgcolumnar_compression = COLUMNAR_COMPRESSION_ZSTD;
@@ -2295,6 +2296,21 @@ _PG_init(void)
 							&pgcolumnar_chunk_group_row_limit,
 							10000,
 							100, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.fsst_verdict_reuse",
+							"Row groups that may reuse a column's FSST keep/drop verdict.",
+							"Deciding whether an FSST symbol table pays for itself costs a "
+							"whole-corpus encode plus a compression pass, and the answer "
+							"cannot be sampled, so it is asked once per column per row "
+							"group. For a column whose data does not change character that "
+							"re-derives a constant. 0 asks every time, which is the "
+							"behaviour before this setting existed.",
+							&pgcolumnar_fsst_verdict_reuse,
+							16,
+							0, INT_MAX,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

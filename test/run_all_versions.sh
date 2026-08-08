@@ -67,6 +67,7 @@ SUITES=(
 	encode_invariants
 	fk_referencing
 	fsst_margin
+	fsst_verdict_cache
 	fuzz
 	fuzz_arrow
 	fuzz_parquet
