@@ -59,6 +59,7 @@
 #include "optimizer/restrictinfo.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/pg_locale.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -325,8 +326,8 @@ pgcolumnar_like_prefix_scankey(OpExpr *op, Var *var, Const *con,
 	 * The caller has already required that they agree with each other; this
 	 * requires that what they agree on is C.
 	 */
-	if (att->attcollation != C_COLLATION_OID ||
-		op->inputcollid != C_COLLATION_OID)
+	if (!COLUMNAR_COLLATION_IS_C(att->attcollation) ||
+		!COLUMNAR_COLLATION_IS_C(op->inputcollid))
 		return 0;
 
 	pat = DatumGetTextPP(con->constvalue);

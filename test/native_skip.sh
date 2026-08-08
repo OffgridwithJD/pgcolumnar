@@ -296,10 +296,92 @@ psql_run "INSERT INTO nd $NSK_LGEN;"
 
 check "premise: the range prunes on the default-collation table too (#426)" \
 	"$(gt0 "$(skipped "SELECT t FROM nd WHERE t >= 'k00005000' AND t < 'k00005001'")")" "yes"
-check "anchored LIKE does not prune without COLLATE \"C\" (#426)" \
+
+# THIS cluster is not a C-collation database and that is worth stating, because
+# I assumed it was. lib.sh runs initdb with no locale, so it inherits LANG --
+# C.UTF-8 here -- and PostgreSQL does not report C.UTF-8 as C collation even
+# though its ordering is by code point. So a default-collation column here is
+# correctly refused, and this check pins that rather than the reverse.
+check "default collation that is not C is refused (#426)" \
 	"$(gt0 "$(skipped "SELECT t FROM nd WHERE t LIKE 'k00005000%'")")" "no"
 check "default-collation LIKE result parity (#426)" \
 	"$(pgc_set_hash "SELECT t FROM nd WHERE t LIKE 'k00005000%'")" \
 	"$(pgc_set_hash "SELECT t FROM hd WHERE t LIKE 'k00005000%'")"
+
+# ...and the case the widening exists for, which needs a database this suite does
+# not otherwise create. A column with the DEFAULT collation in a --locale=C
+# database is byte ordering, so the bound is sound and must be derived. Keying
+# the guard on an explicit COLLATE "C" instead would refuse it, and refuse every
+# deployment initdb'd that way.
+psql_admin "DROP DATABASE IF EXISTS nsk_cdb;" >/dev/null 2>&1
+psql_admin "CREATE DATABASE nsk_cdb LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;" >/dev/null 2>&1
+_cdb() {  # run against the C-collation database
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d nsk_cdb -At -c "$1" 2>/dev/null
+}
+if [ "$(_cdb "SELECT datcollate FROM pg_database WHERE datname = current_database();")" = "C" ]; then
+	_cdb "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
+	_cdb "CREATE TABLE nc (t text) USING pgcolumnar;" >/dev/null
+	_cdb "SELECT pgcolumnar.set_options('nc', stripe_row_limit => 2048, chunk_group_row_limit => 1024);" >/dev/null
+	_cdb "INSERT INTO nc $NSK_LGEN;" >/dev/null
+	# Usable Skip Predicates rather than the removal count: it reports whether the
+	# keys were DERIVED, which is what the guard decides, and it does not depend on
+	# how the fixture happens to be laid out.
+	check "a default-collation column in a --locale=C database derives the bounds (#426)" \
+		"$(_cdb "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+			SELECT t FROM nc WHERE t LIKE 'k00005000%';" \
+			| grep -oE 'Usable Skip Predicates: [0-9]+' | grep -oE '[0-9]+$')" \
+		"2"
+	check "and it returns the right rows (#426)" \
+		"$(_cdb "SELECT count(*) FROM nc WHERE t LIKE 'k00005000%';")" "1"
+else
+	echo "-- SKIP: could not create a --locale=C database, so the widened guard is"
+	echo "         NOT covered by this run"
+fi
+
+# ...and the refusal, on a collation that is genuinely not byte ordering. This is
+# the check the narrow version could not have: with the guard keyed on the
+# collation OID, every table here was C by construction and deleting the guard
+# reddened nothing.
+#
+# Under a non-C collation "starts with these bytes" does not imply "sorts at or
+# after them", so the bound would not be conservative and could skip a group that
+# really matches. Parity is asserted with it, because "did not prune" and
+# "returned the right rows" are different claims and only the second is
+# correctness.
+# The collation is DISCOVERED rather than named, because which ones work is a
+# property of the build and the host: this container has the `unicode` entry in
+# the catalog but no ICU ("ICU is not supported in this build"), and `en_US.utf8`
+# depends on a locale someone generated. Naming one and hoping is how temporal.sh
+# reports a red on a box missing btree_gist (#505). If none is usable the checks
+# say so and are skipped, rather than passing vacuously or failing for the
+# environment.
+NSK_NONC=""
+for _c in "en_US.utf8" "en_US.UTF-8" "unicode" "pg_unicode_fast"; do
+	if [ "$(q "SELECT 'x' LIKE 'x' COLLATE \"$_c\";" 2>/dev/null)" = "t" ] &&
+	   [ "$(q "SELECT ('b' < 'a' COLLATE \"$_c\');" 2>/dev/null)" = "f" ]; then
+		NSK_NONC="$_c"; break
+	fi
+done
+
+if [ -z "$NSK_NONC" ]; then
+	echo "-- SKIP: no usable non-C collation on this build, so the refusal half of"
+	echo "         the #426 collation guard is NOT covered by this run"
+else
+	echo "-- non-C collation under test: $NSK_NONC"
+	psql_run "CREATE TABLE hu (t text COLLATE \"$NSK_NONC\");"
+	psql_run "CREATE TABLE nu (t text COLLATE \"$NSK_NONC\") USING pgcolumnar;"
+	psql_run "SELECT pgcolumnar.set_options('nu', stripe_row_limit => 2048, chunk_group_row_limit => 1024);"
+	psql_run "INSERT INTO hu $NSK_LGEN;"
+	psql_run "INSERT INTO nu $NSK_LGEN;"
+
+	check "premise: a range still prunes under a non-C collation (#426)" \
+		"$(gt0 "$(skipped "SELECT t FROM nu WHERE t >= 'k00005000' AND t < 'k00005001'")")" "yes"
+	check "anchored LIKE does not prune under a non-C collation (#426)" \
+		"$(gt0 "$(skipped "SELECT t FROM nu WHERE t LIKE 'k00005000%'")")" "no"
+	check "non-C collation LIKE result parity (#426)" \
+		"$(pgc_set_hash "SELECT t FROM nu WHERE t LIKE 'k00005000%'")" \
+		"$(pgc_set_hash "SELECT t FROM hu WHERE t LIKE 'k00005000%'")"
+fi
 
 pgc_summary
