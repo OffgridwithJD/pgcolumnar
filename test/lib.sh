@@ -121,11 +121,27 @@ pgc_setup() {
 	# PGC_SKIP_BUILD so parallel suites do not each rebuild (a no-op relink) or
 	# race on writing the shared .so during "make install". A suite run on its own
 	# still builds and installs.
+	#
+	# Both steps are status-checked. lib.sh sets `set -uo pipefail` but not -e, so
+	# an unchecked make that fails to compile does not stop the suite: it carries
+	# on and runs every check against the PREVIOUSLY INSTALLED .so, then prints a
+	# full PASS/FAIL report for code that does not exist. That is indistinguishable
+	# from a real result, and it was caught only because someone fingerprinted the
+	# installed .so and saw the same hash either side of a source change that could
+	# not have produced it.
 	if [ -z "${PGC_SKIP_BUILD:-}" ]; then
 		echo "-- building"
-		make -C "$PGC_SRCDIR" PG_CONFIG="$PGC_PG_CONFIG" >/dev/null
+		if ! make -C "$PGC_SRCDIR" PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
+			echo "FATAL: the build failed, so there is nothing new to test" >&2
+			echo "       (refusing to report checks against the previously installed .so)" >&2
+			exit 1
+		fi
 		echo "-- installing"
-		make -C "$PGC_SRCDIR" install PG_CONFIG="$PGC_PG_CONFIG" >/dev/null
+		if ! make -C "$PGC_SRCDIR" install PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
+			echo "FATAL: the install failed, so the .so under test is not the one just built" >&2
+			echo "       (refusing to report checks against the previously installed .so)" >&2
+			exit 1
+		fi
 	fi
 
 	# initdb and pg_ctl cannot run as root; use postgres when we are root.
