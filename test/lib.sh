@@ -726,6 +726,27 @@ pgc_summary() {
 		# summary dies on an unset PGC_LOGFILE under `set -u` and the suite
 		# reports "unbound variable" instead of which check failed.
 		if [ -n "${PGC_LOGFILE:-}" ]; then
+			# The tail is the right thing to show when one statement failed and
+			# the wrong thing after a crash. A crashing backend takes the
+			# postmaster through "terminating any other active server processes"
+			# and recovery for every subsequent check, so the cause sits at the
+			# TOP of the log and the last 40 lines are its aftermath.
+			#
+			# Measured under the pg18_san build, with a deliberate heap overrun:
+			# 67 AddressSanitizer reports in an 8,777-line log, the first at line
+			# 12. The tail showed lines 8738-8777 and pgc_teardown then removed
+			# the file, so a suite reported 123 failures with no way to find out
+			# why -- the diagnosis existed, for a quarter of a second, 8,765 lines
+			# above the only window anyone was shown.
+			#
+			# grep the whole file for the events that mean "this was not a failed
+			# assertion", and print the first few with line numbers.
+			_pgc_fatal="$(pgc_pg "grep -nE 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|terminated by signal|PANIC:' '$PGC_LOGFILE' | head -5" 2>/dev/null || true)"
+			if [ -n "$_pgc_fatal" ]; then
+				echo "---- first fatal events in the server log ----"
+				printf '%s\n' "$_pgc_fatal"
+				echo "(the tail below is what followed; the cause is above)"
+			fi
 			echo "---- server log tail ----"
 			pgc_pg "tail -40 '$PGC_LOGFILE'" 2>/dev/null || true
 		fi
