@@ -244,7 +244,17 @@ bitunpack(const unsigned char *in, uint32 inLen, uint32 n, int width,
 			bitpos += width;
 		}
 
-		/* Tail: assemble only the bytes that exist, one bit at a time. */
+		/*
+		 * Tail: assemble only the bytes that exist, one bit at a time.
+		 *
+		 * Deliberately bit-indexed and therefore endian-independent, where the
+		 * fast path above is not. Spec 3 already requires a little-endian host,
+		 * so this is not a second contract -- but do not "simplify" this into
+		 * the same word trick. The fast path is bounded by nFast precisely
+		 * because the wide load would read past the encoded body here, and an
+		 * array that is correct above nFast and wrong below it is far nastier to
+		 * diagnose than one that is uniformly wrong.
+		 */
 		for (; i < n; i++)
 		{
 			uint64		v = 0;
@@ -2768,12 +2778,39 @@ pgcolumnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
 	for (width = 1; width <= 64; width++)
 	{
 		static const uint32 counts[] = {1, 2, 3, 7, 8, 9, 17, 64, 129};
+		uint32		ns[lengthof(counts) + 1];
 		uint64		state = UINT64CONST(0x155) + (uint64) width;
 		uint32		ci;
 
+		/*
+		 * One derived count per width, in addition to the fixed list (#514
+		 * review). Coverage of the unpacker's two paths is a property of these
+		 * counts and not of the loop: nFast is zero until the encoded body
+		 * reaches nine bytes, which needs n * width >= 65, so a shorter list
+		 * would exercise low widths through the TAIL only -- and the tail is the
+		 * per-bit assembly, which is what ref_bitunpack does. The oracle would
+		 * then be comparing the reference against itself and passing.
+		 *
+		 * Derived rather than listed so that trimming counts[] above cannot
+		 * silently narrow this, and checked below so it cannot rot either.
+		 */
+		ns[lengthof(counts)] = (65 + (uint32) width - 1) / (uint32) width + 4;
 		for (ci = 0; ci < lengthof(counts); ci++)
+			ns[ci] = counts[ci];
+
 		{
-			uint32		n = counts[ci];
+			uint32		dn = ns[lengthof(counts)];
+			uint32		dbytes = (uint32) (((uint64) dn * (uint32) width + 7) / 8);
+
+			if (dbytes < 9)
+				SELFTEST_FAIL("width=%d: derived n=%u yields %u bytes, "
+							  "which never reaches the wide load",
+							  width, dn, dbytes);
+		}
+
+		for (ci = 0; ci < lengthof(ns); ci++)
+		{
+			uint32		n = ns[ci];
 			uint64	   *vals = palloc(sizeof(uint64) * n);
 			StringInfoData a;
 			StringInfoData b;
