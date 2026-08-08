@@ -117,6 +117,26 @@ pgc_setup() {
 	echo "version=$("$PGC_PG_CONFIG" --version)"
 	echo "workdir=$PGC_WORKDIR"
 
+	# initdb and pg_ctl cannot run as root; use postgres when we are root.
+	#
+	# Settled BEFORE the build, and before the trap below, because pgc_teardown
+	# reaches pg_ctl through pgc_pg, which expands PGC_RUNPG. Installing the trap
+	# while that array is still unset would turn any early failure into an
+	# unbound-variable error under `set -u` instead of a cleanup.
+	if [ "$(id -u)" = "0" ]; then
+		PGC_RUNPG=(runuser -u postgres --)
+		chown -R postgres "$PGC_WORKDIR"
+		chmod 777 "$PGC_WORKDIR" "$PGC_SQLDIR"
+	else
+		PGC_RUNPG=(env)
+	fi
+
+	# Armed here rather than after the build: the build below can exit, and
+	# between mktemp above and this line there is nothing to remove the workdir.
+	# Stopping a cluster that was never started is a no-op, so arming it early
+	# costs nothing and covers every failure path after the directory exists.
+	trap pgc_teardown EXIT
+
 	# The matrix runner builds and installs once per version and sets
 	# PGC_SKIP_BUILD so parallel suites do not each rebuild (a no-op relink) or
 	# race on writing the shared .so during "make install". A suite run on its own
@@ -143,17 +163,6 @@ pgc_setup() {
 			exit 1
 		fi
 	fi
-
-	# initdb and pg_ctl cannot run as root; use postgres when we are root.
-	if [ "$(id -u)" = "0" ]; then
-		PGC_RUNPG=(runuser -u postgres --)
-		chown -R postgres "$PGC_WORKDIR"
-		chmod 777 "$PGC_WORKDIR" "$PGC_SQLDIR"
-	else
-		PGC_RUNPG=(env)
-	fi
-
-	trap pgc_teardown EXIT
 
 	echo "-- initdb"
 	pgc_pg "initdb -D '$PGC_PGDATA' -A trust" >/dev/null 2>&1
