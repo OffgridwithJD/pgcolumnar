@@ -93,6 +93,34 @@ if ! perf stat -e "$PERF_EVENT" true >/dev/null 2>"$WORKDIR/evprobe.err"; then
 		exit 1; }
 fi
 
+# An assert build is not a slower version of the same profile, it is a different
+# one. --enable-cassert compiles in validation that production never runs, and it
+# does not distribute evenly: profiled against the assert PG18 here, the largest
+# single self-time entry of the ingest shape was verify_compact_attribute at
+# 9.28%, a function that does not exist in a production build, with every other
+# percentage diluted against it. Someone reading that profile would reasonably
+# have gone looking at tuple descriptor validation.
+#
+# This is the same category as an unopenable perf event above, and gets the same
+# treatment: refuse, rather than emit a number that looks like data. The override
+# exists because an assert build is still worth profiling when it is the only one
+# to hand, and a comparison between two assert builds is valid.
+CASSERT="$("$PG_CONFIG" --configure | grep -c 'enable-cassert' || true)"
+if [ "${CASSERT:-0}" != "0" ]; then
+	if [ -n "${PROFILE_ALLOW_CASSERT:-}" ]; then
+		echo "-- WARNING: assert build (--enable-cassert). Percentages below include"
+		echo "   validation a production build never runs, and are comparable only"
+		echo "   against another assert build."
+	else
+		echo "FATAL: $("$PG_CONFIG" --bindir) is an --enable-cassert build."
+		echo "       Assert-only validation would be profiled as if it were work:"
+		echo "       measured at 9.28% self time for verify_compact_attribute alone."
+		echo "       Use a non-assert build, or set PROFILE_ALLOW_CASSERT=1 to"
+		echo "       profile anyway and have every percentage labelled as such."
+		exit 1
+	fi
+fi
+
 CFLAGS="$("$PG_CONFIG" --cflags)"
 case "$CFLAGS" in
 	*-fno-omit-frame-pointer*) UNWIND="fp";      UNWIND_WHY="frame pointers present" ;;
@@ -299,8 +327,23 @@ for shape in $SHAPES; do
 	project)
 		profile_shape project "PERFORM id, k, v FROM p WHERE k BETWEEN 100 AND 140" ;;
 	ingest)
+		# The source rows are materialised OUTSIDE the profiled statement.
+		#
+		# This shape used to be
+		#     INSERT INTO pw SELECT g, md5(g::text) FROM generate_series(...)
+		# which put md5_calc at 12.31% and pg_md5_hash at 1.65% of the profile:
+		# about 14% of an "ingest" measurement was the fixture inventing its own
+		# strings, inside the timed statement, inflating the denominator every
+		# write-path entry was measured against.
+		#
+		# A heap source is also closer to what a load is: rows arriving from
+		# somewhere, rather than being computed per row by the insert itself.
+		sql_run "DROP TABLE IF EXISTS pw_src;
+			CREATE TABLE pw_src (id bigint, t text);
+			INSERT INTO pw_src SELECT g, md5(g::text) FROM generate_series(1,200000) g;
+			ANALYZE pw_src;" >/dev/null 2>&1
 		sql_run "CREATE TABLE pw (id bigint, t text) USING pgcolumnar;" >/dev/null 2>&1
-		profile_shape ingest "INSERT INTO pw SELECT g, md5(g::text) FROM generate_series(1,200000) g" ;;
+		profile_shape ingest "INSERT INTO pw SELECT id, t FROM pw_src" ;;
 	*)
 		echo "FAIL: unknown shape '$shape'"
 		echo "      valid: decode filtered project ingest"
@@ -310,6 +353,7 @@ for shape in $SHAPES; do
 done
 
 echo
+echo "Build: $([ "${CASSERT:-0}" != "0" ] && echo "ASSERT (--enable-cassert)" || echo "non-assert")"
 echo "Event and unwind method are printed above and belong with any number taken"
 echo "from this run: a percentage is only comparable against another profile that"
 echo "sampled the same way."
