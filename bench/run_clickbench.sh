@@ -166,6 +166,23 @@ require() {  # require <description> <condition-result> <expected>
 BINDIR="$("$PG_CONFIG" --bindir)" || die "no pg_config at $PG_CONFIG"
 PSQL="$BINDIR/psql -h /tmp -p $CB_PORT -U postgres -d clickbench -X -q"
 
+# initdb and the postmaster refuse to run as root; the client tools do not, and
+# they reach the cluster over the socket with trust auth. So only the server side
+# is dropped to postgres and the script itself stays root, which is what keeps
+# drop_caches below reachable. test/lib.sh makes the same split for the suites.
+#
+# Running the whole script as postgres instead looks simpler and is worse: it
+# gives up the page-cache drop silently, which is exactly the failure the probe
+# below exists to stop.
+CB_AS_ROOT=0
+CB_RUNPG=(env)
+if [ "$(id -u)" = 0 ]; then
+	id -u postgres >/dev/null 2>&1 \
+		|| die "running as root and there is no postgres user to run the server as"
+	CB_AS_ROOT=1
+	CB_RUNPG=(runuser -u postgres --)
+fi
+
 # ---------------------------------------------------------------------------
 # 0. Preconditions, once, loudly
 # ---------------------------------------------------------------------------
@@ -177,6 +194,30 @@ mkdir -p "$CB_DATA" || die "cannot write $CB_DATA"
 note "   pg_config: $PG_CONFIG ($("$PG_CONFIG" --version))"
 note "   data dir:  $CB_DATA"
 note "   rows:      $CB_ROWS    tries: $CB_TRIES    arms: $CB_ARMS"
+
+# Whether this host can drop the page cache is established HERE, by doing it,
+# and not at the first query by a test that lies. In an unprivileged container
+# /proc/sys/vm/drop_caches belongs to a uid outside the namespace and refuses
+# even the container's own root, so the old code fell through to a silent no-op
+# while the report went on printing the lukewarm-cold-run tag regardless. A
+# "cold" number that was never cold is worse than an honestly warm one, so the
+# capability is probed once and the tag in section 6 follows what it finds.
+CB_DROP_HOW=none
+sync
+if (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null; then
+	CB_DROP_HOW=direct
+elif command -v sudo >/dev/null 2>&1 \
+	&& sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+	CB_DROP_HOW=sudo
+fi
+if [ "$CB_DROP_HOW" = none ]; then
+	note "   page cache: CANNOT be dropped here, so the first-try column is WARM"
+	if [ "${PGC_CB_REQUIRE_COLD:-0}" = 1 ]; then
+		die "PGC_CB_REQUIRE_COLD=1 and the page cache cannot be dropped on this host"
+	fi
+else
+	note "   page cache: dropped before each query ($CB_DROP_HOW)"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. The definition, fetched rather than vendored
@@ -294,10 +335,16 @@ NCPU=$(nproc)
 SHARED_MB=$(( MEMKB / 1024 / 4 ))
 CACHE_MB=$(( MEMKB / 1024 * 3 / 4 ))
 if [ -d "$CB_PGDATA" ]; then
-	"$BINDIR/pg_ctl" -D "$CB_PGDATA" -w stop >/dev/null 2>&1
+	"${CB_RUNPG[@]}" "$BINDIR/pg_ctl" -D "$CB_PGDATA" -w stop >/dev/null 2>&1
 	rm -rf "$CB_PGDATA"
 fi
-"$BINDIR/initdb" -D "$CB_PGDATA" --locale=C -U postgres > "$CB_DATA/initdb.log" 2>&1 \
+# initdb accepts an existing empty directory, which is how the data directory
+# comes to belong to postgres when the parent belongs to root.
+mkdir -p "$CB_PGDATA" || die "cannot create $CB_PGDATA"
+if [ "$CB_AS_ROOT" = 1 ]; then
+	chown postgres "$CB_PGDATA" || die "cannot give $CB_PGDATA to postgres"
+fi
+"${CB_RUNPG[@]}" "$BINDIR/initdb" -D "$CB_PGDATA" --locale=C -U postgres > "$CB_DATA/initdb.log" 2>&1 \
 	|| { tail -20 "$CB_DATA/initdb.log"; die "initdb failed"; }
 # Settings follow the shape the upstream PostgreSQL entry uses, scaled to this
 # machine. They are applied to every arm equally, so they cannot favour one.
@@ -320,11 +367,11 @@ max_prepared_transactions = $CB_PCOPY_WORKERS
 listen_addresses = ''
 unix_socket_directories = '/tmp'
 CONF
-"$BINDIR/pg_ctl" -D "$CB_PGDATA" -l "$CB_PGDATA/server.log" -w start >/dev/null 2>&1 \
+"${CB_RUNPG[@]}" "$BINDIR/pg_ctl" -D "$CB_PGDATA" -l "$CB_PGDATA/server.log" -w start >/dev/null 2>&1 \
 	|| { tail -30 "$CB_PGDATA/server.log"; die "cluster did not start"; }
 cleanup() {
 	if [ "$CB_KEEP" != 1 ]; then
-		"$BINDIR/pg_ctl" -D "$CB_PGDATA" -w stop >/dev/null 2>&1
+		"${CB_RUNPG[@]}" "$BINDIR/pg_ctl" -D "$CB_PGDATA" -w stop >/dev/null 2>&1
 	fi
 }
 trap cleanup EXIT
@@ -585,11 +632,11 @@ note "== queries ($NQUERIES x ${#ARMS[@]} arms x $CB_TRIES tries, interleaved)"
 
 drop_caches() {
 	sync
-	if [ -w /proc/sys/vm/drop_caches ]; then
-		echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-	elif command -v sudo >/dev/null 2>&1; then
-		sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null
-	fi
+	case "$CB_DROP_HOW" in
+		direct) echo 3 > /proc/sys/vm/drop_caches 2>/dev/null ;;
+		sudo)   sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null ;;
+		none)   : ;;
+	esac
 }
 
 # Run one query once and return its milliseconds, or ERR.
@@ -682,7 +729,12 @@ require "every query in the file ran" "$qn" "$NQUERIES" || fail=1
 # ---------------------------------------------------------------------------
 echo
 echo "================= CLICKBENCH, pgColumnar $EXTVER ================="
-echo "tag: lukewarm-cold-run (page cache dropped, server not restarted per query)"
+if [ "$CB_DROP_HOW" = none ]; then
+	echo "tag: WARM-RUN (page cache could NOT be dropped on this host; the first-try"
+	echo "     column is not a cold number and must not be quoted as one)"
+else
+	echo "tag: lukewarm-cold-run (page cache dropped, server not restarted per query)"
+fi
 printf '%s\n' "${ARMS[@]}" | grep -qx duckdb && \
 	echo "duckdb: PERSISTENT database file, not :memory:, so it stores what it loaded like the others"
 printf '%s\n' "${ARMS[@]}" | grep -qx citus && \
