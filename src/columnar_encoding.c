@@ -185,19 +185,90 @@ bitunpack(const unsigned char *in, uint32 inLen, uint32 n, int width,
 	if (((uint64) n * (uint32) width + 7) / 8 > inLen)
 		DECODE_CORRUPT("bit-packed body exceeds encoded length");
 
-	for (i = 0; i < n; i++)
+	/*
+	 * Word at a time (#501). The per-bit loop this replaces ran once per BIT --
+	 * a load, two shifts, a mask, a test and an or for each one -- and was the
+	 * largest single frame in a profile of both scan shapes, at 21.0% of a
+	 * filtered aggregate and 19.2% of a row-returning projection.
+	 *
+	 * A value of `width` bits starting at bit offset `shift` occupies at most
+	 * 64 + 7 bits, so one unaligned 64-bit load plus at most one more byte
+	 * covers it. Both are little-endian reads, which this format already
+	 * requires (spec 3), and the shift-in of the high byte is guarded: it runs
+	 * only when shift + width > 64, which cannot hold with shift == 0 because
+	 * width is at most 64, so `64 - shift` is never a shift by 64.
+	 *
+	 * The fast path is used only where its 9-byte window lies inside the buffer.
+	 * The tail falls back to the reference loop rather than reading past the end
+	 * -- the over-read would be at most seven bytes and would usually land in the
+	 * same allocation, which is exactly the kind of bug that survives every test
+	 * and fails under a sanitizer on someone else's machine.
+	 */
 	{
-		uint64		v = 0;
-		int			b;
+		const uint64 mask = (width == 64)
+			? ~UINT64CONST(0) : ((UINT64CONST(1) << width) - 1);
+		uint32		nbytes = (uint32) (((uint64) n * (uint32) width + 7) / 8);
 
-		COLUMNAR_DECODE_INTERRUPT(i);
-		for (b = 0; b < width; b++)
+		/*
+		 * How many values the wide load can serve, computed once rather than
+		 * tested per value. Value i starts at byte (i * width) / 8 and needs
+		 * nine bytes, so the condition is i * width <= 8 * (nbytes - 9).
+		 *
+		 * Hoisting this matters at small widths: a per-value bounds test cost
+		 * more than the whole per-bit loop it was replacing when width was 1,
+		 * measured at 1.7% slower on a monotonic bigint before the split.
+		 */
+		uint32		nFast = 0;
+
+		if (nbytes >= 9)
 		{
-			if ((in[(bitpos + b) >> 3] >> ((bitpos + b) & 7)) & 1)
-				v |= (uint64) 1 << b;
+			uint64		maxIdx = (8 * (uint64) (nbytes - 9)) / (uint32) width;
+
+			nFast = (maxIdx + 1 < (uint64) n) ? (uint32) (maxIdx + 1) : n;
 		}
-		out[i] = v;
-		bitpos += width;
+
+		for (i = 0; i < nFast; i++)
+		{
+			uint64		lo;
+			unsigned	shift = (unsigned) (bitpos & 7);
+			uint64		v;
+
+			COLUMNAR_DECODE_INTERRUPT(i);
+
+			memcpy(&lo, in + (bitpos >> 3), sizeof(uint64));
+			v = lo >> shift;
+			if (shift + (unsigned) width > 64)
+				v |= (uint64) in[(bitpos >> 3) + 8] << (64 - shift);
+
+			out[i] = v & mask;
+			bitpos += width;
+		}
+
+		/*
+		 * Tail: assemble only the bytes that exist, one bit at a time.
+		 *
+		 * Deliberately bit-indexed and therefore endian-independent, where the
+		 * fast path above is not. Spec 3 already requires a little-endian host,
+		 * so this is not a second contract -- but do not "simplify" this into
+		 * the same word trick. The fast path is bounded by nFast precisely
+		 * because the wide load would read past the encoded body here, and an
+		 * array that is correct above nFast and wrong below it is far nastier to
+		 * diagnose than one that is uniformly wrong.
+		 */
+		for (; i < n; i++)
+		{
+			uint64		v = 0;
+			int			b;
+
+			COLUMNAR_DECODE_INTERRUPT(i);
+			for (b = 0; b < width; b++)
+			{
+				if ((in[(bitpos + b) >> 3] >> ((bitpos + b) & 7)) & 1)
+					v |= (uint64) 1 << b;
+			}
+			out[i] = v;
+			bitpos += width;
+		}
 	}
 }
 
@@ -2532,6 +2603,42 @@ PgColumnarDecodeChunk(const char *enc, uint32 encLen, int encodingType,
  * catalog, like the other debug hooks.
  * ------------------------------------------------------------------------- */
 
+/*
+ * Reference bit unpacker: the pre-#501 per-bit loop, verbatim.
+ *
+ * The oracle for the word-at-a-time reader that replaced it. Kept naive on
+ * purpose -- it walks one bit at a time and that is the whole point, because the
+ * claim the rewrite has to make is that it is byte-identical, and an oracle that
+ * shares the fast path's cleverness cannot check that.
+ */
+static void
+ref_bitunpack(const unsigned char *in, uint32 n, int width, uint64 *out)
+{
+	uint64		bitpos = 0;
+	uint32		i;
+
+	if (width == 0)
+	{
+		for (i = 0; i < n; i++)
+			out[i] = 0;
+		return;
+	}
+
+	for (i = 0; i < n; i++)
+	{
+		uint64		v = 0;
+		int			b;
+
+		for (b = 0; b < width; b++)
+		{
+			if ((in[(bitpos + b) >> 3] >> ((bitpos + b) & 7)) & 1)
+				v |= (uint64) 1 << b;
+		}
+		out[i] = v;
+		bitpos += width;
+	}
+}
+
 /* Reference bit packer: the pre-#285 per-bit loop. */
 static void
 ref_bitpack(const uint64 *vals, uint32 n, int width, StringInfo out)
@@ -2671,12 +2778,39 @@ pgcolumnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
 	for (width = 1; width <= 64; width++)
 	{
 		static const uint32 counts[] = {1, 2, 3, 7, 8, 9, 17, 64, 129};
+		uint32		ns[lengthof(counts) + 1];
 		uint64		state = UINT64CONST(0x155) + (uint64) width;
 		uint32		ci;
 
+		/*
+		 * One derived count per width, in addition to the fixed list (#514
+		 * review). Coverage of the unpacker's two paths is a property of these
+		 * counts and not of the loop: nFast is zero until the encoded body
+		 * reaches nine bytes, which needs n * width >= 65, so a shorter list
+		 * would exercise low widths through the TAIL only -- and the tail is the
+		 * per-bit assembly, which is what ref_bitunpack does. The oracle would
+		 * then be comparing the reference against itself and passing.
+		 *
+		 * Derived rather than listed so that trimming counts[] above cannot
+		 * silently narrow this, and checked below so it cannot rot either.
+		 */
+		ns[lengthof(counts)] = (65 + (uint32) width - 1) / (uint32) width + 4;
 		for (ci = 0; ci < lengthof(counts); ci++)
+			ns[ci] = counts[ci];
+
 		{
-			uint32		n = counts[ci];
+			uint32		dn = ns[lengthof(counts)];
+			uint32		dbytes = (uint32) (((uint64) dn * (uint32) width + 7) / 8);
+
+			if (dbytes < 9)
+				SELFTEST_FAIL("width=%d: derived n=%u yields %u bytes, "
+							  "which never reaches the wide load",
+							  width, dn, dbytes);
+		}
+
+		for (ci = 0; ci < lengthof(ns); ci++)
+		{
+			uint32		n = ns[ci];
 			uint64	   *vals = palloc(sizeof(uint64) * n);
 			StringInfoData a;
 			StringInfoData b;
@@ -2695,6 +2829,35 @@ pgcolumnar_debug_encoding_selftest(PG_FUNCTION_ARGS)
 			bitpack(vals, n, width, &a);
 			ref_bitpack(vals, n, width, &b);
 			cases++;
+
+			/*
+			 * And the reader (#501). The word-at-a-time unpacker must agree with
+			 * the per-bit reference value for value, at every width and at every
+			 * sub-byte start offset the counts above produce. This is the only
+			 * place widths above ~32, the nine-byte field span and the width==64
+			 * mask are reached at all.
+			 */
+			{
+				uint64	   *got = palloc(sizeof(uint64) * n);
+				uint64	   *want = palloc(sizeof(uint64) * n);
+				uint32		j;
+
+				bitunpack((const unsigned char *) a.data, (uint32) a.len,
+						  n, width, got);
+				ref_bitunpack((const unsigned char *) a.data, n, width, want);
+				cases++;
+
+				for (j = 0; j < n; j++)
+				{
+					if (got[j] != want[j])
+						SELFTEST_FAIL(
+							"bitunpack width=%d n=%u value %u: " UINT64_FORMAT
+							" vs reference " UINT64_FORMAT,
+							width, n, j, got[j], want[j]);
+				}
+				pfree(got);
+				pfree(want);
+			}
 
 			if (a.len != b.len)
 				SELFTEST_FAIL("bitpack width=%d n=%u: length %d vs reference %d",
