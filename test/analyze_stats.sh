@@ -571,4 +571,73 @@ check "the all-visible fraction does not hand every query to the index (#507)" \
 		|| echo "no ($(printf '%s' "$plan_all" | head -1))")" \
 	"yes"
 
+# --- 11. the fraction is a fraction of the LIVE relation (#507) ----------------
+#
+# allvisfrac is relallvisible over the block count, and which block count decides
+# whether a relation that has grown since its last vacuum is priced honestly.
+# Divide by the live count and the fraction decays as pages are added, exactly
+# where the new pages are the ones not yet all-visible. Divide by
+# pg_class.relpages -- which is right there in the same struct, looks equivalent,
+# and is stale between vacuums -- and the fraction stays at its old value, so an
+# index-only scan is priced cheap on precisely the pages most likely to fetch.
+#
+# This pins the divisor, and nothing above it does: on a freshly loaded, vacuumed
+# and analyzed table relpages and the live count are equal by construction, so
+# both implementations agree and all of section 10 passes either way. The removal
+# proof for this section is that swap, not deleting a check.
+#
+# The added rows are deliberately OUTSIDE the predicate. Rows inside it would
+# make the index-only scan read more entries and cost more for a reason that has
+# nothing to do with allvisfrac, and the check would then pass under both
+# divisors while appearing to prove something.
+# Measured as the GAP between a plain index scan and an index-only scan on the
+# same index and predicate. In cost_index that gap is the whole of what
+# allvisfrac buys -- the two plans are otherwise identical -- so it isolates the
+# fraction from everything else that moves when a table grows. The first version
+# of this check compared index-only-scan costs directly and was VACUOUS: the
+# estimator reports live *tuples from row-group metadata, so adding rows raises
+# the row estimate and the cost rises under both divisors. It passed either way.
+#
+# The fetch penalty is off for the same reason: it mutates T_IndexScan and not
+# T_IndexOnlyScan, so it would put a term in the gap that is not the fraction.
+ios_gap() {  # (index scan) - (index only scan), the saving allvisfrac buys
+	local off idx ios
+	off="SET pgcolumnar.enable_custom_scan = off; SET enable_seqscan = off;
+	     SET enable_bitmapscan = off; SET pgcolumnar.enable_index_fetch_penalty = off;"
+	ios="$(plan_of "$off EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
+		| grep -m1 'Index Only Scan' | sed -E 's/.*\.\.([0-9]+)\.[0-9]+.*/\1/')"
+	idx="$(plan_of "$off SET enable_indexonlyscan = off;
+		EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
+		| grep -m1 'Index Scan' | sed -E 's/.*\.\.([0-9]+)\.[0-9]+.*/\1/')"
+	[ -n "$idx" ] && [ -n "$ios" ] && echo $((idx - ios))
+}
+
+iosc_gap_a="$(ios_gap)"
+
+# Grown, and NOT analyzed or vacuumed: the only window in which the two divisors
+# differ, since ANALYZE brings relpages back level with the live count. The added
+# rows sit OUTSIDE the predicate so the index-only scan reads the same entries.
+psql_run "INSERT INTO iosc SELECT g, 200001 + ((g::bigint * 48271) % 799999)::int,
+		repeat(md5(g::text), 4) FROM generate_series(300001, 340000) g;" >/dev/null
+iosc_gap_b="$(ios_gap)"
+
+check "premise: both estimates were taken (#507)" \
+	"$([ -n "$iosc_gap_a" ] && [ -n "$iosc_gap_b" ] && echo yes \
+		|| echo "no (a=$iosc_gap_a b=$iosc_gap_b)")" \
+	"yes"
+
+# The saving is worth a fixed number of all-visible PAGES, and growth adds none
+# of them -- so it must not grow. Against the live count the fraction decays as
+# the fetch estimate rises and the two cancel; against a stale relpages the
+# fraction is frozen and the saving inflates with the table. Measured on this
+# fixture: 3296 -> 3296 correct, 3296 -> 3752 with the stale divisor.
+#
+# One-sided deliberately. Equal-or-lower is what a live divisor gives and the
+# cancellation is only exact while the fetch estimate saturates the relation;
+# higher is what the stale one gives, and that is the direction that misprices.
+check "growth without vacuum does not inflate the all-visible saving (#507)" \
+	"$([ "${iosc_gap_b:-1}" -le "${iosc_gap_a:-0}" ] && echo yes \
+		|| echo "no (grown $iosc_gap_b above vacuumed $iosc_gap_a)")" \
+	"yes"
+
 pgc_summary
