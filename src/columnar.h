@@ -910,6 +910,34 @@ extern Node *PgColumnarCreateGroupAggScanState(CustomScan *cscan);
  * Shared by the base custom scan and the vectorized aggregate (spec 9). Clauses
  * that are not simple "column op const" comparisons are ignored.
  */
+/*
+ * The chunk-group statistics every scan node reports, and the one place they are
+ * printed (#495).
+ *
+ * Three nodes emit these lines -- the scalar custom scan and both vectorized
+ * aggregates -- and each used to print its own copy. #484 had to add
+ * "Usable Skip Predicates" in three places for exactly that reason, and said why
+ * it could not do fewer: fixing one would leave a line of plan text meaning two
+ * different things depending on which node ran. That invariant was held by
+ * discipline; this holds it by structure, and pushdown_report.sh fails if a
+ * fourth emitter appears.
+ *
+ * Two functions rather than one because the nodes interleave: the aggregate node
+ * prints "Columnar Batch Fold" between the filter count and the group counters,
+ * so combining them would reorder its plan output.
+ */
+typedef struct PgColumnarGroupStats
+{
+	int64		usableSkipPredicates;
+	uint64		groupsTotal;
+	uint64		groupsRead;
+	uint64		groupsRemoved;
+} PgColumnarGroupStats;
+
+extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);
+extern void PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats,
+									  ExplainState *es);
+
 extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
 									 TupleDesc tupdesc, int *nkeys);
 

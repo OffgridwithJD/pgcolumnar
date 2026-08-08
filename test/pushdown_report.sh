@@ -336,4 +336,32 @@ check "grouped: the usable arm reports one of each, agreeing" \
 check "grouped: and the unusable arm builds no skip predicate" \
 	"$(field "$g_unusable" 'Columnar Usable Skip Predicates')" "0"
 
+# ---- one emitter per shared statistic (#495) --------------------------------
+#
+# Five of these lines are printed by every scan node -- the scalar custom scan and
+# the two vectorized aggregates -- and each used to print its own copy. #484 had
+# to add "Usable Skip Predicates" in three places for that reason, and its own
+# rationale says why it could not do fewer: "fixing one would leave a line of plan
+# text meaning two different things depending on which node ran."
+#
+# Unifying three call sites into one is only durable if a FOURTH is detectable.
+# Otherwise the next node grows its own copy, the suite stays green, and the three
+# reappear exactly as they arose. So this asserts the count at the source, which
+# is the only place a new caller is visible before it has drifted.
+#
+# A grep over source rather than a behavioural check on purpose: the failure being
+# guarded is "someone wrote a second emitter", which is a property of the code and
+# not of any plan. The behavioural half -- that the nodes agree -- is the checks
+# above.
+PGC_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
+for _line in "Columnar Pushed-Down Filters" \
+             "Columnar Usable Skip Predicates" \
+             "Columnar Chunk Groups Total" \
+             "Columnar Chunk Groups Read" \
+             "Columnar Chunk Groups Removed by Filter"; do
+	check "exactly one emitter for \"$_line\" (#495)" \
+		"$(grep -rho "ExplainPropertyInteger(\"$_line\"" "$PGC_SRC_DIR" | wc -l | tr -d ' ')" \
+		"1"
+done
+
 pgc_summary

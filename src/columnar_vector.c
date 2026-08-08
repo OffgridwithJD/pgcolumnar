@@ -3534,8 +3534,7 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
-	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
-						   state->npreds, es);
+	PgColumnarExplainPushedDown(state->npreds, es);
 	if (state->scanFold)
 		ExplainPropertyText("Columnar Batch Fold",
 							state->batchEligible ? "yes" : "no", es);
@@ -3543,23 +3542,18 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 	if (state->haveStats)
 	{
 		/*
-		 * See PgColumnarExplainCustomScan: npreds above counts the quals that
-		 * became scan keys, this counts the ones the reader can exclude a chunk
-		 * group with, and only the pair distinguishes an unselective predicate
-		 * from an unusable one (#479). This node fills npreds from
-		 * PgColumnarCountConvertibleQuals, which is the same built-key count the
-		 * scalar node reports, so it has the same gap and needs the same second
-		 * number -- otherwise one line of plan text would mean two different
-		 * things depending on which node ran.
+		 * npreds is this node's built-key count from
+		 * PgColumnarCountConvertibleQuals, the same quantity the scalar node
+		 * reports, so it has the same gap and needs the same second number.
+		 * PgColumnarExplainGroupStats is why that is now automatic.
 		 */
-		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
-							   state->usablePreds, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
-							   (int64) state->groupsTotal, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
-							   (int64) state->groupsRead, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
-							   (int64) state->groupsSkipped, es);
+		PgColumnarGroupStats gs;
+
+		gs.usableSkipPredicates = state->usablePreds;
+		gs.groupsTotal = state->groupsTotal;
+		gs.groupsRead = state->groupsRead;
+		gs.groupsRemoved = state->groupsSkipped;
+		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
 
@@ -4226,20 +4220,17 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 						   state->nkeys, es);
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
-	ExplainPropertyInteger("Columnar Pushed-Down Filters", NULL,
-						   state->npreds, es);
+	PgColumnarExplainPushedDown(state->npreds, es);
 
 	if (state->haveStats)
 	{
-		/* of those, the ones that can exclude a chunk group (#479) */
-		ExplainPropertyInteger("Columnar Usable Skip Predicates", NULL,
-							   state->usablePreds, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Total", NULL,
-							   (int64) state->groupsTotal, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Read", NULL,
-							   (int64) state->groupsRead, es);
-		ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
-							   (int64) state->groupsSkipped, es);
+		PgColumnarGroupStats gs;
+
+		gs.usableSkipPredicates = state->usablePreds;
+		gs.groupsTotal = state->groupsTotal;
+		gs.groupsRead = state->groupsRead;
+		gs.groupsRemoved = state->groupsSkipped;
+		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
 
