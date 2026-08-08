@@ -126,7 +126,91 @@ offsets already exists (`nativeVecStart`); per-row offsets within a vector do
 not. **Walking from the vector start (at most 1023 length-prefix steps, no
 copies) is the cheap answer and should be measured before anything more clever.**
 
-## Phase 1b: exact selection feedback into the existing skip vector
+## Phase 1b splits in two, and only one half needs batching
+
+Established by reading `pgcolumnar_native_load_group`, not assumed:
+
+```
+:1598   pgcolumnar_native_decode_chunk(...)      per wanted column
+:1615   pgcolumnar_native_build_skipvec(...)     from zone maps
+```
+
+**Decode runs before the skip vector exists.** So today even a vector the zone
+maps have ruled out is fully decoded; `nativeSkipVec` only makes the row producer
+step its cursors past it (`:1686`). "Vectors Skipped" means "not turned into
+Datums", never "not decoded". That is a stronger statement than #452's text,
+which says only that decompression is not skipped.
+
+### 1b-i: let decode honour the skip vector it already builds
+
+Self-contained, and a prerequisite for 1b-ii. Move `build_skipvec` above the
+decode loop (it reads zone maps and needs no decoded data) and give
+`pgcolumnar_native_decode_chunk` the mask, so ruled-out vectors are never
+decoded. **No batching, no restructure, no new observable** — `Columnar Vectors
+Skipped` already reports the count and the suites already assert on it.
+
+Worth being explicit that **this does nothing for ClickBench q24**, whose qual is
+a leading-wildcard LIKE and therefore yields `numPredicates == 0` and a NULL skip
+vector. It pays on queries with a usable predicate, which is most analytic
+filters and none of the six #445 losses.
+
+#### 1b-i is larger than it looks: the vectorized fold reads the raw buffer
+
+Found before writing the code, and it is the reason 1b-i was not attempted in the
+same session as 1a.
+
+Skipping a vector's decode leaves a **hole** in the chunk's raw buffer. The row
+producer never reads it, because it steps its cursors past skipped vectors. But
+the batch-fold path does:
+
+- `PgColumnarReadFoldColumn` (`columnar_reader.c:1953`) hands out the raw buffer
+  pointer and the per-vector lengths, with no skip information.
+- `columnar_vector.c:3161` fetches `skipVec` into a local and **never indexes
+  it** — `skipVec[` does not appear in that file.
+- The fold stays correct anyway because it **evaluates the scan keys itself**,
+  per value (`columnar_vector.c:3236-3242`). That is exact filtering, so a
+  ruled-out vector's rows are excluded by evaluation rather than by the skip.
+
+So today the fold reads vectors the zone maps ruled out, and gets the right
+answer because it re-checks every value. **Leave a hole and it re-checks
+uninitialized memory**, which can only produce a wrong aggregate — silently, and
+only on data whose zone maps rule something out.
+
+**1b-i therefore requires the fold to honour the skip as well**, and that is a
+change to the vectorized aggregate path, not just the loader. It is still worth
+doing, and it is no longer a small self-contained slice. The eligibility rule
+(`pgcolumnar_batch_shape_eligible` requires every qual to be convertible to a
+scan key) means the fold runs precisely when predicates exist — which is exactly
+when vectors get skipped, so this is the common case, not an edge.
+
+A suite was written for 1b-i and is red against `main` for the right reasons: 30
+of 32 vectors skipped, no `Columnar Vectors Decoded` counter. It is not in the
+tree, because a registered red suite or an unregistered stray `.sh` are both
+worse than a specification. Its shape, to rebuild:
+
+- one row group of 32 vectors, monotonic `id` so zone maps are tight
+- narrow predicate (`id BETWEEN 2000 AND 2050`) against wide (`BETWEEN 1 AND n`)
+- premises: narrow skips vectors, wide skips none, the counter exists and moves
+- checks: decoded(narrow) < decoded(wide), and the difference equals the skipped
+  count exactly — "fewer" alone would pass on decoding one vector less
+
+### 1b-ii: exact selection, which does need batching
+
+To skip decode for vectors holding no *surviving* row, the qual must be evaluated
+before the payload columns are decoded — and the qual can only be evaluated on
+decoded qual columns. So the producer has to work a vector at a time: decode the
+qual columns, evaluate 1024 rows, decode the payload for that vector only if any
+survived, emit.
+
+This is the batching 1a turned out not to need, and it is the larger piece. It is
+also the only one of the two that reaches q24, where the measured budget is the
+~3200 ms 1a leaves behind.
+
+**Order matters:** 1b-i first, because it is small, independently valuable, and
+its mask plumbing is what 1b-ii extends from zone-map-derived to
+evaluation-derived.
+
+## Phase 1b (original sketch): exact selection feedback into the existing skip vector
 
 Cheap, additive, and it fixes the issue's own headline test case.
 
