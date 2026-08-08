@@ -209,10 +209,18 @@ rowrange_cmp(const void *a, const void *b)
  *		lock the caller holds; the table-AM relation_vacuum path holds only
  *		ShareUpdateExclusiveLock, so this is concurrent with readers and writers,
  *		and clear-on-write removes any bit for a row changed after this runs.
+ *
+ *		Returns how many ROWS the bits it set cover, which is what the caller
+ *		needs to record the result in pg_class (#507). Rows and not blocks on
+ *		purpose: these are *synthetic* blocks, rowNumber / K, and relpages counts
+ *		stored pages -- on a 20,000,000-row table that is 68,730 against 45,994.
+ *		Handing a synthetic block count to a field core divides by relpages
+ *		produces an all-visible fraction above 1 from arithmetic alone.
  */
-void
+uint64
 PgColumnarVMSetVisibleForRelation(Relation rel)
 {
+	uint64		visibleRows = 0;
 	uint64		storageId = PgColumnarStorageId(rel);
 	TransactionId oldestXmin = PgColumnarOldestXmin(rel);
 	List	   *groups = PgColumnarComputeAllVisibleGroups(storageId, oldestXmin);
@@ -223,7 +231,7 @@ PgColumnarVMSetVisibleForRelation(Relation rel)
 	int			i;
 
 	if (n == 0)
-		return;
+		return 0;
 
 	arr = palloc(sizeof(PgColumnarRowRange) * n);
 	i = 0;
@@ -253,6 +261,8 @@ PgColumnarVMSetVisibleForRelation(Relation rel)
 		/* blocks entirely within [lo, hi): ceil(lo/K) .. floor(hi/K) - 1 */
 		b = (BlockNumber) ((lo + K - 1) / K);
 		bend = (BlockNumber) (hi / K);
+		if (bend > b)
+			visibleRows += (uint64) (bend - b) * K;
 		for (; b < bend; b++)
 			PgColumnarVMSetVisible(rel, b);
 
@@ -260,6 +270,7 @@ PgColumnarVMSetVisibleForRelation(Relation rel)
 	}
 
 	pfree(arr);
+	return visibleRows;
 }
 
 /*

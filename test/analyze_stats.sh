@@ -512,4 +512,149 @@ check "the bound does not disable the penalty for a full ordered read (#376)" \
 		&& echo yes || echo "no ($(printf '%s' "$plan_nolim" | head -1))")" \
 	"yes"
 
+# --- 10. a vacuumed table is priced with its all-visible pages (#507) ----------
+#
+# cost_index scales an index-only scan's heap-fetch estimate by
+# (1 - allvisfrac), and for a columnar relation allvisfrac arrives from this
+# extension's own relation_estimate_size callback -- core delegates, so that
+# callback is the only place the planner can learn it. It returned a hardcoded
+# zero, which prices every index-only scan as though it fetched every row.
+#
+# The checks are here rather than in native_ios.sh because this is a costing
+# question: native_ios.sh forces the plan with enable_custom_scan=off and
+# therefore cannot see a choice being made at all.
+#
+# Deliberately paired. "Takes the index-only scan" alone is satisfied by a
+# callback that reports everything all-visible unconditionally, which would be
+# the same defect with the sign flipped, so the second check holds a query where
+# the scan is genuinely cheaper and requires it to still win.
+IOSC_ROWS=${PGC_IOSC_ROWS:-300000}
+
+# k is deterministic -- the same (g * 48271) scatter o355 uses above -- because a
+# premise that moves with a random draw fails eventually and blames innocent
+# code (#487). The pad must not compress away: the effect turns on the relation
+# having pages for the fetch estimate to be a fraction of, and a constant string
+# costs almost none.
+psql_run "DROP TABLE IF EXISTS iosc;
+	CREATE TABLE iosc (id int, k int, pad text) USING pgcolumnar;
+	INSERT INTO iosc SELECT g, ((g::bigint * 48271) % 1000000)::int,
+		repeat(md5(g::text), 4) FROM generate_series(1, $IOSC_ROWS) g;
+	CREATE INDEX iosc_k ON iosc (k);
+	ANALYZE iosc;" >/dev/null
+psql_run "VACUUM iosc;" >/dev/null
+
+# Premise: the pricing question below is meaningless unless VACUUM actually
+# recorded all-visible pages, and that is a different mechanism from the one
+# under test -- it is asserted in native_ios.sh, and asserted again here because
+# this suite must not report a costing result that rests on it silently.
+check "premise: VACUUM recorded all-visible pages to price with (#507)" \
+	"$(q "SELECT relallvisible > 0 FROM pg_class WHERE relname = 'iosc';")" "t"
+check "premise: the selective range has its rows (#507)" \
+	"$(q 'SELECT count(*) FROM iosc WHERE k BETWEEN 0 AND 200000;')" "60003"
+
+# 60,003 of 300,000 rows: the index-only scan reads a fifth of the index and no
+# data at all, and beats the columnar scan 1,847 to 4,524 once its fetch estimate
+# is not inflated. Hardcoding allvisfrac to zero prices it at 5,143 and the
+# columnar scan wins instead.
+plan_ios="$(plan_of "EXPLAIN (COSTS off) SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;")"
+check "a vacuumed columnar table can reach an index-only scan (#507)" \
+	"$(grep -q 'Index Only Scan using iosc_k' <<<"$plan_ios" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_ios" | head -1))")" \
+	"yes"
+
+# ...and the other direction, so a callback that simply claims everything is
+# all-visible does not pass. Reading every row, the columnar scan is genuinely
+# the cheaper plan (4,524 against 9,312) and must still be chosen.
+plan_all="$(plan_of "EXPLAIN (COSTS off) SELECT k FROM iosc WHERE k BETWEEN 0 AND 1000000;")"
+check "the all-visible fraction does not hand every query to the index (#507)" \
+	"$(grep -q 'Custom Scan (PgColumnarScan)' <<<"$plan_all" && echo yes \
+		|| echo "no ($(printf '%s' "$plan_all" | head -1))")" \
+	"yes"
+
+# --- 11. the fraction is a fraction of the LIVE relation (#507) ----------------
+#
+# allvisfrac is relallvisible over the block count, and which block count decides
+# whether a relation that has grown since its last vacuum is priced honestly.
+# Divide by the live count and the fraction decays as pages are added, exactly
+# where the new pages are the ones not yet all-visible. Divide by
+# pg_class.relpages -- which is right there in the same struct, looks equivalent,
+# and is stale between vacuums -- and the fraction stays at its old value, so an
+# index-only scan is priced cheap on precisely the pages most likely to fetch.
+#
+# This pins the divisor, and nothing above it does: on a freshly loaded, vacuumed
+# and analyzed table relpages and the live count are equal by construction, so
+# both implementations agree and all of section 10 passes either way. The removal
+# proof for this section is that swap, not deleting a check.
+#
+# The added rows are deliberately OUTSIDE the predicate. Rows inside it would
+# make the index-only scan read more entries and cost more for a reason that has
+# nothing to do with allvisfrac, and the check would then pass under both
+# divisors while appearing to prove something.
+# Measured as the GAP between a plain index scan and an index-only scan on the
+# same index and predicate. In cost_index that gap is the whole of what
+# allvisfrac buys -- the two plans are otherwise identical -- so it isolates the
+# fraction from everything else that moves when a table grows. The first version
+# of this check compared index-only-scan costs directly and was VACUOUS: the
+# estimator reports live *tuples from row-group metadata, so adding rows raises
+# the row estimate and the cost rises under both divisors. It passed either way.
+#
+# The fetch penalty is off for the same reason: it mutates T_IndexScan and not
+# T_IndexOnlyScan, so it would put a term in the gap that is not the fraction.
+ios_gap() {  # (index scan) - (index only scan), the saving allvisfrac buys
+	local off idx ios
+	# enable_index_fetch_penalty = off is NOT redundant setup and must not be
+	# tidied away: the penalty adds to T_IndexScan and not to T_IndexOnlyScan, so
+	# it lands inside the very gap this function measures and swamps the fraction.
+	# The other three merely stop a cheaper plan being chosen instead.
+	off="SET pgcolumnar.enable_custom_scan = off; SET enable_seqscan = off;
+	     SET enable_bitmapscan = off; SET pgcolumnar.enable_index_fetch_penalty = off;"
+	# The FULL cost, decimals included. Truncating to an integer here is what made
+	# the first version of this check fail in CI on PG17 at "grown 3296 above
+	# vacuumed 3295" -- a one-unit difference manufactured by rounding two
+	# independent subtractions, not by anything the code did.
+	ios="$(plan_of "$off EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
+		| grep -m1 'Index Only Scan' | sed -E 's/.*\.\.([0-9.]+).*/\1/')"
+	idx="$(plan_of "$off SET enable_indexonlyscan = off;
+		EXPLAIN SELECT k FROM iosc WHERE k BETWEEN 0 AND 200000;" \
+		| grep -m1 'Index Scan' | sed -E 's/.*\.\.([0-9.]+).*/\1/')"
+	[ -n "$idx" ] && [ -n "$ios" ] && awk -v a="$idx" -v b="$ios" 'BEGIN{printf "%.2f", a - b}'
+}
+
+iosc_gap_a="$(ios_gap)"
+
+# Grown, and NOT analyzed or vacuumed: the only window in which the two divisors
+# differ, since ANALYZE brings relpages back level with the live count. The added
+# rows sit OUTSIDE the predicate so the index-only scan reads the same entries.
+psql_run "INSERT INTO iosc SELECT g, 200001 + ((g::bigint * 48271) % 799999)::int,
+		repeat(md5(g::text), 4) FROM generate_series(300001, 340000) g;" >/dev/null
+iosc_gap_b="$(ios_gap)"
+
+check "premise: both estimates were taken (#507)" \
+	"$([ -n "$iosc_gap_a" ] && [ -n "$iosc_gap_b" ] && echo yes \
+		|| echo "no (a=$iosc_gap_a b=$iosc_gap_b)")" \
+	"yes"
+
+# The saving is worth a fixed number of all-visible PAGES, and growth adds none
+# of them -- so it must not grow. Against the live count the fraction decays as
+# the fetch estimate rises and the two cancel; against a stale relpages the
+# fraction is frozen and the saving inflates with the table. Measured on this
+# fixture: 3296 -> 3296 correct, 3296 -> 3752 with the stale divisor.
+#
+# One-sided deliberately: equal-or-lower is what a live divisor gives, higher is
+# what the stale one gives, and that is the direction that misprices.
+#
+# The tolerance is arithmetic rather than taste, and it exists because the first
+# version had none and failed in CI on PG17 at 3296 against 3295. The cancellation
+# is only EXACT while the fetch estimate saturates the relation; where it does not
+# quite, the two sides differ in their last fraction of a cost unit. So the noise
+# floor is order 1 unit in 3300, about 0.03%, while the defect this detects is
+# 3296 -> 3752, or 13.8%. Five percent sits two orders of magnitude above the
+# noise and nearly three below the signal -- it cannot be reached by rounding and
+# cannot hide the stale divisor.
+iosc_tol="$(awk -v a="${iosc_gap_a:-0}" 'BEGIN{printf "%.2f", a * 1.05}')"
+check "growth without vacuum does not inflate the all-visible saving (#507)" \
+	"$(awk -v b="${iosc_gap_b:-1}" -v t="$iosc_tol" 'BEGIN{exit !(b <= t)}' && echo yes \
+		|| echo "no (grown $iosc_gap_b above vacuumed $iosc_gap_a, tolerance $iosc_tol)")" \
+	"yes"
+
 pgc_summary

@@ -288,6 +288,24 @@ PgColumnarOpInterpStrategy(const OpBtreeInterpretation *o)
 #endif
 
 /* -------------------------------------------------------------------------
+ * vac_update_relstats() gained a num_all_frozen_pages argument in PG18, between
+ * num_all_visible_pages and hasindex. We pass zero for it: nothing here computes
+ * an all-frozen count, and claiming pages are frozen when they have not been
+ * examined is the one direction that would be unsafe.
+ * ------------------------------------------------------------------------- */
+#if PG_VERSION_NUM >= 180000
+#define COLUMNAR_VAC_UPDATE_RELSTATS(rel, pages, tuples, allvis, hasindex, \
+									 fxid, mxid, fupd, mupd, inxact) \
+	vac_update_relstats((rel), (pages), (tuples), (allvis), 0, (hasindex), \
+						(fxid), (mxid), (fupd), (mupd), (inxact))
+#else
+#define COLUMNAR_VAC_UPDATE_RELSTATS(rel, pages, tuples, allvis, hasindex, \
+									 fxid, mxid, fupd, mupd, inxact) \
+	vac_update_relstats((rel), (pages), (tuples), (allvis), (hasindex), \
+						(fxid), (mxid), (fupd), (mupd), (inxact))
+#endif
+
+/* -------------------------------------------------------------------------
  * Oldest-xmin horizon for all-visible determination. GetOldestXmin(rel, flags)
  * was replaced by GetOldestNonRemovableTransactionId(rel) in PG14. A stripe
  * whose insert xid precedes this is visible to every current and future

@@ -783,7 +783,45 @@ pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 
 	*pages = Max(nblocks, 1);
 	*tuples = Max(liveRows, 0);
-	*allvisfrac = 0.0;
+
+	/*
+	 * The all-visible fraction, from the catalog rather than hardcoded (#507).
+	 *
+	 * This callback is the ONLY place the planner learns it: core's
+	 * estimate_rel_size delegates to the AM, so a hardcoded zero here overrides
+	 * pg_class entirely and no amount of VACUUM recording the truth can reach
+	 * cost_index. That is worth stating plainly because it is not visible from
+	 * either end -- the catalog looks right and the plan stays wrong, and a test
+	 * that asserts relallvisible is green while the defect is untouched.
+	 *
+	 * Zero is not a safe default here either. cost_index scales an index-only
+	 * scan's heap-fetch estimate by (1 - allvisfrac), so zero prices every
+	 * index-only scan as though it fetched every row -- on a 500,000-row fixture
+	 * that is the difference between an index-only scan priced 5,505 and the same
+	 * scan priced as high as 21,284, and it decides the plan.
+	 *
+	 * Same derivation core uses for a heap: the recorded all-visible pages over
+	 * the pages we are reporting, clamped, since the two are read at different
+	 * moments and a relation that shrank between them could otherwise exceed one.
+	 *
+	 * The two ends deliberately use different page counts, and it is not an
+	 * oversight: vacuum scales the numerator by the CATALOG relpages when it
+	 * records it, and this divides by the LIVE block count at plan time. Heap has
+	 * the same property -- vac_update_relstats writes relallvisible against the
+	 * pages it counted, and estimate_rel_size divides by curpages -- and both
+	 * directions are safe. A relation that grew since its vacuum divides an old
+	 * numerator by a larger denominator, so the fraction decays exactly where the
+	 * new pages are the ones not yet all-visible; one that shrank is caught by
+	 * the clamp. test/analyze_stats.sh pins the growth direction.
+	 */
+	if (nblocks > 0 && rel->rd_rel->relallvisible > 0)
+	{
+		double		frac = (double) rel->rd_rel->relallvisible / (double) nblocks;
+
+		*allvisfrac = (frac > 1.0) ? 1.0 : frac;
+	}
+	else
+		*allvisfrac = 0.0;
 }
 
 /*
@@ -1058,7 +1096,69 @@ pgcolumnar_relation_vacuum(Relation rel, COLUMNAR_VACUUM_PARAMS params,
 	 * concurrent with readers and writers. The space-reclaiming rewrite stays in
 	 * columnar.vacuum (AccessExclusiveLock, the VACUUM-FULL analog).
 	 */
-	PgColumnarVMSetVisibleForRelation(rel);
+	uint64		visibleRows = PgColumnarVMSetVisibleForRelation(rel);
+
+	/*
+	 * Record the result where the planner can see it (#507).
+	 *
+	 * Setting the VM bits is only half the job. rel->allvisfrac is derived from
+	 * pg_class.relallvisible, and core's cost_index prices an index-only scan by
+	 * it, so a relation whose VM is populated and whose relallvisible is 0 is
+	 * priced as though every row still needs a fetch. Measured on 20,000,000
+	 * rows: relallvisible stayed 0 where a heap on identical rows reached 186,914
+	 * of 186,916 pages, and the planner refused an index-only scan running
+	 * 187.8 ms in favour of one running 361.4 ms.
+	 *
+	 * Converted through the row count rather than counted in blocks, because the
+	 * VM is keyed by SYNTHETIC blocks (rowNumber / K) while relpages counts
+	 * stored pages -- 68,730 against 45,994 on that table. Core computes the
+	 * fraction as relallvisible / relpages, so the numerator has to be in
+	 * relpages units or the fraction exceeds 1 by arithmetic alone.
+	 *
+	 * relpages and reltuples are passed back unchanged: ANALYZE owns them, and a
+	 * VACUUM that also rewrote them would make the two commands fight over the
+	 * same fields. InvalidTransactionId and InvalidMultiXactId are core's own
+	 * idiom for "leave the horizons alone".
+	 */
+	if (visibleRows > 0 && rel->rd_rel->reltuples > 0 && rel->rd_rel->relpages > 0)
+	{
+		double		frac = (double) visibleRows / (double) rel->rd_rel->reltuples;
+		BlockNumber allvis;
+
+		/*
+		 * When the clamp can bind, and why it is not hiding an overshoot.
+		 *
+		 * visibleRows counts rows in blocks lying ENTIRELY within an all-visible
+		 * run, so it is bounded by the true all-visible row count, which is
+		 * bounded by the true live row count. The denominator is not a count at
+		 * all -- reltuples is ANALYZE's estimate -- so the only way frac exceeds
+		 * one is that the estimate sits below the rows actually there. The clamp
+		 * therefore fires when the two inputs disagree, never when both are
+		 * accurate, and the value it produces in that case (every page
+		 * all-visible) is the right answer for a relation whose rows are all
+		 * visible. It cannot mask a miscounted numerator, because a numerator
+		 * that could overshoot on its own would have to count rows that do not
+		 * exist.
+		 *
+		 * test/native_ios.sh asserts the outcome either way: relallvisible must
+		 * not exceed relpages, and must still be most of the relation.
+		 */
+		if (frac > 1.0)
+			frac = 1.0;
+		/* truncating cast, not floor(): both are non-negative here, and this
+		 * needs no <math.h> in a file that otherwise wants none */
+		allvis = (BlockNumber) ((double) rel->rd_rel->relpages * frac);
+
+		COLUMNAR_VAC_UPDATE_RELSTATS(rel,
+									 rel->rd_rel->relpages,
+									 rel->rd_rel->reltuples,
+									 allvis,
+									 rel->rd_rel->relhasindex,
+									 InvalidTransactionId,
+									 InvalidMultiXactId,
+									 NULL, NULL,
+									 false);
+	}
 
 	/*
 	 * Online compaction (Phase F3a): retire row groups that are fully deleted
@@ -1358,6 +1458,28 @@ pgcolumnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 
 	rowNumber = PgColumnarWriteRow(writeState, rel, slot->tts_values,
 								 slot->tts_isnull);
+
+	/*
+	 * The new row version makes its block not all-visible, exactly as a plain
+	 * insert does (gap 28). This half of update-as-delete-plus-insert was the
+	 * only write path not clearing the bit, while PgColumnarVMClearForRow's own
+	 * contract says it is "called by every write path (insert/delete/update)".
+	 * PgColumnarMarkRowDeleted above covers the OLD row; this covers the new one.
+	 *
+	 * It is a no-op today, and that is the reason to write it rather than a
+	 * reason to leave it out. PgColumnarVMSetVisibleForRelation marks only blocks
+	 * lying ENTIRELY inside an all-visible run -- `bend = hi / K` with a
+	 * `b < bend` loop -- so the partly-filled block at the append frontier is
+	 * never marked, and an appended row can only land there or beyond. That
+	 * safety is a `<` in another file with nothing pointing at it: marking the
+	 * boundary block looks like a tightening, and whoever makes it would turn
+	 * this no-op into a stale all-visible bit on a block that just changed, which
+	 * an index-only scan reads as permission to skip the fetch.
+	 *
+	 * Cheap when no bit is set (a short-circuit read), and the insert path
+	 * already pays it per row.
+	 */
+	PgColumnarVMClearForRow(rel, rowNumber);
 
 	PgColumnarRowNumberToItemPointer(rowNumber, &slot->tts_tid);
 	slot->tts_tableOid = RelationGetRelid(rel);
