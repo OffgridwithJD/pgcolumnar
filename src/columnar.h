@@ -935,6 +935,9 @@ typedef struct PgColumnarGroupStats
 } PgColumnarGroupStats;
 
 extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);
+extern void PgColumnarExplainVectorPredicates(int64 npreds, ExplainState *es);
+extern int	PgColumnarCountScanKeys(List *qual, Index scanrelid,
+								  TupleDesc tupdesc);
 extern void PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats,
 									  ExplainState *es);
 
