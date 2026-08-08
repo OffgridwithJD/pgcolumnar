@@ -1738,7 +1738,22 @@ pgcolumnar_scan_row_filter(void *arg)
 	ResetExprContext(econtext);
 	econtext->ecxt_scantuple = slot;
 
-	return ExecQual(ss->ps.qual, econtext);
+	if (ExecQual(ss->ps.qual, econtext))
+		return true;
+
+	/*
+	 * Count the rejection where the executor would have counted it.
+	 *
+	 * ExecScan increments nfiltered1 for every tuple its own qual rejects, and
+	 * that is what EXPLAIN prints as "Rows Removed by Filter". Filtering here
+	 * instead means ExecScan never sees the rejected rows, so without this the
+	 * line silently reads 0 on every columnar scan with a qual -- an
+	 * instrumentation counter that stops counting while the plan still looks
+	 * right. The five-major gate caught exactly that: pushdown_report and
+	 * analyze_stats both read this line, and both failed on all five majors.
+	 */
+	InstrCountFiltered1(ss, 1);
+	return false;
 }
 
 static void

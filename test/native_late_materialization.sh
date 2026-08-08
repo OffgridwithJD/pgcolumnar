@@ -87,6 +87,20 @@ early=$(counter "Columnar Rows Filtered Before Materialization" "$Q")
 check_num "a rejected row does not materialize its payload columns" \
 	"${early:-0}" "$((ROWS - n_match))"
 
+# ---- the executor's own counter must keep counting -------------------------
+#
+# ExecScan increments nfiltered1 for every tuple ITS qual rejects, and that is
+# what EXPLAIN prints as "Rows Removed by Filter". Filtering inside the scan
+# means ExecScan never sees a rejected row, so the line silently went to 0 on
+# every columnar scan with a qual -- the plan still looked right and a counter
+# other suites depend on had stopped counting.
+#
+# The five-major gate caught it (pushdown_report and analyze_stats, all five
+# majors); this pins it here, next to the feature that broke it.
+removed=$(counter "Rows Removed by Filter" "$Q")
+check_num "the executor still reports the rows the scan filtered" \
+	"${removed:-0}" "$((ROWS - n_match))"
+
 # ---- and it may not change a single answer ---------------------------------
 #
 # The heap mirror is the oracle. Late materialization is a pure optimization:
