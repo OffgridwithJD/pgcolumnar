@@ -836,11 +836,15 @@ engine and in nothing else.
 
 Query latency, hot times, same run:
 
-| arm | total across 43 queries | geometric mean |
+| arm | total across 43 queries | geometric mean against heap |
 | --- | ---: | ---: |
 | heap | 154.9 s | |
-| columnar | 127.7 s | 0.54 against heap |
-| citus columnar | 251.7 s | 0.28 against citus |
+| columnar | 127.7 s | 0.53 |
+| citus columnar | 251.7 s | 1.91 |
+
+Every figure in the last column is that row's own arm measured against heap, so
+the column can be read down. Columnar against Citus is 0.28, which belongs in
+this sentence rather than in the Citus row.
 
 Against heap, columnar wins 33 of the 43 queries, loses 6, and ties on 4. A tie
 is a query whose two arms are closer to each other than the run to run scatter
