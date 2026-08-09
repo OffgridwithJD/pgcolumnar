@@ -634,7 +634,18 @@ check "a failing suite names the first fatal event in its log" \
 #
 # Asked as "every suite that drives the selftest" rather than by name, so moving
 # the selftest to another suite cannot quietly narrow this.
-_san_suites="$(sed -n '/^SUITES=/,/}"/p' "$PGC_SRCDIR/test/run_san.sh")"
+# Ask the runner rather than parsing the source (CONTEXT.md, #473) -- but with
+# PGC_SAN_SUITES cleared, because the claim under test is about the SHIPPED
+# DEFAULT, not about whatever an operator overrode it with for one run.
+#
+# Both halves are load-bearing and each fixes a different defect. Asking the
+# runner means this cannot drift from what run_san.sh actually iterates. Clearing
+# the variable means a developer with an override exported does not get a red
+# from a check that is not about their override -- which is what a plain
+# --list-suites here produces, verified: with PGC_SAN_SUITES='smoke differential'
+# the runner reports no encode_invariants and this check would fail while the
+# shipped default is perfectly correct.
+_san_suites="$(env -u PGC_SAN_SUITES bash "$PGC_SRCDIR/test/run_san.sh" --list-suites 2>/dev/null)"
 check "premise: run_san.sh's default subset was found and is non-empty" \
 	"$([ -n "$_san_suites" ] && echo yes || echo no)" "yes"
 

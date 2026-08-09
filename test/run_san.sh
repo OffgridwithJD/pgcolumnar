@@ -34,6 +34,30 @@
 #
 set -uo pipefail
 
+# The subset, and the one place it is defined.
+#
+# Declared before anything else runs so --list-suites can answer without building
+# a sanitizer PostgreSQL first, and so a caller asking what would be sanitized
+# gets the same string the loop below iterates -- not a second copy of it, and
+# not a text parser's reading of this file. #473 replaced exactly that pattern in
+# run_all_versions.sh, and CONTEXT.md records why: a parser over the array
+# disagrees with the shell on the mistake this invites, and the disagreement is
+# silent.
+SUITES="${PGC_SAN_SUITES:-smoke native_writer native_roundtrip native_encoding \
+	native_zonemap write_fsst_compressed write_minmax_fastpath encode_effort \
+	encode_invariants \
+	native_dml native_skip native_fetch_position native_fetch_cache \
+	arrow_import arrow_export parquet_import parquet_export native_read_parquet \
+	native_parquet_schema hardening corruption differential fuzz_arrow fuzz_parquet}"
+
+# --list-suites: print the subset, one name per line, and exit. Answered before
+# the prerequisite check below, so it works on a box with no sanitizer build at
+# all -- a caller asking "what does this cover" should not need one.
+if [ "${1:-}" = "--list-suites" ]; then
+	printf '%s\n' $SUITES
+	exit 0
+fi
+
 SAN="${1:-/usr/local/pg18_san}"
 PGCONF="$SAN/bin/pg_config"
 if [ ! -x "$PGCONF" ]; then
@@ -75,12 +99,6 @@ if ! make -s PG_CONFIG="$PGCONF" install > /tmp/run-san-ext.log 2>&1; then
 fi
 
 FUZZ_ITERS="${PGC_SAN_FUZZ_ITERS:-200}"
-SUITES="${PGC_SAN_SUITES:-smoke native_writer native_roundtrip native_encoding \
-	native_zonemap write_fsst_compressed write_minmax_fastpath encode_effort \
-	encode_invariants \
-	native_dml native_skip native_fetch_position native_fetch_cache \
-	arrow_import arrow_export parquet_import parquet_export native_read_parquet \
-	native_parquet_schema hardening corruption differential fuzz_arrow fuzz_parquet}"
 
 echo "-- running the subset under ASAN+UBSAN (fatal)"
 fail=0
