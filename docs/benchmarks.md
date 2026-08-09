@@ -897,30 +897,40 @@ are part of a published ClickBench result, so both are here.
 
 Columnar is faster on 32 of the 43 queries and slower on 11.
 
+The shapes below are read off the benchmark definition as recorded on
+2026-08-06, `queries.sql a7d6673357348ee9`. This run predates that digest being
+recorded, so the labels are matched against that definition rather than proved
+against the file this particular run fetched. An earlier revision of this page
+described six of these ten queries as something other than what they are, which
+is #533.
+
 The largest wins, as heap time divided by columnar time:
 
 | query | shape | faster by |
 | --- | --- | ---: |
-| q1 | `COUNT(*)` | 358x |
-| q3 | `SUM`, `COUNT`, `AVG` of three integer columns | 27x |
-| q41, q42 | `GROUP BY` a URL prefix, with a filter | 25x |
+| q1 | `COUNT(*)` over the whole table | 358x |
+| q3 | `SUM`, `COUNT` and `AVG`, no `GROUP BY` | 27x |
+| q41, q42 | `GROUP BY` two narrow columns, behind a five predicate filter | 25x |
 | q7 | `MIN` and `MAX` of a date | 24x |
-| q20 | `COUNT(*)` with a `LIKE` on a short column | 16x |
+| q20 | a point lookup, `WHERE UserID = <constant>` | 16x |
 
 The largest losses, as columnar time divided by heap time:
 
 | query | shape | slower by |
 | --- | --- | ---: |
-| q24 | `SearchPhrase LIKE`, `ORDER BY EventTime LIMIT 10` | 11.6x |
-| q23 | `SELECT *` of every column, `ORDER BY EventTime LIMIT 10` | 3.2x |
+| q24 | `SELECT *` of all 105 columns, `URL LIKE '%google%'`, `ORDER BY EventTime LIMIT 10` | 11.6x |
+| q23 | `GROUP BY SearchPhrase` with `Title LIKE '%Google%'` and `COUNT(DISTINCT UserID)` | 3.2x |
 | q21 | `COUNT(*) WHERE URL LIKE '%google%'` | 2.2x |
-| q28 | `GROUP BY` a normalised URL, with `HAVING` | 2.2x |
-| q22 | `SearchPhrase LIKE`, `ORDER BY EventTime LIMIT 10` | 1.8x |
+| q28 | `GROUP BY CounterID` with `AVG(length(URL))` and a `HAVING` | 2.2x |
+| q22 | `GROUP BY SearchPhrase` with `URL LIKE '%google%'` and `MIN(URL)` | 1.8x |
 
-Every loss reads wide text and returns few rows. `q23` selects all 105 columns,
-so there is no projection to make. `q24` and `q22` sort a large intermediate to
-return ten rows. A row store reads one row and stops. A column store decodes the
-chunk groups that hold the candidates.
+Every loss reads wide text. `q24` selects all 105 columns, so there is no
+projection to make. It also sorts a large intermediate to return ten rows. A row
+store reads one row and stops, while a column store decodes the chunk groups
+that hold the candidates. The other four sit behind a predicate on a wide text
+column that no minimum and maximum statistic can prune. That column is therefore
+read in full, whatever else the query returns. The 2026-08-09 run above measures
+the same effect in more detail.
 
 ### The accelerations are off by default, and turning them on is not a clear win
 
