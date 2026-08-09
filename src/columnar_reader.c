@@ -148,6 +148,7 @@ struct PgColumnarReadState
 	uint32	   *nativeVecStart;		/* [nativeVectorCount+1] cumulative row spans */
 	int			nativeCurVec;		/* vector containing rowInGroup */
 	uint64		vectorsSkipped;		/* for EXPLAIN */
+	uint64		vectorsDecoded;		/* for EXPLAIN; see PgColumnarGroupStats */
 
 	/*
 	 * Late materialization (#452 Phase 1a). Rows whose qual columns were decoded,
@@ -768,8 +769,10 @@ static char *
 pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 							 char *values, uint32 valuesLen,
 							 const char *desc, uint32 descLen, int blockCodec,
-							 uint32 **outVecRawLen, int *outVecCount)
+							 uint32 **outVecRawLen, int *outVecCount,
+							 const bool *skipVec, int *outVecDecoded)
 {
+	int			decodedCount = 0;
 	uint32		vectorCount;
 	uint32		v;
 	const char *dp;
@@ -877,13 +880,47 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		vecRawLen[v] = rawLen;
 		if (rawLen > 0)
 		{
-			char	   *rawVec = PgColumnarDecodeChunk(encCursor, encLen, encType,
-													 att, valueCount, rawLen,
-													 sharedTable, sharedTableLen,
-													 decodeScratch);
+			/*
+			 * #452 phase 1b-i. A vector the caller's zone maps ruled out is not
+			 * decoded: no PgColumnarDecodeChunk, no memcpy. Both cursors still
+			 * advance by the descriptor's lengths, so every later vector lands
+			 * at the same offset it would have without the skip, and vecRawLen
+			 * still reports the full raw length so the row producer steps over
+			 * the gap exactly as before.
+			 *
+			 * This LEAVES A HOLE in rawBuf: those rawLen bytes are whatever
+			 * palloc handed back. That is safe only because nothing reads them.
+			 * The row producer steps past skipped vectors, and the vectorized
+			 * fold refuses a group whose decode skipped anything (#512, #523) --
+			 * it reads this buffer directly and re-checks every value, so it
+			 * would otherwise re-check uninitialized memory and return a wrong
+			 * aggregate silently. Do not relax that guard without giving the
+			 * fold the mask.
+			 */
+			if (skipVec != NULL && skipVec[v])
+				rawCursor += rawLen;
+			else
+			{
+				char	   *rawVec = PgColumnarDecodeChunk(encCursor, encLen, encType,
+														 att, valueCount, rawLen,
+														 sharedTable, sharedTableLen,
+														 decodeScratch);
 
-			memcpy(rawCursor, rawVec, rawLen);
-			rawCursor += rawLen;
+				memcpy(rawCursor, rawVec, rawLen);
+				rawCursor += rawLen;
+				decodedCount++;
+			}
+		}
+		else if (!(skipVec != NULL && skipVec[v]))
+		{
+			/*
+			 * An empty vector costs no decode, but it is not a saving either,
+			 * and the group's vectors have to add up: the suite asserts decoded
+			 * plus skipped is the vector count, and a rawLen == 0 vector that
+			 * counted as neither would break that arithmetic on any column with
+			 * an all-NULL vector.
+			 */
+			decodedCount++;
 		}
 		encCursor += encLen;
 	}
@@ -892,6 +929,16 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		*outVecRawLen = vecRawLen;
 	if (outVecCount != NULL)
 		*outVecCount = (int) vectorCount;
+	/*
+	 * Reported from the loop that did the work, never derived from the mask the
+	 * caller passed in. Deriving it is the first thing anyone writes here and it
+	 * makes the counter unfalsifiable: it would report the saving whether or not
+	 * decode honoured the mask, and a removal proof would pass. That is not a
+	 * hypothetical -- this counter was written that way first, and the suite
+	 * passed with the skip removed.
+	 */
+	if (outVecDecoded != NULL)
+		*outVecDecoded = decodedCount;
 
 	/* rawBuf and vecRawLen live in cx; the scratch above does not */
 	MemoryContextDelete(decodeScratch);
@@ -1481,6 +1528,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	ListCell   *lc;
 	int			validityBytes;
 	int			maxVecCount;
+	int			groupVecDecoded;	/* measured in the decode loop, never derived */
 	bool		allDescriptor;
 
 	/*
@@ -1554,7 +1602,71 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	rs->nativeVecRawLen = (uint32 **) palloc0(sizeof(uint32 *) * rs->natts);
 	validityBytes = (int) ((rg->rowCount + 7) / 8);
 	maxVecCount = 0;
+	groupVecDecoded = 0;
 	allDescriptor = (chunks != NIL);
+
+	/*
+	 * #452 phase 1b-i: the skip vector has to exist BEFORE the decode loop, or
+	 * decode cannot honour it. It used to be built afterwards, from the vector
+	 * count the decode returned, which is why every ruled-out vector was decoded
+	 * in full and then merely not turned into Datums.
+	 *
+	 * Nothing about that ordering was necessary. The vector count lives in the
+	 * encoding descriptor header, which is chunk METADATA already in hand, and
+	 * build_skipvec's only other inputs are the predicates and the zone map
+	 * catalog. So this pre-pass reads the count and decides allDescriptor without
+	 * touching a single value byte.
+	 */
+	{
+		ListCell   *pc;
+
+		foreach(pc, chunks)
+		{
+			NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(pc);
+			uint32		vc;
+
+			if (cc->columnIndex < 0 || cc->columnIndex >= rs->natts)
+				continue;
+			if (!rs->colWanted[cc->columnIndex])
+				continue;
+
+			if (cc->encodingDescriptorLen == 1 &&
+				(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
+			{
+				/* D2b baseline: no per-vector structure at all */
+				allDescriptor = false;
+				continue;
+			}
+
+			/*
+			 * A descriptor too short to hold its own header is corrupt. Say
+			 * nothing about it here and decode no fewer vectors for it: the
+			 * decode below raises the proper error with the proper message, and
+			 * a skip decided from a malformed header would be a silent wrong
+			 * answer instead of a loud one.
+			 */
+			if (cc->encodingDescriptorLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN ||
+				(uint8) cc->encodingDescriptor[0] != COLUMNAR_NATIVE_ENCDESC_VERSION)
+			{
+				allDescriptor = false;
+				continue;
+			}
+
+			memcpy(&vc, cc->encodingDescriptor + 2, sizeof(uint32));
+			if ((int) vc > maxVecCount)
+				maxVecCount = (int) vc;
+		}
+	}
+
+	if (allDescriptor)
+		pgcolumnar_native_build_skipvec(rs, rg->groupNumber, maxVecCount);
+	else
+	{
+		rs->nativeSkipVec = NULL;
+		rs->nativeVecStart = NULL;
+		rs->nativeVectorCount = maxVecCount;
+		rs->nativeCurVec = 0;
+	}
 
 	foreach(lc, chunks)
 	{
@@ -1592,6 +1704,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			Form_pg_attribute att = TupleDescAttr(rs->tupdesc, cc->columnIndex);
 			uint32	   *vraw = NULL;
 			int			vcount = 0;
+			int			vdecoded = 0;
 
 			/* D4: reconstruct the raw present-value stream from the descriptor */
 			rs->nativeValueCursor[cc->columnIndex] =
@@ -1599,28 +1712,29 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 											 (uint32) (cc->pageLength - validityBytes),
 											 cc->encodingDescriptor,
 											 cc->encodingDescriptorLen,
-											 cc->blockCodec, &vraw, &vcount);
+											 cc->blockCodec, &vraw, &vcount,
+											 rs->nativeSkipVec, &vdecoded);
 			rs->nativeVecRawLen[cc->columnIndex] = vraw;
 			if (vcount > maxVecCount)
 				maxVecCount = vcount;
+			/*
+			 * Vector POSITIONS, so the max across columns rather than the sum:
+			 * a group of 32 vectors over 5 projected columns decodes 32
+			 * positions, not 160. That is the unit vectorsSkipped uses, and the
+			 * suite's "decoded plus skipped is the group's vectors" is false in
+			 * any other unit.
+			 */
+			if (vdecoded > groupVecDecoded)
+				groupVecDecoded = vdecoded;
 		}
 	}
+	rs->vectorsDecoded += (uint64) groupVecDecoded;
 
 	/*
 	 * Per-vector skipping (native spec 7.1, D5b): build the skip vector from the
 	 * per-vector zone maps. Only when every column carries a descriptor (so the
 	 * vector boundaries line up); a legacy baseline chunk disables it.
 	 */
-	if (allDescriptor)
-		pgcolumnar_native_build_skipvec(rs, rg->groupNumber, maxVecCount);
-	else
-	{
-		rs->nativeSkipVec = NULL;
-		rs->nativeVecStart = NULL;
-		rs->nativeVectorCount = maxVecCount;
-		rs->nativeCurVec = 0;
-	}
-
 	/*
 	 * Native delete visibility (D6b): combine this group's row-mask rows (keyed
 	 * by group number, one bit per row-in-group) into a single delete mask that
@@ -2945,7 +3059,8 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 												 vstream, vlen,
 												 cc->encodingDescriptor,
 												 cc->encodingDescriptorLen,
-												 cc->blockCodec, NULL, NULL);
+												 cc->blockCodec, NULL, NULL,
+												 NULL, NULL);
 			MemoryContextSwitchTo(decOld);
 
 			/*
@@ -3201,4 +3316,18 @@ uint64
 PgColumnarVectorsSkipped(PgColumnarReadState *readState)
 {
 	return readState->vectorsSkipped;
+}
+
+/*
+ * PgColumnarVectorsDecoded
+ *		How many 1024-value vectors the native scan actually decoded within read
+ *		row groups (#452 phase 1b-i). Counted in vector positions, the same unit
+ *		as PgColumnarVectorsSkipped, so that the two are comparable: on a group
+ *		where decode honours the skip vector, decoded plus skipped is the group's
+ *		vector count. Used by EXPLAIN.
+ */
+uint64
+PgColumnarVectorsDecoded(PgColumnarReadState *readState)
+{
+	return readState->vectorsDecoded;
 }

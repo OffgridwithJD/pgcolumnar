@@ -669,6 +669,7 @@ extern void PgColumnarReadStats(PgColumnarReadState *readState,
 							  uint64 *groupsRead, uint64 *groupsSkipped,
 							  uint64 *groupsTotal);
 extern uint64 PgColumnarVectorsSkipped(PgColumnarReadState *readState);
+extern uint64 PgColumnarVectorsDecoded(PgColumnarReadState *readState);
 
 /*
  * How many of the scan keys the reader was handed became skip predicates it can
@@ -925,6 +926,15 @@ typedef struct PgColumnarGroupStats
 	uint64		groupsRead;
 	uint64		groupsRemoved;
 	uint64		vectorsSkipped;
+
+	/*
+	 * Vectors actually decoded (#452 phase 1b-i). Separate from vectorsSkipped
+	 * because the two answered the same question only by accident: decode ran
+	 * before the skip vector existed, so a skipped vector was decoded in full
+	 * and merely not turned into Datums. "Skipped" therefore never implied "not
+	 * decoded", and no counter could tell those apart until this one.
+	 */
+	uint64		vectorsDecoded;
 } PgColumnarGroupStats;
 
 extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);

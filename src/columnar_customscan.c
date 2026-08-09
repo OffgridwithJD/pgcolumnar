@@ -2179,6 +2179,15 @@ PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats, ExplainState *es)
 	 */
 	ExplainPropertyInteger("Columnar Vectors Skipped", NULL,
 						   (int64) stats->vectorsSkipped, es);
+	/*
+	 * Printed beside Skipped because neither number means anything alone. Before
+	 * #452 phase 1b-i a skipped vector was still decoded, so "Skipped: 30" beside
+	 * "Decoded: 32" is the honest reading of that state and "Skipped: 30" alone
+	 * invited the reader to assume the work had been avoided. Same failure as
+	 * #477: one number cannot say both.
+	 */
+	ExplainPropertyInteger("Columnar Vectors Decoded", NULL,
+						   (int64) stats->vectorsDecoded, es);
 }
 
 /* -------------------------------------------------------------------------
@@ -2308,6 +2317,7 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		gs.groupsRead = groupsRead;
 		gs.groupsRemoved = groupsSkipped;
 		gs.vectorsSkipped = PgColumnarVectorsSkipped(cstate->readState);
+		gs.vectorsDecoded = PgColumnarVectorsDecoded(cstate->readState);
 		PgColumnarExplainGroupStats(&gs, es);
 
 		/*
