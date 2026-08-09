@@ -202,9 +202,9 @@ than a wrong algorithm.
   It applies to any change at all, not just a guard: a bug fix, a feature, an
   optimisation, a counter, a call site, a comment claiming a behaviour. This
   bullet used to say "guard", and on 2026-08-09 two changes shipped whose entire
-  contribution could be deleted with the suite still green (#538, and the first
-  version of #537's own fix). Neither was a guard, which is exactly why this line
-  did not fire for either.
+  contribution could be deleted with the suite still green (#532, and the first
+  version of #537's own fix; #538 is the change that caught the first of those).
+  Neither was a guard, which is exactly why this line did not fire for either.
 
   Fingerprint the installed `.so` when you do it, because a shared install prefix
   will happily let the "before" run be the fixed binary.
@@ -220,16 +220,17 @@ than a wrong algorithm.
   to be misled and they are mirror images. A check too TIGHT to fail approves
   anything, and you find out when someone deletes your feature and the suite
   stays green. A check too LOOSE to be believed condemns anything, and you find
-  out after chasing a defect that does not exist -- a grep for one message
-  matched a different message that merely began the same way, and reported a
-  fault that was not there. So: make a passing check fail, and show a failing
-  check passes on code known to be good. Both directions, every time.
+  out after chasing a defect that does not exist -- in #537 a grep for one
+  message matched a different message that merely began the same way, one about
+  the previously installed `.so` (#513), and reported a fault that was not there.
+  So: make a passing check fail, and show a failing check passes on code known to
+  be good. Both directions, every time.
 - **When a rule does not fire, fix its trigger, not your discipline.** Guidance
   here, in a code comment, or in a local note can be correct, specific, and
   silent, because the condition that summons it is narrower than the content it
   guards. The bullet above is the worked example: it said "guard" while its
-  content covered any removal, so it stayed quiet for two people writing fixes.
-  When something you had already written fails to help, ask whether its CONTENT
+  content covered any removal, so it stayed quiet for both changes above. When
+  something you had already written fails to help, ask whether its CONTENT
   would have covered the case. If yes the trigger is the bug, so widen it and put
   the wider form in the first line where it is actually read. If no, the content
   is. Only the second is about knowledge, and the first is the common one.
