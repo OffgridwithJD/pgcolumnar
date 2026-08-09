@@ -613,4 +613,47 @@ check "a failing suite names the first fatal event in its log" \
 		| grep -c "$_fatal_marker")" -ge 1 ] && echo yes || echo no)" \
 	"yes"
 
+# ---- the sanitizer subset must cover the C-level encoding selftest -----------
+#
+# test/run_san.sh runs a SUBSET of the suites, and a suite that is not in it is
+# not sanitized -- silently, since nothing reports the omission.
+#
+# encode_invariants is the only suite that drives pgcolumnar_debug_encoding_selftest,
+# which exercises bitunpack at every width 1..64 across counts 1,2,3,7,8,9,17,64,129
+# plus a derived count per width. That matters because it is the only fixture that
+# crosses bitunpack's fast/tail boundary in both directions: nFast is 0 until the
+# encoded body reaches nine bytes, so small counts are all tail. Measured with a
+# probe build, counting backends that reached the tail loop:
+#
+#     encode_invariants  21
+#     differential        0
+#
+# differential's chunks are large enough that nFast == n throughout, so a
+# sanitizer pass that includes differential and not encode_invariants covers one
+# of bitunpack's two paths -- over exactly the code #514 rewrote.
+#
+# Asked as "every suite that drives the selftest" rather than by name, so moving
+# the selftest to another suite cannot quietly narrow this.
+_san_suites="$(sed -n '/^SUITES=/,/}"/p' "$PGC_SRCDIR/test/run_san.sh")"
+check "premise: run_san.sh's default subset was found and is non-empty" \
+	"$([ -n "$_san_suites" ] && echo yes || echo no)" "yes"
+
+_san_missing=""
+_san_drivers=0
+for _f in "$PGC_SRCDIR"/test/*.sh; do
+	# Skip this file. It names the function in the pattern just below, so a
+	# blind sweep matches the searcher as well as the searched -- the same
+	# self-match that makes `pgrep -f <pattern>` find its own command line.
+	[ "$(basename "$_f")" = "$(basename "${BASH_SOURCE[0]}")" ] && continue
+	grep -q 'debug_encoding_selftest' "$_f" || continue
+	_san_drivers=$((_san_drivers + 1))
+	_b="$(basename "$_f" .sh)"
+	grep -qw "$_b" <<<"$_san_suites" || _san_missing="$_san_missing $_b"
+done
+check "premise: at least one suite drives the C-level encoding selftest" \
+	"$([ "$_san_drivers" -ge 1 ] && echo yes || echo no)" "yes"
+
+check "the sanitizer subset runs every suite that drives the encoding selftest" \
+	"$(printf '%s' "$_san_missing" | sed 's/^ //')" ""
+
 pgc_summary
