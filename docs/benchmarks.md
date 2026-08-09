@@ -772,10 +772,13 @@ that. The benchmark definition they came from is the licensed material. The full
 list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
 of 2026-08-06.
 
-The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
-non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
-every ninth row of the real 100 million row table. The reported time is the best
-of two hot runs, which is what ClickBench reports.
+Two runs are recorded below. The 2026-08-09 run is the current one and adds a
+Citus arm, the parallel loader, and a Citus bulk arm to compare it against. The
+2026-08-05 run is kept because it is a second independent run of the same
+benchmark. Both used PostgreSQL 18.4 non-assert, 16 cores, 62 GB of memory,
+and 11,110,833 rows. That row count is every ninth row of the real 100 million
+row table. The reported time is the best of two hot runs, which is what
+ClickBench reports.
 
 ### Why the sample is every ninth row and not the first eleven million
 
@@ -792,7 +795,95 @@ clusters perfectly on the filtered columns. That flatters columnar storage
 heavily. The harness therefore samples with a stride, and it fails the run if the
 loaded sample is degenerate.
 
-### Storage and load
+### The 2026-08-09 run: the bulk load is slower than Citus, not faster
+
+This run adds a Citus columnar arm, the parallel loader, and a Citus bulk arm to
+compare the parallel loader against. It is also the first run that can cite the
+definition digest recorded above. Upstream has not changed since:
+`create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
+
+Conditions: PostgreSQL 18.4 non-assert, 16 cores, 62 GB, 11,110,833 rows, three
+tries per query, arms interleaved per query. Citus columnar was co-loaded in the
+same cluster, which became possible when the custom scan names stopped colliding.
+Every arm loaded all 11,110,833 rows.
+
+| arm | connections | load | total relation size |
+| --- | ---: | ---: | ---: |
+| heap | 1 | 148.8 s | 7,818,592,256 bytes |
+| columnar, serial `COPY` | 1 | 447.4 s | 1,479,745,536 bytes |
+| citus columnar, serial `COPY` | 1 | 187.2 s | 1,662,558,208 bytes |
+| columnar, `pgcolumnar.parallel_copy` | 16 | 86.6 s | 1,478,057,984 bytes |
+| citus columnar, parallel `COPY` | 16 | 49.1 s | 1,663,025,152 bytes |
+
+Read the rows in pairs, by connection count. On a single connection columnar is
+2.39 times slower to load than Citus. At sixteen workers columnar is 1.76 times
+slower than Citus, and 1.72 times faster than heap. Comparing the two sixteen
+worker arms, the stored table is 11.1 percent smaller than Citus and 5.3 times
+smaller than heap. On the serial pair the size difference against Citus is 11.0
+percent, so the storage result does not depend on which loader wrote it.
+
+Our own serial to bulk speedup is 5.17 times against their 3.81 times. That is a
+statement about how our loader scales, and not a win over Citus on load time.
+
+An earlier version of this page and of issue #445 reported the parallel loader as
+2.01 times faster than Citus on the bulk path. That was wrong, and wrong in sign.
+It compared our sixteen worker path against a single Citus `COPY` connection.
+Citus accepts concurrent writers into one columnar table and scales well, so the
+comparison rested on a premise that had never been checked. Both bulk arms now
+split the same file at the same boundaries, using our own
+`pgcolumnar.file_split_offsets`, with the same worker count. They differ in
+engine and in nothing else.
+
+Query latency, hot times, same run:
+
+| arm | total across 43 queries | geometric mean |
+| --- | ---: | ---: |
+| heap | 154.9 s | |
+| columnar | 127.7 s | 0.54 against heap |
+| citus columnar | 251.7 s | 0.28 against citus |
+
+Against heap, columnar wins 33 of the 43 queries, loses 6, and ties on 4. A tie
+is a query whose two arms are closer to each other than the run to run scatter
+of their own repeated tries. This run cannot separate them in either direction.
+The four are q13, q19, q34 and q35. Against Citus, columnar wins 39 of 43 with
+no tie, losing q16, q17, q19 and q33.
+
+The six losses against heap all read wide text, and the cost columnar adds rises
+with the number of columns the query materialises:
+
+| query | columns touched | heap | columnar | columnar adds | ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| q29 | 1 | 8000.7 ms | 8434.2 ms | 433.4 ms | 1.05 |
+| q21 | 1 | 675.1 ms | 1346.2 ms | 671.1 ms | 1.99 |
+| q22 | 2 | 810.4 ms | 1417.4 ms | 607.0 ms | 1.75 |
+| q28 | 2 | 688.4 ms | 1498.0 ms | 809.7 ms | 2.18 |
+| q23 | 4 | 750.2 ms | 1982.6 ms | 1232.5 ms | 2.64 |
+| q24 | 105 | 711.5 ms | 4401.7 ms | 3690.2 ms | 6.19 |
+
+Read the added milliseconds, not the ratio. The ratio does not order these six
+the same way, and the reason is the baseline rather than anything about
+columnar. Queries q29 and q21 both touch one column, and both add a similar
+amount of work, 433 ms and 671 ms. But q29 sits on an 8,001 ms baseline and q21
+on a 675 ms one. The same kind of overhead therefore reads as 1.05 on one line
+and 1.99 on the next. The added cost rises with columns touched, with the one
+and two column groups overlapping. The ratio column rises only at the extremes.
+
+None of the six can be pruned by a minimum and maximum statistic, but not for one
+reason. In q21 through q24 the predicate is a `LIKE` with a leading wildcard,
+which no min and max can bound. In q28 and q29 the predicate is `URL <> ''` and
+`Referer <> ''`. Pruning those is possible in principle, but only for a row group
+whose minimum and maximum are both the empty string. That is a group in which
+every value is empty. An earlier version of this page said every one of these
+predicates had a leading wildcard. Two of them do not. The conclusion is
+unchanged: all six are the late materialisation problem, issue #452, and none is
+addressed by pushing text predicates down.
+
+Two limits on this table. Every arm was vacuumed and analyzed after loading, so
+these are vacuumed state numbers. For a columnar table that is not the normal
+state, because autovacuum cannot reach it. The columnar arm also runs with the
+analytical accelerators off, which is what a user gets by default.
+
+### The 2026-08-05 run: storage and load
 
 | arm | load | total relation size |
 | --- | ---: | ---: |
