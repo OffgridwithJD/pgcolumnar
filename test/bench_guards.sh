@@ -217,6 +217,53 @@ check "an unknown band suppresses the verdict, it does not strict-compare" \
 check "an errored arm has no verdict" "$(cb_verdict ERR 1000 0.02)" "-"
 check "and neither does a zero baseline" "$(cb_verdict 500 0 0.02)" "-"
 
+# ---- and the report must ASK the guard, not merely have one (#531) ---------
+#
+# The checks above prove cb_verdict's arithmetic. None of them proves that
+# bench/run_clickbench.sh asks it anything. This suite sources bench/cb_guards.sh
+# and never reads the benchmark, so the call site is invisible to it: restoring
+# the #531 defect verbatim,
+#
+#     r1=$(ratio "$c" "$h")
+#     if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ] ...
+#
+# leaves every check above PASSING. That is measured and not reasoned about --
+# the revert was applied to a clean tree and the suite ran 45/45 green before
+# these four checks existed.
+#
+# These are checks over source text, which is the weaker kind, and they are here
+# because the behaviour they guard needs the 15 GB download and the tuned cluster
+# this suite exists to do without. The alternative is not a better test; it is no
+# test, which is what the 45 above amounted to at this seam.
+CB="$SRCDIR/bench/run_clickbench.sh"
+check "premise: the benchmark script is present to be judged" \
+	"$([ -f "$CB" ] && echo yes || echo no)" "yes"
+
+# Without this premise the next check is vacuous. Rename r1 and "no ratio value
+# decides anything" passes against a report that has gone back to deciding on one
+# under another name -- the grep finds nothing and nothing is what it approves.
+check "premise: the report still captures ratio() into a display variable" \
+	"$([ "$(grep -c 'r[12]=\$(ratio' "$CB")" -ge 1 ] && echo yes || echo no)" "yes"
+
+check "ratio()'s output reaches printf and nothing else" \
+	"$(grep '\$r[12]' "$CB" | grep -vc 'printf')" "0"
+
+# Matched as a CALL and not as a mention. `grep -c 'cb_verdict'` counts any
+# occurrence, including one in a comment, and that is enough to approve a report
+# that has gone back to deciding inline: measured, the verdict was recomputed on
+# $c and $h directly with only a "might reinstate cb_verdict here" comment left
+# behind, and this suite reported 49 checks PASSED. Deciding on $c and $h rather
+# than on $r1 satisfies the check above at the same time, so both fall together.
+#
+# The realistic path is not somebody being clever. It is somebody refactoring the
+# loop and leaving a TODO that names the function.
+#
+# `cb_verdict "` is the shape a call takes here and a mention almost never does.
+# Measured on the bypassed tree: loose 1 (approves), tight 0 (rejects); on the
+# good tree tight is 1 and still approves.
+check "and the verdict is asked of cb_verdict rather than recomputed inline" \
+	"$([ "$(grep -c 'cb_verdict "' "$CB")" -ge 1 ] && echo yes || echo no)" "yes"
+
 echo
 echo "checks run: $PGC_CHECKS"
 if [ "$PGC_FAIL" != 0 ]; then
