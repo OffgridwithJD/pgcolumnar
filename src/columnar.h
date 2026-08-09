@@ -624,7 +624,8 @@ extern void PgColumnarEndRead(PgColumnarReadState *readState);
 extern bool PgColumnarReadFoldNextGroup(PgColumnarReadState *readState);
 extern void PgColumnarReadFoldGroupInfo(PgColumnarReadState *readState, uint64 *nrows,
 									  const char **deleteMask, uint32 *deleteMaskLen,
-									  const bool **skipVec, const uint32 **vecStart,
+									  const bool **skipVec, bool *decodeSkipped,
+									  const uint32 **vecStart,
 									  int *vectorCount);
 extern bool PgColumnarReadFoldColumn(PgColumnarReadState *readState, int attidx,
 								   const char **validity, const char **packed,
