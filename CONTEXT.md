@@ -222,7 +222,7 @@ than a wrong algorithm.
   stays green. A check too LOOSE to be believed condemns anything, and you find
   out after chasing a defect that does not exist -- in #537 a grep for one
   message matched a different message that merely began the same way, one about
-  the previously installed `.so` (#513), and reported a fault that was not there.
+  the previously installed `.so` (#508), and reported a fault that was not there.
   So: make a passing check fail, and show a failing check passes on code known to
   be good. Both directions, every time.
 - **When a rule does not fire, fix its trigger, not your discipline.** Guidance
@@ -235,6 +235,14 @@ than a wrong algorithm.
   the wider form in the first line where it is actually read. If no, the content
   is. Only the second is about knowledge, and the first is the common one.
   "Consult it more carefully" is not a fix.
+- **When you fix one instance, look for the rest before you believe you are
+  done.** A correction is not complete until you have searched for the same claim
+  elsewhere: grep for the phrasing you just removed. The bullets above were
+  written with a claim about people in them, corrected in one place, and the same
+  claim survived one paragraph below in different words. Then a wrong issue
+  citation was corrected in one place and a second wrong one survived four lines
+  away, and was caught by this rule rather than by rereading. Both times the
+  first correction felt like completion.
 - **Never gate on luck.** A premise that requires a random sample to miss, or
   core to be unlucky, will fail eventually and will blame innocent code (#487).
   Restate it as arithmetic, or print it as an observation.
