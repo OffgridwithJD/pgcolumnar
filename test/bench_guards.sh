@@ -69,6 +69,50 @@ check "one short is refused, which is the off-by-one that would run 7 workers" \
 check "a serial arm needs no prepared transactions" \
 	"$(cb_prepared_xacts_ok 0 0 && echo ok || echo refused)" "ok"
 
+# ---- max_worker_processes, the other setting that costs a restart -----------
+#
+# parallel_copy registers one background worker per loader, plus a coordinator,
+# and the logical replication launcher already holds one slot. So an N-worker arm
+# needs N + 2, not N. The stock default is 8, which is why an 8-worker arm fails
+# at "could not register pgcolumnar parallel_copy loader 7 of 8" and leaves an
+# EMPTY table -- a fast, wrong, publishable-looking result.
+#
+# N + 2 is measured, not reasoned. Sweeping max_worker_processes against three
+# worker counts on the bench, the smallest value that loaded every row was:
+#
+#     workers 2 -> 4      workers 4 -> 6      workers 8 -> 10
+#
+# and one below each failed on the LAST loader with the table left empty.
+check "the stock 8 is refused for an 8-worker arm, which is the case that bit us" \
+	"$(cb_worker_slots_ok 8 8 && echo ok || echo refused)" "refused"
+check "N + 1 is still refused: the coordinator needs a slot too" \
+	"$(cb_worker_slots_ok 9 8 && echo ok || echo refused)" "refused"
+check "N + 2 is accepted, the measured minimum" \
+	"$(cb_worker_slots_ok 10 8 && echo ok || echo refused)" "ok"
+check "more than enough is accepted" \
+	"$(cb_worker_slots_ok 32 8 && echo ok || echo refused)" "ok"
+check "the rule holds at another worker count (4 needs 6)" \
+	"$(cb_worker_slots_ok 6 4 && echo ok || echo refused)" "ok"
+check "and one below it does not" \
+	"$(cb_worker_slots_ok 5 4 && echo ok || echo refused)" "refused"
+
+# A serial arm registers no workers at all.
+check "a serial arm needs no worker slots" \
+	"$(cb_worker_slots_ok 0 0 && echo ok || echo refused)" "ok"
+
+# Non-numeric input must be refused rather than compared. A psql that failed
+# yields an empty string, and "" -ge "" is not a comparison anyone wants.
+check "a missing current value is refused, not compared" \
+	"$(cb_worker_slots_ok "" 8 && echo ok || echo refused)" "refused"
+
+wmsg="$(cb_worker_slots_message 8 8)"
+check "the worker-slot message names the setting" \
+	"$([ "$(grep -c 'max_worker_processes' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+check "and the value it must reach, not merely the worker count" \
+	"$([ "$(grep -c '10' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+check "and says it needs a restart" \
+	"$([ "$(grep -ci 'restart' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+
 # The message is the deliverable here: the operator has to know WHAT to set and
 # that it costs a restart. A bare "failed" sends them to the load log, which
 # reports a per-worker error and not the cause.
