@@ -351,16 +351,21 @@ pgc_pg() {
 # here, and the reason is measured rather than reasoned, because the first reason
 # written here was wrong and did not survive being checked.
 #
-# What is true: a PASSING run of native_backend_crash.sh leaves two FATAL lines
-# in its server log, both of them
+# What is true: a crash restart produces routine FATALs in TWO classes, and
+# neither is a cause of anything. A PASSING run of native_backend_crash.sh leaves
+# two lines of the first class; forcing a crash and then attempting twelve
+# connections during the recovery window produces both:
 #
-#     FATAL:  the database system is in recovery mode
+#     5  FATAL:  the database system is not yet accepting connections
+#     3  FATAL:  the database system is in recovery mode
 #
-# which are consequences of the crash that suite deliberately causes, not causes
-# of anything. Matching bare FATAL would print them under "first fatal events" on
-# any later failure of that suite: a consequence presented as a cause, which is
-# the exact defect #537 exists to fix. PANIC stays in the pattern because a PANIC
-# is a cause.
+# The second class is the one that matters for this decision, because its count
+# scales with how many connections arrive during recovery rather than with
+# anything about the failure. So the wallpaper bare FATAL would print is not
+# bounded at the two lines the crash suite happens to show; a busier run prints
+# as many as it raced. Matching them would put a consequence under "first fatal
+# events" as though it were a cause, which is the exact defect #537 exists to
+# fix. PANIC stays in the pattern because a PANIC is a cause.
 #
 # What is NOT true, and was the original justification here: that a cluster
 # stopped with -m immediate logs a routine FATAL per live backend. Measured with
