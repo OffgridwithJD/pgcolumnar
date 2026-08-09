@@ -772,12 +772,13 @@ that. The benchmark definition they came from is the licensed material. The full
 list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
 of 2026-08-06.
 
-Two runs are recorded below. The 2026-08-08 run is the current one and adds a
-Citus arm and the parallel loader. The 2026-08-05 run is kept because its query
-analysis has not been repeated. Both used PostgreSQL 18.4 non-assert, 16 cores,
-62 GB of memory, and 11,110,833 rows. That row count is
-every ninth row of the real 100 million row table. The reported time is the best
-of two hot runs, which is what ClickBench reports.
+Two runs are recorded below. The 2026-08-09 run is the current one and adds a
+Citus arm, the parallel loader, and a Citus bulk arm to compare it against. The
+2026-08-05 run is kept because it is a second independent run of the same
+benchmark. Both used PostgreSQL 18.4 non-assert, 16 cores, 62 GB of memory,
+and 11,110,833 rows. That row count is every ninth row of the real 100 million
+row table. The reported time is the best of two hot runs, which is what
+ClickBench reports.
 
 ### Why the sample is every ninth row and not the first eleven million
 
@@ -794,70 +795,88 @@ clusters perfectly on the filtered columns. That flatters columnar storage
 heavily. The harness therefore samples with a stride, and it fails the run if the
 loaded sample is degenerate.
 
-### The 2026-08-08 run: three arms, and the load result is about which path you use
+### The 2026-08-09 run: the bulk load is slower than Citus, not faster
 
-This run adds a Citus columnar arm and the parallel loader. It is also the first
-run that can cite the definition digest recorded above. Upstream has not changed
-since: `create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
+This run adds a Citus columnar arm, the parallel loader, and a Citus bulk arm to
+compare the parallel loader against. It is also the first run that can cite the
+definition digest recorded above. Upstream has not changed since:
+`create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
 
 Conditions: PostgreSQL 18.4 non-assert, 16 cores, 62 GB, 11,110,833 rows, three
 tries per query, arms interleaved per query. Citus columnar was co-loaded in the
 same cluster, which became possible when the custom scan names stopped colliding.
+Every arm loaded all 11,110,833 rows.
 
-| arm | load | total relation size |
-| --- | ---: | ---: |
-| heap | 139.1 s | 7,818,592,256 bytes |
-| columnar, serial `COPY` | 437.7 s | 1,479,745,536 bytes |
-| citus columnar | 182.5 s | 1,662,558,208 bytes |
-| columnar, `pgcolumnar.parallel_copy` with 16 workers | 90.9 s | 1,478,057,984 bytes |
+| arm | connections | load | total relation size |
+| --- | ---: | ---: | ---: |
+| heap | 1 | 148.8 s | 7,818,592,256 bytes |
+| columnar, serial `COPY` | 1 | 447.4 s | 1,479,745,536 bytes |
+| citus columnar, serial `COPY` | 1 | 187.2 s | 1,662,558,208 bytes |
+| columnar, `pgcolumnar.parallel_copy` | 16 | 86.6 s | 1,478,057,984 bytes |
+| citus columnar, parallel `COPY` | 16 | 49.1 s | 1,663,025,152 bytes |
 
-Read the load rows together rather than separately. On the single connection path
-columnar is 2.40 times slower than Citus. The parallel loader is 1.53 times
-faster than heap and 4.8 times faster than our own serial path. The stored table
-is 11 percent smaller than Citus and 5.3 times smaller than heap.
+Read the rows in pairs, by connection count. On a single connection columnar is
+2.39 times slower to load than Citus. At sixteen workers columnar is 1.76 times
+slower than Citus, and 1.72 times faster than heap. Comparing the two sixteen
+worker arms, the stored table is 11.1 percent smaller than Citus and 5.3 times
+smaller than heap. On the serial pair the size difference against Citus is 11.0
+percent, so the storage result does not depend on which loader wrote it.
 
-**The parallel row must not be compared with the Citus row.** Citus also accepts
-concurrent writers into one columnar table, and it scales well. This was measured
-on a separate fixture of four million rows and three columns. Eight concurrent
-`COPY` sessions took Citus from 3.06 s to 0.51 s, a 5.9 times speedup. Our
-parallel loader scaled 4.2 times on the same fixture. Comparing our sixteen
-worker path against their single connection path is not a like for like
-comparison, and this table does not draw one. A fair bulk comparison needs a
-Citus bulk arm in the harness, and that arm does not exist yet.
+Our own serial to bulk speedup is 5.17 times against their 3.81 times. That is a
+statement about how our loader scales, and not a win over Citus on load time.
+
+An earlier version of this page and of issue #445 reported the parallel loader as
+2.01 times faster than Citus on the bulk path. That was wrong, and wrong in sign.
+It compared our sixteen worker path against a single Citus `COPY` connection.
+Citus accepts concurrent writers into one columnar table and scales well, so the
+comparison rested on a premise that had never been checked. Both bulk arms now
+split the same file at the same boundaries, using our own
+`pgcolumnar.file_split_offsets`, with the same worker count, so they differ in
+engine and in nothing else.
 
 Query latency, hot times, same run:
 
-| arm | total across 43 queries | geometric mean against heap |
+| arm | total across 43 queries | geometric mean |
 | --- | ---: | ---: |
-| heap | 152.3 s | |
-| columnar | 123.3 s | 0.49 |
-| citus columnar | 256.9 s | 0.25 against citus |
+| heap | 154.9 s | |
+| columnar | 127.7 s | 0.54 against heap |
+| citus columnar | 251.7 s | 0.28 against citus |
 
-Columnar is faster than heap on 35 of the 43 queries and faster than Citus on 39
-of 43.
+Against heap, columnar wins 33 of the 43 queries, loses 6, and ties on 4. A tie
+is a query where the two arms are closer to each other than the run to run
+scatter of their own repeated tries, so this run cannot separate them in either
+direction: q13, q19, q34 and q35. Against Citus, columnar wins 39 of 43 with no
+tie, losing q16, q17, q19 and q33.
 
-All eight losses against heap read wide text, and the loss tracks how many
-columns the query materialises rather than the cost of its predicate:
+The six losses against heap all read wide text, and the cost columnar adds rises
+with the number of columns the query materialises:
 
-| query | columns touched | heap | columnar | ratio |
-| --- | ---: | ---: | ---: | ---: |
-| q29 | 1 | 8156.7 ms | 8824.0 ms | 1.08 |
-| q21 | 1 | 695.1 ms | 1202.1 ms | 1.73 |
-| q22 | 2 | 846.4 ms | 1274.8 ms | 1.51 |
-| q28 | 2 | 692.1 ms | 1227.3 ms | 1.77 |
-| q23 | 4 | 772.3 ms | 1877.9 ms | 2.43 |
-| q24 | 105 | 707.5 ms | 6007.1 ms | 8.49 |
+| query | columns touched | heap | columnar | columnar adds | ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| q29 | 1 | 8000.7 ms | 8434.2 ms | 433.4 ms | 1.05 |
+| q21 | 1 | 675.1 ms | 1346.2 ms | 671.1 ms | 1.99 |
+| q22 | 2 | 810.4 ms | 1417.4 ms | 607.0 ms | 1.75 |
+| q28 | 2 | 688.4 ms | 1498.0 ms | 809.7 ms | 2.18 |
+| q23 | 4 | 750.2 ms | 1982.6 ms | 1232.5 ms | 2.64 |
+| q24 | 105 | 711.5 ms | 4401.7 ms | 3690.2 ms | 6.19 |
 
-The baselines are printed beside the ratios deliberately. A 1.08 on an 8,157 ms
-baseline and a 1.73 on a 695 ms baseline are not comparable quantities. Query q29
-is the clearest evidence for the ordering. It does the most expensive per value
-work of the six, a regular expression rather than a substring search, on a single
-column. It is also the smallest loss on the board.
+Read the added milliseconds, not the ratio. The ratio does not order these six
+the same way, and the reason is the baseline rather than anything about columnar:
+q29 and q21 both touch one column and add a similar amount of work, 433 ms and
+671 ms, but q29 sits on an 8,001 ms baseline and q21 on a 675 ms one, so the same
+kind of overhead reads as 1.05 on one line and 1.99 on the next. The added cost
+rises with columns touched, with the one and two column groups overlapping. The
+ratio column rises only at the extremes.
 
-Every one of these predicates has a leading wildcard, so no minimum and maximum
-statistic can prune it however the operator is admitted. They are all the late
-materialisation problem, issue #452, and none of them is addressed by pushing
-text predicates down.
+None of the six can be pruned by a minimum and maximum statistic, but not for one
+reason. In q21 through q24 the predicate is a `LIKE` with a leading wildcard,
+which no min and max can bound. In q28 and q29 the predicate is `URL <> ''` and
+`Referer <> ''`, where pruning is possible in principle but only for a row group
+whose minimum and maximum are both the empty string, which is to say a group in
+which every value is empty. An earlier version of this page said every one of
+these predicates had a leading wildcard. Two of them do not. The conclusion is
+unchanged: all six are the late materialisation problem, issue #452, and none is
+addressed by pushing text predicates down.
 
 Two limits on this table. Every arm was vacuumed and analyzed after loading, so
 these are vacuumed state numbers. For a columnar table that is not the normal
