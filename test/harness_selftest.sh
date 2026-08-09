@@ -667,4 +667,75 @@ check "premise: at least one suite drives the C-level encoding selftest" \
 check "the sanitizer subset runs every suite that drives the encoding selftest" \
 	"$(printf '%s' "$_san_missing" | sed 's/^ //')" ""
 
+# ---- a cluster that will not start must report WHY (#537) -------------------
+#
+# The failure path printed eight identical retry lines and a verdict naming none
+# of the eight causes, while pg_ctl -l had been writing the reason to server.log
+# the whole time. The workdir is removed on exit, so the evidence was gone by the
+# time anyone read the verdict.
+#
+# These are text decisions, so they are tested without standing anything up, for
+# the same reason bench_guards exists (#465).
+
+check "premise: the harness exposes its fatal pattern to be judged" \
+	"$(type -t pgc_fatal_pattern)" "function"
+
+_m() { grep -cE "$(pgc_fatal_pattern)" <<<"$1"; }
+
+check "the fatal pattern matches a library that will not load" \
+	"$(_m 'FATAL:  could not load library "/usr/local/pg19/lib/pgcolumnar.so": undefined symbol: get_relation_info_hook')" \
+	"1"
+check "and still matches an AddressSanitizer report" \
+	"$(_m '==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1')" "1"
+check "and still matches a PANIC" \
+	"$(_m 'PANIC:  could not write to file')" "1"
+check "and still matches a signal death" \
+	"$(_m 'server process was terminated by signal 11: Segmentation fault')" "1"
+check "but not a routine statement error" \
+	"$(_m 'ERROR:  division by zero')" "0"
+check "nor an ordinary log line" \
+	"$(_m 'LOG:  database system is ready to accept connections')" "0"
+
+# ---- the verdict must not assert a cause it has not established -------------
+#
+# "(refusing to run against a cluster this suite does not own)" is ONE reason a
+# start can fail, and it was not the reason in #537: nothing was squatting, our
+# own postmaster died on eight different ports. The loop already knows which case
+# it saw; the message collapsed them.
+check "premise: the verdict is composed somewhere it can be judged" \
+	"$(type -t pgc_start_failure_message)" "function"
+
+check "the ownership claim is made when another cluster really was found" \
+	"$(pgc_start_failure_message 8 15208 1 | grep -c 'does not own')" "1"
+check "and is NOT made when our own postmaster died, which is the #537 case" \
+	"$(pgc_start_failure_message 8 15208 0 | grep -c 'does not own')" "0"
+check "the port is named either way" \
+	"$(pgc_start_failure_message 8 15208 0 | grep -c '15208')" "1"
+check "and so is the attempt count" \
+	"$(pgc_start_failure_message 8 15208 0 | grep -c '8 attempts')" "1"
+check "and the no-squatter verdict points at the server log" \
+	"$([ "$(pgc_start_failure_message 8 15208 0 | grep -ci 'log')" -ge 1 ] && echo yes || echo no)" "yes"
+
+# ---- and the log report must show the cause, not just that there was one ----
+check "premise: the log report is a function that can be fed a fixture" \
+	"$(type -t pgc_start_log_report)" "function"
+
+_lf="$(mktemp /tmp/pgc-537.XXXXXX)"; chmod 644 "$_lf"
+{
+	echo 'LOG:  starting PostgreSQL 19beta2'
+	echo 'FATAL:  could not load library "/usr/local/pg19/lib/pgcolumnar.so": undefined symbol: get_relation_info_hook'
+	echo 'LOG:  database system is shut down'
+} > "$_lf"
+_rep="$(pgc_start_log_report "$_lf" 2>&1)"
+# At least once, not exactly once: the line legitimately appears twice, in the
+# first-fatal block and again in the tail, and pinning it to one would fail on
+# correct output.
+check "the report names the symbol that was actually missing" \
+	"$([ "$(grep -c 'undefined symbol: get_relation_info_hook' <<<"$_rep")" -ge 1 ] && echo yes || echo no)" \
+	"yes"
+check "and a log with no fatal line still reports rather than staying silent" \
+	"$([ -n "$(printf 'LOG:  all fine\n' > "$_lf"; pgc_start_log_report "$_lf" 2>&1)" ] && echo yes || echo no)" \
+	"yes"
+rm -f "$_lf"
+
 pgc_summary

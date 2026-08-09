@@ -233,9 +233,10 @@ pgc_setup() {
 	# suite proceeds, and if it never does, the suite fails rather than guessing.
 	echo "-- start"
 	{
-		local _a _i _dd _started
+		local _a _i _dd _started _sawforeign
 
 		_started=0
+		_sawforeign=0
 		for _a in 1 2 3 4 5 6 7 8; do
 			_dd=""
 			if pgc_pg "pg_ctl -D '$PGC_PGDATA' -l '$PGC_LOGFILE' start -w" >/dev/null 2>&1; then
@@ -246,6 +247,7 @@ pgc_setup() {
 				_dd="$(pgc_cluster_datadir)"
 			fi
 			if [ -n "$_dd" ]; then
+				_sawforeign=1
 				echo "-- port $PGC_PORT serves $_dd, not ours; retrying on a fresh port"
 			else
 				echo "-- start attempt $_a failed; retrying on a fresh port"
@@ -270,8 +272,12 @@ pgc_setup() {
 		done
 
 		if [ "$_started" != "1" ]; then
-			echo "FATAL: no cluster of our own on port $PGC_PORT after $_a attempts" >&2
-			echo "       (refusing to run against a cluster this suite does not own)" >&2
+			# The reason FIRST, then the verdict. pg_ctl -l has been writing it
+			# to this file since attempt one, and pgc_teardown removes the
+			# workdir on exit, so a verdict without it is the last thing anyone
+			# sees before the evidence is deleted (#537).
+			pgc_start_log_report "${PGC_LOGFILE:-}"
+			pgc_start_failure_message "$_a" "$PGC_PORT" "$_sawforeign" >&2
 			exit 1
 		fi
 	}
@@ -329,6 +335,90 @@ pgc_teardown() {
 # Run a command as the postgres OS user (for initdb/pg_ctl).
 pgc_pg() {
 	"${PGC_RUNPG[@]}" env PATH="$PGC_BINDIR:$PATH" bash -lc "$1"
+}
+
+# ---- reporting a failure that happened before any check ran (#537) ----------
+
+# The events in a server log that mean "this was not a failed assertion".
+#
+# One definition, used by both the start-failure path and the summary path,
+# because they were drifting: the summary path had a pattern and the start path
+# had none at all, so a library that would not load produced eight identical
+# retry lines and a verdict naming no cause, while the reason sat in server.log
+# from the first attempt.
+#
+# "could not load library" is the addition. Bare "FATAL:" deliberately is NOT in
+# here, and the reason is measured rather than reasoned, because the first reason
+# written here was wrong and did not survive being checked.
+#
+# What is true: a PASSING run of native_backend_crash.sh leaves two FATAL lines
+# in its server log, both of them
+#
+#     FATAL:  the database system is in recovery mode
+#
+# which are consequences of the crash that suite deliberately causes, not causes
+# of anything. Matching bare FATAL would print them under "first fatal events" on
+# any later failure of that suite: a consequence presented as a cause, which is
+# the exact defect #537 exists to fix. PANIC stays in the pattern because a PANIC
+# is a cause.
+#
+# What is NOT true, and was the original justification here: that a cluster
+# stopped with -m immediate logs a routine FATAL per live backend. Measured with
+# four backends held open on pg_sleep, an immediate stop SIGQUITs them and they
+# log no FATAL at all. Zero. Do not restore that reasoning.
+#
+# The START path can afford a bare FATAL grep, and does one, because a cluster
+# that never started has produced no routine FATALs to confuse it.
+pgc_fatal_pattern() {
+	printf '%s\n' 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|terminated by signal|PANIC:|could not load library'
+}
+
+# What the server log says about a cluster that would not start.
+#
+# Takes the log path so it can be tested against a fixture without standing a
+# cluster up. Prints the first FATAL lines with their line numbers, then a tail,
+# and says so explicitly when it found neither -- silence here reads as "there
+# was nothing to say", which was the whole complaint in #537.
+pgc_start_log_report() {
+	local _log="$1" _fatal _tail
+
+	if [ -z "$_log" ] || [ ! -s "$_log" ]; then
+		echo "---- server log: absent or empty at ${_log:-<unset>} ----" >&2
+		return 0
+	fi
+
+	_fatal="$(grep -nE 'FATAL:|PANIC:' "$_log" 2>/dev/null | head -5 || true)"
+	if [ -n "$_fatal" ]; then
+		echo "---- why the cluster would not start ----" >&2
+		printf '%s\n' "$_fatal" >&2
+	else
+		echo "---- no FATAL in the server log; its tail follows ----" >&2
+	fi
+	_tail="$(tail -20 "$_log" 2>/dev/null || true)"
+	if [ -n "$_tail" ]; then
+		echo "---- server log tail ($_log) ----" >&2
+		printf '%s\n' "$_tail" >&2
+	fi
+	return 0
+}
+
+# The verdict, which must not assert a cause the code has not established.
+#
+# The third argument is whether any attempt actually found ANOTHER cluster's data
+# directory on the port. Only then is "a cluster this suite does not own" a
+# statement about what happened. In #537 nothing was squatting: our own
+# postmaster died on eight different ports, and the parenthetical sent the reader
+# hunting a port collision that was not there.
+pgc_start_failure_message() {
+	local _attempts="$1" _port="$2" _sawforeign="$3"
+
+	printf '%s\n' "FATAL: no cluster of our own on port $_port after $_attempts attempts"
+	if [ "$_sawforeign" = "1" ]; then
+		printf '%s\n' "       (a cluster this suite does not own was on the port; refusing to use it)"
+	else
+		printf '%s\n' "       (nothing was squatting: our own postmaster failed to start, and the"
+		printf '%s\n' "        reason is in the server log reported above)"
+	fi
 }
 
 # ---- SQL helpers (run as root over TCP, trust auth) ------------------------
@@ -741,7 +831,7 @@ pgc_summary() {
 			#
 			# grep the whole file for the events that mean "this was not a failed
 			# assertion", and print the first few with line numbers.
-			_pgc_fatal="$(pgc_pg "grep -nE 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|terminated by signal|PANIC:' '$PGC_LOGFILE' | head -5" 2>/dev/null || true)"
+			_pgc_fatal="$(pgc_pg "grep -nE '$(pgc_fatal_pattern)' '$PGC_LOGFILE' | head -5" 2>/dev/null || true)"
 			if [ -n "$_pgc_fatal" ]; then
 				echo "---- first fatal events in the server log ----"
 				printf '%s\n' "$_pgc_fatal"
