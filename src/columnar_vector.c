@@ -596,6 +596,7 @@ typedef struct PgColumnarAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		vectorsSkipped;
+	uint64		vectorsDecoded;
 	uint64		groupsTotal;
 
 	/*
@@ -698,6 +699,7 @@ typedef struct PgColumnarGroupAggScanState
 	uint64		groupsRead;
 	uint64		groupsSkipped;
 	uint64		vectorsSkipped;
+	uint64		vectorsDecoded;
 	uint64		groupsTotal;
 	int			usablePreds;	/* of npreds, how many can exclude (#479) */
 } PgColumnarGroupAggScanState;
@@ -3168,40 +3170,42 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 		bool		decodeSkipped;
 		const uint32 *vecStart;
 		int			vcount;
+		int			curVec;
 		uint64		r;
 
 		PgColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
 								  &skipVec, &decodeSkipped, &vecStart, &vcount);
 
 		/*
-		 * This loop does not honour skipVec. It reads every vector and reaches
-		 * the right answer by re-checking every value against the scan keys
-		 * below, which is correct only while decode has produced every vector.
+		 * This loop now honours skipVec, and it has to (#512, #452 phase 1b-i).
+		 * Decode no longer produces the vectors the zone maps ruled out, so the
+		 * packed stream has HOLES in it. Reading one would re-check uninitialised
+		 * memory: a wrong aggregate, silently, and only on data whose zone maps
+		 * rule something out.
 		 *
-		 * The moment decode is taught to skip the vectors the zone maps ruled
-		 * out (#452 phase 1b, the obvious next optimisation), the buffer gains
-		 * holes and this loop would re-check UNINITIALISED memory: a wrong
-		 * aggregate, silently, and only on data whose zone maps rule something
-		 * out. The row producer is safe there because it steps its cursors past
-		 * skipped vectors; this path is not, and pgcolumnar_batch_shape_eligible
-		 * requires every qual to be convertible to a scan key -- so the fold runs
-		 * precisely when predicates exist, which is exactly when vectors get
-		 * skipped. Common case, not an edge.
+		 * Skipping them is not merely safe, it is exact. The reader built skipVec
+		 * from the same scan keys this loop re-checks -- pgcolumnar_batch_shape_
+		 * eligible requires every qual to be convertible to a scan key, and those
+		 * keys are what PgColumnarBeginRead was given -- so a vector those zone
+		 * maps rule out contains no row this fold would have counted.
 		 *
-		 * So the ordering constraint is enforced rather than written down: the
-		 * fold must learn to skip before decode is allowed to. Whoever makes that
-		 * change gets this error instead of arithmetic, and they are the person
-		 * least likely to look in this file.
+		 * The present index must still advance across a skipped vector, exactly
+		 * as it does across a deleted row: the stream is packed by presence, so
+		 * a skipped row's slot is consumed whether or not its value is read.
+		 * Getting that wrong misaligns every later vector rather than losing one.
 		 *
-		 * Measured, so the ordering is not merely asserted: teaching this loop to
-		 * honour skipVec costs about 2% and saves nothing until decode changes,
-		 * so it belongs IN that change and not before it (#512).
+		 * The tripwire that used to stand here (#523) was an ordering guard: it
+		 * refused a group whose decode had skipped, so that decode could not be
+		 * taught to skip without this loop being taught first. It has done its
+		 * job -- it fired on exactly the change it was written for -- and the
+		 * handling below replaces it. What remains of it is the fallback: if the
+		 * reader reports a skip without the per-vector map this loop needs to
+		 * honour it, refuse rather than guess.
 		 */
-		if (decodeSkipped)
+		if (decodeSkipped && (skipVec == NULL || vecStart == NULL || vcount <= 0))
 			elog(ERROR,
 				 "pgcolumnar: the vectorized aggregate cannot fold a row group "
-				 "whose decode skipped vectors (#512); teach this loop to honour "
-				 "the skip vector in the same change that makes decode honour it");
+				 "whose decode skipped vectors without the per-vector map (#512)");
 
 		for (col = 0; col < natts; col++)
 		{
@@ -3240,12 +3244,27 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			cattlen[col] = al;
 		}
 
+		curVec = 0;
 		for (r = 0; r < nrows; r++)
 		{
 			bool		del;
 			bool		pass = true;
+			bool		vecSkipped = false;
 
 			CHECK_FOR_INTERRUPTS();
+
+			/*
+			 * Which vector holds this row, and was it ruled out? vecStart is
+			 * cumulative row spans with a [vcount] terminator, and r only ever
+			 * increases, so this walk costs one step per vector boundary across
+			 * the whole group rather than a search per row.
+			 */
+			if (skipVec != NULL && vecStart != NULL && vcount > 0)
+			{
+				while (curVec < vcount && r >= vecStart[curVec + 1])
+					curVec++;
+				vecSkipped = (curVec < vcount && skipVec[curVec]);
+			}
 
 			/* gather needed values at each column's present index; advance it */
 			for (col = 0; col < natts; col++)
@@ -3254,14 +3273,24 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 					continue;
 				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
 				{
-					cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
-										  true, cattlen[col]);
-					cisnull[col] = false;
+					/*
+					 * A skipped vector's bytes were never decoded. Consume the
+					 * slot, do not read it.
+					 */
+					if (!vecSkipped)
+					{
+						cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+											  true, cattlen[col]);
+						cisnull[col] = false;
+					}
 					cpresent[col]++;
 				}
 				else
 					cisnull[col] = true;
 			}
+
+			if (vecSkipped)
+				continue;			/* value slots already consumed above */
 
 			del = (dmask != NULL && (r >> 3) < dlen &&
 				   (dmask[r >> 3] & (1 << (r & 7))) != 0);
@@ -3302,6 +3331,7 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 					  &state->groupsTotal);
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
+	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 	PgColumnarEndRead(rs);
@@ -3437,6 +3467,7 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 						  &state->groupsTotal);
 		state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
+	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 		state->haveStats = true;
 	}
 
@@ -3594,6 +3625,7 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 		gs.groupsRead = state->groupsRead;
 		gs.groupsRemoved = state->groupsSkipped;
 		gs.vectorsSkipped = state->vectorsSkipped;
+		gs.vectorsDecoded = state->vectorsDecoded;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
@@ -4156,6 +4188,7 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 					  &state->groupsTotal);
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
+	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->haveStats = true;
 
 	PgColumnarEndRead(rs);
@@ -4276,6 +4309,7 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 		gs.groupsRead = state->groupsRead;
 		gs.groupsRemoved = state->groupsSkipped;
 		gs.vectorsSkipped = state->vectorsSkipped;
+		gs.vectorsDecoded = state->vectorsDecoded;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }

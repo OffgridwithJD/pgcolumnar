@@ -133,6 +133,7 @@ SUITES=(
 	native_sort_by
 	native_truncate
 	native_vacuum_race
+	native_vecdecode
 	native_vecskip
 	native_writer
 	native_zonemap
