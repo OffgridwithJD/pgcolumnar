@@ -41,6 +41,54 @@ cb_prepared_xacts_message() {
 		"Set max_prepared_transactions = ${workers} (or more) and restart the postmaster; it cannot be changed in a session."
 }
 
+# cb_worker_slots_needed <workers>
+#
+# An N-worker parallel_copy needs N + 2 worker slots: one background worker per
+# loader, one coordinator, and one already held by the logical replication
+# launcher. A serial arm registers nothing and needs none.
+#
+# N + 2 is measured rather than reasoned. Sweeping max_worker_processes against
+# three worker counts, the smallest value that loaded every row was 4 for 2
+# workers, 6 for 4, and 10 for 8. One below each failed on the LAST loader and
+# left the table empty.
+cb_worker_slots_needed() {
+	local workers="${1:-}"
+	case "$workers" in '' | *[!0-9]*) printf '0\n'; return 1 ;; esac
+	if [ "$workers" -eq 0 ]; then printf '0\n'; else printf '%s\n' "$((workers + 2))"; fi
+}
+
+# cb_worker_slots_ok <current> <workers>
+#
+# The same shape as cb_prepared_xacts_ok and for the same reason: raising
+# max_worker_processes costs a postmaster restart, so it must be asked before any
+# arm is loaded rather than discovered in a load log.
+#
+# The stock default is 8. An 8-worker arm therefore fails on the stock setting,
+# at "could not register pgcolumnar parallel_copy loader 7 of 8", and leaves an
+# EMPTY table -- which returns fast and reads as excellent scaling. That is the
+# #465 failure with a different cause.
+cb_worker_slots_ok() {
+	local current="${1:-}" workers="${2:-}" need
+	case "$current" in '' | *[!0-9]*) return 1 ;; esac
+	case "$workers" in '' | *[!0-9]*) return 1 ;; esac
+	need="$(cb_worker_slots_needed "$workers")" || return 1
+	[ "$current" -ge "$need" ]
+}
+
+# cb_worker_slots_message <current> <workers>
+#
+# Names the value to set, not merely the worker count: N + 2 is not a number the
+# operator can be expected to derive from a per-loader error message.
+cb_worker_slots_message() {
+	local current="${1:-}" workers="${2:-}" need
+	need="$(cb_worker_slots_needed "$workers")"
+	printf '%s\n' \
+		"max_worker_processes is ${current:-unset}, and a ${workers}-worker parallel arm needs ${need}." \
+		"parallel_copy registers one worker per loader plus a coordinator, and the logical replication launcher holds one slot." \
+		"Set max_worker_processes = ${need} (or more) and restart the postmaster; it cannot be changed in a session." \
+		"Below that the arm fails on its last loader and leaves an empty table, which reads as a very fast load."
+}
+
 # cb_rows_ok <got> <want>
 #
 # A load that lost rows is a failure and not a fast result. An errored parallel
