@@ -14,6 +14,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include "fmgr.h"
 #include "access/detoast.h"
 #include "access/htup_details.h"

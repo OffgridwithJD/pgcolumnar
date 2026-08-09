@@ -228,7 +228,6 @@ typedef struct PgColumnarMetapage
 } PgColumnarMetapage;
 
 
-
 /* -------------------------------------------------------------------------
  * Native format catalog row shapes (re-origination line, PGCN v1). These map
  * to pgcolumnar.storage / row_group / column_chunk (native spec section 11).
@@ -424,19 +423,9 @@ typedef struct PgColumnarRowRange
 
 /* row groups every one of whose rows is deleted as-of oldestXmin. Returns a
  * List of palloc'd uint64 group numbers. */
-extern void PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber);
 extern int64 PgColumnarRetireFullyDeletedGroups(Relation rel);
-extern void PgColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber);
-extern bool PgColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
-									  TransactionId oldestXmin, uint64 *fileOffset);
-extern bool PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
-										  TransactionId oldestXmin);
-extern void PgColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd);
-extern void PgColumnarReconcileFreeList(Relation dataRel);
 /* all-visible chunk-group row ranges: stripe committed past the horizon and no
  * deletes (committed or in-progress). Returns a List of PgColumnarRowRange *. */
-extern List *PgColumnarComputeAllVisibleGroups(uint64 storageId,
-											 TransactionId oldestXmin);
 
 /* physical reclaim: split freed ranges on allocate and coalesce on free (GUC) */
 extern bool pgcolumnar_reclaim_coalesce;
@@ -463,38 +452,21 @@ extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
  * metadata layer (pgcolumnar_metadata.c)
  * ------------------------------------------------------------------------- */
 extern uint64 PgColumnarNextStorageId(void);
-extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
 
 /* projection: needed attnos (pull_varattnos form) -> the reader's 0-based set */
 extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
 											   int *nProjected);
-extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
-									int64 lastGroup);
 extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
-extern void PgColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
-extern void PgColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc);
-extern void PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z);
-extern void PgColumnarInsertBloomRow(const NativeBloomMetadata *b);
 extern List *PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
-extern List *PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber,
-										 Snapshot snapshot);
 extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
 									 Snapshot snapshot);
-extern List *PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
-										Snapshot snapshot);
-extern NativeBloomMetadata *PgColumnarReadBloomForColumn(uint64 storageId,
-													   uint64 groupNumber,
-													   int columnIndex,
-													   Snapshot snapshot);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */
 extern bool PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts);
-extern void PgColumnarDeleteOptions(Oid relid);
 
 /* declared physical sort key (#288); List of pstrdup'd column names, NIL if
  * none is declared. Names (not attnums) so the value survives dump/restore. */
-extern List *PgColumnarReadSortBy(Oid relid);
 
 /* projection catalog (gap 26, format 2.2). List entries are PgColumnarProjection*
  * palloc'd in the current context, ordered by projection_id. */
@@ -502,13 +474,8 @@ extern List *PgColumnarListProjections(uint64 storageId);
 extern void PgColumnarInsertProjectionRow(const PgColumnarProjection *proj);
 /* The dumpable declaration behind a projection, keyed by regclass and stored as
  * column names so a dump and restore can carry it (#266). */
-extern void PgColumnarRecordProjectionDeclaration(Oid relid, const char *name,
-												ArrayType *columns,
-												ArrayType *sortKey);
-extern void PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name);
 /* Every declaration for a relation, for the drop hook: a dropped table must not
  * leave rows behind whose regclass no longer resolves (#304). */
-extern void PgColumnarDeleteProjectionDeclarationsForRel(Oid relid);
 extern void PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId);
 
 /* whether a relation uses the columnar table access method */
@@ -529,7 +496,6 @@ extern Snapshot PgColumnarCatalogSnapshot(Snapshot base);
 /* delete_vector catalog access (spec 7.5) */
 extern List *PgColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId,
 									 Snapshot snapshot);
-extern bool PgColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot);
 extern void PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm);
 
 /* -------------------------------------------------------------------------
