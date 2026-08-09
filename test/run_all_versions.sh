@@ -90,6 +90,7 @@ SUITES=(
 	native_ctas
 	native_dml
 	native_encoding
+	native_exact_selection
 	native_fastdecode
 	native_fetch_bigcap
 	native_fetch_cache
