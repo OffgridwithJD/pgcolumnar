@@ -908,7 +908,26 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 			 * fold the mask.
 			 */
 			if (skipVec != NULL && skipVec[v])
+			{
+				/*
+				 * Poisoned in assert builds, and this is not decoration. Reading
+				 * a hole is undefined behaviour whose SYMPTOM is data-dependent:
+				 * whatever palloc last left here is usually rejected by the
+				 * reader's own scan-key recheck, so a consumer that wrongly reads
+				 * holes returns the right answer on most data and a wrong one on
+				 * some. That is unfalsifiable by a test.
+				 *
+				 * A fixed poison makes the bug deterministic instead: the value
+				 * is the same on every run, so a consumer that reads it can be
+				 * caught by a predicate the poison satisfies. test/native_vecdecode.sh
+				 * does exactly that, and without this the check passes against a
+				 * fold that reads every hole.
+				 */
+#ifdef USE_ASSERT_CHECKING
+				memset(rawCursor, 0xA5, rawLen);
+#endif
 				rawCursor += rawLen;
+			}
 			else
 			{
 				char	   *rawVec = PgColumnarDecodeChunk(encCursor, encLen, encType,
@@ -1739,6 +1758,14 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 		}
 	}
 	rs->vectorsDecoded += (uint64) groupVecDecoded;
+
+	/*
+	 * The #512 tripwire's input, and it is measured rather than inferred from
+	 * the mask: a mask with nothing set in it skips nothing, and a decode that
+	 * ignored the mask skipped nothing either. Both must read as false here, and
+	 * only the decoded count can say so.
+	 */
+	rs->decodeSkippedVectors = (groupVecDecoded < maxVecCount);
 
 	/*
 	 * Per-vector skipping (native spec 7.1, D5b): build the skip vector from the
