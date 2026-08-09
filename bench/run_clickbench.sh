@@ -773,7 +773,7 @@ grouped_engaged() {  # grouped_engaged <arm> <sql>
 		grep -qi 'Vectorized Group Keys' && echo yes || echo no
 }
 
-declare -A COLD HOT ERRS
+declare -A COLD HOT ERRS WARMSPREAD
 : > "$CB_DATA/query_errors.log"
 : > "$CB_DATA/raw_timings.tsv"
 
@@ -802,6 +802,10 @@ while IFS= read -r sql; do
 			fi
 		done
 		HOT["$qn:$arm"]="${best:-ERR}"
+		# The scatter of the warm tries, kept because it is the only estimate of
+		# this run's own resolution that the run produces. "$@" is already the
+		# warm set: the shift above dropped the cold try.
+		WARMSPREAD["$qn:$arm"]=$(cb_warm_spread "$@")
 		case "${COLD["$qn:$arm"]}${HOT["$qn:$arm"]}" in
 			*ERR*) ERRS["$arm"]=$(( ${ERRS["$arm"]:-0} + 1 )) ;;
 		esac
@@ -847,7 +851,7 @@ echo "-- hot times, milliseconds. 'x' is columnar over heap; above 1.00 means we
 printf '%-6s' query
 for arm in "${ARMS[@]}"; do printf ' %14s' "$arm"; done
 printf ' %10s %10s\n' 'col/heap' 'tuned/heap'
-wins=0; losses=0
+wins=0; losses=0; ties=0; tielist=""
 for q in $(seq 1 "$qn"); do
 	printf 'q%-5s' "$q"
 	for arm in "${ARMS[@]}"; do printf ' %14s' "${HOT["$q:$arm"]}"; done
@@ -856,15 +860,23 @@ for q in $(seq 1 "$qn"); do
 	c="${HOT["$q:columnar"]:-}"
 	tu="${HOT["$q:columnar_tuned"]:-}"
 	r1=$(ratio "$c" "$h")
-	if [ "$r1" != "-" ]; then
-		if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ]; then
-			wins=$((wins + 1)); else losses=$((losses + 1)); fi
-	fi
+	# Counted from the times, NOT from r1. r1 is rounded for the table, and
+	# rounding a comparison decides sub-percent differences by typography.
+	band=$(cb_band "${WARMSPREAD["$q:heap"]:--}" "${WARMSPREAD["$q:columnar"]:--}")
+	case "$(cb_verdict "$c" "$h" "$band")" in
+		win)  wins=$((wins + 1)) ;;
+		loss) losses=$((losses + 1)) ;;
+		tie)  ties=$((ties + 1)); tielist="$tielist q$q" ;;
+	esac
 	r2=$(ratio "$tu" "$h")
 	printf ' %10s %10s\n' "$r1" "$r2"
 done
 echo
-echo "columnar beats heap on $wins queries and loses on $losses, at defaults."
+echo "columnar beats heap on $wins queries, ties on $ties, and loses on $losses, at defaults."
+if [ "$ties" -gt 0 ]; then
+	echo "   tie:$tielist -- the two arms are closer than the run-to-run scatter of"
+	echo "   their own warm tries, so this run cannot separate them in either direction."
+fi
 if [ -s "$CB_DATA/query_errors.log" ]; then
 	echo
 	echo "-- queries that errored, which are reported and NOT dropped:"

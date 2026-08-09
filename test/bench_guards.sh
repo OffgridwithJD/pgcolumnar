@@ -174,6 +174,49 @@ check "a host that could not drop the page cache is not called a cold run" \
 check "and the tag says plainly that the run was warm" \
 	"$(grep -q 'WARM-RUN' <<<"$tag_none" && echo yes || echo no)" "yes"
 
+# ---- a win is decided on the times, not on the printed string (#531) --------
+#
+# The defect: the report counted wins from the "%.2f" ratio it had already
+# formatted for the table, so columnar ahead by less than half a percent printed
+# 1.00, failed `r < 1`, and was counted a LOSS -- against the legend printed
+# directly above it. The 2026-08-09 run reported 33 wins and 10 losses where the
+# times give 36 and 7.
+#
+# The three numbers below are that run's q13, the smallest real case: heap
+# 1588.095 ms, columnar 1582.859 ms, and a warm-try scatter of 0.99 percent.
+check "premise: the verdict helpers are present to be judged" \
+	"$(type -t cb_verdict)/$(type -t cb_warm_spread)/$(type -t cb_band)" \
+	"function/function/function"
+
+check "a clear win is a win" "$(cb_verdict 500 1000 0.02)" "win"
+check "a clear loss is a loss" "$(cb_verdict 2000 1000 0.02)" "loss"
+# The regression case, stated as the defect: rounding to 1.00 must not flip the
+# sign of the verdict. With no band this is a win; it must never be a loss.
+check "columnar ahead by 0.33 percent is not a LOSS, which is the #531 defect" \
+	"$(cb_verdict 1582.859 1588.095 0.0000)" "win"
+check "and under a band wider than the gap it is a tie, not a win either" \
+	"$(cb_verdict 1582.859 1588.095 0.0099)" "tie"
+check "a gap just outside the band is still called" \
+	"$(cb_verdict 900 1000 0.05)" "win"
+check "and a loss just outside it likewise" \
+	"$(cb_verdict 1100 1000 0.05)" "loss"
+
+# Scatter is measured from the tries, and an unknown scatter must not read as
+# zero: "-" through cb_band must suppress the verdict rather than license a
+# strict comparison on an arm nobody measured twice.
+check "spread is the fractional range over the best" "$(cb_warm_spread 100 103)" "0.0300"
+check "order does not matter, and ERR tries are dropped" \
+	"$(cb_warm_spread 103 100 ERR)" "0.0300"
+check "a single warm try has no measurable scatter" "$(cb_warm_spread 100)" "0.0000"
+check "no usable try yields no spread, not zero" "$(cb_warm_spread '' ERR)" "-"
+check "a zero best is refused rather than divided by" "$(cb_warm_spread 0 5)" "-"
+check "the band is the wider of the two arms" "$(cb_band 0.0100 0.0290)" "0.0290"
+check "and is unknown if either arm is unknown" "$(cb_band - 0.0290)" "-"
+check "an unknown band suppresses the verdict, it does not strict-compare" \
+	"$(cb_verdict 1582.859 1588.095 -)" "-"
+check "an errored arm has no verdict" "$(cb_verdict ERR 1000 0.02)" "-"
+check "and neither does a zero baseline" "$(cb_verdict 500 0 0.02)" "-"
+
 echo
 echo "checks run: $PGC_CHECKS"
 if [ "$PGC_FAIL" != 0 ]; then

@@ -134,3 +134,71 @@ cb_cold_tag() {
 			;;
 	esac
 }
+
+# ---------------------------------------------------------------------------
+# Deciding a win from two timings (#531)
+# ---------------------------------------------------------------------------
+#
+# The report used to count wins by comparing the "%.2f" string it had already
+# printed for the table:
+#
+#     r1=$(ratio "$c" "$h")
+#     if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ] ...
+#
+# so a query where columnar was faster by less than half a percent printed 1.00
+# and was counted a LOSS -- contradicting the legend printed directly above the
+# same table, which says "above 1.00 means we lose". On the 2026-08-09 run this
+# reported 33 wins and 10 losses where the times give 36 and 7.
+#
+# Comparing the unrounded times fixes the contradiction, but a bare two-way
+# comparison then over-claims in the other direction: q35 that day was 0.01
+# percent apart while the arms' OWN warm tries were 2.9 percent apart. A
+# difference smaller than the instrument's scatter is not a result in either
+# direction, so the verdict is three-way and the band is that scatter, measured
+# per query from the arms in play rather than picked here as a constant.
+
+# Fractional spread of a set of timings: (worst - best) / best, or "-" when
+# there is nothing usable. With CB_TRIES=2 there is ONE warm try per arm, so
+# this is 0 and cb_verdict degenerates to a strict comparison. That is the
+# honest degeneration: no repeat means no evidence about repeatability, which is
+# not licence to call a 0.01 percent difference a result.
+cb_warm_spread() {  # cb_warm_spread <t> [t...] -> "n.nnnn" or "-"
+	local t best="" worst=""
+	for t in "$@"; do
+		case "$t" in '' | *ERR*) continue ;; esac
+		if [ -z "$best" ]; then best="$t"; worst="$t"; continue; fi
+		[ "$(awk -v a="$t" -v b="$best"  'BEGIN { print (a < b) ? 1 : 0 }')" = 1 ] && best="$t"
+		[ "$(awk -v a="$t" -v b="$worst" 'BEGIN { print (a > b) ? 1 : 0 }')" = 1 ] && worst="$t"
+	done
+	[ -z "$best" ] && { echo '-'; return; }
+	if [ "$(awk -v x="$best" 'BEGIN { print (x + 0 == 0) ? 1 : 0 }')" = 1 ]; then
+		echo '-'; return
+	fi
+	awk -v w="$worst" -v b="$best" 'BEGIN { printf "%.4f", (w - b) / b }'
+}
+
+# The wider of two arms' spreads, which is the band a difference has to clear.
+# "-" from either side is not treated as zero: an arm whose scatter is unknown
+# must not silently license a strict comparison.
+cb_band() {  # cb_band <spread_a> <spread_b> -> "n.nnnn" or "-"
+	awk -v a="${1:--}" -v b="${2:--}" 'BEGIN {
+		if (a == "-" || a == "" || b == "-" || b == "") { print "-" }
+		else { printf "%.4f", (a > b) ? a : b }
+	}'
+}
+
+# win / tie / loss for one query, decided on the UNROUNDED times.
+cb_verdict() {  # cb_verdict <col_hot> <heap_hot> <band> -> win|tie|loss|-
+	local c="$1" h="$2" band="$3"
+	case "$c" in '' | *ERR*) echo '-'; return ;; esac
+	case "$h" in '' | *ERR*) echo '-'; return ;; esac
+	case "$band" in '' | '-' | *ERR*) echo '-'; return ;; esac
+	if [ "$(awk -v x="$h" 'BEGIN { print (x + 0 == 0) ? 1 : 0 }')" = 1 ]; then
+		echo '-'; return
+	fi
+	awk -v c="$c" -v h="$h" -v b="$band" 'BEGIN {
+		d = c / h - 1
+		if (d < 0) d = -d
+		if (d <= b) { print "tie" } else if (c < h) { print "win" } else { print "loss" }
+	}'
+}
