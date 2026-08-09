@@ -831,7 +831,7 @@ It compared our sixteen worker path against a single Citus `COPY` connection.
 Citus accepts concurrent writers into one columnar table and scales well, so the
 comparison rested on a premise that had never been checked. Both bulk arms now
 split the same file at the same boundaries, using our own
-`pgcolumnar.file_split_offsets`, with the same worker count, so they differ in
+`pgcolumnar.file_split_offsets`, with the same worker count. They differ in
 engine and in nothing else.
 
 Query latency, hot times, same run:
@@ -843,10 +843,10 @@ Query latency, hot times, same run:
 | citus columnar | 251.7 s | 0.28 against citus |
 
 Against heap, columnar wins 33 of the 43 queries, loses 6, and ties on 4. A tie
-is a query where the two arms are closer to each other than the run to run
-scatter of their own repeated tries, so this run cannot separate them in either
-direction: q13, q19, q34 and q35. Against Citus, columnar wins 39 of 43 with no
-tie, losing q16, q17, q19 and q33.
+is a query whose two arms are closer to each other than the run to run scatter
+of their own repeated tries. This run cannot separate them in either direction.
+The four are q13, q19, q34 and q35. Against Citus, columnar wins 39 of 43 with
+no tie, losing q16, q17, q19 and q33.
 
 The six losses against heap all read wide text, and the cost columnar adds rises
 with the number of columns the query materialises:
@@ -861,20 +861,20 @@ with the number of columns the query materialises:
 | q24 | 105 | 711.5 ms | 4401.7 ms | 3690.2 ms | 6.19 |
 
 Read the added milliseconds, not the ratio. The ratio does not order these six
-the same way, and the reason is the baseline rather than anything about columnar:
-q29 and q21 both touch one column and add a similar amount of work, 433 ms and
-671 ms, but q29 sits on an 8,001 ms baseline and q21 on a 675 ms one, so the same
-kind of overhead reads as 1.05 on one line and 1.99 on the next. The added cost
-rises with columns touched, with the one and two column groups overlapping. The
-ratio column rises only at the extremes.
+the same way, and the reason is the baseline rather than anything about
+columnar. Queries q29 and q21 both touch one column, and both add a similar
+amount of work, 433 ms and 671 ms. But q29 sits on an 8,001 ms baseline and q21
+on a 675 ms one. The same kind of overhead therefore reads as 1.05 on one line
+and 1.99 on the next. The added cost rises with columns touched, with the one
+and two column groups overlapping. The ratio column rises only at the extremes.
 
 None of the six can be pruned by a minimum and maximum statistic, but not for one
 reason. In q21 through q24 the predicate is a `LIKE` with a leading wildcard,
 which no min and max can bound. In q28 and q29 the predicate is `URL <> ''` and
-`Referer <> ''`, where pruning is possible in principle but only for a row group
-whose minimum and maximum are both the empty string, which is to say a group in
-which every value is empty. An earlier version of this page said every one of
-these predicates had a leading wildcard. Two of them do not. The conclusion is
+`Referer <> ''`. Pruning those is possible in principle, but only for a row group
+whose minimum and maximum are both the empty string. That is a group in which
+every value is empty. An earlier version of this page said every one of these
+predicates had a leading wildcard. Two of them do not. The conclusion is
 unchanged: all six are the late materialisation problem, issue #452, and none is
 addressed by pushing text predicates down.
 
