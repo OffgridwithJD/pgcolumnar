@@ -69,6 +69,50 @@ check "one short is refused, which is the off-by-one that would run 7 workers" \
 check "a serial arm needs no prepared transactions" \
 	"$(cb_prepared_xacts_ok 0 0 && echo ok || echo refused)" "ok"
 
+# ---- max_worker_processes, the other setting that costs a restart -----------
+#
+# parallel_copy registers one background worker per loader, plus a coordinator,
+# and the logical replication launcher already holds one slot. So an N-worker arm
+# needs N + 2, not N. The stock default is 8, which is why an 8-worker arm fails
+# at "could not register pgcolumnar parallel_copy loader 7 of 8" and leaves an
+# EMPTY table -- a fast, wrong, publishable-looking result.
+#
+# N + 2 is measured, not reasoned. Sweeping max_worker_processes against three
+# worker counts on the bench, the smallest value that loaded every row was:
+#
+#     workers 2 -> 4      workers 4 -> 6      workers 8 -> 10
+#
+# and one below each failed on the LAST loader with the table left empty.
+check "the stock 8 is refused for an 8-worker arm, which is the case that bit us" \
+	"$(cb_worker_slots_ok 8 8 && echo ok || echo refused)" "refused"
+check "N + 1 is still refused: the coordinator needs a slot too" \
+	"$(cb_worker_slots_ok 9 8 && echo ok || echo refused)" "refused"
+check "N + 2 is accepted, the measured minimum" \
+	"$(cb_worker_slots_ok 10 8 && echo ok || echo refused)" "ok"
+check "more than enough is accepted" \
+	"$(cb_worker_slots_ok 32 8 && echo ok || echo refused)" "ok"
+check "the rule holds at another worker count (4 needs 6)" \
+	"$(cb_worker_slots_ok 6 4 && echo ok || echo refused)" "ok"
+check "and one below it does not" \
+	"$(cb_worker_slots_ok 5 4 && echo ok || echo refused)" "refused"
+
+# A serial arm registers no workers at all.
+check "a serial arm needs no worker slots" \
+	"$(cb_worker_slots_ok 0 0 && echo ok || echo refused)" "ok"
+
+# Non-numeric input must be refused rather than compared. A psql that failed
+# yields an empty string, and "" -ge "" is not a comparison anyone wants.
+check "a missing current value is refused, not compared" \
+	"$(cb_worker_slots_ok "" 8 && echo ok || echo refused)" "refused"
+
+wmsg="$(cb_worker_slots_message 8 8)"
+check "the worker-slot message names the setting" \
+	"$([ "$(grep -c 'max_worker_processes' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+check "and the value it must reach, not merely the worker count" \
+	"$([ "$(grep -c '10' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+check "and says it needs a restart" \
+	"$([ "$(grep -ci 'restart' <<<"$wmsg")" -ge 1 ] && echo yes || echo no)" "yes"
+
 # The message is the deliverable here: the operator has to know WHAT to set and
 # that it costs a restart. A bare "failed" sends them to the load log, which
 # reports a per-worker error and not the cause.
@@ -129,6 +173,49 @@ check "a host that could not drop the page cache is not called a cold run" \
 # the wrong output this check exists to catch.
 check "and the tag says plainly that the run was warm" \
 	"$(grep -q 'WARM-RUN' <<<"$tag_none" && echo yes || echo no)" "yes"
+
+# ---- a win is decided on the times, not on the printed string (#531) --------
+#
+# The defect: the report counted wins from the "%.2f" ratio it had already
+# formatted for the table, so columnar ahead by less than half a percent printed
+# 1.00, failed `r < 1`, and was counted a LOSS -- against the legend printed
+# directly above it. The 2026-08-09 run reported 33 wins and 10 losses where the
+# times give 36 and 7.
+#
+# The three numbers below are that run's q13, the smallest real case: heap
+# 1588.095 ms, columnar 1582.859 ms, and a warm-try scatter of 0.99 percent.
+check "premise: the verdict helpers are present to be judged" \
+	"$(type -t cb_verdict)/$(type -t cb_warm_spread)/$(type -t cb_band)" \
+	"function/function/function"
+
+check "a clear win is a win" "$(cb_verdict 500 1000 0.02)" "win"
+check "a clear loss is a loss" "$(cb_verdict 2000 1000 0.02)" "loss"
+# The regression case, stated as the defect: rounding to 1.00 must not flip the
+# sign of the verdict. With no band this is a win; it must never be a loss.
+check "columnar ahead by 0.33 percent is not a LOSS, which is the #531 defect" \
+	"$(cb_verdict 1582.859 1588.095 0.0000)" "win"
+check "and under a band wider than the gap it is a tie, not a win either" \
+	"$(cb_verdict 1582.859 1588.095 0.0099)" "tie"
+check "a gap just outside the band is still called" \
+	"$(cb_verdict 900 1000 0.05)" "win"
+check "and a loss just outside it likewise" \
+	"$(cb_verdict 1100 1000 0.05)" "loss"
+
+# Scatter is measured from the tries, and an unknown scatter must not read as
+# zero: "-" through cb_band must suppress the verdict rather than license a
+# strict comparison on an arm nobody measured twice.
+check "spread is the fractional range over the best" "$(cb_warm_spread 100 103)" "0.0300"
+check "order does not matter, and ERR tries are dropped" \
+	"$(cb_warm_spread 103 100 ERR)" "0.0300"
+check "a single warm try has no measurable scatter" "$(cb_warm_spread 100)" "0.0000"
+check "no usable try yields no spread, not zero" "$(cb_warm_spread '' ERR)" "-"
+check "a zero best is refused rather than divided by" "$(cb_warm_spread 0 5)" "-"
+check "the band is the wider of the two arms" "$(cb_band 0.0100 0.0290)" "0.0290"
+check "and is unknown if either arm is unknown" "$(cb_band - 0.0290)" "-"
+check "an unknown band suppresses the verdict, it does not strict-compare" \
+	"$(cb_verdict 1582.859 1588.095 -)" "-"
+check "an errored arm has no verdict" "$(cb_verdict ERR 1000 0.02)" "-"
+check "and neither does a zero baseline" "$(cb_verdict 500 0 0.02)" "-"
 
 echo
 echo "checks run: $PGC_CHECKS"

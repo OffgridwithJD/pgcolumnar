@@ -73,7 +73,7 @@ PG_FUNCTION_INFO_V1(pgcolumnar_vm_is_visible);
  *		only the VM fork -- there is no heap page to flag -- which is why it does
  *		not go through visibilitymap_set().
  */
-void
+static void
 PgColumnarVMSetVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;
@@ -112,7 +112,7 @@ PgColumnarVMSetVisible(Relation rel, BlockNumber blk)
  *		Clear the all-visible (and all-frozen) bits for `blk`, WAL-logged. Used
  *		by write paths so a modified range is never reported all-visible.
  */
-void
+static void
 PgColumnarVMClearVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;
@@ -173,7 +173,7 @@ PgColumnarVMClearForRow(Relation rel, uint64 rowNumber)
  *		True if `blk` is marked all-visible in the VM fork. Thin wrapper over the
  *		stock reader (the same call the index-only-scan executor makes).
  */
-bool
+static bool
 PgColumnarVMIsVisible(Relation rel, BlockNumber blk)
 {
 	Buffer		vmbuf = InvalidBuffer;

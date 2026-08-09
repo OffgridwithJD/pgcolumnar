@@ -29,36 +29,6 @@
 #endif
 
 /*
- * PgColumnarCodecAvailable
- *		Whether a compression type can be produced by this binary. none and
- *		pglz are always available; lz4 and zstd depend on the build.
- */
-bool
-PgColumnarCodecAvailable(int compressionType)
-{
-	switch (compressionType)
-	{
-		case COLUMNAR_COMPRESSION_NONE:
-		case COLUMNAR_COMPRESSION_PGLZ:
-			return true;
-		case COLUMNAR_COMPRESSION_LZ4:
-#ifdef HAVE_LIBLZ4
-			return true;
-#else
-			return false;
-#endif
-		case COLUMNAR_COMPRESSION_ZSTD:
-#ifdef HAVE_LIBZSTD
-			return true;
-#else
-			return false;
-#endif
-		default:
-			return false;
-	}
-}
-
-/*
  * try_pglz
  *		Compress with PostgreSQL's builtin pglz. Returns the compressed length
  *		on success (always < rawLen because we use the "always" strategy and

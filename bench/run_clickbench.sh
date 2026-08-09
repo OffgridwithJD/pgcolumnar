@@ -423,7 +423,17 @@ if [ "$CB_PCOPY_WORKERS" -gt 0 ]; then
 		cb_prepared_xacts_message "$CB_PREPARED" "$CB_PCOPY_WORKERS" >&2
 		die "the parallel arm cannot run; set PGC_CB_PCOPY_WORKERS=0 to skip it"
 	fi
-	note "   parallel arm: $CB_PCOPY_WORKERS workers, max_prepared_transactions=$CB_PREPARED"
+	# The other setting that costs a restart, and the one that actually bit:
+	# parallel_copy registers a background worker per loader plus a coordinator,
+	# and the logical replication launcher already holds a slot, so an N-worker
+	# arm needs N + 2. The stock default is 8, so an 8-worker arm fails on it at
+	# "could not register ... loader 7 of 8" and leaves an EMPTY table.
+	CB_WSLOTS=$($PSQL -At -c "SHOW max_worker_processes")
+	if ! cb_worker_slots_ok "$CB_WSLOTS" "$CB_PCOPY_WORKERS"; then
+		cb_worker_slots_message "$CB_WSLOTS" "$CB_PCOPY_WORKERS" >&2
+		die "the parallel arm cannot run; set PGC_CB_PCOPY_WORKERS=0 to skip it"
+	fi
+	note "   parallel arm: $CB_PCOPY_WORKERS workers, max_prepared_transactions=$CB_PREPARED, max_worker_processes=$CB_WSLOTS"
 fi
 
 # ---------------------------------------------------------------------------
@@ -571,6 +581,63 @@ if [ "$CB_PCOPY_WORKERS" -gt 0 ] && [ -n "${ROWS[hits_col]:-}" ]; then
 	fi
 fi
 
+# ---- the Citus bulk arm, so the bulk row compares like with like -----------
+#
+# Citus columnar accepts concurrent writers into one table. Measured on this box:
+# 8 concurrent COPY loaded 4M rows 5.9x faster than one, with every row present.
+# So publishing our 16-worker parallel_copy against their single COPY compares
+# our best path with their non-best one, which is not a comparison worth making
+# and is the specific claim #445 was opened about.
+#
+# The split is OURS -- pgcolumnar.file_split_offsets, the same newline-aligned
+# byte boundaries parallel_copy gives its own loaders -- so the two bulk arms
+# differ in the engine and not in how the file was divided. FROM PROGRAM feeds
+# each connection its range without copying a 15 GB file N times.
+if [ "$CB_PCOPY_WORKERS" -gt 0 ] && [ -n "${ROWS[hits_citus]:-}" ]; then
+	cz_tbl=hits_citus_pcopy
+	$PSQL -c "DROP TABLE IF EXISTS $cz_tbl;" >/dev/null 2>&1
+	ddl_for "$cz_tbl" "USING columnar" | $PSQL -v ON_ERROR_STOP=1 >/dev/null 2>"$CB_DATA/ddl.czpcopy.err"
+	if [ -s "$CB_DATA/ddl.czpcopy.err" ]; then
+		head -5 "$CB_DATA/ddl.czpcopy.err"; die "citus bulk arm DDL failed"
+	fi
+	read -r -a cz_off <<<"$($PSQL -At -c \
+		"SELECT array_to_string(pgcolumnar.file_split_offsets('$TSV', $CB_PCOPY_WORKERS), ' ')")"
+	if [ "${#cz_off[@]}" -ne "$((CB_PCOPY_WORKERS + 1))" ]; then
+		die "file_split_offsets returned ${#cz_off[@]} offsets for $CB_PCOPY_WORKERS workers"
+	fi
+	t0=$(date +%s.%N)
+	cz_rc=0
+	for ((i = 0; i < CB_PCOPY_WORKERS; i++)); do
+		start=${cz_off[$i]}
+		len=$(( ${cz_off[$((i + 1))]} - start ))
+		[ "$len" -gt 0 ] || continue
+		# tail -c is 1-based from the start of the file.
+		$PSQL -v ON_ERROR_STOP=1 -c \
+			"\\copy $cz_tbl FROM PROGRAM 'tail -c +$((start + 1)) $TSV | head -c $len'" \
+			>> "$CB_DATA/load.czpcopy.log" 2>&1 || cz_rc=1 &
+	done
+	wait
+	[ "$cz_rc" = 0 ] || { tail -10 "$CB_DATA/load.czpcopy.log"; die "the citus bulk arm failed; it is not reported as a fast load"; }
+	$PSQL -c "VACUUM ANALYZE $cz_tbl;" >/dev/null 2>&1
+	t1=$(date +%s.%N)
+	LOAD_S[citus_pcopy]=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+	ROWS[citus_pcopy]=$($PSQL -At -c "SELECT count(*) FROM $cz_tbl")
+	SIZE_B[citus_pcopy]=$($PSQL -At -c "SELECT pg_total_relation_size('$cz_tbl')")
+	note "   citus_pcopy (${CB_PCOPY_WORKERS}w): ${LOAD_S[citus_pcopy]}s, ${ROWS[citus_pcopy]} rows, ${SIZE_B[citus_pcopy]} bytes"
+
+	# Same assertion as the pgcolumnar bulk arm, for the same reason: an arm that
+	# errored leaves an empty table and returns fast, which reads as a win.
+	if cb_rows_ok "${ROWS[citus_pcopy]}" "$TSV_ROWS"; then
+		printf 'ok     premise: %s\n' "the citus bulk arm loaded every row of the file"
+	else
+		printf 'FAIL   premise: %s (got [%s] want [%s])\n' \
+			"the citus bulk arm loaded every row of the file" \
+			"${ROWS[citus_pcopy]}" "$TSV_ROWS" >&2
+		fail=1
+	fi
+fi
+
+
 # Every arm must hold the same rows as the file. A load that silently dropped
 # rows makes every query below faster and wrong.
 for arm in "${ARMS[@]}"; do
@@ -706,7 +773,7 @@ grouped_engaged() {  # grouped_engaged <arm> <sql>
 		grep -qi 'Vectorized Group Keys' && echo yes || echo no
 }
 
-declare -A COLD HOT ERRS
+declare -A COLD HOT ERRS WARMSPREAD
 : > "$CB_DATA/query_errors.log"
 : > "$CB_DATA/raw_timings.tsv"
 
@@ -735,6 +802,10 @@ while IFS= read -r sql; do
 			fi
 		done
 		HOT["$qn:$arm"]="${best:-ERR}"
+		# The scatter of the warm tries, kept because it is the only estimate of
+		# this run's own resolution that the run produces. "$@" is already the
+		# warm set: the shift above dropped the cold try.
+		WARMSPREAD["$qn:$arm"]=$(cb_warm_spread "$@")
 		case "${COLD["$qn:$arm"]}${HOT["$qn:$arm"]}" in
 			*ERR*) ERRS["$arm"]=$(( ${ERRS["$arm"]:-0} + 1 )) ;;
 		esac
@@ -765,6 +836,13 @@ done
 if [ -n "${LOAD_S[columnar_pcopy]:-}" ]; then
 	printf '%-16s %12s %16s %10s\n' "columnar_pcopy" \
 		"${LOAD_S[columnar_pcopy]}" "${SIZE_B[columnar_pcopy]}" "-"
+fi
+# Printed beside columnar_pcopy, because the bulk row is only worth reading as a
+# pair. A bulk number for one engine against a serial number for the other is the
+# comparison this arm exists to stop.
+if [ -n "${LOAD_S[citus_pcopy]:-}" ]; then
+	printf '%-16s %12s %16s %10s\n' "citus_pcopy" \
+		"${LOAD_S[citus_pcopy]}" "${SIZE_B[citus_pcopy]}" "-"
 	printf '   parallel_copy with %s workers, beside the serial number above; both are the point\n' \
 		"$CB_PCOPY_WORKERS"
 fi
@@ -773,7 +851,7 @@ echo "-- hot times, milliseconds. 'x' is columnar over heap; above 1.00 means we
 printf '%-6s' query
 for arm in "${ARMS[@]}"; do printf ' %14s' "$arm"; done
 printf ' %10s %10s\n' 'col/heap' 'tuned/heap'
-wins=0; losses=0
+wins=0; losses=0; ties=0; tielist=""
 for q in $(seq 1 "$qn"); do
 	printf 'q%-5s' "$q"
 	for arm in "${ARMS[@]}"; do printf ' %14s' "${HOT["$q:$arm"]}"; done
@@ -782,15 +860,23 @@ for q in $(seq 1 "$qn"); do
 	c="${HOT["$q:columnar"]:-}"
 	tu="${HOT["$q:columnar_tuned"]:-}"
 	r1=$(ratio "$c" "$h")
-	if [ "$r1" != "-" ]; then
-		if [ "$(awk -v r="$r1" 'BEGIN { print (r < 1) ? 1 : 0 }')" = 1 ]; then
-			wins=$((wins + 1)); else losses=$((losses + 1)); fi
-	fi
+	# Counted from the times, NOT from r1. r1 is rounded for the table, and
+	# rounding a comparison decides sub-percent differences by typography.
+	band=$(cb_band "${WARMSPREAD["$q:heap"]:--}" "${WARMSPREAD["$q:columnar"]:--}")
+	case "$(cb_verdict "$c" "$h" "$band")" in
+		win)  wins=$((wins + 1)) ;;
+		loss) losses=$((losses + 1)) ;;
+		tie)  ties=$((ties + 1)); tielist="$tielist q$q" ;;
+	esac
 	r2=$(ratio "$tu" "$h")
 	printf ' %10s %10s\n' "$r1" "$r2"
 done
 echo
-echo "columnar beats heap on $wins queries and loses on $losses, at defaults."
+echo "columnar beats heap on $wins queries, ties on $ties, and loses on $losses, at defaults."
+if [ "$ties" -gt 0 ]; then
+	echo "   tie:$tielist -- the two arms are closer than the run-to-run scatter of"
+	echo "   their own warm tries, so this run cannot separate them in either direction."
+fi
 if [ -s "$CB_DATA/query_errors.log" ]; then
 	echo
 	echo "-- queries that errored, which are reported and NOT dropped:"

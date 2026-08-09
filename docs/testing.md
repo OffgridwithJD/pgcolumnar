@@ -313,6 +313,41 @@ x86_64 cannot see. x86_64 puts stores in a more strict order than aarch64. Thus 
 missing barrier in concurrent code can be invisible on one architecture and a
 defect on the other. The suites that would show it must run.
 
+### What the sanitizer gate cannot see
+
+A green sanitizer run does not mean there is no over-read. AddressSanitizer
+reports a read past an **allocation**. `palloc` sub-allocates chunks out of an
+8 KB block. The sanitizer sees that block as one live object. So a read past a
+chunk's logical end usually lands inside the block. That memory is allocated and
+addressable, and the read is not reported. Detection depends on where in its
+block the chunk happened to sit.
+
+Measured on the instrumented build. The injected read is one byte past a
+`palloc(8)`:
+
+| the chunk sat | ASAN | Valgrind, `USE_VALGRIND` build |
+| --- | --- | --- |
+| at the end of its 8 KB block | reports | reports |
+| interior to its block | **silent** | reports |
+
+This is structural, not a configuration mistake. PostgreSQL has no ASAN poisoning
+hooks. `aset.c` marks chunk padding for Valgrind with
+`VALGRIND_MAKE_MEM_NOACCESS`, and AddressSanitizer has no equivalent. A
+`USE_VALGRIND` build under memcheck does see these reads. It is the right
+instrument for a decode-path audit. It is not in CI, because it is far too slow
+for one.
+
+One class no memory tool can report is a read that stays **inside** an allocated
+buffer. `bitunpack` receives a pointer into a larger `palloc`'d blob. A modest
+over-read of the packed body lands in that same chunk. It produces wrong values
+rather than a fault. That is not a memory error, so nothing flags it.
+
+The consequence for review is narrow but important. A clean sanitizer run is not
+evidence that a bounds calculation is correct. What protects those is the
+arithmetic itself, and the reference oracles described under the differential
+oracle above. Read "ASAN clean" as its true meaning: no use-after-free, no escape
+from the allocation, and no alignment fault.
+
 **On documentation changes** (`.github/workflows/docs.yml`): builds and publishes
 the site at
 [commandprompt.github.io/pgcolumnar](https://commandprompt.github.io/pgcolumnar/).
