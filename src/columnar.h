@@ -671,6 +671,8 @@ extern void PgColumnarReadStats(PgColumnarReadState *readState,
 							  uint64 *groupsTotal);
 extern uint64 PgColumnarVectorsSkipped(PgColumnarReadState *readState);
 extern uint64 PgColumnarVectorsDecoded(PgColumnarReadState *readState);
+extern uint64 PgColumnarVectorDecodes(PgColumnarReadState *readState);
+extern uint64 PgColumnarVectorsRuledOutByValue(PgColumnarReadState *readState);
 
 /*
  * How many of the scan keys the reader was handed became skip predicates it can
@@ -936,6 +938,24 @@ typedef struct PgColumnarGroupStats
 	 * decoded", and no counter could tell those apart until this one.
 	 */
 	uint64		vectorsDecoded;
+
+	/*
+	 * Vector decodes as (vector, column) PAIRS, where vectorsDecoded above counts
+	 * vector POSITIONS. Two quantities, two labels (#493). Positions cannot see
+	 * #452 phase 1b-ii at all: exact selection leaves the qual column decoded at
+	 * every position and saves the payload columns, so the max across columns
+	 * does not move while the work done falls by a factor of the column count.
+	 */
+	uint64		vectorDecodes;
+
+	/*
+	 * The subset of vectorsSkipped that exact selection ruled out (#452 phase
+	 * 1b-ii), as opposed to the zone maps. Separate because "Vectors Skipped"
+	 * alone stopped being one quantity the moment a second mechanism could set
+	 * a bit in the same mask, and a reader cannot tell a zone map win from an
+	 * exact-selection win without it (#493).
+	 */
+	uint64		vectorsRuledOutByValue;
 } PgColumnarGroupStats;
 
 extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);

@@ -149,6 +149,8 @@ struct PgColumnarReadState
 	int			nativeCurVec;		/* vector containing rowInGroup */
 	uint64		vectorsSkipped;		/* for EXPLAIN */
 	uint64		vectorsDecoded;		/* for EXPLAIN; see PgColumnarGroupStats */
+	uint64		vectorDecodes;		/* (vector, column) pairs; see PgColumnarGroupStats */
+	uint64		vectorsRuledOutByValue;	/* subset of vectorsSkipped; #452 1b-ii */
 
 	/*
 	 * Late materialization (#452 Phase 1a). Rows whose qual columns were decoded,
@@ -975,6 +977,192 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 }
 
 /*
+ * native_is_qual_column
+ *		Does any pushed-down predicate read this column? Decode order depends on
+ *		it: qual columns must be decoded before exact selection can run, payload
+ *		columns after, or there is nothing left to save.
+ */
+static bool
+native_is_qual_column(PgColumnarReadState *rs, int col)
+{
+	int			p;
+
+	for (p = 0; p < rs->numPredicates; p++)
+		if (rs->predicates[p].attidx == col)
+			return true;
+	return false;
+}
+
+/*
+ * native_value_satisfies
+ *		Does one decoded value satisfy one pushed-down predicate? The mirror of
+ *		native_zone_excludes below, which asks the same question of a min/max pair
+ *		rather than of a value.
+ *
+ *		Column first and constant second, like every other comparison here. The
+ *		argument order is part of a cross-type proc's signature and getting it
+ *		backwards is #477.
+ *
+ *		An unrecognised strategy returns true: "cannot rule this out" is the only
+ *		safe answer, because the caller turns a false into a skipped vector.
+ */
+static bool
+native_value_satisfies(SkipPredicate *pred, Datum val)
+{
+	int32		c = DatumGetInt32(FunctionCall2Coll(&pred->cmpFn, pred->collation,
+													val, pred->compareValue));
+
+	switch (pred->strategy)
+	{
+		case BTLessStrategyNumber:
+			return (c < 0);
+		case BTLessEqualStrategyNumber:
+			return (c <= 0);
+		case BTEqualStrategyNumber:
+			return (c == 0);
+		case BTGreaterEqualStrategyNumber:
+			return (c >= 0);
+		case BTGreaterStrategyNumber:
+			return (c > 0);
+		default:
+			return true;
+	}
+}
+
+/*
+ * pgcolumnar_native_refine_skipvec
+ *		Extend the skip vector from "the zone maps could not rule this vector out"
+ *		to "no row in it actually matches" (#452 phase 1b-ii).
+ *
+ *		Called between the two decode passes: the qual columns are decoded, the
+ *		payload columns are not yet, so a vector ruled out here costs the payload
+ *		columns nothing. That ordering IS the optimisation. Run it after both
+ *		passes and it saves nothing at all.
+ *
+ *		Predicates are grouped BY COLUMN and evaluated conjunctively within a
+ *		column: a row keeps the vector alive only if it satisfies EVERY predicate
+ *		on that column. Evaluating them one at a time instead is sound but
+ *		useless, and uselessly in exactly the shape this is for -- `BETWEEN 51 AND
+ *		59` is two predicates, and on a column holding multiples of ten some row
+ *		satisfies `>= 51` and some other row satisfies `<= 59`, so neither alone
+ *		is ever unsatisfied and no vector is ever ruled out. Measured that way
+ *		first; it saved nothing.
+ *
+ *		Across columns it stays conservative: a vector is ruled out when SOME
+ *		column's predicates are satisfied by no row in it. It can miss a vector
+ *		where every row fails some predicate but no single column rules it out.
+ *		Missing a skip costs time; taking a wrong one would cost rows, so the
+ *		asymmetry runs the safe way.
+ *
+ *		A NULL never satisfies a btree comparison, so a NULL row cannot keep a
+ *		vector alive. That matches what the executor does with it.
+ */
+static void
+pgcolumnar_native_refine_skipvec(PgColumnarReadState *rs, int vecCount)
+{
+	MemoryContext scratch;
+	MemoryContext old;
+	int			p;
+
+	if (rs->nativeSkipVec == NULL || rs->nativeVecStart == NULL ||
+		rs->numPredicates == 0 || vecCount <= 0)
+		return;
+
+	scratch = AllocSetContextCreate(CurrentMemoryContext,
+									"columnar exact selection",
+									ALLOCSET_SMALL_SIZES);
+	old = MemoryContextSwitchTo(scratch);
+
+	for (p = 0; p < rs->numPredicates; p++)
+	{
+		int			col = rs->predicates[p].attidx;
+		Form_pg_attribute att;
+		const uint32 *vrl;
+		char	   *cursor;
+		int			v;
+		int			q;
+		bool		seen = false;
+
+		if (col < 0 || col >= rs->natts)
+			continue;
+
+		/* one pass per COLUMN, not per predicate: take the first mention */
+		for (q = 0; q < p; q++)
+			if (rs->predicates[q].attidx == col)
+				seen = true;
+		if (seen)
+			continue;
+		/* not projected, or a baseline chunk with no per-vector structure */
+		if (rs->nativeValueCursor[col] == NULL || rs->nativeVecRawLen[col] == NULL ||
+			rs->nativeValidity[col] == NULL)
+			continue;
+
+		att = TupleDescAttr(rs->tupdesc, col);
+		vrl = rs->nativeVecRawLen[col];
+		cursor = rs->nativeValueCursor[col];
+
+		for (v = 0; v < vecCount; v++)
+		{
+			char	   *vecCur = cursor;
+			uint32		r0 = rs->nativeVecStart[v];
+			uint32		r1 = rs->nativeVecStart[v + 1];
+			uint32		r;
+			bool		any = false;
+
+			/*
+			 * Advance to the next vector BEFORE the skip test. A skipped vector
+			 * still occupies its full raw length; its bytes are simply a hole
+			 * that 1b-i left undecoded, and in an assert build they are poison.
+			 * Reading them is exactly the bug that change was careful about.
+			 */
+			cursor += vrl[v];
+			if (rs->nativeSkipVec[v])
+				continue;
+
+			CHECK_FOR_INTERRUPTS();
+
+			for (r = r0; r < r1; r++)
+			{
+				Datum		val;
+				bool		ok;
+
+				if (!((rs->nativeValidity[col][r >> 3] >> (r & 7)) & 1))
+					continue;	/* NULL: satisfies no btree comparison */
+
+				val = PgColumnarDecodeValue(att, &vecCur, scratch);
+
+				/* every predicate on THIS column, conjunctively */
+				ok = true;
+				for (q = 0; q < rs->numPredicates; q++)
+				{
+					if (rs->predicates[q].attidx != col)
+						continue;
+					if (!native_value_satisfies(&rs->predicates[q], val))
+					{
+						ok = false;
+						break;
+					}
+				}
+				if (ok)
+				{
+					any = true;
+					break;
+				}
+			}
+
+			if (!any)
+			{
+				rs->nativeSkipVec[v] = true;
+				rs->vectorsRuledOutByValue++;
+			}
+		}
+	}
+
+	MemoryContextSwitchTo(old);
+	MemoryContextDelete(scratch);
+}
+
+/*
  * native_zone_excludes
  *		Return true when a zone map's min/max prove that no value in its range can
  *		satisfy the predicate (so the vector or chunk can be skipped). A missing or
@@ -1377,7 +1565,19 @@ pgcolumnar_native_build_skipvec(PgColumnarReadState *rs, uint64 groupNumber, int
 	for (v = 0; v < vecCount; v++)
 		rs->nativeVecStart[v + 1] = rs->nativeVecStart[v] + span[v];
 
-	rs->nativeSkipVec = any ? skip : NULL;
+	/*
+	 * Kept even when the zone maps ruled nothing out, which they usually do not.
+	 *
+	 * This was `any ? skip : NULL`, and returning NULL there was a fair
+	 * optimisation while zone maps were the only thing that could set a bit: an
+	 * all-false mask is pure overhead to consult. Exact selection (#452 phase
+	 * 1b-ii) writes into this same mask AFTER this function returns, and the
+	 * case it exists for is precisely the one where the zone maps found nothing.
+	 * Returning NULL there left it nowhere to write, silently, and the suite
+	 * measured no saving at all.
+	 */
+	rs->nativeSkipVec = skip;
+	(void) any;
 }
 
 /* a half-open span of the row group's bytes, used to build coalesced reads */
@@ -1558,6 +1758,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	int			validityBytes;
 	int			maxVecCount;
 	int			groupVecDecoded;	/* measured in the decode loop, never derived */
+	int			pass;
 	bool		allDescriptor;
 
 	/*
@@ -1697,6 +1898,23 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 		rs->nativeCurVec = 0;
 	}
 
+	/*
+	 * Two passes, and the order is the whole of #452 phase 1b-ii.
+	 *
+	 * Pass 0 decodes only the columns a pushed-down predicate reads. Exact
+	 * selection then evaluates those predicates against the decoded values and
+	 * turns "the zone maps could not rule this vector out" into "no row in it
+	 * matches". Pass 1 decodes everything else against that sharpened mask, so a
+	 * vector holding no matching row costs the payload columns nothing.
+	 *
+	 * Run as one pass, the refinement still produces a correct mask and saves
+	 * exactly nothing, because the payload columns are already decoded by then.
+	 */
+	for (pass = 0; pass < 2; pass++)
+	{
+	if (pass == 1 && allDescriptor)
+		pgcolumnar_native_refine_skipvec(rs, maxVecCount);
+
 	foreach(lc, chunks)
 	{
 		NativeColumnChunkMetadata *cc = (NativeColumnChunkMetadata *) lfirst(lc);
@@ -1706,6 +1924,10 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 		CHECK_FOR_INTERRUPTS();
 
 		if (cc->columnIndex < 0 || cc->columnIndex >= rs->natts)
+			continue;
+
+		/* pass 0 is the qual columns, pass 1 is the rest */
+		if (native_is_qual_column(rs, cc->columnIndex) != (pass == 0))
 			continue;
 
 		/*
@@ -1755,7 +1977,10 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			 */
 			if (vdecoded > groupVecDecoded)
 				groupVecDecoded = vdecoded;
+			/* pairs, so summed across columns rather than maxed */
+			rs->vectorDecodes += (uint64) vdecoded;
 		}
+	}
 	}
 	rs->vectorsDecoded += (uint64) groupVecDecoded;
 
@@ -3368,4 +3593,28 @@ uint64
 PgColumnarVectorsDecoded(PgColumnarReadState *readState)
 {
 	return readState->vectorsDecoded;
+}
+
+/*
+ * PgColumnarVectorDecodes
+ *		How many individual (vector, column) decodes the native scan performed.
+ *		This is the quantity that measures decode WORK; PgColumnarVectorsDecoded
+ *		measures how many row positions were covered. Used by EXPLAIN.
+ */
+uint64
+PgColumnarVectorDecodes(PgColumnarReadState *readState)
+{
+	return readState->vectorDecodes;
+}
+
+/*
+ * PgColumnarVectorsRuledOutByValue
+ *		How many vectors exact selection ruled out by evaluating the pushed-down
+ *		predicates against decoded values, rather than against min/max (#452
+ *		phase 1b-ii). A subset of PgColumnarVectorsSkipped. Used by EXPLAIN.
+ */
+uint64
+PgColumnarVectorsRuledOutByValue(PgColumnarReadState *readState)
+{
+	return readState->vectorsRuledOutByValue;
 }

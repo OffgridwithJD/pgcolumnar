@@ -194,17 +194,74 @@ worse than a specification. Its shape, to rebuild:
 - checks: decoded(narrow) < decoded(wide), and the difference equals the skipped
   count exactly — "fewer" alone would pass on decoding one vector less
 
-### 1b-ii: exact selection, which does need batching
+### 1b-ii: exact selection, which turned out NOT to need batching
 
-To skip decode for vectors holding no *surviving* row, the qual must be evaluated
-before the payload columns are decoded — and the qual can only be evaluated on
-decoded qual columns. So the producer has to work a vector at a time: decode the
-qual columns, evaluate 1024 rows, decode the payload for that vector only if any
-survived, emit.
+**Implemented. The paragraph below this one is what was predicted; the correction
+after it is what the code needed, and it is smaller.**
 
-This is the batching 1a turned out not to need, and it is the larger piece. It is
-also the only one of the two that reaches q24, where the measured budget is the
-~3200 ms 1a leaves behind.
+Predicted: to skip decode for vectors holding no *surviving* row, the qual must
+be evaluated before the payload columns are decoded, and the qual can only be
+evaluated on decoded qual columns. So the producer has to work a vector at a
+time: decode the qual columns, evaluate 1024 rows, decode the payload for that
+vector only if any survived, emit. "This is the batching 1a turned out not to
+need, and it is the larger piece."
+
+**Corrected after 1b-i landed.** No producer restructure was needed, and the
+reason is that 1b-i had already moved the expensive part. Once the skip vector is
+built before the decode loop and decode takes a mask, exact selection is just a
+second pass over the same loop:
+
+1. **Pass 0** decodes only the columns a pushed-down predicate reads.
+2. **Refine** the mask by evaluating those predicates against the decoded values,
+   turning "the zone maps could not rule this vector out" into "no row in it
+   matches".
+3. **Pass 1** decodes everything else against the sharpened mask.
+
+The producer is untouched. It already steps over a set bit, and it does not care
+which mechanism set it.
+
+Three things that were not obvious and cost time:
+
+- **The mask must be allocated even when the zone maps rule nothing out.**
+  `build_skipvec` ended in `rs->nativeSkipVec = any ? skip : NULL`, a fair
+  optimisation while zone maps were the only writer. The case exact selection
+  exists for is exactly the one where `any` is false, so it had nowhere to write
+  and the suite measured no saving at all, silently.
+- **Predicates must be evaluated conjunctively per column.** Evaluating each one
+  independently is sound and useless: `BETWEEN 51 AND 59` is two predicates, and
+  on a column of multiples of ten some row satisfies `>= 51` and another
+  satisfies `<= 59`, so neither is ever unsatisfied and nothing is ever ruled
+  out. Measured that way first.
+- **The counter had to be split.** Exact selection writes into the same mask as
+  the zone maps, so `Columnar Vectors Skipped` stopped being one quantity.
+  `Columnar Vectors Ruled Out by Value` is the subset (#493).
+
+Measured on the suite's fixture, `SELECT *` over six columns, 32 vectors, a
+zero-matching range: **192 vector decodes to 32**, with all 32 vectors ruled out
+by value and none by zone map.
+
+#### The issue's own acceptance case is already solved, by bloom filters
+
+`clienttimezone = 3600` matching zero rows is an **equality**, and the per-chunk
+bloom filter (I7, gap 25) prunes the whole row group for it. Measured: the
+equality form reports `Chunk Groups Removed by Filter: 1` and decodes nothing at
+all. A suite built on it proves nothing about decode, because decode never runs.
+
+So the gap 1b-ii actually closes is **range** predicates that fall in a gap
+between stored values, which bloom cannot answer and min/max cannot bound.
+`test/native_exact_selection.sh` uses `BETWEEN 51 AND 59` on a column of
+multiples of ten for that reason, and asserts the equality form's group pruning
+as a check so that a later "simplification" back to `z = 51` cannot silently stop
+testing anything.
+
+#### What this does NOT do for q24
+
+Nothing. q24's qual is a leading-wildcard `LIKE`, which is not admitted as a
+`SkipPredicate` at all, so `numPredicates` is 0, there is no mask, and exact
+selection has nothing to evaluate. **The ~3200 ms budget on q24 remains
+unclaimed**, and reaching it needs text predicates admitted to the reader (#426)
+or the per-row qual-first materialisation of 1a extended to skip whole vectors.
+Neither is this change.
 
 **Order matters:** 1b-i first, because it is small, independently valuable, and
 its mask plumbing is what 1b-ii extends from zone-map-derived to

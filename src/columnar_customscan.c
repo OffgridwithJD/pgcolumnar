@@ -2188,6 +2188,10 @@ PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats, ExplainState *es)
 	 */
 	ExplainPropertyInteger("Columnar Vectors Decoded", NULL,
 						   (int64) stats->vectorsDecoded, es);
+	ExplainPropertyInteger("Columnar Vector Decodes", NULL,
+						   (int64) stats->vectorDecodes, es);
+	ExplainPropertyInteger("Columnar Vectors Ruled Out by Value", NULL,
+						   (int64) stats->vectorsRuledOutByValue, es);
 }
 
 /* -------------------------------------------------------------------------
@@ -2318,6 +2322,8 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		gs.groupsRemoved = groupsSkipped;
 		gs.vectorsSkipped = PgColumnarVectorsSkipped(cstate->readState);
 		gs.vectorsDecoded = PgColumnarVectorsDecoded(cstate->readState);
+		gs.vectorDecodes = PgColumnarVectorDecodes(cstate->readState);
+		gs.vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(cstate->readState);
 		PgColumnarExplainGroupStats(&gs, es);
 
 		/*

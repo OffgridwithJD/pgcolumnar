@@ -206,9 +206,30 @@ POISONQ="SELECT count(*), sum(v) FROM n WHERE id BETWEEN -2000000000 AND 3000"
 check "premise: the poison-accepting range reaches the fold" \
 	"$(fold_plan "$POISONQ" | grep -oE 'Columnar Batch Fold: [a-z]+' | head -1)" \
 	"Columnar Batch Fold: yes"
-check "premise: and it still skips vectors, or there is no hole to read" \
-	"$([ "$(counter_in "$(explain_of "SELECT id FROM n WHERE id BETWEEN -2000000000 AND 3000")" 'Columnar Vectors Skipped')" -gt 0 ] && echo yes || echo no)" \
-	"yes"
+# Measured on the FOLD plan, not on a bare projection beside it.
+#
+# This premise used to read "Columnar Vectors Skipped" off
+# "SELECT id FROM n WHERE ...", a scalar-arm plan, and infer that the fold arm
+# skipped too. That inference is true today because both arms share one decode,
+# but it makes the premise for a fold check a measurement of a different plan.
+# It is also unfixable in its own terms: Vectors Skipped reads 0 on the fold arm
+# whatever happens, because it is incremented in the row-production path the fold
+# never enters (#542).
+#
+# "Columnar Vectors Decoded" does report correctly on the fold arm, so the
+# premise is now a direct statement about the plan under test. Ids 1..3000 live
+# in the first three vectors of 1024, so three is the whole of what this query
+# needs and the other 29 are the saving.
+FOLD_DEC="$(counter_in "$(fold_plan "$POISONQ")" 'Columnar Vectors Decoded')"
+check "premise: the FOLD ARM really decodes only the vectors it needs" "$FOLD_DEC" "3"
+
+# The counter must be capable of reading high on this arm, or the check above is
+# satisfied by a number that is simply always small. This is the case that would
+# catch a fold which silently stopped skipping and decoded everything: it would
+# return the right answer, read no poison, and fail nothing else we assert.
+check "control: and the same counter reads every vector when nothing is skipped" \
+	"$(counter_in "$(fold_plan 'SELECT count(*), sum(v) FROM n WHERE id >= 0')" 'Columnar Vectors Decoded')" \
+	"32"
 check "the fold does not count rows from a vector it never decoded" \
 	"$(fold_run "$POISONQ")" \
 	"$(q 'SELECT count(*), sum(v) FROM h WHERE id BETWEEN -2000000000 AND 3000;')"

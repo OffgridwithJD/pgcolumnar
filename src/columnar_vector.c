@@ -597,6 +597,8 @@ typedef struct PgColumnarAggScanState
 	uint64		groupsSkipped;
 	uint64		vectorsSkipped;
 	uint64		vectorsDecoded;
+	uint64		vectorDecodes;
+	uint64		vectorsRuledOutByValue;
 	uint64		groupsTotal;
 
 	/*
@@ -700,6 +702,8 @@ typedef struct PgColumnarGroupAggScanState
 	uint64		groupsSkipped;
 	uint64		vectorsSkipped;
 	uint64		vectorsDecoded;
+	uint64		vectorDecodes;
+	uint64		vectorsRuledOutByValue;
 	uint64		groupsTotal;
 	int			usablePreds;	/* of npreds, how many can exclude (#479) */
 } PgColumnarGroupAggScanState;
@@ -3332,6 +3336,8 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
+	state->vectorDecodes = PgColumnarVectorDecodes(rs);
+	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 	PgColumnarEndRead(rs);
@@ -3468,6 +3474,8 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 		state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
+	state->vectorDecodes = PgColumnarVectorDecodes(rs);
+	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
 		state->haveStats = true;
 	}
 
@@ -3626,6 +3634,8 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 		gs.groupsRemoved = state->groupsSkipped;
 		gs.vectorsSkipped = state->vectorsSkipped;
 		gs.vectorsDecoded = state->vectorsDecoded;
+		gs.vectorDecodes = state->vectorDecodes;
+		gs.vectorsRuledOutByValue = state->vectorsRuledOutByValue;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
@@ -4189,6 +4199,8 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
 	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
+	state->vectorDecodes = PgColumnarVectorDecodes(rs);
+	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
 	state->haveStats = true;
 
 	PgColumnarEndRead(rs);
@@ -4310,6 +4322,8 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 		gs.groupsRemoved = state->groupsSkipped;
 		gs.vectorsSkipped = state->vectorsSkipped;
 		gs.vectorsDecoded = state->vectorsDecoded;
+		gs.vectorDecodes = state->vectorDecodes;
+		gs.vectorsRuledOutByValue = state->vectorsRuledOutByValue;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
