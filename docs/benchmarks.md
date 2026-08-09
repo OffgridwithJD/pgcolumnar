@@ -772,8 +772,10 @@ that. The benchmark definition they came from is the licensed material. The full
 list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
 of 2026-08-06.
 
-The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
-non-assert, 16 cores, 62 GB of memory, and 11,110,833 rows. That row count is
+Two runs are recorded below. The 2026-08-08 run is the current one and adds a
+Citus arm and the parallel loader. The 2026-08-05 run is kept because its query
+analysis has not been repeated. Both used PostgreSQL 18.4 non-assert, 16 cores,
+62 GB of memory, and 11,110,833 rows. That row count is
 every ninth row of the real 100 million row table. The reported time is the best
 of two hot runs, which is what ClickBench reports.
 
@@ -792,7 +794,69 @@ clusters perfectly on the filtered columns. That flatters columnar storage
 heavily. The harness therefore samples with a stride, and it fails the run if the
 loaded sample is degenerate.
 
-### Storage and load
+### The 2026-08-08 run: three arms, and the load result is about which path you use
+
+This run adds a Citus columnar arm and the parallel loader. It is also the first
+run that can cite the definition digest recorded above. Upstream has not changed
+since: `create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
+
+Conditions: PostgreSQL 18.4 non-assert, 16 cores, 62 GB, 11,110,833 rows, three
+tries per query, arms interleaved per query. Citus columnar was co-loaded in the
+same cluster, which became possible when the custom scan names stopped colliding.
+
+| arm | load | total relation size |
+| --- | ---: | ---: |
+| heap | 139.1 s | 7,818,592,256 bytes |
+| columnar, serial `COPY` | 437.7 s | 1,479,745,536 bytes |
+| citus columnar | 182.5 s | 1,662,558,208 bytes |
+| columnar, `pgcolumnar.parallel_copy` with 16 workers | 90.9 s | 1,478,057,984 bytes |
+
+Read the load rows together rather than separately. On the single connection path
+columnar is 2.40 times slower than Citus. On the bulk path it is 2.01 times
+faster than Citus and 1.53 times faster than heap. The stored table is 11 percent
+smaller than Citus and 5.3 times smaller than heap. A statement about ingest
+speed that names only one of those two paths is incomplete.
+
+Query latency, hot times, same run:
+
+| arm | total across 43 queries | geometric mean against heap |
+| --- | ---: | ---: |
+| heap | 152.3 s | |
+| columnar | 123.3 s | 0.49 |
+| citus columnar | 256.9 s | 0.25 against citus |
+
+Columnar is faster than heap on 35 of the 43 queries and faster than Citus on 39
+of 43.
+
+All eight losses against heap read wide text, and the loss tracks how many
+columns the query materialises rather than the cost of its predicate:
+
+| query | columns touched | heap | columnar | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| q29 | 1 | 8156.7 ms | 8824.0 ms | 1.08 |
+| q21 | 1 | 695.1 ms | 1202.1 ms | 1.73 |
+| q22 | 2 | 846.4 ms | 1274.8 ms | 1.51 |
+| q28 | 2 | 692.1 ms | 1227.3 ms | 1.77 |
+| q23 | 4 | 772.3 ms | 1877.9 ms | 2.43 |
+| q24 | 105 | 707.5 ms | 6007.1 ms | 8.49 |
+
+The baselines are printed beside the ratios deliberately. A 1.08 on an 8,157 ms
+baseline and a 1.73 on a 695 ms baseline are not comparable quantities. Query q29
+is the clearest evidence for the ordering. It does the most expensive per value
+work of the six, a regular expression rather than a substring search, on a single
+column. It is also the smallest loss on the board.
+
+Every one of these predicates has a leading wildcard, so no minimum and maximum
+statistic can prune it however the operator is admitted. They are all the late
+materialisation problem, issue #452, and none of them is addressed by pushing
+text predicates down.
+
+Two limits on this table. Every arm was vacuumed and analyzed after loading, so
+these are vacuumed state numbers. For a columnar table that is not the normal
+state, because autovacuum cannot reach it. The columnar arm also runs with the
+analytical accelerators off, which is what a user gets by default.
+
+### The 2026-08-05 run: storage and load
 
 | arm | load | total relation size |
 | --- | ---: | ---: |
