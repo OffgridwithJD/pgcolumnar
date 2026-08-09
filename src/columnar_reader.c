@@ -158,6 +158,16 @@ struct PgColumnarReadState
 	uint64		rowsFilteredEarly;
 
 	/*
+	 * Did loading this group skip the DECODE of any vector (#512)?
+	 *
+	 * False always, today: pgcolumnar_native_decode_chunk takes no skip mask and
+	 * produces every vector. It exists so the batch fold can refuse a group it
+	 * cannot read safely the day that changes -- see PgColumnarReadFoldGroupInfo
+	 * and the check in columnar_vector.c.
+	 */
+	bool		decodeSkippedVectors;
+
+	/*
 	 * Native delete visibility (Phase D6b): the current row group's combined
 	 * delete mask (one bit per row-in-group, set = deleted), from
 	 * pgcolumnar.delete_vector keyed by group number. NULL when the group has no
@@ -1931,13 +1941,14 @@ PgColumnarReadFoldNextGroup(PgColumnarReadState *readState)
 void
 PgColumnarReadFoldGroupInfo(PgColumnarReadState *readState, uint64 *nrows,
 						  const char **deleteMask, uint32 *deleteMaskLen,
-						  const bool **skipVec, const uint32 **vecStart,
+						  const bool **skipVec, bool *decodeSkipped, const uint32 **vecStart,
 						  int *vectorCount)
 {
 	*nrows = readState->groupRowCount;
 	*deleteMask = readState->nativeDeleteMask;
 	*deleteMaskLen = readState->nativeDeleteMaskLen;
 	*skipVec = readState->nativeSkipVec;
+	*decodeSkipped = readState->decodeSkippedVectors;
 	*vecStart = readState->nativeVecStart;
 	*vectorCount = readState->nativeVectorCount;
 }
