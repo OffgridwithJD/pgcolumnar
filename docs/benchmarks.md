@@ -812,10 +812,18 @@ same cluster, which became possible when the custom scan names stopped colliding
 | columnar, `pgcolumnar.parallel_copy` with 16 workers | 90.9 s | 1,478,057,984 bytes |
 
 Read the load rows together rather than separately. On the single connection path
-columnar is 2.40 times slower than Citus. On the bulk path it is 2.01 times
-faster than Citus and 1.53 times faster than heap. The stored table is 11 percent
-smaller than Citus and 5.3 times smaller than heap. A statement about ingest
-speed that names only one of those two paths is incomplete.
+columnar is 2.40 times slower than Citus. The parallel loader is 1.53 times
+faster than heap and 4.8 times faster than our own serial path. The stored table
+is 11 percent smaller than Citus and 5.3 times smaller than heap.
+
+**The parallel row must not be compared with the Citus row.** Citus also accepts
+concurrent writers into one columnar table, and it scales well. This was measured
+on a separate fixture of four million rows and three columns. Eight concurrent
+`COPY` sessions took Citus from 3.06 s to 0.51 s, a 5.9 times speedup. Our
+parallel loader scaled 4.2 times on the same fixture. Comparing our sixteen
+worker path against their single connection path is not a like for like
+comparison, and this table does not draw one. A fair bulk comparison needs a
+Citus bulk arm in the harness, and that arm does not exist yet.
 
 Query latency, hot times, same run:
 
