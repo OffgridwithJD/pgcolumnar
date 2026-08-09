@@ -77,6 +77,7 @@ fi
 FUZZ_ITERS="${PGC_SAN_FUZZ_ITERS:-200}"
 SUITES="${PGC_SAN_SUITES:-smoke native_writer native_roundtrip native_encoding \
 	native_zonemap write_fsst_compressed write_minmax_fastpath encode_effort \
+	encode_invariants \
 	native_dml native_skip native_fetch_position native_fetch_cache \
 	arrow_import arrow_export parquet_import parquet_export native_read_parquet \
 	native_parquet_schema hardening corruption differential fuzz_arrow fuzz_parquet}"
