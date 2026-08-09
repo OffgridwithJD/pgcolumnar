@@ -373,10 +373,7 @@ extern uint64 PgColumnarItemPointerToRowNumber(ItemPointer tid);
 /* -------------------------------------------------------------------------
  * visibility map for index-only scans (pgcolumnar_visibilitymap.c, gap 28)
  * ------------------------------------------------------------------------- */
-extern void PgColumnarVMSetVisible(Relation rel, BlockNumber blk);
-extern void PgColumnarVMClearVisible(Relation rel, BlockNumber blk);
 extern void PgColumnarVMClearForRow(Relation rel, uint64 rowNumber);
-extern bool PgColumnarVMIsVisible(Relation rel, BlockNumber blk);
 extern uint64 PgColumnarVMSetVisibleForRelation(Relation rel);
 extern void PgColumnarDiscardFetchCache(void);
 
@@ -427,8 +424,6 @@ typedef struct PgColumnarRowRange
 
 /* row groups every one of whose rows is deleted as-of oldestXmin. Returns a
  * List of palloc'd uint64 group numbers. */
-extern List *PgColumnarComputeFullyDeletedGroups(uint64 storageId,
-											   TransactionId oldestXmin);
 extern void PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber);
 extern int64 PgColumnarRetireFullyDeletedGroups(Relation rel);
 extern void PgColumnarLockChunkGroup(uint64 storageId, uint64 groupNumber);
@@ -487,8 +482,6 @@ extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
 									 Snapshot snapshot);
 extern List *PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
 										Snapshot snapshot);
-extern List *PgColumnarReadBloomList(uint64 storageId, uint64 groupNumber,
-								   Snapshot snapshot);
 extern NativeBloomMetadata *PgColumnarReadBloomForColumn(uint64 storageId,
 													   uint64 groupNumber,
 													   int columnIndex,
@@ -838,7 +831,6 @@ extern bool PgColumnarBlockNextRun(PgColumnarBlockReader *br,
 /* -------------------------------------------------------------------------
  * compression (pgcolumnar_compression.c, spec 5)
  * ------------------------------------------------------------------------- */
-extern bool PgColumnarCodecAvailable(int compressionType);
 extern void PgColumnarCompressValueStream(const char *raw, uint32 rawLen,
 										int requestedType, int level,
 										char **outData, uint32 *outLen,

@@ -322,7 +322,7 @@ PgColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
  *		delete or any inserter to target, and old-snapshot readers keep the old
  *		catalog version via heap MVCC. Returns a List of palloc'd uint64.
  */
-List *
+static List *
 PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
@@ -1917,57 +1917,6 @@ PgColumnarInsertBloomRow(const NativeBloomMetadata *b)
 	CatalogTupleInsert(rel, tuple);
 	heap_freetuple(tuple);
 	table_close(rel, RowExclusiveLock);
-}
-
-/*
- * PgColumnarReadBloomList
- *		The per-column-chunk bloom filters of one row group (native spec 7.2,
- *		Phase D5b). The caller indexes the result by column_index; the filter
- *		bytes are copied into the current memory context.
- */
-List *
-PgColumnarReadBloomList(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
-{
-	Relation	rel = open_columnar_table("bloom", AccessShareLock);
-	TupleDesc	tupdesc = RelationGetDescr(rel);
-	ScanKeyData key[2];
-	SysScanDesc scan;
-	Oid			idxOid;
-	HeapTuple	tuple;
-	List	   *result = NIL;
-
-	ScanKeyInit(&key[0], Anum_bloom_storage_id, BTEqualStrategyNumber,
-				F_INT8EQ, Int64GetDatum((int64) storageId));
-	ScanKeyInit(&key[1], Anum_bloom_group_number, BTEqualStrategyNumber,
-				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	idxOid = pgcolumnar_index_oid("bloom_pkey");
-	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot,
-							  2, key);
-	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
-	{
-		NativeBloomMetadata *b = palloc0(sizeof(NativeBloomMetadata));
-		bool		isnull;
-		Datum		d;
-
-		b->storageId = storageId;
-		b->groupNumber = groupNumber;
-		b->columnIndex = DatumGetInt16(
-			heap_getattr(tuple, Anum_bloom_column_index, tupdesc, &isnull));
-		d = heap_getattr(tuple, Anum_bloom_filter, tupdesc, &isnull);
-		if (!isnull)
-		{
-			bytea	   *bf = DatumGetByteaPP(d);
-
-			b->filterLen = VARSIZE_ANY_EXHDR(bf);
-			b->filter = (const char *) memcpy(palloc(b->filterLen + 1),
-											  VARDATA_ANY(bf), b->filterLen);
-		}
-		result = lappend(result, b);
-	}
-	systable_endscan(scan);
-	table_close(rel, AccessShareLock);
-
-	return result;
 }
 
 /*
