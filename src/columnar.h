@@ -374,7 +374,6 @@ extern uint64 PgColumnarItemPointerToRowNumber(ItemPointer tid);
  * ------------------------------------------------------------------------- */
 extern void PgColumnarVMClearForRow(Relation rel, uint64 rowNumber);
 extern uint64 PgColumnarVMSetVisibleForRelation(Relation rel);
-extern void PgColumnarDiscardFetchCache(void);
 
 /* index maintenance for callers that insert rows without an executor (#153) */
 typedef struct PgColumnarIndexInsertState
@@ -565,13 +564,6 @@ extern bool PgColumnarReadNextRow(PgColumnarReadState *readState,
  */
 typedef bool (*PgColumnarRowFilter) (void *arg);
 
-extern bool PgColumnarReadNextRowFiltered(PgColumnarReadState *readState,
-										Datum *values, bool *nulls,
-										uint64 *rowNumber,
-										const bool *qualCols,
-										PgColumnarRowFilter filter,
-										void *filterArg);
-extern uint64 PgColumnarRowsFilteredEarly(PgColumnarReadState *readState);
 extern void PgColumnarRescanRead(PgColumnarReadState *readState);
 extern void PgColumnarEndRead(PgColumnarReadState *readState);
 
@@ -580,15 +572,6 @@ extern void PgColumnarEndRead(PgColumnarReadState *readState);
  * so an ungrouped aggregate can fold it column-at-a-time instead of one Datum
  * tuple per row. See the block comment in pgcolumnar_reader.c for the contract.
  */
-extern bool PgColumnarReadFoldNextGroup(PgColumnarReadState *readState);
-extern void PgColumnarReadFoldGroupInfo(PgColumnarReadState *readState, uint64 *nrows,
-									  const char **deleteMask, uint32 *deleteMaskLen,
-									  const bool **skipVec, bool *decodeSkipped,
-									  const uint32 **vecStart,
-									  int *vectorCount);
-extern bool PgColumnarReadFoldColumn(PgColumnarReadState *readState, int attidx,
-								   const char **validity, const char **packed,
-								   int16 *attlen, const uint32 **vecRawLen);
 
 /*
  * Restrict a scan to a set of row groups (issue #149). Groups outside the set
@@ -615,9 +598,6 @@ extern void PgColumnarParquetCheckExportable(Relation rel);
  * read off colWanted, so a caller reporting a projection cannot report one it
  * failed to apply.
  */
-extern void PgColumnarReadSetProjection(PgColumnarReadState *readState,
-										Bitmapset *projectedColumns);
-extern int	PgColumnarReadProjectedCount(PgColumnarReadState *readState);
 
 /*
  * Parallel scan (gap 23): point the read state at a shared atomic that hands out
@@ -654,11 +634,6 @@ extern int	PgColumnarReadUsablePredicates(PgColumnarReadState *readState);
 /* cached base-liveness for a projection scan (gap 26): build once per scan,
  * probe per row with a binary search instead of a per-row catalog scan */
 typedef struct PgColumnarLivenessCache PgColumnarLivenessCache;
-extern PgColumnarLivenessCache *PgColumnarBuildLivenessCache(Relation rel,
-														 Snapshot snapshot);
-extern bool PgColumnarLivenessCacheIsLive(PgColumnarLivenessCache *cache,
-										uint64 rowNumber);
-extern void PgColumnarFreeLivenessCache(PgColumnarLivenessCache *cache);
 /*
  * Fetch a single row by its 1-based row number (spec 6), for the table AM's
  * fetch-by-tid callback used by UPDATE. Fills values/nulls (by-reference values
@@ -943,9 +918,6 @@ extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
  */
 #define PGCOLUMNAR_PRUNE_SAMPLE_GROUPS 32
 
-extern double PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc,
-											List *qual, Index scanrelid,
-											uint64 ngroups, int sampleTarget);
 
 /* -------------------------------------------------------------------------
  * vectorized aggregation and filtering (pgcolumnar_vector.c, spec 9)
