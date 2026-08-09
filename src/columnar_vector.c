@@ -3167,12 +3167,43 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 		const char *dmask;
 		uint32		dlen;
 		const bool *skipVec;
+		bool		decodeSkipped;
 		const uint32 *vecStart;
 		int			vcount;
 		uint64		r;
 
 		PgColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
-								  &skipVec, &vecStart, &vcount);
+								  &skipVec, &decodeSkipped, &vecStart, &vcount);
+
+		/*
+		 * This loop does not honour skipVec. It reads every vector and reaches
+		 * the right answer by re-checking every value against the scan keys
+		 * below, which is correct only while decode has produced every vector.
+		 *
+		 * The moment decode is taught to skip the vectors the zone maps ruled
+		 * out (#452 phase 1b, the obvious next optimisation), the buffer gains
+		 * holes and this loop would re-check UNINITIALISED memory: a wrong
+		 * aggregate, silently, and only on data whose zone maps rule something
+		 * out. The row producer is safe there because it steps its cursors past
+		 * skipped vectors; this path is not, and pgcolumnar_batch_shape_eligible
+		 * requires every qual to be convertible to a scan key -- so the fold runs
+		 * precisely when predicates exist, which is exactly when vectors get
+		 * skipped. Common case, not an edge.
+		 *
+		 * So the ordering constraint is enforced rather than written down: the
+		 * fold must learn to skip before decode is allowed to. Whoever makes that
+		 * change gets this error instead of arithmetic, and they are the person
+		 * least likely to look in this file.
+		 *
+		 * Measured, so the ordering is not merely asserted: teaching this loop to
+		 * honour skipVec costs about 2% and saves nothing until decode changes,
+		 * so it belongs IN that change and not before it (#512).
+		 */
+		if (decodeSkipped)
+			elog(ERROR,
+				 "pgcolumnar: the vectorized aggregate cannot fold a row group "
+				 "whose decode skipped vectors (#512); teach this loop to honour "
+				 "the skip vector in the same change that makes decode honour it");
 
 		for (col = 0; col < natts; col++)
 		{

@@ -96,6 +96,7 @@ SUITES=(
 	native_fetch_interrupt
 	native_fetch_position
 	native_fetch_projection
+	native_fold_skipguard
 	native_format
 	native_gap
 	native_groupagg
