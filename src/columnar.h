@@ -932,6 +932,7 @@ typedef struct PgColumnarGroupStats
 	uint64		groupsTotal;
 	uint64		groupsRead;
 	uint64		groupsRemoved;
+	uint64		vectorsSkipped;
 } PgColumnarGroupStats;
 
 extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);

@@ -595,6 +595,7 @@ typedef struct PgColumnarAggScanState
 	bool		haveStats;
 	uint64		groupsRead;
 	uint64		groupsSkipped;
+	uint64		vectorsSkipped;
 	uint64		groupsTotal;
 
 	/*
@@ -696,6 +697,7 @@ typedef struct PgColumnarGroupAggScanState
 	bool		haveStats;
 	uint64		groupsRead;
 	uint64		groupsSkipped;
+	uint64		vectorsSkipped;
 	uint64		groupsTotal;
 	int			usablePreds;	/* of npreds, how many can exclude (#479) */
 } PgColumnarGroupAggScanState;
@@ -3268,6 +3270,7 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
+	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 	PgColumnarEndRead(rs);
@@ -3402,6 +3405,7 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 		PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 						  &state->groupsTotal);
 		state->usablePreds = PgColumnarReadUsablePredicates(rs);
+	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 		state->haveStats = true;
 	}
 
@@ -3558,6 +3562,7 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 		gs.groupsTotal = state->groupsTotal;
 		gs.groupsRead = state->groupsRead;
 		gs.groupsRemoved = state->groupsSkipped;
+		gs.vectorsSkipped = state->vectorsSkipped;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
@@ -4119,6 +4124,7 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
 					  &state->groupsTotal);
 	state->usablePreds = PgColumnarReadUsablePredicates(rs);
+	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
 	state->haveStats = true;
 
 	PgColumnarEndRead(rs);
@@ -4238,6 +4244,7 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 		gs.groupsTotal = state->groupsTotal;
 		gs.groupsRead = state->groupsRead;
 		gs.groupsRemoved = state->groupsSkipped;
+		gs.vectorsSkipped = state->vectorsSkipped;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }

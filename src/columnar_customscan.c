@@ -2170,6 +2170,15 @@ PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats, ExplainState *es)
 						   (int64) stats->groupsRead, es);
 	ExplainPropertyInteger("Columnar Chunk Groups Removed by Filter", NULL,
 						   (int64) stats->groupsRemoved, es);
+	/*
+	 * Vectors skipped belongs with the group counters rather than beside them:
+	 * it was printed by the scalar node alone, so a plan could not say whether
+	 * per-vector skipping happened on the vectorized aggregate path -- the path
+	 * where it matters most, since #512 is about the fold and the skip vector
+	 * disagreeing and this is the number that would show it.
+	 */
+	ExplainPropertyInteger("Columnar Vectors Skipped", NULL,
+						   (int64) stats->vectorsSkipped, es);
 }
 
 /* -------------------------------------------------------------------------
@@ -2298,9 +2307,8 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		gs.groupsTotal = groupsTotal;
 		gs.groupsRead = groupsRead;
 		gs.groupsRemoved = groupsSkipped;
+		gs.vectorsSkipped = PgColumnarVectorsSkipped(cstate->readState);
 		PgColumnarExplainGroupStats(&gs, es);
-		ExplainPropertyInteger("Columnar Vectors Skipped", NULL,
-							   (int64) PgColumnarVectorsSkipped(cstate->readState), es);
 
 		/*
 		 * Rows the qual rejected before their remaining projected columns were
