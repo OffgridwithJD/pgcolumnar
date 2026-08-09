@@ -370,9 +370,16 @@ pgc_pg() {
 # fix. PANIC stays in the pattern because a PANIC is a cause.
 #
 # What is NOT true, and was the original justification here: that a cluster
-# stopped with -m immediate logs a routine FATAL per live backend. Measured with
-# four backends held open on pg_sleep, an immediate stop SIGQUITs them and they
-# log no FATAL at all. Zero. Do not restore that reasoning.
+# stopped with -m immediate logs a routine FATAL per live backend. Measured twice,
+# independently, on two majors and two machines -- four backends held open on
+# pg_sleep, then pg_ctl stop -m immediate:
+#
+#     PG18: 0 FATAL lines        PG17: 0 FATAL lines, before and after
+#
+# An immediate stop SIGQUITs them and they log nothing. Do not restore that
+# reasoning. It is recorded here BECAUSE it is the intuitive answer and will
+# otherwise be re-derived by whoever reads this next; it was written into this
+# file once already as though it were a finding.
 #
 # The START path can afford a bare FATAL grep, and does one, because a cluster
 # that never started has produced no routine FATALs to confuse it.
