@@ -233,10 +233,10 @@ pgc_setup() {
 	# suite proceeds, and if it never does, the suite fails rather than guessing.
 	echo "-- start"
 	{
-		local _a _i _dd _started _sawforeign
+		local _a _i _dd _started _nforeign
 
 		_started=0
-		_sawforeign=0
+		_nforeign=0
 		for _a in 1 2 3 4 5 6 7 8; do
 			_dd=""
 			if pgc_pg "pg_ctl -D '$PGC_PGDATA' -l '$PGC_LOGFILE' start -w" >/dev/null 2>&1; then
@@ -247,7 +247,7 @@ pgc_setup() {
 				_dd="$(pgc_cluster_datadir)"
 			fi
 			if [ -n "$_dd" ]; then
-				_sawforeign=1
+				_nforeign=$(( _nforeign + 1 ))
 				echo "-- port $PGC_PORT serves $_dd, not ours; retrying on a fresh port"
 			else
 				echo "-- start attempt $_a failed; retrying on a fresh port"
@@ -277,7 +277,7 @@ pgc_setup() {
 			# workdir on exit, so a verdict without it is the last thing anyone
 			# sees before the evidence is deleted (#537).
 			pgc_start_log_report "${PGC_LOGFILE:-}"
-			pgc_start_failure_message "$_a" "$PGC_PORT" "$_sawforeign" >&2
+			pgc_start_failure_message "$_a" "$PGC_PORT" "$_nforeign" >&2
 			exit 1
 		fi
 	}
@@ -339,13 +339,15 @@ pgc_pg() {
 
 # ---- reporting a failure that happened before any check ran (#537) ----------
 
-# The events in a server log that mean "this was not a failed assertion".
+# The events in a server log that mean "this was not a failed assertion", for the
+# SUMMARY path.
 #
-# One definition, used by both the start-failure path and the summary path,
-# because they were drifting: the summary path had a pattern and the start path
-# had none at all, so a library that would not load produced eight identical
-# retry lines and a verdict naming no cause, while the reason sat in server.log
-# from the first attempt.
+# There are deliberately TWO patterns, not one, and an earlier version of this
+# comment claimed they were one shared definition while the code had already
+# diverged -- the exact defect #537 is about, committed in the fix for it. They
+# are named functions so the divergence is visible and greppable rather than two
+# literals in two places: pgc_fatal_pattern here, pgc_start_fatal_pattern below.
+# Their reasons for differing are given at each.
 #
 # "could not load library" is the addition. Bare "FATAL:" deliberately is NOT in
 # here, and the reason is measured rather than reasoned, because the first reason
@@ -378,6 +380,14 @@ pgc_fatal_pattern() {
 	printf '%s\n' 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|terminated by signal|PANIC:|could not load library'
 }
 
+# The same question for the START path, which can afford a bare FATAL where the
+# summary path cannot. A cluster that never started has produced no routine
+# FATALs -- the two routine classes both come from crash RECOVERY, which requires
+# having started -- so here every FATAL is a candidate cause.
+pgc_start_fatal_pattern() {
+	printf '%s\n' 'FATAL:|PANIC:'
+}
+
 # What the server log says about a cluster that would not start.
 #
 # Takes the log path so it can be tested against a fixture without standing a
@@ -392,7 +402,7 @@ pgc_start_log_report() {
 		return 0
 	fi
 
-	_fatal="$(grep -nE 'FATAL:|PANIC:' "$_log" 2>/dev/null | head -5 || true)"
+	_fatal="$(grep -nE "$(pgc_start_fatal_pattern)" "$_log" 2>/dev/null | head -5 || true)"
 	if [ -n "$_fatal" ]; then
 		echo "---- why the cluster would not start ----" >&2
 		printf '%s\n' "$_fatal" >&2
@@ -409,19 +419,27 @@ pgc_start_log_report() {
 
 # The verdict, which must not assert a cause the code has not established.
 #
-# The third argument is whether any attempt actually found ANOTHER cluster's data
-# directory on the port. Only then is "a cluster this suite does not own" a
-# statement about what happened. In #537 nothing was squatting: our own
-# postmaster died on eight different ports, and the parenthetical sent the reader
-# hunting a port collision that was not there.
+# The third argument is HOW MANY attempts actually found another cluster's data
+# directory on the port. A count rather than a flag, because a flag was sticky:
+# set on any attempt and never cleared, so one squatter on attempt 1 followed by
+# seven genuine start failures printed the squatter verdict for all eight. That
+# is #537's own defect narrowed rather than removed, and it is reachable, since
+# escaping a port collision is what the retry loop exists for.
+#
+# Three cases, and the mixed one is why this is not a branch on zero.
 pgc_start_failure_message() {
-	local _attempts="$1" _port="$2" _sawforeign="$3"
+	local _attempts="$1" _port="$2" _nforeign="$3"
 
 	printf '%s\n' "FATAL: no cluster of our own on port $_port after $_attempts attempts"
-	if [ "$_sawforeign" = "1" ]; then
-		printf '%s\n' "       (a cluster this suite does not own was on the port; refusing to use it)"
-	else
+	if [ "$_nforeign" = "0" ]; then
 		printf '%s\n' "       (nothing was squatting: our own postmaster failed to start, and the"
+		printf '%s\n' "        reason is in the server log reported above)"
+	elif [ "$_nforeign" = "$_attempts" ]; then
+		printf '%s\n' "       (a cluster this suite does not own held the port on every attempt;"
+		printf '%s\n' "        refusing to use it)"
+	else
+		printf '%s\n' "       ($_nforeign of $_attempts attempts found a cluster this suite does not"
+		printf '%s\n' "        own; the other $(( _attempts - _nforeign )) failed to start, and that"
 		printf '%s\n' "        reason is in the server log reported above)"
 	fi
 }
