@@ -3030,6 +3030,20 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
+	/*
+	 * INSERT on the target, before any file is opened (#559). The server-file
+	 * role above governs reading a file; it says nothing about writing this
+	 * relation, so without this a pg_read_server_files member could insert into
+	 * any columnar table it cannot INSERT into. The parallel twin already checks
+	 * this (columnar_parallel_copy.c:1294).
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
+
 	/* resolve the path (file, directory, or glob) before taking the lock */
 	files = pq_resolve_paths(path);
 

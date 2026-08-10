@@ -986,6 +986,20 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 	pathText = PG_GETARG_TEXT_PP(1);
 	path = text_to_cstring(pathText);
 
+	/*
+	 * SELECT on the source, before the file is opened (#559). The server-file
+	 * role above governs writing a file; it says nothing about reading this
+	 * relation, so without this a pg_write_server_files member could dump any
+	 * columnar table it cannot SELECT. The parallel twin already checks this
+	 * (columnar_parallel_export.c:471).
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
+
 	rel = table_open(relid, AccessShareLock);
 	if (!PgColumnarIsColumnarRelation(relid))
 	{
@@ -1761,6 +1775,19 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 
 	relid = PG_GETARG_OID(0);
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	/*
+	 * INSERT on the target, before the file is opened (#559). The server-file
+	 * role above governs reading a file; it says nothing about writing this
+	 * relation, so without this a pg_read_server_files member could insert into
+	 * any columnar table it cannot INSERT into.
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
 
 	rel = table_open(relid, RowExclusiveLock);
 	if (!PgColumnarIsColumnarRelation(relid))

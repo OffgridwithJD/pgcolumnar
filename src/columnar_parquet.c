@@ -1151,6 +1151,19 @@ pgcolumnar_export_parquet(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	path = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
+	/*
+	 * SELECT on the source, before the file is opened (#559). The server-file
+	 * role above governs writing a file; it does not govern reading this
+	 * relation. The parallel twin already checks this
+	 * (columnar_parallel_export.c:471).
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
+
 	rel = table_open(relid, AccessShareLock);
 	if (!PgColumnarIsColumnarRelation(relid))
 	{
