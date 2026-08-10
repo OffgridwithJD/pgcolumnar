@@ -28,6 +28,7 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -394,6 +395,31 @@ pgcolumnar_read_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table", get_rel_name(relid))));
 
+	/*
+	 * SELECT on the BASE relation, checked before a single row is read (#562).
+	 *
+	 * These two returned any caller-supplied relation's contents with no
+	 * privilege check at all, and CREATE FUNCTION grants EXECUTE to PUBLIC, so
+	 * USAGE on the schema was the whole boundary. reconstruct_via_projection is
+	 * the worse of the pair: it rebuilds NON-COVERED columns from the base by row
+	 * number, so the projection was never the bound on what leaked -- one
+	 * projection on any column exposed the whole row.
+	 *
+	 * ACL_SELECT rather than PgColumnarRequireTableOwner, and that is a
+	 * correctness argument rather than a lenient one. Both functions read base
+	 * columns, so SELECT on the base is exactly the privilege that governs
+	 * reading them by any other route. Ownership would be a stricter bar that
+	 * happens to exclude the attacker, which is a different and worse property:
+	 * it would also refuse a reader who has been granted SELECT deliberately.
+	 * Same pattern as columnar_parallel_export.c:471.
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
+
 	rel = table_open(relid, AccessShareLock);
 	/* persist pending base + projection writes so this read sees them */
 	PgColumnarFlushWriteStateForRelation(relid);
@@ -550,6 +576,31 @@ pgcolumnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table", get_rel_name(relid))));
+
+	/*
+	 * SELECT on the BASE relation, checked before a single row is read (#562).
+	 *
+	 * These two returned any caller-supplied relation's contents with no
+	 * privilege check at all, and CREATE FUNCTION grants EXECUTE to PUBLIC, so
+	 * USAGE on the schema was the whole boundary. reconstruct_via_projection is
+	 * the worse of the pair: it rebuilds NON-COVERED columns from the base by row
+	 * number, so the projection was never the bound on what leaked -- one
+	 * projection on any column exposed the whole row.
+	 *
+	 * ACL_SELECT rather than PgColumnarRequireTableOwner, and that is a
+	 * correctness argument rather than a lenient one. Both functions read base
+	 * columns, so SELECT on the base is exactly the privilege that governs
+	 * reading them by any other route. Ownership would be a stricter bar that
+	 * happens to exclude the attacker, which is a different and worse property:
+	 * it would also refuse a reader who has been granted SELECT deliberately.
+	 * Same pattern as columnar_parallel_export.c:471.
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
 
 	rel = table_open(relid, AccessShareLock);
 	PgColumnarFlushWriteStateForRelation(relid);
