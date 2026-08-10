@@ -116,18 +116,21 @@ if command -v nm >/dev/null 2>&1; then
 	IGNORE='^(_ITM_|__gmon_start__$|__cxa_finalize$)'
 
 	undef="$(nm -D --undefined-only "$SO" 2>/dev/null | awk '{print $NF}' |
-		strip_ver | grep -Ev "$IGNORE" | sort -u)"
+		strip_ver | grep -Ev "$IGNORE" | LC_ALL=C sort -u)"
 	# The .so is dlopen'd into the running postgres, so its symbols resolve against
 	# the server binary, everything the server itself links (libm, libssl, ...), and
 	# the .so's own dependencies. All three belong in the reference set.
 	defined="$(nm -D --defined-only "$BINDIR/postgres" 2>/dev/null | awk '{print $NF}')"
 	for lib in $(ldd "$SO" "$BINDIR/postgres" 2>/dev/null |
-			awk '/=>/ {print $3}' | grep -v '^$' | sort -u); do
+			awk '/=>/ {print $3}' | grep -v '^$' | LC_ALL=C sort -u); do
 		defined="$defined
 $(nm -D --defined-only "$lib" 2>/dev/null | awk '{print $NF}')"
 	done
-	defined="$(echo "$defined" | strip_ver | sort -u)"
-	missing="$(comm -23 <(echo "$undef") <(echo "$defined"))"
+	defined="$(echo "$defined" | strip_ver | LC_ALL=C sort -u)"
+	# comm requires ONE collation across both inputs and does not check. Both
+	# sorts above are pinned to C, so comm is pinned to C too -- inputs sorted one
+	# way and compared another is the same defect with an extra step (#552).
+	missing="$(LC_ALL=C comm -23 <(echo "$undef") <(echo "$defined"))"
 	if [ -n "$missing" ]; then
 		echo "rebuild: UNRESOLVED SYMBOLS against $PGVER:" >&2
 		echo "$missing" | head -20 >&2

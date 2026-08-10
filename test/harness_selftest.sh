@@ -330,6 +330,34 @@ check "the suite list is sorted in C order, so two new suites land in different 
 check "premise: C collation puts sort_status before sorted_projection" \
 	"$(printf 'sorted_projection\nsort_status\n' | LC_ALL=C sort | head -1)" "sort_status"
 
+# ---- and comm's two inputs must be sorted the SAME way (#552 follow-up) -----
+#
+# `comm` requires both inputs sorted in one collation and does not check. Fed
+# inconsistently-sorted input it does not error; it returns the wrong lines.
+#
+# test/rebuild.sh:130 does `comm -23` over two `sort -u` outputs, neither pinned.
+# They agree today because they share a locale. The plausible next edit is
+# somebody pinning ONE of them because this PR taught them to, and the result is
+# a symbol check that silently reports the wrong unresolved symbols -- either a
+# false red, or the worse direction, a real unresolved symbol not reported.
+#
+# Asserted over source text, which is the weaker kind, because reproducing it
+# needs two locales and a built .so. Premised on the comm still existing, or the
+# grep approves a file that no longer has one.
+_cm_files="$(grep -ln 'comm -' "$(dirname "${BASH_SOURCE[0]}")"/*.sh 2>/dev/null)"
+check "premise: some suite still uses comm, or the check below is vacuous" \
+	"$([ -n "$_cm_files" ] && echo yes || echo no)" "yes"
+
+_cm_unpinned=""
+for _f in $_cm_files; do
+	# every `| sort` in a file that uses comm must carry LC_ALL=C
+	if grep -qE '\|[[:space:]]*sort' "$_f" && grep -E '\|[[:space:]]*sort' "$_f" | grep -qv 'LC_ALL=C'; then
+		_cm_unpinned="$_cm_unpinned $(basename "$_f")"
+	fi
+done
+check "a file that uses comm pins the collation of every sort feeding it" \
+	"$(printf '%s' "$_cm_unpinned" | sed 's/^ //')" ""
+
 # A case over the cached list rather than `listed_suites | grep -qx`. The pipe
 # was the defect: grep -q returns on its match, printf takes EPIPE, and pipefail
 # turns that into a failed pipeline for a suite that IS registered. See the note
