@@ -592,6 +592,25 @@ COMMENT ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text)
 REVOKE ALL ON FUNCTION pgcolumnar.read_projection(regclass, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text) FROM PUBLIC;
 
+CREATE FUNCTION pgcolumnar.require_caller_select(rel regclass) RETURNS void
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_require_caller_select';
+
+REVOKE ALL ON FUNCTION pgcolumnar.require_caller_select(regclass) FROM PUBLIC;
+
+COMMENT ON FUNCTION pgcolumnar.require_caller_select(regclass)
+	IS 'raise unless the calling role may SELECT the relation; for SECURITY DEFINER callers (#560)';
+
+-- SECURITY DEFINER, because this reads pgcolumnar's catalog tables and those
+-- carry no GRANT, so a columnar table's own owner could not read the statistics
+-- of the table they own. Granting SELECT on the catalog instead would publish
+-- pgcolumnar.zone_map, which holds per-column minimum, maximum and sum for every
+-- columnar table. That is actual column data and a far larger disclosure than
+-- the usability defect it would fix.
+--
+-- Definer rights mean nothing else will refuse anyone, so the privilege check is
+-- explicit and is the first statement. search_path is pinned because a definer
+-- function must not resolve names through a caller-controlled path.
 CREATE FUNCTION pgcolumnar.stats(
 	rel regclass,
 	OUT stripeid bigint,
@@ -601,8 +620,12 @@ CREATE FUNCTION pgcolumnar.stats(
 	OUT chunkcount integer,
 	OUT datalength bigint)
 	RETURNS SETOF record
-	LANGUAGE sql STABLE
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
 	AS $stats$
+BEGIN
+	PERFORM pgcolumnar.require_caller_select(rel);
+	RETURN QUERY
 	-- Native (PGCN v1) tables report one row per row group from the native
 	-- catalog.
 	SELECT rg.group_number,
@@ -621,6 +644,7 @@ CREATE FUNCTION pgcolumnar.stats(
 	FROM pgcolumnar.row_group rg
 	WHERE rg.storage_id = pgcolumnar.get_storage_id(rel)
 	ORDER BY 1;
+END;
 $stats$;
 
 COMMENT ON FUNCTION pgcolumnar.stats(regclass)

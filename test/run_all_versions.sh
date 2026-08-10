@@ -171,6 +171,7 @@ SUITES=(
 	smoke
 	sort_status
 	sorted_projection
+	stats_privilege
 	temporal
 	ungrouped_vector_agg
 	unique_conc

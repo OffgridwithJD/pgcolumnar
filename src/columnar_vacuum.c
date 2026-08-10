@@ -67,6 +67,43 @@ PG_FUNCTION_INFO_V1(pgcolumnar_debug_set_metapage_version);
  * until the abort/crash path is fully hardened and matrix-validated. */
 bool		pgcolumnar_enable_end_truncation = false;
 
+PG_FUNCTION_INFO_V1(pgcolumnar_require_caller_select);
+
+/*
+ * pgcolumnar_require_caller_select(rel regclass) -> void
+ *		Raise unless the CALLER may SELECT the relation.
+ *
+ * Exists for pgcolumnar.stats, which is SECURITY DEFINER (#560). stats() reads
+ * pgcolumnar's catalog tables, which carry no GRANT, so a columnar table's own
+ * owner could not read the statistics of the table they own. Granting SELECT on
+ * those catalogs instead would publish pgcolumnar.zone_map, which stores per
+ * column minimum, maximum and sum for every columnar table: actual column
+ * values, and a much larger disclosure than the bug being fixed.
+ *
+ * GetOuterUserId, NOT GetUserId. Inside a SECURITY DEFINER function the
+ * effective user is the function's OWNER, so GetUserId returns the superuser who
+ * installed the extension and pg_class_aclcheck against it returns ACLCHECK_OK
+ * for every relation in the database. Such a check refuses nobody while looking
+ * exactly like a correct one. Measured on a build of this tree:
+ *
+ *		plain call   as t_id: cur=t_id      outer=t_id  sess=t_id
+ *		definer call as t_id: cur=postgres  outer=t_id  sess=t_id
+ *
+ * GetOuterUserId is the calling role, and it follows SET ROLE, which is the
+ * behaviour wanted: the privilege tested is the one the caller is acting with.
+ */
+Datum
+pgcolumnar_require_caller_select(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	AclResult	ac = pg_class_aclcheck(relid, GetOuterUserId(), ACL_SELECT);
+
+	if (ac != ACLCHECK_OK)
+		aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+
+	PG_RETURN_VOID();
+}
+
 /*
  * PgColumnarRequireTableOwner
  *		Error unless the current user owns the relation (superusers pass). Every

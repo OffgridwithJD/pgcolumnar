@@ -234,6 +234,10 @@ keep core `ANALYZE` scheduled and use this only to sharpen particular columns.
 
 ### pgcolumnar.stats(rel regclass)
 
+Requires `SELECT` on the table. The function runs with the privileges of the
+extension owner, because it reads pgcolumnar's own catalog tables. It checks the
+calling role's privilege on the table before it returns anything.
+
 Returns one row per row group, with these columns:
 
 | Column | Type | Meaning |
