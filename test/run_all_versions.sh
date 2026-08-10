@@ -174,6 +174,7 @@ SUITES=(
 	temporal
 	ungrouped_vector_agg
 	unique_conc
+	vacuum_lock_privilege
 	vm_privilege
 	wal_envelope
 	write_fsst_compressed
