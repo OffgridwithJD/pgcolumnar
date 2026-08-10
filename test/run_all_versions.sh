@@ -170,6 +170,7 @@ SUITES=(
 	smoke
 	sort_status
 	sorted_projection
+	stats_privilege
 	temporal
 	ungrouped_vector_agg
 	unique_conc
@@ -177,8 +178,7 @@ SUITES=(
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
-	zonemap_cost
-)
+	zonemap_cost)
 
 
 # ---------------------------------------------------------------------------
