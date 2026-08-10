@@ -3,21 +3,30 @@
 # pgColumnar: the batch fold must refuse a group whose decode skipped vectors
 # (#512).
 #
-# The fold at columnar_vector.c does NOT honour the skip vector. It reads every
-# vector and reaches the right answer by re-checking every value against the scan
-# keys, which is correct only while decode produces every vector -- and today it
-# does, because pgcolumnar_native_decode_chunk takes no skip mask at all.
+# That day has arrived. #452 phase 1b-i taught decode to skip the vectors the
+# zone maps rule out, and taught the fold to honour the same mask, so the text
+# that used to stand here -- "the fold does NOT honour the skip vector ... decode
+# produces every vector" -- is no longer true of any line in the tree.
 #
-# The day decode is taught to skip ruled-out vectors (#452 phase 1b) the decoded
-# buffer gains holes, and this loop would re-check UNINITIALISED memory: a wrong
-# aggregate, silently, and only on data whose zone maps rule something out. The
-# row producer is safe there; the fold is not. So the ordering constraint is
-# enforced by a guard rather than written in a comment.
+# What the #512 guard was for: decode gaining holes before the fold learned about
+# them would have made the fold re-check UNINITIALISED memory -- a wrong
+# aggregate, silently, and only on data whose zone maps rule something out. It
+# was an ORDERING guard, and it fired on exactly the change it was written for.
+# What survives it is a narrow fallback: a skip reported without the per-vector
+# map to honour it must ERROR rather than guess.
 #
-# This suite proves the guard is REACHABLE, which is the part that is easy to get
-# wrong: the fold only runs for a shape that qualifies for it, and the hazard only
-# exists where vectors are skipped. Both have to be true at once, and a check that
-# never reaches the fold would pass forever while guarding nothing.
+# So be exact about what this suite does and does not prove, because the two are
+# easy to confuse now that the guard is no longer load-bearing:
+#
+#   this suite          the fold is REACHABLE for a shape that skips vectors, and
+#                       that it accounts for the skipping it performs
+#   native_vecdecode    the fold is CORRECT there -- its poison check picks a
+#                       predicate that ACCEPTS 0xA5, so a fold reading an
+#                       undecoded hole counts rows that are not there
+#
+# Neutering the surviving fallback does NOT redden this suite, and that is now
+# the expected result rather than a hole: the path it guards is unreachable while
+# decode and the fold honour the same mask. Measured, not assumed.
 #
 # Usage:  test/native_fold_skipguard.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -46,15 +55,32 @@ run() {  # run <setup> <sql>
 		-d "$PGC_DB" -At -c "$1" -c "$2" 2>&1
 }
 
-# ---- premise one: the reader really does skip vectors for this predicate ----
+# ---- premise one: the FOLD ARM does the skipping, and says so ---------------
 #
-# Read off the SCALAR arm, because the vectorized aggregate node does not print
-# "Columnar Vectors Skipped" at all -- a reporting gap of its own. Same table,
-# same predicate, same reader, so what it skips there it skips here.
-vskip=$(run "$SET_OFF" "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $Q" \
-	| grep "Columnar Vectors Skipped" | grep -oE '[0-9]+' | head -1)
-check "premise: the predicate rules vectors out at all" \
-	"$([ "${vskip:-0}" -gt 0 ] && echo yes || echo no)" "yes"
+# Read off the fold arm itself, which is the plan under test. It used to be read
+# off the scalar arm with the note "same table, same predicate, same reader, so
+# what it skips there it skips here" -- a proxy, and one that hid #542: the
+# counter was incremented only where rows are produced, so the fold reported
+# "Vectors Skipped: 0" while decoding 1 of 59 vectors. Measuring the premise on a
+# plan that is not the one under test is what let that sit unnoticed.
+#
+# Exact values, not "greater than zero". 60,000 rows at chunk_group_row_limit
+# 1024 is 59 vector positions in one group, and k BETWEEN 30000 AND 30100 lies
+# inside one of them, so decode must touch exactly 1 and skip exactly 58.
+#
+# This is a WORK-DONE assertion, and it is the only kind that can catch a fold
+# that silently stops skipping. Every other check here and in native_vecdecode is
+# a correctness check, and a fold that decoded all 59 vectors would pass all of
+# them: decoding everything reads real values, never a hole, so the answers stay
+# right and the saving disappears in silence.
+GROUP_VECS=59
+fplan=$(run "$SET_ON" "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $Q")
+vskip=$(grep "Columnar Vectors Skipped" <<<"$fplan" | grep -oE '[0-9]+' | head -1)
+vdec=$(grep "Columnar Vectors Decoded" <<<"$fplan" | grep -oE '[0-9]+' | head -1)
+check "premise: the fold arm decodes only the vector it needs" "${vdec:-none}" "1"
+check "and reports the 58 it skipped, on its own plan (#542)" "${vskip:-none}" "58"
+check "so decoded plus skipped is the group's vectors, on the FOLD arm" \
+	"$(( ${vdec:-0} + ${vskip:-0} ))" "$GROUP_VECS"
 
 # ---- premise two: the query actually reaches the fold -----------------------
 #
@@ -65,14 +91,18 @@ fold=$(run "$SET_ON" "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $Q" 
 	| grep -oE "Columnar Batch Fold: [a-z]+" | head -1)
 check "premise: the query reaches the batch fold" "$fold" "Columnar Batch Fold: yes"
 
-# ---- the guard is silent while decode produces every vector ----------------
+# ---- and it answers correctly while decode DOES skip -----------------------
 #
-# Today decode never skips, so the fold must run normally and answer correctly.
-# The heap arithmetic is the oracle: 101 rows, sum of 30000..30100.
+# The name matters. This check was called "the fold answers correctly while
+# decode skips nothing", which contradicted the premise directly above it even
+# when it was written, and became plainly false when #452 phase 1b-i landed.
+# Decode skips 58 of 59 vectors on this query; the fold answers over the one that
+# survives. The heap arithmetic is the oracle: 101 rows, sum of 30000..30100.
 want_n=101
 want_s=$(( (30000 + 30100) * 101 / 2 ))
 got=$(run "$SET_ON" "$Q" | tail -1)
-check "the fold answers correctly while decode skips nothing" "$got" "$want_n|$want_s"
+check "the fold answers correctly while decode skips 58 of 59 vectors" \
+	"$got" "$want_n|$want_s"
 
 # And the same answer without the fold, so the fold is not quietly wrong in a way
 # that matches a wrong expectation.
