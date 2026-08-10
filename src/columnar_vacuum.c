@@ -843,6 +843,20 @@ pgcolumnar_relation_storageid(PG_FUNCTION_ARGS)
 	Relation	rel;
 	uint64		storageId;
 
+	/*
+	 * SELECT on the relation (#566). This returns an internal storage identifier
+	 * of a caller-supplied relation and checked nothing, so USAGE on the schema
+	 * was the whole boundary. The value is not otherwise reachable: a role with
+	 * schema USAGE is refused pgcolumnar.storage directly. A reader who may
+	 * SELECT the table may know its storage id; anyone else may not.
+	 */
+	{
+		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
+
+		if (ac != ACLCHECK_OK)
+			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+	}
+
 	rel = try_relation_open(relid, AccessShareLock);
 	if (rel == NULL)
 		PG_RETURN_NULL();

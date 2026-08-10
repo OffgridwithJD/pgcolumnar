@@ -76,6 +76,7 @@ SUITES=(
 	harness_selftest
 	import_deferred
 	import_exclusion
+	import_export_privilege
 	index_only
 	isolation
 	logical_subscriber
