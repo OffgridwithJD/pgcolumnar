@@ -344,26 +344,8 @@ typedef struct PgColumnarProjection
  * ------------------------------------------------------------------------- */
 struct SMgrRelationData;
 
-extern void PgColumnarWriteNewMetapage(const RelFileLocator *newrlocator,
-									 struct SMgrRelationData *srel,
-									 char persistence, uint64 storageId);
 extern void PgColumnarReadMetapage(Relation rel, PgColumnarMetapage *meta);
 extern uint64 PgColumnarStorageId(Relation rel);
-extern void PgColumnarEnsureStorageRow(Relation rel);	/* pre-create storage row (#300 parallel_copy) */
-extern void PgColumnarReserveRowNumbers(Relation rel, uint64 rowCount,
-									  uint64 *stripeId, uint64 *firstRowNumber);
-extern void PgColumnarReserveOffset(Relation rel, uint64 dataLength,
-								  uint64 *fileOffset);
-extern void PgColumnarAdvanceReservedOffset(Relation rel, uint64 addBytes);
-extern void PgColumnarDebugSetMetapageVersion(Relation rel, uint32 versionMajor,
-											uint32 versionMinor);
-extern void PgColumnarSetReservedOffset(Relation rel, uint64 newOffset);
-extern void PgColumnarTruncateMainFork(Relation rel, BlockNumber newnblocks);
-extern void PgColumnarWriteLogicalData(Relation rel, uint64 logicalOffset,
-									 char *data, uint64 length);
-extern void PgColumnarReadLogicalData(Relation rel, uint64 logicalOffset,
-									char *dest, uint64 length);
-extern void PgColumnarResetMetapage(Relation rel);
 
 /* row number <-> item pointer (spec 6) */
 extern void PgColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid);
@@ -453,8 +435,7 @@ extern void PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId);
 extern uint64 PgColumnarNextStorageId(void);
 
 /* projection: needed attnos (pull_varattnos form) -> the reader's 0-based set */
-extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
-											   int *nProjected);
+
 extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName);
 extern List *PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
 extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
@@ -503,37 +484,17 @@ extern void PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata 
 typedef struct PgColumnarWriteState PgColumnarWriteState;
 
 extern PgColumnarWriteState *PgColumnarGetWriteState(Relation rel);
-extern int PgColumnarWriteStateStripeCount(PgColumnarWriteState *ws);
-extern uint64 *PgColumnarWriteStateStripeIds(PgColumnarWriteState *ws, int *n);
-extern uint64 *PgColumnarWriteStateProjStripeIds(PgColumnarWriteState *ws, int *n);
 extern uint64 PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 							   Datum *values, bool *nulls);
 extern void PgColumnarProjectionFanoutRow(Relation rel, PgColumnarWriteState *baseWs,
 										uint64 rowNumber, Datum *values,
 										bool *nulls);
-extern void PgColumnarBackfillProjection(Relation rel,
-									   const PgColumnarProjection *proj);
-extern bool PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
-										Datum *values, bool *nulls);
 extern void PgColumnarFlushWriteStateForRelation(Oid relid);
-extern void PgColumnarForgetWriteStateForRelation(Oid relid);
-extern void PgColumnarFlushAllPendingWrites(void);
-extern void PgColumnarDiscardAllPendingWrites(void);
-extern void PgColumnarWriteStateDiscardSubXact(SubTransactionId subid);
-extern void PgColumnarWriteStatePromoteSubXact(SubTransactionId subid,
-											 SubTransactionId parent);
 
 /* -------------------------------------------------------------------------
  * delete vector / delete tracking (pgcolumnar_delete_vector.c, spec 7.5, 9)
  * ------------------------------------------------------------------------- */
-extern void PgColumnarMarkRowDeleted(Relation rel, uint64 rowNumber);
-extern bool PgColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber);
 extern void PgColumnarFlushDeleteVectorForRelation(Relation rel);
-extern void PgColumnarFlushAllDeleteVectors(void);
-extern void PgColumnarDiscardAllDeleteVectors(void);
-extern void PgColumnarDeleteVectorDiscardSubXact(SubTransactionId subid);
-extern void PgColumnarDeleteVectorPromoteSubXact(SubTransactionId subid,
-										  SubTransactionId parent);
 
 /* -------------------------------------------------------------------------
  * reader (pgcolumnar_reader.c)
@@ -831,7 +792,6 @@ extern void PgColumnarUniqueInit(void);
 /* -------------------------------------------------------------------------
  * planner integration (pgcolumnar_customscan.c, spec 8.3, 9)
  * ------------------------------------------------------------------------- */
-extern void PgColumnarCustomScanInit(void);
 
 /*
  * The single registered CustomScanMethods, shared by the base custom scan and
@@ -899,12 +859,6 @@ typedef struct PgColumnarGroupStats
 	uint64		vectorsRuledOutByValue;
 } PgColumnarGroupStats;
 
-extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);
-extern void PgColumnarExplainVectorPredicates(int64 npreds, ExplainState *es);
-extern int	PgColumnarCountScanKeys(List *qual, Index scanrelid,
-								  TupleDesc tupdesc);
-extern void PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats,
-									  ExplainState *es);
 
 extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
 									 TupleDesc tupdesc, int *nkeys);

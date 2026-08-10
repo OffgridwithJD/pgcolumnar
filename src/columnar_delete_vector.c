@@ -21,6 +21,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_delete_vector.h"
 #include "access/xact.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"

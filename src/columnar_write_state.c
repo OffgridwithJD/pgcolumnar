@@ -14,6 +14,8 @@
 #include "columnar.h"
 
 #include "columnar_metadata.h"
+#include "columnar_storage.h"
+#include "columnar_write_state.h"
 #include "columnar_compat.h"
 #include "access/htup_details.h"
 #include "access/table.h"
