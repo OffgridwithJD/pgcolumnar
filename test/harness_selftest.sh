@@ -710,6 +710,21 @@ pgc_port_free() { return 1; }
 _none="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" 5 || echo NONE)"
 check "an entirely busy band reports itself full and terminates" "$_none" "NONE"
 
+# The caller says "no free port for the restore cluster in [lo,hi)". That names
+# the WHOLE band, so the picker has to have swept the whole band before it may
+# say nothing is free. It used to stop after 300 probes, which meant a free port
+# 500 away from the base was reported as a full band -- #548's own defect
+# surviving inside #548's fix, and #537's defect in the message.
+#
+# One free port, deliberately further from the base than the old 300 bound.
+pgc_port_free() { [ "$1" = "$(( PGC_AUX_PORT_LO + 500 ))" ]; }
+check "premise: the stub frees exactly one port, 500 past the floor" \
+	"$(pgc_port_free $(( PGC_AUX_PORT_LO + 500 )) && echo free || echo busy)/$(pgc_port_free $(( PGC_AUX_PORT_LO + 200 )) && echo free || echo busy)" \
+	"free/busy"
+_far="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" 0 || echo NONE)"
+check "a free port beyond the old 300-probe bound is still found" \
+	"$_far" "$(( PGC_AUX_PORT_LO + 500 ))"
+
 eval "$_realfree"
 check "premise: the real prober was restored, or every check after this lies" \
 	"$(pgc_port_free 1 && echo probing || echo stubbed)" "probing"

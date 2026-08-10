@@ -73,7 +73,7 @@ pick_sb_port() {
 }
 SB_PORT="$(pick_sb_port)"
 if [ -z "$SB_PORT" ]; then
-	echo "FAIL  no free port for the standby"
+	echo "FAIL  no free port for the standby in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI): the picker swept the whole band"
 	PGC_FAIL=1
 	pgc_summary
 fi
@@ -83,7 +83,7 @@ RS_PORT="$(pick_sb_port)"
 # but an unreachable branch that silently probes the empty string is the kind of
 # thing that stops being unreachable when the band is resized.
 if [ -z "$RS_PORT" ]; then
-	echo "FAIL  no free port for the restore cluster in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI)"
+	echo "FAIL  no free port for the restore cluster in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI): the picker swept the whole band"
 	PGC_FAIL=1
 	pgc_summary
 fi
