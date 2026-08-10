@@ -20,6 +20,7 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_metadata.h"
 #include "columnar_compat.h"
 
 #include "fmgr.h"

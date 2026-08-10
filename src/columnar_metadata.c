@@ -11,6 +11,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include "fmgr.h"
 #include "columnar_compat.h"
 #include "access/genam.h"
