@@ -1304,6 +1304,38 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
 
+	/*
+	 * stripe_count is refused rather than honoured (#560).
+	 *
+	 * It was documented as bounding how many row groups are combined in one
+	 * call, and it has never been read: this function fetched argument 0 and
+	 * passed a literal 0 as the bound. A caller asking for a bound of 4 got an
+	 * unbounded whole-relation rewrite and no indication of it.
+	 *
+	 * Honouring it is not a small change and must not be attempted here.
+	 * pgcolumnar_compact_relation's second parameter is nsortkeys, not a bound,
+	 * and its body dereferences sortAtts[i]. More seriously it swaps the whole
+	 * relation to a NEW relfilenode, so rewriting only some row groups would
+	 * leave the rest behind in storage that is then discarded. Bounded
+	 * compaction is a different algorithm, and one already exists:
+	 * pgcolumnar.compact_rewrite passes its max_groups through to
+	 * pgcolumnar_rewrite_partial_groups.
+	 *
+	 * So refuse, and name the thing that works. An accepted-and-ignored
+	 * argument is a documented promise the code does not keep; an error is the
+	 * only answer that is both truthful and non-breaking for the default form.
+	 */
+	if (!PG_ARGISNULL(1) && PG_GETARG_INT32(1) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.vacuum does not support a stripe_count bound"),
+				 errdetail("The argument was accepted and ignored in earlier "
+						   "releases: every call rewrote the whole relation."),
+				 errhint("Use pgcolumnar.compact_rewrite(rel, min_deleted_fraction, "
+						 "max_groups), which bounds the number of row groups it "
+						 "rewrites, or omit stripe_count to rewrite the whole "
+						 "relation.")));
+
 	/* Ownership before the AccessExclusiveLock, so a non-owner cannot queue in
 	 * the lock FIFO and block readers of a table it does not own (#568). */
 	PgColumnarRequireTableOwnerByOid(relid);
