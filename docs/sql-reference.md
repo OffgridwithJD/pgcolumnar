@@ -52,8 +52,14 @@ Compacts a columnar table by combining small row groups and reclaiming space hel
 by rows that were deleted or updated. Use it after bulk deletes or updates, or
 after many small load transactions have produced many small row groups.
 
-`stripe_count` bounds how many row groups are combined in one call; `0` places no
-bound.
+`stripe_count` is not supported and a non-zero value raises an error. The
+argument is retained so existing calls that pass the default keep working. It was
+documented as bounding how many row groups are combined in one call. It was never
+read, and every call rewrote the whole relation regardless of the value.
+
+To bound the work, use
+[`pgcolumnar.compact_rewrite`](#pgcolumnarcompact_rewriterel-regclass-min_deleted_fraction-float8-max_groups-int),
+whose `max_groups` does limit how many row groups are rewritten.
 
 ```sql
 SELECT pgcolumnar.vacuum('events');
@@ -160,7 +166,10 @@ SELECT pgcolumnar.truncate('events');
 ### pgcolumnar.vacuum_full(schema name DEFAULT 'public', sleep_time real DEFAULT 0.0, stripe_count int DEFAULT 0)
 
 Runs `pgcolumnar.vacuum` on every columnar table in a schema. `sleep_time` is a
-pause in seconds between tables. Each call receives the same `stripe_count`.
+pause in seconds between tables.
+
+`stripe_count` is passed through to `pgcolumnar.vacuum` and is subject to the same
+restriction: a non-zero value raises an error.
 
 ```sql
 SELECT pgcolumnar.vacuum_full('public');

@@ -175,12 +175,12 @@ SUITES=(
 	ungrouped_vector_agg
 	unique_conc
 	vacuum_lock_privilege
+	vacuum_stripe_count
 	vm_privilege
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
-	zonemap_cost
-)
+	zonemap_cost)
 
 
 # ---------------------------------------------------------------------------
