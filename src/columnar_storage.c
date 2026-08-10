@@ -12,6 +12,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_storage.h"
 #include "fmgr.h"
 #include "columnar_compat.h"
 #include "access/rmgr.h"

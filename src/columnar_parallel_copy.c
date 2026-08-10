@@ -43,6 +43,7 @@
 
 #include "columnar.h"
 
+#include "columnar_write_state.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/twophase.h"

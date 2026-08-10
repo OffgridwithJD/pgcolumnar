@@ -13,8 +13,12 @@
  */
 #include "columnar.h"
 
+#include "columnar_customscan.h"
+#include "columnar_delete_vector.h"
 #include "columnar_metadata.h"
 #include "columnar_reader.h"
+#include "columnar_storage.h"
+#include "columnar_write_state.h"
 #include "access/multixact.h"
 #include "access/genam.h"
 #include "access/table.h"

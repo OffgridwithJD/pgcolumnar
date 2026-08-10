@@ -36,6 +36,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_customscan.h"
 #include "columnar_metadata.h"
 #include "columnar_reader.h"
 #include <math.h>
