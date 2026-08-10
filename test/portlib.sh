@@ -144,10 +144,37 @@ pgc_port_free() {
 # A free port from a band, verified rather than assumed. Callers pass the band so
 # a suite standing up extra clusters can draw from AUX while the matrix walks MAIN.
 pgc_pick_free_port() {
-	local lo="$1" hi="$2" seed="${3:-$$}" base p
-	base=$(( lo + (seed % (hi - lo)) ))
-	for p in $(seq "$base" $(( base + 300 ))); do
-		[ "$p" -ge "$hi" ] && break
+	local lo="$1" hi="$2" seed="${3:-$$}" width base span i p
+
+	width=$(( hi - lo ))
+	[ "$width" -le 0 ] && return 1
+	base=$(( lo + (seed % width) ))
+
+	# The walk WRAPS to lo, and is bounded by the band width (#548).
+	#
+	# It used to run `seq base base+300` and `break` at hi, so a seed landing
+	# near the ceiling got a truncated scan and a seed landing on hi-1 got a scan
+	# of one port. The caller then reported the band full while the whole band
+	# beneath it was free. Resizing the band does not fix that: the failure needs
+	# a base within one port of the ceiling, which stays a fixed fraction of the
+	# width whatever the width is.
+	#
+	# The bound matters as much as the wrap. Without it a genuinely full band
+	# spins forever rather than reporting itself full.
+	#
+	# The bound is the WHOLE BAND, not a 300-probe budget. A budget reintroduces
+	# the defect it was meant to fix one layer up: the caller reports "no free
+	# port in [lo,hi)", naming 2000 ports, on the strength of 300 probes, so a
+	# free port 500 away from the base reads as a full band. Sweeping the band is
+	# what makes that message true, which is #537's rule applied here.
+	#
+	# It costs nothing that matters. The picker returns on the first free port, so
+	# a full sweep happens only when the band really is full, which is the failure
+	# path. Measured on the bench container: 2000 probes take 856 ms, against
+	# 191 ms for 300, and neither is paid on the success path.
+	span=$width
+	for i in $(seq 0 $(( span - 1 ))); do
+		p=$(( lo + ((base - lo + i) % width) ))
 		if pgc_port_free "$p"; then
 			printf '%s\n' "$p"
 			return 0

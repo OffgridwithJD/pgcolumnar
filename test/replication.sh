@@ -62,21 +62,18 @@ RS_LOG="$PGC_WORKDIR/restore.log"
 # Probing for free is kept, but it is now meaningful: below the floor, a port that
 # probes free is still free when the standby binds it, because the kernel does not
 # allocate from here.
+#
+# Delegates to portlib's picker rather than keeping a second copy of the same
+# walk. This function WAS that second copy, and it carried the #548 defect the
+# original had: no wrap at the ceiling, so a seed landing on hi-1 scanned one
+# port and reported the band full with the band empty. Two copies of a walk is
+# how one of them gets fixed.
 pick_sb_port() {
-	local base p
-	base=$(( PGC_AUX_PORT_LO + ($$ % (PGC_AUX_PORT_HI - PGC_AUX_PORT_LO)) ))
-	for p in $(seq "$base" $((base + 300))); do
-		[ "$p" -ge "$PGC_AUX_PORT_HI" ] && break
-		if pgc_port_free "$p"; then
-			echo "$p"
-			return 0
-		fi
-	done
-	return 1
+	pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI"
 }
 SB_PORT="$(pick_sb_port)"
 if [ -z "$SB_PORT" ]; then
-	echo "FAIL  no free port for the standby"
+	echo "FAIL  no free port for the standby in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI): the picker swept the whole band"
 	PGC_FAIL=1
 	pgc_summary
 fi
@@ -86,13 +83,36 @@ RS_PORT="$(pick_sb_port)"
 # but an unreachable branch that silently probes the empty string is the kind of
 # thing that stops being unreachable when the band is resized.
 if [ -z "$RS_PORT" ]; then
-	echo "FAIL  no free port for the restore cluster in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI)"
+	echo "FAIL  no free port for the restore cluster in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI): the picker swept the whole band"
 	PGC_FAIL=1
 	pgc_summary
 fi
+#
+# Both draws return the SAME port by construction: $$ inside $( ) is the
+# invoking shell's PID, not the subshell's, so pick_sb_port is deterministic
+# within a run. This loop exists to step off that collision, and it is expected
+# to run at least once.
+#
+# It WRAPS to the band floor and is bounded by the band width (#548). It used to
+# increment and hard-fail at PGC_AUX_PORT_HI, so a seed landing on hi-1 failed
+# immediately with all 2000 ports free beneath it: about 1 run in 2000 per
+# replication run, which across five majors is roughly 1 CI run in 400 and
+# matches the observed "rare, unattributable, moves between majors".
+#
+# The bound is what makes the failure message honest. Sweeping the whole band
+# and finding it full is a different fact from walking off the end of it, and
+# they want different responses from whoever reads the log; the old message
+# asserted the first when only the second had been established.
+_rs_width=$(( PGC_AUX_PORT_HI - PGC_AUX_PORT_LO ))
+_rs_tries=0
 while [ "$RS_PORT" = "$SB_PORT" ] || ! pgc_port_free "$RS_PORT"; do
-	RS_PORT=$((RS_PORT + 1))
-	[ "$RS_PORT" -ge "$PGC_AUX_PORT_HI" ] && { echo "FAIL  no free port for the restore"; PGC_FAIL=1; pgc_summary; }
+	RS_PORT=$(( PGC_AUX_PORT_LO + ((RS_PORT - PGC_AUX_PORT_LO + 1) % _rs_width) ))
+	_rs_tries=$(( _rs_tries + 1 ))
+	if [ "$_rs_tries" -ge "$_rs_width" ]; then
+		echo "FAIL  no free port for the restore: swept all $_rs_width ports in [$PGC_AUX_PORT_LO,$PGC_AUX_PORT_HI) and every one was busy or the standby's"
+		PGC_FAIL=1
+		pgc_summary
+	fi
 done
 echo "-- primary port $PGC_PORT, standby port $SB_PORT"
 
