@@ -64,13 +64,16 @@ EXEMPT="$(echo $EXEMPT)"
 # PINNED AS THE WRONG VALUE, deliberately, per CONTEXT.md: when a fix lands this
 # suite goes red and forces the list to shrink on purpose, rather than a comment
 # nobody re-reads. Each carries the issue that owns it.
-# One line, for the same reason as EXEMPT above.
+# EMPTY, and that is the point of the list rather than an oversight.
 #
-# #558 and #562 landed on 2026-08-10 (merges d0d7309 and 77b530d), so
-# read_projection, reconstruct_via_projection, vm_is_visible and vm_selftest have
-# moved out of this list and into GUARDED_BEHAVIOURAL below.
-KNOWN_UNGUARDED="export_arrow export_parquet import_arrow import_parquet get_storage_id"
-KNOWN_UNGUARDED="$(echo $KNOWN_UNGUARDED)"
+# #558 and #562 landed first (d0d7309, 77b530d), then #559 and #566 (819ce21), and
+# each landing turned the pins for those functions RED and forced this line to
+# shrink. Every relation-taking C entry point is now guarded, and each one is
+# asserted behaviourally below rather than trusted.
+#
+# A name added back here is a claim that something is ungated, and it needs an
+# issue number beside it.
+KNOWN_UNGUARDED=""
 
 # Functions that ACT on relations without declaring one as their first argument,
 # so `proargtypes[0] = 'regclass'` cannot see them. Named explicitly, because the
@@ -106,7 +109,7 @@ CATALOG_GOVERNED="$(echo $CATALOG_GOVERNED)"
 
 # Relation-taking entry points that are supposed to REFUSE an unprivileged
 # caller, asserted behaviourally rather than believed.
-GUARDED_BEHAVIOURAL="read_projection reconstruct_via_projection vm_is_visible vm_selftest"
+GUARDED_BEHAVIOURAL="read_projection reconstruct_via_projection vm_is_visible vm_selftest get_storage_id"
 GUARDED_BEHAVIOURAL="$(echo $GUARDED_BEHAVIOURAL)"
 
 # ---- the enumeration, from the catalog -------------------------------------
@@ -245,8 +248,7 @@ check_num "the catalog-governed class is the six from #560" "$catalog_n" "6"
 # 3. The pinned count is exactly the size of the known class. This is the arm
 #    that reddens when a fix lands, which is the entire purpose of the pins: the
 #    engineer who closes one must come here and remove the name.
-check_num "KNOWN WRONG (#559/#566): entry points still ungated on this build" \
-	"$pinned_n" "5"
+check_num "no relation-taking C entry point is still ungated" "$pinned_n" "0"
 
 # THE COUNT ABOVE IS NOT ENOUGH, AND THIS SUITE PROVED IT ON ITSELF.
 #
@@ -322,6 +324,8 @@ call_for() {  # call_for <fn> -> a valid argument vector for that function
 		read_projection|reconstruct_via_projection) echo "SELECT pgcolumnar.$1('ep_target','p1');" ;;
 		vm_is_visible|vm_selftest)                  echo "SELECT pgcolumnar.$1('ep_target',0);" ;;
 		get_storage_id)                             echo "SELECT pgcolumnar.$1('ep_target');" ;;
+		export_arrow|export_parquet|import_arrow|import_parquet)
+			echo "SELECT pgcolumnar.$1('ep_target','/nonexistent/dir/x');" ;;
 		*) echo "" ;;
 	esac
 }
@@ -356,30 +360,23 @@ for fn in $GUARDED_BEHAVIOURAL; do
 		"$(as_ep "$sql")" "42501"
 done
 
-# The four import/export siblings, pinned BEHAVIOURALLY rather than by name.
-#
-# A pin that counts names in a list cannot see a fix land; that is recorded above
-# and it is the defect that let four names go stale when #558 and #562 merged.
-# These four need a server-file role before they reach any table-level check, and
-# a real fixture file would duplicate test/import_export_privilege.sh, which owns
-# their full behaviour under the split for #569.
-#
-# So discriminate on the SHAPE of the failure with a path that cannot exist. It
-# needs no fixture and it distinguishes the two states exactly:
-#
-#   ungated -> the call runs past the (absent) privilege check and dies at the
-#              file layer:   could not open file "/nonexistent/..."
-#   guarded -> aclcheck_error fires first:   permission denied for table
-#
-# Measured on main before the fix: all four report the file error, which is
-# itself the proof that nothing checked the relation first. When #559's fix lands
-# these arms go RED, and whoever landed it removes the names from
-# KNOWN_UNGUARDED. That is the point of a pin.
+# These four gate on a server-file role BEFORE any table check, so the role must
+# hold both or it is refused by that outer layer and never reaches the bar under
+# test. Removing this grant while restructuring is exactly how the arms below
+# started reporting "must be superuser or a member of the pg_write_server_files
+# role", which is a refusal by the wrong layer and proves nothing.
 psql_run "GRANT pg_read_server_files, pg_write_server_files TO t_ep;"
 check "premise: t_ep holds the server-file roles, so it reaches the table check" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_ep -d "$PGC_DB" -At \
 		-c "SELECT pg_has_role('t_ep','pg_read_server_files','member');" 2>&1 | head -1)" "t"
 
+# The four import/export siblings, now GUARDED by #559 (merge 819ce21).
+#
+# They gate on a server-file role before any table check, so the role is given
+# both roles above. A path that cannot exist still discriminates: an unguarded
+# function runs past the absent check and dies at the file layer, a guarded one
+# refuses first. These arms asserted "reached-the-file-layer" until #559 landed,
+# at which point they reddened and named themselves, which is what a pin is for.
 for fn in export_arrow export_parquet import_arrow import_parquet; do
 	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_ep -d "$PGC_DB" -At \
 		-c "SELECT pgcolumnar.$fn('ep_target','/nonexistent/dir/x');" 2>&1 | head -1)"
@@ -388,15 +385,12 @@ for fn in export_arrow export_parquet import_arrow import_parquet; do
 		*"could not open file"*)         state=reached-the-file-layer ;;
 		*)                               state="unexpected: $out" ;;
 	esac
-	check "KNOWN WRONG (#559): $fn reaches the file layer for a caller with no privilege" \
-		"$state" "reached-the-file-layer"
+	check "$fn refuses a caller with no privilege before touching the file" \
+		"$state" "refused"
 done
 
-# get_storage_id is the one whose argument vector needs nothing invented.
-sqlstate="$(as_ep "$(call_for get_storage_id)")"
-check "premise: the owner can call get_storage_id" \
-	"$(q "$(call_for get_storage_id)" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
-check "KNOWN WRONG (#566): get_storage_id answers an unprivileged caller instead of raising 42501" \
-	"$([ "$sqlstate" = "42501" ] && echo refused || echo answered)" "answered"
+# get_storage_id is covered by the GUARDED_BEHAVIOURAL loop above, which asserts
+# 42501 from a caller holding nothing. It was the last member of the ungated
+# class (#566) and landed with #559 in the same merge.
 
 pgc_summary
