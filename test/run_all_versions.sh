@@ -172,6 +172,7 @@ SUITES=(
 	temporal
 	ungrouped_vector_agg
 	unique_conc
+	vm_privilege
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath

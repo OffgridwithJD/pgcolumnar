@@ -885,6 +885,14 @@ CREATE FUNCTION pgcolumnar.vm_is_visible(rel regclass, blk int)
 COMMENT ON FUNCTION pgcolumnar.vm_is_visible(regclass, int)
 	IS 'gap 28: is the synthetic block marked all-visible in the VM fork?';
 
+-- These two are phase-1 self-test helpers, not user API. CREATE FUNCTION grants
+-- EXECUTE to PUBLIC, which put a visibility-map write behind nothing but USAGE on
+-- this schema -- and the documented maintenance API lives in the same schema, so
+-- any deployment exposing that also exposed these (#558). The C code checks
+-- ownership as well; this REVOKE is the second layer, not the only one.
+REVOKE ALL ON FUNCTION pgcolumnar.vm_selftest(regclass, int) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgcolumnar.vm_is_visible(regclass, int) FROM PUBLIC;
+
 CREATE FUNCTION pgcolumnar.vacuum_full(
 	schema name DEFAULT 'public',
 	sleep_time real DEFAULT 0.0,
