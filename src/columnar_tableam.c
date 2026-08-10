@@ -13,6 +13,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include "access/multixact.h"
 #include "access/genam.h"
 #include "access/table.h"

@@ -36,6 +36,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include <math.h>
 
 #include "miscadmin.h"

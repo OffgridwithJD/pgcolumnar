@@ -14,6 +14,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include "fmgr.h"
 #include "access/detoast.h"
 #include "access/htup_details.h"
@@ -1985,6 +1986,61 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	rs->vectorsDecoded += (uint64) groupVecDecoded;
 
 	/*
+	 * Counted HERE, where the skipping is performed, and not where rows are
+	 * produced (#542).
+	 *
+	 * It used to be incremented in pgcolumnar_native_skip_current_vector, which
+	 * only the row path enters. The batch fold takes a group whole through
+	 * PgColumnarReadFoldNextGroup and never produces rows one at a time, so it
+	 * never reached that counter: a fold that decoded 1 of 59 vectors reported
+	 * "Columnar Vectors Skipped: 0". That is worse than printing nothing, because
+	 * it answers the question wrongly, and it is the number #522 added precisely
+	 * so a plan could say whether per-vector skipping happened on the fold path.
+	 *
+	 * Decode is shared by both paths, and it is the only place the final mask
+	 * exists.
+	 *
+	 * What this does to the scalar arm's total, stated exactly, because an
+	 * earlier version of this comment claimed it was unchanged and that is only
+	 * true of a scan that runs to completion:
+	 *
+	 *     query                                    before   after
+	 *     WHERE k BETWEEN 30000 AND 30100              58      58
+	 *     ... LIMIT 1                                  29      58
+	 *
+	 * The old counter incremented as the PRODUCER stepped over vectors, so a
+	 * LIMIT that stopped it halfway counted half of them. This one counts what
+	 * decode ruled out, which does not depend on how many rows were consumed. The
+	 * new number is the one that satisfies the invariant this change exists for:
+	 * on a 59-vector group the LIMIT row was 1 + 29 = 30, and is now 1 + 58 = 59.
+	 * The old number conflated "ruled out by the mask" with "stepped over before
+	 * we stopped", which is the same conflation #542 is about, one layer down.
+	 *
+	 * Counted from nativeSkipVec and NOT as (maxVecCount - groupVecDecoded).
+	 * That subtraction looks equivalent and is not, because #452 phase 1b-ii made
+	 * the loop two-pass: pass 0 decodes the qual columns against the mask the
+	 * ZONE MAPS built, refine_skipvec then sharpens it to "no row in this vector
+	 * matches", and pass 1 decodes the payload columns against the sharpened one.
+	 * groupVecDecoded is the max across columns over BOTH passes, so on a
+	 * zero-matching range it is the qual column's full 32 while the payload
+	 * columns decoded nothing -- the subtraction yields 0 skipped for a group
+	 * where every vector was ruled out. Measured: it made
+	 * native_exact_selection's "zone maps rule out nothing" premise read -32.
+	 *
+	 * The mask is the thing that says what was skipped, so ask it.
+	 */
+	if (rs->nativeSkipVec != NULL && rs->nativeVectorCount > 0)
+	{
+		int			v;
+		int			skipped = 0;
+
+		for (v = 0; v < rs->nativeVectorCount; v++)
+			if (rs->nativeSkipVec[v])
+				skipped++;
+		rs->vectorsSkipped += (uint64) skipped;
+	}
+
+	/*
 	 * The #512 tripwire's input, and it is measured rather than inferred from
 	 * the mask: a mask with nothing set in it skips nothing, and a decode that
 	 * ignored the mask skipped nothing either. Both must read as false here, and
@@ -2064,7 +2120,12 @@ pgcolumnar_native_skip_current_vector(PgColumnarReadState *rs)
 
 	rs->rowInGroup = rs->nativeVecStart[v + 1];
 	rs->nativeCurVec = v + 1;
-	rs->vectorsSkipped++;
+	/*
+	 * vectorsSkipped is NOT incremented here any more (#542). This function is
+	 * on the row path only, so counting here made the number a row-path counter
+	 * wearing a plan-wide name: correct on a sequential scan, silently 0 on the
+	 * batch fold. It is now counted in the group decode, which both paths share.
+	 */
 	return true;
 }
 
