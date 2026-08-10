@@ -72,6 +72,38 @@ EXEMPT="$(echo $EXEMPT)"
 KNOWN_UNGUARDED="export_arrow export_parquet import_arrow import_parquet get_storage_id"
 KNOWN_UNGUARDED="$(echo $KNOWN_UNGUARDED)"
 
+# Functions that ACT on relations without declaring one as their first argument,
+# so `proargtypes[0] = 'regclass'` cannot see them. Named explicitly, because the
+# alternative is to let them fall out of the population the way the language
+# filter did.
+#
+# This is the blind spot of the type-based rule this suite argues for, and it is
+# worth stating plainly rather than hiding: bucketing on the declared type beats
+# bucketing on a parameter NAME, and it still misses a function that takes text
+# and resolves a relation itself.
+#
+#   alter_table_set_access_method(t text, method text)
+#       plpgsql, and its first statement is `rel regclass := t::regclass`. It is
+#       relation-taking in every sense except the declaration.
+#   vacuum_full(schema name, sleep_time real, stripe_count int)
+#       schema-scoped: it loops over the tables in a schema, so its bar is
+#       whatever the per-table path it calls enforces, not a bar of its own. It
+#       also carries the same phantom `stripe_count` argument as
+#       pgcolumnar.vacuum (#560).
+#
+# Both are recorded here rather than resolved. Neither is claimed guarded.
+RELATION_BY_OTHER_MEANS="alter_table_set_access_method vacuum_full"
+RELATION_BY_OTHER_MEANS="$(echo $RELATION_BY_OTHER_MEANS)"
+
+# Relation-taking entry points that are NOT C functions. Their bar is not a
+# pg_class_aclcheck in a C body at all: they are SQL/plpgsql and read the
+# pgcolumnar catalog tables directly, so what governs them is the ACL on those
+# tables. That is a different mechanism and a different defect (#560), and it is
+# named here rather than filtered out of the population, so the coverage arm
+# balances over the real class.
+CATALOG_GOVERNED="analyze rebuild_projections reset_options set_options sort_status stats"
+CATALOG_GOVERNED="$(echo $CATALOG_GOVERNED)"
+
 # Relation-taking entry points that are supposed to REFUSE an unprivileged
 # caller, asserted behaviourally rather than believed.
 GUARDED_BEHAVIOURAL="read_projection reconstruct_via_projection vm_is_visible vm_selftest"
@@ -88,13 +120,21 @@ installed="$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.
 symbols="$(q "SELECT string_agg(DISTINCT p.prosrc, ' ' ORDER BY p.prosrc)
               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
               WHERE n.nspname = 'pgcolumnar' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'c');")"
+# NO LANGUAGE FILTER HERE, deliberately. An earlier version of this file scoped
+# the population with prolang = 'c', which silently excluded six relation-taking
+# functions written in sql/plpgsql (analyze, rebuild_projections, reset_options,
+# set_options, sort_status, stats). The coverage arm still balanced, because it
+# balanced over the truncated population. That is the same disease this file
+# indicts the older scans for, moved from name-derivation to a language filter,
+# and it was found by review rather than by the suite. The language filter
+# survives only where prosrc is read AS a C symbol, above.
 relfns="$(q "SELECT string_agg(DISTINCT p.proname, ' ' ORDER BY p.proname)
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-             WHERE n.nspname = 'pgcolumnar' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'c')
+             WHERE n.nspname = 'pgcolumnar'
                AND p.proargtypes[0] = 'regclass'::regtype;")"
 allfns="$(q "SELECT string_agg(DISTINCT p.proname, ' ' ORDER BY p.proname)
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-             WHERE n.nspname = 'pgcolumnar' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'c');")"
+             WHERE n.nspname = 'pgcolumnar';")"
 
 # ---- premises: the enumeration is real -------------------------------------
 #
@@ -129,16 +169,27 @@ check "the catalog and the install script agree on the symbol set" \
 # Every C entry point lands in exactly one bucket, and the buckets sum to the
 # input. This is the line that makes the rest a fact rather than a list.
 
-exempt_seen=0 rel_seen=0 unbucketed=""
+exempt_seen=0 rel_seen=0 other_seen=0 unbucketed=""
 for fn in $allfns; do
 	case " $EXEMPT " in *" $fn "*) exempt_seen=$((exempt_seen + 1)); continue ;; esac
 	case " $relfns " in *" $fn "*) rel_seen=$((rel_seen + 1)); continue ;; esac
+	case " $RELATION_BY_OTHER_MEANS " in *" $fn "*) other_seen=$((other_seen + 1)); continue ;; esac
 	unbucketed="$unbucketed $fn"
 done
+
+# The non-C relation-taking functions must all be inside the relation-taking
+# population, or the CATALOG_GOVERNED list has gone stale against the catalog.
+missing_cg=""
+for fn in $CATALOG_GOVERNED; do
+	case " $relfns " in *" $fn "*) ;; *) missing_cg="$missing_cg $fn" ;; esac
+done
+check "every catalog-governed name is still a relation-taking entry point" \
+	"$([ -z "${missing_cg// /}" ] && echo none || echo "$missing_cg")" "none"
 n_all="$(printf '%s\n' $allfns | grep -c .)"
 
 check_num "coverage: inputs == sum(buckets)" \
-	"$n_all" "$(( exempt_seen + rel_seen + $(printf '%s\n' $unbucketed | grep -c .) ))"
+	"$n_all" "$(( exempt_seen + rel_seen + other_seen + $(printf '%s\n' $unbucketed | grep -c .) ))"
+check_num "the relation-by-other-means class is the two that are known" "$other_seen" "2"
 check "coverage: no entry point is unbucketed" \
 	"$([ -z "${unbucketed// /}" ] && echo none || echo "$unbucketed")" "none"
 
@@ -178,16 +229,18 @@ check "no pinned name is stale (all still exist and take a relation)" \
 
 # 2. The split is exhaustive and the two sides sum to the population, printed
 #    from the data rather than retyped.
-pinned_n=0 guarded_n=0
+pinned_n=0 guarded_n=0 catalog_n=0
 for fn in $relfns; do
+	case " $CATALOG_GOVERNED " in *" $fn "*) catalog_n=$((catalog_n + 1)); continue ;; esac
 	case " $KNOWN_UNGUARDED " in
 		*" $fn "*) pinned_n=$((pinned_n + 1)) ;;
 		*)         guarded_n=$((guarded_n + 1)) ;;
 	esac
 done
 n_rel="$(printf '%s\n' $relfns | grep -c .)"
-check_num "coverage: relation-taking == pinned + claimed-guarded" \
-	"$n_rel" "$(( pinned_n + guarded_n ))"
+check_num "coverage: relation-taking == pinned + claimed-guarded + catalog-governed" \
+	"$n_rel" "$(( pinned_n + guarded_n + catalog_n ))"
+check_num "the catalog-governed class is the six from #560" "$catalog_n" "6"
 
 # 3. The pinned count is exactly the size of the known class. This is the arm
 #    that reddens when a fix lands, which is the entire purpose of the pins: the
