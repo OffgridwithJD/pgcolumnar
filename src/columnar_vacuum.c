@@ -82,6 +82,21 @@ PgColumnarRequireTableOwner(Relation rel)
 					   RelationGetRelationName(rel));
 }
 
+/*
+ * Same check on an Oid, for callers that must refuse BEFORE table_open (#568).
+ * vacuum, vacuum_sorted and cluster open with AccessExclusiveLock, which queues
+ * in the lock FIFO ahead of readers. An unprivileged caller that reached
+ * table_open would sit in that queue and block every reader of a table it does
+ * not own until its own lock request was resolved, so it has to be turned away
+ * before the lock is requested rather than after it is held.
+ */
+static void
+PgColumnarRequireTableOwnerByOid(Oid relid)
+{
+	if (!COLUMNAR_TABLE_OWNERCHECK(relid))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
+}
+
 /* Z-order helpers (defined later, used by the online recluster below) */
 static bool cluster_type_supported(Oid typid);
 static bytea *cluster_zorder_key(Datum *values, bool *isnull, AttrNumber *atts,
@@ -1289,6 +1304,10 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
 
+	/* Ownership before the AccessExclusiveLock, so a non-owner cannot queue in
+	 * the lock FIFO and block readers of a table it does not own (#568). */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1299,8 +1318,6 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	pgcolumnar_compact_relation(rel, 0, NULL);
 
@@ -1345,6 +1362,9 @@ pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 				 errmsg("table name cannot be null")));
 	relid = PG_GETARG_OID(0);
 
+	/* Ownership before the AccessExclusiveLock (#568), as in pgcolumnar_vacuum. */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1355,8 +1375,6 @@ pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	/*
 	 * Collect the sort-column names. Explicit columns win; when none are given
@@ -1515,6 +1533,9 @@ pgcolumnar_cluster(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("Z-order clustering supports at most 8 columns")));
 
+	/* Ownership before the AccessExclusiveLock (#568), as in pgcolumnar_vacuum. */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1525,8 +1546,6 @@ pgcolumnar_cluster(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	tupdesc = RelationGetDescr(rel);
 	atts = palloc(ncols * sizeof(AttrNumber));
