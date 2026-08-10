@@ -65,6 +65,7 @@ SUITES=(
 	drop_cleanup
 	encode_effort
 	encode_invariants
+	entry_point_privilege
 	fk_referencing
 	fsst_margin
 	fsst_verdict_cache
@@ -175,8 +176,7 @@ SUITES=(
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
-	zonemap_cost
-)
+	zonemap_cost)
 
 
 # ---------------------------------------------------------------------------
