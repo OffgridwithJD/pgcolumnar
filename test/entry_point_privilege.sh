@@ -303,11 +303,43 @@ for fn in $GUARDED_BEHAVIOURAL; do
 		"$(as_ep "$sql")" "42501"
 done
 
-# Ungated: the same shape, pinned as the WRONG value. get_storage_id is the one
-# whose argument vector needs nothing invented; the four import/export siblings
-# additionally gate on a server-file role, so their deny arms belong with the
-# #559 fix that gives them a table-level bar, and they are covered here only by
-# the list arms above.
+# The four import/export siblings, pinned BEHAVIOURALLY rather than by name.
+#
+# A pin that counts names in a list cannot see a fix land; that is recorded above
+# and it is the defect that let four names go stale when #558 and #562 merged.
+# These four need a server-file role before they reach any table-level check, and
+# a real fixture file would duplicate test/import_export_privilege.sh, which owns
+# their full behaviour under the split for #569.
+#
+# So discriminate on the SHAPE of the failure with a path that cannot exist. It
+# needs no fixture and it distinguishes the two states exactly:
+#
+#   ungated -> the call runs past the (absent) privilege check and dies at the
+#              file layer:   could not open file "/nonexistent/..."
+#   guarded -> aclcheck_error fires first:   permission denied for table
+#
+# Measured on main before the fix: all four report the file error, which is
+# itself the proof that nothing checked the relation first. When #559's fix lands
+# these arms go RED, and whoever landed it removes the names from
+# KNOWN_UNGUARDED. That is the point of a pin.
+psql_run "GRANT pg_read_server_files, pg_write_server_files TO t_ep;"
+check "premise: t_ep holds the server-file roles, so it reaches the table check" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_ep -d "$PGC_DB" -At \
+		-c "SELECT pg_has_role('t_ep','pg_read_server_files','member');" 2>&1 | head -1)" "t"
+
+for fn in export_arrow export_parquet import_arrow import_parquet; do
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_ep -d "$PGC_DB" -At \
+		-c "SELECT pgcolumnar.$fn('ep_target','/nonexistent/dir/x');" 2>&1 | head -1)"
+	case "$out" in
+		*"permission denied for table"*) state=refused ;;
+		*"could not open file"*)         state=reached-the-file-layer ;;
+		*)                               state="unexpected: $out" ;;
+	esac
+	check "KNOWN WRONG (#559): $fn reaches the file layer for a caller with no privilege" \
+		"$state" "reached-the-file-layer"
+done
+
+# get_storage_id is the one whose argument vector needs nothing invented.
 sqlstate="$(as_ep "$(call_for get_storage_id)")"
 check "premise: the owner can call get_storage_id" \
 	"$(q "$(call_for get_storage_id)" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
