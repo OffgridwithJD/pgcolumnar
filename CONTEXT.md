@@ -167,9 +167,12 @@ and ends with `pgc_summary`.
   **one name per line and sorted**; insert in sorted position, never at the end.
   `harness_selftest` fails if the order decays.
 - Count suites by asking the runner, never by parsing the source:
-  `bash test/run_all_versions.sh --list-suites | wc -l`. It is 132 today. A text
-  parser over the array disagrees with bash on exactly the mistake this invites,
-  and the disagreement is silent.
+  `bash test/run_all_versions.sh --list-suites | wc -l`. A text parser over the
+  array disagrees with bash on exactly the mistake this invites, and the
+  disagreement is silent. No number is quoted here on purpose: this bullet used
+  to end "it is 132 today", which was 137 by the time anyone noticed. A count
+  that changes weekly, written beside the command that computes it, is a
+  liability and not a convenience.
 - Assertions: `check` (string equality), `check_num`, `check_text` (for hashes
   and other things `check_num` must refuse), `check_ratio`, `check_timing`.
   `check "" ""` passes, which is why the helpers refuse empty sides.
@@ -190,12 +193,56 @@ than a wrong algorithm.
   asserts a derived relation without asserting the physical fact underneath it
   can stay green for its whole life while measuring nothing. `zonemap_cost`
   priced pruning correctly for a year while pruning zero groups.
-- **Prove the guard by removal.** A test proves nothing until it has been seen to
-  fail with that specific guard removed. Fingerprint the installed `.so` when you
-  do it, because a shared install prefix will happily let the "before" run be the
-  fixed binary.
+- **Prove it by removal, and not only guards.** A test proves nothing until it
+  has been seen to fail with the thing under test removed. The one-line form,
+  which needs no interpretation and costs ten seconds:
+
+      Can I delete this change and still be green?
+
+  It applies to any change at all, not just a guard: a bug fix, a feature, an
+  optimisation, a counter, a call site, a comment claiming a behaviour. This
+  bullet used to say "guard", and on 2026-08-09 two changes shipped whose entire
+  contribution could be deleted with the suite still green (#532, and the first
+  version of #537's own fix; #538 is the change that caught the first of those).
+  Neither was a guard, which is exactly why this line did not fire for either.
+
+  Fingerprint the installed `.so` when you do it, because a shared install prefix
+  will happily let the "before" run be the fixed binary.
 - **A removal proof must fail for the STATED reason.** That a check can fail is
   not evidence that it fails for the reason claimed. Read the failure text.
+- **A suite that sources a helper cannot see whether anything calls it.** Feeding
+  a function fixtures proves its arithmetic and nothing else, so the caller can
+  be deleted with every check still passing. Assert the call site too. A grep
+  over source text is the weaker kind of check and is still worth writing;
+  premise it on the call site existing, or it approves a file that no longer has
+  one.
+- **Before believing a check, make it say the other thing.** There are two ways
+  to be misled and they are mirror images. A check too TIGHT to fail approves
+  anything, and you find out when someone deletes your feature and the suite
+  stays green. A check too LOOSE to be believed condemns anything, and you find
+  out after chasing a defect that does not exist -- in #537 a grep for one
+  message matched a different message that merely began the same way, one about
+  the previously installed `.so` (#508), and reported a fault that was not there.
+  So: make a passing check fail, and show a failing check passes on code known to
+  be good. Both directions, every time.
+- **When a rule does not fire, fix its trigger, not your discipline.** Guidance
+  here, in a code comment, or in a local note can be correct, specific, and
+  silent, because the condition that summons it is narrower than the content it
+  guards. The bullet above is the worked example: it said "guard" while its
+  content covered any removal, so it stayed quiet for both changes above. When
+  something you had already written fails to help, ask whether its CONTENT
+  would have covered the case. If yes the trigger is the bug, so widen it and put
+  the wider form in the first line where it is actually read. If no, the content
+  is. Only the second is about knowledge, and the first is the common one.
+  "Consult it more carefully" is not a fix.
+- **When you fix one instance, look for the rest before you believe you are
+  done.** A correction is not complete until you have searched for the same claim
+  elsewhere: grep for the phrasing you just removed. The bullets above were
+  written with a claim about people in them, corrected in one place, and the same
+  claim survived one paragraph below in different words. Then a wrong issue
+  citation was corrected in one place and a second wrong one survived four lines
+  away, and was caught by this rule rather than by rereading. Both times the
+  first correction felt like completion.
 - **Never gate on luck.** A premise that requires a random sample to miss, or
   core to be unlucky, will fail eventually and will blame innocent code (#487).
   Restate it as arithmetic, or print it as an observation.
