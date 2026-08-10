@@ -305,10 +305,58 @@ rm -f "$_fx"
 #
 # This check is what keeps the property true. Without it the order decays the
 # first time somebody appends by hand, and the reduction quietly goes away.
-_sorted_expected="$(listed_suites | sort)"
+#
+# LC_ALL=C, and the collation is part of the property rather than a detail (#552).
+# "Sorted" is not machine-independent: C compares byte by byte so `_` (0x5F)
+# precedes `e`, while en_US.UTF-8 ignores punctuation at the first level and
+# compares `sortstatus` against `sortedprojection`. The array holds sort_status
+# then sorted_projection, so it is sorted in one and unsorted in the other, and
+# this check pinned neither. On a clean main it FAILED under en_US.UTF-8 and
+# passed here only because the container defaults to C.UTF-8, which collates
+# like C.
+#
+# The ambiguity is worse than the false red. Sorted order is what gives two
+# agents' new suites different insertion points; if two contributors disagree
+# about what sorted means they insert in different places, and the property stops
+# delivering the merges it exists for.
+_sorted_expected="$(listed_suites | LC_ALL=C sort)"
 _sorted_actual="$(listed_suites)"
-check "the suite list is sorted, so two new suites land in different places" \
+check "the suite list is sorted in C order, so two new suites land in different places" \
 	"$([ "$_sorted_actual" = "$_sorted_expected" ] && echo sorted || echo "not sorted")" "sorted"
+
+# The pair that decides it, asserted directly so a future edit that "fixes" the
+# order to UTF-8 collation fails here with the reason rather than only failing
+# the comparison above.
+check "premise: C collation puts sort_status before sorted_projection" \
+	"$(printf 'sorted_projection\nsort_status\n' | LC_ALL=C sort | head -1)" "sort_status"
+
+# ---- and comm's two inputs must be sorted the SAME way (#552 follow-up) -----
+#
+# `comm` requires both inputs sorted in one collation and does not check. Fed
+# inconsistently-sorted input it does not error; it returns the wrong lines.
+#
+# test/rebuild.sh:130 does `comm -23` over two `sort -u` outputs, neither pinned.
+# They agree today because they share a locale. The plausible next edit is
+# somebody pinning ONE of them because this PR taught them to, and the result is
+# a symbol check that silently reports the wrong unresolved symbols -- either a
+# false red, or the worse direction, a real unresolved symbol not reported.
+#
+# Asserted over source text, which is the weaker kind, because reproducing it
+# needs two locales and a built .so. Premised on the comm still existing, or the
+# grep approves a file that no longer has one.
+_cm_files="$(grep -ln 'comm -' "$(dirname "${BASH_SOURCE[0]}")"/*.sh 2>/dev/null)"
+check "premise: some suite still uses comm, or the check below is vacuous" \
+	"$([ -n "$_cm_files" ] && echo yes || echo no)" "yes"
+
+_cm_unpinned=""
+for _f in $_cm_files; do
+	# every `| sort` in a file that uses comm must carry LC_ALL=C
+	if grep -qE '\|[[:space:]]*sort' "$_f" && grep -E '\|[[:space:]]*sort' "$_f" | grep -qv 'LC_ALL=C'; then
+		_cm_unpinned="$_cm_unpinned $(basename "$_f")"
+	fi
+done
+check "a file that uses comm pins the collation of every sort feeding it" \
+	"$(printf '%s' "$_cm_unpinned" | sed 's/^ //')" ""
 
 # A case over the cached list rather than `listed_suites | grep -qx`. The pipe
 # was the defect: grep -q returns on its match, printf takes EPIPE, and pipefail
