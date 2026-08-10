@@ -14,6 +14,7 @@
 #include "columnar.h"
 
 #include "columnar_metadata.h"
+#include "columnar_reader.h"
 #include "access/multixact.h"
 #include "access/genam.h"
 #include "access/table.h"

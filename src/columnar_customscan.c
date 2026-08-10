@@ -26,6 +26,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_reader.h"
 #include <math.h>
 
 #include "access/htup_details.h"
