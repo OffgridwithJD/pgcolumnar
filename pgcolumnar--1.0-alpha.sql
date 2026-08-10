@@ -585,6 +585,13 @@ CREATE FUNCTION pgcolumnar.reconstruct_via_projection(rel regclass, name text)
 COMMENT ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text)
 	IS 'read all live rows via a projection, reconstructing non-covered columns from the base by row number (gap 26)';
 
+-- #562: EXECUTE is granted to PUBLIC by CREATE FUNCTION, so without these the
+-- C check below is the only boundary. Two layers on purpose: the C check is
+-- what makes the functions safe, and this is what keeps an unprivileged role
+-- from reaching them at all.
+REVOKE ALL ON FUNCTION pgcolumnar.read_projection(regclass, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text) FROM PUBLIC;
+
 CREATE FUNCTION pgcolumnar.stats(
 	rel regclass,
 	OUT stripeid bigint,
