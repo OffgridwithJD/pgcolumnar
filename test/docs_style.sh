@@ -92,6 +92,37 @@ check "no document carries a merge conflict marker" \
 # CHANGELOG.md: dash characters only. See the scope note above.
 dashes=$(grep -c '—\|–' "$SRCDIR/CHANGELOG.md" || true)
 check "CHANGELOG.md carries no em or en dash" "$dashes" "0"
+# ---- a document that quotes the version must quote the current one ----------
+#
+# Nothing reads the VERSION file mechanically: no Makefile rule, no CI step. Two
+# documents cite it AND hardcode the string beside the citation:
+#
+#     CHANGELOG.md         the version marker is `1.0-alpha`, recorded in `VERSION`
+#     docs/limitations.md  The version marker is `1.0-alpha`, recorded in `VERSION`,
+#
+# So a release that bumps VERSION and pgcolumnar.control, and forgets these, ships
+# documentation asserting the previous version. Nothing else would notice: the
+# upgrade path is gated by extension_upgrade.sh, which compares control against
+# the installed extension and never reads prose.
+#
+# The pairing is what makes it checkable. A document that says "recorded in
+# `VERSION`" is pointing at a file whose content is knowable, so the two can be
+# compared instead of trusted to be edited together.
+_ver="$(cat "$SRCDIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
+check "premise: the VERSION file has a version to compare against" \
+	"$([ -n "$_ver" ] && echo yes || echo no)" "yes"
+
+_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+check "premise: at least one document cites the VERSION file" \
+	"$([ -n "$_verdocs" ] && echo yes || echo no)" "yes"
+
+_stale=""
+for _d in $_verdocs; do
+	grep -q "\`$_ver\`, recorded in \`VERSION\`" "$_d" || _stale="$_stale $(basename "$_d")"
+done
+check "every document citing VERSION quotes the version VERSION holds" \
+	"$(printf '%s' "$_stale" | sed 's/^ //')" ""
+
 
 echo "checks run: $checks"
 if [ "$fail" = 0 ]; then
