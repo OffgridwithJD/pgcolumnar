@@ -264,6 +264,56 @@ check "ratio()'s output reaches printf and nothing else" \
 check "and the verdict is asked of cb_verdict rather than recomputed inline" \
 	"$([ "$(grep -c 'cb_verdict "' "$CB")" -ge 1 ] && echo yes || echo no)" "yes"
 
+# ---- the accelerator claim must not call a separation "variation" (#565) ----
+#
+# docs/benchmarks.md called q18 and q31 "run to run variation" while publishing
+# them at 2.17x and 1.48x against a shared baseline, and claimed the plan was
+# identical when EXPLAIN on the four-setting tuned arm shows a seven-worker
+# parallel plan replaced by a serial vectorized node. Three checks, because the
+# headline one goes vacuous once the sentence is removed.
+DOC="$SRCDIR/docs/benchmarks.md"
+check "premise: the benchmark page is present to be judged" \
+	"$([ -f "$DOC" ] && echo yes || echo no)" "yes"
+
+# 1. Frozen fixture. The extractor must find both ids in a claim wrapped across
+# lines, so it stays proven after the real page no longer carries the sentence.
+# Without this the headline check below is satisfiable by an extractor that
+# matches nothing, which is exactly how the first draft of this guard passed.
+_fx="$(mktemp)"
+printf 'A lead sentence naming q18 and q31 here.\ntheir rows are therefore run to\nrun variation, not an effect.\n' > "$_fx"
+check "the variation-claim extractor reads ids wrapped across two lines" \
+	"$(cb_doc_variation_qids "$_fx" | tr '\n' ' ' | sed 's/ *$//')" "q18 q31"
+rm -f "$_fx"
+
+# 2. Headline. A query may be called "run to run variation" only if its own
+# accelerator figures are a tie within the page's band. The page publishes no
+# per-query scatter, so the band is '-' and cb_verdict returns '-', not "tie" --
+# any such claim is unbanded and refused. Fires on the unfixed page (q18, q31),
+# passes once the sentence is gone.
+_bad=""
+for _q in $(cb_doc_variation_qids "$DOC"); do
+	set -- $(cb_doc_accel_figures "$DOC" "$_q")
+	_v="$(cb_verdict "${2:-}" "${1:-}" "$(cb_band - -)")"
+	[ "$_v" = tie ] || _bad="$_bad $_q(${1:-?}/${2:-?}:$_v)"
+done
+_nclaim="$(cb_doc_variation_qids "$DOC" | grep -c .)"
+echo "  variation claims examined: $_nclaim"
+check "no query is called run-to-run variation unless its figures are a measured tie" \
+	"claims=$_nclaim$_bad" "claims=0"
+
+# 3. Census, which never goes vacuous. The tuned arm sets FOUR settings; the page
+# must name all four and the group-cap value it sets, so it cannot be described
+# as the two enable_* GUCs alone (the pre-fix text) or misstate the arm.
+_sec="$(awk '/^### The accelerations are off by default/{f=1; next} f&&/^#/{f=0} f' "$DOC")"
+_miss=""
+for _t in pgcolumnar.enable_group_vectorization pgcolumnar.enable_ungrouped_vector_agg \
+	pgcolumnar.enable_parallel_vector_agg pgcolumnar.groupagg_max_groups 200000000; do
+	grep -qF "$_t" <<<"$_sec" || _miss="$_miss $_t"
+done
+echo "  tuned-arm settings named on the page:$([ -z "$_miss" ] && echo ' all four + value' || echo "$_miss MISSING")"
+check "the tuned-arm section names all four settings and the group-cap value" \
+	"missing:$_miss" "missing:"
+
 echo
 echo "checks run: $PGC_CHECKS"
 if [ "$PGC_FAIL" != 0 ]; then

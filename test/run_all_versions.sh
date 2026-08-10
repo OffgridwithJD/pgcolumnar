@@ -172,9 +172,12 @@ SUITES=(
 	smoke
 	sort_status
 	sorted_projection
+	stats_privilege
 	temporal
 	ungrouped_vector_agg
 	unique_conc
+	vacuum_lock_privilege
+	vacuum_stripe_count
 	vm_privilege
 	wal_envelope
 	write_fsst_compressed

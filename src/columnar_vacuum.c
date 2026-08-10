@@ -68,6 +68,43 @@ PG_FUNCTION_INFO_V1(pgcolumnar_debug_set_metapage_version);
  * until the abort/crash path is fully hardened and matrix-validated. */
 bool		pgcolumnar_enable_end_truncation = false;
 
+PG_FUNCTION_INFO_V1(pgcolumnar_require_caller_select);
+
+/*
+ * pgcolumnar_require_caller_select(rel regclass) -> void
+ *		Raise unless the CALLER may SELECT the relation.
+ *
+ * Exists for pgcolumnar.stats, which is SECURITY DEFINER (#560). stats() reads
+ * pgcolumnar's catalog tables, which carry no GRANT, so a columnar table's own
+ * owner could not read the statistics of the table they own. Granting SELECT on
+ * those catalogs instead would publish pgcolumnar.zone_map, which stores per
+ * column minimum, maximum and sum for every columnar table: actual column
+ * values, and a much larger disclosure than the bug being fixed.
+ *
+ * GetOuterUserId, NOT GetUserId. Inside a SECURITY DEFINER function the
+ * effective user is the function's OWNER, so GetUserId returns the superuser who
+ * installed the extension and pg_class_aclcheck against it returns ACLCHECK_OK
+ * for every relation in the database. Such a check refuses nobody while looking
+ * exactly like a correct one. Measured on a build of this tree:
+ *
+ *		plain call   as t_id: cur=t_id      outer=t_id  sess=t_id
+ *		definer call as t_id: cur=postgres  outer=t_id  sess=t_id
+ *
+ * GetOuterUserId is the calling role, and it follows SET ROLE, which is the
+ * behaviour wanted: the privilege tested is the one the caller is acting with.
+ */
+Datum
+pgcolumnar_require_caller_select(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	AclResult	ac = pg_class_aclcheck(relid, GetOuterUserId(), ACL_SELECT);
+
+	if (ac != ACLCHECK_OK)
+		aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
+
+	PG_RETURN_VOID();
+}
+
 /*
  * PgColumnarRequireNoRowSecurity
  *		Refuse a relation whose row-level security policies apply to this caller.
@@ -127,6 +164,21 @@ PgColumnarRequireTableOwner(Relation rel)
 	if (!COLUMNAR_TABLE_OWNERCHECK(RelationGetRelid(rel)))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   RelationGetRelationName(rel));
+}
+
+/*
+ * Same check on an Oid, for callers that must refuse BEFORE table_open (#568).
+ * vacuum, vacuum_sorted and cluster open with AccessExclusiveLock, which queues
+ * in the lock FIFO ahead of readers. An unprivileged caller that reached
+ * table_open would sit in that queue and block every reader of a table it does
+ * not own until its own lock request was resolved, so it has to be turned away
+ * before the lock is requested rather than after it is held.
+ */
+static void
+PgColumnarRequireTableOwnerByOid(Oid relid)
+{
+	if (!COLUMNAR_TABLE_OWNERCHECK(relid))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 }
 
 /* Z-order helpers (defined later, used by the online recluster below) */
@@ -1350,6 +1402,42 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel;
 
+	/*
+	 * stripe_count is refused rather than honoured (#560).
+	 *
+	 * It was documented as bounding how many row groups are combined in one
+	 * call, and it has never been read: this function fetched argument 0 and
+	 * passed a literal 0 as the bound. A caller asking for a bound of 4 got an
+	 * unbounded whole-relation rewrite and no indication of it.
+	 *
+	 * Honouring it is not a small change and must not be attempted here.
+	 * pgcolumnar_compact_relation's second parameter is nsortkeys, not a bound,
+	 * and its body dereferences sortAtts[i]. More seriously it swaps the whole
+	 * relation to a NEW relfilenode, so rewriting only some row groups would
+	 * leave the rest behind in storage that is then discarded. Bounded
+	 * compaction is a different algorithm, and one already exists:
+	 * pgcolumnar.compact_rewrite passes its max_groups through to
+	 * pgcolumnar_rewrite_partial_groups.
+	 *
+	 * So refuse, and name the thing that works. An accepted-and-ignored
+	 * argument is a documented promise the code does not keep; an error is the
+	 * only answer that is both truthful and non-breaking for the default form.
+	 */
+	if (!PG_ARGISNULL(1) && PG_GETARG_INT32(1) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.vacuum does not support a stripe_count bound"),
+				 errdetail("The argument was accepted and ignored in earlier "
+						   "releases: every call rewrote the whole relation."),
+				 errhint("Use pgcolumnar.compact_rewrite(rel, min_deleted_fraction, "
+						 "max_groups), which bounds the number of row groups it "
+						 "rewrites, or omit stripe_count to rewrite the whole "
+						 "relation.")));
+
+	/* Ownership before the AccessExclusiveLock, so a non-owner cannot queue in
+	 * the lock FIFO and block readers of a table it does not own (#568). */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1360,8 +1448,6 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	pgcolumnar_compact_relation(rel, 0, NULL);
 
@@ -1406,6 +1492,9 @@ pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 				 errmsg("table name cannot be null")));
 	relid = PG_GETARG_OID(0);
 
+	/* Ownership before the AccessExclusiveLock (#568), as in pgcolumnar_vacuum. */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1416,8 +1505,6 @@ pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	/*
 	 * Collect the sort-column names. Explicit columns win; when none are given
@@ -1576,6 +1663,9 @@ pgcolumnar_cluster(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("Z-order clustering supports at most 8 columns")));
 
+	/* Ownership before the AccessExclusiveLock (#568), as in pgcolumnar_vacuum. */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, AccessExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -1586,8 +1676,6 @@ pgcolumnar_cluster(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	tupdesc = RelationGetDescr(rel);
 	atts = palloc(ncols * sizeof(AttrNumber));
