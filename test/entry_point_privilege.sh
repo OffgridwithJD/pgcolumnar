@@ -65,8 +65,17 @@ EXEMPT="$(echo $EXEMPT)"
 # suite goes red and forces the list to shrink on purpose, rather than a comment
 # nobody re-reads. Each carries the issue that owns it.
 # One line, for the same reason as EXEMPT above.
-KNOWN_UNGUARDED="read_projection reconstruct_via_projection vm_is_visible vm_selftest export_arrow export_parquet import_arrow import_parquet get_storage_id"
+#
+# #558 and #562 landed on 2026-08-10 (merges d0d7309 and 77b530d), so
+# read_projection, reconstruct_via_projection, vm_is_visible and vm_selftest have
+# moved out of this list and into GUARDED_BEHAVIOURAL below.
+KNOWN_UNGUARDED="export_arrow export_parquet import_arrow import_parquet get_storage_id"
 KNOWN_UNGUARDED="$(echo $KNOWN_UNGUARDED)"
+
+# Relation-taking entry points that are supposed to REFUSE an unprivileged
+# caller, asserted behaviourally rather than believed.
+GUARDED_BEHAVIOURAL="read_projection reconstruct_via_projection vm_is_visible vm_selftest"
+GUARDED_BEHAVIOURAL="$(echo $GUARDED_BEHAVIOURAL)"
 
 # ---- the enumeration, from the catalog -------------------------------------
 #
@@ -183,8 +192,20 @@ check_num "coverage: relation-taking == pinned + claimed-guarded" \
 # 3. The pinned count is exactly the size of the known class. This is the arm
 #    that reddens when a fix lands, which is the entire purpose of the pins: the
 #    engineer who closes one must come here and remove the name.
-check_num "KNOWN WRONG (#558/#559/#562/#566): entry points still ungated on this build" \
-	"$pinned_n" "9"
+check_num "KNOWN WRONG (#559/#566): entry points still ungated on this build" \
+	"$pinned_n" "5"
+
+# THE COUNT ABOVE IS NOT ENOUGH, AND THIS SUITE PROVED IT ON ITSELF.
+#
+# When #558 and #562 merged, four of the nine names here became genuinely
+# guarded, and this file stayed FULLY GREEN. The arm counts names in a list I
+# maintain, so it measures my intent rather than the world: a fix can land and
+# the list can go stale with nothing to say so. That is the same "measure the
+# work, never the intent" failure this suite exists to catch, built into the
+# suite itself.
+#
+# The arms below are the correction. Each makes the call and reads the SQLSTATE,
+# so a fix landing turns the relevant arm red on its own, whatever the list says.
 
 # ---- the pins, which are assertions of the WRONG value ----------------------
 #
@@ -236,7 +257,60 @@ check "premise: t_ep cannot read the table by any ordinary route" \
 # no argument vector to be invented. It is the pin this slice proves
 # behaviourally; the remaining eight need their own valid argument vectors and
 # are covered by the bucketing arm above until those are written (#569).
-sqlstate="$(as_ep "SELECT pgcolumnar.get_storage_id('ep_target');")"
+# A projection is needed before the projection entry points can be called at all,
+# and the REACHED premise below is what makes each deny arm mean anything: the
+# owner making the identical call must succeed, or a refusal is indistinguishable
+# from a broken call.
+psql_run "SELECT pgcolumnar.add_projection('ep_target','p1',ARRAY['id'],ARRAY['id']);"
+psql_run "SELECT pgcolumnar.rebuild_projections('ep_target');"
+
+call_for() {  # call_for <fn> -> a valid argument vector for that function
+	case "$1" in
+		read_projection|reconstruct_via_projection) echo "SELECT pgcolumnar.$1('ep_target','p1');" ;;
+		vm_is_visible|vm_selftest)                  echo "SELECT pgcolumnar.$1('ep_target',0);" ;;
+		get_storage_id)                             echo "SELECT pgcolumnar.$1('ep_target');" ;;
+		*) echo "" ;;
+	esac
+}
+
+# THE ROLE MUST CLEAR THE SQL LAYER FIRST, OR THIS PROVES NOTHING.
+#
+# #562's fix ships two layers: a REVOKE of EXECUTE from PUBLIC, and a C-level
+# pg_class_aclcheck. Both raise 42501. A role holding only schema USAGE is
+# stopped by the REVOKE, so the SQLSTATE is identical whether or not the C check
+# exists, and deleting the C guard leaves this suite fully green.
+#
+# That is not hypothetical. It was measured on 2026-08-10: both guards were
+# removed from src/columnar_projection.c, the extension rebuilt, and this file
+# reported 22 of 22 passing.
+#
+# Granting EXECUTE puts the role PAST the SQL layer on purpose, so the only thing
+# left that can refuse it is the C check. Now 42501 attributes to one layer.
+for fn in $GUARDED_BEHAVIOURAL; do
+	psql_run "GRANT EXECUTE ON FUNCTION pgcolumnar.$fn($(case "$fn" in read_projection|reconstruct_via_projection) echo "regclass,text" ;; *) echo "regclass,int" ;; esac)) TO t_ep;" 2>/dev/null
+done
+check "premise: t_ep now holds EXECUTE, so a refusal below can only be the C check" \
+	"$(q "SELECT bool_and(has_function_privilege('t_ep', p.oid, 'EXECUTE'))
+	      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	      WHERE n.nspname='pgcolumnar' AND p.proname IN ('read_projection','reconstruct_via_projection','vm_is_visible','vm_selftest');")" \
+	"t"
+
+for fn in $GUARDED_BEHAVIOURAL; do
+	sql="$(call_for "$fn")"
+	check "premise: the owner can call $fn, so a refusal below is a refusal" \
+		"$(q "$sql" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
+	check "$fn refuses an unprivileged caller with 42501" \
+		"$(as_ep "$sql")" "42501"
+done
+
+# Ungated: the same shape, pinned as the WRONG value. get_storage_id is the one
+# whose argument vector needs nothing invented; the four import/export siblings
+# additionally gate on a server-file role, so their deny arms belong with the
+# #559 fix that gives them a table-level bar, and they are covered here only by
+# the list arms above.
+sqlstate="$(as_ep "$(call_for get_storage_id)")"
+check "premise: the owner can call get_storage_id" \
+	"$(q "$(call_for get_storage_id)" >/dev/null 2>&1 && echo ok || echo broken)" "ok"
 check "KNOWN WRONG (#566): get_storage_id answers an unprivileged caller instead of raising 42501" \
 	"$([ "$sqlstate" = "42501" ] && echo refused || echo answered)" "answered"
 
