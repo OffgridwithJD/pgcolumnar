@@ -1290,9 +1290,6 @@ pgcolumnar_parallel_copy(PG_FUNCTION_ARGS)
 		 * do not run the executor permission check themselves, so enforce it here,
 		 * up front, before anything is spawned.
 		 */
-		/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
-		PgColumnarRequireNoRowSecurity(relid);
-
 		{
 			AclResult	aclresult = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
 
@@ -1304,6 +1301,10 @@ pgcolumnar_parallel_copy(PG_FUNCTION_ARGS)
 				table_close(target, AccessShareLock);
 				aclcheck_error(aclresult, OBJECT_TABLE, nm);
 			}
+
+		/* RLS after the ACL check, matching core's ordering (#563). */
+		PgColumnarRequireNoRowSecurity(relid);
+
 		}
 
 		if (target->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)

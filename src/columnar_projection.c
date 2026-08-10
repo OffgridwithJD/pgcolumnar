@@ -413,15 +413,15 @@ pgcolumnar_read_projection(PG_FUNCTION_ARGS)
 	 * it would also refuse a reader who has been granted SELECT deliberately.
 	 * Same pattern as columnar_parallel_export.c:471.
 	 */
-	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
-	PgColumnarRequireNoRowSecurity(relid);
-
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	rel = table_open(relid, AccessShareLock);
 	/* persist pending base + projection writes so this read sees them */
@@ -598,15 +598,15 @@ pgcolumnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	 * it would also refuse a reader who has been granted SELECT deliberately.
 	 * Same pattern as columnar_parallel_export.c:471.
 	 */
-	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
-	PgColumnarRequireNoRowSecurity(relid);
-
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	rel = table_open(relid, AccessShareLock);
 	PgColumnarFlushWriteStateForRelation(relid);

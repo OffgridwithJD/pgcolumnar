@@ -3037,15 +3037,15 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 	 * any columnar table it cannot INSERT into. The parallel twin already checks
 	 * this (columnar_parallel_copy.c:1294).
 	 */
-	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
-	PgColumnarRequireNoRowSecurity(relid);
-
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
 
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	/* resolve the path (file, directory, or glob) before taking the lock */
 	files = pq_resolve_paths(path);

@@ -132,6 +132,26 @@ check "no export file was written for the refused caller" \
 	"$([ -e "$OUT/leak1.parquet" ] || [ -e "$OUT/leak2.arrow" ] || [ -e "$OUT/leak3" ] && echo written || echo none)" "none"
 check_num "and no imported row landed in the restricted table" "$(q 'SELECT count(*) FROM rls_t;')" "$ROWS"
 
+# ---- a caller WITHOUT privilege sees the ACL error, not the RLS one ---------
+#
+# The guard sits below the ACL check so these functions agree with core, which
+# applies the ACL first. Above it, a caller with no privilege on an RLS table was
+# told "row-level security is in force", which discloses RLS state that ordinary
+# SQL does not. Found in review; this arm is what would notice the order being
+# swapped back.
+psql_run "DROP ROLE IF EXISTS t_rlsnone;"
+psql_run "CREATE ROLE t_rlsnone NOSUPERUSER LOGIN;"
+psql_run "GRANT USAGE ON SCHEMA pgcolumnar TO t_rlsnone;"
+psql_run "GRANT EXECUTE ON FUNCTION pgcolumnar.read_projection(regclass,text) TO t_rlsnone;"
+as_none() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_rlsnone \
+	-d "$PGC_DB" -At -v ON_ERROR_STOP=0 -c "$1" 2>&1 | head -1; }
+check "premise: the no-privilege role is told permission denied by ordinary SQL" \
+	"$(as_none 'SELECT count(*) FROM rls_t;' | grep -c 'permission denied')" "1"
+check "and read_projection tells it the same thing, not that RLS exists" \
+	"$(as_none "SELECT count(*) FROM pgcolumnar.read_projection('rls_t','p1');" | grep -c 'permission denied')" "1"
+check "so no caller without privilege learns RLS state from these functions" \
+	"$(as_none "SELECT count(*) FROM pgcolumnar.read_projection('rls_t','p1');" | grep -c 'row-level security')" "0"
+
 # ---- not over-refusing ------------------------------------------------------
 #
 # Without these the fix could pass by refusing everyone, which is a broken

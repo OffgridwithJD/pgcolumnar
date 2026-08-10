@@ -132,9 +132,24 @@ pgcolumnar_require_caller_select(PG_FUNCTION_ARGS)
  * owner too, which is why declaring this surface owner-only would narrow the
  * hole rather than close it.
  *
- * This must be called ABOVE the relation ACL check, not below it. The caller
- * this exists for HOLDS the privilege that check tests, so an RLS check placed
- * after it is never reached by the only caller that needs it.
+ * Call this AFTER the relation ACL check, not before it.
+ *
+ * An earlier version of this argued the opposite, that an RLS check below the
+ * ACL check "is never reached by the only caller that needs it". That reasoning
+ * is wrong and was corrected in review: the caller this exists for HOLDS
+ * SELECT, so it passes pg_class_aclcheck without raising and reaches whatever
+ * follows. The ACL check only raises for a caller who lacks the privilege.
+ *
+ * What the order actually decides is the error a caller WITHOUT privilege sees
+ * on an RLS table. With this check first, they were told "row-level security is
+ * in force", which discloses RLS state that ordinary SQL does not, and disagrees
+ * with core, which applies the ACL first. Measured:
+ *
+ *		RLS on, no-select, ordinary SQL     -> permission denied for table
+ *		RLS on, no-select, read_projection  -> row-level security is in force
+ *
+ * Below the ACL check both say "permission denied", and the intended caller's
+ * behaviour is identical either way.
  */
 void
 PgColumnarRequireNoRowSecurity(Oid relid)

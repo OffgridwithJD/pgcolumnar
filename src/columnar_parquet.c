@@ -1157,15 +1157,15 @@ pgcolumnar_export_parquet(PG_FUNCTION_ARGS)
 	 * relation. The parallel twin already checks this
 	 * (columnar_parallel_export.c:471).
 	 */
-	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
-	PgColumnarRequireNoRowSecurity(relid);
-
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	rel = table_open(relid, AccessShareLock);
 	if (!PgColumnarIsColumnarRelation(relid))
