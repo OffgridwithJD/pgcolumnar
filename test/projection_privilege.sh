@@ -142,4 +142,31 @@ check "a role WITH SELECT still reads the projection" \
 check "and still reconstructs" \
 	"$(count_as t_prjsel reconstruct_via_projection)" "$ROWS"
 
+# ---- what this fix does NOT close: row-level security (#563) -----------------
+#
+# Pinned as an assertion of the WRONG value, deliberately, per CONTEXT.md: a
+# known defect recorded as an echo is read by nobody, and pinned as an assertion
+# the eventual fix turns this suite red and forces the expectation to be updated
+# on purpose.
+#
+# ACL_SELECT answers "may this role read this table". RLS answers "which rows",
+# and nothing here asks the second. RLS is applied by the REWRITER to a query's
+# range table entry; these functions never build a query over the relation, they
+# open storage and read it, so there is nothing to rewrite. The project's own
+# exemplar has the same gap: parallel_export_parquet already does
+# pg_class_aclcheck(ACL_SELECT) and also returns every row (#563).
+#
+# So after this change a role WITH SELECT and a restrictive policy still reads
+# past it. That is strictly better than before -- the no-privilege case is closed
+# -- and it is not the whole job.
+psql_run "ALTER TABLE secret ENABLE ROW LEVEL SECURITY;"
+psql_run "CREATE POLICY p_one ON secret FOR SELECT TO t_prjsel USING (id = 1);"
+
+check_num "premise: the policy is in force for ordinary SQL" \
+	"$(as t_prjsel 'SELECT count(*) FROM secret;' | head -1)" "1"
+check_num "KNOWN WRONG (#563): read_projection ignores the policy and returns every row" \
+	"$(count_as t_prjsel read_projection)" "$ROWS"
+check_num "KNOWN WRONG (#563): reconstruct_via_projection ignores it too" \
+	"$(count_as t_prjsel reconstruct_via_projection)" "$ROWS"
+
 pgc_summary
