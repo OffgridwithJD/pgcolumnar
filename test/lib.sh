@@ -173,12 +173,25 @@ pgc_setup() {
 	# installed .so and saw the same hash either side of a source change that could
 	# not have produced it.
 	if [ -z "${PGC_SKIP_BUILD:-}" ]; then
+		# Objects from another major link but do not load (#536).
+		_pgc_stamp="$PGC_SRCDIR/.pgc_built_for_major"
+		_pgc_had="$(cat "$_pgc_stamp" 2>/dev/null | tr -dc '0-9')"
+		_pgc_objs=no
+		[ -n "$(find "$PGC_SRCDIR/src" -maxdepth 1 -name '*.o' -print -quit 2>/dev/null)" ] && _pgc_objs=yes
+		if [ "$(pgc_build_needs_clean "$_pgc_had" "$PGC_MAJOR" "$_pgc_objs")" = yes ]; then
+			pgc_build_stale_message "$_pgc_had" "$PGC_MAJOR"
+			make -C "$PGC_SRCDIR" clean PG_CONFIG="$PGC_PG_CONFIG" >/dev/null 2>&1 || true
+		fi
 		echo "-- building"
 		if ! make -C "$PGC_SRCDIR" PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
 			echo "FATAL: the build failed, so there is nothing new to test" >&2
 			echo "       (refusing to report checks against the previously installed .so)" >&2
 			exit 1
 		fi
+		# Stamped only after a build that succeeded. printf '%s\n', NOT '%s\\n':
+		# the doubled backslash writes the four bytes 1 9 \ n, which only worked
+		# because the reader strips non-digits. Caught in review, not by a test.
+		pgc_write_build_stamp "$_pgc_stamp" "$PGC_MAJOR"
 		echo "-- installing"
 		if ! make -C "$PGC_SRCDIR" install PG_CONFIG="$PGC_PG_CONFIG" >/dev/null; then
 			echo "FATAL: the install failed, so the .so under test is not the one just built" >&2
@@ -448,6 +461,50 @@ pgc_start_failure_message() {
 		printf '%s\n' "       ($_nforeign of $_attempts attempts found a cluster this suite does not"
 		printf '%s\n' "        own; the other $(( _attempts - _nforeign )) failed to start, and that"
 		printf '%s\n' "        reason is in the server log reported above)"
+	fi
+}
+
+
+# ---- an in-tree build must not reuse another major's objects (#536) ---------
+#
+# lib.sh builds in $PGC_SRCDIR with no clean and no record of which major the
+# objects belong to. One suite against pg18a then pg19a in the same tree links
+# the first run's objects into the second .so, which fails to load with
+# "undefined symbol: get_relation_info_hook": every cluster start dies and the
+# suite reports eight retries with no cause.
+#
+# The MATRIX is not exposed -- run_all_versions.sh cleans each per-major copy
+# right after its cp -a. Measured, after #536 was filed claiming otherwise.
+#
+# Objects present with NO stamp are unknown provenance and must be cleaned: that
+# is what a hand-run `make PG_CONFIG=...` leaves, which is how anyone debugging
+# builds and how every gate script here builds.
+pgc_build_needs_clean() {
+	local have="${1:-}" want="${2:-}" objects="${3:-}"
+
+	case "$want" in '' | *[!0-9]*) echo yes; return ;; esac
+	[ "$objects" = yes ] || { echo no; return; }
+	[ -z "$have" ] && { echo yes; return; }
+	case "$have" in *[!0-9]*) echo yes; return ;; esac
+	[ "$have" = "$want" ] && echo no || echo yes
+}
+
+# The stamp writer, as a function so a check can exercise THE WRITER rather
+# than a copy of it. It was written inline as printf '%s\\n' -- a doubled
+# backslash inside single quotes -- which emits the four bytes `1 9 \ n`. That
+# passed unnoticed because the reader does tr -dc '0-9' and strips the junk; a
+# direct comparison against the major failed. Found in review, not by a check.
+pgc_write_build_stamp() {
+	printf '%s\n' "${2:-}" > "${1:-/dev/null}" 2>/dev/null || true
+}
+
+# An absent stamp is not "built for PG?" -- that asserts a provenance the code
+# never recorded, which is the defect #537 was filed about.
+pgc_build_stale_message() {
+	if [ -z "${1:-}" ]; then
+		printf -- '-- the tree holds objects with no recorded major and this run wants PG%s; cleaning first (#536)\n' "${2:-?}"
+	else
+		printf -- '-- the tree was last built for PG%s and this run wants PG%s; cleaning first (#536)\n' "$1" "${2:-?}"
 	fi
 }
 
