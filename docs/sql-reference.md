@@ -166,6 +166,63 @@ pause in seconds between tables. Each call receives the same `stripe_count`.
 SELECT pgcolumnar.vacuum_full('public');
 ```
 
+### pgcolumnar.analyze(rel regclass, columns text[] DEFAULT NULL)
+
+Collects planner statistics for named columns of a columnar table. It reads each
+column once instead of sampling whole rows. **PostgreSQL 18 or later.** On 17 and
+below it raises an error. It writes through `pg_restore_attribute_stats`, which does
+not exist before 18.
+
+```sql
+SELECT pgcolumnar.analyze('events', ARRAY['customer_id']);   -- one column
+SELECT pgcolumnar.analyze('events');                         -- every column
+```
+
+**This is not a faster `ANALYZE`.** That difference decides whether you want it. It
+reads every value of the columns you name. Core samples 30,000 rows, whatever the
+size of the table. Measured on 3,000,000 rows across 20 columns:
+
+| | time |
+| --- | ---: |
+| core `ANALYZE`, all 20 columns | 7,169 ms |
+| `pgcolumnar.analyze(rel, ARRAY['k'])`, 1 column | 1,092 ms |
+| `pgcolumnar.analyze(rel)`, all 20 columns | 90,611 ms |
+
+It wins when you want a **subset** of the columns of a wide table. Core cannot do
+that at all. `ANALYZE t (k)` still materialises whole rows, so naming one column
+saves about 6 percent. It loses badly for every column. On this shape the crossover
+is two to three columns. Prefer core `ANALYZE` unless you analyse a few columns of a
+wide table.
+
+The extra cost buys **exactness**. A sample can miss a value held by one row in
+500,000. It also collapses range estimates above the largest value it saw. This
+function reads the column, so the frequencies and the bounds are counted.
+
+Statistics written, for each named column:
+
+| statistic | |
+| --- | --- |
+| `null_frac` | exact, from the same read as the rest |
+| `n_distinct` | exact |
+| `most_common_vals` | exact, and with no significance filter |
+| `most_common_freqs` | exact |
+| `histogram_bounds` | over the rows the most-common list does not hold |
+
+Core applies a significance filter to its most-common list because that list is
+sampled. This one is counted, so the filter does not apply.
+
+Not written: `correlation`, and nothing at the level of the relation.
+`pg_class.reltuples` stays at `-1` after this function. That looks alarming and is
+not. The row estimate of a columnar table comes from the access method, not from the
+catalog, so plans still get the right row count. Run core `ANALYZE` if you want the
+catalog populated.
+
+**Nothing schedules this.** Autovacuum does not call it. The same is true of
+[`pgcolumnar.vacuum`](#pgcolumnarvacuumtablename-regclass-stripe_count-int-default-0),
+but the consequence differs. A stale vacuum wastes space. Stale statistics produce
+bad plans, and they do it silently. Re-run this function when the data changes, or
+keep core `ANALYZE` scheduled and use this only to sharpen particular columns.
+
 ### pgcolumnar.stats(rel regclass)
 
 Returns one row per row group, with these columns:

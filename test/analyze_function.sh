@@ -761,4 +761,46 @@ check "null_frac and the most-common frequencies agree on how many rows there ar
 			      / nullif((most_common_freqs)[1]::numeric, 0))::text || ')' END
 		FROM pg_stats WHERE tablename = 'af_del' AND attname = 'v'")" "yes"
 
+
+# ---- the documented statistics must be the statistics written (#414) --------
+#
+# pgcolumnar.analyze() went five slices without an entry in
+# docs/sql-reference.md. Now that it has one, the list in it is a claim about
+# this function, and a claim in prose is the kind that rots quietly: nothing
+# builds it, no suite reads it, and it is wrong only for the reader.
+#
+# So the doc's table is parsed and compared against what the function actually
+# populates. Source text on one side, live catalog on the other.
+_doc="$PGC_SRCDIR/docs/sql-reference.md"
+# awk, not sed: a sed range ending at /^## / runs past the next ### heading and
+# swallows the tables of pgcolumnar.stats and sort_status, which made the first
+# version of this check compare against seventeen names from three sections.
+_docstats="$(awk '/^### pgcolumnar\.analyze\(/{f=1;next} /^### /{f=0} f' "$_doc" \
+             | grep -oE '^\| `[a-z_]+`' | tr -d '|` ' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+check "premise: the doc lists the statistics it claims to write" \
+	"$([ -n "$_docstats" ] && echo yes || echo no)" "yes"
+
+psql_run "CREATE TABLE af_doc (k int, t text) USING pgcolumnar;"
+psql_run "INSERT INTO af_doc SELECT g % 500, 'v' || (g % 90) FROM generate_series(1, 20000) g;"
+psql_run "SELECT pgcolumnar.analyze('af_doc', ARRAY['k']);"
+_written="$(q "SELECT string_agg(x, ' ' ORDER BY x) FROM (
+                 SELECT 'histogram_bounds' AS x WHERE (SELECT histogram_bounds IS NOT NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k')
+                 UNION ALL SELECT 'most_common_freqs' WHERE (SELECT most_common_freqs IS NOT NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k')
+                 UNION ALL SELECT 'most_common_vals'  WHERE (SELECT most_common_vals  IS NOT NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k')
+                 UNION ALL SELECT 'n_distinct'        WHERE (SELECT n_distinct        IS NOT NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k')
+                 UNION ALL SELECT 'null_frac'         WHERE (SELECT null_frac         IS NOT NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k')) s")"
+check "every statistic the doc lists is one the function writes" \
+	"$_written" "$_docstats"
+
+# And the negative the doc states in prose: correlation is NOT written. Without
+# this the check above passes if the doc silently drops a column it should list.
+check "and correlation is absent, as the doc says" \
+	"$(q "SELECT correlation IS NULL FROM pg_stats WHERE tablename='af_doc' AND attname='k'")" "t"
+
+# The doc also claims reltuples stays -1 and that plans are unaffected. Both are
+# surprising enough that a reader will check them, so the suite checks them too.
+check "reltuples is untouched, as the doc says" \
+	"$(q "SELECT reltuples::bigint FROM pg_class WHERE relname='af_doc'")" "-1"
+
+
 pgc_summary
