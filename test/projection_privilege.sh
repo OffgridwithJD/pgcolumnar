@@ -44,6 +44,18 @@ psql_run "REVOKE ALL ON secret FROM PUBLIC;"
 #   t_prjsel   USAGE + EXECUTE + SELECT. Must SUCCEED. This is the arm that
 #              distinguishes ACL_SELECT from ownership: an owner-only bar refuses
 #              it, and refusing it would be a regression, not a fix.
+#
+# A RULE FOR ANYONE EDITING THE PREMISES BELOW. A premise about a role is
+# connectivity-safe only if THAT ROLE is the one running it. count_as() maps any
+# non-numeric output to "refused", so a FATAL at login satisfies a deny arm just
+# as well as a privilege error does, and a premise the OWNER runs -- a catalog
+# lookup like has_function_privilege -- cannot see that. t_prjexec was exposed
+# exactly that way until the premise below was added; t_prjnone and t_prjsel are
+# covered only because their premises happen to be statements those roles
+# execute themselves (a literal 'permission denied' match, and a row count).
+# Tidying either of those into the count_as idiom reopens the hole silently, and
+# only the error-text checks would still catch it. Keep the role in the driving
+# seat of its own premise.
 for r in t_prjnone t_prjexec t_prjsel; do
 	psql_run "DROP ROLE IF EXISTS $r;"
 	psql_run "CREATE ROLE $r NOSUPERUSER LOGIN;"
