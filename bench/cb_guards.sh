@@ -202,3 +202,31 @@ cb_verdict() {  # cb_verdict <col_hot> <heap_hot> <band> -> win|tie|loss|-
 		if (d <= b) { print "tie" } else if (c < h) { print "win" } else { print "loss" }
 	}'
 }
+
+# ---- doc guards for the accelerator claim (#565) ---------------------------
+#
+# docs/benchmarks.md published a "run to run variation" verdict on q18 and q31
+# with no measured band, against separations of 115 and 54 percent, and claimed
+# the plan was identical when EXPLAIN on the four-setting tuned arm shows it is
+# not. These turn that prose into the same numbers cb_verdict already decides.
+
+# The query ids named in any "run to run variation" claim. The claim can wrap
+# across lines, so each blank-line paragraph is folded to one line before the
+# match: a line-wise grep for the phrase returns nothing on the real page.
+cb_doc_variation_qids() {  # cb_doc_variation_qids <file> -> qids, one per line
+	awk 'BEGIN { RS = "" } {
+		p = $0; gsub(/\n/, " ", p); gsub(/  +/, " ", p)
+		if (p ~ /run to run variation/) print p
+	}' "$1" | grep -oE 'q[0-9]+' | sort -u
+}
+
+# The default and accelerated figures for a query, read ONLY from the accelerator
+# table (scoped to its own header). A query id can appear in several tables, so
+# an unscoped scan would feed the wrong pair to the verdict.
+cb_doc_accel_figures() {  # cb_doc_accel_figures <file> <qid> -> "<default> <accelerated>" or ""
+	awk -v q="$2" '
+		/^\| query \| default \| accelerated \|/ { f = 1; next }
+		f && NF == 0 { f = 0 }
+		f && $2 == q { d = $4; a = $6; gsub(/[*x]/, "", d); gsub(/[*x]/, "", a); print d, a }
+	' "$1"
+}

@@ -943,12 +943,10 @@ the same effect in more detail.
 queries are `GROUP BY`. So a default run measures this engine with its main
 analytical accelerator disabled.
 
-The harness therefore runs a third arm with them turned on. Read that arm as "these
-GUCs are set" and not as "the grouped node ran". On this dataset the planner
-declines the grouped node on most shapes. Measured on the same table, it is
-declined at 5,727, 18,344 and 49,511 groups, and chosen only at 4,906,030, where
-it then ties. So the differences below cannot be attributed to it. See issue
-#369.
+The harness runs a third arm with the analytical accelerators on. That arm sets
+four settings, not only the two above. It also sets
+`pgcolumnar.enable_parallel_vector_agg` on and raises
+`pgcolumnar.groupagg_max_groups` to 200000000.
 
 The result does not support turning these settings on by default:
 
@@ -961,12 +959,15 @@ The result does not support turning these settings on by default:
 | q31 | 0.96x | **1.48x** |
 | q15 | 0.84x | **0.92x** |
 
-Three queries improve and three get worse. This is a reason to investigate rather
-than a conclusion, and one caution belongs with it. For `q18` and `q31` the plan
-is **identical** with these settings on and off. Their rows are therefore run to
-run variation, and not an effect of the settings. They are left in the table
-because removing the rows that embarrass a reading is how a benchmark page stops
-being trustworthy.
+Three queries improve and three get worse, and the losses are an effect of the
+settings rather than noise. For `q18` and `q31` the plan is not identical with
+the settings on and off. Measured by `EXPLAIN` on this four-setting arm, each
+query runs a seven-worker parallel plan by default. With the settings on, each
+runs a serial `Custom Scan` with `Columnar Vectorized Group Keys` instead. The
+grouped node is chosen and forecloses the `Gather`, so the query loses its
+parallelism. Both queries have a `GROUP BY`, so that node is responsible. The
+group counts of 5,727, 18,344, 49,511 and 4,906,030 were measured on other query
+shapes, so they do not license excluding the node here. See issue #369.
 
 One query, `q21`, fails outright with the accelerations on. It is
 `COUNT(*) WHERE URL LIKE '%google%'`, and it raises
