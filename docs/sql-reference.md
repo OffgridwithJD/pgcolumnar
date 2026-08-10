@@ -54,8 +54,8 @@ after many small load transactions have produced many small row groups.
 
 `stripe_count` is not supported and a non-zero value raises an error. The
 argument is retained so existing calls that pass the default keep working. It was
-documented as bounding how many row groups are combined in one call, and it was
-never read: every call rewrote the whole relation regardless of the value.
+documented as bounding how many row groups are combined in one call. It was never
+read, and every call rewrote the whole relation regardless of the value.
 
 To bound the work, use
 [`pgcolumnar.compact_rewrite`](#pgcolumnarcompact_rewriterel-regclass-min_deleted_fraction-float8-max_groups-int),
