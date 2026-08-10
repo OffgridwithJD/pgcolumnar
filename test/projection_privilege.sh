@@ -125,6 +125,15 @@ check "and the refusal comes from the SQL grant, naming the function" \
 # cannot be the REVOKE and cannot be the schema.
 check "premise: t_prjexec really does hold EXECUTE, so it reaches the C gate" \
 	"$(q "SELECT has_function_privilege('t_prjexec','pgcolumnar.read_projection(regclass,text)','EXECUTE');")" "t"
+# And that it can CONNECT. The line above is a catalog lookup run as the owner,
+# so it is blind to whether this role can open a session at all -- and count_as
+# turns any non-numeric output into "refused", which a FATAL at login satisfies
+# just as well as a privilege error does. Measured, not hypothetical: with
+# `ALTER ROLE t_prjexec NOLOGIN` injected, the EXECUTE premise above and both
+# "is refused" checks below still PASSED, and only the error-text check caught
+# it. A deny arm is evidence only if the call reached the code that denies it.
+check "premise: t_prjexec can open a session, so a refusal below is a refusal" \
+	"$(as t_prjexec 'SELECT 1;' | head -1)" "1"
 check "a role with EXECUTE but no SELECT is refused read_projection" \
 	"$(count_as t_prjexec read_projection)" "refused"
 check "and is refused reconstruct_via_projection, which leaks non-covered columns" \
