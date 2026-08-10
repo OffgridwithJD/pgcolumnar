@@ -667,4 +667,51 @@ check "premise: at least one suite drives the C-level encoding selftest" \
 check "the sanitizer subset runs every suite that drives the encoding selftest" \
 	"$(printf '%s' "$_san_missing" | sed 's/^ //')" ""
 
+# ---- the port walk must WRAP, not walk off the ceiling (#548) ---------------
+#
+# pgc_pick_free_port seeds a base from the PID and scans forward. It used to
+# `break` at hi, so a seed near the ceiling got a truncated scan: the failure
+# needs the ports at the top of the band to be BUSY, and then the walk gives up
+# with the whole band free beneath it. About 1 replication run in 2000, which
+# across five majors is roughly 1 CI run in 400, presenting as an unattributable
+# red that moved between majors.
+#
+# The band must be made busy to test this. A first version of these checks asked
+# the picker for a port with the band EMPTY, where the old code also succeeds --
+# they passed with the no-wrap walk restored, which is to say they tested
+# nothing. The stub is the whole point.
+
+_w=$(( PGC_AUX_PORT_HI - PGC_AUX_PORT_LO ))
+check "premise: the auxiliary band has a width to wrap within" \
+	"$([ "$_w" -gt 400 ] && echo yes || echo no)" "yes"
+
+_realfree=$(declare -f pgc_port_free)
+
+# Every port in the TOP 400 is busy; everything below is free. A walk that stops
+# at hi finds nothing from a base inside that region. A walk that wraps lands in
+# the free part below.
+pgc_port_free() { [ "$1" -lt $(( PGC_AUX_PORT_HI - 400 )) ]; }
+check "premise: the stub really does refuse the top of the band" \
+	"$(pgc_port_free $(( PGC_AUX_PORT_HI - 1 )) && echo free || echo busy)" "busy"
+check "premise: and really does allow the bottom" \
+	"$(pgc_port_free "$PGC_AUX_PORT_LO" && echo free || echo busy)" "free"
+
+_top="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" $(( _w - 1 )) || echo NONE)"
+check "a seed at the ceiling wraps past a busy top and still finds a port" \
+	"$([ "$_top" != "NONE" ] && [ -n "$_top" ] && echo yes || echo no)" "yes"
+check "and the port it found is below the busy region, which is where wrapping lands" \
+	"$([ "$_top" != "NONE" ] && [ "$_top" -lt $(( PGC_AUX_PORT_HI - 400 )) ] && [ "$_top" -ge "$PGC_AUX_PORT_LO" ] && echo yes || echo no)" \
+	"yes"
+
+# A band with every port busy must report itself full rather than spin. The
+# bound is half the fix; without it the wrap turns a hard failure into a hang,
+# which is worse than the failure it replaces.
+pgc_port_free() { return 1; }
+_none="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI" 5 || echo NONE)"
+check "an entirely busy band reports itself full and terminates" "$_none" "NONE"
+
+eval "$_realfree"
+check "premise: the real prober was restored, or every check after this lies" \
+	"$(pgc_port_free 1 && echo probing || echo stubbed)" "probing"
+
 pgc_summary
