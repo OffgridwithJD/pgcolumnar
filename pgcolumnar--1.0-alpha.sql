@@ -585,6 +585,13 @@ CREATE FUNCTION pgcolumnar.reconstruct_via_projection(rel regclass, name text)
 COMMENT ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text)
 	IS 'read all live rows via a projection, reconstructing non-covered columns from the base by row number (gap 26)';
 
+-- #562: EXECUTE is granted to PUBLIC by CREATE FUNCTION, so without these the
+-- C check below is the only boundary. Two layers on purpose: the C check is
+-- what makes the functions safe, and this is what keeps an unprivileged role
+-- from reaching them at all.
+REVOKE ALL ON FUNCTION pgcolumnar.read_projection(regclass, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass, text) FROM PUBLIC;
+
 CREATE FUNCTION pgcolumnar.stats(
 	rel regclass,
 	OUT stripeid bigint,
@@ -884,6 +891,14 @@ CREATE FUNCTION pgcolumnar.vm_is_visible(rel regclass, blk int)
 
 COMMENT ON FUNCTION pgcolumnar.vm_is_visible(regclass, int)
 	IS 'gap 28: is the synthetic block marked all-visible in the VM fork?';
+
+-- These two are phase-1 self-test helpers, not user API. CREATE FUNCTION grants
+-- EXECUTE to PUBLIC, which put a visibility-map write behind nothing but USAGE on
+-- this schema -- and the documented maintenance API lives in the same schema, so
+-- any deployment exposing that also exposed these (#558). The C code checks
+-- ownership as well; this REVOKE is the second layer, not the only one.
+REVOKE ALL ON FUNCTION pgcolumnar.vm_selftest(regclass, int) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgcolumnar.vm_is_visible(regclass, int) FROM PUBLIC;
 
 CREATE FUNCTION pgcolumnar.vacuum_full(
 	schema name DEFAULT 'public',

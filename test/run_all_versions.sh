@@ -158,6 +158,7 @@ SUITES=(
 	phase5
 	phase6
 	planner_choice_quality
+	projection_privilege
 	projections
 	pushdown_report
 	read_stream
@@ -173,6 +174,7 @@ SUITES=(
 	temporal
 	ungrouped_vector_agg
 	unique_conc
+	vm_privilege
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
