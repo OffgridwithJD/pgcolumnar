@@ -413,6 +413,9 @@ pgcolumnar_read_projection(PG_FUNCTION_ARGS)
 	 * it would also refuse a reader who has been granted SELECT deliberately.
 	 * Same pattern as columnar_parallel_export.c:471.
 	 */
+	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 
@@ -595,6 +598,9 @@ pgcolumnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 	 * it would also refuse a reader who has been granted SELECT deliberately.
 	 * Same pattern as columnar_parallel_export.c:471.
 	 */
+	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 

@@ -993,6 +993,9 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 	 * columnar table it cannot SELECT. The parallel twin already checks this
 	 * (columnar_parallel_export.c:471).
 	 */
+	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 
@@ -1782,6 +1785,9 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 	 * relation, so without this a pg_read_server_files member could insert into
 	 * any columnar table it cannot INSERT into.
 	 */
+	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
 

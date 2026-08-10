@@ -467,6 +467,9 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_write_server_files role to export to server files")));
+	/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	{
 		AclResult	ac = pg_class_aclcheck(relid, GetUserId(), ACL_SELECT);
 

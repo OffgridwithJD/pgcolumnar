@@ -1290,6 +1290,9 @@ pgcolumnar_parallel_copy(PG_FUNCTION_ARGS)
 		 * do not run the executor permission check themselves, so enforce it here,
 		 * up front, before anything is spawned.
 		 */
+		/* RLS first: the caller this guards HOLDS the privilege checked below (#563). */
+		PgColumnarRequireNoRowSecurity(relid);
+
 		{
 			AclResult	aclresult = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
 

@@ -166,6 +166,7 @@ SUITES=(
 	recovery
 	replication
 	rewrite_group_scan
+	rls_direct_storage
 	row_triggers
 	server_file_privilege
 	smoke
@@ -178,8 +179,7 @@ SUITES=(
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
-	zonemap_cost
-)
+	zonemap_cost)
 
 
 # ---------------------------------------------------------------------------
