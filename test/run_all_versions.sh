@@ -65,6 +65,7 @@ SUITES=(
 	drop_cleanup
 	encode_effort
 	encode_invariants
+	entry_point_privilege
 	fk_referencing
 	fsst_margin
 	fsst_verdict_cache
