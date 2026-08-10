@@ -275,6 +275,30 @@ PgColumnarVMSetVisibleForRelation(Relation rel)
 }
 
 /*
+ * Both entry points below write to, or read, the visibility-map fork of a
+ * caller-supplied relation. They are self-test helpers for the phase-1 VM work,
+ * not user API, and they took an arbitrary regclass and checked nothing --
+ * neither ownership, nor any ACL, nor that the relation was even columnar.
+ *
+ * CREATE FUNCTION grants EXECUTE to PUBLIC and the install script carried no
+ * REVOKE, so any role with USAGE on the pgcolumnar schema could mark pages of
+ * ANY relation all-visible, including a heap table it neither owned nor could
+ * read. An index-only scan over that relation then skips the heap visibility
+ * check and returns deleted rows: measured at 20,000 rows returned from a table
+ * with 10,000 live ones (#558).
+ *
+ * PgColumnarRequireTableOwner is the check the rest of the tree already uses for
+ * "you may act on this relation" -- columnar_vacuum.c and columnar_projection.c
+ * call it at eleven sites. Ownership is the right bar here rather than a
+ * server-file role, because these touch one named relation's storage.
+ *
+ * The install script also revokes EXECUTE from PUBLIC, but this check is the
+ * load-bearing one: a REVOKE is undone by a later GRANT ... ON ALL FUNCTIONS IN
+ * SCHEMA, and it does not protect an already installed extension until it is
+ * upgraded.
+ */
+
+/*
  * pgcolumnar_vm_selftest(rel regclass, blk int) -> bool
  *		Phase-1 proof: set the all-visible bit for a synthetic block on a
  *		columnar relation, then read it back through the backend's own
@@ -292,6 +316,7 @@ pgcolumnar_vm_selftest(PG_FUNCTION_ARGS)
 				after;
 
 	rel = table_open(relid, RowExclusiveLock);
+	PgColumnarRequireTableOwner(rel);
 
 	before = PgColumnarVMIsVisible(rel, blk);
 	PgColumnarVMSetVisible(rel, blk);
@@ -314,8 +339,12 @@ pgcolumnar_vm_is_visible(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	BlockNumber blk = (BlockNumber) PG_GETARG_INT32(1);
-	Relation	rel = table_open(relid, AccessShareLock);
-	bool		vis = PgColumnarVMIsVisible(rel, blk);
+	Relation	rel;
+	bool		vis;
+
+	rel = table_open(relid, AccessShareLock);
+	PgColumnarRequireTableOwner(rel);
+	vis = PgColumnarVMIsVisible(rel, blk);
 
 	table_close(rel, AccessShareLock);
 	PG_RETURN_BOOL(vis);
