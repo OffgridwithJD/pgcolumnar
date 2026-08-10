@@ -1000,6 +1000,9 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
 
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	rel = table_open(relid, AccessShareLock);
 	if (!PgColumnarIsColumnarRelation(relid))
 	{
@@ -1788,6 +1791,9 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	rel = table_open(relid, RowExclusiveLock);
 	if (!PgColumnarIsColumnarRelation(relid))

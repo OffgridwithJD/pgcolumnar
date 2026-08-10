@@ -1301,6 +1301,10 @@ pgcolumnar_parallel_copy(PG_FUNCTION_ARGS)
 				table_close(target, AccessShareLock);
 				aclcheck_error(aclresult, OBJECT_TABLE, nm);
 			}
+
+		/* RLS after the ACL check, matching core's ordering (#563). */
+		PgColumnarRequireNoRowSecurity(relid);
+
 		}
 
 		if (target->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)

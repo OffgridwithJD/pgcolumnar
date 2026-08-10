@@ -474,6 +474,9 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
 
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	rel = table_open(relid, AccessShareLock);
 
 	/* an MVCC snapshot to export; a SQL function normally has one active */

@@ -116,6 +116,27 @@ dump that exists still restores into a newer build. `pg_dump` writes an explicit
 column list for the configuration tables of the extension, and a new column takes
 its default of NULL.
 
+## Row-level security
+
+The functions that read or write a table's storage directly refuse a relation
+whose row-level security policies apply to the caller. They raise
+`row-level security is in force on "<table>"`.
+
+These functions do not run a query against the table. They open its storage and
+read or write it, and row-level security is applied by the query rewriter, so no
+policy would be consulted. Returning rows in that state would hand a restricted
+caller every row, so the call is refused instead.
+
+The functions affected are `read_projection`, `reconstruct_via_projection`,
+`export_arrow`, `export_parquet`, `parallel_export_parquet`, `import_arrow`,
+`import_parquet` and `parallel_copy`.
+
+A superuser, a role with `BYPASSRLS`, and a table's owner without `FORCE ROW
+LEVEL SECURITY` are not refused. Each already reads every row by other means.
+Under `FORCE ROW LEVEL SECURITY` the owner is refused as well.
+
+Use ordinary SQL against the table when policies must apply.
+
 ## PostgreSQL versions
 
 pgColumnar builds from one source tree on PostgreSQL 15, 16, 17, 18, and

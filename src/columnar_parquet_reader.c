@@ -3044,6 +3044,9 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
 
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	/* resolve the path (file, directory, or glob) before taking the lock */
 	files = pq_resolve_paths(path);
 

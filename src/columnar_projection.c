@@ -420,6 +420,9 @@ pgcolumnar_read_projection(PG_FUNCTION_ARGS)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
 
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
+
 	rel = table_open(relid, AccessShareLock);
 	/* persist pending base + projection writes so this read sees them */
 	PgColumnarFlushWriteStateForRelation(relid);
@@ -601,6 +604,9 @@ pgcolumnar_reconstruct_via_projection(PG_FUNCTION_ARGS)
 		if (ac != ACLCHECK_OK)
 			aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 	}
+
+	/* RLS after the ACL check, matching core's ordering (#563). */
+	PgColumnarRequireNoRowSecurity(relid);
 
 	rel = table_open(relid, AccessShareLock);
 	PgColumnarFlushWriteStateForRelation(relid);

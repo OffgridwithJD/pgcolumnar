@@ -46,6 +46,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
+#include "utils/rls.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/tuplesort.h"
@@ -102,6 +103,67 @@ pgcolumnar_require_caller_select(PG_FUNCTION_ARGS)
 		aclcheck_error(ac, OBJECT_TABLE, get_rel_name(relid));
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * PgColumnarRequireNoRowSecurity
+ *		Refuse a relation whose row-level security policies apply to this caller.
+ *
+ * Row-level security is applied by the REWRITER to a query's range table entry.
+ * Every entry point that calls this opens storage and reads or writes it
+ * directly, so there is no query to rewrite and no policy is ever consulted. A
+ * caller holding SELECT but restricted to one row by a policy received every
+ * row (#563).
+ *
+ * Refusing is the fix rather than applying the policies, deliberately. Routing
+ * these reads through SPI or the executor would discard the reason
+ * direct-storage access exists, and evaluating policies per row would
+ * reimplement the rewriter inside an extension. A refusal closes the hole
+ * completely, is cheap, and is defensible the day it ships.
+ *
+ * The bar is RLS_ENABLED and nothing wider. check_enable_rls returns
+ * RLS_NONE_ENV for a superuser, a BYPASSRLS role, and an owner without FORCE
+ * ROW LEVEL SECURITY. All of those already read every row by other means, so
+ * refusing them would break admin tooling and export fixtures while buying no
+ * confidentiality. noError is true so the verdict does not change with the
+ * row_security GUC.
+ *
+ * FORCE ROW LEVEL SECURITY makes check_enable_rls return RLS_ENABLED for the
+ * owner too, which is why declaring this surface owner-only would narrow the
+ * hole rather than close it.
+ *
+ * Call this AFTER the relation ACL check, not before it.
+ *
+ * An earlier version of this argued the opposite, that an RLS check below the
+ * ACL check "is never reached by the only caller that needs it". That reasoning
+ * is wrong and was corrected in review: the caller this exists for HOLDS
+ * SELECT, so it passes pg_class_aclcheck without raising and reaches whatever
+ * follows. The ACL check only raises for a caller who lacks the privilege.
+ *
+ * What the order actually decides is the error a caller WITHOUT privilege sees
+ * on an RLS table. With this check first, they were told "row-level security is
+ * in force", which discloses RLS state that ordinary SQL does not, and disagrees
+ * with core, which applies the ACL first. Measured:
+ *
+ *		RLS on, no-select, ordinary SQL     -> permission denied for table
+ *		RLS on, no-select, read_projection  -> row-level security is in force
+ *
+ * Below the ACL check both say "permission denied", and the intended caller's
+ * behaviour is identical either way.
+ */
+void
+PgColumnarRequireNoRowSecurity(Oid relid)
+{
+	if (check_enable_rls(relid, InvalidOid, true) == RLS_ENABLED)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("row-level security is in force on \"%s\"",
+						get_rel_name(relid)),
+				 errdetail("pgcolumnar reads and writes this relation's storage "
+						   "directly, so row-level security policies are not "
+						   "applied."),
+				 errhint("Use ordinary SQL against the table, which applies the "
+						 "policies.")));
 }
 
 /*
