@@ -60,6 +60,7 @@ SUITES=(
 	concurrent_diff
 	corruption
 	decode_interrupts
+	dependency_estimate
 	differential
 	docs_style
 	drop_cleanup
