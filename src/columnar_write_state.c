@@ -727,8 +727,27 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 		}
 		else
 		{
+			Datum		v = values[c];
+			struct varlena *flat = NULL;
+
+			/*
+			 * Detoast a varlena ONCE per row and reuse the flattened Datum for
+			 * everything below. It is otherwise flattened up to four times -- by
+			 * the encoder, the bloom hash, and each of the two min/max
+			 * comparisons -- and for a toasted (compressed) value each of those
+			 * is a full decompression, which #445's profile saw as detoast_attr
+			 * on the write path. pg_detoast_datum returns the same pointer for an
+			 * already-flat value, so the uncompressed common case copies and
+			 * frees nothing; non-varlena types skip it entirely.
+			 */
+			if (att->attlen == -1)
+			{
+				flat = pg_detoast_datum((struct varlena *) DatumGetPointer(v));
+				v = PointerGetDatum(flat);
+			}
+
 			appendStringInfoChar(&col->existsStream, 1);
-			PgColumnarEncodeValue(&col->valueStream, att, values[c]);
+			PgColumnarEncodeValue(&col->valueStream, att, v);
 			col->valueCount++;
 
 			/* accumulate the value's hash for the per-chunk bloom filter (I7) */
@@ -737,7 +756,7 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 				uint32		h = DatumGetUInt32(
 					FunctionCall1Coll(&writeState->colDefs[c].hashFn,
 									  writeState->colDefs[c].hashCollation,
-									  values[c]));
+									  v));
 
 				appendBinaryStringInfo(&col->hashBuf, (char *) &h, sizeof(uint32));
 			}
@@ -745,8 +764,8 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 			/* maintain the per-chunk exact int sum for the zone map (D5) */
 			if (writeState->colDefs[c].summableInt)
 				col->sum += (att->atttypid == INT2OID)
-					? (int64) DatumGetInt16(values[c])
-					: (int64) DatumGetInt32(values[c]);
+					? (int64) DatumGetInt16(v)
+					: (int64) DatumGetInt32(v);
 
 			/* maintain the per-chunk min/max for orderable types */
 			if (writeState->colDefs[c].orderable)
@@ -757,10 +776,8 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 
 				if (!col->hasMinMax)
 				{
-					col->minValue = datumCopy(values[c], att->attbyval,
-											  att->attlen);
-					col->maxValue = datumCopy(values[c], att->attbyval,
-											  att->attlen);
+					col->minValue = datumCopy(v, att->attbyval, att->attlen);
+					col->maxValue = datumCopy(v, att->attbyval, att->attlen);
 					col->hasMinMax = true;
 				}
 				else
@@ -773,28 +790,34 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 					 * of a serial or timestamp column produces -- cost one
 					 * comparison per value instead of two.
 					 */
-					int32		cmpMax = pgcolumnar_cmp_value(def, values[c],
+					int32		cmpMax = pgcolumnar_cmp_value(def, v,
 														   col->maxValue);
 
 					if (cmpMax > 0)
 					{
 						if (!att->attbyval)
 							pfree(DatumGetPointer(col->maxValue));
-						col->maxValue = datumCopy(values[c], att->attbyval,
-												  att->attlen);
+						col->maxValue = datumCopy(v, att->attbyval, att->attlen);
 					}
-					else if (pgcolumnar_cmp_value(def, values[c],
-												col->minValue) < 0)
+					else if (pgcolumnar_cmp_value(def, v, col->minValue) < 0)
 					{
 						if (!att->attbyval)
 							pfree(DatumGetPointer(col->minValue));
-						col->minValue = datumCopy(values[c], att->attbyval,
-												  att->attlen);
+						col->minValue = datumCopy(v, att->attbyval, att->attlen);
 					}
 				}
 
 				MemoryContextSwitchTo(oldContext);
 			}
+
+			/*
+			 * Free the flattened copy if detoasting made one. Everything above
+			 * has consumed it: the encoder and bloom copied the bytes out, and
+			 * min/max datumCopy'd into the stripe context. Nothing was allocated
+			 * when the value was already flat (flat == the original pointer).
+			 */
+			if (flat != NULL && (char *) flat != DatumGetPointer(values[c]))
+				pfree(flat);
 		}
 	}
 
