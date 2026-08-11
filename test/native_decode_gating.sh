@@ -173,4 +173,38 @@ check "the control returns every row, values intact" \
 	"$(q "SELECT count(*), sum(p1), sum(p5) FROM n WHERE tag LIKE '%row%';")" \
 	"$(q "SELECT count(*), sum(p1), sum(p5) FROM h WHERE tag LIKE '%row%';")"
 
+# ---- deleted rows across MULTIPLE groups (lifecycle regression) -------------
+#
+# The evaluator reads the delete mask at group-load time to keep deleted rows out
+# of "does any row pass" and the reject tally. That mask must be the CURRENT
+# group's. An earlier version built it AFTER the evaluator, so on the second group
+# of a table with deletes the evaluator read the PREVIOUS group's mask -- freed by
+# the group-context reset one load earlier. A use-after-free ASAN aborts on and
+# this differential pins. It needs all three at once: more than one row group,
+# deleted rows, and the unprunable qual; none of the single-group arms above
+# reaches it. The heap mirror carries the identical deletes and is the oracle.
+MROWS=49152
+psql_run "CREATE TABLE hm (tag text, p1 int, p2 int);"
+psql_run "CREATE TABLE m  (tag text, p1 int, p2 int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('m', stripe_row_limit => 8192, chunk_group_row_limit => 1024);"
+MGEN="SELECT 'x' || CASE WHEN g % 4096 = 7 THEN 'needle' ELSE 'miss' END || g::text, g, g * 2
+      FROM generate_series(1, $MROWS) g"
+psql_run "INSERT INTO hm $MGEN;"
+psql_run "INSERT INTO m  $MGEN;"
+psql_run "DELETE FROM hm WHERE p1 % 17 = 0;"
+psql_run "DELETE FROM m  WHERE p1 % 17 = 0;"
+
+check "premise: the columnar table spans more than one row group" \
+	"$(q "SELECT count(*) > 1 FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('m');")" \
+	"t"
+check "premise: rows really were deleted (so the mask is non-NULL)" \
+	"$(q "SELECT count(*) FROM m WHERE p1 % 17 = 0;")" "0"
+
+check "deletes + multiple groups + unprunable qual: columnar matches the heap" \
+	"$(pgc_set_hash "SELECT * FROM m  WHERE tag LIKE '%needle%'")" \
+	"$(pgc_set_hash "SELECT * FROM hm WHERE tag LIKE '%needle%'")"
+check "and the full scan across every group's mask matches too" \
+	"$(pgc_set_hash "SELECT * FROM m")" \
+	"$(pgc_set_hash "SELECT * FROM hm")"
+
 pgc_summary

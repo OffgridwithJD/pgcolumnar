@@ -1974,6 +1974,46 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	rs->nativeGroup = rg;
 
 	/*
+	 * Native delete visibility (D6b): combine this group's row-mask rows (keyed
+	 * by group number, one bit per row-in-group) into a single delete mask that
+	 * pgcolumnar_native_next_row consults to skip deleted rows.
+	 *
+	 * Built HERE, right after the group context is reset and re-entered, and NOT
+	 * after the decode passes as it once was. #452 phase 2's between-pass
+	 * evaluator reads this mask to keep deleted rows from counting toward "does
+	 * any row pass" and the reject tally. Built later, the evaluator would read
+	 * the PREVIOUS group's mask, which the reset above just freed -- a
+	 * use-after-free that only a table with deleted rows under an unprunable qual
+	 * could reach, and only on the second group onward. The mask is palloc0'd in
+	 * groupContext, so this ordering also gives it the same lifetime it had.
+	 */
+	rs->nativeDeleteMask = NULL;
+	rs->nativeDeleteMaskLen = 0;
+	{
+		List	   *maskList = PgColumnarReadDeleteVectorList(rs->storageId,
+													   rg->groupNumber,
+													   rs->metaSnapshot);
+		ListCell   *mlc;
+		uint32		want = (uint32) ((rg->rowCount + 7) / 8);
+
+		foreach(mlc, maskList)
+		{
+			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mlc);
+			uint32		i;
+
+			if (rm->bitmap == NULL || rm->bitmapLen == 0)
+				continue;
+			if (rs->nativeDeleteMask == NULL)
+			{
+				rs->nativeDeleteMask = palloc0(want > 0 ? want : 1);
+				rs->nativeDeleteMaskLen = want;
+			}
+			for (i = 0; i < rm->bitmapLen && i < want; i++)
+				rs->nativeDeleteMask[i] |= rm->bitmap[i];
+		}
+	}
+
+	/*
 	 * The chunk metadata is read before the data (#338) because it carries the
 	 * per-column byte ranges the projected read needs. It is a catalog read and
 	 * touches none of the group's data pages.
@@ -2226,42 +2266,6 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	 * only the decoded count can say so.
 	 */
 	rs->decodeSkippedVectors = (groupVecDecoded < maxVecCount);
-
-	/*
-	 * Per-vector skipping (native spec 7.1, D5b): build the skip vector from the
-	 * per-vector zone maps. Only when every column carries a descriptor (so the
-	 * vector boundaries line up); a legacy baseline chunk disables it.
-	 */
-	/*
-	 * Native delete visibility (D6b): combine this group's row-mask rows (keyed
-	 * by group number, one bit per row-in-group) into a single delete mask that
-	 * pgcolumnar_native_next_row consults to skip deleted rows.
-	 */
-	rs->nativeDeleteMask = NULL;
-	rs->nativeDeleteMaskLen = 0;
-	{
-		List	   *maskList = PgColumnarReadDeleteVectorList(rs->storageId,
-													   rg->groupNumber,
-													   rs->metaSnapshot);
-		ListCell   *mlc;
-		uint32		want = (uint32) ((rg->rowCount + 7) / 8);
-
-		foreach(mlc, maskList)
-		{
-			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mlc);
-			uint32		i;
-
-			if (rm->bitmap == NULL || rm->bitmapLen == 0)
-				continue;
-			if (rs->nativeDeleteMask == NULL)
-			{
-				rs->nativeDeleteMask = palloc0(want > 0 ? want : 1);
-				rs->nativeDeleteMaskLen = want;
-			}
-			for (i = 0; i < rm->bitmapLen && i < want; i++)
-				rs->nativeDeleteMask[i] |= rm->bitmap[i];
-		}
-	}
 
 	rs->groupRowCount = rg->rowCount;
 	rs->rowInGroup = 0;
