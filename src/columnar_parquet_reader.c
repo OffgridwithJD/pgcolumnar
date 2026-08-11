@@ -679,12 +679,65 @@ pq_check_row_groups(const PqFile *pf, const char *path)
 	int			rg;
 
 	for (rg = 0; rg < pf->nrowgroups; rg++)
-		if (pf->rgs[rg].chunks == NULL || pf->rgs[rg].nchunks != pf->ncols)
+	{
+		PqRowGroup *g = &pf->rgs[rg];
+		int			ci;
+
+		if (g->chunks == NULL || g->nchunks != pf->ncols)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("Parquet file \"%s\" has a malformed row group", path),
 					 errdetail("Row group %d carries %d column chunks, but the schema has %d leaf columns.",
-							   rg, pf->rgs[rg].nchunks, pf->ncols)));
+							   rg, g->nchunks, pf->ncols)));
+
+		/*
+		 * num_rows and each chunk's num_values are file-supplied, and both drive
+		 * allocation and loop bounds later without a check of their own. Reject
+		 * the out-of-range values here, once, before anything is sized or read.
+		 *
+		 * #570: the per-chunk decode arrays are palloc'd as sizeof(T) * cap with
+		 * cap = Max(num_values, 1). That product is size_t arithmetic, so a
+		 * num_values near 2^62 wraps to a small or zero size, the palloc
+		 * succeeds, and decode writes the page past it. Bounding num_values to
+		 * what palloc itself would accept (MaxAllocSize / widest element) removes
+		 * the wrap: a merely-large value now errors cleanly, and the wrapping
+		 * value never reaches the multiplication.
+		 *
+		 * #571: the row-assembly loop runs for num_rows iterations, reading
+		 * defs[ei]/vals[vi] out of arrays sized to a chunk's num_values. A file
+		 * whose num_rows exceeds a chunk's num_values walks those cursors off the
+		 * end: phantom rows built from adjacent heap, or a crash. For every leaf
+		 * chunk, a valid file has num_values >= num_rows (one entry per row, plus
+		 * nulls, and more for repeated columns), so num_rows > num_values is
+		 * malformed.
+		 */
+		if (g->num_rows < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("Parquet file \"%s\" has a malformed row group", path),
+					 errdetail("Row group %d declares a negative num_rows (%ld).",
+							   rg, (long) g->num_rows)));
+
+		for (ci = 0; ci < g->nchunks; ci++)
+		{
+			int64		nv = g->chunks[ci].num_values;
+
+			if (nv < 0 || nv > (int64) (MaxAllocSize / sizeof(Datum)))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Parquet file \"%s\" has a malformed row group", path),
+						 errdetail("Row group %d column %d declares num_values %ld, outside the supported range 0..%zu.",
+								   rg, ci, (long) nv,
+								   (size_t) (MaxAllocSize / sizeof(Datum)))));
+
+			if (g->num_rows > nv)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Parquet file \"%s\" has a malformed row group", path),
+						 errdetail("Row group %d declares num_rows %ld, but column %d holds only %ld values.",
+								   rg, (long) g->num_rows, ci, (long) nv)));
+		}
+	}
 }
 
 /* -------------------------------------------------------------------------
