@@ -60,6 +60,8 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
+#include "statistics/statistics.h"
+#include "catalog/pg_statistic_ext.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
@@ -1371,6 +1373,107 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		return;
 	if (!OidIsValid(rte->relid) || !PgColumnarIsColumnarRelation(rte->relid))
 		return;
+
+	/*
+	 * #438: a capacity-truncated extended MCV can displace a functional
+	 * dependency and collapse the joint row estimate far below what the columns'
+	 * own marginals allow (measured: 1 against an actual 300). Core's precedence
+	 * cannot be changed from here, but the estimate can. When a dependency
+	 * statistic covers the restriction columns, recompute a dependency-consistent
+	 * estimate and, only if core's is lower, raise rel->rows to it.
+	 *
+	 * The joint selectivity of a FULL dependency is the most selective single-
+	 * column marginal (the determining column decides the rest); of NO dependency
+	 * it is the independence product. Interpolate by the strongest applicable
+	 * dependency degree:  degree*min_marginal + (1-degree)*independence.  That is
+	 * exact for the two-clause case and reduces to no correction at degree 0, so
+	 * a weak dependency is not over-raised and a correct estimate is never lowered.
+	 */
+	if (rel->baserestrictinfo != NIL && rel->tuples > 0 && rel->statlist != NIL)
+	{
+		Bitmapset  *clauseCols = NULL;
+		Selectivity minMarg = 1.0;
+		Selectivity indep = 1.0;
+		int			nclause = 0;
+		double		degree = 0.0;
+		bool		haveDep = false;
+		ListCell   *rc;
+		ListCell   *sc;
+
+		foreach(rc, rel->baserestrictinfo)
+		{
+			RestrictInfo *ri = lfirst_node(RestrictInfo, rc);
+			Selectivity slc = clause_selectivity(root, (Node *) ri, 0,
+												 JOIN_INNER, NULL);
+
+			pull_varattnos((Node *) ri->clause, rel->relid, &clauseCols);
+			if (slc < minMarg)
+				minMarg = slc;
+			indep *= slc;
+			nclause++;
+		}
+
+		if (nclause >= 2 && bms_num_members(clauseCols) >= 2)
+		{
+			foreach(sc, rel->statlist)
+			{
+				StatisticExtInfo *stat = (StatisticExtInfo *) lfirst(sc);
+				Bitmapset  *statCols = NULL;
+				int			x = -1;
+
+				if (stat->kind != STATS_EXT_DEPENDENCIES)
+					continue;
+				while ((x = bms_next_member(stat->keys, x)) >= 0)
+					statCols = bms_add_member(statCols,
+											  x - FirstLowInvalidHeapAttributeNumber);
+				if (bms_is_subset(clauseCols, statCols))
+				{
+					MVDependencies *deps =
+						statext_dependencies_load(stat->statOid, stat->inherit);
+
+					if (deps != NULL)
+					{
+						uint32		d;
+
+						for (d = 0; d < deps->ndeps; d++)
+						{
+							MVDependency *dep = deps->deps[d];
+							bool		covered = true;
+							int			a;
+
+							for (a = 0; a < dep->nattributes; a++)
+							{
+								int			off = dep->attributes[a] -
+									FirstLowInvalidHeapAttributeNumber;
+
+								if (!bms_is_member(off, clauseCols))
+								{
+									covered = false;
+									break;
+								}
+							}
+							if (covered && dep->degree > degree)
+								degree = dep->degree;
+						}
+						haveDep = true;
+					}
+					bms_free(statCols);
+					break;
+				}
+				bms_free(statCols);
+			}
+		}
+
+		if (haveDep && degree > 0.0)
+		{
+			Selectivity depSel = degree * minMarg + (1.0 - degree) * indep;
+			double		depRows = clamp_row_est(rel->tuples * depSel);
+
+			if (depRows > rel->rows)
+				rel->rows = depRows;
+		}
+		bms_free(clauseCols);
+	}
 
 	/*
 	 * The custom scan is the scalar per-row path (PgColumnarReadNextRow), so
