@@ -352,11 +352,16 @@ scan. A columnar scan ships fewer, already-decoded rows, so that rate overstates
 its Gather cost. On the shape above the Gather cost reached almost the whole cost
 of the serial scan. The serial plan won on cost while losing on the clock.
 
-A columnar table would want about half the default `parallel_tuple_cost` for this
-decision. That rate is a global setting, applied through the core Gather cost. An
-access method cannot set its own value without a core change. Lowering the global
-setting is not the fix, because it changes the rate for every table on the system
-and the evidence is one workload.
+The default rate is conservative for any row-returning parallel scan, not only a
+columnar one. A heap scan on the same shape also flipped and ran faster at the
+lower rate. A columnar scan is affected most, because its own cost is low and the
+Gather cost then dominates. About half the default rate picks the faster plan on
+the shape above.
+
+That rate is a global setting, applied through the core Gather cost. An access
+method cannot set its own value without a core change. Lowering the global setting
+is not the fix, because it changes the rate for every table on the system and the
+evidence is one workload.
 
 The workaround is to force the parallel plan when it helps, with `SET
 max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
