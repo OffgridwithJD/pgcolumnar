@@ -27,10 +27,16 @@ ROWS=20480
 NEEDLE=zqx
 
 # One row group so nothing is pruned wholesale, and wide payload columns so
-# materialization is the cost under test. Only row 7 in every 2048 carries the
-# needle, so the qual rejects the overwhelming majority.
+# materialization is the cost under test. Row 7 in every 1024 -- one per vector --
+# carries the needle, so the qual rejects the overwhelming majority AND every
+# vector keeps a survivor. That last part is deliberate: it isolates 1a's per-row
+# materialization from #452 phase 2, which skips a vector's payload DECODE only
+# when NO row in it passes. With a survivor in each vector phase 2 rules none out
+# (the "nothing pruned at the vector level" premise below), so what this suite
+# measures is 1a alone. Phase 2's own vector skipping is proven in
+# test/native_decode_gating.sh.
 GEN="SELECT g AS id,
-            CASE WHEN g % 2048 = 7 THEN 'aaa${NEEDLE}bbb' ELSE 'aaaaaabbb' END AS k,
+            CASE WHEN g % 1024 = 7 THEN 'aaa${NEEDLE}bbb' ELSE 'aaaaaabbb' END AS k,
             repeat(md5(g::text), 4) AS p1,
             repeat(md5((g+1)::text), 4) AS p2,
             repeat(md5((g+2)::text), 4) AS p3
@@ -64,7 +70,7 @@ check_num "premise: the fixture loaded every row" "$n_rows" "$ROWS"
 
 n_match=$(scalar "SELECT count(*) FROM n WHERE k LIKE '%${NEEDLE}%';")
 h_match=$(scalar "SELECT count(*) FROM h WHERE k LIKE '%${NEEDLE}%';")
-check_num "premise: the needle is selective, not most of the table" "$n_match" "10"
+check_num "premise: the needle is selective, not most of the table" "$n_match" "20"
 check_num "premise: heap agrees on how many rows match" "$h_match" "$n_match"
 
 # The scalar columnar custom scan reports "Columnar Projected Columns"; no other

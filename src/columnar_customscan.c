@@ -1961,6 +1961,32 @@ pgcolumnar_scan_row_filter(void *arg)
 	return false;
 }
 
+/*
+ * pgcolumnar_scan_row_filter_nocount
+ *		The same qual test, without the InstrCountFiltered1 side effect.
+ *
+ * Phase 2 (#452) evaluates the qual for the WHOLE group at load time to skip
+ * payload decode for vectors no row passes, and it counts every rejection there,
+ * once. The producer then re-tests a surviving vector to find the rows to emit;
+ * it must not count those same rejections again. So on that path the producer
+ * filters through this, and the counting variant above stays the evaluator's.
+ */
+static bool
+pgcolumnar_scan_row_filter_nocount(void *arg)
+{
+	ScanState  *ss = (ScanState *) arg;
+	ExprContext *econtext = ss->ps.ps_ExprContext;
+	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
+
+	ExecClearTuple(slot);
+	ExecStoreVirtualTuple(slot);
+
+	ResetExprContext(econtext);
+	econtext->ecxt_scantuple = slot;
+
+	return ExecQual(ss->ps.qual, econtext);
+}
+
 static void
 PgColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 {
@@ -2096,7 +2122,8 @@ PgColumnarScanNext(ScanState *ss)
 		if (!PgColumnarReadNextRowFiltered(cstate->readState, slot->tts_values,
 										 slot->tts_isnull, &rowNumber,
 										 cstate->qualCols,
-										 pgcolumnar_scan_row_filter, ss))
+										 pgcolumnar_scan_row_filter,
+										 pgcolumnar_scan_row_filter_nocount, ss))
 			return NULL;
 
 		ExecClearTuple(slot);

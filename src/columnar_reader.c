@@ -165,6 +165,24 @@ struct PgColumnarReadState
 	uint64		rowsFilteredEarly;
 
 	/*
+	 * Late materialization for an UNPRUNABLE qual (#452 phase 2). When the qual
+	 * is not a SkipPredicate (numPredicates == 0) these carry the executor's
+	 * per-row filter into the group load, so a vector no row can pass is masked
+	 * BEFORE its payload columns are decoded. All NULL on every non-filtered read
+	 * path -- the fold path and PgColumnarReadNextRow both leave them NULL -- and
+	 * that NULL is what turns the between-pass evaluator off. nativeQualValues
+	 * and nativeQualNulls are the scan slot's own arrays, the same ones the
+	 * filter reads when it stores the slot as a virtual tuple.
+	 */
+	const bool *nativeQualCols;			/* [natts] executor qual columns, or NULL */
+	PgColumnarRowFilter nativeQualFilter;	/* the node's qual (counts rejects), or NULL */
+	PgColumnarRowFilter nativeQualFilterNoCount; /* same qual, no InstrCountFiltered1 */
+	void	   *nativeQualFilterArg;
+	Datum	   *nativeQualValues;		/* scan slot tts_values, or NULL */
+	bool	   *nativeQualNulls;		/* scan slot tts_isnull, or NULL */
+	bool		nativeQualCounted;		/* the phase-2 evaluator counted this group's rejects */
+
+	/*
 	 * Did loading this group skip the DECODE of any vector (#512)?
 	 *
 	 * False always, today: pgcolumnar_native_decode_chunk takes no skip mask and
@@ -994,6 +1012,18 @@ native_is_qual_column(PgColumnarReadState *rs, int col)
 	for (p = 0; p < rs->numPredicates; p++)
 		if (rs->predicates[p].attidx == col)
 			return true;
+
+	/*
+	 * #452 phase 2: with no reader predicate, refine_skipvec can build no mask,
+	 * so the columns the executor qual reads are the ones to decode first -- an
+	 * unprunable qual (a leading-wildcard LIKE) can then gate the payload decode.
+	 * Gated on numPredicates == 0 so 1b-ii's predicate-driven split is byte-for-
+	 * byte unchanged whenever a predicate exists.
+	 */
+	if (rs->numPredicates == 0 && rs->nativeQualCols != NULL &&
+		col >= 0 && col < rs->natts && rs->nativeQualCols[col])
+		return true;
+
 	return false;
 }
 
@@ -1512,7 +1542,19 @@ pgcolumnar_native_build_skipvec(PgColumnarReadState *rs, uint64 groupNumber, int
 	rs->nativeVectorCount = vecCount;
 	rs->nativeCurVec = 0;
 
-	if (rs->numPredicates == 0 || vecCount <= 0)
+	if (vecCount <= 0)
+		return;
+
+	/*
+	 * Build the mask and the per-vector spans whenever something will CONSULT
+	 * them: reader predicates (1b-ii), or an unprunable executor qual (#452
+	 * phase 2), which sets nativeQualFilter. With neither, a mask is pure
+	 * overhead and the plain scan path leaves both NULL exactly as before. The
+	 * predicate-exclusion loop below is a no-op when numPredicates is 0, so the
+	 * phase-2 case falls through it with an all-false mask for its evaluator to
+	 * fill.
+	 */
+	if (rs->numPredicates == 0 && rs->nativeQualFilter == NULL)
 		return;
 
 	zones = PgColumnarReadZoneMapVectors(rs->storageId, groupNumber, rs->metaSnapshot);
@@ -1741,6 +1783,131 @@ pgcolumnar_native_read_projected(PgColumnarReadState *rs,
 }
 
 /*
+ * pgcolumnar_native_qual_skipvec
+ *		Extend the skip vector from an UNPRUNABLE qual (#452 phase 2).
+ *
+ *		refine_skipvec turns min/max non-exclusion into "no row matches" for
+ *		reader predicates; this does the same for a qual the reader never admitted
+ *		as a predicate at all -- a leading-wildcard LIKE, whose numPredicates is 0.
+ *		Called between the two decode passes: the qual columns are decoded (they
+ *		are pass 0 once native_is_qual_column answers for the executor qualCols),
+ *		the payload columns are not, so a vector ruled out here costs the payload
+ *		columns no decode. That ordering IS the optimisation.
+ *
+ *		The evaluation reuses 1a's exact callback -- the same ExprState the row
+ *		producer trusts -- so a vector is masked only when NO row in it passes.
+ *		A surviving row keeps the whole vector's payload decoded, which is
+ *		correct: decode granularity is the vector. Missing a skip costs time;
+ *		taking a wrong one would drop rows, so the asymmetry runs the safe way.
+ *
+ *		The qual columns' value cursors are saved and restored: the producer reads
+ *		them from where pass 0 left them, so this non-destructive walk must not
+ *		advance them. rowInGroup is set per row here and reset to 0 by load_group
+ *		after both passes, so it needs no restore.
+ */
+static void
+pgcolumnar_native_qual_skipvec(PgColumnarReadState *rs, int vecCount)
+{
+	char	  **saved;
+	int			c;
+	int			v;
+
+	if (rs->nativeSkipVec == NULL || rs->nativeVecStart == NULL ||
+		rs->nativeQualFilter == NULL || rs->nativeQualValues == NULL ||
+		vecCount <= 0)
+		return;
+
+	/*
+	 * This evaluator becomes the group's SOLE counter of "Rows Removed by
+	 * Filter": it walks every live row, so every rejection is counted here once,
+	 * through the counting filter. The producer must then filter through the
+	 * NON-counting variant on this path (nativeQualCounted tells it so), or a
+	 * rejection in a surviving vector -- which the producer re-tests to find the
+	 * rows to emit -- would be counted a second time.
+	 */
+	rs->nativeQualCounted = true;
+
+	/* Stable across the per-row rowContext resets below: not in rowContext. */
+	saved = (char **) palloc(sizeof(char *) * rs->natts);
+	for (c = 0; c < rs->natts; c++)
+		saved[c] = rs->nativeValueCursor[c];
+
+	for (v = 0; v < vecCount; v++)
+	{
+		uint32		r0 = rs->nativeVecStart[v];
+		uint32		r1 = rs->nativeVecStart[v + 1];
+		uint32		r;
+		bool		anyPass = false;
+		uint64		liveRows = 0;
+
+		/*
+		 * Every live row of the vector is walked, even once one has passed:
+		 * the qual columns' cursors are contiguous and the NEXT vector reads from
+		 * where this one ends, so breaking early would leave the cursor short --
+		 * and this is the one pass that counts each rejection.
+		 */
+		for (r = r0; r < r1; r++)
+		{
+			MemoryContext oldContext;
+			bool		deleted;
+
+			rs->rowInGroup = r;
+
+			deleted = (rs->nativeDeleteMask != NULL &&
+					   (r >> 3) < rs->nativeDeleteMaskLen &&
+					   (rs->nativeDeleteMask[r >> 3] & (1 << (r & 7))) != 0);
+
+			MemoryContextReset(rs->rowContext);
+			oldContext = MemoryContextSwitchTo(rs->rowContext);
+
+			for (c = 0; c < rs->natts; c++)
+			{
+				if (native_is_qual_column(rs, c))
+					pgcolumnar_row_read_column(rs, c, rs->nativeQualValues,
+											 rs->nativeQualNulls);
+				else
+				{
+					/* payload is not decoded yet (pass 1); the qual never reads
+					 * it, so a NULL placeholder completes the tuple harmlessly. */
+					rs->nativeQualValues[c] = (Datum) 0;
+					rs->nativeQualNulls[c] = true;
+				}
+			}
+
+			MemoryContextSwitchTo(oldContext);
+
+			/*
+			 * A deleted row is invisible: it neither counts as filtered nor keeps
+			 * the vector alive, though its cursors were advanced above so the walk
+			 * stays aligned. Every live row is asked, and the counting filter
+			 * records the ones it rejects.
+			 */
+			if (deleted)
+				continue;
+			liveRows++;
+			if (rs->nativeQualFilter(rs->nativeQualFilterArg))
+				anyPass = true;
+		}
+
+		/*
+		 * A vector no live row passed is skipped: its payload columns are never
+		 * decoded and the producer never reaches its rows. Those rows are
+		 * filtered before materialization exactly as the producer's own rejects
+		 * are, so they join that counter here, where they are ruled out (#542's
+		 * principle: count the skip where it happens).
+		 */
+		if (!anyPass)
+		{
+			rs->nativeSkipVec[v] = true;
+			rs->rowsFilteredEarly += liveRows;
+		}
+	}
+
+	for (c = 0; c < rs->natts; c++)
+		rs->nativeValueCursor[c] = saved[c];
+}
+
+/*
  * pgcolumnar_native_load_group
  *		Load the next native row group (PGCN v1, Phase D3): read the bytes of the
  *		projected columns into the group context and set each such column's
@@ -1914,10 +2081,19 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	 * Run as one pass, the refinement still produces a correct mask and saves
 	 * exactly nothing, because the payload columns are already decoded by then.
 	 */
+	rs->nativeQualCounted = false;
 	for (pass = 0; pass < 2; pass++)
 	{
 	if (pass == 1 && allDescriptor)
 		pgcolumnar_native_refine_skipvec(rs, maxVecCount);
+
+	/*
+	 * #452 phase 2: refine_skipvec did nothing (no predicate to refine), so an
+	 * unprunable qual gets its per-vector chance here, between the passes. Same
+	 * guard shape as refine's, and mutually exclusive with it on numPredicates.
+	 */
+	if (pass == 1 && allDescriptor && rs->numPredicates == 0)
+		pgcolumnar_native_qual_skipvec(rs, maxVecCount);
 
 	foreach(lc, chunks)
 	{
@@ -2154,7 +2330,8 @@ static bool
 pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 						 uint64 *rowNumber,
 						 const bool *qualCols,
-						 PgColumnarRowFilter filter, void *filterArg)
+						 PgColumnarRowFilter filter,
+						 PgColumnarRowFilter filterNoCount, void *filterArg)
 {
 	MemoryContext oldContext;
 	int			c;
@@ -2162,6 +2339,18 @@ pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 
 	if (rs->exhausted)
 		return false;
+
+	/*
+	 * Carry the filter into the group load so phase 2's between-pass evaluator
+	 * can reach it (#452). NULL on the unfiltered path, which turns it off. Set
+	 * every call: it is cheaper than a branch and always the same pointers.
+	 */
+	rs->nativeQualCols = qualCols;
+	rs->nativeQualFilter = filter;
+	rs->nativeQualFilterNoCount = filterNoCount;
+	rs->nativeQualFilterArg = filterArg;
+	rs->nativeQualValues = values;
+	rs->nativeQualNulls = nulls;
 
 	for (;;)
 	{
@@ -2237,7 +2426,18 @@ pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 				 * rowContext and stay valid -- it is reset per row, not here.
 				 */
 				MemoryContextSwitchTo(oldContext);
-				keep = filter(filterArg);
+
+				/*
+				 * When phase 2's evaluator already counted this group's rejects
+				 * (it walks every row), the producer must not count them again as
+				 * it re-tests a surviving vector for the rows to emit. It filters
+				 * through the non-counting variant then; otherwise (1a with a
+				 * predicate, or a group with no per-vector structure) it counts.
+				 */
+				if (rs->nativeQualCounted && rs->nativeQualFilterNoCount != NULL)
+					keep = rs->nativeQualFilterNoCount(filterArg);
+				else
+					keep = filter(filterArg);
 				MemoryContextSwitchTo(rs->rowContext);
 
 				/* Pass two: the rest, built only if the row survived. */
@@ -2292,7 +2492,7 @@ PgColumnarReadNextRow(PgColumnarReadState *readState, Datum *values, bool *nulls
 {
 	pgcolumnar_read_start(readState);
 	return pgcolumnar_native_next_row(readState, values, nulls, rowNumber,
-									NULL, NULL, NULL);
+									NULL, NULL, NULL, NULL);
 }
 
 /*
@@ -2311,12 +2511,13 @@ bool
 PgColumnarReadNextRowFiltered(PgColumnarReadState *readState,
 							Datum *values, bool *nulls, uint64 *rowNumber,
 							const bool *qualCols,
-							PgColumnarRowFilter filter, void *filterArg)
+							PgColumnarRowFilter filter,
+							PgColumnarRowFilter filterNoCount, void *filterArg)
 {
-	Assert(qualCols != NULL && filter != NULL);
+	Assert(qualCols != NULL && filter != NULL && filterNoCount != NULL);
 	pgcolumnar_read_start(readState);
 	return pgcolumnar_native_next_row(readState, values, nulls, rowNumber,
-									qualCols, filter, filterArg);
+									qualCols, filter, filterNoCount, filterArg);
 }
 
 /*
