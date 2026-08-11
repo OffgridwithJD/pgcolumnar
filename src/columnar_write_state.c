@@ -906,6 +906,438 @@ PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 	return false;
 }
 
+typedef struct FlushColumnResult
+{
+	StringInfo	chunk;			/* [validity][finalData] column-chunk bytes; NULL if skipped */
+	char	   *descriptor;		/* encoding descriptor bytes; NULL if the column was skipped */
+	uint32		descriptorLen;
+	int			blockCodec;
+	List	   *zoneRows;		/* NativeZoneMapMetadata * for this column (per-vector + whole-chunk) */
+	NativeBloomMetadata *bloomRow;	/* per-chunk bloom for this column, or NULL */
+} FlushColumnResult;
+
+/*
+ * flush_one_column
+ *		Produce one column chunk's bytes, descriptor, block codec, zone maps and
+ *		bloom from that column's buffered input, reading only its arguments (no
+ *		writeState reach-through). The caller assembles the column chunks into the
+ *		stripe in column order and performs all I/O and catalog writes. Output is
+ *		byte-identical to the in-loop code this was extracted from (#445 slice 1).
+ */
+static FlushColumnResult
+flush_one_column(Form_pg_attribute att, List *chunkGroups,
+				 PgColumnarColumnDef *def, uint64 rowCount, int validityBytes,
+				 int encodeEffort, int compressionType, int compressionLevel,
+				 uint64 storageId, uint64 groupNumber, int columnIndex)
+{
+	FlushColumnResult result;
+	List	   *zoneRows = NIL;
+	NativeBloomMetadata *bloomRow = NULL;
+	StringInfo	chunk = makeStringInfo();
+	ListCell   *lc;
+	uint8	   *validity = (uint8 *) palloc0(validityBytes);
+	uint64		rowIdx = 0;
+	StringInfo	encoded = makeStringInfo();
+	StringInfo	desc = makeStringInfo();
+	uint8		descVersion = COLUMNAR_NATIVE_ENCDESC_VERSION;
+	uint8		descReserved = 0;
+	uint32		vectorCount = (uint32) list_length(chunkGroups);
+	char	   *fsstTable = NULL;	/* chunk-shared FSST table (E3b), or NULL */
+	uint32		fsstTableLen = 0;
+	char	   *finalData;
+	uint32		finalLen;
+	int			blockCodec = COLUMNAR_COMPRESSION_NONE;
+	int			vec = 0;
+	bool		chunkHasMinMax = false;
+	Datum		chunkMin = (Datum) 0;
+	Datum		chunkMax = (Datum) 0;
+	uint64		chunkValueCount = 0;
+	int64		chunkSum = 0;
+
+	/*
+	 * Virtual generated columns (attgenerated 'v', PostgreSQL 18+) are computed
+	 * on read from their base columns and never stored, so writing an all-null
+	 * chunk for them wastes space. Skip the chunk entirely: the reader finds no
+	 * column_chunk for this column, treats it as absent, and returns its missing
+	 * value (NULL via getmissingattr), while the executor expands the generated
+	 * expression regardless. A NULL descriptor marks the column skipped for the
+	 * column_chunk insertion pass below. ('v' is never set on PG15-17.)
+	 */
+	if (att->attgenerated == 'v')
+	{
+		result.chunk = NULL;
+		result.descriptor = NULL;
+		result.descriptorLen = 0;
+		result.blockCodec = COLUMNAR_COMPRESSION_NONE;
+		result.zoneRows = NIL;
+		result.bloomRow = NULL;
+		pfree(validity);
+		return result;
+	}
+
+	foreach(lc, chunkGroups)
+	{
+		ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+		ColumnChunkBuffer *col = &group->columns[columnIndex];
+		char	   *existsBytes = col->existsStream.data;
+		uint64		i;
+
+		for (i = 0; i < group->rowCount; i++, rowIdx++)
+			if (existsBytes[i])
+				validity[rowIdx >> 3] |= (uint8) (1 << (rowIdx & 7));
+	}
+	appendBinaryStringInfo(chunk, (char *) validity, validityBytes);
+
+	/* descriptor header */
+	appendBinaryStringInfo(desc, (char *) &descVersion, 1);
+	appendBinaryStringInfo(desc, (char *) &descReserved, 1);
+	appendBinaryStringInfo(desc, (char *) &vectorCount, sizeof(uint32));
+
+	/*
+	 * E3b: build one FSST symbol table for the whole column chunk from a
+	 * bounded sample of its value streams, so the costly table build is paid
+	 * once here rather than once per vector. It is stored once as a trailing
+	 * descriptor region and reused by every FSST vector below. Non-varlena
+	 * columns and columns FSST cannot help leave it NULL.
+	 */
+	if (att->attlen == -1)
+	{
+		StringInfoData corpus;
+		uint32		sampleLen = 0;
+		/* `def` is the enclosing block's, at the top of this per-column
+		 * loop. Re-declaring it here shadowed that one, which this project
+		 * builds with -Wshadow=compatible-local and treats as an error. */
+		bool		reuseVerdict;
+
+		initStringInfo(&corpus);
+		foreach(lc, chunkGroups)
+		{
+			ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+			ColumnChunkBuffer *col = &group->columns[columnIndex];
+
+			if (col->valueStream.len > 0)
+				appendBinaryStringInfo(&corpus, col->valueStream.data,
+									   col->valueStream.len);
+			if (sampleLen == 0 && corpus.len >= 262144)
+				sampleLen = (uint32) corpus.len;	/* matches FSST_SAMPLE_CAP:
+													 * train the one per-chunk
+													 * table on a broad sample */
+			if (corpus.len >= COLUMNAR_FSST_DECIDE_CAP)
+				break;
+		}
+		if (sampleLen == 0)
+			sampleLen = (uint32) corpus.len;
+
+		/*
+		 * encode_effort = fast skips the FSST substring search entirely:
+		 * no symbol table, so no whole-corpus decision below and no
+		 * per-vector encode either, since all three are reached only
+		 * through a non-NULL fsstTable.
+		 *
+		 * This is where a text column's write cost lives (issue #155).
+		 * Measured on 1,000,000 rows, one text column, the load runs 1.2x
+		 * to 5.7x faster without it -- and on five of the seven shapes
+		 * measured it produced byte-for-byte identical storage, so that
+		 * time bought nothing at all. On the two where FSST does win it
+		 * costs 2.7% and 12.2% more space, which is why this is a choice
+		 * offered rather than a default changed.
+		 */
+		/*
+		 * Skip the FSST symbol-table build when a cheap distinct probe shows
+		 * the dictionary wins outright (#155): the build is the single largest
+		 * cost of a text load, and for a low-cardinality column the table is
+		 * built and then never used per vector. The probe reads the same corpus
+		 * the keep/drop decision uses, and only skips when the dictionary is
+		 * viable and wins for every vector, so the stored bytes are identical.
+		 */
+		/*
+		 * Reuse this column's previous verdict when it is young enough
+		 * (#472). A HURTS verdict skips the build as well as the question,
+		 * since the vectors then take their ordinary encoding, which is
+		 * what a freshly taken HURTS would have produced.
+		 */
+		reuseVerdict = (pgcolumnar_fsst_verdict_reuse > 0 &&
+						def->fsstVerdict != COLUMNAR_FSST_UNKNOWN &&
+						def->fsstVerdictAge < pgcolumnar_fsst_verdict_reuse);
+
+		if (corpus.len > 0 &&
+			encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
+			!(reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS) &&
+			!PgColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
+			PgColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
+										&fsstTable, &fsstTableLen);
+
+		/*
+		 * A table that shrinks every vector can still enlarge the chunk,
+		 * because what lands on disk is this stream after the codec below
+		 * has run, and FSST codes compress far worse than the text they
+		 * replace. Ask before committing to it, and drop the table when the
+		 * answer is no: the vectors below then take their ordinary encoding
+		 * and skip the FSST attempt altogether, so the check pays for itself
+		 * in write time exactly when it saves space.
+		 *
+		 * This is asked over a much longer run of bytes than the table is
+		 * trained on, because the answer moves with volume and the sample
+		 * size is not neutral: zstd needs a good deal of FSST output before
+		 * it finds the structure in it. Measured on 300,000 e-mail-shaped
+		 * rows, the 256 kB training sample says FSST is 24% worse while over
+		 * the whole column it is 23% better -- a verdict that is not merely
+		 * imprecise but inverted, so no margin on the sample would be safe.
+		 */
+		if (fsstTable != NULL)
+		{
+			bool		helps;
+
+			/*
+			 * A reused HELPS verdict still builds the table above, because
+			 * the table is trained on THIS row group's corpus and stored
+			 * with the chunk: reusing the table itself would change the
+			 * stored bytes. Only the whole-corpus question is skipped, and
+			 * that is the expensive half.
+			 */
+			if (reuseVerdict)
+			{
+				helps = (def->fsstVerdict == COLUMNAR_FSST_HELPS);
+				def->fsstVerdictAge++;
+			}
+			else
+			{
+				helps = PgColumnarFsstHelpsCompressed(corpus.data,
+													(uint32) corpus.len,
+													fsstTable, fsstTableLen,
+													compressionType,
+													compressionLevel);
+				def->fsstVerdict = helps ? COLUMNAR_FSST_HELPS
+					: COLUMNAR_FSST_HURTS;
+				def->fsstVerdictAge = 0;
+			}
+
+			if (!helps)
+			{
+				pfree(fsstTable);
+				fsstTable = NULL;
+				fsstTableLen = 0;
+			}
+		}
+		else if (reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS)
+		{
+			/*
+			 * The build was skipped on the strength of the cached verdict,
+			 * so this row group counts as a reuse too. Without this the age
+			 * would never advance on the common path and the bound would
+			 * never re-take the verdict.
+			 */
+			def->fsstVerdictAge++;
+		}
+
+		pfree(corpus.data);
+	}
+
+	/* encode each vector (chunk group) and record its descriptor entry */
+	foreach(lc, chunkGroups)
+	{
+		ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+		ColumnChunkBuffer *col = &group->columns[columnIndex];
+		char	   *encData;
+		uint32		encLen;
+		int			encType;
+		uint8		entryType;
+		uint32		entryValueCount;
+		uint32		entryRawLen;
+
+		encType = PgColumnarEncodeChunk(col->valueStream.data,
+									  col->valueStream.len, att,
+									  col->valueCount, fsstTable, fsstTableLen,
+									  &encData, &encLen);
+
+		if (encLen > 0)
+			appendBinaryStringInfo(encoded, encData, encLen);
+
+		entryType = (uint8) encType;
+		entryValueCount = (uint32) col->valueCount;
+		entryRawLen = (uint32) col->valueStream.len;
+		appendBinaryStringInfo(desc, (char *) &entryType, 1);
+		appendBinaryStringInfo(desc, (char *) &entryValueCount, sizeof(uint32));
+		appendBinaryStringInfo(desc, (char *) &entryRawLen, sizeof(uint32));
+		appendBinaryStringInfo(desc, (char *) &encLen, sizeof(uint32));
+
+		/* per-vector zone map (native spec 7.1, D5) */
+		{
+			NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
+
+			z->storageId = storageId;
+			z->groupNumber = groupNumber;
+			z->columnIndex = columnIndex;
+			z->vectorIndex = vec;
+			z->valueCount = col->valueCount;
+			z->nullCount = group->rowCount - col->valueCount;
+
+			if (def->summableInt && col->valueCount > 0)
+			{
+				z->hasSum = true;
+				z->sum = DirectFunctionCall1(int8_numeric,
+											 Int64GetDatum(col->sum));
+			}
+
+			if (col->hasMinMax)
+			{
+				StringInfoData mn;
+				StringInfoData mx;
+
+				initStringInfo(&mn);
+				initStringInfo(&mx);
+				PgColumnarEncodeValue(&mn, att, col->minValue);
+				PgColumnarEncodeValue(&mx, att, col->maxValue);
+				z->hasMinMax = true;
+				z->minimum = mn.data;
+				z->minimumLen = (uint32) mn.len;
+				z->maximum = mx.data;
+				z->maximumLen = (uint32) mx.len;
+
+				/* fold into the whole-chunk min/max via the btree cmp proc */
+				if (!chunkHasMinMax)
+				{
+					chunkMin = col->minValue;
+					chunkMax = col->maxValue;
+					chunkHasMinMax = true;
+				}
+				else
+				{
+					if (DatumGetInt32(FunctionCall2Coll(&def->cmpFn,
+														def->collation,
+														col->minValue,
+														chunkMin)) < 0)
+						chunkMin = col->minValue;
+					if (DatumGetInt32(FunctionCall2Coll(&def->cmpFn,
+														def->collation,
+														col->maxValue,
+														chunkMax)) > 0)
+						chunkMax = col->maxValue;
+				}
+			}
+
+			chunkValueCount += col->valueCount;
+			chunkSum += col->sum;
+			zoneRows = lappend(zoneRows, z);
+		}
+		vec++;
+	}
+
+	/*
+	 * E3b: trailing chunk-shared FSST table region (descriptor version 2).
+	 * sharedTableLen is 0 when the chunk has no shared table; FSST vectors
+	 * above reference this one table instead of embedding their own.
+	 */
+	appendBinaryStringInfo(desc, (char *) &fsstTableLen, sizeof(uint32));
+	if (fsstTableLen > 0)
+		appendBinaryStringInfo(desc, fsstTable, fsstTableLen);
+
+	/* whole-chunk zone map (vector_index -1) */
+	{
+		NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
+
+		z->storageId = storageId;
+		z->groupNumber = groupNumber;
+		z->columnIndex = columnIndex;
+		z->vectorIndex = -1;
+		z->valueCount = chunkValueCount;
+		z->nullCount = rowCount - chunkValueCount;
+
+		if (def->summableInt && chunkValueCount > 0)
+		{
+			z->hasSum = true;
+			z->sum = DirectFunctionCall1(int8_numeric,
+										 Int64GetDatum(chunkSum));
+		}
+
+		if (chunkHasMinMax)
+		{
+			StringInfoData mn;
+			StringInfoData mx;
+
+			initStringInfo(&mn);
+			initStringInfo(&mx);
+			PgColumnarEncodeValue(&mn, att, chunkMin);
+			PgColumnarEncodeValue(&mx, att, chunkMax);
+			z->hasMinMax = true;
+			z->minimum = mn.data;
+			z->minimumLen = (uint32) mn.len;
+			z->maximum = mx.data;
+			z->maximumLen = (uint32) mx.len;
+		}
+
+		zoneRows = lappend(zoneRows, z);
+	}
+
+	/* per-column-chunk bloom over hashable values (native spec 7.2, D5b) */
+	if (def->bloomable)
+	{
+		StringInfoData hashes;
+		char	   *bloom;
+		uint32		bloomLen;
+
+		initStringInfo(&hashes);
+		foreach(lc, chunkGroups)
+		{
+			ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+			ColumnChunkBuffer *col = &group->columns[columnIndex];
+
+			if (col->hashBuf.len > 0)
+				appendBinaryStringInfo(&hashes, col->hashBuf.data,
+									   col->hashBuf.len);
+		}
+		if (hashes.len > 0 &&
+			PgColumnarBloomBuild((const uint32 *) hashes.data,
+							   hashes.len / sizeof(uint32),
+							   &bloom, &bloomLen))
+		{
+			NativeBloomMetadata *b = palloc0(sizeof(NativeBloomMetadata));
+
+			b->storageId = storageId;
+			b->groupNumber = groupNumber;
+			b->columnIndex = columnIndex;
+			b->filter = bloom;
+			b->filterLen = bloomLen;
+			bloomRow = b;
+		}
+	}
+
+	/* optional block codec over the whole encoded region (spec 6) */
+	finalData = encoded->data;
+	finalLen = encoded->len;
+	if (compressionType != COLUMNAR_COMPRESSION_NONE &&
+		encoded->len > 0)
+	{
+		char	   *compData;
+		uint32		compLen;
+		int			usedType;
+		int			usedLevel;
+
+		PgColumnarCompressValueStream(encoded->data, encoded->len,
+									compressionType,
+									compressionLevel,
+									&compData, &compLen,
+									&usedType, &usedLevel);
+		if (usedType != COLUMNAR_COMPRESSION_NONE)
+		{
+			finalData = compData;
+			finalLen = compLen;
+			blockCodec = usedType;
+		}
+	}
+
+	if (finalLen > 0)
+		appendBinaryStringInfo(chunk, finalData, finalLen);
+
+	result.chunk = chunk;
+	result.descriptor = desc->data;
+	result.descriptorLen = (uint32) desc->len;
+	result.blockCodec = blockCodec;
+	result.zoneRows = zoneRows;
+	result.bloomRow = bloomRow;
+	return result;
+}
+
 /*
  * pgcolumnar_flush_row_group
  *		Native-format (PGCN v1) flush. Lay out the accumulated rows as one row
@@ -989,405 +1421,24 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	for (c = 0; c < natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
-		uint8	   *validity = (uint8 *) palloc0(validityBytes);
-		uint64		rowIdx = 0;
-		StringInfo	encoded = makeStringInfo();
-		StringInfo	desc = makeStringInfo();
-		uint8		descVersion = COLUMNAR_NATIVE_ENCDESC_VERSION;
-		uint8		descReserved = 0;
-		uint32		vectorCount = (uint32) list_length(writeState->chunkGroups);
-		char	   *fsstTable = NULL;	/* chunk-shared FSST table (E3b), or NULL */
-		uint32		fsstTableLen = 0;
-		char	   *finalData;
-		uint32		finalLen;
-		int			blockCodec = COLUMNAR_COMPRESSION_NONE;
-		PgColumnarColumnDef *def = &writeState->colDefs[c];
-		int			vec = 0;
-		bool		chunkHasMinMax = false;
-		Datum		chunkMin = (Datum) 0;
-		Datum		chunkMax = (Datum) 0;
-		uint64		chunkValueCount = 0;
-		int64		chunkSum = 0;
+		FlushColumnResult res = flush_one_column(att, writeState->chunkGroups,
+												 &writeState->colDefs[c], rowCount,
+												 validityBytes, writeState->encodeEffort,
+												 writeState->compressionType,
+												 writeState->compressionLevel,
+												 writeState->storageId, groupNumber, c);
 
 		chunkOffset[c] = data->len;
-
-		/*
-		 * Virtual generated columns (attgenerated 'v', PostgreSQL 18+) are computed
-		 * on read from their base columns and never stored, so writing an all-null
-		 * chunk for them wastes space. Skip the chunk entirely: the reader finds no
-		 * column_chunk for this column, treats it as absent, and returns its missing
-		 * value (NULL via getmissingattr), while the executor expands the generated
-		 * expression regardless. A NULL descriptor marks the column skipped for the
-		 * column_chunk insertion pass below. ('v' is never set on PG15-17.)
-		 */
-		if (att->attgenerated == 'v')
-		{
-			chunkLength[c] = 0;
-			chunkDescriptor[c] = NULL;
-			chunkDescriptorLen[c] = 0;
-			chunkBlockCodec[c] = COLUMNAR_COMPRESSION_NONE;
-			pfree(validity);
-			continue;
-		}
-
-		foreach(lc, writeState->chunkGroups)
-		{
-			ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
-			ColumnChunkBuffer *col = &group->columns[c];
-			char	   *existsBytes = col->existsStream.data;
-			uint64		i;
-
-			for (i = 0; i < group->rowCount; i++, rowIdx++)
-				if (existsBytes[i])
-					validity[rowIdx >> 3] |= (uint8) (1 << (rowIdx & 7));
-		}
-		appendBinaryStringInfo(data, (char *) validity, validityBytes);
-
-		/* descriptor header */
-		appendBinaryStringInfo(desc, (char *) &descVersion, 1);
-		appendBinaryStringInfo(desc, (char *) &descReserved, 1);
-		appendBinaryStringInfo(desc, (char *) &vectorCount, sizeof(uint32));
-
-		/*
-		 * E3b: build one FSST symbol table for the whole column chunk from a
-		 * bounded sample of its value streams, so the costly table build is paid
-		 * once here rather than once per vector. It is stored once as a trailing
-		 * descriptor region and reused by every FSST vector below. Non-varlena
-		 * columns and columns FSST cannot help leave it NULL.
-		 */
-		if (att->attlen == -1)
-		{
-			StringInfoData corpus;
-			uint32		sampleLen = 0;
-			/* `def` is the enclosing block's, at the top of this per-column
-			 * loop. Re-declaring it here shadowed that one, which this project
-			 * builds with -Wshadow=compatible-local and treats as an error. */
-			bool		reuseVerdict;
-
-			initStringInfo(&corpus);
-			foreach(lc, writeState->chunkGroups)
-			{
-				ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
-				ColumnChunkBuffer *col = &group->columns[c];
-
-				if (col->valueStream.len > 0)
-					appendBinaryStringInfo(&corpus, col->valueStream.data,
-										   col->valueStream.len);
-				if (sampleLen == 0 && corpus.len >= 262144)
-					sampleLen = (uint32) corpus.len;	/* matches FSST_SAMPLE_CAP:
-														 * train the one per-chunk
-														 * table on a broad sample */
-				if (corpus.len >= COLUMNAR_FSST_DECIDE_CAP)
-					break;
-			}
-			if (sampleLen == 0)
-				sampleLen = (uint32) corpus.len;
-
-			/*
-			 * encode_effort = fast skips the FSST substring search entirely:
-			 * no symbol table, so no whole-corpus decision below and no
-			 * per-vector encode either, since all three are reached only
-			 * through a non-NULL fsstTable.
-			 *
-			 * This is where a text column's write cost lives (issue #155).
-			 * Measured on 1,000,000 rows, one text column, the load runs 1.2x
-			 * to 5.7x faster without it -- and on five of the seven shapes
-			 * measured it produced byte-for-byte identical storage, so that
-			 * time bought nothing at all. On the two where FSST does win it
-			 * costs 2.7% and 12.2% more space, which is why this is a choice
-			 * offered rather than a default changed.
-			 */
-			/*
-			 * Skip the FSST symbol-table build when a cheap distinct probe shows
-			 * the dictionary wins outright (#155): the build is the single largest
-			 * cost of a text load, and for a low-cardinality column the table is
-			 * built and then never used per vector. The probe reads the same corpus
-			 * the keep/drop decision uses, and only skips when the dictionary is
-			 * viable and wins for every vector, so the stored bytes are identical.
-			 */
-			/*
-			 * Reuse this column's previous verdict when it is young enough
-			 * (#472). A HURTS verdict skips the build as well as the question,
-			 * since the vectors then take their ordinary encoding, which is
-			 * what a freshly taken HURTS would have produced.
-			 */
-			reuseVerdict = (pgcolumnar_fsst_verdict_reuse > 0 &&
-							def->fsstVerdict != COLUMNAR_FSST_UNKNOWN &&
-							def->fsstVerdictAge < pgcolumnar_fsst_verdict_reuse);
-
-			if (corpus.len > 0 &&
-				writeState->encodeEffort != COLUMNAR_ENCODE_EFFORT_FAST &&
-				!(reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS) &&
-				!PgColumnarFsstDictWins(corpus.data, (uint32) corpus.len))
-				PgColumnarFsstBuildChunkTable(corpus.data, sampleLen, att,
-											&fsstTable, &fsstTableLen);
-
-			/*
-			 * A table that shrinks every vector can still enlarge the chunk,
-			 * because what lands on disk is this stream after the codec below
-			 * has run, and FSST codes compress far worse than the text they
-			 * replace. Ask before committing to it, and drop the table when the
-			 * answer is no: the vectors below then take their ordinary encoding
-			 * and skip the FSST attempt altogether, so the check pays for itself
-			 * in write time exactly when it saves space.
-			 *
-			 * This is asked over a much longer run of bytes than the table is
-			 * trained on, because the answer moves with volume and the sample
-			 * size is not neutral: zstd needs a good deal of FSST output before
-			 * it finds the structure in it. Measured on 300,000 e-mail-shaped
-			 * rows, the 256 kB training sample says FSST is 24% worse while over
-			 * the whole column it is 23% better -- a verdict that is not merely
-			 * imprecise but inverted, so no margin on the sample would be safe.
-			 */
-			if (fsstTable != NULL)
-			{
-				bool		helps;
-
-				/*
-				 * A reused HELPS verdict still builds the table above, because
-				 * the table is trained on THIS row group's corpus and stored
-				 * with the chunk: reusing the table itself would change the
-				 * stored bytes. Only the whole-corpus question is skipped, and
-				 * that is the expensive half.
-				 */
-				if (reuseVerdict)
-				{
-					helps = (def->fsstVerdict == COLUMNAR_FSST_HELPS);
-					def->fsstVerdictAge++;
-				}
-				else
-				{
-					helps = PgColumnarFsstHelpsCompressed(corpus.data,
-														(uint32) corpus.len,
-														fsstTable, fsstTableLen,
-														writeState->compressionType,
-														writeState->compressionLevel);
-					def->fsstVerdict = helps ? COLUMNAR_FSST_HELPS
-						: COLUMNAR_FSST_HURTS;
-					def->fsstVerdictAge = 0;
-				}
-
-				if (!helps)
-				{
-					pfree(fsstTable);
-					fsstTable = NULL;
-					fsstTableLen = 0;
-				}
-			}
-			else if (reuseVerdict && def->fsstVerdict == COLUMNAR_FSST_HURTS)
-			{
-				/*
-				 * The build was skipped on the strength of the cached verdict,
-				 * so this row group counts as a reuse too. Without this the age
-				 * would never advance on the common path and the bound would
-				 * never re-take the verdict.
-				 */
-				def->fsstVerdictAge++;
-			}
-
-			pfree(corpus.data);
-		}
-
-		/* encode each vector (chunk group) and record its descriptor entry */
-		foreach(lc, writeState->chunkGroups)
-		{
-			ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
-			ColumnChunkBuffer *col = &group->columns[c];
-			char	   *encData;
-			uint32		encLen;
-			int			encType;
-			uint8		entryType;
-			uint32		entryValueCount;
-			uint32		entryRawLen;
-
-			encType = PgColumnarEncodeChunk(col->valueStream.data,
-										  col->valueStream.len, att,
-										  col->valueCount, fsstTable, fsstTableLen,
-										  &encData, &encLen);
-
-			if (encLen > 0)
-				appendBinaryStringInfo(encoded, encData, encLen);
-
-			entryType = (uint8) encType;
-			entryValueCount = (uint32) col->valueCount;
-			entryRawLen = (uint32) col->valueStream.len;
-			appendBinaryStringInfo(desc, (char *) &entryType, 1);
-			appendBinaryStringInfo(desc, (char *) &entryValueCount, sizeof(uint32));
-			appendBinaryStringInfo(desc, (char *) &entryRawLen, sizeof(uint32));
-			appendBinaryStringInfo(desc, (char *) &encLen, sizeof(uint32));
-
-			/* per-vector zone map (native spec 7.1, D5) */
-			{
-				NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
-
-				z->storageId = writeState->storageId;
-				z->groupNumber = groupNumber;
-				z->columnIndex = c;
-				z->vectorIndex = vec;
-				z->valueCount = col->valueCount;
-				z->nullCount = group->rowCount - col->valueCount;
-
-				if (def->summableInt && col->valueCount > 0)
-				{
-					z->hasSum = true;
-					z->sum = DirectFunctionCall1(int8_numeric,
-												 Int64GetDatum(col->sum));
-				}
-
-				if (col->hasMinMax)
-				{
-					StringInfoData mn;
-					StringInfoData mx;
-
-					initStringInfo(&mn);
-					initStringInfo(&mx);
-					PgColumnarEncodeValue(&mn, att, col->minValue);
-					PgColumnarEncodeValue(&mx, att, col->maxValue);
-					z->hasMinMax = true;
-					z->minimum = mn.data;
-					z->minimumLen = (uint32) mn.len;
-					z->maximum = mx.data;
-					z->maximumLen = (uint32) mx.len;
-
-					/* fold into the whole-chunk min/max via the btree cmp proc */
-					if (!chunkHasMinMax)
-					{
-						chunkMin = col->minValue;
-						chunkMax = col->maxValue;
-						chunkHasMinMax = true;
-					}
-					else
-					{
-						if (DatumGetInt32(FunctionCall2Coll(&def->cmpFn,
-															def->collation,
-															col->minValue,
-															chunkMin)) < 0)
-							chunkMin = col->minValue;
-						if (DatumGetInt32(FunctionCall2Coll(&def->cmpFn,
-															def->collation,
-															col->maxValue,
-															chunkMax)) > 0)
-							chunkMax = col->maxValue;
-					}
-				}
-
-				chunkValueCount += col->valueCount;
-				chunkSum += col->sum;
-				zoneRows = lappend(zoneRows, z);
-			}
-			vec++;
-		}
-
-		/*
-		 * E3b: trailing chunk-shared FSST table region (descriptor version 2).
-		 * sharedTableLen is 0 when the chunk has no shared table; FSST vectors
-		 * above reference this one table instead of embedding their own.
-		 */
-		appendBinaryStringInfo(desc, (char *) &fsstTableLen, sizeof(uint32));
-		if (fsstTableLen > 0)
-			appendBinaryStringInfo(desc, fsstTable, fsstTableLen);
-
-		/* whole-chunk zone map (vector_index -1) */
-		{
-			NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
-
-			z->storageId = writeState->storageId;
-			z->groupNumber = groupNumber;
-			z->columnIndex = c;
-			z->vectorIndex = -1;
-			z->valueCount = chunkValueCount;
-			z->nullCount = rowCount - chunkValueCount;
-
-			if (def->summableInt && chunkValueCount > 0)
-			{
-				z->hasSum = true;
-				z->sum = DirectFunctionCall1(int8_numeric,
-											 Int64GetDatum(chunkSum));
-			}
-
-			if (chunkHasMinMax)
-			{
-				StringInfoData mn;
-				StringInfoData mx;
-
-				initStringInfo(&mn);
-				initStringInfo(&mx);
-				PgColumnarEncodeValue(&mn, att, chunkMin);
-				PgColumnarEncodeValue(&mx, att, chunkMax);
-				z->hasMinMax = true;
-				z->minimum = mn.data;
-				z->minimumLen = (uint32) mn.len;
-				z->maximum = mx.data;
-				z->maximumLen = (uint32) mx.len;
-			}
-
-			zoneRows = lappend(zoneRows, z);
-		}
-
-		/* per-column-chunk bloom over hashable values (native spec 7.2, D5b) */
-		if (def->bloomable)
-		{
-			StringInfoData hashes;
-			char	   *bloom;
-			uint32		bloomLen;
-
-			initStringInfo(&hashes);
-			foreach(lc, writeState->chunkGroups)
-			{
-				ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
-				ColumnChunkBuffer *col = &group->columns[c];
-
-				if (col->hashBuf.len > 0)
-					appendBinaryStringInfo(&hashes, col->hashBuf.data,
-										   col->hashBuf.len);
-			}
-			if (hashes.len > 0 &&
-				PgColumnarBloomBuild((const uint32 *) hashes.data,
-								   hashes.len / sizeof(uint32),
-								   &bloom, &bloomLen))
-			{
-				NativeBloomMetadata *b = palloc0(sizeof(NativeBloomMetadata));
-
-				b->storageId = writeState->storageId;
-				b->groupNumber = groupNumber;
-				b->columnIndex = c;
-				b->filter = bloom;
-				b->filterLen = bloomLen;
-				bloomRows = lappend(bloomRows, b);
-			}
-		}
-
-		/* optional block codec over the whole encoded region (spec 6) */
-		finalData = encoded->data;
-		finalLen = encoded->len;
-		if (writeState->compressionType != COLUMNAR_COMPRESSION_NONE &&
-			encoded->len > 0)
-		{
-			char	   *compData;
-			uint32		compLen;
-			int			usedType;
-			int			usedLevel;
-
-			PgColumnarCompressValueStream(encoded->data, encoded->len,
-										writeState->compressionType,
-										writeState->compressionLevel,
-										&compData, &compLen,
-										&usedType, &usedLevel);
-			if (usedType != COLUMNAR_COMPRESSION_NONE)
-			{
-				finalData = compData;
-				finalLen = compLen;
-				blockCodec = usedType;
-			}
-		}
-
-		if (finalLen > 0)
-			appendBinaryStringInfo(data, finalData, finalLen);
-
+		if (res.chunk != NULL && res.chunk->len > 0)
+			appendBinaryStringInfo(data, res.chunk->data, res.chunk->len);
 		chunkLength[c] = data->len - chunkOffset[c];
-		chunkDescriptor[c] = desc->data;
-		chunkDescriptorLen[c] = (uint32) desc->len;
-		chunkBlockCodec[c] = blockCodec;
+		chunkDescriptor[c] = res.descriptor;
+		chunkDescriptorLen[c] = res.descriptorLen;
+		chunkBlockCodec[c] = res.blockCodec;
+		if (res.zoneRows != NIL)
+			zoneRows = list_concat(zoneRows, res.zoneRows);
+		if (res.bloomRow != NULL)
+			bloomRows = lappend(bloomRows, res.bloomRow);
 	}
 
 	dataLength = data->len;
