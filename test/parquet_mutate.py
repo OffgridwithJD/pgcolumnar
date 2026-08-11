@@ -20,14 +20,27 @@ import struct
 import sys
 
 # Values that break arithmetic on a field the reader treats as a size or a
-# count: zero, the negatives, the signed and unsigned ceilings, and the ones
-# that overflow a 32-bit multiply by a small element width.
+# count: zero, the negatives, the signed and unsigned ceilings, the ones that
+# overflow a 32-bit multiply by a small element width, and the ones that overflow
+# a 64-bit size_t multiply.
+#
+# The 64-bit row is why this list grew (#570/#571). A count of ~2^61 makes
+# sizeof(Datum) * count = 8 * 2^61 wrap size_t to a small value, so palloc
+# succeeds at a size far below what the count implies and the decode writes past
+# it. A merely-large count like 10^9 is rejected cleanly by MaxAllocSize; only the
+# wrapping magnitudes near 2^61..2^63 are dangerous, and the old ceiling of
+# 0x7FFFFFFF (2^31) could not reach them. num_values and num_rows are i64 thrift
+# fields, so those magnitudes have to be produced as wide varints (below), not
+# only as plain 8-byte windows.
 EXTREMES = [
     0, 1, -1, 2, -2,
     0x7F, 0x80, 0xFF,
     0x7FFF, 0x8000, 0xFFFF,
     0x7FFFFFFF, 0x80000000, 0xFFFFFFFF,
     0x40000000, 0x20000000, 0x10000000,
+    # 64-bit size_t multiply-wrap magnitudes (#570/#571)
+    0x2000000000000000, 0x4000000000000000, 0x1FFFFFFFFFFFFFFF,
+    0x7FFFFFFFFFFFFFFF, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF,
 ]
 
 
@@ -49,21 +62,31 @@ def _extreme_int(b, rnd):
         return
     i = rnd.randrange(len(b) - width + 1)
     v = rnd.choice(EXTREMES)
-    b[i:i + width] = struct.pack("<q" if width == 8 else "<i",
-                                 v if v < 0x80000000 or width == 8 else v - 0x100000000)
+    # Mask to the window width and pack unsigned, so a value at or above the
+    # signed ceiling (the 2^63 wrap magnitudes) writes its bit pattern rather
+    # than raising. The reader interprets those bytes as its own signed field.
+    mask = (1 << (width * 8)) - 1
+    b[i:i + width] = struct.pack("<Q" if width == 8 else "<I", v & mask)
 
 
 def _varint_extreme(b, rnd):
-    """Thrift compact protocol encodes lengths and list sizes as varints, so a
-    boundary value has to be written as a varint to be read as one. Writes a
-    5-byte varint in place, which is what a large count looks like on the wire.
+    """Thrift compact protocol encodes lengths, list sizes and the i64 count
+    fields as varints, so a boundary value has to be written as a varint to be
+    read as one. Writes a full-width varint in place, up to ten bytes, which is
+    what a large i64 count looks like on the wire.
 
-    This is the mutation that reaches list and element counts, and therefore the
-    #210 class: a schema child count is a varint the reader trusts."""
-    if len(b) < 5:
+    This reaches list and element counts (the #210 class: a schema child count is
+    a varint the reader trusts) AND the i64 num_values/num_rows (the #570/#571
+    class). num_values is a zigzag i64, so a raw varint v is read as
+    (v >> 1) ^ -(v & 1); an even 2^62 therefore reads as +2^61, exactly the
+    size_t multiply-wrap magnitude. The old five-byte, 2^31-ceiling form could not
+    encode a value that large, which is why the fuzzer never reached this class.
+    Ten bytes covers the full uint64 range."""
+    width = 10
+    if len(b) < width:
         return
-    i = rnd.randrange(len(b) - 5 + 1)
-    v = rnd.choice([0x7FFFFFFF, 0xFFFFFFF, 0x1FFFFF, 0xFFFF, 0x7FFF, 0x3FFF])
+    i = rnd.randrange(len(b) - width + 1)
+    v = rnd.choice(EXTREMES) & 0xFFFFFFFFFFFFFFFF
     out = bytearray()
     while True:
         byte = v & 0x7F
@@ -73,8 +96,11 @@ def _varint_extreme(b, rnd):
         else:
             out.append(byte)
             break
-    out = (out + bytearray(b"\x00" * 5))[:5]
-    b[i:i + 5] = out
+    out = (out + bytearray(b"\x80" * width))[:width]
+    # a run of 0x80 continuation bytes with no terminator would be an unterminated
+    # varint; cap the last byte so the value ends inside the window.
+    out[width - 1] &= 0x7F
+    b[i:i + width] = out
 
 
 def _truncate(b, rnd):
