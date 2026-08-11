@@ -954,6 +954,40 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
  *		Both the target list and the restriction clauses count: a qual on a
  *		column that is not selected still has to be decoded to be evaluated.
  */
+/*
+ * pgcolumnar_projected_ncols
+ *		How many distinct columns a scan decodes: the projected columns plus the
+ *		columns any restriction reads. This is the multiplier for the per-value
+ *		decode cost (#503); the inherited heap seqscan cost has no such term, so a
+ *		wide projection is priced the same as a narrow one and the planner cannot
+ *		see that decoding nine columns costs nine times the CPU of decoding one.
+ *		Counted from the same "needed" set as the width fraction below, but as a
+ *		count rather than a width, because decode cost is per value not per byte.
+ */
+static int
+pgcolumnar_projected_ncols(RelOptInfo *rel)
+{
+	Bitmapset  *needed = NULL;
+	ListCell   *lc;
+	int			n = 0;
+	int			m = -1;
+
+	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &needed);
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		pull_varattnos((Node *) rinfo->clause, rel->relid, &needed);
+	}
+
+	while ((m = bms_next_member(needed, m)) >= 0)
+		if (m + FirstLowInvalidHeapAttributeNumber >= 1)		/* a real column, not a system attr */
+			n++;
+
+	bms_free(needed);
+	return n;
+}
+
 static double
 pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
 {
@@ -1420,6 +1454,7 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		double		widthFrac = pgcolumnar_projected_width_fraction(rel, rte->relid);
 		Cost		pageCost = seq_page_cost * (double) rel->pages;
 		Cost		run = full - cpath->path.startup_cost;
+		double		ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
 
 		/*
 		 * Only the page-read part scales with the projected width: the CPU terms
@@ -1440,6 +1475,22 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				saved = run;
 			run -= saved;
 		}
+
+		/*
+		 * Per-column decode CPU (#503). The inherited heap seqscan cost has no
+		 * term for decoding column values -- cpu_tuple_cost is per row, paid once
+		 * whatever the projection width. So a scan that decodes many columns is
+		 * priced the same as one that decodes one, and the planner cannot see the
+		 * CPU that a parallel plan would divide across workers: it declines the
+		 * partial path even where the parallel scan is measured 2.56x faster.
+		 *
+		 * Price one cpu_operator_cost per decoded value, ncols per row, added to
+		 * the run and scaled by survival like the rest (only surviving vectors
+		 * decode). This raises the full-scan cost, which is the safe direction for
+		 * #171 -- a pricier full scan makes the planner MORE likely to keep an
+		 * index scan, never less -- and analyze_stats/zonemap_cost pin that.
+		 */
+		run += cpu_operator_cost * ntuples * (double) pgcolumnar_projected_ncols(rel);
 
 		cpath->path.total_cost = cpath->path.startup_cost + run * survival;
 	}

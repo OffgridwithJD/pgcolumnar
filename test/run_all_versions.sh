@@ -170,6 +170,7 @@ SUITES=(
 	rewrite_group_scan
 	rls_direct_storage
 	row_triggers
+	scan_decode_cost
 	server_file_privilege
 	smoke
 	sort_status
