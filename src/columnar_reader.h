@@ -26,6 +26,7 @@ extern bool PgColumnarReadNextRowFiltered(PgColumnarReadState *readState,
 										uint64 *rowNumber,
 										const bool *qualCols,
 										PgColumnarRowFilter filter,
+										PgColumnarRowFilter filterNoCount,
 										void *filterArg);
 
 extern uint64 PgColumnarRowsFilteredEarly(PgColumnarReadState *readState);

@@ -90,6 +90,7 @@ SUITES=(
 	native_cluster
 	native_compact
 	native_ctas
+	native_decode_gating
 	native_dml
 	native_encoding
 	native_exact_selection
