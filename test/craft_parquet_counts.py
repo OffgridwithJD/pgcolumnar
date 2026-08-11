@@ -133,4 +133,15 @@ if __name__ == "__main__":
     craft(f"{W}/honest.parquet", f"{W}/bignv.parquet",  "num_values", 1 << 62)
     craft(f"{W}/honest.parquet", f"{W}/bignr.parquet",  "num_rows",   40)
     craft(f"{W}/honest.parquet", f"{W}/hugenr.parquet", "num_rows",   5_000_000)
-    print("self-check OK; crafted bignv(num_values=2^62) bignr(num_rows=40) hugenr(num_rows=5e6)")
+
+    # Repeated (LIST) column: num_values counts ELEMENTS, not records (#571). One
+    # record of eight elements has num_values = 8, so num_rows = 8 slips past the
+    # num_rows <= num_values check yet drives the row loop past the one record.
+    # A valid three-record list is crafted too, to prove the per-record guard
+    # does not over-reject a legitimately multi-row list.
+    pq.write_table(pa.table({"a": pa.array([[1, 2, 3, 4, 5, 6, 7, 8]], pa.list_(pa.int32()))}),
+                   f"{W}/list_honest.parquet", compression="none")
+    craft(f"{W}/list_honest.parquet", f"{W}/list_bad.parquet", "num_rows", 8)
+    pq.write_table(pa.table({"a": pa.array([[1, 2], [3], [4, 5, 6, 7, 8]], pa.list_(pa.int32()))}),
+                   f"{W}/list_valid3.parquet", compression="none")
+    print("self-check OK; crafted scalar bignv/bignr/hugenr and list_honest/list_bad/list_valid3")

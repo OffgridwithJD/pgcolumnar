@@ -110,4 +110,31 @@ check "the num_values rejection names num_values in its detail" \
 check "the num_rows rejection names num_rows in its detail" \
 	"$(detail_of bignr.parquet | grep -c 'num_rows')" "1"
 
+# ---- #571 for repeated (LIST) columns ---------------------------------------
+#
+# num_rows <= num_values bounds the row loop only for a FLAT column. A repeated
+# column's num_values counts ELEMENTS, so num_rows can exceed the record count
+# while still passing pq_check_row_groups, and the per-record read walks past the
+# decoded entries. The scalar arms above cannot catch this; the fix is a
+# per-record ei < nEntries guard, and these arms pin it.
+import_list_of() {
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-v ON_ERROR_STOP=0 \
+		-c "DROP TABLE IF EXISTS pcl;" \
+		-c "CREATE TABLE pcl (a int[]) USING pgcolumnar;" \
+		-c "SELECT pgcolumnar.import_parquet('pcl','$W/$1');" \
+		-c "SELECT count(*) FROM pcl;" 2>&1)"
+	if grep -q '^ERROR:' <<<"$out"; then echo "ERR: $(grep -m1 '^ERROR:' <<<"$out")"; else echo "$out" | tail -1; fi
+}
+check_num "an honest one-record list imports one row" "$(import_list_of list_honest.parquet)" "1"
+check_num "a valid three-record list imports three rows (not over-rejected)" \
+	"$(import_list_of list_valid3.parquet)" "3"
+r_listbad="$(import_list_of list_bad.parquet)"
+check "num_rows past a list's record count is rejected, not emitted as phantom rows" \
+	"$(grep -qi 'malformed row group' <<<"$r_listbad" && echo rejected || echo "$r_listbad")" "rejected"
+check "and it did not silently return more rows than the file's records" \
+	"$([ "$r_listbad" = "8" ] && echo leaked || echo ok)" "ok"
+check "and the backend survived the list over-read" "$(alive)" "1"
+
 pgc_summary

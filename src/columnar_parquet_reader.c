@@ -2781,6 +2781,30 @@ pq_tuplestore_sink(TupleTableSlot *slot, void *arg)
  * never accumulates O(rows) memory. Both import (insert sink) and read_parquet
  * (tuplestore sink) run through here, so their row semantics are identical.
  */
+/*
+ * A per-record leaf read must not run past the values that were decoded (#571).
+ *
+ * pq_check_row_groups bounds num_rows by num_values, which is one value per
+ * record only for a FLAT column. A repeated (LIST) column's num_values counts
+ * ELEMENTS, so a chunk with one record of eight elements has num_values 8 while
+ * holding one record; num_rows up to 8 then passes that check yet drives the row
+ * loop eight iterations, reading defs[]/vals[] past nEntries into the adjacent
+ * allocation -- phantom rows built from out-of-bounds memory. num_values cannot
+ * bound the row loop for a repeated column, so the record-level read is bounded
+ * here, at each of the three entry points (scalar, list, struct field). The
+ * list-continuation do/while already checks ei against nEntries itself.
+ */
+static inline void
+pq_require_entry(const ImpLeaf *l)
+{
+	if (l->ei >= l->nEntries)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Parquet file has a malformed row group"),
+				 errdetail("A row reads value %ld of a column, past the %ld decoded (num_rows exceeds the record count).",
+						   (long) l->ei, (long) l->nEntries)));
+}
+
 static int64
 pq_read_rows(PqFile *pf, PqSource *src,
 			 ImpTop *tops, int ntops, ImpLeaf *leaves,
@@ -2909,7 +2933,10 @@ pq_read_rows(PqFile *pf, PqSource *src,
 				if (tp->kind == IMP_SCALAR)
 				{
 					ImpLeaf    *l = &leaves[tp->firstLeaf];
-					bool		present = (l->defs[l->ei] == (uint32) l->max_def);
+					bool		present;
+
+					pq_require_entry(l);
+					present = (l->defs[l->ei] == (uint32) l->max_def);
 
 					slot->tts_values[tp->attno] = present ? l->vals[l->vi++] : (Datum) 0;
 					slot->tts_isnull[tp->attno] = !present;
@@ -2918,7 +2945,10 @@ pq_read_rows(PqFile *pf, PqSource *src,
 				else if (tp->kind == IMP_LIST)
 				{
 					ImpLeaf    *l = &leaves[tp->firstLeaf];
-					uint32		def0 = l->defs[l->ei];
+					uint32		def0;
+
+					pq_require_entry(l);
+					def0 = l->defs[l->ei];
 
 					if (def0 == 0)
 					{
@@ -2992,6 +3022,7 @@ pq_read_rows(PqFile *pf, PqSource *src,
 							continue;
 						}
 						l = &leaves[li];
+						pq_require_entry(l);
 						d = l->defs[l->ei];
 						if (d == 0)
 							structNull = true;	/* every field agrees */
