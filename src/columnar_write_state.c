@@ -24,6 +24,7 @@
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "storage/dsm.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -1339,6 +1340,479 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 }
 
 /*
+ * serialize_column_input
+ *		Serialise one column's flush_one_column input (its per-chunk-group
+ *		buffers) into `out`, in the INPUT wire format (#445 slice 2). The bytes
+ *		are later copied into a dsm segment behind a uint32 length prefix. Only
+ *		the fields flush_one_column reads are written; the min/max Datums use
+ *		datumSerialize with the column's byval/len.
+ */
+static void
+serialize_column_input(StringInfo out, Form_pg_attribute att, List *chunkGroups,
+					   int columnIndex)
+{
+	uint32		vectorCount = (uint32) list_length(chunkGroups);
+	ListCell   *lc;
+
+	appendBinaryStringInfo(out, (char *) &vectorCount, sizeof(uint32));
+
+	foreach(lc, chunkGroups)
+	{
+		ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+		ColumnChunkBuffer *col = &group->columns[columnIndex];
+		uint64		groupRowCount = group->rowCount;
+		uint64		valueCount = col->valueCount;
+		int64		sum = col->sum;
+		uint8		hasMinMax = (uint8) (col->hasMinMax ? 1 : 0);
+		uint32		existsLen = (uint32) col->existsStream.len;
+		uint32		valueLen = (uint32) col->valueStream.len;
+		uint32		hashLen = (uint32) col->hashBuf.len;
+
+		appendBinaryStringInfo(out, (char *) &groupRowCount, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &valueCount, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &sum, sizeof(int64));
+		appendBinaryStringInfo(out, (char *) &hasMinMax, sizeof(uint8));
+
+		appendBinaryStringInfo(out, (char *) &existsLen, sizeof(uint32));
+		if (existsLen > 0)
+			appendBinaryStringInfo(out, col->existsStream.data, existsLen);
+		appendBinaryStringInfo(out, (char *) &valueLen, sizeof(uint32));
+		if (valueLen > 0)
+			appendBinaryStringInfo(out, col->valueStream.data, valueLen);
+		appendBinaryStringInfo(out, (char *) &hashLen, sizeof(uint32));
+		if (hashLen > 0)
+			appendBinaryStringInfo(out, col->hashBuf.data, hashLen);
+
+		if (col->hasMinMax)
+		{
+			Size		minSpace = datumEstimateSpace(col->minValue, false,
+													  att->attbyval, att->attlen);
+			Size		maxSpace = datumEstimateSpace(col->maxValue, false,
+													  att->attbyval, att->attlen);
+			char	   *ptr;
+
+			enlargeStringInfo(out, (int) minSpace);
+			ptr = out->data + out->len;
+			datumSerialize(col->minValue, false, att->attbyval, att->attlen,
+						   &ptr);
+			out->len += (int) minSpace;
+
+			enlargeStringInfo(out, (int) maxSpace);
+			ptr = out->data + out->len;
+			datumSerialize(col->maxValue, false, att->attbyval, att->attlen,
+						   &ptr);
+			out->len += (int) maxSpace;
+
+			out->data[out->len] = '\0';
+		}
+	}
+}
+
+/*
+ * deserialize_column_input
+ *		Rebuild the List *chunkGroups flush_one_column expects from a dsm segment
+ *		written by serialize_column_input (#445 slice 2). dsmaddr points at a
+ *		uint32 payload length followed by the payload. Every buffer is copied out
+ *		of the dsm into freshly palloc'd memory so nothing points into the segment
+ *		after it is detached. Each ChunkGroupBuffer's columns array is sized
+ *		(columnIndex + 1) and only [columnIndex] is populated.
+ */
+static List *
+deserialize_column_input(void *dsmaddr, Form_pg_attribute att, int columnIndex)
+{
+	char	   *base = (char *) dsmaddr;
+	uint32		payloadLen PG_USED_FOR_ASSERTS_ONLY;
+	char	   *cursor;
+	uint32		vectorCount;
+	uint32		v;
+	List	   *chunkGroups = NIL;
+
+	memcpy(&payloadLen, base, sizeof(uint32));
+	cursor = base + sizeof(uint32);
+
+	memcpy(&vectorCount, cursor, sizeof(uint32));
+	cursor += sizeof(uint32);
+
+	for (v = 0; v < vectorCount; v++)
+	{
+		ChunkGroupBuffer *group = palloc0(sizeof(ChunkGroupBuffer));
+		ColumnChunkBuffer *col;
+		uint64		groupRowCount;
+		uint64		valueCount;
+		int64		sum;
+		uint8		hasMinMax;
+		uint32		existsLen;
+		uint32		valueLen;
+		uint32		hashLen;
+
+		group->columns = palloc0(sizeof(ColumnChunkBuffer) * (columnIndex + 1));
+		col = &group->columns[columnIndex];
+
+		memcpy(&groupRowCount, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&valueCount, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&sum, cursor, sizeof(int64));
+		cursor += sizeof(int64);
+		memcpy(&hasMinMax, cursor, sizeof(uint8));
+		cursor += sizeof(uint8);
+
+		group->rowCount = groupRowCount;
+		col->valueCount = valueCount;
+		col->sum = sum;
+		col->hasMinMax = (hasMinMax != 0);
+
+		memcpy(&existsLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+		initStringInfo(&col->existsStream);
+		if (existsLen > 0)
+		{
+			appendBinaryStringInfo(&col->existsStream, cursor, existsLen);
+			cursor += existsLen;
+		}
+
+		memcpy(&valueLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+		initStringInfo(&col->valueStream);
+		if (valueLen > 0)
+		{
+			appendBinaryStringInfo(&col->valueStream, cursor, valueLen);
+			cursor += valueLen;
+		}
+
+		memcpy(&hashLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+		initStringInfo(&col->hashBuf);
+		if (hashLen > 0)
+		{
+			appendBinaryStringInfo(&col->hashBuf, cursor, hashLen);
+			cursor += hashLen;
+		}
+
+		if (col->hasMinMax)
+		{
+			bool		isnull;
+
+			col->minValue = datumRestore(&cursor, &isnull);
+			col->maxValue = datumRestore(&cursor, &isnull);
+		}
+
+		chunkGroups = lappend(chunkGroups, group);
+	}
+
+	Assert(cursor == base + sizeof(uint32) + payloadLen);
+	return chunkGroups;
+}
+
+/*
+ * serialize_column_result
+ *		Serialise one column's flush_one_column result into `out`, in the RESULT
+ *		wire format (#445 slice 2). The numeric zone sum is a varlena Datum
+ *		(byval=false, len=-1); the encoded min/max and bloom filter are opaque
+ *		byte buffers copied verbatim.
+ */
+static void
+serialize_column_result(StringInfo out, FlushColumnResult *res)
+{
+	uint8		hasChunk = (uint8) (res->chunk != NULL ? 1 : 0);
+	uint8		hasDescriptor = (uint8) (res->descriptor != NULL ? 1 : 0);
+	int32		blockCodec = (int32) res->blockCodec;
+	uint32		zoneCount = (uint32) list_length(res->zoneRows);
+	uint8		hasBloom = (uint8) (res->bloomRow != NULL ? 1 : 0);
+	ListCell   *lc;
+
+	appendBinaryStringInfo(out, (char *) &hasChunk, sizeof(uint8));
+	if (res->chunk != NULL)
+	{
+		uint32		chunkLen = (uint32) res->chunk->len;
+
+		appendBinaryStringInfo(out, (char *) &chunkLen, sizeof(uint32));
+		if (chunkLen > 0)
+			appendBinaryStringInfo(out, res->chunk->data, chunkLen);
+	}
+
+	appendBinaryStringInfo(out, (char *) &hasDescriptor, sizeof(uint8));
+	if (res->descriptor != NULL)
+	{
+		uint32		descLen = res->descriptorLen;
+
+		appendBinaryStringInfo(out, (char *) &descLen, sizeof(uint32));
+		if (descLen > 0)
+			appendBinaryStringInfo(out, res->descriptor, descLen);
+	}
+
+	appendBinaryStringInfo(out, (char *) &blockCodec, sizeof(int32));
+	appendBinaryStringInfo(out, (char *) &zoneCount, sizeof(uint32));
+
+	foreach(lc, res->zoneRows)
+	{
+		NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
+		uint64		storageId = z->storageId;
+		uint64		groupNumber = z->groupNumber;
+		int32		columnIndex = (int32) z->columnIndex;
+		int32		vectorIndex = (int32) z->vectorIndex;
+		uint64		valueCount = z->valueCount;
+		uint64		nullCount = z->nullCount;
+		uint8		hasSum = (uint8) (z->hasSum ? 1 : 0);
+		uint8		zHasMinMax = (uint8) (z->hasMinMax ? 1 : 0);
+
+		appendBinaryStringInfo(out, (char *) &storageId, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &groupNumber, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &columnIndex, sizeof(int32));
+		appendBinaryStringInfo(out, (char *) &vectorIndex, sizeof(int32));
+		appendBinaryStringInfo(out, (char *) &valueCount, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &nullCount, sizeof(uint64));
+
+		appendBinaryStringInfo(out, (char *) &hasSum, sizeof(uint8));
+		if (z->hasSum)
+		{
+			Size		sumSpace = datumEstimateSpace(z->sum, false, false, -1);
+			char	   *ptr;
+
+			enlargeStringInfo(out, (int) sumSpace);
+			ptr = out->data + out->len;
+			datumSerialize(z->sum, false, false, -1, &ptr);
+			out->len += (int) sumSpace;
+			out->data[out->len] = '\0';
+		}
+
+		appendBinaryStringInfo(out, (char *) &zHasMinMax, sizeof(uint8));
+		if (z->hasMinMax)
+		{
+			uint32		minLen = z->minimumLen;
+			uint32		maxLen = z->maximumLen;
+
+			appendBinaryStringInfo(out, (char *) &minLen, sizeof(uint32));
+			if (minLen > 0)
+				appendBinaryStringInfo(out, z->minimum, minLen);
+			appendBinaryStringInfo(out, (char *) &maxLen, sizeof(uint32));
+			if (maxLen > 0)
+				appendBinaryStringInfo(out, z->maximum, maxLen);
+		}
+	}
+
+	appendBinaryStringInfo(out, (char *) &hasBloom, sizeof(uint8));
+	if (res->bloomRow != NULL)
+	{
+		NativeBloomMetadata *b = res->bloomRow;
+		uint64		storageId = b->storageId;
+		uint64		groupNumber = b->groupNumber;
+		int32		columnIndex = (int32) b->columnIndex;
+		uint32		filterLen = b->filterLen;
+
+		appendBinaryStringInfo(out, (char *) &storageId, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &groupNumber, sizeof(uint64));
+		appendBinaryStringInfo(out, (char *) &columnIndex, sizeof(int32));
+		appendBinaryStringInfo(out, (char *) &filterLen, sizeof(uint32));
+		if (filterLen > 0)
+			appendBinaryStringInfo(out, b->filter, filterLen);
+	}
+}
+
+/*
+ * deserialize_column_result
+ *		Rebuild a FlushColumnResult from a dsm segment written by
+ *		serialize_column_result (#445 slice 2). dsmaddr points at a uint32 payload
+ *		length followed by the payload. Every buffer (chunk, descriptor, zone
+ *		min/max, bloom filter) and the numeric sum Datum are copied out of the dsm
+ *		into palloc'd memory so nothing points into the segment after detach.
+ */
+static FlushColumnResult
+deserialize_column_result(void *dsmaddr)
+{
+	char	   *base = (char *) dsmaddr;
+	uint32		payloadLen PG_USED_FOR_ASSERTS_ONLY;
+	char	   *cursor;
+	FlushColumnResult result;
+	uint8		hasChunk;
+	uint8		hasDescriptor;
+	int32		blockCodec;
+	uint32		zoneCount;
+	uint32		z;
+	uint8		hasBloom;
+	List	   *zoneRows = NIL;
+
+	memcpy(&payloadLen, base, sizeof(uint32));
+	cursor = base + sizeof(uint32);
+
+	result.chunk = NULL;
+	result.descriptor = NULL;
+	result.descriptorLen = 0;
+	result.blockCodec = COLUMNAR_COMPRESSION_NONE;
+	result.zoneRows = NIL;
+	result.bloomRow = NULL;
+
+	memcpy(&hasChunk, cursor, sizeof(uint8));
+	cursor += sizeof(uint8);
+	if (hasChunk)
+	{
+		uint32		chunkLen;
+		StringInfo	chunk = makeStringInfo();
+
+		memcpy(&chunkLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+		if (chunkLen > 0)
+		{
+			appendBinaryStringInfo(chunk, cursor, chunkLen);
+			cursor += chunkLen;
+		}
+		result.chunk = chunk;
+	}
+
+	memcpy(&hasDescriptor, cursor, sizeof(uint8));
+	cursor += sizeof(uint8);
+	if (hasDescriptor)
+	{
+		uint32		descLen;
+
+		memcpy(&descLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+		if (descLen > 0)
+		{
+			char	   *desc = palloc(descLen);
+
+			memcpy(desc, cursor, descLen);
+			cursor += descLen;
+			result.descriptor = desc;
+		}
+		else
+			result.descriptor = palloc(0);
+		result.descriptorLen = descLen;
+	}
+
+	memcpy(&blockCodec, cursor, sizeof(int32));
+	cursor += sizeof(int32);
+	result.blockCodec = blockCodec;
+
+	memcpy(&zoneCount, cursor, sizeof(uint32));
+	cursor += sizeof(uint32);
+
+	for (z = 0; z < zoneCount; z++)
+	{
+		NativeZoneMapMetadata *zm = palloc0(sizeof(NativeZoneMapMetadata));
+		uint64		storageId;
+		uint64		groupNumber;
+		int32		columnIndex;
+		int32		vectorIndex;
+		uint64		valueCount;
+		uint64		nullCount;
+		uint8		hasSum;
+		uint8		zHasMinMax;
+
+		memcpy(&storageId, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&groupNumber, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&columnIndex, cursor, sizeof(int32));
+		cursor += sizeof(int32);
+		memcpy(&vectorIndex, cursor, sizeof(int32));
+		cursor += sizeof(int32);
+		memcpy(&valueCount, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&nullCount, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+
+		zm->storageId = storageId;
+		zm->groupNumber = groupNumber;
+		zm->columnIndex = columnIndex;
+		zm->vectorIndex = vectorIndex;
+		zm->valueCount = valueCount;
+		zm->nullCount = nullCount;
+
+		memcpy(&hasSum, cursor, sizeof(uint8));
+		cursor += sizeof(uint8);
+		if (hasSum)
+		{
+			bool		isnull;
+
+			zm->hasSum = true;
+			zm->sum = datumRestore(&cursor, &isnull);
+		}
+
+		memcpy(&zHasMinMax, cursor, sizeof(uint8));
+		cursor += sizeof(uint8);
+		if (zHasMinMax)
+		{
+			uint32		minLen;
+			uint32		maxLen;
+
+			zm->hasMinMax = true;
+
+			memcpy(&minLen, cursor, sizeof(uint32));
+			cursor += sizeof(uint32);
+			if (minLen > 0)
+			{
+				char	   *mn = palloc(minLen);
+
+				memcpy(mn, cursor, minLen);
+				cursor += minLen;
+				zm->minimum = mn;
+			}
+			else
+				zm->minimum = palloc(0);
+			zm->minimumLen = minLen;
+
+			memcpy(&maxLen, cursor, sizeof(uint32));
+			cursor += sizeof(uint32);
+			if (maxLen > 0)
+			{
+				char	   *mx = palloc(maxLen);
+
+				memcpy(mx, cursor, maxLen);
+				cursor += maxLen;
+				zm->maximum = mx;
+			}
+			else
+				zm->maximum = palloc(0);
+			zm->maximumLen = maxLen;
+		}
+
+		zoneRows = lappend(zoneRows, zm);
+	}
+	result.zoneRows = zoneRows;
+
+	memcpy(&hasBloom, cursor, sizeof(uint8));
+	cursor += sizeof(uint8);
+	if (hasBloom)
+	{
+		NativeBloomMetadata *b = palloc0(sizeof(NativeBloomMetadata));
+		uint64		storageId;
+		uint64		groupNumber;
+		int32		columnIndex;
+		uint32		filterLen;
+
+		memcpy(&storageId, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&groupNumber, cursor, sizeof(uint64));
+		cursor += sizeof(uint64);
+		memcpy(&columnIndex, cursor, sizeof(int32));
+		cursor += sizeof(int32);
+		memcpy(&filterLen, cursor, sizeof(uint32));
+		cursor += sizeof(uint32);
+
+		b->storageId = storageId;
+		b->groupNumber = groupNumber;
+		b->columnIndex = columnIndex;
+		if (filterLen > 0)
+		{
+			char	   *f = palloc(filterLen);
+
+			memcpy(f, cursor, filterLen);
+			cursor += filterLen;
+			b->filter = f;
+		}
+		else
+			b->filter = palloc(0);
+		b->filterLen = filterLen;
+
+		result.bloomRow = b;
+	}
+
+	Assert(cursor == base + sizeof(uint32) + payloadLen);
+	return result;
+}
+
+/*
  * pgcolumnar_flush_row_group
  *		Native-format (PGCN v1) flush. Lay out the accumulated rows as one row
  *		group: each column is a column chunk of [validity bitmap][values], where
@@ -1418,27 +1892,60 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	 * so an incompressible column stays byte-for-byte the D2b baseline plus the
 	 * descriptor.
 	 */
+	/*
+	 * slice 2: round-trip each column's input and result through a dsm segment,
+	 * still serially in this backend, to prove the serialisation before slice 3's
+	 * workers.
+	 */
 	for (c = 0; c < natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
-		FlushColumnResult res = flush_one_column(att, writeState->chunkGroups,
-												 &writeState->colDefs[c], rowCount,
-												 validityBytes, writeState->encodeEffort,
-												 writeState->compressionType,
-												 writeState->compressionLevel,
-												 writeState->storageId, groupNumber, c);
+		PgColumnarColumnDef *def = &writeState->colDefs[c];
+		StringInfoData inbuf;
+		dsm_segment *inseg;
+		List	   *rtGroups;
+		FlushColumnResult res;
+		StringInfoData outbuf;
+		dsm_segment *outseg;
+		FlushColumnResult rtRes;
 
+		/* serialise this column's input, ship it through a dsm segment, read it back */
+		initStringInfo(&inbuf);
+		serialize_column_input(&inbuf, att, writeState->chunkGroups, c);
+		inseg = dsm_create(inbuf.len + sizeof(uint32), 0);
+		memcpy(dsm_segment_address(inseg), &inbuf.len, sizeof(uint32));
+		memcpy((char *) dsm_segment_address(inseg) + sizeof(uint32), inbuf.data, inbuf.len);
+		rtGroups = deserialize_column_input(dsm_segment_address(inseg), att, c);
+
+		/* run the pure function on the round-tripped input */
+		res = flush_one_column(att, rtGroups, def, rowCount, validityBytes,
+							   writeState->encodeEffort, writeState->compressionType,
+							   writeState->compressionLevel, writeState->storageId,
+							   groupNumber, c);
+
+		/* serialise the result, ship it through a dsm segment, read it back */
+		initStringInfo(&outbuf);
+		serialize_column_result(&outbuf, &res);
+		outseg = dsm_create(outbuf.len + sizeof(uint32), 0);
+		memcpy(dsm_segment_address(outseg), &outbuf.len, sizeof(uint32));
+		memcpy((char *) dsm_segment_address(outseg) + sizeof(uint32), outbuf.data, outbuf.len);
+		rtRes = deserialize_column_result(dsm_segment_address(outseg));
+
+		/* assemble from the round-tripped result (identical to slice 1's assembly) */
 		chunkOffset[c] = data->len;
-		if (res.chunk != NULL && res.chunk->len > 0)
-			appendBinaryStringInfo(data, res.chunk->data, res.chunk->len);
+		if (rtRes.chunk != NULL && rtRes.chunk->len > 0)
+			appendBinaryStringInfo(data, rtRes.chunk->data, rtRes.chunk->len);
 		chunkLength[c] = data->len - chunkOffset[c];
-		chunkDescriptor[c] = res.descriptor;
-		chunkDescriptorLen[c] = res.descriptorLen;
-		chunkBlockCodec[c] = res.blockCodec;
-		if (res.zoneRows != NIL)
-			zoneRows = list_concat(zoneRows, res.zoneRows);
-		if (res.bloomRow != NULL)
-			bloomRows = lappend(bloomRows, res.bloomRow);
+		chunkDescriptor[c] = rtRes.descriptor;
+		chunkDescriptorLen[c] = rtRes.descriptorLen;
+		chunkBlockCodec[c] = rtRes.blockCodec;
+		if (rtRes.zoneRows != NIL)
+			zoneRows = list_concat(zoneRows, rtRes.zoneRows);
+		if (rtRes.bloomRow != NULL)
+			bloomRows = lappend(bloomRows, rtRes.bloomRow);
+
+		dsm_detach(inseg);
+		dsm_detach(outseg);
 	}
 
 	dataLength = data->len;
