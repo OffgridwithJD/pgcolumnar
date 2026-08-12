@@ -14,6 +14,14 @@ which was true until that script existed.
 
 ### Added
 
+- `pgcolumnar.parallel_flush` dispatches a stripe flush across background workers
+  (#445). Default off. When on, a flush of two or more columns fans the per-column
+  encode and compress work out to a worker pool. Any column a worker does not
+  finish is completed serially in the backend, so the stored bytes match the
+  serial path either way. It helps one large flush of many columns by up to 14
+  percent, and it regresses frequent small flushes. So it is a per-session opt-in
+  for a wide bulk load, not a default.
+
 - `pgcolumnar.fsst_verdict_reuse` caches a column's FSST keep/drop verdict for a
   bounded number of row groups (#472). Default 16; `0` asks every time, which is
   the behaviour before this setting existed.
@@ -170,6 +178,20 @@ which was true until that script existed.
   half of the rename is hygiene rather than a visible change.
 
 ### Changed
+
+- A columnar scan whose filter cannot be pushed down now skips decoding the
+  projected columns of a 1024-row vector that holds no matching row (#452). The
+  scan decodes the filter columns first, rules out the vectors with no match, and
+  decodes the rest only for the vectors that survive. A `SELECT *` under a
+  leading-wildcard `LIKE` that matches few rows then approaches the cost of
+  `count(*)`. It no longer decodes every column of every row scanned. A count over
+  one column gains nothing, because it has no projected column to skip.
+
+- The writer detoasts each value once per row (#445). It was detoasted once for
+  the encoder, once for the bloom filter, and once for each of the two zone-map
+  comparisons. For a toasted column each of those was a separate decompression. A
+  load of a large compressed text column is about 11 percent faster, and the
+  stored bytes are unchanged.
 
 - `pgcolumnar.analyze()` places `histogram_bounds` at PostgreSQL's own positions
   (#414). The bounds were evenly spaced quantiles; core places bound i at
