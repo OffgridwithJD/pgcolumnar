@@ -1807,8 +1807,14 @@ pgcolumnar_native_qual_probe_selective(PgColumnarReadState *rs, int vecCount)
 	if (pgcolumnar_qual_skipvec_probe_vecs <= 0)
 		return true;
 
+	/*
+	 * Uses the NO-COUNT filter: the probe only measures selectivity, it must not
+	 * touch "Rows Removed by Filter". qual_skipvec, if we then run it, is the
+	 * group's sole counter. Counting here too would double-count the probed
+	 * vectors' rejects.
+	 */
 	if (rs->nativeSkipVec == NULL || rs->nativeVecStart == NULL ||
-		rs->nativeQualFilter == NULL || rs->nativeQualValues == NULL ||
+		rs->nativeQualFilterNoCount == NULL || rs->nativeQualValues == NULL ||
 		probeVecs <= 0)
 		return false;
 
@@ -1850,7 +1856,7 @@ pgcolumnar_native_qual_probe_selective(PgColumnarReadState *rs, int vecCount)
 
 			if (deleted)
 				continue;
-			if (rs->nativeQualFilter(rs->nativeQualFilterArg))
+			if (rs->nativeQualFilterNoCount(rs->nativeQualFilterArg))
 				anyPass = true;
 		}
 		if (!anyPass)
