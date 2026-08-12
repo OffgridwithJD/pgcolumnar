@@ -2517,59 +2517,35 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	else
 	{
 		/*
-		 * slice 2: round-trip each column's input and result through a dsm segment,
-		 * still serially in this backend, to prove the serialisation before slice 3's
-		 * workers.
+		 * Serial / non-dispatched path: call flush_one_column directly, no dsm.
+		 * The serialize/dsm round-trip only earns its cost when a worker will read
+		 * the bytes across a process boundary; in-backend-serial it is pure
+		 * overhead (a per-column dsm_create pair), so the non-dispatched path is
+		 * the same direct call as slice 1 (#589) and OFF stays byte-identical to
+		 * and as fast as main. The dsm crossing lives solely in
+		 * flush_columns_parallel, on the worker path where it pays for itself.
 		 */
 		for (c = 0; c < natts; c++)
 		{
 			Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
-			PgColumnarColumnDef *def = &writeState->colDefs[c];
-			StringInfoData inbuf;
-			dsm_segment *inseg;
-			List	   *rtGroups;
-			FlushColumnResult res;
-			StringInfoData outbuf;
-			dsm_segment *outseg;
-			FlushColumnResult rtRes;
+			FlushColumnResult res = flush_one_column(att, writeState->chunkGroups,
+													 &writeState->colDefs[c], rowCount,
+													 validityBytes, writeState->encodeEffort,
+													 writeState->compressionType,
+													 writeState->compressionLevel,
+													 writeState->storageId, groupNumber, c);
 
-			/* serialise this column's input, ship it through a dsm segment, read it back */
-			initStringInfo(&inbuf);
-			serialize_column_input(&inbuf, att, writeState->chunkGroups, c);
-			inseg = dsm_create(inbuf.len + sizeof(uint32), 0);
-			memcpy(dsm_segment_address(inseg), &inbuf.len, sizeof(uint32));
-			memcpy((char *) dsm_segment_address(inseg) + sizeof(uint32), inbuf.data, inbuf.len);
-			rtGroups = deserialize_column_input(dsm_segment_address(inseg), att, c);
-
-			/* run the pure function on the round-tripped input */
-			res = flush_one_column(att, rtGroups, def, rowCount, validityBytes,
-								   writeState->encodeEffort, writeState->compressionType,
-								   writeState->compressionLevel, writeState->storageId,
-								   groupNumber, c);
-
-			/* serialise the result, ship it through a dsm segment, read it back */
-			initStringInfo(&outbuf);
-			serialize_column_result(&outbuf, &res);
-			outseg = dsm_create(outbuf.len + sizeof(uint32), 0);
-			memcpy(dsm_segment_address(outseg), &outbuf.len, sizeof(uint32));
-			memcpy((char *) dsm_segment_address(outseg) + sizeof(uint32), outbuf.data, outbuf.len);
-			rtRes = deserialize_column_result(dsm_segment_address(outseg));
-
-			/* assemble from the round-tripped result (identical to slice 1's assembly) */
 			chunkOffset[c] = data->len;
-			if (rtRes.chunk != NULL && rtRes.chunk->len > 0)
-				appendBinaryStringInfo(data, rtRes.chunk->data, rtRes.chunk->len);
+			if (res.chunk != NULL && res.chunk->len > 0)
+				appendBinaryStringInfo(data, res.chunk->data, res.chunk->len);
 			chunkLength[c] = data->len - chunkOffset[c];
-			chunkDescriptor[c] = rtRes.descriptor;
-			chunkDescriptorLen[c] = rtRes.descriptorLen;
-			chunkBlockCodec[c] = rtRes.blockCodec;
-			if (rtRes.zoneRows != NIL)
-				zoneRows = list_concat(zoneRows, rtRes.zoneRows);
-			if (rtRes.bloomRow != NULL)
-				bloomRows = lappend(bloomRows, rtRes.bloomRow);
-
-			dsm_detach(inseg);
-			dsm_detach(outseg);
+			chunkDescriptor[c] = res.descriptor;
+			chunkDescriptorLen[c] = res.descriptorLen;
+			chunkBlockCodec[c] = res.blockCodec;
+			if (res.zoneRows != NIL)
+				zoneRows = list_concat(zoneRows, res.zoneRows);
+			if (res.bloomRow != NULL)
+				bloomRows = lappend(bloomRows, res.bloomRow);
 		}
 	}
 
