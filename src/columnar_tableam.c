@@ -72,6 +72,8 @@ int			pgcolumnar_encoding_sample_rows = 2048;
 int			pgcolumnar_compression = COLUMNAR_COMPRESSION_ZSTD;
 int			pgcolumnar_compression_level = 3;
 int			pgcolumnar_fsst_min_gain_percent = 5;
+int			pgcolumnar_qual_skipvec_probe_vecs = 32;		/* #595 prototype */
+int			pgcolumnar_qual_skipvec_min_skip_pct = 30;		/* #595 prototype */
 bool		pgcolumnar_enable_qual_pushdown = true;
 bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
@@ -2497,6 +2499,37 @@ _PG_init(void)
 							&pgcolumnar_fsst_min_gain_percent,
 							5,
 							0, 99,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.qual_skipvec_probe_vecs",
+							"#595 prototype: vectors to probe before committing to "
+							"per-vector decode gating for an unprunable qual.",
+							"The #452 phase-2 gating evaluates the qual on every vector "
+							"to skip payload decode for no-match vectors. That wins big "
+							"on a selective filter and regresses a non-selective one. "
+							"Before running it over the whole group, probe this many "
+							"leading vectors and only gate if enough are skippable "
+							"(qual_skipvec_min_skip_pct). 0 disables the probe (always "
+							"gate, the pre-#595 behaviour).",
+							&pgcolumnar_qual_skipvec_probe_vecs,
+							32,
+							0, 100000,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.qual_skipvec_min_skip_pct",
+							"#595 prototype: minimum percent of probed vectors that must "
+							"be fully skippable to commit to per-vector decode gating.",
+							"Of the qual_skipvec_probe_vecs leading vectors, at least "
+							"this percent must have no surviving row for the gating to "
+							"run over the whole group. Higher is stricter (gate only very "
+							"selective filters); 0 always gates.",
+							&pgcolumnar_qual_skipvec_min_skip_pct,
+							30,
+							0, 100,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

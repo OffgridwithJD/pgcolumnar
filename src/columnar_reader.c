@@ -1783,6 +1783,87 @@ pgcolumnar_native_read_projected(PgColumnarReadState *rs,
 }
 
 /*
+ * pgcolumnar_native_qual_probe_selective
+ *		#595 prototype: before paying qual_skipvec's per-vector evaluation over the
+ *		whole group, probe the first N vectors and report whether the qual is
+ *		selective enough to be worth it. Read-only -- it evaluates the qual on the
+ *		probed vectors but masks nothing, counts nothing, and saves/restores the
+ *		qual columns' cursors exactly as qual_skipvec does, so it is invisible to
+ *		everything downstream. Returns true when at least min_skip_pct percent of
+ *		the probed vectors have no surviving row (so gating them skips real payload
+ *		decode); false leaves gating off, sparing an unselective scan the
+ *		whole-group evaluation that #595 measured as a 1.2-2x regression.
+ */
+static bool
+pgcolumnar_native_qual_probe_selective(PgColumnarReadState *rs, int vecCount)
+{
+	char	  **saved;
+	int			c;
+	int			v;
+	int			probeVecs = Min(vecCount, pgcolumnar_qual_skipvec_probe_vecs);
+	int			nSkippable = 0;
+
+	/* probe disabled: always gate, the pre-#595 behaviour */
+	if (pgcolumnar_qual_skipvec_probe_vecs <= 0)
+		return true;
+
+	if (rs->nativeSkipVec == NULL || rs->nativeVecStart == NULL ||
+		rs->nativeQualFilter == NULL || rs->nativeQualValues == NULL ||
+		probeVecs <= 0)
+		return false;
+
+	saved = (char **) palloc(sizeof(char *) * rs->natts);
+	for (c = 0; c < rs->natts; c++)
+		saved[c] = rs->nativeValueCursor[c];
+
+	for (v = 0; v < probeVecs; v++)
+	{
+		uint32		r0 = rs->nativeVecStart[v];
+		uint32		r1 = rs->nativeVecStart[v + 1];
+		uint32		r;
+		bool		anyPass = false;
+
+		for (r = r0; r < r1; r++)
+		{
+			MemoryContext oldContext;
+			bool		deleted;
+
+			rs->rowInGroup = r;
+			deleted = (rs->nativeDeleteMask != NULL &&
+					   (r >> 3) < rs->nativeDeleteMaskLen &&
+					   (rs->nativeDeleteMask[r >> 3] & (1 << (r & 7))) != 0);
+
+			MemoryContextReset(rs->rowContext);
+			oldContext = MemoryContextSwitchTo(rs->rowContext);
+			for (c = 0; c < rs->natts; c++)
+			{
+				if (native_is_qual_column(rs, c))
+					pgcolumnar_row_read_column(rs, c, rs->nativeQualValues,
+											 rs->nativeQualNulls);
+				else
+				{
+					rs->nativeQualValues[c] = (Datum) 0;
+					rs->nativeQualNulls[c] = true;
+				}
+			}
+			MemoryContextSwitchTo(oldContext);
+
+			if (deleted)
+				continue;
+			if (rs->nativeQualFilter(rs->nativeQualFilterArg))
+				anyPass = true;
+		}
+		if (!anyPass)
+			nSkippable++;
+	}
+
+	for (c = 0; c < rs->natts; c++)
+		rs->nativeValueCursor[c] = saved[c];
+
+	return (nSkippable * 100 >= probeVecs * pgcolumnar_qual_skipvec_min_skip_pct);
+}
+
+/*
  * pgcolumnar_native_qual_skipvec
  *		Extend the skip vector from an UNPRUNABLE qual (#452 phase 2).
  *
@@ -2132,7 +2213,8 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	 * unprunable qual gets its per-vector chance here, between the passes. Same
 	 * guard shape as refine's, and mutually exclusive with it on numPredicates.
 	 */
-	if (pass == 1 && allDescriptor && rs->numPredicates == 0)
+	if (pass == 1 && allDescriptor && rs->numPredicates == 0 &&
+		pgcolumnar_native_qual_probe_selective(rs, maxVecCount))
 		pgcolumnar_native_qual_skipvec(rs, maxVecCount);
 
 	foreach(lc, chunks)

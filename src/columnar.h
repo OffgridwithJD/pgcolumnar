@@ -185,6 +185,8 @@ extern int	pgcolumnar_fsst_verdict_reuse;
 #define COLUMNAR_FSST_HELPS		1
 #define COLUMNAR_FSST_HURTS		2
 extern bool pgcolumnar_enable_qual_pushdown;
+extern int pgcolumnar_qual_skipvec_probe_vecs;		/* #595 prototype: probe vector count */
+extern int pgcolumnar_qual_skipvec_min_skip_pct;	/* #595 prototype: min skippable %% to gate */
 extern bool pgcolumnar_enable_late_materialization;
 extern bool pgcolumnar_enable_column_projection;
 extern bool pgcolumnar_enable_custom_scan;
