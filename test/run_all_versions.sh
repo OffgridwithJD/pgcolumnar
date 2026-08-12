@@ -136,6 +136,7 @@ SUITES=(
 	native_roundtrip
 	native_skip
 	native_sort_by
+	native_toasted_write
 	native_truncate
 	native_vacuum_race
 	native_vecdecode
