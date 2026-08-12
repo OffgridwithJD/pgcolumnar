@@ -2173,6 +2173,7 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 	BackgroundWorker bw;
 	BackgroundWorkerHandle **handles;
 	int			nstarted = 0;
+	int			nWorkerCols = 0;
 	int			c;
 	int			i;
 
@@ -2319,6 +2320,14 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 			if (outseg == NULL)
 				continue;		/* lost the segment: fall to serial completion */
 
+			/*
+			 * Release the worker's pin now that we hold a mapping: the segment
+			 * lives until our dsm_detach below, and if anything between here and
+			 * there throws, the resource owner detaches our (now unpinned) mapping
+			 * and the segment is freed rather than leaked to postmaster restart.
+			 */
+			dsm_unpin_segment(slots[i].outHandle);
+
 			obase = (char *) dsm_segment_address(outseg);
 			memcpy(&count, obase, sizeof(uint32));
 			cursor = obase + sizeof(uint32);
@@ -2344,8 +2353,8 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 				writeState->colDefs[col].fsstVerdict = verdict;
 				writeState->colDefs[col].fsstVerdictAge = age;
 				done[col] = true;
+				nWorkerCols++;
 			}
-			dsm_unpin_segment(slots[i].outHandle);
 			dsm_detach(outseg);
 		}
 		else if (st == PFLUSH_FAILED)
@@ -2358,6 +2367,15 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 
 	dsm_detach(seg);
 	pfree(inputs.data);
+
+	/*
+	 * Observability + the test premise: how the flush was actually split. A run
+	 * with the GUC on but every column done serially (slot starvation) reports 0
+	 * worker columns, so a silent fall-back to serial cannot be mistaken for a
+	 * working parallel flush.
+	 */
+	elog(DEBUG1, "pgcolumnar parallel_flush: %d of %d columns by %d worker(s), %d serial",
+		 nWorkerCols, natts, nstarted, natts - nWorkerCols);
 
 	/*
 	 * Serial completion of the remainder: every column no worker produced
