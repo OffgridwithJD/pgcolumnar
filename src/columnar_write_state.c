@@ -24,17 +24,100 @@
 #include "catalog/pg_type.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "libpq/pqsignal.h"
+#include "port/atomics.h"
+#include "postmaster/bgworker.h"
 #include "storage/dsm.h"
+#include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/shm_toc.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+
+#ifndef DSM_HANDLE_INVALID
+#define DSM_HANDLE_INVALID 0
+#endif
+
+/* -------------------------------------------------------------------------
+ * #445 slice 3: dispatch the per-column flush across background workers.
+ *
+ * One input DSM segment carries every column's flush_one_column input (the
+ * slice-2 serialize_column_input blobs) plus the shared FSST verdict cache;
+ * N workers claim columns off an atomic counter, run flush_one_column, and
+ * publish their results in a per-worker OUTPUT segment whose handle they store
+ * in their slot. The backend waits, collects every DONE worker's columns, and
+ * completes any column a worker did not finish serially in-process, so the set
+ * of columns written is always exactly [0, natts) -- slot starvation or a
+ * worker error degrades to the serial path, never to a wrong row count.
+ * ------------------------------------------------------------------------- */
+#define PFLUSH_MAGIC		0x50464c53	/* 'PFLS' */
+#define PFLUSH_KEY_HEADER	0
+#define PFLUSH_KEY_INPUTS	1
+#define PFLUSH_KEY_INOFFS	2
+#define PFLUSH_KEY_VERDICTS 3
+#define PFLUSH_KEY_SLOTS	4
+#define PFLUSH_KEY_CLAIM	5
+#define PFLUSH_MAX_WORKERS	8
+
+typedef enum PflushState
+{
+	PFLUSH_PENDING = 0,			/* not finished (also: worker never started) */
+	PFLUSH_DONE,				/* columns written; outHandle is valid */
+	PFLUSH_FAILED				/* worker caught an error; see errmsg */
+} PflushState;
+
+typedef struct PflushWorkerSlot
+{
+	pg_atomic_uint32 state;		/* PflushState */
+	dsm_handle	outHandle;		/* this worker's OUTPUT segment (valid on DONE) */
+	uint32		outLen;			/* its byte length */
+	int			sqlerrcode;
+	char		errmsg[512];
+} PflushWorkerSlot;
+
+typedef struct PflushHeader
+{
+	Oid			dbid;
+	Oid			roleid;
+	Oid			relid;
+	uint64		storageId;
+	uint64		groupNumber;
+	uint64		rowCount;
+	int			validityBytes;
+	int			encodeEffort;
+	int			compressionType;
+	int			compressionLevel;
+	int			natts;
+	int			nworkers;
+	bool		bloomEnabled;
+
+	/*
+	 * Byte-identity: these encoding GUCs are read live inside flush_one_column
+	 * (and its encoder), not captured into the write state, so a worker -- a
+	 * fresh backend that never saw the launching session's SET -- would encode
+	 * different bytes than the serial path under a non-default session value.
+	 * Thread the launcher's live values so the worker reproduces them exactly.
+	 */
+	int			fsstVerdictReuse;
+	int			fsstMinGainPercent;
+	int			encodingSampleRows;
+} PflushHeader;
+
+/* KEY_VERDICTS: the FSST verdict cache, one seed per column (#472). */
+typedef struct PflushVerdict
+{
+	int8		verdict;
+	int32		age;
+} PflushVerdict;
 
 /*
  * How many bytes of a column chunk to run through both candidates when deciding
@@ -166,6 +249,16 @@ struct PgColumnarWriteState
 	SubTransactionId subid;			/* subtransaction that owns the buffer */
 	TupleDesc	tupdesc;			/* copy owned by writeContext */
 	int			natts;
+
+	/*
+	 * True when `tupdesc` is relid's on-disk descriptor, so a #445-slice-3
+	 * parallel-flush worker may rebuild each column's Form_pg_attribute from
+	 * table_open(relid). Set only by the base writer; false (fail-closed) for a
+	 * projection's inner writer, whose tupdesc is a synthetic {rownumber, proj
+	 * cols...} descriptor that does NOT match its base-table relid -- those flush
+	 * on the serial path, which is byte-identical.
+	 */
+	bool		tupdescIsRel;
 	int			stripeRowLimit;
 	int			chunkGroupRowLimit;
 	int			compressionType;	/* columnar.compression at open time */
@@ -225,11 +318,25 @@ struct PgColumnarWriteState
 static MemoryContext PgColumnarWriteContext = NULL;
 static List *PgColumnarWriteStates = NIL;
 
+/*
+ * #445 slice 3 GUC: dispatch the per-column flush across background workers.
+ * Off by default so the merged behaviour is unchanged; the parallel path is
+ * opt-in for testing (slice 4 makes it the measured, eventually-default
+ * control). Externed in columnar.h; the DefineCustomBoolVariable lives with the
+ * other GUCs in columnar_tableam.c.
+ */
+bool		pgcolumnar_parallel_flush = false;
+
 static void pgcolumnar_flush_row_group(PgColumnarWriteState *writeState);
 static void flush_ws_projections(PgColumnarWriteState *writeState);
 static ChunkGroupBuffer *pgcolumnar_start_chunk_group(PgColumnarWriteState *writeState);
 static uint64 *grow_uint64_array(uint64 *arr, int oldSize, int newSize);
 static void pgcolumnar_init_col_defs(PgColumnarWriteState *writeState);
+static void build_column_def(Form_pg_attribute att, bool bloomEnabled,
+							 MemoryContext cxt, PgColumnarColumnDef *def);
+
+/* bgworker entry: found by name via RegisterDynamicBackgroundWorker (#445 slice 3) */
+PGDLLEXPORT void pgcolumnar_parallel_flush_worker(Datum main_arg);
 
 /*
  * pgcolumnar_cmp_value
@@ -272,6 +379,86 @@ pgcolumnar_cmp_value(PgColumnarColumnDef *def, Datum a, Datum b)
 }
 
 /*
+ * build_column_def
+ *		Resolve one column's skip metadata into *def: the btree comparison proc
+ *		(for the per-chunk min/max skip list, spec 7.2) and the hash proc (for
+ *		the per-chunk bloom filter, I7), plus the direct-comparison kind and the
+ *		int2/int4 summable flag. fmgr procs are copied into `cxt` (the caller's
+ *		long-lived context). A dropped column is left fully zero.
+ *
+ *		Extracted from pgcolumnar_init_col_defs (#445 slice 3) so the flush
+ *		workers reconstruct a column's def with byte-for-byte the same logic the
+ *		backend's write-state setup uses -- worker and backend must agree exactly
+ *		or the stored bytes diverge. *def is zeroed first, so a caller may pass a
+ *		stack def; the FSST verdict cache (fsstVerdict/Age) is seeded separately.
+ */
+static void
+build_column_def(Form_pg_attribute att, bool bloomEnabled, MemoryContext cxt,
+				 PgColumnarColumnDef *def)
+{
+	TypeCacheEntry *tce;
+
+	memset(def, 0, sizeof(PgColumnarColumnDef));
+
+	if (att->attisdropped)
+		return;
+
+	tce = lookup_type_cache(att->atttypid,
+							TYPECACHE_CMP_PROC_FINFO |
+							TYPECACHE_HASH_PROC_FINFO);
+	if (OidIsValid(tce->cmp_proc_finfo.fn_oid))
+	{
+		def->orderable = true;
+		fmgr_info_copy(&def->cmpFn, &tce->cmp_proc_finfo, cxt);
+		def->collation = att->attcollation;
+
+		/*
+		 * Resolve a direct comparison where the type permits one. These
+		 * compare byte-for-byte under any collation, so the fast path
+		 * cannot disagree with the operator it replaces; the zone map it
+		 * feeds is read back through the same ordering.
+		 */
+		switch (att->atttypid)
+		{
+			case INT2OID:
+				def->fastCmp = COLUMNAR_FASTCMP_I16;
+				break;
+			case INT4OID:
+			case DATEOID:
+				def->fastCmp = COLUMNAR_FASTCMP_I32;
+				break;
+			case INT8OID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+				def->fastCmp = COLUMNAR_FASTCMP_I64;
+				break;
+			default:
+				def->fastCmp = COLUMNAR_FASTCMP_NONE;
+				break;
+		}
+	}
+
+	/* int2/int4: exact sum fits int64, carried in the zone map (D5) */
+	def->summableInt =
+		(att->atttypid == INT2OID || att->atttypid == INT4OID);
+
+	/*
+	 * Bloom filter for hashable columns whose collation is safe (I7, gap
+	 * 25): non-collatable types and deterministic collations, so a value
+	 * hashes consistently between this build and an equality probe. A
+	 * nondeterministic collation is left unbloomed.
+	 */
+	if (bloomEnabled &&
+		OidIsValid(tce->hash_proc_finfo.fn_oid) &&
+		PgColumnarCollationIsDeterministic(att->attcollation))
+	{
+		def->bloomable = true;
+		fmgr_info_copy(&def->hashFn, &tce->hash_proc_finfo, cxt);
+		def->hashCollation = att->attcollation;
+	}
+}
+
+/*
  * pgcolumnar_init_col_defs
  *		Allocate and fill writeState->colDefs: for each column, resolve the btree
  *		comparison proc (for the per-chunk min/max skip list, spec 7.2) and the
@@ -288,66 +475,9 @@ pgcolumnar_init_col_defs(PgColumnarWriteState *writeState)
 	for (c = 0; c < writeState->natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
-		TypeCacheEntry *tce;
 
-		if (att->attisdropped)
-			continue;
-
-		tce = lookup_type_cache(att->atttypid,
-								TYPECACHE_CMP_PROC_FINFO |
-								TYPECACHE_HASH_PROC_FINFO);
-		if (OidIsValid(tce->cmp_proc_finfo.fn_oid))
-		{
-			writeState->colDefs[c].orderable = true;
-			fmgr_info_copy(&writeState->colDefs[c].cmpFn,
-						   &tce->cmp_proc_finfo, PgColumnarWriteContext);
-			writeState->colDefs[c].collation = att->attcollation;
-
-			/*
-			 * Resolve a direct comparison where the type permits one. These
-			 * compare byte-for-byte under any collation, so the fast path
-			 * cannot disagree with the operator it replaces; the zone map it
-			 * feeds is read back through the same ordering.
-			 */
-			switch (att->atttypid)
-			{
-				case INT2OID:
-					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I16;
-					break;
-				case INT4OID:
-				case DATEOID:
-					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I32;
-					break;
-				case INT8OID:
-				case TIMESTAMPOID:
-				case TIMESTAMPTZOID:
-					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_I64;
-					break;
-				default:
-					writeState->colDefs[c].fastCmp = COLUMNAR_FASTCMP_NONE;
-					break;
-			}
-		}
-
-		/* int2/int4: exact sum fits int64, carried in the zone map (D5) */
-		writeState->colDefs[c].summableInt =
-			(att->atttypid == INT2OID || att->atttypid == INT4OID);
-
-		/*
-		 * Bloom filter for hashable columns whose collation is safe (I7, gap
-		 * 25): non-collatable types and deterministic collations, so a value
-		 * hashes consistently between this build and an equality probe. A
-		 * nondeterministic collation is left unbloomed.
-		 */
-		if (writeState->bloomEnabled &&
-			OidIsValid(tce->hash_proc_finfo.fn_oid) &&
-			PgColumnarCollationIsDeterministic(att->attcollation))
-		{
-			writeState->colDefs[c].bloomable = true;
-			fmgr_info_copy(&writeState->colDefs[c].hashFn,
-						   &tce->hash_proc_finfo, PgColumnarWriteContext);
-			writeState->colDefs[c].hashCollation = att->attcollation;
-		}
+		build_column_def(att, writeState->bloomEnabled, PgColumnarWriteContext,
+						 &writeState->colDefs[c]);
 	}
 }
 
@@ -456,6 +586,7 @@ PgColumnarGetWriteState(Relation rel)
 	 * CreateTupleDescCopy would clear. */
 	writeState->tupdesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
 	writeState->natts = writeState->tupdesc->natts;
+	writeState->tupdescIsRel = true;	/* rebuildable by a parallel-flush worker */
 	writeState->stripeRowLimit = pgcolumnar_stripe_row_limit;
 	writeState->chunkGroupRowLimit = pgcolumnar_chunk_group_row_limit;
 	writeState->compressionType = pgcolumnar_compression;
@@ -1813,6 +1944,446 @@ deserialize_column_result(void *dsmaddr)
 }
 
 /*
+ * pflush_auto_workers
+ *		Worker count for the parallel flush: half the admin's max_parallel_workers
+ *		budget, at least one, capped at PFLUSH_MAX_WORKERS. Mirrors the export
+ *		path's pexport_auto_workers (that copy is static in another file).
+ */
+static int
+pflush_auto_workers(void)
+{
+	const char *s = GetConfigOption("max_parallel_workers", true, false);
+	int			budget = (s != NULL) ? atoi(s) : 8;
+	int			n = budget / 2;
+
+	if (n < 1)
+		n = 1;
+	if (n > PFLUSH_MAX_WORKERS)
+		n = PFLUSH_MAX_WORKERS;
+	return n;
+}
+
+/*
+ * pgcolumnar_parallel_flush_worker
+ *		Background-worker entry (#445 slice 3): attach the input DSM, connect,
+ *		and run flush_one_column for every column it can claim off the shared
+ *		atomic counter, publishing the results in its own OUTPUT segment.
+ *
+ *		Modelled on pgcolumnar_parallel_export_worker. Unlike the export path
+ *		this does NOT import the launcher's snapshot: the value data lives in the
+ *		DSM, not the table, so the worker reads only committed catalog (the
+ *		relation's tupdesc). StartTransactionCommand plus a pushed
+ *		GetTransactionSnapshot is enough to open the relation; no
+ *		ExportSnapshot/ImportSnapshot is needed (owner's default decision).
+ */
+PGDLLEXPORT void
+pgcolumnar_parallel_flush_worker(Datum main_arg)
+{
+	dsm_segment *seg;
+	shm_toc    *toc;
+	PflushHeader *hdr;
+	PflushWorkerSlot *slots;
+	char	   *inputs;
+	uint64	   *inoffs;
+	PflushVerdict *verds;
+	pg_atomic_uint32 *claim;
+	PflushWorkerSlot *me;
+	int			widx;
+	uint32		conn_flags = BGWORKER_BYPASS_ALLOWCONN;
+
+	memcpy(&widx, MyBgworkerEntry->bgw_extra, sizeof(int));
+
+	pqsignal(SIGTERM, die);
+	BackgroundWorkerUnblockSignals();
+
+	seg = dsm_attach(DatumGetUInt32(main_arg));
+	if (seg == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pgcolumnar parallel_flush worker could not attach to the shared segment")));
+	toc = shm_toc_attach(PFLUSH_MAGIC, dsm_segment_address(seg));
+	if (toc == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("pgcolumnar parallel_flush worker found a bad shared segment")));
+	hdr = (PflushHeader *) shm_toc_lookup(toc, PFLUSH_KEY_HEADER, false);
+	inputs = (char *) shm_toc_lookup(toc, PFLUSH_KEY_INPUTS, false);
+	inoffs = (uint64 *) shm_toc_lookup(toc, PFLUSH_KEY_INOFFS, false);
+	verds = (PflushVerdict *) shm_toc_lookup(toc, PFLUSH_KEY_VERDICTS, false);
+	slots = (PflushWorkerSlot *) shm_toc_lookup(toc, PFLUSH_KEY_SLOTS, false);
+	claim = (pg_atomic_uint32 *) shm_toc_lookup(toc, PFLUSH_KEY_CLAIM, false);
+	me = &slots[widx];
+
+#if PG_VERSION_NUM >= 170000
+	conn_flags |= BGWORKER_BYPASS_ROLELOGINCHECK;
+#endif
+	BackgroundWorkerInitializeConnectionByOid(hdr->dbid, hdr->roleid, conn_flags);
+
+	/*
+	 * A fresh snapshot for catalog/tupdesc reads only. A plain
+	 * GetTransactionSnapshot pushed onto the active stack lets table_open resolve
+	 * the relation; no ImportSnapshot, because the worker never reads the
+	 * backend's uncommitted rows -- the value bytes are all in the DSM.
+	 */
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	PG_TRY();
+	{
+		Relation	rel = table_open(hdr->relid, AccessShareLock);
+		TupleDesc	tupdesc = RelationGetDescr(rel);
+		StringInfoData recbuf;
+		uint32		count = 0;
+		dsm_segment *outseg;
+		char	   *obase;
+
+		/*
+		 * Adopt the launcher's live encoding GUCs so the bytes this worker
+		 * produces match the serial path exactly (see PflushHeader).
+		 */
+		pgcolumnar_fsst_verdict_reuse = hdr->fsstVerdictReuse;
+		pgcolumnar_fsst_min_gain_percent = hdr->fsstMinGainPercent;
+		pgcolumnar_encoding_sample_rows = hdr->encodingSampleRows;
+
+		initStringInfo(&recbuf);
+
+		for (;;)
+		{
+			uint32		c = pg_atomic_fetch_add_u32(claim, 1);
+			Form_pg_attribute att;
+			PgColumnarColumnDef def;
+			List	   *groups;
+			FlushColumnResult res;
+			StringInfoData outbuf;
+			uint32		resultLen;
+			int8		verdict;
+			int32		age;
+
+			if (c >= (uint32) hdr->natts)
+				break;
+
+			att = TupleDescAttr(tupdesc, c);
+
+			/* reconstruct the column def with the SAME logic the backend uses */
+			build_column_def(att, hdr->bloomEnabled, CurrentMemoryContext, &def);
+			def.fsstVerdict = verds[c].verdict;
+			def.fsstVerdictAge = verds[c].age;
+
+			/* rebuild this column's input from the DSM and flush it */
+			groups = deserialize_column_input(inputs + inoffs[c], att, (int) c);
+			res = flush_one_column(att, groups, &def, hdr->rowCount,
+								   hdr->validityBytes, hdr->encodeEffort,
+								   hdr->compressionType, hdr->compressionLevel,
+								   hdr->storageId, hdr->groupNumber, (int) c);
+
+			/* record (c, updated verdict/age, serialized result) */
+			initStringInfo(&outbuf);
+			serialize_column_result(&outbuf, &res);
+			resultLen = (uint32) outbuf.len;
+			verdict = def.fsstVerdict;
+			age = (int32) def.fsstVerdictAge;
+
+			appendBinaryStringInfo(&recbuf, (char *) &c, sizeof(uint32));
+			appendBinaryStringInfo(&recbuf, (char *) &verdict, sizeof(int8));
+			appendBinaryStringInfo(&recbuf, (char *) &age, sizeof(int32));
+			appendBinaryStringInfo(&recbuf, (char *) &resultLen, sizeof(uint32));
+			if (resultLen > 0)
+				appendBinaryStringInfo(&recbuf, outbuf.data, outbuf.len);
+			count++;
+		}
+
+		/*
+		 * Publish one OUTPUT segment: {uint32 count; per column: uint32 c,
+		 * int8 verdict, int32 age, uint32 resultLen, result bytes}. The
+		 * (resultLen, result bytes) pair is exactly the length-prefixed payload
+		 * deserialize_column_result reads, so the backend deserialises straight
+		 * from the record. Pin the segment so it survives this worker's exit --
+		 * the backend attaches only after WaitForBackgroundWorkerShutdown, by
+		 * which point an unpinned segment (zero mappings) would be gone.
+		 */
+		outseg = dsm_create((Size) sizeof(uint32) + recbuf.len, 0);
+		obase = (char *) dsm_segment_address(outseg);
+		memcpy(obase, &count, sizeof(uint32));
+		if (recbuf.len > 0)
+			memcpy(obase + sizeof(uint32), recbuf.data, recbuf.len);
+		dsm_pin_segment(outseg);
+		me->outHandle = dsm_segment_handle(outseg);
+		me->outLen = (uint32) (sizeof(uint32) + recbuf.len);
+		dsm_detach(outseg);		/* pinned: persists for the backend to attach */
+
+		table_close(rel, AccessShareLock);
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+		pg_atomic_write_u32(&me->state, PFLUSH_DONE);
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(TopMemoryContext);
+		edata = CopyErrorData();
+		me->sqlerrcode = edata->sqlerrcode;
+		strlcpy(me->errmsg,
+				edata->message ? edata->message : "parallel_flush worker failed",
+				sizeof(me->errmsg));
+		FlushErrorState();
+		FreeErrorData(edata);
+		AbortOutOfAnyTransaction();
+		pg_atomic_write_u32(&me->state, PFLUSH_FAILED);
+	}
+	PG_END_TRY();
+
+	dsm_detach(seg);
+	proc_exit(0);
+}
+
+/*
+ * flush_columns_parallel
+ *		The #445 slice-3 parallel flush: dispatch flush_one_column across a pool
+ *		of background workers and fill colResults[natts] with every column's
+ *		result. Registration failure or a worker error is not fatal -- the
+ *		backend completes any column a worker did not produce serially, in this
+ *		process, so colResults ends up populated for all of [0, natts). The FSST
+ *		verdict cache in writeState->colDefs is updated in column order (each
+ *		column is owned by exactly one flush, so there is no cross-worker race).
+ *		The caller assembles colResults and does all I/O and catalog writes.
+ */
+static void
+flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
+					   uint64 rowCount, int validityBytes,
+					   FlushColumnResult *colResults)
+{
+	int			natts = writeState->natts;
+	int			nworkers = Min(natts, pflush_auto_workers());
+	bool	   *done = palloc0(sizeof(bool) * natts);
+	StringInfoData inputs;
+	uint64	   *inoffs = palloc(sizeof(uint64) * (natts + 1));
+	shm_toc_estimator est;
+	Size		segsize;
+	Size		inputsChunk;
+	dsm_segment *seg;
+	shm_toc    *toc;
+	PflushHeader *hdr;
+	char	   *inbuf;
+	uint64	   *offs;
+	PflushVerdict *verds;
+	PflushWorkerSlot *slots;
+	pg_atomic_uint32 *claim;
+	uint32		dsmh;
+	BackgroundWorker bw;
+	BackgroundWorkerHandle **handles;
+	int			nstarted = 0;
+	int			c;
+	int			i;
+
+	/* concatenate every column's length-prefixed serialize_column_input blob */
+	initStringInfo(&inputs);
+	for (c = 0; c < natts; c++)
+	{
+		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
+		StringInfoData one;
+		uint32		len;
+
+		inoffs[c] = (uint64) inputs.len;
+		initStringInfo(&one);
+		serialize_column_input(&one, att, writeState->chunkGroups, c);
+		len = (uint32) one.len;
+		appendBinaryStringInfo(&inputs, (char *) &len, sizeof(uint32));
+		if (len > 0)
+			appendBinaryStringInfo(&inputs, one.data, one.len);
+		pfree(one.data);
+	}
+	inoffs[natts] = (uint64) inputs.len;
+
+	/* one input DSM segment: header, inputs, offsets, verdict seeds, slots, claim */
+	inputsChunk = (inputs.len > 0) ? (Size) inputs.len : 1;
+	shm_toc_initialize_estimator(&est);
+	shm_toc_estimate_chunk(&est, sizeof(PflushHeader));
+	shm_toc_estimate_chunk(&est, inputsChunk);
+	shm_toc_estimate_chunk(&est, mul_size(sizeof(uint64), natts + 1));
+	shm_toc_estimate_chunk(&est, mul_size(sizeof(PflushVerdict), natts));
+	shm_toc_estimate_chunk(&est, mul_size(sizeof(PflushWorkerSlot), nworkers));
+	shm_toc_estimate_chunk(&est, sizeof(pg_atomic_uint32));
+	shm_toc_estimate_keys(&est, 6);
+	segsize = shm_toc_estimate(&est);
+
+	seg = dsm_create(segsize, 0);
+	toc = shm_toc_create(PFLUSH_MAGIC, dsm_segment_address(seg), segsize);
+
+	hdr = (PflushHeader *) shm_toc_allocate(toc, sizeof(PflushHeader));
+	shm_toc_insert(toc, PFLUSH_KEY_HEADER, hdr);
+	inbuf = (char *) shm_toc_allocate(toc, inputsChunk);
+	shm_toc_insert(toc, PFLUSH_KEY_INPUTS, inbuf);
+	offs = (uint64 *) shm_toc_allocate(toc, mul_size(sizeof(uint64), natts + 1));
+	shm_toc_insert(toc, PFLUSH_KEY_INOFFS, offs);
+	verds = (PflushVerdict *) shm_toc_allocate(toc, mul_size(sizeof(PflushVerdict), natts));
+	shm_toc_insert(toc, PFLUSH_KEY_VERDICTS, verds);
+	slots = (PflushWorkerSlot *) shm_toc_allocate(toc,
+												  mul_size(sizeof(PflushWorkerSlot), nworkers));
+	shm_toc_insert(toc, PFLUSH_KEY_SLOTS, slots);
+	claim = (pg_atomic_uint32 *) shm_toc_allocate(toc, sizeof(pg_atomic_uint32));
+	shm_toc_insert(toc, PFLUSH_KEY_CLAIM, claim);
+
+	if (inputs.len > 0)
+		memcpy(inbuf, inputs.data, inputs.len);
+	memcpy(offs, inoffs, sizeof(uint64) * (natts + 1));
+	for (c = 0; c < natts; c++)
+	{
+		verds[c].verdict = writeState->colDefs[c].fsstVerdict;
+		verds[c].age = (int32) writeState->colDefs[c].fsstVerdictAge;
+	}
+	pg_atomic_init_u32(claim, 0);
+
+	hdr->dbid = MyDatabaseId;
+	hdr->roleid = GetUserId();
+	hdr->relid = writeState->relid;
+	hdr->storageId = writeState->storageId;
+	hdr->groupNumber = groupNumber;
+	hdr->rowCount = rowCount;
+	hdr->validityBytes = validityBytes;
+	hdr->encodeEffort = writeState->encodeEffort;
+	hdr->compressionType = writeState->compressionType;
+	hdr->compressionLevel = writeState->compressionLevel;
+	hdr->natts = natts;
+	hdr->nworkers = nworkers;
+	hdr->bloomEnabled = writeState->bloomEnabled;
+	hdr->fsstVerdictReuse = pgcolumnar_fsst_verdict_reuse;
+	hdr->fsstMinGainPercent = pgcolumnar_fsst_min_gain_percent;
+	hdr->encodingSampleRows = pgcolumnar_encoding_sample_rows;
+
+	for (i = 0; i < nworkers; i++)
+	{
+		pg_atomic_init_u32(&slots[i].state, PFLUSH_PENDING);
+		slots[i].outHandle = DSM_HANDLE_INVALID;
+		slots[i].outLen = 0;
+		slots[i].sqlerrcode = 0;
+		slots[i].errmsg[0] = '\0';
+	}
+
+	dsmh = dsm_segment_handle(seg);
+
+	/*
+	 * Register the workers. A registration failure is NOT an error: the started
+	 * workers self-balance via the claim counter (a single worker will claim
+	 * every column), and any column left unclaimed is completed serially below.
+	 */
+	handles = (BackgroundWorkerHandle **)
+		palloc0(sizeof(BackgroundWorkerHandle *) * nworkers);
+
+	memset(&bw, 0, sizeof(bw));
+	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+	bw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	bw.bgw_restart_time = BGW_NEVER_RESTART;
+	strlcpy(bw.bgw_library_name, "pgcolumnar", BGW_MAXLEN);
+	strlcpy(bw.bgw_function_name, "pgcolumnar_parallel_flush_worker", BGW_MAXLEN);
+	snprintf(bw.bgw_name, BGW_MAXLEN, "pgcolumnar parallel_flush worker");
+	snprintf(bw.bgw_type, BGW_MAXLEN, "pgcolumnar parallel_flush worker");
+	bw.bgw_main_arg = UInt32GetDatum(dsmh);
+	bw.bgw_notify_pid = MyProcPid;
+
+	for (i = 0; i < nworkers; i++)
+	{
+		memcpy(bw.bgw_extra, &i, sizeof(int));
+		if (RegisterDynamicBackgroundWorker(&bw, &handles[i]))
+			nstarted++;
+		else
+		{
+			handles[i] = NULL;
+			break;				/* slot exhausted: the rest is done serially */
+		}
+	}
+
+	/* wait for every started worker to finish (SIGTERM handler is die) */
+	for (i = 0; i < nstarted; i++)
+		if (handles[i] != NULL)
+			WaitForBackgroundWorkerShutdown(handles[i]);
+
+	/*
+	 * Collect. For each DONE worker, attach its OUTPUT segment and stash every
+	 * column it produced, applying the returned FSST verdict. A FAILED worker's
+	 * columns are left undone (a WARNING is logged); a worker that never started
+	 * leaves state PENDING. Everything not done is completed serially afterwards.
+	 */
+	for (i = 0; i < nstarted; i++)
+	{
+		uint32		st = pg_atomic_read_u32(&slots[i].state);
+
+		if (st == PFLUSH_DONE && slots[i].outHandle != DSM_HANDLE_INVALID)
+		{
+			dsm_segment *outseg = dsm_attach(slots[i].outHandle);
+			char	   *obase;
+			char	   *cursor;
+			uint32		count;
+			uint32		k;
+
+			if (outseg == NULL)
+				continue;		/* lost the segment: fall to serial completion */
+
+			obase = (char *) dsm_segment_address(outseg);
+			memcpy(&count, obase, sizeof(uint32));
+			cursor = obase + sizeof(uint32);
+			for (k = 0; k < count; k++)
+			{
+				uint32		col;
+				int8		verdict;
+				int32		age;
+				uint32		resultLen;
+
+				memcpy(&col, cursor, sizeof(uint32));
+				cursor += sizeof(uint32);
+				memcpy(&verdict, cursor, sizeof(int8));
+				cursor += sizeof(int8);
+				memcpy(&age, cursor, sizeof(int32));
+				cursor += sizeof(int32);
+				memcpy(&resultLen, cursor, sizeof(uint32));
+
+				/* cursor points at [uint32 resultLen][payload] -> deserialize */
+				colResults[col] = deserialize_column_result(cursor);
+				cursor += sizeof(uint32) + resultLen;
+
+				writeState->colDefs[col].fsstVerdict = verdict;
+				writeState->colDefs[col].fsstVerdictAge = age;
+				done[col] = true;
+			}
+			dsm_unpin_segment(slots[i].outHandle);
+			dsm_detach(outseg);
+		}
+		else if (st == PFLUSH_FAILED)
+		{
+			ereport(WARNING,
+					(errmsg("pgcolumnar parallel_flush worker %d failed, completing its columns serially: %s",
+							i, slots[i].errmsg[0] ? slots[i].errmsg : "unknown error")));
+		}
+	}
+
+	dsm_detach(seg);
+	pfree(inputs.data);
+
+	/*
+	 * Serial completion of the remainder: every column no worker produced
+	 * (unstarted slot, failed worker, or lost segment). flush_one_column mutates
+	 * writeState->colDefs[c] in place, so its verdict is applied by the call.
+	 */
+	for (c = 0; c < natts; c++)
+	{
+		Form_pg_attribute att;
+		PgColumnarColumnDef *def;
+
+		if (done[c])
+			continue;
+
+		att = TupleDescAttr(writeState->tupdesc, c);
+		def = &writeState->colDefs[c];
+		colResults[c] = flush_one_column(att, writeState->chunkGroups, def,
+										 rowCount, validityBytes,
+										 writeState->encodeEffort,
+										 writeState->compressionType,
+										 writeState->compressionLevel,
+										 writeState->storageId, groupNumber, c);
+	}
+}
+
+/*
  * pgcolumnar_flush_row_group
  *		Native-format (PGCN v1) flush. Lay out the accumulated rows as one row
  *		group: each column is a column chunk of [validity bitmap][values], where
@@ -1893,59 +2464,95 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	 * descriptor.
 	 */
 	/*
-	 * slice 2: round-trip each column's input and result through a dsm segment,
-	 * still serially in this backend, to prove the serialisation before slice 3's
-	 * workers.
+	 * #445 slice 3: with pgcolumnar.parallel_flush on and at least two columns
+	 * to spread, dispatch flush_one_column across a worker pool, degrading to
+	 * serial completion of any column a worker did not produce (byte-identical to
+	 * the serial path either way). tupdescIsRel keeps a projection's inner writer
+	 * (synthetic tupdesc a worker could not rebuild from relid) on the serial
+	 * path. With the GUC off, keep slice 2's in-backend round-trip loop unchanged.
 	 */
-	for (c = 0; c < natts; c++)
+	if (pgcolumnar_parallel_flush && natts >= 2 && writeState->tupdescIsRel)
 	{
-		Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
-		PgColumnarColumnDef *def = &writeState->colDefs[c];
-		StringInfoData inbuf;
-		dsm_segment *inseg;
-		List	   *rtGroups;
-		FlushColumnResult res;
-		StringInfoData outbuf;
-		dsm_segment *outseg;
-		FlushColumnResult rtRes;
+		FlushColumnResult *colResults = palloc0(sizeof(FlushColumnResult) * natts);
 
-		/* serialise this column's input, ship it through a dsm segment, read it back */
-		initStringInfo(&inbuf);
-		serialize_column_input(&inbuf, att, writeState->chunkGroups, c);
-		inseg = dsm_create(inbuf.len + sizeof(uint32), 0);
-		memcpy(dsm_segment_address(inseg), &inbuf.len, sizeof(uint32));
-		memcpy((char *) dsm_segment_address(inseg) + sizeof(uint32), inbuf.data, inbuf.len);
-		rtGroups = deserialize_column_input(dsm_segment_address(inseg), att, c);
+		flush_columns_parallel(writeState, groupNumber, rowCount, validityBytes,
+							   colResults);
 
-		/* run the pure function on the round-tripped input */
-		res = flush_one_column(att, rtGroups, def, rowCount, validityBytes,
-							   writeState->encodeEffort, writeState->compressionType,
-							   writeState->compressionLevel, writeState->storageId,
-							   groupNumber, c);
+		/* assemble in column order (identical to the serial assembly) */
+		for (c = 0; c < natts; c++)
+		{
+			FlushColumnResult *r = &colResults[c];
 
-		/* serialise the result, ship it through a dsm segment, read it back */
-		initStringInfo(&outbuf);
-		serialize_column_result(&outbuf, &res);
-		outseg = dsm_create(outbuf.len + sizeof(uint32), 0);
-		memcpy(dsm_segment_address(outseg), &outbuf.len, sizeof(uint32));
-		memcpy((char *) dsm_segment_address(outseg) + sizeof(uint32), outbuf.data, outbuf.len);
-		rtRes = deserialize_column_result(dsm_segment_address(outseg));
+			chunkOffset[c] = data->len;
+			if (r->chunk != NULL && r->chunk->len > 0)
+				appendBinaryStringInfo(data, r->chunk->data, r->chunk->len);
+			chunkLength[c] = data->len - chunkOffset[c];
+			chunkDescriptor[c] = r->descriptor;
+			chunkDescriptorLen[c] = r->descriptorLen;
+			chunkBlockCodec[c] = r->blockCodec;
+			if (r->zoneRows != NIL)
+				zoneRows = list_concat(zoneRows, r->zoneRows);
+			if (r->bloomRow != NULL)
+				bloomRows = lappend(bloomRows, r->bloomRow);
+		}
+	}
+	else
+	{
+		/*
+		 * slice 2: round-trip each column's input and result through a dsm segment,
+		 * still serially in this backend, to prove the serialisation before slice 3's
+		 * workers.
+		 */
+		for (c = 0; c < natts; c++)
+		{
+			Form_pg_attribute att = TupleDescAttr(writeState->tupdesc, c);
+			PgColumnarColumnDef *def = &writeState->colDefs[c];
+			StringInfoData inbuf;
+			dsm_segment *inseg;
+			List	   *rtGroups;
+			FlushColumnResult res;
+			StringInfoData outbuf;
+			dsm_segment *outseg;
+			FlushColumnResult rtRes;
 
-		/* assemble from the round-tripped result (identical to slice 1's assembly) */
-		chunkOffset[c] = data->len;
-		if (rtRes.chunk != NULL && rtRes.chunk->len > 0)
-			appendBinaryStringInfo(data, rtRes.chunk->data, rtRes.chunk->len);
-		chunkLength[c] = data->len - chunkOffset[c];
-		chunkDescriptor[c] = rtRes.descriptor;
-		chunkDescriptorLen[c] = rtRes.descriptorLen;
-		chunkBlockCodec[c] = rtRes.blockCodec;
-		if (rtRes.zoneRows != NIL)
-			zoneRows = list_concat(zoneRows, rtRes.zoneRows);
-		if (rtRes.bloomRow != NULL)
-			bloomRows = lappend(bloomRows, rtRes.bloomRow);
+			/* serialise this column's input, ship it through a dsm segment, read it back */
+			initStringInfo(&inbuf);
+			serialize_column_input(&inbuf, att, writeState->chunkGroups, c);
+			inseg = dsm_create(inbuf.len + sizeof(uint32), 0);
+			memcpy(dsm_segment_address(inseg), &inbuf.len, sizeof(uint32));
+			memcpy((char *) dsm_segment_address(inseg) + sizeof(uint32), inbuf.data, inbuf.len);
+			rtGroups = deserialize_column_input(dsm_segment_address(inseg), att, c);
 
-		dsm_detach(inseg);
-		dsm_detach(outseg);
+			/* run the pure function on the round-tripped input */
+			res = flush_one_column(att, rtGroups, def, rowCount, validityBytes,
+								   writeState->encodeEffort, writeState->compressionType,
+								   writeState->compressionLevel, writeState->storageId,
+								   groupNumber, c);
+
+			/* serialise the result, ship it through a dsm segment, read it back */
+			initStringInfo(&outbuf);
+			serialize_column_result(&outbuf, &res);
+			outseg = dsm_create(outbuf.len + sizeof(uint32), 0);
+			memcpy(dsm_segment_address(outseg), &outbuf.len, sizeof(uint32));
+			memcpy((char *) dsm_segment_address(outseg) + sizeof(uint32), outbuf.data, outbuf.len);
+			rtRes = deserialize_column_result(dsm_segment_address(outseg));
+
+			/* assemble from the round-tripped result (identical to slice 1's assembly) */
+			chunkOffset[c] = data->len;
+			if (rtRes.chunk != NULL && rtRes.chunk->len > 0)
+				appendBinaryStringInfo(data, rtRes.chunk->data, rtRes.chunk->len);
+			chunkLength[c] = data->len - chunkOffset[c];
+			chunkDescriptor[c] = rtRes.descriptor;
+			chunkDescriptorLen[c] = rtRes.descriptorLen;
+			chunkBlockCodec[c] = rtRes.blockCodec;
+			if (rtRes.zoneRows != NIL)
+				zoneRows = list_concat(zoneRows, rtRes.zoneRows);
+			if (rtRes.bloomRow != NULL)
+				bloomRows = lappend(bloomRows, rtRes.bloomRow);
+
+			dsm_detach(inseg);
+			dsm_detach(outseg);
+		}
 	}
 
 	dataLength = data->len;
