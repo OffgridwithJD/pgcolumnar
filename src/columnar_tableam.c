@@ -2685,6 +2685,23 @@ _PG_init(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.parallel_flush",
+							 "Dispatch the per-column stripe flush across background "
+							 "workers (#445 slice 3).",
+							 "Off by default so the merged write path is unchanged. "
+							 "When on, a stripe flush of two or more columns fans the "
+							 "per-column encode/compress work out to a pool of "
+							 "background workers and degrades to serial in-backend "
+							 "completion for any column a worker does not finish, so "
+							 "the stored bytes are byte-identical to the serial path "
+							 "either way. Opt-in for testing; slice 4 makes it the "
+							 "measured, eventually-default control.",
+							 &pgcolumnar_parallel_flush,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_unique_insert_lock",
 							 "Serialize concurrent inserts of the same unique key.",
 							 "Takes a transaction-scoped advisory lock per unique "
