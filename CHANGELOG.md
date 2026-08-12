@@ -18,9 +18,10 @@ which was true until that script existed.
   (#445). Default off. When on, a flush of two or more columns fans the per-column
   encode and compress work out to a worker pool. Any column a worker does not
   finish is completed serially in the backend, so the stored bytes match the
-  serial path either way. It helps one large flush of many columns by up to 14
-  percent, and it regresses frequent small flushes. So it is a per-session opt-in
-  for a wide bulk load, not a default.
+  serial path either way. It helps one large flush of many numeric columns by up
+  to 14 percent. A wide text-heavy flush regresses, and so do frequent small
+  flushes, because it copies the buffered bytes through shared memory. So it is a
+  per-session opt-in for a wide numeric bulk load, not a default.
 
 - `pgcolumnar.fsst_verdict_reuse` caches a column's FSST keep/drop verdict for a
   bounded number of row groups (#472). Default 16; `0` asks every time, which is
