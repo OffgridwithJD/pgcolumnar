@@ -149,6 +149,7 @@ SUITES=(
 	parallel_copy
 	parallel_degree
 	parallel_export_parquet
+	parallel_flush_optin
 	parallel_vector_agg
 	parquet_count_bounds
 	parquet_export

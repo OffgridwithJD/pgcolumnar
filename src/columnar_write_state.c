@@ -2206,6 +2206,43 @@ pflush_error_cleanup(int code, Datum arg)
 }
 
 /*
+ * pflush_metrics
+ *		Sum a stripe's buffered column sizes for the parallel_flush dispatch log
+ *		(#445). One pass over the .len fields already in hand; reads no data and
+ *		allocates nothing, so it does not perturb the flush. bufBytes is the total
+ *		the parallel path would copy through shared memory; valBytes and valCount
+ *		describe the value payload alone.
+ */
+static void
+pflush_metrics(PgColumnarWriteState *writeState, uint64 *bufBytes,
+			   uint64 *valBytes, uint64 *valCount)
+{
+	ListCell   *lc;
+	uint64		bb = 0;
+	uint64		vb = 0;
+	uint64		vc = 0;
+
+	foreach(lc, writeState->chunkGroups)
+	{
+		ChunkGroupBuffer *group = (ChunkGroupBuffer *) lfirst(lc);
+		int			c;
+
+		for (c = 0; c < writeState->natts; c++)
+		{
+			ColumnChunkBuffer *col = &group->columns[c];
+
+			bb += (uint64) col->existsStream.len + (uint64) col->valueStream.len +
+				(uint64) col->hashBuf.len;
+			vb += (uint64) col->valueStream.len;
+			vc += col->valueCount;
+		}
+	}
+	*bufBytes = bb;
+	*valBytes = vb;
+	*valCount = vc;
+}
+
+/*
  * flush_columns_parallel
  *		The #445 slice-3 parallel flush: dispatch flush_one_column across a pool
  *		of background workers and fill colResults[natts] with every column's
@@ -2546,6 +2583,7 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	ListCell   *lc;
 	int			c;
 	bool		pushedSnapshot = false;
+	bool		goParallel;
 	List	   *zoneRows = NIL;		/* NativeZoneMapMetadata * to insert (D5) */
 	List	   *bloomRows = NIL;		/* NativeBloomMetadata * to insert (D5b) */
 
@@ -2594,9 +2632,37 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	 * the serial path either way). tupdescIsRel keeps a projection's inner writer
 	 * (synthetic tupdesc a worker could not rebuild from relid) on the serial
 	 * path. With the GUC off, keep slice 2's in-backend round-trip loop unchanged.
+	 *
+	 * The GUC stays OFF by default. A gate to turn it on by default was measured
+	 * and REFUTED (#445): no metric computable here -- natts, buffered bytes, or
+	 * bytes per value -- separates the win from the losses, because the deciding
+	 * variable is per-column encode CPU and its balance across columns, which the
+	 * buffered .len fields do not carry. Two shapes with byte-identical
+	 * (natts, bufbytes) had opposite best: 20 int2 and 5 int8 both buffer the same
+	 * bytes yet one wins and one regresses, and a random int column ties a
+	 * constant one on the metric while differing three-fold in fact. So do NOT add
+	 * a (natts, bufbytes, width) gate here; it would mispredict. The dispatch log
+	 * below records the metrics, so the refutation stays checkable and an opt-in
+	 * user can see how a flush was split. test/parallel_flush_optin.sh pins this.
 	 */
-	if (pgcolumnar_parallel_flush && natts >= 2 && writeState->tupdescIsRel &&
-		!rel_new_in_current_xact(writeState->relid))
+	goParallel = pgcolumnar_parallel_flush && natts >= 2 &&
+		writeState->tupdescIsRel && !rel_new_in_current_xact(writeState->relid);
+
+	if (message_level_is_interesting(DEBUG1))
+	{
+		uint64		bufBytes;
+		uint64		valBytes;
+		uint64		valCount;
+
+		pflush_metrics(writeState, &bufBytes, &valBytes, &valCount);
+		elog(DEBUG1, "pgcolumnar parallel_flush dispatch: rows=%lu natts=%d "
+			 "bufbytes=%lu valbytes=%lu valcount=%lu -> %s",
+			 (unsigned long) rowCount, natts, (unsigned long) bufBytes,
+			 (unsigned long) valBytes, (unsigned long) valCount,
+			 goParallel ? "parallel" : "serial");
+	}
+
+	if (goParallel)
 	{
 		FlushColumnResult *colResults = palloc0(sizeof(FlushColumnResult) * natts);
 
