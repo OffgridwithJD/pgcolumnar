@@ -7,8 +7,11 @@ merged in #584) and `design/ISSUE_452_PHASE2_DECODE_GATING.md`.
 ## DISPOSITION (2026-08-11): feasible, measured, NOT built
 
 The design below is sound and the step-1 measurement was taken on real ClickBench
-`hits` URLs (1,000,000 rows via duckdb). Result: reaching the ~93% prune plateau
-costs **~8 bytes/row** on the filtered string column (65536 bits per 1024-row
+`hits` URLs (1,000,000 rows via duckdb; re-checked on the full 11.1M sample).
+Result: reaching the ~91% prune ceiling (the initial 1M-row probe read ~93%, but
+that is a prefix, and the `%google%` matches cluster, so the full sample is the
+truer ~91% -- a prefix over-counts skippable vectors) costs **~8 bytes/row** on
+the filtered string column (65536 bits per 1024-row
 vector; real URLs carry ~7,251 distinct trigrams/vector, so a smaller filter
 saturates and prunes nothing). On URL that is ~40% overhead on the column, ~6% of
 the whole hits table, and it buys only q21/q22 (2.2x/1.8x) because q24 -- the big
