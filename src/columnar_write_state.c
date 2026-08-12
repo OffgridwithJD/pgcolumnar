@@ -2161,6 +2161,51 @@ pgcolumnar_parallel_flush_worker(Datum main_arg)
 }
 
 /*
+ * pflush_error_cleanup
+ *		Runs on an error during the parallel flush's wait/collect (#445 slice 4).
+ *		Terminates any still-running workers, then frees every published-but-
+ *		uncollected output segment. The collect loop invalidates each slot's handle
+ *		as it frees it, so this only attaches segments still pinned by a worker --
+ *		valid handles, safe to map -- and never double-frees one the happy path
+ *		already released. Without this, a statement cancel inside WaitForBackground-
+ *		WorkerShutdown would leak the pinned segments until postmaster restart.
+ */
+typedef struct PflushCleanup
+{
+	BackgroundWorkerHandle **handles;
+	int			nstarted;
+	PflushWorkerSlot *slots;
+	int			nworkers;
+} PflushCleanup;
+
+static void
+pflush_error_cleanup(int code, Datum arg)
+{
+	PflushCleanup *cl = (PflushCleanup *) DatumGetPointer(arg);
+	int			i;
+
+	for (i = 0; i < cl->nstarted; i++)
+		if (cl->handles[i] != NULL)
+		{
+			TerminateBackgroundWorker(cl->handles[i]);
+			WaitForBackgroundWorkerShutdown(cl->handles[i]);
+		}
+
+	for (i = 0; i < cl->nworkers; i++)
+		if (pg_atomic_read_u32(&cl->slots[i].state) == PFLUSH_DONE &&
+			cl->slots[i].outHandle != DSM_HANDLE_INVALID)
+		{
+			dsm_segment *s = dsm_attach(cl->slots[i].outHandle);
+
+			if (s != NULL)
+			{
+				dsm_unpin_segment(cl->slots[i].outHandle);
+				dsm_detach(s);
+			}
+		}
+}
+
+/*
  * flush_columns_parallel
  *		The #445 slice-3 parallel flush: dispatch flush_one_column across a pool
  *		of background workers and fill colResults[natts] with every column's
@@ -2195,6 +2240,7 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 	uint32		dsmh;
 	BackgroundWorker bw;
 	BackgroundWorkerHandle **handles;
+	PflushCleanup cleanup;
 	int			nstarted = 0;
 	int			nWorkerCols = 0;
 	int			c;
@@ -2317,6 +2363,19 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 		}
 	}
 
+	/*
+	 * Arm the cancel-safe cleanup over the wait+collect: an error here (a
+	 * statement cancel inside the wait is the realistic one) terminates the
+	 * workers and frees any pinned output segment not yet collected, so nothing
+	 * leaks to postmaster restart. Disarmed at PG_END below on the normal path.
+	 */
+	cleanup.handles = handles;
+	cleanup.nstarted = nstarted;
+	cleanup.slots = slots;
+	cleanup.nworkers = nworkers;
+
+	PG_ENSURE_ERROR_CLEANUP(pflush_error_cleanup, PointerGetDatum(&cleanup));
+	{
 	/* wait for every started worker to finish (SIGTERM handler is die) */
 	for (i = 0; i < nstarted; i++)
 		if (handles[i] != NULL)
@@ -2379,6 +2438,7 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 				nWorkerCols++;
 			}
 			dsm_detach(outseg);
+			slots[i].outHandle = DSM_HANDLE_INVALID;	/* freed; skip in cleanup */
 		}
 		else if (st == PFLUSH_FAILED)
 		{
@@ -2387,6 +2447,8 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 							i, slots[i].errmsg[0] ? slots[i].errmsg : "unknown error")));
 		}
 	}
+	}
+	PG_END_ENSURE_ERROR_CLEANUP(pflush_error_cleanup, PointerGetDatum(&cleanup));
 
 	dsm_detach(seg);
 	pfree(inputs.data);
@@ -2422,6 +2484,27 @@ flush_columns_parallel(PgColumnarWriteState *writeState, uint64 groupNumber,
 										 writeState->compressionLevel,
 										 writeState->storageId, groupNumber, c);
 	}
+}
+
+/*
+ * rel_new_in_current_xact
+ *		True if the relation was created in the current transaction, so its
+ *		pg_class row is not yet committed. A parallel-flush worker opens the
+ *		relation on a fresh snapshot to read its tuple descriptor; for a table
+ *		created and loaded in one transaction (CREATE TABLE ...; INSERT ..., or
+ *		CREATE TABLE AS) that open fails, and the flush would register workers,
+ *		have them all fail, log a WARNING, and redo the whole thing serially.
+ *		Detect it up front and keep the flush serial -- silently, and without the
+ *		wasted registration and double work. (#445 slice 4)
+ */
+static bool
+rel_new_in_current_xact(Oid relid)
+{
+	Relation	rel = table_open(relid, NoLock);	/* the INSERT already holds a lock */
+	bool		isnew = (rel->rd_createSubid != InvalidSubTransactionId);
+
+	table_close(rel, NoLock);
+	return isnew;
 }
 
 /*
@@ -2512,7 +2595,8 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 	 * (synthetic tupdesc a worker could not rebuild from relid) on the serial
 	 * path. With the GUC off, keep slice 2's in-backend round-trip loop unchanged.
 	 */
-	if (pgcolumnar_parallel_flush && natts >= 2 && writeState->tupdescIsRel)
+	if (pgcolumnar_parallel_flush && natts >= 2 && writeState->tupdescIsRel &&
+		!rel_new_in_current_xact(writeState->relid))
 	{
 		FlushColumnResult *colResults = palloc0(sizeof(FlushColumnResult) * natts);
 

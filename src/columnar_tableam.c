@@ -2687,15 +2687,23 @@ _PG_init(void)
 
 	DefineCustomBoolVariable("pgcolumnar.parallel_flush",
 							 "Dispatch the per-column stripe flush across background "
-							 "workers (#445 slice 3).",
-							 "Off by default so the merged write path is unchanged. "
-							 "When on, a stripe flush of two or more columns fans the "
-							 "per-column encode/compress work out to a pool of "
-							 "background workers and degrades to serial in-backend "
-							 "completion for any column a worker does not finish, so "
-							 "the stored bytes are byte-identical to the serial path "
-							 "either way. Opt-in for testing; slice 4 makes it the "
-							 "measured, eventually-default control.",
+							 "workers (#445).",
+							 "Off by default, and stays that way (#445 slice 4 measured "
+							 "it). When on, a stripe flush of two or more columns fans "
+							 "the per-column encode/compress work out to a pool of "
+							 "background workers, degrading to serial in-backend "
+							 "completion for any column a worker does not finish, so the "
+							 "stored bytes are byte-identical to the serial path either "
+							 "way. It is a targeted opt-in, not a general win: it helps a "
+							 "single large flush of many cheap (numeric) columns -- a "
+							 "wide bulk load -- by up to ~14%, and it REGRESSES the common "
+							 "cases, because it copies the buffered data through shared "
+							 "memory: small or frequent flushes (a low stripe_row_limit, "
+							 "or per-row commits) pay the fixed worker-spawn cost (3.6x "
+							 "slower measured), and text-heavy or very large flushes pay "
+							 "an O(bytes) serialization cost that outweighs the parallel "
+							 "saving. Turn it on only for a wide-numeric bulk load, off "
+							 "otherwise.",
 							 &pgcolumnar_parallel_flush,
 							 false,
 							 PGC_USERSET,
