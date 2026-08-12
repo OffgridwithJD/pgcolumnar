@@ -1783,6 +1783,29 @@ pgcolumnar_native_read_projected(PgColumnarReadState *rs,
 }
 
 /*
+ * pgcolumnar_native_payload_col_count
+ *		#595: how many wanted columns the gating would actually spare from decode
+ *		-- the projected columns that are NOT qual columns (the qual columns are
+ *		decoded in pass 0 regardless). The per-vector evaluation costs the same
+ *		whatever the projection, but its payoff is this count times the per-vector
+ *		decode saved on a skipped vector. A narrow projection (a count or a
+ *		single-column aggregate) has almost nothing to spare, so gating it is
+ *		pure cost; a wide SELECT * has a lot. The benchmark bears this out: gating
+ *		wins only q24 (SELECT *, 105 columns) and regresses the narrow queries.
+ */
+static int
+pgcolumnar_native_payload_col_count(PgColumnarReadState *rs)
+{
+	int			c;
+	int			n = 0;
+
+	for (c = 0; c < rs->natts; c++)
+		if (rs->colWanted[c] && !native_is_qual_column(rs, c))
+			n++;
+	return n;
+}
+
+/*
  * pgcolumnar_native_qual_probe_selective
  *		#595 prototype: before paying qual_skipvec's per-vector evaluation over the
  *		whole group, probe the first N vectors and report whether the qual is
@@ -2220,6 +2243,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	 * guard shape as refine's, and mutually exclusive with it on numPredicates.
 	 */
 	if (pass == 1 && allDescriptor && rs->numPredicates == 0 &&
+		pgcolumnar_native_payload_col_count(rs) >= pgcolumnar_qual_skipvec_min_payload_cols &&
 		pgcolumnar_native_qual_probe_selective(rs, maxVecCount))
 		pgcolumnar_native_qual_skipvec(rs, maxVecCount);
 

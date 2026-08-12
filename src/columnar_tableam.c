@@ -74,6 +74,7 @@ int			pgcolumnar_compression_level = 3;
 int			pgcolumnar_fsst_min_gain_percent = 5;
 int			pgcolumnar_qual_skipvec_probe_vecs = 32;		/* #595 prototype */
 int			pgcolumnar_qual_skipvec_min_skip_pct = 30;		/* #595 prototype */
+int			pgcolumnar_qual_skipvec_min_payload_cols = 20;	/* #595 prototype */
 bool		pgcolumnar_enable_qual_pushdown = true;
 bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
@@ -2530,6 +2531,23 @@ _PG_init(void)
 							&pgcolumnar_qual_skipvec_min_skip_pct,
 							30,
 							0, 100,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.qual_skipvec_min_payload_cols",
+							"#595 prototype: minimum projected non-qual columns for "
+							"per-vector decode gating to run.",
+							"Gating only spares decode on the projected columns that "
+							"are not the qual's own -- a wide SELECT * has many, a count "
+							"or single-column aggregate almost none. Below this many, "
+							"the per-vector evaluation cannot pay for itself, so gating "
+							"is skipped. The benchmark shows gating wins only the wide "
+							"projection (q24, 105 columns) and regresses the narrow "
+							"ones. 0 disables the width gate.",
+							&pgcolumnar_qual_skipvec_min_payload_cols,
+							20,
+							0, 100000,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
