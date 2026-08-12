@@ -22,15 +22,14 @@ These environment variables control the harnesses:
 - `BENCH_DUCKDB`. Set it to 1 to add a DuckDB comparison, if `duckdb` is on
   `PATH`.
 
-The numbers below come from one full run of `bench/run_bench.sh` on 2026-08-04, at
-commit `aeb7882`, which is the same commit as the cross-engine run below. The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
-an 8-column table, the median of 5 repetitions, 8 cores and 12 GB of memory.
+The numbers below come from one full run of `bench/run_bench.sh` on 2026-08-12, at
+commit `2fe6596` (Merge #592). The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
+an 8-column table, the median of 5 repetitions, 16 cores and 62 GB of memory.
 
-The previous record of this section was 2026-07-27 at commit `7a9c9f7`, on
-PostgreSQL 17.10 and a machine with 24 GB. The harness itself did not change
-between the two runs. The major version and the machine did, so read the ratios
-and not the absolute values. The old raw output is in
-[../bench/sample_output_all_2026_07_27.txt](https://github.com/commandprompt/pgcolumnar/blob/main/bench/sample_output_all_2026_07_27.txt).
+The previous record of this section was 2026-08-04 at commit `aeb7882`, on
+PostgreSQL 18.4 and an 8-core machine with 12 GB. The harness itself did not change
+between the two runs. The machine did, so read the ratios and not the absolute
+values.
 
 The read stream section is not re-measured. It needs a PostgreSQL 18 build with
 `--with-liburing`, and no such build exists on this machine. Its numbers are from
@@ -44,11 +43,10 @@ deliberately. A table of fully random values will therefore look worse, and a
 repetitive table will look better.
 
 **Compare the ratios between runs. Do not compare absolute milliseconds.** This
-machine measured the commit of the previous run again, on the same day. Refer to
-[What changed](#what-changed-since-the-previous-run). The query latencies were
-the same. But the ingestion shapes and the I/O shapes were approximately 20
-percent slower than the first record of those numbers. Absolute figures change
-with the machine. Trust the comparison that one day gives.
+run is on a larger machine than the previous record, 16 cores and 62 GB against
+8 and 12, so the absolute figures here are larger and different, and that is
+expected. Refer to [What changed](#what-changed-since-the-previous-run) for what
+moved in the code. Trust the ratios, not the milliseconds.
 
 ## Storage
 
@@ -81,11 +79,11 @@ Heap versus columnar (zstd), median milliseconds:
 
 | query | heap | columnar | heap / columnar |
 | --- | --- | --- | --- |
-| count(*) full table | 135.66 | 0.01 | 13566 |
-| sum/avg over one int column | 190.04 | 0.28 | 679 |
-| filtered agg, min/max-skippable range | 154.05 | 7.96 | 19.4 |
-| projection: 3 of 8 cols, 1% filter | 146.91 | 7.15 | 20.6 |
-| point lookup by indexed id | 0.01 | 11.90 | 0.00 |
+| count(*) full table | 517.98 | 0.04 | 12950 |
+| sum/avg over one int column | 571.25 | 0.96 | 595 |
+| filtered agg, min/max-skippable range | 443.74 | 19.75 | 22.5 |
+| projection: 3 of 8 cols, 1% filter | 444.16 | 17.90 | 24.8 |
+| point lookup by indexed id | 0.03 | 18.17 | 0.00 |
 
 `count(*)` and the ungrouped aggregates are answered from row-group metadata
 without decoding column data, which is why they are microseconds rather than
@@ -95,7 +93,7 @@ The point lookup was a regression when the previous version of this page was
 written, at 1251.88 ms, and it was reported as
 [issue #171](https://github.com/commandprompt/pgcolumnar/issues/171). That issue is
 closed. The planner chose a full columnar scan for a point lookup once statistics
-existed. It now keeps the index, and the same query takes 11.90 ms.
+existed. It now keeps the index, and the same query takes 18.17 ms.
 
 The filtered aggregate and the projection query also changed by about 8 times.
 Column projection is the cause. A columnar scan reads only the columns that a
@@ -136,16 +134,19 @@ single run for the delete:
 
 | operation | heap | columnar | columnar / heap |
 | --- | --- | --- | --- |
-| UPDATE single row by id | 0.01 ms | 62.47 ms | 6247 |
-| UPDATE 1000 rows, ids in row order | 2.04 ms | 74.55 ms | 37 |
-| UPDATE 1000 rows, ids scattered | 24.70 ms | 69.97 ms | 2.8 |
-| DELETE 1000 rows by id range | 0.3 ms | 64.7 ms | 216 |
+| UPDATE single row by id | 0.03 ms | 1.91 ms | 64 |
+| UPDATE 1000 rows, ids in row order | 4.73 ms | 23.21 ms | 4.9 |
+| UPDATE 1000 rows, ids scattered | 83.51 ms | 79.38 ms | 0.95 |
+| DELETE 1000 rows by id range | 0.8 ms | 4.5 ms | 5.6 |
 
-The columnar cost is close to the same for one row and for 1000. A write to a
-columnar table marks the old row and appends a new one, and the row group is the
-unit of that work. The count of rows that are reached therefore matters much less
-than it does for heap. This is why the ratio against heap falls as the number of
-rows rises: heap pays per row, and columnar pays per row group.
+The columnar cost rises far more slowly than the row count. A single update is
+1.91 ms and 1000 scattered updates 79.38 ms, about 40 times the cost for 1000
+times the rows. A write to a columnar table marks the old row and appends a new
+one, and the row group is the unit of that work. The count of rows that are
+reached therefore matters much less than it does for heap. This is why the ratio
+against heap falls as the number of rows rises, from 64 times on a single row to
+below heap on the scattered batch: heap pays per row, and columnar pays per row
+group.
 
 Read the ratio for the scattered case and not the ratio for one row. A single-row
 update is the shape that columnar storage is worst at, and the table says so.
@@ -161,7 +162,7 @@ The delete figure was the weakest number in this document, at 1509 ms. At that
 time, to reach a row, the code went through each earlier row in the group. Both
 halves of [issue #143](https://github.com/commandprompt/pgcolumnar/issues/143) are now
 complete. The code decodes the group one time and keeps it in a cache. It then
-reaches the value of a row by rank, and not by a walk. Deleting 1000 rows costs 22.8 ms rather than 1509.
+reaches the value of a row by rank, and not by a walk. Deleting 1000 rows costs 4.5 ms rather than 1509.
 
 ## Feature toggles
 
@@ -169,10 +170,10 @@ Vectorization on versus off (columnar zstd, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sum/avg over int | 0.29 | 179.36 | 618 |
-| filtered agg (range) | 5.70 | 5.59 | 0.98 |
+| sum/avg over int | 0.84 | 522.30 | 622 |
+| filtered agg (range) | 18.15 | 18.11 | 1.00 |
 
-The "off" column is much faster than in the record before these two runs, at 179 ms
+The "off" column is much faster than in the record before these two runs, at 522 ms
 against 1392 ms. Column projection (issue #339) is the reason. The path that does not
 vectorize now also reads fewer columns.
 
@@ -180,29 +181,29 @@ Index-only scan on versus off (covering range count, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| covering count, id range (~2%) | 3.72 | 404.02 | 109 |
+| covering count, id range (~2%) | 9.25 | 1069.93 | 116 |
 
 The "off" column is the fetch-by-row path with no other work. It therefore
 isolates the cost of that path and the effect of #143. This shape was 200.9 s
-before the decoded-group cache. It was 31.8 s after the cache. It is 0.69 s now
+before the decoded-group cache. It was 31.8 s after the cache. It is 1.07 s now
 that the walk to the row is also gone.
 
 Projection scan on versus off (covering scan on a scattered sort key, median ms):
 
 | query | on | off | speedup |
 | --- | --- | --- | --- |
-| sortk, val where sortk in ~0.1% range | 96.72 | 162.88 | 1.68 |
+| sortk, val where sortk in ~0.1% range | 49.16 | 330.32 | 6.72 |
 
 Sorted storage (`pgcolumnar.vacuum_sorted`), narrow range scan on a key not
 correlated with insert order, median ms:
 
 | state | ms |
 | --- | --- |
-| before vacuum_sorted | 160.68 |
-| after vacuum_sorted | 1.24 |
+| before vacuum_sorted | 318.70 |
+| after vacuum_sorted | 1.75 |
 
 Compression `none` against `zstd`, for the columnar table only: 40 MB against
-5.95 MB. The scan latency does not change, at 0.28 ms against 0.28 ms. The
+5.95 MB. The scan latency does not change, at 0.85 ms against 0.87 ms. The
 encoded stream is already small, and the aggregates do not read it.
 
 ## Parallel bulk ingest
@@ -257,15 +258,15 @@ Export, 6,000,000 rows, 5 columns:
 
 | format | ms | file size | M rows/s |
 | --- | --- | --- | --- |
-| arrow | 526.7 | 186 MB | 11.4 |
-| parquet | 579.7 | 186 MB | 10.4 |
+| arrow | 1226.4 | 186 MB | 4.9 |
+| parquet | 1254.3 | 186 MB | 4.8 |
 
 Import, 6,000,000 rows, 5 columns:
 
 | format | ms | M rows/s |
 | --- | --- | --- |
-| arrow | 3313.7 | 1.8 |
-| parquet | 3353.6 | 1.8 |
+| arrow | 4190.4 | 1.4 |
+| parquet | 4410.8 | 1.4 |
 
 Import is about 18x slower than export, and the reason is not the import code.
 A separate measurement shows this. `import_arrow` costs 12,150 ms. An
@@ -296,8 +297,8 @@ column:
 
 | format | export ms | import ms | file size |
 | --- | --- | --- | --- |
-| arrow | 622.8 | 4904.1 | 38 MB |
-| parquet | 533.7 | 4860.1 | 35 MB |
+| arrow | 509.7 | 2889.7 | 38 MB |
+| parquet | 455.3 | 3025.6 | 35 MB |
 
 Both reconstructed tables matched the source exactly (zero differing rows).
 
@@ -331,15 +332,15 @@ image of the table at call time.
 
 | | |
 | --- | --- |
-| heap INSERT | 2.00 s |
-| columnar INSERT | 12.86 s |
+| heap INSERT | 2.89 s |
+| columnar INSERT | 10.31 s |
 | heap size | 419 MB |
 | columnar size | 101 MB |
 | vectors using FSST | 20 of 20 |
 | round trip | exact match |
 
 FSST is chosen for every vector of the URL column and gives 4.2x on size, paid for
-with 6.4x on ingestion time. That ratio is the reason to optimise the selection of the encoding. It is also
+with 3.6x on ingestion time. That ratio is the reason to optimise the selection of the encoding. It is also
 the reason to choose the candidates from a sample, and not to apply each of them.
 `pgcolumnar.encoding_sample_rows` controls this. It measured loads that are 1.33x
 faster, with output that is identical byte for byte.
@@ -622,36 +623,28 @@ competitive claim.
 
 ## What changed since the previous run
 
-Measured on the same machine, same harness, at three commits. The middle column
-is the run this document previously recorded.
+The previous record of this page was 2026-08-04 at `aeb7882`. These are the code
+deltas between it and this run's `2fe6596` (Merge #592):
 
-| metric | 2f1320f | 1be027b | 7a9c9f7 |
-| --- | --- | --- | --- |
-| count(*) | 8.27 ms | 0.02 ms | 0.02 ms |
-| sum/avg over int | 8.04 ms | 0.53 ms | 0.56 ms |
-| covering count, index-only scan off | 200,914 ms | 689 ms | 699 ms |
-| DELETE 1000 rows by id range | not measured | 22.8 ms | **14.7 ms** |
-| UPDATE 1000 rows, ids in row order | not measured | 20.78 ms | **14.28 ms** |
-| count(*) with one row deleted | 222.28 ms | 0.18 ms | 0.18 ms |
-| point lookup by indexed id | 32.96 ms | 23.75 ms | **1251.88 ms** |
-| storage, all three tables | identical | identical | identical |
-
-The mutation figures improved again, from the direct zone min/max comparison
-(#160) and the needed-columns fetch (#164).
-
-Two things do not appear in this table because they are not in the harness, and
-both are larger than anything in it:
-
-- **A wide table now permits index-driven access.** 2,000 index fetches that read
-  one column of a 41-column table went from 1,001,374 ms to 614 ms. The lazily
-  decoding slot (#169) made this change. An 11-column table went from 284,148 ms
-  to 159 ms. This is the large step that #157 described, and it is gone.
-- **`ANALYZE` now collects statistics** (#159). These include correlation, which
-  lets the planner see the locality that `vacuum_sorted` and Z-ordering make.
-  This document does not measure its cost. That measurement is part of #171.
-
-The point lookup is the one number that moved the wrong way, and it moved a long
-way. See the note above it.
+- **Late-materialization decode gating shipped (#452, phase 2).** This is the
+  trade described in the ClickBench section above. It is a large win on a wide
+  `SELECT *` under a highly selective filter (q24 from 6098 ms to 3395 ms with
+  gating on) and a regression on unselective quals, so it moved the ClickBench win
+  count from 33 to 25. Gating it on selectivity is tracked as #595. Phase 1 also
+  landed, so #452 is no longer open on either half.
+- **Detoast once (#587).** A toasted text value is now detoasted a single time per
+  scan rather than per reference, about 11 percent on queries over toasted text.
+- **FSST verdict cache (#472).** The FSST encode decision is cached rather than
+  recomputed per vector.
+- **Bloom filters sized by distinct count (#467).** Filter width now follows the
+  column's distinct count instead of a fixed provisioning.
+- **`pgcolumnar.parallel_flush` (#445 slice 4).** A measured opt-in, off by
+  default. It helps a wide bulk load of many numeric columns by up to about 14
+  percent and regresses text-heavy or small, frequent flushes, because it copies
+  buffered data through shared memory. It is not a default.
+- **Anchored `LIKE 'prefix%'` now prunes (#510).** Infix `LIKE '%...%'` is handled
+  by phase-2 decode gating (#426/#586), not a substring filter, so #426 is
+  addressed for both the anchored and the infix case.
 
 ## Joins
 
@@ -663,7 +656,7 @@ measures them.
 BENCH_SCALE=20000000 bench/run_bench_join.sh /path/to/pg18n/bin/pg_config
 ```
 
-The numbers below are one run on 2026-08-05. The conditions were PostgreSQL 18.4
+The numbers below are one run on 2026-08-12. The conditions were PostgreSQL 18.4
 non-assert, 16 cores, 20,000,000 fact rows, serial execution and the median of
 three repetitions. The fact table has eight metric columns. The dimensions are
 heap tables in both arms, which is the realistic deployment.
@@ -678,28 +671,28 @@ that was much larger than the realistic one.
 
 | shape | heap | columnar | columnar over heap |
 | --- | ---: | ---: | ---: |
-| no join, the control | 1,536.8 ms | 820.2 ms | **0.53x** |
-| selective dimension join | 1,952.3 ms | 2,655.6 ms | 1.36x |
-| unselective join | 3,152.8 ms | 3,694.1 ms | 1.17x |
-| multi-dimension star | 6,560.8 ms | 6,936.6 ms | 1.06x |
-| wide projection under a join | 2,293.0 ms | 6,821.8 ms | 2.98x |
-| total relation size | 2,185,166,848 B | 307,109,888 B | 0.141x |
+| no join, the control | 1,584.7 ms | 601.5 ms | **0.38x** |
+| selective dimension join | 1,935.7 ms | 2,538.7 ms | 1.31x |
+| unselective join | 3,125.6 ms | 3,621.5 ms | 1.16x |
+| multi-dimension star | 6,538.6 ms | 6,774.1 ms | 1.04x |
+| wide projection under a join | 2,265.4 ms | 5,015.0 ms | 2.21x |
+| total relation size | 2,185,166,848 B | 307,118,080 B | 0.141x |
 
 ### Incompressible data
 
 | shape | heap | columnar | columnar over heap |
 | --- | ---: | ---: | ---: |
-| no join, the control | 1,533.6 ms | 1,912.0 ms | 1.25x |
-| selective dimension join | 1,968.6 ms | 3,957.4 ms | 2.01x |
-| unselective join | 3,161.9 ms | 4,990.6 ms | 1.58x |
-| multi-dimension star | 6,581.0 ms | 8,176.0 ms | 1.24x |
-| wide projection under a join | 2,311.6 ms | 16,269.1 ms | 7.04x |
-| total relation size | 2,185,166,848 B | 1,306,492,928 B | 0.598x |
+| no join, the control | 1,600.5 ms | 1,972.3 ms | 1.23x |
+| selective dimension join | 1,970.3 ms | 4,053.4 ms | 2.06x |
+| unselective join | 3,177.2 ms | 5,147.9 ms | 1.62x |
+| multi-dimension star | 6,576.2 ms | 8,283.9 ms | 1.26x |
+| wide projection under a join | 2,274.9 ms | 16,442.5 ms | 7.23x |
+| total relation size | 2,185,166,848 B | 1,306,484,736 B | 0.598x |
 
 ### What the control says
 
-Read the first two rows of the first table together. **Without a join we are 1.87
-times faster. Add a join and we are 1.36 times slower.** The rows are the same,
+Read the first two rows of the first table together. **Without a join we are 2.63
+times faster. Add a join and we are 1.31 times slower.** The rows are the same,
 the bytes are the same, and the encoding is the same.
 
 The reason is structural. Our vectorized aggregate only sits directly above our
@@ -714,7 +707,7 @@ thing we are fast at.
 ### What the two data shapes say
 
 Compressibility is a second and separate effect. On incompressible data we lose
-even with no join at all, and the wide projection shape goes from 2.98x to 7.04x.
+even with no join at all, and the wide projection shape goes from 2.21x to 7.23x.
 Storage goes from 7.1 times smaller to 1.7 times smaller.
 
 Neither effect explains the other. Both are real.
@@ -772,10 +765,10 @@ that. The benchmark definition they came from is the licensed material. The full
 list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
 of 2026-08-06.
 
-Two runs are recorded below. The 2026-08-09 run is the current one and adds a
-Citus arm, the parallel loader, and a Citus bulk arm to compare it against. The
-2026-08-05 run is kept because it is a second independent run of the same
-benchmark. Both used PostgreSQL 18.4 non-assert, 16 cores, 62 GB of memory,
+Two runs are recorded below. The 2026-08-12 run is the current one and adds a
+Citus arm, the parallel loader, a Citus bulk arm, a DuckDB arm, and an accelerated
+columnar arm. The 2026-08-05 run is kept because it is a second independent run of
+the same benchmark. Both used PostgreSQL 18.4 non-assert, 16 cores, 62 GB of memory,
 and 11,110,833 rows. That row count is every ninth row of the real 100 million
 row table. The reported time is the best of two hot runs, which is what
 ClickBench reports.
@@ -795,11 +788,12 @@ clusters perfectly on the filtered columns. That flatters columnar storage
 heavily. The harness therefore samples with a stride, and it fails the run if the
 loaded sample is degenerate.
 
-### The 2026-08-09 run: the bulk load is slower than Citus, not faster
+### The 2026-08-12 run: the bulk load is slower than Citus, not faster
 
-This run adds a Citus columnar arm, the parallel loader, and a Citus bulk arm to
-compare the parallel loader against. It is also the first run that can cite the
-definition digest recorded above. Upstream has not changed since:
+This run adds a Citus columnar arm, the parallel loader, a Citus bulk arm to
+compare the parallel loader against, a DuckDB arm, and an accelerated columnar
+arm. It is also a run that can cite the definition digest recorded above.
+Upstream has not changed since:
 `create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
 
 Conditions: PostgreSQL 18.4 non-assert, 16 cores, 62 GB, 11,110,833 rows, three
@@ -809,20 +803,24 @@ Every arm loaded all 11,110,833 rows.
 
 | arm | connections | load | total relation size |
 | --- | ---: | ---: | ---: |
-| heap | 1 | 148.8 s | 7,818,592,256 bytes |
-| columnar, serial `COPY` | 1 | 447.4 s | 1,479,745,536 bytes |
-| citus columnar, serial `COPY` | 1 | 187.2 s | 1,662,558,208 bytes |
-| columnar, `pgcolumnar.parallel_copy` | 16 | 86.6 s | 1,478,057,984 bytes |
-| citus columnar, parallel `COPY` | 16 | 49.1 s | 1,663,025,152 bytes |
+| heap | 1 | 145.3 s | 7,818,592,256 bytes |
+| columnar, serial `COPY` | 1 | 443.0 s | 1,479,745,536 bytes |
+| citus columnar, serial `COPY` | 1 | 186.2 s | 1,662,558,208 bytes |
+| columnar, `pgcolumnar.parallel_copy` | 16 | 89.0 s | 1,478,057,984 bytes |
+| citus columnar, parallel `COPY` | 16 | 51.4 s | 1,663,025,152 bytes |
+| duckdb (persistent file) | - | 27.0 s | 3,238,277,120 bytes |
 
 Read the rows in pairs, by connection count. On a single connection columnar is
-2.39 times slower to load than Citus. At sixteen workers columnar is 1.76 times
-slower than Citus, and 1.72 times faster than heap. Comparing the two sixteen
-worker arms, the stored table is 11.1 percent smaller than Citus and 5.3 times
-smaller than heap. On the serial pair the size difference against Citus is 11.0
-percent, so the storage result does not depend on which loader wrote it.
+2.38 times slower to load than Citus (443.0 against 186.2). At sixteen workers
+columnar is 1.73 times slower than Citus (89.0 against 51.4), and 1.63 times
+faster than heap. Both figures are a property of the loader, not the format.
+Comparing the two sixteen worker arms, the stored table is 11.1 percent smaller
+than Citus and 5.3 times smaller than heap. On the serial pair the size
+difference against Citus is 11.0 percent, so the storage result does not depend
+on which loader wrote it. Columnar is the smallest of these on disk: 1.48 GB
+against Citus 1.66 GB and DuckDB 3.24 GB.
 
-Our own serial to bulk speedup is 5.17 times against their 3.81 times. That is a
+Our own serial to bulk speedup is 4.98 times against their 3.62 times. That is a
 statement about how our loader scales, and not a win over Citus on load time.
 
 An earlier version of this page and of issue #445 reported the parallel loader as
@@ -838,54 +836,78 @@ Query latency, hot times, same run:
 
 | arm | total across 43 queries | geometric mean against heap |
 | --- | ---: | ---: |
-| heap | 154.9 s | |
-| columnar | 127.7 s | 0.53 |
-| citus columnar | 251.7 s | 1.91 |
+| heap | 168.2 s | |
+| columnar | 140.4 s | 0.52 |
+| citus columnar | 266.9 s | 1.77 |
 
 Every figure in the last column is that row's own arm measured against heap, so
-the column can be read down. Columnar against Citus is 0.28, which belongs in
+the column can be read down. Columnar against Citus is 0.29, which belongs in
 this sentence rather than in the Citus row.
 
-Against heap, columnar wins 33 of the 43 queries, loses 6, and ties on 4. A tie
+Against heap, columnar wins 25 of the 43 queries, loses 13, and ties on 5. A tie
 is a query whose two arms are closer to each other than the run to run scatter
 of their own repeated tries. This run cannot separate them in either direction.
-The four are q13, q19, q34 and q35. Against Citus, columnar wins 39 of 43 with
-no tie, losing q16, q17, q19 and q33.
+The five are q13, q19, q29, q34 and q35. Against Citus, columnar wins 38 of 43
+with no tie, losing q15, q16, q17, q19 and q33.
 
-The six losses against heap all read wide text, and the cost columnar adds rises
-with the number of columns the query materialises:
+> The win count fell from 33 to 25 because the late-materialization decode gating (#452 phase 2)
+> shipped since the previous run, and it is a selectivity trade applied to every unprunable-qual
+> scan. On the query it is built for -- a wide `SELECT *` under a highly selective filter -- it is a
+> large win: q24 goes from 6098 ms to 3395 ms with gating on. But it evaluates the qual per 1024-row
+> vector to decide what to skip, and when the filter is not selective that evaluation buys nothing.
+> An A/B on this build and data (gating on vs off) attributes eight regressions to it -- q11, q12,
+> q14, q15, q25, q27, q31, q32, each about 1.2 to 2x -- which recover completely with gating off
+> while q24 loses its win. It is a deliberate trade, not a regression to hide, and the fix is to gate
+> the gating on selectivity (ideally a runtime probe, since a `LIKE '%...%'` estimate is unreliable):
+> issue #595.
+
+The wide-text losses read wide text under a predicate no min and max can bound,
+and the cost columnar adds rises with the number of columns the query
+materialises:
 
 | query | columns touched | heap | columnar | columnar adds | ratio |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| q29 | 1 | 8000.7 ms | 8434.2 ms | 433.4 ms | 1.05 |
-| q21 | 1 | 675.1 ms | 1346.2 ms | 671.1 ms | 1.99 |
-| q22 | 2 | 810.4 ms | 1417.4 ms | 607.0 ms | 1.75 |
-| q28 | 2 | 688.4 ms | 1498.0 ms | 809.7 ms | 2.18 |
-| q23 | 4 | 750.2 ms | 1982.6 ms | 1232.5 ms | 2.64 |
-| q24 | 105 | 711.5 ms | 4401.7 ms | 3690.2 ms | 6.19 |
+| q29 | 1 | 8423.8 ms | 8707.2 ms | 283.4 ms | 1.03 |
+| q21 | 1 | 794.8 ms | 1413.9 ms | 619.1 ms | 1.78 |
+| q22 | 2 | 919.7 ms | 1473.7 ms | 554.0 ms | 1.60 |
+| q28 | 2 | 798.6 ms | 2000.1 ms | 1201.5 ms | 2.50 |
+| q23 | 4 | 911.8 ms | 2317.7 ms | 1405.9 ms | 2.54 |
+| q24 | 105 | 777.0 ms | 3453.2 ms | 2676.2 ms | 4.44 |
 
-Read the added milliseconds, not the ratio. The ratio does not order these six
-the same way, and the reason is the baseline rather than anything about
-columnar. Queries q29 and q21 both touch one column, and both add a similar
-amount of work, 433 ms and 671 ms. But q29 sits on an 8,001 ms baseline and q21
-on a 675 ms one. The same kind of overhead therefore reads as 1.05 on one line
-and 1.99 on the next. The added cost rises with columns touched, with the one
-and two column groups overlapping. The ratio column rises only at the extremes.
+q29 is now a tie rather than a loss, and q24 improved from 6.19x to 4.44x
+col/heap; both are #452 phase 2 at work. Read the added milliseconds, not the
+ratio. The ratio does not order these the same way, and the reason is the
+baseline rather than anything about columnar. Queries q29 and q21 both touch one
+column, and both add a few hundred milliseconds of work, 283 ms and 619 ms. But
+q29 sits on an 8,424 ms baseline and q21 on a 795 ms one. The same kind of
+overhead therefore reads as 1.03 on one line and 1.78 on the next. The added
+cost rises with columns touched, with the one and two column groups overlapping.
+The ratio column rises only at the extremes.
 
-None of the six can be pruned by a minimum and maximum statistic, but not for one
+None of these can be pruned by a minimum and maximum statistic, but not for one
 reason. In q21 through q24 the predicate is a `LIKE` with a leading wildcard,
-which no min and max can bound. In q28 and q29 the predicate is `URL <> ''` and
+which no min and max can bound; the anchored `LIKE 'prefix%'` case does prune now
+(#510), but these are infix. In q28 and q29 the predicate is `URL <> ''` and
 `Referer <> ''`. Pruning those is possible in principle, but only for a row group
 whose minimum and maximum are both the empty string. That is a group in which
 every value is empty. An earlier version of this page said every one of these
-predicates had a leading wildcard. Two of them do not. The conclusion is
-unchanged: all six are the late materialisation problem, issue #452, and none is
-addressed by pushing text predicates down.
+predicates had a leading wildcard. Two of them do not. These are the
+late-materialisation shapes of issue #452, whose phase 1 and phase 2 both shipped
+since the previous run. Infix `LIKE '%...%'` is now handled by the phase-2 decode
+gating (#426/#586) rather than a substring pushdown, which is why q29 fell to a
+tie; the remaining losses are the selectivity trade of that gating, described
+above, and none is addressed by pushing text predicates down.
 
 Two limits on this table. Every arm was vacuumed and analyzed after loading, so
 these are vacuumed state numbers. For a columnar table that is not the normal
 state, because autovacuum cannot reach it. The columnar arm also runs with the
 analytical accelerators off, which is what a user gets by default.
+
+The accelerated arm (`columnar_tuned`, the analytical accelerators on) sharpens
+several results against heap: q2 to 0.13, q16 to 0.39, q17 to 0.41, q38 to 0.11,
+and q19 from a near-tie of 0.99 to a clear 0.76. Turning the accelerators on is
+not a clear win everywhere, though, and the 2026-08-05 run below records where it
+regresses.
 
 ### The 2026-08-05 run: storage and load
 
@@ -973,6 +995,11 @@ One query, `q21`, fails outright with the accelerations on. It is
 `COUNT(*) WHERE URL LIKE '%google%'`, and it raises
 `ERROR: unsupported byval length: -1`. That is issue #423. The harness reports a
 failed query and does not drop it.
+
+**Resolved since:** in the 2026-08-12 run above, `q21` no longer errors -- it
+returns 1399 ms with the accelerations on (`columnar_tuned`) and 1414 ms at
+defaults -- so #423 has been fixed in the interval, and this 2026-08-05
+subsection is kept only as the historical record of when it failed.
 
 ## What this page does not measure
 
