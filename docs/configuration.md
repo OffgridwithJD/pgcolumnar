@@ -29,6 +29,7 @@ pgColumnar has two kinds of settings:
 | `pgcolumnar.compression` | enum | `zstd` | Default codec for new chunks. One of `none`, `pglz`, `lz4`, `zstd`. `lz4` and `zstd` are available only when the extension was built with those libraries. |
 | `pgcolumnar.compression_level` | integer | `3` | Level for the `zstd` codec. Range 1 to 22. Higher levels compress more and write more slowly. |
 | `pgcolumnar.fsst_min_gain_percent` | integer | `5` | Minimum size reduction, in percent, for FSST string encoding to be kept for a column chunk. Range 0 to 99. See below. |
+| `pgcolumnar.parallel_flush` | boolean | `off` | Opt-in. When on, a stripe flush of two or more columns fans the per-column encode and compress work out to background workers. The stored bytes match the serial path. It helps one large flush of many numeric columns by up to 14 percent. A wide text-heavy flush regresses, because it copies the buffered bytes through shared memory. Frequent small flushes regress too, so it is off by default. Enable it for a wide numeric bulk load in the session that runs it. |
 
 To build the FSST codes for each vector is one of the larger costs of a load of
 text data. A value of `0` keeps FSST if it makes any reduction after the block
