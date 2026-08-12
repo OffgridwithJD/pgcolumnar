@@ -43,9 +43,9 @@ deliberately. A table of fully random values will therefore look worse, and a
 repetitive table will look better.
 
 **Compare the ratios between runs. Do not compare absolute milliseconds.** This
-run is on a larger machine than the previous record, 16 cores and 62 GB against
-8 and 12, so the absolute figures here are larger and different, and that is
-expected. Refer to [What changed](#what-changed-since-the-previous-run) for what
+run is on a larger machine than the previous record. It has 16 cores and 62 GB
+against 8 and 12. The absolute figures here are therefore larger and different,
+and that is expected. Refer to [What changed](#what-changed-since-the-previous-run) for what
 moved in the code. Trust the ratios, not the milliseconds.
 
 ## Storage
@@ -144,9 +144,9 @@ The columnar cost rises far more slowly than the row count. A single update is
 times the rows. A write to a columnar table marks the old row and appends a new
 one, and the row group is the unit of that work. The count of rows that are
 reached therefore matters much less than it does for heap. This is why the ratio
-against heap falls as the number of rows rises, from 64 times on a single row to
-below heap on the scattered batch: heap pays per row, and columnar pays per row
-group.
+against heap falls as the number of rows rises. It goes from 64 times on a single
+row to below heap on the scattered batch. Heap pays per row, and columnar pays
+per row group.
 
 Read the ratio for the scattered case and not the ratio for one row. A single-row
 update is the shape that columnar storage is worst at, and the table says so.
@@ -629,22 +629,23 @@ deltas between it and this run's `2fe6596` (Merge #592):
 - **Late-materialization decode gating shipped (#452, phase 2).** This is the
   trade described in the ClickBench section above. It is a large win on a wide
   `SELECT *` under a highly selective filter (q24 from 6098 ms to 3395 ms with
-  gating on) and a regression on unselective quals, so it moved the ClickBench win
-  count from 33 to 25. Gating it on selectivity is tracked as #595. Phase 1 also
+  gating on). It is a regression on unselective quals, so it moved the ClickBench
+  win count from 33 to 25. Gating it on selectivity is tracked as #595. Phase 1 also
   landed, so #452 is no longer open on either half.
 - **Detoast once (#587).** A toasted text value is now detoasted a single time per
-  scan rather than per reference, about 11 percent on queries over toasted text.
+  scan rather than per reference. This is about 11 percent on queries over toasted
+  text.
 - **FSST verdict cache (#472).** The FSST encode decision is cached rather than
   recomputed per vector.
 - **Bloom filters sized by distinct count (#467).** Filter width now follows the
   column's distinct count instead of a fixed provisioning.
 - **`pgcolumnar.parallel_flush` (#445 slice 4).** A measured opt-in, off by
   default. It helps a wide bulk load of many numeric columns by up to about 14
-  percent and regresses text-heavy or small, frequent flushes, because it copies
+  percent. It regresses text-heavy or small, frequent flushes, because it copies
   buffered data through shared memory. It is not a default.
 - **Anchored `LIKE 'prefix%'` now prunes (#510).** Infix `LIKE '%...%'` is handled
-  by phase-2 decode gating (#426/#586), not a substring filter, so #426 is
-  addressed for both the anchored and the infix case.
+  by phase-2 decode gating (#426/#586), not a substring filter. This addresses
+  #426 for both the anchored and the infix case.
 
 ## Joins
 
@@ -765,7 +766,7 @@ that. The benchmark definition they came from is the licensed material. The full
 list of prohibited uses is in `PROVENANCE.md`, beside the owner's determination
 of 2026-08-06.
 
-Two runs are recorded below. The 2026-08-12 run is the current one and adds a
+Two runs are recorded below. The 2026-08-12 run is the current one. It adds a
 Citus arm, the parallel loader, a Citus bulk arm, a DuckDB arm, and an accelerated
 columnar arm. The 2026-08-05 run is kept because it is a second independent run of
 the same benchmark. Both used PostgreSQL 18.4 non-assert, 16 cores, 62 GB of memory,
@@ -790,9 +791,9 @@ loaded sample is degenerate.
 
 ### The 2026-08-12 run: the bulk load is slower than Citus, not faster
 
-This run adds a Citus columnar arm, the parallel loader, a Citus bulk arm to
-compare the parallel loader against, a DuckDB arm, and an accelerated columnar
-arm. It is also a run that can cite the definition digest recorded above.
+This run adds a Citus columnar arm, the parallel loader, and a Citus bulk arm to
+compare the parallel loader against. It also adds a DuckDB arm and an accelerated
+columnar arm. It is also a run that can cite the definition digest recorded above.
 Upstream has not changed since:
 `create.sql 42d28575fd59fb4a`, `queries.sql a7d6673357348ee9`.
 
@@ -850,19 +851,19 @@ of their own repeated tries. This run cannot separate them in either direction.
 The five are q13, q19, q29, q34 and q35. Against Citus, columnar wins 38 of 43
 with no tie, losing q15, q16, q17, q19 and q33.
 
-> The win count fell from 33 to 25 because the late-materialization decode gating (#452 phase 2)
-> shipped since the previous run, and it is a selectivity trade applied to every unprunable-qual
-> scan. On the query it is built for -- a wide `SELECT *` under a highly selective filter -- it is a
-> large win: q24 goes from 6098 ms to 3395 ms with gating on. But it evaluates the qual per 1024-row
-> vector to decide what to skip, and when the filter is not selective that evaluation buys nothing.
-> An A/B on this build and data (gating on vs off) attributes eight regressions to it -- q11, q12,
-> q14, q15, q25, q27, q31, q32, each about 1.2 to 2x -- which recover completely with gating off
-> while q24 loses its win. It is a deliberate trade, not a regression to hide, and the fix is to gate
-> the gating on selectivity (ideally a runtime probe, since a `LIKE '%...%'` estimate is unreliable):
-> issue #595.
+> The win count fell from 33 to 25 because the late-materialization decode gating (#452 phase 2) shipped since the previous run.
+> It is a selectivity trade applied to every unprunable-qual scan.
+> On the query it is built for (a wide `SELECT *` under a highly selective filter) it is a large win.
+> Here q24 goes from 6098 ms to 3395 ms with gating on.
+> But it evaluates the qual per 1024-row vector to decide what to skip, and when the filter is not selective that evaluation buys nothing.
+> An A/B on this build and data (gating on vs off) attributes eight regressions to it.
+> They are q11, q12, q14, q15, q25, q27, q31, q32, each about 1.2 to 2x.
+> These recover completely with gating off, while q24 loses its win.
+> It is a deliberate trade, not a regression to hide.
+> The fix is to gate the gating on selectivity (ideally a runtime probe, since a `LIKE '%...%'` estimate is unreliable): issue #595.
 
-The wide-text losses read wide text under a predicate no min and max can bound,
-and the cost columnar adds rises with the number of columns the query
+The wide-text losses read wide text under a predicate no min and max can bound.
+The cost columnar adds rises with the number of columns the query
 materialises:
 
 | query | columns touched | heap | columnar | columnar adds | ratio |
@@ -886,7 +887,7 @@ The ratio column rises only at the extremes.
 
 None of these can be pruned by a minimum and maximum statistic, but not for one
 reason. In q21 through q24 the predicate is a `LIKE` with a leading wildcard,
-which no min and max can bound; the anchored `LIKE 'prefix%'` case does prune now
+which no min and max can bound. The anchored `LIKE 'prefix%'` case does prune now
 (#510), but these are infix. In q28 and q29 the predicate is `URL <> ''` and
 `Referer <> ''`. Pruning those is possible in principle, but only for a row group
 whose minimum and maximum are both the empty string. That is a group in which
@@ -895,8 +896,8 @@ predicates had a leading wildcard. Two of them do not. These are the
 late-materialisation shapes of issue #452, whose phase 1 and phase 2 both shipped
 since the previous run. Infix `LIKE '%...%'` is now handled by the phase-2 decode
 gating (#426/#586) rather than a substring pushdown, which is why q29 fell to a
-tie; the remaining losses are the selectivity trade of that gating, described
-above, and none is addressed by pushing text predicates down.
+tie. The remaining losses are the selectivity trade of that gating, described
+above. None is addressed by pushing text predicates down.
 
 Two limits on this table. Every arm was vacuumed and analyzed after loading, so
 these are vacuumed state numbers. For a columnar table that is not the normal
@@ -904,8 +905,8 @@ state, because autovacuum cannot reach it. The columnar arm also runs with the
 analytical accelerators off, which is what a user gets by default.
 
 The accelerated arm (`columnar_tuned`, the analytical accelerators on) sharpens
-several results against heap: q2 to 0.13, q16 to 0.39, q17 to 0.41, q38 to 0.11,
-and q19 from a near-tie of 0.99 to a clear 0.76. Turning the accelerators on is
+several results against heap. It brings q2 to 0.13, q16 to 0.39, q17 to 0.41,
+q38 to 0.11, and q19 from a near-tie of 0.99 to a clear 0.76. Turning the accelerators on is
 not a clear win everywhere, though, and the 2026-08-05 run below records where it
 regresses.
 
@@ -996,9 +997,9 @@ One query, `q21`, fails outright with the accelerations on. It is
 `ERROR: unsupported byval length: -1`. That is issue #423. The harness reports a
 failed query and does not drop it.
 
-**Resolved since:** in the 2026-08-12 run above, `q21` no longer errors -- it
+**Resolved since:** in the 2026-08-12 run above, `q21` no longer errors. It
 returns 1399 ms with the accelerations on (`columnar_tuned`) and 1414 ms at
-defaults -- so #423 has been fixed in the interval, and this 2026-08-05
+defaults. So #423 has been fixed in the interval. This 2026-08-05
 subsection is kept only as the historical record of when it failed.
 
 ## What this page does not measure
