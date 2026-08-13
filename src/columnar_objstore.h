@@ -33,10 +33,29 @@
 
 #include "postgres.h"
 
-#define PGCOLUMNAR_OBJSTORE_ABI 1
+#define PGCOLUMNAR_OBJSTORE_ABI 2
 
 /* An open remote object. The module owns everything behind this. */
 typedef struct PgColumnarObjHandle PgColumnarObjHandle;
+
+/*
+ * Connection configuration resolved from the FDW catalogs (#393 M4). NULL
+ * means "no catalog config": endpoint/region/credentials come from the
+ * ambient environment, allowed - the function-API paths, which are gated by
+ * pg_read_server_files and have no server object to hang a mapping on. A
+ * non-NULL config with allow_ambient=false and no credential triple makes the
+ * module refuse (SQLSTATE 28000) rather than fall back to the postmaster's
+ * identity: ambient is a privilege, not a default.
+ */
+typedef struct PgColumnarObjStoreConfig
+{
+	const char *endpoint;		/* NULL: AWS_ENDPOINT_URL */
+	const char *region;			/* NULL: AWS_REGION / AWS_DEFAULT_REGION */
+	const char *akid;			/* credential triple; akid+secret together */
+	const char *secret;
+	const char *token;			/* optional session token */
+	bool		allow_ambient;	/* may fall back to the environment */
+} PgColumnarObjStoreConfig;
 
 typedef struct PgColumnarObjStoreApi
 {
@@ -52,9 +71,11 @@ typedef struct PgColumnarObjStoreApi
 	 * Open `url` and report its size. Raises on failure, like every other read
 	 * path in this extension. `len` is required: the Parquet footer is located
 	 * from the end of the object, so a source that cannot report a length cannot
-	 * be read.
+	 * be read. `cfg` may be NULL (see PgColumnarObjStoreConfig).
 	 */
-	PgColumnarObjHandle *(*open) (const char *url, int64 *len);
+	PgColumnarObjHandle *(*open) (const char *url,
+								  const PgColumnarObjStoreConfig *cfg,
+								  int64 *len);
 
 	/*
 	 * Read exactly `n` bytes at `off`. The caller has already bounded the range

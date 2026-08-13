@@ -49,7 +49,10 @@
 #endif
 #include "executor/tuptable.h"
 #include "foreign/fdwapi.h"
+#include "catalog/pg_foreign_server.h"
+#include "catalog/pg_user_mapping.h"
 #include "foreign/foreign.h"
+#include "utils/syscache.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "catalog/pg_authid_d.h"
@@ -1647,7 +1650,8 @@ pq_source_prefetch(PqSource *src, int64 off, int64 n)
  * crafted file reports the same thing through either path.
  */
 static void
-pq_source_open(const char *path, PqSource *src, PqFile *pf)
+pq_source_open_cfg(const char *path, PqSource *src, PqFile *pf,
+				   const PgColumnarObjStoreConfig *cfg)
 {
 	uint8		tail[8];
 	uint8		head[4];
@@ -1704,7 +1708,7 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 		 */
 		src->winCtx = CurrentMemoryContext;
 		src->api = api;
-		src->priv = (void *) api->open(path, &src->len);
+		src->priv = (void *) api->open(path, cfg, &src->len);
 		src->ops = &pq_remote_ops;
 	}
 	else
@@ -1774,6 +1778,18 @@ pq_source_close(PqSource *src)
 		src->winLen = 0;
 	}
 	src->ops->close(src);
+}
+
+/*
+ * The function-API entry points (read_parquet, import, schema) have no server
+ * object and therefore no user mapping; they open with a NULL config, which
+ * the module treats as ambient-allowed. Their gate is pg_read_server_files,
+ * which already implies the postmaster's identity (#393 M4 design).
+ */
+static void
+pq_source_open(const char *path, PqSource *src, PqFile *pf)
+{
+	pq_source_open_cfg(path, src, pf, NULL);
 }
 
 
@@ -4204,6 +4220,85 @@ pqfdw_compute_needed(ForeignScanState *node, ImpTop *tops, int ntops,
 	return needTop;
 }
 
+/*
+ * Resolve the object-store configuration for a foreign table (#393 M4):
+ * endpoint and region from the SERVER options, the credential triple from the
+ * scanning user's USER MAPPING (else the PUBLIC mapping), probed without
+ * erroring because a mapping is optional here, unlike postgres_fdw. Ambient
+ * (environment) credentials are a privilege: a superuser, or a mapping a
+ * superuser marked credentials_required 'false'.
+ */
+static void
+pqfdw_objstore_config(Oid foreigntableid, PgColumnarObjStoreConfig *cfg)
+{
+	ForeignTable *ft = GetForeignTable(foreigntableid);
+	ForeignServer *server = GetForeignServer(ft->serverid);
+	HeapTuple	tp;
+	List	   *umoptions = NIL;
+	bool		credRequired = true;
+	ListCell   *lc;
+
+	memset(cfg, 0, sizeof(*cfg));
+
+	foreach(lc, server->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "endpoint") == 0)
+			cfg->endpoint = defGetString(def);
+		else if (strcmp(def->defname, "region") == 0)
+			cfg->region = defGetString(def);
+	}
+
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(server->serverid));
+	if (!HeapTupleIsValid(tp))
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(server->serverid));
+	if (HeapTupleIsValid(tp))
+	{
+		Datum		datum;
+		bool		isnull;
+
+		datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+								Anum_pg_user_mapping_umoptions, &isnull);
+		if (!isnull)
+			umoptions = untransformRelOptions(datum);
+		ReleaseSysCache(tp);
+	}
+
+	foreach(lc, umoptions)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "access_key_id") == 0)
+			cfg->akid = defGetString(def);
+		else if (strcmp(def->defname, "secret_access_key") == 0)
+			cfg->secret = defGetString(def);
+		else if (strcmp(def->defname, "session_token") == 0)
+			cfg->token = defGetString(def);
+		else if (strcmp(def->defname, "credentials_required") == 0)
+			credRequired = defGetBoolean(def);
+	}
+
+	/*
+	 * The validator cannot see across ALTER statements, so the pairing is
+	 * enforced here: half a credential is a misconfiguration, not a fallback
+	 * to somebody else's identity.
+	 */
+	if ((cfg->akid == NULL) != (cfg->secret == NULL))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("columnar: the user mapping for server \"%s\" carries "
+						"only half a credential", server->servername),
+				 errhint("Set both access_key_id and secret_access_key, or "
+						 "neither.")));
+
+	cfg->allow_ambient = superuser() || !credRequired;
+}
+
 static void
 pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 {
@@ -4224,6 +4319,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 	bool	   *partNull = NULL;
 	List	   *partQuals = NIL;
 	TupleTableSlot *partSlot = NULL;
+	PgColumnarObjStoreConfig oscfg;
 
 	/* nothing to do for a plan-only (EXPLAIN without ANALYZE) invocation */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -4233,6 +4329,8 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
+
+	pqfdw_objstore_config(RelationGetRelid(rel), &oscfg);
 
 	path = pqfdw_get_path(RelationGetRelid(rel));
 	if (path == NULL)
@@ -4300,7 +4398,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 		}
 
 		st->filesRead++;
-		pq_source_open((char *) lfirst(lc), &src, &pf);
+		pq_source_open_cfg((char *) lfirst(lc), &src, &pf, &oscfg);
 		pq_check_row_groups(&pf, (char *) lfirst(lc));
 		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, partMask);
 
@@ -4467,11 +4565,60 @@ pgcolumnar_parquet_fdw_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 						 errmsg("\"partition_columns\" is not a valid comma-separated column list")));
 		}
+		else if (catalog == ForeignServerRelationId &&
+				 (strcmp(def->defname, "endpoint") == 0 ||
+				  strcmp(def->defname, "region") == 0))
+		{
+			/*
+			 * Non-secret connection config only (#393 M4). srvoptions is
+			 * world-readable, which is exactly why nothing secret is accepted
+			 * here.
+			 */
+			if (defGetString(def)[0] == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"%s\" option cannot be empty", def->defname)));
+			if (strcmp(def->defname, "endpoint") == 0 &&
+				pg_strncasecmp(defGetString(def), "http://", 7) != 0 &&
+				pg_strncasecmp(defGetString(def), "https://", 8) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"endpoint\" must be an http:// or https:// URL")));
+		}
+		else if (catalog == UserMappingRelationId &&
+				 (strcmp(def->defname, "access_key_id") == 0 ||
+				  strcmp(def->defname, "secret_access_key") == 0 ||
+				  strcmp(def->defname, "session_token") == 0))
+		{
+			/* secrets live HERE and only here: pg_user_mapping is protected */
+			if (defGetString(def)[0] == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"%s\" option cannot be empty", def->defname)));
+		}
+		else if (catalog == UserMappingRelationId &&
+				 strcmp(def->defname, "credentials_required") == 0)
+		{
+			/*
+			 * password_required's shape: setting it false hands the mapped
+			 * role the postmaster's ambient identity, so only a superuser may
+			 * do that. defGetBoolean also rejects a non-boolean value.
+			 */
+			if (!defGetBoolean(def) && !superuser())
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("only a superuser may set \"credentials_required\" to false"),
+						 errdetail("It permits the mapped role to use the "
+								   "server process's ambient credentials.")));
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid option \"%s\"", def->defname),
-					 errhint("The pgcolumnar_parquet wrapper accepts the foreign-table options \"path\" and \"partition_columns\".")));
+					 errhint("Foreign tables accept \"path\" and \"partition_columns\"; "
+							 "servers accept \"endpoint\" and \"region\"; user mappings "
+							 "accept \"access_key_id\", \"secret_access_key\", "
+							 "\"session_token\", and \"credentials_required\".")));
 	}
 
 	PG_RETURN_VOID();

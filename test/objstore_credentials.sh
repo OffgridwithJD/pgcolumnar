@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+#
+# pgColumnar #393 M4: the validator split and catalog credentials.
+#
+# The placement policy is enforced at DDL time: non-secret config (endpoint,
+# region) lives on the SERVER, secrets (access_key_id, secret_access_key,
+# session_token) live ONLY on a USER MAPPING, and every misplacement is
+# HV00D at CREATE/ALTER -- so a secret can never land in a world-readable
+# catalog. Ambient (postmaster environment) credentials become a privilege:
+# superusers, or a mapping a superuser marked credentials_required 'false'
+# (password_required's shape). See design/ISSUE_393_M4_CREDENTIALS.md.
+#
+# The catalog arms run with NO AWS_* in the postmaster environment at all, so
+# nothing ambient can make them pass vacuously: a green read in phase 1 proves
+# the catalog options reached the wire. Per-user resolution is proven by two
+# roles reading the SAME table over the SAME server where the only variable is
+# their mapping (alice's carries the right secret, bob's a wrong one, and the
+# SigV4-verifying fixture judges).
+#
+# Usage:  test/objstore_credentials.sh [PG_CONFIG]
+# Written fresh for pgColumnar.
+
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+python3 -c 'import pyarrow' 2>/dev/null || pgc_skip pyarrow "pyarrow is required to write the fixture"
+
+S3_PORT="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI")"
+S3_LOG="$PGC_WORKDIR/cred.log"
+SRV_PID=""
+AKID="PGCTESTKEYID"
+SECRET="pgctest-good-secret"
+BADSECRET="pgctest-wrong-secret"
+REGION="pgc-test-1"
+BUCKET="pgc-bucket"
+
+objstore_cred_teardown() {
+	[ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
+	pgc_teardown
+}
+trap objstore_cred_teardown EXIT INT TERM
+
+pg_restart_env() {
+	pgc_pg "pg_ctl -D '$PGC_PGDATA' stop -m fast -w" >/dev/null 2>&1
+	pgc_pg "$* pg_ctl -D '$PGC_PGDATA' -l '$PGC_LOGFILE' start -w" >/dev/null 2>&1
+	for _ in $(seq 1 30); do
+		[ -n "$(q 'SELECT 1')" ] && return 0
+		sleep 0.5
+	done
+	echo "FATAL: cluster did not come back after env restart"; exit 1
+}
+
+sqlstate_of() {  # sqlstate_of <sql> [role]
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "${2:-postgres}" \
+		-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+\\set VERBOSITY sqlstate
+$1;
+SQLEOF
+}
+q_as() {  # q_as <role> <sql>
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" \
+		-d "$PGC_DB" -At -c "$2" 2>/dev/null || true
+}
+
+# ---- fixture + verifying server --------------------------------------------
+G=3; NCOLS=4; ROWS_PER_GROUP=6000
+mkdir -p "$PGC_WORKDIR/$BUCKET"
+python3 - "$PGC_WORKDIR/$BUCKET/fixture.parquet" <<PYEOF
+import sys
+import pyarrow as pa, pyarrow.parquet as pq
+G, NCOLS, RPG = $G, $NCOLS, $ROWS_PER_GROUP
+n = G * RPG
+cols = {("c%d" % i): pa.array([(i + 1) * v for v in range(n)], pa.int64())
+        for i in range(NCOLS)}
+pq.write_table(pa.table(cols), sys.argv[1], row_group_size=RPG,
+               data_page_size=4096, compression="NONE", use_dictionary=False)
+PYEOF
+python3 "$(dirname "${BASH_SOURCE[0]}")/objstore_http_server.py" \
+	--dir "$PGC_WORKDIR" --port "$S3_PORT" --log "$S3_LOG" \
+	--sigv4-key "$AKID" --sigv4-secret "$SECRET" --sigv4-region "$REGION" \
+	> "$PGC_WORKDIR/cred_server.out" 2>&1 &
+SRV_PID=$!
+for _ in $(seq 1 50); do
+	grep -q READY "$PGC_WORKDIR/cred_server.out" 2>/dev/null && break
+	sleep 0.1
+done
+check "premise: sigv4 fixture server is up" \
+	"$(grep -c READY "$PGC_WORKDIR/cred_server.out" 2>/dev/null)" "1"
+
+COLDEFS="$(python3 -c "print(', '.join('c%d int8' % i for i in range($NCOLS)))")"
+
+# ---- roles ------------------------------------------------------------------
+for r in cred_alice cred_bob cred_carol; do
+	psql_run "CREATE ROLE $r LOGIN;"
+	psql_run "GRANT pg_read_server_files TO $r;"
+done
+
+# ---- placement arms (the validator split) -----------------------------------
+check "placement: secret on a SERVER is HV00D" \
+	"$(sqlstate_of "CREATE SERVER badsrv FOREIGN DATA WRAPPER pgcolumnar_parquet OPTIONS (secret_access_key 'x')")" "HV00D"
+check "placement: endpoint on a TABLE is HV00D" \
+	"$(sqlstate_of "CREATE SERVER tmpsrv FOREIGN DATA WRAPPER pgcolumnar_parquet; CREATE FOREIGN TABLE ft_bad ($COLDEFS) SERVER tmpsrv OPTIONS (endpoint 'x')")" "HV00D"
+
+psql_run "CREATE SERVER csrv FOREIGN DATA WRAPPER pgcolumnar_parquet
+          OPTIONS (endpoint 'http://127.0.0.1:$S3_PORT', region '$REGION');"
+check "placement: endpoint and region on the SERVER are accepted" \
+	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvname = 'csrv'")" "1"
+check "placement: a credential on a USER MAPPING is accepted" \
+	"$(sqlstate_of "CREATE USER MAPPING FOR postgres SERVER csrv
+	   OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET')")" ""
+check "placement: endpoint on a USER MAPPING is HV00D" \
+	"$(sqlstate_of "CREATE USER MAPPING FOR cred_alice SERVER csrv OPTIONS (endpoint 'x')")" "HV00D"
+
+psql_run "GRANT USAGE ON FOREIGN SERVER csrv TO cred_alice, cred_bob, cred_carol;"
+psql_run "CREATE USER MAPPING FOR cred_alice SERVER csrv
+          OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET');"
+psql_run "CREATE USER MAPPING FOR cred_bob SERVER csrv
+          OPTIONS (access_key_id '$AKID', secret_access_key '$BADSECRET');"
+
+check "placement: a non-superuser cannot set credentials_required false (42501)" \
+	"$(sqlstate_of "ALTER USER MAPPING FOR cred_alice SERVER csrv OPTIONS (ADD credentials_required 'false')" cred_alice)" "42501"
+check "placement: a superuser can (for carol, used below)" \
+	"$(sqlstate_of "CREATE USER MAPPING FOR cred_carol SERVER csrv OPTIONS (credentials_required 'false')")" ""
+
+# ---- tables -----------------------------------------------------------------
+psql_run "CREATE FOREIGN TABLE flocal ($COLDEFS) SERVER csrv OPTIONS (path '$PGC_WORKDIR/$BUCKET/fixture.parquet');"
+psql_run "CREATE FOREIGN TABLE fs3 ($COLDEFS) SERVER csrv OPTIONS (path 's3://$BUCKET/fixture.parquet');"
+psql_run "GRANT SELECT ON flocal, fs3 TO cred_alice, cred_bob, cred_carol;"
+
+# ---- phase 1: NO AWS environment anywhere -----------------------------------
+# The premise and the point: the postmaster has no AWS_* variables, so every
+# green below can only have come from the catalogs.
+psql_run "DROP USER MAPPING FOR postgres SERVER csrv;"
+check "premise: without mapping or environment, even a superuser gets 28000" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3")" "28000"
+psql_run "CREATE USER MAPPING FOR postgres SERVER csrv
+          OPTIONS (access_key_id '$AKID', secret_access_key '$SECRET');"
+
+check "catalog: mapping + server options reach the wire (differential)" \
+	"$(pgc_set_hash "SELECT * FROM fs3")" "$(pgc_set_hash "SELECT * FROM flocal")"
+check_num "catalog: count(*) with catalog credentials only" \
+	"$(q "SELECT count(*) FROM fs3")" "$((G * ROWS_PER_GROUP))"
+
+check_num "per-user: alice (good secret in her mapping) reads" \
+	"$(q_as cred_alice "SELECT count(*) FROM fs3")" "$((G * ROWS_PER_GROUP))"
+check "per-user: bob (wrong secret in his mapping) is refused 28000" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_bob)" "28000"
+check "ambient-is-privilege: carol (credentials_required=false, but no env exists) is 28000" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_carol)" "28000"
+
+# ---- no-leak arm ------------------------------------------------------------
+BOB_ERR="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U cred_bob \
+	-d "$PGC_DB" -qtA 2>&1 <<SQLEOF
+\\set VERBOSITY verbose
+SELECT count(*) FROM fs3;
+SQLEOF
+)"
+EXPL="$(q "EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM fs3")"
+check_num "no-leak: bob's verbose error carries no secret" \
+	"$(grep -c -e "$SECRET" -e "$BADSECRET" <<<"$BOB_ERR")" "0"
+check "premise: bob's error was a real refusal, not silence" \
+	"$([ -n "$BOB_ERR" ] && echo yes)" "yes"
+check_num "no-leak: EXPLAIN VERBOSE carries no secret" \
+	"$(grep -c -e "$SECRET" -e "$BADSECRET" <<<"$EXPL")" "0"
+check_num "no-leak: srvoptions carry no secret (by construction)" \
+	"$(q "SELECT count(*) FROM pg_foreign_server WHERE srvoptions::text LIKE '%$SECRET%'")" "0"
+
+# ---- phase 2: environment present; ambient is still a privilege -------------
+pg_restart_env "AWS_ENDPOINT_URL='http://127.0.0.1:$S3_PORT'" \
+	"AWS_ACCESS_KEY_ID='$AKID'" "AWS_SECRET_ACCESS_KEY='$SECRET'" \
+	"AWS_REGION='$REGION'"
+
+check_num "ambient: carol (credentials_required=false) now reads via the environment" \
+	"$(q_as cred_carol "SELECT count(*) FROM fs3")" "$((G * ROWS_PER_GROUP))"
+psql_run "DROP USER MAPPING FOR cred_carol SERVER csrv;"
+check "ambient: without her mapping, carol is refused despite the environment" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3" cred_carol)" "28000"
+psql_run "DROP USER MAPPING FOR postgres SERVER csrv;"
+check_num "ambient: a superuser with no mapping reads via the environment" \
+	"$(q "SELECT count(*) FROM fs3")" "$((G * ROWS_PER_GROUP))"
+
+pgc_summary
