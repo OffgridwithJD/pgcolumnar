@@ -6,13 +6,31 @@ model), a synthesized TDD plan, and an adversarial critique that overturned the
 plan's own recommendation. Every load-bearing citation was read against `main`
 and the two crux claims were re-verified by hand before this doc was written.
 
-## TL;DR — RETRACTED. There is no recoverable gap. #452 Phase 1a already did it.
+## TL;DR — RETRACTED for the row path; the fold path's gap is REAL (second correction)
 
-**An earlier revision of this doc reported the Step 1 gate CLEARED at 41–58%
-recoverable. That measurement was invalid and the conclusion is withdrawn.** The
-error was caught by implementing Step 2, verifying the work-done counter, and
-finding it read **0** — which exposed that the modified path is not the path the
-workload uses, and that the gate compared two different execution paths.
+**This TL;DR has been corrected twice, and both corrections are kept legible
+because each one was caught by the discipline the other skipped.**
+
+1. An earlier revision reported the Step 1 gate CLEARED at 41–58% recoverable.
+   That measurement compared two different execution paths and is withdrawn.
+   Caught by implementing Step 2 and finding its work-done counter read 0.
+2. The first retraction then over-corrected: it concluded "the fold path never
+   carries payload, so there is nothing to defer anywhere." **That was an int8
+   artifact, not an architecture fact** (review on PR #601): the Step-2 counter
+   read 0 because the fixture's payload was int8, and `sum(int8)` is one of the
+   shapes the fold classifier rejects. Payload-carrying shapes over int2, int4,
+   float4 and float8 DO take the fold, their payload cost is flat in
+   selectivity (paid for every non-skipped row before the key check), and the
+   measured recoverable share is ~11% of a wide query on incompressible float8
+   at 1% selectivity, with a derived ceiling of ~4.6x on highly compressible
+   payload.
+
+**What stands: there is no recoverable gap on the ROW path — #452 Phase 1a
+already defers there.** On the (default-off) fold path the gap the
+pre-retraction plan targeted is real on the shapes below, bounded by the gather
+share of payload cost, and the cost-model requirement (kill shot 4's
+successor) is re-confirmed: recoverable ≈ gather × (1 − selectivity), so at
+high survival there is nothing to win.
 
 ### What the invalid gate did wrong
 
@@ -42,26 +60,48 @@ decode (comp-vs-rand at 1%: 421 vs 537 ms, so 116 ms is payload decode), neither
 of which is cheaply position-deferrable (`decode_delta/dict/fsst` are sequential
 streams — the adversary's original point).
 
-### Why the batch-fold path cannot help
+### The fold-path census (corrects "it never carries payload")
 
-`pgcolumnar_native_batch_fold` — the only place lacking position-level late-mat —
-is taken **only for aggregates with no payload column** (`count(*)`). The moment a
-query aggregates a payload column it takes the row path, where deferral already
-happens. So there is nothing to defer on the fold path: it never carries payload.
-Verified: every `sum(pN)` shape reports `Batch Fold: no`.
+`pgcolumnar_batch_agg_ok` (`columnar_vector.c`) accepts `count(*)`,
+`count(col)`, and `sum`/`avg` over int2, int4, float4 and float8 — all
+payload-carrying — and rejects `sum`/`avg` over int8 (whose transition type is
+numeric) and numeric, `min`/`max`, and any aggregate list containing one
+ineligible member. Verified in code and empirically on two independent lanes
+(PG18 assert in the #601 review; PG17 non-assert by the author:
+`sum(int4)`/`sum(float8)`/`avg(int4)` report `Batch Fold: yes` under ANALYZE,
+`sum(int8)`/`max` report `no`, on the post-#602 line that reports the fold
+that RAN).
 
-### Outcome
+The earlier claim "every `sum(pN)` shape reports Batch Fold: no" was a true
+observation whose scope was the fixture's payload type — int8 — not the fold
+path. The Step-2 work-done counter read 0 for the same reason. The #601
+review's like-with-like measurement on float8 payload (fold pinned in every
+timed run, arms interleaved, median of 7) decomposes the fold's payload cost
+at 1% selectivity into ~2,579 ms whole-vector decode (kill shot 1 stands: the
+reorder cannot recover it) and ~330 ms gather (~10.3 ns per row·col,
+reproducing this doc's 11.7 ns figure on the valid comparison), against a
+2,998 ms fold total — flat to 3,147 ms at 99% selectivity.
 
-The adversary's original critique was right, and I overturned it on a bad number.
-The corrected measurement restores it. **#405 item 1 is already implemented by
-#452 Phase 1a. Steps 2–4 are dropped. The Step 2 branch was abandoned unpushed.**
-The remaining possible work — extending batch fold to payload aggregates for its
-column-at-a-time efficiency — is a different optimization (not late materialization)
-and is out of scope for #405.
+### Outcome (corrected on PR #601 review)
 
-The rest of this document below is the pre-retraction plan, kept for the verified
-architecture facts (the plumbing verdict, the two decode granularities, the
-#452 1a row-path deferral) but NOT as a recommendation to implement.
+**Row path: #405 item 1 is implemented by #452 Phase 1a.** Steps 2–4 as
+originally scoped (row-path-shaped) stay dropped; the abandoned Step 2 branch
+stays abandoned.
+
+**Fold path: the gap is real on the census shapes above and the pre-retraction
+plan's Step 2 (the gather reorder) is worth ~11% of a wide float8 query at 1%
+selectivity, with a ~4.6x derived ceiling on highly compressible payload.**
+Whether that justifies rebuilding Step 2 is a scheduling call recorded on
+#405, not made here; two facts bound it: `enable_ungrouped_vector_agg`
+defaults to off, so no default configuration reaches the gap, and Step 4's
+cost model is mandatory because the recoverable share vanishes at high
+selectivity. The byval-only gate stands, so none of this touches q24.
+
+The rest of this document below is the pre-retraction plan, kept for the
+verified architecture facts (the plumbing verdict, the two decode
+granularities, the #452 1a row-path deferral, the fold-path kill shots that
+survive) — its Step 2/4 shapes are the starting point if the scheduling call
+above is ever taken.
 
 ---
 
