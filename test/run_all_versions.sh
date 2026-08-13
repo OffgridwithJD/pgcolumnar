@@ -148,6 +148,7 @@ SUITES=(
 	native_vecskip
 	native_writer
 	native_zonemap
+	objstore_allowlist
 	objstore_credentials
 	objstore_http_read
 	objstore_module

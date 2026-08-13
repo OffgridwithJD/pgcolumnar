@@ -191,6 +191,7 @@ extern bool pgcolumnar_enable_column_projection;
 extern bool pgcolumnar_enable_custom_scan;
 extern bool pgcolumnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 extern bool pgcolumnar_objstore_buffered;	/* chunk-granular remote reads (#393) */
+extern char *pgcolumnar_objstore_allowed_endpoints; /* #393 allow-list, SUSET */
 
 /* Phase 6 GUCs (spec 8.3) */
 extern bool pgcolumnar_enable_vectorization;	/* vectorized aggregate path */

@@ -32,6 +32,10 @@
 
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The endpoint allow-list (#393) defaults to deny-all; this suite's fixture is
+# the documented configuration example for a trusted local endpoint.
+export PGC_EXTRA_CONF="pgcolumnar.objstore_allowed_endpoints='127.0.0.1'"
+
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 python3 -c 'import pyarrow' 2>/dev/null || pgc_skip pyarrow "pyarrow is required to write the fixture"
