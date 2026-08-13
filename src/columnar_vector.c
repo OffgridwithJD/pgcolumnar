@@ -3618,8 +3618,23 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 	PgColumnarExplainPushedDown(state->nscankeys, es);
 	PgColumnarExplainVectorPredicates(state->npreds, es);
 	if (state->scanFold)
+	{
+		/*
+		 * Plain EXPLAIN has no execution to report, so it shows the shape
+		 * prediction. Once the node has run, report what actually happened:
+		 * a predicted-eligible fold can still fall back to the row path (a
+		 * column added after some row groups), and printing the prediction
+		 * under ANALYZE reported "yes" for a row-path run (#602).
+		 *
+		 * A node ANALYZE marks "(never executed)" has no stats either, so
+		 * the prediction prints there too; beside that marker it means
+		 * "would have been attempted", not "ran".
+		 */
 		ExplainPropertyText("Columnar Batch Fold",
-							state->batchEligible ? "yes" : "no", es);
+							(state->haveStats ? state->batchFolded
+											  : state->batchEligible)
+							? "yes" : "no", es);
+	}
 
 	if (state->haveStats)
 	{
