@@ -106,7 +106,7 @@ check_num "positive control: it IS defined in the module, so nm really looked" \
 for url in "s3://bucket/key.parquet" "gs://bucket/key.parquet" "https://host/key.parquet"; do
 	out=$(psql_run "SELECT * FROM pgcolumnar.read_parquet('$url') AS (a int)" 2>&1)
 	check "a $(cut -d: -f1 <<<"$url") URL reports an object-storage error, not a missing file" \
-		"$([ "$(grep -c 'object storage is not implemented\|is not supported\|requires the object-store module' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
+		"$([ "$(grep -c 'object storage is not implemented\|is not supported\|requires the object-store module\|requires AWS_' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
 	check_num "and does NOT report it as a missing file" \
 		"$(grep -c 'No such file or directory' <<<"$out")" "0"
 done
@@ -206,7 +206,12 @@ mv "$MOD.probe" "$MOD" 2>/dev/null
 #    queries, one session, two different errors, the second one plausible.
 #
 # Both reads run in ONE psql session on purpose. Separate sessions cannot see it.
-Q="SELECT * FROM pgcolumnar.read_parquet('s3://bucket/key.parquet') AS (a int)"
+# gs:// deliberately: the scheme must be one the module recognizes as remote
+# but does NOT handle. s3:// stopped qualifying when #393 M2 implemented it
+# (its no-environment error is pinned in the loop above and in
+# objstore_s3_read.sh); gs:// stays unhandled until a GCS milestone exists,
+# at which point this becomes az:// or a reserved test scheme.
+Q="SELECT * FROM pgcolumnar.read_parquet('gs://bucket/key.parquet') AS (a int)"
 two_reads() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
 		-At -q -c "$Q" -c "$Q" 2>&1

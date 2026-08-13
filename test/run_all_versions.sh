@@ -148,6 +148,7 @@ SUITES=(
 	native_zonemap
 	objstore_http_read
 	objstore_module
+	objstore_s3_read
 	objstore_stash_recovery
 	parallel
 	parallel_copy
