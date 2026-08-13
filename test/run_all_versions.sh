@@ -83,6 +83,7 @@ SUITES=(
 	index_only
 	isolation
 	logical_subscriber
+	maintenance_due
 	native_agg
 	native_agg_addcolumn
 	native_agg_deletes

@@ -1470,3 +1470,93 @@ $$;
 
 COMMENT ON FUNCTION pgcolumnar.analyze(regclass, text[])
 	IS 'collect per-column statistics by reading one column at a time rather than sampling every column (#414); null_frac, n_distinct and the most-common frequencies all come from that read, so they describe one population (#485); core ANALYZE remains the correctness path and nothing schedules this, see #415';
+
+-- pgcolumnar.maintenance_due (#415): report whether an online maintenance verb
+-- is worth running on a columnar table, from table statistics alone. A pure
+-- report -- it takes no lock and rewrites nothing. A cron job or an operator
+-- consults it; a background worker, if one is ever built, is a thin consumer of
+-- the same verdict (see #415).
+--
+-- Thresholds are PARAMETERS, not GUCs: the pgcolumnar GUC prefix is reserved
+-- (MarkGUCPrefixReserved), so an unregistered pgcolumnar.* GUC is rejected, and
+-- a report is better configured at the call site than globally. The defaults are
+-- measured on #415 -- compact_rewrite's overhead reaches ~10% of a query at a
+-- deleted fraction of 0.2 (the knee), and clustering decay is already costly at
+-- the smallest fraction measured, so recluster gates low at 0.05.
+--
+-- recluster_due gates on the sort key EXISTING. sort_status() reports a
+-- never-ordered table as entirely appended, because it has no sorted run; that
+-- is not decay and there is no ordering to restore, so the sort-key guard
+-- suppresses the recommendation there.
+CREATE FUNCTION pgcolumnar.maintenance_due(
+	rel regclass,
+	compact_due_fraction float8 DEFAULT 0.2,
+	recluster_due_fraction float8 DEFAULT 0.05,
+	OUT total_rows bigint,
+	OUT deleted_rows bigint,
+	OUT deleted_fraction float8,
+	OUT sort_key name[],
+	OUT appended_groups bigint,
+	OUT appended_rows bigint,
+	OUT appended_fraction float8,
+	OUT compact_rewrite_due boolean,
+	OUT recluster_due boolean,
+	OUT recommendation text)
+	RETURNS record
+	-- SECURITY DEFINER, mirroring stats(): the report reads pgcolumnar's internal
+	-- catalogs through sort_status(), which ordinary roles cannot SELECT, so an
+	-- invoker-rights function false-denied every non-superuser caller -- the
+	-- cron/monitoring role this report is for. require_caller_select (inside
+	-- stats()) still gates the REAL caller via GetOuterUserId(), so definer rights
+	-- do not widen who may read a table's statistics. search_path is pinned as a
+	-- definer function must.
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
+	AS $maintenance_due$
+DECLARE
+	st_rows bigint;
+	st_del  bigint;
+	ss      record;
+BEGIN
+	-- stats() enforces require_caller_select(rel) before it returns a row, so a
+	-- caller without SELECT on rel is refused here rather than reported to.
+	SELECT COALESCE(sum(s.rowcount), 0), COALESCE(sum(s.deletedrows), 0)
+	  INTO st_rows, st_del
+	  FROM pgcolumnar.stats(rel) s;
+
+	SELECT * INTO ss FROM pgcolumnar.sort_status(rel);
+
+	total_rows   := st_rows;
+	deleted_rows := st_del;
+	deleted_fraction := CASE WHEN st_rows > 0
+							 THEN st_del::float8 / st_rows ELSE 0 END;
+
+	sort_key        := ss.sort_key;
+	appended_groups := ss.appended_groups;
+	appended_rows   := ss.appended_rows;
+	appended_fraction := CASE WHEN (ss.sorted_rows + ss.appended_rows) > 0
+							  THEN ss.appended_rows::float8
+								   / (ss.sorted_rows + ss.appended_rows)
+							  ELSE 0 END;
+
+	compact_rewrite_due := (deleted_fraction >= compact_due_fraction);
+	-- A sorted RUN must exist for recluster to mean anything. sort_status()
+	-- reports a never-ordered table as entirely appended (no run), and
+	-- vacuum_sorted() establishes a run without setting options.sort_by, so the
+	-- run -- sorted_groups > 0 -- is the signal, not the sort_by label (sort_key
+	-- is reported for information and may be NULL on an ordered table).
+	recluster_due := (ss.sorted_groups > 0
+					  AND ss.appended_groups > 0
+					  AND appended_fraction >= recluster_due_fraction);
+
+	recommendation := NULLIF(
+		concat_ws(', ',
+			CASE WHEN compact_rewrite_due THEN 'compact_rewrite' END,
+			CASE WHEN recluster_due THEN 'recluster' END),
+		'');
+	RETURN;
+END;
+$maintenance_due$;
+
+COMMENT ON FUNCTION pgcolumnar.maintenance_due(regclass, float8, float8)
+	IS 'report whether an online maintenance verb (compact_rewrite, recluster) is worth running, from table statistics alone; thresholds are parameters with defaults measured on #415; pure report, takes no lock and rewrites nothing (#415)';
