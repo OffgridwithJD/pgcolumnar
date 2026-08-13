@@ -194,7 +194,16 @@ CREATE TABLE pgcolumnar.storage (
 	-- sorted_through]; a bare upper bound cannot exclude a concurrently written
 	-- group whose id was drawn below the rewrite's own first id, which is how a
 	-- foreign group came to be counted as ordered.
-	sorted_from bigint
+	sorted_from bigint,
+	-- What the ordered run is clustered BY and HOW (#415). sorted_by is the
+	-- clustering columns; sorted_kind is 'zorder' (recluster/cluster) or
+	-- 'lexicographic' (vacuum_sorted). Both NULL on an unordered storage, or on
+	-- one ordered before this column existed -- treated as "unknown key", which
+	-- the self-gating recluster never skips. They let recluster tell "already
+	-- clustered by these columns this way" from "clustered by something else",
+	-- so it returns without a full rewrite when nothing decayed.
+	sorted_by name[],
+	sorted_kind text
 );
 CREATE UNIQUE INDEX storage_pkey
 	ON pgcolumnar.storage USING btree (storage_id);
@@ -733,7 +742,14 @@ BEGIN
 		FROM pgcolumnar.row_group rg
 		JOIN s ON rg.storage_id = s.storage_id
 	)
-	SELECT (SELECT o.sort_by FROM pgcolumnar.options o WHERE o.regclass = rel),
+	-- sort_key reports the ACTUAL clustering recorded by the last recluster
+	-- (#415, storage.sorted_by), falling back to the declared options.sort_by
+	-- when nothing has been reclustered yet. Before #415 this read only the
+	-- declared key, so it was NULL on a table clustered but never declared.
+	SELECT COALESCE(
+			(SELECT st.sorted_by FROM pgcolumnar.storage st
+			 WHERE st.storage_id = pgcolumnar.get_storage_id(rel)),
+			(SELECT o.sort_by FROM pgcolumnar.options o WHERE o.regclass = rel)),
 		   (SELECT count(*)::bigint FROM g),
 		   (SELECT count(*)::bigint FROM g WHERE g.in_run),
 		   (SELECT count(*)::bigint FROM g WHERE NOT g.in_run),

@@ -42,7 +42,14 @@ extern List *PgColumnarComputeAllVisibleGroups(uint64 storageId,
 extern void PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s);
 
 extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
-									int64 lastGroup);
+									  int64 lastGroup, List *sortByNames,
+									  const char *sortedKind);
+/* #415: the current run's clustering key (a list of column-name strings, NIL
+ * if unknown) and kind ('zorder'/'lexicographic'/NULL), for recluster's
+ * self-gate and sort_status. */
+extern void PgColumnarGetSortedInfo(uint64 storageId, int64 *firstGroup,
+									int64 *lastGroup, List **sortByNames,
+									char **sortedKind);
 
 extern void PgColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg);
 
