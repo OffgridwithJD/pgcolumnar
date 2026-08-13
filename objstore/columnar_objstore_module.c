@@ -40,12 +40,17 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "common/cryptohash.h"
+#include "common/hmac.h"
+#include "common/sha2.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "pgtime.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "utils/memutils.h"
@@ -78,6 +83,20 @@ struct PgColumnarObjHandle
 	int64		len;			/* object length from open's HEAD */
 	uint64		served;			/* requests completed on this connection */
 
+	/*
+	 * SigV4 (#393 M2). sign=false is the plain-http M1 path, byte-identical to
+	 * before. The credential strings come from the ambient environment at open
+	 * and live with the handle; the signing key is the four-HMAC derivation,
+	 * cached per UTC day the way pgBackRest caches it.
+	 */
+	bool		sign;
+	char	   *akid;
+	char	   *secret;
+	char	   *token;			/* session token, or NULL */
+	char	   *region;
+	char		sigDate[9];		/* YYYYMMDD the cached key was derived for */
+	uint8		sigKey[PG_SHA256_DIGEST_LENGTH];
+
 	/* receive staging */
 	uint8	   *rb;
 	int			rb_off;			/* consumed up to here */
@@ -85,6 +104,10 @@ struct PgColumnarObjHandle
 
 	dlist_node	node;			/* open-handle list, for abort cleanup */
 };
+
+/* SHA-256 of an empty payload; every request we sign sends no body. */
+#define OS_EMPTY_SHA256 \
+	"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 /* One parsed response head. */
 typedef struct OsResponse
@@ -130,6 +153,14 @@ os_free_handle(PgColumnarObjHandle *h)
 		pfree(h->host);
 	if (h->abspath)
 		pfree(h->abspath);
+	if (h->akid)
+		pfree(h->akid);
+	if (h->secret)
+		pfree(h->secret);
+	if (h->token)
+		pfree(h->token);
+	if (h->region)
+		pfree(h->region);
 	pfree(h);
 }
 
@@ -566,6 +597,162 @@ os_read_body(PgColumnarObjHandle *h, const OsResponse *resp,
 	}
 }
 
+/* ---------------------------------------------------------------- signing */
+
+static void
+os_sha256(const uint8 *data, size_t len, uint8 out[PG_SHA256_DIGEST_LENGTH])
+{
+	pg_cryptohash_ctx *ctx = pg_cryptohash_create(PG_SHA256);
+
+	if (ctx == NULL ||
+		pg_cryptohash_init(ctx) < 0 ||
+		pg_cryptohash_update(ctx, data, len) < 0 ||
+		pg_cryptohash_final(ctx, out, PG_SHA256_DIGEST_LENGTH) < 0)
+		elog(ERROR, "columnar: SHA-256 computation failed");
+	pg_cryptohash_free(ctx);
+}
+
+static void
+os_hmac256(const uint8 *key, size_t klen,
+		   const uint8 *data, size_t dlen,
+		   uint8 out[PG_SHA256_DIGEST_LENGTH])
+{
+	pg_hmac_ctx *ctx = pg_hmac_create(PG_SHA256);
+
+	if (ctx == NULL ||
+		pg_hmac_init(ctx, key, klen) < 0 ||
+		pg_hmac_update(ctx, data, dlen) < 0 ||
+		pg_hmac_final(ctx, out, PG_SHA256_DIGEST_LENGTH) < 0)
+		elog(ERROR, "columnar: HMAC-SHA-256 computation failed");
+	pg_hmac_free(ctx);
+}
+
+static void
+os_hex(const uint8 *in, size_t n, char *out)	/* out: 2n+1 bytes */
+{
+	static const char digits[] = "0123456789abcdef";
+	size_t		i;
+
+	for (i = 0; i < n; i++)
+	{
+		out[2 * i] = digits[in[i] >> 4];
+		out[2 * i + 1] = digits[in[i] & 0xf];
+	}
+	out[2 * n] = '\0';
+}
+
+/*
+ * AWS UriEncode for the path: unreserved bytes and '/' pass, everything else
+ * is %XX with UPPERCASE hex. Hand-written per AWS's own recommendation:
+ * platform encoders disagree on exactly the bytes that break signatures
+ * (space, '+', '=', '~'). The query-string variant (encode '/') is not needed
+ * until a listing operation exists.
+ */
+static void
+os_uriencode_path(StringInfo out, const char *s)
+{
+	for (; *s != '\0'; s++)
+	{
+		unsigned char c = (unsigned char) *s;
+
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~' || c == '/')
+			appendStringInfoChar(out, (char) c);
+		else
+			appendStringInfo(out, "%%%02X", c);
+	}
+}
+
+/*
+ * Derive (or reuse) the day's signing key and return the SigV4 headers for one
+ * request: x-amz-content-sha256, x-amz-date, optional x-amz-security-token,
+ * and Authorization. `rangeVal` is the exact Range header value the request
+ * will carry, or NULL for HEAD; the Range header is signed, which leaves no
+ * unsigned header a middlebox could rewrite.
+ */
+static void
+os_sign_request(PgColumnarObjHandle *h, const char *method,
+				const char *rangeVal, StringInfo headers)
+{
+	char		amzdate[20];	/* YYYYMMDDTHHMMSSZ */
+	char		datestamp[9];	/* YYYYMMDD */
+	pg_time_t	now = (pg_time_t) time(NULL);
+	StringInfoData creq;
+	StringInfoData signedlist;
+	StringInfoData sts;
+	uint8		digest[PG_SHA256_DIGEST_LENGTH];
+	char		hexdigest[PG_SHA256_DIGEST_LENGTH * 2 + 1];
+	char		signature[PG_SHA256_DIGEST_LENGTH * 2 + 1];
+
+	pg_strftime(amzdate, sizeof(amzdate), "%Y%m%dT%H%M%SZ", pg_gmtime(&now));
+	memcpy(datestamp, amzdate, 8);
+	datestamp[8] = '\0';
+
+	/* the four chained HMACs, cached per UTC day */
+	if (strcmp(h->sigDate, datestamp) != 0)
+	{
+		StringInfoData seed;
+		uint8		k[PG_SHA256_DIGEST_LENGTH];
+
+		initStringInfo(&seed);
+		appendStringInfo(&seed, "AWS4%s", h->secret);
+		os_hmac256((uint8 *) seed.data, seed.len,
+				   (uint8 *) datestamp, 8, k);
+		os_hmac256(k, sizeof(k), (uint8 *) h->region, strlen(h->region), k);
+		os_hmac256(k, sizeof(k), (uint8 *) "s3", 2, k);
+		os_hmac256(k, sizeof(k), (uint8 *) "aws4_request", 12, k);
+		memcpy(h->sigKey, k, sizeof(k));
+		strlcpy(h->sigDate, datestamp, sizeof(h->sigDate));
+		pfree(seed.data);
+	}
+
+	/* signed-headers list, alphabetical by construction */
+	initStringInfo(&signedlist);
+	appendStringInfoString(&signedlist, "host");
+	if (rangeVal != NULL)
+		appendStringInfoString(&signedlist, ";range");
+	appendStringInfoString(&signedlist, ";x-amz-content-sha256;x-amz-date");
+	if (h->token != NULL)
+		appendStringInfoString(&signedlist, ";x-amz-security-token");
+
+	/* canonical request */
+	initStringInfo(&creq);
+	appendStringInfo(&creq, "%s\n%s\n\n", method, h->abspath);
+	appendStringInfo(&creq, "host:%s:%d\n", h->host, h->port);
+	if (rangeVal != NULL)
+		appendStringInfo(&creq, "range:%s\n", rangeVal);
+	appendStringInfo(&creq, "x-amz-content-sha256:%s\n", OS_EMPTY_SHA256);
+	appendStringInfo(&creq, "x-amz-date:%s\n", amzdate);
+	if (h->token != NULL)
+		appendStringInfo(&creq, "x-amz-security-token:%s\n", h->token);
+	appendStringInfo(&creq, "\n%s\n%s", signedlist.data, OS_EMPTY_SHA256);
+
+	os_sha256((uint8 *) creq.data, creq.len, digest);
+	os_hex(digest, sizeof(digest), hexdigest);
+
+	/* string to sign, then the signature */
+	initStringInfo(&sts);
+	appendStringInfo(&sts, "AWS4-HMAC-SHA256\n%s\n%s/%s/s3/aws4_request\n%s",
+					 amzdate, datestamp, h->region, hexdigest);
+	os_hmac256(h->sigKey, sizeof(h->sigKey),
+			   (uint8 *) sts.data, sts.len, digest);
+	os_hex(digest, sizeof(digest), signature);
+
+	appendStringInfo(headers, "x-amz-content-sha256: %s\r\n", OS_EMPTY_SHA256);
+	appendStringInfo(headers, "x-amz-date: %s\r\n", amzdate);
+	if (h->token != NULL)
+		appendStringInfo(headers, "x-amz-security-token: %s\r\n", h->token);
+	appendStringInfo(headers,
+					 "Authorization: AWS4-HMAC-SHA256 Credential=%s/%s/%s/s3/aws4_request, "
+					 "SignedHeaders=%s, Signature=%s\r\n",
+					 h->akid, datestamp, h->region, signedlist.data, signature);
+
+	pfree(creq.data);
+	pfree(signedlist.data);
+	pfree(sts.data);
+}
+
 /* ---------------------------------------------------------------- request */
 
 /*
@@ -586,6 +773,15 @@ os_request(PgColumnarObjHandle *h, const char *method,
 	if (isGet)
 		appendStringInfo(&req, "Range: bytes=%lld-%lld\r\n",
 						 (long long) off, (long long) (off + n - 1));
+	if (h->sign)
+	{
+		char		rangeVal[64];
+
+		if (isGet)
+			snprintf(rangeVal, sizeof(rangeVal), "bytes=%lld-%lld",
+					 (long long) off, (long long) (off + n - 1));
+		os_sign_request(h, method, isGet ? rangeVal : NULL, &req);
+	}
 	appendStringInfoString(&req, "User-Agent: pgcolumnar-objstore/1\r\n\r\n");
 
 	for (attempt = 0;; attempt++)
@@ -615,17 +811,164 @@ os_request(PgColumnarObjHandle *h, const char *method,
 	pfree(req.data);
 }
 
+/*
+ * A 403 means the server rejected our authentication or signature. Read out
+ * the XML <Code> element when the body is small and simply framed, so the
+ * error names the server's reason; the credential itself never appears
+ * anywhere. Raises; does not return.
+ */
+static void
+os_reject_403(PgColumnarObjHandle *h, const OsResponse *resp, bool hasBody)
+{
+	char		code[64] = "";
+
+	/*
+	 * hasBody is false for HEAD: its response advertises a Content-Length but
+	 * carries no body bytes, and reading them would wait on a transfer that
+	 * never comes.
+	 */
+	if (hasBody && !resp->chunked && resp->content_length > 0 &&
+		resp->content_length < 8192)
+	{
+		char	   *body = palloc((Size) resp->content_length + 1);
+		char	   *codeStart;
+
+		os_read_exact(h, (uint8 *) body, resp->content_length);
+		body[resp->content_length] = '\0';
+		codeStart = strstr(body, "<Code>");
+		if (codeStart != NULL)
+		{
+			char	   *codeEnd = strstr(codeStart, "</Code>");
+
+			if (codeEnd != NULL &&
+				codeEnd - (codeStart + 6) < (ptrdiff_t) sizeof(code))
+			{
+				memcpy(code, codeStart + 6, codeEnd - (codeStart + 6));
+				code[codeEnd - (codeStart + 6)] = '\0';
+			}
+		}
+		pfree(body);
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+			 errmsg("columnar: access to \"%s\" was denied (HTTP 403%s%s)",
+					h->url, code[0] ? ": " : "", code),
+			 errhint("Check the AWS_* credential environment of the server "
+					 "process.")));
+}
+
 /* -------------------------------------------------------------------- ABI */
 
 static bool
 objstore_handles_url(const char *url)
 {
 	/*
-	 * Plain http:// only in M1. https:// and s3:// stay unhandled so they
-	 * report "no such URL scheme" rather than silently downgrading to
-	 * cleartext; they arrive with M3 and M2 respectively.
+	 * Plain http:// (M1) and s3:// (M2). https:// stays unhandled so it
+	 * reports "no such URL scheme" rather than silently downgrading to
+	 * cleartext; it arrives with M3.
 	 */
-	return pg_strncasecmp(url, "http://", 7) == 0;
+	return pg_strncasecmp(url, "http://", 7) == 0 ||
+		pg_strncasecmp(url, "s3://", 5) == 0;
+}
+
+/* A required credential-environment variable, or the 28000 the design owes. */
+static const char *
+os_require_env(const char *name, const char *url)
+{
+	const char *v = getenv(name);
+
+	if (v == NULL || v[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("columnar: reading \"%s\" requires %s in the server "
+						"environment", url, name),
+				 errhint("Ambient credentials are read from the postmaster's "
+						 "environment. Set %s and restart, or use a local "
+						 "path.", name)));
+	return v;
+}
+
+/*
+ * Resolve an s3://bucket/key URL against the ambient environment: endpoint
+ * host and port from AWS_ENDPOINT_URL (http only until M3), credentials and
+ * region from the AWS_* variables, path-style request target with the key
+ * percent-encoded exactly as it is signed.
+ */
+static void
+os_resolve_s3(PgColumnarObjHandle *h, const char *url)
+{
+	const char *bucket = url + 5;
+	const char *slash = strchr(bucket, '/');
+	const char *ep;
+	const char *ephost;
+	const char *epslash;
+	const char *epcolon;
+	const char *region;
+	const char *token;
+	StringInfoData path;
+	MemoryContext oldcxt;
+
+	if (slash == NULL || slash == bucket || slash[1] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: \"%s\" is not s3://bucket/key", url)));
+
+	ep = os_require_env("AWS_ENDPOINT_URL", url);
+	if (pg_strncasecmp(ep, "https://", 8) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: AWS_ENDPOINT_URL is https, which this "
+						"build does not support yet"),
+				 errdetail("TLS support is milestone M3 of #393; until then "
+						   "only an explicitly configured http endpoint is "
+						   "accepted.")));
+	if (pg_strncasecmp(ep, "http://", 7) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: AWS_ENDPOINT_URL must be an http:// URL")));
+
+	region = getenv("AWS_REGION");
+	if (region == NULL || region[0] == '\0')
+		region = getenv("AWS_DEFAULT_REGION");
+	if (region == NULL || region[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("columnar: reading \"%s\" requires AWS_REGION or "
+						"AWS_DEFAULT_REGION in the server environment", url)));
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	h->akid = pstrdup(os_require_env("AWS_ACCESS_KEY_ID", url));
+	h->secret = pstrdup(os_require_env("AWS_SECRET_ACCESS_KEY", url));
+	token = getenv("AWS_SESSION_TOKEN");
+	h->token = (token != NULL && token[0] != '\0') ? pstrdup(token) : NULL;
+	h->region = pstrdup(region);
+
+	/* endpoint authority */
+	ephost = ep + 7;
+	epslash = strchr(ephost, '/');
+	if (epslash == NULL)
+		epslash = ephost + strlen(ephost);
+	epcolon = memchr(ephost, ':', epslash - ephost);
+	if (epcolon != NULL)
+	{
+		h->host = pnstrdup(ephost, epcolon - ephost);
+		h->port = atoi(epcolon + 1);
+	}
+	else
+	{
+		h->host = pnstrdup(ephost, epslash - ephost);
+		h->port = 80;
+	}
+
+	/* path-style, encoded exactly as signed */
+	initStringInfo(&path);
+	appendStringInfoChar(&path, '/');
+	os_uriencode_path(&path, bucket);	/* bucket/key together; '/' passes */
+	h->abspath = path.data;
+	MemoryContextSwitchTo(oldcxt);
+
+	h->sign = true;
 }
 
 static PgColumnarObjHandle *
@@ -633,9 +976,7 @@ objstore_open(const char *url, int64 *len)
 {
 	PgColumnarObjHandle *h;
 	OsResponse	resp;
-	const char *authority = url + 7;
-	const char *slash = strchr(authority, '/');
-	const char *colon;
+	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0);
 	MemoryContext oldcxt;
 
 	if (!os_callback_registered)
@@ -643,15 +984,6 @@ objstore_open(const char *url, int64 *len)
 		RegisterResourceReleaseCallback(os_resource_release, NULL);
 		os_callback_registered = true;
 	}
-
-	if (slash == NULL || slash == authority)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("columnar: \"%s\" has no object path", url)));
-	if (memchr(authority, '@', slash - authority) != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("columnar: userinfo in \"%s\" is not supported", url)));
 
 	/*
 	 * The handle and its buffers live in TopMemoryContext and are freed
@@ -664,33 +996,52 @@ objstore_open(const char *url, int64 *len)
 	h = (PgColumnarObjHandle *) palloc0(sizeof(PgColumnarObjHandle));
 	h->fd = -1;
 	h->url = pstrdup(url);
-	h->abspath = pstrdup(slash);
-	colon = memchr(authority, ':', slash - authority);
-	if (colon != NULL)
-	{
-		h->host = pnstrdup(authority, colon - authority);
-		h->port = atoi(colon + 1);
-	}
-	else
-	{
-		h->host = pnstrdup(authority, slash - authority);
-		h->port = 80;
-	}
 	h->rb = (uint8 *) palloc(OS_RBUF);
 	MemoryContextSwitchTo(oldcxt);
+	dlist_push_head(&os_open_handles, &h->node);
 
-	if (h->port <= 0 || h->port > 65535 || h->host[0] == '\0')
+	if (isS3)
+		os_resolve_s3(h, url);
+	else
 	{
-		dlist_push_head(&os_open_handles, &h->node);	/* so free can delete */
-		os_free_handle(h);
+		const char *authority = url + 7;
+		const char *slash = strchr(authority, '/');
+		const char *colon;
+
+		if (slash == NULL || slash == authority)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("columnar: \"%s\" has no object path", url)));
+		if (memchr(authority, '@', slash - authority) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("columnar: userinfo in \"%s\" is not supported", url)));
+
+		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		h->abspath = pstrdup(slash);
+		colon = memchr(authority, ':', slash - authority);
+		if (colon != NULL)
+		{
+			h->host = pnstrdup(authority, colon - authority);
+			h->port = atoi(colon + 1);
+		}
+		else
+		{
+			h->host = pnstrdup(authority, slash - authority);
+			h->port = 80;
+		}
+		MemoryContextSwitchTo(oldcxt);
+	}
+
+	if (h->port <= 0 || h->port > 65535 ||
+		h->host == NULL || h->host[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("columnar: \"%s\" has an invalid host or port", url)));
-	}
-
-	dlist_push_head(&os_open_handles, &h->node);
 
 	os_request(h, "HEAD", 0, 0, &resp);
+	if (resp.status == 403)
+		os_reject_403(h, &resp, false);
 	if (resp.status == 404)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_FILE),
@@ -738,6 +1089,8 @@ objstore_read(PgColumnarObjHandle *h, int64 off, void *buf, size_t n)
 				 errdetail("The server answered 200 with the whole object "
 						   "instead of 206 with the requested bytes.")));
 	}
+	if (resp.status == 403)
+		os_reject_403(h, &resp, true);
 	if (resp.status == 404)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_FILE),

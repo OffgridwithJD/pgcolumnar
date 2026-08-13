@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Range-capable logging HTTP fixture for test/objstore_http_read.sh (#393 M1).
+# Range-capable logging HTTP fixture for test/objstore_http_read.sh (#393 M1)
+# and test/objstore_s3_read.sh (#393 M2).
 #
 # Serves files from --dir and appends one line per request to --log:
 #     METHOD <path> <value of the Range header, or "-">
@@ -13,16 +14,48 @@
 #                    then sleep: the cancel arm proves statement_timeout gets the
 #                    backend back while the transfer is wedged.
 #
+# SigV4 verification mode (#393 M2): with --sigv4-key/--sigv4-secret/
+# --sigv4-region, every request must carry a valid AWS Signature Version 4
+# Authorization header. The signature is recomputed here with python's stdlib
+# hmac/hashlib, so a green data check proves the C signer and an INDEPENDENT
+# implementation agree on every byte of the canonical request; any mismatch is
+# a 403 with SignatureDoesNotMatch. --sigv4-token additionally requires the
+# x-amz-security-token header, with the right value, inside the signed set.
+# --tamper-bucket names a top-level path component whose requests are verified
+# against a deliberately different secret, so a correctly signing client is
+# always refused there: the suite's 403-surface arm.
+#
 # Written fresh for pgColumnar.
 
 import argparse
+import hashlib
+import hmac
 import os
 import re
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+AUTH_RE = re.compile(
+    r"^AWS4-HMAC-SHA256 Credential=([^/]+)/(\d{8})/([^/]+)/s3/aws4_request,\s*"
+    r"SignedHeaders=([^,]+),\s*Signature=([0-9a-f]{64})$")
+
+
+def sigv4_expected(secret, method, path, headers, signed_headers, amzdate,
+                   datestamp, region, payload_hash):
+    canon_headers = "".join(
+        "%s:%s\n" % (h, headers.get(h, "").strip()) for h in signed_headers)
+    creq = "\n".join([method, path, "", canon_headers,
+                      ";".join(signed_headers), payload_hash])
+    scope = "%s/%s/s3/aws4_request" % (datestamp, region)
+    sts = "\n".join(["AWS4-HMAC-SHA256", amzdate, scope,
+                     hashlib.sha256(creq.encode()).hexdigest()])
+    k = ("AWS4" + secret).encode()
+    for part in (datestamp, region, "s3", "aws4_request"):
+        k = hmac.new(k, part.encode(), hashlib.sha256).digest()
+    return hmac.new(k, sts.encode(), hashlib.sha256).hexdigest()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -37,7 +70,9 @@ class Handler(BaseHTTPRequestHandler):
             f.write("%s %s %s\n" % (self.command, self.path, rng))
 
     def _resolve(self):
-        path = self.path
+        # SigV4 verification runs over the RAW request target (that is what
+        # the client signed); only the filesystem lookup decodes it.
+        path = urllib.parse.unquote(self.path)
         mode = "normal"
         for prefix in ("/norange/", "/stall/"):
             if path.startswith(prefix):
@@ -46,6 +81,60 @@ class Handler(BaseHTTPRequestHandler):
                 break
         local = os.path.join(self.server.rootdir, path.lstrip("/"))
         return mode, local
+
+    def _deny(self, status, code):
+        body = ("<?xml version=\"1.0\"?><Error><Code>%s</Code></Error>"
+                % code).encode()
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _sigv4_check(self):
+        """True when the request may proceed. Answers 403 itself otherwise."""
+        srv = self.server
+        if srv.sigv4_secret is None:
+            return True
+        auth = self.headers.get("Authorization", "")
+        m = AUTH_RE.match(auth)
+        if m is None:
+            self._deny(403, "AccessDenied")
+            return False
+        keyid, datestamp, region, signed, got_sig = m.groups()
+        signed_headers = signed.split(";")
+        secret = srv.sigv4_secret
+        # The tamper bucket verifies against a different secret, so a client
+        # signing correctly with the real one is always refused there.
+        top = self.path.lstrip("/").split("/", 1)[0]
+        if srv.tamper_bucket is not None and top == srv.tamper_bucket:
+            secret = srv.sigv4_secret + "-tampered"
+        if keyid != srv.sigv4_key or region != srv.sigv4_region:
+            self._deny(403, "InvalidAccessKeyId")
+            return False
+        if srv.sigv4_token is not None:
+            if ("x-amz-security-token" not in signed_headers or
+                    self.headers.get("x-amz-security-token") != srv.sigv4_token):
+                self._deny(403, "InvalidToken")
+                return False
+        # Stricter than AWS on purpose: our client PROMISES to sign the Range
+        # header (design/ISSUE_393_M2_SIGV4.md), and a compliant verifier
+        # cannot falsify that promise because it follows the client's own
+        # SignedHeaders list. This pin can: a ranged request whose signature
+        # excludes Range is refused, so the removal proof (drop range from the
+        # signed set) goes red here instead of passing as protocol-legal.
+        if self.headers.get("Range") and "range" not in signed_headers:
+            self._deny(403, "UnsignedRange")
+            return False
+        amzdate = self.headers.get("x-amz-date", "")
+        payload_hash = self.headers.get("x-amz-content-sha256", "")
+        want = sigv4_expected(secret, self.command, self.path, self.headers,
+                              signed_headers, amzdate, datestamp, region,
+                              payload_hash)
+        if not hmac.compare_digest(want, got_sig):
+            self._deny(403, "SignatureDoesNotMatch")
+            return False
+        return True
 
     def _head_common(self, local):
         if not os.path.isfile(local):
@@ -57,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         self._log_line()
+        if not self._sigv4_check():
+            return
         size = self._head_common(self._resolve()[1])
         if size < 0:
             return
@@ -67,6 +158,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._log_line()
+        if not self._sigv4_check():
+            return
         mode, local = self._resolve()
         size = self._head_common(local)
         if size < 0:
@@ -117,11 +210,21 @@ def main():
     ap.add_argument("--dir", required=True)
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--log", required=True)
+    ap.add_argument("--sigv4-key")
+    ap.add_argument("--sigv4-secret")
+    ap.add_argument("--sigv4-region")
+    ap.add_argument("--sigv4-token")
+    ap.add_argument("--tamper-bucket")
     args = ap.parse_args()
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     srv.rootdir = args.dir
     srv.reqlog = args.log
+    srv.sigv4_key = args.sigv4_key
+    srv.sigv4_secret = args.sigv4_secret
+    srv.sigv4_region = args.sigv4_region
+    srv.sigv4_token = args.sigv4_token
+    srv.tamper_bucket = args.tamper_bucket
     open(args.log, "a").close()
     # Readiness marker for the suite: print once the socket is bound.
     print("READY", flush=True)
