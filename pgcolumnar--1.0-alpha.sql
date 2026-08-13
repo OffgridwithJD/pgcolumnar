@@ -868,12 +868,12 @@ COMMENT ON FUNCTION pgcolumnar.import_parquet(regclass, text)
 	IS 'insert rows from a Parquet file, directory, or glob into a table; returns rows inserted (gap 27)';
 
 CREATE FUNCTION pgcolumnar.parquet_schema(path text)
-	RETURNS TABLE(column_name text, data_type text, nullable boolean)
+	RETURNS TABLE(column_name text, data_type text, nullable boolean, field_id integer)
 	LANGUAGE C STRICT
 	AS 'MODULE_PATHNAME', 'pgcolumnar_parquet_schema';
 
 COMMENT ON FUNCTION pgcolumnar.parquet_schema(text)
-	IS 'report the leaf columns of a Parquet file and the PostgreSQL type each maps to; for a directory or glob, of its first file (Phase G scan core)';
+	IS 'report the leaf columns of a Parquet file and the PostgreSQL type each maps to; for a directory or glob, of its first file; field_id is the SchemaElement field id Iceberg projects by, NULL when the writer emitted none (Phase G scan core, #388)';
 
 CREATE FUNCTION pgcolumnar.read_parquet(path text)
 	RETURNS SETOF record

@@ -110,6 +110,17 @@ def main():
     # --- an empty file still has a footer and a schema to walk.
     w(outdir, "empty", pa.table({"a": pa.array([], pa.int32())}))
 
+    # --- SchemaElement.field_id (thrift field 9, #388): the footer parse now
+    # consumes it instead of skipping, so the mutator must get to bend a footer
+    # that actually carries one.
+    w(outdir, "field_ids", pa.table(
+        {"a": pa.array(range(n), pa.int32()),
+         "b": pa.array([str(i) for i in range(n)], pa.string())},
+        schema=pa.schema([
+            pa.field("a", pa.int32(), metadata={b"PARQUET:field_id": b"7"}),
+            pa.field("b", pa.string(), metadata={b"PARQUET:field_id": b"0"}),
+        ])))
+
 
 if __name__ == "__main__":
     main()

@@ -103,8 +103,37 @@ PY
 		"$(q "SELECT nullable FROM pgcolumnar.parquet_schema('$REQ') WHERE column_name='opt_s';")" "t"
 	check "REQUIRED int32 maps to integer" \
 		"$(q "SELECT data_type FROM pgcolumnar.parquet_schema('$REQ') WHERE column_name='req_i';")" "integer"
+
+	# ---- field IDs (#388 step 2) ---------------------------------------------
+	# Iceberg selects columns by SchemaElement field_id (thrift field 9), which
+	# this reader used to skip. parquet_schema now reports it, with pyarrow as
+	# the independent writer: ids deliberately out of order and disjoint from
+	# the positional indices, so a reader that fabricated ids from position
+	# could not pass. A file written WITHOUT ids reports NULL, never 0: 0 is a
+	# legal field id, so absence must be distinguishable from it.
+	FID="$PGC_WORKDIR/fieldids.parquet"
+	python3 - "$FID" <<'PY'
+import sys, pyarrow as pa, pyarrow.parquet as pq
+schema = pa.schema([
+    pa.field("alpha", pa.int32(), metadata={b"PARQUET:field_id": b"7"}),
+    pa.field("beta", pa.string(), metadata={b"PARQUET:field_id": b"3"}),
+    pa.field("gamma", pa.float64(), metadata={b"PARQUET:field_id": b"12"}),
+])
+tbl = pa.table({"alpha": pa.array([1], pa.int32()),
+                "beta": pa.array(["x"], pa.string()),
+                "gamma": pa.array([1.5], pa.float64())}, schema=schema)
+pq.write_table(tbl, sys.argv[1])
+PY
+	check "premise: pyarrow wrote the field-id file" \
+		"$([ -s "$FID" ] && echo yes)" "yes"
+	check "field ids report as written, in schema order" \
+		"$(q "SELECT string_agg(field_id::text, ',' ORDER BY ord) FROM (SELECT field_id, row_number() OVER () AS ord FROM pgcolumnar.parquet_schema('$FID')) s;")" \
+		"7,3,12"
+	check "a file without field ids reports NULL, not zero" \
+		"$(q "SELECT count(*) FILTER (WHERE field_id IS NULL) || '/' || count(*) FROM pgcolumnar.parquet_schema('$REQ');")" \
+		"2/2"
 else
-	echo "SKIP  pyarrow not available; REQUIRED-column nullable check skipped"
+	echo "SKIP  pyarrow not available; REQUIRED-column and field-id checks skipped"
 fi
 
 pgc_summary
