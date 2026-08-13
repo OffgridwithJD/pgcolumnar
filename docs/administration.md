@@ -156,6 +156,36 @@ others work in place and run beside your queries.
 Schedule the exclusive three in a maintenance window. Anything that runs
 unattended, such as a cron entry, should call the online ones.
 
+### The maintenance daemon (pgcolumnar.autovacuum)
+
+pgColumnar's online maintenance verbs, `compact_rewrite` and `recluster`, live
+in extension functions. PostgreSQL's autovacuum never calls them. Without a
+schedule, a table's dead rows and clustering decay accumulate unattended. The
+`pgcolumnar.autovacuum` daemon runs those verbs for you.
+
+It is off by default. When it is on, a launcher wakes every
+`pgcolumnar.autovacuum_naptime` seconds (default 60) and starts one worker per
+database. Each worker asks `pgcolumnar.maintenance_due()` which columnar tables
+have crossed a threshold, then runs the verb it recommends.
+
+The daemon calls only the online `ShareUpdateExclusiveLock` verbs. It never
+calls `vacuum`, `vacuum_sorted`, or `cluster`. So it does not block readers or
+writers. It also yields the way autovacuum does: it cancels its own maintenance
+the moment a statement needs a stronger lock on the table.
+
+```
+-- turn it on (SIGHUP, no restart)
+ALTER SYSTEM SET pgcolumnar.autovacuum = on;
+SELECT pg_reload_conf();
+```
+
+The thresholds are reloadable. `pgcolumnar.autovacuum_compact_threshold` is the
+deleted fraction (default 0.2). `pgcolumnar.autovacuum_recluster_threshold` is
+the appended fraction (default 0.05). A table is reclustered only when it has a
+recorded clustering key, from a prior `recluster` or from
+`set_options(..., sort_by => ...)`. The launcher needs `pgcolumnar` in
+`shared_preload_libraries`, which the extension already requires.
+
 ### Online maintenance and disk reclaim
 
 The online maintenance functions run under ShareUpdateExclusiveLock, so reads and

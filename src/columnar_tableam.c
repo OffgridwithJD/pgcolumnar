@@ -81,6 +81,11 @@ bool		pgcolumnar_enable_bloom_filter = true;
 bool		pgcolumnar_objstore_buffered = true;	/* #393 */
 int			pgcolumnar_objstore_part_size = 0;	/* #394 remote part size */
 char	   *pgcolumnar_objstore_allowed_endpoints = NULL;	/* #393 allow-list */
+bool		pgcolumnar_autovacuum = false;		/* #415 daemon master switch */
+int			pgcolumnar_autovacuum_naptime = 60;
+double		pgcolumnar_autovacuum_compact_threshold = 0.2;
+double		pgcolumnar_autovacuum_recluster_threshold = 0.05;
+int			pgcolumnar_maintenance_hold_ms = 0;	/* dev/test fault injection */
 
 /* value set for columnar.compression (spec 5, 8.3) */
 static const struct config_enum_entry pgcolumnar_compression_options[] = {
@@ -2830,7 +2835,64 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.autovacuum",
+							 "Run the pgColumnar maintenance daemon (compact_rewrite / recluster).",
+							 "Off by default. When on it runs ONLY the online ShareUpdateExclusiveLock "
+							 "verbs, and yields (like autovacuum) to any statement needing a stronger lock.",
+							 &pgcolumnar_autovacuum,
+							 false,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.autovacuum_naptime",
+							"Seconds the maintenance launcher sleeps between sweeps.",
+							NULL,
+							&pgcolumnar_autovacuum_naptime,
+							60, 1, 86400,
+							PGC_SIGHUP,
+							GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	DefineCustomRealVariable("pgcolumnar.autovacuum_compact_threshold",
+							 "Deleted fraction at or above which the daemon compact_rewrites a table.",
+							 NULL,
+							 &pgcolumnar_autovacuum_compact_threshold,
+							 0.2, 0.0, 1.0,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomRealVariable("pgcolumnar.autovacuum_recluster_threshold",
+							 "Appended fraction at or above which the daemon reclusters a table.",
+							 NULL,
+							 &pgcolumnar_autovacuum_recluster_threshold,
+							 0.05, 0.0, 1.0,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.maintenance_hold_ms",
+							"Dev/test: hold ShareUpdateExclusiveLock this many ms inside a "
+							"maintenance verb, interruptibly.",
+							"0 disables. Exists so the autovacuum-yield behaviour is testable "
+							"deterministically: the verb waits with the lock held, so a session "
+							"needing a stronger lock can observe the daemon cancel.",
+							&pgcolumnar_maintenance_hold_ms,
+							0, 0, 600000,
+							PGC_USERSET,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
 	MarkGUCPrefixReserved("pgcolumnar");
+
+	/*
+	 * The maintenance daemon launcher (#415). Registered only under
+	 * shared_preload_libraries, which pgColumnar already requires; a server
+	 * without preload simply loses the daemon.
+	 */
+	if (process_shared_preload_libraries_in_progress)
+		PgColumnarAutovacuumRegister();
 
 	RegisterXactCallback(pgcolumnar_xact_callback, NULL);
 	RegisterSubXactCallback(pgcolumnar_subxact_callback, NULL);

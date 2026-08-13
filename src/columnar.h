@@ -193,6 +193,13 @@ extern bool pgcolumnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 extern bool pgcolumnar_objstore_buffered;	/* chunk-granular remote reads (#393) */
 extern char *pgcolumnar_objstore_allowed_endpoints; /* #393 allow-list, SUSET */
 extern int	pgcolumnar_objstore_part_size;	/* #394 remote multipart part size */
+/* #415 autovacuum daemon */
+extern bool pgcolumnar_autovacuum;
+extern int	pgcolumnar_autovacuum_naptime;
+extern double pgcolumnar_autovacuum_compact_threshold;
+extern double pgcolumnar_autovacuum_recluster_threshold;
+extern void PgColumnarAutovacuumRegister(void);
+extern int	pgcolumnar_maintenance_hold_ms;	/* dev/test: hold SUEL this long in a maintenance verb */
 
 /* Phase 6 GUCs (spec 8.3) */
 extern bool pgcolumnar_enable_vectorization;	/* vectorized aggregate path */
