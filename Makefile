@@ -28,7 +28,8 @@ OBJS = \
 	src/columnar_parquet_reader.o \
 	src/columnar_parallel_copy.o \
 	src/columnar_parallel_export.o \
-	src/columnar_objstore.o
+	src/columnar_objstore.o \
+	src/columnar_sink.o
 
 EXTENSION = pgcolumnar
 DATA = pgcolumnar--1.0-alpha.sql pgcolumnar--1.0-dev--1.0-alpha.sql

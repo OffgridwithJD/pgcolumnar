@@ -29,6 +29,9 @@ COLS="id int, k int, v float8, txt text"
 RB="id int, k int, v float8, txt text"		# read_parquet column list
 
 nfiles() { ls "$1"/*.parquet 2>/dev/null | wc -l | tr -d ' '; }
+# every file including in-flight temps: the #394 sink writes part-N.parquet.tmp.PID
+# and renames at completion, so *.parquet appears only when a part is DONE.
+anyfiles() { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
 
 # run a query, echo stdout+stderr (capture-then-grep, so pipefail cannot hide it)
 err_of() {
@@ -146,10 +149,14 @@ env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$P
 bgpid=$!
 wrote=no
 for i in $(seq 1 200); do
-	[ "$(nfiles "$DCX")" -ge 1 ] && { wrote=yes; break; }
+	[ "$(anyfiles "$DCX")" -ge 1 ] && { wrote=yes; break; }
 	sleep 0.1
 done
-check "a part file was on disk before the cancel (cleanup has files to remove)" "$wrote" yes
+# anyfiles, not nfiles: since the #394 sink, a part's FINAL name appears only at
+# completion, so waiting for *.parquet meant waiting for a whole part to finish
+# and the cancel raced the end of the run. The temp appears at worker open,
+# which is the earliest "the run reached execution" signal there is.
+check "a file was on disk before the cancel (cleanup has work to do)" "$wrote" yes
 q "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
    WHERE query LIKE '%parallel_export_parquet%' AND state = 'active'
      AND pid <> pg_backend_pid()" >/dev/null
@@ -160,8 +167,10 @@ wait "$bgpid" 2>/dev/null || true
 # the file-count check failing as if cleanup were broken. Grow t_big if it does.
 check "the export was cancelled mid-flight, not completed first (fixture premise)" \
 	"$(grep -qiE 'canceling statement|canceled on user request' "$BGLOG" && echo cancelled || echo completed)" cancelled
+# anyfiles: completed parts are removed by the dispatcher, and in-flight temps
+# by each worker's own sink abort (#394) - a cancelled export leaves NOTHING.
 check "a cancelled export leaves no partial files (item 2)" \
-	"$(nfiles "$DCX")" 0
+	"$(anyfiles "$DCX")" 0
 # and the cleaned directory is reusable (require-empty does not block a retry)
 q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$DCX', 2)" >/dev/null 2>&1
 check "retry into the cleaned directory succeeds" \

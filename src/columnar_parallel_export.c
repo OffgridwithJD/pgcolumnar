@@ -228,11 +228,17 @@ pexport_prepare_dir(const char *dir)
 
 /*
  * pexport_remove_outputs
- *		Best-effort removal of the *.parquet this export wrote. A failed or
+ *		Best-effort removal of everything this export wrote. A failed or
  *		cancelled run must not leave part files behind: read_parquet unions
  *		whatever is present (so a partial set reads as a complete export), and the
  *		require-empty-directory guard would block a retry. The output directory was
  *		created or required empty at entry, so every *.parquet in it is ours.
+ *
+ *		Since #394 the workers write through the sink, so an in-flight part is
+ *		part-NNNN.parquet.tmp.<pid>. A worker that ERRORs unlinks its own temp
+ *		through the sink's abort, but a worker the dispatcher TERMINATES dies
+ *		FATAL, which does not unwind through PG_CATCH, so its temp survives the
+ *		worker. It is still ours by construction; remove it here.
  */
 static void
 pexport_remove_outputs(const char *dir)
@@ -249,8 +255,13 @@ pexport_remove_outputs(const char *dir)
 	while ((de = ReadDir(d, dir)) != NULL)
 	{
 		size_t		len = strlen(de->d_name);
+		bool		ours = false;
 
-		if (len < 8 || strcmp(de->d_name + len - 8, ".parquet") != 0)
+		if (len >= 8 && strcmp(de->d_name + len - 8, ".parquet") == 0)
+			ours = true;
+		else if (strstr(de->d_name, ".parquet.tmp.") != NULL)
+			ours = true;
+		if (!ours)
 			continue;
 		snprintf(fp, sizeof(fp), "%s/%s", dir, de->d_name);
 		(void) unlink(fp);
