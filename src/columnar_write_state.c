@@ -2758,40 +2758,57 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 		s.rowGroupLimit = writeState->stripeRowLimit;
 		PgColumnarInsertNativeStorageRow(&s);
 	}
+	/*
+	 * #445: share one open per metadata table across this flush's inserts. The
+	 * PG_TRY drops the session on error so a later open never reuses a relation
+	 * the aborting subtransaction has freed; the resource owner closes them.
+	 */
+	PgColumnarBeginMetadataFlush();
+	PG_TRY();
 	{
-		NativeRowGroupMetadata rg;
+		{
+			NativeRowGroupMetadata rg;
 
-		rg.storageId = writeState->storageId;
-		rg.groupNumber = groupNumber;
-		rg.fileOffset = fileOffset;
-		rg.rowCount = rowCount;
-		rg.byteLength = dataLength;
-		rg.firstRowNumber = writeState->stripeFirstRowNumber;
-		PgColumnarInsertRowGroupRow(&rg);
+			rg.storageId = writeState->storageId;
+			rg.groupNumber = groupNumber;
+			rg.fileOffset = fileOffset;
+			rg.rowCount = rowCount;
+			rg.byteLength = dataLength;
+			rg.firstRowNumber = writeState->stripeFirstRowNumber;
+			PgColumnarInsertRowGroupRow(&rg);
+		}
+		for (c = 0; c < natts; c++)
+		{
+			NativeColumnChunkMetadata cc;
+
+			/* skipped virtual generated column (no chunk written) */
+			if (chunkDescriptor[c] == NULL)
+				continue;
+
+			cc.storageId = writeState->storageId;
+			cc.groupNumber = groupNumber;
+			cc.columnIndex = c;
+			cc.valueCount = rowCount;
+			cc.encodingDescriptor = chunkDescriptor[c];
+			cc.encodingDescriptorLen = chunkDescriptorLen[c];
+			cc.blockCodec = chunkBlockCodec[c];
+			cc.pageOffset = fileOffset + chunkOffset[c];
+			cc.pageLength = chunkLength[c];
+			PgColumnarInsertColumnChunkRow(&cc);
+		}
+		foreach(lc, zoneRows)
+			PgColumnarInsertZoneMapRow((NativeZoneMapMetadata *) lfirst(lc));
+		foreach(lc, bloomRows)
+			PgColumnarInsertBloomRow((NativeBloomMetadata *) lfirst(lc));
+
+		PgColumnarEndMetadataFlush();
 	}
-	for (c = 0; c < natts; c++)
+	PG_CATCH();
 	{
-		NativeColumnChunkMetadata cc;
-
-		/* skipped virtual generated column (no chunk written) */
-		if (chunkDescriptor[c] == NULL)
-			continue;
-
-		cc.storageId = writeState->storageId;
-		cc.groupNumber = groupNumber;
-		cc.columnIndex = c;
-		cc.valueCount = rowCount;
-		cc.encodingDescriptor = chunkDescriptor[c];
-		cc.encodingDescriptorLen = chunkDescriptorLen[c];
-		cc.blockCodec = chunkBlockCodec[c];
-		cc.pageOffset = fileOffset + chunkOffset[c];
-		cc.pageLength = chunkLength[c];
-		PgColumnarInsertColumnChunkRow(&cc);
+		PgColumnarResetMetadataFlush();
+		PG_RE_THROW();
 	}
-	foreach(lc, zoneRows)
-		PgColumnarInsertZoneMapRow((NativeZoneMapMetadata *) lfirst(lc));
-	foreach(lc, bloomRows)
-		PgColumnarInsertBloomRow((NativeBloomMetadata *) lfirst(lc));
+	PG_END_TRY();
 
 	table_close(rel, RowExclusiveLock);
 

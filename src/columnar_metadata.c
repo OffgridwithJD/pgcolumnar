@@ -134,11 +134,66 @@ pgcolumnar_schema_oid(void)
 	return get_namespace_oid(COLUMNAR_SCHEMA_NAME, false);
 }
 
+/*
+ * #445: a metadata flush session.
+ *
+ * Every PgColumnarInsert*Row opened its catalog with open_columnar_table,
+ * inserted one row, and closed. A stripe flush inserts a chunk row per column
+ * and about 16 zone rows per column, so it opened a metadata relation on the
+ * order of natts * 17 times per flush. Each open ran get_namespace_oid plus
+ * get_relname_relid (catcache probes) and table_open (a relcache lookup, a lock,
+ * a resource-owner remember), and the matching close undid it. A profile of the
+ * numeric write path (#445) put that per-row open and close cycle, not the
+ * encoding, at the top of the profile.
+ *
+ * A session caches each metadata relation and its index state the first time the
+ * flush opens it, and reuses that open for every later row of the same flush. The
+ * relation is closed once, when the flush ends. The rows written, their values,
+ * their order, and the indexes updated are all unchanged, so the catalog and the
+ * on-disk bytes are byte-for-byte identical. This is a scan-local optimisation,
+ * not a format change.
+ */
+#define MD_FLUSH_MAX 8
+typedef struct MetadataFlushSession
+{
+	bool		active;
+	int			count;
+	const char *names[MD_FLUSH_MAX];
+	LOCKMODE	locks[MD_FLUSH_MAX];
+	Relation	rels[MD_FLUSH_MAX];
+	CatalogIndexState indstates[MD_FLUSH_MAX];	/* lazily opened on first insert */
+} MetadataFlushSession;
+
+static MetadataFlushSession md_flush = {0};
+
+/*
+ * Count of real metadata relation opens during the active session. It is the
+ * work-done witness for the #445 batching: with the session off it counts one
+ * open per inserted metadata row, with it on it counts one per distinct table.
+ * native_metadata_flush.sh asserts on it via the DEBUG1 line End emits.
+ */
+static uint64 md_flush_opens = 0;
+
 static Relation
 open_columnar_table(const char *name, LOCKMODE lockmode)
 {
-	Oid			nspOid = pgcolumnar_schema_oid();
-	Oid			relOid = get_relname_relid(name, nspOid);
+	Oid			nspOid;
+	Oid			relOid;
+	Relation	rel;
+
+	/* Reuse a relation already open for this flush session. */
+	if (md_flush.active)
+	{
+		int			i;
+
+		for (i = 0; i < md_flush.count; i++)
+			if (md_flush.locks[i] == lockmode &&
+				strcmp(md_flush.names[i], name) == 0)
+				return md_flush.rels[i];
+	}
+
+	nspOid = pgcolumnar_schema_oid();
+	relOid = get_relname_relid(name, nspOid);
 
 	if (!OidIsValid(relOid))
 		ereport(ERROR,
@@ -146,7 +201,124 @@ open_columnar_table(const char *name, LOCKMODE lockmode)
 				 errmsg("columnar metadata table \"%s.%s\" does not exist",
 						COLUMNAR_SCHEMA_NAME, name)));
 
-	return table_open(relOid, lockmode);
+	rel = table_open(relOid, lockmode);
+
+	/*
+	 * Count every real open reached during a session, whether or not it is
+	 * cached. With reuse on this is one per distinct table; with reuse removed it
+	 * is one per inserted row, which is what the removal proof in
+	 * native_metadata_flush.sh relies on.
+	 */
+	if (md_flush.active)
+		md_flush_opens++;
+
+	/*
+	 * Cache it for the rest of the flush. The names are string literals with
+	 * static lifetime, so storing the pointer is safe. If more than MD_FLUSH_MAX
+	 * distinct tables are ever opened in one flush (there are five), the extra
+	 * relation is left uncached and metadata_flush_close closes it as before, so
+	 * nothing leaks.
+	 */
+	if (md_flush.active && md_flush.count < MD_FLUSH_MAX)
+	{
+		int			i = md_flush.count++;
+
+		md_flush.names[i] = name;
+		md_flush.locks[i] = lockmode;
+		md_flush.rels[i] = rel;
+		md_flush.indstates[i] = NULL;
+	}
+	return rel;
+}
+
+/*
+ * metadata_flush_insert
+ *		Insert one metadata tuple. Under a flush session the relation's index
+ *		state is opened once and reused, so CatalogOpenIndexes does not run per
+ *		row. Off-session it is the plain CatalogTupleInsert, unchanged.
+ */
+static void
+metadata_flush_insert(Relation rel, HeapTuple tuple)
+{
+	if (md_flush.active)
+	{
+		int			i;
+
+		for (i = 0; i < md_flush.count; i++)
+		{
+			if (md_flush.rels[i] == rel)
+			{
+				if (md_flush.indstates[i] == NULL)
+					md_flush.indstates[i] = CatalogOpenIndexes(rel);
+				CatalogTupleInsertWithInfo(rel, tuple, md_flush.indstates[i]);
+				return;
+			}
+		}
+	}
+	CatalogTupleInsert(rel, tuple);
+}
+
+/*
+ * metadata_flush_close
+ *		Close a metadata relation, unless the session owns it (then the session
+ *		closes it once at the end). Off-session it is the plain table_close.
+ */
+static void
+metadata_flush_close(Relation rel, LOCKMODE lockmode)
+{
+	if (md_flush.active)
+	{
+		int			i;
+
+		for (i = 0; i < md_flush.count; i++)
+			if (md_flush.rels[i] == rel)
+				return;			/* PgColumnarEndMetadataFlush closes it */
+	}
+	table_close(rel, lockmode);
+}
+
+/*
+ * PgColumnarBeginMetadataFlush / EndMetadataFlush / ResetMetadataFlush
+ *		Bracket the metadata inserts of one stripe flush so the inserters share
+ *		one open per table. Begin and End are the success path. Reset is the
+ *		error path: the aborting subtransaction closes the relations through the
+ *		resource owner, so Reset only drops the session pointer, so that a later
+ *		open never reads a relation the abort has freed.
+ */
+void
+PgColumnarBeginMetadataFlush(void)
+{
+	Assert(!md_flush.active);	/* nesting would orphan the outer opens */
+	md_flush.active = true;
+	md_flush.count = 0;
+	md_flush_opens = 0;
+}
+
+void
+PgColumnarEndMetadataFlush(void)
+{
+	int			i;
+
+	if (!md_flush.active)
+		return;
+	for (i = 0; i < md_flush.count; i++)
+	{
+		if (md_flush.indstates[i] != NULL)
+			CatalogCloseIndexes(md_flush.indstates[i]);
+		table_close(md_flush.rels[i], md_flush.locks[i]);
+	}
+	md_flush.active = false;
+	if (message_level_is_interesting(DEBUG1))
+		elog(DEBUG1, "pgcolumnar metadata flush: opens=%lu tables=%d",
+			 (unsigned long) md_flush_opens, md_flush.count);
+	md_flush.count = 0;
+}
+
+void
+PgColumnarResetMetadataFlush(void)
+{
+	md_flush.active = false;
+	md_flush.count = 0;
 }
 
 /*
@@ -1646,9 +1818,9 @@ insert_row:
 	nulls[Anum_native_storage_sorted_from - 1] = true;
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	CatalogTupleInsert(rel, tuple);
+	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
-	table_close(rel, RowExclusiveLock);
+	metadata_flush_close(rel, RowExclusiveLock);
 }
 
 /*
@@ -1797,9 +1969,9 @@ PgColumnarInsertRowGroupRow(const NativeRowGroupMetadata *rg)
 		PointerGetDatum(construct_empty_array(INT2OID));
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	CatalogTupleInsert(rel, tuple);
+	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
-	table_close(rel, RowExclusiveLock);
+	metadata_flush_close(rel, RowExclusiveLock);
 }
 
 void
@@ -1828,9 +2000,9 @@ PgColumnarInsertColumnChunkRow(const NativeColumnChunkMetadata *cc)
 	values[Anum_column_chunk_page_length - 1] = Int64GetDatum((int64) cc->pageLength);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	CatalogTupleInsert(rel, tuple);
+	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
-	table_close(rel, RowExclusiveLock);
+	metadata_flush_close(rel, RowExclusiveLock);
 }
 
 /*
@@ -1884,9 +2056,9 @@ PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z)
 	values[Anum_zone_map_null_count - 1] = Int64GetDatum((int64) z->nullCount);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	CatalogTupleInsert(rel, tuple);
+	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
-	table_close(rel, RowExclusiveLock);
+	metadata_flush_close(rel, RowExclusiveLock);
 }
 
 /*
@@ -1915,9 +2087,9 @@ PgColumnarInsertBloomRow(const NativeBloomMetadata *b)
 	values[Anum_bloom_filter - 1] = PointerGetDatum(filt);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
-	CatalogTupleInsert(rel, tuple);
+	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
-	table_close(rel, RowExclusiveLock);
+	metadata_flush_close(rel, RowExclusiveLock);
 }
 
 /*
