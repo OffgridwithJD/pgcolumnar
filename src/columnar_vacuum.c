@@ -444,7 +444,8 @@ pgcolumnar_rewrite_partial_groups(Relation rel, double minDeletedFraction,
  */
 static void
 record_online_sorted_extent(Relation rel, uint64 storageId,
-							PgColumnarWriteState *writeState, int stripeMark)
+							PgColumnarWriteState *writeState, int stripeMark,
+							List *sortByNames, const char *sortedKind)
 {
 	int			nAll;
 	uint64	   *all = PgColumnarWriteStateStripeIds(writeState, &nAll);
@@ -504,7 +505,8 @@ record_online_sorted_extent(Relation rel, uint64 storageId,
 		runEnd = ours[i];
 	}
 
-	PgColumnarSetSortedExtent(storageId, (int64) ours[0], (int64) runEnd);
+	PgColumnarSetSortedExtent(storageId, (int64) ours[0], (int64) runEnd,
+							  sortByNames, sortedKind);
 	pfree(ours);
 }
 
@@ -579,6 +581,53 @@ pgcolumnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 
 	/* lock every group in ascending order (deadlock-safe), held to commit */
 	qsort(oldGroups, nGroups, sizeof(uint64), uint64_cmp);
+
+	/*
+	 * Self-gate (#415): if the whole live relation is already the Z-order run
+	 * over exactly these columns -- nothing appended past the recorded run, same
+	 * kind, same key -- there is nothing to recluster. Return before locking and
+	 * rewriting every group, so a scheduler (or a user) can call recluster
+	 * speculatively without paying a full rewrite each time. Any mismatch
+	 * (appended groups, a different key, a lexicographic or unknown run) falls
+	 * through to the full reorg below, so re-clustering by a new key still works.
+	 */
+	{
+		int64		sfrom,
+					sthrough;
+		List	   *skey;
+		char	   *skind;
+		bool		sameKey = false;
+
+		PgColumnarGetSortedInfo(storageId, &sfrom, &sthrough, &skey, &skind);
+		if (skind != NULL && strcmp(skind, "zorder") == 0 &&
+			list_length(skey) == ncols)
+		{
+			ListCell   *klc;
+
+			sameKey = true;
+			i = 0;
+			foreach(klc, skey)
+			{
+				const char *want = NameStr(TupleDescAttr(tupdesc, atts[i] - 1)->attname);
+
+				if (strcmp((char *) lfirst(klc), want) != 0)
+				{
+					sameKey = false;
+					break;
+				}
+				i++;
+			}
+		}
+		if (sameKey && sfrom >= 0 && sthrough >= 0 &&
+			(int64) oldGroups[0] >= sfrom &&
+			(int64) oldGroups[nGroups - 1] <= sthrough)
+		{
+			pfree(oldGroups);
+			/* no active snapshot pushed yet at this point -- see below */
+			return 0;
+		}
+	}
+
 	for (i = 0; i < nGroups; i++)
 		PgColumnarLockChunkGroup(storageId, oldGroups[i]);
 
@@ -662,8 +711,17 @@ pgcolumnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 	for (i = 0; i < nGroups; i++)
 		PgColumnarRetireGroup(storageId, oldGroups[i]);
 
-	/* record how far the reordered run reaches (#311) */
-	record_online_sorted_extent(rel, storageId, writeState, stripeMark);
+	/* record how far the reordered run reaches (#311) and BY WHAT (#415) */
+	{
+		List	   *keyNames = NIL;
+		int			ci;
+
+		for (ci = 0; ci < ncols; ci++)
+			keyNames = lappend(keyNames,
+							   pstrdup(NameStr(TupleDescAttr(tupdesc, atts[ci] - 1)->attname)));
+		record_online_sorted_extent(rel, storageId, writeState, stripeMark,
+									keyNames, "zorder");
+	}
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snap);
@@ -1028,7 +1086,8 @@ record_sorted_extent(Relation rel)
 	list_free_deep(groups);
 
 	if (haveGroup)
-		PgColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup);
+		PgColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup,
+								  NIL, NULL);
 }
 
 /*

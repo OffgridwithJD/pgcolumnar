@@ -67,7 +67,9 @@
 #define Anum_native_storage_row_group_limit 5
 #define Anum_native_storage_sorted_through 6
 #define Anum_native_storage_sorted_from 7
-#define Natts_native_storage 7
+#define Anum_native_storage_sorted_by 8
+#define Anum_native_storage_sorted_kind 9
+#define Natts_native_storage 9
 
 #define Anum_row_group_storage_id 1
 #define Anum_row_group_group_number 2
@@ -1816,6 +1818,8 @@ insert_row:
 	 */
 	nulls[Anum_native_storage_sorted_through - 1] = true;
 	nulls[Anum_native_storage_sorted_from - 1] = true;
+	nulls[Anum_native_storage_sorted_by - 1] = true;
+	nulls[Anum_native_storage_sorted_kind - 1] = true;
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	metadata_flush_insert(rel, tuple);
@@ -1843,13 +1847,30 @@ insert_row:
  *		groups and reports no decay.
  */
 void
-PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
+PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup,
+						  List *sortByNames, const char *sortedKind)
 {
 	Relation	rel;
 	TupleDesc	tupdesc;
 	ScanKeyData key[1];
 	SysScanDesc scan;
 	HeapTuple	tuple;
+	Datum		byDatum = (Datum) 0;
+	bool		byNull = (sortByNames == NIL);
+
+	/* build the name[] once, before opening the catalog */
+	if (!byNull)
+	{
+		Datum	   *elems = (Datum *) palloc(sizeof(Datum) * list_length(sortByNames));
+		int			ne = 0;
+		ListCell   *lc;
+
+		foreach(lc, sortByNames)
+			elems[ne++] = DirectFunctionCall1(namein,
+											  CStringGetDatum((char *) lfirst(lc)));
+		byDatum = PointerGetDatum(construct_array(elems, ne, NAMEOID,
+												  NAMEDATALEN, false, TYPALIGN_CHAR));
+	}
 
 	/*
 	 * The storage row was inserted by this same transaction, in the same command
@@ -1884,6 +1905,28 @@ PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
 		replace[Anum_native_storage_sorted_through - 1] = true;
 		values[Anum_native_storage_sorted_from - 1] = Int64GetDatum(firstGroup);
 		replace[Anum_native_storage_sorted_from - 1] = true;
+		/*
+		 * The new columns exist only after the base script (fresh install) or
+		 * the dev->alpha upgrade ALTERs. A new .so on an un-upgraded 7-column
+		 * storage table must not touch attnums 8/9 -- heap_modify_tuple would
+		 * index past the tuple descriptor. Guard on the live natts: with the
+		 * columns absent this records nothing (the run's key stays unknown, so
+		 * recluster never self-gates), exactly the pre-#415 behavior.
+		 */
+		if (tupdesc->natts >= Anum_native_storage_sorted_kind)
+		{
+			replace[Anum_native_storage_sorted_by - 1] = true;
+			if (byNull)
+				nulls[Anum_native_storage_sorted_by - 1] = true;
+			else
+				values[Anum_native_storage_sorted_by - 1] = byDatum;
+			replace[Anum_native_storage_sorted_kind - 1] = true;
+			if (sortedKind == NULL)
+				nulls[Anum_native_storage_sorted_kind - 1] = true;
+			else
+				values[Anum_native_storage_sorted_kind - 1] =
+					DirectFunctionCall1(textin, CStringGetDatum((char *) sortedKind));
+		}
 
 		newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
 		CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);
@@ -1891,6 +1934,74 @@ PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup)
 	}
 	systable_endscan(scan);
 	table_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarGetSortedInfo
+ *		Read the run bounds, clustering key and kind for a storage (#415).
+ *		*firstGroup and *lastGroup are -1 when unordered; *sortByNames is NIL and
+ *		*sortedKind is NULL when unknown. Used by recluster's self-gate.
+ */
+void
+PgColumnarGetSortedInfo(uint64 storageId, int64 *firstGroup, int64 *lastGroup,
+						List **sortByNames, char **sortedKind)
+{
+	Relation	rel;
+	TupleDesc	tupdesc;
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	*firstGroup = -1;
+	*lastGroup = -1;
+	*sortByNames = NIL;
+	*sortedKind = NULL;
+
+	rel = open_columnar_table("storage", AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		Datum		d;
+		bool		isnull;
+
+		d = heap_getattr(tuple, Anum_native_storage_sorted_through, tupdesc, &isnull);
+		if (!isnull)
+			*lastGroup = DatumGetInt64(d);
+		d = heap_getattr(tuple, Anum_native_storage_sorted_from, tupdesc, &isnull);
+		if (!isnull)
+			*firstGroup = DatumGetInt64(d);
+		/*
+		 * attnums 8/9 exist only after the base script or the upgrade ALTERs
+		 * (#614): on an un-upgraded 7-column storage table reading them would
+		 * index past the descriptor. Absent -> leave key/kind unknown, so the
+		 * caller (recluster) never self-gates -- the safe pre-#415 default.
+		 */
+		if (tupdesc->natts >= Anum_native_storage_sorted_kind)
+		{
+			d = heap_getattr(tuple, Anum_native_storage_sorted_by, tupdesc, &isnull);
+			if (!isnull)
+			{
+				Datum	   *elems;
+				int			n;
+				int			i;
+
+				deconstruct_array(DatumGetArrayTypeP(d), NAMEOID, NAMEDATALEN,
+								  false, TYPALIGN_CHAR, &elems, NULL, &n);
+				for (i = 0; i < n; i++)
+					*sortByNames = lappend(*sortByNames,
+										   pstrdup(NameStr(*DatumGetName(elems[i]))));
+			}
+			d = heap_getattr(tuple, Anum_native_storage_sorted_kind, tupdesc, &isnull);
+			if (!isnull)
+				*sortedKind = text_to_cstring(DatumGetTextPP(d));
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
 }
 
 /*

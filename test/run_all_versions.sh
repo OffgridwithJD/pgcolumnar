@@ -177,6 +177,7 @@ SUITES=(
 	pushdown_report
 	read_stream
 	recluster_extent
+	recluster_gate
 	recovery
 	replication
 	rewrite_group_scan
