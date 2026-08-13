@@ -77,6 +77,7 @@ bool		pgcolumnar_enable_qual_pushdown = true;
 bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
 bool		pgcolumnar_enable_bloom_filter = true;
+bool		pgcolumnar_objstore_buffered = true;	/* #393 */
 
 /* value set for columnar.compression (spec 5, 8.3) */
 static const struct config_enum_entry pgcolumnar_compression_options[] = {
@@ -2525,6 +2526,20 @@ _PG_init(void)
 							 "Push scan qualifiers down for chunk-group skipping.",
 							 NULL,
 							 &pgcolumnar_enable_qual_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	/*
+	 * Dev control for #393: off maps every page read 1:1 onto a ranged request
+	 * so the request-count suite can measure both arms in one run. Nothing
+	 * else should turn it off; the buffered path is the supported one.
+	 */
+	DefineCustomBoolVariable("pgcolumnar.objstore_buffered",
+							 "Coalesce remote Parquet reads to one request per column chunk.",
+							 NULL,
+							 &pgcolumnar_objstore_buffered,
 							 true,
 							 PGC_USERSET,
 							 0,

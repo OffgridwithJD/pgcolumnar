@@ -1484,6 +1484,7 @@ decode_plain_bools(const uint8 *buf, size_t buflen, int n, Datum *out)
  * client links is mapped into the postmaster. See PgColumnarObjStoreApi.
  */
 typedef struct PqSource PqSource;
+static void pq_source_close(PqSource *src);
 
 typedef struct PqSourceOps
 {
@@ -1497,10 +1498,25 @@ struct PqSource
 	const PqSourceOps *ops;		/* the implementation; never NULL once opened */
 	FILE	   *f;				/* AllocateFile handle (buffered), local only */
 	void	   *priv;			/* remote implementation's own state */
+	const PgColumnarObjStoreApi *api;	/* remote only; NULL for local */
 	const char *path;			/* for error messages; palloc'd by the caller */
 	int64		len;			/* file length in bytes */
 	uint8	   *meta;			/* serialized footer metadata */
 	uint32		metalen;
+
+	/*
+	 * Prefetch window (#393 M1). pq_source_prefetch fills it with ONE
+	 * underlying read covering a whole column chunk, and pq_source_read serves
+	 * any request that falls inside it from memory. Local sources skip it: the
+	 * local path's read behaviour must not change, and stdio already buffers.
+	 * The pgcolumnar.objstore_buffered GUC (dev) turns it off so the
+	 * request-count suite measures the unbuffered arm in the same run.
+	 */
+	uint8	   *win;
+	int64		winOff;
+	int64		winLen;
+	MemoryContext winCtx;		/* win lives here, not in a per-group context
+								 * that resets under the window's feet */
 };
 
 /*
@@ -1552,11 +1568,76 @@ static const PqSourceOps pq_local_ops = {
 	.close = pq_source_close_local,
 };
 
+/*
+ * The remote implementation (#393): every call forwards to the object-store
+ * module through the ABI. The module has already been resolved and the handle
+ * opened by the time these can run, so src->api and src->priv are never NULL
+ * here.
+ */
+static void
+pq_source_read_remote(PqSource *src, int64 off, void *buf, size_t n)
+{
+	Assert(off >= 0 && n <= (size_t) (src->len - off));
+	src->api->read((PgColumnarObjHandle *) src->priv, off, buf, n);
+}
+
+static void
+pq_source_close_remote(PqSource *src)
+{
+	if (src->priv != NULL)
+	{
+		src->api->close((PgColumnarObjHandle *) src->priv);
+		src->priv = NULL;
+	}
+}
+
+static const PqSourceOps pq_remote_ops = {
+	.name = "remote",
+	.read = pq_source_read_remote,
+	.close = pq_source_close_remote,
+};
+
 /* The dispatchers every caller uses. */
 static void
 pq_source_read(PqSource *src, int64 off, void *buf, size_t n)
 {
+	if (src->win != NULL &&
+		off >= src->winOff &&
+		(int64) (off + n) <= src->winOff + src->winLen)
+	{
+		memcpy(buf, src->win + (off - src->winOff), n);
+		return;
+	}
 	src->ops->read(src, off, buf, n);
+}
+
+/*
+ * Pull [off, off+n) into the window with one underlying read, so the per-page
+ * reads that follow are served from memory. A remote-only, best-effort hint:
+ * requests outside the window still work, they just cost a request each. The
+ * clamp against src->len matters because callers pass the chunk extent plus a
+ * page-header pad, which can run past the end of the last chunk.
+ */
+static void
+pq_source_prefetch(PqSource *src, int64 off, int64 n)
+{
+	if (src->ops != &pq_remote_ops || !pgcolumnar_objstore_buffered)
+		return;
+	if (off < 0 || off >= src->len)
+		return;
+	n = Min(n, src->len - off);
+	if (n <= 0 || n > (int64) MaxAllocSize)
+		return;
+
+	if (src->win != NULL)
+	{
+		pfree(src->win);
+		src->win = NULL;
+	}
+	src->win = (uint8 *) MemoryContextAlloc(src->winCtx, (Size) n);
+	src->ops->read(src, off, src->win, (size_t) n);
+	src->winOff = off;
+	src->winLen = n;
 }
 
 
@@ -1614,27 +1695,37 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 					 errdetail("The installed object-store module handles no "
 							   "such URL scheme."),
 					 errhint("Use a local filesystem path.")));
-		/* the remote source is wired in the next commit */
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("columnar: object storage is not implemented yet")));
+
+		/*
+		 * The module raises on failure (connection refused, 404, a server
+		 * ignoring Range), so a non-NULL handle with a length is the only way
+		 * out of open. The window context is captured here: the source struct
+		 * outlives the per-group decode contexts the prefetch runs under.
+		 */
+		src->winCtx = CurrentMemoryContext;
+		src->api = api;
+		src->priv = (void *) api->open(path, &src->len);
+		src->ops = &pq_remote_ops;
+	}
+	else
+	{
+		src->f = AllocateFile(path, PG_BINARY_R);
+		if (src->f == NULL)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open file \"%s\" for reading: %m", path)));
+		/* off_t, not long: a 32-bit long would cap a readable file at 2GB */
+		if (fseeko(src->f, 0, SEEK_END) != 0 || (src->len = ftello(src->f)) < 0)
+		{
+			FreeFile(src->f);
+			ereport(ERROR, (errcode_for_file_access(),
+							errmsg("could not size \"%s\": %m", path)));
+		}
 	}
 
-	src->f = AllocateFile(path, PG_BINARY_R);
-	if (src->f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	/* off_t, not long: a 32-bit long would cap a readable file at 2GB */
-	if (fseeko(src->f, 0, SEEK_END) != 0 || (src->len = ftello(src->f)) < 0)
-	{
-		FreeFile(src->f);
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not size \"%s\": %m", path)));
-	}
 	if (src->len < 12)
 	{
-		FreeFile(src->f);
+		pq_source_close(src);
 		ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
 						errmsg("\"%s\" is not a Parquet file", path)));
 	}
@@ -1644,7 +1735,7 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 	pq_source_read(src, src->len - 8, tail, 8);
 	if (memcmp(head, "PAR1", 4) != 0 || memcmp(tail + 4, "PAR1", 4) != 0)
 	{
-		FreeFile(src->f);
+		pq_source_close(src);
 		ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
 						errmsg("\"%s\" is not a Parquet file (bad magic)", path)));
 	}
@@ -1657,7 +1748,7 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 	 */
 	if ((int64) src->metalen + 8 > src->len || src->metalen > MaxAllocSize)
 	{
-		FreeFile(src->f);
+		pq_source_close(src);
 		ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
 						errmsg("\"%s\" has a corrupt Parquet footer", path)));
 	}
@@ -1667,7 +1758,7 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 
 	if (!parse_file_metadata(src->meta, src->metalen, pf))
 	{
-		FreeFile(src->f);
+		pq_source_close(src);
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("could not parse \"%s\" (unsupported or corrupt Parquet metadata)", path)));
 	}
@@ -1676,6 +1767,12 @@ pq_source_open(const char *path, PqSource *src, PqFile *pf)
 static void
 pq_source_close(PqSource *src)
 {
+	if (src->win != NULL)
+	{
+		pfree(src->win);
+		src->win = NULL;
+		src->winLen = 0;
+	}
 	src->ops->close(src);
 }
 
@@ -1762,6 +1859,18 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 	Datum	   *dict = NULL;
 	int			dictCount = 0;
 	int			nDictPages = 0;
+
+	/*
+	 * One underlying read for the whole chunk (#393 M1): the page walk below is
+	 * then served from the window instead of costing two ranged requests per
+	 * page. The pad keeps the fixed-size page-header window reads near the
+	 * chunk's tail inside the window; total_compressed_size is file-declared,
+	 * so the prefetch clamps it against the object length rather than trusting
+	 * it to size anything beyond one bounded allocation.
+	 */
+	if (ch->total_compressed_size > 0)
+		pq_source_prefetch(src, pos,
+						   ch->total_compressed_size + PQ_PAGE_HDR_WIN_MIN);
 
 	while (nEntries < ch->num_values && pos < src->len)
 	{
@@ -3609,14 +3718,15 @@ pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
 			if (strcmp(NameStr(att->attname), key) != 0)
 				continue;
 			{
-				char	   *text = pq_percent_decode(eq + 1, file);
+				/* not "text": -Wshadow, the SQL type of that name */
+				char	   *decoded = pq_percent_decode(eq + 1, file);
 
 				/*
 				 * The null marker is checked after decoding, so a value that
 				 * spells it out through escapes is treated the same way a writer
 				 * that emitted it plainly would be.
 				 */
-				if (strcmp(text, PQ_HIVE_NULL_PARTITION) == 0)
+				if (strcmp(decoded, PQ_HIVE_NULL_PARTITION) == 0)
 				{
 					vals[i] = (Datum) 0;
 					isnull[i] = true;
@@ -3627,7 +3737,7 @@ pqfdw_partition_values(const char *root, const char *file, TupleDesc tupdesc,
 					Oid			ioparam;
 
 					getTypeInputInfo(att->atttypid, &infunc, &ioparam);
-					vals[i] = OidInputFunctionCall(infunc, text, ioparam,
+					vals[i] = OidInputFunctionCall(infunc, decoded, ioparam,
 												   att->atttypmod);
 					isnull[i] = false;
 				}
