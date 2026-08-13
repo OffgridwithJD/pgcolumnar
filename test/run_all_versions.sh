@@ -145,6 +145,7 @@ SUITES=(
 	native_vecskip
 	native_writer
 	native_zonemap
+	objstore_http_read
 	objstore_module
 	objstore_stash_recovery
 	parallel
