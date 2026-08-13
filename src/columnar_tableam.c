@@ -79,6 +79,7 @@ bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
 bool		pgcolumnar_enable_bloom_filter = true;
 bool		pgcolumnar_objstore_buffered = true;	/* #393 */
+char	   *pgcolumnar_objstore_allowed_endpoints = NULL;	/* #393 allow-list */
 
 /* value set for columnar.compression (spec 5, 8.3) */
 static const struct config_enum_entry pgcolumnar_compression_options[] = {
@@ -2757,6 +2758,24 @@ _PG_init(void)
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
+
+	/*
+	 * The endpoint allow-list (#393, owner decision 2026-08-13): empty (the
+	 * default) refuses every remote endpoint, so pg_read_server_files is not
+	 * an SSRF primitive out of the box. SUSET is load-bearing: a USERSET list
+	 * would let any role widen its own allow-list, which is the privilege the
+	 * list exists to withhold. The objstore module enforces it at connect
+	 * time via GetConfigOption; link-local ranges are refused there
+	 * unconditionally, list or no list.
+	 */
+	DefineCustomStringVariable("pgcolumnar.objstore_allowed_endpoints",
+							   "Remote endpoints the object-store module may connect to.",
+							   "Comma-separated host or host:port entries; empty refuses all remote access.",
+							   &pgcolumnar_objstore_allowed_endpoints,
+							   "",
+							   PGC_SUSET,
+							   GUC_LIST_INPUT,
+							   NULL, NULL, NULL);
 
 	/*
 	 * Dev fault injection for the export sink (#394): fail the sink, as

@@ -59,6 +59,7 @@
 #include "pgtime.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/wait_event.h"
@@ -256,6 +257,105 @@ os_wait(PgColumnarObjHandle *h, uint32 sockEvents, int *quiet)
 
 /* ---------------------------------------------------------------- connect */
 
+/*
+ * The endpoint allow-list (#393, owner decision 2026-08-13). Empty, the
+ * default, refuses every remote endpoint: pg_read_server_files must not be an
+ * SSRF primitive out of the box. Entries are host or host:port, matched
+ * case-insensitively against the endpoint the connection will use, BEFORE any
+ * resolution: the list authorizes what the operator wrote. The GUC is defined
+ * by the preloaded library (SUSET there, which is load-bearing) and read here
+ * by name, so no cross-library symbol exists.
+ */
+static void
+os_check_endpoint_allowed(PgColumnarObjHandle *h)
+{
+	const char *list =
+		GetConfigOption("pgcolumnar.objstore_allowed_endpoints", true, false);
+	bool		ok = false;
+
+	if (list != NULL && list[0] != '\0')
+	{
+		char	   *copy = pstrdup(list);
+		char	   *save = NULL;
+		char	   *tok;
+
+		for (tok = strtok_r(copy, ",", &save); tok != NULL;
+			 tok = strtok_r(NULL, ",", &save))
+		{
+			char	   *entry = tok;
+			char	   *end;
+			char	   *colon;
+
+			while (*entry == ' ' || *entry == '\t')
+				entry++;
+			end = entry + strlen(entry);
+			while (end > entry && (end[-1] == ' ' || end[-1] == '\t'))
+				*--end = '\0';
+			if (entry[0] == '\0')
+				continue;
+
+			/*
+			 * An entry may pin a port. M1 accepts no IPv6 literals in URLs,
+			 * so a colon in the entry can only introduce a port.
+			 */
+			colon = strrchr(entry, ':');
+			if (colon != NULL && colon[1] != '\0' &&
+				strspn(colon + 1, "0123456789") == strlen(colon + 1))
+			{
+				if (atoi(colon + 1) != h->port)
+					continue;
+				*colon = '\0';
+			}
+			if (pg_strcasecmp(entry, h->host) == 0)
+			{
+				ok = true;
+				break;
+			}
+		}
+		pfree(copy);
+	}
+
+	if (!ok)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("columnar: endpoint \"%s:%d\" is not in "
+						"pgcolumnar.objstore_allowed_endpoints",
+						h->host, h->port),
+				 errhint("A superuser can permit it: ALTER SYSTEM SET "
+						 "pgcolumnar.objstore_allowed_endpoints = '%s'; "
+						 "SELECT pg_reload_conf();", h->host)));
+}
+
+/*
+ * Link-local refusal, UNCONDITIONAL (#393): 169.254.0.0/16 and fe80::/10 are
+ * the cloud-metadata credential-theft surface (IMDS lives at
+ * 169.254.169.254) and have no legitimate object-storage use. Checked after
+ * resolution so a name pinned to a link-local address is caught, and the
+ * whole connection is refused rather than the address skipped, so a resolver
+ * returning a mixed set cannot steer the choice.
+ */
+static bool
+os_addr_is_linklocal(const struct addrinfo *ai)
+{
+	if (ai->ai_family == AF_INET)
+	{
+		uint32		a = ntohl(((const struct sockaddr_in *) ai->ai_addr)->sin_addr.s_addr);
+
+		return (a & 0xFFFF0000U) == 0xA9FE0000U;	/* 169.254/16 */
+	}
+	if (ai->ai_family == AF_INET6)
+	{
+		const struct in6_addr *a6 =
+			&((const struct sockaddr_in6 *) ai->ai_addr)->sin6_addr;
+
+		if (IN6_IS_ADDR_LINKLOCAL(a6))
+			return true;
+		if (IN6_IS_ADDR_V4MAPPED(a6))
+			return a6->s6_addr[12] == 169 && a6->s6_addr[13] == 254;
+	}
+	return false;
+}
+
 static void
 os_connect(PgColumnarObjHandle *h)
 {
@@ -267,6 +367,8 @@ os_connect(PgColumnarObjHandle *h)
 	int			quiet = 0;
 
 	Assert(h->fd < 0);
+
+	os_check_endpoint_allowed(h);
 
 	if (!h->fd_reserved)
 	{
@@ -294,6 +396,20 @@ os_connect(PgColumnarObjHandle *h)
 				(errcode(ERRCODE_CONNECTION_FAILURE),
 				 errmsg("columnar: could not resolve \"%s\": %s",
 						h->host, gai_strerror(rc))));
+
+	for (ai = addrs; ai != NULL; ai = ai->ai_next)
+		if (os_addr_is_linklocal(ai))
+		{
+			freeaddrinfo(addrs);
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("columnar: \"%s\" resolves into a link-local range, "
+							"which object storage never legitimately uses",
+							h->host),
+					 errdetail("Link-local addresses (169.254.0.0/16, fe80::/10) "
+							   "are refused unconditionally: they are the cloud "
+							   "instance-metadata surface.")));
+		}
 
 	for (ai = addrs; ai != NULL; ai = ai->ai_next)
 	{
