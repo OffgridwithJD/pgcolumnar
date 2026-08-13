@@ -111,6 +111,7 @@ SUITES=(
 	native_ios
 	native_late_materialization
 	native_lazy_slot
+	native_metadata_flush
 	native_ownership
 	native_parquet_codecs
 	native_parquet_fdw

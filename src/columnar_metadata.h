@@ -52,6 +52,11 @@ extern void PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z);
 
 extern void PgColumnarInsertBloomRow(const NativeBloomMetadata *b);
 
+/* #445: bracket a stripe flush's metadata inserts to share one open per table. */
+extern void PgColumnarBeginMetadataFlush(void);
+extern void PgColumnarEndMetadataFlush(void);
+extern void PgColumnarResetMetadataFlush(void);
+
 extern List *PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber,
 										 Snapshot snapshot);
 
