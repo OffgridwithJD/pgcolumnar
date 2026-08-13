@@ -32,6 +32,17 @@
 
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# #595 added a payload-WIDTH gate (pgcolumnar.qual_skipvec_min_payload_cols,
+# default 20): phase-2 decode gating runs only once the projection has at least
+# that many non-qual payload columns to spare from decode, because the per-vector
+# evaluation does not pay on a narrow projection. THIS suite tests the gating
+# MACHINERY, not the width policy, and its fixture projects five payload columns
+# -- below the default -- so under the shipped default it would not gate and every
+# count below would change. Pin the width gate OFF (0 = always gate, the pre-#595
+# behaviour) so the machinery is exercised whatever the threshold. The width
+# POLICY has its own suite, native_decode_gate_width.sh.
+PGC_EXTRA_CONF="pgcolumnar.qual_skipvec_min_payload_cols=0"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 ROWS=32768
@@ -78,6 +89,8 @@ check "premise: the needle plan is a columnar custom scan" \
 check "premise: one row group, so every count below is one group's" \
 	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('n');")" \
 	"1"
+check "premise: the width gate is pinned off, so this narrow projection still gates" \
+	"$(q "SHOW pgcolumnar.qual_skipvec_min_payload_cols;")" "0"
 
 # The whole point of the fixture is that this qual is NOT admitted to the reader.
 # If a future #426 taught the reader to prune an infix LIKE, numPredicates would

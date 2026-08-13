@@ -91,6 +91,7 @@ SUITES=(
 	native_cluster
 	native_compact
 	native_ctas
+	native_decode_gate_width
 	native_decode_gating
 	native_dml
 	native_encoding
