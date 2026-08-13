@@ -185,6 +185,7 @@ SUITES=(
 	server_file_privilege
 	smoke
 	sort_status
+	sort_status_privilege
 	sorted_projection
 	stats_privilege
 	temporal

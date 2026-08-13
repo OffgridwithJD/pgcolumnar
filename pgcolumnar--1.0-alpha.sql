@@ -699,8 +699,17 @@ CREATE FUNCTION pgcolumnar.sort_status(
 	OUT sorted_rows bigint,
 	OUT appended_rows bigint)
 	RETURNS record
-	LANGUAGE sql STABLE
+	-- SECURITY DEFINER, like stats() (#560): the body reads pgcolumnar's internal
+	-- catalogs (storage, row_group, options), which carry no GRANT, so an
+	-- invoker-rights function false-denied a table's own owner on their own table
+	-- (#608). require_caller_select gates the REAL caller via GetOuterUserId(), so
+	-- definer rights do not widen who may read a table's sort status. search_path
+	-- is pinned as a definer function must.
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
 	AS $sort_status$
+BEGIN
+	PERFORM pgcolumnar.require_caller_select(rel);
 	WITH s AS (
 		SELECT st.storage_id, st.sorted_through, st.sorted_from
 		FROM pgcolumnar.storage st
@@ -729,7 +738,9 @@ CREATE FUNCTION pgcolumnar.sort_status(
 		   (SELECT count(*)::bigint FROM g WHERE g.in_run),
 		   (SELECT count(*)::bigint FROM g WHERE NOT g.in_run),
 		   COALESCE((SELECT sum(g.row_count)::bigint FROM g WHERE g.in_run), 0::bigint),
-		   COALESCE((SELECT sum(g.row_count)::bigint FROM g WHERE NOT g.in_run), 0::bigint);
+		   COALESCE((SELECT sum(g.row_count)::bigint FROM g WHERE NOT g.in_run), 0::bigint)
+	INTO sort_key, total_groups, sorted_groups, appended_groups, sorted_rows, appended_rows;
+END;
 $sort_status$;
 
 COMMENT ON FUNCTION pgcolumnar.sort_status(regclass)
