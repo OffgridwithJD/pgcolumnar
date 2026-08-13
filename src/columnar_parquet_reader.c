@@ -137,6 +137,9 @@ typedef struct PqSchemaCol
 	int			scale;			/* DECIMAL scale (0 if none) */
 	int			precision;		/* DECIMAL precision (0 if none) */
 	int			num_children;	/* >0 for a group */
+	int			field_id;		/* SchemaElement field 9, or -1 when absent:
+								 * 0 is a legal id, so absence needs its own
+								 * value. Iceberg projects by this (#388). */
 	char	   *name;
 } PqSchemaCol;
 
@@ -431,6 +434,7 @@ parse_schema_element(TCReader *r, PqSchemaCol *sc)
 	sc->scale = 0;
 	sc->precision = 0;
 	sc->num_children = 0;
+	sc->field_id = -1;
 	sc->name = NULL;
 
 	for (;;)
@@ -473,6 +477,9 @@ parse_schema_element(TCReader *r, PqSchemaCol *sc)
 				break;
 			case 8:				/* precision (DECIMAL) */
 				sc->precision = (int) PgColumnarThriftZigzag(r);
+				break;
+			case 9:				/* field_id (#388): Iceberg's projection key */
+				sc->field_id = (int) PgColumnarThriftZigzag(r);
 				break;
 			case 10:			/* logicalType */
 				parse_logical_type(r, sc);
@@ -3422,10 +3429,11 @@ pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
 	pq_source_open(path, &src, &pf);
 	pq_source_close(&src);
 
-	retdesc = CreateTemplateTupleDesc(3);
+	retdesc = CreateTemplateTupleDesc(4);
 	TupleDescInitEntry(retdesc, 1, "column_name", TEXTOID, -1, 0);
 	TupleDescInitEntry(retdesc, 2, "data_type", TEXTOID, -1, 0);
 	TupleDescInitEntry(retdesc, 3, "nullable", BOOLOID, -1, 0);
+	TupleDescInitEntry(retdesc, 4, "field_id", INT4OID, -1, 0);
 
 	oldContext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	tupstore = tuplestore_begin_heap(true, false, work_mem);
@@ -3439,8 +3447,8 @@ pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
 		PqSchemaCol *sc = pf.leaves[i].sc;
 		Oid			typid;
 		int32		typmod;
-		Datum		values[3];
-		bool		nulls[3] = {false, false, false};
+		Datum		values[4];
+		bool		nulls[4] = {false, false, false, false};
 
 		values[0] = CStringGetTextDatum(sc->name != NULL ? sc->name : "");
 		if (pq_leaf_to_pgtype(sc, &typid, &typmod))
@@ -3450,6 +3458,11 @@ pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
 			nulls[1] = true;
 		/* a column is nullable iff it is OPTIONAL somewhere above the leaf */
 		values[2] = BoolGetDatum(pf.leaves[i].max_def > 0);
+		/* field_id (#388): NULL when the writer emitted none; 0 is a real id */
+		if (sc->field_id >= 0)
+			values[3] = Int32GetDatum(sc->field_id);
+		else
+			nulls[3] = true;
 
 		tuplestore_putvalues(tupstore, retdesc, values, nulls);
 	}
