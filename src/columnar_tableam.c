@@ -79,6 +79,7 @@ bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
 bool		pgcolumnar_enable_bloom_filter = true;
 bool		pgcolumnar_objstore_buffered = true;	/* #393 */
+int			pgcolumnar_objstore_part_size = 0;	/* #394 remote part size */
 char	   *pgcolumnar_objstore_allowed_endpoints = NULL;	/* #393 allow-list */
 
 /* value set for columnar.compression (spec 5, 8.3) */
@@ -2785,6 +2786,22 @@ _PG_init(void)
 	 * that land inside write_record_batch, the helper the 13-site census
 	 * missed.
 	 */
+	/*
+	 * Multipart part size for remote export (#394). Default 0 means the
+	 * module's built-in 8 MiB; a small value forces the multipart path on a
+	 * small fixture. Read by the objstore module via GetConfigOption; defined
+	 * here because the module loads after configuration parsing.
+	 */
+	DefineCustomIntVariable("pgcolumnar.objstore_part_size",
+							"Multipart part size in bytes for remote export (0 = module default 8 MiB).",
+							NULL,
+							&pgcolumnar_objstore_part_size,
+							0,
+							0, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
 	DefineCustomIntVariable("pgcolumnar.sink_fail_after",
 							"Fail export writes after this many bytes (dev fault injection).",
 							"-1 disables. The failure takes the same path a full disk takes.",

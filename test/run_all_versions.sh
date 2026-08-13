@@ -154,6 +154,7 @@ SUITES=(
 	objstore_http_read
 	objstore_module
 	objstore_s3_read
+	objstore_sink_write
 	objstore_stash_recovery
 	objstore_tls_read
 	parallel

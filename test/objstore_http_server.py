@@ -66,11 +66,25 @@ AUTH_RE = re.compile(
     r"SignedHeaders=([^,]+),\s*Signature=([0-9a-f]{64})$")
 
 
-def sigv4_expected(secret, method, path, headers, signed_headers, amzdate,
-                   datestamp, region, payload_hash):
+def canonical_query(qs):
+    """AWS canonical query: sorted, strictly UriEncoded (the query variant
+    encodes '/'). qs is the raw string after '?'."""
+    if not qs:
+        return ""
+    def enc(x):
+        return urllib.parse.quote(urllib.parse.unquote_plus(x), safe="-._~")
+    pairs = []
+    for part in qs.split("&"):
+        k, _, v = part.partition("=")
+        pairs.append((enc(k), enc(v)))
+    return "&".join("%s=%s" % kv for kv in sorted(pairs))
+
+
+def sigv4_expected(secret, method, path, query, headers, signed_headers,
+                   amzdate, datestamp, region, payload_hash):
     canon_headers = "".join(
         "%s:%s\n" % (h, headers.get(h, "").strip()) for h in signed_headers)
-    creq = "\n".join([method, path, "", canon_headers,
+    creq = "\n".join([method, path, canonical_query(query), canon_headers,
                       ";".join(signed_headers), payload_hash])
     scope = "%s/%s/s3/aws4_request" % (datestamp, region)
     sts = "\n".join(["AWS4-HMAC-SHA256", amzdate, scope,
@@ -89,13 +103,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _log_line(self):
         rng = self.headers.get("Range", "-").replace(" ", "")
+        rawpath, _, query = self.path.partition("?")
         with open(self.server.reqlog, "a") as f:
-            f.write("%s %s %s\n" % (self.command, self.path, rng))
+            f.write("%s %s %s %s\n" % (self.command, rawpath,
+                                        query or "-", rng))
 
     def _resolve(self):
         # SigV4 verification runs over the RAW request target (that is what
-        # the client signed); only the filesystem lookup decodes it.
-        path = urllib.parse.unquote(self.path)
+        # the client signed); only the filesystem lookup decodes it, and the
+        # query never names a file.
+        path = urllib.parse.unquote(self.path.partition("?")[0])
         mode = "normal"
         for prefix in ("/norange/", "/stall/"):
             if path.startswith(prefix):
@@ -151,12 +168,21 @@ class Handler(BaseHTTPRequestHandler):
             return False
         amzdate = self.headers.get("x-amz-date", "")
         payload_hash = self.headers.get("x-amz-content-sha256", "")
-        want = sigv4_expected(secret, self.command, self.path, self.headers,
-                              signed_headers, amzdate, datestamp, region,
-                              payload_hash)
+        rawpath, _, query = self.path.partition("?")
+        want = sigv4_expected(secret, self.command, rawpath, query,
+                              self.headers, signed_headers, amzdate,
+                              datestamp, region, payload_hash)
         if not hmac.compare_digest(want, got_sig):
             self._deny(403, "SignatureDoesNotMatch")
             return False
+        # Requests carrying a body must hash it truthfully (#394): the write
+        # arms are cross-implementation checks of the payload hash too.
+        clen = int(self.headers.get("Content-Length", "0") or "0")
+        if self.command in ("PUT", "POST") :
+            self._body = self.rfile.read(clen) if clen else b""
+            if payload_hash != "UNSIGNED-PAYLOAD" and                hashlib.sha256(self._body).hexdigest() != payload_hash:
+                self._deny(403, "XAmzContentSHA256Mismatch")
+                return False
         return True
 
     def _head_common(self, local):
@@ -228,6 +254,92 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+    # ---- write side (#394): plain PUT, and a faithful multipart emulation --
+    def _qdict(self):
+        q = {}
+        for part in self.path.partition("?")[2].split("&"):
+            if part:
+                k, _, v = part.partition("=")
+                q[urllib.parse.unquote(k)] = urllib.parse.unquote(v)
+        return q
+
+    def do_PUT(self):
+        self._log_line()
+        if not self._sigv4_check():
+            return
+        q = self._qdict()
+        _, local = self._resolve()
+        if "uploadId" in q and "partNumber" in q:
+            up = self.server.uploads.get(q["uploadId"])
+            if up is None or up["local"] != local:
+                self._deny(404, "NoSuchUpload")
+                return
+            up["parts"][int(q["partNumber"])] = self._body
+            etag = hashlib.md5(self._body).hexdigest()
+            self.send_response(200)
+            self.send_header("ETag", '"%s"' % etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            f.write(self._body)
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        self._log_line()
+        if not self._sigv4_check():
+            return
+        q = self._qdict()
+        _, local = self._resolve()
+        if "uploads" in q:
+            uid = "up-%d" % (len(self.server.uploads) + 1)
+            self.server.uploads[uid] = {"local": local, "parts": {}}
+            body = ("<?xml version=\"1.0\"?><InitiateMultipartUploadResult>"
+                    "<UploadId>%s</UploadId>"
+                    "</InitiateMultipartUploadResult>" % uid).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if "uploadId" in q:
+            up = self.server.uploads.pop(q["uploadId"], None)
+            if up is None or up["local"] != local:
+                self._deny(404, "NoSuchUpload")
+                return
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+            with open(local, "wb") as f:
+                for n in sorted(up["parts"]):
+                    f.write(up["parts"][n])
+            body = b"<?xml version=\"1.0\"?><CompleteMultipartUploadResult/>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._deny(400, "InvalidRequest")
+
+    def do_DELETE(self):
+        self._log_line()
+        if not self._sigv4_check():
+            return
+        q = self._qdict()
+        _, local = self._resolve()
+        if "uploadId" in q:
+            up = self.server.uploads.pop(q["uploadId"], None)
+            if up is None:
+                self._deny(404, "NoSuchUpload")
+                return
+        elif os.path.isfile(local):
+            os.unlink(local)
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
@@ -254,6 +366,7 @@ def main():
     srv.sigv4_region = args.sigv4_region
     srv.sigv4_token = args.sigv4_token
     srv.tamper_bucket = args.tamper_bucket
+    srv.uploads = {}
     open(args.log, "a").close()
     # Readiness marker for the suite: print once the socket is bound.
     print("READY", flush=True)

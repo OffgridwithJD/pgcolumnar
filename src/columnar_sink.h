@@ -18,7 +18,10 @@
 
 typedef struct PqSink PqSink;
 
-/* Open <path>.tmp.<pid> for writing; the final name stays untouched. */
+/* Open a sink for `path`: local (temp-and-rename) or remote (#394) by scheme. */
+extern PqSink *PgColumnarSinkOpen(const char *path);
+
+/* The local implementation; PgColumnarSinkOpen dispatches to it for a path. */
 extern PqSink *PgColumnarSinkOpenLocal(const char *path);
 
 /* Append exactly n bytes; a short write is an error AT THE CALL (#394). */
