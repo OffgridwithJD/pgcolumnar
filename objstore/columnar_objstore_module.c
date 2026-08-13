@@ -43,6 +43,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef HAVE_OBJSTORE_OPENSSL
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+#endif
+
 #include "common/cryptohash.h"
 #include "common/hmac.h"
 #include "common/sha2.h"
@@ -97,6 +103,18 @@ struct PgColumnarObjHandle
 	char		sigDate[9];		/* YYYYMMDD the cached key was derived for */
 	uint8		sigKey[PG_SHA256_DIGEST_LENGTH];
 
+	/*
+	 * TLS (#393 M3). tls=false is the cleartext path, byte-identical to M1/M2.
+	 * OpenSSL performs chain verification and hostname binding; this module
+	 * only configures it (design/ISSUE_393_M3_TLS.md). The SSL object rides
+	 * the same nonblocking fd, so the M1 wait loop and cancel semantics hold.
+	 */
+	bool		tls;
+#ifdef HAVE_OBJSTORE_OPENSSL
+	SSL_CTX    *sctx;
+	SSL		   *ssl;
+#endif
+
 	/* receive staging */
 	uint8	   *rb;
 	int			rb_off;			/* consumed up to here */
@@ -121,11 +139,33 @@ typedef struct OsResponse
 static dlist_head os_open_handles = DLIST_STATIC_INIT(os_open_handles);
 static bool os_callback_registered = false;
 
+static void os_tls_handshake(PgColumnarObjHandle *h);
+
 /* ---------------------------------------------------------------- lifecycle */
 
 static void
 os_disconnect(PgColumnarObjHandle *h)
 {
+#ifdef HAVE_OBJSTORE_OPENSSL
+	if (h->ssl != NULL)
+	{
+		/*
+		 * Best-effort close_notify: one nonblocking attempt, never a wait. A
+		 * peer that already went away would otherwise make disconnect block,
+		 * and disconnect runs on error paths.
+		 */
+		ERR_clear_error();
+		(void) SSL_shutdown(h->ssl);
+		SSL_free(h->ssl);
+		h->ssl = NULL;
+	}
+	if (h->sctx != NULL)
+	{
+		SSL_CTX_free(h->sctx);
+		h->sctx = NULL;
+	}
+	ERR_clear_error();
+#endif
 	if (h->fd >= 0)
 	{
 		close(h->fd);
@@ -298,7 +338,124 @@ os_connect(PgColumnarObjHandle *h)
 	(void) setsockopt(h->fd, IPPROTO_TCP, TCP_NODELAY, &rc, sizeof(rc));
 	h->served = 0;
 	h->rb_off = h->rb_len = 0;
+
+	if (h->tls)
+		os_tls_handshake(h);
 }
+
+#ifdef HAVE_OBJSTORE_OPENSSL
+/*
+ * TLS handshake on the already-connected nonblocking fd (#393 M3). OpenSSL
+ * verifies; we configure: SSL_VERIFY_PEER against the default verify paths
+ * (which honour SSL_CERT_FILE/SSL_CERT_DIR), hostname binding through
+ * X509_VERIFY_PARAM with partial wildcards refused, set1_ip_asc for IP
+ * literals (X509_check_host alone silently misses them, and an IP endpoint is
+ * the ordinary MinIO/Garage form), SNI only for names, TLS 1.2 minimum.
+ */
+static void
+os_tls_handshake(PgColumnarObjHandle *h)
+{
+	X509_VERIFY_PARAM *param;
+	unsigned char ipbuf[16];
+	bool		isIp;
+	int			quiet = 0;
+
+	ERR_clear_error();
+	h->sctx = SSL_CTX_new(TLS_client_method());
+	if (h->sctx == NULL ||
+		SSL_CTX_set_min_proto_version(h->sctx, TLS1_2_VERSION) != 1 ||
+		SSL_CTX_set_default_verify_paths(h->sctx) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: could not initialize TLS for \"%s\"",
+						h->url)));
+	SSL_CTX_set_verify(h->sctx, SSL_VERIFY_PEER, NULL);
+
+	h->ssl = SSL_new(h->sctx);
+	if (h->ssl == NULL || SSL_set_fd(h->ssl, h->fd) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: could not initialize TLS for \"%s\"",
+						h->url)));
+
+	param = SSL_get0_param(h->ssl);
+	X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+	isIp = (inet_pton(AF_INET, h->host, ipbuf) == 1 ||
+			inet_pton(AF_INET6, h->host, ipbuf) == 1);
+	if (isIp)
+	{
+		/* IP literal: bind the IP, and no SNI (RFC 6066 forbids it) */
+		if (X509_VERIFY_PARAM_set1_ip_asc(param, h->host) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("columnar: could not bind the endpoint address for \"%s\"",
+							h->url)));
+	}
+	else
+	{
+		if (X509_VERIFY_PARAM_set1_host(param, h->host, 0) != 1 ||
+			SSL_set_tlsext_host_name(h->ssl, h->host) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("columnar: could not bind the endpoint name for \"%s\"",
+							h->url)));
+	}
+
+	for (;;)
+	{
+		int			rc;
+		int			serr;
+
+		ERR_clear_error();
+		rc = SSL_connect(h->ssl);
+		if (rc == 1)
+			return;
+
+		serr = SSL_get_error(h->ssl, rc);
+		if (serr == SSL_ERROR_WANT_READ)
+		{
+			os_wait(h, WL_SOCKET_READABLE, &quiet);
+			continue;
+		}
+		if (serr == SSL_ERROR_WANT_WRITE)
+		{
+			os_wait(h, WL_SOCKET_WRITEABLE, &quiet);
+			continue;
+		}
+
+		/*
+		 * Failed. A verification failure carries the reason every operator
+		 * question starts with; anything else reports OpenSSL's own reason.
+		 */
+		{
+			long		vres = SSL_get_verify_result(h->ssl);
+
+			if (vres != X509_V_OK)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("columnar: could not establish TLS to \"%s\"",
+								h->url),
+						 errdetail("Certificate verification failed: %s.",
+								   X509_verify_cert_error_string(vres))));
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("columnar: could not establish TLS to \"%s\"",
+							h->url),
+					 errdetail("%s.",
+							   ERR_reason_error_string(ERR_peek_last_error()) ?
+							   ERR_reason_error_string(ERR_peek_last_error()) :
+							   "TLS handshake failed")));
+		}
+	}
+}
+#else
+static void
+os_tls_handshake(PgColumnarObjHandle *h)
+{
+	/* unreachable: h->tls is never set on a build without OpenSSL */
+	elog(ERROR, "columnar: TLS requested but this build has no TLS support");
+}
+#endif
 
 /* ------------------------------------------------------------------- send */
 
@@ -311,6 +468,36 @@ static bool
 os_send_all(PgColumnarObjHandle *h, const char *buf, size_t len)
 {
 	int			quiet = 0;
+
+#ifdef HAVE_OBJSTORE_OPENSSL
+	if (h->tls)
+	{
+		while (len > 0)
+		{
+			int			rc;
+			int			serr;
+
+			ERR_clear_error();
+			rc = SSL_write(h->ssl, buf, (int) len);
+			if (rc > 0)
+			{
+				buf += rc;
+				len -= (size_t) rc;
+				continue;
+			}
+			serr = SSL_get_error(h->ssl, rc);
+			if (serr == SSL_ERROR_WANT_READ)
+				os_wait(h, WL_SOCKET_READABLE, &quiet);
+			else if (serr == SSL_ERROR_WANT_WRITE)
+				os_wait(h, WL_SOCKET_WRITEABLE, &quiet);
+			else if (serr == SSL_ERROR_SYSCALL && errno == EINTR)
+				continue;
+			else
+				return false;	/* peer went away: maybe stale keep-alive */
+		}
+		return true;
+	}
+#endif
 
 	while (len > 0)
 	{
@@ -350,6 +537,45 @@ os_fill(PgColumnarObjHandle *h)
 		h->rb_len -= h->rb_off;
 		h->rb_off = 0;
 	}
+
+#ifdef HAVE_OBJSTORE_OPENSSL
+	if (h->tls)
+	{
+		for (;;)
+		{
+			int			rc;
+			int			serr;
+
+			ERR_clear_error();
+			rc = SSL_read(h->ssl, h->rb + h->rb_len, OS_RBUF - h->rb_len);
+			if (rc > 0)
+			{
+				h->rb_len += rc;
+				return true;
+			}
+			serr = SSL_get_error(h->ssl, rc);
+			if (serr == SSL_ERROR_ZERO_RETURN)
+				return false;	/* orderly close_notify */
+			if (serr == SSL_ERROR_WANT_READ)
+			{
+				os_wait(h, WL_SOCKET_READABLE, &quiet);
+				continue;
+			}
+			if (serr == SSL_ERROR_WANT_WRITE)
+			{
+				os_wait(h, WL_SOCKET_WRITEABLE, &quiet);
+				continue;
+			}
+			if (serr == SSL_ERROR_SYSCALL && errno == EINTR)
+				continue;
+			if (serr == SSL_ERROR_SYSCALL && errno == 0)
+				return false;	/* EOF without close_notify: stale keep-alive */
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("columnar: TLS read from \"%s\" failed", h->url)));
+		}
+	}
+#endif
 
 	for (;;)
 	{
@@ -864,10 +1090,14 @@ static bool
 objstore_handles_url(const char *url)
 {
 	/*
-	 * Plain http:// (M1) and s3:// (M2). https:// stays unhandled so it
-	 * reports "no such URL scheme" rather than silently downgrading to
-	 * cleartext; it arrives with M3.
+	 * http:// (M1), s3:// (M2), and https:// when this module was built with
+	 * OpenSSL (M3). Without OpenSSL, https:// stays unhandled so it reports
+	 * "no such URL scheme" rather than silently downgrading to cleartext.
 	 */
+#ifdef HAVE_OBJSTORE_OPENSSL
+	if (pg_strncasecmp(url, "https://", 8) == 0)
+		return true;
+#endif
 	return pg_strncasecmp(url, "http://", 7) == 0 ||
 		pg_strncasecmp(url, "s3://", 5) == 0;
 }
@@ -916,17 +1146,23 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 
 	ep = os_require_env("AWS_ENDPOINT_URL", url);
 	if (pg_strncasecmp(ep, "https://", 8) == 0)
+	{
+#ifdef HAVE_OBJSTORE_OPENSSL
+		h->tls = true;
+#else
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("columnar: AWS_ENDPOINT_URL is https, which this "
-						"build does not support yet"),
-				 errdetail("TLS support is milestone M3 of #393; until then "
-						   "only an explicitly configured http endpoint is "
-						   "accepted.")));
-	if (pg_strncasecmp(ep, "http://", 7) != 0)
+				 errmsg("columnar: AWS_ENDPOINT_URL is https, but this "
+						"object-store module was built without OpenSSL"),
+				 errhint("Rebuild the module with OpenSSL available, or use "
+						 "an explicitly configured http endpoint.")));
+#endif
+	}
+	else if (pg_strncasecmp(ep, "http://", 7) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("columnar: AWS_ENDPOINT_URL must be an http:// URL")));
+				 errmsg("columnar: AWS_ENDPOINT_URL must be an http:// or "
+						"https:// URL")));
 
 	region = getenv("AWS_REGION");
 	if (region == NULL || region[0] == '\0')
@@ -945,7 +1181,7 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 	h->region = pstrdup(region);
 
 	/* endpoint authority */
-	ephost = ep + 7;
+	ephost = ep + (h->tls ? 8 : 7);
 	epslash = strchr(ephost, '/');
 	if (epslash == NULL)
 		epslash = ephost + strlen(ephost);
@@ -958,7 +1194,7 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 	else
 	{
 		h->host = pnstrdup(ephost, epslash - ephost);
-		h->port = 80;
+		h->port = h->tls ? 443 : 80;
 	}
 
 	/* path-style, encoded exactly as signed */
@@ -1004,7 +1240,8 @@ objstore_open(const char *url, int64 *len)
 		os_resolve_s3(h, url);
 	else
 	{
-		const char *authority = url + 7;
+		bool		isHttps = (pg_strncasecmp(url, "https://", 8) == 0);
+		const char *authority = url + (isHttps ? 8 : 7);
 		const char *slash = strchr(authority, '/');
 		const char *colon;
 
@@ -1028,9 +1265,10 @@ objstore_open(const char *url, int64 *len)
 		else
 		{
 			h->host = pnstrdup(authority, slash - authority);
-			h->port = 80;
+			h->port = isHttps ? 443 : 80;
 		}
 		MemoryContextSwitchTo(oldcxt);
+		h->tls = isHttps;
 	}
 
 	if (h->port <= 0 || h->port > 65535 ||

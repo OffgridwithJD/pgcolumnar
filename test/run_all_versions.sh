@@ -151,6 +151,7 @@ SUITES=(
 	objstore_module
 	objstore_s3_read
 	objstore_stash_recovery
+	objstore_tls_read
 	parallel
 	parallel_copy
 	parallel_degree
