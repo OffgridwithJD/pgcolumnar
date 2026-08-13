@@ -106,7 +106,7 @@ check_num "positive control: it IS defined in the module, so nm really looked" \
 for url in "s3://bucket/key.parquet" "gs://bucket/key.parquet" "https://host/key.parquet"; do
 	out=$(psql_run "SELECT * FROM pgcolumnar.read_parquet('$url') AS (a int)" 2>&1)
 	check "a $(cut -d: -f1 <<<"$url") URL reports an object-storage error, not a missing file" \
-		"$([ "$(grep -c 'object storage is not implemented\|is not supported\|requires the object-store module\|requires AWS_' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
+		"$([ "$(grep -c 'object storage is not implemented\|is not supported\|requires the object-store module\|requires AWS_\|could not resolve\|could not connect' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
 	check_num "and does NOT report it as a missing file" \
 		"$(grep -c 'No such file or directory' <<<"$out")" "0"
 done

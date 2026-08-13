@@ -152,12 +152,23 @@ check "403: tamper bucket surfaces 28000" \
 check "403 ordering premise: verified requests still reach 404 = 58P01" \
 	"$(sqlstate_of "SELECT count(*) FROM fs3miss")" "58P01"
 
-# ---- phase 3: https endpoint refused until M3 -------------------------------
+# ---- phase 3: an https endpoint is never silently downgraded ---------------
+# The property is no-downgrade; its SQLSTATE depends on the build. A module
+# built with OpenSSL (M3) ACCEPTS the endpoint and then fails the TLS
+# handshake against this plain-HTTP fixture, 08006 -- proving the bytes went
+# TLS, not cleartext. A module built without OpenSSL refuses outright, 0A000.
+# Either way a silent cleartext read (a row count) is the red.
 pg_restart_env "AWS_ENDPOINT_URL='https://127.0.0.1:$S3_PORT'" \
 	"AWS_ACCESS_KEY_ID='$AKID'" "AWS_SECRET_ACCESS_KEY='$SECRET'" \
 	"AWS_REGION='$REGION'"
-check "https endpoint is refused 0A000, not downgraded" \
-	"$(sqlstate_of "SELECT count(*) FROM fs3")" "0A000"
+MOD_SO="$(pgc_pg "$PGC_BINDIR/pg_config --pkglibdir" | tail -1)/pgcolumnar_objstore.so"
+if pgc_pg "ldd '$MOD_SO'" 2>/dev/null | grep -q libssl; then
+	HTTPS_WANT="08006"
+else
+	HTTPS_WANT="0A000"
+fi
+check "https endpoint is not downgraded (want $HTTPS_WANT for this build)" \
+	"$(sqlstate_of "SELECT count(*) FROM fs3")" "$HTTPS_WANT"
 
 # ---- phase 4: optional integration against a real S3 implementation --------
 if [ -n "${PGC_S3_INTEGRATION_ENDPOINT:-}" ]; then

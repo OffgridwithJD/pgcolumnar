@@ -16,6 +16,17 @@ PGFILEDESC = "pgColumnar object-store byte source"
 
 PG_CPPFLAGS = -I$(realpath $(dir $(firstword $(MAKEFILE_LIST)))../src)
 
+PKG_CONFIG ?= pkg-config
+
+# TLS (#393 M3). OpenSSL is linked into THIS module only -- the preloaded
+# library's dependency set is unchanged, which is the reason this module
+# exists. Without OpenSSL at build time the module still builds and serves
+# http:// and s3://-over-http; https reports that this build has no TLS.
+ifeq ($(shell $(PKG_CONFIG) --exists openssl && echo yes),yes)
+PG_CPPFLAGS += -DHAVE_OBJSTORE_OPENSSL $(shell $(PKG_CONFIG) --cflags openssl)
+SHLIB_LINK += $(shell $(PKG_CONFIG) --libs openssl)
+endif
+
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 

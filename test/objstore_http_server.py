@@ -32,10 +32,33 @@ import hashlib
 import hmac
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class TLSServer(ThreadingHTTPServer):
+    """TLS wrap per connection, with the ATTEMPT logged before the handshake.
+
+    A client that refuses our certificate (wrong host, expired, untrusted CA)
+    aborts during the handshake and never reaches the request handler, so the
+    request log would show nothing and a refusal arm could pass vacuously
+    against a server that was never contacted. Logging HANDSHAKE at accept
+    time gives the suite its reached-the-code premise (#393 M3).
+    """
+
+    def __init__(self, addr, handler, certfile, keyfile):
+        super().__init__(addr, handler)
+        self.tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.tls_ctx.load_cert_chain(certfile, keyfile)
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        with open(self.reqlog, "a") as f:
+            f.write("HANDSHAKE - -\n")
+        return self.tls_ctx.wrap_socket(sock, server_side=True), addr
 
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 AUTH_RE = re.compile(
@@ -215,9 +238,15 @@ def main():
     ap.add_argument("--sigv4-region")
     ap.add_argument("--sigv4-token")
     ap.add_argument("--tamper-bucket")
+    ap.add_argument("--tls-cert")
+    ap.add_argument("--tls-key")
     args = ap.parse_args()
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    if args.tls_cert:
+        srv = TLSServer(("127.0.0.1", args.port), Handler,
+                        args.tls_cert, args.tls_key)
+    else:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     srv.rootdir = args.dir
     srv.reqlog = args.log
     srv.sigv4_key = args.sigv4_key
