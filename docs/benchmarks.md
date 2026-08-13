@@ -629,9 +629,10 @@ deltas between it and this run's `2fe6596` (Merge #592):
 - **Late-materialization decode gating shipped (#452, phase 2).** This is the
   trade described in the ClickBench section above. It is a large win on a wide
   `SELECT *` under a highly selective filter (q24 from 6098 ms to 3395 ms with
-  gating on). It is a regression on unselective quals, so it moved the ClickBench
-  win count from 33 to 25. Gating it on selectivity is tracked as #595. Phase 1 also
-  landed, so #452 is no longer open on either half.
+  gating on). It was a regression on unselective narrow quals, so it moved the
+  ClickBench win count from 33 to 25. #598 then gated the gating on projected
+  payload width, which recovered those queries and returned the win count to 34.
+  Phase 1 also landed, so #452 is no longer open on either half.
 - **Detoast once (#587).** A toasted text value is now detoasted a single time per
   scan rather than per reference. This is about 11 percent on queries over toasted
   text.
@@ -804,16 +805,16 @@ Every arm loaded all 11,110,833 rows.
 
 | arm | connections | load | total relation size |
 | --- | ---: | ---: | ---: |
-| heap | 1 | 145.3 s | 7,818,592,256 bytes |
-| columnar, serial `COPY` | 1 | 443.0 s | 1,479,745,536 bytes |
-| citus columnar, serial `COPY` | 1 | 186.2 s | 1,662,558,208 bytes |
-| columnar, `pgcolumnar.parallel_copy` | 16 | 89.0 s | 1,478,057,984 bytes |
-| citus columnar, parallel `COPY` | 16 | 51.4 s | 1,663,025,152 bytes |
-| duckdb (persistent file) | - | 27.0 s | 3,238,277,120 bytes |
+| heap | 1 | 141.5 s | 7,818,592,256 bytes |
+| columnar, serial `COPY` | 1 | 443.4 s | 1,479,745,536 bytes |
+| citus columnar, serial `COPY` | 1 | 186.8 s | 1,662,558,208 bytes |
+| columnar, `pgcolumnar.parallel_copy` | 16 | 88.8 s | 1,478,057,984 bytes |
+| citus columnar, parallel `COPY` | 16 | 49.9 s | 1,663,025,152 bytes |
+| duckdb (persistent file) | - | 36.2 s | 3,237,752,832 bytes |
 
 Read the rows in pairs, by connection count. On a single connection columnar is
-2.38 times slower to load than Citus (443.0 against 186.2). At sixteen workers
-columnar is 1.73 times slower than Citus (89.0 against 51.4), and 1.63 times
+2.37 times slower to load than Citus (443.4 against 186.8). At sixteen workers
+columnar is 1.78 times slower than Citus (88.8 against 49.9), and 1.59 times
 faster than heap. Both figures are a property of the loader, not the format.
 Comparing the two sixteen worker arms, the stored table is 11.1 percent smaller
 than Citus and 5.3 times smaller than heap. On the serial pair the size
@@ -821,7 +822,7 @@ difference against Citus is 11.0 percent, so the storage result does not depend
 on which loader wrote it. Columnar is the smallest of these on disk: 1.48 GB
 against Citus 1.66 GB and DuckDB 3.24 GB.
 
-Our own serial to bulk speedup is 4.98 times against their 3.62 times. That is a
+Our own serial to bulk speedup is 4.99 times against their 3.74 times. That is a
 statement about how our loader scales, and not a win over Citus on load time.
 
 An earlier version of this page and of issue #445 reported the parallel loader as
@@ -837,30 +838,31 @@ Query latency, hot times, same run:
 
 | arm | total across 43 queries | geometric mean against heap |
 | --- | ---: | ---: |
-| heap | 168.2 s | |
-| columnar | 140.4 s | 0.52 |
-| citus columnar | 266.9 s | 1.77 |
+| heap | 157.6 s | |
+| columnar | 129.4 s | 0.49 |
+| citus columnar | 260.6 s | 1.86 |
 
 Every figure in the last column is that row's own arm measured against heap, so
-the column can be read down. Columnar against Citus is 0.29, which belongs in
+the column can be read down. Columnar against Citus is 0.26, which belongs in
 this sentence rather than in the Citus row.
 
-Against heap, columnar wins 25 of the 43 queries, loses 13, and ties on 5. A tie
+Against heap, columnar wins 34 of the 43 queries, loses 7, and ties on 2. A tie
 is a query whose two arms are closer to each other than the run to run scatter
 of their own repeated tries. This run cannot separate them in either direction.
-The five are q13, q19, q29, q34 and q35. Against Citus, columnar wins 38 of 43
-with no tie, losing q15, q16, q17, q19 and q33.
+The two are q34 and q35. Against Citus, columnar wins 39 of 43
+with no tie, losing q16, q17, q19 and q33.
 
-> The win count fell from 33 to 25 because the late-materialization decode gating (#452 phase 2) shipped since the previous run.
-> It is a selectivity trade applied to every unprunable-qual scan.
-> On the query it is built for (a wide `SELECT *` under a highly selective filter) it is a large win.
-> Here q24 goes from 6098 ms to 3395 ms with gating on.
-> But it evaluates the qual per 1024-row vector to decide what to skip, and when the filter is not selective that evaluation buys nothing.
-> An A/B on this build and data (gating on vs off) attributes eight regressions to it.
-> They are q11, q12, q14, q15, q25, q27, q31, q32, each about 1.2 to 2x.
-> These recover completely with gating off, while q24 loses its win.
-> It is a deliberate trade, not a regression to hide.
-> The fix is to gate the gating on selectivity (ideally a runtime probe, since a `LIKE '%...%'` estimate is unreliable): issue #595.
+> The late-materialization decode gating (#452 phase 2) is a trade applied to unprunable-qual scans.
+> It evaluates the qual per 1024-row vector to decide which vectors' payload decode it can skip.
+> On the query it is built for, a wide `SELECT *` under a highly selective filter, it is a large win.
+> An A/B on this data, gating on versus off, takes q24 from 6098 ms to 3395 ms.
+> But on a narrow projection there is no payload to skip, so the per-vector evaluation only adds cost.
+> An earlier run of this benchmark, with gating always on, lost eight queries to it.
+> They were q11, q12, q14, q15, q25, q27, q31 and q32, each about 1.2 to 2x.
+> #598 gates the gating on projected payload width, a plan-time property the unreliable `LIKE '%...%'` estimate cannot corrupt.
+> It runs only when the scan materializes at least twenty non-qual columns, which only q24 does here.
+> So the eight narrow queries recover their wins and q24 keeps its gain.
+> This run measures the gate on, with the win count back at 34: issue #595.
 
 The wide-text losses read wide text under a predicate no min and max can bound.
 The cost columnar adds rises with the number of columns the query
@@ -868,20 +870,20 @@ materialises:
 
 | query | columns touched | heap | columnar | columnar adds | ratio |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| q29 | 1 | 8423.8 ms | 8707.2 ms | 283.4 ms | 1.03 |
-| q21 | 1 | 794.8 ms | 1413.9 ms | 619.1 ms | 1.78 |
-| q22 | 2 | 919.7 ms | 1473.7 ms | 554.0 ms | 1.60 |
-| q28 | 2 | 798.6 ms | 2000.1 ms | 1201.5 ms | 2.50 |
-| q23 | 4 | 911.8 ms | 2317.7 ms | 1405.9 ms | 2.54 |
-| q24 | 105 | 777.0 ms | 3453.2 ms | 2676.2 ms | 4.44 |
+| q29 | 1 | 8271.0 ms | 8526.2 ms | 255.2 ms | 1.03 |
+| q21 | 1 | 771.9 ms | 1386.8 ms | 614.9 ms | 1.80 |
+| q22 | 2 | 914.2 ms | 1433.1 ms | 518.9 ms | 1.57 |
+| q28 | 2 | 738.9 ms | 1491.5 ms | 752.6 ms | 2.02 |
+| q23 | 4 | 913.9 ms | 2014.9 ms | 1101.0 ms | 2.20 |
+| q24 | 105 | 777.9 ms | 3376.1 ms | 2598.2 ms | 4.34 |
 
-q29 is now a tie rather than a loss, and q24 improved from 6.19x to 4.44x
-col/heap; both are #452 phase 2 at work. Read the added milliseconds, not the
-ratio. The ratio does not order these the same way, and the reason is the
-baseline rather than anything about columnar. Queries q29 and q21 both touch one
-column, and both add a few hundred milliseconds of work, 283 ms and 619 ms. But
-q29 sits on an 8,424 ms baseline and q21 on a 795 ms one. The same kind of
-overhead therefore reads as 1.03 on one line and 1.78 on the next. The added
+q24 improved from 6.19x to 4.34x col/heap, which is #452 phase 2 at work. Read
+the added milliseconds, not the ratio. The ratio does not order these the same
+way, and the reason is the baseline rather than anything about columnar. Queries
+q29 and q21 both touch one column, and both add a few hundred milliseconds of
+work, 255 ms and 615 ms. But q29 sits on an 8,271 ms baseline and q21 on a 772 ms
+one. The same kind of overhead therefore reads as 1.03 on one line and 1.80 on
+the next. The added
 cost rises with columns touched, with the one and two column groups overlapping.
 The ratio column rises only at the extremes.
 
@@ -895,9 +897,11 @@ every value is empty. An earlier version of this page said every one of these
 predicates had a leading wildcard. Two of them do not. These are the
 late-materialisation shapes of issue #452, whose phase 1 and phase 2 both shipped
 since the previous run. Infix `LIKE '%...%'` is now handled by the phase-2 decode
-gating (#426/#586) rather than a substring pushdown, which is why q29 fell to a
-tie. The remaining losses are the selectivity trade of that gating, described
-above. None is addressed by pushing text predicates down.
+gating (#426/#586) rather than a substring pushdown. These are the losses that
+gating cannot remove. The q24 win comes from skipping payload. The others, q21
+through q23, q28 and q29, have too little payload to skip and must decode the wide
+text column itself. The selectivity trade that once cost eight narrow queries is gone,
+gated out by #598. None of these is addressed by pushing text predicates down.
 
 Two limits on this table. Every arm was vacuumed and analyzed after loading, so
 these are vacuumed state numbers. For a columnar table that is not the normal
@@ -905,8 +909,8 @@ state, because autovacuum cannot reach it. The columnar arm also runs with the
 analytical accelerators off, which is what a user gets by default.
 
 The accelerated arm (`columnar_tuned`, the analytical accelerators on) sharpens
-several results against heap. It brings q2 to 0.13, q16 to 0.39, q17 to 0.41,
-q38 to 0.11, and q19 from a near-tie of 0.99 to a clear 0.76. Turning the accelerators on is
+several results against heap. It brings q2 to 0.13, q16 to 0.39, q17 to 0.39,
+q38 to 0.11, and q19 from a loss of 1.05 to 0.84. Turning the accelerators on is
 not a clear win everywhere, though, and the 2026-08-05 run below records where it
 regresses.
 
@@ -956,7 +960,7 @@ projection to make. It also sorts a large intermediate to return ten rows. A row
 store reads one row and stops, while a column store decodes the chunk groups
 that hold the candidates. The other four sit behind a predicate on a wide text
 column that no minimum and maximum statistic can prune. That column is therefore
-read in full, whatever else the query returns. The 2026-08-09 run above measures
+read in full, whatever else the query returns. The 2026-08-12 run above measures
 the same effect in more detail.
 
 ### The accelerations are off by default, and turning them on is not a clear win
