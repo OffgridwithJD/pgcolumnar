@@ -583,6 +583,18 @@ typedef struct PgColumnarAggScanState
 	bool		batchFolded;
 
 	/*
+	 * Fold-path payload deferral (#405 step 2). foldPayloadLoads counts
+	 * fetch_att materializations of non-key columns, incremented at the
+	 * stable post-key site when deferring and at the eager gather otherwise,
+	 * so the counter measures the work either way and the deferral's saving
+	 * is their difference. foldGroupsDeferred/foldGroupsTotal expose the
+	 * runtime-adaptive gate (defer unless observed survival exceeds half).
+	 */
+	uint64		foldPayloadLoads;
+	int			foldGroupsDeferred;
+	int			foldGroupsTotal;
+
+	/*
 	 * Parallel batch fold (#289 phase 5/6): a partial node emits its per-worker
 	 * transition state instead of the finalized value, and its reader claims
 	 * distinct row groups through parallelCounter -- the same shared atomic the
@@ -3124,8 +3136,13 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	int16	   *cattlen = (int16 *) palloc0(sizeof(int16) * natts);
 	uint64	   *cpresent = (uint64 *) palloc0(sizeof(uint64) * natts);
 	bool	   *cneeded = (bool *) palloc0(sizeof(bool) * natts);
+	bool	   *ciskey = (bool *) palloc0(sizeof(bool) * natts);
 	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
 	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
+	int			npayload = 0;
+	int64		candRows = 0;	/* rows that reached the key check */
+	int64		survRows = 0;	/* rows that passed it */
+	bool		deferOn = false;
 
 	if (!pgcolumnar_batch_shape_eligible(state, tupdesc, &keys, &nkeys))
 		return false;
@@ -3134,6 +3151,27 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	while ((col = bms_next_member(state->projected, col)) >= 0)
 		if (col >= 0 && col < natts)
 			cneeded[col] = true;
+
+	/*
+	 * Payload deferral (#405 step 2): key columns are the ones the scan keys
+	 * read; every other needed column is payload, whose fetch_att can wait
+	 * until the key check passes. ciskey is the split; npayload > 0 is the
+	 * only case with anything to defer.
+	 */
+	{
+		int			kk;
+
+		for (kk = 0; kk < nkeys; kk++)
+		{
+			int			ka = keys[kk].sk_attno - 1;
+
+			if (ka >= 0 && ka < natts)
+				ciskey[ka] = true;
+		}
+		for (col = 0; col < natts; col++)
+			if (cneeded[col] && !ciskey[col])
+				npayload++;
+	}
 
 	/*
 	 * Push the scan keys so the reader prunes whole row groups its zone maps rule
@@ -3182,6 +3220,19 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 
 		PgColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
 								  &skipVec, &decodeSkipped, &vecStart, &vcount);
+
+		/*
+		 * The adaptive gate (#405, amended step 4): defer this group's payload
+		 * unless the survival observed so far exceeds half, in which case the
+		 * two-phase gather would refetch nearly everything and eager is
+		 * cheaper. The first group is optimistic. One comparison per group:
+		 * the #289 no-per-group-precompute guard holds.
+		 */
+		deferOn = (npayload > 0 &&
+				   (candRows == 0 || survRows * 2 <= candRows));
+		state->foldGroupsTotal++;
+		if (deferOn)
+			state->foldGroupsDeferred++;
 
 		/*
 		 * This loop now honours skipVec, and it has to (#512, #452 phase 1b-i).
@@ -3273,10 +3324,15 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 				vecSkipped = (curVec < vcount && skipVec[curVec]);
 			}
 
-			/* gather needed values at each column's present index; advance it */
+			/*
+			 * Phase 1: gather the scan-key columns (and, when this group is
+			 * eager, everything). Deferred payload columns are not touched
+			 * here at all -- not even their cursors -- so the failing-row
+			 * path below can consume their slots without a fetch (#405).
+			 */
 			for (col = 0; col < natts; col++)
 			{
-				if (!cneeded[col])
+				if (!cneeded[col] || (deferOn && !ciskey[col]))
 					continue;
 				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
 				{
@@ -3289,6 +3345,8 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 						cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
 											  true, cattlen[col]);
 						cisnull[col] = false;
+						if (!ciskey[col])
+							state->foldPayloadLoads++;
 					}
 					cpresent[col]++;
 				}
@@ -3297,12 +3355,28 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			}
 
 			if (vecSkipped)
-				continue;			/* value slots already consumed above */
+			{
+				/* consume deferred payload slots; never read them (#405) */
+				if (deferOn)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
+							cpresent[col]++;
+				continue;
+			}
 
 			del = (dmask != NULL && (r >> 3) < dlen &&
 				   (dmask[r >> 3] & (1 << (r & 7))) != 0);
 			if (del)
-				continue;			/* value slots already consumed above */
+			{
+				if (deferOn)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
+							cpresent[col]++;
+				continue;
+			}
+			candRows++;
 
 			for (k = 0; k < nkeys; k++)
 			{
@@ -3319,7 +3393,38 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 				}
 			}
 			if (!pass)
+			{
+				if (deferOn)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
+							cpresent[col]++;
 				continue;
+			}
+			survRows++;
+
+			/*
+			 * Phase 2 (#405): the row survived, so NOW materialize its
+			 * deferred payload. This is the stable post-key counter site the
+			 * plan required: on a deferred group the counter equals surviving
+			 * rows times fetched payload values, never candidates.
+			 */
+			if (deferOn)
+				for (col = 0; col < natts; col++)
+				{
+					if (!cneeded[col] || ciskey[col])
+						continue;
+					if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+					{
+						cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+											  true, cattlen[col]);
+						cisnull[col] = false;
+						state->foldPayloadLoads++;
+						cpresent[col]++;
+					}
+					else
+						cisnull[col] = true;
+				}
 
 			for (a = 0; a < state->naggs; a++)
 			{
@@ -3585,6 +3690,9 @@ PgColumnarReScanAggScan(CustomScanState *node)
 	state->done = false;
 	state->haveStats = false;
 	state->batchFolded = false;
+	state->foldPayloadLoads = 0;
+	state->foldGroupsDeferred = 0;
+	state->foldGroupsTotal = 0;
 	MemoryContextReset(state->resultContext);
 	for (a = 0; a < state->naggs; a++)
 	{
@@ -3645,6 +3753,15 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 		 * PgColumnarExplainGroupStats is why that is now automatic.
 		 */
 		PgColumnarGroupStats gs;
+
+		if (state->batchFolded)
+		{
+			ExplainPropertyInteger("Columnar Fold Payload Loads", NULL,
+								   (int64) state->foldPayloadLoads, es);
+			ExplainPropertyText("Columnar Fold Deferred Groups",
+								psprintf("%d of %d", state->foldGroupsDeferred,
+										 state->foldGroupsTotal), es);
+		}
 
 		gs.usableSkipPredicates = state->usablePreds;
 		gs.groupsTotal = state->groupsTotal;

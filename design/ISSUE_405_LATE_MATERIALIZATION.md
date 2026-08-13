@@ -310,3 +310,30 @@ position-level late-mat, but it is byval-only and the residual is a decoded-buff
 load, so the win is bounded by a wall-clock measurement not yet taken." The row
 path — where the expensive varlena decode lives — already defers. The measurement
 in Step 1 decides whether even the fold slice is worth it; the honest prior is no.
+
+---
+
+## Step 2 rebuild (scheduled 2026-08-13): the implementation shape, one amendment
+
+The owner scheduled the rebuild (issue comment, 2026-08-13). Steps 2 and 3
+are implemented as this document planned: the gather loop defers non-key
+`fetch_att` until the scan-key check passes, payload cursors advance without
+reading on failing rows (the consume-slot-do-not-read contract vecSkipped and
+deleted rows already follow), and the work-done counter increments at the
+stable post-key site with its own label, `Columnar Fold Payload Loads`, so no
+EXPLAIN line means two different quantities on two plans (Step 3 by
+construction).
+
+**Amendment to Step 4**: the cost gate is RUNTIME-ADAPTIVE, not the planner
+plumbing this plan sketched. Per group, deferral is enabled iff the survival
+fraction observed over all previous groups is at most one half; the first
+group is optimistic. Rationale for the deviation, recorded per house rule:
+the planner route requires extending the agg node's positional
+custom_private and its list_length discriminator plus an input_rel width
+computation, all to consume a planner selectivity estimate that the executor
+can simply measure; the adaptive gate needs no statistics, self-corrects on
+data the planner mispredicts, costs one comparison per group boundary (the
+#289 no-per-group-precompute guard holds), and is directly observable as
+`Columnar Fold Deferred Groups: X of Y`. The reviewer may push back to the
+planner design; the suite's arms bind the BEHAVIOUR (deferral on selective
+data, eager fallback on high survival), not the mechanism.
