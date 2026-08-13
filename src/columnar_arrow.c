@@ -25,6 +25,7 @@
  */
 #include "columnar.h"
 #include "columnar_flatbuffers.h"
+#include "columnar_sink.h"
 
 #include "fmgr.h"
 #include "funcapi.h"
@@ -841,7 +842,7 @@ arrow_build_field(FBB *b, ArrowCol *c)
 
 /* build one RecordBatch (metadata + body) and write it */
 static void
-write_record_batch(FILE *f, ArrowCol *cols, int ncols, int64 nrows)
+write_record_batch(PqSink *snk, ArrowCol *cols, int ncols, int64 nrows)
 {
 	StringInfoData body;
 	FBB			b;
@@ -926,13 +927,13 @@ write_record_batch(FILE *f, ArrowCol *cols, int ncols, int64 nrows)
 		uint32		metaLenField = metaLen + metaPad;
 		static const char zeros[8] = {0};
 
-		fwrite(&cont, 4, 1, f);
-		fwrite(&metaLenField, 4, 1, f);
-		fwrite(b.buf + b.cap - b.tail, 1, metaLen, f);
+		PgColumnarSinkWrite(snk, &cont, 4);
+		PgColumnarSinkWrite(snk, &metaLenField, 4);
+		PgColumnarSinkWrite(snk, b.buf + b.cap - b.tail, metaLen);
 		if (metaPad)
-			fwrite(zeros, 1, metaPad, f);
+			PgColumnarSinkWrite(snk, zeros, metaPad);
 		if (body.len > 0)
-			fwrite(body.data, 1, body.len, f);
+			PgColumnarSinkWrite(snk, body.data, body.len);
 	}
 
 	pfree(b.buf);
@@ -962,7 +963,7 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 	uint64		rowNumber;
 	int64		total = 0;
 	int64		batchRows = 0;
-	FILE	   *f;
+	PqSink	   *snk;
 	FBB			b;
 	int			i;
 	uint32		vec,
@@ -1051,14 +1052,9 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 		arrowcol_reset(&cols[i]);
 	}
 
-	f = AllocateFile(path, PG_BINARY_W);
-	if (f == NULL)
+	snk = PgColumnarSinkOpenLocal(path);
+	PG_TRY();
 	{
-		table_close(rel, AccessShareLock);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for writing: %m", path)));
-	}
 
 	/* ---- Schema message ---- */
 	fieldOff = palloc(sizeof(uint32) * ncols);
@@ -1089,11 +1085,11 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 		uint32		metaLenField = metaLen + metaPad;
 		static const char zeros[8] = {0};
 
-		fwrite(&cont, 4, 1, f);
-		fwrite(&metaLenField, 4, 1, f);
-		fwrite(b.buf + b.cap - b.tail, 1, metaLen, f);
+		PgColumnarSinkWrite(snk, &cont, 4);
+		PgColumnarSinkWrite(snk, &metaLenField, 4);
+		PgColumnarSinkWrite(snk, b.buf + b.cap - b.tail, metaLen);
 		if (metaPad)
-			fwrite(zeros, 1, metaPad, f);
+			PgColumnarSinkWrite(snk, zeros, metaPad);
 	}
 	pfree(b.buf);
 
@@ -1119,7 +1115,7 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 		if (batchRows == ARROW_BATCH_ROWS)
 		{
 			oldCtx = MemoryContextSwitchTo(batchCtx);
-			write_record_batch(f, cols, ncols, batchRows);
+			write_record_batch(snk, cols, ncols, batchRows);
 			MemoryContextSwitchTo(oldCtx);
 			MemoryContextReset(batchCtx);
 			for (i = 0; i < ncols; i++)
@@ -1132,7 +1128,7 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 	if (batchRows > 0)
 	{
 		oldCtx = MemoryContextSwitchTo(batchCtx);
-		write_record_batch(f, cols, ncols, batchRows);
+		write_record_batch(snk, cols, ncols, batchRows);
 		MemoryContextSwitchTo(oldCtx);
 	}
 
@@ -1141,17 +1137,23 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 		uint32		cont = 0xFFFFFFFF;
 		uint32		zero = 0;
 
-		fwrite(&cont, 4, 1, f);
-		fwrite(&zero, 4, 1, f);
+		PgColumnarSinkWrite(snk, &cont, 4);
+		PgColumnarSinkWrite(snk, &zero, 4);
 	}
 
-	if (FreeFile(f) != 0)
-	{
-		table_close(rel, AccessShareLock);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not write file \"%s\": %m", path)));
+	/*
+	 * Commit: the final name appears only here, whole (#394). Any failure
+	 * above unwinds through the CATCH, which removes the temp file; the
+	 * final path is never touched on error.
+	 */
+	PgColumnarSinkFinish(snk);
 	}
+	PG_CATCH();
+	{
+		PgColumnarSinkAbort(snk);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	table_close(rel, AccessShareLock);
 	PG_RETURN_INT64(total);

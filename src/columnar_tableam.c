@@ -14,6 +14,7 @@
 #include "columnar.h"
 
 #include "columnar_customscan.h"
+#include "columnar_sink.h"
 #include "columnar_delete_vector.h"
 #include "columnar_metadata.h"
 #include "columnar_reader.h"
@@ -2756,6 +2757,24 @@ _PG_init(void)
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
+
+	/*
+	 * Dev fault injection for the export sink (#394): fail the sink, as
+	 * ENOSPC would, once the export has written this many bytes. Exists so
+	 * the export failure paths (error, no partial file at the final name, no
+	 * temp debris) are testable deterministically; the suite chooses values
+	 * that land inside write_record_batch, the helper the 13-site census
+	 * missed.
+	 */
+	DefineCustomIntVariable("pgcolumnar.sink_fail_after",
+							"Fail export writes after this many bytes (dev fault injection).",
+							"-1 disables. The failure takes the same path a full disk takes.",
+							&pgcolumnar_sink_fail_after,
+							-1,
+							-1, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pgcolumnar.unique_lock_buckets",
 							"Advisory-lock buckets per unique index for same-key "

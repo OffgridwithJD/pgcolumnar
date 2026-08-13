@@ -23,6 +23,7 @@
  */
 #include "columnar.h"
 #include "columnar_parquet_format.h"
+#include "columnar_sink.h"
 #include "columnar_thrift.h"
 
 #include "fmgr.h"
@@ -958,7 +959,7 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 	int64		total = 0;
 	int64		groupRows = 0;
 	int64		offset = 0;
-	FILE	   *f;
+	PqSink	   *snk;
 	int			i;
 	PqRowGroup *rgs = NULL;
 	int			nrgs = 0;
@@ -998,13 +999,10 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 							format_type_be(att->atttypid))));
 	}
 
-	f = AllocateFile(filepath, PG_BINARY_W);
-	if (f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for writing: %m", filepath)));
-
-	fwrite("PAR1", 1, 4, f);		/* magic header */
+	snk = PgColumnarSinkOpenLocal(filepath);
+	PG_TRY();
+	{
+	PgColumnarSinkWrite(snk, "PAR1", 4);	/* magic header */
 	offset = 4;
 
 	values = palloc(sizeof(Datum) * ntop);
@@ -1062,8 +1060,8 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 				initStringInfo(&ph);
 				write_page_header(&ph, leaves[i].nEntries, (int32) body.len);
 
-				fwrite(ph.data, 1, ph.len, f);
-				fwrite(body.data, 1, body.len, f);
+				PgColumnarSinkWrite(snk, ph.data, ph.len);
+				PgColumnarSinkWrite(snk, body.data, body.len);
 				offset += ph.len + body.len;
 
 				rg->cols[i].dataPageOffset = pageStart;
@@ -1110,17 +1108,26 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 		PgColumnarThriftPutStringField(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
 		PgColumnarThriftPutStop(&fmd);
 
-		fwrite(fmd.data, 1, fmd.len, f);
+		PgColumnarSinkWrite(snk, fmd.data, fmd.len);
 		footerLen = fmd.len;
-		fwrite(&footerLen, 4, 1, f);	/* footer length, LE */
-		fwrite("PAR1", 1, 4, f);		/* magic footer */
+		PgColumnarSinkWrite(snk, &footerLen, 4);	/* footer length, LE */
+		PgColumnarSinkWrite(snk, "PAR1", 4);	/* magic footer */
 		pfree(fmd.data);
 	}
 
-	if (FreeFile(f) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not write file \"%s\": %m", filepath)));
+	/*
+	 * Commit: the final name appears only here, whole (#394). Any failure
+	 * above, including inside a write, unwinds through the CATCH, which
+	 * removes the temp file; the final path is never touched on error.
+	 */
+	PgColumnarSinkFinish(snk);
+	}
+	PG_CATCH();
+	{
+		PgColumnarSinkAbort(snk);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	return total;
 }
