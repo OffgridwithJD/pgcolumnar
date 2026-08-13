@@ -1120,13 +1120,16 @@ os_require_env(const char *name, const char *url)
 }
 
 /*
- * Resolve an s3://bucket/key URL against the ambient environment: endpoint
- * host and port from AWS_ENDPOINT_URL (http only until M3), credentials and
- * region from the AWS_* variables, path-style request target with the key
- * percent-encoded exactly as it is signed.
+ * Resolve an s3://bucket/key URL: endpoint and region from the catalog config
+ * when present, else the environment; credentials from the config's mapping
+ * triple when present, else the environment IF ambient use is allowed
+ * (superuser, credentials_required=false, or a function-path caller), else a
+ * 28000 refusal. Path-style request target with the key percent-encoded
+ * exactly as it is signed.
  */
 static void
-os_resolve_s3(PgColumnarObjHandle *h, const char *url)
+os_resolve_s3(PgColumnarObjHandle *h, const char *url,
+			  const PgColumnarObjStoreConfig *cfg)
 {
 	const char *bucket = url + 5;
 	const char *slash = strchr(bucket, '/');
@@ -1136,6 +1139,7 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 	const char *epcolon;
 	const char *region;
 	const char *token;
+	bool		ambientOk = (cfg == NULL || cfg->allow_ambient);
 	StringInfoData path;
 	MemoryContext oldcxt;
 
@@ -1144,7 +1148,10 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("columnar: \"%s\" is not s3://bucket/key", url)));
 
-	ep = os_require_env("AWS_ENDPOINT_URL", url);
+	if (cfg != NULL && cfg->endpoint != NULL)
+		ep = cfg->endpoint;
+	else
+		ep = os_require_env("AWS_ENDPOINT_URL", url);
 	if (pg_strncasecmp(ep, "https://", 8) == 0)
 	{
 #ifdef HAVE_OBJSTORE_OPENSSL
@@ -1164,20 +1171,51 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 				 errmsg("columnar: AWS_ENDPOINT_URL must be an http:// or "
 						"https:// URL")));
 
-	region = getenv("AWS_REGION");
-	if (region == NULL || region[0] == '\0')
-		region = getenv("AWS_DEFAULT_REGION");
-	if (region == NULL || region[0] == '\0')
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-				 errmsg("columnar: reading \"%s\" requires AWS_REGION or "
-						"AWS_DEFAULT_REGION in the server environment", url)));
+	if (cfg != NULL && cfg->region != NULL)
+		region = cfg->region;
+	else
+	{
+		region = getenv("AWS_REGION");
+		if (region == NULL || region[0] == '\0')
+			region = getenv("AWS_DEFAULT_REGION");
+		if (region == NULL || region[0] == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					 errmsg("columnar: reading \"%s\" requires a region option "
+							"on the server, or AWS_REGION in the server "
+							"environment", url)));
+	}
 
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-	h->akid = pstrdup(os_require_env("AWS_ACCESS_KEY_ID", url));
-	h->secret = pstrdup(os_require_env("AWS_SECRET_ACCESS_KEY", url));
-	token = getenv("AWS_SESSION_TOKEN");
-	h->token = (token != NULL && token[0] != '\0') ? pstrdup(token) : NULL;
+	if (cfg != NULL && cfg->akid != NULL)
+	{
+		/* the mapping's credential triple; the validator required the pair */
+		h->akid = pstrdup(cfg->akid);
+		h->secret = pstrdup(cfg->secret);
+		h->token = (cfg->token != NULL && cfg->token[0] != '\0')
+			? pstrdup(cfg->token) : NULL;
+	}
+	else if (ambientOk)
+	{
+		h->akid = pstrdup(os_require_env("AWS_ACCESS_KEY_ID", url));
+		h->secret = pstrdup(os_require_env("AWS_SECRET_ACCESS_KEY", url));
+		token = getenv("AWS_SESSION_TOKEN");
+		h->token = (token != NULL && token[0] != '\0') ? pstrdup(token) : NULL;
+	}
+	else
+	{
+		MemoryContextSwitchTo(oldcxt);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("columnar: no credentials for \"%s\"", url),
+				 errdetail("No user mapping for this server carries "
+						   "access_key_id and secret_access_key for the "
+						   "current role."),
+				 errhint("Create a user mapping with credentials, or have a "
+						 "superuser set credentials_required 'false' on the "
+						 "mapping to permit the server environment's ambient "
+						 "identity.")));
+	}
 	h->region = pstrdup(region);
 
 	/* endpoint authority */
@@ -1208,7 +1246,7 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url)
 }
 
 static PgColumnarObjHandle *
-objstore_open(const char *url, int64 *len)
+objstore_open(const char *url, const PgColumnarObjStoreConfig *cfg, int64 *len)
 {
 	PgColumnarObjHandle *h;
 	OsResponse	resp;
@@ -1237,7 +1275,7 @@ objstore_open(const char *url, int64 *len)
 	dlist_push_head(&os_open_handles, &h->node);
 
 	if (isS3)
-		os_resolve_s3(h, url);
+		os_resolve_s3(h, url, cfg);
 	else
 	{
 		bool		isHttps = (pg_strncasecmp(url, "https://", 8) == 0);
