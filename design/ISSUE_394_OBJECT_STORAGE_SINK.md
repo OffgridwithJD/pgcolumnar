@@ -9,12 +9,22 @@ should be fixed ahead of any remote sink.
 
 - **Parquet has a single choke point**: `PgColumnarWriteParquetFile`
   (`src/columnar_parquet.c:944-1126`) writes all data bytes for both the serial
-  and the parallel exporter, through five raw `fwrite` sites (magic `:1007`,
+  and the parallel exporter, through six raw `fwrite` sites (magic `:1007`,
   page header + body `:1065-1066`, footer `:1113`, footer length `:1115`,
   tail magic `:1116`).
-- **Arrow is separate**: `src/columnar_arrow.c:948-1158` with its own eight
-  `fwrite` sites. No shared writer abstraction exists; a byte SINK seam is
-  absent on both paths.
+- **Arrow is separate**, and its writes are NOT all inside the entry function:
+  `pgcolumnar_export_arrow` (`src/columnar_arrow.c:948-1158`) holds six
+  `fwrite` sites, and the helper `write_record_batch` (`:844`, called twice,
+  `:1122` and `:1135`) holds five more (`:929-935`), including the record-batch
+  body write at `:935`, the largest single write on the arrow path. Eleven
+  sites total. No shared writer abstraction exists; a byte SINK seam is absent
+  on both paths.
+- **Census: 17 `fwrite` sites** (6 parquet + 11 arrow), counted by grep against
+  main at review time. The implementation must re-derive the site list by grep
+  when it lands, never work from this number: an earlier revision of this doc
+  said 13 by exactly the lossy enumeration this repo's rules warn about, and
+  the four missed sites included the arrow body write (caught in review, PR
+  #604).
 - **Both writers are strictly append-only.** Offsets are tracked by summing
   written lengths; there is no fseek on the write path. A pure append sink
   suffices; nothing needs random access.
@@ -32,12 +42,16 @@ should be fixed ahead of any remote sink.
 Both were found mapping the path and both are wrong today without any object
 storage involved:
 
-1. **`fwrite` return values are unchecked at all 13 sites.** The only error
+1. **`fwrite` return values are unchecked at all 17 sites.** The only error
    detection is `FreeFile(f) != 0` at close (`columnar_parquet.c:1120`,
    `columnar_arrow.c:1148`). A disk-full mid-export is detected only if the
    final flush happens to fail. The sink seam fixes this structurally: the
    sink's `write` reports short writes as errors at the call, the way the read
    seam's `pq_source_read` already treats short reads as `DATA_CORRUPTED`.
+   The seam is also why the census stops mattering: once every write routes
+   through the one checked `write`, the claim becomes "no `fwrite` remains in
+   either export file", which a grep in the Step-1 suite pins as a check
+   instead of a number maintained by hand.
 2. **Serial exports leave a partial file at the final path on error.** There
    is no temp-and-rename and no unlink-on-error (the parallel path cleans up;
    the serial paths do not). The local sink gains: write to
@@ -107,8 +121,14 @@ module, shared by source and sink.
 1. **Local sink seam + the two defect fixes** (short-write errors,
    temp-and-rename with unlink-on-error), serial paths first, parallel
    dispatcher unchanged. Suites: byte-identical output via the existing
-   parquet/arrow export oracles, plus the two removal-proof arms. This PR is
-   useful standalone and blocks on nothing.
+   parquet/arrow export oracles, plus the two removal-proof arms, plus a
+   zero-`fwrite`-remaining grep check over both export files. The
+   short-write removal proof must inject its failure into a write **inside
+   `write_record_batch`** (the body write at `:935`), not only into the
+   top-level export functions: the helper is where the earlier census missed,
+   and a proof that never reaches it would green a Step 1 that leaves the
+   largest arrow write unchecked. This PR is useful standalone and blocks on
+   nothing.
 2. Arrow and parallel writers onto the seam (parallel workers open their own
    sinks; dispatcher cleanup unchanged).
 3. Remote sink in the module, single-object first, behind #393 M2 (signing);
