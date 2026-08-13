@@ -1503,7 +1503,15 @@ CREATE FUNCTION pgcolumnar.maintenance_due(
 	OUT recluster_due boolean,
 	OUT recommendation text)
 	RETURNS record
-	LANGUAGE plpgsql STABLE
+	-- SECURITY DEFINER, mirroring stats(): the report reads pgcolumnar's internal
+	-- catalogs through sort_status(), which ordinary roles cannot SELECT, so an
+	-- invoker-rights function false-denied every non-superuser caller -- the
+	-- cron/monitoring role this report is for. require_caller_select (inside
+	-- stats()) still gates the REAL caller via GetOuterUserId(), so definer rights
+	-- do not widen who may read a table's statistics. search_path is pinned as a
+	-- definer function must.
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
 	AS $maintenance_due$
 DECLARE
 	st_rows bigint;

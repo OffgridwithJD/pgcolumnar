@@ -117,16 +117,33 @@ check "both: recluster due"        "$(md md_both recluster_due)"       "t"
 check "both: recommendation names both verbs" \
 	"$(md md_both recommendation)" "compact_rewrite, recluster"
 
-# ---- privilege: inherited from stats() (require_caller_select) --------------
-# A role with no SELECT on the relation must be refused, exactly as stats() is.
-psql_run "CREATE ROLE md_noselect LOGIN;"
-psql_run "GRANT USAGE ON SCHEMA pgcolumnar TO md_noselect;"
-NOSEL_ERR="$(PGPASSWORD= env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" \
-	-U md_noselect -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | grep -c "permission denied"
-SELECT compact_rewrite_due FROM pgcolumnar.maintenance_due('md_clean');
+# ---- privilege: a positive control AND a deny arm ---------------------------
+# A deny arm alone is vacuous -- a function that refuses EVERYONE passes it,
+# which is exactly how an invoker-rights bug (sort_status reads an internal
+# catalog ordinary roles cannot) hid here. Test both, and assert the deny on
+# SQLSTATE (42501), not a "permission denied" grep a login FATAL also matches.
+sqlstate_as() {  # sqlstate_as <role> <sql>
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" \
+		-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+\\set VERBOSITY sqlstate
+$2;
 SQLEOF
-)"
-check "privilege: a role without SELECT is refused" \
-	"$([ "${NOSEL_ERR:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+}
+scalar_as() {  # scalar_as <role> <sql> -- value as <role>, empty on error
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U "$1" \
+		-d "$PGC_DB" -qtA -c "$2" 2>/dev/null | tail -1
+}
+psql_run "CREATE ROLE md_reader LOGIN;"
+psql_run "GRANT USAGE ON SCHEMA pgcolumnar TO md_reader;"
+psql_run "GRANT SELECT ON md_clean TO md_reader;"   # SELECT on the table, nothing on the catalogs
+psql_run "CREATE ROLE md_none LOGIN;"
+psql_run "GRANT USAGE ON SCHEMA pgcolumnar TO md_none;"
+# Positive control: a SELECT-holder gets a verdict. Reds on invoker rights
+# (42501 on pgcolumnar.row_group inside sort_status).
+check "positive: a SELECT-holder gets a verdict, not a false deny" \
+	"$(scalar_as md_reader "SELECT compact_rewrite_due FROM pgcolumnar.maintenance_due('md_clean')")" "f"
+# Deny: a role without SELECT on the relation is refused, 42501 specifically.
+check "deny: a role without SELECT on the relation is refused (42501)" \
+	"$(sqlstate_as md_none "SELECT compact_rewrite_due FROM pgcolumnar.maintenance_due('md_clean')")" "42501"
 
 pgc_summary
