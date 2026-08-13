@@ -35,6 +35,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Static analysis of the test harness itself, errors only. The harness is
+  # ~130 bash suites whose failure modes have their own gotcha literature
+  # (harness_selftest polices the semantic ones, like assigning to a bash
+  # special, #616 retracted); shellcheck at -S error catches the syntactic
+  # class without demanding a warning cleanup of the whole corpus. -s bash
+  # because the selftest parts are sourced fragments with no shebang.
+  shellcheck:
+    name: shellcheck (test harness, errors only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck -S error over the harness
+        run: shellcheck -S error -s bash test/*.sh test/selftest/*.sh
+
   # Build against every supported major. Fast, and it is what an API change
   # between majors trips first.
   # Both architectures, because a build preflight is cheap and the project has
