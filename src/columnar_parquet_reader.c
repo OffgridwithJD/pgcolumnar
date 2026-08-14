@@ -26,6 +26,7 @@
 #include <math.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <glob.h>
 
 #include "fmgr.h"
@@ -2637,6 +2638,26 @@ pq_has_parquet_ext(const char *name)
 }
 
 /*
+ * Mirror the local directory walk's skip of `_SUCCESS`, `_temporary`, and
+ * dot-hidden names (#619): a listed key whose any path segment begins with '_'
+ * or '.' is excluded, so a Spark staging directory does not fold into a read.
+ * The `//` in a scheme prefix is not a segment start and never matches.
+ */
+static bool
+pq_remote_key_hidden(const char *key)
+{
+	const char *p = key;
+
+	while ((p = strchr(p, '/')) != NULL)
+	{
+		if (p[1] == '_' || p[1] == '.')
+			return true;
+		p++;
+	}
+	return false;
+}
+
+/*
  * Whether a path produced by a directory listing or a glob expansion should be
  * handed to the reader.
  *
@@ -2779,30 +2800,72 @@ pq_walk_dir(const char *path, int depth, List **files, int *skipped)
  * this is an ordinary key, not a crafted one.
  */
 static List *
-pq_resolve_paths(const char *path)
+pq_resolve_paths(const char *path, const PgColumnarObjStoreConfig *cfg)
 {
 	struct stat st;
 	List	   *files = NIL;
 
 	if (PgColumnarPathIsRemote(path))
 	{
+		bool		hasGlob = pq_has_glob_meta(path);
+		size_t		plen = strlen(path);
+		bool		isDir = (plen > 0 && path[plen - 1] == '/');
+		const PgColumnarObjStoreApi *api;
+		char	   *listUrl;
+		char	  **keys;
+		int			nkeys;
+		int			i;
+
 		/*
-		 * v1 reads exact object keys. Expanding a pattern needs a LIST call,
-		 * whose paged XML or JSON response is a third hand-rolled parser over
-		 * input an outside party controls, which is the shape that produced #210
-		 * and #228. Refusing here is a decision, so it says so; treating the
-		 * metacharacter as a literal key byte would be the silent alternative
-		 * and would surprise anyone who typed a pattern on purpose.
+		 * An exact key (no pattern, no trailing slash) is read as one object,
+		 * with no LIST call: a point read stays a single GET (#619). A trailing
+		 * slash lists every object under the prefix at any depth, like the local
+		 * recursive directory walk; a glob lists the literal prefix before the
+		 * first metacharacter and matches the pattern against the keys.
 		 */
-		if (pq_has_glob_meta(path))
+		if (!hasGlob && !isDir)
+			return list_make1(pstrdup(path));
+
+		api = PgColumnarObjStoreGet();
+		if (api == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("columnar: cannot expand a pattern in the object-storage path \"%s\"",
+					 errmsg("columnar: expanding \"%s\" requires the object-store module",
 							path),
-					 errdetail("Patterns are expanded on the local filesystem "
-							   "only. Object storage is read by exact key."),
-					 errhint("Name each object explicitly.")));
-		return list_make1(pstrdup(path));
+					 errdetail("Object storage support is a separate library, "
+							   "pgcolumnar_objstore, which is not installed.")));
+
+		if (hasGlob)
+		{
+			const char *meta = strpbrk(path, "*?[");
+			const char *seg = meta;
+
+			/* the prefix to list is the literal head up to the last '/' before
+			 * the first metacharacter */
+			while (seg > path && *seg != '/')
+				seg--;
+			listUrl = (*seg == '/')
+				? pnstrdup(path, (seg - path) + 1) : pstrdup(path);
+		}
+		else
+			listUrl = pstrdup(path);
+
+		keys = api->list_objects(listUrl, cfg, &nkeys);
+		for (i = 0; i < nkeys; i++)
+		{
+			if (!pq_has_parquet_ext(keys[i]) || pq_remote_key_hidden(keys[i]))
+				continue;
+			/* a glob applies segment by segment, as the local glob() does */
+			if (hasGlob && fnmatch(path, keys[i], FNM_PATHNAME) != 0)
+				continue;
+			files = lappend(files, keys[i]);
+		}
+		if (files == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_FILE),
+					 errmsg("no objects under \"%s\" match", path)));
+		list_sort(files, pq_list_str_cmp);
+		return files;
 	}
 
 	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
@@ -3264,8 +3327,10 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 	/* RLS after the ACL check, matching core's ordering (#563). */
 	PgColumnarRequireNoRowSecurity(relid);
 
-	/* resolve the path (file, directory, or glob) before taking the lock */
-	files = pq_resolve_paths(path);
+	/* resolve the path (file, directory, or glob) before taking the lock. The
+	 * function API has no server object, so a remote listing uses the ambient
+	 * environment (cfg NULL), like the object opens on this path. */
+	files = pq_resolve_paths(path, NULL);
 
 	rel = table_open(relid, RowExclusiveLock);
 	tupdesc = RelationGetDescr(rel);
@@ -3355,7 +3420,7 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 				 errmsg("pgcolumnar.read_parquet requires a column definition list"),
 				 errhint("Call it as SELECT * FROM pgcolumnar.read_parquet(path) AS t(col1 type1, ...).")));
 
-	files = pq_resolve_paths(path);
+	files = pq_resolve_paths(path, NULL);
 
 	oldContext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	retdesc = CreateTupleDescCopy(retdesc);
@@ -3424,7 +3489,7 @@ pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
 				 errmsg("set-valued function called in context that cannot accept a set")));
 
 	/* describe the first resolved file; a directory/glob is assumed uniform */
-	path = (char *) linitial(pq_resolve_paths(path));
+	path = (char *) linitial(pq_resolve_paths(path, NULL));
 
 	/* the schema lives in the footer, so the body is never read */
 	pq_source_open(path, &src, &pf);
@@ -4505,7 +4570,7 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 				 errmsg("foreign table \"%s\" has no \"path\" option",
 						RelationGetRelationName(rel))));
 
-	files = pq_resolve_paths(path);
+	files = pq_resolve_paths(path, &st->oscfg);
 
 	st->node = node;
 	st->tupdesc = tupdesc;

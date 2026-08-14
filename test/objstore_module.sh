@@ -111,20 +111,21 @@ for url in "s3://bucket/key.parquet" "gs://bucket/key.parquet" "https://host/key
 		"$(grep -c 'No such file or directory' <<<"$out")" "0"
 done
 
-# ---- a remote path must not be expanded against the local filesystem ----------
+# ---- a remote glob must be expanded REMOTELY, never against the local FS -------
 #
 # pq_resolve_paths runs AHEAD of the byte source at every entry point, so before
 # #393's fix an s3:// key containing a glob metacharacter went to glob() against
-# the LOCAL filesystem and came back "no files match pattern". That is exactly the
-# filesystem-miss-for-a-remote-path report the byte source exists to remove,
-# arriving one layer above it. `*`, `?` and `[` are all legal in an S3 key, so
-# this is an ordinary key and not a crafted one.
+# the LOCAL filesystem and came back "no files match pattern". Since #619 a remote
+# glob is expanded by a ListObjectsV2 call through the module, not against the
+# local filesystem: with no endpoint configured here it fails as a remote/object-
+# storage error, and the invariant this arm still guards is that it is NEVER a
+# local filesystem miss. `*`, `?` and `[` are all legal in an S3 key.
 for pat in "s3://bucket/a*.parquet" "s3://bucket/a?.parquet" "s3://bucket/a[0-9].parquet"; do
 	out=$(psql_run "SELECT * FROM pgcolumnar.read_parquet('$pat') AS (a int)" 2>&1)
-	check "a glob character in an object key is refused as a pattern, not expanded" \
-		"$([ "$(grep -c 'cannot expand a pattern in the object-storage path' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
+	check "a remote glob is handled remotely (an object-storage error, not a local one)" \
+		"$([ "$(grep -c 'requires AWS_\|object storage\|objstore_allowed_endpoints\|requires the object-store module\|could not resolve\|could not connect\|is not in pgcolumnar' <<<"$out")" -ge 1 ] && echo yes || echo no)" "yes"
 	check_num "and it is NOT reported as a local filesystem miss" \
-		"$(grep -c 'no files match pattern\|matched no regular files' <<<"$out")" "0"
+		"$(grep -c 'no files match pattern\|matched no regular files\|No such file or directory' <<<"$out")" "0"
 done
 
 # A local path must be entirely unaffected, which is the regression this could cause.

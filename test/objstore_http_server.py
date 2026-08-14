@@ -205,9 +205,75 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
 
+    def _do_list_v2(self, query):
+        # ListObjectsV2 over the objects on disk under rootdir/<bucket>. Paged
+        # by --list-page-size using an opaque continuation token (the last key
+        # returned), so the client's paging loop is exercised.
+        #
+        # Fuzz hook: if <rootdir>/__listing_override__ exists, its raw bytes are
+        # returned verbatim as the listing body, so a harness can feed the C
+        # parser arbitrary (malformed) XML and check the backend survives.
+        override = os.path.join(self.server.rootdir, "__listing_override__")
+        if os.path.exists(override):
+            with open(override, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        q = urllib.parse.parse_qs(query)
+        bucket = self.path.partition("?")[0].lstrip("/").split("/", 1)[0]
+        prefix = q.get("prefix", [""])[0]
+        token = q.get("continuation-token", [None])[0]
+        base = os.path.join(self.server.rootdir, bucket)
+        keys = []
+        for root, _dirs, names in os.walk(base):
+            for nm in names:
+                full = os.path.join(root, nm)
+                key = os.path.relpath(full, base).replace(os.sep, "/")
+                if key.startswith(prefix):
+                    keys.append(key)
+        keys.sort()
+        start = 0
+        if token is not None:
+            start = len([k for k in keys if k <= token])
+        page_size = self.server.list_page_size
+        page = keys[start:start + page_size]
+        truncated = start + page_size < len(keys)
+        next_token = page[-1] if (truncated and page) else None
+
+        def esc(s):
+            return (s.replace("&", "&amp;").replace("<", "&lt;")
+                     .replace(">", "&gt;"))
+        parts = ["<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                 "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+                 "<Name>%s</Name>" % esc(bucket),
+                 "<Prefix>%s</Prefix>" % esc(prefix),
+                 "<KeyCount>%d</KeyCount>" % len(page),
+                 "<IsTruncated>%s</IsTruncated>" % ("true" if truncated else "false")]
+        if next_token is not None:
+            parts.append("<NextContinuationToken>%s</NextContinuationToken>"
+                         % esc(next_token))
+        for k in page:
+            parts.append("<Contents><Key>%s</Key><Size>0</Size></Contents>"
+                         % esc(k))
+        parts.append("</ListBucketResult>")
+        body = "".join(parts).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         self._log_line()
         if not self._sigv4_check():
+            return
+        _rawpath, _, _query = self.path.partition("?")
+        if "list-type=2" in _query:
+            self._do_list_v2(_query)
             return
         mode, local = self._resolve()
         size = self._head_common(local)
@@ -357,6 +423,8 @@ def main():
     ap.add_argument("--tamper-bucket")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
+    ap.add_argument("--list-page-size", type=int, default=1000,
+                    help="ListObjectsV2 keys per page; small values force paging")
     args = ap.parse_args()
 
     if args.tls_cert:
@@ -371,6 +439,7 @@ def main():
     srv.sigv4_region = args.sigv4_region
     srv.sigv4_token = args.sigv4_token
     srv.tamper_bucket = args.tamper_bucket
+    srv.list_page_size = args.list_page_size
     srv.uploads = {}
     open(args.log, "a").close()
     # Readiness marker for the suite: print once the socket is bound.
