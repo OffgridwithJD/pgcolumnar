@@ -616,6 +616,25 @@ SELECT manifest_path, added_files_count, added_rows_count
   FROM pgcolumnar.read_manifest_list('/data/warehouse/db/events/metadata/snap-123.avro');
 ```
 
+### pgcolumnar.iceberg_current_snapshot(metadata_path text) returns table(snapshot_id bigint, parent_snapshot_id bigint, sequence_number bigint, timestamp_ms bigint, operation text, manifest_list text, schema_id int)
+
+Reads an Apache Iceberg table `metadata.json` and reports the current snapshot
+the table declares: the snapshot whose id equals the file's
+`current-snapshot-id`, with its sequence number, commit timestamp, operation
+(`append`, `overwrite`, `delete`, `replace`), the manifest-list file it points
+at, and its schema id. It returns one row, or no rows when the table has no
+current snapshot. The caller needs the `pg_read_server_files` role, which
+superusers hold. This is the start of Iceberg catalog support (#388 phase 3):
+it resolves the metadata pointer from the filesystem without a network. It
+reports the `manifest_list` path as the file records it; it does not yet open
+that file or resolve the table's data files, which are later steps. The
+manifest-list it names can then be decoded with `read_manifest_list`.
+
+```sql
+SELECT snapshot_id, operation, manifest_list
+  FROM pgcolumnar.iceberg_current_snapshot('/data/warehouse/db/events/metadata/v3.metadata.json');
+```
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams
