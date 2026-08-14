@@ -33,7 +33,7 @@
 
 #include "postgres.h"
 
-#define PGCOLUMNAR_OBJSTORE_ABI 3
+#define PGCOLUMNAR_OBJSTORE_ABI 4
 
 /* An open remote object (read) / upload (write). Module owns both. */
 typedef struct PgColumnarObjHandle PgColumnarObjHandle;
@@ -105,6 +105,21 @@ typedef struct PgColumnarObjStoreApi
 	void		(*sink_abort) (PgColumnarObjSink *s);
 	void		(*delete_object) (const char *url,
 								  const PgColumnarObjStoreConfig *cfg);
+
+	/*
+	 * List the objects under a prefix (#619). `url` is s3://bucket/prefix; the
+	 * prefix may be empty (list the whole bucket) or name a folder. Returns a
+	 * palloc'd array of `*nkeys` cstrings in the current memory context, each a
+	 * full s3://bucket/key URL, sorted ascending, so the caller wraps them into
+	 * the same file list a local directory walk produces. `*nkeys` may be 0.
+	 * Raises on a transport or a listing-parse failure. The module owns the
+	 * paging (ListObjectsV2 continuation tokens) and the hostile-input XML
+	 * parse behind this ABI, the isolation the frozen boundary exists for. cfg
+	 * may be NULL (the function-API paths).
+	 */
+	char	  **(*list_objects) (const char *url,
+								 const PgColumnarObjStoreConfig *cfg,
+								 int *nkeys);
 } PgColumnarObjStoreApi;
 
 /*

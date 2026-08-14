@@ -2004,6 +2004,452 @@ objstore_sink_abort(PgColumnarObjSink *s)
 	os_sink_free(s);
 }
 
+/* -------------------------------------------------------- ListObjectsV2 (#619)
+ *
+ * A ListObjectsV2 response is XML from the endpoint. The endpoint is allow-listed
+ * (the operator authorized it), but an authorized endpoint can still be hostile,
+ * so the response is attacker-influenceable input and the parser wears the
+ * columnar_thrift.c discipline: a {buf, len, pos} scan, every bound written as
+ * subtract-not-add so a crafted length cannot wrap, and anything unrecognized is
+ * end-of-input, never a read past the buffer. It is a targeted extractor for the
+ * three elements a listing carries that we use, not a general XML parser.
+ */
+
+/* Caps so a hostile endpoint cannot exhaust memory or spin the backend forever. */
+#define OS_LIST_MAX_BODY	(16 * 1024 * 1024)
+#define OS_LIST_MAX_KEYS	1000000
+#define OS_LIST_MAX_PAGES	100000
+
+/*
+ * Byte offset just past the next occurrence of `needle` at or after `from` in
+ * [buf, buf+len). Returns -1 when absent. The loop bound `i <= len - nlen` is
+ * the overflow-safe form (never `i + nlen <= len`, which wraps).
+ */
+static int64
+os_xml_find(const char *buf, int64 len, int64 from, const char *needle)
+{
+	int64		nlen = (int64) strlen(needle);
+	int64		i;
+
+	if (nlen == 0 || from < 0 || nlen > len)
+		return -1;
+	for (i = from; i <= len - nlen; i++)
+		if (memcmp(buf + i, needle, (size_t) nlen) == 0)
+			return i + nlen;
+	return -1;
+}
+
+/*
+ * Append the XML-decoded content of [buf+start, buf+end) to `out`, resolving the
+ * five predefined entities and single-byte numeric character references. An
+ * unrecognized ampersand sequence is copied literally. Every scan is bounded by
+ * `end`, and a numeric reference is bounded to a short window.
+ */
+static void
+os_xml_decode_append(StringInfo out, const char *buf, int64 start, int64 end)
+{
+	int64		i = start;
+
+	while (i < end)
+	{
+		int64		semi = -1;
+		int64		j;
+
+		if (buf[i] != '&')
+		{
+			appendStringInfoChar(out, buf[i]);
+			i++;
+			continue;
+		}
+		for (j = i + 1; j < end && j < i + 12; j++)
+			if (buf[j] == ';')
+			{
+				semi = j;
+				break;
+			}
+		if (semi < 0)
+		{
+			appendStringInfoChar(out, '&');
+			i++;
+			continue;
+		}
+		if (semi - (i + 1) >= 2 && buf[i + 1] == '#')
+		{
+			char		numbuf[12];
+			int64		nlen = semi - (i + 2);
+			long		code;
+
+			if (nlen <= 0 || nlen >= (int64) sizeof(numbuf))
+			{
+				appendStringInfoChar(out, '&');
+				i++;
+				continue;
+			}
+			memcpy(numbuf, buf + i + 2, (size_t) nlen);
+			numbuf[nlen] = '\0';
+			code = (numbuf[0] == 'x' || numbuf[0] == 'X')
+				? strtol(numbuf + 1, NULL, 16) : strtol(numbuf, NULL, 10);
+			if (code > 0 && code < 128)
+			{
+				appendStringInfoChar(out, (char) code);
+				i = semi + 1;
+				continue;
+			}
+			appendStringInfoChar(out, '&');
+			i++;
+		}
+		else
+		{
+			int64		nlen = semi - (i + 1);
+			const char *e = buf + i + 1;
+
+			if (nlen == 3 && memcmp(e, "amp", 3) == 0)
+				appendStringInfoChar(out, '&');
+			else if (nlen == 2 && memcmp(e, "lt", 2) == 0)
+				appendStringInfoChar(out, '<');
+			else if (nlen == 2 && memcmp(e, "gt", 2) == 0)
+				appendStringInfoChar(out, '>');
+			else if (nlen == 4 && memcmp(e, "quot", 4) == 0)
+				appendStringInfoChar(out, '"');
+			else if (nlen == 4 && memcmp(e, "apos", 4) == 0)
+				appendStringInfoChar(out, '\'');
+			else
+			{
+				appendStringInfoChar(out, '&');
+				i++;
+				continue;
+			}
+			i = semi + 1;
+		}
+	}
+}
+
+/* The literal content span of a single <tag>...</tag>, XML-decoded into `out`.
+ * Returns true when both tags were found in order. Bounded. */
+static bool
+os_xml_element(const char *buf, int64 len, const char *open, const char *close,
+			   StringInfo out)
+{
+	int64		s = os_xml_find(buf, len, 0, open);
+	int64		e;
+
+	if (s < 0)
+		return false;
+	e = os_xml_find(buf, len, s, close);
+	if (e < 0)
+		return false;
+	os_xml_decode_append(out, buf, s, e - (int64) strlen(close));
+	return true;
+}
+
+/*
+ * Parse one ListObjectsV2 page: append each <Key> (XML-decoded, as a full
+ * s3://bucket/<key> URL) to `keys`, and report truncation and the next token.
+ * No delimiter is sent, so there are no CommonPrefixes and every <Key> is an
+ * object key.
+ */
+static void
+os_list_parse_page(const char *body, int64 blen, const char *bucket,
+				   List **keys, bool *truncated, char **nextToken)
+{
+	StringInfoData v;
+	StringInfoData kbuf;
+	int64		pos = 0;
+
+	*truncated = false;
+	*nextToken = NULL;
+
+	initStringInfo(&v);
+	if (os_xml_element(body, blen, "<IsTruncated>", "</IsTruncated>", &v))
+		*truncated = (v.len == 4 && pg_strncasecmp(v.data, "true", 4) == 0);
+
+	resetStringInfo(&v);
+	if (os_xml_element(body, blen, "<NextContinuationToken>",
+					   "</NextContinuationToken>", &v) && v.len > 0)
+		*nextToken = pstrdup(v.data);
+	pfree(v.data);
+
+	initStringInfo(&kbuf);
+	for (;;)
+	{
+		int64		ks = os_xml_find(body, blen, pos, "<Key>");
+		int64		ke;
+
+		if (ks < 0)
+			break;
+		ke = os_xml_find(body, blen, ks, "</Key>");
+		if (ke < 0)
+			break;
+		resetStringInfo(&kbuf);
+		appendStringInfo(&kbuf, "s3://%s/", bucket);
+		os_xml_decode_append(&kbuf, body, ks, ke - (int64) strlen("</Key>"));
+		*keys = lappend(*keys, pstrdup(kbuf.data));
+		pos = ke;
+		if (list_length(*keys) > OS_LIST_MAX_KEYS)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("columnar: object listing exceeded %d keys",
+							OS_LIST_MAX_KEYS)));
+	}
+	pfree(kbuf.data);
+}
+
+/* Read the whole response body into a palloc'd NUL-terminated buffer, bounded by
+ * cap; handles chunked and content-length framing. */
+static char *
+os_slurp_body(PgColumnarObjHandle *h, const OsResponse *resp, int64 cap,
+			  int64 *outlen)
+{
+	StringInfoData s;
+
+	initStringInfo(&s);
+	if (resp->chunked)
+	{
+		char		line[64];
+
+		for (;;)
+		{
+			int64		sz;
+
+			os_read_line(h, line, sizeof(line));
+			sz = strtoll(line, NULL, 16);
+			if (sz < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("columnar: bad chunk size from \"%s\"", h->url)));
+			if (sz == 0)
+			{
+				do
+				{
+					os_read_line(h, line, sizeof(line));
+				} while (line[0] != '\0');
+				break;
+			}
+			if ((int64) s.len + sz > cap)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("columnar: object listing from \"%s\" exceeded %lld bytes",
+								h->url, (long long) cap)));
+			enlargeStringInfo(&s, (int) sz);
+			os_read_exact(h, (uint8 *) s.data + s.len, sz);
+			s.len += (int) sz;
+			s.data[s.len] = '\0';
+			os_read_line(h, line, sizeof(line));	/* chunk-terminating CRLF */
+		}
+	}
+	else
+	{
+		int64		cl = resp->content_length;
+
+		if (cl < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("columnar: \"%s\" listing has no length", h->url)));
+		if (cl > cap)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("columnar: object listing from \"%s\" exceeded %lld bytes",
+							h->url, (long long) cap)));
+		enlargeStringInfo(&s, (int) cl);
+		os_read_exact(h, (uint8 *) s.data, cl);
+		s.len = (int) cl;
+		s.data[s.len] = '\0';
+	}
+	if (outlen != NULL)
+		*outlen = s.len;
+	return s.data;
+}
+
+/* Issue a signed GET for `rawQuery` and return the full response body. rawQuery
+ * is wire and canonical both, keys already sorted and values already encoded. */
+static char *
+os_list_request(PgColumnarObjHandle *h, const char *rawQuery, int64 *outlen)
+{
+	/* SHA-256 of the empty payload, the GET body */
+	static const char emptyHash[] =
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	OsResponse	resp;
+	int			attempt;
+
+	for (attempt = 0;; attempt++)
+	{
+		StringInfoData req;
+		bool		fresh;
+
+		if (h->fd < 0)
+			os_connect(h);
+		fresh = (attempt == 0 && h->served == 0);
+
+		initStringInfo(&req);
+		appendStringInfo(&req, "GET %s%s%s HTTP/1.1\r\nHost: %s:%d\r\n",
+						 h->abspath, rawQuery[0] ? "?" : "", rawQuery,
+						 h->host, h->port);
+		os_sign_write(h, "GET", h->abspath, rawQuery, emptyHash, &req);
+		appendStringInfoString(&req, "User-Agent: pgcolumnar-objstore/1\r\n\r\n");
+
+		if (os_send_all(h, req.data, req.len) && os_read_head(h, &resp))
+		{
+			pfree(req.data);
+			break;
+		}
+		pfree(req.data);
+		os_disconnect(h);
+		if (!fresh && attempt == 0)
+			continue;			/* stale keep-alive: one reconnect */
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: LIST to \"%s\" failed before a response",
+						h->url)));
+	}
+
+	if (resp.status == 403)
+		os_reject_403(h, &resp, true);
+	if (resp.status < 200 || resp.status >= 300)
+	{
+		if (resp.content_length > 0 || resp.chunked)
+			os_read_body(h, &resp, NULL, 0);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: LIST to \"%s\" returned HTTP %d",
+						h->url, resp.status)));
+	}
+
+	{
+		char	   *body = os_slurp_body(h, &resp, OS_LIST_MAX_BODY, outlen);
+
+		if (resp.conn_close)
+			os_disconnect(h);
+		else
+			h->served++;
+		return body;
+	}
+}
+
+static char **
+objstore_list_objects(const char *url, const PgColumnarObjStoreConfig *cfg,
+					  int *nkeys)
+{
+	const char *bstart;
+	const char *slash;
+	char	   *bucket;
+	char	   *prefix;
+	char	   *encPrefix;
+	char	   *dummyUrl;
+	char	   *token = NULL;
+	PgColumnarObjHandle *h;
+	List	   *keys = NIL;
+	char	  **out;
+	ListCell   *lc;
+	int			pages = 0;
+	int			i;
+
+	if (pg_strncasecmp(url, "s3://", 5) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: listing a prefix is only supported for s3:// URLs, not \"%s\"",
+						url)));
+	bstart = url + 5;
+	slash = strchr(bstart, '/');
+	if (slash == NULL || slash == bstart)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: \"%s\" is not s3://bucket/prefix", url)));
+	bucket = pnstrdup(bstart, slash - bstart);
+	prefix = pstrdup(slash + 1);	/* may be "" (list the whole bucket) */
+
+	/* resolve host/region/credentials from a dummy key, then point the request
+	 * target at the bucket root and carry the prefix in the signed query */
+	dummyUrl = psprintf("s3://%s/_", bucket);
+	h = os_write_handle(dummyUrl, cfg);
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		StringInfoData bp;
+
+		initStringInfo(&bp);
+		appendStringInfoChar(&bp, '/');
+		os_uriencode_path(&bp, bucket);
+		if (h->abspath != NULL)
+			pfree(h->abspath);
+		h->abspath = bp.data;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	encPrefix = os_uriencode_query(prefix);
+
+	PG_TRY();
+	{
+		for (;;)
+		{
+			StringInfoData q;
+			char	   *body;
+			int64		blen = 0;
+			bool		truncated = false;
+			char	   *next = NULL;
+
+			if (++pages > OS_LIST_MAX_PAGES)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("columnar: object listing of \"%s\" exceeded %d pages",
+								url, OS_LIST_MAX_PAGES)));
+
+			/* canonical query: keys sorted, continuation-token < list-type < prefix */
+			initStringInfo(&q);
+			if (token != NULL)
+			{
+				char	   *encTok = os_uriencode_query(token);
+
+				appendStringInfo(&q, "continuation-token=%s&", encTok);
+				pfree(encTok);
+			}
+			appendStringInfo(&q, "list-type=2&prefix=%s", encPrefix);
+
+			body = os_list_request(h, q.data, &blen);
+			pfree(q.data);
+
+			os_list_parse_page(body, blen, bucket, &keys, &truncated, &next);
+			pfree(body);
+
+			if (!truncated || next == NULL)
+			{
+				if (next != NULL)
+					pfree(next);
+				break;
+			}
+			/*
+			 * A continuation token that repeats the one we just sent means the
+			 * endpoint is not advancing: refuse rather than loop, so a hostile or
+			 * broken endpoint that replays one page forever cannot spin the
+			 * backend toward the OS_LIST_MAX_PAGES backstop. The fuzzer
+			 * (fuzz_listing.sh) finds this shape.
+			 */
+			if (token != NULL && strcmp(next, token) == 0)
+			{
+				pfree(next);
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("columnar: listing of \"%s\" returned a non-advancing continuation token",
+								url)));
+			}
+			if (token != NULL)
+				pfree(token);
+			token = next;
+		}
+	}
+	PG_CATCH();
+	{
+		os_free_handle(h);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	os_free_handle(h);
+
+	*nkeys = list_length(keys);
+	out = (char **) palloc(sizeof(char *) * Max(*nkeys, 1));
+	i = 0;
+	foreach(lc, keys)
+		out[i++] = (char *) lfirst(lc);
+	return out;
+}
+
 static void
 objstore_delete_object(const char *url, const PgColumnarObjStoreConfig *cfg)
 {
@@ -2033,6 +2479,7 @@ static const PgColumnarObjStoreApi objstore_api = {
 	.sink_finish = objstore_sink_finish,
 	.sink_abort = objstore_sink_abort,
 	.delete_object = objstore_delete_object,
+	.list_objects = objstore_list_objects,
 };
 
 const PgColumnarObjStoreApi *

@@ -568,9 +568,10 @@ constant of the same type; [limitations.md](limitations.md) lists the conditions
 A scan that skips nothing still returns correct rows.
 
 The `path` option can name a local file, directory, or glob, or an
-object-storage URL for a single object. For a remote server the endpoint and
-credentials come from the server and user-mapping options described in
-[Object storage](#object-storage).
+object-storage URL. A remote URL is an exact object, a prefix ending in a slash,
+or a pattern, expanded the same way as a local path. For a remote server the
+endpoint and credentials come from the server and user-mapping options described
+in [Object storage](#object-storage).
 
 Table options: `path`, and `partition_columns` for a Hive-style layout. The
 latter names the columns whose values come from `col=value` directory components
@@ -611,8 +612,17 @@ recognized:
 Object-storage support lives in a separate module, `pgcolumnar_objstore`, which
 loads on the first use of a remote URL and never before. A build or an install
 without it reads and writes local files as before, and a remote URL reports that
-the module is required. Only exact object keys work. A glob or a directory over a
-remote URL is refused, not expanded.
+the module is required.
+
+A remote path is read as an exact key, a prefix, or a pattern. An `s3://` URL
+that names an object reads that one object with a single GET, no listing. An
+`s3://bucket/prefix/` URL that ends in a slash lists every object under the
+prefix, at any depth, like a local directory. An `s3://bucket/prefix/*.parquet`
+URL lists the literal prefix and matches the pattern segment by segment, like a
+local glob. Listing is a paged ListObjectsV2 call. `_SUCCESS`, `_temporary`, and
+dot-hidden names are skipped, as they are for a local directory. Hive
+`partition_columns` work over a remote prefix. A pattern or a prefix requires the
+object-store module, since only it can issue the listing.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above
