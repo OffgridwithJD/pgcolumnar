@@ -2708,6 +2708,23 @@ build_imp_targets_by_field_id(TupleDesc tupdesc, PqFile *pf,
 					 errmsg("no Parquet column has field id %d (requested for output column \"%s\")",
 							req, NameStr(att->attname))));
 
+		/*
+		 * Two output columns asking for the same id would bind twice to one file
+		 * leaf, which pq_read_rows cannot serve (a leaf's cursor is consumed
+		 * once) -- it would later fail deep in the decode and wrongly blame the
+		 * file. Refuse it here with a message that names the real cause.
+		 */
+		{
+			int			k;
+
+			for (k = 0; k < nt; k++)
+				if (tops[k].firstLeaf == found)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("field id %d is requested more than once; each output column must select a distinct field id",
+									req)));
+		}
+
 		if (pf->leaves[found].max_rep != 0)
 			IMP_FAIL("Parquet column with field id %d is repeated; field-id projection binds scalar columns",
 					 req);
