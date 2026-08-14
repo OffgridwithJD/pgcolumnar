@@ -136,3 +136,46 @@ module, shared by source and sink.
    mid-upload asserting abort ran (the arm that "leaks money and never gets
    exercised by accident").
 4. Parallel-to-remote, per-worker objects, dispatcher key-wise cleanup.
+
+## Completion marker (decided, 2026-08-14)
+
+The issue's step 3 asked whether a completion marker or manifest is wanted for
+`parallel_export_parquet`, since a directory or bucket of `part-NNNN.parquet`
+objects carries no record of whether a run finished. Decided: an empty
+`_SUCCESS` marker at the destination, the Hadoop/Spark `FileOutputCommitter`
+convention that Spark, Hive and Trino directory readers already recognize.
+
+- Written **last**, only after every worker reports success and past the
+  error-cleanup region, so a failed or cancelled run (whose parts the dispatcher
+  removes) leaves none. Its presence is the "a complete run's output is here"
+  signal; its absence means incomplete.
+- Written through the same `PqSink` seam as the data, so it is temp-and-rename
+  locally and a single object remotely, with no new code path.
+- The failure cleanup also drops any stale `_SUCCESS`, so a failed re-run into a
+  prefix that held a prior run's marker does not leave a misleading one.
+- The read path already skips `_`-prefixed names, so the marker is never folded
+  into a `read_parquet` or FDW scan.
+- If the marker write itself fails, it raises without deleting the parts (it is
+  past the cleanup region): the committed data is preserved and the caller learns
+  the signal could not be written, rather than losing a good export.
+
+A **richer manifest** (the part list with row counts, schema and partition
+values) is deliberately NOT this: that is the Iceberg metadata layer, which
+belongs to #388, and the issue itself noted this is "the point where this starts
+to touch #388". `_SUCCESS` is the minimal, standard, format-neutral signal; the
+manifest is the format-specific one and is scoped there.
+
+## Remote reconcile before the marker (#632 review, 2026-08-14)
+
+An adversarial review reproduced, on live Garage, a real gap: the remote path
+allows an overwrite re-run into a used prefix (#619 require-empty is deferred), so
+a smaller run overwrites the low-numbered parts and leaves the larger prior run's
+higher-numbered parts behind, then stamps `_SUCCESS` on top -- certifying a mixed
+set as one complete run. The local path is safe (prepare_dir require-empty refuses
+a non-empty directory first). Fixed by making the remote success path, now that
+#619 listing exists, delete any `part-NNNN.parquet` at the prefix whose index is
+at or above this run's key count (the stale tail) before writing the marker, so
+the marker certifies exactly this run's parts. A regression arm runs a 4-worker
+then a 2-worker export into one prefix and asserts the stale parts are gone; the
+removal proof (disable the reconcile) reds it with 4 parts left, the review's
+reproduction.

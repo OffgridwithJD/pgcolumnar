@@ -511,6 +511,16 @@ mid-upload can leave one incomplete multipart upload that the dispatcher cannot
 address. Set a bucket lifecycle rule that expires incomplete multipart uploads to
 reclaim it, as the object-storage notes recommend for `export_parquet`.
 
+On success the function writes an empty `_SUCCESS` marker at the destination, the
+Hadoop and Spark convention. Its presence means a complete run's output is there;
+a failed or cancelled run, whose part files the dispatcher removes, leaves none.
+The marker is written last, after every worker has finished, so a directory or
+prefix that carries it is a whole export. A remote prefix allows a re-run to
+overwrite a used prefix. A smaller re-run there first removes the stale
+higher-numbered parts a larger prior run left, so the marker certifies exactly
+the parts this run wrote. `read_parquet` and the foreign-data wrapper skip it, as
+they skip any name beginning with an underscore.
+
 When `workers` is omitted the function derives a value from the target.
 
 ```sql
@@ -647,9 +657,10 @@ dot-hidden names are skipped, as they are for a local directory. Hive
 `partition_columns` work over a remote prefix. A pattern or a prefix requires the
 object-store module, since only it can issue the listing.
 
-On write, `parallel_export_parquet` treats a remote URL as a prefix, writing one
-`part-NNNN.parquet` object under it per worker; every other function writes a
-single object at the exact key.
+On write, `parallel_export_parquet` treats a remote URL as a prefix. It writes one
+`part-NNNN.parquet` object under the prefix per worker, and an empty `_SUCCESS`
+marker beside them on completion. Every other write function writes a single
+object at the exact key.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above
