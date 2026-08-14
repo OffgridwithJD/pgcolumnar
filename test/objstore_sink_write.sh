@@ -170,6 +170,21 @@ check "parallel: the union of the per-worker objects == source" \
 check_num "parallel: a re-run into the same prefix succeeds (overwrite)" \
 	"$(q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/par', 4)")" "$PARROWS"
 
+# #632 review: a SMALLER re-run into a used prefix must not leave the prior
+# larger run's higher-numbered parts under a freshly-stamped _SUCCESS. First 4
+# workers, then 2: the reconcile drops the stale part-0002/0003, so the marker
+# certifies exactly the 2 parts this run wrote.
+q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/sr', 4)" >/dev/null
+check "shrink: the 4-worker run wrote 4 parts + marker" \
+	"$([ "$(ls "$PGC_WORKDIR/$BUCKET/sr/" 2>/dev/null | grep -c 'part-.*parquet$')" = 4 ] && [ -f "$PGC_WORKDIR/$BUCKET/sr/_SUCCESS" ] && echo ok)" "ok"
+q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/sr', 2)" >/dev/null
+check_num "shrink: a smaller re-run leaves exactly its own 2 parts (stale tail dropped)" \
+	"$(ls "$PGC_WORKDIR/$BUCKET/sr/" 2>/dev/null | grep -c 'part-.*parquet$')" "2"
+check "shrink: parts 0002/0003 from the larger run are gone" \
+	"$([ ! -e "$PGC_WORKDIR/$BUCKET/sr/part-0002.parquet" ] && [ ! -e "$PGC_WORKDIR/$BUCKET/sr/part-0003.parquet" ] && echo gone)" "gone"
+check "shrink: _SUCCESS certifies the reconciled prefix" \
+	"$([ -f "$PGC_WORKDIR/$BUCKET/sr/_SUCCESS" ] && echo yes)" "yes"
+
 # cancel mid-run: the dispatcher removes the completed keys it wrote. Big table
 # + small parts so a worker is mid-multipart when the cancel lands.
 psql_run "DROP TABLE IF EXISTS es_parbig;

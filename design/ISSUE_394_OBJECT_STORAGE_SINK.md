@@ -164,3 +164,18 @@ values) is deliberately NOT this: that is the Iceberg metadata layer, which
 belongs to #388, and the issue itself noted this is "the point where this starts
 to touch #388". `_SUCCESS` is the minimal, standard, format-neutral signal; the
 manifest is the format-specific one and is scoped there.
+
+## Remote reconcile before the marker (#632 review, 2026-08-14)
+
+An adversarial review reproduced, on live Garage, a real gap: the remote path
+allows an overwrite re-run into a used prefix (#619 require-empty is deferred), so
+a smaller run overwrites the low-numbered parts and leaves the larger prior run's
+higher-numbered parts behind, then stamps `_SUCCESS` on top -- certifying a mixed
+set as one complete run. The local path is safe (prepare_dir require-empty refuses
+a non-empty directory first). Fixed by making the remote success path, now that
+#619 listing exists, delete any `part-NNNN.parquet` at the prefix whose index is
+at or above this run's key count (the stale tail) before writing the marker, so
+the marker certifies exactly this run's parts. A regression arm runs a 4-worker
+then a 2-worker export into one prefix and asserts the stale parts are gone; the
+removal proof (disable the reconcile) reds it with 4 parts left, the review's
+reproduction.

@@ -515,8 +515,11 @@ On success the function writes an empty `_SUCCESS` marker at the destination, th
 Hadoop and Spark convention. Its presence means a complete run's output is there;
 a failed or cancelled run, whose part files the dispatcher removes, leaves none.
 The marker is written last, after every worker has finished, so a directory or
-prefix that carries it is a whole export. `read_parquet` and the foreign-data
-wrapper skip it, as they skip any name beginning with an underscore.
+prefix that carries it is a whole export. A remote prefix allows a re-run to
+overwrite a used prefix. A smaller re-run there first removes the stale
+higher-numbered parts a larger prior run left, so the marker certifies exactly
+the parts this run wrote. `read_parquet` and the foreign-data wrapper skip it, as
+they skip any name beginning with an underscore.
 
 When `workers` is omitted the function derives a value from the target.
 

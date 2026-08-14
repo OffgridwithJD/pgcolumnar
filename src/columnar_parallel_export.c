@@ -336,6 +336,60 @@ pexport_remove_outputs(const char *dir, int nkeys)
 	(void) unlink(fp);
 }
 
+/* match exactly "part-<digits>.parquet"; on success set *idx to the index */
+static bool
+pexport_part_index(const char *base, int *idx)
+{
+	const char *p = base;
+	const char *digits;
+
+	if (strncmp(p, "part-", 5) != 0)
+		return false;
+	p += 5;
+	digits = p;
+	while (*p >= '0' && *p <= '9')
+		p++;
+	if (p == digits || strcmp(p, ".parquet") != 0)
+		return false;
+	*idx = atoi(digits);
+	return true;
+}
+
+/*
+ * Reconcile a remote prefix before stamping the completion marker (#394, #632
+ * review). The remote path allows an overwrite re-run into a used prefix
+ * (#619's require-empty is deferred), so a smaller run leaves the stale
+ * higher-numbered parts of a larger prior run behind: run A writes
+ * part-0000..0007, run B with fewer workers overwrites part-0000..0003 and
+ * leaves 0004..0007. Writing _SUCCESS on top would certify a mixed set as one
+ * complete run. Now that listing exists (#619), the dispatcher deletes any
+ * part-NNNN.parquet at the prefix whose index is >= this run's key count -- the
+ * stale tail -- so the marker means what it says: the prefix holds exactly this
+ * run's parts. The local path needs none of this: prepare_dir require-empty
+ * already refuses a non-empty directory before any worker spawns.
+ */
+static void
+pexport_remove_stale_remote_parts(const char *dir, int nkeys)
+{
+	const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+	char	  **keys;
+	int			n = 0;
+	int			i;
+
+	if (api == NULL || api->list_objects == NULL)
+		return;
+	keys = api->list_objects(dir, NULL, &n);
+	for (i = 0; i < n; i++)
+	{
+		const char *slash = strrchr(keys[i], '/');
+		const char *base = slash ? slash + 1 : keys[i];
+		int			idx;
+
+		if (pexport_part_index(base, &idx) && idx >= nkeys)
+			api->delete_object(keys[i], NULL);
+	}
+}
+
 /*
  * Write the _SUCCESS completion marker (#394). parallel_export_parquet writes a
  * directory or prefix of part-NNNN.parquet objects, and a bucket (or a directory)
@@ -804,13 +858,17 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	table_close(rel, AccessShareLock);
 
 	/*
-	 * Every worker completed: write the _SUCCESS marker (#394). This is past the
-	 * error-cleanup region (PG_END_ENSURE_ERROR_CLEANUP above), so if the marker
-	 * write itself fails it raises without deleting the parts the workers already
-	 * committed -- the data is preserved and the caller learns the completion
-	 * signal could not be written, rather than losing a good export to a marker
-	 * hiccup.
+	 * Every worker completed. On a remote prefix, first drop any stale
+	 * higher-numbered parts a larger prior run left (see
+	 * pexport_remove_stale_remote_parts), so the marker certifies exactly this
+	 * run's parts. Then write the _SUCCESS marker (#394). Both are past the
+	 * error-cleanup region (PG_END_ENSURE_ERROR_CLEANUP above), so a failure here
+	 * raises without deleting the parts the workers already committed -- the data
+	 * is preserved and the caller learns the completion signal could not be
+	 * finalized, rather than losing a good export to a marker hiccup.
 	 */
+	if (PgColumnarPathIsRemote(dir))
+		pexport_remove_stale_remote_parts(dir, single_table ? workers : npart);
 	pexport_write_success_marker(dir);
 	PG_RETURN_INT64(total);
 }
