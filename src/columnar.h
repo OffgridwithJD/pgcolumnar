@@ -193,6 +193,7 @@ extern bool pgcolumnar_enable_bloom_filter;	/* bloom equality skipping (I7) */
 extern bool pgcolumnar_objstore_buffered;	/* chunk-granular remote reads (#393) */
 extern char *pgcolumnar_objstore_allowed_endpoints; /* #393 allow-list, SUSET */
 extern int	pgcolumnar_objstore_part_size;	/* #394 remote multipart part size */
+extern char *pgcolumnar_objstore_s3_addressing; /* #621 path|virtual addressing */
 /* #415 autovacuum daemon */
 extern bool pgcolumnar_autovacuum;
 extern int	pgcolumnar_autovacuum_naptime;
