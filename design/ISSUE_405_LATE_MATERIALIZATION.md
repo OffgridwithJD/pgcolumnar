@@ -337,3 +337,36 @@ data the planner mispredicts, costs one comparison per group boundary (the
 `Columnar Fold Deferred Groups: X of Y`. The reviewer may push back to the
 planner design; the suite's arms bind the BEHAVIOUR (deferral on selective
 data, eager fallback on high survival), not the mechanism.
+
+---
+
+## Closing disposition (2026-08-14, re-measured on `main` 977bb44) — recommend CLOSE
+
+The issue ranked three items and asked that item 1 be **measured first**, items 2 and 3 **left recorded**. All three are now dispositioned against current `main`.
+
+### Item 1 — position-list intersection before materialization: MEASURED, disposition holds
+
+Re-ran the position-vs-vector probe on `main` 977bb44 (pg18n non-assert, 2,000,000 rows, an ~160-byte `pad`, bloom off, serial). Two queries return the **same 2,000 surviving rows**, differing only in how those survivors are spread across 1024-row vectors:
+
+| shape | survivors | pad decode (median of 5) | Rows Removed by Filter | Vectors Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| packed (`k <= 2000`, one vector, zone map prunes the rest) | 2,000 | **28.9 ms** | 8,000 | 14 |
+| spread (`k % 1000 = 0`, one survivor per vector, unprunable) | 2,000 | **726.7 ms** | 1,998,000 | 0 |
+
+Same survivor count, **25x the payload-decode cost**, and the spread shape materialised ~2,000,000 rows to return 2,000. Decode cost tracks the number of surviving **vectors**, not surviving **positions**. Abadi's position-list intersection would decode payload for only the 2,000 survivors in both cases and the two costs would be equal. They are not: **we prune at the 1024-row vector, we do not intersect positions across columns.**
+
+The mechanism on current `main` (all `src/columnar_reader.c`): whole-group and per-vector zone-map skip; #452's per-column exact refine, which by construction "can miss a vector where every row fails some predicate but no single column rules it out" — exactly the cross-column intersection Abadi performs and we do not; the unprunable-qual per-vector mask; and a two-pass load that decodes payload columns **only for surviving vectors**, with a residual per-row `ExecQual` plus the row producer's per-row late-materialization (`pgcolumnar_skip_value`) avoiding payload decode for a row the qual will reject.
+
+So Abadi's full position-list bit-string intersection is **not** implemented — it was planned, stress-tested, and **retracted** (this document's TL;DR; PR #601), because the measurement showed it is a trade, not a free win: its downside (high column-reaccess cost, worse on unsorted positions) is Abadi's own stated loss case. The worthwhile subset — deferring payload materialisation until a row survives — **did ship**: the fold-path payload deferral with an adaptive gate (#617, `Columnar Fold Deferred Groups`, proven by `test/native_fold_deferral.sh`) and the row producer's per-row late-materialisation. Item 1 is answered: measured, dispositioned, and the useful part implemented.
+
+### Item 2 — branch predication in selection: not applicable to the current architecture; recorded
+
+X100's branch-vs-predicated comparison applies to a hot loop that builds a packed position/selection vector (`out[j]=i; j+=pred`). The current tree builds no such vector: selection is per-vector zone-map masking plus per-row `ExecQual`. The only branch-free typed comparison loops that ever produced a selection vector were deleted in #200 (tombstone comment in `src/columnar_vector.c`). There is no hot selection-packing loop to predicate, so the microbenchmark has no live target here; predication would only matter if we adopted position-vector selection, which is the retracted item-1 plan. Recorded, no code.
+
+### Item 3 — vector length vs column count: reframed; the constant is not the knob
+
+`COLUMNAR_NATIVE_VECTOR_LENGTH` (`src/columnar.h:47` = 1024) is used at only three sites, all write-side, all merely stamping the write-only catalog column `pgcolumnar.storage.vector_length` (defined and inserted once, never read back). The actual 1024-value execution stride is a hardcoded literal in `src/columnar_reader.c`, not derived from the macro; the runtime granularity knob is `pgcolumnar.chunk_group_row_limit`. The vector length is therefore **not a single tunable constant** — changing it would need coordinated edits to the write-side stamp and the read-side literals. That is "not a knob to turn casually," as the issue said, and more so than it assumed: the macro is misleadingly non-load-bearing. X100's cache argument applies to the chunk-group/decode geometry that `chunk_group_row_limit` governs at runtime. Recorded; the macro's vestigiality is worth a small follow-up cleanup but changes no behaviour. (The X100 alignment the issue opened with — a 1024-value execution vector distinct from the ~10,000-row storage chunk group — still holds.)
+
+### Recommendation: CLOSE
+
+Item 1 is measured and dispositioned with the useful part shipped (#617); items 2 and 3 are recorded architecture/microbenchmark notes, exactly as the issue proposed. Nothing here is an open build.
