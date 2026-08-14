@@ -100,6 +100,31 @@ for m in manifests:
 with open(os.path.join(OUT, "expected_list.json"), "w") as f:
     json.dump(list_report, f, indent=2, sort_keys=True)
 
+# the table metadata.json (#388 phase 3a): copy the current metadata pointer and
+# an oracle for its current snapshot. The committed metadata.json carries the
+# real absolute warehouse paths pyiceberg wrote, rewritten to a neutral, stable
+# root so the fixture is machine-independent (basenames, and the oracle, are
+# unaffected; real relocation/rebasing is phase 3b).
+md_src = tbl.metadata_location.replace("file://", "")
+md_text = open(md_src).read().replace(f"file://{WH}", "file:///warehouse")
+assert WH not in md_text, "warehouse path leaked into the committed metadata.json"
+with open(os.path.join(OUT, "table.metadata.json"), "w") as f:
+    f.write(md_text)
+
+op = snap.summary.operation.value if snap.summary and snap.summary.operation else None
+meta_oracle = {
+    "current_snapshot_id": tbl.metadata.current_snapshot_id,
+    "snapshot_id": snap.snapshot_id,
+    "parent_snapshot_id": snap.parent_snapshot_id,
+    "sequence_number": snap.sequence_number,
+    "timestamp_ms": snap.timestamp_ms,
+    "operation": op,
+    "manifest_list_basename": os.path.basename(snap.manifest_list),
+    "schema_id": snap.schema_id,
+}
+with open(os.path.join(OUT, "expected_meta.json"), "w") as f:
+    json.dump(meta_oracle, f, indent=2, sort_keys=True)
+
 # report the avro header of the first manifest so we know the codec/schema shape
 with open(os.path.join(OUT, "manifest-0.avro"), "rb") as f:
     head = f.read(4)

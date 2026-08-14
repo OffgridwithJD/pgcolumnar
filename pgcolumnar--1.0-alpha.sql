@@ -922,6 +922,16 @@ CREATE FUNCTION pgcolumnar.read_manifest_list(path text)
 COMMENT ON FUNCTION pgcolumnar.read_manifest_list(text)
 	IS 'decode an Apache Iceberg snapshot manifest-list Avro file and report the manifest files it points at (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_current_snapshot(metadata_path text)
+	RETURNS TABLE(snapshot_id bigint, parent_snapshot_id bigint,
+				  sequence_number bigint, timestamp_ms bigint, operation text,
+				  manifest_list text, schema_id integer)
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_current_snapshot';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_current_snapshot(text)
+	IS 'read an Apache Iceberg table metadata.json and report its current snapshot (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *

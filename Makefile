@@ -29,6 +29,7 @@ OBJS = \
 	src/columnar_parallel_copy.o \
 	src/columnar_parallel_export.o \
 	src/columnar_avro.o \
+	src/columnar_iceberg.o \
 	src/columnar_objstore.o \
 	src/columnar_sink.o \
 	src/columnar_autovacuum.o

@@ -1,0 +1,10 @@
+{
+  "current_snapshot_id": 1015321693306905452,
+  "manifest_list_basename": "snap-1015321693306905452-0-070dea05-1705-402a-82cc-14b56e17cb1c.avro",
+  "operation": "append",
+  "parent_snapshot_id": null,
+  "schema_id": 0,
+  "sequence_number": 1,
+  "snapshot_id": 1015321693306905452,
+  "timestamp_ms": 1786728744204
+}
