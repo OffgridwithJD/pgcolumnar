@@ -148,6 +148,13 @@ NOBJ="$(ls "$PGC_WORKDIR/$BUCKET/par/" 2>/dev/null | grep -c 'part-.*\.parquet$'
 check "parallel: one object per worker was written (4)" "$NOBJ" "4"
 check "parallel: every worker PUT went to the prefix" \
 	"$([ "$(logn '^PUT /pgc-bucket/par/part-')" -ge 4 ] && echo yes)" "yes"
+# #394: a completed remote export writes a _SUCCESS marker object at the prefix,
+# put through the same remote sink (a single PUT), so a consumer listing the
+# prefix sees the run completed. It is not a part object (NOBJ==4 above).
+check "parallel remote: a _SUCCESS marker object exists at the prefix" \
+	"$([ -f "$PGC_WORKDIR/$BUCKET/par/_SUCCESS" ] && echo yes || echo no)" "yes"
+check "parallel remote: the marker went to the prefix as a PUT" \
+	"$([ "$(logn '^PUT /pgc-bucket/par/_SUCCESS')" -ge 1 ] && echo yes)" "yes"
 # read each key back and union; the union equals the source (prefix-union read
 # is #619, so this reads the four exact keys, not the prefix).
 for i in 0 1 2 3; do
@@ -193,6 +200,10 @@ check "cancel: the dispatcher issued DELETE over the known keys" \
 	"$([ "$(logn '^DELETE /pgc-bucket/cx/part-')" -ge 1 ] && echo yes)" "yes"
 check_num "cancel: no completed object remains at the prefix" \
 	"$(ls "$PGC_WORKDIR/$BUCKET/cx/" 2>/dev/null | grep -c 'part-.*\.parquet$')" "0"
+# #394: a cancelled remote run writes no completion marker (it is written last,
+# only on full success), and the dispatcher's cleanup also drops any stale one.
+check "cancel: no _SUCCESS marker at the prefix" \
+	"$([ -e "$PGC_WORKDIR/$BUCKET/cx/_SUCCESS" ] && echo present || echo absent)" "absent"
 
 # ---- optional: a real S3 implementation (Garage) ----------------------------
 if [ -n "${PGC_S3_INTEGRATION_ENDPOINT:-}" ]; then

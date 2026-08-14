@@ -36,6 +36,7 @@
 
 #include "columnar.h"
 #include "columnar_objstore.h"
+#include "columnar_sink.h"
 
 #include "access/relation.h"
 #include "access/table.h"
@@ -305,6 +306,10 @@ pexport_remove_outputs(const char *dir, int nkeys)
 			snprintf(fp, sizeof(fp), "%s/part-%04d.parquet", dir, i);
 			api->delete_object(fp, NULL);
 		}
+		/* also drop any _SUCCESS marker (#394): a failed or cancelled run must
+		 * not leave a stale completion marker from an earlier run at the prefix */
+		snprintf(fp, sizeof(fp), "%s/_SUCCESS", dir);
+		api->delete_object(fp, NULL);
 		return;
 	}
 
@@ -326,6 +331,41 @@ pexport_remove_outputs(const char *dir, int nkeys)
 		(void) unlink(fp);
 	}
 	FreeDir(d);
+	/* the completion marker (#394) is not a *.parquet name; drop it explicitly */
+	snprintf(fp, sizeof(fp), "%s/_SUCCESS", dir);
+	(void) unlink(fp);
+}
+
+/*
+ * Write the _SUCCESS completion marker (#394). parallel_export_parquet writes a
+ * directory or prefix of part-NNNN.parquet objects, and a bucket (or a directory)
+ * carries no record of which run produced which objects, nor whether the run
+ * finished. This is the Hadoop/Spark convention a consumer already recognizes: an
+ * empty _SUCCESS object at the destination, written ONLY after every worker
+ * completed. Its presence means "a complete run's output is here"; its absence
+ * (a failed or cancelled run, whose parts the cleanup removes) means it is not.
+ * The read path already skips '_'-prefixed names, so the marker is never folded
+ * into a read. Written through the same sink seam as the data, so it is
+ * temp-and-rename locally and a single object remotely.
+ */
+static void
+pexport_write_success_marker(const char *dir)
+{
+	char		fp[MAXPGPATH];
+	PqSink	   *snk;
+
+	snprintf(fp, sizeof(fp), "%s/_SUCCESS", dir);
+	snk = PgColumnarSinkOpen(fp);
+	PG_TRY();
+	{
+		PgColumnarSinkFinish(snk);	/* empty marker */
+	}
+	PG_CATCH();
+	{
+		PgColumnarSinkAbort(snk);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 /* error-cleanup: stop every worker so a dispatcher FATAL cannot leave them
@@ -762,5 +802,15 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	if (pushed)
 		PopActiveSnapshot();
 	table_close(rel, AccessShareLock);
+
+	/*
+	 * Every worker completed: write the _SUCCESS marker (#394). This is past the
+	 * error-cleanup region (PG_END_ENSURE_ERROR_CLEANUP above), so if the marker
+	 * write itself fails it raises without deleting the parts the workers already
+	 * committed -- the data is preserved and the caller learns the completion
+	 * signal could not be written, rather than losing a good export to a marker
+	 * hiccup.
+	 */
+	pexport_write_success_marker(dir);
 	PG_RETURN_INT64(total);
 }
