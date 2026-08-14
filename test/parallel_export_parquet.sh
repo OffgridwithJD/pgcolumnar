@@ -70,6 +70,13 @@ for W in 1 2 4; do
 	check "single($W): read-back == source" "$rb" "$SRC"
 	check "single($W): read-back == serial export" "$rb" "$SER_HASH"
 	check "single($W): wrote exactly $W files (distinct per worker)" "$(nfiles "$D")" "$W"
+	# #394: a completed export writes a _SUCCESS marker. nfiles==W above already
+	# proves it is not counted as a part, and read-back==source proves read_parquet
+	# ignores it; here assert it is present and empty.
+	check "single($W): a _SUCCESS completion marker is written" \
+		"$([ -f "$D/_SUCCESS" ] && echo yes || echo no)" yes
+	check "single($W): the _SUCCESS marker is empty" \
+		"$([ -f "$D/_SUCCESS" ] && [ ! -s "$D/_SUCCESS" ] && echo empty || echo no)" empty
 done
 
 # ---- partitioned columnar table: one file per partition ---------------------
@@ -171,10 +178,17 @@ check "the export was cancelled mid-flight, not completed first (fixture premise
 # by each worker's own sink abort (#394) - a cancelled export leaves NOTHING.
 check "a cancelled export leaves no partial files (item 2)" \
 	"$(anyfiles "$DCX")" 0
+# #394: the completion marker is written LAST, only after every worker finishes,
+# so a cancelled run leaves none -- the absence of _SUCCESS is what tells a
+# consumer the run did not complete.
+check "a cancelled export writes no _SUCCESS marker" \
+	"$([ -e "$DCX/_SUCCESS" ] && echo present || echo absent)" absent
 # and the cleaned directory is reusable (require-empty does not block a retry)
 q "SELECT pgcolumnar.parallel_export_parquet('t_col'::regclass, '$DCX', 2)" >/dev/null 2>&1
 check "retry into the cleaned directory succeeds" \
 	"$([ "$(nfiles "$DCX")" -ge 1 ] && echo yes || echo no)" yes
+check "the retry writes a fresh _SUCCESS marker" \
+	"$([ -f "$DCX/_SUCCESS" ] && echo yes || echo no)" yes
 
 # ---- error cases ------------------------------------------------------------
 # st_1 was written above, so it is non-empty

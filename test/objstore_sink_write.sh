@@ -148,6 +148,13 @@ NOBJ="$(ls "$PGC_WORKDIR/$BUCKET/par/" 2>/dev/null | grep -c 'part-.*\.parquet$'
 check "parallel: one object per worker was written (4)" "$NOBJ" "4"
 check "parallel: every worker PUT went to the prefix" \
 	"$([ "$(logn '^PUT /pgc-bucket/par/part-')" -ge 4 ] && echo yes)" "yes"
+# #394: a completed remote export writes a _SUCCESS marker object at the prefix,
+# put through the same remote sink (a single PUT), so a consumer listing the
+# prefix sees the run completed. It is not a part object (NOBJ==4 above).
+check "parallel remote: a _SUCCESS marker object exists at the prefix" \
+	"$([ -f "$PGC_WORKDIR/$BUCKET/par/_SUCCESS" ] && echo yes || echo no)" "yes"
+check "parallel remote: the marker went to the prefix as a PUT" \
+	"$([ "$(logn '^PUT /pgc-bucket/par/_SUCCESS')" -ge 1 ] && echo yes)" "yes"
 # read each key back and union; the union equals the source (prefix-union read
 # is #619, so this reads the four exact keys, not the prefix).
 for i in 0 1 2 3; do
@@ -162,6 +169,21 @@ check "parallel: the union of the per-worker objects == source" \
 : > "$S3_LOG"
 check_num "parallel: a re-run into the same prefix succeeds (overwrite)" \
 	"$(q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/par', 4)")" "$PARROWS"
+
+# #632 review: a SMALLER re-run into a used prefix must not leave the prior
+# larger run's higher-numbered parts under a freshly-stamped _SUCCESS. First 4
+# workers, then 2: the reconcile drops the stale part-0002/0003, so the marker
+# certifies exactly the 2 parts this run wrote.
+q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/sr', 4)" >/dev/null
+check "shrink: the 4-worker run wrote 4 parts + marker" \
+	"$([ "$(ls "$PGC_WORKDIR/$BUCKET/sr/" 2>/dev/null | grep -c 'part-.*parquet$')" = 4 ] && [ -f "$PGC_WORKDIR/$BUCKET/sr/_SUCCESS" ] && echo ok)" "ok"
+q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/sr', 2)" >/dev/null
+check_num "shrink: a smaller re-run leaves exactly its own 2 parts (stale tail dropped)" \
+	"$(ls "$PGC_WORKDIR/$BUCKET/sr/" 2>/dev/null | grep -c 'part-.*parquet$')" "2"
+check "shrink: parts 0002/0003 from the larger run are gone" \
+	"$([ ! -e "$PGC_WORKDIR/$BUCKET/sr/part-0002.parquet" ] && [ ! -e "$PGC_WORKDIR/$BUCKET/sr/part-0003.parquet" ] && echo gone)" "gone"
+check "shrink: _SUCCESS certifies the reconciled prefix" \
+	"$([ -f "$PGC_WORKDIR/$BUCKET/sr/_SUCCESS" ] && echo yes)" "yes"
 
 # cancel mid-run: the dispatcher removes the completed keys it wrote. Big table
 # + small parts so a worker is mid-multipart when the cancel lands.
@@ -193,6 +215,10 @@ check "cancel: the dispatcher issued DELETE over the known keys" \
 	"$([ "$(logn '^DELETE /pgc-bucket/cx/part-')" -ge 1 ] && echo yes)" "yes"
 check_num "cancel: no completed object remains at the prefix" \
 	"$(ls "$PGC_WORKDIR/$BUCKET/cx/" 2>/dev/null | grep -c 'part-.*\.parquet$')" "0"
+# #394: a cancelled remote run writes no completion marker (it is written last,
+# only on full success), and the dispatcher's cleanup also drops any stale one.
+check "cancel: no _SUCCESS marker at the prefix" \
+	"$([ -e "$PGC_WORKDIR/$BUCKET/cx/_SUCCESS" ] && echo present || echo absent)" "absent"
 
 # ---- optional: a real S3 implementation (Garage) ----------------------------
 if [ -n "${PGC_S3_INTEGRATION_ENDPOINT:-}" ]; then

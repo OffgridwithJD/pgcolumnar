@@ -119,6 +119,15 @@ class Handler(BaseHTTPRequestHandler):
                 mode = prefix.strip("/")
                 path = "/" + path[len(prefix):]
                 break
+        # virtual-host addressing (#621): the bucket is the leftmost Host
+        # label(s) before the configured base, and the request path is the key
+        # alone, so re-attach the bucket for the on-disk lookup.
+        base = getattr(self.server, "vhost_base", None)
+        if base:
+            hosthdr = self.headers.get("Host", "").split(":", 1)[0]
+            if hosthdr.endswith("." + base):
+                bucket = hosthdr[: -len(base) - 1]
+                path = "/" + bucket + path
         local = os.path.join(self.server.rootdir, path.lstrip("/"))
         return mode, local
 
@@ -423,6 +432,9 @@ def main():
     ap.add_argument("--tamper-bucket")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
+    ap.add_argument("--virtual-host-base",
+                    help="base host under which the leftmost Host label is the "
+                         "bucket (S3 virtual-host addressing, #621)")
     ap.add_argument("--list-page-size", type=int, default=1000,
                     help="ListObjectsV2 keys per page; small values force paging")
     args = ap.parse_args()
@@ -439,6 +451,7 @@ def main():
     srv.sigv4_region = args.sigv4_region
     srv.sigv4_token = args.sigv4_token
     srv.tamper_bucket = args.tamper_bucket
+    srv.vhost_base = args.virtual_host_base
     srv.list_page_size = args.list_page_size
     srv.uploads = {}
     open(args.log, "a").close()

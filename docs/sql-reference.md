@@ -511,6 +511,16 @@ mid-upload can leave one incomplete multipart upload that the dispatcher cannot
 address. Set a bucket lifecycle rule that expires incomplete multipart uploads to
 reclaim it, as the object-storage notes recommend for `export_parquet`.
 
+On success the function writes an empty `_SUCCESS` marker at the destination, the
+Hadoop and Spark convention. Its presence means a complete run's output is there;
+a failed or cancelled run, whose part files the dispatcher removes, leaves none.
+The marker is written last, after every worker has finished, so a directory or
+prefix that carries it is a whole export. A remote prefix allows a re-run to
+overwrite a used prefix. A smaller re-run there first removes the stale
+higher-numbered parts a larger prior run left, so the marker certifies exactly
+the parts this run wrote. `read_parquet` and the foreign-data wrapper skip it, as
+they skip any name beginning with an underscore.
+
 When `workers` is omitted the function derives a value from the target.
 
 ```sql
@@ -632,14 +642,20 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ## Object storage
 
 The Parquet read and export functions, and the foreign-data wrapper, accept an
-object-storage URL wherever they accept a local path. Three URL schemes are
+object-storage URL wherever they accept a local path. These URL schemes are
 recognized:
 
 | Scheme | Meaning |
 | --- | --- |
 | `s3://bucket/key` | An S3 or S3-compatible object. The request is signed with AWS Signature Version 4. |
+| `gs://bucket/key` | A Google Cloud Storage object, read and written through the interoperable XML API. It signs with the same Signature Version 4 as `s3://`, so a GCS HMAC key is given as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. The endpoint defaults to `https://storage.googleapis.com` and the region to `auto`; set `AWS_ENDPOINT_URL` to override. |
 | `http://host[:port]/path` | A plain-HTTP object. For a trusted network only, because a plain-HTTP request carries any credential in clear. |
 | `https://host[:port]/path` | An HTTPS object. Available when the object-store module was built with OpenSSL. The server certificate is verified. |
+
+S3 requests use path-style addressing (`endpoint/bucket/key`) by default. Set
+`pgcolumnar.objstore_s3_addressing` to `virtual` for virtual-host addressing
+(`bucket.endpoint/key`), which is what AWS now prefers; the endpoint allow-list
+still authorizes the endpoint, not the per-bucket hostname.
 
 Object-storage support lives in a separate module, `pgcolumnar_objstore`, which
 loads on the first use of a remote URL and never before. A build or an install
@@ -657,8 +673,9 @@ dot-hidden names are skipped, as they are for a local directory. Hive
 object-store module, since only it can issue the listing.
 
 On write, `parallel_export_parquet` treats a remote URL as a prefix. It writes one
-`part-NNNN.parquet` object under the prefix per worker. Every other write function
-writes a single object at the exact key.
+`part-NNNN.parquet` object under the prefix per worker, and an empty `_SUCCESS`
+marker beside them on completion. Every other write function writes a single
+object at the exact key.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above
@@ -675,7 +692,7 @@ credentials come from the environment of the server process:
 
 | Variable | Meaning |
 | --- | --- |
-| `AWS_ENDPOINT_URL` | The object-storage endpoint, `http://...` or `https://...`. Required for an `s3://` URL. |
+| `AWS_ENDPOINT_URL` | The object-storage endpoint, `http://...` or `https://...`. Required for an `s3://` URL; optional for `gs://`, which defaults to `https://storage.googleapis.com`. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | The access key pair. |
 | `AWS_SESSION_TOKEN` | A session token, when the credentials are temporary. Optional. |
 | `AWS_REGION` or `AWS_DEFAULT_REGION` | The signing region. |
