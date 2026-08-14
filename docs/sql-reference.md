@@ -635,6 +635,31 @@ SELECT snapshot_id, operation, manifest_list
   FROM pgcolumnar.iceberg_current_snapshot('/data/warehouse/db/events/metadata/v3.metadata.json');
 ```
 
+### pgcolumnar.iceberg_data_files(metadata_path text) returns table(file_path text, file_format text, record_count bigint, partition text)
+
+Lists the live data files of an Apache Iceberg table at its current snapshot.
+It resolves the current snapshot from `metadata.json`, reads that snapshot's
+manifest list, then each manifest, and returns one row per data-file entry: the
+file path, format, row count, and partition rendered as `name=value`. The
+caller needs the `pg_read_server_files` role, which superusers hold. It returns
+no rows when the table has no current snapshot.
+
+The absolute paths recorded in the table are rebased onto the table's actual
+location, taken from where `metadata.json` sits, so a table copied to a new
+directory still reads. A recorded path that points outside the table location
+is refused, not read.
+
+Delete files are refused, not ignored: a snapshot that carries any delete
+manifest or delete entry raises an error rather than returning rows the table
+says are gone. Reading Iceberg tables that use deletes is a later step (#388
+phase 4). This lists data files from the manifests; opening each Parquet file
+and projecting its columns by field id is the following step (#388 phase 3c).
+
+```sql
+SELECT file_path, record_count, partition
+  FROM pgcolumnar.iceberg_data_files('/data/warehouse/db/events/metadata/v3.metadata.json');
+```
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams

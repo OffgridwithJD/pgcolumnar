@@ -1,0 +1,21 @@
+{
+  "data_files": [
+    {
+      "content": 0,
+      "file_basename": "00000-0-a95ea5a1-2b11-47bc-9ba7-4759ae01be40.parquet",
+      "file_format": "PARQUET",
+      "record_count": 2,
+      "region": "eu",
+      "status": 1
+    },
+    {
+      "content": 0,
+      "file_basename": "00000-1-a95ea5a1-2b11-47bc-9ba7-4759ae01be40.parquet",
+      "file_format": "PARQUET",
+      "record_count": 3,
+      "region": "us",
+      "status": 1
+    }
+  ],
+  "recorded_root": "/tmp/pgc_ice_wh"
+}

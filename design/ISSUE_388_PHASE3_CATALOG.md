@@ -43,6 +43,14 @@ Behaviour:
 - `manifest_list` is reported verbatim (absolute path as the writer wrote it).
   Rebasing relocated paths is 3b's concern, deliberately not here.
 
+SQLSTATEs: malformed JSON `22P02` (jsonb_in); not table metadata (no
+`format-version`, or not an object) `22023`; a `current-snapshot-id` naming no
+snapshot in the file's own `snapshots[]` `XX001` (data_corrupted); a snapshot id
+past the int64 range `22003` (numeric out of range, surfaced by `numeric_int8`);
+caller without `pg_read_server_files` `42501`. The snapshot scan carries a
+`CHECK_FOR_INTERRUPTS` (the input is capped at `ICE_MAX_METADATA` = 64 MB, so it
+is bounded, but the scan is over untrusted input).
+
 New source file `src/columnar_iceberg.c` (this begins the catalog component,
 kept separate from the Avro decoder). SQL declaration in
 `pgcolumnar--1.0-alpha.sql`. Docs in `docs/sql-reference.md`.
@@ -66,29 +74,64 @@ manifest-list basename, schema-id) using pyiceberg's own view of the table.
 Regenerate from the same real pyiceberg v2 warehouse as steps 1-2 (host venv;
 no pip in the containers, so the output is committed).
 
-## 3b - current snapshot -> live data-file list (next PR)
+## 3b - current snapshot -> live data-file list (DONE, this PR)
 
-Chain 3a into the two Avro decoders: current snapshot -> `manifest_list` ->
-`manifest_file[]` -> each manifest -> `manifest_entry[]` -> the live data files.
 `pgcolumnar.iceberg_data_files(metadata_path text)` returning
-`(file_path, file_format, record_count, partition)`.
+`(file_path, file_format, record_count, partition)`. Chains 3a into the two Avro
+decoders: current snapshot -> `manifest_list` -> `manifest_file[]` -> each
+manifest -> `manifest_entry[]` -> the live data files. The 3a resolver was
+refactored into a shared `ice_current_snapshot()`; both entry points use it.
 
-Two designs this PR must settle and test:
-1. **Absolute-path rebasing.** metadata.json, the manifest list, and the
-   manifests all store absolute paths (`file:///.../warehouse/...`). A committed
-   fixture, or any relocated table, will not sit at the recorded `location`.
-   Derive the table root from where `metadata.json` was found, strip the recorded
-   `location` prefix, and re-root each path onto the actual root; refuse a path
-   that does not start with the recorded `location` rather than reading an
-   arbitrary absolute path off the host. Test by copying the warehouse to a
-   second directory and confirming it still resolves.
-2. **Loud delete refusal.** Refuse (a specific SQLSTATE, not a silent skip) if
-   any `manifest_file.content != 0` (a delete manifest) or any
-   `manifest_entry.content != 0` / `status == 2` (position/equality deletes, or a
-   deleted entry). A reader that drops deletes looks finished and is wrong. The
-   deny arm needs a fixture that actually carries a delete so the call reaches the
-   refusing code (assert SQLSTATE), either a real pyiceberg delete table or a
-   crafted manifest with `content=1`.
+Two designs settled here:
+1. **Absolute-path rebasing, keyed off `location`.** metadata.json, the manifest
+   list, and the manifests all store absolute paths. The recorded root is
+   metadata.json's `location`; the actual root is derived from where the
+   metadata.json sits (Iceberg's layout puts it at `<location>/metadata/<file>`,
+   so the location is the parent of the `metadata/` dir). Each recorded path has
+   its `location` prefix stripped and is re-rooted onto the actual root; a
+   recorded path **not under** `location` is refused (`22023`), never read, so a
+   tampered table cannot make the backend open an arbitrary server file.
+
+   The boundary is not a byte-prefix match -- that was a real bug ChronicallyJD
+   reproduced on the first 3b revision (`<location>/../../etc/passwd` shares the
+   prefix and escapes when re-rooted; `<location>EVIL/x` shares the bytes as a
+   sibling). `ice_rebase` therefore (a) requires the recorded path under
+   `location` on a **path boundary** (next byte `/` or end), rejecting the
+   sibling, and (b) re-roots, then canonicalizes and re-checks containment,
+   collapsing any `..`.
+
+   Lexical canonicalization alone is **symlink-blind**, though -- a second bug
+   ChronicallyJD reproduced: a symlink planted under `location` (the attacker
+   writes the warehouse) whose lexical path is contained but which points outside
+   is followed out on `open`. So for every path 3b actually **opens** (the
+   manifest list and each manifest), `ice_open_path` resolves the rebased path
+   with **`realpath`** -- which collapses symlinks as well as `..` -- and
+   re-checks containment against the `realpath`'d actual root. Data-file paths are
+   only returned (never opened here), so they keep the lexical rebase; 3c must
+   `realpath`/`O_NOFOLLOW` them at open time, and its design note says so.
+
+   The suite copies the committed warehouse to a different directory (recorded
+   root != actual root) and asserts rebased paths under the actual root, no leaked
+   recorded root, and four refusal payloads -- foreign absolute, `..` traversal,
+   sibling prefix, and a **symlink** under the location targeting outside -- each
+   `22023`. The `..` and symlink targets are a real server file (`/etc/hostname`),
+   so the removal proofs are exact: dropping the canonicalization reads the `..`
+   target (`XX001`), and dropping the `realpath` reads the symlink target
+   (`XX001`), instead of `22023`. Both boundaries are load-bearing.
+2. **Loud delete refusal (`0A000`).** Refuses if any `manifest_file.content != 0`
+   (a delete manifest, caught at the manifest-list level without opening it) or
+   any `manifest_entry.content != 0` / `status == 2`. pyiceberg 0.11.1 **cannot**
+   write merge-on-read deletes (it warns and falls back to copy-on-write), so the
+   deny arm uses a **crafted** manifest-list OCF with `content = 1` -- the same
+   crafted-deny technique as the avro suite's bomb/bad-magic arms. Removal proof:
+   deleting the `content != 0` gate turns the refusal into a file-not-found
+   (`58P01`) instead of `0A000`.
+
+The suite (`test/iceberg_data_files.sh`) asserts the data files against
+pyiceberg's own `snap.manifests(io)` oracle (`expected_files.json`), generated
+by `gen_iceberg_warehouse.py` at a fixed recorded root; only the metadata/
+subtree is committed (the resolver lists data files from manifests, it does not
+open them, so no Parquet data is checked in).
 
 ## 3c - scan the data files, projecting by field id (later PR)
 
@@ -97,6 +140,13 @@ file from 3b through the existing Parquet reader, but resolve the Iceberg
 schema's columns to Parquet leaves by **field id** (thrift field 9, already
 parsed into `PqSchemaCol.field_id`), with name mapping as the documented
 fallback for files written without ids.
+
+**Open-time path safety (carried from the 3b review).** 3b rebases data-file
+paths but does not open them, so it leaves them lexically rebased. 3c *opens*
+them, so it must apply the same symlink-resolving boundary as `ice_open_path`
+(`realpath` + containment under the actual location, or `O_NOFOLLOW`) before
+reading each Parquet file -- otherwise a symlinked data-file path is a direct
+content leak, not just an existence oracle. Reuse `ice_open_path`.
 
 Map of what 3c must change (from the reader survey, all in
 `src/columnar_parquet_reader.c`; there is no separate FDW file):
