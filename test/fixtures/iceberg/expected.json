@@ -1,0 +1,40 @@
+{
+  "entries": [
+    {
+      "content": 0,
+      "file_format": "PARQUET",
+      "file_path_basename": "00000-0-070dea05-1705-402a-82cc-14b56e17cb1c.parquet",
+      "file_size_in_bytes": 1265,
+      "manifest": "manifest-0.avro",
+      "partition": {
+        "region": "eu"
+      },
+      "record_count": 2,
+      "status": 1
+    },
+    {
+      "content": 0,
+      "file_format": "PARQUET",
+      "file_path_basename": "00000-1-070dea05-1705-402a-82cc-14b56e17cb1c.parquet",
+      "file_size_in_bytes": 1275,
+      "manifest": "manifest-0.avro",
+      "partition": {
+        "region": "us"
+      },
+      "record_count": 3,
+      "status": 1
+    }
+  ],
+  "format_version": 2,
+  "manifest_list": "manifest-list.avro",
+  "manifests": [
+    {
+      "added_files_count": 2,
+      "content": 0,
+      "deleted_files_count": 0,
+      "existing_files_count": 0,
+      "fixture": "manifest-0.avro",
+      "partition_spec_id": 0
+    }
+  ]
+}
