@@ -482,6 +482,17 @@ on the target. The output directory must be empty. It is created if it does not 
 its own `part-NNNN.parquet` file, and `pgcolumnar.read_parquet` reads the whole
 directory back as one relation.
 
+The `path` may also be an `s3://` prefix. Each worker writes one
+`part-NNNN.parquet` object under it, exactly as for a local directory. See
+[Object storage](#object-storage) for the endpoint and credential rules, which
+are the same as for `export_parquet`. One difference applies to a remote prefix.
+The local path is created and checked for emptiness before the export. A remote
+prefix cannot be checked for emptiness without a bucket listing, which pgColumnar
+does not yet perform. The prefix must therefore be new or empty by the caller's
+own account. A stale higher-numbered object left in the prefix by a larger prior
+export would be read back by a later directory read. Read each object by its
+exact key until prefix reads land.
+
 The target may be one of two kinds:
 
 - A single columnar table. The workers split it by row-group ranges, so each
@@ -493,8 +504,12 @@ The export is read-only and consistent. The dispatcher exports one snapshot and
 every worker imports it. The files together are the committed image of the table
 at call time. This holds even when the call runs inside a transaction with
 uncommitted rows. There is no coordinator and no shared write state. If any worker
-fails the dispatcher removes the files it wrote, so a partial directory is never
-left for `read_parquet` to union.
+fails, or the statement is cancelled, the dispatcher removes the files it wrote.
+A partial directory is never left for `read_parquet` to union. Over an `s3://`
+prefix the dispatcher deletes the same objects by key. A worker terminated
+mid-upload can leave one incomplete multipart upload that the dispatcher cannot
+address. Set a bucket lifecycle rule that expires incomplete multipart uploads to
+reclaim it, as the object-storage notes recommend for `export_parquet`.
 
 When `workers` is omitted the function derives a value from the target.
 
@@ -560,12 +575,14 @@ SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
 
 ### The pgcolumnar_parquet foreign-data wrapper
 
-Exposes a Parquet file, directory, or glob as a foreign table. The scan pushes
-work down: row groups whose min/max statistics exclude the query's predicate are
-skipped, and only referenced columns are decoded. Skipping requires a
-`column op constant` clause over an integer or floating-point column with a
-constant of the same type; [limitations.md](limitations.md) lists the conditions.
-A scan that skips nothing still returns correct rows.
+Exposes a Parquet file, directory, or glob as a foreign table. The scan streams
+one row group at a time. It holds a single row group rather than the whole file.
+A `LIMIT` the plan satisfies early leaves the rest of the file undecoded. It
+pushes work down: row groups whose min/max statistics exclude the
+query's predicate are skipped, and only referenced columns are decoded. Skipping
+requires a `column op constant` clause over an integer or floating-point column
+with a constant of the same type; [limitations.md](limitations.md) lists the
+conditions. A scan that skips nothing still returns correct rows.
 
 The `path` option can name a local file, directory, or glob, or an
 object-storage URL. A remote URL is an exact object, a prefix ending in a slash,
@@ -592,8 +609,8 @@ CREATE FOREIGN TABLE events_p (id int, amount numeric(12,2), dt date, region tex
 
 SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
 
--- EXPLAIN ANALYZE reports Row Groups, Row Groups Skipped, Columns Read,
--- Columns Total, and Files.
+-- EXPLAIN ANALYZE reports Row Groups, Row Groups Skipped, Row Groups Decoded,
+-- Columns Read, Columns Total, and Files.
 EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ```
 
@@ -623,6 +640,10 @@ local glob. Listing is a paged ListObjectsV2 call. `_SUCCESS`, `_temporary`, and
 dot-hidden names are skipped, as they are for a local directory. Hive
 `partition_columns` work over a remote prefix. A pattern or a prefix requires the
 object-store module, since only it can issue the listing.
+
+On write, `parallel_export_parquet` treats a remote URL as a prefix, writing one
+`part-NNNN.parquet` object under it per worker; every other function writes a
+single object at the exact key.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above

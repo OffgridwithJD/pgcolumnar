@@ -35,6 +35,7 @@
 #include <unistd.h>
 
 #include "columnar.h"
+#include "columnar_objstore.h"
 
 #include "access/relation.h"
 #include "access/table.h"
@@ -108,6 +109,7 @@ typedef struct PexportSpawn
 	BackgroundWorkerHandle **handles;
 	int			n;
 	const char *dirpath;
+	int			nkeys;			/* part-NNNN.parquet count, for remote cleanup */
 } PexportSpawn;
 
 PGDLLEXPORT void pgcolumnar_parallel_export_worker(Datum main_arg);
@@ -191,6 +193,37 @@ pexport_prepare_dir(const char *dir)
 	DIR		   *d;
 	struct dirent *de;
 
+	/*
+	 * A remote prefix (#623) has no directory to create, and require-empty
+	 * cannot be checked without a bucket listing, which is #619 and
+	 * deliberately deferred. So the remote branch does not verify the prefix
+	 * is empty: the documented rule is that a remote prefix must be new or
+	 * empty, and a stale higher-numbered part from a larger prior export into
+	 * the same prefix would be unioned by a later read. The one thing done
+	 * here is to load the module and reject an unsupported scheme up front, so
+	 * a missing module fails before any worker is spawned rather than N times.
+	 */
+	if (PgColumnarPathIsRemote(dir))
+	{
+		const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+
+		if (api == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: writing to \"%s\" requires the object-store module",
+							dir),
+					 errdetail("Object storage support is a separate library, "
+							   "pgcolumnar_objstore, which is not installed.")));
+		if (!api->handles_url(dir))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("columnar: writing to \"%s\" is not supported", dir),
+					 errhint("A remote prefix must be new or empty; "
+							 "pgcolumnar cannot verify this without a bucket "
+							 "listing.")));
+		return;
+	}
+
 	if (stat(dir, &st) != 0)
 	{
 		if (errno != ENOENT)
@@ -241,7 +274,7 @@ pexport_prepare_dir(const char *dir)
  *		worker. It is still ours by construction; remove it here.
  */
 static void
-pexport_remove_outputs(const char *dir)
+pexport_remove_outputs(const char *dir, int nkeys)
 {
 	DIR		   *d;
 	struct dirent *de;
@@ -249,6 +282,32 @@ pexport_remove_outputs(const char *dir)
 
 	if (dir == NULL || dir[0] == '\0')
 		return;
+
+	/*
+	 * Remote (#623): the dispatcher knows its own key set exactly, so no
+	 * listing is needed. The keys are dir/part-0000.parquet through
+	 * dir/part-(nkeys-1).parquet; delete each through the module, best-effort
+	 * like the local unlink. A worker the dispatcher TERMINATES dies FATAL
+	 * with its multipart upload neither completed nor aborted, and the ABI's
+	 * delete_object removes a completed key, not an in-progress upload, so an
+	 * orphaned upload is left to the bucket's incomplete-multipart lifecycle
+	 * rule (the same residue #622 documented for a single object).
+	 */
+	if (PgColumnarPathIsRemote(dir))
+	{
+		const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+		int			i;
+
+		if (api == NULL)
+			return;
+		for (i = 0; i < nkeys; i++)
+		{
+			snprintf(fp, sizeof(fp), "%s/part-%04d.parquet", dir, i);
+			api->delete_object(fp, NULL);
+		}
+		return;
+	}
+
 	d = AllocateDir(dir);
 	if (d == NULL)
 		return;
@@ -280,7 +339,7 @@ pexport_cleanup(int code, Datum arg)
 	for (i = 0; i < s->n; i++)
 		if (s->handles[i] != NULL)
 			TerminateBackgroundWorker(s->handles[i]);
-	pexport_remove_outputs(s->dirpath);
+	pexport_remove_outputs(s->dirpath, s->nkeys);
 }
 
 /*
@@ -614,6 +673,8 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 	spawn.handles = handles;
 	spawn.n = workers;
 	spawn.dirpath = dir;
+	/* one part-NNNN.parquet per worker (single table) or per partition */
+	spawn.nkeys = single_table ? workers : npart;
 
 	memset(&bw, 0, sizeof(bw));
 	bw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -686,7 +747,7 @@ pgcolumnar_parallel_export_parquet(PG_FUNCTION_ARGS)
 				: "worker exited without reporting a result", sizeof(msg));
 		/* all workers have stopped; drop any part files they wrote so the failed
 		 * run leaves a clean directory and a retry is not half-read or blocked */
-		pexport_remove_outputs(dir);
+		pexport_remove_outputs(dir, single_table ? workers : npart);
 		dsm_detach(seg);
 		if (pushed)
 			PopActiveSnapshot();
