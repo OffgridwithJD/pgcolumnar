@@ -482,6 +482,17 @@ on the target. The output directory must be empty. It is created if it does not 
 its own `part-NNNN.parquet` file, and `pgcolumnar.read_parquet` reads the whole
 directory back as one relation.
 
+The `path` may also be an `s3://` prefix. Each worker writes one
+`part-NNNN.parquet` object under it, exactly as for a local directory. See
+[Object storage](#object-storage) for the endpoint and credential rules, which
+are the same as for `export_parquet`. One difference applies to a remote prefix.
+The local path is created and checked for emptiness before the export. A remote
+prefix cannot be checked for emptiness without a bucket listing, which pgColumnar
+does not yet perform. The prefix must therefore be new or empty by the caller's
+own account. A stale higher-numbered object left in the prefix by a larger prior
+export would be read back by a later directory read. Read each object by its
+exact key until prefix reads land.
+
 The target may be one of two kinds:
 
 - A single columnar table. The workers split it by row-group ranges, so each
@@ -493,8 +504,12 @@ The export is read-only and consistent. The dispatcher exports one snapshot and
 every worker imports it. The files together are the committed image of the table
 at call time. This holds even when the call runs inside a transaction with
 uncommitted rows. There is no coordinator and no shared write state. If any worker
-fails the dispatcher removes the files it wrote, so a partial directory is never
-left for `read_parquet` to union.
+fails, or the statement is cancelled, the dispatcher removes the files it wrote.
+A partial directory is never left for `read_parquet` to union. Over an `s3://`
+prefix the dispatcher deletes the same objects by key. A worker terminated
+mid-upload can leave one incomplete multipart upload that the dispatcher cannot
+address. Set a bucket lifecycle rule that expires incomplete multipart uploads to
+reclaim it, as the object-storage notes recommend for `export_parquet`.
 
 When `workers` is omitted the function derives a value from the target.
 
@@ -611,8 +626,10 @@ recognized:
 Object-storage support lives in a separate module, `pgcolumnar_objstore`, which
 loads on the first use of a remote URL and never before. A build or an install
 without it reads and writes local files as before, and a remote URL reports that
-the module is required. Only exact object keys work. A glob or a directory over a
-remote URL is refused, not expanded.
+the module is required. On read, only exact object keys work. A glob or a
+directory over a remote URL is refused, not expanded. On write,
+`parallel_export_parquet` is the one function that treats a remote URL as a
+prefix, writing one `part-NNNN.parquet` object under it per worker.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above
