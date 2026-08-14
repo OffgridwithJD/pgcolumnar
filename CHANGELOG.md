@@ -14,6 +14,15 @@ which was true until that script existed.
 
 ### Added
 
+- `pgcolumnar.maintenance_due(rel, compact_due_fraction, recluster_due_fraction)`
+  reports whether an online maintenance verb is worth running on a table, from its
+  statistics alone (#415). It takes no lock and rewrites nothing. It returns the
+  deleted and appended fractions, whether `compact_rewrite` or `recluster` has
+  crossed its threshold, and a `recommendation`. This is the policy the
+  `pgcolumnar.autovacuum` daemon consults, and a monitoring role can call it
+  directly. It is `SECURITY DEFINER` and checks that the caller may `SELECT` the
+  table, so the owner can run it without superuser rights.
+
 - `pgcolumnar.parallel_flush` dispatches a stripe flush across background workers
   (#445). Default off. When on, a flush of two or more columns fans the per-column
   encode and compress work out to a worker pool. Any column a worker does not
@@ -84,6 +93,13 @@ which was true until that script existed.
   stored value against an independent count.
 
 ### Fixed
+
+- `pgcolumnar.sort_status` works for a non-superuser who owns the table (#608).
+  The function reads pgColumnar's internal catalogs, which carry no `GRANT`. As an
+  invoker-rights function it therefore failed for any caller who was not a
+  superuser. It is now `SECURITY DEFINER` and checks that the caller may `SELECT`
+  the table. The owner can read the sort status of their own table, and no caller
+  gains access to a table they could not already read.
 
 - `pgcolumnar.analyze()` counts `null_frac` over live rows (#485). It came from
   the zone maps, which record what was written, so a deleted row kept counting
@@ -179,6 +195,15 @@ which was true until that script existed.
   half of the rename is hygiene rather than a visible change.
 
 ### Changed
+
+- `pgcolumnar.recluster` no longer rewrites a table that is already clustered by
+  the requested key (#415). The function records the clustering key and kind it
+  establishes. A later call with the same key returns 0 and touches nothing when
+  the existing sorted run still covers every row group. Before this, it re-sorted
+  on every call, so a scheduled recluster rewrote the whole table each time, which
+  is why the maintenance daemon could not have run it safely. `pgcolumnar.sort_status`
+  now reports this recorded key as `sort_key`, and falls back to the declared
+  `sort_by` when there is no recorded key.
 
 - A columnar scan whose filter cannot be pushed down now skips decoding the
   projected columns of a 1024-row vector that holds no matching row (#452). The

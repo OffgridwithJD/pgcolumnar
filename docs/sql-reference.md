@@ -129,6 +129,12 @@ reclustered.
 SELECT pgcolumnar.recluster('events', 'customer_id', 'ts');
 ```
 
+Re-running `recluster` with the same key on a table whose clustering is intact is
+a fast no-op. The function records the key it last established. It returns 0
+without rewriting anything when the recorded key matches, the kind is Z-order,
+and the existing sorted run already covers every row group. This is what lets the
+maintenance daemon call it on a schedule without churning storage.
+
 ### pgcolumnar.compact(tablename regclass) returns bigint
 
 Retires row groups that are fully deleted, dropping their metadata so scans skip
@@ -263,7 +269,7 @@ Reports how much of a table's sorted order is still in place. Returns one row:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `sort_key` | name[] | The `sort_by` key declared by `set_options`, or NULL. |
+| `sort_key` | name[] | The clustering key in effect. It is the key the last `recluster` recorded, or the `sort_by` declared by `set_options`, or NULL. |
 | `total_groups` | bigint | Row groups in the table. |
 | `sorted_groups` | bigint | Row groups written by the last ordering rewrite. |
 | `appended_groups` | bigint | Row groups written after it. |
@@ -303,6 +309,34 @@ values are still in order. An `UPDATE` stores the new row version at the end,
 which counts as appended. The record is internal storage metadata and `pg_dump`
 does not carry it, so a restored table reports no sorted groups until you sort it
 again.
+
+### pgcolumnar.maintenance_due(rel regclass, compact_due_fraction float8 DEFAULT 0.2, recluster_due_fraction float8 DEFAULT 0.05)
+
+Reports whether an online maintenance verb is worth running on a table, from its
+statistics alone. It takes no lock and rewrites nothing. This is the policy the
+`pgcolumnar.autovacuum` daemon consults on each sweep. You can also call it from a
+monitoring query. Returns one row:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `total_rows` | bigint | Stored rows, including deleted rows not yet reclaimed. |
+| `deleted_rows` | bigint | Rows deleted but still stored. |
+| `deleted_fraction` | float8 | `deleted_rows` over `total_rows`. |
+| `sort_key` | name[] | The recorded clustering key, or NULL. |
+| `appended_groups` | bigint | Row groups written after the last ordering. |
+| `appended_rows` | bigint | Rows in those appended groups. |
+| `appended_fraction` | float8 | Appended rows over the sorted plus appended rows. |
+| `compact_rewrite_due` | boolean | True when `deleted_fraction` reaches `compact_due_fraction`. |
+| `recluster_due` | boolean | True when a sorted run exists and `appended_fraction` reaches `recluster_due_fraction`. |
+| `recommendation` | text | The verbs to run, comma-separated, or NULL when nothing is due. |
+
+The two thresholds default to the values the daemon uses. The function is
+`SECURITY DEFINER` and checks that the caller may `SELECT` the table. A monitoring
+role that owns the table can therefore call it without superuser rights.
+
+```sql
+SELECT recommendation FROM pgcolumnar.maintenance_due('events');
+```
 
 ## Projections
 
