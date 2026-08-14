@@ -64,6 +64,32 @@ check "every entry's file_path ends in .parquet" \
 check "all entries are ADDED data files (status=1, content=0)" \
 	"$(q "SELECT bool_and(status = 1 AND content = 0) FROM pgcolumnar.read_avro_manifest('$M0')")" "t"
 
+# ---- the manifest LIST (a snapshot's manifest_file entries) -----------------
+# The same object-container machinery, a different embedded record. Decode the
+# committed real manifest-list and assert its manifest_file entry against the
+# writer's oracle (expected_list.json).
+ML="$PGC_WORKDIR/manifest-list.avro"
+cp "$FX/manifest-list.avro" "$ML"; chmod 644 "$ML"
+LORACLE="$(python3 - "$FX/expected_list.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))["manifest_files"]
+r = m[0]
+print("%d|%d|%d|%d|%d|%d|%d" % (r["manifest_length"], r["content"],
+      r["partition_spec_id"], r["added_files_count"], r["added_rows_count"],
+      r["sequence_number"], r["added_snapshot_id"]))
+PY
+)"
+check "manifest-list entry count == oracle (1)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.read_manifest_list('$ML')")" "1"
+check "manifest-list entry == oracle (len|content|spec|files|rows|seq|snap)" \
+	"$(q "SELECT manifest_length || '|' || content || '|' || partition_spec_id || '|' ||
+	             added_files_count || '|' || added_rows_count || '|' ||
+	             sequence_number || '|' || added_snapshot_id
+	      FROM pgcolumnar.read_manifest_list('$ML')")" "$LORACLE"
+check "manifest-list points at an .avro manifest, no existing/deleted files" \
+	"$(q "SELECT bool_and(manifest_path LIKE '%.avro' AND existing_files_count = 0
+	                      AND deleted_files_count = 0) FROM pgcolumnar.read_manifest_list('$ML')")" "t"
+
 # ---- privilege: needs pg_read_server_files ---------------------------------
 psql_run "DROP ROLE IF EXISTS avro_unpriv; CREATE ROLE avro_unpriv LOGIN;"
 check "an unprivileged role is refused (42501)" \

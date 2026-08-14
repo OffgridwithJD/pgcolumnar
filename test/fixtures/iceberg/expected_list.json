@@ -1,0 +1,19 @@
+{
+  "manifest_files": [
+    {
+      "added_files_count": 2,
+      "added_rows_count": 5,
+      "added_snapshot_id": 1015321693306905452,
+      "content": 0,
+      "deleted_files_count": 0,
+      "deleted_rows_count": 0,
+      "existing_files_count": 0,
+      "existing_rows_count": 0,
+      "manifest_length": 4852,
+      "manifest_path_basename": "070dea05-1705-402a-82cc-14b56e17cb1c-m0.avro",
+      "min_sequence_number": 1,
+      "partition_spec_id": 0,
+      "sequence_number": 1
+    }
+  ]
+}

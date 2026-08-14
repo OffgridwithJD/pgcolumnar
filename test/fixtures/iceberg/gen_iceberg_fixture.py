@@ -79,6 +79,27 @@ for i, m in enumerate(manifests):
 with open(os.path.join(OUT, "expected.json"), "w") as f:
     json.dump(report, f, indent=2, sort_keys=True)
 
+# the manifest-list oracle: the manifest_file entries the snapshot points at
+list_report = {"manifest_files": []}
+for m in manifests:
+    list_report["manifest_files"].append({
+        "manifest_path_basename": os.path.basename(m.manifest_path),
+        "manifest_length": m.manifest_length,
+        "partition_spec_id": m.partition_spec_id,
+        "content": int(m.content),
+        "sequence_number": m.sequence_number,
+        "min_sequence_number": m.min_sequence_number,
+        "added_snapshot_id": m.added_snapshot_id,
+        "added_files_count": m.added_files_count,
+        "existing_files_count": m.existing_files_count,
+        "deleted_files_count": m.deleted_files_count,
+        "added_rows_count": m.added_rows_count,
+        "existing_rows_count": m.existing_rows_count,
+        "deleted_rows_count": m.deleted_rows_count,
+    })
+with open(os.path.join(OUT, "expected_list.json"), "w") as f:
+    json.dump(list_report, f, indent=2, sort_keys=True)
+
 # report the avro header of the first manifest so we know the codec/schema shape
 with open(os.path.join(OUT, "manifest-0.avro"), "rb") as f:
     head = f.read(4)

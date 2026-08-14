@@ -631,6 +631,54 @@ av_decode_entry(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 	}
 }
 
+/* decode one manifest_file record (a manifest-list entry) into a projection */
+static void
+av_decode_manifest_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestFile *e)
+{
+	int			i;
+
+	if (s->kind != AV_RECORD)
+	{
+		r->error = true;
+		return;
+	}
+	for (i = 0; i < s->n && !r->error; i++)
+	{
+		const char *nm = s->fields[i].name;
+		AvSchema   *ft = s->fields[i].type;
+		bool		have;
+
+		if (strcmp(nm, "manifest_path") == 0)
+			e->manifest_path = av_read_string(r, ft);
+		else if (strcmp(nm, "manifest_length") == 0)
+			e->manifest_length = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "partition_spec_id") == 0)
+			e->partition_spec_id = (int32) av_read_long(r, ft, &have);
+		else if (strcmp(nm, "content") == 0)
+			e->content = (int32) av_read_long(r, ft, &have);
+		else if (strcmp(nm, "sequence_number") == 0)
+			e->sequence_number = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "min_sequence_number") == 0)
+			e->min_sequence_number = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "added_snapshot_id") == 0)
+			e->added_snapshot_id = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "added_files_count") == 0)
+			e->added_files_count = (int32) av_read_long(r, ft, &have);
+		else if (strcmp(nm, "existing_files_count") == 0)
+			e->existing_files_count = (int32) av_read_long(r, ft, &have);
+		else if (strcmp(nm, "deleted_files_count") == 0)
+			e->deleted_files_count = (int32) av_read_long(r, ft, &have);
+		else if (strcmp(nm, "added_rows_count") == 0)
+			e->added_rows_count = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "existing_rows_count") == 0)
+			e->existing_rows_count = av_read_long(r, ft, &have);
+		else if (strcmp(nm, "deleted_rows_count") == 0)
+			e->deleted_rows_count = av_read_long(r, ft, &have);
+		else
+			av_skip(r, ft);
+	}
+}
+
 /* ---------------------------------------------------- object-container file */
 
 /* decode the header metadata map (Avro map<string,bytes>) into schema + codec */
@@ -750,8 +798,17 @@ av_inflate(const uint8 *in, int64 inlen, int64 *outlen)
 	return out;
 }
 
-PgColumnarAvroManifestEntry *
-PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
+/*
+ * Read an Avro object-container file, decoding each record with `decode` into a
+ * fresh element of an array of `elemsize`-byte elements. Shared by the manifest
+ * and manifest-list readers: only the per-record projection differs; the OCF
+ * framing, deflate codec, caps and sync-marker checks are identical and live
+ * here, in one place. Returns the palloc'd array; *nout is the count.
+ */
+static void *
+av_read_ocf(const uint8 *buf, int64 len, Size elemsize,
+			void (*decode) (AvReader *br, AvSchema *schema, void *elem),
+			int *nout)
 {
 	AvReader	r = {buf, len, 0, false};
 	char	   *schema_json;
@@ -761,7 +818,7 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 	AvSchema   *schema;
 	JsonbValue	rootv;
 	Jsonb	   *j;
-	PgColumnarAvroManifestEntry *out = NULL;
+	char	   *out = NULL;
 	int			nalloc = 0;
 	int			n = 0;
 
@@ -862,15 +919,15 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 		{
 			nalloc = (int) Max((int64) (n + count), (int64) 16);
 			out = out == NULL
-				? (PgColumnarAvroManifestEntry *) palloc0(sizeof(*out) * nalloc)
-				: (PgColumnarAvroManifestEntry *) repalloc(out, sizeof(*out) * nalloc);
-			memset(out + n, 0, sizeof(*out) * (nalloc - n));
+				? (char *) palloc0(elemsize * nalloc)
+				: (char *) repalloc(out, elemsize * nalloc);
+			memset(out + (Size) n * elemsize, 0, (Size) (nalloc - n) * elemsize);
 		}
 		for (i = 0; i < count; i++)
 		{
 			if ((i & 0xFFF) == 0)
 				CHECK_FOR_INTERRUPTS();
-			av_decode_entry(&br, schema, &out[n]);
+			decode(&br, schema, out + (Size) n * elemsize);
 			if (br.error)
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
@@ -895,42 +952,45 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 	return out;
 }
 
+/* thin callbacks so av_read_ocf can decode either record type */
+static void
+av_entry_cb(AvReader *br, AvSchema *s, void *e)
+{
+	av_decode_entry(br, s, (PgColumnarAvroManifestEntry *) e);
+}
+
+static void
+av_manifest_file_cb(AvReader *br, AvSchema *s, void *e)
+{
+	av_decode_manifest_file(br, s, (PgColumnarAvroManifestFile *) e);
+}
+
+PgColumnarAvroManifestEntry *
+PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
+{
+	return (PgColumnarAvroManifestEntry *)
+		av_read_ocf(buf, len, sizeof(PgColumnarAvroManifestEntry),
+					av_entry_cb, nout);
+}
+
+PgColumnarAvroManifestFile *
+PgColumnarAvroReadManifestList(const uint8 *buf, int64 len, int *nout)
+{
+	return (PgColumnarAvroManifestFile *)
+		av_read_ocf(buf, len, sizeof(PgColumnarAvroManifestFile),
+					av_manifest_file_cb, nout);
+}
+
 /* ------------------------------------------------------ SQL introspection */
 
-PG_FUNCTION_INFO_V1(pgcolumnar_read_avro_manifest);
-
-Datum
-pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
+/* slurp a whole (small) local Avro file into a palloc'd buffer */
+static uint8 *
+av_slurp_file(const char *path, int64 *outlen)
 {
-	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext oldcxt;
-	FILE	   *f;
+	FILE	   *f = AllocateFile(path, PG_BINARY_R);
 	int64		flen;
 	uint8	   *buf;
-	PgColumnarAvroManifestEntry *entries;
-	int			n,
-				i;
 
-	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
-
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
-		(rsinfo->allowedModes & SFRM_Materialize) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in a context that cannot accept a set")));
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("function returning record called in a context that cannot accept it")));
-
-	/* slurp the whole (small) manifest into memory */
-	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -951,18 +1011,60 @@ pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errcode_for_file_access(),
 						errmsg("could not read \"%s\": %m", path)));
 	FreeFile(f);
+	*outlen = flen;
+	return buf;
+}
 
-	entries = PgColumnarAvroReadManifest(buf, flen, &n);
+/* the shared SRF preamble: privilege gate, result-set checks, tupdesc, and the
+ * per-query-context tuplestore (the per-call context frees before the executor
+ * drains it -- ASAN caught a heap-use-after-free in tuplestore_gettuple). */
+static Tuplestorestate *
+av_srf_begin(FunctionCallInfo fcinfo, TupleDesc *tupdesc)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Tuplestorestate *tupstore;
+	MemoryContext oldcxt;
 
-	/* the tuplestore must live in the per-query context, not this per-call one,
-	 * or the executor reads freed memory when it drains the result (ASAN caught
-	 * exactly this: a heap-use-after-free in tuplestore_gettuple). */
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in a context that cannot accept a set")));
+	if (get_call_result_type(fcinfo, NULL, tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("function returning record called in a context that cannot accept it")));
+
 	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	tupstore = tuplestore_begin_heap(false, false, work_mem);
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = CreateTupleDescCopy(tupdesc);
+	rsinfo->setDesc = CreateTupleDescCopy(*tupdesc);
 	MemoryContextSwitchTo(oldcxt);
+	return tupstore;
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_read_avro_manifest);
+
+Datum
+pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	int64		flen;
+	uint8	   *buf;
+	PgColumnarAvroManifestEntry *entries;
+	int			n,
+				i;
+
+	tupstore = av_srf_begin(fcinfo, &tupdesc);
+	buf = av_slurp_file(path, &flen);
+	entries = PgColumnarAvroReadManifest(buf, flen, &n);
 
 	for (i = 0; i < n; i++)
 	{
@@ -986,6 +1088,51 @@ pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
 			values[6] = CStringGetTextDatum(e->partition);
 		else
 			nulls[6] = true;
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+	}
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_read_manifest_list);
+
+Datum
+pgcolumnar_read_manifest_list(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	int64		flen;
+	uint8	   *buf;
+	PgColumnarAvroManifestFile *files;
+	int			n,
+				i;
+
+	tupstore = av_srf_begin(fcinfo, &tupdesc);
+	buf = av_slurp_file(path, &flen);
+	files = PgColumnarAvroReadManifestList(buf, flen, &n);
+
+	for (i = 0; i < n; i++)
+	{
+		Datum		values[13];
+		bool		nulls[13] = {false};
+		PgColumnarAvroManifestFile *e = &files[i];
+
+		if (e->manifest_path)
+			values[0] = CStringGetTextDatum(e->manifest_path);
+		else
+			nulls[0] = true;
+		values[1] = Int64GetDatum(e->manifest_length);
+		values[2] = Int32GetDatum(e->content);
+		values[3] = Int32GetDatum(e->partition_spec_id);
+		values[4] = Int32GetDatum(e->added_files_count);
+		values[5] = Int32GetDatum(e->existing_files_count);
+		values[6] = Int32GetDatum(e->deleted_files_count);
+		values[7] = Int64GetDatum(e->added_rows_count);
+		values[8] = Int64GetDatum(e->existing_rows_count);
+		values[9] = Int64GetDatum(e->deleted_rows_count);
+		values[10] = Int64GetDatum(e->sequence_number);
+		values[11] = Int64GetDatum(e->min_sequence_number);
+		values[12] = Int64GetDatum(e->added_snapshot_id);
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	}
 	return (Datum) 0;

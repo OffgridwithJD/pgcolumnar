@@ -598,6 +598,24 @@ SELECT file_path, record_count, partition
   FROM pgcolumnar.read_avro_manifest('/data/warehouse/db/events/metadata/abc.avro');
 ```
 
+### pgcolumnar.read_manifest_list(path text) returns table(manifest_path text, manifest_length bigint, content int, partition_spec_id int, added_files_count int, existing_files_count int, deleted_files_count int, added_rows_count bigint, existing_rows_count bigint, deleted_rows_count bigint, sequence_number bigint, min_sequence_number bigint, added_snapshot_id bigint)
+
+Decodes an Apache Iceberg snapshot manifest-list Avro file and reports its
+`manifest_file` entries. Each row names one manifest the snapshot points at,
+with its length, content type (0 data, 1 deletes), partition spec, and the
+added, existing, and deleted file and row counts the writer recorded. The
+caller needs the `pg_read_server_files` role, which superusers hold. This is
+step two of Iceberg support (#388): it reads the same Avro object-container
+format as `read_avro_manifest`, decoded against the schema embedded in the
+file, so a v3 manifest list reads structurally. It reads a local file. It does
+not resolve a table's current snapshot or open the manifests it names, which
+are later steps.
+
+```sql
+SELECT manifest_path, added_files_count, added_rows_count
+  FROM pgcolumnar.read_manifest_list('/data/warehouse/db/events/metadata/snap-123.avro');
+```
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams

@@ -31,12 +31,37 @@ typedef struct PgColumnarAvroManifestEntry
 } PgColumnarAvroManifestEntry;
 
 /*
- * Decode an Avro manifest file (already slurped into memory) into a palloc'd
- * array of entries in the current memory context. Raises on any malformed
- * input rather than returning a partial result. *nout is set to the count.
+ * One decoded manifest_file entry from a snapshot's manifest list: which
+ * manifest files the snapshot points at, and their summary counts.
+ */
+typedef struct PgColumnarAvroManifestFile
+{
+	char	   *manifest_path;
+	int64		manifest_length;
+	int32		partition_spec_id;
+	int32		content;		/* 0 DATA, 1 DELETES */
+	int64		sequence_number;
+	int64		min_sequence_number;
+	int64		added_snapshot_id;
+	int32		added_files_count;
+	int32		existing_files_count;
+	int32		deleted_files_count;
+	int64		added_rows_count;
+	int64		existing_rows_count;
+	int64		deleted_rows_count;
+} PgColumnarAvroManifestFile;
+
+/*
+ * Decode an Avro manifest file, or a manifest LIST file, (already slurped into
+ * memory) into a palloc'd array of entries in the current memory context. Raises
+ * on any malformed input rather than returning a partial result. *nout is set to
+ * the count.
  */
 extern PgColumnarAvroManifestEntry *PgColumnarAvroReadManifest(const uint8 *buf,
 															   int64 len,
 															   int *nout);
+extern PgColumnarAvroManifestFile *PgColumnarAvroReadManifestList(const uint8 *buf,
+																  int64 len,
+																  int *nout);
 
 #endif							/* COLUMNAR_AVRO_H */

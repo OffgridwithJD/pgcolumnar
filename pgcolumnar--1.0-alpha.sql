@@ -909,6 +909,19 @@ CREATE FUNCTION pgcolumnar.read_avro_manifest(path text)
 COMMENT ON FUNCTION pgcolumnar.read_avro_manifest(text)
 	IS 'decode an Apache Iceberg Avro manifest file and report its data-file entries; the first step of Iceberg read support (#388)';
 
+CREATE FUNCTION pgcolumnar.read_manifest_list(path text)
+	RETURNS TABLE(manifest_path text, manifest_length bigint, content integer,
+				  partition_spec_id integer, added_files_count integer,
+				  existing_files_count integer, deleted_files_count integer,
+				  added_rows_count bigint, existing_rows_count bigint,
+				  deleted_rows_count bigint, sequence_number bigint,
+				  min_sequence_number bigint, added_snapshot_id bigint)
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_read_manifest_list';
+
+COMMENT ON FUNCTION pgcolumnar.read_manifest_list(text)
+	IS 'decode an Apache Iceberg snapshot manifest-list Avro file and report the manifest files it points at (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *
