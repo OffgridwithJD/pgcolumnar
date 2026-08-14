@@ -86,6 +86,15 @@ check "a field_ids/column-count mismatch is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_parquet('$FID', ARRAY[7,3]) AS t(a int)")" "22023"
 check "a file with no field ids is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_parquet('$NOID', ARRAY[1]) AS t(x int)")" "22023"
+# a duplicate REQUESTED id (two output columns asking for one file column) is
+# refused up front with a clear cause, not left to fail deep in the decode with a
+# message that wrongly blames the file (ChronicallyJD's #638 note).
+check "a duplicate requested field id is refused (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_parquet('$FID', ARRAY[7,7]) AS t(a1 int, a2 int)")" "22023"
+check "the duplicate-requested-id error names the id, not the file" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA \
+		-c "SELECT * FROM pgcolumnar.read_parquet('$FID', ARRAY[7,7]) AS t(a1 int, a2 int)" 2>&1 \
+		| grep -c 'requested more than once')" "1"
 check "backend still up after the refusals" "$(q 'SELECT 1')" "1"
 
 pgc_summary
