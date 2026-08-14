@@ -142,6 +142,19 @@ check "a non-advancing continuation token is refused, not an infinite paging loo
 	"$(sqlstate_of "SET statement_timeout='10s'; SELECT count(*) FROM pgcolumnar.read_parquet('s3://$BUCKET/lst/') AS t(id int8)")" "08P01"
 rm -f "$PGC_WORKDIR/__listing_override__"
 
+# A truncated page that carries NO keys is the other non-progress shape: an
+# endpoint that varies its token each page (which the token check cannot catch)
+# but never returns a key would otherwise page to the OS_LIST_MAX_PAGES backstop.
+# ListObjectsV2 always returns a key on a truncated page, so an empty truncated
+# page is refused on the first page (08P01). Removal proof: without the progress
+# check this pages until statement_timeout (57014).
+cat > "$PGC_WORKDIR/__listing_override__" <<'XML'
+<?xml version="1.0"?><ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next-1</NextContinuationToken></ListBucketResult>
+XML
+check "a truncated page with no keys is refused, not looped" \
+	"$(sqlstate_of "SET statement_timeout='10s'; SELECT count(*) FROM pgcolumnar.read_parquet('s3://$BUCKET/lst/') AS t(id int8)")" "08P01"
+rm -f "$PGC_WORKDIR/__listing_override__"
+
 # ---- optional: a real S3 (Garage), same as the sibling suites ---------------
 if [ -n "${PGC_S3_INTEGRATION_ENDPOINT:-}" ]; then
 	:

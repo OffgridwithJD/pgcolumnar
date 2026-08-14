@@ -2384,6 +2384,7 @@ objstore_list_objects(const char *url, const PgColumnarObjStoreConfig *cfg,
 			int64		blen = 0;
 			bool		truncated = false;
 			char	   *next = NULL;
+			int			before = list_length(keys);
 
 			if (++pages > OS_LIST_MAX_PAGES)
 				ereport(ERROR,
@@ -2415,11 +2416,28 @@ objstore_list_objects(const char *url, const PgColumnarObjStoreConfig *cfg,
 				break;
 			}
 			/*
-			 * A continuation token that repeats the one we just sent means the
-			 * endpoint is not advancing: refuse rather than loop, so a hostile or
-			 * broken endpoint that replays one page forever cannot spin the
-			 * backend toward the OS_LIST_MAX_PAGES backstop. The fuzzer
-			 * (fuzz_listing.sh) finds this shape.
+			 * A truncated page must make progress. ListObjectsV2 returns at least
+			 * one key on every truncated page (there is more to come, so this page
+			 * was full), so a truncated page that added nothing is a broken or
+			 * hostile endpoint. Refusing here bounds the paging loop for ANY token
+			 * pattern, including a short cycle of alternating tokens that the
+			 * next-token check below cannot catch: a cycle that returns no new
+			 * keys is stopped on its first empty page rather than running to the
+			 * OS_LIST_MAX_PAGES backstop. The fuzzer (fuzz_listing.sh) finds it.
+			 */
+			if (list_length(keys) == before)
+			{
+				pfree(next);
+				ereport(ERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("columnar: listing of \"%s\" returned a truncated page with no keys",
+								url)));
+			}
+			/*
+			 * A continuation token that repeats the one we just sent is the other
+			 * non-advancing shape (the endpoint replays a page that does carry
+			 * keys); refuse it too rather than accumulate duplicates toward the
+			 * OS_LIST_MAX_KEYS backstop.
 			 */
 			if (token != NULL && strcmp(next, token) == 0)
 			{
