@@ -79,6 +79,10 @@ disk. It never changes the values that a table returns.
 | --- | --- | --- | --- |
 | `pgcolumnar.reclaim_coalesce` | boolean | `on` | During online compaction, split an oversized freed range on reuse and coalesce adjacent freed ranges, so space is reclaimed under fragmentation. Off reverts to whole-range reuse. |
 | `pgcolumnar.enable_end_truncation` | boolean | `off` | Allow `pgcolumnar.truncate()` to return trailing reclaimed blocks to the operating system. Off makes `pgcolumnar.truncate()` a no-op. Requires superuser to set. |
+| `pgcolumnar.autovacuum` | boolean | `off` | Run the maintenance daemon. When on, it runs `compact_rewrite` and `recluster` on columnar tables that cross a threshold. It uses only `ShareUpdateExclusiveLock` and yields to any stronger lock. It never blocks a reader or a writer. See the [administration guide](administration.md#the-maintenance-daemon-pgcolumnarautovacuum). Reloadable, not a per-session setting. |
+| `pgcolumnar.autovacuum_naptime` | integer | `60` | Seconds between daemon sweeps. Each sweep starts one worker per database. Range 1 to 86400. Reloadable. |
+| `pgcolumnar.autovacuum_compact_threshold` | float | `0.2` | Deleted fraction at which the daemon rewrites a table with `compact_rewrite`. Range 0.0 to 1.0. Reloadable. |
+| `pgcolumnar.autovacuum_recluster_threshold` | float | `0.05` | Appended fraction at which the daemon reclusters a table that has a recorded clustering key. Range 0.0 to 1.0. Reloadable. |
 
 ### Object storage
 
@@ -105,6 +109,7 @@ appears in `pg_settings` and a reader who finds it there deserves an answer.
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pgcolumnar.bulk_parallel_writer` | boolean | `off` | Internal. Set by `pgcolumnar.parallel_copy` loader workers so they skip the storage-row creation lock when the row already exists committed, which is what lets several atomic writers load one table at once. Marked `GUC_NOT_IN_SAMPLE`; leave it alone. Setting it by hand is safe but pointless: the skip only fires when the storage row is already committed, which is exactly when the lock guards nothing. |
+| `pgcolumnar.maintenance_hold_ms` | integer | `0` | Internal, for tests. A maintenance verb holds `ShareUpdateExclusiveLock` this many milliseconds, interruptibly, so a test can observe the daemon yield to a stronger lock. `0` disables it. Range 0 to 600000. Leave it at `0`. |
 
 ## Per-table storage options
 
