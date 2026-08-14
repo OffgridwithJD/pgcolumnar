@@ -66,29 +66,40 @@ manifest-list basename, schema-id) using pyiceberg's own view of the table.
 Regenerate from the same real pyiceberg v2 warehouse as steps 1-2 (host venv;
 no pip in the containers, so the output is committed).
 
-## 3b - current snapshot -> live data-file list (next PR)
+## 3b - current snapshot -> live data-file list (DONE, this PR)
 
-Chain 3a into the two Avro decoders: current snapshot -> `manifest_list` ->
-`manifest_file[]` -> each manifest -> `manifest_entry[]` -> the live data files.
 `pgcolumnar.iceberg_data_files(metadata_path text)` returning
-`(file_path, file_format, record_count, partition)`.
+`(file_path, file_format, record_count, partition)`. Chains 3a into the two Avro
+decoders: current snapshot -> `manifest_list` -> `manifest_file[]` -> each
+manifest -> `manifest_entry[]` -> the live data files. The 3a resolver was
+refactored into a shared `ice_current_snapshot()`; both entry points use it.
 
-Two designs this PR must settle and test:
-1. **Absolute-path rebasing.** metadata.json, the manifest list, and the
-   manifests all store absolute paths (`file:///.../warehouse/...`). A committed
-   fixture, or any relocated table, will not sit at the recorded `location`.
-   Derive the table root from where `metadata.json` was found, strip the recorded
-   `location` prefix, and re-root each path onto the actual root; refuse a path
-   that does not start with the recorded `location` rather than reading an
-   arbitrary absolute path off the host. Test by copying the warehouse to a
-   second directory and confirming it still resolves.
-2. **Loud delete refusal.** Refuse (a specific SQLSTATE, not a silent skip) if
-   any `manifest_file.content != 0` (a delete manifest) or any
-   `manifest_entry.content != 0` / `status == 2` (position/equality deletes, or a
-   deleted entry). A reader that drops deletes looks finished and is wrong. The
-   deny arm needs a fixture that actually carries a delete so the call reaches the
-   refusing code (assert SQLSTATE), either a real pyiceberg delete table or a
-   crafted manifest with `content=1`.
+Two designs settled here:
+1. **Absolute-path rebasing, keyed off `location`.** metadata.json, the manifest
+   list, and the manifests all store absolute paths. The recorded root is
+   metadata.json's `location`; the actual root is derived from where the
+   metadata.json sits (Iceberg's layout puts it at `<location>/metadata/<file>`,
+   so the location is the parent of the `metadata/` dir). Each recorded path has
+   its `location` prefix stripped and is re-rooted onto the actual root; a
+   recorded path **not under** `location` is refused (`22023`), never read, so a
+   tampered table cannot make the backend open an arbitrary server file. The
+   suite copies the committed warehouse to a different directory, so the recorded
+   root and the actual root genuinely differ and rebasing is exercised, with an
+   arm asserting no returned path leaks the recorded root.
+2. **Loud delete refusal (`0A000`).** Refuses if any `manifest_file.content != 0`
+   (a delete manifest, caught at the manifest-list level without opening it) or
+   any `manifest_entry.content != 0` / `status == 2`. pyiceberg 0.11.1 **cannot**
+   write merge-on-read deletes (it warns and falls back to copy-on-write), so the
+   deny arm uses a **crafted** manifest-list OCF with `content = 1` -- the same
+   crafted-deny technique as the avro suite's bomb/bad-magic arms. Removal proof:
+   deleting the `content != 0` gate turns the refusal into a file-not-found
+   (`58P01`) instead of `0A000`.
+
+The suite (`test/iceberg_data_files.sh`) asserts the data files against
+pyiceberg's own `snap.manifests(io)` oracle (`expected_files.json`), generated
+by `gen_iceberg_warehouse.py` at a fixed recorded root; only the metadata/
+subtree is committed (the resolver lists data files from manifests, it does not
+open them, so no Parquet data is checked in).
 
 ## 3c - scan the data files, projecting by field id (later PR)
 

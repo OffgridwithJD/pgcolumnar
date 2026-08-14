@@ -932,6 +932,15 @@ CREATE FUNCTION pgcolumnar.iceberg_current_snapshot(metadata_path text)
 COMMENT ON FUNCTION pgcolumnar.iceberg_current_snapshot(text)
 	IS 'read an Apache Iceberg table metadata.json and report its current snapshot (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_data_files(metadata_path text)
+	RETURNS TABLE(file_path text, file_format text, record_count bigint,
+				  partition text)
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_data_files';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_data_files(text)
+	IS 'list the live data files of an Apache Iceberg table current snapshot; refuses tables with delete files (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *
