@@ -567,6 +567,30 @@ SELECT count(*) FROM pgcolumnar.read_parquet('/data/events/')
   AS t(id int, ts timestamp, amount numeric(12,2));
 ```
 
+### pgcolumnar.read_parquet(path text, field_ids integer[]) returns setof record
+
+Returns the rows of a Parquet file, binding output columns to file columns by
+Parquet field id rather than by position. Output column `i` is bound to the file
+column whose field id equals `field_ids[i]`. The reader decodes only those
+columns, in the order given, whatever their order in the file. The array length
+must equal the column definition list length. This is the projection form Apache
+Iceberg uses, where a data file written before a column rename still carries the
+old name and columns are selected by id (#388).
+
+The file must carry field ids. A file written without them is an error that
+directs you to the positional form above. Each requested id must match exactly
+one scalar column of a compatible type. A requested id that is absent, an id that
+matches more than one column, and an array or composite output column are each an
+error, not a silent wrong column. Read the ids a file carries with
+`parquet_schema`.
+
+```sql
+-- the file has columns alpha (id 7), beta (id 3), gamma (id 12);
+-- read gamma then alpha, by id, in that order
+SELECT * FROM pgcolumnar.read_parquet('/data/events.parquet', ARRAY[12, 7])
+  AS t(g int, a int);
+```
+
 ### pgcolumnar.parquet_schema(path text) returns table(column_name text, data_type text, nullable bool, field_id int)
 
 Reports the leaf columns of a Parquet file and the PostgreSQL type each maps to,
