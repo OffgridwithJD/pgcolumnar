@@ -22,8 +22,13 @@ These environment variables control the harnesses:
 - `BENCH_DUCKDB`. Set it to 1 to add a DuckDB comparison, if `duckdb` is on
   `PATH`.
 
-The numbers below come from one full run of `bench/run_bench.sh` on 2026-08-12, at
-commit `2fe6596` (Merge #592). The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
+The numbers below come from `bench/run_bench.sh`. The storage, query, and mutation
+tables were re-run on 2026-08-14 at commit `122fd5c`. They are materially unchanged
+from the 2026-08-12 run at `2fe6596` (Merge #592). Today's work is on the
+maintenance path. It does not touch the scan, storage, or write paths these tables
+measure. Spot checks match: heap 707 MB against columnar-zstd 6.1 MB, and
+`count(*)` at 0.04 ms. The new [Online maintenance](#online-maintenance) section
+measures today's changes. The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
 an 8-column table, the median of 5 repetitions, 16 cores and 62 GB of memory.
 
 The previous record of this section was 2026-08-04 at commit `aeb7882`, on
@@ -163,6 +168,53 @@ time, to reach a row, the code went through each earlier row in the group. Both
 halves of [issue #143](https://github.com/commandprompt/pgcolumnar/issues/143) are now
 complete. The code decodes the group one time and keeps it in a cache. It then
 reaches the value of a row by rank, and not by a walk. Deleting 1000 rows costs 4.5 ms rather than 1509.
+
+## Online maintenance
+
+pgColumnar's online maintenance verbs run under `ShareUpdateExclusiveLock`, so
+they do not block readers or writers. Two changes today make them cheap to run on
+a schedule. Both were measured on the same non-assert PostgreSQL 18.4 host.
+
+### recluster is a no-op when the clustering is intact (#614)
+
+`recluster` re-establishes a table's Z-order clustering online. Before #614 it
+rewrote the whole table on every call, even when the table was already clustered
+by that key and nothing had changed. That is the cost a scheduled recluster, or
+the maintenance daemon, would pay every sweep. #614 records the clustering key and
+makes a redundant call a no-op.
+
+The table below is 10,000,000 rows in 67 chunk groups, a 186 MB relation. It is
+clustered once, then `recluster` is called again on the unchanged table:
+
+| build | groups rewritten | time |
+| --- | --- | --- |
+| before #614 (`bd983d9`) | 67 (all) | 14,750 ms |
+| after #614 (self-gate) | 0 | 0.96 ms |
+
+Each figure is the median of three repeat calls. Before #614 every repeat rewrote
+all 67 groups and the physical layout digest changed each time. After #614 every
+repeat returned 0 and the layout digest was byte-identical. Establishing the order
+the first time costs about 21,000 ms either way. The win is that the second and
+later calls no longer pay it. This is what lets the maintenance daemon call
+`recluster` on a schedule without churning storage.
+
+### The maintenance daemon does not steal foreground throughput (#624)
+
+The `pgcolumnar.autovacuum` daemon runs `compact_rewrite` and `recluster` in the
+background, and is off by default. To measure its cost when on, a representative
+columnar scan was timed while the daemon actively `compact_rewrite`d a separate
+6,000,000-row deleted-heavy table:
+
+| foreground scan (8,000,000-row table) | median |
+| --- | --- |
+| daemon off | 174.3 ms |
+| daemon on, actively maintaining | 173.9 ms |
+
+The scan is unaffected. The daemon completed its maintenance during the window, so
+the table was genuinely being rewritten. The daemon also yields to any statement
+that needs a stronger lock. `test/autovacuum_yield.sh` proves this with a hard
+bound. An `AccessExclusive` request is granted within a fraction of a held
+maintenance window, rather than waiting it out.
 
 ## Feature toggles
 
@@ -647,6 +699,19 @@ deltas between it and this run's `2fe6596` (Merge #592):
 - **Anchored `LIKE 'prefix%'` now prunes (#510).** Infix `LIKE '%...%'` is handled
   by phase-2 decode gating (#426/#586), not a substring filter. This addresses
   #426 for both the anchored and the infix case.
+
+Re-run on 2026-08-14 at `122fd5c`. The storage, query, and mutation numbers above
+are materially unchanged. The code deltas since `2fe6596` are on the maintenance
+path and are measured in [Online maintenance](#online-maintenance):
+
+- **`recluster` self-gates (#614).** A redundant `recluster` on an already
+  clustered table is a no-op rather than a full rewrite. Measured at 14,750 ms down
+  to 0.96 ms on a 10,000,000-row table.
+- **The `pgcolumnar.autovacuum` maintenance daemon (#624).** Off by default. It
+  runs the online verbs on a schedule and yields to any stronger lock. It does not
+  measurably affect foreground scan latency while maintaining.
+- **`pgcolumnar.maintenance_due()` (#607).** Reports when a verb is worth running,
+  and takes no lock. Not a throughput change; it is the daemon's policy input.
 
 ## Joins
 
