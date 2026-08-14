@@ -4616,6 +4616,11 @@ pqfdwReScanForeignScan(ForeignScanState *node)
 	st->groupsDecoded = 0;
 	st->filesRead = 0;
 	st->filesPruned = 0;
+	/* colsTotal/colsRead are set per opened file; clear them too so a rescan
+	 * that opens zero files (every file partition-pruned on a nested loop's
+	 * inner side) does not leave the prior scan's column counts in EXPLAIN. */
+	st->colsTotal = 0;
+	st->colsRead = 0;
 }
 
 static void
