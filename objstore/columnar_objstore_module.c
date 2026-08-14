@@ -26,9 +26,12 @@
  *
  * - Sockets are cleaned up on abort through a resource-release callback over
  *   the open-handle list. The invariant that makes close-all-on-abort correct:
- *   no handle survives its statement (every reader materializes and closes
- *   before returning), so a live handle during an abort belongs to the
- *   statement being aborted.
+ *   no handle survives its statement, so a live handle during an abort belongs
+ *   to the statement being aborted. The streaming FDW (#620) holds a read
+ *   handle open across IterateForeignScan calls, so a handle no longer always
+ *   closes before its opener returns. The invariant still holds: the handle is
+ *   the running statement's, EndForeignScan closes it on the normal path, and
+ *   the release callback closes it on abort, whoever holds the pointer.
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"

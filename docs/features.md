@@ -189,12 +189,15 @@ coverage.
 - A `path` that is a directory reads each `*.parquet` file below it, at any
   depth, as one relation. A glob pattern expands in the same way. Both use a
   sorted order that does not change between runs.
-- The foreign-table scan pushes work down. It skips a row group when the minimum
-  and maximum statistics exclude the predicate of the query. It decodes only the
-  columns that the query refers to. `EXPLAIN ANALYZE` reports the row groups read and
-  skipped, the columns read, and the number of files. Skipping applies to
-  `column op constant` clauses over integer and floating-point columns; see
-  [limitations.md](limitations.md) for the exact conditions.
+- The foreign-table scan streams one row group at a time. It holds one row group
+  rather than the whole file, and a `LIMIT` the plan meets early leaves the rest
+  undecoded. It pushes work down. It skips a row group when the
+  minimum and maximum statistics exclude the predicate of the query. It decodes
+  only the columns that the query refers to. `EXPLAIN ANALYZE` reports the row
+  groups read, skipped, and decoded, the columns read, and the number of files.
+  Skipping applies to `column op constant` clauses over integer and
+  floating-point columns; see [limitations.md](limitations.md) for the exact
+  conditions.
 - Hive-style partitioning. A foreign table that declares `partition_columns`
   reads a `col=value` directory name as a column. A predicate on such a column
   removes complete files before the reader opens them. A file that pruning

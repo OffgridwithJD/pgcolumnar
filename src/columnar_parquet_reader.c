@@ -2943,7 +2943,7 @@ pq_read_rows(PqFile *pf, PqSource *src,
 			 TupleTableSlot *slot, PqRowSink sink, void *sinkarg,
 			 const bool *skipGroup, const bool *needTop,
 			 const Datum *constVals, const bool *constHas,
-			 const bool *constNull)
+			 const bool *constNull, int rgFrom, int rgTo)
 {
 	int			natts = slot->tts_tupleDescriptor->natts;
 	MemoryContext groupCtx;
@@ -2980,7 +2980,7 @@ pq_read_rows(PqFile *pf, PqSource *src,
 								   "columnar parquet read row",
 								   ALLOCSET_DEFAULT_SIZES);
 
-	for (rg = 0; rg < pf->nrowgroups; rg++)
+	for (rg = rgFrom; rg < rgTo; rg++)
 	{
 		PqRowGroup *g = &pf->rgs[rg];
 		int64		n = g->num_rows;
@@ -3219,7 +3219,8 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 	pq_check_row_groups(&pf, path);
 	tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
-					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL);
+					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL,
+					 0, pf.nrowgroups);
 	pq_source_close(&src);
 	return n;
 }
@@ -3483,16 +3484,57 @@ pgcolumnar_parquet_schema(PG_FUNCTION_ARGS)
  *       OPTIONS (path '/data/f.parquet');
  * ------------------------------------------------------------------------- */
 
-/* per-scan state: the whole file materialized into a tuplestore, drained by
- * IterateForeignScan. Eager (reads the file up front); streaming is a follow-on.
- * readslot is a minimal-tuple slot the tuplestore drains into; each row is then
- * copied into the scan slot, whose ops are not guaranteed to be minimal-tuple. */
+/*
+ * per-scan state: streaming, one row group at a time (#620). Begin resolves the
+ * file list and prunes but decodes nothing; each refill decodes the next
+ * non-skipped row group of the current file into a bounded one-group tuplestore,
+ * which Iterate drains. Memory is one row group, not the whole file, and a LIMIT
+ * stops the scan after the groups it consumed. readslot is a minimal-tuple slot
+ * the tuplestore drains into; each row is then copied into the scan slot, whose
+ * ops are not guaranteed to be minimal-tuple.
+ *
+ * The whole-file materialize is retained only for read_parquet, which is an
+ * SFRM_Materialize SRF (see pq_read_file_into); this cursor is the FDW's.
+ */
 typedef struct PqFdwScanState
 {
-	Tuplestorestate *tupstore;
+	Tuplestorestate *tupstore;	/* holds one decoded row group at a time */
 	TupleTableSlot *readslot;
+	TupleTableSlot *rowslot;	/* virtual slot pq_read_rows assembles into */
+
+	/* the scan-wide inputs, resolved once in Begin and reused across refills */
+	List	   *files;			/* resolved paths, after pq_resolve_paths */
+	int			nfiles;
+	char	   *path;			/* the table's declared path option */
+	TupleDesc	tupdesc;
+	PgColumnarObjStoreConfig oscfg;
+	ForeignScanState *node;		/* for projection/skip pushdown helpers */
+	MemoryContext fileCtx;		/* per-file decode buffers; reset per file */
+
+	/* partition machinery, compiled once, applied to each file */
+	bool	   *partMask;
+	int			nPart;
+	List	   *partQuals;
+	TupleTableSlot *partSlot;
+
+	/* the streaming cursor */
+	int			fileIdx;		/* next file to open (0..nfiles) */
+	bool		srcOpen;		/* is src/pf below a live open file */
+	int			curRg;			/* next row group of the open file to decode */
+	PqSource	src;			/* the open file's source (remote handle here) */
+	PqFile		pf;				/* the open file's footer */
+	ImpTop	   *tops;
+	ImpLeaf    *leaves;
+	int			ntops;
+	bool	   *skipGroup;		/* per-group predicate-pushdown skip, this file */
+	bool	   *needTop;		/* projection: which top columns to decode */
+	Datum	   *partVals;		/* this file's partition-column values */
+	bool	   *partHas;
+	bool	   *partNull;
+
 	int			groupsTotal;	/* row groups across all files */
 	int			groupsSkipped;	/* skipped by predicate pushdown */
+	int			groupsDecoded;	/* row groups actually decoded (work done, #620) */
 	int			colsTotal;		/* top-level columns (same across files) */
 	int			colsRead;		/* decoded after projection pushdown */
 	int			filesRead;		/* files the path resolved to, after pruning */
@@ -4312,27 +4354,137 @@ pqfdw_objstore_config(Oid foreigntableid, PgColumnarObjStoreConfig *cfg)
 	cfg->allow_ambient = superuser() || !credRequired;
 }
 
+static bool
+pqfdw_open_next_file(PqFdwScanState *st)
+{
+	MemoryContext old;
+
+	/* close a previously open file and drop its per-file decode buffers */
+	if (st->srcOpen)
+	{
+		pq_source_close(&st->src);
+		st->srcOpen = false;
+	}
+	MemoryContextReset(st->fileCtx);
+
+	/*
+	 * The source and its footer, targets, and prefetch window are allocated in
+	 * fileCtx so they outlive a single Iterate call (the window's winCtx is the
+	 * context current at open). fileCtx lives until the next file is opened.
+	 */
+	old = MemoryContextSwitchTo(st->fileCtx);
+	while (st->fileIdx < st->nfiles)
+	{
+		char	   *file = (char *) list_nth(st->files, st->fileIdx);
+		int			nNeeded;
+
+		st->fileIdx++;
+
+		/*
+		 * Partition pruning, before the file is opened: a file whose directory
+		 * values fail a partition-only qual costs no I/O at all.
+		 */
+		if (st->partMask != NULL)
+		{
+			st->partVals = (Datum *) palloc0(sizeof(Datum) * Max(st->tupdesc->natts, 1));
+			st->partHas = (bool *) palloc0(sizeof(bool) * Max(st->tupdesc->natts, 1));
+			st->partNull = (bool *) palloc0(sizeof(bool) * Max(st->tupdesc->natts, 1));
+			pqfdw_partition_values(st->path, file, st->tupdesc, st->partMask,
+								   st->partVals, st->partHas, st->partNull);
+			if (pqfdw_partition_excludes_file(st->node, st->partSlot, st->partQuals,
+											  st->tupdesc, st->partVals, st->partHas,
+											  st->partNull))
+			{
+				st->filesPruned++;
+				MemoryContextReset(st->fileCtx);	/* drop this file's part arrays */
+				continue;
+			}
+		}
+		else
+		{
+			st->partVals = NULL;
+			st->partHas = NULL;
+			st->partNull = NULL;
+		}
+
+		st->filesRead++;
+		pq_source_open_cfg(file, &st->src, &st->pf, &st->oscfg);
+		pq_check_row_groups(&st->pf, file);
+		st->tops = build_imp_targets(st->tupdesc, &st->pf, &st->leaves,
+									 &st->ntops, st->partMask);
+
+		/* projection: decode only referenced columns (same set each file) */
+		st->needTop = pqfdw_compute_needed(st->node, st->tops, st->ntops, &nNeeded);
+		st->colsTotal = st->ntops;
+		st->colsRead = nNeeded;
+
+		st->groupsTotal += st->pf.nrowgroups;
+		st->skipGroup = (bool *) palloc0(sizeof(bool) * Max(st->pf.nrowgroups, 1));
+		st->groupsSkipped += pqfdw_compute_skip(st->node, &st->pf, st->tops,
+												st->ntops, st->leaves, st->skipGroup);
+		st->curRg = 0;
+		st->srcOpen = true;
+		MemoryContextSwitchTo(old);
+		return true;
+	}
+
+	MemoryContextSwitchTo(old);
+	return false;			/* no more files */
+}
+
+/*
+ * Decode the next non-skipped row group of the scan into the one-group
+ * tuplestore, opening and advancing files as needed. Returns false only when
+ * every group of every file has been decoded. This is the streaming producer:
+ * memory is bounded to a single row group, and a LIMIT that stops the scan
+ * leaves the remaining groups and files untouched.
+ */
+static bool
+pqfdw_refill(PqFdwScanState *st)
+{
+	/* open the first file lazily on the first refill */
+	if (!st->srcOpen && !pqfdw_open_next_file(st))
+		return false;
+
+	for (;;)
+	{
+		while (st->curRg < st->pf.nrowgroups)
+		{
+			int			rg = st->curRg++;
+			MemoryContext old;
+
+			/* predicate pushdown: a group that cannot match decodes nothing */
+			if (st->skipGroup != NULL && st->skipGroup[rg])
+				continue;
+
+			tuplestore_clear(st->tupstore);
+			old = MemoryContextSwitchTo(st->fileCtx);
+			(void) pq_read_rows(&st->pf, &st->src, st->tops, st->ntops, st->leaves,
+								st->rowslot, pq_tuplestore_sink, st->tupstore,
+								st->skipGroup, st->needTop,
+								st->partVals, st->partHas, st->partNull,
+								rg, rg + 1);
+			MemoryContextSwitchTo(old);
+			st->groupsDecoded++;
+			return true;		/* one group's rows are buffered */
+		}
+
+		/* the open file is drained; advance (open_next_file closes it) */
+		if (!pqfdw_open_next_file(st))
+			return false;
+	}
+}
+
 static void
 pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	Relation	rel = node->ss.ss_currentRelation;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	char	   *path;
-	TupleTableSlot *slot;
 	PqFdwScanState *st;
-	bool	   *needTop;
-	int			nNeeded;
 	List	   *files;
-	ListCell   *lc;
-	MemoryContext fileCtx;
 	bool	   *partMask;
 	int			nPart;
-	Datum	   *partVals = NULL;
-	bool	   *partHas = NULL;
-	bool	   *partNull = NULL;
-	List	   *partQuals = NIL;
-	TupleTableSlot *partSlot = NULL;
-	PgColumnarObjStoreConfig oscfg;
 
 	/* nothing to do for a plan-only (EXPLAIN without ANALYZE) invocation */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -4343,7 +4495,8 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
 
-	pqfdw_objstore_config(RelationGetRelid(rel), &oscfg);
+	st = (PqFdwScanState *) palloc0(sizeof(PqFdwScanState));
+	pqfdw_objstore_config(RelationGetRelid(rel), &st->oscfg);
 
 	path = pqfdw_get_path(RelationGetRelid(rel));
 	if (path == NULL)
@@ -4353,90 +4506,38 @@ pqfdwBeginForeignScan(ForeignScanState *node, int eflags)
 						RelationGetRelationName(rel))));
 
 	files = pq_resolve_paths(path);
+
+	st->node = node;
+	st->tupdesc = tupdesc;
+	st->path = path;
+	st->files = files;
+	st->nfiles = list_length(files);
+
 	partMask = pqfdw_partition_mask(RelationGetRelid(rel), tupdesc, &nPart);
+	st->partMask = partMask;
+	st->nPart = nPart;
 	if (partMask != NULL)
 	{
 		/* compiled once, in the scan's own context, and reused for every file */
-		partQuals = pqfdw_partition_quals(node, tupdesc, partMask);
-		partSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+		st->partQuals = pqfdw_partition_quals(node, tupdesc, partMask);
+		st->partSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	}
-
-	st = (PqFdwScanState *) palloc0(sizeof(PqFdwScanState));
-	/* randomAccess so ReScan can rewind the materialized rows */
-	st->tupstore = tuplestore_begin_heap(true, false, work_mem);
-	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
-
-	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 
 	/*
-	 * Read each resolved file into the one tuplestore. Predicate pushdown is per
-	 * file (each file's own row-group statistics); projection is query-derived and
-	 * identical across files, since every file shares the target descriptor. The
-	 * EXPLAIN counters sum row groups across files while the column counts are the
-	 * same each file. The per-file decode is bounded by fileCtx.
+	 * One decoded row group at a time. Not randomAccess: ReScan re-streams from
+	 * the top rather than rewinding a whole-file buffer, which is the point of
+	 * not holding the whole file.
 	 */
-	fileCtx = AllocSetContextCreate(CurrentMemoryContext,
-									"pgcolumnar parquet fdw file",
-									ALLOCSET_DEFAULT_SIZES);
-	foreach(lc, files)
-	{
-		MemoryContext old = MemoryContextSwitchTo(fileCtx);
-		PqSource	src;
-		PqFile		pf;
-		ImpTop	   *tops;
-		ImpLeaf    *leaves;
-		int			ntops;
-		bool	   *skipGroup;
+	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
+	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
+	st->rowslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 
-		/*
-		 * Partition pruning, before the file is opened: a file whose directory
-		 * values fail a partition-only qual costs no I/O at all, which is what
-		 * makes this cheaper than row-group skipping rather than a variant of it.
-		 */
-		if (partMask != NULL)
-		{
-			partVals = (Datum *) palloc0(sizeof(Datum) * Max(tupdesc->natts, 1));
-			partHas = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
-			partNull = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
-			pqfdw_partition_values(path, (char *) lfirst(lc), tupdesc, partMask,
-								   partVals, partHas, partNull);
-			if (pqfdw_partition_excludes_file(node, partSlot, partQuals, tupdesc,
-											  partVals, partHas, partNull))
-			{
-				st->filesPruned++;
-				MemoryContextSwitchTo(old);
-				MemoryContextReset(fileCtx);
-				continue;
-			}
-		}
-
-		st->filesRead++;
-		pq_source_open_cfg((char *) lfirst(lc), &src, &pf, &oscfg);
-		pq_check_row_groups(&pf, (char *) lfirst(lc));
-		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, partMask);
-
-		/* projection: decode only referenced columns (same set each file) */
-		needTop = pqfdw_compute_needed(node, tops, ntops, &nNeeded);
-		st->colsTotal = ntops;
-		st->colsRead = nNeeded;
-
-		st->groupsTotal += pf.nrowgroups;
-		skipGroup = (bool *) palloc0(sizeof(bool) * Max(pf.nrowgroups, 1));
-		st->groupsSkipped += pqfdw_compute_skip(node, &pf, tops, ntops,
-												leaves, skipGroup);
-
-		(void) pq_read_rows(&pf, &src, tops, ntops, leaves,
-							slot, pq_tuplestore_sink, st->tupstore, skipGroup,
-							needTop, partVals, partHas, partNull);
-		pq_source_close(&src);
-
-		MemoryContextSwitchTo(old);
-		MemoryContextReset(fileCtx);
-	}
-	MemoryContextDelete(fileCtx);
-	ExecDropSingleTupleTableSlot(slot);
-	if (partSlot != NULL)
-		ExecDropSingleTupleTableSlot(partSlot);
+	st->fileCtx = AllocSetContextCreate(CurrentMemoryContext,
+										"pgcolumnar parquet fdw file",
+										ALLOCSET_DEFAULT_SIZES);
+	st->fileIdx = 0;
+	st->srcOpen = false;
+	st->curRg = 0;
 
 	node->fdw_state = st;
 }
@@ -4446,8 +4547,6 @@ pqfdwIterateForeignScan(ForeignScanState *node)
 {
 	PqFdwScanState *st = (PqFdwScanState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-	MemoryContext oldcxt;
-	bool		got;
 
 	if (st == NULL)
 		return ExecClearTuple(slot);
@@ -4455,7 +4554,9 @@ pqfdwIterateForeignScan(ForeignScanState *node)
 	/*
 	 * Drain one row into our minimal-tuple readslot, then copy it into the scan
 	 * slot (a heap-tuple slot: table_slot_callbacks() hands foreign tables
-	 * TTSOpsHeapTuple, which cannot receive a minimal tuple directly).
+	 * TTSOpsHeapTuple, which cannot receive a minimal tuple directly). When the
+	 * one-group tuplestore is empty, decode the next row group; when every group
+	 * of every file is decoded, the scan is done.
 	 *
 	 * The fetch must run in a context that outlives the row. ForeignNext() calls
 	 * us in ecxt_per_tuple_memory, and ExecScan resets that before every fetch --
@@ -4467,13 +4568,21 @@ pqfdwIterateForeignScan(ForeignScanState *node)
 	 * even with copy=false (readtup palloc's and sets should_free), so pin the
 	 * context rather than the copy flag.
 	 */
-	oldcxt = MemoryContextSwitchTo(node->ss.ps.state->es_query_cxt);
-	got = tuplestore_gettupleslot(st->tupstore, true, false, st->readslot);
-	MemoryContextSwitchTo(oldcxt);
+	for (;;)
+	{
+		MemoryContext oldcxt;
+		bool		got;
 
-	if (!got)
-		return ExecClearTuple(slot);
-	return ExecCopySlot(slot, st->readslot);
+		oldcxt = MemoryContextSwitchTo(node->ss.ps.state->es_query_cxt);
+		got = tuplestore_gettupleslot(st->tupstore, true, false, st->readslot);
+		MemoryContextSwitchTo(oldcxt);
+
+		if (got)
+			return ExecCopySlot(slot, st->readslot);
+
+		if (!pqfdw_refill(st))
+			return ExecClearTuple(slot);
+	}
 }
 
 static void
@@ -4481,8 +4590,32 @@ pqfdwReScanForeignScan(ForeignScanState *node)
 {
 	PqFdwScanState *st = (PqFdwScanState *) node->fdw_state;
 
-	if (st != NULL && st->tupstore != NULL)
-		tuplestore_rescan(st->tupstore);
+	if (st == NULL)
+		return;
+
+	/*
+	 * Re-stream from the top: close any open file, drop its decode buffers,
+	 * empty the one-group tuplestore, and reset the cursor. The per-scan work
+	 * counters reset too, so EXPLAIN ANALYZE reports one scan's work, not the
+	 * sum over rescans (the eager model computed them once and rewound for free;
+	 * streaming re-decodes, which is the deliberate trade for bounded memory).
+	 */
+	if (st->srcOpen)
+	{
+		pq_source_close(&st->src);
+		st->srcOpen = false;
+	}
+	if (st->fileCtx != NULL)
+		MemoryContextReset(st->fileCtx);
+	if (st->tupstore != NULL)
+		tuplestore_clear(st->tupstore);
+	st->fileIdx = 0;
+	st->curRg = 0;
+	st->groupsTotal = 0;
+	st->groupsSkipped = 0;
+	st->groupsDecoded = 0;
+	st->filesRead = 0;
+	st->filesPruned = 0;
 }
 
 static void
@@ -4493,12 +4626,28 @@ pqfdwEndForeignScan(ForeignScanState *node)
 	if (st == NULL)
 		return;
 
-	/* drop the slot first: a non-copied fetch leaves it pointing into the
+	if (st->srcOpen)
+	{
+		pq_source_close(&st->src);
+		st->srcOpen = false;
+	}
+
+	/* drop the slots first: a non-copied fetch leaves readslot pointing into the
 	 * tuplestore's own memory, which tuplestore_end() releases */
 	if (st->readslot != NULL)
 	{
 		ExecDropSingleTupleTableSlot(st->readslot);
 		st->readslot = NULL;
+	}
+	if (st->rowslot != NULL)
+	{
+		ExecDropSingleTupleTableSlot(st->rowslot);
+		st->rowslot = NULL;
+	}
+	if (st->partSlot != NULL)
+	{
+		ExecDropSingleTupleTableSlot(st->partSlot);
+		st->partSlot = NULL;
 	}
 	if (st->tupstore != NULL)
 	{
@@ -4517,6 +4666,7 @@ pqfdwExplainForeignScan(ForeignScanState *node, ExplainState *es)
 		return;
 	ExplainPropertyInteger("Row Groups", NULL, st->groupsTotal, es);
 	ExplainPropertyInteger("Row Groups Skipped", NULL, st->groupsSkipped, es);
+	ExplainPropertyInteger("Row Groups Decoded", NULL, st->groupsDecoded, es);
 	ExplainPropertyInteger("Columns Read", NULL, st->colsRead, es);
 	ExplainPropertyInteger("Columns Total", NULL, st->colsTotal, es);
 	ExplainPropertyInteger("Files", NULL, st->filesRead, es);
