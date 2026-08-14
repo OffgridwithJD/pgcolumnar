@@ -35,15 +35,24 @@ python3 -c 'import hashlib' 2>/dev/null || pgc_skip python "python3 is required"
 SEED="${PGC_SEED:-20260814}"
 ITERS="${PGC_ITERS:-300}"
 BASE="$FX/manifest-0.avro"
+BASE_LIST="$FX/manifest-list.avro"
 MUT="$PGC_WORKDIR/mutant.avro"
 NEWLOG="$PGC_WORKDIR/newlog.txt"
 
-RD="SELECT count(*) FROM pgcolumnar.read_avro_manifest('$MUT')"
+# two decode targets share one Avro reader: the manifest (manifest_entry) and the
+# manifest LIST (manifest_file). Alternate mutants between them by seed parity so
+# the fuzzer exercises both projections, not just the manifest one.
+RD_MANIFEST="SELECT count(*) FROM pgcolumnar.read_avro_manifest('$MUT')"
+RD_LIST="SELECT count(*) FROM pgcolumnar.read_manifest_list('$MUT')"
 
-# control: the unmutated manifest decodes to its entries, proving the decoder is
-# reached (without this the three "no finding" checks could pass vacuously).
+# control: each unmutated file decodes to its entries, proving both decoders are
+# reached (without this the "no finding" checks could pass vacuously).
 python3 "$CORPUS" "$BASE" valid "$MUT"; chmod 644 "$MUT"
-check "control: the valid manifest reaches the decoder (2 entries)" "$(q "$RD")" "2"
+check "control: the valid manifest reaches the decoder (2 entries)" \
+	"$(q "$RD_MANIFEST")" "2"
+python3 "$CORPUS" "$BASE_LIST" valid "$MUT"; chmod 644 "$MUT"
+check "control: the valid manifest-list reaches the decoder (1 entry)" \
+	"$(q "$RD_LIST")" "1"
 
 LOGPOS=0
 crashes=0; hangs=0; sanitizer=0; errors=0; clean=0
@@ -67,7 +76,9 @@ log_since
 echo "-- fuzzing $ITERS Avro manifest mutants (seed base $SEED)"
 for ((i = 0; i < ITERS; i++)); do
 	s=$((SEED + i))
-	python3 "$CORPUS" "$BASE" "$s" "$MUT"; chmod 644 "$MUT" 2>/dev/null
+	if (( i % 2 == 0 )); then base="$BASE"; RD="$RD_MANIFEST"
+	else base="$BASE_LIST"; RD="$RD_LIST"; fi
+	python3 "$CORPUS" "$base" "$s" "$MUT"; chmod 644 "$MUT" 2>/dev/null
 	log_since
 	out="$(timeout 30 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" \
 		-U postgres -d "$PGC_DB" -v ON_ERROR_STOP=0 \
