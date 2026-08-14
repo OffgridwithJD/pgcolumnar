@@ -33,7 +33,7 @@
 
 #include "postgres.h"
 
-#define PGCOLUMNAR_OBJSTORE_ABI 3
+#define PGCOLUMNAR_OBJSTORE_ABI 4
 
 /* An open remote object (read) / upload (write). Module owns both. */
 typedef struct PgColumnarObjHandle PgColumnarObjHandle;
@@ -95,8 +95,10 @@ typedef struct PgColumnarObjStoreApi
 	 * is the ONLY point the object becomes visible at its final name;
 	 * sink_abort tears down without publishing and never raises, so it is safe
 	 * from a PG_CATCH. delete_object removes a completed object by key (the
-	 * parallel dispatcher's remote cleanup). All raise on failure except
-	 * sink_abort. cfg may be NULL (the export function paths).
+	 * parallel dispatcher's remote cleanup); it is best-effort and never raises,
+	 * like a local unlink, so it too is safe from the dispatcher's error-cleanup
+	 * path. sink_create/sink_write/sink_finish raise on failure; sink_abort and
+	 * delete_object do not. cfg may be NULL (the export function paths).
 	 */
 	PgColumnarObjSink *(*sink_create) (const char *url,
 									   const PgColumnarObjStoreConfig *cfg);
@@ -105,6 +107,21 @@ typedef struct PgColumnarObjStoreApi
 	void		(*sink_abort) (PgColumnarObjSink *s);
 	void		(*delete_object) (const char *url,
 								  const PgColumnarObjStoreConfig *cfg);
+
+	/*
+	 * List the objects under a prefix (#619). `url` is s3://bucket/prefix; the
+	 * prefix may be empty (list the whole bucket) or name a folder. Returns a
+	 * palloc'd array of `*nkeys` cstrings in the current memory context, each a
+	 * full s3://bucket/key URL, sorted ascending, so the caller wraps them into
+	 * the same file list a local directory walk produces. `*nkeys` may be 0.
+	 * Raises on a transport or a listing-parse failure. The module owns the
+	 * paging (ListObjectsV2 continuation tokens) and the hostile-input XML
+	 * parse behind this ABI, the isolation the frozen boundary exists for. cfg
+	 * may be NULL (the function-API paths).
+	 */
+	char	  **(*list_objects) (const char *url,
+								 const PgColumnarObjStoreConfig *cfg,
+								 int *nkeys);
 } PgColumnarObjStoreApi;
 
 /*

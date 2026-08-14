@@ -132,8 +132,67 @@ check "allow-list: an unlisted endpoint refuses 42501 before any write" \
 check "arrow export to s3:// also round-trips" \
 	"$(q "SELECT pgcolumnar.export_arrow('es_small', 's3://$BUCKET/small.arrow') > 0")" "t"
 
-# Parallel export to a remote prefix is step 4 (the dispatcher's local
-# directory prep and key cleanup need remote-awareness); tracked separately.
+# ---- step 4 (#623): parallel_export_parquet to an s3:// prefix --------------
+# The workers already write per-worker objects remotely through the sink; this
+# arm proves the dispatcher's remote-awareness: it does not choke on the prefix
+# in pexport_prepare_dir, and on cancel it removes the completed keys it wrote.
+psql_run "CREATE TABLE es_par (id int8, v int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('es_par', stripe_row_limit => 5000);"
+psql_run "INSERT INTO es_par SELECT g, g % 100 FROM generate_series(1,80000) g;"
+PARROWS="$(q "SELECT count(*) FROM es_par")"
+
+: > "$S3_LOG"
+check_num "parallel export to an s3:// prefix succeeds" \
+	"$(q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/par', 4)")" "$PARROWS"
+NOBJ="$(ls "$PGC_WORKDIR/$BUCKET/par/" 2>/dev/null | grep -c 'part-.*\.parquet$')"
+check "parallel: one object per worker was written (4)" "$NOBJ" "4"
+check "parallel: every worker PUT went to the prefix" \
+	"$([ "$(logn '^PUT /pgc-bucket/par/part-')" -ge 4 ] && echo yes)" "yes"
+# read each key back and union; the union equals the source (prefix-union read
+# is #619, so this reads the four exact keys, not the prefix).
+for i in 0 1 2 3; do
+	psql_run "CREATE FOREIGN TABLE fpar_$i (id int8, v int) SERVER wsrv OPTIONS (path 's3://$BUCKET/par/part-000$i.parquet');"
+done
+check "parallel: the union of the per-worker objects == source" \
+	"$(pgc_set_hash "SELECT * FROM fpar_0 UNION ALL SELECT * FROM fpar_1 UNION ALL SELECT * FROM fpar_2 UNION ALL SELECT * FROM fpar_3")" \
+	"$(pgc_set_hash "SELECT * FROM es_par")"
+
+# a non-empty prefix is a documented caveat, not enforced remotely: a re-run
+# into the same prefix overwrites the same keys and still round-trips.
+: > "$S3_LOG"
+check_num "parallel: a re-run into the same prefix succeeds (overwrite)" \
+	"$(q "SELECT pgcolumnar.parallel_export_parquet('es_par'::regclass, 's3://$BUCKET/par', 4)")" "$PARROWS"
+
+# cancel mid-run: the dispatcher removes the completed keys it wrote. Big table
+# + small parts so a worker is mid-multipart when the cancel lands.
+psql_run "DROP TABLE IF EXISTS es_parbig;
+          CREATE TABLE es_parbig (id int8, pad text) USING pgcolumnar;
+          SELECT pgcolumnar.set_options('es_parbig', stripe_row_limit => 4000);
+          INSERT INTO es_parbig SELECT g, md5(g::text)||md5((g+1)::text)
+                                FROM generate_series(1,3000000) g;"
+: > "$S3_LOG"
+rm -rf "$PGC_WORKDIR/$BUCKET/cx"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+	-c "SET pgcolumnar.objstore_part_size = 262144" \
+	-c "SELECT pgcolumnar.parallel_export_parquet('es_parbig'::regclass, 's3://$BUCKET/cx', 4)" \
+	>"$PGC_WORKDIR/cx_bg.out" 2>&1 &
+bgpid=$!
+wrote=no
+for _ in $(seq 1 300); do
+	[ "$(logn '^PUT /pgc-bucket/cx/part-')" -ge 1 ] && { wrote=yes; break; }
+	sleep 0.1
+done
+check "premise: a worker was uploading before the cancel" "$wrote" "yes"
+q "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+   WHERE query LIKE '%parallel_export_parquet%' AND state = 'active'
+     AND pid <> pg_backend_pid()" >/dev/null
+wait "$bgpid" 2>/dev/null || true
+check "premise: the export was cancelled, not completed" \
+	"$(grep -qiE 'canceling statement|canceled on user request' "$PGC_WORKDIR/cx_bg.out" && echo cancelled || echo completed)" "cancelled"
+check "cancel: the dispatcher issued DELETE over the known keys" \
+	"$([ "$(logn '^DELETE /pgc-bucket/cx/part-')" -ge 1 ] && echo yes)" "yes"
+check_num "cancel: no completed object remains at the prefix" \
+	"$(ls "$PGC_WORKDIR/$BUCKET/cx/" 2>/dev/null | grep -c 'part-.*\.parquet$')" "0"
 
 # ---- optional: a real S3 implementation (Garage) ----------------------------
 if [ -n "${PGC_S3_INTEGRATION_ENDPOINT:-}" ]; then
