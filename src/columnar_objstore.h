@@ -95,8 +95,10 @@ typedef struct PgColumnarObjStoreApi
 	 * is the ONLY point the object becomes visible at its final name;
 	 * sink_abort tears down without publishing and never raises, so it is safe
 	 * from a PG_CATCH. delete_object removes a completed object by key (the
-	 * parallel dispatcher's remote cleanup). All raise on failure except
-	 * sink_abort. cfg may be NULL (the export function paths).
+	 * parallel dispatcher's remote cleanup); it is best-effort and never raises,
+	 * like a local unlink, so it too is safe from the dispatcher's error-cleanup
+	 * path. sink_create/sink_write/sink_finish raise on failure; sink_abort and
+	 * delete_object do not. cfg may be NULL (the export function paths).
 	 */
 	PgColumnarObjSink *(*sink_create) (const char *url,
 									   const PgColumnarObjStoreConfig *cfg);
