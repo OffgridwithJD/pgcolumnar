@@ -81,4 +81,44 @@ check "a non-Avro file is rejected (bad magic), backend survives" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_avro_manifest('$PGC_WORKDIR/notavro.bin')")" "XX001"
 check "backend still up after the bad file" "$(q 'SELECT 1')" "1"
 
+# the file_format decodes to the bare Iceberg enum name (matches the normalized
+# oracle, not pyiceberg's Python repr)
+check "file_format decodes to the Iceberg enum name" \
+	"$(q "SELECT bool_and(file_format = 'PARQUET') FROM pgcolumnar.read_avro_manifest('$M0')")" "t"
+
+# ---- deflate zip-bomb: a crafted manifest must not OOM the backend ----------
+# #633 review: count=0 blocks decode no entries yet still inflate, so they bypass
+# the per-entry cap; without the per-block free + cumulative decompressed cap a
+# small file inflates to hundreds of GB. Craft a minimal valid OCF whose deflate
+# blocks inflate past the 1 GB cumulative cap, and assert it is refused
+# (program_limit_exceeded, 54000), not OOMed. Each block's buffer is freed as it
+# goes, so peak memory stays one block.
+python3 - "$PGC_WORKDIR/bomb.avro" <<'PY'
+import sys, zlib
+def varint(u):
+    out = bytearray()
+    while True:
+        b = u & 0x7f; u >>= 7
+        out.append(b | 0x80 if u else b)
+        if not u: break
+    return bytes(out)
+def zz(n): return varint(((n << 1) ^ (n >> 63)) & 0xFFFFFFFFFFFFFFFF)
+sync = b'\x00' * 16
+schema = b'{"type":"record","name":"x","fields":[]}'
+meta = zz(2)
+for k, v in ((b'avro.schema', schema), (b'avro.codec', b'deflate')):
+    meta += zz(len(k)) + k + zz(len(v)) + v
+meta += zz(0)
+out = b'Obj\x01' + meta + sync
+co = zlib.compressobj(9, zlib.DEFLATED, -15)          # raw deflate
+raw = co.compress(b'\x00' * (128 * 1024 * 1024)) + co.flush()
+for _ in range(9):                                    # 9 x 128 MiB > 1 GiB cap
+    out += zz(0) + zz(len(raw)) + raw + sync
+open(sys.argv[1], 'wb').write(out)
+PY
+chmod 644 "$PGC_WORKDIR/bomb.avro"
+check "a deflate zip-bomb is refused by the cumulative cap (54000)" \
+	"$(sqlstate_of "SET statement_timeout='60s'; SELECT count(*) FROM pgcolumnar.read_avro_manifest('$PGC_WORKDIR/bomb.avro')")" "54000"
+check "backend still up after the zip-bomb" "$(q 'SELECT 1')" "1"
+
 pgc_summary

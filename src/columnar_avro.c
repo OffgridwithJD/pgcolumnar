@@ -34,7 +34,8 @@
 
 /* Caps so a hostile manifest cannot exhaust memory or spin the backend. */
 #define AV_MAX_FILE			((int64) 256 * 1024 * 1024)
-#define AV_MAX_BLOCK		((int64) 256 * 1024 * 1024)	/* decompressed */
+#define AV_MAX_BLOCK		((int64) 256 * 1024 * 1024)	/* one block, decompressed */
+#define AV_MAX_TOTAL		((int64) 1024 * 1024 * 1024)	/* all blocks, decompressed */
 #define AV_MAX_OBJECTS		((int64) 50 * 1000 * 1000)
 #define AV_MAX_SCHEMA		((int64) 4 * 1024 * 1024)
 #define AV_SYNC_LEN			16
@@ -381,11 +382,18 @@ av_skip(AvReader *r, AvSchema *s)
 			{
 				int64		i;
 
+				CHECK_FOR_INTERRUPTS();
 				cnt = av_long(r);
 				if (cnt == 0)
 					break;
 				if (cnt < 0)
 				{
+					/* also catches INT64_MIN, whose negation is signed-overflow UB */
+					if (cnt < -AV_MAX_OBJECTS)
+					{
+						r->error = true;
+						break;
+					}
 					cnt = -cnt;
 					(void) av_long(r);	/* block byte size, unused */
 				}
@@ -403,11 +411,17 @@ av_skip(AvReader *r, AvSchema *s)
 			{
 				int64		i;
 
+				CHECK_FOR_INTERRUPTS();
 				cnt = av_long(r);
 				if (cnt == 0)
 					break;
 				if (cnt < 0)
 				{
+					if (cnt < -AV_MAX_OBJECTS)	/* INT64_MIN negate is UB */
+					{
+						r->error = true;
+						break;
+					}
 					cnt = -cnt;
 					(void) av_long(r);
 				}
@@ -630,10 +644,16 @@ av_read_metadata(AvReader *r, char **schema_json, char **codec)
 		int64		cnt = av_long(r);
 		int64		i;
 
+		CHECK_FOR_INTERRUPTS();
 		if (cnt == 0)
 			break;
 		if (cnt < 0)
 		{
+			if (cnt < -AV_MAX_OBJECTS)	/* INT64_MIN negate is UB */
+			{
+				r->error = true;
+				return;
+			}
 			cnt = -cnt;
 			(void) av_long(r);	/* block byte size */
 		}
@@ -781,14 +801,20 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 				 errmsg("columnar: Avro manifest schema is not a record")));
 
 	/* data blocks */
+	{
+	int64		total_dec = 0;		/* decompressed bytes across all blocks */
+
 	while (r.pos < r.len && !r.error)
 	{
 		int64		count = av_long(&r);
 		int64		bsize = av_long(&r);
 		const uint8 *block = av_take(&r, bsize);
 		const uint8 *bsync;
+		uint8	   *dfree = NULL;	/* this block's decompressed buffer, freed below */
 		AvReader	br;
 		int64		i;
+
+		CHECK_FOR_INTERRUPTS();
 
 		if (r.error || block == NULL || count < 0 || count > AV_MAX_OBJECTS)
 			ereport(ERROR,
@@ -798,9 +824,25 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 		if (codec != NULL && strcmp(codec, "deflate") == 0)
 		{
 			int64		dlen;
-			uint8	   *d = av_inflate(block, bsize, &dlen);
 
-			br.buf = d;
+			dfree = av_inflate(block, bsize, &dlen);
+			/*
+			 * A cumulative decompressed-bytes cap. A count==0 block decodes no
+			 * entries yet still inflates, so it bypasses the per-entry cap; many
+			 * such blocks in a small compressed file are a deflate zip bomb. The
+			 * buffer is freed at the end of this iteration, so peak retained
+			 * memory is one block, but the total inflation still needs a bound.
+			 */
+			total_dec += dlen;
+			if (total_dec > AV_MAX_TOTAL)
+			{
+				pfree(dfree);
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("columnar: Avro manifest decompresses past %lld bytes",
+								(long long) AV_MAX_TOTAL)));
+			}
+			br.buf = dfree;
 			br.len = dlen;
 		}
 		else
@@ -826,6 +868,8 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 		}
 		for (i = 0; i < count; i++)
 		{
+			if ((i & 0xFFF) == 0)
+				CHECK_FOR_INTERRUPTS();
 			av_decode_entry(&br, schema, &out[n]);
 			if (br.error)
 				ereport(ERROR,
@@ -834,6 +878,9 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 			n++;
 		}
 
+		if (dfree != NULL)
+			pfree(dfree);		/* peak retained memory stays one block */
+
 		/* the block's trailing sync marker must match the header's */
 		bsync = av_take(&r, AV_SYNC_LEN);
 		if (r.error || bsync == NULL ||
@@ -841,6 +888,7 @@ PgColumnarAvroReadManifest(const uint8 *buf, int64 len, int *nout)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("columnar: Avro block sync marker mismatch")));
+	}
 	}
 
 	*nout = n;

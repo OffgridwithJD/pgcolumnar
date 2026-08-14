@@ -69,7 +69,7 @@ for i, m in enumerate(manifests):
             "manifest": dst,
             "status": int(e.status),
             "file_path_basename": os.path.basename(df.file_path),
-            "file_format": str(df.file_format),
+            "file_format": str(df.file_format).split(".")[-1],
             "content": int(df.content),
             "record_count": df.record_count,
             "file_size_in_bytes": df.file_size_in_bytes,
