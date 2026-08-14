@@ -295,7 +295,12 @@ class Handler(BaseHTTPRequestHandler):
         q = self._qdict()
         _, local = self._resolve()
         if "uploads" in q:
-            uid = "up-%d" % (len(self.server.uploads) + 1)
+            # A reserved character ('/', '+') in the id on purpose: a real AWS
+            # UploadId can carry them, and the client must percent-encode the id
+            # in the canonical query or its signature diverges. With this id the
+            # multipart round trip passes ONLY if that encoding is correct
+            # (#394 review turned from "unproven" to pinned).
+            uid = "up/%d+x" % (len(self.server.uploads) + 1)
             self.server.uploads[uid] = {"local": local, "parts": {}}
             body = ("<?xml version=\"1.0\"?><InitiateMultipartUploadResult>"
                     "<UploadId>%s</UploadId>"

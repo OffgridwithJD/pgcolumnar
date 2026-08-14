@@ -1000,8 +1000,7 @@ os_hex(const uint8 *in, size_t n, char *out)	/* out: 2n+1 bytes */
  * AWS UriEncode for the path: unreserved bytes and '/' pass, everything else
  * is %XX with UPPERCASE hex. Hand-written per AWS's own recommendation:
  * platform encoders disagree on exactly the bytes that break signatures
- * (space, '+', '=', '~'). The query-string variant (encode '/') is not needed
- * until a listing operation exists.
+ * (space, '+', '=', '~').
  */
 static void
 os_uriencode_path(StringInfo out, const char *s)
@@ -1017,6 +1016,34 @@ os_uriencode_path(StringInfo out, const char *s)
 		else
 			appendStringInfo(out, "%%%02X", c);
 	}
+}
+
+/*
+ * The query-string variant: '/' is NOT exempt (SigV4 canonical-query encoding
+ * percent-encodes every reserved byte). Used for a multipart UploadId value,
+ * which S3 returns opaque and AWS ids can carry reserved characters; encoding
+ * it here means the query the client signs matches AWS's canonicalization
+ * regardless of what the server chose (#394 review). Garage/MinIO ids are
+ * unreserved, so this is a no-op there and byte-identical to before.
+ */
+static char *
+os_uriencode_query(const char *s)
+{
+	StringInfoData out;
+
+	initStringInfo(&out);
+	for (; *s != '\0'; s++)
+	{
+		unsigned char c = (unsigned char) *s;
+
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~')
+			appendStringInfoChar(&out, (char) c);
+		else
+			appendStringInfo(&out, "%%%02X", c);
+	}
+	return out.data;
 }
 
 /*
@@ -1694,9 +1721,11 @@ os_sign_write(PgColumnarObjHandle *h, const char *method, const char *canonPath,
 /*
  * One signed write request (PUT/POST/DELETE) with an optional body, a single
  * reconnect on a stale keep-alive. `rawQuery` is the query as it goes on the
- * wire (already sorted+encoded, so it doubles as the canonical query since our
- * queries use only unreserved characters and already-encoded upload ids). The
- * response body, if any, is captured into *outBody (palloc'd) for the caller.
+ * wire AND the canonical query the signature covers: the caller builds it with
+ * keys already sorted (partNumber < uploadId; single-key queries are trivially
+ * sorted) and any UploadId value already percent-encoded through
+ * os_uriencode_query, so wire and canonical are byte-identical. The response
+ * body, if any, is captured into *outBody (palloc'd) for the caller.
  */
 static void
 os_write_request(PgColumnarObjHandle *h, const char *method, const char *rawQuery,
@@ -1777,14 +1806,14 @@ os_flush_part(PgColumnarObjSink *s)
 {
 	OsResponse	resp;
 	char	   *body = NULL;
-	char		query[128];
-	char	   *etag;
-	char	   *etagEnd;
+	char	   *encId = os_uriencode_query(s->uploadId);
+	char	   *query = psprintf("partNumber=%d&uploadId=%s", s->partNo, encId);
+	const char *etag;
 
-	snprintf(query, sizeof(query), "partNumber=%d&uploadId=%s",
-			 s->partNo, s->uploadId);
 	os_write_request(s->h, "PUT", query, (uint8 *) s->buf.data, s->buf.len,
 					 &resp, &body);
+	pfree(query);
+	pfree(encId);
 	if (resp.status != 200)
 		ereport(ERROR,
 				(errcode(ERRCODE_IO_ERROR),
@@ -1795,7 +1824,6 @@ os_flush_part(PgColumnarObjSink *s)
 	 * quoted by the server). The fixture ignores it and concatenates by part
 	 * number, so both are satisfied. */
 	etag = resp.etag[0] ? resp.etag : "\"\"";
-	(void) etagEnd;
 	appendStringInfo(&s->completeXml,
 					 "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>",
 					 s->partNo, etag);
@@ -1832,6 +1860,24 @@ os_begin_multipart(PgColumnarObjSink *s)
 	MemoryContextSwitchTo(oldcxt);
 	s->partNo = 1;
 	pfree(body);
+}
+
+/*
+ * Free the sink and its TopMemoryContext-resident buffers (#394 review): the
+ * handle is freed by the caller (finish/abort) before this. Called at every
+ * terminal point so a long-lived session running many exports does not
+ * accumulate them.
+ */
+static void
+os_sink_free(PgColumnarObjSink *s)
+{
+	if (s->buf.data != NULL)
+		pfree(s->buf.data);
+	if (s->completeXml.data != NULL)
+		pfree(s->completeXml.data);
+	if (s->uploadId != NULL)
+		pfree(s->uploadId);
+	pfree(s);
 }
 
 static PgColumnarObjSink *
@@ -1899,17 +1945,19 @@ objstore_sink_finish(PgColumnarObjSink *s)
 	else
 	{
 		StringInfoData xml;
-		char		query[96];
+		char	   *encId = os_uriencode_query(s->uploadId);
+		char	   *query = psprintf("uploadId=%s", encId);
 
 		if (s->buf.len > 0)			/* the final (short) part */
 			os_flush_part(s);
 		initStringInfo(&xml);
 		appendStringInfo(&xml, "<CompleteMultipartUpload>%s</CompleteMultipartUpload>",
 						 s->completeXml.data);
-		snprintf(query, sizeof(query), "uploadId=%s", s->uploadId);
 		os_write_request(s->h, "POST", query, (uint8 *) xml.data, xml.len,
 						 &resp, NULL);
 		pfree(xml.data);
+		pfree(query);
+		pfree(encId);
 		if (resp.status != 200)
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
@@ -1918,13 +1966,19 @@ objstore_sink_finish(PgColumnarObjSink *s)
 	}
 	os_free_handle(s->h);
 	s->h = NULL;
+	os_sink_free(s);
 }
 
 static void
 objstore_sink_abort(PgColumnarObjSink *s)
 {
-	if (s == NULL || s->h == NULL)
+	if (s == NULL)
 		return;
+	if (s->h == NULL)			/* finish already ran; just reclaim */
+	{
+		os_sink_free(s);
+		return;
+	}
 	/* best effort, never raises: an ABORT that itself failed must not mask
 	 * the error that triggered it */
 	PG_TRY();
@@ -1932,10 +1986,12 @@ objstore_sink_abort(PgColumnarObjSink *s)
 		if (s->uploadId != NULL)
 		{
 			OsResponse	resp;
-			char		query[96];
+			char	   *encId = os_uriencode_query(s->uploadId);
+			char	   *query = psprintf("uploadId=%s", encId);
 
-			snprintf(query, sizeof(query), "uploadId=%s", s->uploadId);
 			os_write_request(s->h, "DELETE", query, NULL, 0, &resp, NULL);
+			pfree(query);
+			pfree(encId);
 		}
 	}
 	PG_CATCH();
@@ -1945,6 +2001,7 @@ objstore_sink_abort(PgColumnarObjSink *s)
 	PG_END_TRY();
 	os_free_handle(s->h);
 	s->h = NULL;
+	os_sink_free(s);
 }
 
 static void
