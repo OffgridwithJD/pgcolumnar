@@ -79,6 +79,16 @@ disk. It never changes the values that a table returns.
 | `pgcolumnar.reclaim_coalesce` | boolean | `on` | During online compaction, split an oversized freed range on reuse and coalesce adjacent freed ranges, so space is reclaimed under fragmentation. Off reverts to whole-range reuse. |
 | `pgcolumnar.enable_end_truncation` | boolean | `off` | Allow `pgcolumnar.truncate()` to return trailing reclaimed blocks to the operating system. Off makes `pgcolumnar.truncate()` a no-op. Requires superuser to set. |
 
+### Object storage
+
+These govern the object-store module that reads and writes remote Parquet and
+Arrow files. See [Object storage](sql-reference.md#object-storage) for the URL
+schemes and the credential model.
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pgcolumnar.objstore_allowed_endpoints` | string | `''` (empty) | The endpoints the module may connect to, comma-separated as `host` or `host:port`. Empty refuses every remote endpoint, so a role that can read or write server files cannot reach an arbitrary host through the extension. Link-local addresses, including `169.254.169.254`, are refused whether or not they are listed. Superuser-only, so a role cannot widen its own reach. |
+
 ### Concurrent unique inserts
 
 | Setting | Type | Default | Description |
