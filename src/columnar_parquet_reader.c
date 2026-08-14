@@ -2614,6 +2614,132 @@ build_imp_targets(TupleDesc tupdesc, PqFile *pf,
 	return tops;
 }
 
+/*
+ * Bind a tuple descriptor to a Parquet file by FIELD ID rather than by position
+ * (#388 phase 3c). Each output attribute i is bound to the file leaf whose
+ * field_id equals field_ids[i]; the file's other columns are not read. This is
+ * projection, so -- unlike build_imp_targets -- it does not require the target to
+ * expand to the file's full leaf count, and it reads columns in the output's
+ * order, not the file's.
+ *
+ * Scope: flat top-level scalars. A requested id must resolve to exactly one
+ * non-repeated scalar leaf of a compatible physical type; a nested/array output,
+ * an absent id, a duplicate id, or a file with no ids at all is refused rather
+ * than silently mis-bound. Reuses the same ImpTop/ImpLeaf output as the
+ * positional binder, so pq_read_rows is unchanged.
+ */
+static ImpTop *
+build_imp_targets_by_field_id(TupleDesc tupdesc, PqFile *pf,
+							  const int *field_ids, int nfield,
+							  ImpLeaf **pleaves, int *ntops)
+{
+	int			natts = tupdesc->natts;
+	ImpTop	   *tops = palloc0(sizeof(ImpTop) * Max(natts, 1));
+	ImpLeaf    *leaves = palloc0(sizeof(ImpLeaf) * Max(pf->ncols, 1));
+	int			nt = 0;
+	int			fi = 0;
+	int			outn = 0;
+	bool		anyId = false;
+	int			i;
+
+#define IMP_FAIL(...) \
+	ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH), errmsg(__VA_ARGS__)))
+
+	/* the file must carry field ids for id resolution to mean anything */
+	for (i = 0; i < pf->ncols; i++)
+		if (pf->leaves[i].sc->field_id >= 0)
+		{
+			anyId = true;
+			break;
+		}
+	if (!anyId)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the Parquet file carries no field ids; it cannot be read by field id"),
+				 errhint("Read it positionally: SELECT * FROM pgcolumnar.read_parquet(path) AS t(...).")));
+
+	for (i = 0; i < natts; i++)
+		if (!TupleDescAttr(tupdesc, i)->attisdropped)
+			outn++;
+	if (outn != nfield)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("field_ids has %d element(s) but the column definition list has %d column(s)",
+						nfield, outn)));
+
+	for (i = 0; i < natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		Oid			typid;
+		int			req;
+		int			found = -1;
+		int			want;
+		int			j;
+		ImpTop	   *t;
+		ImpLeaf    *l;
+
+		if (att->attisdropped)
+			continue;
+		req = field_ids[fi++];
+		typid = att->atttypid;
+
+		if (OidIsValid(get_element_type(typid)) || type_is_rowtype(typid))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("field-id projection supports only scalar columns, but output column \"%s\" is not scalar",
+							NameStr(att->attname))));
+
+		/* the unique top-level leaf carrying this field id */
+		for (j = 0; j < pf->ncols; j++)
+		{
+			if (pf->leaves[j].sc->field_id == req)
+			{
+				if (found >= 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+							 errmsg("field id %d is not unique among the Parquet file's columns",
+									req)));
+				found = j;
+			}
+		}
+		if (found < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("no Parquet column has field id %d (requested for output column \"%s\")",
+							req, NameStr(att->attname))));
+
+		if (pf->leaves[found].max_rep != 0)
+			IMP_FAIL("Parquet column with field id %d is repeated; field-id projection binds scalar columns",
+					 req);
+		want = pq_want_phys_for(typid, pq_leaf_sc(pf, found));
+		if (want < 0)
+			IMP_FAIL("output column \"%s\" has type %s, which columnar.read_parquet does not support",
+					 NameStr(att->attname), format_type_be(typid));
+		if (pf->leaves[found].sc->phys_type != want)
+			IMP_FAIL("Parquet column with field id %d has a physical type incompatible with output column \"%s\" (%s)",
+					 req, NameStr(att->attname), format_type_be(typid));
+
+		t = &tops[nt];
+		t->attno = i;
+		t->kind = IMP_SCALAR;
+		t->firstLeaf = found;
+		t->nleaves = 1;
+		l = &leaves[found];
+		l->plan.typid = typid;
+		get_typlenbyval(typid, &l->plan.typlen, &l->plan.typbyval);
+		l->plan.expect_phys = want;
+		pq_plan_bind_schema(&l->plan, pf->leaves[found].sc);
+		l->max_def = pf->leaves[found].max_def;
+		l->max_rep = pf->leaves[found].max_rep;
+		nt++;
+	}
+#undef IMP_FAIL
+
+	*pleaves = leaves;
+	*ntops = nt;
+	return tops;
+}
+
 /* strcmp comparator for list_sort over a List of cstrings */
 static int
 pq_list_str_cmp(const ListCell *a, const ListCell *b)
@@ -3269,7 +3395,8 @@ pq_read_rows(PqFile *pf, PqSource *src,
  */
 static int64
 pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
-				  PqRowSink sink, void *sinkarg)
+				  PqRowSink sink, void *sinkarg,
+				  const int *field_ids, int nfield)
 {
 	PqSource	src;
 	PqFile		pf;
@@ -3280,7 +3407,11 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 
 	pq_source_open(path, &src, &pf);
 	pq_check_row_groups(&pf, path);
-	tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
+	if (field_ids != NULL)
+		tops = build_imp_targets_by_field_id(tupdesc, &pf, field_ids, nfield,
+											 &leaves, &ntops);
+	else
+		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
 					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL,
 					 0, pf.nrowgroups);
@@ -3351,7 +3482,7 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 		MemoryContext old = MemoryContextSwitchTo(fileCtx);
 
 		total += pq_read_file_into((char *) lfirst(lc), tupdesc, slot,
-								   pq_insert_sink, &sinkarg);
+								   pq_insert_sink, &sinkarg, NULL, 0);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -3376,18 +3507,20 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 }
 
 /*
- * pgcolumnar.read_parquet(path text) returns setof record
+ * pgcolumnar.read_parquet(path text [, field_ids int[]]) returns setof record
  *
  * Stream a server-side Parquet file's rows in place, without importing. The caller
  * supplies a column definition list:
  *
  *   SELECT * FROM pgcolumnar.read_parquet('/data/f.parquet') AS t(id int, name text);
  *
- * The declared descriptor is bound against the file's leaf columns by position,
- * exactly as import binds a target table's descriptor (same type-compatibility
- * rules, same "declared column count must equal the file's" contract), and rows are
- * produced through the shared scan core. Superuser only (reads a server-side file);
- * materialize-mode SRF.
+ * Without field_ids, the declared descriptor is bound against the file's leaf
+ * columns by position (same type-compatibility rules and "declared column count
+ * must equal the file's" contract as import). With field_ids, output column i is
+ * bound to the file column whose Parquet field id equals field_ids[i] -- a
+ * projection that reads only those columns, in the given order, regardless of the
+ * file's own column order (#388 phase 3c). Superuser only (reads a server-side
+ * file); materialize-mode SRF.
  */
 Datum
 pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
@@ -3401,6 +3534,31 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 	MemoryContext fileCtx;
 	List	   *files;
 	ListCell   *lc;
+	int		   *field_ids = NULL;
+	int			nfield = 0;
+
+	/* optional field_ids int[]: switches binding from positional to by-field-id */
+	if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
+	{
+		ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(1);
+		Datum	   *elems;
+		bool	   *nulls;
+		int			k;
+
+		if (ARR_HASNULL(arr))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("field_ids must not contain NULL")));
+		deconstruct_array(arr, INT4OID, sizeof(int32), true, TYPALIGN_INT,
+						  &elems, &nulls, &nfield);
+		if (nfield == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("field_ids must not be empty")));
+		field_ids = (int *) palloc(sizeof(int) * nfield);
+		for (k = 0; k < nfield; k++)
+			field_ids[k] = DatumGetInt32(elems[k]);
+	}
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
@@ -3443,7 +3601,7 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 		MemoryContext old = MemoryContextSwitchTo(fileCtx);
 
 		(void) pq_read_file_into((char *) lfirst(lc), retdesc, slot,
-								 pq_tuplestore_sink, tupstore);
+								 pq_tuplestore_sink, tupstore, field_ids, nfield);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
