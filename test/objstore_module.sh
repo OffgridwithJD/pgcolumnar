@@ -206,12 +206,12 @@ mv "$MOD.probe" "$MOD" 2>/dev/null
 #    queries, one session, two different errors, the second one plausible.
 #
 # Both reads run in ONE psql session on purpose. Separate sessions cannot see it.
-# gs:// deliberately: the scheme must be one the module recognizes as remote
-# but does NOT handle. s3:// stopped qualifying when #393 M2 implemented it
-# (its no-environment error is pinned in the loop above and in
-# objstore_s3_read.sh); gs:// stays unhandled until a GCS milestone exists,
-# at which point this becomes az:// or a reserved test scheme.
-Q="SELECT * FROM pgcolumnar.read_parquet('gs://bucket/key.parquet') AS (a int)"
+# az:// deliberately: the scheme must be one the module recognizes as remote
+# but does NOT handle. s3:// stopped qualifying when #393 M2 implemented it, and
+# gs:// stopped qualifying when #621 implemented GCS interop (their no-endpoint
+# errors are pinned in the loop above and in the addressing suite); az:// stays
+# unhandled until an Azure milestone exists, if one ever does.
+Q="SELECT * FROM pgcolumnar.read_parquet('az://bucket/key.parquet') AS (a int)"
 two_reads() {
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
 		-At -q -c "$Q" -c "$Q" 2>&1

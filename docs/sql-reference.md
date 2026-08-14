@@ -599,14 +599,20 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ## Object storage
 
 The Parquet read and export functions, and the foreign-data wrapper, accept an
-object-storage URL wherever they accept a local path. Three URL schemes are
+object-storage URL wherever they accept a local path. These URL schemes are
 recognized:
 
 | Scheme | Meaning |
 | --- | --- |
 | `s3://bucket/key` | An S3 or S3-compatible object. The request is signed with AWS Signature Version 4. |
+| `gs://bucket/key` | A Google Cloud Storage object, read and written through the interoperable XML API. It signs with the same Signature Version 4 as `s3://`, so a GCS HMAC key is given as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. The endpoint defaults to `https://storage.googleapis.com` and the region to `auto`; set `AWS_ENDPOINT_URL` to override. |
 | `http://host[:port]/path` | A plain-HTTP object. For a trusted network only, because a plain-HTTP request carries any credential in clear. |
 | `https://host[:port]/path` | An HTTPS object. Available when the object-store module was built with OpenSSL. The server certificate is verified. |
+
+S3 requests use path-style addressing (`endpoint/bucket/key`) by default. Set
+`pgcolumnar.objstore_s3_addressing` to `virtual` for virtual-host addressing
+(`bucket.endpoint/key`), which is what AWS now prefers; the endpoint allow-list
+still authorizes the endpoint, not the per-bucket hostname.
 
 Object-storage support lives in a separate module, `pgcolumnar_objstore`, which
 loads on the first use of a remote URL and never before. A build or an install
@@ -629,7 +635,7 @@ credentials come from the environment of the server process:
 
 | Variable | Meaning |
 | --- | --- |
-| `AWS_ENDPOINT_URL` | The object-storage endpoint, `http://...` or `https://...`. Required for an `s3://` URL. |
+| `AWS_ENDPOINT_URL` | The object-storage endpoint, `http://...` or `https://...`. Required for an `s3://` URL; optional for `gs://`, which defaults to `https://storage.googleapis.com`. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | The access key pair. |
 | `AWS_SESSION_TOKEN` | A session token, when the credentials are temporary. Optional. |
 | `AWS_REGION` or `AWS_DEFAULT_REGION` | The signing region. |

@@ -81,7 +81,10 @@ PGDLLEXPORT const PgColumnarObjStoreApi *pgcolumnar_objstore_init(void);
 struct PgColumnarObjHandle
 {
 	char	   *url;			/* full URL, for error messages */
-	char	   *host;			/* authority, split for connect */
+	char	   *host;			/* authority, split for connect (and Host header) */
+	char	   *auth_host;		/* endpoint authority for the allow-list, NULL =
+								 * use host (#621: virtual-host puts the bucket in
+								 * host, but the operator authorizes the endpoint) */
 	int			port;
 	char	   *abspath;		/* request-target, always starts with '/' */
 
@@ -272,6 +275,9 @@ os_check_endpoint_allowed(PgColumnarObjHandle *h)
 {
 	const char *list =
 		GetConfigOption("pgcolumnar.objstore_allowed_endpoints", true, false);
+	/* the operator authorizes the endpoint; under virtual-host addressing the
+	 * connect host carries the bucket, so match the endpoint authority (#621) */
+	const char *checkhost = (h->auth_host != NULL) ? h->auth_host : h->host;
 	bool		ok = false;
 
 	if (list != NULL && list[0] != '\0')
@@ -307,7 +313,7 @@ os_check_endpoint_allowed(PgColumnarObjHandle *h)
 					continue;
 				*colon = '\0';
 			}
-			if (pg_strcasecmp(entry, h->host) == 0)
+			if (pg_strcasecmp(entry, checkhost) == 0)
 			{
 				ok = true;
 				break;
@@ -321,10 +327,10 @@ os_check_endpoint_allowed(PgColumnarObjHandle *h)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("columnar: endpoint \"%s:%d\" is not in "
 						"pgcolumnar.objstore_allowed_endpoints",
-						h->host, h->port),
+						checkhost, h->port),
 				 errhint("A superuser can permit it: ALTER SYSTEM SET "
 						 "pgcolumnar.objstore_allowed_endpoints = '%s'; "
-						 "SELECT pg_reload_conf();", h->host)));
+						 "SELECT pg_reload_conf();", checkhost)));
 }
 
 /*
@@ -1255,7 +1261,8 @@ objstore_handles_url(const char *url)
 		return true;
 #endif
 	return pg_strncasecmp(url, "http://", 7) == 0 ||
-		pg_strncasecmp(url, "s3://", 5) == 0;
+		pg_strncasecmp(url, "s3://", 5) == 0 ||
+		pg_strncasecmp(url, "gs://", 5) == 0;	/* GCS via the interop XML API (#621) */
 }
 
 /* A required credential-environment variable, or the 28000 the design owes. */
@@ -1287,14 +1294,18 @@ static void
 os_resolve_s3(PgColumnarObjHandle *h, const char *url,
 			  const PgColumnarObjStoreConfig *cfg)
 {
-	const char *bucket = url + 5;
+	const char *bucket = url + 5;	/* both "s3://" and "gs://" are 5 chars */
 	const char *slash = strchr(bucket, '/');
+	bool		isGs = (pg_strncasecmp(url, "gs://", 5) == 0);
 	const char *ep;
 	const char *ephost;
 	const char *epslash;
 	const char *epcolon;
 	const char *region;
 	const char *token;
+	const char *addr;
+	char	   *authhost;
+	bool		virtualHost;
 	bool		ambientOk = (cfg == NULL || cfg->allow_ambient);
 	StringInfoData path;
 	MemoryContext oldcxt;
@@ -1302,12 +1313,24 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url,
 	if (slash == NULL || slash == bucket || slash[1] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("columnar: \"%s\" is not s3://bucket/key", url)));
+				 errmsg("columnar: \"%s\" is not %s://bucket/key", url,
+						isGs ? "gs" : "s3")));
 
 	if (cfg != NULL && cfg->endpoint != NULL)
 		ep = cfg->endpoint;
 	else
-		ep = os_require_env("AWS_ENDPOINT_URL", url);
+	{
+		ep = getenv("AWS_ENDPOINT_URL");
+		if (ep == NULL || ep[0] == '\0')
+		{
+			/* GCS has a well-known interop endpoint; S3 requires an explicit
+			 * one, since there is no single default S3 authority (#621). */
+			if (isGs)
+				ep = "https://storage.googleapis.com";
+			else
+				ep = os_require_env("AWS_ENDPOINT_URL", url);
+		}
+	}
 	if (pg_strncasecmp(ep, "https://", 8) == 0)
 	{
 #ifdef HAVE_OBJSTORE_OPENSSL
@@ -1335,11 +1358,18 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url,
 		if (region == NULL || region[0] == '\0')
 			region = getenv("AWS_DEFAULT_REGION");
 		if (region == NULL || region[0] == '\0')
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
-					 errmsg("columnar: reading \"%s\" requires a region option "
-							"on the server, or AWS_REGION in the server "
-							"environment", url)));
+		{
+			/* GCS interop accepts "auto"; S3 needs a real region for the
+			 * signature scope (#621). */
+			if (isGs)
+				region = "auto";
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+						 errmsg("columnar: reading \"%s\" requires a region option "
+								"on the server, or AWS_REGION in the server "
+								"environment", url)));
+		}
 	}
 
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
@@ -1382,19 +1412,43 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url,
 	epcolon = memchr(ephost, ':', epslash - ephost);
 	if (epcolon != NULL)
 	{
-		h->host = pnstrdup(ephost, epcolon - ephost);
+		authhost = pnstrdup(ephost, epcolon - ephost);
 		h->port = atoi(epcolon + 1);
 	}
 	else
 	{
-		h->host = pnstrdup(ephost, epslash - ephost);
+		authhost = pnstrdup(ephost, epslash - ephost);
 		h->port = h->tls ? 443 : 80;
 	}
 
-	/* path-style, encoded exactly as signed */
+	/*
+	 * Addressing style (#621). Path-style (the default, byte-identical to
+	 * before) sends every request to the endpoint authority with the bucket as
+	 * the first path segment. Virtual-host addressing puts the bucket in the
+	 * host (bucket.s3.region.amazonaws.com) and the key alone in the path, which
+	 * is what AWS now prefers and what the cert is verified against. The
+	 * endpoint allow-list still authorizes the endpoint authority, so auth_host
+	 * carries it under virtual-host.
+	 */
+	addr = GetConfigOption("pgcolumnar.objstore_s3_addressing", true, false);
+	virtualHost = (addr != NULL && pg_strcasecmp(addr, "virtual") == 0);
+
 	initStringInfo(&path);
 	appendStringInfoChar(&path, '/');
-	os_uriencode_path(&path, bucket);	/* bucket/key together; '/' passes */
+	if (virtualHost)
+	{
+		char	   *bname = pnstrdup(bucket, slash - bucket);
+
+		h->host = psprintf("%s.%s", bname, authhost);
+		h->auth_host = authhost;
+		os_uriencode_path(&path, slash + 1);	/* the key alone */
+	}
+	else
+	{
+		h->host = authhost;
+		h->auth_host = NULL;
+		os_uriencode_path(&path, bucket);	/* bucket/key together; '/' passes */
+	}
 	h->abspath = path.data;
 	MemoryContextSwitchTo(oldcxt);
 
@@ -1406,7 +1460,8 @@ objstore_open(const char *url, const PgColumnarObjStoreConfig *cfg, int64 *len)
 {
 	PgColumnarObjHandle *h;
 	OsResponse	resp;
-	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0);
+	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0 ||
+						pg_strncasecmp(url, "gs://", 5) == 0);	/* #621: GCS interop */
 	MemoryContext oldcxt;
 
 	if (!os_callback_registered)
@@ -1586,7 +1641,8 @@ static PgColumnarObjHandle *
 os_write_handle(const char *url, const PgColumnarObjStoreConfig *cfg)
 {
 	PgColumnarObjHandle *h;
-	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0);
+	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0 ||
+						pg_strncasecmp(url, "gs://", 5) == 0);	/* #621: GCS interop */
 	MemoryContext oldcxt;
 
 	if (!os_callback_registered)

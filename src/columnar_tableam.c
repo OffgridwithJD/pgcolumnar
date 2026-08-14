@@ -81,6 +81,7 @@ bool		pgcolumnar_enable_bloom_filter = true;
 bool		pgcolumnar_objstore_buffered = true;	/* #393 */
 int			pgcolumnar_objstore_part_size = 0;	/* #394 remote part size */
 char	   *pgcolumnar_objstore_allowed_endpoints = NULL;	/* #393 allow-list */
+char	   *pgcolumnar_objstore_s3_addressing = NULL;	/* #621 path|virtual */
 bool		pgcolumnar_autovacuum = false;		/* #415 daemon master switch */
 int			pgcolumnar_autovacuum_naptime = 60;
 double		pgcolumnar_autovacuum_compact_threshold = 0.2;
@@ -2781,6 +2782,21 @@ _PG_init(void)
 							   "",
 							   PGC_SUSET,
 							   GUC_LIST_INPUT,
+							   NULL, NULL, NULL);
+
+	/*
+	 * S3 addressing style (#621), read by the object-store module via
+	 * GetConfigOption. "path" (the default) sends s3://bucket/key to
+	 * endpoint/bucket/key; "virtual" sends it to bucket.endpoint/key, which is
+	 * what AWS now prefers. Any value other than "virtual" is treated as path.
+	 */
+	DefineCustomStringVariable("pgcolumnar.objstore_s3_addressing",
+							   "S3 request addressing style: 'path' or 'virtual'.",
+							   "Virtual-host puts the bucket in the hostname (bucket.endpoint); path keeps it as the first path segment.",
+							   &pgcolumnar_objstore_s3_addressing,
+							   "path",
+							   PGC_USERSET,
+							   0,
 							   NULL, NULL, NULL);
 
 	/*
