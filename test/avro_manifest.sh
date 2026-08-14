@@ -70,25 +70,36 @@ check "all entries are ADDED data files (status=1, content=0)" \
 # writer's oracle (expected_list.json).
 ML="$PGC_WORKDIR/manifest-list.avro"
 cp "$FX/manifest-list.avro" "$ML"; chmod 644 "$ML"
+# every scalar the manifest_file record carries, so the arm is not vacuous on the
+# columns the decoder fills to zero for this fixture (min_sequence_number,
+# existing/deleted rows). Field order matches the SELECT below.
 LORACLE="$(python3 - "$FX/expected_list.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))["manifest_files"]
 r = m[0]
-print("%d|%d|%d|%d|%d|%d|%d" % (r["manifest_length"], r["content"],
-      r["partition_spec_id"], r["added_files_count"], r["added_rows_count"],
-      r["sequence_number"], r["added_snapshot_id"]))
+print("%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%s" % (
+      r["manifest_length"], r["content"], r["partition_spec_id"],
+      r["added_files_count"], r["existing_files_count"], r["deleted_files_count"],
+      r["added_rows_count"], r["existing_rows_count"], r["deleted_rows_count"],
+      r["sequence_number"], r["min_sequence_number"], r["added_snapshot_id"]))
 PY
 )"
+# the manifest_path the snapshot points at, matched by basename against the oracle
+# (the fixture stores an absolute file:// path the writer chose; only the basename
+# is stable across warehouses)
+LPATH="$(python3 -c "import json;print(json.load(open('$FX/expected_list.json'))['manifest_files'][0]['manifest_path_basename'])")"
 check "manifest-list entry count == oracle (1)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_manifest_list('$ML')")" "1"
-check "manifest-list entry == oracle (len|content|spec|files|rows|seq|snap)" \
+check "manifest-list entry == oracle (all scalar fields)" \
 	"$(q "SELECT manifest_length || '|' || content || '|' || partition_spec_id || '|' ||
-	             added_files_count || '|' || added_rows_count || '|' ||
-	             sequence_number || '|' || added_snapshot_id
+	             added_files_count || '|' || existing_files_count || '|' ||
+	             deleted_files_count || '|' || added_rows_count || '|' ||
+	             existing_rows_count || '|' || deleted_rows_count || '|' ||
+	             sequence_number || '|' || min_sequence_number || '|' || added_snapshot_id
 	      FROM pgcolumnar.read_manifest_list('$ML')")" "$LORACLE"
-check "manifest-list points at an .avro manifest, no existing/deleted files" \
-	"$(q "SELECT bool_and(manifest_path LIKE '%.avro' AND existing_files_count = 0
-	                      AND deleted_files_count = 0) FROM pgcolumnar.read_manifest_list('$ML')")" "t"
+check "manifest-list manifest_path basename == oracle" \
+	"$(q "SELECT (regexp_match(manifest_path, '[^/]+\$'))[1]
+	      FROM pgcolumnar.read_manifest_list('$ML')")" "$LPATH"
 
 # ---- privilege: needs pg_read_server_files ---------------------------------
 psql_run "DROP ROLE IF EXISTS avro_unpriv; CREATE ROLE avro_unpriv LOGIN;"
