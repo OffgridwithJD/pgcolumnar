@@ -43,6 +43,14 @@ Behaviour:
 - `manifest_list` is reported verbatim (absolute path as the writer wrote it).
   Rebasing relocated paths is 3b's concern, deliberately not here.
 
+SQLSTATEs: malformed JSON `22P02` (jsonb_in); not table metadata (no
+`format-version`, or not an object) `22023`; a `current-snapshot-id` naming no
+snapshot in the file's own `snapshots[]` `XX001` (data_corrupted); a snapshot id
+past the int64 range `22003` (numeric out of range, surfaced by `numeric_int8`);
+caller without `pg_read_server_files` `42501`. The snapshot scan carries a
+`CHECK_FOR_INTERRUPTS` (the input is capped at `ICE_MAX_METADATA` = 64 MB, so it
+is bounded, but the scan is over untrusted input).
+
 New source file `src/columnar_iceberg.c` (this begins the catalog component,
 kept separate from the Avro decoder). SQL declaration in
 `pgcolumnar--1.0-alpha.sql`. Docs in `docs/sql-reference.md`.

@@ -258,6 +258,9 @@ ice_current_snapshot(JsonbContainer *root, const char *path, int64 *cur)
 		JsonbValue *v;
 		int64		sid;
 
+		/* cheap hygiene for a scan over an untrusted (if capped) snapshot list */
+		CHECK_FOR_INTERRUPTS();
+
 		if (s == NULL || s->type != jbvBinary)
 			continue;
 		sc = s->val.binary.data;
@@ -492,6 +495,8 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 			PgColumnarAvroManifestEntry *e = &entries[ei];
 			Datum		values[ICE_FILE_NCOLS];
 			bool		nulls[ICE_FILE_NCOLS];
+
+			CHECK_FOR_INTERRUPTS();
 
 			/* a delete file, or an entry the snapshot marks removed (status 2
 			 * DELETED): refuse rather than silently drop it */
