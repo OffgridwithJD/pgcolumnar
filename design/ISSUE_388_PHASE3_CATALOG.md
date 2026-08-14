@@ -97,15 +97,27 @@ Two designs settled here:
    prefix and escapes when re-rooted; `<location>EVIL/x` shares the bytes as a
    sibling). `ice_rebase` therefore (a) requires the recorded path under
    `location` on a **path boundary** (next byte `/` or end), rejecting the
-   sibling, and (b) re-roots, then **`canonicalize_path`s the result and
-   re-checks containment** under the canonicalized actual root, collapsing any
-   `..` and rejecting a traversal escape. The suite copies the committed
-   warehouse to a different directory (recorded root != actual root), and asserts
-   rebased paths under the actual root, no leaked recorded root, and three
-   refusal payloads -- foreign absolute, `..` traversal, sibling prefix -- each
-   `22023`. The traversal target is a real server file (`/etc/hostname`), so the
-   removal proof (drop the canonicalization) reads it and returns `XX001` (bad
-   Avro magic) instead of `22023`: the boundary is load-bearing.
+   sibling, and (b) re-roots, then canonicalizes and re-checks containment,
+   collapsing any `..`.
+
+   Lexical canonicalization alone is **symlink-blind**, though -- a second bug
+   ChronicallyJD reproduced: a symlink planted under `location` (the attacker
+   writes the warehouse) whose lexical path is contained but which points outside
+   is followed out on `open`. So for every path 3b actually **opens** (the
+   manifest list and each manifest), `ice_open_path` resolves the rebased path
+   with **`realpath`** -- which collapses symlinks as well as `..` -- and
+   re-checks containment against the `realpath`'d actual root. Data-file paths are
+   only returned (never opened here), so they keep the lexical rebase; 3c must
+   `realpath`/`O_NOFOLLOW` them at open time, and its design note says so.
+
+   The suite copies the committed warehouse to a different directory (recorded
+   root != actual root) and asserts rebased paths under the actual root, no leaked
+   recorded root, and four refusal payloads -- foreign absolute, `..` traversal,
+   sibling prefix, and a **symlink** under the location targeting outside -- each
+   `22023`. The `..` and symlink targets are a real server file (`/etc/hostname`),
+   so the removal proofs are exact: dropping the canonicalization reads the `..`
+   target (`XX001`), and dropping the `realpath` reads the symlink target
+   (`XX001`), instead of `22023`. Both boundaries are load-bearing.
 2. **Loud delete refusal (`0A000`).** Refuses if any `manifest_file.content != 0`
    (a delete manifest, caught at the manifest-list level without opening it) or
    any `manifest_entry.content != 0` / `status == 2`. pyiceberg 0.11.1 **cannot**
@@ -128,6 +140,13 @@ file from 3b through the existing Parquet reader, but resolve the Iceberg
 schema's columns to Parquet leaves by **field id** (thrift field 9, already
 parsed into `PqSchemaCol.field_id`), with name mapping as the documented
 fallback for files written without ids.
+
+**Open-time path safety (carried from the 3b review).** 3b rebases data-file
+paths but does not open them, so it leaves them lexically rebased. 3c *opens*
+them, so it must apply the same symlink-resolving boundary as `ice_open_path`
+(`realpath` + containment under the actual location, or `O_NOFOLLOW`) before
+reading each Parquet file -- otherwise a symlinked data-file path is a direct
+content leak, not just an existence oracle. Reuse `ice_open_path`.
 
 Map of what 3c must change (from the reader survey, all in
 `src/columnar_parquet_reader.c`; there is no separate FDW file):

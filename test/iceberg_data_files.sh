@@ -56,9 +56,10 @@ check "every data file is PARQUET" \
 
 # ---- rebasing proof: paths point at the ACTUAL location, not the recorded --
 # the fixture's recorded root is /tmp/pgc_ice_wh; the resolver must return paths
-# under $DEST, never the recorded root.
+# under the actual (realpath-resolved) location, never the recorded root.
+AROOT="$(realpath "$DEST/db/events")"
 check "returned paths are rebased under the actual location" \
-	"$(q "SELECT bool_and(file_path LIKE '$DEST/%') FROM pgcolumnar.iceberg_data_files('$MD')")" "t"
+	"$(q "SELECT bool_and(file_path LIKE '$AROOT/%') FROM pgcolumnar.iceberg_data_files('$MD')")" "t"
 check "no returned path leaks the recorded root" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_data_files('$MD')
 	      WHERE file_path LIKE '/tmp/pgc_ice_wh/%'")" "0"
@@ -77,8 +78,13 @@ check "no returned path leaks the recorded root" \
 # (/etc/hostname) precisely so a bypass reads it and returns XX001, making the
 # regression visible.
 LOC="$(python3 -c "import json;print(json.load(open('$MD'))['location'].replace('file://',''))")"
+# the tampered variants must sit in the REAL table's metadata dir, so the
+# resolver derives the same actual location (<dir>/.. of the metadata file) and a
+# symlink planted there resolves under it -- writing them elsewhere would derive a
+# wrong actual root and mask the boundary under a "file not found".
+MDDIR="$(dirname "$MD")"
 esc_case() {  # $1 payload manifest-list, writes a metadata variant, echoes its path
-	local payload="$1" out="$PGC_WORKDIR/esc_$2.metadata.json"
+	local payload="$1" out="$MDDIR/esc_$2.metadata.json"
 	python3 - "$MD" "$out" "$payload" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -93,6 +99,14 @@ check "a .. traversal manifest-list is refused, not read (22023, not XX001)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://$LOC/../../../../../../../etc/hostname" b)')")" "22023"
 check "a sibling-prefix manifest-list is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://${LOC}EVIL/x.avro" c)')")" "22023"
+# (d) a SYMLINK under the location that targets a file outside it. The attacker
+# writes the warehouse, so they can plant a symlink; a lexical check passes it
+# (its own path is under the location) and open() follows it out. The boundary
+# must resolve symlinks (realpath) and reject. Target a real server file so a
+# bypass reads it and returns XX001 rather than 22023.
+ln -sf /etc/hostname "$DEST/db/events/metadata/sneaky.avro"
+check "a symlink under the location targeting outside is refused (22023, not XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://$LOC/metadata/sneaky.avro" d)')")" "22023"
 check "backend still up after the traversal attempts" "$(q 'SELECT 1')" "1"
 
 # ---- deletes are refused, not ignored --------------------------------------

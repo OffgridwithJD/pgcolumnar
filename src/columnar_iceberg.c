@@ -361,6 +361,51 @@ ice_rebase(const char *recorded_root, const char *actual_root,
 	return cand;
 }
 
+/*
+ * The rebase to use for a path we are about to OPEN. ice_rebase's lexical
+ * canonicalization collapses ".." but is symlink-blind: a symlink placed under
+ * the location by whoever wrote the (untrusted) table would pass the lexical
+ * containment check and then be followed out of the location on open. So resolve
+ * the rebased path with realpath() -- which collapses symlinks as well as ".."
+ * -- and re-check containment against the (also realpath'd) actual root before
+ * handing it to the file reader. A legitimately relocated table never symlinks
+ * out of its own directory, so honest tables resolve under the actual root and
+ * are unaffected. `actual_root_real` must already be realpath'd by the caller.
+ */
+static char *
+ice_open_path(const char *recorded_root, const char *actual_root_real,
+			  const char *recorded_path, const char *what, const char *mdpath)
+{
+	char	   *cand = ice_rebase(recorded_root, actual_root_real,
+								  recorded_path, what, mdpath);
+	char	   *real = realpath(cand, NULL);
+	size_t		alen;
+	char	   *out;
+
+	if (real == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("iceberg: could not resolve %s \"%s\" from \"%s\": %m",
+						what, recorded_path, mdpath)));
+
+	alen = strlen(actual_root_real);
+	if (strncmp(real, actual_root_real, alen) != 0 ||
+		(real[alen] != '\0' && real[alen] != '/'))
+	{
+		char	   *escaped = pstrdup(real);
+
+		free(real);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("iceberg: %s path \"%s\" from \"%s\" resolves outside the table location \"%s\"",
+						what, recorded_path, mdpath, actual_root_real),
+				 errdetail("Resolved to \"%s\".", escaped)));
+	}
+	out = pstrdup(real);
+	free(real);
+	return out;
+}
+
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_current_snapshot);
 
 /*
@@ -481,15 +526,25 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 		return (Datum) 0;		/* no current snapshot -> no data files */
 
 	/* the recorded table root, and where the table actually sits now. The
-	 * actual root is canonicalized once here so ice_rebase can test path
-	 * containment against a normalized form. */
+	 * actual root is resolved with realpath once here so the files we open can
+	 * be re-checked for containment against a symlink-resolved form. */
 	recorded_root = ice_strip_scheme(ice_str_required(&jb->root, "location", path));
-	actual_root = ice_actual_location(path);
-	canonicalize_path(actual_root);
+	{
+		char	   *raw = ice_actual_location(path);
+		char	   *real = realpath(raw, NULL);
+
+		if (real == NULL)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("iceberg: could not resolve the table location of \"%s\": %m",
+							path)));
+		actual_root = pstrdup(real);
+		free(real);
+	}
 
 	ml_recorded = ice_str_required(sc, "manifest-list", path);
-	ml_path = ice_rebase(recorded_root, actual_root, ml_recorded,
-						 "manifest-list", path);
+	ml_path = ice_open_path(recorded_root, actual_root, ml_recorded,
+							"manifest-list", path);
 	mlbuf = ice_slurp_bin(ml_path, &mllen);
 	mfs = PgColumnarAvroReadManifestList(mlbuf, mllen, &nmf);
 
@@ -513,8 +568,8 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 					 errdetail("Manifest \"%s\" has content %d (a delete manifest).",
 							   mfs[mi].manifest_path, mfs[mi].content)));
 
-		m_path = ice_rebase(recorded_root, actual_root, mfs[mi].manifest_path,
-							"manifest", path);
+		m_path = ice_open_path(recorded_root, actual_root, mfs[mi].manifest_path,
+							   "manifest", path);
 		mbuf = ice_slurp_bin(m_path, &mlen);
 		entries = PgColumnarAvroReadManifest(mbuf, mlen, &ne);
 
