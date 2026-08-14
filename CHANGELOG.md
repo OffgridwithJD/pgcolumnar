@@ -27,7 +27,8 @@ which was true until that script existed.
 
 - Credentials for object storage come from the server process environment
   (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-  `AWS_SESSION_TOKEN`, `AWS_REGION`) for the function API, and from the catalog
+  `AWS_SESSION_TOKEN`, `AWS_REGION` or `AWS_DEFAULT_REGION`) for the function
+  API, and from the catalog
   for the foreign-data wrapper: `endpoint` and `region` on the server, and
   `access_key_id`, `secret_access_key`, `session_token`, and
   `credentials_required` only on a user mapping, so a secret is never in a
