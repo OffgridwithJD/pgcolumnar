@@ -14,6 +14,38 @@ which was true until that script existed.
 
 ### Added
 
+- The Parquet read and export functions and the foreign-data wrapper read from
+  and write to object storage (#393, #394). A path may be an `s3://`,
+  `http://`, or `https://` URL wherever it may be a local path. `s3://` requests
+  are signed with AWS Signature Version 4; `https://` verifies the server
+  certificate and is available when the object-store module is built with
+  OpenSSL. Support lives in a separate module, `pgcolumnar_objstore`, loaded on
+  the first remote use. Reads take exact object keys only. `export_parquet` and
+  `export_arrow` write to `s3://`, as one request for a small object or a
+  multipart upload for a large one, and the object becomes visible only when the
+  upload completes. See [Object storage](docs/sql-reference.md#object-storage).
+
+- Credentials for object storage come from the server process environment
+  (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_SESSION_TOKEN`, `AWS_REGION` or `AWS_DEFAULT_REGION`) for the function
+  API, and from the catalog
+  for the foreign-data wrapper: `endpoint` and `region` on the server, and
+  `access_key_id`, `secret_access_key`, `session_token`, and
+  `credentials_required` only on a user mapping, so a secret is never in a
+  world-readable option. Ambient environment credentials are used only for a
+  superuser or a mapping a superuser marked `credentials_required 'false'`.
+
+- `pgcolumnar.objstore_allowed_endpoints` lists the endpoints the object-store
+  module may connect to (#393). It is empty by default, which refuses every
+  remote endpoint, so a role that can read or write server files cannot reach an
+  arbitrary host through the extension. Link-local addresses, including the cloud
+  instance-metadata address, are refused whether or not they are listed. The
+  setting is superuser-only.
+
+- `pgcolumnar.parquet_schema` reports a `field_id` column (#388), the Parquet
+  schema field id each leaf column carries, which formats such as Apache Iceberg
+  use to select columns by id. It is NULL when the writer emitted none.
+
 - `pgcolumnar.maintenance_due(rel, compact_due_fraction, recluster_due_fraction)`
   reports whether an online maintenance verb is worth running on a table, from its
   statistics alone (#415). It takes no lock and rewrites nothing. It returns the
@@ -93,6 +125,18 @@ which was true until that script existed.
   stored value against an independent count.
 
 ### Fixed
+
+- A failed `export_parquet` or `export_arrow` no longer leaves a partial file at
+  the destination (#394). An export writes to a temporary name and renames to the
+  final name only when it is complete, so a reader never sees a half-written file.
+  Every write is checked, so a full disk during an export is reported rather than
+  detected only at close.
+
+- `EXPLAIN (ANALYZE)` on a vectorized aggregate reports whether the batch fold
+  actually ran, not whether it was predicted eligible (#602). A query that fell
+  back to the row path, such as an aggregate over a column added after some row
+  groups, no longer reads `Columnar Batch Fold: yes`. Plain `EXPLAIN`, which has
+  no execution to report, still shows the prediction.
 
 - `pgcolumnar.sort_status` works for a non-superuser who owns the table (#608).
   The function reads pgColumnar's internal catalogs, which carry no `GRANT`. As an

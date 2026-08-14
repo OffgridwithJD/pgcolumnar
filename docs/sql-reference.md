@@ -391,6 +391,8 @@ inspection and testing, not for query use.
 These functions read and write Arrow IPC stream files and Parquet files. They read
 and write files on the server host, so a reader needs the `pg_read_server_files`
 role and a writer needs the `pg_write_server_files` role. Superusers hold both.
+The Parquet functions also read from and write to object storage. See
+[Object storage](#object-storage).
 They run on little-endian hosts only. They support scalar column types, one-dimensional
 arrays, and composite types, with nulls at every level. The functions refuse multi-dimensional arrays
 and types that they do not support. See
@@ -399,12 +401,14 @@ and types that they do not support. See
 ### pgcolumnar.export_arrow(rel regclass, path text) returns bigint
 
 Writes the live rows of `rel` to an Arrow IPC stream file at `path`. Returns the
-number of rows written.
+number of rows written. `path` can be a local file or an `s3://` URL. See
+[Object storage](#object-storage).
 
 ### pgcolumnar.export_parquet(rel regclass, path text) returns bigint
 
 Writes the live rows of `rel` to a Parquet file at `path`. Returns the number of
-rows written.
+rows written. `path` can be a local file or an `s3://` URL. See
+[Object storage](#object-storage).
 
 ### pgcolumnar.import_arrow(rel regclass, path text) returns bigint
 
@@ -509,7 +513,9 @@ require the `pg_read_server_files` role, which superusers hold, and operate on
 little-endian hosts. In each function, `path`
 can be one of three things. It can be a single file. It can be a directory, and
 then the function reads all the `*.parquet` files below it at any depth as one
-relation, in sorted order. It can also be a glob pattern.
+relation, in sorted order. It can also be a glob pattern. A local `path` can be
+any of these; an object-storage URL must be a single object key. See
+[Object storage](#object-storage).
 
 ### pgcolumnar.read_parquet(path text) returns setof record
 
@@ -536,12 +542,17 @@ SELECT count(*) FROM pgcolumnar.read_parquet('/data/events/')
   AS t(id int, ts timestamp, amount numeric(12,2));
 ```
 
-### pgcolumnar.parquet_schema(path text) returns table(column_name text, data_type text, nullable bool)
+### pgcolumnar.parquet_schema(path text) returns table(column_name text, data_type text, nullable bool, field_id int)
 
 Reports the leaf columns of a Parquet file and the PostgreSQL type each maps to,
 without reading the data. Useful for writing the column definition list for
 `read_parquet` or a foreign table. For a directory or glob it describes the first
 file.
+
+`field_id` is the Parquet schema field id the column carries. Formats such as
+Apache Iceberg use it to select columns by id rather than by name. It is NULL when
+the writer emitted no field id. A field id of 0 is a real value, so a NULL and a 0
+mean different things.
 
 ```sql
 SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
@@ -555,6 +566,11 @@ skipped, and only referenced columns are decoded. Skipping requires a
 `column op constant` clause over an integer or floating-point column with a
 constant of the same type; [limitations.md](limitations.md) lists the conditions.
 A scan that skips nothing still returns correct rows.
+
+The `path` option can name a local file, directory, or glob, or an
+object-storage URL for a single object. For a remote server the endpoint and
+credentials come from the server and user-mapping options described in
+[Object storage](#object-storage).
 
 Table options: `path`, and `partition_columns` for a Hive-style layout. The
 latter names the columns whose values come from `col=value` directory components
@@ -579,6 +595,102 @@ SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
 -- Columns Total, and Files.
 EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ```
+
+## Object storage
+
+The Parquet read and export functions, and the foreign-data wrapper, accept an
+object-storage URL wherever they accept a local path. Three URL schemes are
+recognized:
+
+| Scheme | Meaning |
+| --- | --- |
+| `s3://bucket/key` | An S3 or S3-compatible object. The request is signed with AWS Signature Version 4. |
+| `http://host[:port]/path` | A plain-HTTP object. For a trusted network only, because a plain-HTTP request carries any credential in clear. |
+| `https://host[:port]/path` | An HTTPS object. Available when the object-store module was built with OpenSSL. The server certificate is verified. |
+
+Object-storage support lives in a separate module, `pgcolumnar_objstore`, which
+loads on the first use of a remote URL and never before. A build or an install
+without it reads and writes local files as before, and a remote URL reports that
+the module is required. Only exact object keys work. A glob or a directory over a
+remote URL is refused, not expanded.
+
+Remote paths carry the same privilege as local ones. A read needs
+`pg_read_server_files` and a write needs `pg_write_server_files`, over and above
+any table privilege.
+
+### Endpoints and credentials
+
+The endpoint and the credentials come from the server process environment, from
+the catalog, or from both.
+
+The function API (`read_parquet`, `export_parquet`, `export_arrow`,
+`import_parquet`, `parquet_schema`) has no server object. Its endpoint and
+credentials come from the environment of the server process:
+
+| Variable | Meaning |
+| --- | --- |
+| `AWS_ENDPOINT_URL` | The object-storage endpoint, `http://...` or `https://...`. Required for an `s3://` URL. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | The access key pair. |
+| `AWS_SESSION_TOKEN` | A session token, when the credentials are temporary. Optional. |
+| `AWS_REGION` or `AWS_DEFAULT_REGION` | The signing region. |
+
+For the foreign-data wrapper the endpoint and credentials come from the catalog,
+which keeps them out of a world-readable place. The non-secret settings go on the
+server and the secret ones go on a user mapping:
+
+```sql
+CREATE SERVER s3 FOREIGN DATA WRAPPER pgcolumnar_parquet
+  OPTIONS (endpoint 'https://s3.example.com', region 'us-east-1');
+
+CREATE USER MAPPING FOR analyst SERVER s3
+  OPTIONS (access_key_id '...', secret_access_key '...');
+
+CREATE FOREIGN TABLE events (id int, ts timestamp, amount numeric(12,2))
+  SERVER s3 OPTIONS (path 's3://reports/events.parquet');
+```
+
+The wrapper accepts `endpoint` and `region` only on the server, and
+`access_key_id`, `secret_access_key`, `session_token`, and `credentials_required`
+only on a user mapping. Any other placement is an error at `CREATE` or `ALTER`
+time. `pg_user_mapping` is not world-readable, so a secret placed there is not
+exposed the way a server option is.
+
+A read resolves the scanning user's mapping first, then a `PUBLIC` mapping. When a
+mapping supplies no credentials, the server process environment is used only in
+two cases. The caller is a superuser. Or a superuser has marked the mapping
+`credentials_required 'false'`. Ambient credentials are a privilege, not a
+default. An ordinary role with no mapping is refused rather than given the server
+process identity.
+
+### The endpoint allow-list
+
+`pgcolumnar.objstore_allowed_endpoints` lists the endpoints the module may
+connect to. It is empty by default, which refuses every remote endpoint. A role
+that can read server files therefore cannot use the extension to reach an
+arbitrary host. A superuser sets it to the endpoints the deployment uses:
+
+```sql
+ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints = 's3.example.com';
+SELECT pg_reload_conf();
+```
+
+Each entry is a host or a `host:port`. A request whose endpoint matches no entry
+is refused before any connection is made. Link-local addresses, including the
+cloud instance-metadata address `169.254.169.254`, are refused unconditionally,
+whether or not they appear in the list. The setting is superuser-only, so a role
+cannot widen its own reach.
+
+### Exporting to object storage
+
+`export_parquet` and `export_arrow` write to an `s3://` URL as well as a local
+path. A small object goes in one request. A large one is written as a multipart
+upload. It becomes visible at its final name only when the upload completes, so a
+reader never sees a partial object. A failed export removes what it wrote,
+including an incomplete multipart upload.
+
+Export to object storage is not transactional. An export whose transaction later
+rolls back has already written the object. This is true of a local export as
+well, and is more visible when the artifact is remote and shared.
 
 ## Visibility map inspection
 
