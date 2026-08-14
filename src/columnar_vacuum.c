@@ -36,6 +36,8 @@
 #include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "pgstat.h"
+#include "storage/latch.h"
 #include "storage/lmgr.h"
 #include "storage/lockdefs.h"
 #include "storage/procarray.h"
@@ -835,6 +837,33 @@ pgcolumnar_recluster(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(reclustered);
 }
 
+/*
+ * Dev/test fault injection (#415): hold the caller's lock for
+ * pgcolumnar.maintenance_hold_ms, interruptibly. A query-cancel -- including the
+ * one the lock manager sends when this process holds a lock blocking a stronger
+ * request while carrying PROC_IS_AUTOVACUUM (the maintenance daemon's yield) --
+ * fires at CHECK_FOR_INTERRUPTS and aborts the verb, which is what the yield test
+ * asserts. Zero (default) is a no-op.
+ */
+static void
+pgcolumnar_maintenance_hold(void)
+{
+	long		remaining = (long) pgcolumnar_maintenance_hold_ms;
+
+	while (remaining > 0)
+	{
+		long		slice = Min(remaining, 1000L);
+		int			rc;
+
+		rc = WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+					   slice, PG_WAIT_EXTENSION);
+		if (rc & WL_LATCH_SET)
+			ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+		remaining -= slice;
+	}
+}
+
 Datum
 pgcolumnar_compact_rewrite(PG_FUNCTION_ARGS)
 {
@@ -865,6 +894,9 @@ pgcolumnar_compact_rewrite(PG_FUNCTION_ARGS)
 	}
 
 	PgColumnarRequireTableOwner(rel);
+
+	/* dev/test: hold SUEL so the daemon's yield is observable (#415) */
+	pgcolumnar_maintenance_hold();
 
 	rewritten = pgcolumnar_rewrite_partial_groups(rel, minFrac, maxGroups);
 

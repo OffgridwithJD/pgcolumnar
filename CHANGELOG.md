@@ -55,6 +55,26 @@ which was true until that script existed.
   directly. It is `SECURITY DEFINER` and checks that the caller may `SELECT` the
   table, so the owner can run it without superuser rights.
 
+- `pgcolumnar.autovacuum`, a maintenance daemon for the online upkeep that core
+  autovacuum cannot reach (#415). pgColumnar's `compact_rewrite` and `recluster`
+  live in extension functions, not table access method callbacks, so core
+  autovacuum never runs them. A table's dead rows and clustering decay then
+  accumulate until someone runs the verbs by hand. This daemon runs them for you.
+
+  It is off by default. When on, a launcher wakes every
+  `pgcolumnar.autovacuum_naptime` seconds (default 60) and starts one worker per
+  database. Each worker asks `pgcolumnar.maintenance_due()` which tables crossed a
+  threshold, then runs the recommended verb over SPI in its own transaction.
+
+  Two properties make it safe unattended. It calls only the
+  `ShareUpdateExclusiveLock` verbs, never `vacuum`, `vacuum_sorted`, or `cluster`,
+  so it cannot block a reader or a writer. And it yields the way autovacuum does:
+  the worker sets `PROC_IS_AUTOVACUUM`, so the lock manager cancels its
+  maintenance the moment a backend queues for a stronger lock. New settings:
+  `pgcolumnar.autovacuum`, `autovacuum_naptime`, `autovacuum_compact_threshold`
+  (0.2), and `autovacuum_recluster_threshold` (0.05). See the administration
+  guide for the operator's view.
+
 - `pgcolumnar.parallel_flush` dispatches a stripe flush across background workers
   (#445). Default off. When on, a flush of two or more columns fans the per-column
   encode and compress work out to a worker pool. Any column a worker does not

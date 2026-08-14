@@ -50,6 +50,8 @@ SUITES=(
 	arrow_nested
 	arrow_nested_import
 	audit
+	autovacuum
+	autovacuum_yield
 	batch_fold_explain
 	bench_guards
 	bloom_lazy
