@@ -899,6 +899,16 @@ CREATE FUNCTION pgcolumnar.read_parquet(path text)
 COMMENT ON FUNCTION pgcolumnar.read_parquet(text)
 	IS 'read a Parquet file, directory, or glob in place as a set of rows; requires a column definition list covering every leaf column, e.g. SELECT * FROM pgcolumnar.read_parquet(path) AS t(id int, name text) (Phase G)';
 
+CREATE FUNCTION pgcolumnar.read_avro_manifest(path text)
+	RETURNS TABLE(status integer, content integer, file_path text,
+				  file_format text, record_count bigint,
+				  file_size_in_bytes bigint, partition text)
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_read_avro_manifest';
+
+COMMENT ON FUNCTION pgcolumnar.read_avro_manifest(text)
+	IS 'decode an Apache Iceberg Avro manifest file and report its data-file entries; the first step of Iceberg read support (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *
