@@ -90,10 +90,22 @@ Two designs settled here:
    so the location is the parent of the `metadata/` dir). Each recorded path has
    its `location` prefix stripped and is re-rooted onto the actual root; a
    recorded path **not under** `location` is refused (`22023`), never read, so a
-   tampered table cannot make the backend open an arbitrary server file. The
-   suite copies the committed warehouse to a different directory, so the recorded
-   root and the actual root genuinely differ and rebasing is exercised, with an
-   arm asserting no returned path leaks the recorded root.
+   tampered table cannot make the backend open an arbitrary server file.
+
+   The boundary is not a byte-prefix match -- that was a real bug ChronicallyJD
+   reproduced on the first 3b revision (`<location>/../../etc/passwd` shares the
+   prefix and escapes when re-rooted; `<location>EVIL/x` shares the bytes as a
+   sibling). `ice_rebase` therefore (a) requires the recorded path under
+   `location` on a **path boundary** (next byte `/` or end), rejecting the
+   sibling, and (b) re-roots, then **`canonicalize_path`s the result and
+   re-checks containment** under the canonicalized actual root, collapsing any
+   `..` and rejecting a traversal escape. The suite copies the committed
+   warehouse to a different directory (recorded root != actual root), and asserts
+   rebased paths under the actual root, no leaked recorded root, and three
+   refusal payloads -- foreign absolute, `..` traversal, sibling prefix -- each
+   `22023`. The traversal target is a real server file (`/etc/hostname`), so the
+   removal proof (drop the canonicalization) reads it and returns `XX001` (bad
+   Avro magic) instead of `22023`: the boundary is load-bearing.
 2. **Loud delete refusal (`0A000`).** Refuses if any `manifest_file.content != 0`
    (a delete manifest, caught at the manifest-list level without opening it) or
    any `manifest_entry.content != 0` / `status == 2`. pyiceberg 0.11.1 **cannot**

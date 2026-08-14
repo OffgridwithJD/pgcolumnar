@@ -304,29 +304,6 @@ ice_actual_location(const char *metadata_path)
 	return ice_dirname(metadir);
 }
 
-/*
- * Rebase a path recorded in the table onto the table's actual location. Both
- * roots are plain filesystem paths (any "file://" stripped). A recorded path
- * that is not under the recorded location is refused rather than read, so a
- * tampered or foreign table cannot make us open an arbitrary server file.
- */
-static char *
-ice_rebase(const char *recorded_root, const char *actual_root,
-		   const char *recorded_path, const char *what, const char *mdpath)
-{
-	const char *p = recorded_path;
-	size_t		rlen = strlen(recorded_root);
-
-	if (strncmp(p, "file://", 7) == 0)
-		p += 7;
-	if (strncmp(p, recorded_root, rlen) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("iceberg: %s path \"%s\" from \"%s\" is not under the table location \"%s\"",
-						what, recorded_path, mdpath, recorded_root)));
-	return psprintf("%s%s", actual_root, p + rlen);
-}
-
 /* strip a leading "file://" scheme from a recorded root, in place-ish */
 static const char *
 ice_strip_scheme(const char *path)
@@ -334,6 +311,54 @@ ice_strip_scheme(const char *path)
 	if (strncmp(path, "file://", 7) == 0)
 		return path + 7;
 	return path;
+}
+
+/*
+ * Rebase a path recorded in the table onto the table's actual location, and
+ * refuse anything that would escape that location. This is the arbitrary-file
+ * -read boundary: `recorded_path` comes from an untrusted metadata.json, so a
+ * byte-prefix match is not enough -- `<location>/../../etc/passwd` shares the
+ * prefix, and `<location>EVIL/x` shares the bytes but is a sibling. So:
+ *
+ *   1. require the recorded path to sit under `recorded_root` on a PATH
+ *      boundary (the next byte is '/' or end), which rejects the sibling;
+ *   2. re-root onto `actual_root`, then canonicalize the result and re-check
+ *      containment, which collapses any ".." and rejects a traversal escape.
+ *
+ * `actual_root` is passed already canonicalized so the containment test compares
+ * like with like.
+ */
+static char *
+ice_rebase(const char *recorded_root, const char *actual_root,
+		   const char *recorded_path, const char *what, const char *mdpath)
+{
+	const char *p = ice_strip_scheme(recorded_path);
+	size_t		rlen = strlen(recorded_root);
+	size_t		alen;
+	char	   *cand;
+
+	/* tolerate a trailing slash on the recorded location */
+	while (rlen > 1 && recorded_root[rlen - 1] == '/')
+		rlen--;
+
+	if (strncmp(p, recorded_root, rlen) != 0 ||
+		(p[rlen] != '\0' && p[rlen] != '/'))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("iceberg: %s path \"%s\" from \"%s\" is not under the table location \"%s\"",
+						what, recorded_path, mdpath, recorded_root)));
+
+	cand = psprintf("%s%s", actual_root, p + rlen);
+	canonicalize_path(cand);	/* collapse any ".." / "." / "//" segments */
+
+	alen = strlen(actual_root);
+	if (strncmp(cand, actual_root, alen) != 0 ||
+		(cand[alen] != '\0' && cand[alen] != '/'))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("iceberg: %s path \"%s\" from \"%s\" escapes the table location \"%s\"",
+						what, recorded_path, mdpath, actual_root)));
+	return cand;
 }
 
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_current_snapshot);
@@ -455,9 +480,12 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 	if (sc == NULL)
 		return (Datum) 0;		/* no current snapshot -> no data files */
 
-	/* the recorded table root, and where the table actually sits now */
+	/* the recorded table root, and where the table actually sits now. The
+	 * actual root is canonicalized once here so ice_rebase can test path
+	 * containment against a normalized form. */
 	recorded_root = ice_strip_scheme(ice_str_required(&jb->root, "location", path));
 	actual_root = ice_actual_location(path);
+	canonicalize_path(actual_root);
 
 	ml_recorded = ice_str_required(sc, "manifest-list", path);
 	ml_path = ice_rebase(recorded_root, actual_root, ml_recorded,

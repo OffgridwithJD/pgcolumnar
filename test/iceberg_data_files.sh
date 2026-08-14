@@ -63,20 +63,37 @@ check "no returned path leaks the recorded root" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_data_files('$MD')
 	      WHERE file_path LIKE '/tmp/pgc_ice_wh/%'")" "0"
 
-# ---- a path outside the table location is refused, not read ----------------
-# point a copied metadata.json's manifest-list at an absolute path outside the
-# recorded location; the resolver must refuse rather than open it.
-ESC="$PGC_WORKDIR/escape.metadata.json"
-python3 - "$MD" "$ESC" <<'PY'
+# ---- a path outside the table location is refused, NOT read ----------------
+# The arbitrary-file-read boundary. A tampered metadata.json can point the
+# manifest-list anywhere; the resolver must refuse before opening it. Three
+# payloads, each a distinct bypass of a naive prefix check:
+#   (a) a plainly foreign absolute path (no shared prefix)
+#   (b) a ".." traversal that shares the location prefix but escapes when
+#       re-rooted -- the boundary must canonicalize and reject it
+#   (c) a sibling that shares the byte prefix but is not on a path boundary
+# All must be 22023 ("not under / escapes the table location"). Critically NOT
+# XX001 (bad Avro magic): an XX001 means the backend OPENED and read the file,
+# i.e. the boundary was bypassed. The traversal target is a real server file
+# (/etc/hostname) precisely so a bypass reads it and returns XX001, making the
+# regression visible.
+LOC="$(python3 -c "import json;print(json.load(open('$MD'))['location'].replace('file://',''))")"
+esc_case() {  # $1 payload manifest-list, writes a metadata variant, echoes its path
+	local payload="$1" out="$PGC_WORKDIR/esc_$2.metadata.json"
+	python3 - "$MD" "$out" "$payload" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
-s = m["snapshots"][-1]
-s["manifest-list"] = "file:///etc/passwd"      # outside the table location
+m["snapshots"][-1]["manifest-list"] = sys.argv[3]
 json.dump(m, open(sys.argv[2], "w"))
 PY
-chmod 644 "$ESC"
-check "a manifest-list outside the table location is refused (22023)" \
-	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$ESC')")" "22023"
+	chmod 644 "$out"; echo "$out"
+}
+check "a foreign absolute manifest-list is refused (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file:///etc/passwd" a)')")" "22023"
+check "a .. traversal manifest-list is refused, not read (22023, not XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://$LOC/../../../../../../../etc/hostname" b)')")" "22023"
+check "a sibling-prefix manifest-list is refused (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://${LOC}EVIL/x.avro" c)')")" "22023"
+check "backend still up after the traversal attempts" "$(q 'SELECT 1')" "1"
 
 # ---- deletes are refused, not ignored --------------------------------------
 # pyiceberg 0.11.1 cannot write merge-on-read deletes, so craft the deny input:
