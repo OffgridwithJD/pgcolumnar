@@ -5,9 +5,10 @@ pgColumnar has two kinds of settings:
 - Server settings. These settings use the `pgcolumnar.` prefix. The list is
   below. For almost all of them, you do not need a special privilege. You can set
   them in `postgresql.conf`, for one session with `SET`, for one role, or for one
-  database. There are two exceptions. `pgcolumnar.enable_end_truncation` needs
-  superuser. You can set `pgcolumnar.unique_lock_buckets` only at server start.
-  The row for each exception gives this condition again.
+  database. A few need a special privilege or a specific time. Setting
+  `pgcolumnar.enable_end_truncation` or `pgcolumnar.objstore_allowed_endpoints`
+  needs superuser. You can set `pgcolumnar.unique_lock_buckets` only at server
+  start. The row for each of these gives the condition again.
 - Per-table storage options. You set these options with
   `pgcolumnar.set_options`. They apply to one table. That table uses them when it
   writes new data.
