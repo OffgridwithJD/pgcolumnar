@@ -575,12 +575,14 @@ SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
 
 ### The pgcolumnar_parquet foreign-data wrapper
 
-Exposes a Parquet file, directory, or glob as a foreign table. The scan pushes
-work down: row groups whose min/max statistics exclude the query's predicate are
-skipped, and only referenced columns are decoded. Skipping requires a
-`column op constant` clause over an integer or floating-point column with a
-constant of the same type; [limitations.md](limitations.md) lists the conditions.
-A scan that skips nothing still returns correct rows.
+Exposes a Parquet file, directory, or glob as a foreign table. The scan streams
+one row group at a time. It holds a single row group rather than the whole file.
+A `LIMIT` the plan satisfies early leaves the rest of the file undecoded. It
+pushes work down: row groups whose min/max statistics exclude the
+query's predicate are skipped, and only referenced columns are decoded. Skipping
+requires a `column op constant` clause over an integer or floating-point column
+with a constant of the same type; [limitations.md](limitations.md) lists the
+conditions. A scan that skips nothing still returns correct rows.
 
 The `path` option can name a local file, directory, or glob, or an
 object-storage URL for a single object. For a remote server the endpoint and
@@ -606,8 +608,8 @@ CREATE FOREIGN TABLE events_p (id int, amount numeric(12,2), dt date, region tex
 
 SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
 
--- EXPLAIN ANALYZE reports Row Groups, Row Groups Skipped, Columns Read,
--- Columns Total, and Files.
+-- EXPLAIN ANALYZE reports Row Groups, Row Groups Skipped, Row Groups Decoded,
+-- Columns Read, Columns Total, and Files.
 EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ```
 

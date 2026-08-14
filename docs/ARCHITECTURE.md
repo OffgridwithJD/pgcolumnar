@@ -278,13 +278,18 @@ feeds three surfaces over the same file parse and type inference:
 - `import_parquet` inserts into a target table via `table_tuple_insert`.
 - `read_parquet` returns rows as a set-returning function, and `parquet_schema`
   reports the leaf columns and their inferred PostgreSQL types.
-- The `pgcolumnar_parquet` foreign-data wrapper materializes the file into a
-  tuplestore that the scan drains. It pushes predicates down: it skips a row
-  group when the minimum and maximum statistics prove that the group is empty.
-  This applies to fixed-width ordered types only, and it guards against NaN and
-  against an inverted interval. It also projects: it decodes only the columns
-  that the plan refers to. It computes that set from the reltarget and the quals
-  of the base rel.
+- The `pgcolumnar_parquet` foreign-data wrapper streams the file one row group
+  at a time. Each scan step decodes the next row group into a bounded buffer that
+  the executor drains. The scan holds one row group rather than the whole file. A
+  `LIMIT` that the plan satisfies early leaves the remaining groups and files
+  undecoded. `EXPLAIN ANALYZE` reports `Row Groups Decoded`, the number of groups
+  the scan actually decoded, which a `LIMIT` reduces. It pushes
+  predicates down: it skips a row group when the minimum and maximum statistics
+  prove that the group is empty. This applies to fixed-width ordered types only,
+  and it guards against NaN and against an inverted interval. It also projects:
+  it decodes only the columns that the plan refers to. It computes that set from
+  the reltarget and the quals of the base rel. `read_parquet`, a set-returning
+  function, still materializes its whole result.
 
 A `path` that is a directory or a glob resolves to a sorted list of files. The
 same core reads each file into the one sink. The decode buffers of a file are

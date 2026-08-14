@@ -379,7 +379,49 @@ check "the uncompressed source file still reads" \
 	"$(q "SELECT count(*), sum(id) FROM pgcolumnar.read_parquet('$W/plain.parquet') AS t(id int);" | tr '|' ' ')" \
 	"200 19900"
 
+# ---- #620: the FDW streams row groups; a LIMIT decodes fewer ----------------
+# The FDW no longer materializes the whole file into a tuplestore. It decodes one
+# row group at a time, so a LIMIT that the executor satisfies early leaves the
+# rest of the file undecoded. "Row Groups Decoded" is the work-done counter added
+# for this: a full scan decodes every group; a LIMIT inside the first group
+# decodes one; a LIMIT that spills into the second decodes two. On the eager
+# model this counter did not exist and every group was decoded up front, so this
+# is the streaming proof. A four-row-group file (1000 rows each).
+STREAMP="$W/stream_groups.parquet"
+python3 - "$STREAMP" <<'PY'
+import sys, pyarrow as pa, pyarrow.parquet as pq
+n = 4000
+tbl = pa.table({"id": pa.array(range(n), pa.int32()),
+                "v":  pa.array([i * 2 for i in range(n)], pa.int64())})
+pq.write_table(tbl, sys.argv[1], row_group_size=1000)
+assert pq.ParquetFile(sys.argv[1]).num_row_groups == 4
+PY
+psql_run "CREATE SERVER pqs FOREIGN DATA WRAPPER pgcolumnar_parquet;"
+psql_run "CREATE FOREIGN TABLE fts (id int4, v int8) SERVER pqs OPTIONS (path '$STREAMP');"
+
+decoded_for() {  # decoded_for SQL -> the Row Groups Decoded count for that plan
+	q "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $1" \
+		| grep 'Row Groups Decoded' | grep -oE '[0-9]+' | head -1
+}
+
+check "streaming: full scan content is correct" \
+	"$(q 'SELECT count(*), sum(id), sum(v) FROM fts;' | tr '|' ' ')" \
+	"4000 7998000 15996000"
+check "streaming: a full scan decodes all four row groups" \
+	"$(decoded_for 'SELECT * FROM fts')" "4"
+check "streaming: LIMIT 10 (inside group 0) decodes one row group" \
+	"$(decoded_for 'SELECT * FROM fts LIMIT 10')" "1"
+check "streaming: LIMIT 1010 (into group 1) decodes two row groups" \
+	"$(decoded_for 'SELECT * FROM fts LIMIT 1010')" "2"
+# a rescan re-streams from the top rather than rewinding a buffer. Force a
+# nested loop so fts is re-scanned once per outer row, and check the result is
+# correct across rescans. outer2 = {1,2}; fts.id = o.k matches id 1 then id 2.
+psql_run "CREATE TABLE outer2 (k int); INSERT INTO outer2 VALUES (1),(2);"
+check "streaming: rescan under a nested loop is correct" \
+	"$(q "SET enable_hashjoin=off; SET enable_mergejoin=off;
+	      SELECT count(*) FROM outer2 o JOIN fts ON fts.id = o.k;" | tail -1)" "2"
+
 rm -f "$W/huge_sparse.parquet" "$W/zero_pages.parquet" "$W/bad_size.parquet" \
 	"$W/noise_pages.parquet" "$W/bad_offset.parquet" "$W/two_dicts.parquet" \
-	"$W/v2_levels.parquet" "$W/allnull.parquet"
+	"$W/v2_levels.parquet" "$W/allnull.parquet" "$W/stream_groups.parquet"
 pgc_summary
