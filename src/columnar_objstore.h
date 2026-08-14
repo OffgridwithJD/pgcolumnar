@@ -33,10 +33,11 @@
 
 #include "postgres.h"
 
-#define PGCOLUMNAR_OBJSTORE_ABI 2
+#define PGCOLUMNAR_OBJSTORE_ABI 3
 
-/* An open remote object. The module owns everything behind this. */
+/* An open remote object (read) / upload (write). Module owns both. */
 typedef struct PgColumnarObjHandle PgColumnarObjHandle;
+typedef struct PgColumnarObjSink PgColumnarObjSink;
 
 /*
  * Connection configuration resolved from the FDW catalogs (#393 M4). NULL
@@ -85,6 +86,25 @@ typedef struct PgColumnarObjStoreApi
 	void		(*read) (PgColumnarObjHandle *h, int64 off, void *buf, size_t n);
 
 	void		(*close) (PgColumnarObjHandle *h);
+
+	/*
+	 * Write side (#394). sink_create opens an upload for `url`; sink_write
+	 * appends (the module buffers into >= part-size chunks and starts a
+	 * multipart upload when the total crosses one part); sink_finish commits
+	 * (a single PUT for a small object, CompleteMultipartUpload otherwise) and
+	 * is the ONLY point the object becomes visible at its final name;
+	 * sink_abort tears down without publishing and never raises, so it is safe
+	 * from a PG_CATCH. delete_object removes a completed object by key (the
+	 * parallel dispatcher's remote cleanup). All raise on failure except
+	 * sink_abort. cfg may be NULL (the export function paths).
+	 */
+	PgColumnarObjSink *(*sink_create) (const char *url,
+									   const PgColumnarObjStoreConfig *cfg);
+	void		(*sink_write) (PgColumnarObjSink *s, const void *buf, size_t n);
+	void		(*sink_finish) (PgColumnarObjSink *s);
+	void		(*sink_abort) (PgColumnarObjSink *s);
+	void		(*delete_object) (const char *url,
+								  const PgColumnarObjStoreConfig *cfg);
 } PgColumnarObjStoreApi;
 
 /*

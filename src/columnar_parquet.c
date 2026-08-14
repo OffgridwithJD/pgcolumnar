@@ -999,7 +999,7 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 							format_type_be(att->atttypid))));
 	}
 
-	snk = PgColumnarSinkOpenLocal(filepath);
+	snk = PgColumnarSinkOpen(filepath);
 	PG_TRY();
 	{
 	PgColumnarSinkWrite(snk, "PAR1", 4);	/* magic header */

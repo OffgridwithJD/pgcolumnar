@@ -145,8 +145,10 @@ check_ratio "B: buffered/unbuffered request ratio" "$FULL_BUF" "$FULL_UNBUF" "0.
 # on an empty log, which is exactly what the RED run produced.
 : > "$HTTP_LOG"
 q "SELECT sum(c0) FROM fhttp" >/dev/null
+# log columns since #394: METHOD path query range ($4 is the range; a GET's
+# query is always "-", so the range moved from $3 to $4).
 NGETS="$(awk '$1 == "GET"' "$HTTP_LOG" | wc -l | tr -d ' ')"
-NORANGE="$(awk '$1 == "GET" && $3 == "-"' "$HTTP_LOG" | wc -l | tr -d ' ')"
+NORANGE="$(awk '$1 == "GET" && $4 == "-"' "$HTTP_LOG" | wc -l | tr -d ' ')"
 check "premise: the range-audit phase logged GETs" \
 	"$([ "${NGETS:-0}" -gt 0 ] 2>/dev/null && echo yes)" "yes"
 check_num "B: every GET carried a Range header" "$NORANGE" "0"

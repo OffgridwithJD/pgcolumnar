@@ -135,6 +135,7 @@ typedef struct OsResponse
 	int64		content_length; /* -1 when absent */
 	bool		chunked;
 	bool		conn_close;
+	char		etag[80];		/* PUT part response ETag, "" when absent (#394) */
 } OsResponse;
 
 static dlist_head os_open_handles = DLIST_STATIC_INIT(os_open_handles);
@@ -799,6 +800,18 @@ os_read_head(PgColumnarObjHandle *h, OsResponse *resp)
 			else if (pg_strncasecmp(line, "Connection:", 11) == 0 &&
 					 strstr(line, "close") != NULL && strstr(line, "close") < eol)
 				resp->conn_close = true;
+			else if (pg_strncasecmp(line, "ETag:", 5) == 0)
+			{
+				const char *p = line + 5;
+				int			i = 0;
+
+				while (p < eol && (*p == ' ' || *p == '\t'))
+					p++;
+				while (p < eol && *p != '\r' && *p != '\n' &&
+					   i < (int) sizeof(resp->etag) - 1)
+					resp->etag[i++] = *p++;
+				resp->etag[i] = '\0';
+			}
 			line = eol + 1;
 		}
 	}
@@ -987,8 +1000,7 @@ os_hex(const uint8 *in, size_t n, char *out)	/* out: 2n+1 bytes */
  * AWS UriEncode for the path: unreserved bytes and '/' pass, everything else
  * is %XX with UPPERCASE hex. Hand-written per AWS's own recommendation:
  * platform encoders disagree on exactly the bytes that break signatures
- * (space, '+', '=', '~'). The query-string variant (encode '/') is not needed
- * until a listing operation exists.
+ * (space, '+', '=', '~').
  */
 static void
 os_uriencode_path(StringInfo out, const char *s)
@@ -1004,6 +1016,34 @@ os_uriencode_path(StringInfo out, const char *s)
 		else
 			appendStringInfo(out, "%%%02X", c);
 	}
+}
+
+/*
+ * The query-string variant: '/' is NOT exempt (SigV4 canonical-query encoding
+ * percent-encodes every reserved byte). Used for a multipart UploadId value,
+ * which S3 returns opaque and AWS ids can carry reserved characters; encoding
+ * it here means the query the client signs matches AWS's canonicalization
+ * regardless of what the server chose (#394 review). Garage/MinIO ids are
+ * unreserved, so this is a no-op there and byte-identical to before.
+ */
+static char *
+os_uriencode_query(const char *s)
+{
+	StringInfoData out;
+
+	initStringInfo(&out);
+	for (; *s != '\0'; s++)
+	{
+		unsigned char c = (unsigned char) *s;
+
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~')
+			appendStringInfoChar(&out, (char) c);
+		else
+			appendStringInfo(&out, "%%%02X", c);
+	}
+	return out.data;
 }
 
 /*
@@ -1508,12 +1548,491 @@ objstore_close(PgColumnarObjHandle *h)
 		os_free_handle(h);
 }
 
+/* ------------------------------------------------------------- write side */
+
+/* One staged part is 8 MiB, comfortably above S3's 5 MiB non-final minimum.
+ * A dev GUC lowers it so a small fixture exercises the multipart path without
+ * generating tens of MiB (the same shape as pgcolumnar.sink_fail_after). */
+#define OS_PART_SIZE_DEFAULT	(8 * 1024 * 1024)
+
+static int
+os_part_size(void)
+{
+	const char *v =
+		GetConfigOption("pgcolumnar.objstore_part_size", true, false);
+	int			n = (v != NULL && v[0] != '\0') ? atoi(v) : 0;
+
+	return n > 0 ? n : OS_PART_SIZE_DEFAULT;
+}
+
+struct PgColumnarObjSink
+{
+	PgColumnarObjHandle *h;		/* the resolved connection + credentials */
+	StringInfoData buf;			/* bytes not yet flushed as a part */
+	char	   *uploadId;		/* NULL until a multipart upload begins */
+	StringInfoData completeXml; /* <Part> list built as parts complete */
+	int			partNo;			/* next part number (1-based) */
+	int			partSize;		/* frozen at create from the GUC */
+	int64		total;			/* bytes handed to sink_write */
+};
+
+/*
+ * Resolve a write target into a connection handle exactly as the read path
+ * does (endpoint, credentials, path-style key, allow-list and link-local
+ * enforced at connect), minus the HEAD. Shares os_resolve_s3 for s3:// and
+ * the plain authority parse for http(s)://.
+ */
+static PgColumnarObjHandle *
+os_write_handle(const char *url, const PgColumnarObjStoreConfig *cfg)
+{
+	PgColumnarObjHandle *h;
+	bool		isS3 = (pg_strncasecmp(url, "s3://", 5) == 0);
+	MemoryContext oldcxt;
+
+	if (!os_callback_registered)
+	{
+		RegisterResourceReleaseCallback(os_resource_release, NULL);
+		os_callback_registered = true;
+	}
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	h = (PgColumnarObjHandle *) palloc0(sizeof(PgColumnarObjHandle));
+	h->fd = -1;
+	h->url = pstrdup(url);
+	h->rb = (uint8 *) palloc(OS_RBUF);
+	MemoryContextSwitchTo(oldcxt);
+	dlist_push_head(&os_open_handles, &h->node);
+
+	if (isS3)
+		os_resolve_s3(h, url, cfg);
+	else
+	{
+		bool		isHttps = (pg_strncasecmp(url, "https://", 8) == 0);
+		const char *authority = url + (isHttps ? 8 : 7);
+		const char *slash = strchr(authority, '/');
+		const char *colon;
+
+		if (slash == NULL || slash == authority)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("columnar: \"%s\" has no object path", url)));
+		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		h->abspath = pstrdup(slash);
+		colon = memchr(authority, ':', slash - authority);
+		if (colon != NULL)
+		{
+			h->host = pnstrdup(authority, colon - authority);
+			h->port = atoi(colon + 1);
+		}
+		else
+		{
+			h->host = pnstrdup(authority, slash - authority);
+			h->port = isHttps ? 443 : 80;
+		}
+		MemoryContextSwitchTo(oldcxt);
+		h->tls = isHttps;
+	}
+	if (h->port <= 0 || h->port > 65535 || h->host == NULL || h->host[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: \"%s\" has an invalid host or port", url)));
+	return h;
+}
+
+/*
+ * Sign a write request. Unlike the read signer this carries a canonical QUERY
+ * string (multipart uses ?uploads, ?partNumber=&uploadId=, ?uploadId=) and a
+ * REAL payload hash (the SHA-256 of the body), both of which SigV4 folds into
+ * the canonical request. Caller passes the already-canonicalized query (sorted,
+ * UriEncoded) and the payload hash hex.
+ */
+static void
+os_sign_write(PgColumnarObjHandle *h, const char *method, const char *canonPath,
+			  const char *canonQuery, const char *payloadHex, StringInfo headers)
+{
+	char		amzdate[20];
+	char		datestamp[9];
+	pg_time_t	now = (pg_time_t) time(NULL);
+	StringInfoData creq;
+	StringInfoData sts;
+	StringInfoData signedlist;
+	uint8		digest[PG_SHA256_DIGEST_LENGTH];
+	char		hexdigest[PG_SHA256_DIGEST_LENGTH * 2 + 1];
+	char		signature[PG_SHA256_DIGEST_LENGTH * 2 + 1];
+
+	pg_strftime(amzdate, sizeof(amzdate), "%Y%m%dT%H%M%SZ", pg_gmtime(&now));
+	memcpy(datestamp, amzdate, 8);
+	datestamp[8] = '\0';
+
+	if (strcmp(h->sigDate, datestamp) != 0)
+	{
+		StringInfoData seed;
+		uint8		k[PG_SHA256_DIGEST_LENGTH];
+
+		initStringInfo(&seed);
+		appendStringInfo(&seed, "AWS4%s", h->secret);
+		os_hmac256((uint8 *) seed.data, seed.len, (uint8 *) datestamp, 8, k);
+		os_hmac256(k, sizeof(k), (uint8 *) h->region, strlen(h->region), k);
+		os_hmac256(k, sizeof(k), (uint8 *) "s3", 2, k);
+		os_hmac256(k, sizeof(k), (uint8 *) "aws4_request", 12, k);
+		memcpy(h->sigKey, k, sizeof(k));
+		strlcpy(h->sigDate, datestamp, sizeof(h->sigDate));
+		pfree(seed.data);
+	}
+
+	initStringInfo(&signedlist);
+	appendStringInfoString(&signedlist,
+						   "host;x-amz-content-sha256;x-amz-date");
+	if (h->token != NULL)
+		appendStringInfoString(&signedlist, ";x-amz-security-token");
+
+	initStringInfo(&creq);
+	appendStringInfo(&creq, "%s\n%s\n%s\n", method, canonPath, canonQuery);
+	appendStringInfo(&creq, "host:%s:%d\n", h->host, h->port);
+	appendStringInfo(&creq, "x-amz-content-sha256:%s\n", payloadHex);
+	appendStringInfo(&creq, "x-amz-date:%s\n", amzdate);
+	if (h->token != NULL)
+		appendStringInfo(&creq, "x-amz-security-token:%s\n", h->token);
+	appendStringInfo(&creq, "\n%s\n%s", signedlist.data, payloadHex);
+
+	os_sha256((uint8 *) creq.data, creq.len, digest);
+	os_hex(digest, sizeof(digest), hexdigest);
+
+	initStringInfo(&sts);
+	appendStringInfo(&sts, "AWS4-HMAC-SHA256\n%s\n%s/%s/s3/aws4_request\n%s",
+					 amzdate, datestamp, h->region, hexdigest);
+	os_hmac256(h->sigKey, sizeof(h->sigKey),
+			   (uint8 *) sts.data, sts.len, digest);
+	os_hex(digest, sizeof(digest), signature);
+
+	appendStringInfo(headers, "x-amz-content-sha256: %s\r\n", payloadHex);
+	appendStringInfo(headers, "x-amz-date: %s\r\n", amzdate);
+	if (h->token != NULL)
+		appendStringInfo(headers, "x-amz-security-token: %s\r\n", h->token);
+	appendStringInfo(headers,
+					 "Authorization: AWS4-HMAC-SHA256 Credential=%s/%s/%s/s3/aws4_request, "
+					 "SignedHeaders=%s, Signature=%s\r\n",
+					 h->akid, datestamp, h->region, signedlist.data, signature);
+	pfree(creq.data);
+	pfree(sts.data);
+	pfree(signedlist.data);
+}
+
+/*
+ * One signed write request (PUT/POST/DELETE) with an optional body, a single
+ * reconnect on a stale keep-alive. `rawQuery` is the query as it goes on the
+ * wire AND the canonical query the signature covers: the caller builds it with
+ * keys already sorted (partNumber < uploadId; single-key queries are trivially
+ * sorted) and any UploadId value already percent-encoded through
+ * os_uriencode_query, so wire and canonical are byte-identical. The response
+ * body, if any, is captured into *outBody (palloc'd) for the caller.
+ */
+static void
+os_write_request(PgColumnarObjHandle *h, const char *method, const char *rawQuery,
+				 const uint8 *body, int64 bodylen, OsResponse *resp,
+				 char **outBody)
+{
+	uint8		phash[PG_SHA256_DIGEST_LENGTH];
+	char		payloadHex[PG_SHA256_DIGEST_LENGTH * 2 + 1];
+	int			attempt;
+
+	os_sha256(body, (size_t) bodylen, phash);
+	os_hex(phash, sizeof(phash), payloadHex);
+
+	for (attempt = 0;; attempt++)
+	{
+		StringInfoData req;
+		bool		fresh;
+
+		if (h->fd < 0)
+			os_connect(h);
+		fresh = (attempt == 0 && h->served == 0);
+
+		initStringInfo(&req);
+		appendStringInfo(&req, "%s %s%s%s HTTP/1.1\r\nHost: %s:%d\r\n",
+						 method, h->abspath, rawQuery[0] ? "?" : "", rawQuery,
+						 h->host, h->port);
+		appendStringInfo(&req, "Content-Length: %lld\r\n", (long long) bodylen);
+		os_sign_write(h, method, h->abspath, rawQuery, payloadHex, &req);
+		appendStringInfoString(&req, "User-Agent: pgcolumnar-objstore/1\r\n\r\n");
+
+		if (os_send_all(h, req.data, req.len) &&
+			(bodylen == 0 || os_send_all(h, (const char *) body, bodylen)) &&
+			os_read_head(h, resp))
+		{
+			pfree(req.data);
+			break;
+		}
+		pfree(req.data);
+		os_disconnect(h);
+		if (!fresh && attempt == 0)
+			continue;			/* stale keep-alive: one reconnect */
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: %s to \"%s\" failed before a response",
+						method, h->url)));
+	}
+
+	if (resp->status == 403)
+		os_reject_403(h, resp, true);
+
+	{
+		char	   *b = NULL;
+
+		if (!resp->chunked && resp->content_length > 0 &&
+			resp->content_length < 1024 * 1024)
+		{
+			b = palloc((Size) resp->content_length + 1);
+			os_read_exact(h, (uint8 *) b, resp->content_length);
+			b[resp->content_length] = '\0';
+		}
+		else if (resp->content_length > 0 || resp->chunked)
+			os_read_body(h, resp, NULL, 0);		/* drain */
+		if (outBody != NULL)
+			*outBody = b;
+		else if (b != NULL)
+			pfree(b);
+	}
+
+	if (resp->conn_close)
+		os_disconnect(h);
+	else
+		h->served++;
+}
+
+/* Upload the buffered bytes as the next multipart part; record its ETag. */
+static void
+os_flush_part(PgColumnarObjSink *s)
+{
+	OsResponse	resp;
+	char	   *body = NULL;
+	char	   *encId = os_uriencode_query(s->uploadId);
+	char	   *query = psprintf("partNumber=%d&uploadId=%s", s->partNo, encId);
+	const char *etag;
+
+	os_write_request(s->h, "PUT", query, (uint8 *) s->buf.data, s->buf.len,
+					 &resp, &body);
+	pfree(query);
+	pfree(encId);
+	if (resp.status != 200)
+		ereport(ERROR,
+				(errcode(ERRCODE_IO_ERROR),
+				 errmsg("columnar: uploading a part of \"%s\" failed (HTTP %d)",
+						s->h->url, resp.status)));
+	/* The part's ETag is the server's word for its bytes; CompleteMultipart
+	 * validates the list against it on a real S3, so echo it verbatim (already
+	 * quoted by the server). The fixture ignores it and concatenates by part
+	 * number, so both are satisfied. */
+	etag = resp.etag[0] ? resp.etag : "\"\"";
+	appendStringInfo(&s->completeXml,
+					 "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>",
+					 s->partNo, etag);
+	if (body != NULL)
+		pfree(body);
+	resetStringInfo(&s->buf);
+	s->partNo++;
+}
+
+static void
+os_begin_multipart(PgColumnarObjSink *s)
+{
+	OsResponse	resp;
+	char	   *body = NULL;
+	char	   *idStart;
+	char	   *idEnd;
+	MemoryContext oldcxt;
+
+	os_write_request(s->h, "POST", "uploads=", NULL, 0, &resp, &body);
+	if (resp.status != 200 || body == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_IO_ERROR),
+				 errmsg("columnar: could not start a multipart upload for \"%s\" (HTTP %d)",
+						s->h->url, resp.status)));
+	idStart = strstr(body, "<UploadId>");
+	idEnd = idStart ? strstr(idStart, "</UploadId>") : NULL;
+	if (idStart == NULL || idEnd == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_IO_ERROR),
+				 errmsg("columnar: multipart upload for \"%s\" returned no UploadId",
+						s->h->url)));
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	s->uploadId = pnstrdup(idStart + 10, idEnd - (idStart + 10));
+	MemoryContextSwitchTo(oldcxt);
+	s->partNo = 1;
+	pfree(body);
+}
+
+/*
+ * Free the sink and its TopMemoryContext-resident buffers (#394 review): the
+ * handle is freed by the caller (finish/abort) before this. Called at every
+ * terminal point so a long-lived session running many exports does not
+ * accumulate them.
+ */
+static void
+os_sink_free(PgColumnarObjSink *s)
+{
+	if (s->buf.data != NULL)
+		pfree(s->buf.data);
+	if (s->completeXml.data != NULL)
+		pfree(s->completeXml.data);
+	if (s->uploadId != NULL)
+		pfree(s->uploadId);
+	pfree(s);
+}
+
+static PgColumnarObjSink *
+objstore_sink_create(const char *url, const PgColumnarObjStoreConfig *cfg)
+{
+	PgColumnarObjSink *s;
+	MemoryContext oldcxt;
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	s = (PgColumnarObjSink *) palloc0(sizeof(PgColumnarObjSink));
+	initStringInfo(&s->buf);
+	initStringInfo(&s->completeXml);
+	MemoryContextSwitchTo(oldcxt);
+	s->partSize = os_part_size();
+	s->h = os_write_handle(url, cfg);
+	return s;
+}
+
+static void
+objstore_sink_write(PgColumnarObjSink *s, const void *buf, size_t n)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+	appendBinaryStringInfo(&s->buf, (const char *) buf, (int) n);
+	MemoryContextSwitchTo(oldcxt);
+	s->total += (int64) n;
+
+	while (s->buf.len >= s->partSize)
+	{
+		StringInfoData rest;
+		int			carry = s->buf.len - s->partSize;
+
+		/* peel exactly one part; keep the remainder for the next flush */
+		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+		initStringInfo(&rest);
+		if (carry > 0)
+			appendBinaryStringInfo(&rest, s->buf.data + s->partSize, carry);
+		s->buf.len = s->partSize;
+		s->buf.data[s->partSize] = '\0';
+		if (s->uploadId == NULL)
+			os_begin_multipart(s);
+		os_flush_part(s);
+		pfree(s->buf.data);
+		s->buf = rest;
+		MemoryContextSwitchTo(oldcxt);
+	}
+}
+
+static void
+objstore_sink_finish(PgColumnarObjSink *s)
+{
+	OsResponse	resp;
+
+	if (s->uploadId == NULL)
+	{
+		/* small object: a single PUT is the whole story */
+		os_write_request(s->h, "PUT", "", (uint8 *) s->buf.data, s->buf.len,
+						 &resp, NULL);
+		if (resp.status != 200)
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg("columnar: writing \"%s\" failed (HTTP %d)",
+							s->h->url, resp.status)));
+	}
+	else
+	{
+		StringInfoData xml;
+		char	   *encId = os_uriencode_query(s->uploadId);
+		char	   *query = psprintf("uploadId=%s", encId);
+
+		if (s->buf.len > 0)			/* the final (short) part */
+			os_flush_part(s);
+		initStringInfo(&xml);
+		appendStringInfo(&xml, "<CompleteMultipartUpload>%s</CompleteMultipartUpload>",
+						 s->completeXml.data);
+		os_write_request(s->h, "POST", query, (uint8 *) xml.data, xml.len,
+						 &resp, NULL);
+		pfree(xml.data);
+		pfree(query);
+		pfree(encId);
+		if (resp.status != 200)
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg("columnar: completing the upload of \"%s\" failed (HTTP %d)",
+							s->h->url, resp.status)));
+	}
+	os_free_handle(s->h);
+	s->h = NULL;
+	os_sink_free(s);
+}
+
+static void
+objstore_sink_abort(PgColumnarObjSink *s)
+{
+	if (s == NULL)
+		return;
+	if (s->h == NULL)			/* finish already ran; just reclaim */
+	{
+		os_sink_free(s);
+		return;
+	}
+	/* best effort, never raises: an ABORT that itself failed must not mask
+	 * the error that triggered it */
+	PG_TRY();
+	{
+		if (s->uploadId != NULL)
+		{
+			OsResponse	resp;
+			char	   *encId = os_uriencode_query(s->uploadId);
+			char	   *query = psprintf("uploadId=%s", encId);
+
+			os_write_request(s->h, "DELETE", query, NULL, 0, &resp, NULL);
+			pfree(query);
+			pfree(encId);
+		}
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	os_free_handle(s->h);
+	s->h = NULL;
+	os_sink_free(s);
+}
+
+static void
+objstore_delete_object(const char *url, const PgColumnarObjStoreConfig *cfg)
+{
+	PgColumnarObjHandle *h = os_write_handle(url, cfg);
+	OsResponse	resp;
+
+	PG_TRY();
+	{
+		os_write_request(h, "DELETE", "", NULL, 0, &resp, NULL);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();		/* best effort, like the local unlink */
+	}
+	PG_END_TRY();
+	os_free_handle(h);
+}
+
 static const PgColumnarObjStoreApi objstore_api = {
 	.abi_version = PGCOLUMNAR_OBJSTORE_ABI,
 	.handles_url = objstore_handles_url,
 	.open = objstore_open,
 	.read = objstore_read,
 	.close = objstore_close,
+	.sink_create = objstore_sink_create,
+	.sink_write = objstore_sink_write,
+	.sink_finish = objstore_sink_finish,
+	.sink_abort = objstore_sink_abort,
+	.delete_object = objstore_delete_object,
 };
 
 const PgColumnarObjStoreApi *

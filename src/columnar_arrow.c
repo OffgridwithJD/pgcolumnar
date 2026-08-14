@@ -1052,7 +1052,7 @@ pgcolumnar_export_arrow(PG_FUNCTION_ARGS)
 		arrowcol_reset(&cols[i]);
 	}
 
-	snk = PgColumnarSinkOpenLocal(path);
+	snk = PgColumnarSinkOpen(path);
 	PG_TRY();
 	{
 
