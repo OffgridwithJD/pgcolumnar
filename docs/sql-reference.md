@@ -573,6 +573,21 @@ mean different things.
 SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
 ```
 
+### pgcolumnar.read_avro_manifest(path text) returns table(status int, content int, file_path text, file_format text, record_count bigint, file_size_in_bytes bigint, partition text)
+
+Decodes an Apache Iceberg Avro manifest file and reports its data-file entries.
+Each row is one entry: the file path, format, row count, byte size, and the
+partition rendered as `name=value`. The caller needs the `pg_read_server_files`
+role, which superusers hold. This is the first step of Iceberg support (#388). It
+is a standalone Avro object-container reader, decoded against the schema embedded
+in the file, so a v3 manifest reads structurally. It reads a local file. It does
+not resolve a table's snapshot or apply delete files, which are later steps.
+
+```sql
+SELECT file_path, record_count, partition
+  FROM pgcolumnar.read_avro_manifest('/data/warehouse/db/events/metadata/abc.avro');
+```
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams
@@ -641,9 +656,9 @@ dot-hidden names are skipped, as they are for a local directory. Hive
 `partition_columns` work over a remote prefix. A pattern or a prefix requires the
 object-store module, since only it can issue the listing.
 
-On write, `parallel_export_parquet` treats a remote URL as a prefix, writing one
-`part-NNNN.parquet` object under it per worker; every other function writes a
-single object at the exact key.
+On write, `parallel_export_parquet` treats a remote URL as a prefix. It writes one
+`part-NNNN.parquet` object under the prefix per worker. Every other write function
+writes a single object at the exact key.
 
 Remote paths carry the same privilege as local ones. A read needs
 `pg_read_server_files` and a write needs `pg_write_server_files`, over and above

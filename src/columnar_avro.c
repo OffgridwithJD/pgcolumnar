@@ -28,6 +28,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "utils/tuplestore.h"
 
 #include "columnar_avro.h"
 
