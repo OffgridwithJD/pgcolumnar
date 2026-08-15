@@ -75,7 +75,7 @@ ice_slurp_remote(const char *url, int64 *outlen)
 	const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
 	PgColumnarObjHandle *h;
 	int64		len;
-	uint8	   *buf;
+	uint8	   *volatile buf = NULL;
 
 	if (api == NULL)
 		ereport(ERROR,
@@ -93,20 +93,30 @@ ice_slurp_remote(const char *url, int64 *outlen)
 				 errdetail("The installed object-store module handles no such URL scheme.")));
 
 	h = api->open(url, NULL, &len);	/* raises on failure; len is required */
-	if (len < 0 || len > ICE_MAX_METADATA)
+	/* the handle is module-owned and not freed on transaction abort (the module
+	 * uses explicit caller cleanup, like its sink API), so close it on any raise
+	 * between open and the normal close -- a too-large check, palloc, or a
+	 * read that raises on a short read / transport error -- or it leaks an fd */
+	PG_TRY();
+	{
+		if (len < 0 || len > ICE_MAX_METADATA)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("columnar: Iceberg object \"%s\" is too large", url)));
+		buf = (uint8 *) palloc(Max(len, 1) + 1);
+		if (len > 0)
+			api->read(h, 0, buf, (size_t) len);	/* short read raises */
+	}
+	PG_CATCH();
 	{
 		api->close(h);
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("columnar: Iceberg object \"%s\" is too large", url)));
+		PG_RE_THROW();
 	}
-	buf = (uint8 *) palloc(Max(len, 1) + 1);
-	if (len > 0)
-		api->read(h, 0, buf, (size_t) len);	/* short read is an error, raises */
+	PG_END_TRY();
 	api->close(h);
 	buf[len] = '\0';
 	*outlen = len;
-	return buf;
+	return (uint8 *) buf;
 }
 
 /*

@@ -86,3 +86,23 @@ Refusals kept (never a silent wrong read): a remote endpoint absent from
 recorded key that escapes the table's bucket/prefix is refused by the lexical
 `ice_rebase` containment; a non-remote-capable build (the objstore module
 absent) surfaces the module's clean load error, not a crash.
+
+## Adversarial audit (3 lenses; security clean, 1 minor fixed)
+
+The audit (security-boundary / memory / spec, each finding verified) put the
+weight on the security lens, since this extends the arbitrary-read boundary to
+remote. That lens found NOTHING: no SSRF (the endpoint allow-list is enforced by
+the module on `open` even with cfg NULL), no containment escape (bucket-switch,
+cross-scheme, trailing-slash, and `..` vectors all refused), and the local-vs-
+remote decision is not bypassable. The scheme-matching concern was refuted (the
+existing strcmp-over-scheme-stripped matching is correct for both schemes).
+
+One confirmed minor finding, fixed: **`ice_slurp_remote` leaked the object-store
+handle if `api->read` raised** (a short read or transport error) between `open`
+and `close`. The module does not free the handle on transaction abort (it uses
+explicit caller cleanup, like its sink API), so a mid-read failure leaked one fd
+per failed query. Fixed with a `PG_TRY`/`PG_CATCH` that closes the handle on any
+raise between open and the normal close, then re-throws. (The audit noted the
+already-merged Parquet remote read path -- `pq_source` -- has the identical
+leak-on-raise pattern; that is a pre-existing follow-up in a different subsystem,
+not this increment.)
