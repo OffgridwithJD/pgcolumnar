@@ -574,15 +574,14 @@ Parquet field id rather than by position. Output column `i` is bound to the file
 column whose field id equals `field_ids[i]`. The reader decodes only those
 columns, in the order given, whatever their order in the file. The array length
 must equal the column definition list length. This is the projection form Apache
-Iceberg uses, where a data file written before a column rename still carries the
-old name and columns are selected by id (#388).
+Iceberg uses (#388). A data file written before a column rename still carries the
+old name, and columns are selected by id.
 
 The file must carry field ids. A file written without them is an error that
 directs you to the positional form above. Each requested id must match exactly
-one scalar column of a compatible type. A requested id that is absent, an id that
-matches more than one column, and an array or composite output column are each an
-error, not a silent wrong column. Read the ids a file carries with
-`parquet_schema`.
+one scalar column of a compatible type. An absent id is an error. So is an id
+that matches more than one column, or an array or composite output column. None
+is a silent wrong column. Read the ids a file carries with `parquet_schema`.
 
 ```sql
 -- the file has columns alpha (id 7), beta (id 3), gamma (id 12);
@@ -612,15 +611,16 @@ SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
 Decodes an Apache Iceberg Avro manifest file and reports its data-file entries.
 Each row is one entry: the file path, format, row count, byte size, the
 partition rendered as `name=value`, and the entry's data sequence number. The
-sequence number is NULL when the entry inherits it from the manifest (the usual
-case for a freshly written manifest); a position delete applies to data files
-with a lower or equal sequence number (the same commit or earlier), an equality
-delete to a strictly lower one, so it is the ordering key for reading tables
-with deletes. The caller needs the `pg_read_server_files` role, which superusers
-hold. This is the first step of Iceberg support (#388). It is a standalone Avro
-object-container reader, decoded against the schema embedded in the file, so a
-v3 manifest reads structurally. It reads a local file. It does not resolve a
-table's snapshot or apply delete files, which are later steps.
+sequence number is NULL when the entry inherits it from the manifest. That is
+the usual case for a freshly written manifest. It is the ordering key for
+reading tables with deletes. A position delete applies to data files with a
+lower or equal sequence number, the same commit or earlier. An equality delete
+applies to a strictly lower one. The caller needs the `pg_read_server_files`
+role, which superusers hold. This is the first step of Iceberg support (#388).
+It is a standalone Avro object-container reader, decoded against the schema
+embedded in the file, so a v3 manifest reads structurally. It reads a local
+file. It does not resolve a table's snapshot or apply delete files, which are
+later steps.
 
 ```sql
 SELECT file_path, record_count, partition
@@ -630,15 +630,15 @@ SELECT file_path, record_count, partition
 ### pgcolumnar.read_manifest_list(path text) returns table(manifest_path text, manifest_length bigint, content int, partition_spec_id int, added_files_count int, existing_files_count int, deleted_files_count int, added_rows_count bigint, existing_rows_count bigint, deleted_rows_count bigint, sequence_number bigint, min_sequence_number bigint, added_snapshot_id bigint)
 
 Decodes an Apache Iceberg snapshot manifest-list Avro file and reports its
-`manifest_file` entries. Each row names one manifest the snapshot points at,
-with its length, content type (0 data, 1 deletes), partition spec, and the
-added, existing, and deleted file and row counts the writer recorded. The
-caller needs the `pg_read_server_files` role, which superusers hold. This is
-step two of Iceberg support (#388): it reads the same Avro object-container
-format as `read_avro_manifest`, decoded against the schema embedded in the
-file, so a v3 manifest list reads structurally. It reads a local file. It does
-not resolve a table's current snapshot or open the manifests it names, which
-are later steps.
+`manifest_file` entries. Each row names one manifest the snapshot points at. It
+carries the manifest's length, content type (0 data, 1 deletes), and partition
+spec. It also carries the added, existing, and deleted file and row counts the
+writer recorded. The caller needs the `pg_read_server_files` role, which
+superusers hold. This is step two of Iceberg support (#388). It reads the same
+Avro object-container format as `read_avro_manifest`, decoded against the schema
+embedded in the file. A v3 manifest list therefore reads structurally. It reads
+a local file. It does not resolve a table's current snapshot or open the
+manifests it names, which are later steps.
 
 ```sql
 SELECT manifest_path, added_files_count, added_rows_count
@@ -648,16 +648,17 @@ SELECT manifest_path, added_files_count, added_rows_count
 ### pgcolumnar.iceberg_current_snapshot(metadata_path text) returns table(snapshot_id bigint, parent_snapshot_id bigint, sequence_number bigint, timestamp_ms bigint, operation text, manifest_list text, schema_id int)
 
 Reads an Apache Iceberg table `metadata.json` and reports the current snapshot
-the table declares: the snapshot whose id equals the file's
-`current-snapshot-id`, with its sequence number, commit timestamp, operation
-(`append`, `overwrite`, `delete`, `replace`), the manifest-list file it points
-at, and its schema id. It returns one row, or no rows when the table has no
-current snapshot. The caller needs the `pg_read_server_files` role, which
-superusers hold. This is the start of Iceberg catalog support (#388 phase 3):
-it resolves the metadata pointer from the filesystem without a network. It
-reports the `manifest_list` path as the file records it; it does not yet open
-that file or resolve the table's data files, which are later steps. The
-manifest-list it names can then be decoded with `read_manifest_list`.
+the table declares. The current snapshot is the one whose id equals the file's
+`current-snapshot-id`. The row carries its sequence number, commit timestamp,
+and operation (`append`, `overwrite`, `delete`, `replace`). It also carries the
+manifest-list file the snapshot points at and its schema id. It returns one row,
+or no rows when the table has no current snapshot. The caller needs the
+`pg_read_server_files` role, which superusers hold. This is the start of Iceberg
+catalog support (#388 phase 3): it resolves the metadata pointer from the
+filesystem without a network. It reports the `manifest_list` path as the file
+records it. It does not yet open that file or resolve the table's data files.
+Those are later steps. The manifest-list it names can then be decoded with
+`read_manifest_list`.
 
 ```sql
 SELECT snapshot_id, operation, manifest_list
@@ -668,19 +669,19 @@ SELECT snapshot_id, operation, manifest_list
 
 Lists the live data files of an Apache Iceberg table at its current snapshot.
 It resolves the current snapshot from `metadata.json`, reads that snapshot's
-manifest list, then each manifest, and returns one row per data-file entry: the
+manifest list, then each manifest. It returns one row per data-file entry: the
 file path, format, row count, and partition rendered as `name=value`. The
 caller needs the `pg_read_server_files` role, which superusers hold. It returns
 no rows when the table has no current snapshot.
 
 The absolute paths recorded in the table are rebased onto the table's actual
-location, taken from where `metadata.json` sits, so a table copied to a new
-directory still reads. A recorded path that points outside the table location
-is refused, not read.
+location. That location is taken from where `metadata.json` sits. A table copied
+to a new directory therefore still reads. A recorded path that points outside
+the table location is refused, not read.
 
-Delete files are refused, not ignored: a snapshot that carries any delete
-manifest or delete entry raises an error rather than returning rows the table
-says are gone. Reading Iceberg tables that use deletes is a later step (#388
+Delete files are refused, not ignored. A snapshot that carries any delete
+manifest or delete entry raises an error. It does not return rows the table says
+are gone. Reading Iceberg tables that use deletes is a later step (#388
 phase 4). This lists data files from the manifests; opening each Parquet file
 and projecting its columns by field id is the following step (#388 phase 3c).
 
@@ -693,26 +694,26 @@ SELECT file_path, record_count, partition
 
 Reads an Apache Iceberg table at its current snapshot. You supply a column
 definition list. Each output column name is resolved to a field id through the
-table's current schema, and every live data file is read projected by those
-ids. Because Iceberg selects columns by field id, a data file written before a
-column was renamed still reads: the name in the file need not match, only the
-id. The caller needs the `pg_read_server_files` role, which superusers hold.
+table's current schema. Every live data file is then read, projected by those
+ids. Iceberg selects columns by field id. A data file written before a column
+was renamed still reads. The name in the file need not match, only the id. The
+caller needs the `pg_read_server_files` role, which superusers hold.
 
 The output column names must be fields of the table's current schema; a name
 that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
-Position deletes are applied: a delete file drops the row ordinals it lists from
-the data file it names, when that data file's data sequence number is less than
-or equal to the delete's (the Iceberg rule: a position delete affects data
-written in the same commit or earlier, so a delete and the rows it removes may
-share a sequence number).
-Equality deletes are not yet supported and are refused rather than ignored, so a
-table using them errors instead of returning rows it should have removed. The
+Position deletes are applied. A delete file drops the row ordinals it lists from
+the data file it names. It applies when that data file's data sequence number is
+at or below the delete's. The Iceberg rule is that a position delete affects
+data written in the same commit or earlier. A delete and the rows it removes may
+therefore share a sequence number.
+Equality deletes are not yet supported. They are refused rather than ignored. A
+table using them errors, instead of returning rows it should have removed. The
 recorded file paths are rebased onto the table's actual location and resolved
-against a path boundary, so a relocated table reads and a path pointing outside
-the table is refused.
+against a path boundary. A relocated table therefore reads. A path pointing
+outside the table is refused.
 
 ```sql
 SELECT id, region, sum(amount)
