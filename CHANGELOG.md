@@ -69,7 +69,12 @@ which was true until that script existed.
   second TLS stack enters the server process. A bearer token, when the catalog
   requires one, is read from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` server
   environment variable, never a function argument, so it does not appear in the
-  statement log. See
+  statement log. When the catalog vends short-lived storage credentials in its
+  `loadTable` reply (the flat `config` keys or the `storage-credentials` array,
+  longest prefix selected), `iceberg_rest_scan` reads the table's files with
+  those credentials rather than the server environment (#656). Vended
+  credentials do not bypass the endpoint allow-list. A table that vends none
+  reads with the ambient environment as before. See
   [Iceberg REST catalog](docs/sql-reference.md#pgcolumnariceberg_rest_scancatalog_uri-text-namespace-text-table_name-text-returns-setof-record).
 
 - The Parquet read and export functions and the foreign-data wrapper read from

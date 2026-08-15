@@ -145,11 +145,36 @@ class Handler(BaseHTTPRequestHandler):
         if ns_norm != ARGS.namespace or table != ARGS.table:
             self._not_found("no such table %s.%s" % (ns, table))
             return
-        self._send_json(200, {
+        config = {}
+        # vended storage credentials: the client must sign its S3 reads with
+        # these, not with any ambient environment credential.
+        if ARGS.vend_key:
+            config["s3.access-key-id"] = ARGS.vend_key
+            config["s3.secret-access-key"] = ARGS.vend_secret
+            config["s3.region"] = ARGS.vend_region
+            if ARGS.vend_endpoint:
+                config["s3.endpoint"] = ARGS.vend_endpoint
+            if ARGS.vend_token:
+                config["s3.session-token"] = ARGS.vend_token
+        resp = {
             "metadata-location": ARGS.metadata_location,
             "metadata": {"format-version": 2, "location": ARGS.table_location},
-            "config": {},
-        })
+            "config": config,
+        }
+        # storage-credentials array form (newer spec), longest-prefix selected by
+        # the client. When --storage-cred-prefix is given, offer TWO entries: a
+        # deliberately wrong catch-all and the correct, more specific one, so a
+        # green read proves longest-prefix selection.
+        if ARGS.storage_cred_prefix and ARGS.vend_key:
+            resp["storage-credentials"] = [
+                {"prefix": "s3://", "config": {
+                    "s3.access-key-id": "WRONGKEY",
+                    "s3.secret-access-key": "wrong-secret",
+                    "s3.region": ARGS.vend_region,
+                    "s3.endpoint": ARGS.vend_endpoint}},
+                {"prefix": ARGS.storage_cred_prefix, "config": config},
+            ]
+        self._send_json(200, resp)
 
 
 def main():
@@ -164,6 +189,12 @@ def main():
     ap.add_argument("--metadata-location", required=True)
     ap.add_argument("--table-location", default="")
     ap.add_argument("--bad-config", action="store_true")
+    ap.add_argument("--vend-key", default="")
+    ap.add_argument("--vend-secret", default="")
+    ap.add_argument("--vend-token", default="")
+    ap.add_argument("--vend-region", default="")
+    ap.add_argument("--vend-endpoint", default="")
+    ap.add_argument("--storage-cred-prefix", default="")
     ARGS = ap.parse_args()
     open(ARGS.log, "w").close()
     httpd = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)

@@ -3528,7 +3528,8 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 				  const int *field_ids, int nfield,
 				  const char *const *nm_names, const int *nm_ids, int nm_count,
 				  bool missing_as_null,
-				  const uint64 *skipPos, int nSkipPos)
+				  const uint64 *skipPos, int nSkipPos,
+				  const PgColumnarObjStoreConfig *cfg)
 {
 	PqSource	src;
 	PqFile		pf;
@@ -3537,7 +3538,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 	int			ntops;
 	int64		n;
 
-	pq_source_open(path, &src, &pf);
+	pq_source_open_cfg(path, &src, &pf, cfg);
 	pq_check_row_groups(&pf, path);
 	if (field_ids != NULL)
 		tops = build_imp_targets_by_field_id(tupdesc, &pf, field_ids, nfield,
@@ -3563,11 +3564,12 @@ int64
 PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 							   const int *field_ids, int nfield,
 							   Tuplestorestate *tupstore, TupleTableSlot *slot,
-							   const uint64 *skipPos, int nSkipPos)
+							   const uint64 *skipPos, int nSkipPos,
+							   const PgColumnarObjStoreConfig *cfg)
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
 							 field_ids, nfield, NULL, NULL, 0, false,
-							 skipPos, nSkipPos);
+							 skipPos, nSkipPos, cfg);
 }
 
 /*
@@ -3586,11 +3588,12 @@ PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdesc,
 								 const char *const *nm_names, const int *nm_ids,
 								 int nm_count,
 								 Tuplestorestate *tupstore, TupleTableSlot *slot,
-								 const uint64 *skipPos, int nSkipPos)
+								 const uint64 *skipPos, int nSkipPos,
+								 const PgColumnarObjStoreConfig *cfg)
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
 							 field_ids, nfield, nm_names, nm_ids, nm_count,
-							 true, skipPos, nSkipPos);
+							 true, skipPos, nSkipPos, cfg);
 }
 
 /*
@@ -3657,7 +3660,7 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 
 		total += pq_read_file_into((char *) lfirst(lc), tupdesc, slot,
 								   pq_insert_sink, &sinkarg, NULL, 0,
-								   NULL, NULL, 0, false, NULL, 0);
+								   NULL, NULL, 0, false, NULL, 0, NULL);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -3777,7 +3780,7 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 
 		(void) pq_read_file_into((char *) lfirst(lc), retdesc, slot,
 								 pq_tuplestore_sink, tupstore, field_ids, nfield,
-								 NULL, NULL, 0, false, NULL, 0);
+								 NULL, NULL, 0, false, NULL, 0, NULL);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}

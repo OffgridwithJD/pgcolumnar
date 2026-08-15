@@ -71,7 +71,8 @@
  * module). The metadata cap bounds the object as for a local file.
  */
 static uint8 *
-ice_slurp_remote(const char *url, int64 *outlen)
+ice_slurp_remote(const char *url, int64 *outlen,
+				 const PgColumnarObjStoreConfig *cfg)
 {
 	const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
 	PgColumnarObjHandle *h;
@@ -93,7 +94,7 @@ ice_slurp_remote(const char *url, int64 *outlen)
 				 errmsg("iceberg: reading \"%s\" is not supported", url),
 				 errdetail("The installed object-store module handles no such URL scheme.")));
 
-	h = api->open(url, NULL, &len);	/* raises on failure; len is required */
+	h = api->open(url, cfg, &len);	/* raises on failure; len is required */
 	/* the handle is module-owned and not freed on transaction abort (the module
 	 * uses explicit caller cleanup, like its sink API), so close it on any raise
 	 * between open and the normal close -- a too-large check, palloc, or a
@@ -126,14 +127,14 @@ ice_slurp_remote(const char *url, int64 *outlen)
  * http(s)://) through the object-store module.
  */
 static char *
-ice_slurp_text(const char *path)
+ice_slurp_text(const char *path, const PgColumnarObjStoreConfig *cfg)
 {
 	FILE	   *f;
 	int64		flen;
 	char	   *buf;
 
 	if (PgColumnarPathIsRemote(path))
-		return (char *) ice_slurp_remote(path, &flen);
+		return (char *) ice_slurp_remote(path, &flen, cfg);
 
 	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
@@ -163,14 +164,15 @@ ice_slurp_text(const char *path)
 /* slurp a whole binary file (a manifest list, manifest, or Puffin file) into a
  * palloc'd buffer. Local via AllocateFile; remote via the object-store module. */
 static uint8 *
-ice_slurp_bin(const char *path, int64 *outlen)
+ice_slurp_bin(const char *path, int64 *outlen,
+			  const PgColumnarObjStoreConfig *cfg)
 {
 	FILE	   *f;
 	int64		flen;
 	uint8	   *buf;
 
 	if (PgColumnarPathIsRemote(path))
-		return ice_slurp_remote(path, outlen);
+		return ice_slurp_remote(path, outlen, cfg);
 
 	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
@@ -641,7 +643,7 @@ pgcolumnar_iceberg_current_snapshot(PG_FUNCTION_ARGS)
 
 	tupstore = ice_srf_begin(fcinfo, &tupdesc);
 
-	json = ice_slurp_text(path);
+	json = ice_slurp_text(path, NULL);	/* introspection: ambient creds */
 	/* jsonb_in raises a clean 22P02 on malformed JSON */
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
 
@@ -714,7 +716,8 @@ typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
  */
 static void
 ice_walk_data_files(const char *path, JsonbContainer *root,
-					bool collect_deletes, IceDataFileCb cb, void *ctx)
+					bool collect_deletes, IceDataFileCb cb, void *ctx,
+					const PgColumnarObjStoreConfig *cfg)
 {
 	JsonbContainer *sc;
 	int64		cur;
@@ -757,7 +760,7 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 	ml_path = ice_open_path(recorded_root, actual_root,
 							ice_str_required(sc, "manifest-list", path),
 							"manifest-list", path);
-	mlbuf = ice_slurp_bin(ml_path, &mllen);
+	mlbuf = ice_slurp_bin(ml_path, &mllen, cfg);
 	mfs = PgColumnarAvroReadManifestList(mlbuf, mllen, &nmf);
 
 	for (mi = 0; mi < nmf; mi++)
@@ -782,7 +785,7 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 
 		m_path = ice_open_path(recorded_root, actual_root, mfs[mi].manifest_path,
 							   "manifest", path);
-		mbuf = ice_slurp_bin(m_path, &mlen);
+		mbuf = ice_slurp_bin(m_path, &mlen, cfg);
 		entries = PgColumnarAvroReadManifest(mbuf, mlen, &ne);
 
 		for (ei = 0; ei < ne; ei++)
@@ -919,8 +922,8 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 
 	ctx.tupstore = ice_srf_begin(fcinfo, &ctx.tupdesc);
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
-											CStringGetDatum(ice_slurp_text(path))));
-	ice_walk_data_files(path, &jb->root, false, ice_list_cb, &ctx);
+											CStringGetDatum(ice_slurp_text(path, NULL))));
+	ice_walk_data_files(path, &jb->root, false, ice_list_cb, &ctx, NULL);
 	return (Datum) 0;
 }
 
@@ -1301,6 +1304,7 @@ typedef struct IceScanCtx
 	char	   *recorded_root;
 	char	   *actual_root;
 	char	   *mdpath;
+	const PgColumnarObjStoreConfig *cfg;	/* vended storage creds, or NULL */
 	List	   *data;			/* IceEntry* content 0 */
 	List	   *posdel;			/* IceEntry* content 1 */
 	List	   *eqdel;			/* IceEntry* content 2 */
@@ -1415,7 +1419,8 @@ ice_read_pos_deletes(IceScanCtx *c)
 		safe = ice_open_path(c->recorded_root, c->actual_root,
 							 pd->file_path, "position-delete", c->mdpath);
 		ts = tuplestore_begin_heap(false, false, work_mem);
-		(void) PgColumnarReadParquetByFieldId(safe, dtd, fids, 2, ts, wslot, NULL, 0);
+		(void) PgColumnarReadParquetByFieldId(safe, dtd, fids, 2, ts, wslot, NULL, 0,
+											  c->cfg);
 		while (tuplestore_gettupleslot(ts, true, false, rslot))
 		{
 			bool		n1,
@@ -1536,7 +1541,7 @@ ice_read_dvs(IceScanCtx *c, int64 format_version)
 		old = MemoryContextSwitchTo(filectx);
 		safe = ice_open_path(c->recorded_root, c->actual_root,
 							 pd->file_path, "deletion-vector", c->mdpath);
-		buf = ice_slurp_bin(safe, &len);
+		buf = ice_slurp_bin(safe, &len, c->cfg);
 		{
 			uint64	   *scratch_pos;
 			int64		scratch_n;
@@ -1825,7 +1830,7 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
 							 ed->file_path, "equality-delete", c->mdpath);
 		ts = tuplestore_begin_heap(false, false, work_mem);
 		(void) PgColumnarReadParquetByFieldId(safe, dtd, (const int *) E->ids,
-											  E->nids, ts, wslot, NULL, 0);
+											  E->nids, ts, wslot, NULL, 0, c->cfg);
 		while (tuplestore_gettupleslot(ts, true, false, rslot))
 		{
 			IceEqRow   *row;
@@ -2003,7 +2008,7 @@ ice_eq_probe(IceScanCtx *c, IceEntry *d, List *elig,
 						 "data-file", c->mdpath);
 	ts = tuplestore_begin_heap(false, false, work_mem);
 	(void) PgColumnarReadParquetByFieldId(safe, ptd, uids, nuni, ts, wslot,
-										  NULL, 0);
+										  NULL, 0, c->cfg);
 	dv = (Datum *) palloc(nuni * sizeof(Datum));
 	dn = (bool *) palloc(nuni * sizeof(bool));
 	while (tuplestore_gettupleslot(ts, true, false, rslot))
@@ -2055,7 +2060,8 @@ ice_eq_probe(IceScanCtx *c, IceEntry *d, List *elig,
  */
 void
 PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
-						  ReturnSetInfo *rsinfo)
+						  ReturnSetInfo *rsinfo,
+						  const PgColumnarObjStoreConfig *cfg)
 {
 	MemoryContext oldcxt;
 	IceScanCtx	ctx;
@@ -2068,8 +2074,10 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 	List	   *eqdels;
 	ListCell   *lc;
 
+	ctx.cfg = cfg;				/* vended storage creds for every file, or NULL */
+
 	/* map output column names -> field ids via the table's current schema */
-	json = ice_slurp_text(path);
+	json = ice_slurp_text(path, cfg);
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
 	field_ids = ice_field_ids_for_columns(&jb->root, tupdesc, path, &nfield);
 	ice_name_mapping(&jb->root, path, &ctx.nm_names, &ctx.nm_ids, &ctx.nm_count);
@@ -2098,7 +2106,7 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 
 	/* pass 1: collect the snapshot's data and delete entries (reuse the
 	 * metadata already parsed for the schema, so the file is read once) */
-	ice_walk_data_files(path, &jb->root, true, ice_scan_cb, &ctx);
+	ice_walk_data_files(path, &jb->root, true, ice_scan_cb, &ctx, cfg);
 
 	/* read the position-delete files once into (dpath, pos, seq) rows, and the
 	 * applicable equality-delete files once into per-file delete-row sets
@@ -2268,7 +2276,7 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 													(const char *const *) ctx.nm_names,
 													ctx.nm_ids, ctx.nm_count,
 													ctx.tupstore, ctx.slot,
-													skip, nskip);
+													skip, nskip, ctx.cfg);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(ctx.filectx);
 
@@ -2355,6 +2363,6 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 				 errmsg("pgcolumnar.iceberg_scan requires a column definition list"),
 				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(col1 type1, ...).")));
 
-	PgColumnarIcebergScanInto(path, tupdesc, rsinfo);
+	PgColumnarIcebergScanInto(path, tupdesc, rsinfo, NULL);
 	return (Datum) 0;
 }
