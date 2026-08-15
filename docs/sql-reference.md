@@ -700,11 +700,16 @@ id. The caller needs the `pg_read_server_files` role, which superusers hold.
 The output column names must be fields of the table's current schema; a name
 that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
-Parquet data files are read. A table whose current snapshot carries any delete
-file is refused, not read with the deletes ignored (that is a later step, #388
-phase 4). The recorded file paths are rebased onto the table's actual location
-and resolved against a path boundary, so a relocated table reads and a path
-pointing outside the table is refused.
+Parquet data files are read.
+
+Position deletes are applied: a delete file drops the row ordinals it lists from
+the data file it names, when the delete's data sequence number is greater than
+that data file's (a delete affects data written before it, never after).
+Equality deletes are not yet supported and are refused rather than ignored, so a
+table using them errors instead of returning rows it should have removed. The
+recorded file paths are rebased onto the table's actual location and resolved
+against a path boundary, so a relocated table reads and a path pointing outside
+the table is refused.
 
 ```sql
 SELECT id, region, sum(amount)

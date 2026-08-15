@@ -88,46 +88,7 @@ check "a column renamed in the schema still reads by field id (amt2 = amount)" \
 check "an output column not in the schema is refused (42703)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MD') AS t(nosuch int)")" "42703"
 
-# ---- deletes are refused (shared walk with iceberg_data_files) --------------
-# craft a table whose current snapshot's manifest-list is a delete manifest
-DT="$PGC_WORKDIR/deltbl/db/t"
-mkdir -p "$DT/metadata"
-python3 - "$DT" <<'PY'
-import json, sys, os
-DT = sys.argv[1]
-def varint(u):
-    out = bytearray()
-    while True:
-        b = u & 0x7f; u >>= 7
-        out.append(b | 0x80 if u else b)
-        if not u: break
-    return bytes(out)
-def zz(n): return varint(n << 1) if n >= 0 else varint((n << 1) ^ -1)
-def s(bs): return zz(len(bs)) + bs
-schema = json.dumps({"type":"record","name":"manifest_file","fields":[
-    {"name":"manifest_path","type":"string"},{"name":"manifest_length","type":"long"},
-    {"name":"partition_spec_id","type":"int"},{"name":"content","type":"int"},
-    {"name":"sequence_number","type":"long"},{"name":"min_sequence_number","type":"long"},
-    {"name":"added_snapshot_id","type":"long"},{"name":"added_files_count","type":"int"},
-    {"name":"existing_files_count","type":"int"},{"name":"deleted_files_count","type":"int"},
-    {"name":"added_rows_count","type":"long"},{"name":"existing_rows_count","type":"long"},
-    {"name":"deleted_rows_count","type":"long"}]}).encode()
-rec  = s(b"file:///tmp/pgc_ice_wh/db/t/metadata/delete-m0.avro") + zz(100) + zz(0)
-rec += zz(1) + zz(1) + zz(1) + zz(1) + zz(1) + zz(0) + zz(0) + zz(1) + zz(0) + zz(0)
-sync = b"\x00" * 16
-meta = zz(2) + s(b"avro.schema") + s(schema) + s(b"avro.codec") + s(b"null") + zz(0)
-ocf  = b"Obj\x01" + meta + sync + zz(1) + zz(len(rec)) + rec + sync
-open(os.path.join(DT, "metadata", "delete-list.avro"), "wb").write(ocf)
-md = {"format-version":2,"location":"file:///tmp/pgc_ice_wh/db/t","current-snapshot-id":1,
-      "current-schema-id":0,"schemas":[{"schema-id":0,"fields":[{"id":1,"name":"x","type":"int"}]}],
-      "snapshots":[{"snapshot-id":1,"sequence-number":1,"timestamp-ms":0,
-        "manifest-list":"file:///tmp/pgc_ice_wh/db/t/metadata/delete-list.avro",
-        "summary":{"operation":"overwrite"},"schema-id":0}]}
-open(os.path.join(DT, "metadata", "v1.metadata.json"), "w").write(json.dumps(md))
-PY
-check "iceberg_scan refuses a snapshot with delete files (0A000)" \
-	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$DT/metadata/v1.metadata.json') AS t(x int)")" "0A000"
-check "backend still up after the delete refusal" "$(q 'SELECT 1')" "1"
+# deletes (apply position, refuse equality) are covered by iceberg_deletes.sh
 
 # ---- privilege -------------------------------------------------------------
 psql_run "DROP ROLE IF EXISTS icescan_unpriv; CREATE ROLE icescan_unpriv LOGIN;"

@@ -3150,13 +3150,16 @@ pq_read_rows(PqFile *pf, PqSource *src,
 			 TupleTableSlot *slot, PqRowSink sink, void *sinkarg,
 			 const bool *skipGroup, const bool *needTop,
 			 const Datum *constVals, const bool *constHas,
-			 const bool *constNull, int rgFrom, int rgTo)
+			 const bool *constNull, int rgFrom, int rgTo,
+			 const uint64 *skipPos, int nSkipPos)
 {
 	int			natts = slot->tts_tupleDescriptor->natts;
 	MemoryContext groupCtx;
 	MemoryContext rowCtx;
 	bool	   *needLeaf;
 	int64		total = 0;
+	int64		grpBase = 0;	/* file ordinal of the current row group's row 0 */
+	int			skipIdx = 0;	/* moving cursor into the sorted skipPos array */
 	int			i;
 	int			rg;
 	int			t0;
@@ -3197,9 +3200,14 @@ pq_read_rows(PqFile *pf, PqSource *src,
 
 		/* row-group skipping (predicate pushdown): the group cannot match, so
 		 * decode nothing and emit nothing. The executor still rechecks quals on
-		 * the rows we do emit, so a missed skip only costs work, never rows. */
+		 * the rows we do emit, so a missed skip only costs work, never rows.
+		 * The file ordinal still advances past the group's rows (skipPos is only
+		 * used on the no-pushdown iceberg path, but keep the accounting honest). */
 		if (skipGroup != NULL && skipGroup[rg])
+		{
+			grpBase += n;
 			continue;
+		}
 
 		/* decode every leaf column of this row group into its entry stream */
 		MemoryContextReset(groupCtx);
@@ -3391,12 +3399,39 @@ pq_read_rows(PqFile *pf, PqSource *src,
 			}
 
 			ExecStoreVirtualTuple(slot);
-			sink(slot, sinkarg);
+
+			/*
+			 * Position deletes (#388 phase 4): drop the row if its file ordinal
+			 * is in the sorted skipPos set. The row was still fully assembled
+			 * above (which consumes its values from the leaf streams); only the
+			 * sink is withheld. Ordinals ascend monotonically, so a single moving
+			 * cursor over the sorted set suffices.
+			 */
+			{
+				uint64		ord = (uint64) (grpBase + r);
+				bool		deleted = false;
+
+				if (skipPos != NULL)
+				{
+					while (skipIdx < nSkipPos && skipPos[skipIdx] < ord)
+						skipIdx++;
+					if (skipIdx < nSkipPos && skipPos[skipIdx] == ord)
+					{
+						deleted = true;
+						skipIdx++;
+					}
+				}
+				if (!deleted)
+				{
+					sink(slot, sinkarg);
+					total++;
+				}
+			}
 			MemoryContextSwitchTo(rowOld);
 			MemoryContextReset(rowCtx);
-			total++;
 			CHECK_FOR_INTERRUPTS();
 		}
+		grpBase += n;
 	}
 
 	MemoryContextDelete(groupCtx);
@@ -3414,7 +3449,8 @@ pq_read_rows(PqFile *pf, PqSource *src,
 static int64
 pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 				  PqRowSink sink, void *sinkarg,
-				  const int *field_ids, int nfield)
+				  const int *field_ids, int nfield,
+				  const uint64 *skipPos, int nSkipPos)
 {
 	PqSource	src;
 	PqFile		pf;
@@ -3432,24 +3468,26 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
 					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL,
-					 0, pf.nrowgroups);
+					 0, pf.nrowgroups, skipPos, nSkipPos);
 	pq_source_close(&src);
 	return n;
 }
 
 /*
  * Public entry (columnar_parquet_reader.h): read one Parquet file's rows into a
- * tuplestore, projected by field id. Thin wrapper over the file-local read path
- * so the Iceberg scan can read a data file by the table's field ids without
- * reaching into the reader's internals.
+ * tuplestore, projected by field id, dropping rows whose 0-based file ordinal is
+ * in the sorted skipPos set (Iceberg position deletes; NULL/0 = keep all). Thin
+ * wrapper over the file-local read path so the Iceberg scan can read a data file
+ * by field id and apply its deletes without reaching into the reader's internals.
  */
 int64
 PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 							   const int *field_ids, int nfield,
-							   Tuplestorestate *tupstore, TupleTableSlot *slot)
+							   Tuplestorestate *tupstore, TupleTableSlot *slot,
+							   const uint64 *skipPos, int nSkipPos)
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
-							 field_ids, nfield);
+							 field_ids, nfield, skipPos, nSkipPos);
 }
 
 /*
@@ -3515,7 +3553,7 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 		MemoryContext old = MemoryContextSwitchTo(fileCtx);
 
 		total += pq_read_file_into((char *) lfirst(lc), tupdesc, slot,
-								   pq_insert_sink, &sinkarg, NULL, 0);
+								   pq_insert_sink, &sinkarg, NULL, 0, NULL, 0);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -3634,7 +3672,8 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 		MemoryContext old = MemoryContextSwitchTo(fileCtx);
 
 		(void) pq_read_file_into((char *) lfirst(lc), retdesc, slot,
-								 pq_tuplestore_sink, tupstore, field_ids, nfield);
+								 pq_tuplestore_sink, tupstore, field_ids, nfield,
+								 NULL, 0);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -4719,7 +4758,7 @@ pqfdw_refill(PqFdwScanState *st)
 								st->rowslot, pq_tuplestore_sink, st->tupstore,
 								st->skipGroup, st->needTop,
 								st->partVals, st->partHas, st->partNull,
-								rg, rg + 1);
+								rg, rg + 1, NULL, 0);
 			MemoryContextSwitchTo(old);
 			st->groupsDecoded++;
 			return true;		/* one group's rows are buffered */

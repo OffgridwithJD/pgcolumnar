@@ -76,10 +76,20 @@ opened here too -- same content-leak surface as data files).
 
 ## Sub-increments (each its own PR, each provable)
 
-- **4a - position deletes.** The common case. Single data file, a path-scoped
-  position-delete file dropping known ordinals; oracle = data minus those rows.
-  Plus the sequence-number arm (a too-old delete does not apply). Still refuse
-  equality (`content = 2`) and v3 until their increments.
+- **4a - position deletes. DONE.** `pq_read_rows` gained a sorted `skipPos` set
+  (dropping rows by file ordinal, computed as sum-of-prior-row-group-rows + r);
+  `PgColumnarReadParquetByFieldId` threads it. The walk grew a `collect_deletes`
+  mode: the lister still refuses deletes, the scan collects position-delete
+  entries (still refusing equality) and resolves each entry's data sequence
+  number (inheriting the manifest's when null). `iceberg_scan` reads the
+  position-delete Parquet files (by their reserved field ids 2147483546/545),
+  and for each data file drops the ordinals its deletes name whose sequence
+  number is greater than the data file's. Fixture is hand-crafted
+  (`warehouse_del`, generator `gen_delete_fixture.py`) with `apply` / `noapply`
+  (too-old) / `equality` variants. Removal proofs: defeating the reader skip
+  keeps the deleted rows; defeating the sequence gate applies a too-old delete.
+  PG17/18/19 (PG19 needed `TupleDescFinalize` on the manual pos-delete tupdesc)
+  + ASAN; the Parquet family and 3a/3b/3c suites are unregressed.
 - **4b - equality deletes.** Add equality evaluation on `equality_ids` columns.
 - **4c - v3 deletion vectors (Puffin).** A new container format (Puffin) holding
   a roaring bitmap of deleted positions -- a decoder like the Avro one. Largest.

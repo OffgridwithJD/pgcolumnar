@@ -26,6 +26,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -484,25 +485,32 @@ pgcolumnar_iceberg_current_snapshot(PG_FUNCTION_ARGS)
 }
 
 /*
- * Callback invoked once per live data-file entry of the current snapshot, with
- * the entry and the roots needed to rebase its recorded path. Shared by the two
- * consumers: iceberg_data_files (lists the paths) and iceberg_scan (opens and
- * reads them).
+ * Callback invoked once per live entry of the current snapshot, with the entry
+ * and the roots needed to rebase its recorded path. The entry's `content`
+ * distinguishes data (0) from position-delete (1) files, and its
+ * `sequence_number` has been resolved (inheriting the manifest's when the entry
+ * left it null). Shared by iceberg_data_files (lists data files) and iceberg_scan
+ * (reads them and applies deletes).
  */
 typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
 							   const char *recorded_root, const char *actual_root,
 							   const char *mdpath, int64 snapshot_id);
 
 /*
- * Walk the current snapshot's live data-file entries and hand each to `cb`.
- * Resolves the snapshot from an already-parsed metadata.json `root` (so the file
- * is read and parsed once per call, not again here), reads its manifest list and
- * each manifest (opening both through ice_open_path's path boundary), and refuses
- * deletes loudly. Does nothing when the table has no current snapshot.
+ * Walk the current snapshot's live entries and hand each to `cb`. Resolves the
+ * snapshot from an already-parsed metadata.json `root` (so the file is read and
+ * parsed once per call), reads its manifest list and each manifest (opening both
+ * through ice_open_path's path boundary).
+ *
+ * When `collect_deletes` is false (the lister), any delete file or removed entry
+ * is refused loudly (0A000). When true (the scan), position-delete entries
+ * (content 1) are passed to `cb` alongside data entries (content 0), removed
+ * entries (status 2) are skipped, and only equality deletes (content 2) -- not
+ * yet supported -- are refused. Does nothing when there is no current snapshot.
  */
 static void
 ice_walk_data_files(const char *path, JsonbContainer *root,
-					IceDataFileCb cb, void *ctx)
+					bool collect_deletes, IceDataFileCb cb, void *ctx)
 {
 	JsonbContainer *sc;
 	int64		cur;
@@ -553,8 +561,8 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 
 		CHECK_FOR_INTERRUPTS();
 
-		/* a delete manifest: refuse the whole snapshot, do not open it */
-		if (mfs[mi].content != 0)
+		/* the lister refuses a delete manifest without even opening it */
+		if (mfs[mi].content != 0 && !collect_deletes)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("iceberg: snapshot " INT64_FORMAT " has delete files; reading tables with deletes is not supported",
@@ -573,15 +581,39 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 
 			CHECK_FOR_INTERRUPTS();
 
-			/* a delete file, or an entry the snapshot marks removed (status 2
-			 * DELETED): refuse rather than silently drop it */
-			if (e->content != 0 || e->status == 2)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("iceberg: snapshot " INT64_FORMAT " has delete files; reading tables with deletes is not supported",
-								cur),
-						 errdetail("Entry \"%s\" has content %d, status %d.",
-								   e->file_path, e->content, e->status)));
+			if (!collect_deletes)
+			{
+				/* the lister refuses any delete file or removed entry */
+				if (e->content != 0 || e->status == 2)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg: snapshot " INT64_FORMAT " has delete files; reading tables with deletes is not supported",
+									cur),
+							 errdetail("Entry \"%s\" has content %d, status %d.",
+									   e->file_path, e->content, e->status)));
+			}
+			else
+			{
+				/* the scan skips removed entries and, for now, refuses only the
+				 * equality-delete kind it does not yet apply */
+				if (e->status == 2)
+					continue;
+				if (e->content == 2)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg: snapshot " INT64_FORMAT " has equality delete files, which are not yet supported",
+									cur),
+							 errdetail("Entry \"%s\" has content 2 (equality deletes).",
+									   e->file_path)));
+			}
+
+			/* resolve the data sequence number: a null entry sequence number
+			 * inherits the manifest's (from the manifest list) */
+			if (!e->has_sequence_number)
+			{
+				e->sequence_number = mfs[mi].sequence_number;
+				e->has_sequence_number = true;
+			}
 
 			cb(ctx, e, recorded_root, actual_root, path, cur);
 		}
@@ -654,7 +686,7 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 	ctx.tupstore = ice_srf_begin(fcinfo, &ctx.tupdesc);
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
 											CStringGetDatum(ice_slurp_text(path))));
-	ice_walk_data_files(path, &jb->root, ice_list_cb, &ctx);
+	ice_walk_data_files(path, &jb->root, false, ice_list_cb, &ctx);
 	return (Datum) 0;
 }
 
@@ -773,10 +805,29 @@ ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
 	return ids;
 }
 
-/* iceberg_scan callback: open the data file (symlink-safe) and read its rows,
- * projected by the table's field ids, into the tuplestore. Each file's decode
- * buffers live in a context reset between files, so a many-file table does not
- * accumulate O(total bytes). */
+/* the reserved Iceberg field ids of a position-delete file's two columns */
+#define ICE_POSDEL_PATH_ID 2147483546
+#define ICE_POSDEL_POS_ID  2147483545
+
+/* one collected manifest entry: a data file or a position-delete file */
+typedef struct IceEntry
+{
+	char	   *file_path;		/* the path as recorded (rebased at read time) */
+	char	   *file_format;	/* for the "only PARQUET" check on data files */
+	int64		seq;			/* resolved data sequence number */
+}			IceEntry;
+
+/* one position-delete row: drop row `pos` of data file `dpath`, if this delete's
+ * sequence number is greater than that data file's */
+typedef struct IcePosDel
+{
+	char	   *dpath;
+	int64		pos;
+	int64		seq;
+}			IcePosDel;
+
+/* iceberg_scan collects the current snapshot's entries first (data and
+ * position-delete files), then reads the data files applying the deletes. */
 typedef struct IceScanCtx
 {
 	Tuplestorestate *tupstore;
@@ -785,6 +836,11 @@ typedef struct IceScanCtx
 	const int  *field_ids;
 	int			nfield;
 	MemoryContext filectx;
+	char	   *recorded_root;
+	char	   *actual_root;
+	char	   *mdpath;
+	List	   *data;			/* IceEntry* content 0 */
+	List	   *posdel;			/* IceEntry* content 1 */
 }			IceScanCtx;
 
 static void
@@ -793,27 +849,96 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 			const char *mdpath, int64 snapshot_id)
 {
 	IceScanCtx *c = (IceScanCtx *) ctx;
-	char	   *safe;
-	MemoryContext old;
+	IceEntry   *ie = (IceEntry *) palloc0(sizeof(IceEntry));
 
 	(void) snapshot_id;
+	if (c->recorded_root == NULL)
+	{
+		c->recorded_root = pstrdup(recorded_root);
+		c->actual_root = pstrdup(actual_root);
+		c->mdpath = pstrdup(mdpath);
+	}
+	ie->file_path = pstrdup(e->file_path);
+	ie->file_format = e->file_format ? pstrdup(e->file_format) : NULL;
+	ie->seq = e->sequence_number;
+	if (e->content == 0)
+		c->data = lappend(c->data, ie);
+	else						/* content 1: position deletes (2 refused upstream) */
+		c->posdel = lappend(c->posdel, ie);
+}
 
-	if (e->file_format != NULL && strcmp(e->file_format, "PARQUET") != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("iceberg: data file \"%s\" has format %s; only PARQUET is supported",
-						e->file_path, e->file_format)));
+/*
+ * Read every collected position-delete file into a flat list of (dpath, pos,
+ * seq). Each file is opened through the path boundary and read by the reserved
+ * field ids, so column names/order in the file do not matter.
+ */
+static List *
+ice_read_pos_deletes(IceScanCtx *c)
+{
+	List	   *out = NIL;
+	ListCell   *lc;
+	TupleDesc	dtd;
+	TupleTableSlot *wslot;
+	TupleTableSlot *rslot;
+	int			fids[2];
 
-	/* open through the path boundary: a data-file path is opened here, so a
-	 * traversal or symlink would be a content leak, not just an oracle */
-	safe = ice_open_path(recorded_root, actual_root, e->file_path,
-						 "data-file", mdpath);
+	if (c->posdel == NIL)
+		return NIL;
 
-	old = MemoryContextSwitchTo(c->filectx);
-	(void) PgColumnarReadParquetByFieldId(safe, c->tupdesc, c->field_ids,
-										  c->nfield, c->tupstore, c->slot);
-	MemoryContextSwitchTo(old);
-	MemoryContextReset(c->filectx);
+	dtd = CreateTemplateTupleDesc(2);
+	TupleDescInitEntry(dtd, 1, "file_path", TEXTOID, -1, 0);
+	TupleDescInitEntry(dtd, 2, "pos", INT8OID, -1, 0);
+#if PG_VERSION_NUM >= 190000
+	/* PG19 asserts firstNonCachedOffsetAttr >= 0 on a manually built tupdesc;
+	 * BlessTupleDesc does not compute it, TupleDescFinalize does */
+	TupleDescFinalize(dtd);
+#endif
+	dtd = BlessTupleDesc(dtd);
+	wslot = MakeSingleTupleTableSlot(dtd, &TTSOpsVirtual);
+	rslot = MakeSingleTupleTableSlot(dtd, &TTSOpsMinimalTuple);
+	fids[0] = ICE_POSDEL_PATH_ID;
+	fids[1] = ICE_POSDEL_POS_ID;
+
+	foreach(lc, c->posdel)
+	{
+		IceEntry   *pd = (IceEntry *) lfirst(lc);
+		char	   *safe = ice_open_path(c->recorded_root, c->actual_root,
+										 pd->file_path, "position-delete", c->mdpath);
+		Tuplestorestate *ts = tuplestore_begin_heap(false, false, work_mem);
+
+		(void) PgColumnarReadParquetByFieldId(safe, dtd, fids, 2, ts, wslot, NULL, 0);
+		while (tuplestore_gettupleslot(ts, true, false, rslot))
+		{
+			bool		n1,
+						n2;
+			Datum		d1 = slot_getattr(rslot, 1, &n1);
+			Datum		d2 = slot_getattr(rslot, 2, &n2);
+
+			if (!n1 && !n2)
+			{
+				IcePosDel  *r = (IcePosDel *) palloc(sizeof(IcePosDel));
+
+				r->dpath = text_to_cstring(DatumGetTextPP(d1));
+				r->pos = DatumGetInt64(d2);
+				r->seq = pd->seq;
+				out = lappend(out, r);
+			}
+		}
+		tuplestore_end(ts);
+	}
+	ExecDropSingleTupleTableSlot(wslot);
+	ExecDropSingleTupleTableSlot(rslot);
+	return out;
+}
+
+/* ascending qsort comparator over uint64 file ordinals */
+static int
+ice_cmp_u64(const void *a, const void *b)
+{
+	uint64		x = *(const uint64 *) a;
+	uint64		y = *(const uint64 *) b;
+
+	return (x < y) ? -1 : (x > y) ? 1 : 0;
 }
 
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
@@ -825,9 +950,13 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
  * column definition list; each output column name is resolved to a field id via
  * the table's current schema, and every live data file is read projected by
  * those ids -- so a data file written before a column rename still reads, since
- * Iceberg selects columns by id, not name or position. Deletes are refused
- * upstream by the same walk iceberg_data_files uses; only PARQUET data files are
- * read. Superuser / pg_read_server_files; materialize-mode SRF.
+ * Iceberg selects columns by id, not name or position.
+ *
+ * Position deletes are applied: a delete file drops the listed row ordinals of
+ * the data file it names, when the delete's data sequence number is greater than
+ * the data file's (deletes affect data written before them). Equality deletes
+ * are not yet supported and are refused. Only PARQUET data files are read.
+ * Superuser / pg_read_server_files; materialize-mode SRF.
  */
 Datum
 pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
@@ -841,6 +970,8 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	Jsonb	   *jb;
 	int		   *field_ids;
 	int			nfield;
+	List	   *posdels;
+	ListCell   *lc;
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
@@ -877,10 +1008,79 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	ctx.filectx = AllocSetContextCreate(CurrentMemoryContext,
 										"pgcolumnar iceberg_scan file",
 										ALLOCSET_DEFAULT_SIZES);
+	ctx.recorded_root = NULL;
+	ctx.actual_root = NULL;
+	ctx.mdpath = NULL;
+	ctx.data = NIL;
+	ctx.posdel = NIL;
 
-	/* reuse the metadata we already parsed for the schema, so the file is read
-	 * and parsed once, not again inside the walk */
-	ice_walk_data_files(path, &jb->root, ice_scan_cb, &ctx);
+	/* pass 1: collect the snapshot's data and position-delete entries (reuse the
+	 * metadata already parsed for the schema, so the file is read once) */
+	ice_walk_data_files(path, &jb->root, true, ice_scan_cb, &ctx);
+
+	/* read the position-delete files once into (dpath, pos, seq) rows */
+	posdels = ice_read_pos_deletes(&ctx);
+
+	/* pass 2: read each data file, skipping the positions its deletes drop */
+	foreach(lc, ctx.data)
+	{
+		IceEntry   *d = (IceEntry *) lfirst(lc);
+		const char *dp = ice_strip_scheme(d->file_path);
+		uint64	   *skip = NULL;
+		int			nskip = 0;
+		int			cap = 0;
+		char	   *safe;
+		MemoryContext old;
+		ListCell   *lc2;
+
+		if (d->file_format != NULL && strcmp(d->file_format, "PARQUET") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: data file \"%s\" has format %s; only PARQUET is supported",
+							d->file_path, d->file_format)));
+
+		/* gather the ordinals to drop: position deletes that target this file
+		 * and whose sequence number is greater than the data file's */
+		foreach(lc2, posdels)
+		{
+			IcePosDel  *pd = (IcePosDel *) lfirst(lc2);
+
+			if (pd->seq > d->seq &&
+				strcmp(ice_strip_scheme(pd->dpath), dp) == 0)
+			{
+				if (nskip == cap)
+				{
+					cap = cap ? cap * 2 : 16;
+					skip = (skip == NULL)
+						? (uint64 *) palloc(cap * sizeof(uint64))
+						: (uint64 *) repalloc(skip, cap * sizeof(uint64));
+				}
+				skip[nskip++] = (uint64) pd->pos;
+			}
+		}
+		if (nskip > 1)			/* the reader wants the set sorted and unique */
+		{
+			int			w = 1;
+			int			k;
+
+			qsort(skip, nskip, sizeof(uint64), ice_cmp_u64);
+			for (k = 1; k < nskip; k++)
+				if (skip[k] != skip[w - 1])
+					skip[w++] = skip[k];
+			nskip = w;
+		}
+
+		safe = ice_open_path(ctx.recorded_root, ctx.actual_root, d->file_path,
+							 "data-file", ctx.mdpath);
+		old = MemoryContextSwitchTo(ctx.filectx);
+		(void) PgColumnarReadParquetByFieldId(safe, ctx.tupdesc, ctx.field_ids,
+											  ctx.nfield, ctx.tupstore, ctx.slot,
+											  skip, nskip);
+		MemoryContextSwitchTo(old);
+		MemoryContextReset(ctx.filectx);
+		if (skip != NULL)
+			pfree(skip);
+	}
 
 	MemoryContextDelete(ctx.filectx);
 	ExecDropSingleTupleTableSlot(ctx.slot);
