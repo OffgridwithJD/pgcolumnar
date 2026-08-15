@@ -968,6 +968,32 @@ CREATE FUNCTION pgcolumnar.iceberg_rest_table_location(catalog_uri text,
 COMMENT ON FUNCTION pgcolumnar.iceberg_rest_table_location(text, text, text)
 	IS 'resolve the current metadata-location of a table named by an Iceberg REST catalog (catalog URI + namespace + table); the bearer token is read from the server environment variable PGCOLUMNAR_ICEBERG_REST_TOKEN, never a SQL argument (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_rest_scan(catalog_uri text,
+											 namespace text,
+											 table_name text)
+	RETURNS SETOF record
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_rest_scan';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_scan(text, text, text)
+	IS 'read a table named by an Iceberg REST catalog at its current snapshot; supply a column definition list, as for iceberg_scan; the metadata location is resolved through the catalog and read like any other Iceberg table (#388)';
+
+CREATE FUNCTION pgcolumnar.iceberg_rest_namespaces(catalog_uri text)
+	RETURNS SETOF text
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_rest_namespaces';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_namespaces(text)
+	IS 'list the namespaces of an Iceberg REST catalog, one per row, multi-level namespaces dot-joined (#388)';
+
+CREATE FUNCTION pgcolumnar.iceberg_rest_tables(catalog_uri text, namespace text)
+	RETURNS SETOF text
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_rest_tables';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_tables(text, text)
+	IS 'list the table names in a namespace of an Iceberg REST catalog, one per row (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *

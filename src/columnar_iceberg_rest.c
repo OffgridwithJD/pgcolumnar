@@ -22,15 +22,49 @@
 #include "postgres.h"
 
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "utils/tuplestore.h"
 
+#include "funcapi.h"
+#include "columnar_iceberg.h"
 #include "columnar_objstore.h"
 #include "columnar_iceberg_rest.h"
+
+/*
+ * Set up a materialize-mode SRF returning a single text column, and return its
+ * tuplestore. Used by the listing functions, which return SETOF text (a scalar
+ * return type InitMaterializedSRF does not build a tupdesc for).
+ */
+static Tuplestorestate *
+rest_text_srf_setup(ReturnSetInfo *rsinfo, TupleDesc *tdout)
+{
+	Tuplestorestate *ts;
+	TupleDesc	td;
+	MemoryContext oldcxt;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in a context that cannot accept a set")));
+
+	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	td = CreateTemplateTupleDesc(1);
+	TupleDescInitEntry(td, 1, "name", TEXTOID, -1, 0);
+	ts = tuplestore_begin_heap(false, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = ts;
+	rsinfo->setDesc = td;
+	MemoryContextSwitchTo(oldcxt);
+	*tdout = td;
+	return ts;
+}
 
 /*
  * A catalog reply is small (a metadata-location plus, for now, an ignored inline
@@ -288,4 +322,181 @@ pgcolumnar_iceberg_rest_table_location(PG_FUNCTION_ARGS)
 
 	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table);
 	PG_RETURN_TEXT_P(cstring_to_text(loc));
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_scan);
+
+/*
+ * SQL: iceberg_rest_scan(catalog_uri, namespace, table_name) RETURNS SETOF
+ * record. Resolve the table's current metadata-location through the catalog,
+ * then read it through the very same path as iceberg_scan (a resolved remote
+ * location reads because the reader is remote-capable). Superuser /
+ * pg_read_server_files, materialize-mode SRF, column definition list required.
+ */
+Datum
+pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
+{
+	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *ns = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *table = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+	char	   *loc;
+
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in a context that cannot accept a set")));
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.iceberg_rest_scan requires a column definition list"),
+				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_rest_scan(uri, ns, tbl) AS t(col1 type1, ...).")));
+
+	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table);
+	/*
+	 * A metadata-location is a URI. The reader's remote path handles s3:// and
+	 * http(s)://; a file:// location is a local path, and the local read path
+	 * opens a bare filename, so strip the scheme here.
+	 */
+	if (pg_strncasecmp(loc, "file://", 7) == 0)
+		loc += 7;
+	PgColumnarIcebergScanInto(loc, tupdesc, rsinfo);
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_namespaces);
+
+/*
+ * SQL: iceberg_rest_namespaces(catalog_uri) RETURNS SETOF text. One row per
+ * namespace; a multi-level namespace is dot-joined.
+ */
+Datum
+pgcolumnar_iceberg_rest_namespaces(PG_FUNCTION_ARGS)
+{
+	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Tuplestorestate *ts;
+	TupleDesc	td;
+	Jsonb	   *doc;
+	JsonbValue	vbuf;
+	JsonbValue *nsv;
+	uint32		n;
+	uint32		i;
+
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
+	ts = rest_text_srf_setup(rsinfo, &td);
+
+	doc = rest_get_json(catalog_uri, "/v1/namespaces", "namespaces");
+	if (!JsonContainerIsObject(&doc->root))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: the REST catalog namespaces response is not a JSON object")));
+	nsv = getKeyJsonValueFromContainer(&doc->root, "namespaces", 10, &vbuf);
+	if (nsv == NULL || nsv->type != jbvBinary ||
+		!JsonContainerIsArray(nsv->val.binary.data))
+		return (Datum) 0;		/* no namespaces */
+
+	/* each element is itself an array of level strings; dot-join them */
+	n = JsonContainerSize(nsv->val.binary.data);
+	for (i = 0; i < n; i++)
+	{
+		JsonbValue *lv = getIthJsonbValueFromContainer(nsv->val.binary.data, i);
+		StringInfoData name;
+		uint32		nlev;
+		uint32		j;
+		Datum		values[1];
+		bool		nulls[1] = {false};
+
+		if (lv == NULL || lv->type != jbvBinary ||
+			!JsonContainerIsArray(lv->val.binary.data))
+			continue;
+		initStringInfo(&name);
+		nlev = JsonContainerSize(lv->val.binary.data);
+		for (j = 0; j < nlev; j++)
+		{
+			JsonbValue *pv = getIthJsonbValueFromContainer(lv->val.binary.data, j);
+
+			if (pv == NULL || pv->type != jbvString)
+				continue;
+			if (name.len > 0)
+				appendStringInfoChar(&name, '.');
+			appendBinaryStringInfo(&name, pv->val.string.val, pv->val.string.len);
+		}
+		values[0] = PointerGetDatum(cstring_to_text_with_len(name.data, name.len));
+		tuplestore_putvalues(ts, td, values, nulls);
+		pfree(name.data);
+	}
+	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_tables);
+
+/*
+ * SQL: iceberg_rest_tables(catalog_uri, namespace) RETURNS SETOF text. One row
+ * per table name in the namespace.
+ */
+Datum
+pgcolumnar_iceberg_rest_tables(PG_FUNCTION_ARGS)
+{
+	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *ns = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Tuplestorestate *ts;
+	TupleDesc	td;
+	StringInfoData rp;
+	Jsonb	   *doc;
+	JsonbValue	vbuf;
+	JsonbValue *idv;
+	uint32		n;
+	uint32		i;
+
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
+	ts = rest_text_srf_setup(rsinfo, &td);
+
+	initStringInfo(&rp);
+	appendStringInfoString(&rp, "/v1/namespaces/");
+	rest_append_namespace(&rp, ns);
+	appendStringInfoString(&rp, "/tables");
+	doc = rest_get_json(catalog_uri, rp.data, "table list");
+	if (!JsonContainerIsObject(&doc->root))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: the REST catalog table-list response is not a JSON object")));
+	idv = getKeyJsonValueFromContainer(&doc->root, "identifiers", 11, &vbuf);
+	if (idv == NULL || idv->type != jbvBinary ||
+		!JsonContainerIsArray(idv->val.binary.data))
+		return (Datum) 0;		/* no tables */
+
+	n = JsonContainerSize(idv->val.binary.data);
+	for (i = 0; i < n; i++)
+	{
+		JsonbValue *e = getIthJsonbValueFromContainer(idv->val.binary.data, i);
+		JsonbValue	nbuf;
+		JsonbValue *nm;
+		Datum		values[1];
+		bool		nulls[1] = {false};
+
+		if (e == NULL || e->type != jbvBinary ||
+			!JsonContainerIsObject(e->val.binary.data))
+			continue;
+		nm = getKeyJsonValueFromContainer(e->val.binary.data, "name", 4, &nbuf);
+		if (nm == NULL || nm->type != jbvString)
+			continue;
+		values[0] = PointerGetDatum(cstring_to_text_with_len(nm->val.string.val,
+															 nm->val.string.len));
+		tuplestore_putvalues(ts, td, values, nulls);
+	}
+	return (Datum) 0;
 }
