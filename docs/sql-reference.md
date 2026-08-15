@@ -704,6 +704,13 @@ that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
+The table may live in object storage. A metadata path of `s3://`, `http://`, or
+`https://` reads the metadata, manifests, data files, and delete files from the
+endpoint. The endpoint must be listed in `pgcolumnar.objstore_allowed_endpoints`,
+and credentials come from the process environment, the same way `read_parquet`
+reads a remote file. The results are identical to reading the same table from a
+local path.
+
 A data file written outside Iceberg carries no field ids. Such a file is read
 through the table's `schema.name-mapping.default` property, which maps each
 field id to the column names an id-less file may use. Each id-less column is
