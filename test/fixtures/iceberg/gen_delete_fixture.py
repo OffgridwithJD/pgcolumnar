@@ -214,12 +214,215 @@ open(os.path.join(md, "badseq.metadata.json"), "w").write(json.dumps({
                    "manifest-list": f"{LOC}/metadata/manifest-list-badseq.avro",
                    "summary": {"operation": "append"}, "schema-id": 0}]}))
 
+# ===================== 4b: equality deletes (additive) ======================
+# Everything below ADDS files; nothing written above is touched, so the merged
+# 4a fixture bytes never churn. Design: design/ISSUE_388_PHASE4_DELETES.md, 4b.
+
+# manifest_entry schema whose data_file carries equality_ids (Iceberg data_file
+# field 135, list<int>). Only the equality variants use it; the 4a manifests
+# keep their original schema (and its exact bytes).
+ENTRY_SCHEMA_EQ = json.dumps({"type": "record", "name": "manifest_entry", "fields": [
+    {"name": "status", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "data_file", "type": {"type": "record", "name": "df", "fields": [
+        {"name": "content", "type": "int"},
+        {"name": "file_path", "type": "string"},
+        {"name": "file_format", "type": "string"},
+        {"name": "record_count", "type": "long"},
+        {"name": "file_size_in_bytes", "type": "long"},
+        {"name": "equality_ids",
+         "type": ["null", {"type": "array", "items": "int"}]}]}}]}).encode()
+
+
+def entry_eq(status, seq, content, path, fmt, rows, size, eq_ids):
+    """One manifest entry against ENTRY_SCHEMA_EQ. eq_ids None encodes the
+    union's null branch (required to be null for non-equality content; corrupt
+    for content 2); a list encodes one array block of zig-zag ints, then the
+    zero terminator, per the Avro array block protocol."""
+    seqbytes = zz(0) if seq is None else (zz(1) + zz(seq))
+    if eq_ids is None:
+        eqb = zz(0)
+    else:
+        eqb = zz(1)
+        if eq_ids:
+            eqb += zz(len(eq_ids)) + b"".join(zz(i) for i in eq_ids)
+        eqb += zz(0)
+    return zz(status) + seqbytes + zz(content) + s(path.encode()) + \
+        s(fmt.encode()) + zz(rows) + zz(size) + eqb
+
+
+def ocf_multi(schema_json, records):
+    """An OCF whose single block holds several records (ocf() writes one)."""
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(schema_json) + s(b"avro.codec") + s(b"null") + zz(0)
+    body = b"".join(records)
+    return b"Obj\x01" + meta + sync + zz(len(records)) + zz(len(body)) + body + sync
+
+
+def mfile_spec(path, content, seq, snap, files, rows, spec_id):
+    """mfile() with an explicit partition_spec_id (mfile hardcodes 0)."""
+    return s(path.encode()) + zz(1000) + zz(spec_id) + zz(content) + zz(seq) + zz(seq) + \
+        zz(snap) + zz(files) + zz(0) + zz(0) + zz(rows) + zz(0) + zz(0)
+
+
+# ---- the second data file (nulls) and the equality-delete Parquet files -----
+# data2 exists for the null-matching arm: id 6 has region NULL. Same schema and
+# field ids as data.parquet.
+data2 = pa.table({
+    "id": pa.array([6, 7], pa.int64()),
+    "region": pa.array([None, "eu"], pa.string()),
+    "amount": pa.array([60, 70], pa.int32()),
+}, schema=data.schema)
+pq.write_table(data2, os.path.join(OUT, "db", "t", "data", "data2.parquet"),
+               row_group_size=2)
+DATA2_PATH = f"{LOC}/data/data2.parquet"
+
+F_ID = pa.field("id", pa.int64(), metadata={b"PARQUET:field_id": b"1"})
+F_REGION = pa.field("region", pa.string(), metadata={b"PARQUET:field_id": b"2"})
+F_AMOUNT = pa.field("amount", pa.int32(), metadata={b"PARQUET:field_id": b"3"})
+F_EXTRA9 = pa.field("extra", pa.int64(), metadata={b"PARQUET:field_id": b"9"})
+
+
+def write_eqdel(name, cols):
+    """cols: list of (pa.field, values). Returns the recorded path."""
+    t = pa.table({f.name: pa.array(v, f.type) for f, v in cols},
+                 schema=pa.schema([f for f, _ in cols]))
+    pq.write_table(t, os.path.join(OUT, "db", "t", "data", name))
+    return f"{LOC}/data/{name}"
+
+
+# ids [2, 4]: the value-match arm (and, at an equal seq, the boundary arm)
+EQ_ID = write_eqdel("eqdel-id.parquet", [(F_ID, [2, 4])])
+# id [5]: half of the two-file arm, and the equality half of the mixed arm
+EQ_ID5 = write_eqdel("eqdel-id5.parquet", [(F_ID, [5])])
+# region ['eu']: the other half of the two-file arm
+EQ_REGION = write_eqdel("eqdel-region.parquet", [(F_REGION, ["eu"])])
+# region [NULL]: null matches null (IS NULL semantics), and ONLY null
+EQ_NULL = write_eqdel("eqdel-null.parquet", [(F_REGION, [None])])
+# (id, region) rows (3,'eu') and (4,'us'): AND-not-OR -- (3,'eu') matches no row
+EQ_MULTI = write_eqdel("eqdel-multi.parquet", [(F_ID, [3, 4]), (F_REGION, ["eu", "us"])])
+# id 2 plus a deliberately WRONG amount: only equality_ids=[1] may define the
+# match, so the wrong amount must be ignored and id 2 still deleted
+EQ_EXTRA = write_eqdel("eqdel-extra.parquet", [(F_ID, [2]), (F_AMOUNT, [999])])
+# a long column with field id 9, present here but absent from data.parquet
+EQ_NINE = write_eqdel("eqdel-nine.parquet", [(F_EXTRA9, [42])])
+
+# the equality variants' schema: the data fields plus a timestamp field (8, for
+# the unsupported-type refusal) and a long field (9, absent from data.parquet,
+# for the missing-column error). A separate dict so the 4a metadata stays
+# byte-identical.
+schema_eq = {"schema-id": 0, "type": "struct", "fields": [
+    {"id": 1, "name": "id", "required": False, "type": "long"},
+    {"id": 2, "name": "region", "required": False, "type": "string"},
+    {"id": 3, "name": "amount", "required": False, "type": "int"},
+    {"id": 8, "name": "created", "required": False, "type": "timestamp"},
+    {"id": 9, "name": "extra", "required": False, "type": "long"}]}
+
+# spec 0 is unpartitioned (equality deletes under it are GLOBAL); spec 1 is
+# partitioned (an equality delete under it must be refused until phase 5)
+PARTITION_SPECS = [
+    {"spec-id": 0, "fields": []},
+    {"spec-id": 1, "fields": [
+        {"name": "region", "transform": "identity", "source-id": 2, "field-id": 1000}]},
+]
+
+# a second data manifest carrying data2.parquet at the same data seq 5
+DM2 = f"{LOC}/metadata/data-manifest-2.avro"
+open(os.path.join(md, "data-manifest-2.avro"), "wb").write(
+    ocf(ENTRY_SCHEMA, entry(1, DATA_SEQ, 0, DATA2_PATH, "PARQUET", 2, 1000)))
+
+
+def emit_eq_variant(tag, delete_entries, with_data2=False, del_spec_id=0):
+    """delete_entries: list of (content, seq, path, eq_ids, nrows). One delete
+    manifest holds them all; the manifest list points at the shared data
+    manifest(s) plus that delete manifest (partition_spec_id del_spec_id)."""
+    xm_name = f"delete-manifest-{tag}.avro"
+    ml_name = f"manifest-list-{tag}.avro"
+    recs = [entry_eq(1, seq, content, path, "PARQUET", nrows, 500, eq_ids)
+            for (content, seq, path, eq_ids, nrows) in delete_entries]
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(ENTRY_SCHEMA_EQ, recs))
+    xm = f"{LOC}/metadata/{xm_name}"
+    max_del_seq = max(seq for (_, seq, _, _, _) in delete_entries)
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    mrecs = [mfile(DM, 0, DATA_SEQ, SNAP, 1, 5)]
+    if with_data2:
+        mrecs.append(mfile(DM2, 0, DATA_SEQ, SNAP, 1, 2))
+    mrecs.append(mfile_spec(xm, 1, max_del_seq, SNAP, len(delete_entries),
+                            sum(n for (_, _, _, _, n) in delete_entries),
+                            del_spec_id))
+    for rec in mrecs:
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, ml_name), "wb").write(ml)
+    metadata = {
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema_eq], "partition-specs": PARTITION_SPECS,
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{
+            "snapshot-id": SNAP, "sequence-number": max(DATA_SEQ, max_del_seq),
+            "timestamp-ms": 0,
+            "manifest-list": f"{LOC}/metadata/{ml_name}",
+            "summary": {"operation": "overwrite"}, "schema-id": 0}],
+    }
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
+
+
+EQ_SEQ = DATA_SEQ + 1            # strictly newer than the data: applies
+# value arms (survivors justified inline; the data is rows 1..5 above, plus
+# data2's (6, NULL, 60) and (7, 'eu', 70) where with_data2 is set)
+emit_eq_variant("eqapply", [(2, EQ_SEQ, EQ_ID, [1], 2)])
+#   deletes id in {2,4} -> survivors 1,3,5
+emit_eq_variant("eqboundary", [(2, DATA_SEQ, EQ_ID, [1], 2)])
+#   the SAME delete at seq EQUAL to the data's: the strict-< rule says it does
+#   NOT apply (opposite boundary from position deletes) -> all 5 rows survive
+emit_eq_variant("eqmulti", [(2, EQ_SEQ, EQ_MULTI, [1, 2], 2)])
+#   (3,'eu') matches nothing (row 3 is 'us': AND, not OR); (4,'us') deletes row
+#   4 -> survivors 1,2,3,5
+emit_eq_variant("eqextra", [(2, EQ_SEQ, EQ_EXTRA, [1], 1)])
+#   equality_ids=[1] only: the wrong amount (999) is ignored, id 2 deleted ->
+#   survivors 1,3,4,5
+emit_eq_variant("eqnull", [(2, EQ_SEQ, EQ_NULL, [2], 1)], with_data2=True)
+#   region NULL matches ONLY id 6's NULL region -> survivors 1,2,3,4,5,7
+emit_eq_variant("eqtwo", [(2, EQ_SEQ, EQ_ID5, [1], 1),
+                          (2, EQ_SEQ, EQ_REGION, [2], 1)])
+#   two delete files with different equality_ids: id=5 and region='eu' ->
+#   deletes 1,2 (eu) and 5 -> survivors 3,4
+emit_eq_variant("eqmixed", [(1, DATA_SEQ, DEL_PATH, None, 2),
+                            (2, EQ_SEQ, EQ_ID5, [1], 1)])
+#   position deletes (ordinals 1,3 = ids 2,4; seq 5 >= 5 applies) UNION the
+#   equality delete of id 5 -> survivors 1,3
+# refusal / corruption arms
+emit_eq_variant("eqnoids", [(2, EQ_SEQ, EQ_ID, None, 2)])
+#   content=2 with null equality_ids is corrupt metadata (spec: required)
+emit_eq_variant("eqpart", [(2, EQ_SEQ, EQ_ID, [1], 2)], del_spec_id=1)
+#   a partition-scoped equality delete: refused (globalizing it over-deletes)
+emit_eq_variant("eqtype", [(2, EQ_SEQ, EQ_ID, [8], 2)])
+#   field 8 is a timestamp: no supported mapping, refused before any file opens
+emit_eq_variant("eqmissing", [(2, EQ_SEQ, EQ_NINE, [9], 1)])
+#   field 9 reads fine from the delete file but is absent from data.parquet:
+#   the probe read errors loudly (the reader's missing-field-id error)
+emit_eq_variant("eqescape", [(2, EQ_SEQ, "file:///etc/hostname", [1], 1)])
+#   a delete path outside the table root: the path boundary refuses it
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]
 oracle = {"deleted_positions": DELETED_POS,
           "surviving": [{"id": r[0], "region": r[1], "amount": r[2]} for r in survive],
-          "data_seq": 1, "delete_seq": 2}
+          "data_seq": DATA_SEQ, "delete_seq": DATA_SEQ,
+          # equality arms: surviving ids per variant, hand-derived above where
+          # each variant is emitted
+          "eq_surviving": {
+              "eqapply": [1, 3, 5],
+              "eqboundary": [1, 2, 3, 4, 5],
+              "eqmulti": [1, 2, 3, 5],
+              "eqextra": [1, 3, 4, 5],
+              "eqnull": [1, 2, 3, 4, 5, 7],
+              "eqtwo": [3, 4],
+              "eqmixed": [1, 3],
+          }}
 open(os.path.join(OUT, "expected_deletes.json"), "w").write(json.dumps(oracle, indent=2))
 print("surviving rows:", oracle["surviving"])
 print("deleted positions:", DELETED_POS)
+print("equality survivors:", oracle["eq_surviving"])

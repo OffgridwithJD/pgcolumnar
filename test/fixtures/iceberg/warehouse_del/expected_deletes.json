@@ -20,6 +20,48 @@
       "amount": 50
     }
   ],
-  "data_seq": 1,
-  "delete_seq": 2
+  "data_seq": 5,
+  "delete_seq": 5,
+  "eq_surviving": {
+    "eqapply": [
+      1,
+      3,
+      5
+    ],
+    "eqboundary": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "eqmulti": [
+      1,
+      2,
+      3,
+      5
+    ],
+    "eqextra": [
+      1,
+      3,
+      4,
+      5
+    ],
+    "eqnull": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      7
+    ],
+    "eqtwo": [
+      3,
+      4
+    ],
+    "eqmixed": [
+      1,
+      3
+    ]
+  }
 }
