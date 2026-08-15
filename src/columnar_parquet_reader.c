@@ -2628,15 +2628,25 @@ build_imp_targets(TupleDesc tupdesc, PqFile *pf,
  * an absent id, a duplicate id, or a file with no ids at all is refused rather
  * than silently mis-bound. Reuses the same ImpTop/ImpLeaf output as the
  * positional binder, so pq_read_rows is unchanged.
+ *
+ * Name mapping (Iceberg schema.name-mapping.default): when a leaf carries no
+ * field id, its id is looked up from the caller's (name -> id) table by the
+ * leaf's own column name, synthesizing the id the file omitted -- exactly the
+ * spec's "map field id to columns without field id". This lets a data file
+ * written without field ids (an imported dataset) bind by name. A leaf that
+ * does carry an id ignores the table. nm_count 0 disables it, preserving the
+ * no-ids refusal.
  */
 static ImpTop *
 build_imp_targets_by_field_id(TupleDesc tupdesc, PqFile *pf,
 							  const int *field_ids, int nfield,
-							  ImpLeaf **pleaves, int *ntops)
+							  const char *const *nm_names, const int *nm_ids,
+							  int nm_count, ImpLeaf **pleaves, int *ntops)
 {
 	int			natts = tupdesc->natts;
 	ImpTop	   *tops = palloc0(sizeof(ImpTop) * Max(natts, 1));
 	ImpLeaf    *leaves = palloc0(sizeof(ImpLeaf) * Max(pf->ncols, 1));
+	int		   *eff_id = palloc(sizeof(int) * Max(pf->ncols, 1));
 	int			nt = 0;
 	int			fi = 0;
 	int			outn = 0;
@@ -2646,18 +2656,32 @@ build_imp_targets_by_field_id(TupleDesc tupdesc, PqFile *pf,
 #define IMP_FAIL(...) \
 	ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH), errmsg(__VA_ARGS__)))
 
-	/* the file must carry field ids for id resolution to mean anything */
+	/* the effective id of each leaf: its own field id, or -- for an id-less
+	 * leaf and a supplied name mapping -- the id the mapping gives its name */
 	for (i = 0; i < pf->ncols; i++)
-		if (pf->leaves[i].sc->field_id >= 0)
+	{
+		eff_id[i] = pf->leaves[i].sc->field_id;
+		if (eff_id[i] < 0 && nm_count > 0 && pf->leaves[i].sc->name != NULL)
 		{
-			anyId = true;
-			break;
+			int			k;
+
+			for (k = 0; k < nm_count; k++)
+				if (strcmp(nm_names[k], pf->leaves[i].sc->name) == 0)
+				{
+					eff_id[i] = nm_ids[k];
+					break;
+				}
 		}
+		if (eff_id[i] >= 0)
+			anyId = true;
+	}
 	if (!anyId)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("the Parquet file carries no field ids; it cannot be read by field id"),
-				 errhint("Read it positionally: SELECT * FROM pgcolumnar.read_parquet(path) AS t(...).")));
+				 nm_count > 0
+				 ? errhint("Its column names are not in the table's schema.name-mapping.default mapping.")
+				 : errhint("Provide a schema.name-mapping.default mapping, or read it positionally: SELECT * FROM pgcolumnar.read_parquet(path) AS t(...).")));
 
 	for (i = 0; i < natts; i++)
 		if (!TupleDescAttr(tupdesc, i)->attisdropped)
@@ -2690,10 +2714,11 @@ build_imp_targets_by_field_id(TupleDesc tupdesc, PqFile *pf,
 					 errmsg("field-id projection supports only scalar columns, but output column \"%s\" is not scalar",
 							NameStr(att->attname))));
 
-		/* the unique top-level leaf carrying this field id */
+		/* the unique top-level leaf carrying this field id (its own, or one
+		 * synthesized from the name mapping for an id-less file) */
 		for (j = 0; j < pf->ncols; j++)
 		{
-			if (pf->leaves[j].sc->field_id == req)
+			if (eff_id[j] == req)
 			{
 				if (found >= 0)
 					ereport(ERROR,
@@ -3459,6 +3484,7 @@ static int64
 pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 				  PqRowSink sink, void *sinkarg,
 				  const int *field_ids, int nfield,
+				  const char *const *nm_names, const int *nm_ids, int nm_count,
 				  const uint64 *skipPos, int nSkipPos)
 {
 	PqSource	src;
@@ -3472,6 +3498,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 	pq_check_row_groups(&pf, path);
 	if (field_ids != NULL)
 		tops = build_imp_targets_by_field_id(tupdesc, &pf, field_ids, nfield,
+											 nm_names, nm_ids, nm_count,
 											 &leaves, &ntops);
 	else
 		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
@@ -3496,7 +3523,28 @@ PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 							   const uint64 *skipPos, int nSkipPos)
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
-							 field_ids, nfield, skipPos, nSkipPos);
+							 field_ids, nfield, NULL, NULL, 0, skipPos, nSkipPos);
+}
+
+/*
+ * As PgColumnarReadParquetByFieldId, but with an Iceberg name mapping: for a
+ * data file whose columns carry no field ids, each id-less column's field id is
+ * taken from the (nm_names[k] -> nm_ids[k]) table by the column's name. A file
+ * that carries ids ignores the mapping; nm_count 0 is identical to the plain
+ * entry. Used for the Iceberg data-file read, where schema.name-mapping.default
+ * lets an imported (id-less) data file be read.
+ */
+int64
+PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdesc,
+								 const int *field_ids, int nfield,
+								 const char *const *nm_names, const int *nm_ids,
+								 int nm_count,
+								 Tuplestorestate *tupstore, TupleTableSlot *slot,
+								 const uint64 *skipPos, int nSkipPos)
+{
+	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
+							 field_ids, nfield, nm_names, nm_ids, nm_count,
+							 skipPos, nSkipPos);
 }
 
 /*
@@ -3562,7 +3610,8 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 		MemoryContext old = MemoryContextSwitchTo(fileCtx);
 
 		total += pq_read_file_into((char *) lfirst(lc), tupdesc, slot,
-								   pq_insert_sink, &sinkarg, NULL, 0, NULL, 0);
+								   pq_insert_sink, &sinkarg, NULL, 0,
+								   NULL, NULL, 0, NULL, 0);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -3682,7 +3731,7 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 
 		(void) pq_read_file_into((char *) lfirst(lc), retdesc, slot,
 								 pq_tuplestore_sink, tupstore, field_ids, nfield,
-								 NULL, 0);
+								 NULL, NULL, 0, NULL, 0);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}

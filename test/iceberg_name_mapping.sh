@@ -30,6 +30,14 @@ $1;
 SQLEOF
 }
 
+# the full error text (message + detail + hint), for a cause carried in a HINT
+fullerr_of() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | tr '\n' ' '
+$1;
+SQLEOF
+}
+
 FX="$(dirname "${BASH_SOURCE[0]}")/fixtures/iceberg"
 WHN="$FX/warehouse_nm"
 [ -f "$WHN/db/t/metadata/nmapply.metadata.json" ] || pgc_skip fixture "name-mapping fixtures are missing"
@@ -81,8 +89,8 @@ check "an id-less file with no name mapping is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmnomap.metadata.json')
 	                AS t(id bigint, region text, amount int)")" "22023"
 check "...and the refusal names schema.name-mapping.default" \
-	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmnomap.metadata.json')
-	              AS t(id bigint, region text, amount int)" | grep -c "name-mapping")" "1"
+	"$(fullerr_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmnomap.metadata.json')
+	              AS t(id bigint, region text, amount int)" | grep -c "schema.name-mapping.default")" "1"
 # a mapping that lists one name under two field ids violates uniqueness
 check "a duplicate name in the mapping is refused (XX001)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmdup.metadata.json')
