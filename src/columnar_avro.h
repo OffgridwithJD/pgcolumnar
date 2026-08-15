@@ -30,6 +30,8 @@ typedef struct PgColumnarAvroManifestEntry
 	char	   *partition;		/* the partition struct rendered as text, or NULL */
 	int64		sequence_number;	/* the entry's data sequence number, when present */
 	bool		has_sequence_number;	/* false when the field is null (inherited) */
+	int32	   *equality_ids;	/* content 2: the field ids defining row equality */
+	int			nequality_ids;	/* 0 when the field is null or absent */
 } PgColumnarAvroManifestEntry;
 
 /*

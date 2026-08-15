@@ -559,6 +559,78 @@ av_read_long(AvReader *r, AvSchema *s, bool *have)
 	return av_long(r);
 }
 
+/* a data_file's equality_ids names a handful of columns; anything larger than
+ * this is a hostile manifest, not a real table */
+#define AV_MAX_EQUALITY_IDS 10000
+
+/* read a nullable array<int> field (equality_ids) into a palloc'd int32 array.
+ * The array block protocol (negative count = block byte size follows) and its
+ * caps mirror av_skip's AV_ARRAY arm. Null, absent, or mistyped decodes as an
+ * empty array (*nout 0), which the caller treats as "not present". */
+static void
+av_read_int_array(AvReader *r, AvSchema *s, int32 **out, int *nout)
+{
+	bool		isnull;
+	AvSchema   *t = av_unwrap_union(r, s, &isnull);
+	int32	   *vals = NULL;
+	int			n = 0;
+	int			cap = 0;
+
+	*out = NULL;
+	*nout = 0;
+	if (r->error || isnull)
+		return;
+	if (t->kind != AV_ARRAY ||
+		(t->items->kind != AV_INT && t->items->kind != AV_LONG))
+	{
+		av_skip(r, t);
+		return;
+	}
+	while (!r->error)
+	{
+		int64		cnt;
+		int64		i;
+
+		CHECK_FOR_INTERRUPTS();
+		cnt = av_long(r);
+		if (cnt == 0)
+			break;
+		if (cnt < 0)
+		{
+			/* also catches INT64_MIN, whose negation is signed-overflow UB */
+			if (cnt < -AV_MAX_EQUALITY_IDS)
+			{
+				r->error = true;
+				break;
+			}
+			cnt = -cnt;
+			(void) av_long(r);	/* block byte size, unused */
+		}
+		if (cnt > AV_MAX_EQUALITY_IDS || n + cnt > AV_MAX_EQUALITY_IDS)
+		{
+			r->error = true;
+			break;
+		}
+		for (i = 0; i < cnt && !r->error; i++)
+		{
+			int64		v = av_long(r);
+
+			if (n == cap)
+			{
+				cap = cap ? cap * 2 : 8;
+				vals = (vals == NULL)
+					? (int32 *) palloc(cap * sizeof(int32))
+					: (int32 *) repalloc(vals, cap * sizeof(int32));
+			}
+			vals[n++] = (int32) v;
+		}
+	}
+	if (r->error)
+		return;
+	*out = vals;
+	*nout = n;
+}
+
 /* decode one data_file record into the projected fields */
 static void
 av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
@@ -594,6 +666,8 @@ av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 			if (!r->error && !isnull)
 				e->partition = av_decode_partition(r, pt);
 		}
+		else if (strcmp(nm, "equality_ids") == 0)
+			av_read_int_array(r, ft, &e->equality_ids, &e->nequality_ids);
 		else
 			av_skip(r, ft);		/* every other field: advance past it */
 	}
