@@ -231,8 +231,10 @@ pf_roaring32(PfCur *c, uint64 base, PfOut *out)
 			pf_need(c, 8192);
 			for (w = 0; w < 1024; w++)
 			{
-				uint64		word = ((uint64) pf_u32(c)) |
-					((uint64) pf_u32(c) << 32);
+				/* pf_u64 reads lo then hi in ordered statements; an inline
+				 * two-pf_u32 expression here would be unsequenced and could
+				 * swap the halves under a right-first-evaluating compiler */
+				uint64		word = pf_u64(c);
 				int			b;
 
 				if (word == 0)
