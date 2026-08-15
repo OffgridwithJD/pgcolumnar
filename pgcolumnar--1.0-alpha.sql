@@ -949,6 +949,14 @@ CREATE FUNCTION pgcolumnar.iceberg_data_files(metadata_path text)
 COMMENT ON FUNCTION pgcolumnar.iceberg_data_files(text)
 	IS 'list the live data files of an Apache Iceberg table current snapshot; refuses tables with delete files (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_scan(metadata_path text)
+	RETURNS SETOF record
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_scan';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_scan(text)
+	IS 'read an Apache Iceberg table at its current snapshot; supply a column definition list, whose names resolve to the table schema field ids, e.g. SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(id bigint, region text); refuses tables with delete files (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *

@@ -20,6 +20,7 @@
 #include "columnar.h"
 #include "columnar_objstore.h"
 #include "columnar_parquet_format.h"
+#include "columnar_parquet_reader.h"
 #include "columnar_thrift.h"
 #include "columnar_parquet_codec.h"
 
@@ -3434,6 +3435,21 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 					 0, pf.nrowgroups);
 	pq_source_close(&src);
 	return n;
+}
+
+/*
+ * Public entry (columnar_parquet_reader.h): read one Parquet file's rows into a
+ * tuplestore, projected by field id. Thin wrapper over the file-local read path
+ * so the Iceberg scan can read a data file by the table's field ids without
+ * reaching into the reader's internals.
+ */
+int64
+PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
+							   const int *field_ids, int nfield,
+							   Tuplestorestate *tupstore, TupleTableSlot *slot)
+{
+	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
+							 field_ids, nfield);
 }
 
 /*
