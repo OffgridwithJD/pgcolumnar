@@ -1042,6 +1042,141 @@ ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
 	return ids;
 }
 
+/* find the schema field id of a column by name, or -1 */
+static int64
+ice_field_id_by_name(JsonbContainer *fieldsc, uint32 nf, const char *nm)
+{
+	uint32		j;
+
+	for (j = 0; j < nf; j++)
+	{
+		JsonbValue *sf = getIthJsonbValueFromContainer(fieldsc, j);
+		JsonbValue *sfn;
+		int64		fid;
+
+		if (sf == NULL || sf->type != jbvBinary)
+			continue;
+		sfn = ice_field(sf->val.binary.data, "name");
+		if (sfn == NULL || sfn->type != jbvString)
+			continue;
+		if ((int) strlen(nm) == sfn->val.string.len &&
+			strncmp(nm, sfn->val.string.val, sfn->val.string.len) == 0)
+		{
+			if (ice_num_int64(ice_field(sf->val.binary.data, "id"), &fid))
+				return fid;
+			return -1;
+		}
+	}
+	return -1;
+}
+
+/*
+ * Map the current partition spec's IDENTITY fields to foreign-table columns, for
+ * FDW pruning. On return *out_attno[k] is the 1-based attno of the table column
+ * an identity partition field at partition-tuple position k maps to (0 when the
+ * field is a non-identity transform, or its source column is not in the table);
+ * *out_npos is the number of partition fields in the current spec; *out_specid
+ * is the current (default) spec id. A file whose own spec_id differs from
+ * *out_specid must not be pruned with this map (partition evolution). The caller
+ * frees nothing (palloc'd in the current context). Reads the metadata once.
+ */
+void
+PgColumnarIcebergIdentityPartMap(const char *path,
+								 const PgColumnarObjStoreConfig *cfg,
+								 TupleDesc tupdesc,
+								 int **out_attno, int *out_npos, int32 *out_specid)
+{
+	char	   *json = ice_slurp_text(path, cfg);
+	Jsonb	   *jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+													   CStringGetDatum(json)));
+	JsonbContainer *root = &jb->root;
+	JsonbContainer *fieldsc = ice_current_schema_fields(root, path);
+	uint32		nf = JsonContainerSize(fieldsc);
+	JsonbValue *dv;
+	JsonbValue *specs;
+	JsonbContainer *specfields = NULL;
+	uint32		nspec = 0;
+	uint32		k;
+	int64		defspec = 0;
+	int		   *attno;
+
+	*out_attno = NULL;
+	*out_npos = 0;
+	*out_specid = 0;
+
+	dv = ice_field(root, "default-spec-id");
+	if (dv != NULL)
+		(void) ice_num_int64(dv, &defspec);
+	*out_specid = (int32) defspec;
+
+	specs = ice_field(root, "partition-specs");
+	if (specs != NULL && specs->type == jbvBinary &&
+		JsonContainerIsArray(specs->val.binary.data))
+	{
+		uint32		ns = JsonContainerSize(specs->val.binary.data);
+		uint32		i;
+
+		for (i = 0; i < ns; i++)
+		{
+			JsonbValue *sp = getIthJsonbValueFromContainer(specs->val.binary.data, i);
+			JsonbValue *sid;
+			JsonbValue *flds;
+			int64		sv;
+
+			if (sp == NULL || sp->type != jbvBinary)
+				continue;
+			sid = ice_field(sp->val.binary.data, "spec-id");
+			if (sid == NULL || !ice_num_int64(sid, &sv) || sv != defspec)
+				continue;
+			flds = ice_field(sp->val.binary.data, "fields");
+			if (flds != NULL && flds->type == jbvBinary &&
+				JsonContainerIsArray(flds->val.binary.data))
+			{
+				specfields = flds->val.binary.data;
+				nspec = JsonContainerSize(specfields);
+			}
+			break;
+		}
+	}
+	if (specfields == NULL || nspec == 0)
+		return;					/* unpartitioned: nothing to prune */
+
+	attno = (int *) palloc0(sizeof(int) * nspec);
+	for (k = 0; k < nspec; k++)
+	{
+		JsonbValue *f = getIthJsonbValueFromContainer(specfields, k);
+		JsonbValue *tr;
+		JsonbValue *src;
+		int64		srcid;
+		int			a;
+
+		if (f == NULL || f->type != jbvBinary)
+			continue;
+		tr = ice_field(f->val.binary.data, "transform");
+		if (tr == NULL || tr->type != jbvString ||
+			tr->val.string.len != 8 ||
+			strncmp(tr->val.string.val, "identity", 8) != 0)
+			continue;			/* only identity is prunable in this increment */
+		src = ice_field(f->val.binary.data, "source-id");
+		if (src == NULL || !ice_num_int64(src, &srcid))
+			continue;
+		for (a = 0; a < tupdesc->natts; a++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, a);
+
+			if (att->attisdropped)
+				continue;
+			if (ice_field_id_by_name(fieldsc, nf, NameStr(att->attname)) == srcid)
+			{
+				attno[k] = a + 1;
+				break;
+			}
+		}
+	}
+	*out_attno = attno;
+	*out_npos = (int) nspec;
+}
+
 /* A name mapping has one entry per top-level column plus a few aliases; a real
  * schema is well under this. The metadata.json is capped at 64 MB, so without a
  * bound a crafted mapping could carry millions of names -- refuse rather than
@@ -2058,12 +2193,12 @@ ice_eq_probe(IceScanCtx *c, IceEntry *d, List *elig,
  * metadata.json location (local or remote), `tupdesc` the caller's column
  * definition list; the rows land in a materialize-mode tuplestore on `rsinfo`.
  */
-void
-PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
-						  ReturnSetInfo *rsinfo,
-						  const PgColumnarObjStoreConfig *cfg)
+int64
+PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
+						  const PgColumnarObjStoreConfig *cfg,
+						  Tuplestorestate *tupstore,
+						  PgColumnarIceFileFilter filter, void *filterarg)
 {
-	MemoryContext oldcxt;
 	IceScanCtx	ctx;
 	char	   *json;
 	Jsonb	   *jb;
@@ -2073,6 +2208,7 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 	List	   *dvdels;
 	List	   *eqdels;
 	ListCell   *lc;
+	int64		pruned = 0;
 
 	ctx.cfg = cfg;				/* vended storage creds for every file, or NULL */
 
@@ -2082,14 +2218,7 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 	field_ids = ice_field_ids_for_columns(&jb->root, tupdesc, path, &nfield);
 	ice_name_mapping(&jb->root, path, &ctx.nm_names, &ctx.nm_ids, &ctx.nm_count);
 
-	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
-	tupdesc = CreateTupleDescCopy(tupdesc);
-	ctx.tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = ctx.tupstore;
-	rsinfo->setDesc = tupdesc;
-	MemoryContextSwitchTo(oldcxt);
-
+	ctx.tupstore = tupstore;
 	ctx.tupdesc = tupdesc;
 	ctx.slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	ctx.field_ids = field_ids;
@@ -2146,6 +2275,18 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 		char	   *safe;
 		MemoryContext old;
 		ListCell   *lc2;
+
+		/* pruning: a caller-supplied filter may skip a whole data file whose
+		 * partition value cannot match the scan's predicate (the FDW). Skipping
+		 * a file never changes correctness -- a false-negative just reads a file
+		 * that would have returned no rows -- so the filter is only ever an
+		 * optimization, never a source of wrong results. */
+		if (filter != NULL && filter(filterarg, d->part_cells, d->npart_cells,
+									 d->spec_id))
+		{
+			pruned++;
+			continue;
+		}
 
 		if (d->file_format != NULL && strcmp(d->file_format, "PARQUET") != 0)
 			ereport(ERROR,
@@ -2304,6 +2445,31 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 
 	MemoryContextDelete(ctx.filectx);
 	ExecDropSingleTupleTableSlot(ctx.slot);
+	return pruned;
+}
+
+/*
+ * The body of iceberg_scan: read the whole table (no pruning) into a
+ * materialize-mode tuplestore on rsinfo. Thin wrapper over the filtered core.
+ */
+void
+PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
+						  ReturnSetInfo *rsinfo,
+						  const PgColumnarObjStoreConfig *cfg)
+{
+	MemoryContext oldcxt;
+	TupleDesc	outdesc;
+	Tuplestorestate *tupstore;
+
+	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	outdesc = CreateTupleDescCopy(tupdesc);
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = outdesc;
+	MemoryContextSwitchTo(oldcxt);
+
+	(void) PgColumnarIcebergScanCore(path, outdesc, cfg, tupstore, NULL, NULL);
 }
 
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);

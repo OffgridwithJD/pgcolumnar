@@ -892,6 +892,34 @@ SELECT sum(amount) FROM events WHERE ts >= '2026-01-01';
 EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 ```
 
+### The pgcolumnar_iceberg foreign-data wrapper
+
+Exposes an Apache Iceberg table as a foreign table. Unlike `iceberg_scan`, which
+is a set-returning function that receives no predicate, the foreign table gets
+the query's quals and prunes. A predicate on an identity-partitioned column
+removes whole data files before they are opened. The partition value is read
+from the manifest, so a file is skipped without a read. Pruning is only an
+optimization. A file that is not pruned is read normally, so a predicate the
+wrapper cannot decide never changes the rows returned. Field-id projection and
+every delete rule are those of `iceberg_scan`.
+
+The one table option is `metadata_path`, the table's current `metadata.json`
+(a local path or an object-storage URL). The wrapper requires the
+`pg_read_server_files` role. `EXPLAIN (ANALYZE)` reports `Files Pruned`.
+
+Only identity partitioning prunes in this release. A table partitioned by a
+transform such as `bucket`, `truncate`, or a temporal function is read in full,
+which is correct but not yet optimized.
+
+```sql
+CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;
+CREATE FOREIGN TABLE events (id bigint, region text, amount int)
+  SERVER ice OPTIONS (metadata_path '/data/warehouse/db/events/metadata/v3.metadata.json');
+
+-- reads only the region=eu data file; EXPLAIN ANALYZE shows "Files Pruned: 1"
+SELECT sum(amount) FROM events WHERE region = 'eu';
+```
+
 ## Object storage
 
 The Parquet read and export functions, and the foreign-data wrapper, accept an
