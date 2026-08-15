@@ -703,16 +703,28 @@ that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
-Position deletes are applied: a delete file drops the row ordinals it lists from
-the data file it names, when that data file's data sequence number is less than
-or equal to the delete's (the Iceberg rule: a position delete affects data
-written in the same commit or earlier, so a delete and the rows it removes may
-share a sequence number).
-Equality deletes are not yet supported and are refused rather than ignored, so a
-table using them errors instead of returning rows it should have removed. The
+Row-level deletes are applied, each kind under its own Iceberg sequence rule.
+A position delete drops the row ordinals it lists from the data file it names,
+when that data file's data sequence number is less than or equal to the
+delete's (a position delete affects data written in the same commit or earlier,
+so a delete and the rows it removes may share a sequence number). An equality
+delete drops every data row whose values equal a delete row on all of the
+delete file's `equality_ids` columns, when the data file's sequence number is
+strictly less than the delete's (an equality delete never affects data from its
+own commit). A null delete value matches a null data value, and only a null.
+Columns in the delete file beyond `equality_ids` do not take part in the match.
+
+Some equality-delete forms are refused rather than ignored, so a table using
+them errors instead of returning rows it should have removed: a delete written
+under a partitioned partition spec (applying it globally would remove rows in
+other partitions; partition handling is planned), a delete column whose type
+has no supported mapping (supported: `int`, `long`, `string`, `boolean`,
+`date`), and a delete column that is no longer in the table's current schema.
+A delete column missing from an older data file is also an error. The
 recorded file paths are rebased onto the table's actual location and resolved
 against a path boundary, so a relocated table reads and a path pointing outside
-the table is refused.
+the table is refused. Applying equality deletes reads each affected data
+file's delete columns twice (a probe pass computes the row ordinals to drop).
 
 ```sql
 SELECT id, region, sum(amount)
