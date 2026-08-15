@@ -96,6 +96,11 @@ class Handler(BaseHTTPRequestHandler):
         # /v1/config is not under the prefix (the client calls it to LEARN the
         # prefix), so handle it before stripping.
         if path == "/v1/config":
+            if ARGS.bad_config:
+                # a hostile/broken catalog: config is not a JSON object. The
+                # client must refuse this, not walk it as key/value pairs.
+                self._send_json(200, [])
+                return
             overrides = {}
             if ARGS.prefix:
                 overrides["prefix"] = ARGS.prefix.strip("/")
@@ -158,6 +163,7 @@ def main():
     ap.add_argument("--table", default="events")
     ap.add_argument("--metadata-location", required=True)
     ap.add_argument("--table-location", default="")
+    ap.add_argument("--bad-config", action="store_true")
     ARGS = ap.parse_args()
     open(ARGS.log, "w").close()
     httpd = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)

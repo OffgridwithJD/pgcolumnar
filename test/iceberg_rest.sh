@@ -140,6 +140,23 @@ check "an unknown table surfaces a clean not-found (42P01)" \
 	                SELECT pgcolumnar.iceberg_rest_table_location('$CAT','db','nosuch')")" \
 	"42P01"
 
+# ---- a non-object /v1/config body is refused, never walked (XX001) ----------
+# an untrusted catalog whose config is a JSON array/scalar must not reach the
+# object-only key lookup: a debug build would Assert-crash, a release build would
+# read out of bounds. A second fixture serves "[]" for /v1/config.
+BAD_PORT="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI")"
+python3 "$(dirname "${BASH_SOURCE[0]}")/iceberg_rest_server.py" \
+	--port "$BAD_PORT" --log "$PGC_WORKDIR/badcfg.log" --bad-config \
+	--metadata-location "$MDLOC" \
+	> "$PGC_WORKDIR/badcfg.out" 2>&1 &
+BAD_PID=$!
+for _ in $(seq 1 50); do grep -q READY "$PGC_WORKDIR/badcfg.out" 2>/dev/null && break; sleep 0.1; done
+check "a non-object catalog config is refused, not walked (XX001)" \
+	"$(sqlstate_of "SET pgcolumnar.objstore_allowed_endpoints='127.0.0.1';
+	                SELECT pgcolumnar.iceberg_rest_table_location('http://127.0.0.1:$BAD_PORT','db','events')")" \
+	"XX001"
+kill "$BAD_PID" 2>/dev/null
+
 # ---- backend still healthy after the refusals -------------------------------
 check "backend still up after the REST refusals" "$(q 'SELECT 1')" "1"
 

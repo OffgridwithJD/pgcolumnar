@@ -227,6 +227,17 @@ PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
 
 	/* config: {overrides, defaults}; a prefix, if any, is spliced after /v1/ */
 	cfg = rest_get_json(catalog_uri, "/v1/config", "config");
+	/*
+	 * The config body is untrusted (a compromised or hostile allow-listed
+	 * catalog). getKeyJsonValueFromContainer Asserts object-ness before its
+	 * count<=0 early-out and then walks children as key/value pairs, so a
+	 * non-object root ([], a scalar) is an assert crash on a debug build and an
+	 * out-of-bounds read otherwise. Refuse it before any key lookup.
+	 */
+	if (!JsonContainerIsObject(&cfg->root))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: the REST catalog config response is not a JSON object")));
 	prefix = rest_json_string_opt(&cfg->root, "prefix");
 	if (prefix == NULL)
 	{
