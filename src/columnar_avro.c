@@ -467,44 +467,14 @@ av_unwrap_union(AvReader *r, AvSchema *s, bool *is_null)
 	}
 }
 
-/* read a scalar field to text (for partition values); complex types render "?" */
+/*
+ * Decode a partition struct (a record of scalar-ish fields) in ONE pass into
+ * both the display string (name=value,...) the lister surfaces AND a typed cell
+ * per field for exact-equality comparison (partition-scoped equality deletes).
+ * The cells are stored on the entry; the display string is returned.
+ */
 static char *
-av_scalar_text(AvReader *r, AvSchema *s)
-{
-	bool		isnull;
-	AvSchema   *t = av_unwrap_union(r, s, &isnull);
-
-	if (r->error)
-		return NULL;
-	if (isnull)
-		return pstrdup("");
-	switch (t->kind)
-	{
-		case AV_STRING:
-		case AV_BYTES:
-			{
-				char	   *v = av_cstring(r);
-
-				return v ? v : pstrdup("");
-			}
-		case AV_INT:
-		case AV_LONG:
-			return psprintf(INT64_FORMAT, av_long(r));
-		case AV_BOOL:
-			{
-				const uint8 *p = av_take(r, 1);
-
-				return pstrdup(p && *p ? "true" : "false");
-			}
-		default:
-			av_skip(r, t);
-			return pstrdup("?");
-	}
-}
-
-/* render a partition struct (a record of scalar-ish fields) as name=value,... */
-static char *
-av_decode_partition(AvReader *r, AvSchema *s)
+av_decode_partition(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 {
 	StringInfoData out;
 	int			i;
@@ -514,14 +484,72 @@ av_decode_partition(AvReader *r, AvSchema *s)
 		av_skip(r, s);
 		return NULL;
 	}
+	e->part_cells = (PgColumnarAvroPartCell *)
+		palloc0(sizeof(PgColumnarAvroPartCell) * Max(s->n, 1));
+	e->npart_cells = s->n;
 	initStringInfo(&out);
 	for (i = 0; i < s->n && !r->error; i++)
 	{
-		char	   *v = av_scalar_text(r, s->fields[i].type);
+		PgColumnarAvroPartCell *c = &e->part_cells[i];
+		bool		isnull;
+		AvSchema   *t = av_unwrap_union(r, s->fields[i].type, &isnull);
+		char	   *disp;
 
 		if (i > 0)
 			appendStringInfoChar(&out, ',');
-		appendStringInfo(&out, "%s=%s", s->fields[i].name, v ? v : "");
+		if (r->error)
+			break;
+		if (isnull)
+		{
+			c->isnull = true;
+			c->comparable = true;	/* null compares equal only to null */
+			appendStringInfo(&out, "%s=", s->fields[i].name);
+			continue;
+		}
+		switch (t->kind)
+		{
+			case AV_INT:
+			case AV_LONG:
+				c->ival = av_long(r);
+				c->comparable = true;
+				disp = psprintf(INT64_FORMAT, c->ival);
+				break;
+			case AV_BOOL:
+				{
+					const uint8 *p = av_take(r, 1);
+
+					c->ival = (p && *p) ? 1 : 0;
+					c->comparable = true;
+					disp = pstrdup(c->ival ? "true" : "false");
+					break;
+				}
+			case AV_STRING:
+			case AV_BYTES:
+				{
+					int64		n;
+					const uint8 *p = av_bytes(r, &n);
+
+					if (r->error || p == NULL)
+					{
+						disp = pstrdup("");
+						break;
+					}
+					c->is_bytes = true;
+					c->comparable = true;
+					c->bytes = (char *) palloc(n);
+					memcpy(c->bytes, p, n);
+					c->blen = (int) n;
+					disp = pnstrdup((const char *) p, n);
+					break;
+				}
+			default:
+				/* float/double/fixed/other: cannot compare for exact equality */
+				av_skip(r, t);
+				c->comparable = false;
+				disp = pstrdup("?");
+				break;
+		}
+		appendStringInfo(&out, "%s=%s", s->fields[i].name, disp ? disp : "");
 	}
 	return out.data;
 }
@@ -674,7 +702,7 @@ av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 			AvSchema   *pt = av_unwrap_union(r, ft, &isnull);
 
 			if (!r->error && !isnull)
-				e->partition = av_decode_partition(r, pt);
+				e->partition = av_decode_partition(r, pt, e);
 		}
 		else if (strcmp(nm, "equality_ids") == 0)
 			av_read_int_array(r, ft, &e->equality_ids, &e->nequality_ids);

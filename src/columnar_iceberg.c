@@ -998,7 +998,79 @@ typedef struct IceEntry
 	int64		content_size;	/* v3 DV: blob length */
 	bool		has_content_size;
 	int64		record_count;	/* for a DV, its cardinality per the spec */
+	PgColumnarAvroPartCell *part_cells; /* typed partition tuple, or NULL */
+	int			npart_cells;
 }			IceEntry;
+
+/* deep-copy a partition tuple into the current memory context */
+static void
+ice_copy_part_cells(const PgColumnarAvroPartCell *src, int nsrc,
+					PgColumnarAvroPartCell **out, int *nout)
+{
+	int			i;
+
+	*out = NULL;
+	*nout = 0;
+	if (nsrc <= 0)
+		return;
+	*out = (PgColumnarAvroPartCell *)
+		palloc0(sizeof(PgColumnarAvroPartCell) * nsrc);
+	*nout = nsrc;
+	for (i = 0; i < nsrc; i++)
+	{
+		(*out)[i] = src[i];
+		if (src[i].is_bytes && src[i].bytes != NULL)
+		{
+			(*out)[i].bytes = (char *) palloc(src[i].blen);
+			memcpy((*out)[i].bytes, src[i].bytes, src[i].blen);
+		}
+	}
+}
+
+/* are two partition tuples exactly equal? Caller must ensure both are fully
+ * comparable (no float/double/unhandled cell); an incomparable cell here is a
+ * programming error, treated as not-equal defensively. */
+static bool
+ice_part_cells_equal(const PgColumnarAvroPartCell *a, int na,
+					 const PgColumnarAvroPartCell *b, int nb)
+{
+	int			i;
+
+	if (na != nb)
+		return false;
+	for (i = 0; i < na; i++)
+	{
+		if (!a[i].comparable || !b[i].comparable)
+			return false;
+		if (a[i].isnull != b[i].isnull)
+			return false;
+		if (a[i].isnull)
+			continue;
+		if (a[i].is_bytes != b[i].is_bytes)
+			return false;
+		if (a[i].is_bytes)
+		{
+			if (a[i].blen != b[i].blen ||
+				memcmp(a[i].bytes, b[i].bytes, a[i].blen) != 0)
+				return false;
+		}
+		else if (a[i].ival != b[i].ival)
+			return false;
+	}
+	return true;
+}
+
+/* does a partition tuple contain a cell the reader cannot compare exactly? */
+static bool
+ice_part_incomparable(const PgColumnarAvroPartCell *cells, int n)
+{
+	int			i;
+
+	for (i = 0; i < n; i++)
+		if (!cells[i].comparable)
+			return true;
+	return false;
+}
 
 /* one position-delete row: drop row `pos` of data file `dpath`, if this delete's
  * sequence number is greater than that data file's */
@@ -1058,6 +1130,8 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	ie->content_size = e->content_size_in_bytes;
 	ie->has_content_size = e->has_content_size;
 	ie->record_count = e->record_count;
+	ice_copy_part_cells(e->part_cells, e->npart_cells,
+						&ie->part_cells, &ie->npart_cells);
 	if (e->nequality_ids > 0)
 	{
 		ie->eq_ids = (int32 *) palloc(e->nequality_ids * sizeof(int32));
@@ -1424,6 +1498,10 @@ typedef struct IceEqDel
 	int16	   *typlen;
 	bool	   *typbyval;
 	List	   *rows;			/* IceEqRow* */
+	bool		partitioned;	/* delete written under a partitioned spec */
+	int32		spec_id;		/* its partition spec id (partitioned only) */
+	PgColumnarAvroPartCell *part_cells; /* its partition tuple (partitioned) */
+	int			npart_cells;
 }			IceEqDel;
 
 /*
@@ -1489,15 +1567,29 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("iceberg: the manifest list carries no partition_spec_id for equality delete file \"%s\"",
 							ed->file_path)));
-		if (ice_spec_is_partitioned(root, ed->spec_id, path))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("iceberg: equality delete file \"%s\" is partition-scoped (spec %d), which is not supported",
-							ed->file_path, ed->spec_id),
-					 errdetail("Applying a partition-scoped equality delete globally would delete rows in other partitions.")));
 
 		E = (IceEqDel *) palloc0(sizeof(IceEqDel));
 		E->seq = ed->seq;
+		E->spec_id = ed->spec_id;
+		E->partitioned = ice_spec_is_partitioned(root, ed->spec_id, path);
+		if (E->partitioned)
+		{
+			/* a partition-scoped delete applies where its (spec id, partition
+			 * tuple) equals a data file's; we need a comparable tuple. A delete
+			 * whose spec id or values match no data file simply applies to
+			 * nothing -- the pass-2 filter yields that no-op, exactly as the
+			 * spec requires (a partitioned delete never crosses spec ids), so
+			 * no cross-spec refusal is needed or correct. */
+			if (ed->npart_cells == 0 ||
+				ice_part_incomparable(ed->part_cells, ed->npart_cells))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("iceberg: partition-scoped equality delete file \"%s\" has a partition tuple this reader cannot compare",
+								ed->file_path),
+						 errdetail("A float, double, or otherwise uncomparable partition value is not supported.")));
+			ice_copy_part_cells(ed->part_cells, ed->npart_cells,
+								&E->part_cells, &E->npart_cells);
+		}
 		E->nids = ed->neq_ids;
 		E->ids = (int32 *) palloc(E->nids * sizeof(int32));
 		memcpy(E->ids, ed->eq_ids, E->nids * sizeof(int32));
@@ -1777,10 +1869,11 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
  * - Equality deletes drop every data row whose equality_ids column values match
  *   a delete row (all columns equal; null matches null), when the data file's
  *   sequence number is STRICTLY LESS THAN the delete's (an equality delete
- *   never touches same-commit data). Only global (unpartitioned-spec) equality
- *   deletes are applied; partition-scoped ones are refused (0A000) until
- *   partition handling lands (phase 5), since applying them globally would
- *   delete rows in other partitions.
+ *   never touches same-commit data). An unpartitioned-spec equality delete is
+ *   global; a partition-scoped one applies only to a data file whose partition
+ *   (spec id and tuple) equals the delete's, comparing the stored transformed
+ *   partition tuples (phase 5). A partition-scoped delete matching no data
+ *   file's spec, or carrying an uncomparable partition value, is refused.
  *
  * Only PARQUET files are read. Superuser / pg_read_server_files;
  * materialize-mode SRF.
@@ -1961,8 +2054,35 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 		{
 			IceEqDel   *E = (IceEqDel *) lfirst(lc2);
 
-			if (E->seq > d->seq)
-				elig = lappend(elig, E);
+			if (E->seq <= d->seq)
+				continue;
+			/* an unpartitioned-spec equality delete is global (4b); a
+			 * partition-scoped one applies only to a data file of the same
+			 * spec id whose partition tuple equals the delete's */
+			if (E->partitioned)
+			{
+				/* the data file's spec id decides whether a partition-scoped
+				 * delete applies to it; a missing one (corrupt metadata --
+				 * partition_spec_id is required) would default to 0 and could
+				 * silently exclude a delete that should apply (under-delete),
+				 * the mirror of the delete-side check that already refuses. */
+				if (!d->has_spec_id)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("iceberg: data file \"%s\" carries no partition_spec_id, which a partition-scoped equality delete's scope depends on",
+									d->file_path)));
+				if (E->spec_id != d->spec_id)
+					continue;	/* a different partition spec */
+				if (ice_part_incomparable(d->part_cells, d->npart_cells))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg: data file \"%s\" has a partition tuple this reader cannot compare against a partition-scoped equality delete",
+									d->file_path)));
+				if (!ice_part_cells_equal(E->part_cells, E->npart_cells,
+										  d->part_cells, d->npart_cells))
+					continue;	/* a different partition value */
+			}
+			elig = lappend(elig, E);
 		}
 		if (elig != NIL)
 			probe_rows = ice_eq_probe(&ctx, d, elig, &skip, &nskip, &cap);

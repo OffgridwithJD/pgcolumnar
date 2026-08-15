@@ -165,14 +165,49 @@ check "a never-applicable equality delete without equality_ids is skipped (5 row
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/equality.metadata.json')
 	      AS t(id bigint, region text, amount int)")" "5"
 # a partition-scoped equality delete would over-delete if applied globally; it is
-# refused, and the message must name the partition cause (the SQLSTATE alone
-# matches the old blanket refusal)
-check "a partition-scoped equality delete is refused (0A000)" \
-	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart.metadata.json')
-	                AS t(id bigint, region text, amount int)")" "0A000"
-check "...and the refusal names the partition scoping" \
-	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart.metadata.json')
-	              AS t(id bigint, region text, amount int)" | grep -c "partition")" "1"
+# ---- phase 5: partition-scoped equality deletes are APPLIED, scoped ---------
+# a partition-scoped equality delete (spec 1, identity region) on grp=9 tagged
+# region=eu deletes only the eu-partition rows (ids 1,2); us rows survive. grp
+# is 9 on every row, so only the partition scoping -- not the value match --
+# can distinguish the partitions.
+part_ids() {
+	q "SELECT string_agg(id::text, ',' ORDER BY id)
+	   FROM pgcolumnar.iceberg_scan('$MDIR/$1.metadata.json')
+	     AS t(id bigint, region text, grp int)"
+}
+part_oracle() {
+	python3 - "$FX/warehouse_del/expected_deletes.json" "$1" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+print(",".join(str(i) for i in o["part_surviving"][sys.argv[2]]))
+PY
+}
+check "a partition-scoped equality delete applies only to its partition" \
+	"$(part_ids eqpart_apply)" "$(part_oracle eqpart_apply)"
+check "the us-partition rows survive an eu-scoped delete" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_apply.metadata.json')
+	      AS t(id bigint, region text, grp int) WHERE region = 'us'")" "3"
+# a delete scoped to a partition (region=zz) that no data file is in applies to
+# nothing -- a legitimate no-op, not an error and not a global delete
+check "a delete scoped to an empty partition deletes nothing (5 rows)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_nomatch.metadata.json')
+	      AS t(id bigint, region text, grp int)")" "5"
+# corrupt metadata: a data file with no partition_spec_id, matched by a
+# partition-scoped delete, would silently under-delete; refuse it (the mirror
+# of the delete-side has_spec_id check)
+check "a data file lacking partition_spec_id is refused under a partitioned delete (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_datanospec.metadata.json')
+	                AS t(id bigint, region text, grp int)")" "XX001"
+# a delete written under a partition spec no data file uses (partition
+# evolution): per the spec a partitioned delete never crosses spec ids, so it
+# applies to nothing -- a no-op, all rows survive, never a global over-delete
+check "a cross-spec partition-scoped delete applies to nothing (5 rows)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_crossspec.metadata.json')
+	      AS t(id bigint, region text, grp int)")" "5"
+# a partition tuple the reader cannot compare exactly (a double) is refused
+check "a partition-scoped delete with an uncomparable partition value is refused (0A000)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_incomparable.metadata.json')
+	                AS t(id bigint, region text, grp int)")" "0A000"
 # an equality column of a type with no supported mapping (timestamp) is refused
 # before any file is opened
 check "an equality delete on an unsupported column type is refused (0A000)" \

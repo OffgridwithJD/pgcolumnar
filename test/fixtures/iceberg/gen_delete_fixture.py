@@ -880,6 +880,198 @@ def emit_dvdupscheme():
 
 emit_dvdupscheme()
 
+# =============== phase 5: partition-scoped equality deletes ==================
+# A table partitioned by identity(region) (spec 1). An equality delete carries
+# a partition tuple and applies only to data files of the same partition. The
+# manifest entry's data_file now includes the partition struct, so the reader
+# decodes the typed tuple and matches it. grp is 9 on every row, so a value
+# match on grp alone cannot distinguish partitions -- only the partition
+# scoping does, which is the point. See design/ISSUE_388_PHASE5_PARTITIONS.md.
+ENTRY_SCHEMA_PART = json.dumps({"type": "record", "name": "manifest_entry", "fields": [
+    {"name": "status", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "data_file", "type": {"type": "record", "name": "dfp", "fields": [
+        {"name": "content", "type": "int"},
+        {"name": "file_path", "type": "string"},
+        {"name": "file_format", "type": "string"},
+        {"name": "record_count", "type": "long"},
+        {"name": "file_size_in_bytes", "type": "long"},
+        {"name": "partition", "type": {"type": "record", "name": "pt", "fields": [
+            {"name": "region", "type": ["null", "string"]}]}},
+        {"name": "equality_ids",
+         "type": ["null", {"type": "array", "items": "int"}]}]}}]}).encode()
+
+# a partition struct with a DOUBLE field, for the uncomparable-cell arm
+ENTRY_SCHEMA_PARTF = json.dumps({"type": "record", "name": "manifest_entry", "fields": [
+    {"name": "status", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "data_file", "type": {"type": "record", "name": "dfpf", "fields": [
+        {"name": "content", "type": "int"},
+        {"name": "file_path", "type": "string"},
+        {"name": "file_format", "type": "string"},
+        {"name": "record_count", "type": "long"},
+        {"name": "file_size_in_bytes", "type": "long"},
+        {"name": "partition", "type": {"type": "record", "name": "ptf", "fields": [
+            {"name": "amt", "type": ["null", "double"]}]}},
+        {"name": "equality_ids",
+         "type": ["null", {"type": "array", "items": "int"}]}]}}]}).encode()
+
+
+def entry_part(status, seq, content, path, rows, size, region, eq_ids,
+               schema_double=False, dval=0.0):
+    seqb = zz(1) + zz(seq)
+    if schema_double:
+        partb = zz(1) + struct.pack("<d", dval)   # union[null,double] branch 1
+    else:
+        partb = zz(0) if region is None else (zz(1) + s(region.encode()))
+    if eq_ids is None:
+        eqb = zz(0)
+    else:
+        eqb = zz(1) + zz(len(eq_ids)) + b"".join(zz(i) for i in eq_ids) + zz(0)
+    return zz(status) + seqb + zz(content) + s(path.encode()) + \
+        s(b"PARQUET") + zz(rows) + zz(size) + partb + eqb
+
+
+# id-partitioned data: region eu (ids 1,2) and region us (ids 3,4,5), grp=9 all
+P_SCHEMA = pa.schema([
+    pa.field("id", pa.int64(), metadata={b"PARQUET:field_id": b"1"}),
+    pa.field("region", pa.string(), metadata={b"PARQUET:field_id": b"2"}),
+    pa.field("grp", pa.int32(), metadata={b"PARQUET:field_id": b"3"}),
+])
+pq.write_table(pa.table({"id": pa.array([1, 2], pa.int64()),
+                         "region": pa.array(["eu", "eu"], pa.string()),
+                         "grp": pa.array([9, 9], pa.int32())}, schema=P_SCHEMA),
+               os.path.join(OUT, "db", "t", "data", "part-eu.parquet"))
+pq.write_table(pa.table({"id": pa.array([3, 4, 5], pa.int64()),
+                         "region": pa.array(["us", "us", "us"], pa.string()),
+                         "grp": pa.array([9, 9, 9], pa.int32())}, schema=P_SCHEMA),
+               os.path.join(OUT, "db", "t", "data", "part-us.parquet"))
+PART_EU = f"{LOC}/data/part-eu.parquet"
+PART_US = f"{LOC}/data/part-us.parquet"
+# the equality-delete Parquet: grp column (field id 3), value 9
+EQ_GRP = write_eqdel("eqdel-grp.parquet",
+                     [(pa.field("grp", pa.int32(),
+                                metadata={b"PARQUET:field_id": b"3"}), [9])])
+
+P_SCHEMA_JSON = {"schema-id": 0, "type": "struct", "fields": [
+    {"id": 1, "name": "id", "required": False, "type": "long"},
+    {"id": 2, "name": "region", "required": False, "type": "string"},
+    {"id": 3, "name": "grp", "required": False, "type": "int"}]}
+# data manifest: both partitioned data files under spec 1, data seq 5
+PDM = f"{LOC}/metadata/part-data-manifest.avro"
+open(os.path.join(md, "part-data-manifest.avro"), "wb").write(ocf_multi(
+    ENTRY_SCHEMA_PART, [
+        entry_part(1, DATA_SEQ, 0, PART_EU, 2, 1000, "eu", None),
+        entry_part(1, DATA_SEQ, 0, PART_US, 3, 1000, "us", None)]))
+
+
+# spec 2 exists only so a delete can be written under a spec no data file uses
+# (partition evolution), exercising the cross-spec refusal.
+PART_SPECS_P5 = PARTITION_SPECS + [
+    {"spec-id": 2, "fields": [
+        {"name": "region", "transform": "identity", "source-id": 2, "field-id": 1000}]}]
+
+
+def emit_part_variant(tag, del_region, del_schema=ENTRY_SCHEMA_PART,
+                      double_part=False, del_spec_id=1):
+    """A partition-scoped equality delete on grp=9, tagged with partition
+    region=del_region under partition spec del_spec_id, over the two spec-1
+    partitioned data files. Survivors depend on which partition it scopes to."""
+    xm_name = f"delete-manifest-{tag}.avro"
+    if double_part:
+        rec = entry_part(1, EQ_SEQ, 2, EQ_GRP, 1, 500, None, [3],
+                         schema_double=True, dval=1.5)
+    else:
+        rec = entry_part(1, EQ_SEQ, 2, EQ_GRP, 1, 500, del_region, [3])
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(del_schema, [rec]))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rec in (mfile_spec(PDM, 0, DATA_SEQ, SNAP, 2, 5, 1),
+                mfile_spec(xm, 1, EQ_SEQ, SNAP, 1, 1, del_spec_id)):
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps({
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [P_SCHEMA_JSON], "partition-specs": PART_SPECS_P5,
+        "default-spec-id": 1, "current-snapshot-id": SNAP,
+        "snapshots": [{"snapshot-id": SNAP, "sequence-number": EQ_SEQ,
+                       "timestamp-ms": 0,
+                       "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+                       "summary": {"operation": "overwrite"}, "schema-id": 0}]}))
+
+
+# eqpart_apply: delete scoped to region=eu -> only eu rows (1,2) deleted
+emit_part_variant("eqpart_apply", "eu")
+# eqpart_nomatch: delete scoped to region=zz, same spec as the data. No data
+# file is in partition zz, so the delete applies to nothing -- a legitimate
+# no-op, NOT an error: all five rows survive.
+emit_part_variant("eqpart_nomatch", "zz")
+# eqpart_crossspec: delete under spec 2, which NO data file uses (all data is
+# spec 1). The reader cannot resolve cross-spec partition matching, and
+# silently ignoring the delete would under-delete -> refuse 0A000.
+emit_part_variant("eqpart_crossspec", "eu", del_spec_id=2)
+# eqpart_incomparable: a double partition cell -> refuse 0A000
+emit_part_variant("eqpart_incomparable", None, del_schema=ENTRY_SCHEMA_PARTF,
+                  double_part=True)
+
+
+# eqpart_datanospec: corrupt metadata where the DATA file's manifest_file entry
+# carries no partition_spec_id (a nullable union encoding null) while the
+# partitioned delete's does. Without the data-side guard this would silently
+# under-delete (the data file's spec id defaults to 0, mismatches the delete's,
+# and the delete that should apply is skipped). The manifest list uses a schema
+# whose partition_spec_id is [null,int] so one row can omit it and the other not.
+MFILE_SCHEMA_NULLSPEC = json.dumps({"type": "record", "name": "manifest_file", "fields": [
+    {"name": "manifest_path", "type": "string"},
+    {"name": "manifest_length", "type": "long"},
+    {"name": "partition_spec_id", "type": ["null", "int"]},
+    {"name": "content", "type": "int"},
+    {"name": "sequence_number", "type": "long"},
+    {"name": "min_sequence_number", "type": "long"},
+    {"name": "added_snapshot_id", "type": "long"},
+    {"name": "added_files_count", "type": "int"},
+    {"name": "existing_files_count", "type": "int"},
+    {"name": "deleted_files_count", "type": "int"},
+    {"name": "added_rows_count", "type": "long"},
+    {"name": "existing_rows_count", "type": "long"},
+    {"name": "deleted_rows_count", "type": "long"}]}).encode()
+
+
+def mfile_nullspec(path, content, seq, snap, files, rows, spec_id):
+    """mfile with partition_spec_id as a [null,int] union: spec_id None -> null
+    (the corrupt data-file case), else branch 1 with the value."""
+    sb = zz(0) if spec_id is None else (zz(1) + zz(spec_id))
+    return s(path.encode()) + zz(1000) + sb + zz(content) + zz(seq) + zz(seq) + \
+        zz(snap) + zz(files) + zz(0) + zz(0) + zz(rows) + zz(0) + zz(0)
+
+
+def emit_part_datanospec():
+    tag = "eqpart_datanospec"
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(
+        ENTRY_SCHEMA_PART, [entry_part(1, EQ_SEQ, 2, EQ_GRP, 1, 500, "eu", [3])]))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA_NULLSPEC) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rec in (mfile_nullspec(PDM, 0, DATA_SEQ, SNAP, 2, 5, None),   # data: no spec id
+                mfile_nullspec(xm, 1, EQ_SEQ, SNAP, 1, 1, 1)):        # delete: spec 1
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps({
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [P_SCHEMA_JSON], "partition-specs": PART_SPECS_P5,
+        "default-spec-id": 1, "current-snapshot-id": SNAP,
+        "snapshots": [{"snapshot-id": SNAP, "sequence-number": EQ_SEQ,
+                       "timestamp-ms": 0,
+                       "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+                       "summary": {"operation": "overwrite"}, "schema-id": 0}]}))
+
+
+emit_part_datanospec()
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]
@@ -907,7 +1099,9 @@ oracle = {"deleted_positions": DELETED_POS,
               "dvrun": [1, 2],
               "dvbitset": [2, 4],
               "dvtwo": [1, 3, 4, 5, 7],
-          }}
+          },
+          # partition-scoped equality-delete arm: eu rows (1,2) deleted, us kept
+          "part_surviving": {"eqpart_apply": [3, 4, 5]}}
 open(os.path.join(OUT, "expected_deletes.json"), "w").write(json.dumps(oracle, indent=2))
 print("surviving rows:", oracle["surviving"])
 print("deleted positions:", DELETED_POS)

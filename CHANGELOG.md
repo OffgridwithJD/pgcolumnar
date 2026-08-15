@@ -29,12 +29,16 @@ which was true until that script existed.
   position delete files for that file per the specification; the blob checksum,
   the manifest/footer offsets, and the recorded cardinality are verified, and
   at most one vector may reference a data file. A null delete value matches only a null data value,
-  and columns beyond `equality_ids` do not take part in the match. Equality
+  and columns beyond `equality_ids` do not take part in the match. A
+  partition-scoped equality delete is applied within its partition: its stored
+  partition values are matched against each data file's, so it removes rows only
+  from data files in the same partition. Equality
   deletes with no supported handling are refused rather than ignored, so a table
   using them errors instead of returning rows it should have removed:
-  partition-scoped deletes (a partitioned partition spec), delete columns of
-  types outside `int`/`long`/`string`/`boolean`/`date`, and delete columns
-  dropped from the current schema. Supporting introspection functions:
+  delete columns of
+  types outside `int`/`long`/`string`/`boolean`/`date`, delete columns
+  dropped from the current schema, and a partition value the reader cannot
+  compare exactly. Supporting introspection functions:
   `iceberg_current_snapshot` and
   `iceberg_data_files` (which refuses any delete), and the Avro building blocks
   `read_avro_manifest` and `read_manifest_list`. Only Parquet data files are

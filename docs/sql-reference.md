@@ -740,14 +740,17 @@ its offsets against the Puffin footer, and its recorded cardinality are all
 verified, and a mismatch is refused. Deletion vectors in a table below format
 version 3 are refused, as is a compressed Puffin footer.
 
-Some equality-delete forms are refused rather than ignored. A table using them
-errors instead of returning rows it should have removed. A delete written
-under a partitioned partition spec is refused, because applying it globally
-would remove rows in other partitions (partition handling is planned). A
-delete column is refused when its type has no supported mapping; the supported
-types are `int`, `long`, `string`, `boolean`, and `date`. A delete column that
-is no longer in the table's current schema is refused. A delete column missing
-from an older data file is also an error. The recorded file paths are rebased
+An equality delete written under a partitioned spec is applied within its
+partition. Its stored partition values are compared against each data file's,
+and it removes rows only from data files in the same partition. A delete for a
+partition that holds no data removes nothing. Some equality-delete forms are
+refused rather than ignored. A table using them errors instead of returning
+rows it should have removed. A delete column is refused when its type has no
+supported mapping; the supported types are `int`, `long`, `string`, `boolean`,
+and `date`. A delete column that is no longer in the table's current schema is
+refused. A delete column missing from an older data file is also an error. A
+partition value the reader cannot compare exactly, such as a floating-point
+value, is refused. The recorded file paths are rebased
 onto the table's actual location and resolved against a path boundary. A
 relocated table reads, and a path pointing outside the table is refused.
 Applying equality deletes reads each affected data file's delete columns
