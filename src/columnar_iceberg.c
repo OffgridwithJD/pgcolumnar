@@ -495,15 +495,15 @@ typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
 
 /*
  * Walk the current snapshot's live data-file entries and hand each to `cb`.
- * Resolves the snapshot, reads its manifest list and each manifest (opening both
- * through ice_open_path's path boundary), and refuses deletes loudly. Does
- * nothing when the table has no current snapshot.
+ * Resolves the snapshot from an already-parsed metadata.json `root` (so the file
+ * is read and parsed once per call, not again here), reads its manifest list and
+ * each manifest (opening both through ice_open_path's path boundary), and refuses
+ * deletes loudly. Does nothing when the table has no current snapshot.
  */
 static void
-ice_walk_data_files(const char *path, IceDataFileCb cb, void *ctx)
+ice_walk_data_files(const char *path, JsonbContainer *root,
+					IceDataFileCb cb, void *ctx)
 {
-	char	   *json;
-	Jsonb	   *jb;
 	JsonbContainer *sc;
 	int64		cur;
 	const char *recorded_root;
@@ -515,17 +515,14 @@ ice_walk_data_files(const char *path, IceDataFileCb cb, void *ctx)
 	int			nmf;
 	int			mi;
 
-	json = ice_slurp_text(path);
-	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
-
-	sc = ice_current_snapshot(&jb->root, path, &cur);
+	sc = ice_current_snapshot(root, path, &cur);
 	if (sc == NULL)
 		return;					/* no current snapshot -> no data files */
 
 	/* the recorded table root, and where the table actually sits now. The
 	 * actual root is resolved with realpath once here so the files we open can
 	 * be re-checked for containment against a symlink-resolved form. */
-	recorded_root = ice_strip_scheme(ice_str_required(&jb->root, "location", path));
+	recorded_root = ice_strip_scheme(ice_str_required(root, "location", path));
 	{
 		char	   *raw = ice_actual_location(path);
 		char	   *real = realpath(raw, NULL);
@@ -652,9 +649,12 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	IceListCtx	ctx;
+	Jsonb	   *jb;
 
 	ctx.tupstore = ice_srf_begin(fcinfo, &ctx.tupdesc);
-	ice_walk_data_files(path, ice_list_cb, &ctx);
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+											CStringGetDatum(ice_slurp_text(path))));
+	ice_walk_data_files(path, &jb->root, ice_list_cb, &ctx);
 	return (Datum) 0;
 }
 
@@ -878,7 +878,9 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 										"pgcolumnar iceberg_scan file",
 										ALLOCSET_DEFAULT_SIZES);
 
-	ice_walk_data_files(path, ice_scan_cb, &ctx);
+	/* reuse the metadata we already parsed for the schema, so the file is read
+	 * and parsed once, not again inside the walk */
+	ice_walk_data_files(path, &jb->root, ice_scan_cb, &ctx);
 
 	MemoryContextDelete(ctx.filectx);
 	ExecDropSingleTupleTableSlot(ctx.slot);
