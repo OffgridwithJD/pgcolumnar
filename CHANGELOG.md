@@ -43,7 +43,11 @@ which was true until that script existed.
   `iceberg_data_files` (which refuses any delete), and the Avro building blocks
   `read_avro_manifest` and `read_manifest_list`. Only Parquet data files are
   read; recorded paths are rebased onto the table's actual location and refused
-  if they resolve outside it. A data file written outside Iceberg, which carries
+  if they resolve outside it. The table may live in object storage: a metadata
+  path of `s3://`, `http://`, or `https://` reads the metadata, manifests, data
+  files, and delete files from the endpoint through the object-store module,
+  gated by the same `objstore_allowed_endpoints` allow-list and ambient
+  credentials as the Parquet reader. A data file written outside Iceberg, which carries
   no field ids, is read through the table's `schema.name-mapping.default`
   property, which binds its columns by name; a file with no field ids and no
   such property is refused rather than guessed. `read_parquet` also gained a

@@ -231,6 +231,11 @@ check "an equality-delete path outside the table location is refused (22023)" \
 check "...and the boundary refusal names the escape" \
 	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqescape.metadata.json')
 	              AS t(id bigint, region text, amount int)" | grep -c "table location")" "1"
+# a path under the table root that climbs out with ".." is refused by the
+# containment (canonicalize collapses it and the re-check fails)
+check "a dotdot-escaping delete path is refused (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqdotdot.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "22023"
 check "backend still up after the equality refusals" "$(q 'SELECT 1')" "1"
 
 # ---- 4b audit arms (multi-agent adversarial audit findings) -----------------
