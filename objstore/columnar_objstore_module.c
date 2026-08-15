@@ -2545,6 +2545,130 @@ objstore_delete_object(const char *url, const PgColumnarObjStoreConfig *cfg)
 	os_free_handle(h);
 }
 
+/*
+ * A one-shot HTTP(S) request (#388 phase 7). See columnar_objstore.h. The
+ * handle lives in TopMemoryContext and is freed here on the normal path (by the
+ * resource-release callback on abort), like every other handle; the response
+ * body is returned in the caller's context. No signing: authentication is
+ * whatever the caller placed in header_lines.
+ */
+static PgColumnarHttpResult
+objstore_http_request(const char *url, const char *method,
+					  const char *const *header_lines, int nheaders,
+					  const char *body, int64 body_len, int64 max_response)
+{
+	PgColumnarObjHandle *h;
+	OsResponse	resp;
+	PgColumnarHttpResult result;
+	StringInfoData req;
+	MemoryContext oldcxt;
+	bool		isHttps = (pg_strncasecmp(url, "https://", 8) == 0);
+	const char *authority;
+	const char *slash;
+	const char *colon;
+	int			i;
+
+	if (!isHttps && pg_strncasecmp(url, "http://", 7) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: HTTP request URL \"%s\" is not http(s)://", url)));
+#ifndef HAVE_OBJSTORE_OPENSSL
+	if (isHttps)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar: https requires the object-store module built with OpenSSL")));
+#endif
+
+	/* request-splitting guard: a header line may not carry CR or LF */
+	for (i = 0; i < nheaders; i++)
+		if (strpbrk(header_lines[i], "\r\n") != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("columnar: an HTTP header line may not contain CR or LF")));
+
+	if (!os_callback_registered)
+	{
+		RegisterResourceReleaseCallback(os_resource_release, NULL);
+		os_callback_registered = true;
+	}
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	h = (PgColumnarObjHandle *) palloc0(sizeof(PgColumnarObjHandle));
+	h->fd = -1;
+	h->url = pstrdup(url);
+	h->rb = (uint8 *) palloc(OS_RBUF);
+	MemoryContextSwitchTo(oldcxt);
+	dlist_push_head(&os_open_handles, &h->node);	/* before any raise */
+
+	authority = url + (isHttps ? 8 : 7);
+	slash = strchr(authority, '/');
+	if (slash == NULL || slash == authority)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: \"%s\" has no request path", url)));
+	if (memchr(authority, '@', slash - authority) != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: userinfo in \"%s\" is not supported", url)));
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	h->abspath = pstrdup(slash);
+	colon = memchr(authority, ':', slash - authority);
+	if (colon != NULL)
+	{
+		h->host = pnstrdup(authority, colon - authority);
+		h->port = atoi(colon + 1);
+	}
+	else
+	{
+		h->host = pnstrdup(authority, slash - authority);
+		h->port = isHttps ? 443 : 80;
+	}
+	h->tls = isHttps;
+	MemoryContextSwitchTo(oldcxt);
+
+	if (h->port <= 0 || h->port > 65535 || h->host[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: \"%s\" has an invalid host or port", url)));
+
+	initStringInfo(&req);
+	appendStringInfo(&req, "%s %s HTTP/1.1\r\n", method, h->abspath);
+	appendStringInfo(&req, "Host: %s:%d\r\n", h->host, h->port);
+	appendStringInfoString(&req, "User-Agent: pgcolumnar-objstore/1\r\n");
+	appendStringInfoString(&req, "Connection: close\r\n");
+	for (i = 0; i < nheaders; i++)
+		appendStringInfo(&req, "%s\r\n", header_lines[i]);
+	if (body != NULL && body_len > 0)
+		appendStringInfo(&req, "Content-Length: %lld\r\n", (long long) body_len);
+	appendStringInfoString(&req, "\r\n");
+	if (body != NULL && body_len > 0)
+		appendBinaryStringInfo(&req, body, (int) body_len);
+
+	os_connect(h);				/* allow-list + link-local + TLS handshake */
+	if (!os_send_all(h, req.data, req.len) || !os_read_head(h, &resp))
+	{
+		os_disconnect(h);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("columnar: connection to \"%s\" failed before a response",
+						url)));
+	}
+	pfree(req.data);
+
+	result.status = resp.status;
+	if (strcmp(method, "HEAD") == 0)
+	{
+		result.body = NULL;
+		result.body_len = 0;
+	}
+	else
+		result.body = os_slurp_body(h, &resp, max_response, &result.body_len);
+
+	os_free_handle(h);
+	return result;
+}
+
 static const PgColumnarObjStoreApi objstore_api = {
 	.abi_version = PGCOLUMNAR_OBJSTORE_ABI,
 	.handles_url = objstore_handles_url,
@@ -2557,6 +2681,7 @@ static const PgColumnarObjStoreApi objstore_api = {
 	.sink_abort = objstore_sink_abort,
 	.delete_object = objstore_delete_object,
 	.list_objects = objstore_list_objects,
+	.http_request = objstore_http_request,
 };
 
 const PgColumnarObjStoreApi *

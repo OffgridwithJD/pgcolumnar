@@ -774,6 +774,46 @@ SELECT id, region, sum(amount)
   GROUP BY id, region;
 ```
 
+### pgcolumnar.iceberg_rest_table_location(catalog_uri text, namespace text, table_name text) returns text
+
+Resolves a table named by an Iceberg REST catalog to the URI of its current
+metadata file. The function calls the catalog over HTTP or HTTPS. It reads the
+catalog configuration, loads the table, and returns the reported metadata
+location. That location is an ordinary metadata path, so it is read with
+`iceberg_scan` and the other functions above.
+
+The catalog endpoint is subject to `pgcolumnar.objstore_allowed_endpoints`, the
+allow-list that governs every other remote access. A host that resolves to a
+link-local or instance-metadata address is refused whether or not it is listed.
+The request is carried by the `pgcolumnar_objstore` module, so no additional TLS
+library is loaded into the server process. HTTPS requires the module to be built
+with OpenSSL, as for object storage.
+
+When the catalog requires authentication, the bearer token is read from the
+`PGCOLUMNAR_ICEBERG_REST_TOKEN` variable in the server process environment. It is
+never a function argument, so it does not appear in the statement log or in
+`pg_stat_activity`. A catalog that needs no token is queried without one.
+
+Multi-level namespaces are given dot-separated, and the function requires the
+`pg_read_server_files` role, like the other Iceberg functions.
+
+```sql
+-- token, if any, comes from the server environment, not the query
+SELECT pgcolumnar.iceberg_rest_table_location(
+         'https://catalog.example.com', 'analytics', 'events');
+--> s3://warehouse/analytics/events/metadata/00042-....metadata.json
+
+SELECT count(*) FROM pgcolumnar.iceberg_scan(
+  pgcolumnar.iceberg_rest_table_location('https://catalog.example.com',
+                                         'analytics', 'events'))
+  AS t(id bigint, region text, amount int);
+```
+
+Several extensions are planned follow-ups. Per-catalog credentials can move to a
+foreign server and user mapping. The catalog can issue temporary storage
+credentials. The resolved table can be read directly by name. See issue #656 and
+the later phase 7 work.
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams

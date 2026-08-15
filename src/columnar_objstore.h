@@ -33,11 +33,24 @@
 
 #include "postgres.h"
 
-#define PGCOLUMNAR_OBJSTORE_ABI 4
+#define PGCOLUMNAR_OBJSTORE_ABI 5
 
 /* An open remote object (read) / upload (write). Module owns both. */
 typedef struct PgColumnarObjHandle PgColumnarObjHandle;
 typedef struct PgColumnarObjSink PgColumnarObjSink;
+
+/*
+ * The result of a one-shot HTTP request (#388 phase 7, ABI v5). `status` is the
+ * HTTP status line code. `body` is the palloc'd response body in the caller's
+ * memory context (NUL-terminated for convenience; `body_len` is the true byte
+ * length, which may be 0 with body != NULL).
+ */
+typedef struct PgColumnarHttpResult
+{
+	int			status;
+	char	   *body;
+	int64		body_len;
+} PgColumnarHttpResult;
 
 /*
  * Connection configuration resolved from the FDW catalogs (#393 M4). NULL
@@ -122,6 +135,29 @@ typedef struct PgColumnarObjStoreApi
 	char	  **(*list_objects) (const char *url,
 								 const PgColumnarObjStoreConfig *cfg,
 								 int *nkeys);
+
+	/*
+	 * A one-shot HTTP(S) request (#388 phase 7). `url` must be http:// or
+	 * https:// (an s3:// URL is refused: this is the general transport, not the
+	 * object path). `method` is "GET"/"POST"/etc. `header_lines` are full
+	 * "Name: value" lines (no trailing CRLF); the module adds Host, User-Agent,
+	 * Connection, and Content-Length, and refuses any header line carrying a CR
+	 * or LF (request-splitting guard). This entry does NOT sign: authentication
+	 * is whatever the caller places in `header_lines` (e.g. an Authorization
+	 * header). The response body is read up to `max_response` bytes; a larger
+	 * advertised or streamed body raises (ERRCODE_PROGRAM_LIMIT_EXCEEDED). The
+	 * request goes through the same connect path as every other entry, so the
+	 * endpoint allow-list and the link-local/instance-metadata refusal apply
+	 * unchanged. 4xx/5xx statuses are RETURNED (not raised) so the caller maps
+	 * them; a transport, allow-list, or size failure raises. Runs through the
+	 * same nonblocking wait loop, so it is cancellable.
+	 */
+	PgColumnarHttpResult (*http_request) (const char *url,
+										  const char *method,
+										  const char *const *header_lines,
+										  int nheaders,
+										  const char *body, int64 body_len,
+										  int64 max_response);
 } PgColumnarObjStoreApi;
 
 /*

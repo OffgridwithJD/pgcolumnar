@@ -90,6 +90,7 @@ SUITES=(
 	iceberg_malformed
 	iceberg_name_mapping
 	iceberg_objstore
+	iceberg_rest
 	iceberg_scan
 	import_deferred
 	import_exclusion
