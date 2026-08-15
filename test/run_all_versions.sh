@@ -80,6 +80,7 @@ SUITES=(
 	generated_columns
 	hardening
 	harness_selftest
+	iceberg_malformed
 	import_deferred
 	import_exclusion
 	import_export_privilege

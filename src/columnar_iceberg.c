@@ -605,6 +605,15 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 					continue;
 			}
 
+			/* a manifest entry with no data-file path is corrupt metadata; refuse
+			 * it here so neither consumer dereferences a NULL file_path (the scan
+			 * pstrdup's it, the lister rebases it, the error path below prints it) */
+			if (e->file_path == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: a manifest entry in snapshot " INT64_FORMAT " has no data file path",
+								cur)));
+
 			/* resolve the data sequence number. A manifest whose entry schema
 			 * has no sequence-number column at all is v1-shaped: the spec
 			 * defaults every file's sequence number to 0, for every status.

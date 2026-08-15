@@ -183,7 +183,10 @@ av_prim_kind(const char *name, int len)
 static JsonbValue *
 av_jb_field(JsonbValue *obj, const char *key)
 {
-	if (obj->type != jbvBinary)
+	/* A jsonb binary container is an object OR an array; getKeyJsonValueFromContainer
+	 * asserts object-ness and walks an object pair-stride, so an array container
+	 * (e.g. a "fields":[[...]] element) must be rejected here, not passed through. */
+	if (obj->type != jbvBinary || !JsonContainerIsObject(obj->val.binary.data))
 		return NULL;
 	return getKeyJsonValueFromContainer(obj->val.binary.data, key,
 										(int) strlen(key),

@@ -728,6 +728,10 @@ relocated table reads, and a path pointing outside the table is refused.
 Applying equality deletes reads each affected data file's delete columns
 twice. A probe pass computes the row ordinals to drop.
 
+A malformed manifest is refused, not read as far as it parses. A manifest entry
+that records no data-file path is an error, as is a manifest whose embedded Avro
+schema is not well formed.
+
 ```sql
 SELECT id, region, sum(amount)
   FROM pgcolumnar.iceberg_scan('/data/warehouse/db/events/metadata/v3.metadata.json')
