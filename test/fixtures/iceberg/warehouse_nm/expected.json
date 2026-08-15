@@ -1,0 +1,29 @@
+{
+  "rows": [
+    {
+      "id": 1,
+      "region": "eu",
+      "amount": 10
+    },
+    {
+      "id": 2,
+      "region": "eu",
+      "amount": 20
+    },
+    {
+      "id": 3,
+      "region": "us",
+      "amount": 30
+    },
+    {
+      "id": 4,
+      "region": "us",
+      "amount": 40
+    },
+    {
+      "id": 5,
+      "region": "us",
+      "amount": 50
+    }
+  ]
+}

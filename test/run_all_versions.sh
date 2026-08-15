@@ -87,6 +87,7 @@ SUITES=(
 	iceberg_data_files
 	iceberg_deletes
 	iceberg_malformed
+	iceberg_name_mapping
 	iceberg_scan
 	import_deferred
 	import_exclusion
