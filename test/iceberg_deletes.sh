@@ -192,6 +192,12 @@ check "the us-partition rows survive an eu-scoped delete" \
 check "a delete scoped to an empty partition deletes nothing (5 rows)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_nomatch.metadata.json')
 	      AS t(id bigint, region text, grp int)")" "5"
+# corrupt metadata: a data file with no partition_spec_id, matched by a
+# partition-scoped delete, would silently under-delete; refuse it (the mirror
+# of the delete-side has_spec_id check)
+check "a data file lacking partition_spec_id is refused under a partitioned delete (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_datanospec.metadata.json')
+	                AS t(id bigint, region text, grp int)")" "XX001"
 # a delete written under a partition spec no data file uses (partition
 # evolution): per the spec a partitioned delete never crosses spec ids, so it
 # applies to nothing -- a no-op, all rows survive, never a global over-delete

@@ -2183,6 +2183,16 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 			 * spec id whose partition tuple equals the delete's */
 			if (E->partitioned)
 			{
+				/* the data file's spec id decides whether a partition-scoped
+				 * delete applies to it; a missing one (corrupt metadata --
+				 * partition_spec_id is required) would default to 0 and could
+				 * silently exclude a delete that should apply (under-delete),
+				 * the mirror of the delete-side check that already refuses. */
+				if (!d->has_spec_id)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("iceberg: data file \"%s\" carries no partition_spec_id, which a partition-scoped equality delete's scope depends on",
+									d->file_path)));
 				if (E->spec_id != d->spec_id)
 					continue;	/* a different partition spec */
 				if (ice_part_incomparable(d->part_cells, d->npart_cells))
