@@ -704,6 +704,19 @@ that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
+A data file written outside Iceberg carries no field ids. Such a file is read
+through the table's `schema.name-mapping.default` property, which maps each
+field id to the column names an id-less file may use. Each id-less column is
+bound to the field id whose mapping lists its name. A file that carries field
+ids ignores the mapping. An id-less file with no such property is refused,
+because the specification defines no positional fallback, and the error names
+the property. The mapping is read for top-level scalar columns.
+
+A projected column that the file does not carry reads as null. This covers a
+column added to the schema after the file was written. It also covers a column
+an id-less file has but the mapping does not bind. The file's other columns
+return their real values.
+
 Row-level deletes are applied, each kind under its own Iceberg sequence rule.
 A position delete drops the row ordinals it lists from the data file it names.
 It applies when that data file's data sequence number is at or below the

@@ -32,4 +32,19 @@ extern int64 PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 											 TupleTableSlot *slot,
 											 const uint64 *skipPos, int nSkipPos);
 
+/*
+ * As above, plus an Iceberg name mapping (schema.name-mapping.default): for a
+ * data file whose columns carry no field ids, an id-less column's field id is
+ * taken from the (nm_names[k] -> nm_ids[k]) table by the column's name. A file
+ * that carries ids ignores the mapping; nm_count 0 behaves like the plain call.
+ */
+extern int64 PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdesc,
+											   const int *field_ids, int nfield,
+											   const char *const *nm_names,
+											   const int *nm_ids, int nm_count,
+											   Tuplestorestate *tupstore,
+											   TupleTableSlot *slot,
+											   const uint64 *skipPos,
+											   int nSkipPos);
+
 #endif							/* COLUMNAR_PARQUET_READER_H */

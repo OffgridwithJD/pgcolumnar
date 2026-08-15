@@ -835,6 +835,149 @@ ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
 	return ids;
 }
 
+/* A name mapping has one entry per top-level column plus a few aliases; a real
+ * schema is well under this. The metadata.json is capped at 64 MB, so without a
+ * bound a crafted mapping could carry millions of names -- refuse rather than
+ * spend the memory and time on it. */
+#define ICE_MAX_NAME_MAPPING 100000
+
+/* qsort comparator over char* by string value, for the uniqueness check */
+static int
+ice_cmp_namep(const void *a, const void *b)
+{
+	return strcmp(*(const char *const *) a, *(const char *const *) b);
+}
+
+/*
+ * Parse the table's schema.name-mapping.default property into a flat (name ->
+ * field id) table, for reading data files that carry no field ids. The property
+ * lives at metadata root `properties` and its value is a JSON *string* holding
+ * an array of {names: string[], field-id: int, fields: [...]} objects. Only the
+ * top-level entries are flattened (the reader binds flat scalars; nested
+ * `fields` are ignored), emitting one (name, id) pair per name. A name that
+ * appears twice is corrupt metadata (the spec requires names to be unique).
+ * Returns palloc'd parallel arrays; *nout is 0 when the property is absent, so
+ * the caller preserves the no-mapping refusal for an id-less file.
+ */
+static void
+ice_name_mapping(JsonbContainer *root, const char *path,
+				 char ***names_out, int **ids_out, int *nout)
+{
+	JsonbValue *props = ice_field(root, "properties");
+	JsonbValue *nm;
+	Jsonb	   *arrjb;
+	JsonbContainer *arr;
+	uint32		ne;
+	uint32		k;
+	char	  **names;
+	int		   *ids;
+	int			n = 0;
+	int			cap;
+
+	*names_out = NULL;
+	*ids_out = NULL;
+	*nout = 0;
+
+	if (props == NULL || props->type != jbvBinary)
+		return;
+	nm = ice_field(props->val.binary.data, "schema.name-mapping.default");
+	if (nm == NULL || nm->type != jbvString)
+		return;
+
+	/* the property value is itself a JSON document (a string), re-parsed here */
+	arrjb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+											   CStringGetDatum(pnstrdup(nm->val.string.val,
+																		nm->val.string.len))));
+	if (!JsonContainerIsArray(&arrjb->root))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: \"%s\" schema.name-mapping.default is not a JSON array",
+						path)));
+	arr = &arrjb->root;
+	ne = JsonContainerSize(arr);
+	cap = Max(ne, 1);
+	names = (char **) palloc(sizeof(char *) * cap);
+	ids = (int *) palloc(sizeof(int) * cap);
+
+	for (k = 0; k < ne; k++)
+	{
+		JsonbValue *ent = getIthJsonbValueFromContainer(arr, k);
+		int64		fid;
+		JsonbValue *namesv;
+		JsonbContainer *narr;
+		uint32		nn;
+		uint32		m;
+
+		CHECK_FOR_INTERRUPTS();
+		if (ent == NULL || ent->type != jbvBinary)
+			continue;
+		/* an entry without a field-id is an unmapped column; skip it */
+		if (!ice_num_int64(ice_field(ent->val.binary.data, "field-id"), &fid))
+			continue;
+		/* a field id beyond int32 would truncate and could alias a real id */
+		if (fid < 0 || fid > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: \"%s\" schema.name-mapping.default has a field-id out of range: " INT64_FORMAT,
+							path, fid)));
+		namesv = ice_field(ent->val.binary.data, "names");
+		if (namesv == NULL || namesv->type != jbvBinary ||
+			!JsonContainerIsArray(namesv->val.binary.data))
+			continue;
+		narr = namesv->val.binary.data;
+		nn = JsonContainerSize(narr);
+		for (m = 0; m < nn; m++)
+		{
+			JsonbValue *nv = getIthJsonbValueFromContainer(narr, m);
+			char	   *nstr;
+
+			if (nv == NULL || nv->type != jbvString)
+				continue;
+			nstr = pnstrdup(nv->val.string.val, nv->val.string.len);
+			if (n >= ICE_MAX_NAME_MAPPING)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("iceberg: \"%s\" schema.name-mapping.default has more than %d names",
+								path, ICE_MAX_NAME_MAPPING)));
+			if (n == cap)
+			{
+				cap *= 2;
+				names = (char **) repalloc(names, sizeof(char *) * cap);
+				ids = (int *) repalloc(ids, sizeof(int) * cap);
+			}
+			names[n] = nstr;
+			ids[n] = (int) fid;
+			n++;
+		}
+	}
+
+	/* the spec requires names to be unique. Detect a duplicate by sorting a
+	 * copy of the name pointers and scanning adjacent pairs -- O(n log n), not
+	 * the O(n^2) of an each-against-all scan over an attacker-sized mapping. */
+	if (n > 1)
+	{
+		char	  **sorted = (char **) palloc(sizeof(char *) * n);
+		int			i;
+
+		memcpy(sorted, names, sizeof(char *) * n);
+		qsort(sorted, n, sizeof(char *), ice_cmp_namep);
+		for (i = 1; i < n; i++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			if (strcmp(sorted[i - 1], sorted[i]) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: name \"%s\" appears more than once in \"%s\" schema.name-mapping.default",
+								sorted[i], path)));
+		}
+		pfree(sorted);
+	}
+
+	*names_out = names;
+	*ids_out = ids;
+	*nout = n;
+}
+
 /* the reserved Iceberg field ids of a position-delete file's two columns */
 #define ICE_POSDEL_PATH_ID 2147483546
 #define ICE_POSDEL_POS_ID  2147483545
@@ -875,6 +1018,9 @@ typedef struct IceScanCtx
 	TupleTableSlot *slot;
 	const int  *field_ids;
 	int			nfield;
+	char	  **nm_names;		/* name mapping: id-less file columns by name */
+	int		   *nm_ids;
+	int			nm_count;
 	MemoryContext filectx;
 	char	   *recorded_root;
 	char	   *actual_root;
@@ -1675,6 +1821,7 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	json = ice_slurp_text(path);
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
 	field_ids = ice_field_ids_for_columns(&jb->root, tupdesc, path, &nfield);
+	ice_name_mapping(&jb->root, path, &ctx.nm_names, &ctx.nm_ids, &ctx.nm_count);
 
 	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 	tupdesc = CreateTupleDescCopy(tupdesc);
@@ -1838,9 +1985,12 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 		old = MemoryContextSwitchTo(ctx.filectx);
 		safe = ice_open_path(ctx.recorded_root, ctx.actual_root, d->file_path,
 							 "data-file", ctx.mdpath);
-		returned = PgColumnarReadParquetByFieldId(safe, ctx.tupdesc, ctx.field_ids,
-												  ctx.nfield, ctx.tupstore, ctx.slot,
-												  skip, nskip);
+		returned = PgColumnarReadParquetByFieldIdNM(safe, ctx.tupdesc, ctx.field_ids,
+													ctx.nfield,
+													(const char *const *) ctx.nm_names,
+													ctx.nm_ids, ctx.nm_count,
+													ctx.tupstore, ctx.slot,
+													skip, nskip);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(ctx.filectx);
 
