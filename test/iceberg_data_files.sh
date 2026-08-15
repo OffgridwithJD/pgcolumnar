@@ -102,9 +102,14 @@ check "a sibling-prefix manifest-list is refused (22023)" \
 # (d) a SYMLINK under the location that targets a file outside it. The attacker
 # writes the warehouse, so they can plant a symlink; a lexical check passes it
 # (its own path is under the location) and open() follows it out. The boundary
-# must resolve symlinks (realpath) and reject. Target a real server file so a
-# bypass reads it and returns XX001 rather than 22023.
-ln -sf /etc/hostname "$DEST/db/events/metadata/sneaky.avro"
+# must resolve symlinks (realpath) and reject. Target a real EXISTING file
+# outside the location (not a fixed system path like /etc/hostname, which is
+# absent on some hosts -- a broken symlink resolves to ENOENT and the boundary
+# would refuse with 58P01 before the containment check, masking this arm) so
+# realpath resolves and the containment refusal (22023) is what is exercised.
+OUTSIDE="$PGC_WORKDIR/outside_symlink_target"
+printf 'outside\n' > "$OUTSIDE"
+ln -sf "$OUTSIDE" "$DEST/db/events/metadata/sneaky.avro"
 check "a symlink under the location targeting outside is refused (22023, not XX001)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$(esc_case "file://$LOC/metadata/sneaky.avro" d)')")" "22023"
 check "backend still up after the traversal attempts" "$(q 'SELECT 1')" "1"
