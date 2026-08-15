@@ -80,7 +80,10 @@ MFILE_SCHEMA = json.dumps({"type": "record", "name": "manifest_file", "fields": 
 
 
 def entry(status, seq, content, path, fmt, rows, size):
-    return zz(status) + zz(1) + zz(seq) + zz(content) + s(path.encode()) + \
+    # seq None -> encode the sequence_number union as null (branch 0), so the
+    # reader must inherit it from the manifest; else branch 1 with the value
+    seqbytes = zz(0) if seq is None else (zz(1) + zz(seq))
+    return zz(status) + seqbytes + zz(content) + s(path.encode()) + \
         s(fmt.encode()) + zz(rows) + zz(size)
 
 
@@ -99,7 +102,11 @@ data = pa.table({
     pa.field("region", pa.string(), metadata={b"PARQUET:field_id": b"2"}),
     pa.field("amount", pa.int32(), metadata={b"PARQUET:field_id": b"3"}),
 ]))
-pq.write_table(data, os.path.join(OUT, "db", "t", "data", "data.parquet"))
+# write in small row groups (2 rows each -> 3 groups for 5 rows) so the delete
+# ordinals span row-group boundaries: position 1 is in group 0, position 3 in
+# group 1, exercising pq_read_rows' cross-group file-ordinal accounting.
+pq.write_table(data, os.path.join(OUT, "db", "t", "data", "data.parquet"),
+               row_group_size=2)
 
 DATA_PATH = f"{LOC}/data/data.parquet"
 DEL_PATH = f"{LOC}/data/posdel.parquet"
@@ -128,14 +135,17 @@ schema = {"schema-id": 0, "type": "struct", "fields": [
     {"id": 3, "name": "amount", "required": False, "type": "int"}]}
 
 
-def emit_variant(tag, del_content, del_seq):
+def emit_variant(tag, del_content, del_seq, entry_seq="explicit"):
     """Write a (delete manifest, manifest list, metadata) triple: a delete file
     of the given data_file content (1 position, 2 equality) at data sequence
-    number del_seq, over the shared data manifest (content 0, seq 1)."""
+    number del_seq, over the shared data manifest (content 0, seq 1). entry_seq
+    "explicit" writes del_seq on the entry; None leaves it null so the reader must
+    inherit del_seq from the manifest_file in the manifest list."""
     xm_name = f"delete-manifest-{tag}.avro"
     ml_name = f"manifest-list-{tag}.avro"
+    eseq = del_seq if entry_seq == "explicit" else None
     open(os.path.join(md, xm_name), "wb").write(
-        ocf(ENTRY_SCHEMA, entry(1, del_seq, del_content, DEL_PATH, "PARQUET",
+        ocf(ENTRY_SCHEMA, entry(1, eseq, del_content, DEL_PATH, "PARQUET",
                                 len(DELETED_POS), 500)))
     xm = f"{LOC}/metadata/{xm_name}"
     sync = b"\x00" * 16
@@ -163,6 +173,9 @@ def emit_variant(tag, del_content, del_seq):
 emit_variant("apply", 1, 2)
 emit_variant("noapply", 1, 1)
 emit_variant("equality", 2, 2)
+# a position delete whose entry sequence number is NULL, inheriting seq 2 from
+# the manifest (the way real writers record it); it still applies over seq-1 data
+emit_variant("inherit", 1, 2, entry_seq=None)
 
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]

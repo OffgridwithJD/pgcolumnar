@@ -902,9 +902,20 @@ ice_read_pos_deletes(IceScanCtx *c)
 	foreach(lc, c->posdel)
 	{
 		IceEntry   *pd = (IceEntry *) lfirst(lc);
-		char	   *safe = ice_open_path(c->recorded_root, c->actual_root,
-										 pd->file_path, "position-delete", c->mdpath);
-		Tuplestorestate *ts = tuplestore_begin_heap(false, false, work_mem);
+		char	   *safe;
+		Tuplestorestate *ts;
+
+		/* v2 position deletes are Parquet; a Puffin/other delete file is a later
+		 * step, refused here with a clear cause rather than a parse error */
+		if (pd->file_format != NULL && strcmp(pd->file_format, "PARQUET") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: position-delete file \"%s\" has format %s; only PARQUET position deletes are supported",
+							pd->file_path, pd->file_format)));
+
+		safe = ice_open_path(c->recorded_root, c->actual_root,
+							 pd->file_path, "position-delete", c->mdpath);
+		ts = tuplestore_begin_heap(false, false, work_mem);
 
 		(void) PgColumnarReadParquetByFieldId(safe, dtd, fids, 2, ts, wslot, NULL, 0);
 		while (tuplestore_gettupleslot(ts, true, false, rslot))

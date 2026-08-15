@@ -57,6 +57,13 @@ check "the deleted ids (2, 4) are gone" \
 check "exactly the two deleted rows were removed (5 - 2 = 3)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/apply.metadata.json')
 	      AS t(id bigint, region text, amount int)")" "3"
+# deletes are by row ordinal, independent of column projection: reading only one
+# column must still drop the same rows (the ordinal is the row index, not a
+# column value)
+check "position deletes apply under column projection (id only -> 1,3,5)" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+	      FROM pgcolumnar.iceberg_scan('$MDIR/apply.metadata.json') AS t(id bigint)")" \
+	"1,3,5"
 
 # ---- sequence-number ordering: a too-old delete does NOT apply -------------
 # same delete file, but at a sequence number not greater than the data's, so by
@@ -67,6 +74,14 @@ check "a delete with seq not greater than the data does not apply (5 rows)" \
 check "the would-be-deleted ids survive when the delete is too old" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/noapply.metadata.json')
 	      AS t(id bigint, region text, amount int) WHERE id IN (2,4)")" "2"
+
+# ---- the delete's sequence number is inherited when the entry leaves it null -
+# real writers record a null entry sequence number and inherit the manifest's;
+# this variant's delete entry is null, inheriting seq 2 from the manifest, so it
+# must still apply over the seq-1 data (3 rows survive), proving inheritance.
+check "a position delete with an inherited (null-entry) sequence number applies" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/inherit.metadata.json')
+	      AS t(id bigint, region text, amount int)")" "3"
 
 # ---- equality deletes are refused, not misapplied --------------------------
 check "an equality delete is refused (0A000)" \
