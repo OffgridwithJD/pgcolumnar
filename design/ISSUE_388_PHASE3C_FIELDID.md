@@ -90,13 +90,34 @@ a reader fabricating ids from position cannot pass.
   each.
 - Matrix PG17/18/19 + ASAN (a binding/decode change earns the sanitizer).
 
-## Then: the Iceberg scan (follow-on PR, 3c end-to-end)
+## Then: the Iceberg scan (3c end-to-end) -- DONE
 
 `pgcolumnar.iceberg_scan(metadata_path) AS t(...)`: resolve the data files
 (#637), read the table's current schema from metadata.json (name -> field id),
 map each output column's name to its field id, and read each data file through
-this field-id path, streaming rows. **Reuse `ice_open_path`** to open each data
-file (the 3b review's symlink boundary -- a data-file path is opened here, so a
-traversal would be a content leak). Deletes already refused upstream by
-`iceberg_data_files`. That PR is where field-id projection becomes the Iceberg
-read it was built for.
+this field-id path, streaming rows.
+
+Delivered:
+- The 3b resolve->manifest-list->manifests->entries walk is refactored into a
+  shared `ice_walk_data_files(cb)` iterator; `iceberg_data_files` and
+  `iceberg_scan` are its two callbacks (the list one lexically rebases and emits
+  a row; the scan one opens and reads). `iceberg_data_files` behavior is
+  unchanged (its suite still green).
+- `PgColumnarReadParquetByFieldId` (new `columnar_parquet_reader.h`) exposes the
+  field-id read path so `columnar_iceberg.c` reads a data file into the
+  tuplestore without reaching into the reader's internals.
+- Each data file is opened through **`ice_open_path`** (realpath + containment):
+  a data-file path is opened here, so the 3b symlink/traversal boundary applies.
+  Per-file decode buffers live in a context reset between files.
+- Deletes refused upstream by the shared walk; only PARQUET data files read;
+  an output column name absent from the schema is `42703`.
+- Tests (`test/iceberg_scan.sh`): full read, project+reorder by id, subset, and
+  the headline -- a column renamed in the schema (`amt2`, id 3) still reads the
+  physical `amount` column, which a name-based reader could not. Removal proof:
+  resolving output columns positionally instead of by schema id reds the
+  reorder and rename arms. Delete-refusal and privilege arms. The committed
+  warehouse fixture gained its `data/` Parquet subtree. PG17/18/19 + ASAN; the
+  Parquet family and the 3a/3b suites are unregressed.
+
+Name-mapping fallback for id-less Parquet files (the plan's documented fallback)
+remains a follow-on.

@@ -32,11 +32,14 @@
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "executor/tuptable.h"
 #include "utils/jsonb.h"
+#include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/tuplestore.h"
 
 #include "columnar_avro.h"
+#include "columnar_parquet_reader.h"
 
 /*
  * A table metadata.json is small (schemas, snapshot log, partition specs). Cap
@@ -480,35 +483,31 @@ pgcolumnar_iceberg_current_snapshot(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
-PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_data_files);
+/*
+ * Callback invoked once per live data-file entry of the current snapshot, with
+ * the entry and the roots needed to rebase its recorded path. Shared by the two
+ * consumers: iceberg_data_files (lists the paths) and iceberg_scan (opens and
+ * reads them).
+ */
+typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
+							   const char *recorded_root, const char *actual_root,
+							   const char *mdpath, int64 snapshot_id);
 
 /*
- * pgcolumnar.iceberg_data_files(metadata_path text)
- *
- * List the live data files of the current snapshot: resolve the snapshot, read
- * its manifest list, then each manifest, and emit one row per data-file entry
- * (path, format, record count, partition). The recorded absolute paths are
- * rebased onto the table's actual location, so a relocated table reads. Zero
- * rows for a table with no current snapshot.
- *
- * Deletes are refused, not ignored: a snapshot that carries any delete manifest
- * (manifest_file.content != 0) or any delete/removed entry (data_file.content
- * != 0, or a DELETED status) raises feature_not_supported (0A000). A reader that
- * silently dropped deletes would return rows the table says are gone.
+ * Walk the current snapshot's live data-file entries and hand each to `cb`.
+ * Resolves the snapshot, reads its manifest list and each manifest (opening both
+ * through ice_open_path's path boundary), and refuses deletes loudly. Does
+ * nothing when the table has no current snapshot.
  */
-Datum
-pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
+static void
+ice_walk_data_files(const char *path, IceDataFileCb cb, void *ctx)
 {
-	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
 	char	   *json;
 	Jsonb	   *jb;
 	JsonbContainer *sc;
 	int64		cur;
 	const char *recorded_root;
 	char	   *actual_root;
-	char	   *ml_recorded;
 	char	   *ml_path;
 	uint8	   *mlbuf;
 	int64		mllen;
@@ -516,14 +515,12 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 	int			nmf;
 	int			mi;
 
-	tupstore = ice_srf_begin(fcinfo, &tupdesc);
-
 	json = ice_slurp_text(path);
 	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
 
 	sc = ice_current_snapshot(&jb->root, path, &cur);
 	if (sc == NULL)
-		return (Datum) 0;		/* no current snapshot -> no data files */
+		return;					/* no current snapshot -> no data files */
 
 	/* the recorded table root, and where the table actually sits now. The
 	 * actual root is resolved with realpath once here so the files we open can
@@ -542,8 +539,8 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 		free(real);
 	}
 
-	ml_recorded = ice_str_required(sc, "manifest-list", path);
-	ml_path = ice_open_path(recorded_root, actual_root, ml_recorded,
+	ml_path = ice_open_path(recorded_root, actual_root,
+							ice_str_required(sc, "manifest-list", path),
 							"manifest-list", path);
 	mlbuf = ice_slurp_bin(ml_path, &mllen);
 	mfs = PgColumnarAvroReadManifestList(mlbuf, mllen, &nmf);
@@ -576,8 +573,6 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 		for (ei = 0; ei < ne; ei++)
 		{
 			PgColumnarAvroManifestEntry *e = &entries[ei];
-			Datum		values[ICE_FILE_NCOLS];
-			bool		nulls[ICE_FILE_NCOLS];
 
 			CHECK_FOR_INTERRUPTS();
 
@@ -591,26 +586,301 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 						 errdetail("Entry \"%s\" has content %d, status %d.",
 								   e->file_path, e->content, e->status)));
 
-			memset(nulls, false, sizeof(nulls));
-			values[0] = PointerGetDatum(cstring_to_text(
-										ice_rebase(recorded_root, actual_root,
-												   e->file_path, "data-file", path)));
-			if (e->file_format != NULL)
-				values[1] = PointerGetDatum(cstring_to_text(e->file_format));
-			else
-				nulls[1] = true;
-			values[2] = Int64GetDatum(e->record_count);
-			if (e->partition != NULL)
-				values[3] = PointerGetDatum(cstring_to_text(e->partition));
-			else
-				nulls[3] = true;
-
-			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+			cb(ctx, e, recorded_root, actual_root, path, cur);
 		}
 
 		pfree(mbuf);
 	}
 
 	pfree(mlbuf);
+}
+
+/* iceberg_data_files callback: emit one row (path, format, record count,
+ * partition) per data-file entry. The path is lexically rebased (the row is
+ * reported, not opened here). */
+typedef struct IceListCtx
+{
+	Tuplestorestate *tupstore;
+	TupleDesc	tupdesc;
+}			IceListCtx;
+
+static void
+ice_list_cb(void *ctx, PgColumnarAvroManifestEntry *e,
+			const char *recorded_root, const char *actual_root,
+			const char *mdpath, int64 snapshot_id)
+{
+	IceListCtx *c = (IceListCtx *) ctx;
+	Datum		values[ICE_FILE_NCOLS];
+	bool		nulls[ICE_FILE_NCOLS];
+
+	(void) snapshot_id;
+	memset(nulls, false, sizeof(nulls));
+	values[0] = PointerGetDatum(cstring_to_text(
+								ice_rebase(recorded_root, actual_root,
+										   e->file_path, "data-file", mdpath)));
+	if (e->file_format != NULL)
+		values[1] = PointerGetDatum(cstring_to_text(e->file_format));
+	else
+		nulls[1] = true;
+	values[2] = Int64GetDatum(e->record_count);
+	if (e->partition != NULL)
+		values[3] = PointerGetDatum(cstring_to_text(e->partition));
+	else
+		nulls[3] = true;
+
+	tuplestore_putvalues(c->tupstore, c->tupdesc, values, nulls);
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_data_files);
+
+/*
+ * pgcolumnar.iceberg_data_files(metadata_path text)
+ *
+ * List the live data files of the current snapshot: resolve the snapshot, read
+ * its manifest list, then each manifest, and emit one row per data-file entry
+ * (path, format, record count, partition). The recorded absolute paths are
+ * rebased onto the table's actual location, so a relocated table reads. Zero
+ * rows for a table with no current snapshot.
+ *
+ * Deletes are refused, not ignored: a snapshot that carries any delete manifest
+ * (manifest_file.content != 0) or any delete/removed entry (data_file.content
+ * != 0, or a DELETED status) raises feature_not_supported (0A000). A reader that
+ * silently dropped deletes would return rows the table says are gone.
+ */
+Datum
+pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	IceListCtx	ctx;
+
+	ctx.tupstore = ice_srf_begin(fcinfo, &ctx.tupdesc);
+	ice_walk_data_files(path, ice_list_cb, &ctx);
+	return (Datum) 0;
+}
+
+/*
+ * Locate the "fields" array of the table's current schema in a parsed
+ * metadata.json: the entry of "schemas" whose "schema-id" equals
+ * "current-schema-id", or the v1 single top-level "schema" object.
+ */
+static JsonbContainer *
+ice_current_schema_fields(JsonbContainer *root, const char *path)
+{
+	JsonbValue *schemas = ice_field(root, "schemas");
+	JsonbValue *curid = ice_field(root, "current-schema-id");
+	JsonbValue *fields = NULL;
+	int64		want;
+
+	if (schemas != NULL && schemas->type == jbvBinary &&
+		JsonContainerIsArray(schemas->val.binary.data) &&
+		ice_num_int64(curid, &want))
+	{
+		JsonbContainer *arr = schemas->val.binary.data;
+		uint32		ns = JsonContainerSize(arr);
+		uint32		k;
+
+		for (k = 0; k < ns; k++)
+		{
+			JsonbValue *s = getIthJsonbValueFromContainer(arr, k);
+			int64		sid;
+
+			if (s == NULL || s->type != jbvBinary)
+				continue;
+			if (ice_num_int64(ice_field(s->val.binary.data, "schema-id"), &sid) &&
+				sid == want)
+			{
+				fields = ice_field(s->val.binary.data, "fields");
+				break;
+			}
+		}
+	}
+	if (fields == NULL)			/* v1: a single top-level "schema" object */
+	{
+		JsonbValue *sch = ice_field(root, "schema");
+
+		if (sch != NULL && sch->type == jbvBinary)
+			fields = ice_field(sch->val.binary.data, "fields");
+	}
+	if (fields == NULL || fields->type != jbvBinary ||
+		!JsonContainerIsArray(fields->val.binary.data))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("iceberg: \"%s\" has no current schema fields", path)));
+	return fields->val.binary.data;
+}
+
+/*
+ * Build the field id to bind each output column to, by matching the output
+ * column name to a field in the table's current schema. Returns a palloc'd array
+ * of one id per non-dropped attribute, in attribute order; *nout is its length.
+ * A column name absent from the schema is an error. Name matching is exact and
+ * case-sensitive against the schema (quote a mixed-case name in the column
+ * definition list to preserve its case).
+ */
+static int *
+ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
+						  const char *path, int *nout)
+{
+	JsonbContainer *fieldsc = ice_current_schema_fields(root, path);
+	uint32		nf = JsonContainerSize(fieldsc);
+	int			natts = tupdesc->natts;
+	int		   *ids;
+	int			outn = 0;
+	int			i;
+
+	for (i = 0; i < natts; i++)
+		if (!TupleDescAttr(tupdesc, i)->attisdropped)
+			outn++;
+	ids = (int *) palloc(sizeof(int) * Max(outn, 1));
+	*nout = 0;
+
+	for (i = 0; i < natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		const char *nm;
+		int			found = -1;
+		uint32		j;
+
+		if (att->attisdropped)
+			continue;
+		nm = NameStr(att->attname);
+		for (j = 0; j < nf; j++)
+		{
+			JsonbValue *f = getIthJsonbValueFromContainer(fieldsc, j);
+			JsonbValue *fn;
+			int64		fid;
+
+			if (f == NULL || f->type != jbvBinary)
+				continue;
+			fn = ice_field(f->val.binary.data, "name");
+			if (fn == NULL || fn->type != jbvString)
+				continue;
+			if ((int) strlen(nm) == fn->val.string.len &&
+				strncmp(nm, fn->val.string.val, fn->val.string.len) == 0)
+			{
+				if (ice_num_int64(ice_field(f->val.binary.data, "id"), &fid))
+					found = (int) fid;
+				break;
+			}
+		}
+		if (found < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("iceberg: output column \"%s\" is not a field in the table's current schema",
+							nm)));
+		ids[(*nout)++] = found;
+	}
+	return ids;
+}
+
+/* iceberg_scan callback: open the data file (symlink-safe) and read its rows,
+ * projected by the table's field ids, into the tuplestore. Each file's decode
+ * buffers live in a context reset between files, so a many-file table does not
+ * accumulate O(total bytes). */
+typedef struct IceScanCtx
+{
+	Tuplestorestate *tupstore;
+	TupleDesc	tupdesc;
+	TupleTableSlot *slot;
+	const int  *field_ids;
+	int			nfield;
+	MemoryContext filectx;
+}			IceScanCtx;
+
+static void
+ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
+			const char *recorded_root, const char *actual_root,
+			const char *mdpath, int64 snapshot_id)
+{
+	IceScanCtx *c = (IceScanCtx *) ctx;
+	char	   *safe;
+	MemoryContext old;
+
+	(void) snapshot_id;
+
+	if (e->file_format != NULL && strcmp(e->file_format, "PARQUET") != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("iceberg: data file \"%s\" has format %s; only PARQUET is supported",
+						e->file_path, e->file_format)));
+
+	/* open through the path boundary: a data-file path is opened here, so a
+	 * traversal or symlink would be a content leak, not just an oracle */
+	safe = ice_open_path(recorded_root, actual_root, e->file_path,
+						 "data-file", mdpath);
+
+	old = MemoryContextSwitchTo(c->filectx);
+	(void) PgColumnarReadParquetByFieldId(safe, c->tupdesc, c->field_ids,
+										  c->nfield, c->tupstore, c->slot);
+	MemoryContextSwitchTo(old);
+	MemoryContextReset(c->filectx);
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
+
+/*
+ * pgcolumnar.iceberg_scan(metadata_path text) returns setof record
+ *
+ * Read an Apache Iceberg table at its current snapshot. The caller supplies a
+ * column definition list; each output column name is resolved to a field id via
+ * the table's current schema, and every live data file is read projected by
+ * those ids -- so a data file written before a column rename still reads, since
+ * Iceberg selects columns by id, not name or position. Deletes are refused
+ * upstream by the same walk iceberg_data_files uses; only PARQUET data files are
+ * read. Superuser / pg_read_server_files; materialize-mode SRF.
+ */
+Datum
+pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+	MemoryContext oldcxt;
+	IceScanCtx	ctx;
+	char	   *json;
+	Jsonb	   *jb;
+	int		   *field_ids;
+	int			nfield;
+
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in a context that cannot accept a set")));
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.iceberg_scan requires a column definition list"),
+				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(col1 type1, ...).")));
+
+	/* map output column names -> field ids via the table's current schema */
+	json = ice_slurp_text(path);
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(json)));
+	field_ids = ice_field_ids_for_columns(&jb->root, tupdesc, path, &nfield);
+
+	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	tupdesc = CreateTupleDescCopy(tupdesc);
+	ctx.tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = ctx.tupstore;
+	rsinfo->setDesc = tupdesc;
+	MemoryContextSwitchTo(oldcxt);
+
+	ctx.tupdesc = tupdesc;
+	ctx.slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	ctx.field_ids = field_ids;
+	ctx.nfield = nfield;
+	ctx.filectx = AllocSetContextCreate(CurrentMemoryContext,
+										"pgcolumnar iceberg_scan file",
+										ALLOCSET_DEFAULT_SIZES);
+
+	ice_walk_data_files(path, ice_scan_cb, &ctx);
+
+	MemoryContextDelete(ctx.filectx);
+	ExecDropSingleTupleTableSlot(ctx.slot);
 	return (Datum) 0;
 }

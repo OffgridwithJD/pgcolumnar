@@ -684,6 +684,31 @@ SELECT file_path, record_count, partition
   FROM pgcolumnar.iceberg_data_files('/data/warehouse/db/events/metadata/v3.metadata.json');
 ```
 
+### pgcolumnar.iceberg_scan(metadata_path text) returns setof record
+
+Reads an Apache Iceberg table at its current snapshot. You supply a column
+definition list. Each output column name is resolved to a field id through the
+table's current schema, and every live data file is read projected by those
+ids. Because Iceberg selects columns by field id, a data file written before a
+column was renamed still reads: the name in the file need not match, only the
+id. The caller needs the `pg_read_server_files` role, which superusers hold.
+
+The output column names must be fields of the table's current schema; a name
+that is not is an error. Matching is case sensitive against the schema, so quote
+a mixed-case name in the column definition list to preserve its case. Only
+Parquet data files are read. A table whose current snapshot carries any delete
+file is refused, not read with the deletes ignored (that is a later step, #388
+phase 4). The recorded file paths are rebased onto the table's actual location
+and resolved against a path boundary, so a relocated table reads and a path
+pointing outside the table is refused.
+
+```sql
+SELECT id, region, sum(amount)
+  FROM pgcolumnar.iceberg_scan('/data/warehouse/db/events/metadata/v3.metadata.json')
+    AS t(id bigint, region text, amount int)
+  GROUP BY id, region;
+```
+
 ### The pgcolumnar_parquet foreign-data wrapper
 
 Exposes a Parquet file, directory, or glob as a foreign table. The scan streams
