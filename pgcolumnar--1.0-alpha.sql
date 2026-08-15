@@ -958,6 +958,16 @@ CREATE FUNCTION pgcolumnar.iceberg_scan(metadata_path text)
 COMMENT ON FUNCTION pgcolumnar.iceberg_scan(text)
 	IS 'read an Apache Iceberg table at its current snapshot; supply a column definition list, whose names resolve to the table schema field ids, e.g. SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(id bigint, region text); refuses tables with delete files (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_rest_table_location(catalog_uri text,
+													   namespace text,
+													   table_name text)
+	RETURNS text
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_rest_table_location';
+
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_table_location(text, text, text)
+	IS 'resolve the current metadata-location of a table named by an Iceberg REST catalog (catalog URI + namespace + table); the bearer token is read from the server environment variable PGCOLUMNAR_ICEBERG_REST_TOKEN, never a SQL argument (#388)';
+
 /* ---------------------------------------------------------------------------
  * Parquet foreign-data wrapper (Phase G)
  *

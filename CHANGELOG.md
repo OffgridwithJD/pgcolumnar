@@ -54,6 +54,18 @@ which was true until that script existed.
   `field_ids` form that projects columns by Parquet field id. See
   [Iceberg](docs/sql-reference.md#pgcolumnariceberg_scanmetadata_path-text-returns-setof-record).
 
+- `pgcolumnar.iceberg_rest_table_location(catalog_uri, namespace, table_name)`
+  resolves a table named by an Iceberg REST catalog to its current
+  metadata-location, over HTTP or HTTPS (#388). The catalog endpoint is subject
+  to the same `objstore_allowed_endpoints` allow-list and link-local refusal as
+  every other remote access, and the request is carried by the object-store
+  module, so no second TLS stack enters the server process. A bearer token, when
+  the catalog requires one, is read from the `PGCOLUMNAR_ICEBERG_REST_TOKEN`
+  server environment variable, never a function argument, so it does not appear
+  in the statement log. This is the first step of REST catalog support; reading
+  the resolved table and listing namespaces and tables follow. See
+  [Iceberg REST catalog](docs/sql-reference.md#pgcolumnariceberg_rest_table_locationcatalog_uri-text-namespace-text-table_name-text-returns-text).
+
 - The Parquet read and export functions and the foreign-data wrapper read from
   and write to object storage (#393, #394). A path may be an `s3://`,
   `http://`, or `https://` URL wherever it may be a local path. `s3://` requests
