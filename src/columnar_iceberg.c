@@ -899,6 +899,12 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 		/* an entry without a field-id is an unmapped column; skip it */
 		if (!ice_num_int64(ice_field(ent->val.binary.data, "field-id"), &fid))
 			continue;
+		/* a field id beyond int32 would truncate and could alias a real id */
+		if (fid < 0 || fid > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: \"%s\" schema.name-mapping.default has a field-id out of range: " INT64_FORMAT,
+							path, fid)));
 		namesv = ice_field(ent->val.binary.data, "names");
 		if (namesv == NULL || namesv->type != jbvBinary ||
 			!JsonContainerIsArray(namesv->val.binary.data))

@@ -113,14 +113,32 @@ def write_idless(name, id_col):
 DATA = write_idless("data.parquet", "id")
 DATA_ALIAS = write_idless("data-alias.parquet", "rid")
 
+
+def write_idless_2col():
+    """An id-less file with only id and region -- the amount column was added to
+    the table schema after this file was written, so it is absent here."""
+    t = pa.table({
+        "id": pa.array([r[0] for r in ROWS], pa.int64()),
+        "region": pa.array([r[1] for r in ROWS], pa.string()),
+    })
+    pq.write_table(t, os.path.join(OUT, "db", "t", "data", "data-2col.parquet"),
+                   row_group_size=2)
+    return f"{LOC}/data/data-2col.parquet"
+
+
+DATA_2COL = write_idless_2col()
+
 SNAP = 5544332211009988
 SEQ = 1
 DM = f"{LOC}/metadata/data-manifest.avro"
 DMA = f"{LOC}/metadata/data-manifest-alias.avro"
+DM2 = f"{LOC}/metadata/data-manifest-2col.avro"
 open(os.path.join(md, "data-manifest.avro"), "wb").write(
     ocf(ENTRY_SCHEMA, entry(1, SEQ, 0, DATA, "PARQUET", 5, 1000)))
 open(os.path.join(md, "data-manifest-alias.avro"), "wb").write(
     ocf(ENTRY_SCHEMA, entry(1, SEQ, 0, DATA_ALIAS, "PARQUET", 5, 1000)))
+open(os.path.join(md, "data-manifest-2col.avro"), "wb").write(
+    ocf(ENTRY_SCHEMA, entry(1, SEQ, 0, DATA_2COL, "PARQUET", 5, 1000)))
 
 
 def emit(tag, fields, mapping, dm=DM):
@@ -190,10 +208,27 @@ emit("nmdup", SCHEMA_STD,
       {"field-id": 2, "names": ["id"]},
       {"field-id": 3, "names": ["amount"]}])
 
-# nmmissing: the mapping has no name for "amount"; projecting amount errors
+# nmmissing: the mapping has no name for "amount". The file physically has an
+# amount column, but with no mapping entry the reader cannot bind it to field 3,
+# so per Column Projection rung 4 amount reads as null (not an error, and not
+# the physical bytes -- there is no binding).
 emit("nmmissing", SCHEMA_STD,
      [{"field-id": 1, "names": ["id"]},
       {"field-id": 2, "names": ["region"]}])
+
+# nmevolve: the headline case -- an imported file written before "amount" was
+# added to the schema. The file has only id and region; the mapping maps all
+# three. amount is absent from the file, so it reads as null while id and
+# region return real data.
+emit("nmevolve", SCHEMA_STD, MAP_STD, dm=DM2)
+
+# nmbigid: a mapping field-id beyond int32. A silent (int) truncation would
+# alias it onto a real field id and bind the wrong column; the reader must
+# refuse the mapping.
+emit("nmbigid", SCHEMA_STD,
+     [{"field-id": (1 << 32) + 1, "names": ["id"]},
+      {"field-id": 2, "names": ["region"]},
+      {"field-id": 3, "names": ["amount"]}])
 
 oracle = {"rows": [{"id": r[0], "region": r[1], "amount": r[2]} for r in ROWS]}
 open(os.path.join(OUT, "expected.json"), "w").write(json.dumps(oracle, indent=2))

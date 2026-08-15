@@ -95,10 +95,31 @@ check "...and the refusal names schema.name-mapping.default" \
 check "a duplicate name in the mapping is refused (XX001)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmdup.metadata.json')
 	                AS t(id bigint, region text, amount int)")" "XX001"
-# the mapping lacks a name for a projected column: that column has no binding
-check "a projected column absent from the mapping is refused (22023)" \
-	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmmissing.metadata.json')
-	                AS t(id bigint, region text, amount int)")" "22023"
+# a mapping field-id beyond int32 would truncate and alias a real id
+check "a mapping field-id beyond int32 is refused (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmbigid.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
 check "backend still up after the name-mapping refusals" "$(q 'SELECT 1')" "1"
+
+# ---- Column Projection null-fill (an absent field id reads as null) ---------
+# the mapping omits "amount"; the file physically has an amount column, but with
+# no mapping entry there is no binding, so amount reads as null (rung 4), while
+# id and region return real data -- not a whole-query error
+check "a projected column absent from the mapping reads null, not an error" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/nmmissing.metadata.json')
+	      AS t(id bigint, region text, amount int)")" "5"
+check "the unmapped column is null and the mapped columns are real" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/nmmissing.metadata.json')
+	      AS t(id bigint, region text, amount int) WHERE amount IS NULL AND id IS NOT NULL")" "5"
+# the headline case: an imported file written before "amount" was added to the
+# schema. The file lacks the column entirely; it reads as null.
+check "a column added after the file was written reads null (schema evolution)" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+	      FROM pgcolumnar.iceberg_scan('$MDIR/nmevolve.metadata.json')
+	        AS t(id bigint, region text, amount int) WHERE amount IS NULL")" "1,2,3,4,5"
+check "...and its other columns still carry real data" \
+	"$(q "SELECT region FROM pgcolumnar.iceberg_scan('$MDIR/nmevolve.metadata.json')
+	      AS t(id bigint, region text, amount int) ORDER BY id LIMIT 1")" "eu"
+check "backend still up after the null-fill reads" "$(q 'SELECT 1')" "1"
 
 pgc_summary

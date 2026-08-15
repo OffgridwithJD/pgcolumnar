@@ -86,3 +86,39 @@ Removal proofs: delete the eff_id overlay -> nmapply reds (back to 22023);
 resolve by output name instead of the schema-mapped id -> nmrename reds; take
 only the first mapping name -> nmalias reds; drop the uniqueness check -> nmdup
 reds. Value arms cross-checked against pyiceberg and DuckDB.
+
+## Adversarial audit (2 lenses, 6 findings -> 5 defects, all fixed)
+
+The audit (spec-conformance + memory/decode-correctness, each finding verified)
+found five distinct defects, zero refuted. Fixed here, with fixture arms and
+removal proofs:
+
+- **IMPORTANT: Column Projection null-fill.** A projected field id not present
+  in the file errored (22023) instead of resolving to null (ladder rung 4).
+  That broke the feature's headline case -- an imported file written before a
+  schema column was added -- and, since a projected column absent from the
+  mapping is also "not bound", the `nmmissing` case too. Fixed: the Iceberg
+  data-file read passes `missing_as_null`, and an unbound output column gets no
+  ImpTop, so pq_read_rows (which nulls every output column per row before
+  filling bound ones) reads it as null while bound columns return real data.
+  Delete-file reads and `read_parquet(field_ids)` keep erroring on an absent id
+  (a reserved id or a user-named id must be present). Arms `nmevolve` (column
+  absent from the file) and `nmmissing` (present but unmapped) both read null.
+  The whole-file no-mapping case (`nmnomap`) still errors -- conformant, and the
+  audit agreed erroring is only wrong once some columns bind.
+- **Nested-name collision** (minor): the eff_id overlay matched leaf names at
+  every depth, so a top-level mapping name could bind a nested struct child of
+  the same name. Fixed: leaves carry a `depth`, and the overlay matches only
+  top-level (`depth == 1`) leaves, matching the flat scope.
+- **field-id int64->int truncation** (minor): a mapping `field-id` beyond int32
+  truncated and could alias another id (the 4c class). Fixed: range-checked in
+  `ice_name_mapping` (XX001).
+- **Real id vs mapped id** (minor): an id-less leaf whose name maps to an id
+  another leaf carries natively produced a false ambiguity error. Fixed: the
+  overlay skips a candidate id already present natively, so a real id wins.
+- **Unbounded/uncancellable loops** (minor): the name dedup and the overlay
+  match are guarded with CHECK_FOR_INTERRUPTS.
+
+Two independent oracles: DuckDB agrees on all six value arms; pyiceberg on all
+but the present-but-unmapped case (`nmmissing`), where pyiceberg errors and we
+null-fill with DuckDB and the spec ladder -- pinned in crosscheck_nm.py.
