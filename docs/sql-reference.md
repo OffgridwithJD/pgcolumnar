@@ -809,10 +809,40 @@ SELECT count(*) FROM pgcolumnar.iceberg_scan(
   AS t(id bigint, region text, amount int);
 ```
 
-Several extensions are planned follow-ups. Per-catalog credentials can move to a
-foreign server and user mapping. The catalog can issue temporary storage
-credentials. The resolved table can be read directly by name. See issue #656 and
-the later phase 7 work.
+Per-catalog credentials can move to a foreign server and user mapping. The
+catalog can issue temporary storage credentials. See issue #656 and the later
+phase 7 work.
+
+### pgcolumnar.iceberg_rest_scan(catalog_uri text, namespace text, table_name text) returns setof record
+
+Reads a table named by an Iceberg REST catalog at its current snapshot. It takes
+a column definition list exactly like `iceberg_scan`. The catalog resolves the
+table to its metadata location. That location is read through the same path, so
+field-id projection and every delete rule apply unchanged. The catalog and
+authentication rules are those of `iceberg_rest_table_location` above, including
+the allow-list, the link-local refusal, and the environment bearer token.
+
+```sql
+SELECT region, sum(amount)
+  FROM pgcolumnar.iceberg_rest_scan('https://catalog.example.com',
+                                    'analytics', 'events')
+    AS t(id bigint, region text, amount int)
+  GROUP BY region;
+```
+
+### pgcolumnar.iceberg_rest_namespaces(catalog_uri text) returns setof text
+
+Lists the namespaces of a catalog, one per row. A multi-level namespace is
+returned dot-joined. Same catalog and authentication rules as above.
+
+### pgcolumnar.iceberg_rest_tables(catalog_uri text, namespace text) returns setof text
+
+Lists the table names in a namespace, one per row.
+
+```sql
+SELECT * FROM pgcolumnar.iceberg_rest_namespaces('https://catalog.example.com');
+SELECT * FROM pgcolumnar.iceberg_rest_tables('https://catalog.example.com', 'analytics');
+```
 
 ### The pgcolumnar_parquet foreign-data wrapper
 

@@ -56,6 +56,8 @@ SQLFILE="$(dirname "${BASH_SOURCE[0]}")/../pgcolumnar--1.0-alpha.sql"
 #   iceberg_scan           reads an Iceberg table's FILES, server-file role (#388)
 #   read_avro_manifest     reads an Avro FILE, gated by the server-file role (#388)
 #   iceberg_rest_table_location  reads an external REST catalog, server-file role (#388 phase 7)
+#   iceberg_rest_scan      reads a REST-cataloged table's FILES, server-file role (#388 phase 7)
+#   iceberg_rest_namespaces / iceberg_rest_tables  list a REST catalog, server-file role (#388 phase 7)
 #   read_manifest_list     reads an Avro FILE, gated by the server-file role (#388)
 #
 # Kept on ONE line and matched after whitespace normalisation. A multi-line list
@@ -63,7 +65,7 @@ SQLFILE="$(dirname "${BASH_SOURCE[0]}")/../pgcolumnar--1.0-alpha.sql"
 # line end is followed by a newline rather than a space, so it silently fails to
 # match and reads as an unbucketed function. That is not hypothetical: it is what
 # the first run of this suite reported for parquet_fdw_validator.
-EXEMPT="columnar_handler parquet_fdw_handler parquet_fdw_validator parquet_schema read_parquet file_split_offsets iceberg_current_snapshot iceberg_data_files iceberg_scan iceberg_rest_table_location read_avro_manifest read_manifest_list"
+EXEMPT="columnar_handler parquet_fdw_handler parquet_fdw_validator parquet_schema read_parquet file_split_offsets iceberg_current_snapshot iceberg_data_files iceberg_scan iceberg_rest_table_location iceberg_rest_scan iceberg_rest_namespaces iceberg_rest_tables read_avro_manifest read_manifest_list"
 EXEMPT="$(echo $EXEMPT)"
 
 # Relation-taking entry points with NO privilege check of any kind on main.

@@ -45,6 +45,7 @@
 
 #include "columnar_avro.h"
 #include "columnar_puffin.h"
+#include "columnar_iceberg.h"
 #include "columnar_objstore.h"
 #include "columnar_parquet_reader.h"
 
@@ -2046,47 +2047,16 @@ ice_eq_probe(IceScanCtx *c, IceEntry *d, List *elig,
 	return (int64) ord;
 }
 
-PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
-
 /*
- * pgcolumnar.iceberg_scan(metadata_path text) returns setof record
- *
- * Read an Apache Iceberg table at its current snapshot. The caller supplies a
- * column definition list; each output column name is resolved to a field id via
- * the table's current schema, and every live data file is read projected by
- * those ids -- so a data file written before a column rename still reads, since
- * Iceberg selects columns by id, not name or position.
- *
- * Row-level deletes are applied, each kind under its own spec rule:
- *
- * - Position deletes drop the listed row ordinals of the data file they name,
- *   when the data file's data sequence number is less than OR EQUAL TO the
- *   delete's (a position delete applies to data written in the same commit or
- *   earlier, so the same-sequence upsert case counts).
- * - v3 deletion vectors (Puffin files) are position deletes in bitmap form:
- *   the same <= sequence rule, scoped to their referenced_data_file. An
- *   applicable DV SUPERSEDES position-delete files for its data file (the
- *   spec's scope rule; the writer folded their deletes into it). At most one
- *   DV may reference a data file; deletion vectors are refused below
- *   format-version 3.
- * - Equality deletes drop every data row whose equality_ids column values match
- *   a delete row (all columns equal; null matches null), when the data file's
- *   sequence number is STRICTLY LESS THAN the delete's (an equality delete
- *   never touches same-commit data). An unpartitioned-spec equality delete is
- *   global; a partition-scoped one applies only to a data file whose partition
- *   (spec id and tuple) equals the delete's, comparing the stored transformed
- *   partition tuples (phase 5). A partition-scoped delete matching no data
- *   file's spec, or carrying an uncomparable partition value, is refused.
- *
- * Only PARQUET files are read. Superuser / pg_read_server_files;
- * materialize-mode SRF.
+ * The body of iceberg_scan, factored (#388 phase 7) so the REST catalog client
+ * reads a table it resolved by name through the very same path. `path` is a
+ * metadata.json location (local or remote), `tupdesc` the caller's column
+ * definition list; the rows land in a materialize-mode tuplestore on `rsinfo`.
  */
-Datum
-pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
+void
+PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
+						  ReturnSetInfo *rsinfo)
 {
-	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
 	MemoryContext oldcxt;
 	IceScanCtx	ctx;
 	char	   *json;
@@ -2097,21 +2067,6 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	List	   *dvdels;
 	List	   *eqdels;
 	ListCell   *lc;
-
-	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
-		(rsinfo->allowedModes & SFRM_Materialize) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in a context that cannot accept a set")));
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pgcolumnar.iceberg_scan requires a column definition list"),
-				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(col1 type1, ...).")));
 
 	/* map output column names -> field ids via the table's current schema */
 	json = ice_slurp_text(path);
@@ -2341,5 +2296,65 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 
 	MemoryContextDelete(ctx.filectx);
 	ExecDropSingleTupleTableSlot(ctx.slot);
+}
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
+
+/*
+ * pgcolumnar.iceberg_scan(metadata_path text) returns setof record
+ *
+ * Read an Apache Iceberg table at its current snapshot. The caller supplies a
+ * column definition list; each output column name is resolved to a field id via
+ * the table's current schema, and every live data file is read projected by
+ * those ids -- so a data file written before a column rename still reads, since
+ * Iceberg selects columns by id, not name or position.
+ *
+ * Row-level deletes are applied, each kind under its own spec rule:
+ *
+ * - Position deletes drop the listed row ordinals of the data file they name,
+ *   when the data file's data sequence number is less than OR EQUAL TO the
+ *   delete's (a position delete applies to data written in the same commit or
+ *   earlier, so the same-sequence upsert case counts).
+ * - v3 deletion vectors (Puffin files) are position deletes in bitmap form:
+ *   the same <= sequence rule, scoped to their referenced_data_file. An
+ *   applicable DV SUPERSEDES position-delete files for its data file (the
+ *   spec's scope rule; the writer folded their deletes into it). At most one
+ *   DV may reference a data file; deletion vectors are refused below
+ *   format-version 3.
+ * - Equality deletes drop every data row whose equality_ids column values match
+ *   a delete row (all columns equal; null matches null), when the data file's
+ *   sequence number is STRICTLY LESS THAN the delete's (an equality delete
+ *   never touches same-commit data). An unpartitioned-spec equality delete is
+ *   global; a partition-scoped one applies only to a data file whose partition
+ *   (spec id and tuple) equals the delete's, comparing the stored transformed
+ *   partition tuples (phase 5). A partition-scoped delete matching no data
+ *   file's spec, or carrying an uncomparable partition value, is refused.
+ *
+ * Only PARQUET files are read. Superuser / pg_read_server_files;
+ * materialize-mode SRF.
+ */
+Datum
+pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or a member of the pg_read_server_files role to read a server file")));
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in a context that cannot accept a set")));
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgcolumnar.iceberg_scan requires a column definition list"),
+				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(col1 type1, ...).")));
+
+	PgColumnarIcebergScanInto(path, tupdesc, rsinfo);
 	return (Datum) 0;
 }
