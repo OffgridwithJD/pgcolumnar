@@ -98,4 +98,14 @@ extern void PgColumnarIcebergBucketMap(const char *path,
 									   int **out_attno, int **out_n,
 									   int *out_count, int32 *out_specid);
 
+/*
+ * Map the current spec's truncate[W] fields to columns for FDW truncate pruning:
+ * per field its partition-tuple position, source attno, and width W. palloc'd.
+ */
+extern void PgColumnarIcebergTruncateMap(const char *path,
+										 const PgColumnarObjStoreConfig *cfg,
+										 TupleDesc tupdesc, int **out_pos,
+										 int **out_attno, int **out_w,
+										 int *out_count, int32 *out_specid);
+
 #endif							/* COLUMNAR_ICEBERG_H */

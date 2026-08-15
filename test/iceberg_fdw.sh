@@ -165,6 +165,35 @@ if [ -f "$FX/warehouse_bucket/db/byid/data/id_bucket=4/00000-0-aa63bd5e-94cd-4a4
 		"5,6,7,8"
 fi
 
+# ---- truncate[W] partition pruning (range, order-preserving) -----------------
+# warehouse_trunc is partitioned by truncate[100](amount) with column metrics
+# DISABLED, so truncate is the only mechanism (metrics would otherwise subsume
+# it). Files: amount_tr=0 (ids 1,2), =100 (ids 3,4), =200 (id 5).
+if ls "$FX"/warehouse_trunc/db/bytr/metadata/*.metadata.json >/dev/null 2>&1; then
+	TDEST="$PGC_WORKDIR/wht"; rm -rf "$TDEST"; mkdir -p "$TDEST"
+	cp -r "$FX/warehouse_trunc/db" "$TDEST/db"; chmod -R u+rwX "$TDEST"
+	MDT="$(ls "$TDEST"/db/bytr/metadata/*.metadata.json | sort | tail -1)"
+	q "CREATE FOREIGN TABLE evt (id bigint, amount int)
+	   SERVER ice OPTIONS (metadata_path '$MDT')" >/dev/null
+	check "the truncate FDW reads the whole table (5 rows)" \
+		"$(q "SELECT count(*) FROM evt")" "5"
+	check "amount < 100 truncate-prunes 2 files" \
+		"$(fp "SELECT * FROM evt WHERE amount < 100")" "2"
+	check "amount < 100 returns ids 1,2" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evt WHERE amount < 100")" "1,2"
+	check "amount = 130 truncate-prunes 2 files" \
+		"$(fp "SELECT * FROM evt WHERE amount = 130")" "2"
+	check "amount = 130 returns id 3" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evt WHERE amount = 130")" "3"
+	check "amount >= 200 truncate-prunes 2 files" \
+		"$(fp "SELECT * FROM evt WHERE amount >= 200")" "2"
+	check_text "a truncate-pruned query matches iceberg_scan (same oracle)" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evt WHERE amount >= 200")" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+		      FROM pgcolumnar.iceberg_scan('$MDT') AS t(id bigint, amount int)
+		      WHERE amount >= 200")"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1

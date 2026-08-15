@@ -68,6 +68,7 @@ typedef struct IceFdwState
 	TupleTableSlot *partSlot;
 	List	   *metricQuals;	/* IceMetricQual*, min/max prune on int/bool cols */
 	List	   *bucketQuals;	/* IceBucketQual*, equality prune on bucket parts */
+	List	   *truncQuals;		/* IceTruncQual*, range prune on truncate[W] parts */
 	int64		filesPruned;
 }			IceFdwState;
 
@@ -94,6 +95,20 @@ typedef struct IceBucketQual
 	int			pos;			/* partition-tuple position of the bucket cell */
 	int32		target;			/* bucket(const, N) */
 }			IceBucketQual;
+
+/*
+ * A "truncate-column <op> const" predicate a truncate[W] partition can decide.
+ * A file's stored truncate cell V means its values lie in [V, V+W); the
+ * predicate is decided against that range with the same min/max logic as metrics
+ * (truncate is order-preserving).
+ */
+typedef struct IceTruncQual
+{
+	int			pos;			/* partition-tuple position of the truncate cell */
+	int			w;				/* truncation width */
+	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
+	int64		constval;
+}			IceTruncQual;
 
 /* murmur3 x86 32-bit (seed 0), the hash Iceberg's bucket transform uses. */
 static uint32
@@ -624,6 +639,116 @@ ice_fdw_bucket_quals(ForeignScanState *node, TupleDesc tupdesc,
 }
 
 /*
+ * Compile "truncate-source-column <op> const" predicates over integer columns
+ * into IceTruncQuals. A truncate[W] partition is order-preserving, so any btree
+ * comparison prunes: a file's cell V bounds its values to [V, V+W).
+ */
+static List *
+ice_fdw_trunc_quals(ForeignScanState *node, TupleDesc tupdesc,
+					const int *tpos, const int *tattno, const int *tw, int tcount)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	if (tcount == 0)
+		return NIL;
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) lfirst(lc);
+		Node	   *larg;
+		Node	   *rarg;
+		Var		   *var;
+		Const	   *con;
+		bool		varLeft;
+		int			strategy = 0;
+		int64		cval;
+		Oid			ctype;
+		ListCell   *ic;
+		List	   *interp;
+		int			ti;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		larg = (Node *) linitial(op->args);
+		rarg = (Node *) lsecond(op->args);
+		if (IsA(larg, Var) && IsA(rarg, Const))
+		{
+			var = (Var *) larg;
+			con = (Const *) rarg;
+			varLeft = true;
+		}
+		else if (IsA(larg, Const) && IsA(rarg, Var))
+		{
+			var = (Var *) rarg;
+			con = (Const *) larg;
+			varLeft = false;
+		}
+		else
+			continue;
+		if (var->varattno < 1 || var->varattno > tupdesc->natts ||
+			contain_volatile_functions((Node *) op))
+			continue;
+		ctype = TupleDescAttr(tupdesc, var->varattno - 1)->atttypid;
+		if (ctype != INT2OID && ctype != INT4OID && ctype != INT8OID)
+			continue;			/* truncate on non-int types deferred */
+		if (!ice_fdw_const_int(con, &cval))
+			continue;
+
+		interp = PgColumnarGetOpInterpretation(op->opno);
+		foreach(ic, interp)
+		{
+			PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+			int			s = PgColumnarOpInterpStrategy(o);
+
+			if (s >= BTLessStrategyNumber && s <= BTGreaterStrategyNumber)
+			{
+				strategy = s;
+				break;
+			}
+		}
+		if (strategy == 0)
+			continue;
+		if (!varLeft)
+		{
+			switch (strategy)
+			{
+				case BTLessStrategyNumber:
+					strategy = BTGreaterStrategyNumber;
+					break;
+				case BTLessEqualStrategyNumber:
+					strategy = BTGreaterEqualStrategyNumber;
+					break;
+				case BTGreaterStrategyNumber:
+					strategy = BTLessStrategyNumber;
+					break;
+				case BTGreaterEqualStrategyNumber:
+					strategy = BTLessEqualStrategyNumber;
+					break;
+				default:
+					break;
+			}
+		}
+
+		for (ti = 0; ti < tcount; ti++)
+		{
+			IceTruncQual *tq;
+
+			if (tattno[ti] != var->varattno)
+				continue;
+			tq = (IceTruncQual *) palloc(sizeof(IceTruncQual));
+			tq->pos = tpos[ti];
+			tq->w = tw[ti];
+			tq->strategy = strategy;
+			tq->constval = cval;
+			out = lappend(out, tq);
+		}
+	}
+	return out;
+}
+
+/*
  * The per-file filter passed to PgColumnarIcebergScanCore: return true to prune
  * (skip) a data file that provably yields no matching row -- because its column
  * min/max bounds exclude a predicate, or its identity-partition value does. A
@@ -679,6 +804,30 @@ ice_fdw_file_excludes(void *arg, const PgColumnarIceFileMeta *meta)
 				!meta->cells[bq->pos].comparable)
 				continue;
 			if (meta->cells[bq->pos].ival != bq->target)
+				return true;
+		}
+	}
+
+	/* truncate pruning: a truncate[W] cell V bounds the file's values to
+	 * [V, V+W); decide the predicate over that range (order-preserving). */
+	if (st->truncQuals != NIL && meta->spec_id == st->specid)
+	{
+		foreach(lc, st->truncQuals)
+		{
+			IceTruncQual *tq = (IceTruncQual *) lfirst(lc);
+			int64		v;
+			int64		hi;
+
+			if (tq->pos < 0 || tq->pos >= meta->ncells)
+				continue;
+			if (meta->cells[tq->pos].isnull || meta->cells[tq->pos].is_bytes ||
+				!meta->cells[tq->pos].comparable)
+				continue;
+			v = meta->cells[tq->pos].ival;
+			if (v > PG_INT64_MAX - tq->w)	/* overflow guard: do not prune */
+				continue;
+			hi = v + tq->w - 1;
+			if (ice_fdw_metric_excludes(tq->strategy, tq->constval, v, hi))
 				return true;
 		}
 	}
@@ -819,6 +968,19 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 		st->bucketQuals = ice_fdw_bucket_quals(node, tupdesc, bpos, battno, bn, bcount);
 	}
 
+	/* truncate pruning: range over a truncate[W]-partitioned integer column */
+	{
+		int		   *tpos;
+		int		   *tattno;
+		int		   *tw;
+		int			tcount;
+		int32		tspec;
+
+		PgColumnarIcebergTruncateMap(st->metadata_path, NULL, tupdesc,
+									 &tpos, &tattno, &tw, &tcount, &tspec);
+		st->truncQuals = ice_fdw_trunc_quals(node, tupdesc, tpos, tattno, tw, tcount);
+	}
+
 	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 	st->started = false;
@@ -840,7 +1002,7 @@ icefdwIterateForeignScan(ForeignScanState *node)
 	{
 		/* read the surviving files (pruned by the filter) into the tuplestore */
 		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL ||
-							 st->bucketQuals != NIL);
+							 st->bucketQuals != NIL || st->truncQuals != NIL);
 
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,
