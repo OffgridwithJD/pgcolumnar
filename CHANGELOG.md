@@ -34,8 +34,11 @@ which was true until that script existed.
   `iceberg_data_files` (which refuses any delete), and the Avro building blocks
   `read_avro_manifest` and `read_manifest_list`. Only Parquet data files are
   read; recorded paths are rebased onto the table's actual location and refused
-  if they resolve outside it. `read_parquet` also gained a `field_ids` form that
-  projects columns by Parquet field id. See
+  if they resolve outside it. A data file written outside Iceberg, which carries
+  no field ids, is read through the table's `schema.name-mapping.default`
+  property, which binds its columns by name; a file with no field ids and no
+  such property is refused rather than guessed. `read_parquet` also gained a
+  `field_ids` form that projects columns by Parquet field id. See
   [Iceberg](docs/sql-reference.md#pgcolumnariceberg_scanmetadata_path-text-returns-setof-record).
 
 - The Parquet read and export functions and the foreign-data wrapper read from
