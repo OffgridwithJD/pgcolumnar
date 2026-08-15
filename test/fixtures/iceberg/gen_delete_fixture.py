@@ -404,6 +404,11 @@ emit_eq_variant("eqmissing", [(2, EQ_SEQ, EQ_NINE, [9], 1)])
 #   the probe read errors loudly (the reader's missing-field-id error)
 emit_eq_variant("eqescape", [(2, EQ_SEQ, "file:///etc/hostname", [1], 1)])
 #   a delete path outside the table root: the path boundary refuses it
+emit_eq_variant("eqdotdot", [(2, EQ_SEQ, f"{LOC}/../../../../etc/hostname",
+                              [1], 1)])
+#   a delete path that starts under the table root then climbs out with "..":
+#   passes the recorded-root prefix check, then the containment must reject the
+#   ".." (canonicalize for a local root, the ".."-segment guard for a remote one)
 
 # ---- audit arms (multi-agent adversarial audit of 4b) ----------------------
 

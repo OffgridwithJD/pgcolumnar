@@ -127,6 +127,11 @@ check "backend still up after the s3 reads" "$(q 'SELECT 1')" "1"
 check "a delete path outside the table location is refused over s3 (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqescape.metadata.json')
 	                AS t(id bigint, region text, amount int)")" "22023"
+# a path that starts under the table root then climbs out with ".." is refused
+# by the remote ".."-segment containment guard, never fetched
+check "a dotdot-escaping delete path is refused over s3 (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqdotdot.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "22023"
 check "backend still up after the s3 refusal" "$(q 'SELECT 1')" "1"
 
 # ---- an endpoint not on the allow-list is refused ---------------------------
