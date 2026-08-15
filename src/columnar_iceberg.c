@@ -1090,8 +1090,12 @@ ice_read_dvs(IceScanCtx *c, int64 format_version)
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("iceberg: the deletion vector in \"%s\" has no content offset or size",
 							pd->file_path)));
+		/* the per-file merge matches on the scheme-stripped path, so the
+		 * one-DV-per-data-file check must too, or an aliased pair (one with a
+		 * file:// scheme, one without) would slip past and be unioned */
 		foreach(lc2, seen)
-			if (strcmp((const char *) lfirst(lc2), pd->ref_data_file) == 0)
+			if (strcmp(ice_strip_scheme((const char *) lfirst(lc2)),
+					   ice_strip_scheme(pd->ref_data_file)) == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg("iceberg: two deletion vectors reference data file \"%s\"",
@@ -1099,29 +1103,42 @@ ice_read_dvs(IceScanCtx *c, int64 format_version)
 						 errdetail("A snapshot may carry at most one deletion vector per data file.")));
 		seen = lappend(seen, pd->ref_data_file);
 
-		/* slurp in the per-file scratch; decode into the outer context so the
-		 * ordinal arrays survive the reset */
+		/* Slurp AND decode in the per-file scratch context; the Puffin footer
+		 * (a payload copy plus its parsed jsonb, up to the metadata cap) must
+		 * not survive per DV entry -- a snapshot with many DVs, or many DVs
+		 * sharing one large-footer Puffin file, would otherwise retain
+		 * O(entries * footer) in the query context. Only the decoded ordinal
+		 * array is copied out to survive the reset. */
 		old = MemoryContextSwitchTo(filectx);
 		safe = ice_open_path(c->recorded_root, c->actual_root,
 							 pd->file_path, "deletion-vector", c->mdpath);
 		buf = ice_slurp_bin(safe, &len);
-		MemoryContextSwitchTo(old);
+		{
+			uint64	   *scratch_pos;
+			int64		scratch_n;
 
-		dv = (IceDvDel *) palloc(sizeof(IceDvDel));
-		dv->dpath = pstrdup(pd->ref_data_file);
-		dv->seq = pd->seq;
-		PgColumnarPuffinReadDeletionVector(buf, len,
-										   pd->content_offset,
-										   pd->content_size,
-										   pd->ref_data_file,
-										   pd->file_path,
-										   &dv->pos, &dv->npos);
-		/* record_count is defined as the DV's cardinality */
-		if (dv->npos != pd->record_count)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("iceberg: the deletion vector in \"%s\" names " INT64_FORMAT " positions but its manifest entry records " INT64_FORMAT,
-							pd->file_path, dv->npos, pd->record_count)));
+			PgColumnarPuffinReadDeletionVector(buf, len,
+											   pd->content_offset,
+											   pd->content_size,
+											   pd->ref_data_file,
+											   pd->file_path,
+											   &scratch_pos, &scratch_n);
+			/* record_count is defined as the DV's cardinality */
+			if (scratch_n != pd->record_count)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: the deletion vector in \"%s\" names " INT64_FORMAT " positions but its manifest entry records " INT64_FORMAT,
+								pd->file_path, scratch_n, pd->record_count)));
+			MemoryContextSwitchTo(old);
+			dv = (IceDvDel *) palloc(sizeof(IceDvDel));
+			dv->dpath = pstrdup(pd->ref_data_file);
+			dv->seq = pd->seq;
+			dv->npos = scratch_n;
+			dv->pos = scratch_n > 0
+				? (uint64 *) palloc(scratch_n * sizeof(uint64)) : NULL;
+			if (scratch_n > 0)
+				memcpy(dv->pos, scratch_pos, scratch_n * sizeof(uint64));
+		}
 		out = lappend(out, dv);
 		MemoryContextReset(filectx);
 	}

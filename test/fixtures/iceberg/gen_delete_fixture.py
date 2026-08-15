@@ -754,6 +754,132 @@ emit_dv_variant("dvescape", [{"positions": [1], "ref": DATA_PATH,
                               "entry_path": "file:///etc/hostname"}])
 #   a Puffin path outside the table root is stopped by the path boundary
 
+# ---- 4c audit arms (multi-agent adversarial audit findings) ----------------
+
+def emit_dv_raw(tag, blob_bytes, ref, card, manifest_off, manifest_size,
+                footer_off, footer_size, extra_pad=b""):
+    """A DV variant with hand-controlled offsets: the footer blob metadata says
+    (footer_off, footer_size) and the manifest entry says (manifest_off,
+    manifest_size), independently of where blob_bytes actually sits. For the
+    bounds-check arms, where the recorded offsets are deliberately impossible."""
+    out = b"PFA1"
+    real_off = len(out)
+    out += blob_bytes + extra_pad
+    payload = json.dumps({"blobs": [{
+        "type": "deletion-vector-v1", "fields": [],
+        "snapshot-id": -1, "sequence-number": -1,
+        "offset": footer_off, "length": footer_size,
+        "properties": {"referenced-data-file": ref,
+                       "cardinality": str(card)}}]}).encode()
+    out += b"PFA1" + payload + struct.pack("<i", len(payload)) + \
+        b"\x00\x00\x00\x00" + b"PFA1"
+    pf_name = f"dv-{tag}.puffin"
+    open(os.path.join(OUT, "db", "t", "data", pf_name), "wb").write(out)
+    PF_PATH = f"{LOC}/data/{pf_name}"
+    rec = entry_dv(1, DATA_SEQ, 1, PF_PATH, "PUFFIN", card, len(out),
+                   ref, manifest_off, manifest_size)
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(ENTRY_SCHEMA_DV, [rec]))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rc in (mfile(DM, 0, DATA_SEQ, SNAP, 1, 5),
+               mfile(xm, 1, DATA_SEQ, SNAP, 1, 0)):
+        ml += zz(1) + zz(len(rc)) + rc + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps({
+        "format-version": 3, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema], "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{"snapshot-id": SNAP, "sequence-number": DATA_SEQ,
+                       "timestamp-ms": 0,
+                       "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+                       "summary": {"operation": "overwrite"}, "schema-id": 0}]}))
+
+
+# a content_offset + content_size that would overflow int64 if added: each is
+# ~2^62, so the sum wraps negative. A bounds check that adds the operands would
+# pass it into a wild-pointer read; testing each operand against the file size
+# refuses it. The footer blob repeats the same impossible numbers so the
+# manifest/footer cross-check is satisfied first.
+_vec, _card = dv_vector([1])
+_blob = dv_blob(_vec)
+_BIG = 0x4000000000000000
+emit_dv_raw("dvbigoff", _blob, DATA_PATH, _card, _BIG, _BIG, _BIG, _BIG)
+
+# a run container whose start + length exceeds the 16-bit container range: the
+# second position would carry into the container-key bits and fabricate an
+# ordinal in another container. Hand-build the roaring bytes (pyroaring will
+# not emit an invalid one): one bucket, key 0; cookie 12347 (run), one
+# container marked as run, run (start=65535, length-1=1) -> 65535, 65536.
+def _roaring_bad_run():
+    v = struct.pack("<Q", 1)              # nbuckets = 1
+    v += struct.pack("<I", 0)             # bucket key 0
+    v += struct.pack("<I", 12347)         # cookie SERIAL_COOKIE (has runs), size-1=0 in high bits
+    v += bytes([0x01])                    # run bitset: container 0 is a run
+    v += struct.pack("<HH", 0, 1)         # descriptive header: key 0, cardinality-1 = 1
+    v += struct.pack("<H", 1)             # one run
+    v += struct.pack("<HH", 65535, 1)     # run start 65535, length-1 = 1 -> 65535, 65536
+    return v
+
+
+_badrun = dv_blob(_roaring_bad_run())
+# card=2 so the record_count check is not what fires; the run overflow is
+emit_dv_raw("dvrunoverflow", _badrun, DATA_PATH, 2, 4, len(_badrun), 4,
+            len(_badrun))
+
+# two DV entries for one data file, referenced with and without the file://
+# scheme: the per-file merge strips the scheme, so the one-DV-per-file check
+# must too, or the union of both vectors would apply
+_ref_stripped = DATA_PATH.replace("file://", "")
+_blob_a = dv_blob(dv_vector([1])[0])
+_blob_b = dv_blob(dv_vector([3])[0])
+
+
+def emit_dvdupscheme():
+    tag = "dvdupscheme"
+    out = b"PFA1"
+    off_a = len(out); out += _blob_a
+    off_b = len(out); out += _blob_b
+    payload = json.dumps({"blobs": [
+        {"type": "deletion-vector-v1", "fields": [], "snapshot-id": -1,
+         "sequence-number": -1, "offset": off_a, "length": len(_blob_a),
+         "properties": {"referenced-data-file": DATA_PATH, "cardinality": "1"}},
+        {"type": "deletion-vector-v1", "fields": [], "snapshot-id": -1,
+         "sequence-number": -1, "offset": off_b, "length": len(_blob_b),
+         "properties": {"referenced-data-file": _ref_stripped, "cardinality": "1"}},
+    ]}).encode()
+    out += b"PFA1" + payload + struct.pack("<i", len(payload)) + \
+        b"\x00\x00\x00\x00" + b"PFA1"
+    open(os.path.join(OUT, "db", "t", "data", f"dv-{tag}.puffin"), "wb").write(out)
+    PF = f"{LOC}/data/dv-{tag}.puffin"
+    recs = [entry_dv(1, DATA_SEQ, 1, PF, "PUFFIN", 1, len(out),
+                     DATA_PATH, off_a, len(_blob_a)),
+            entry_dv(1, DATA_SEQ, 1, PF, "PUFFIN", 1, len(out),
+                     _ref_stripped, off_b, len(_blob_b))]
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(ENTRY_SCHEMA_DV, recs))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rc in (mfile(DM, 0, DATA_SEQ, SNAP, 1, 5),
+               mfile(xm, 1, DATA_SEQ, SNAP, 2, 0)):
+        ml += zz(1) + zz(len(rc)) + rc + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps({
+        "format-version": 3, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema], "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{"snapshot-id": SNAP, "sequence-number": DATA_SEQ,
+                       "timestamp-ms": 0,
+                       "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+                       "summary": {"operation": "overwrite"}, "schema-id": 0}]}))
+
+
+emit_dvdupscheme()
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]

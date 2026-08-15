@@ -204,6 +204,15 @@ pf_roaring32(PfCur *c, uint64 base, PfOut *out)
 				uint32		rlen = (uint32) pf_u16(c) + 1;
 				uint32		v;
 
+				/* a run lives inside one 16-bit container; start + length - 1
+				 * must stay <= 0xFFFF, or the value would carry into the
+				 * container-key bits and fabricate a position in another
+				 * container -- refuse rather than corrupt ordinals */
+				if (start + rlen > 0x10000)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("iceberg: the deletion vector in \"%s\" has a run container that overflows its 16-bit range",
+									c->path)));
 				for (v = 0; v < rlen; v++)
 					pf_emit(out, kbase | (start + v));
 			}
@@ -385,8 +394,12 @@ PgColumnarPuffinReadDeletionVector(const uint8 *buf, int64 len,
 				 errdetail("The manifest's content_offset and content_size_in_bytes must exactly match the footer.")));
 
 	/* ---- the blob itself ---- */
+	/* the operands are attacker-controlled int64s; test each against the file
+	 * bound WITHOUT adding them, so a huge offset+size cannot wrap past the
+	 * check into a wild pointer (blob region ends before the footer's magic) */
 	if (blob_offset < 4 || blob_size < 12 ||
-		blob_offset + blob_size > paystart - 4)
+		blob_size > paystart - 4 - 4 ||
+		blob_offset > paystart - 4 - blob_size)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("iceberg: the deletion vector of \"%s\" lies outside the file's blob region",

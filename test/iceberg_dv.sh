@@ -137,4 +137,23 @@ check "a Puffin path outside the table location is refused (22023)" \
 	                AS t(id bigint, region text, amount int)")" "22023"
 check "backend still up after the DV refusals" "$(q 'SELECT 1')" "1"
 
+# ---- audit arms (multi-agent adversarial audit findings) --------------------
+# content_offset + content_size chosen to overflow int64: a bounds check that
+# adds the operands would wrap negative and read a wild pointer; testing each
+# operand against the file size refuses it cleanly
+check "a DV whose offset+size overflows int64 is refused, not read (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/dvbigoff.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+# a run container whose start+length exceeds the 16-bit container range would
+# fabricate positions in a neighboring container; refuse rather than corrupt
+check "a run container overflowing its 16-bit range is refused (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/dvrunoverflow.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+# two DV entries for one data file recorded with and without the file:// scheme:
+# the one-DV-per-file check strips the scheme, so the aliased pair is caught
+check "an aliased duplicate DV (scheme vs no scheme) is refused (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/dvdupscheme.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+check "backend still up after the audit arms" "$(q 'SELECT 1')" "1"
+
 pgc_summary

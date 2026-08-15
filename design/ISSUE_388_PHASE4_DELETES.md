@@ -380,3 +380,37 @@ skip CRC -> dvbadcrc; skip the offset cross-check -> dvoffmismatch; skip the
 cardinality check -> dvbadcount; drop the v3 gate -> dvv2; drop the dup check
 -> dvdup. Value arms cross-checked against pyiceberg (which reads DVs) and
 DuckDB, extending the 4b crosscheck script.
+
+### 4c adversarial audit (3 lenses, 9 findings -> 4 distinct defects, all fixed)
+
+The audit (spec / memory / hostile-bytes-decode lenses, each finding verified
+against the code) ran after GREEN; the spec and decode lenses independently
+found three of the four, and zero findings were refuted. Fixed here, each with
+a fixture arm and a removal proof:
+
+- **BLOCKING: int64 overflow in the Puffin blob bounds check.**
+  `blob_offset + blob_size > paystart - 4` wrapped negative for attacker-sized
+  operands (both come from the manifest, cross-checked only against a footer
+  the same author wrote), passing the check into `bp = buf + blob_offset`, a
+  wild pointer `pf_be32` dereferenced -- a real SIGSEGV (the pre-fix build
+  crashes on the `dvbigoff` fixture). Fixed by testing each operand against the
+  file bound without adding them.
+- **IMPORTANT: the parsed Puffin footer (payload copy + jsonb, up to the 64 MB
+  cap) was retained in the query context per DV entry**, because the reader was
+  called after switching back to the outer context. A snapshot with many DVs,
+  or many DVs sharing one large-footer Puffin file, retained O(entries x
+  footer). Fixed by decoding inside the per-file scratch context and copying
+  only the ordinal array out before the reset.
+- **IMPORTANT: a roaring run container with start + length > 0xFFFF** carried
+  into the container-key bits and fabricated ordinals in a neighboring
+  container -- silently wrong rows, CRC-valid. Fixed with a bounds check
+  (`dvrunoverflow`, XX001).
+- **MINOR: the one-DV-per-data-file check compared raw strings** while the
+  per-file merge strips the URI scheme, so an aliased pair (one `file://`, one
+  not) evaded the check and was unioned. Fixed by stripping the scheme on both
+  sides (`dvdupscheme`, XX001).
+
+Removal proofs: restoring the additive bounds check crashes `dvbigoff` again;
+deleting the run-range check reds `dvrunoverflow`; reverting the dedup to a raw
+strcmp reds `dvdupscheme`. PG17/18/19 + ASAN clean over all arms including the
+three formerly-crashing ones.
