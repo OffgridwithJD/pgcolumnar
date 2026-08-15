@@ -45,6 +45,7 @@
 
 #include "columnar_avro.h"
 #include "columnar_puffin.h"
+#include "columnar_objstore.h"
 #include "columnar_parquet_reader.h"
 
 /*
@@ -59,18 +60,71 @@
 #define ICE_FILE_NCOLS 4
 
 /*
- * slurp a whole (small) local text file into a palloc'd, NUL-terminated string
- * so jsonb_in can parse it. Mirrors columnar_avro.c's av_slurp_file; when
- * phase 3b adds more catalog SRFs this and the SRF preamble below are the
- * pieces to promote into one shared file-reading helper.
+ * Slurp a whole object from object storage into a palloc'd buffer of *outlen
+ * bytes (an extra NUL is always appended past the end, so a text caller can use
+ * the buffer as a C string without copying). Used for the metadata.json,
+ * manifest list, manifests, and Puffin files of a table in object storage. The
+ * config is NULL: endpoint and credentials come from the ambient environment,
+ * matching the read_parquet function API, which is gated by pg_read_server_files
+ * (the endpoint itself is checked against objstore_allowed_endpoints inside the
+ * module). The metadata cap bounds the object as for a local file.
+ */
+static uint8 *
+ice_slurp_remote(const char *url, int64 *outlen)
+{
+	const PgColumnarObjStoreApi *api = PgColumnarObjStoreGet();
+	PgColumnarObjHandle *h;
+	int64		len;
+	uint8	   *buf;
+
+	if (api == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("iceberg: reading \"%s\" requires the object-store module",
+						url),
+				 errdetail("Object storage support is a separate library, "
+						   "pgcolumnar_objstore, which is not installed."),
+				 errhint("Install the pgcolumnar object-store package, or use a "
+						 "local filesystem path.")));
+	if (!api->handles_url(url))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("iceberg: reading \"%s\" is not supported", url),
+				 errdetail("The installed object-store module handles no such URL scheme.")));
+
+	h = api->open(url, NULL, &len);	/* raises on failure; len is required */
+	if (len < 0 || len > ICE_MAX_METADATA)
+	{
+		api->close(h);
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("columnar: Iceberg object \"%s\" is too large", url)));
+	}
+	buf = (uint8 *) palloc(Max(len, 1) + 1);
+	if (len > 0)
+		api->read(h, 0, buf, (size_t) len);	/* short read is an error, raises */
+	api->close(h);
+	buf[len] = '\0';
+	*outlen = len;
+	return buf;
+}
+
+/*
+ * slurp a whole (small) file into a palloc'd, NUL-terminated string so jsonb_in
+ * can parse it. A local path is read with AllocateFile; a remote URL (s3://,
+ * http(s)://) through the object-store module.
  */
 static char *
 ice_slurp_text(const char *path)
 {
-	FILE	   *f = AllocateFile(path, PG_BINARY_R);
+	FILE	   *f;
 	int64		flen;
 	char	   *buf;
 
+	if (PgColumnarPathIsRemote(path))
+		return (char *) ice_slurp_remote(path, &flen);
+
+	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -95,15 +149,19 @@ ice_slurp_text(const char *path)
 	return buf;
 }
 
-/* slurp a whole local binary file (a manifest list or manifest) into a palloc'd
- * buffer, for the Avro decoders in columnar_avro.c. */
+/* slurp a whole binary file (a manifest list, manifest, or Puffin file) into a
+ * palloc'd buffer. Local via AllocateFile; remote via the object-store module. */
 static uint8 *
 ice_slurp_bin(const char *path, int64 *outlen)
 {
-	FILE	   *f = AllocateFile(path, PG_BINARY_R);
+	FILE	   *f;
 	int64		flen;
 	uint8	   *buf;
 
+	if (PgColumnarPathIsRemote(path))
+		return ice_slurp_remote(path, outlen);
+
+	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -313,13 +371,38 @@ ice_actual_location(const char *metadata_path)
 	return ice_dirname(metadir);
 }
 
-/* strip a leading "file://" scheme from a recorded root, in place-ish */
+/* strip a leading "file://" scheme from a recorded root, in place-ish. A remote
+ * scheme (s3://, http(s)://) is left intact, so a recorded remote key keeps its
+ * scheme and the same containment logic applies to its key portion. */
 static const char *
 ice_strip_scheme(const char *path)
 {
 	if (strncmp(path, "file://", 7) == 0)
 		return path + 7;
 	return path;
+}
+
+/* does a path segment sequence contain a ".." component? For object storage a
+ * key is literal (no symlinks, no realpath), so a recorded ".." cannot be
+ * collapsed the way canonicalize_path does for a local path; reject it, so a
+ * recorded key cannot reference outside the table prefix on a server that
+ * normalizes "..". */
+static bool
+ice_has_dotdot(const char *s)
+{
+	const char *p = s;
+
+	while (p != NULL && *p != '\0')
+	{
+		if (p[0] == '.' && p[1] == '.' &&
+			(p[2] == '\0' || p[2] == '/') &&
+			(p == s || p[-1] == '/'))
+			return true;
+		p = strchr(p, '/');
+		if (p != NULL)
+			p++;
+	}
+	return false;
 }
 
 /*
@@ -358,6 +441,22 @@ ice_rebase(const char *recorded_root, const char *actual_root,
 						what, recorded_path, mdpath, recorded_root)));
 
 	cand = psprintf("%s%s", actual_root, p + rlen);
+
+	/* Object storage: the actual root is a URL (s3://...). canonicalize_path
+	 * would collapse the "://" double slash and corrupt the scheme, and there
+	 * is no realpath/symlink notion, so the containment is purely lexical: the
+	 * key stays under the table prefix (enforced by the recorded-root boundary
+	 * above) and carries no ".." segment that could walk out of it. */
+	if (PgColumnarPathIsRemote(actual_root))
+	{
+		if (ice_has_dotdot(p + rlen))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("iceberg: %s path \"%s\" from \"%s\" escapes the table location \"%s\"",
+							what, recorded_path, mdpath, actual_root)));
+		return cand;
+	}
+
 	canonicalize_path(cand);	/* collapse any ".." / "." / "//" segments */
 
 	alen = strlen(actual_root);
@@ -387,10 +486,17 @@ ice_open_path(const char *recorded_root, const char *actual_root_real,
 {
 	char	   *cand = ice_rebase(recorded_root, actual_root_real,
 								  recorded_path, what, mdpath);
-	char	   *real = realpath(cand, NULL);
+	char	   *real;
 	size_t		alen;
 	char	   *out;
 
+	/* object storage has no symlinks/realpath; ice_rebase already did the full
+	 * (lexical) containment for a remote path, so the rebased URL is safe to
+	 * open as is */
+	if (PgColumnarPathIsRemote(actual_root_real))
+		return cand;
+
+	real = realpath(cand, NULL);
 	if (real == NULL)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -533,10 +639,16 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 	if (sc == NULL)
 		return;					/* no current snapshot -> no data files */
 
-	/* the recorded table root, and where the table actually sits now. The
-	 * actual root is resolved with realpath once here so the files we open can
-	 * be re-checked for containment against a symlink-resolved form. */
+	/* the recorded table root, and where the table actually sits now. For a
+	 * local table the actual root is resolved with realpath once here so the
+	 * files we open can be re-checked for containment against a symlink-resolved
+	 * form. For a table in object storage there is no realpath/symlink notion:
+	 * the actual root is the location derived lexically from the metadata URL,
+	 * and containment is the lexical key-prefix check in ice_rebase. */
 	recorded_root = ice_strip_scheme(ice_str_required(root, "location", path));
+	if (PgColumnarPathIsRemote(path))
+		actual_root = ice_actual_location(path);
+	else
 	{
 		char	   *raw = ice_actual_location(path);
 		char	   *real = realpath(raw, NULL);
