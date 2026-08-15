@@ -16,6 +16,24 @@
 #include "postgres.h"
 
 /*
+ * One typed cell of a data file's partition tuple, captured for exact-equality
+ * comparison (partition-scoped equality deletes, #388 phase 5). The value is
+ * either an integer (int/long/boolean/date/time/timestamp, all compared as
+ * int64) or raw bytes (string/binary), or null. A cell of a kind the reader
+ * cannot compare for exact equality (float/double/fixed/other) is marked not
+ * comparable, so the caller refuses rather than guesses.
+ */
+typedef struct PgColumnarAvroPartCell
+{
+	bool		isnull;
+	bool		is_bytes;		/* true: bytes value; false: integer value */
+	bool		comparable;		/* false for float/double/unhandled kinds */
+	int64		ival;
+	char	   *bytes;
+	int			blen;
+} PgColumnarAvroPartCell;
+
+/*
  * One decoded manifest_entry, projected to the fields this step surfaces. The
  * many statistics maps a manifest also carries are skipped, not captured.
  */
@@ -40,6 +58,8 @@ typedef struct PgColumnarAvroManifestEntry
 	bool		has_content_offset; /* false when the field is null or absent */
 	int64		content_size_in_bytes;	/* v3: the DV blob's length */
 	bool		has_content_size;	/* false when the field is null or absent */
+	PgColumnarAvroPartCell *part_cells; /* the partition tuple, typed, or NULL */
+	int			npart_cells;	/* 0 when there is no partition struct */
 } PgColumnarAvroManifestEntry;
 
 /*
