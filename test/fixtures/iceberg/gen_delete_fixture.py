@@ -538,6 +538,222 @@ def emit_v1seq_variant():
 
 emit_v1seq_variant()
 
+# =============== 4c: v3 deletion vectors, Puffin files (additive) ===========
+# As with 4b: everything below only ADDS files. Puffin blobs are built from
+# pyroaring's portable 64-bit roaring serialization (verified byte-for-byte
+# against the RoaringFormatSpec during 4c research) wrapped per the Iceberg
+# Puffin spec: len(4,BE) | magic D1 D3 39 64 | vector | CRC-32(4,BE, zlib
+# polynomial, over magic+vector). See design/ISSUE_388_PHASE4_DELETES.md (4c).
+import struct
+import zlib
+from pyroaring import BitMap64
+
+# manifest_entry schema whose data_file carries the three v3 DV fields
+ENTRY_SCHEMA_DV = json.dumps({"type": "record", "name": "manifest_entry", "fields": [
+    {"name": "status", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "data_file", "type": {"type": "record", "name": "df", "fields": [
+        {"name": "content", "type": "int"},
+        {"name": "file_path", "type": "string"},
+        {"name": "file_format", "type": "string"},
+        {"name": "record_count", "type": "long"},
+        {"name": "file_size_in_bytes", "type": "long"},
+        {"name": "referenced_data_file", "type": ["null", "string"]},
+        {"name": "content_offset", "type": ["null", "long"]},
+        {"name": "content_size_in_bytes", "type": ["null", "long"]}]}}]}).encode()
+
+
+def entry_dv(status, seq, content, path, fmt, rows, size, ref, coff, csize):
+    """One manifest entry against ENTRY_SCHEMA_DV. ref/coff/csize None encode
+    the unions' null branch (a plain Parquet position-delete entry)."""
+    seqb = zz(0) if seq is None else (zz(1) + zz(seq))
+    refb = zz(0) if ref is None else (zz(1) + s(ref.encode()))
+    coffb = zz(0) if coff is None else (zz(1) + zz(coff))
+    csb = zz(0) if csize is None else (zz(1) + zz(csize))
+    return zz(status) + seqb + zz(content) + s(path.encode()) + \
+        s(fmt.encode()) + zz(rows) + zz(size) + refb + coffb + csb
+
+
+DV_MAGIC = b"\xD1\xD3\x39\x64"
+
+
+def dv_vector(positions, run_opt=False):
+    bm = BitMap64(positions)
+    if run_opt:
+        bm.run_optimize()
+    return bm.serialize(), len(bm)
+
+
+def dv_blob(vec, bad_magic=False, bad_crc=False):
+    magic = b"\xD1\xD3\x39\x65" if bad_magic else DV_MAGIC
+    body = magic + vec
+    crc = zlib.crc32(body) & 0xFFFFFFFF
+    if bad_crc:
+        crc ^= 0xFF
+    return struct.pack(">I", len(body)) + body + struct.pack(">I", crc)
+
+
+def puffin(blobs):
+    """blobs: list of {data, ref, card, [codec], [type]}. Returns
+    (file_bytes, [(offset, length), ...] in blob order)."""
+    out = b"PFA1"
+    metas = []
+    locs = []
+    for b in blobs:
+        off = len(out)
+        out += b["data"]
+        locs.append((off, len(b["data"])))
+        m = {"type": b.get("type", "deletion-vector-v1"), "fields": [],
+             "snapshot-id": -1, "sequence-number": -1,
+             "offset": off, "length": len(b["data"]),
+             "properties": {"referenced-data-file": b["ref"],
+                            "cardinality": str(b["card"])}}
+        if b.get("codec"):
+            m["compression-codec"] = b["codec"]
+        metas.append(m)
+    payload = json.dumps({"blobs": metas}).encode()
+    out += b"PFA1" + payload + struct.pack("<i", len(payload)) + \
+        b"\x00\x00\x00\x00" + b"PFA1"
+    return out, locs
+
+
+def flags_set_bit0(data):
+    """Set the footer flags 'compressed' bit without recompressing anything;
+    a reader that ignores flags would misparse, one that checks refuses."""
+    ba = bytearray(data)
+    ba[-8] |= 1
+    return bytes(ba)
+
+
+# a Parquet position delete that targets data2.parquet ordinal 0 (id 6), for
+# the per-file-supersede arm: a DV on data.parquet must not disable it
+posdel_d2 = pa.table({
+    "file_path": pa.array([DATA2_PATH], pa.string()),
+    "pos": pa.array([0], pa.int64()),
+}, schema=posdel.schema)
+pq.write_table(posdel_d2, os.path.join(OUT, "db", "t", "data", "posdel-data2.parquet"))
+POSDEL_D2 = f"{LOC}/data/posdel-data2.parquet"
+
+
+def emit_dv_variant(tag, dv_specs, extra_entries=(), with_data2=False,
+                    fmt_version=3, mutate=None):
+    """dv_specs: list of {positions, ref, seq, [run_opt], [bad_magic],
+    [bad_crc], [codec], [rows] (record_count override), [coff_shift],
+    [entry_path] (file_path override), [noref]}. One Puffin file carries all of
+    the variant's blobs. extra_entries: raw ENTRY_SCHEMA_DV entry bytes
+    appended to the delete manifest (e.g. Parquet posdel entries). mutate: a
+    function applied to the finished Puffin bytes (e.g. flags_set_bit0)."""
+    blobs = []
+    for sp in dv_specs:
+        vec, card = dv_vector(sp["positions"], sp.get("run_opt", False))
+        blobs.append({"data": dv_blob(vec, sp.get("bad_magic", False),
+                                      sp.get("bad_crc", False)),
+                      "ref": sp["ref"], "card": card,
+                      "codec": sp.get("codec")})
+    pf, locs = puffin(blobs)
+    if mutate is not None:
+        pf = mutate(pf)
+    pf_name = f"dv-{tag}.puffin"
+    open(os.path.join(OUT, "db", "t", "data", pf_name), "wb").write(pf)
+    PF_PATH = f"{LOC}/data/{pf_name}"
+    recs = []
+    for sp, (off, ln), b in zip(dv_specs, locs, blobs):
+        card = int(b["card"])
+        recs.append(entry_dv(
+            1, sp["seq"], 1, sp.get("entry_path", PF_PATH), "PUFFIN",
+            sp.get("rows", card), len(pf),
+            None if sp.get("noref") else sp["ref"],
+            off + sp.get("coff_shift", 0), ln))
+    recs.extend(extra_entries)
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(ENTRY_SCHEMA_DV, recs))
+    xm = f"{LOC}/metadata/{xm_name}"
+    max_seq = max(sp["seq"] for sp in dv_specs)
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    mrecs = [mfile(DM, 0, DATA_SEQ, SNAP, 1, 5)]
+    if with_data2:
+        mrecs.append(mfile(DM2, 0, DATA_SEQ, SNAP, 1, 2))
+    mrecs.append(mfile(xm, 1, max_seq, SNAP, len(recs), 0))
+    for rec in mrecs:
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    metadata = {
+        "format-version": fmt_version, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema], "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{
+            "snapshot-id": SNAP, "sequence-number": max(DATA_SEQ, max_seq),
+            "timestamp-ms": 0,
+            "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+            "summary": {"operation": "overwrite"}, "schema-id": 0}],
+    }
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
+
+
+# value arms (data rows 1..5; DV positions are file ordinals)
+emit_dv_variant("dvapply", [{"positions": [1, 3], "ref": DATA_PATH, "seq": DATA_SEQ}])
+#   THE <= boundary: DV at the data's own seq applies -> ids 2,4 gone -> 1,3,5
+emit_dv_variant("dvnoapply", [{"positions": [1, 3], "ref": DATA_PATH,
+                               "seq": DATA_SEQ - 1}])
+#   strictly older DV applies to nothing -> all 5 rows
+emit_dv_variant("dvsupersede", [{"positions": [1], "ref": DATA_PATH, "seq": DATA_SEQ}],
+                extra_entries=[entry_dv(1, DATA_SEQ, 1, DEL_PATH, "PARQUET",
+                                        2, 500, None, None, None)])
+#   an applicable DV supersedes the (also applicable) Parquet posdel {1,3} for
+#   the same data file: only ordinal 1 drops -> 1,3,4,5 (union would drop 3)
+emit_dv_variant("dvother", [{"positions": [1], "ref": DATA_PATH, "seq": DATA_SEQ}],
+                extra_entries=[entry_dv(1, DATA_SEQ, 1, POSDEL_D2, "PARQUET",
+                                        1, 500, None, None, None)],
+                with_data2=True)
+#   supersede is per data file: the posdel on data2 (ordinal 0 -> id 6) still
+#   applies alongside the DV on data -> 1,3,4,5,7
+emit_dv_variant("dvwide", [{"positions": [1] + list(range(65536, 70000)) +
+                            [(1 << 32) + 5],
+                            "ref": DATA_PATH, "seq": DATA_SEQ}])
+#   run-form containers plus a second 64-bit bucket; only ordinal 1 is in
+#   range -> 1,3,4,5
+emit_dv_variant("dvrun", [{"positions": list(range(2, 100)), "ref": DATA_PATH,
+                           "seq": DATA_SEQ, "run_opt": True}])
+#   cookie 12347 with a run container; ordinals 2,3,4 drop -> ids 1,2
+emit_dv_variant("dvbitset", [{"positions": list(range(0, 10000, 2)),
+                              "ref": DATA_PATH, "seq": DATA_SEQ}])
+#   a bitset container (cardinality 5000 > 4096); ordinals 0,2,4 drop -> 2,4
+emit_dv_variant("dvtwo", [{"positions": [1], "ref": DATA_PATH, "seq": DATA_SEQ},
+                          {"positions": [0], "ref": DATA2_PATH, "seq": DATA_SEQ}],
+                with_data2=True)
+#   two DV blobs in ONE Puffin file, each for its own data file -> 1,3,4,5,7
+# refusal / corruption arms
+emit_dv_variant("dvdup", [{"positions": [1], "ref": DATA_PATH, "seq": DATA_SEQ},
+                          {"positions": [3], "ref": DATA_PATH, "seq": DATA_SEQ}])
+#   two DV entries for ONE data file: the spec allows readers to refuse
+emit_dv_variant("dvbadcrc", [{"positions": [1], "ref": DATA_PATH,
+                              "seq": DATA_SEQ, "bad_crc": True}])
+emit_dv_variant("dvbadmagic", [{"positions": [1], "ref": DATA_PATH,
+                                "seq": DATA_SEQ, "bad_magic": True}])
+emit_dv_variant("dvoffmismatch", [{"positions": [1], "ref": DATA_PATH,
+                                   "seq": DATA_SEQ, "coff_shift": 4}])
+#   manifest content_offset disagrees with the footer's offset
+emit_dv_variant("dvnoref", [{"positions": [1], "ref": DATA_PATH,
+                             "seq": DATA_SEQ, "noref": True}])
+emit_dv_variant("dvbadcount", [{"positions": [1], "ref": DATA_PATH,
+                                "seq": DATA_SEQ, "rows": 99}])
+#   record_count must equal the DV cardinality
+emit_dv_variant("dvcompressed", [{"positions": [1], "ref": DATA_PATH,
+                                  "seq": DATA_SEQ, "codec": "zstd"}])
+#   deletion-vector-v1 must not declare a compression codec
+emit_dv_variant("dvflags", [{"positions": [1], "ref": DATA_PATH,
+                             "seq": DATA_SEQ}], mutate=flags_set_bit0)
+#   a compressed footer is refused, not misparsed
+emit_dv_variant("dvv2", [{"positions": [1], "ref": DATA_PATH,
+                          "seq": DATA_SEQ}], fmt_version=2)
+#   deletion vectors are v3-only; a v2 table carrying one is refused
+emit_dv_variant("dvescape", [{"positions": [1], "ref": DATA_PATH,
+                              "seq": DATA_SEQ,
+                              "entry_path": "file:///etc/hostname"}])
+#   a Puffin path outside the table root is stopped by the path boundary
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]
@@ -554,6 +770,17 @@ oracle = {"deleted_positions": DELETED_POS,
               "eqnull": [1, 2, 3, 4, 5, 7],
               "eqtwo": [3, 4],
               "eqmixed": [1, 3],
+          },
+          # deletion-vector arms: surviving ids, hand-derived at each variant
+          "dv_surviving": {
+              "dvapply": [1, 3, 5],
+              "dvnoapply": [1, 2, 3, 4, 5],
+              "dvsupersede": [1, 3, 4, 5],
+              "dvother": [1, 3, 4, 5, 7],
+              "dvwide": [1, 3, 4, 5],
+              "dvrun": [1, 2],
+              "dvbitset": [2, 4],
+              "dvtwo": [1, 3, 4, 5, 7],
           }}
 open(os.path.join(OUT, "expected_deletes.json"), "w").write(json.dumps(oracle, indent=2))
 print("surviving rows:", oracle["surviving"])
