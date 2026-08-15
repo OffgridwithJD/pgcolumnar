@@ -52,6 +52,7 @@ SUITES=(
 	audit
 	autovacuum
 	autovacuum_yield
+	avro_manifest
 	batch_fold_explain
 	bench_guards
 	bloom_lazy
@@ -76,10 +77,16 @@ SUITES=(
 	fsst_verdict_cache
 	fuzz
 	fuzz_arrow
+	fuzz_avro
+	fuzz_listing
 	fuzz_parquet
 	generated_columns
 	hardening
 	harness_selftest
+	iceberg_catalog
+	iceberg_data_files
+	iceberg_deletes
+	iceberg_scan
 	import_deferred
 	import_exclusion
 	import_export_privilege
@@ -121,6 +128,7 @@ SUITES=(
 	native_ownership
 	native_parquet_codecs
 	native_parquet_fdw
+	native_parquet_fieldid
 	native_parquet_flba
 	native_parquet_hardening
 	native_parquet_multifile
@@ -151,9 +159,11 @@ SUITES=(
 	native_vecskip
 	native_writer
 	native_zonemap
+	objstore_addressing
 	objstore_allowlist
 	objstore_credentials
 	objstore_http_read
+	objstore_listing
 	objstore_module
 	objstore_s3_read
 	objstore_sink_write
