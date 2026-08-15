@@ -162,6 +162,14 @@ which was true until that script existed.
 
 ### Fixed
 
+- The Iceberg reader no longer crashes on a malformed manifest (#644). A crafted
+  manifest that recorded no data-file path made `iceberg_scan` and
+  `iceberg_data_files` dereference a null pointer. A manifest whose Avro record
+  schema gave a `fields` element as a JSON array made the schema decoder read past
+  an object container. Both now raise a clean error. These reproduce only from
+  hand-crafted manifests, since no writer emits them, and they are covered by the
+  new `iceberg_malformed` suite.
+
 - A failed `export_parquet` or `export_arrow` no longer leaves a partial file at
   the destination (#394). An export writes to a temporary name and renames to the
   final name only when it is complete, so a reader never sees a half-written file.

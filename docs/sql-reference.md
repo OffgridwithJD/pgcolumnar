@@ -714,6 +714,10 @@ recorded file paths are rebased onto the table's actual location and resolved
 against a path boundary, so a relocated table reads and a path pointing outside
 the table is refused.
 
+A malformed manifest is refused, not read as far as it parses. A manifest entry
+that records no data-file path is an error, as is a manifest whose embedded Avro
+schema is not well formed.
+
 ```sql
 SELECT id, region, sum(amount)
   FROM pgcolumnar.iceberg_scan('/data/warehouse/db/events/metadata/v3.metadata.json')
