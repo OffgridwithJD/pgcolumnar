@@ -9,14 +9,19 @@
 #include "funcapi.h"
 #include "access/tupdesc.h"
 
+#include "columnar_objstore.h"	/* PgColumnarObjStoreConfig */
+
 /*
  * Read the Iceberg table whose current metadata.json is at `path` (a local or
  * remote URI) into a materialize-mode tuplestore on `rsinfo`, projecting the
  * columns named by `tupdesc`. This is the body of iceberg_scan, shared with the
  * REST catalog client, which resolves a table by name into a metadata location
- * and reads it through the same path. Raises on any failure.
+ * and reads it through the same path. `cfg` is the object-store config for every
+ * remote file of the table (catalog-vended storage credentials), or NULL to use
+ * the ambient environment. Raises on any failure.
  */
 extern void PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
-									  ReturnSetInfo *rsinfo);
+									  ReturnSetInfo *rsinfo,
+									  const PgColumnarObjStoreConfig *cfg);
 
 #endif							/* COLUMNAR_ICEBERG_H */

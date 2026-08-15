@@ -822,6 +822,13 @@ field-id projection and every delete rule apply unchanged. The catalog and
 authentication rules are those of `iceberg_rest_table_location` above, including
 the allow-list, the link-local refusal, and the environment bearer token.
 
+A catalog can vend storage credentials in its `loadTable` reply. The data,
+metadata, and delete files are then read with those credentials, not the server
+environment. Both the flat `config` keys and the `storage-credentials` array are
+read, and the longest-prefix match is used. Vended credentials do not bypass the
+allow-list. The endpoint is still checked. A table that vends no credentials is
+read with the ambient environment, as before.
+
 ```sql
 SELECT region, sum(amount)
   FROM pgcolumnar.iceberg_rest_scan('https://catalog.example.com',

@@ -17,6 +17,8 @@
 #include "executor/tuptable.h"
 #include "utils/tuplestore.h"
 
+#include "columnar_objstore.h"	/* PgColumnarObjStoreConfig */
+
 /*
  * Read one Parquet file's rows into `tupstore`, binding output column i (of
  * `tupdesc`) to the file column whose Parquet field id equals field_ids[i], and
@@ -30,7 +32,8 @@ extern int64 PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 											 const int *field_ids, int nfield,
 											 Tuplestorestate *tupstore,
 											 TupleTableSlot *slot,
-											 const uint64 *skipPos, int nSkipPos);
+											 const uint64 *skipPos, int nSkipPos,
+											 const PgColumnarObjStoreConfig *cfg);
 
 /*
  * As above, plus an Iceberg name mapping (schema.name-mapping.default): for a
@@ -45,6 +48,7 @@ extern int64 PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdes
 											   Tuplestorestate *tupstore,
 											   TupleTableSlot *slot,
 											   const uint64 *skipPos,
-											   int nSkipPos);
+											   int nSkipPos,
+											   const PgColumnarObjStoreConfig *cfg);
 
 #endif							/* COLUMNAR_PARQUET_READER_H */

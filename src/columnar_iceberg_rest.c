@@ -240,18 +240,17 @@ rest_get_json(const char *catalog_uri, const char *resource_path,
 }
 
 /*
- * Resolve the current metadata-location of catalog_uri's ns.table. Calls
- * GET /v1/config to learn any path prefix, then loadTable.
+ * Call GET /v1/config (to learn any path prefix) then loadTable, and return the
+ * whole loadTable JSON document. *out_location is set to its metadata-location.
  */
-char *
-PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
-									   const char *ns, const char *table)
+static Jsonb *
+rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
+					char **out_location)
 {
 	Jsonb	   *cfg;
 	char	   *prefix;
 	Jsonb	   *lt;
 	StringInfoData rp;
-	char	   *loc;
 
 	if (pg_strncasecmp(catalog_uri, "http://", 7) != 0 &&
 		pg_strncasecmp(catalog_uri, "https://", 8) != 0)
@@ -296,7 +295,108 @@ PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
 	rest_pct_encode(&rp, table);
 
 	lt = rest_get_json(catalog_uri, rp.data, "table");
-	loc = rest_json_string(&lt->root, "metadata-location", "loadTable response");
+	if (out_location != NULL)
+		*out_location = rest_json_string(&lt->root, "metadata-location",
+										 "loadTable response");
+	return lt;
+}
+
+/*
+ * Build an object-store config from the storage credentials a loadTable reply
+ * vends, or NULL when it vends none (the caller then falls back to ambient). A
+ * `storage-credentials` array is preferred, choosing the entry whose `prefix` is
+ * the longest match for `metadata_location`; otherwise the flat `config` object.
+ * allow_ambient is false: once a catalog vends credentials a read must use them,
+ * never silently the server's ambient identity.
+ */
+static PgColumnarObjStoreConfig *
+rest_vended_cfg(JsonbContainer *lt, const char *metadata_location)
+{
+	JsonbContainer *chosen = NULL;
+	int			bestlen = -1;
+	JsonbValue	vbuf;
+	JsonbValue *sc;
+	char	   *akid;
+	char	   *secret;
+	PgColumnarObjStoreConfig *cfg;
+
+	if (lt == NULL || !JsonContainerIsObject(lt))
+		return NULL;
+
+	sc = getKeyJsonValueFromContainer(lt, "storage-credentials", 19, &vbuf);
+	if (sc != NULL && sc->type == jbvBinary &&
+		JsonContainerIsArray(sc->val.binary.data))
+	{
+		uint32		n = JsonContainerSize(sc->val.binary.data);
+		uint32		i;
+		int			mloclen = (int) strlen(metadata_location);
+
+		for (i = 0; i < n; i++)
+		{
+			JsonbValue *e = getIthJsonbValueFromContainer(sc->val.binary.data, i);
+			JsonbValue	pbuf,
+						cbuf;
+			JsonbValue *pv;
+			JsonbValue *cv;
+
+			if (e == NULL || e->type != jbvBinary ||
+				!JsonContainerIsObject(e->val.binary.data))
+				continue;
+			pv = getKeyJsonValueFromContainer(e->val.binary.data, "prefix", 6, &pbuf);
+			cv = getKeyJsonValueFromContainer(e->val.binary.data, "config", 6, &cbuf);
+			if (pv == NULL || pv->type != jbvString ||
+				cv == NULL || cv->type != jbvBinary ||
+				!JsonContainerIsObject(cv->val.binary.data))
+				continue;
+			if (pv->val.string.len <= mloclen &&
+				strncmp(metadata_location, pv->val.string.val,
+						pv->val.string.len) == 0 &&
+				pv->val.string.len > bestlen)
+			{
+				bestlen = pv->val.string.len;
+				chosen = cv->val.binary.data;
+			}
+		}
+	}
+
+	if (chosen == NULL)
+	{
+		JsonbValue *cv = getKeyJsonValueFromContainer(lt, "config", 6, &vbuf);
+
+		if (cv != NULL && cv->type == jbvBinary &&
+			JsonContainerIsObject(cv->val.binary.data))
+			chosen = cv->val.binary.data;
+	}
+	if (chosen == NULL)
+		return NULL;
+
+	akid = rest_json_string_opt(chosen, "s3.access-key-id");
+	secret = rest_json_string_opt(chosen, "s3.secret-access-key");
+	if (akid == NULL || secret == NULL)
+		return NULL;			/* no usable vended creds -> ambient fallback */
+
+	cfg = (PgColumnarObjStoreConfig *) palloc0(sizeof(PgColumnarObjStoreConfig));
+	cfg->akid = akid;
+	cfg->secret = secret;
+	cfg->token = rest_json_string_opt(chosen, "s3.session-token");
+	cfg->region = rest_json_string_opt(chosen, "s3.region");
+	if (cfg->region == NULL)
+		cfg->region = rest_json_string_opt(chosen, "client.region");
+	cfg->endpoint = rest_json_string_opt(chosen, "s3.endpoint");
+	cfg->allow_ambient = false;
+	return cfg;
+}
+
+/*
+ * Resolve the current metadata-location of catalog_uri's ns.table.
+ */
+char *
+PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
+									   const char *ns, const char *table)
+{
+	char	   *loc;
+
+	(void) rest_load_table_doc(catalog_uri, ns, table, &loc);
 	return loc;
 }
 
@@ -341,7 +441,9 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 	char	   *table = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
+	Jsonb	   *lt;
 	char	   *loc;
+	PgColumnarObjStoreConfig *cfg;
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
 		ereport(ERROR,
@@ -358,7 +460,9 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 				 errmsg("pgcolumnar.iceberg_rest_scan requires a column definition list"),
 				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_rest_scan(uri, ns, tbl) AS t(col1 type1, ...).")));
 
-	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table);
+	/* one loadTable: the metadata-location AND the vended storage creds (if any) */
+	lt = rest_load_table_doc(catalog_uri, ns, table, &loc);
+	cfg = rest_vended_cfg(&lt->root, loc);
 	/*
 	 * A metadata-location is a URI. The reader's remote path handles s3:// and
 	 * http(s)://; a file:// location is a local path, and the local read path
@@ -366,7 +470,7 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 	 */
 	if (pg_strncasecmp(loc, "file://", 7) == 0)
 		loc += 7;
-	PgColumnarIcebergScanInto(loc, tupdesc, rsinfo);
+	PgColumnarIcebergScanInto(loc, tupdesc, rsinfo, cfg);
 	return (Datum) 0;
 }
 
