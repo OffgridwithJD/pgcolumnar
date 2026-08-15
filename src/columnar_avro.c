@@ -678,6 +678,12 @@ av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 		}
 		else if (strcmp(nm, "equality_ids") == 0)
 			av_read_int_array(r, ft, &e->equality_ids, &e->nequality_ids);
+		else if (strcmp(nm, "referenced_data_file") == 0)
+			e->referenced_data_file = av_read_string(r, ft);
+		else if (strcmp(nm, "content_offset") == 0)
+			e->content_offset = av_read_long(r, ft, &e->has_content_offset);
+		else if (strcmp(nm, "content_size_in_bytes") == 0)
+			e->content_size_in_bytes = av_read_long(r, ft, &e->has_content_size);
 		else
 			av_skip(r, ft);		/* every other field: advance past it */
 	}

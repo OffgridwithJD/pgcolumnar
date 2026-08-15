@@ -107,6 +107,7 @@ opened here too -- same content-leak surface as data files).
   Designed below.
 - **4c - v3 deletion vectors (Puffin).** A new container format (Puffin) holding
   a roaring bitmap of deleted positions -- a decoder like the Avro one. Largest.
+  Designed below.
 
 Held out: pruning/partition transforms (phase 5), object storage + REST (phase
 6). Multiple delete files, and delete + data in one snapshot, are covered within
@@ -261,3 +262,155 @@ as the 4b follow-up backlog:
 - **int->long / float->double type promotion**: a pre-promotion file's physical
   INT32 vs the current schema's `long` errors in the binder; a reader-wide
   promotion feature, not 4b-specific.
+
+## 4c design - v3 deletion vectors (Puffin)
+
+Spec rules (Iceberg table spec + Puffin spec, verified 2026-08-15 against the
+spec texts; local copies in the session scratchpad; DV sections of spec.md at
+lines 710-754, 1050-1095, 1353-1386, 1933-1945):
+
+- A DV is the v3 ENCODING of position deletes: a delete-manifest entry with
+  `content = 1`, `file_format = "puffin"`, `file_path` naming the CONTAINING
+  Puffin file (several DVs may share one), and three v3 `data_file` fields:
+  `referenced_data_file` (135/143: the ONE data file all its deletes target;
+  required for DVs), `content_offset` (144) and `content_size_in_bytes` (145),
+  which are required and "must exactly match the `offset` and `length` stored
+  in the Puffin footer" for the blob. `record_count` is the DV's cardinality.
+- **Sequence gate `<=`**, identical to position-delete files (same-commit
+  deletes count). Partition scoping is subsumed by the exact
+  `referenced_data_file` path match, the same argument as 4a's path match.
+- **A DV SUPERSEDES position-delete files.** The position-delete-file scope
+  rule gains a fourth condition in v3: it applies only when "there is no
+  deletion vector that must be applied to the data file". A writer adding a DV
+  must fold all existing position deletes for that file into it, so a reader
+  ignores Parquet position-delete rows for any data file an applicable DV
+  covers. Union instead of supersede is wrong BY SPEC, not just redundant --
+  the fixture arm sits exactly on that distinction.
+- **At most one DV per data file per snapshot** (writer guarantee); on
+  violation "results of the scan are undefined ... implementations may raise an
+  error". We raise (XX001), the safe choice.
+- **DVs are v3-only**: "not supported in v2 or earlier". The reader gains its
+  first use of the `format-version` VALUE: a puffin-format delete entry in a
+  table whose metadata says version < 3 is refused (0A000, naming the version).
+- Puffin container: `PFA1` magic at start, footer = `PFA1 | payload JSON |
+  payload-size (4, LE) | flags (4) | PFA1`. Flags bit 0 = compressed footer;
+  we refuse a compressed footer loudly (0A000) rather than adding lz4.
+  Blob metadata: type `deletion-vector-v1`, `offset`/`length`,
+  `properties["referenced-data-file"]`; a DV blob must NOT declare a
+  `compression-codec` (declaring one is refused).
+- DV blob bytes: `length (4, BE, = 4 + vector bytes) | magic D1 D3 39 64 |
+  portable 64-bit roaring bitmap | CRC-32 (4, BE, over magic+vector, zlib
+  polynomial)`. Note the endianness split: prefix and CRC big-endian (Delta
+  compatibility), roaring little-endian.
+- Portable roaring64: uint64 LE bucket count; per bucket (ascending key)
+  uint32 LE high-32 key + a full 32-bit roaring bitmap. 32-bit format: cookie
+  12346 (no runs; + uint32 container count) or 12347 (runs; count in the high
+  16 bits + a run-marker bitset); descriptive header of (key, cardinality-1)
+  pairs; an offset header (present for cookie 12346, or 12347 with >= 4
+  containers -- a decoder can ignore it); containers in order: array (sorted
+  uint16s), bitset (8192 bytes), run (uint16 count + (start, length-1) pairs).
+  Any other cookie aborts the decode.
+
+### Architecture
+
+A new decoder file, `src/columnar_puffin.c` (+ .h), mirroring the Avro
+decoder's role: `PgColumnarPuffinReadDeletionVector(buf, len, blob_offset,
+blob_size, referenced_path, &positions, &npos)` parses the footer (payload JSON
+through the server's jsonb reader, like metadata.json), locates the
+`deletion-vector-v1` blob whose footer offset/length EQUAL the manifest's
+`content_offset`/`content_size_in_bytes` (the spec's cross-check), validates
+the blob (length prefix consistency, magic, CRC-32 via zlib's crc32 -- already
+linked for Avro deflate), decodes the roaring bitmap with the Avro decoder's
+bounded-cursor discipline, and returns the positions ascending (the natural
+roaring iteration order -- exactly the sorted skipPos contract).
+
+The scan side rides 4a's machinery whole:
+
+- The Avro decoder gains the three v3 fields (nullable unions, existing
+  helpers); `ice_scan_cb` copies them onto `IceEntry`.
+- `ice_read_pos_deletes` branches where the "only PARQUET" refusal fires
+  today: puffin entries are validated (v3 gate, referenced/offset/size present,
+  size capped), the Puffin file is opened through `ice_open_path` and slurped
+  (whole file, 64 MB cap -- DV blobs are KBs to MBs), and each decoded position
+  becomes an `IcePosDel {dpath = referenced_data_file, pos, seq}` in the same
+  snapshot-global list, flagged `from_dv`. Duplicate DV entries for one
+  referenced file are detected here (XX001).
+- The per-data-file merge applies supersede: if any applicable (`seq >=`,
+  path-matched) DV row exists for data file D, non-DV position rows for D are
+  ignored; DV rows merge into skipPos as position rows always did. Equality
+  deletes (4b) are orthogonal and unaffected.
+- Positions beyond the file's row count never match an ordinal and are
+  harmless by construction; positions above 2^32 exercise the second roaring
+  bucket and flow through uint64 untouched.
+- Validation: decoded cardinality must equal the entry's `record_count`
+  (the spec defines it so), else XX001.
+
+### 4c fixture arms (generator additions, additive only; oracle-rich)
+
+Unlike 4b, BOTH pyiceberg 0.11.1 and DuckDB's iceberg extension read DVs, so
+the hand-built fixtures get two independent oracles (proven live during
+research: a hand-built Puffin file decoded identically by pyiceberg and by the
+recipe DuckDB implements). pyroaring's `BitMap64.serialize()` IS the portable
+serialization (verified byte-by-byte against the format spec); the blob wrapper
+is `struct.pack(">I") + D1D33964 + bytes + crc32 BE`.
+
+| arm | shape | expect |
+|---|---|---|
+| dvapply | DV ordinals {1,3}, seq == data seq 5 | THE `<=` boundary; survivors ids 1,3,5 |
+| dvnoapply | same DV, seq 4 < data 5 | all 5 rows |
+| dvsupersede | DV {1} + applicable Parquet posdel {3}, same data file | posdel IGNORED: survivors 1,3,4,5 (union would also drop id 4) |
+| dvother | DV {1} on data.parquet + posdel {0} on data2.parquet | supersede is per-file: posdel still applies to data2 |
+| dvwide | DV {1, 65536..70000, 2^32+5} | second bucket + bitset-scale container; survivors minus id 2 |
+| dvrun | run-optimized DV {0,1,2} (cookie 12347) | run containers decode; survivors ids 4,5 |
+| dvtwo | one Puffin file, two DV blobs for two data files | multi-blob footer; both apply |
+| dvdup | two DV entries referencing one data file | XX001 |
+| dvbadcrc | CRC word corrupted | XX001 |
+| dvbadmagic | blob magic wrong | XX001 |
+| dvoffmismatch | manifest content_offset != footer offset | XX001 |
+| dvnoref | referenced_data_file null on a puffin entry | XX001 |
+| dvbadcount | record_count != decoded cardinality | XX001 |
+| dvcompressed | blob metadata declares compression-codec | XX001 |
+| dvflags | footer flags bit 0 set (compressed footer) | 0A000 |
+| dvv2 | puffin entry in a format-version 2 table | 0A000 naming the version |
+| dvescape | Puffin path outside the table root | 22023 (boundary) |
+
+Removal proofs: `<=` -> `<` reds dvapply; drop supersede -> dvsupersede reds
+(id 4 wrongly deleted); global instead of per-file supersede -> dvother reds;
+skip CRC -> dvbadcrc; skip the offset cross-check -> dvoffmismatch; skip the
+cardinality check -> dvbadcount; drop the v3 gate -> dvv2; drop the dup check
+-> dvdup. Value arms cross-checked against pyiceberg (which reads DVs) and
+DuckDB, extending the 4b crosscheck script.
+
+### 4c adversarial audit (3 lenses, 9 findings -> 4 distinct defects, all fixed)
+
+The audit (spec / memory / hostile-bytes-decode lenses, each finding verified
+against the code) ran after GREEN; the spec and decode lenses independently
+found three of the four, and zero findings were refuted. Fixed here, each with
+a fixture arm and a removal proof:
+
+- **BLOCKING: int64 overflow in the Puffin blob bounds check.**
+  `blob_offset + blob_size > paystart - 4` wrapped negative for attacker-sized
+  operands (both come from the manifest, cross-checked only against a footer
+  the same author wrote), passing the check into `bp = buf + blob_offset`, a
+  wild pointer `pf_be32` dereferenced -- a real SIGSEGV (the pre-fix build
+  crashes on the `dvbigoff` fixture). Fixed by testing each operand against the
+  file bound without adding them.
+- **IMPORTANT: the parsed Puffin footer (payload copy + jsonb, up to the 64 MB
+  cap) was retained in the query context per DV entry**, because the reader was
+  called after switching back to the outer context. A snapshot with many DVs,
+  or many DVs sharing one large-footer Puffin file, retained O(entries x
+  footer). Fixed by decoding inside the per-file scratch context and copying
+  only the ordinal array out before the reset.
+- **IMPORTANT: a roaring run container with start + length > 0xFFFF** carried
+  into the container-key bits and fabricated ordinals in a neighboring
+  container -- silently wrong rows, CRC-valid. Fixed with a bounds check
+  (`dvrunoverflow`, XX001).
+- **MINOR: the one-DV-per-data-file check compared raw strings** while the
+  per-file merge strips the URI scheme, so an aliased pair (one `file://`, one
+  not) evaded the check and was unioned. Fixed by stripping the scheme on both
+  sides (`dvdupscheme`, XX001).
+
+Removal proofs: restoring the additive bounds check crashes `dvbigoff` again;
+deleting the run-range check reds `dvrunoverflow`; reverting the dedup to a raw
+strcmp reds `dvdupscheme`. PG17/18/19 + ASAN clean over all arms including the
+three formerly-crashing ones.
