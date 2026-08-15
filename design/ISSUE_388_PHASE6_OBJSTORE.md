@@ -106,3 +106,31 @@ raise between open and the normal close, then re-throws. (The audit noted the
 already-merged Parquet remote read path -- `pq_source` -- has the identical
 leak-on-raise pattern; that is a pre-existing follow-up in a different subsystem,
 not this increment.)
+
+## Peer review pass 2 (ChronicallyJD, #655): encoded `..` on the http(s) transport
+
+An independent second look at the security boundary (with a real-S3 removal
+proof) found the containment guard holds, with one gap in its own stated threat
+model. `ice_has_dotdot` matches only the literal two bytes `..`, but a recorded
+remote key is sent to the object store verbatim, and on the `http(s)://`
+transport a normalizing origin or reverse proxy may percent-decode the key
+before serving a file. So a path like `<loc>/%2e%2e/%2e%2e/etc/creds` passes the
+literal-`..` guard, and a server that decodes `%2e%2e` -> `..` (or `..%2f` -> a
+separator) reads an object outside the table location -- a confused-deputy read
+driven by untrusted metadata, exactly what the guard is for. Scoped honestly:
+`s3://` is already neutralized (`os_uriencode_path` turns `%` into `%25`, so the
+key becomes an opaque 404), and the host is unchanged so the allow-list still
+holds -- this was a defense-in-depth gap on the http(s) leg, not a proven leak.
+
+Fixed by modelling what a downstream decoder would see: `ice_has_encoded_dotdot`
+percent-decodes the key suffix to a fixed point (a decoder may run more than
+once, so `%252e` -> `%2e` -> `.`) and refuses if any decoded form reveals a
+`..` segment, while the original bytes are still what gets sent. A literal `%`
+in a legitimate key that does not decode toward a dot segment is left alone; the
+check is remote-only (a local root has no such transport, and `%2e%2e` is just a
+nonexistent directory name that `realpath` rejects). Test arm `eqpctdot` in
+`iceberg_objstore.sh` (a `%2e%2e`-encoded climb-out) asserts `22023`; removal
+proof: neutering `ice_has_encoded_dotdot` reds exactly that arm (`got 58P01` --
+the key is otherwise rebased and the fetch fails downstream) and no other.
+Gated 15/15 (objstore) and 42/42 (deletes) on PG17/18/19, and clean under
+pg18_san ASAN+UBSAN since it is a new decode path over untrusted input.

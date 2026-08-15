@@ -132,6 +132,12 @@ check "a delete path outside the table location is refused over s3 (22023)" \
 check "a dotdot-escaping delete path is refused over s3 (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqdotdot.metadata.json')
 	                AS t(id bigint, region text, amount int)")" "22023"
+# the same climb-out with each ".." percent-encoded as "%2e%2e": a literal
+# ".."-guard sees no "..", but the remote guard must decode-and-reject it, or an
+# http(s) origin that decodes the key before serving would read outside the table
+check "a percent-encoded dotdot delete path is refused over s3 (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqpctdot.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "22023"
 check "backend still up after the s3 refusal" "$(q 'SELECT 1')" "1"
 
 # ---- an endpoint not on the allow-list is refused ---------------------------

@@ -415,6 +415,85 @@ ice_has_dotdot(const char *s)
 	return false;
 }
 
+/* one hex digit -> value, or false if not a hex digit */
+static bool
+ice_hexval(char c, int *out)
+{
+	if (c >= '0' && c <= '9')
+	{
+		*out = c - '0';
+		return true;
+	}
+	if (c >= 'a' && c <= 'f')
+	{
+		*out = c - 'a' + 10;
+		return true;
+	}
+	if (c >= 'A' && c <= 'F')
+	{
+		*out = c - 'A' + 10;
+		return true;
+	}
+	return false;
+}
+
+/* Percent-decode one pass of `s` into a fresh buffer. A "%HH" with two hex
+ * digits becomes the decoded byte; anything else is copied verbatim. Sets
+ * *changed if any escape was decoded. */
+static char *
+ice_percent_decode_once(const char *s, bool *changed)
+{
+	size_t		len = strlen(s);
+	char	   *out = palloc(len + 1);
+	char	   *w = out;
+	const char *p = s;
+	int			hi,
+				lo;
+
+	*changed = false;
+	while (*p != '\0')
+	{
+		if (p[0] == '%' && p[1] != '\0' && p[2] != '\0' &&
+			ice_hexval(p[1], &hi) && ice_hexval(p[2], &lo))
+		{
+			*w++ = (char) ((hi << 4) | lo);
+			p += 3;
+			*changed = true;
+		}
+		else
+			*w++ = *p++;
+	}
+	*w = '\0';
+	return out;
+}
+
+/* Would percent-decoding reveal a ".." segment that ice_has_dotdot cannot see
+ * in the literal bytes? A remote key is sent to the object store verbatim, and
+ * an origin or reverse proxy on the http(s):// transport may percent-decode it
+ * before serving a file -- so ".." can be smuggled past ice_has_dotdot as
+ * "%2e%2e", and a separator as "%2f", reconstituting a traversal only after the
+ * bytes leave us. Model what such a server would see: decode to a fixed point (a
+ * decoder may run more than once, so "%252e" -> "%2e" -> ".") and check each
+ * decoded form for a ".." segment. We still send the original bytes; this only
+ * decides whether to refuse. A literal '%' that does not decode toward a dot
+ * segment (a legitimate, if rare, key) is left alone. Each decoding pass that
+ * changes anything strictly shortens the string, so this terminates. */
+static bool
+ice_has_encoded_dotdot(const char *s)
+{
+	char	   *cur = pstrdup(s);
+	bool		changed;
+
+	for (;;)
+	{
+		cur = ice_percent_decode_once(cur, &changed);
+		if (!changed)
+			return false;		/* nothing left to decode; no hidden ".." */
+		if (ice_has_dotdot(cur))
+			return true;
+	}
+}
+
 /*
  * Rebase a path recorded in the table onto the table's actual location, and
  * refuse anything that would escape that location. This is the arbitrary-file
@@ -456,10 +535,12 @@ ice_rebase(const char *recorded_root, const char *actual_root,
 	 * would collapse the "://" double slash and corrupt the scheme, and there
 	 * is no realpath/symlink notion, so the containment is purely lexical: the
 	 * key stays under the table prefix (enforced by the recorded-root boundary
-	 * above) and carries no ".." segment that could walk out of it. */
+	 * above) and carries no ".." segment that could walk out of it -- neither a
+	 * literal ".." nor one a downstream http(s) origin/proxy would reconstitute
+	 * by percent-decoding the key ("%2e%2e", "..%2f"). */
 	if (PgColumnarPathIsRemote(actual_root))
 	{
-		if (ice_has_dotdot(p + rlen))
+		if (ice_has_dotdot(p + rlen) || ice_has_encoded_dotdot(p + rlen))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("iceberg: %s path \"%s\" from \"%s\" escapes the table location \"%s\"",
