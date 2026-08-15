@@ -28,6 +28,8 @@ typedef struct PgColumnarAvroManifestEntry
 	int64		record_count;
 	int64		file_size_in_bytes;
 	char	   *partition;		/* the partition struct rendered as text, or NULL */
+	int64		sequence_number;	/* the entry's data sequence number, when present */
+	bool		has_sequence_number;	/* false when the field is null (inherited) */
 } PgColumnarAvroManifestEntry;
 
 /*

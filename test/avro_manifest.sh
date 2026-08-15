@@ -64,6 +64,48 @@ check "every entry's file_path ends in .parquet" \
 check "all entries are ADDED data files (status=1, content=0)" \
 	"$(q "SELECT bool_and(status = 1 AND content = 0) FROM pgcolumnar.read_avro_manifest('$M0')")" "t"
 
+# ---- the entry's data sequence number (#388 phase 4) ------------------------
+# The committed manifest was a first append: its entries carry a NULL
+# sequence_number (inherited from the manifest's, per the v2 spec).
+check "the committed entries have a NULL (inherited) sequence_number" \
+	"$(q "SELECT count(*) FILTER (WHERE sequence_number IS NULL) || '/' || count(*)
+	      FROM pgcolumnar.read_avro_manifest('$M0')")" \
+	"$(q "SELECT count(*)::text || '/' || count(*) FROM pgcolumnar.read_avro_manifest('$M0')")"
+# A crafted manifest_entry with an EXPLICIT sequence_number = 42, so the decode of
+# a present (non-null) value is proven, not just the null case. Reduced schema
+# (the decoder projects by field name and skips the rest).
+python3 - "$PGC_WORKDIR/seq.avro" <<'PY'
+import sys
+def zz(n):
+    u = (n << 1) ^ (n >> 63) if n < 0 else (n << 1)
+    out = bytearray()
+    while True:
+        b = u & 0x7f; u >>= 7
+        out.append(b | 0x80 if u else b)
+        if not u: break
+    return bytes(out)
+def s(bs): return zz(len(bs)) + bs
+schema = (b'{"type":"record","name":"manifest_entry","fields":['
+          b'{"name":"status","type":"int"},'
+          b'{"name":"sequence_number","type":["null","long"]},'
+          b'{"name":"data_file","type":{"type":"record","name":"df","fields":['
+          b'{"name":"content","type":"int"},'
+          b'{"name":"file_path","type":"string"},'
+          b'{"name":"file_format","type":"string"},'
+          b'{"name":"record_count","type":"long"},'
+          b'{"name":"file_size_in_bytes","type":"long"}]}}]}')
+# one entry: status=1, sequence_number=union(1)->42, data_file{0,"d.parquet","PARQUET",5,100}
+rec  = zz(1) + zz(1) + zz(42)
+rec += zz(0) + s(b"d.parquet") + s(b"PARQUET") + zz(5) + zz(100)
+sync = b"\x00" * 16
+meta = zz(2) + s(b"avro.schema") + s(schema) + s(b"avro.codec") + s(b"null") + zz(0)
+ocf  = b"Obj\x01" + meta + sync + zz(1) + zz(len(rec)) + rec + sync
+open(sys.argv[1], "wb").write(ocf)
+PY
+chmod 644 "$PGC_WORKDIR/seq.avro"
+check "an explicit entry sequence_number is decoded (42)" \
+	"$(q "SELECT sequence_number FROM pgcolumnar.read_avro_manifest('$PGC_WORKDIR/seq.avro')")" "42"
+
 # ---- the manifest LIST (a snapshot's manifest_file entries) -----------------
 # The same object-container machinery, a different embedded record. Decode the
 # committed real manifest-list and assert its manifest_file entry against the
