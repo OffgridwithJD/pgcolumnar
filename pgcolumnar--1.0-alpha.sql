@@ -1022,6 +1022,23 @@ CREATE FOREIGN DATA WRAPPER pgcolumnar_parquet
 COMMENT ON FOREIGN DATA WRAPPER pgcolumnar_parquet
 	IS 'read a Parquet file, directory, or glob as a foreign table; table option: path (Phase G)';
 
+CREATE FUNCTION pgcolumnar.iceberg_fdw_handler()
+	RETURNS fdw_handler
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_fdw_handler';
+
+CREATE FUNCTION pgcolumnar.iceberg_fdw_validator(text[], oid)
+	RETURNS void
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_fdw_validator';
+
+CREATE FOREIGN DATA WRAPPER pgcolumnar_iceberg
+	HANDLER pgcolumnar.iceberg_fdw_handler
+	VALIDATOR pgcolumnar.iceberg_fdw_validator;
+
+COMMENT ON FOREIGN DATA WRAPPER pgcolumnar_iceberg
+	IS 'read an Apache Iceberg table as a foreign table, pruning data files by a predicate on an identity-partition column; table option: metadata_path (#388)';
+
 CREATE FUNCTION pgcolumnar.vm_selftest(rel regclass, blk int)
 	RETURNS boolean
 	LANGUAGE C

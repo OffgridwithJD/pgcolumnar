@@ -87,6 +87,7 @@ SUITES=(
 	iceberg_data_files
 	iceberg_deletes
 	iceberg_dv
+	iceberg_fdw
 	iceberg_malformed
 	iceberg_name_mapping
 	iceberg_objstore

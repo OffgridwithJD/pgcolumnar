@@ -32,6 +32,7 @@ OBJS = \
 	src/columnar_puffin.o \
 	src/columnar_iceberg.o \
 	src/columnar_iceberg_rest.o \
+	src/columnar_iceberg_fdw.o \
 	src/columnar_objstore.o \
 	src/columnar_sink.o \
 	src/columnar_autovacuum.o
