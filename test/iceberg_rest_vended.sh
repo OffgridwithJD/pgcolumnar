@@ -95,6 +95,21 @@ check "iceberg_rest_scan reads via vended credentials (no ambient creds set)" \
 	      ORDER BY id")" \
 	"$(printf '1|eu|10\n3|us|30\n5|us|50')"
 
+# ---- the vended secret never appears in any log --------------------------
+# the secret comes from the catalog response, is used only as the SigV4 signing
+# seed (never sent on the wire), and is never a SQL argument, so log_statement
+# cannot capture it. Pin that: read under log_statement='all', then grep.
+q "ALTER SYSTEM SET log_statement='all'" >/dev/null
+q "SELECT pg_reload_conf()" >/dev/null
+q "SELECT count(*) FROM pgcolumnar.iceberg_rest_scan('$CAT','db','t')
+   AS t(id bigint, region text, amount int)" >/dev/null
+q "ALTER SYSTEM SET log_statement='none'" >/dev/null
+q "SELECT pg_reload_conf()" >/dev/null
+check "the vended secret never appears in the PG server log" \
+	"$(grep -c "$SECRET" "$PGC_LOGFILE" 2>/dev/null)" "0"
+check "the vended secret never appears in the S3 request log" \
+	"$(grep -c "$SECRET" "$PGC_WORKDIR/s3.log" 2>/dev/null)" "0"
+
 # ---- a WRONG vended secret is used and refused (403 -> 28000), not bypassed --
 start_rest --token "$RESTTOK" \
 	--vend-key "$AKID" --vend-secret "wrong-vended-secret" --vend-region "$REGION" --vend-endpoint "$S3EP"
