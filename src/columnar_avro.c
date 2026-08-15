@@ -615,6 +615,13 @@ av_read_int_array(AvReader *r, AvSchema *s, int32 **out, int *nout)
 		{
 			int64		v = av_long(r);
 
+			/* a field id beyond int32 is malformed; truncating it would alias
+			 * a different (possibly real) column and key the delete wrongly */
+			if (v < 0 || v > PG_INT32_MAX)
+			{
+				r->error = true;
+				break;
+			}
 			if (n == cap)
 			{
 				cap = cap ? cap * 2 : 8;
@@ -698,6 +705,7 @@ av_decode_entry(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 		else if (strcmp(nm, "sequence_number") == 0 ||
 				 strcmp(nm, "data_sequence_number") == 0)
 		{
+			e->has_sequence_field = true;
 			e->sequence_number = av_read_long(r, ft, &have);
 			e->has_sequence_number = have;
 		}
@@ -736,7 +744,10 @@ av_decode_manifest_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestFile *e)
 		else if (strcmp(nm, "manifest_length") == 0)
 			e->manifest_length = av_read_long(r, ft, &have);
 		else if (strcmp(nm, "partition_spec_id") == 0)
+		{
 			e->partition_spec_id = (int32) av_read_long(r, ft, &have);
+			e->has_partition_spec_id = have;
+		}
 		else if (strcmp(nm, "content") == 0)
 			e->content = (int32) av_read_long(r, ft, &have);
 		else if (strcmp(nm, "sequence_number") == 0)

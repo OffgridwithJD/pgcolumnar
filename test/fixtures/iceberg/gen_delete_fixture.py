@@ -405,6 +405,139 @@ emit_eq_variant("eqmissing", [(2, EQ_SEQ, EQ_NINE, [9], 1)])
 emit_eq_variant("eqescape", [(2, EQ_SEQ, "file:///etc/hostname", [1], 1)])
 #   a delete path outside the table root: the path boundary refuses it
 
+# ---- audit arms (multi-agent adversarial audit of 4b) ----------------------
+
+# equality_ids carrying a value beyond int32: a silent (int32) truncation would
+# alias field 2^32+2 onto the real field 2 and delete rows the manifest never
+# named; the decoder must refuse the manifest instead
+emit_eq_variant("eqbigid", [(2, EQ_SEQ, EQ_REGION, [(1 << 32) + 2], 1)])
+
+# a manifest list whose schema OMITS partition_spec_id: the field would decode
+# as 0 (the unpartitioned spec) and silently defeat the partition-scope guard;
+# the reader must refuse to scope an equality delete without it
+MFILE_SCHEMA_NOSPEC = json.dumps({"type": "record", "name": "manifest_file", "fields": [
+    {"name": "manifest_path", "type": "string"},
+    {"name": "manifest_length", "type": "long"},
+    {"name": "content", "type": "int"},
+    {"name": "sequence_number", "type": "long"},
+    {"name": "min_sequence_number", "type": "long"},
+    {"name": "added_snapshot_id", "type": "long"},
+    {"name": "added_files_count", "type": "int"},
+    {"name": "existing_files_count", "type": "int"},
+    {"name": "deleted_files_count", "type": "int"},
+    {"name": "added_rows_count", "type": "long"},
+    {"name": "existing_rows_count", "type": "long"},
+    {"name": "deleted_rows_count", "type": "long"}]}).encode()
+
+
+def mfile_nospec(path, content, seq, snap, files, rows):
+    return s(path.encode()) + zz(1000) + zz(content) + zz(seq) + zz(seq) + \
+        zz(snap) + zz(files) + zz(0) + zz(0) + zz(rows) + zz(0) + zz(0)
+
+
+def emit_nospec_variant():
+    tag = "eqnospec"
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(
+        ocf_multi(ENTRY_SCHEMA_EQ, [entry_eq(1, EQ_SEQ, 2, EQ_ID, "PARQUET", 2, 500, [1])]))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    # the data manifest keeps the full schema; only the delete manifest's
+    # manifest-list record omits partition_spec_id, so the two schemas differ
+    # and the list needs the reduced schema for both rows -- write BOTH rows
+    # under the reduced schema (the data row's spec id is never consulted)
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA_NOSPEC) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rec in (mfile_nospec(DM, 0, DATA_SEQ, SNAP, 1, 5),
+                mfile_nospec(xm, 1, EQ_SEQ, SNAP, 1, 2)):
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    metadata = {
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema_eq], "partition-specs": PARTITION_SPECS,
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{
+            "snapshot-id": SNAP, "sequence-number": EQ_SEQ, "timestamp-ms": 0,
+            "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+            "summary": {"operation": "overwrite"}, "schema-id": 0}],
+    }
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
+
+
+emit_nospec_variant()
+
+# a partition-specs entry that MATCHES the delete's spec id but lacks the
+# required "fields" key: treating it as unpartitioned would silently globalize
+# a possibly partition-scoped delete; the reader must refuse (corrupt metadata)
+def emit_nofields_variant():
+    tag = "eqnofields"
+    # reuse eqapply's delete manifest and list (spec id 0); only the metadata
+    # differs, its spec 0 entry carrying no "fields"
+    metadata = {
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema_eq],
+        "partition-specs": [{"spec-id": 0}],
+        "default-spec-id": 0, "current-snapshot-id": SNAP,
+        "snapshots": [{
+            "snapshot-id": SNAP, "sequence-number": EQ_SEQ, "timestamp-ms": 0,
+            "manifest-list": f"{LOC}/metadata/manifest-list-eqapply.avro",
+            "summary": {"operation": "overwrite"}, "schema-id": 0}],
+    }
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
+
+
+emit_nofields_variant()
+
+# an equality delete that is never applicable (its sequence number does not
+# exceed any data file's) must be SKIPPED entirely, not validated: this variant
+# reuses the unsupported-type delete (field 8, timestamp) at the data's own
+# sequence number, so a reader that validates ineligible deletes refuses where
+# the correct result is all five rows untouched
+emit_eq_variant("eqstaletype", [(2, DATA_SEQ, EQ_ID, [8], 2)])
+
+# a v1-shaped manifest: no sequence_number column in the entry schema at all,
+# and an EXISTING (status 0) entry. The spec defaults every file's sequence
+# number to 0 when the column is absent (a v1 manifest), unlike a v2 manifest
+# whose EXISTING entry carries an explicit null (corrupt, the badseq arm).
+ENTRY_SCHEMA_V1 = json.dumps({"type": "record", "name": "manifest_entry", "fields": [
+    {"name": "status", "type": "int"},
+    {"name": "data_file", "type": {"type": "record", "name": "df", "fields": [
+        {"name": "content", "type": "int"},
+        {"name": "file_path", "type": "string"},
+        {"name": "file_format", "type": "string"},
+        {"name": "record_count", "type": "long"},
+        {"name": "file_size_in_bytes", "type": "long"}]}}]}).encode()
+
+
+def entry_v1(status, content, path, fmt, rows, size):
+    return zz(status) + zz(content) + s(path.encode()) + \
+        s(fmt.encode()) + zz(rows) + zz(size)
+
+
+def emit_v1seq_variant():
+    tag = "v1seq"
+    open(os.path.join(md, f"data-manifest-{tag}.avro"), "wb").write(
+        ocf(ENTRY_SCHEMA_V1, entry_v1(0, 0, DATA_PATH, "PARQUET", 5, 1000)))
+    dmv = f"{LOC}/metadata/data-manifest-{tag}.avro"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    rec = mfile(dmv, 0, 0, SNAP, 1, 5)
+    ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    metadata = {
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [schema], "current-snapshot-id": SNAP,
+        "snapshots": [{
+            "snapshot-id": SNAP, "sequence-number": DATA_SEQ, "timestamp-ms": 0,
+            "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+            "summary": {"operation": "append"}, "schema-id": 0}],
+    }
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
+
+
+emit_v1seq_variant()
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]

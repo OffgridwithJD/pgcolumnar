@@ -213,3 +213,51 @@ clause -> the unprojected-column arm reds (eqapply is run projecting a column
 subset). The equality metadata variants carry `partition-specs`
 (`[{"spec-id":0,"fields":[]}]`, plus a partitioned spec 1 for eqpart); existing
 4a variants are untouched (the scoping lookup runs only for content=2).
+
+### 4b adversarial audit (3 lenses, 11 findings verified, all confirmed)
+
+The 4a-style audit (spec / memory / matching lenses, each finding adversarially
+verified against the code) ran after GREEN. Fixed in this increment, each with
+a fixture arm and a removal proof:
+
+- **equality_ids int64->int32 silent truncation** (`av_read_int_array`): a
+  value beyond int32 aliased onto a real field id and keyed the delete on a
+  column the manifest never named -- silent wrong rows. Now a decode error
+  (XX001); arm `eqbigid` (value 2^32+2, which truncated to the real field 2 and
+  demonstrably deleted the 'eu' rows before the fix).
+- **Missing manifest-list `partition_spec_id` defaulted to 0** and sailed past
+  the partition-scope guard (a scoped delete applied globally). Presence is now
+  tracked through the decoder and required for equality deletes (XX001); arm
+  `eqnospec` (a manifest list schema without the field, which silently
+  globalized before the fix).
+- **A matched partition spec without a `fields` array read as unpartitioned**,
+  the opposite posture from the sibling undefined-spec-id XX001. Now XX001; arm
+  `eqnofields`.
+- **Never-applicable equality deletes were validated (and could refuse) before
+  the eligibility filter ran.** A delete whose sequence number exceeds no data
+  file's has no effect per the strict-< rule and is now skipped unread; arm
+  `eqstaletype` (an unsupported-type delete at the data's own sequence number
+  must NOT refuse). Consequence: the pre-4b `equality` fixture (equal seq, no
+  equality_ids) is now skipped rather than XX001; `eqnoids` (seq 6) keeps the
+  XX001 arm.
+- **v1-shaped manifests (no sequence_number column) were refused as corrupt on
+  EXISTING entries**; the spec defaults every file to 0 when the column is
+  absent. The decoder now distinguishes "column absent from the schema" (v1,
+  default 0, any status) from "v2 explicit null" (ADDED inherits, others
+  XX001 -- the badseq arm still holds); arm `v1seq`.
+- The dropped-column refusal message no longer blames a drop for nested-field
+  ids ("not a top-level field ... dropped or nested columns").
+
+Confirmed and DEFERRED, all loud errors (never silent wrongness), recorded here
+as the 4b follow-up backlog:
+
+- **Missing-id -> null projection**: an equality column added after a data file
+  was written errors 22023 in the probe (arm `eqmissing`); the spec projects it
+  as null. Needs a reader mode binding an absent field id to a constant null
+  column.
+- **Dropped delete columns**: the spec says a dropped column must still be
+  applied (via the historical schema); we refuse 0A000. Needs schema-history
+  resolution.
+- **int->long / float->double type promotion**: a pre-promotion file's physical
+  INT32 vs the current schema's `long` errors in the binder; a reader-wide
+  promotion feature, not 4b-specific.

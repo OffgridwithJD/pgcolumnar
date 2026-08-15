@@ -30,6 +30,8 @@ typedef struct PgColumnarAvroManifestEntry
 	char	   *partition;		/* the partition struct rendered as text, or NULL */
 	int64		sequence_number;	/* the entry's data sequence number, when present */
 	bool		has_sequence_number;	/* false when the field is null (inherited) */
+	bool		has_sequence_field; /* the schema carries the column at all; a v1
+									 * manifest does not (files default to 0) */
 	int32	   *equality_ids;	/* content 2: the field ids defining row equality */
 	int			nequality_ids;	/* 0 when the field is null or absent */
 } PgColumnarAvroManifestEntry;
@@ -43,6 +45,8 @@ typedef struct PgColumnarAvroManifestFile
 	char	   *manifest_path;
 	int64		manifest_length;
 	int32		partition_spec_id;
+	bool		has_partition_spec_id;	/* false when absent/null/mistyped; an
+										 * equality delete cannot be scoped then */
 	int32		content;		/* 0 DATA, 1 DELETES */
 	int64		sequence_number;
 	int64		min_sequence_number;

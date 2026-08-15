@@ -605,21 +605,32 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 					continue;
 			}
 
-			/* resolve the data sequence number. The spec inherits a null entry
-			 * sequence number from the manifest ONLY for ADDED (status 1)
-			 * entries; an EXISTING (0) or DELETED (2) entry must carry it
-			 * explicitly, so a null one there is corrupt metadata, not an
-			 * inheritance -- inheriting the current (too-new) manifest number
-			 * could wrongly keep a row a delete should have removed. */
+			/* resolve the data sequence number. A manifest whose entry schema
+			 * has no sequence-number column at all is v1-shaped: the spec
+			 * defaults every file's sequence number to 0, for every status.
+			 * In a v2 manifest (the column exists) a null is inherited from
+			 * the manifest ONLY for ADDED (status 1) entries; an EXISTING (0)
+			 * or DELETED (2) entry must carry it explicitly, so a null there
+			 * is corrupt metadata, not an inheritance -- inheriting the
+			 * current (too-new) manifest number could wrongly keep a row a
+			 * delete should have removed. */
 			if (!e->has_sequence_number)
 			{
-				if (e->status != 1)
+				if (!e->has_sequence_field)
+				{
+					e->sequence_number = 0;
+					e->has_sequence_number = true;
+				}
+				else if (e->status != 1)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("iceberg: a status-%d manifest entry for \"%s\" has no sequence number",
 									e->status, e->file_path)));
-				e->sequence_number = mfs[mi].sequence_number;
-				e->has_sequence_number = true;
+				else
+				{
+					e->sequence_number = mfs[mi].sequence_number;
+					e->has_sequence_number = true;
+				}
 			}
 
 			cb(ctx, e, &mfs[mi], recorded_root, actual_root, path, cur);
@@ -827,6 +838,7 @@ typedef struct IceEntry
 	int32	   *eq_ids;			/* content 2: the field ids defining equality */
 	int			neq_ids;
 	int32		spec_id;		/* the enclosing manifest's partition spec id */
+	bool		has_spec_id;	/* false when the manifest list omitted it */
 }			IceEntry;
 
 /* one position-delete row: drop row `pos` of data file `dpath`, if this delete's
@@ -876,6 +888,7 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	ie->file_format = e->file_format ? pstrdup(e->file_format) : NULL;
 	ie->seq = e->sequence_number;
 	ie->spec_id = mf->partition_spec_id;
+	ie->has_spec_id = mf->has_partition_spec_id;
 	if (e->nequality_ids > 0)
 	{
 		ie->eq_ids = (int32 *) palloc(e->nequality_ids * sizeof(int32));
@@ -1011,10 +1024,17 @@ ice_spec_is_partitioned(JsonbContainer *root, int32 spec_id, const char *path)
 			if (!ice_num_int64(ice_field(sp->val.binary.data, "spec-id"), &sid) ||
 				sid != spec_id)
 				continue;
+			/* a matched spec whose required "fields" is missing or mistyped
+			 * cannot prove the spec unpartitioned; defaulting to unpartitioned
+			 * would silently globalize a possibly partition-scoped delete */
 			fields = ice_field(sp->val.binary.data, "fields");
-			return fields != NULL && fields->type == jbvBinary &&
-				JsonContainerIsArray(fields->val.binary.data) &&
-				JsonContainerSize(fields->val.binary.data) > 0;
+			if (fields == NULL || fields->type != jbvBinary ||
+				!JsonContainerIsArray(fields->val.binary.data))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: partition spec %d in \"%s\" has no fields array",
+								spec_id, path)));
+			return JsonContainerSize(fields->val.binary.data) > 0;
 		}
 	}
 	ereport(ERROR,
@@ -1084,7 +1104,7 @@ ice_eq_col_type(JsonbContainer *root, int32 fid, const char *path,
 	}
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("iceberg: equality delete field id %d is not in the table's current schema; deletes on a dropped column are not supported",
+			 errmsg("iceberg: equality delete field id %d is not a top-level field of the table's current schema; equality deletes on dropped or nested columns are not supported",
 					fid)));
 	return InvalidOid;			/* unreachable */
 }
@@ -1110,16 +1130,21 @@ typedef struct IceEqDel
 }			IceEqDel;
 
 /*
- * Read every collected equality-delete file into memory. Validates each entry
- * (equality_ids present, PARQUET, unpartitioned spec -- a partition-scoped
- * equality delete applied globally would over-delete, so it is refused), maps
- * each equality column to a Postgres type via the current schema, and reads the
- * file projected to exactly those columns by field id. Rows are kept as Datum
- * arrays in the calling context; the per-file Parquet footer/metadata live in a
- * scratch context reset per file (the 4a memory rule).
+ * Read every applicable equality-delete file into memory. A delete whose
+ * sequence number exceeds no data file's (seq <= min_data_seq) can never apply
+ * -- the strict-< rule -- and is skipped entirely, unread and unvalidated, per
+ * the spec (it has no effect on the scan). Each applicable entry is validated
+ * (equality_ids present, PARQUET, a present partition_spec_id resolving to an
+ * unpartitioned spec -- a partition-scoped equality delete applied globally
+ * would over-delete, so it is refused), each equality column is mapped to a
+ * Postgres type via the current schema, and the file is read projected to
+ * exactly those columns by field id. Rows are kept as Datum arrays in the
+ * calling context; the per-file Parquet footer/metadata live in a scratch
+ * context reset per file (the 4a memory rule).
  */
 static List *
-ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path)
+ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
+					int64 min_data_seq)
 {
 	List	   *out = NIL;
 	ListCell   *lc;
@@ -1144,6 +1169,10 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path)
 		MemoryContext old;
 		int			i;
 
+		/* never applicable: no data file is strictly older than this delete */
+		if (ed->seq <= min_data_seq)
+			continue;
+
 		/* the spec requires equality_ids when content = 2 */
 		if (ed->neq_ids == 0)
 			ereport(ERROR,
@@ -1155,6 +1184,14 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("iceberg: equality-delete file \"%s\" has format %s; only PARQUET equality deletes are supported",
 							ed->file_path, ed->file_format)));
+		/* the manifest list must say which partition spec the delete was
+		 * written under; without it the scope is undecidable, and defaulting
+		 * to "unpartitioned" would silently globalize a scoped delete */
+		if (!ed->has_spec_id)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: the manifest list carries no partition_spec_id for equality delete file \"%s\"",
+							ed->file_path)));
 		if (ice_spec_is_partitioned(root, ed->spec_id, path))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1508,11 +1545,19 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	ice_walk_data_files(path, &jb->root, true, ice_scan_cb, &ctx);
 
 	/* read the position-delete files once into (dpath, pos, seq) rows, and the
-	 * equality-delete files once into per-file delete-row sets (both kinds are
-	 * snapshot-global; equality deletes are validated against the metadata --
-	 * equality_ids present, unpartitioned spec, mappable column types) */
+	 * applicable equality-delete files once into per-file delete-row sets
+	 * (both kinds are snapshot-global; equality deletes are validated against
+	 * the metadata -- equality_ids present, a present partition_spec_id naming
+	 * an unpartitioned spec, mappable column types -- while a delete no data
+	 * file is strictly older than is skipped as having no effect) */
 	posdels = ice_read_pos_deletes(&ctx);
-	eqdels = ice_read_eq_deletes(&ctx, &jb->root, path);
+	{
+		int64		min_data_seq = PG_INT64_MAX;
+
+		foreach(lc, ctx.data)
+			min_data_seq = Min(min_data_seq, ((IceEntry *) lfirst(lc))->seq);
+		eqdels = ice_read_eq_deletes(&ctx, &jb->root, path, min_data_seq);
+	}
 
 	/* pass 2: read each data file, skipping the positions its deletes drop */
 	foreach(lc, ctx.data)
