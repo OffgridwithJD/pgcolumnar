@@ -1177,6 +1177,38 @@ PgColumnarIcebergIdentityPartMap(const char *path,
 	*out_npos = (int) nspec;
 }
 
+/*
+ * Return, for each column of `tupdesc`, the current-schema field id of the
+ * column with that name (0 when the table has no such column), for FDW metrics
+ * pruning that keys a data file's bounds by field id. palloc'd, length natts.
+ */
+int *
+PgColumnarIcebergColumnFieldIds(const char *path,
+								const PgColumnarObjStoreConfig *cfg,
+								TupleDesc tupdesc)
+{
+	char	   *json = ice_slurp_text(path, cfg);
+	Jsonb	   *jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+													   CStringGetDatum(json)));
+	JsonbContainer *fieldsc = ice_current_schema_fields(&jb->root, path);
+	uint32		nf = JsonContainerSize(fieldsc);
+	int		   *out = (int *) palloc0(sizeof(int) * Max(tupdesc->natts, 1));
+	int			a;
+
+	for (a = 0; a < tupdesc->natts; a++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, a);
+		int64		fid;
+
+		if (att->attisdropped)
+			continue;
+		fid = ice_field_id_by_name(fieldsc, nf, NameStr(att->attname));
+		if (fid > 0 && fid <= PG_INT32_MAX)
+			out[a] = (int) fid;
+	}
+	return out;
+}
+
 /* A name mapping has one entry per top-level column plus a few aliases; a real
  * schema is well under this. The metadata.json is capped at 64 MB, so without a
  * bound a crafted mapping could carry millions of names -- refuse rather than
@@ -1342,7 +1374,36 @@ typedef struct IceEntry
 	int64		record_count;	/* for a DV, its cardinality per the spec */
 	PgColumnarAvroPartCell *part_cells; /* typed partition tuple, or NULL */
 	int			npart_cells;
+	PgColumnarAvroBound *lower_bounds;	/* per-field-id column bounds, or NULL */
+	int			nlower;
+	PgColumnarAvroBound *upper_bounds;
+	int			nupper;
 }			IceEntry;
+
+/* deep-copy a bound map into the current memory context */
+static void
+ice_copy_bounds(const PgColumnarAvroBound *src, int nsrc,
+				PgColumnarAvroBound **out, int *nout)
+{
+	int			i;
+
+	*out = NULL;
+	*nout = 0;
+	if (nsrc <= 0)
+		return;
+	*out = (PgColumnarAvroBound *) palloc0(sizeof(PgColumnarAvroBound) * nsrc);
+	*nout = nsrc;
+	for (i = 0; i < nsrc; i++)
+	{
+		(*out)[i] = src[i];
+		if (src[i].bytes != NULL)
+		{
+			(*out)[i].bytes = (char *) palloc(Max(src[i].blen, 1));
+			if (src[i].blen > 0)
+				memcpy((*out)[i].bytes, src[i].bytes, src[i].blen);
+		}
+	}
+}
 
 /* deep-copy a partition tuple into the current memory context */
 static void
@@ -1475,6 +1536,8 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	ie->record_count = e->record_count;
 	ice_copy_part_cells(e->part_cells, e->npart_cells,
 						&ie->part_cells, &ie->npart_cells);
+	ice_copy_bounds(e->lower_bounds, e->nlower, &ie->lower_bounds, &ie->nlower);
+	ice_copy_bounds(e->upper_bounds, e->nupper, &ie->upper_bounds, &ie->nupper);
 	if (e->nequality_ids > 0)
 	{
 		ie->eq_ids = (int32 *) palloc(e->nequality_ids * sizeof(int32));
@@ -2277,15 +2340,26 @@ PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 		ListCell   *lc2;
 
 		/* pruning: a caller-supplied filter may skip a whole data file whose
-		 * partition value cannot match the scan's predicate (the FDW). Skipping
-		 * a file never changes correctness -- a false-negative just reads a file
-		 * that would have returned no rows -- so the filter is only ever an
-		 * optimization, never a source of wrong results. */
-		if (filter != NULL && filter(filterarg, d->part_cells, d->npart_cells,
-									 d->spec_id))
+		 * partition value or column bounds cannot match the scan's predicate
+		 * (the FDW). Skipping a file never changes correctness -- a false-negative
+		 * just reads a file that would have returned no rows -- so the filter is
+		 * only ever an optimization, never a source of wrong results. */
+		if (filter != NULL)
 		{
-			pruned++;
-			continue;
+			PgColumnarIceFileMeta meta;
+
+			meta.cells = d->part_cells;
+			meta.ncells = d->npart_cells;
+			meta.spec_id = d->spec_id;
+			meta.lower = d->lower_bounds;
+			meta.nlower = d->nlower;
+			meta.upper = d->upper_bounds;
+			meta.nupper = d->nupper;
+			if (filter(filterarg, &meta))
+			{
+				pruned++;
+				continue;
+			}
 		}
 
 		if (d->file_format != NULL && strcmp(d->file_format, "PARQUET") != 0)
