@@ -18,12 +18,17 @@ which was true until that script existed.
   snapshot (#388). `pgcolumnar.iceberg_scan(metadata_path)` reads a table given
   a column definition list, resolving each output column to a schema field id so
   a data file written before a column rename still reads. It applies **row-level
-  deletes of both kinds**, each under its own sequence rule: a position delete
+  deletes of all three kinds**, each under its own sequence rule: a position delete
   drops the row ordinals it names from a data file whose data sequence number is
   at or below the delete's (same commit or earlier), and an equality delete
   drops every data row matching a delete row on the delete's `equality_ids`
   columns when the data file's sequence number is strictly below the delete's
-  (never same-commit data). A null delete value matches only a null data value,
+  (never same-commit data). Format-version 3 **deletion vectors** (Puffin
+  files holding a portable roaring bitmap of row ordinals) apply under the
+  position-delete rule, scoped to their referenced data file, and supersede
+  position delete files for that file per the specification; the blob checksum,
+  the manifest/footer offsets, and the recorded cardinality are verified, and
+  at most one vector may reference a data file. A null delete value matches only a null data value,
   and columns beyond `equality_ids` do not take part in the match. Equality
   deletes with no supported handling are refused rather than ignored, so a table
   using them errors instead of returning rows it should have removed:

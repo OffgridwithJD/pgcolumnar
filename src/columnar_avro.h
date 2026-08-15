@@ -34,6 +34,12 @@ typedef struct PgColumnarAvroManifestEntry
 									 * manifest does not (files default to 0) */
 	int32	   *equality_ids;	/* content 2: the field ids defining row equality */
 	int			nequality_ids;	/* 0 when the field is null or absent */
+	char	   *referenced_data_file;	/* v3: the one data file a deletion
+										 * vector targets, or NULL */
+	int64		content_offset; /* v3: the DV blob's offset in its Puffin file */
+	bool		has_content_offset; /* false when the field is null or absent */
+	int64		content_size_in_bytes;	/* v3: the DV blob's length */
+	bool		has_content_size;	/* false when the field is null or absent */
 } PgColumnarAvroManifestEntry;
 
 /*

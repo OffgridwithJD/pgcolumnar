@@ -729,6 +729,17 @@ delete value matches a null data value, and only a null. Columns in the delete
 file beyond `equality_ids` do not take part in the match. A delete that is not
 strictly newer than any data file has no effect and is skipped.
 
+Format version 3 encodes position deletes as deletion vectors. A deletion
+vector is a compressed bitmap of row ordinals, stored as a blob in a Puffin
+file and scoped to one data file. It applies under the same sequence rule as a
+position delete file. When a deletion vector applies to a data file, position
+delete files for that file are ignored. The Iceberg specification requires the
+writer to fold their deletes into the vector. A snapshot may carry at most one
+deletion vector per data file; a second one is refused. The blob's checksum,
+its offsets against the Puffin footer, and its recorded cardinality are all
+verified, and a mismatch is refused. Deletion vectors in a table below format
+version 3 are refused, as is a compressed Puffin footer.
+
 Some equality-delete forms are refused rather than ignored. A table using them
 errors instead of returning rows it should have removed. A delete written
 under a partitioned partition spec is refused, because applying it globally

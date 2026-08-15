@@ -44,6 +44,7 @@
 #include "utils/typcache.h"
 
 #include "columnar_avro.h"
+#include "columnar_puffin.h"
 #include "columnar_parquet_reader.h"
 
 /*
@@ -956,6 +957,12 @@ typedef struct IceEntry
 	int			neq_ids;
 	int32		spec_id;		/* the enclosing manifest's partition spec id */
 	bool		has_spec_id;	/* false when the manifest list omitted it */
+	char	   *ref_data_file;	/* v3 DV: the one data file it targets */
+	int64		content_offset; /* v3 DV: blob offset in the Puffin file */
+	bool		has_content_offset;
+	int64		content_size;	/* v3 DV: blob length */
+	bool		has_content_size;
+	int64		record_count;	/* for a DV, its cardinality per the spec */
 }			IceEntry;
 
 /* one position-delete row: drop row `pos` of data file `dpath`, if this delete's
@@ -1009,6 +1016,13 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	ie->seq = e->sequence_number;
 	ie->spec_id = mf->partition_spec_id;
 	ie->has_spec_id = mf->has_partition_spec_id;
+	ie->ref_data_file = e->referenced_data_file
+		? pstrdup(e->referenced_data_file) : NULL;
+	ie->content_offset = e->content_offset;
+	ie->has_content_offset = e->has_content_offset;
+	ie->content_size = e->content_size_in_bytes;
+	ie->has_content_size = e->has_content_size;
+	ie->record_count = e->record_count;
 	if (e->nequality_ids > 0)
 	{
 		ie->eq_ids = (int32 *) palloc(e->nequality_ids * sizeof(int32));
@@ -1072,8 +1086,12 @@ ice_read_pos_deletes(IceScanCtx *c)
 		Tuplestorestate *ts;
 		MemoryContext old;
 
-		/* v2 position deletes are Parquet; a Puffin/other delete file is a later
-		 * step, refused here with a clear cause rather than a parse error */
+		/* puffin entries are v3 deletion vectors, read by ice_read_dvs */
+		if (pd->file_format != NULL &&
+			pg_strcasecmp(pd->file_format, "PUFFIN") == 0)
+			continue;
+		/* v2 position deletes are Parquet; any other delete-file format is
+		 * refused here with a clear cause rather than a parse error */
 		if (pd->file_format != NULL && strcmp(pd->file_format, "PARQUET") != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1113,6 +1131,130 @@ ice_read_pos_deletes(IceScanCtx *c)
 	MemoryContextDelete(filectx);
 	ExecDropSingleTupleTableSlot(wslot);
 	ExecDropSingleTupleTableSlot(rslot);
+	return out;
+}
+
+/* one decoded v3 deletion vector: the sorted ordinals to drop from `dpath`,
+ * when this DV's data sequence number is at or above that data file's */
+typedef struct IceDvDel
+{
+	char	   *dpath;			/* the referenced data file, as recorded */
+	int64		seq;
+	uint64	   *pos;			/* ascending ordinals */
+	int64		npos;
+}			IceDvDel;
+
+/*
+ * Read every collected puffin-format delete entry (a v3 deletion vector) into
+ * a list of IceDvDel. Validates each entry: deletion vectors exist only from
+ * format-version 3 (0A000 below that), referenced_data_file and the blob
+ * offset/length are required (XX001), at most one DV may reference a data
+ * file in a snapshot (the spec leaves violations undefined and allows readers
+ * to raise -- we raise, XX001), and the entry's record_count must equal the
+ * decoded cardinality (the spec defines it as exactly that). The Puffin file
+ * is opened through the path boundary and slurped whole (the metadata cap
+ * bounds it); columnar_puffin.c validates the container, the manifest/footer
+ * offset cross-check, the blob framing, and the CRC. The per-file buffer
+ * lives in a scratch context reset per file; the decoded ordinal arrays are
+ * allocated in the calling context.
+ */
+static List *
+ice_read_dvs(IceScanCtx *c, int64 format_version)
+{
+	List	   *out = NIL;
+	List	   *seen = NIL;
+	ListCell   *lc;
+	MemoryContext filectx;
+
+	filectx = AllocSetContextCreate(CurrentMemoryContext,
+									"pgcolumnar iceberg_scan dv",
+									ALLOCSET_DEFAULT_SIZES);
+
+	foreach(lc, c->posdel)
+	{
+		IceEntry   *pd = (IceEntry *) lfirst(lc);
+		IceDvDel   *dv;
+		ListCell   *lc2;
+		char	   *safe;
+		uint8	   *buf;
+		int64		len;
+		MemoryContext old;
+
+		if (pd->file_format == NULL ||
+			pg_strcasecmp(pd->file_format, "PUFFIN") != 0)
+			continue;
+
+		if (format_version < 3)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: \"%s\" is a deletion vector, which format-version " INT64_FORMAT " does not support",
+							pd->file_path, format_version),
+					 errdetail("Deletion vectors exist from format-version 3.")));
+		if (pd->ref_data_file == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: the deletion vector in \"%s\" has no referenced_data_file",
+							pd->file_path)));
+		if (!pd->has_content_offset || !pd->has_content_size ||
+			pd->content_offset < 0 || pd->content_size <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: the deletion vector in \"%s\" has no content offset or size",
+							pd->file_path)));
+		/* the per-file merge matches on the scheme-stripped path, so the
+		 * one-DV-per-data-file check must too, or an aliased pair (one with a
+		 * file:// scheme, one without) would slip past and be unioned */
+		foreach(lc2, seen)
+			if (strcmp(ice_strip_scheme((const char *) lfirst(lc2)),
+					   ice_strip_scheme(pd->ref_data_file)) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: two deletion vectors reference data file \"%s\"",
+								pd->ref_data_file),
+						 errdetail("A snapshot may carry at most one deletion vector per data file.")));
+		seen = lappend(seen, pd->ref_data_file);
+
+		/* Slurp AND decode in the per-file scratch context; the Puffin footer
+		 * (a payload copy plus its parsed jsonb, up to the metadata cap) must
+		 * not survive per DV entry -- a snapshot with many DVs, or many DVs
+		 * sharing one large-footer Puffin file, would otherwise retain
+		 * O(entries * footer) in the query context. Only the decoded ordinal
+		 * array is copied out to survive the reset. */
+		old = MemoryContextSwitchTo(filectx);
+		safe = ice_open_path(c->recorded_root, c->actual_root,
+							 pd->file_path, "deletion-vector", c->mdpath);
+		buf = ice_slurp_bin(safe, &len);
+		{
+			uint64	   *scratch_pos;
+			int64		scratch_n;
+
+			PgColumnarPuffinReadDeletionVector(buf, len,
+											   pd->content_offset,
+											   pd->content_size,
+											   pd->ref_data_file,
+											   pd->file_path,
+											   &scratch_pos, &scratch_n);
+			/* record_count is defined as the DV's cardinality */
+			if (scratch_n != pd->record_count)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: the deletion vector in \"%s\" names " INT64_FORMAT " positions but its manifest entry records " INT64_FORMAT,
+								pd->file_path, scratch_n, pd->record_count)));
+			MemoryContextSwitchTo(old);
+			dv = (IceDvDel *) palloc(sizeof(IceDvDel));
+			dv->dpath = pstrdup(pd->ref_data_file);
+			dv->seq = pd->seq;
+			dv->npos = scratch_n;
+			dv->pos = scratch_n > 0
+				? (uint64 *) palloc(scratch_n * sizeof(uint64)) : NULL;
+			if (scratch_n > 0)
+				memcpy(dv->pos, scratch_pos, scratch_n * sizeof(uint64));
+		}
+		out = lappend(out, dv);
+		MemoryContextReset(filectx);
+	}
+	MemoryContextDelete(filectx);
+	list_free(seen);
 	return out;
 }
 
@@ -1591,6 +1733,12 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
  *   when the data file's data sequence number is less than OR EQUAL TO the
  *   delete's (a position delete applies to data written in the same commit or
  *   earlier, so the same-sequence upsert case counts).
+ * - v3 deletion vectors (Puffin files) are position deletes in bitmap form:
+ *   the same <= sequence rule, scoped to their referenced_data_file. An
+ *   applicable DV SUPERSEDES position-delete files for its data file (the
+ *   spec's scope rule; the writer folded their deletes into it). At most one
+ *   DV may reference a data file; deletion vectors are refused below
+ *   format-version 3.
  * - Equality deletes drop every data row whose equality_ids column values match
  *   a delete row (all columns equal; null matches null), when the data file's
  *   sequence number is STRICTLY LESS THAN the delete's (an equality delete
@@ -1615,6 +1763,7 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	int		   *field_ids;
 	int			nfield;
 	List	   *posdels;
+	List	   *dvdels;
 	List	   *eqdels;
 	ListCell   *lc;
 
@@ -1673,8 +1822,17 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	 * file is strictly older than is skipped as having no effect) */
 	posdels = ice_read_pos_deletes(&ctx);
 	{
+		int64		fmtver = 0;
 		int64		min_data_seq = PG_INT64_MAX;
 
+		/* the format-version VALUE gates v3 deletion vectors; its presence
+		 * was already required when the snapshot was resolved */
+		if (!ice_num_int64(ice_field(&jb->root, "format-version"), &fmtver))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: \"%s\" has a non-numeric format-version",
+							path)));
+		dvdels = ice_read_dvs(&ctx, fmtver);
 		foreach(lc, ctx.data)
 			min_data_seq = Min(min_data_seq, ((IceEntry *) lfirst(lc))->seq);
 		eqdels = ice_read_eq_deletes(&ctx, &jb->root, path, min_data_seq);
@@ -1701,28 +1859,62 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 					 errmsg("iceberg: data file \"%s\" has format %s; only PARQUET is supported",
 							d->file_path, d->file_format)));
 
-		/* gather the ordinals to drop: position deletes that target this file
-		 * and whose data sequence number is >= the data file's. The spec rule is
-		 * data_seq <= delete_seq (a position delete applies to data written in the
-		 * same commit or earlier), so the comparison is >=, not > -- an equal
-		 * sequence number (a single-commit upsert) still applies. Equality deletes,
-		 * when added, use strict < instead. */
-		foreach(lc2, posdels)
+		/* deletion vectors first: a DV applies under the same <= sequence rule
+		 * as position-delete files (data_seq <= dv_seq, so the comparison is
+		 * >=), and an applicable DV SUPERSEDES position-delete files for its
+		 * data file -- the spec's scope rule applies a position-delete file
+		 * only when no DV must be applied, because a writer adding a DV must
+		 * fold all existing position deletes into it. */
 		{
-			IcePosDel  *pd = (IcePosDel *) lfirst(lc2);
+			bool		dv_applies = false;
 
-			if (pd->seq >= d->seq &&
-				strcmp(ice_strip_scheme(pd->dpath), dp) == 0)
+			foreach(lc2, dvdels)
 			{
-				if (nskip == cap)
+				IceDvDel   *dv = (IceDvDel *) lfirst(lc2);
+
+				if (dv->seq >= d->seq &&
+					strcmp(ice_strip_scheme(dv->dpath), dp) == 0)
 				{
-					cap = cap ? cap * 2 : 16;
-					skip = (skip == NULL)
-						? (uint64 *) palloc(cap * sizeof(uint64))
-						: (uint64 *) repalloc(skip, cap * sizeof(uint64));
+					dv_applies = true;
+					if (dv->npos > 0)
+					{
+						while (nskip + dv->npos > cap)
+							cap = cap ? cap * 2 : 16;
+						skip = (skip == NULL)
+							? (uint64 *) palloc(cap * sizeof(uint64))
+							: (uint64 *) repalloc(skip, cap * sizeof(uint64));
+						memcpy(skip + nskip, dv->pos,
+							   dv->npos * sizeof(uint64));
+						nskip += (int) dv->npos;
+					}
 				}
-				skip[nskip++] = (uint64) pd->pos;
 			}
+
+			/* gather the ordinals to drop: position deletes that target this
+			 * file and whose data sequence number is >= the data file's. The
+			 * spec rule is data_seq <= delete_seq (a position delete applies
+			 * to data written in the same commit or earlier), so the
+			 * comparison is >=, not > -- an equal sequence number (a
+			 * single-commit upsert) still applies. Equality deletes use
+			 * strict < instead. Skipped entirely when a DV applies. */
+			if (!dv_applies)
+				foreach(lc2, posdels)
+				{
+					IcePosDel  *pd = (IcePosDel *) lfirst(lc2);
+
+					if (pd->seq >= d->seq &&
+						strcmp(ice_strip_scheme(pd->dpath), dp) == 0)
+					{
+						if (nskip == cap)
+						{
+							cap = cap ? cap * 2 : 16;
+							skip = (skip == NULL)
+								? (uint64 *) palloc(cap * sizeof(uint64))
+								: (uint64 *) repalloc(skip, cap * sizeof(uint64));
+						}
+						skip[nskip++] = (uint64) pd->pos;
+					}
+				}
 		}
 
 		/* equality deletes: STRICTLY newer than the data file only (spec rule
