@@ -58,10 +58,10 @@ it, carefully.
   partition struct to a lossy display string (`name=value,...`, `?` for
   non-scalars, ambiguous nulls). A parallel typed decode captures each field as
   a cell: a null flag, and either an integer value (int/long/boolean/date/time/
-  timestamp -- all compared as int64) or raw bytes (string/binary/fixed/decimal
-  -- compared byte-for-byte). float/double partition fields, and any cell a
-  reader cannot represent for exact equality, make the tuple "incomparable".
-  The display string is unchanged (`iceberg_data_files` keeps using it).
+  timestamp -- all compared as int64) or raw bytes (string/binary, Avro
+  length-prefixed -- compared byte-for-byte). float/double, fixed/uuid, a
+  decimal encoded as fixed rather than bytes, and any nested type make the tuple
+  "incomparable". The display string is unchanged (`iceberg_data_files` uses it).
 - **Carry the tuple** onto the manifest entry, then into `IceEntry`, for both
   data files and equality-delete entries.
 - **Eligibility.** `ice_read_eq_deletes` stops refusing a partitioned-spec
@@ -79,12 +79,15 @@ it, carefully.
   or skipping it could be wrong. A partitioned delete whose spec the metadata
   does not define stays the existing `XX001`.
 - **Cross-spec-id (partition evolution).** A partitioned equality delete is
-  matched only against data files of the **same** spec id. Silently ignoring a
-  delete whose spec id matches no data file would under-apply -- failing to
-  remove rows the table says are gone, the plan's worst failure -- so that case
-  is refused `0A000` (the delete was meant to apply somewhere the reader cannot
-  resolve). Within a snapshot where the delete's spec id matches some data
-  files, those are scoped correctly and files of other spec ids are genuinely
+  matched only against data files of the **same** spec id, per the spec: a
+  partitioned delete never crosses spec ids (partition equality requires spec id
+  AND values equal). A delete whose spec id or values match no data file
+  therefore applies to nothing -- a no-op, returning all rows, NOT an error.
+  (The adversarial audit corrected an earlier over-strict design here: an
+  intended cross-spec refusal made spec-legal tables unreadable, and the pass-2
+  eligibility filter already yields the correct no-op, so the refusal was both
+  redundant and wrong.) Within a snapshot where the delete's spec id matches
+  some data
   other partitions. Full cross-spec partition-evolution matching is a later
   increment; refusing the unresolvable case keeps this one never silently
   wrong.
@@ -94,18 +97,22 @@ it, carefully.
 Data files under a partitioned spec (spec 1, identity(region)), each carrying a
 partition tuple; equality-delete files tagged with a partition tuple. Arms:
 
+Data: spec 1 identity(region); part-eu (ids 1,2, region eu) and part-us (ids
+3,4,5, region us); grp=9 on every row so only the partition scoping, not the
+value match, can distinguish partitions. The equality delete is on grp=9.
+
 | arm | shape | expect |
 |---|---|---|
-| eqpart_apply | partitioned eq delete on region='eu', deletes id 1 | only the eu data file's id 1 gone; us rows untouched |
-| eqpart_other | same delete, a us data file | not eligible (different partition), us untouched |
-| eqpart_nomatch | eq delete on region='zz' matching no data file | refused 0A000 (meant to apply somewhere) |
-| eqpart_incomparable | a float/double partition cell | refused 0A000 |
-| eqpart_global | unchanged 4b unpartitioned delete | still global (regression guard) |
+| eqpart_apply | eq delete tagged region='eu' | eu rows (1,2) gone; us (3,4,5) survive |
+| eqpart_nomatch | eq delete tagged region='zz', same spec | no-op, all 5 survive (no data in zz) |
+| eqpart_crossspec | eq delete under spec 2, data all spec 1 | no-op, all 5 survive (never crosses spec) |
+| eqpart_incomparable | a double partition cell | refused 0A000 |
 
-The 4b `eqpart` arm (which asserts the blanket 0A000 refusal) is retired and
-replaced by these; its removal is itself a proof that the refusal is gone.
-Removal proofs: drop the partition-tuple equality check -> eqpart_other reds
-(the us file wrongly loses a row, the DuckDB over-delete bug reproduced);
-drop the no-matching-spec refusal -> eqpart_nomatch reds. Value oracle is
-hand-derived (no correct engine exists); cross-checked structurally by decoding
-the crafted partition tuples back through read_avro_manifest.
+The 4b `eqpart` arm (the blanket 0A000 refusal) is retired; its delete now
+reaches the partitioned path and, carrying no comparable tuple, is refused for
+that reason. Removal proofs: drop the partition-tuple equality check ->
+eqpart_apply reds (the us rows wrongly lost, reproducing DuckDB's over-delete
+bug); drop the incomparable refusal -> eqpart_incomparable reds. The value
+oracle is hand-derived (no correct engine exists -- DuckDB over-deletes,
+pyiceberg refuses equality deletes); the crafted partition tuples are
+cross-checked structurally by decoding them back through fastavro.

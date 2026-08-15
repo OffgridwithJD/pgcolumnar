@@ -1574,11 +1574,12 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
 		E->partitioned = ice_spec_is_partitioned(root, ed->spec_id, path);
 		if (E->partitioned)
 		{
-			ListCell   *lcd;
-			bool		anyspec = false;
-
 			/* a partition-scoped delete applies where its (spec id, partition
-			 * tuple) equals a data file's; we need a comparable tuple */
+			 * tuple) equals a data file's; we need a comparable tuple. A delete
+			 * whose spec id or values match no data file simply applies to
+			 * nothing -- the pass-2 filter yields that no-op, exactly as the
+			 * spec requires (a partitioned delete never crosses spec ids), so
+			 * no cross-spec refusal is needed or correct. */
 			if (ed->npart_cells == 0 ||
 				ice_part_incomparable(ed->part_cells, ed->npart_cells))
 				ereport(ERROR,
@@ -1586,21 +1587,6 @@ ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
 						 errmsg("iceberg: partition-scoped equality delete file \"%s\" has a partition tuple this reader cannot compare",
 								ed->file_path),
 						 errdetail("A float, double, or otherwise uncomparable partition value is not supported.")));
-			/* a delete whose spec id matches no data file was meant to apply
-			 * somewhere the reader cannot resolve (partition evolution);
-			 * silently ignoring it would under-delete, so refuse */
-			foreach(lcd, c->data)
-				if (((IceEntry *) lfirst(lcd))->spec_id == ed->spec_id)
-				{
-					anyspec = true;
-					break;
-				}
-			if (!anyspec)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("iceberg: partition-scoped equality delete file \"%s\" (spec %d) matches no data file's partition spec",
-								ed->file_path, ed->spec_id),
-						 errdetail("Cross-spec partition matching (partition evolution) is not yet supported.")));
 			ice_copy_part_cells(ed->part_cells, ed->npart_cells,
 								&E->part_cells, &E->npart_cells);
 		}

@@ -193,10 +193,11 @@ check "a delete scoped to an empty partition deletes nothing (5 rows)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_nomatch.metadata.json')
 	      AS t(id bigint, region text, grp int)")" "5"
 # a delete written under a partition spec no data file uses (partition
-# evolution) cannot be resolved; ignoring it would under-delete -> refuse
-check "a cross-spec partition-scoped delete is refused (0A000)" \
-	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_crossspec.metadata.json')
-	                AS t(id bigint, region text, grp int)")" "0A000"
+# evolution): per the spec a partitioned delete never crosses spec ids, so it
+# applies to nothing -- a no-op, all rows survive, never a global over-delete
+check "a cross-spec partition-scoped delete applies to nothing (5 rows)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_crossspec.metadata.json')
+	      AS t(id bigint, region text, grp int)")" "5"
 # a partition tuple the reader cannot compare exactly (a double) is refused
 check "a partition-scoped delete with an uncomparable partition value is refused (0A000)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/eqpart_incomparable.metadata.json')
