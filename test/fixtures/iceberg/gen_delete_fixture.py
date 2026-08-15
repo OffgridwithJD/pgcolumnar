@@ -1016,6 +1016,62 @@ emit_part_variant("eqpart_crossspec", "eu", del_spec_id=2)
 emit_part_variant("eqpart_incomparable", None, del_schema=ENTRY_SCHEMA_PARTF,
                   double_part=True)
 
+
+# eqpart_datanospec: corrupt metadata where the DATA file's manifest_file entry
+# carries no partition_spec_id (a nullable union encoding null) while the
+# partitioned delete's does. Without the data-side guard this would silently
+# under-delete (the data file's spec id defaults to 0, mismatches the delete's,
+# and the delete that should apply is skipped). The manifest list uses a schema
+# whose partition_spec_id is [null,int] so one row can omit it and the other not.
+MFILE_SCHEMA_NULLSPEC = json.dumps({"type": "record", "name": "manifest_file", "fields": [
+    {"name": "manifest_path", "type": "string"},
+    {"name": "manifest_length", "type": "long"},
+    {"name": "partition_spec_id", "type": ["null", "int"]},
+    {"name": "content", "type": "int"},
+    {"name": "sequence_number", "type": "long"},
+    {"name": "min_sequence_number", "type": "long"},
+    {"name": "added_snapshot_id", "type": "long"},
+    {"name": "added_files_count", "type": "int"},
+    {"name": "existing_files_count", "type": "int"},
+    {"name": "deleted_files_count", "type": "int"},
+    {"name": "added_rows_count", "type": "long"},
+    {"name": "existing_rows_count", "type": "long"},
+    {"name": "deleted_rows_count", "type": "long"}]}).encode()
+
+
+def mfile_nullspec(path, content, seq, snap, files, rows, spec_id):
+    """mfile with partition_spec_id as a [null,int] union: spec_id None -> null
+    (the corrupt data-file case), else branch 1 with the value."""
+    sb = zz(0) if spec_id is None else (zz(1) + zz(spec_id))
+    return s(path.encode()) + zz(1000) + sb + zz(content) + zz(seq) + zz(seq) + \
+        zz(snap) + zz(files) + zz(0) + zz(0) + zz(rows) + zz(0) + zz(0)
+
+
+def emit_part_datanospec():
+    tag = "eqpart_datanospec"
+    xm_name = f"delete-manifest-{tag}.avro"
+    open(os.path.join(md, xm_name), "wb").write(ocf_multi(
+        ENTRY_SCHEMA_PART, [entry_part(1, EQ_SEQ, 2, EQ_GRP, 1, 500, "eu", [3])]))
+    xm = f"{LOC}/metadata/{xm_name}"
+    sync = b"\x00" * 16
+    meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA_NULLSPEC) + s(b"avro.codec") + s(b"null") + zz(0)
+    ml = b"Obj\x01" + meta + sync
+    for rec in (mfile_nullspec(PDM, 0, DATA_SEQ, SNAP, 2, 5, None),   # data: no spec id
+                mfile_nullspec(xm, 1, EQ_SEQ, SNAP, 1, 1, 1)):        # delete: spec 1
+        ml += zz(1) + zz(len(rec)) + rec + sync
+    open(os.path.join(md, f"manifest-list-{tag}.avro"), "wb").write(ml)
+    open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps({
+        "format-version": 2, "location": LOC, "current-schema-id": 0,
+        "schemas": [P_SCHEMA_JSON], "partition-specs": PART_SPECS_P5,
+        "default-spec-id": 1, "current-snapshot-id": SNAP,
+        "snapshots": [{"snapshot-id": SNAP, "sequence-number": EQ_SEQ,
+                       "timestamp-ms": 0,
+                       "manifest-list": f"{LOC}/metadata/manifest-list-{tag}.avro",
+                       "summary": {"operation": "overwrite"}, "schema-id": 0}]}))
+
+
+emit_part_datanospec()
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]
