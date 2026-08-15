@@ -13,16 +13,30 @@
 #include "columnar_objstore.h"	/* PgColumnarObjStoreConfig */
 
 struct PgColumnarAvroPartCell;
+struct PgColumnarAvroBound;
 
 /*
- * A per-data-file filter for a filtered Iceberg scan (the FDW's pruning): return
- * true to SKIP (prune) the file, false to read it. `cells`/`ncells` is the
- * file's typed partition tuple (as stored in the manifest, already transformed),
- * `spec_id` its partition spec id.
+ * What a per-data-file filter (the FDW's pruning) sees about one data file: its
+ * typed partition tuple (already transformed) and spec id, and its column
+ * lower/upper bounds (Iceberg single-value binary, keyed by field id).
+ */
+typedef struct PgColumnarIceFileMeta
+{
+	const struct PgColumnarAvroPartCell *cells;
+	int			ncells;
+	int32		spec_id;
+	const struct PgColumnarAvroBound *lower;
+	int			nlower;
+	const struct PgColumnarAvroBound *upper;
+	int			nupper;
+} PgColumnarIceFileMeta;
+
+/*
+ * A per-data-file filter for a filtered Iceberg scan: return true to SKIP
+ * (prune) the file, false to read it.
  */
 typedef bool (*PgColumnarIceFileFilter) (void *arg,
-										 const struct PgColumnarAvroPartCell *cells,
-										 int ncells, int32 spec_id);
+										 const PgColumnarIceFileMeta *meta);
 
 /*
  * Read the Iceberg table whose current metadata.json is at `path` (a local or
@@ -63,5 +77,13 @@ extern void PgColumnarIcebergIdentityPartMap(const char *path,
 											 TupleDesc tupdesc,
 											 int **out_attno, int *out_npos,
 											 int32 *out_specid);
+
+/*
+ * Per-column current-schema field ids (0 when absent), length tupdesc->natts,
+ * for FDW metrics pruning keyed by field id. palloc'd in the current context.
+ */
+extern int *PgColumnarIcebergColumnFieldIds(const char *path,
+											const PgColumnarObjStoreConfig *cfg,
+											TupleDesc tupdesc);
 
 #endif							/* COLUMNAR_ICEBERG_H */

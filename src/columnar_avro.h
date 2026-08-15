@@ -60,7 +60,22 @@ typedef struct PgColumnarAvroManifestEntry
 	bool		has_content_size;	/* false when the field is null or absent */
 	PgColumnarAvroPartCell *part_cells; /* the partition tuple, typed, or NULL */
 	int			npart_cells;	/* 0 when there is no partition struct */
+	struct PgColumnarAvroBound *lower_bounds;	/* per field id, single-value bin */
+	int			nlower;
+	struct PgColumnarAvroBound *upper_bounds;
+	int			nupper;
 } PgColumnarAvroManifestEntry;
+
+/*
+ * One data-file column bound (lower_bounds / upper_bounds map entry): a field id
+ * and the column value in Iceberg single-value binary form.
+ */
+typedef struct PgColumnarAvroBound
+{
+	int32		field_id;
+	char	   *bytes;
+	int			blen;
+} PgColumnarAvroBound;
 
 /*
  * One decoded manifest_file entry from a snapshot's manifest list: which

@@ -81,12 +81,14 @@ which was true until that script existed.
   foreign table over an Iceberg table gets the query's predicate, which
   `iceberg_scan` cannot, and prunes: a predicate on an identity-partitioned
   column removes whole data files before they are opened, reading each file's
-  partition value from the manifest. Pruning is only an optimization, so a
+  partition value from the manifest. A predicate on an integer or boolean column
+  removes whole files whose stored minimum and maximum exclude it, so an
+  unpartitioned column prunes too. Pruning is only an optimization, so a
   predicate the wrapper cannot decide never changes the rows returned, and every
   projection and delete rule matches `iceberg_scan`. The table option is
-  `metadata_path`; `EXPLAIN (ANALYZE)` reports `Files Pruned`. Only identity
-  partitioning prunes in this release; other partition transforms read in full.
-  See
+  `metadata_path`; `EXPLAIN (ANALYZE)` reports `Files Pruned`. Partition pruning
+  covers identity partitioning and metrics pruning covers integer and boolean
+  columns; other transforms and types read in full. See
   [Iceberg FDW](docs/sql-reference.md#the-pgcolumnar_iceberg-foreign-data-wrapper).
 
 - The Parquet read and export functions and the foreign-data wrapper read from

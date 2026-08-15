@@ -669,6 +669,148 @@ av_read_int_array(AvReader *r, AvSchema *s, int32 **out, int *nout)
 	*nout = n;
 }
 
+#define AV_MAX_BOUNDS 8192
+#define AV_MAX_BOUND_LEN 65536
+
+/*
+ * Decode a lower_bounds / upper_bounds field: Iceberg's map<int,bytes> is an
+ * Avro array of {key:int, value:bytes} records (Avro maps need string keys), so
+ * read it as a block array of key/value records, keeping the field id and a copy
+ * of the single-value binary. Absent, null, or mistyped decodes as empty.
+ */
+static void
+av_read_bound_map(AvReader *r, AvSchema *s,
+				  PgColumnarAvroBound **out, int *nout)
+{
+	bool		isnull;
+	AvSchema   *t = av_unwrap_union(r, s, &isnull);
+	AvSchema   *rec;
+	PgColumnarAvroBound *b = NULL;
+	int			n = 0;
+	int			cap = 0;
+
+	*out = NULL;
+	*nout = 0;
+	if (r->error || isnull)
+		return;
+	if (t->kind != AV_ARRAY || t->items->kind != AV_RECORD)
+	{
+		av_skip(r, t);
+		return;
+	}
+	rec = t->items;
+
+	while (!r->error)
+	{
+		int64		cnt;
+		int64		i;
+
+		CHECK_FOR_INTERRUPTS();
+		cnt = av_long(r);
+		if (cnt == 0)
+			break;
+		if (cnt < 0)
+		{
+			if (cnt < -AV_MAX_BOUNDS)
+			{
+				r->error = true;
+				break;
+			}
+			cnt = -cnt;
+			(void) av_long(r);	/* block byte size, unused */
+		}
+		if (cnt > AV_MAX_BOUNDS || n + cnt > AV_MAX_BOUNDS)
+		{
+			r->error = true;
+			break;
+		}
+		for (i = 0; i < cnt && !r->error; i++)
+		{
+			int32		key = 0;
+			char	   *val = NULL;
+			int			vlen = 0;
+			bool		haskey = false;
+			bool		hasval = false;
+			int			j;
+
+			for (j = 0; j < rec->n && !r->error; j++)
+			{
+				const char *fn = rec->fields[j].name;
+				AvSchema   *fty = rec->fields[j].type;
+
+				if (strcmp(fn, "key") == 0)
+				{
+					bool		have;
+					int64		k = av_read_long(r, fty, &have);
+
+					if (r->error || k < PG_INT32_MIN || k > PG_INT32_MAX)
+					{
+						r->error = true;
+						break;
+					}
+					key = (int32) k;
+					haskey = true;
+				}
+				else if (strcmp(fn, "value") == 0)
+				{
+					bool		vnull;
+					AvSchema   *vt = av_unwrap_union(r, fty, &vnull);
+
+					if (r->error)
+						break;
+					if (vnull)
+						continue;
+					if (vt->kind != AV_BYTES && vt->kind != AV_STRING)
+					{
+						av_skip(r, vt);
+						continue;
+					}
+					{
+						int64		len = av_long(r);
+						const uint8 *p;
+
+						if (r->error || len < 0 || len > AV_MAX_BOUND_LEN)
+						{
+							r->error = true;
+							break;
+						}
+						p = av_take(r, len);
+						if (r->error)
+							break;
+						val = (char *) palloc(Max(len, 1));
+						if (len > 0)
+							memcpy(val, p, len);
+						vlen = (int) len;
+						hasval = true;
+					}
+				}
+				else
+					av_skip(r, fty);
+			}
+			if (r->error)
+				break;
+			if (haskey && hasval)
+			{
+				if (n == cap)
+				{
+					cap = cap ? cap * 2 : 8;
+					b = (b == NULL)
+						? (PgColumnarAvroBound *) palloc(cap * sizeof(*b))
+						: (PgColumnarAvroBound *) repalloc(b, cap * sizeof(*b));
+				}
+				b[n].field_id = key;
+				b[n].bytes = val;
+				b[n].blen = vlen;
+				n++;
+			}
+		}
+	}
+	if (r->error)
+		return;
+	*out = b;
+	*nout = n;
+}
+
 /* decode one data_file record into the projected fields */
 static void
 av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
@@ -706,6 +848,10 @@ av_decode_data_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 		}
 		else if (strcmp(nm, "equality_ids") == 0)
 			av_read_int_array(r, ft, &e->equality_ids, &e->nequality_ids);
+		else if (strcmp(nm, "lower_bounds") == 0)
+			av_read_bound_map(r, ft, &e->lower_bounds, &e->nlower);
+		else if (strcmp(nm, "upper_bounds") == 0)
+			av_read_bound_map(r, ft, &e->upper_bounds, &e->nupper);
 		else if (strcmp(nm, "referenced_data_file") == 0)
 			e->referenced_data_file = av_read_string(r, ft);
 		else if (strcmp(nm, "content_offset") == 0)

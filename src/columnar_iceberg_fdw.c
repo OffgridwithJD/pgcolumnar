@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 
 #include "access/reloptions.h"
+#include "access/stratnum.h"
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_type_d.h"
@@ -65,8 +66,21 @@ typedef struct IceFdwState
 	int32		specid;			/* current spec; a file with another spec is read */
 	List	   *partQuals;		/* compiled quals over identity-partition columns */
 	TupleTableSlot *partSlot;
+	List	   *metricQuals;	/* IceMetricQual*, min/max prune on int/bool cols */
 	int64		filesPruned;
 }			IceFdwState;
+
+/*
+ * A predicate a data file's column bounds can decide: "column <op> constant" on
+ * an integer/boolean column, reduced to a btree strategy (normalized so the
+ * column is on the left) and the constant as int64.
+ */
+typedef struct IceMetricQual
+{
+	int32		fieldid;		/* the column's Iceberg field id */
+	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
+	int64		constval;
+}			IceMetricQual;
 
 /* a named option of a foreign table, or NULL */
 static char *
@@ -228,26 +242,239 @@ ice_fdw_cell_datum(const PgColumnarAvroPartCell *c, Oid typid, bool *ok)
 	return (Datum) 0;
 }
 
+/* the lower/upper bound bytes for `fieldid` in a bound map, or NULL */
+static const PgColumnarAvroBound *
+ice_fdw_find_bound(const PgColumnarAvroBound *b, int n, int32 fieldid)
+{
+	int			i;
+
+	for (i = 0; i < n; i++)
+		if (b[i].field_id == fieldid)
+			return &b[i];
+	return NULL;
+}
+
+/* Decode an Iceberg single-value binary integer/boolean bound to int64 by its
+ * byte width (bool 1, int 4, long 8, all little-endian). Returns false for any
+ * other width, so an unexpected encoding never prunes. */
+static bool
+ice_fdw_bound_int(const PgColumnarAvroBound *b, int64 *out)
+{
+	const unsigned char *p = (const unsigned char *) b->bytes;
+
+	if (b->bytes == NULL)
+		return false;
+	if (b->blen == 1)
+		*out = (int64) p[0];
+	else if (b->blen == 4)
+		*out = (int64) (int32) ((uint32) p[0] | ((uint32) p[1] << 8) |
+								((uint32) p[2] << 16) | ((uint32) p[3] << 24));
+	else if (b->blen == 8)
+		*out = (int64) ((uint64) p[0] | ((uint64) p[1] << 8) |
+						((uint64) p[2] << 16) | ((uint64) p[3] << 24) |
+						((uint64) p[4] << 32) | ((uint64) p[5] << 40) |
+						((uint64) p[6] << 48) | ((uint64) p[7] << 56));
+	else
+		return false;
+	return true;
+}
+
+/* Does "column <strategy> const" have no satisfying value in [lo, hi]? Sound and
+ * conservative: only returns true when the file provably yields no matching row. */
+static bool
+ice_fdw_metric_excludes(int strategy, int64 c, int64 lo, int64 hi)
+{
+	switch (strategy)
+	{
+		case BTEqualStrategyNumber:
+			return (c < lo || c > hi);
+		case BTLessStrategyNumber:	/* col < c : possible iff lo < c */
+			return (lo >= c);
+		case BTLessEqualStrategyNumber:	/* col <= c : possible iff lo <= c */
+			return (lo > c);
+		case BTGreaterStrategyNumber:	/* col > c : possible iff hi > c */
+			return (hi <= c);
+		case BTGreaterEqualStrategyNumber:	/* col >= c : possible iff hi >= c */
+			return (hi < c);
+		default:
+			return false;
+	}
+}
+
+/* Extract an int2/int4/int8/bool Const as int64; false for any other type. */
+static bool
+ice_fdw_const_int(Const *c, int64 *out)
+{
+	if (c->constisnull)
+		return false;
+	switch (c->consttype)
+	{
+		case BOOLOID:
+			*out = DatumGetBool(c->constvalue) ? 1 : 0;
+			return true;
+		case INT2OID:
+			*out = (int64) DatumGetInt16(c->constvalue);
+			return true;
+		case INT4OID:
+			*out = (int64) DatumGetInt32(c->constvalue);
+			return true;
+		case INT8OID:
+			*out = DatumGetInt64(c->constvalue);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Compile the scan's "column <op> const" predicates over integer/boolean columns
+ * into IceMetricQuals a data file's min/max bounds can decide. Any column with a
+ * field id and a supported type qualifies (not only partition columns), so a
+ * predicate on an unpartitioned column can still prune whole files by metrics.
+ */
+static List *
+ice_fdw_metric_quals(ForeignScanState *node, TupleDesc tupdesc,
+					 const int *attFieldId)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) lfirst(lc);
+		Node	   *larg;
+		Node	   *rarg;
+		Var		   *var;
+		Const	   *con;
+		bool		varLeft;
+		int			strategy = 0;
+		int64		cval;
+		Oid			ctype;
+		ListCell   *ic;
+		List	   *interp;
+		IceMetricQual *mq;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		larg = (Node *) linitial(op->args);
+		rarg = (Node *) lsecond(op->args);
+		if (IsA(larg, Var) && IsA(rarg, Const))
+		{
+			var = (Var *) larg;
+			con = (Const *) rarg;
+			varLeft = true;
+		}
+		else if (IsA(larg, Const) && IsA(rarg, Var))
+		{
+			var = (Var *) rarg;
+			con = (Const *) larg;
+			varLeft = false;
+		}
+		else
+			continue;
+		if (var->varattno < 1 || var->varattno > tupdesc->natts ||
+			attFieldId[var->varattno - 1] == 0)
+			continue;
+		ctype = TupleDescAttr(tupdesc, var->varattno - 1)->atttypid;
+		if (ctype != INT2OID && ctype != INT4OID && ctype != INT8OID &&
+			ctype != BOOLOID)
+			continue;
+		if (contain_volatile_functions((Node *) op))
+			continue;
+		if (!ice_fdw_const_int(con, &cval))
+			continue;
+
+		interp = PgColumnarGetOpInterpretation(op->opno);
+		foreach(ic, interp)
+		{
+			PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+			int			s = PgColumnarOpInterpStrategy(o);
+
+			if (s >= BTLessStrategyNumber && s <= BTGreaterStrategyNumber)
+			{
+				strategy = s;
+				break;
+			}
+		}
+		if (strategy == 0)
+			continue;
+		/* normalize so the column is on the left: "c op var" -> "var flip(op) c" */
+		if (!varLeft)
+		{
+			switch (strategy)
+			{
+				case BTLessStrategyNumber:
+					strategy = BTGreaterStrategyNumber;
+					break;
+				case BTLessEqualStrategyNumber:
+					strategy = BTGreaterEqualStrategyNumber;
+					break;
+				case BTGreaterStrategyNumber:
+					strategy = BTLessStrategyNumber;
+					break;
+				case BTGreaterEqualStrategyNumber:
+					strategy = BTLessEqualStrategyNumber;
+					break;
+				default:
+					break;		/* BTEqual is symmetric */
+			}
+		}
+
+		mq = (IceMetricQual *) palloc(sizeof(IceMetricQual));
+		mq->fieldid = attFieldId[var->varattno - 1];
+		mq->strategy = strategy;
+		mq->constval = cval;
+		out = lappend(out, mq);
+	}
+	return out;
+}
+
 /*
  * The per-file filter passed to PgColumnarIcebergScanCore: return true to prune
- * (skip) a data file whose identity-partition values make every candidate qual
- * false. A file written under a different partition spec than the current one,
- * or with an incomparable/unsupported partition cell, is never pruned.
+ * (skip) a data file that provably yields no matching row -- because its column
+ * min/max bounds exclude a predicate, or its identity-partition value does. A
+ * file written under a different partition spec, or with a missing bound or an
+ * incomparable/unsupported partition cell, is never pruned (it is read and its
+ * rows are re-filtered by the recheckable qual).
  */
 static bool
-ice_fdw_file_excludes(void *arg, const PgColumnarAvroPartCell *cells,
-					  int ncells, int32 spec_id)
+ice_fdw_file_excludes(void *arg, const PgColumnarIceFileMeta *meta)
 {
 	IceFdwState *st = (IceFdwState *) arg;
-	ExprContext *econtext = st->node->ss.ps.ps_ExprContext;
+	ExprContext *econtext;
 	TupleDesc	tupdesc = st->tupdesc;
 	ListCell   *lc;
 	int			i;
 	int			k;
 
-	if (st->partQuals == NIL || spec_id != st->specid || ncells != st->npart)
+	/* metrics pruning: a data file whose [lower, upper] for a column excludes
+	 * the predicate over it yields no matching row (bounds present for both). */
+	foreach(lc, st->metricQuals)
+	{
+		IceMetricQual *mq = (IceMetricQual *) lfirst(lc);
+		const PgColumnarAvroBound *lb = ice_fdw_find_bound(meta->lower, meta->nlower,
+														   mq->fieldid);
+		const PgColumnarAvroBound *ub = ice_fdw_find_bound(meta->upper, meta->nupper,
+														   mq->fieldid);
+		int64		lo;
+		int64		hi;
+
+		if (lb == NULL || ub == NULL)
+			continue;			/* no bounds for this column: cannot decide */
+		if (!ice_fdw_bound_int(lb, &lo) || !ice_fdw_bound_int(ub, &hi))
+			continue;			/* unexpected width: do not prune */
+		if (lo > hi)
+			continue;			/* a nonsense bound: never prune on it */
+		if (ice_fdw_metric_excludes(mq->strategy, mq->constval, lo, hi))
+			return true;
+	}
+
+	if (st->partQuals == NIL || meta->spec_id != st->specid ||
+		meta->ncells != st->npart)
 		return false;
 
+	econtext = st->node->ss.ps.ps_ExprContext;
 	ExecClearTuple(st->partSlot);
 	for (i = 0; i < tupdesc->natts; i++)
 	{
@@ -263,13 +490,13 @@ ice_fdw_file_excludes(void *arg, const PgColumnarAvroPartCell *cells,
 
 		if (a <= 0 || a > tupdesc->natts)
 			continue;
-		if (cells[k].isnull)
+		if (meta->cells[k].isnull)
 		{
 			st->partSlot->tts_isnull[a - 1] = true;	/* a real NULL: prunable */
 			continue;
 		}
 		typid = TupleDescAttr(tupdesc, a - 1)->atttypid;
-		d = ice_fdw_cell_datum(&cells[k], typid, &ok);
+		d = ice_fdw_cell_datum(&meta->cells[k], typid, &ok);
 		if (!ok)
 		{
 			/*
@@ -358,6 +585,14 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 		st->partSlot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 	}
 
+	/* metrics pruning: min/max over int/bool columns, keyed by field id */
+	{
+		int		   *attFieldId = PgColumnarIcebergColumnFieldIds(st->metadata_path,
+																 NULL, tupdesc);
+
+		st->metricQuals = ice_fdw_metric_quals(node, tupdesc, attFieldId);
+	}
+
 	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 	st->started = false;
@@ -378,10 +613,11 @@ icefdwIterateForeignScan(ForeignScanState *node)
 	if (!st->started)
 	{
 		/* read the surviving files (pruned by the filter) into the tuplestore */
+		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL);
+
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,
-													st->partQuals != NIL ?
-													ice_fdw_file_excludes : NULL,
+													prune ? ice_fdw_file_excludes : NULL,
 													st);
 		st->started = true;
 	}

@@ -72,12 +72,30 @@ check "region='zz' prunes both files (Files Pruned: 2)" \
 check "region='zz' returns no rows" \
 	"$(q "SELECT count(*) FROM ev WHERE region='zz'")" "0"
 
-# ---- a predicate on a NON-partition column prunes nothing, stays correct -----
-check "a non-partition predicate prunes no files (Files Pruned: 0)" \
-	"$(fp "SELECT * FROM ev WHERE amount > 25")" "0"
-check "the non-partition predicate still returns the right rows" \
+# ---- metrics pruning: a NON-partition int column prunes by file min/max ------
+# amount bounds: region=eu file [10,20], region=us file [30,50].
+check "amount > 25 prunes the eu file by metrics (Files Pruned: 1)" \
+	"$(fp "SELECT * FROM ev WHERE amount > 25")" "1"
+check "amount > 25 still returns the right rows" \
 	"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev WHERE amount > 25")" \
 	"3,4,5"
+check "amount < 15 prunes the us file by metrics (Files Pruned: 1)" \
+	"$(fp "SELECT * FROM ev WHERE amount < 15")" "1"
+check "amount < 15 returns only id 1" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev WHERE amount < 15")" "1"
+check "amount = 30 prunes the eu file, keeps us (Files Pruned: 1)" \
+	"$(fp "SELECT * FROM ev WHERE amount = 30")" "1"
+check "amount = 30 returns id 3" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev WHERE amount = 30")" "3"
+check "amount = 100 prunes both files by metrics (Files Pruned: 2)" \
+	"$(fp "SELECT * FROM ev WHERE amount = 100")" "2"
+check "amount = 100 returns no rows" \
+	"$(q "SELECT count(*) FROM ev WHERE amount = 100")" "0"
+check_text "a metrics-pruned query matches iceberg_scan (same oracle)" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev WHERE amount >= 30")" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+	      FROM pgcolumnar.iceberg_scan('$MD') AS t(id bigint, region text, amount int)
+	      WHERE amount >= 30")"
 
 # ---- a DATE identity partition must NOT over-prune (the #660 bug) ------------
 # the FDW cannot convert a date partition cell, so it must read the file in full
