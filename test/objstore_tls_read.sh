@@ -80,6 +80,12 @@ gen_cert goodsig   ca1 "IP:127.0.0.1"
 gen_cert wronghost ca1 "DNS:other.example"
 gen_cert expired   ca1 "IP:127.0.0.1" \
 	-not_before 20200101000000Z -not_after 20200102000000Z
+# -not_before/-not_after need OpenSSL 3.4; on an older one (Ubuntu 24.04 CI
+# ships 3.0) the command fails and leaves no pem. Fall back to a zero-lifetime
+# certificate: notAfter equals the signing instant, so it is expired by the
+# time the server answers its first request. The premise check below still
+# proves the certificate is genuinely expired, whichever path produced it.
+[ -s "$PKI/expired.pem" ] || gen_cert expired ca1 "IP:127.0.0.1" -days 0
 gen_cert untrusted ca2 "IP:127.0.0.1"
 for f in ca1 ca2 good goodsig wronghost expired untrusted; do
 	[ -s "$PKI/$f.pem" ] || { echo "FATAL: PKI generation failed for $f"; exit 1; }
