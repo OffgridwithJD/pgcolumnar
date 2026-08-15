@@ -26,6 +26,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -34,10 +35,13 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "executor/tuptable.h"
+#include "utils/datum.h"
 #include "utils/jsonb.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/tuplestore.h"
+#include "utils/typcache.h"
 
 #include "columnar_avro.h"
 #include "columnar_parquet_reader.h"
@@ -493,6 +497,7 @@ pgcolumnar_iceberg_current_snapshot(PG_FUNCTION_ARGS)
  * (reads them and applies deletes).
  */
 typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
+							   const PgColumnarAvroManifestFile *mf,
 							   const char *recorded_root, const char *actual_root,
 							   const char *mdpath, int64 snapshot_id);
 
@@ -503,10 +508,10 @@ typedef void (*IceDataFileCb) (void *ctx, PgColumnarAvroManifestEntry *e,
  * through ice_open_path's path boundary).
  *
  * When `collect_deletes` is false (the lister), any delete file or removed entry
- * is refused loudly (0A000). When true (the scan), position-delete entries
- * (content 1) are passed to `cb` alongside data entries (content 0), removed
- * entries (status 2) are skipped, and only equality deletes (content 2) -- not
- * yet supported -- are refused. Does nothing when there is no current snapshot.
+ * is refused loudly (0A000). When true (the scan), position-delete (content 1)
+ * and equality-delete (content 2) entries are passed to `cb` alongside data
+ * entries (content 0), and removed entries (status 2) are skipped. Does nothing
+ * when there is no current snapshot.
  */
 static void
 ice_walk_data_files(const char *path, JsonbContainer *root,
@@ -594,17 +599,10 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 			}
 			else
 			{
-				/* the scan skips removed entries and, for now, refuses only the
-				 * equality-delete kind it does not yet apply */
+				/* the scan skips removed entries; both delete kinds are
+				 * collected and applied by the caller */
 				if (e->status == 2)
 					continue;
-				if (e->content == 2)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("iceberg: snapshot " INT64_FORMAT " has equality delete files, which are not yet supported",
-									cur),
-							 errdetail("Entry \"%s\" has content 2 (equality deletes).",
-									   e->file_path)));
 			}
 
 			/* a manifest entry with no data-file path is corrupt metadata; refuse
@@ -616,24 +614,35 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 						 errmsg("iceberg: a manifest entry in snapshot " INT64_FORMAT " has no data file path",
 								cur)));
 
-			/* resolve the data sequence number. The spec inherits a null entry
-			 * sequence number from the manifest ONLY for ADDED (status 1)
-			 * entries; an EXISTING (0) or DELETED (2) entry must carry it
-			 * explicitly, so a null one there is corrupt metadata, not an
-			 * inheritance -- inheriting the current (too-new) manifest number
-			 * could wrongly keep a row a delete should have removed. */
+			/* resolve the data sequence number. A manifest whose entry schema
+			 * has no sequence-number column at all is v1-shaped: the spec
+			 * defaults every file's sequence number to 0, for every status.
+			 * In a v2 manifest (the column exists) a null is inherited from
+			 * the manifest ONLY for ADDED (status 1) entries; an EXISTING (0)
+			 * or DELETED (2) entry must carry it explicitly, so a null there
+			 * is corrupt metadata, not an inheritance -- inheriting the
+			 * current (too-new) manifest number could wrongly keep a row a
+			 * delete should have removed. */
 			if (!e->has_sequence_number)
 			{
-				if (e->status != 1)
+				if (!e->has_sequence_field)
+				{
+					e->sequence_number = 0;
+					e->has_sequence_number = true;
+				}
+				else if (e->status != 1)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("iceberg: a status-%d manifest entry for \"%s\" has no sequence number",
 									e->status, e->file_path)));
-				e->sequence_number = mfs[mi].sequence_number;
-				e->has_sequence_number = true;
+				else
+				{
+					e->sequence_number = mfs[mi].sequence_number;
+					e->has_sequence_number = true;
+				}
 			}
 
-			cb(ctx, e, recorded_root, actual_root, path, cur);
+			cb(ctx, e, &mfs[mi], recorded_root, actual_root, path, cur);
 		}
 
 		pfree(mbuf);
@@ -653,6 +662,7 @@ typedef struct IceListCtx
 
 static void
 ice_list_cb(void *ctx, PgColumnarAvroManifestEntry *e,
+			const PgColumnarAvroManifestFile *mf,
 			const char *recorded_root, const char *actual_root,
 			const char *mdpath, int64 snapshot_id)
 {
@@ -660,6 +670,7 @@ ice_list_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	Datum		values[ICE_FILE_NCOLS];
 	bool		nulls[ICE_FILE_NCOLS];
 
+	(void) mf;
 	(void) snapshot_id;
 	memset(nulls, false, sizeof(nulls));
 	values[0] = PointerGetDatum(cstring_to_text(
@@ -827,12 +838,16 @@ ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
 #define ICE_POSDEL_PATH_ID 2147483546
 #define ICE_POSDEL_POS_ID  2147483545
 
-/* one collected manifest entry: a data file or a position-delete file */
+/* one collected manifest entry: a data file or a delete file of either kind */
 typedef struct IceEntry
 {
 	char	   *file_path;		/* the path as recorded (rebased at read time) */
 	char	   *file_format;	/* for the "only PARQUET" check on data files */
 	int64		seq;			/* resolved data sequence number */
+	int32	   *eq_ids;			/* content 2: the field ids defining equality */
+	int			neq_ids;
+	int32		spec_id;		/* the enclosing manifest's partition spec id */
+	bool		has_spec_id;	/* false when the manifest list omitted it */
 }			IceEntry;
 
 /* one position-delete row: drop row `pos` of data file `dpath`, if this delete's
@@ -859,10 +874,12 @@ typedef struct IceScanCtx
 	char	   *mdpath;
 	List	   *data;			/* IceEntry* content 0 */
 	List	   *posdel;			/* IceEntry* content 1 */
+	List	   *eqdel;			/* IceEntry* content 2 */
 }			IceScanCtx;
 
 static void
 ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
+			const PgColumnarAvroManifestFile *mf,
 			const char *recorded_root, const char *actual_root,
 			const char *mdpath, int64 snapshot_id)
 {
@@ -879,10 +896,20 @@ ice_scan_cb(void *ctx, PgColumnarAvroManifestEntry *e,
 	ie->file_path = pstrdup(e->file_path);
 	ie->file_format = e->file_format ? pstrdup(e->file_format) : NULL;
 	ie->seq = e->sequence_number;
+	ie->spec_id = mf->partition_spec_id;
+	ie->has_spec_id = mf->has_partition_spec_id;
+	if (e->nequality_ids > 0)
+	{
+		ie->eq_ids = (int32 *) palloc(e->nequality_ids * sizeof(int32));
+		memcpy(ie->eq_ids, e->equality_ids, e->nequality_ids * sizeof(int32));
+		ie->neq_ids = e->nequality_ids;
+	}
 	if (e->content == 0)
 		c->data = lappend(c->data, ie);
-	else						/* content 1: position deletes (2 refused upstream) */
+	else if (e->content == 1)
 		c->posdel = lappend(c->posdel, ie);
+	else
+		c->eqdel = lappend(c->eqdel, ie);
 }
 
 /*
@@ -978,6 +1005,273 @@ ice_read_pos_deletes(IceScanCtx *c)
 	return out;
 }
 
+/*
+ * Is partition spec `spec_id` a partitioned spec? Resolved against the
+ * metadata's "partition-specs"; a spec id the metadata does not define leaves
+ * an equality delete's scope undecidable, which is corrupt metadata (XX001).
+ */
+static bool
+ice_spec_is_partitioned(JsonbContainer *root, int32 spec_id, const char *path)
+{
+	JsonbValue *specs = ice_field(root, "partition-specs");
+
+	if (specs != NULL && specs->type == jbvBinary &&
+		JsonContainerIsArray(specs->val.binary.data))
+	{
+		JsonbContainer *arr = specs->val.binary.data;
+		uint32		ns = JsonContainerSize(arr);
+		uint32		k;
+
+		for (k = 0; k < ns; k++)
+		{
+			JsonbValue *sp = getIthJsonbValueFromContainer(arr, k);
+			int64		sid;
+			JsonbValue *fields;
+
+			if (sp == NULL || sp->type != jbvBinary)
+				continue;
+			if (!ice_num_int64(ice_field(sp->val.binary.data, "spec-id"), &sid) ||
+				sid != spec_id)
+				continue;
+			/* a matched spec whose required "fields" is missing or mistyped
+			 * cannot prove the spec unpartitioned; defaulting to unpartitioned
+			 * would silently globalize a possibly partition-scoped delete */
+			fields = ice_field(sp->val.binary.data, "fields");
+			if (fields == NULL || fields->type != jbvBinary ||
+				!JsonContainerIsArray(fields->val.binary.data))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: partition spec %d in \"%s\" has no fields array",
+								spec_id, path)));
+			return JsonContainerSize(fields->val.binary.data) > 0;
+		}
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("iceberg: \"%s\" does not define partition spec %d, which an equality delete's scope depends on",
+					path, spec_id)));
+	return false;				/* unreachable */
+}
+
+/*
+ * Resolve an equality-delete column: find field id `fid` in the table's current
+ * schema and map its Iceberg type to the Postgres type it is read and compared
+ * as. The supported primitives cover the types the Parquet reader can project;
+ * anything else is refused loudly (0A000) BEFORE any file is opened -- never
+ * silently unapplied. *fname gets the schema field name (for the tupdesc and
+ * error messages).
+ */
+static Oid
+ice_eq_col_type(JsonbContainer *root, int32 fid, const char *path,
+				const char **fname)
+{
+	JsonbContainer *fieldsc = ice_current_schema_fields(root, path);
+	uint32		nf = JsonContainerSize(fieldsc);
+	uint32		j;
+
+	for (j = 0; j < nf; j++)
+	{
+		JsonbValue *f = getIthJsonbValueFromContainer(fieldsc, j);
+		int64		id;
+		JsonbValue *fn;
+		JsonbValue *ft;
+		char	   *tname;
+
+		if (f == NULL || f->type != jbvBinary)
+			continue;
+		if (!ice_num_int64(ice_field(f->val.binary.data, "id"), &id) ||
+			id != fid)
+			continue;
+
+		fn = ice_field(f->val.binary.data, "name");
+		*fname = (fn != NULL && fn->type == jbvString)
+			? pnstrdup(fn->val.string.val, fn->val.string.len)
+			: psprintf("field_%d", fid);
+		ft = ice_field(f->val.binary.data, "type");
+		if (ft == NULL || ft->type != jbvString)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: equality delete on field \"%s\" of a non-primitive type is not supported",
+							*fname)));
+		tname = pnstrdup(ft->val.string.val, ft->val.string.len);
+		if (strcmp(tname, "int") == 0)
+			return INT4OID;
+		if (strcmp(tname, "long") == 0)
+			return INT8OID;
+		if (strcmp(tname, "string") == 0)
+			return TEXTOID;
+		if (strcmp(tname, "boolean") == 0)
+			return BOOLOID;
+		if (strcmp(tname, "date") == 0)
+			return DATEOID;
+		/* float/double are forbidden as equality-delete columns by the spec;
+		 * everything else simply has no mapping yet */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("iceberg: equality delete on field \"%s\" of type \"%s\" is not supported",
+						*fname, tname)));
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("iceberg: equality delete field id %d is not a top-level field of the table's current schema; equality deletes on dropped or nested columns are not supported",
+					fid)));
+	return InvalidOid;			/* unreachable */
+}
+
+/* one equality-delete row: the delete-column values, in the file's id order */
+typedef struct IceEqRow
+{
+	Datum	   *vals;
+	bool	   *nulls;
+}			IceEqRow;
+
+/* one equality-delete file, read into memory: its sequence number, the columns
+ * that define the match, and every delete row */
+typedef struct IceEqDel
+{
+	int64		seq;
+	int			nids;
+	int32	   *ids;
+	Oid		   *types;
+	int16	   *typlen;
+	bool	   *typbyval;
+	List	   *rows;			/* IceEqRow* */
+}			IceEqDel;
+
+/*
+ * Read every applicable equality-delete file into memory. A delete whose
+ * sequence number exceeds no data file's (seq <= min_data_seq) can never apply
+ * -- the strict-< rule -- and is skipped entirely, unread and unvalidated, per
+ * the spec (it has no effect on the scan). Each applicable entry is validated
+ * (equality_ids present, PARQUET, a present partition_spec_id resolving to an
+ * unpartitioned spec -- a partition-scoped equality delete applied globally
+ * would over-delete, so it is refused), each equality column is mapped to a
+ * Postgres type via the current schema, and the file is read projected to
+ * exactly those columns by field id. Rows are kept as Datum arrays in the
+ * calling context; the per-file Parquet footer/metadata live in a scratch
+ * context reset per file (the 4a memory rule).
+ */
+static List *
+ice_read_eq_deletes(IceScanCtx *c, JsonbContainer *root, const char *path,
+					int64 min_data_seq)
+{
+	List	   *out = NIL;
+	ListCell   *lc;
+	MemoryContext filectx;
+
+	if (c->eqdel == NIL)
+		return NIL;
+
+	filectx = AllocSetContextCreate(CurrentMemoryContext,
+									"pgcolumnar iceberg_scan eqdel",
+									ALLOCSET_DEFAULT_SIZES);
+
+	foreach(lc, c->eqdel)
+	{
+		IceEntry   *ed = (IceEntry *) lfirst(lc);
+		IceEqDel   *E;
+		TupleDesc	dtd;
+		TupleTableSlot *wslot;
+		TupleTableSlot *rslot;
+		Tuplestorestate *ts;
+		char	   *safe;
+		MemoryContext old;
+		int			i;
+
+		/* never applicable: no data file is strictly older than this delete */
+		if (ed->seq <= min_data_seq)
+			continue;
+
+		/* the spec requires equality_ids when content = 2 */
+		if (ed->neq_ids == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: equality delete file \"%s\" has no equality_ids",
+							ed->file_path)));
+		if (ed->file_format != NULL && strcmp(ed->file_format, "PARQUET") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: equality-delete file \"%s\" has format %s; only PARQUET equality deletes are supported",
+							ed->file_path, ed->file_format)));
+		/* the manifest list must say which partition spec the delete was
+		 * written under; without it the scope is undecidable, and defaulting
+		 * to "unpartitioned" would silently globalize a scoped delete */
+		if (!ed->has_spec_id)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: the manifest list carries no partition_spec_id for equality delete file \"%s\"",
+							ed->file_path)));
+		if (ice_spec_is_partitioned(root, ed->spec_id, path))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: equality delete file \"%s\" is partition-scoped (spec %d), which is not supported",
+							ed->file_path, ed->spec_id),
+					 errdetail("Applying a partition-scoped equality delete globally would delete rows in other partitions.")));
+
+		E = (IceEqDel *) palloc0(sizeof(IceEqDel));
+		E->seq = ed->seq;
+		E->nids = ed->neq_ids;
+		E->ids = (int32 *) palloc(E->nids * sizeof(int32));
+		memcpy(E->ids, ed->eq_ids, E->nids * sizeof(int32));
+		E->types = (Oid *) palloc(E->nids * sizeof(Oid));
+		E->typlen = (int16 *) palloc(E->nids * sizeof(int16));
+		E->typbyval = (bool *) palloc(E->nids * sizeof(bool));
+		E->rows = NIL;
+
+		old = MemoryContextSwitchTo(filectx);
+		dtd = CreateTemplateTupleDesc(E->nids);
+		for (i = 0; i < E->nids; i++)
+		{
+			const char *fname = NULL;
+
+			E->types[i] = ice_eq_col_type(root, E->ids[i], path, &fname);
+			get_typlenbyval(E->types[i], &E->typlen[i], &E->typbyval[i]);
+			TupleDescInitEntry(dtd, i + 1, fname, E->types[i], -1, 0);
+		}
+#if PG_VERSION_NUM >= 190000
+		/* PG19 asserts firstNonCachedOffsetAttr >= 0 on a manually built
+		 * tupdesc; BlessTupleDesc does not compute it, TupleDescFinalize does */
+		TupleDescFinalize(dtd);
+#endif
+		dtd = BlessTupleDesc(dtd);
+		wslot = MakeSingleTupleTableSlot(dtd, &TTSOpsVirtual);
+		rslot = MakeSingleTupleTableSlot(dtd, &TTSOpsMinimalTuple);
+
+		safe = ice_open_path(c->recorded_root, c->actual_root,
+							 ed->file_path, "equality-delete", c->mdpath);
+		ts = tuplestore_begin_heap(false, false, work_mem);
+		(void) PgColumnarReadParquetByFieldId(safe, dtd, (const int *) E->ids,
+											  E->nids, ts, wslot, NULL, 0);
+		while (tuplestore_gettupleslot(ts, true, false, rslot))
+		{
+			IceEqRow   *row;
+
+			/* keep the row in the outer context, not the per-file scratch */
+			MemoryContextSwitchTo(old);
+			row = (IceEqRow *) palloc(sizeof(IceEqRow));
+			row->vals = (Datum *) palloc0(E->nids * sizeof(Datum));
+			row->nulls = (bool *) palloc(E->nids * sizeof(bool));
+			for (i = 0; i < E->nids; i++)
+			{
+				Datum		d = slot_getattr(rslot, i + 1, &row->nulls[i]);
+
+				if (!row->nulls[i])
+					row->vals[i] = datumCopy(d, E->typbyval[i], E->typlen[i]);
+			}
+			E->rows = lappend(E->rows, row);
+			MemoryContextSwitchTo(filectx);
+		}
+		tuplestore_end(ts);
+		ExecDropSingleTupleTableSlot(wslot);
+		ExecDropSingleTupleTableSlot(rslot);
+		MemoryContextSwitchTo(old);
+		MemoryContextReset(filectx);
+		out = lappend(out, E);
+	}
+	MemoryContextDelete(filectx);
+	return out;
+}
+
 /* ascending qsort comparator over uint64 file ordinals */
 static int
 ice_cmp_u64(const void *a, const void *b)
@@ -986,6 +1280,187 @@ ice_cmp_u64(const void *a, const void *b)
 	uint64		y = *(const uint64 *) b;
 
 	return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+/*
+ * Does a data row (dv/dn, indexed by union column position) match ANY row of
+ * equality-delete file E? A delete row matches when ALL of E's equality columns
+ * are equal; a null delete value matches a null data value (IS NULL semantics,
+ * per the spec), and only a null. mape maps E's column index to the union
+ * position the probe read that column into.
+ */
+static bool
+ice_eq_file_matches(IceEqDel *E, const int *mape, const Datum *dv,
+					const bool *dn, TypeCacheEntry **utc)
+{
+	ListCell   *lc;
+
+	foreach(lc, E->rows)
+	{
+		IceEqRow   *row = (IceEqRow *) lfirst(lc);
+		bool		all = true;
+		int			i;
+
+		for (i = 0; i < E->nids; i++)
+		{
+			int			k = mape[i];
+
+			if (dn[k] != row->nulls[i])
+			{
+				all = false;
+				break;
+			}
+			if (!dn[k] &&
+				!DatumGetBool(FunctionCall2Coll(&utc[k]->eq_opr_finfo,
+												DEFAULT_COLLATION_OID,
+												dv[k], row->vals[i])))
+			{
+				all = false;
+				break;
+			}
+		}
+		if (all)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * The equality-delete PROBE pass over one data file: read only the union of the
+ * eligible delete files' equality columns (projected by field id, so this is a
+ * whole-file subset read whose tuplestore row index IS the file ordinal), test
+ * each row against each eligible delete file, and append matching ordinals to
+ * the caller's skip set (skip/nskip/cap, grown in the caller's memory
+ * context). Returns the file's total row count, which the caller cross-checks
+ * against the second (full) read. Scratch allocations live in c->filectx,
+ * reset before returning.
+ */
+static int64
+ice_eq_probe(IceScanCtx *c, IceEntry *d, List *elig,
+			 uint64 **skip, int *nskip, int *cap)
+{
+	int			ne = list_length(elig);
+	int			tot = 0;
+	int			nuni = 0;
+	int		   *uids;
+	Oid		   *utypes;
+	int		  **map;
+	TypeCacheEntry **utc;
+	TupleDesc	ptd;
+	TupleTableSlot *wslot;
+	TupleTableSlot *rslot;
+	Tuplestorestate *ts;
+	Datum	   *dv;
+	bool	   *dn;
+	char	   *safe;
+	MemoryContext old;
+	ListCell   *lc;
+	int			e;
+	int			k;
+	uint64		ord = 0;
+
+	/* everything below except the skip-set growth is per-data-file scratch,
+	 * reclaimed by the reset at the end */
+	old = MemoryContextSwitchTo(c->filectx);
+
+	/* the union of the eligible files' equality columns, deduplicated, with a
+	 * per-file map from its column index to the union position */
+	foreach(lc, elig)
+		tot += ((IceEqDel *) lfirst(lc))->nids;
+	uids = (int *) palloc(tot * sizeof(int));
+	utypes = (Oid *) palloc(tot * sizeof(Oid));
+	map = (int **) palloc(ne * sizeof(int *));
+	e = 0;
+	foreach(lc, elig)
+	{
+		IceEqDel   *E = (IceEqDel *) lfirst(lc);
+		int			i;
+
+		map[e] = (int *) palloc(E->nids * sizeof(int));
+		for (i = 0; i < E->nids; i++)
+		{
+			for (k = 0; k < nuni; k++)
+				if (uids[k] == E->ids[i])
+					break;
+			if (k == nuni)
+			{
+				uids[nuni] = E->ids[i];
+				utypes[nuni] = E->types[i];
+				nuni++;
+			}
+			/* both resolved via the same current-schema lookup */
+			Assert(utypes[k] == E->types[i]);
+			map[e][i] = k;
+		}
+		e++;
+	}
+	utc = (TypeCacheEntry **) palloc(nuni * sizeof(TypeCacheEntry *));
+	for (k = 0; k < nuni; k++)
+	{
+		utc[k] = lookup_type_cache(utypes[k], TYPECACHE_EQ_OPR_FINFO);
+		if (!OidIsValid(utc[k]->eq_opr_finfo.fn_oid))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg: equality delete column with field id %d has no equality operator",
+							uids[k])));
+	}
+
+	ptd = CreateTemplateTupleDesc(nuni);
+	for (k = 0; k < nuni; k++)
+		TupleDescInitEntry(ptd, k + 1, psprintf("eq%d", uids[k]),
+						   utypes[k], -1, 0);
+#if PG_VERSION_NUM >= 190000
+	TupleDescFinalize(ptd);
+#endif
+	ptd = BlessTupleDesc(ptd);
+	wslot = MakeSingleTupleTableSlot(ptd, &TTSOpsVirtual);
+	rslot = MakeSingleTupleTableSlot(ptd, &TTSOpsMinimalTuple);
+	safe = ice_open_path(c->recorded_root, c->actual_root, d->file_path,
+						 "data-file", c->mdpath);
+	ts = tuplestore_begin_heap(false, false, work_mem);
+	(void) PgColumnarReadParquetByFieldId(safe, ptd, uids, nuni, ts, wslot,
+										  NULL, 0);
+	dv = (Datum *) palloc(nuni * sizeof(Datum));
+	dn = (bool *) palloc(nuni * sizeof(bool));
+	while (tuplestore_gettupleslot(ts, true, false, rslot))
+	{
+		bool		matched = false;
+
+		CHECK_FOR_INTERRUPTS();
+		for (k = 0; k < nuni; k++)
+			dv[k] = slot_getattr(rslot, k + 1, &dn[k]);
+		e = 0;
+		foreach(lc, elig)
+		{
+			if (ice_eq_file_matches((IceEqDel *) lfirst(lc), map[e], dv, dn, utc))
+			{
+				matched = true;
+				break;
+			}
+			e++;
+		}
+		if (matched)
+		{
+			/* grow the skip set in the caller's context, not the scratch */
+			MemoryContextSwitchTo(old);
+			if (*nskip == *cap)
+			{
+				*cap = *cap ? *cap * 2 : 16;
+				*skip = (*skip == NULL)
+					? (uint64 *) palloc(*cap * sizeof(uint64))
+					: (uint64 *) repalloc(*skip, *cap * sizeof(uint64));
+			}
+			(*skip)[(*nskip)++] = ord;
+			MemoryContextSwitchTo(c->filectx);
+		}
+		ord++;
+	}
+	tuplestore_end(ts);
+	ExecDropSingleTupleTableSlot(wslot);
+	ExecDropSingleTupleTableSlot(rslot);
+	MemoryContextSwitchTo(old);
+	MemoryContextReset(c->filectx);
+	return (int64) ord;
 }
 
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
@@ -999,12 +1474,22 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
  * those ids -- so a data file written before a column rename still reads, since
  * Iceberg selects columns by id, not name or position.
  *
- * Position deletes are applied: a delete file drops the listed row ordinals of
- * the data file it names, when the data file's data sequence number is less than
- * or equal to the delete's (the spec rule -- a position delete applies to data
- * written in the same commit or earlier, so the same-sequence upsert case counts).
- * Equality deletes are not yet supported and are refused. Only PARQUET data files
- * are read. Superuser / pg_read_server_files; materialize-mode SRF.
+ * Row-level deletes are applied, each kind under its own spec rule:
+ *
+ * - Position deletes drop the listed row ordinals of the data file they name,
+ *   when the data file's data sequence number is less than OR EQUAL TO the
+ *   delete's (a position delete applies to data written in the same commit or
+ *   earlier, so the same-sequence upsert case counts).
+ * - Equality deletes drop every data row whose equality_ids column values match
+ *   a delete row (all columns equal; null matches null), when the data file's
+ *   sequence number is STRICTLY LESS THAN the delete's (an equality delete
+ *   never touches same-commit data). Only global (unpartitioned-spec) equality
+ *   deletes are applied; partition-scoped ones are refused (0A000) until
+ *   partition handling lands (phase 5), since applying them globally would
+ *   delete rows in other partitions.
+ *
+ * Only PARQUET files are read. Superuser / pg_read_server_files;
+ * materialize-mode SRF.
  */
 Datum
 pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
@@ -1019,6 +1504,7 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	int		   *field_ids;
 	int			nfield;
 	List	   *posdels;
+	List	   *eqdels;
 	ListCell   *lc;
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
@@ -1061,13 +1547,26 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 	ctx.mdpath = NULL;
 	ctx.data = NIL;
 	ctx.posdel = NIL;
+	ctx.eqdel = NIL;
 
-	/* pass 1: collect the snapshot's data and position-delete entries (reuse the
+	/* pass 1: collect the snapshot's data and delete entries (reuse the
 	 * metadata already parsed for the schema, so the file is read once) */
 	ice_walk_data_files(path, &jb->root, true, ice_scan_cb, &ctx);
 
-	/* read the position-delete files once into (dpath, pos, seq) rows */
+	/* read the position-delete files once into (dpath, pos, seq) rows, and the
+	 * applicable equality-delete files once into per-file delete-row sets
+	 * (both kinds are snapshot-global; equality deletes are validated against
+	 * the metadata -- equality_ids present, a present partition_spec_id naming
+	 * an unpartitioned spec, mappable column types -- while a delete no data
+	 * file is strictly older than is skipped as having no effect) */
 	posdels = ice_read_pos_deletes(&ctx);
+	{
+		int64		min_data_seq = PG_INT64_MAX;
+
+		foreach(lc, ctx.data)
+			min_data_seq = Min(min_data_seq, ((IceEntry *) lfirst(lc))->seq);
+		eqdels = ice_read_eq_deletes(&ctx, &jb->root, path, min_data_seq);
+	}
 
 	/* pass 2: read each data file, skipping the positions its deletes drop */
 	foreach(lc, ctx.data)
@@ -1077,6 +1576,9 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 		uint64	   *skip = NULL;
 		int			nskip = 0;
 		int			cap = 0;
+		List	   *elig = NIL;
+		int64		probe_rows = -1;
+		int64		returned;
 		char	   *safe;
 		MemoryContext old;
 		ListCell   *lc2;
@@ -1110,6 +1612,22 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 				skip[nskip++] = (uint64) pd->pos;
 			}
 		}
+
+		/* equality deletes: STRICTLY newer than the data file only (spec rule
+		 * data_seq < delete_seq -- the opposite boundary from position deletes;
+		 * an equality delete never touches data from its own commit). Eligible
+		 * files drive a probe pass over this data file's equality columns that
+		 * appends the matching ordinals to the same skip set. */
+		foreach(lc2, eqdels)
+		{
+			IceEqDel   *E = (IceEqDel *) lfirst(lc2);
+
+			if (E->seq > d->seq)
+				elig = lappend(elig, E);
+		}
+		if (elig != NIL)
+			probe_rows = ice_eq_probe(&ctx, d, elig, &skip, &nskip, &cap);
+
 		if (nskip > 1)			/* the reader wants the set sorted and unique */
 		{
 			int			w = 1;
@@ -1128,13 +1646,32 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 		old = MemoryContextSwitchTo(ctx.filectx);
 		safe = ice_open_path(ctx.recorded_root, ctx.actual_root, d->file_path,
 							 "data-file", ctx.mdpath);
-		(void) PgColumnarReadParquetByFieldId(safe, ctx.tupdesc, ctx.field_ids,
-											  ctx.nfield, ctx.tupstore, ctx.slot,
-											  skip, nskip);
+		returned = PgColumnarReadParquetByFieldId(safe, ctx.tupdesc, ctx.field_ids,
+												  ctx.nfield, ctx.tupstore, ctx.slot,
+												  skip, nskip);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(ctx.filectx);
+
+		/* the probe and the full read walked the same file: the full read must
+		 * return exactly the probe's row count minus the in-range skips, or the
+		 * two passes disagreed on ordinals */
+		if (probe_rows >= 0)
+		{
+			int64		expect = probe_rows;
+			int			k;
+
+			for (k = 0; k < nskip; k++)
+				if (skip[k] < (uint64) probe_rows)
+					expect--;
+			if (returned != expect)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: data file \"%s\" returned " INT64_FORMAT " rows where " INT64_FORMAT " were expected after deletes",
+								d->file_path, returned, expect)));
+		}
 		if (skip != NULL)
 			pfree(skip);
+		list_free(elig);
 	}
 
 	MemoryContextDelete(ctx.filectx);

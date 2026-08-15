@@ -704,16 +704,30 @@ that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
-Position deletes are applied. A delete file drops the row ordinals it lists from
-the data file it names. It applies when that data file's data sequence number is
-at or below the delete's. The Iceberg rule is that a position delete affects
-data written in the same commit or earlier. A delete and the rows it removes may
-therefore share a sequence number.
-Equality deletes are not yet supported. They are refused rather than ignored. A
-table using them errors, instead of returning rows it should have removed. The
-recorded file paths are rebased onto the table's actual location and resolved
-against a path boundary. A relocated table therefore reads. A path pointing
-outside the table is refused.
+Row-level deletes are applied, each kind under its own Iceberg sequence rule.
+A position delete drops the row ordinals it lists from the data file it names.
+It applies when that data file's data sequence number is at or below the
+delete's. A position delete can affect data written in the same commit, so the
+two may share a sequence number. An equality delete drops every data row that
+equals a delete row on all of the delete file's `equality_ids` columns. It
+applies only when the data file's sequence number is strictly below the
+delete's. An equality delete never affects data from its own commit. A null
+delete value matches a null data value, and only a null. Columns in the delete
+file beyond `equality_ids` do not take part in the match. A delete that is not
+strictly newer than any data file has no effect and is skipped.
+
+Some equality-delete forms are refused rather than ignored. A table using them
+errors instead of returning rows it should have removed. A delete written
+under a partitioned partition spec is refused, because applying it globally
+would remove rows in other partitions (partition handling is planned). A
+delete column is refused when its type has no supported mapping; the supported
+types are `int`, `long`, `string`, `boolean`, and `date`. A delete column that
+is no longer in the table's current schema is refused. A delete column missing
+from an older data file is also an error. The recorded file paths are rebased
+onto the table's actual location and resolved against a path boundary. A
+relocated table reads, and a path pointing outside the table is refused.
+Applying equality deletes reads each affected data file's delete columns
+twice. A probe pass computes the row ordinals to drop.
 
 A malformed manifest is refused, not read as far as it parses. A manifest entry
 that records no data-file path is an error, as is a manifest whose embedded Avro
