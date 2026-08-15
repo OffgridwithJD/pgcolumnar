@@ -835,6 +835,19 @@ ice_field_ids_for_columns(JsonbContainer *root, TupleDesc tupdesc,
 	return ids;
 }
 
+/* A name mapping has one entry per top-level column plus a few aliases; a real
+ * schema is well under this. The metadata.json is capped at 64 MB, so without a
+ * bound a crafted mapping could carry millions of names -- refuse rather than
+ * spend the memory and time on it. */
+#define ICE_MAX_NAME_MAPPING 100000
+
+/* qsort comparator over char* by string value, for the uniqueness check */
+static int
+ice_cmp_namep(const void *a, const void *b)
+{
+	return strcmp(*(const char *const *) a, *(const char *const *) b);
+}
+
 /*
  * Parse the table's schema.name-mapping.default property into a flat (name ->
  * field id) table, for reading data files that carry no field ids. The property
@@ -895,6 +908,7 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 		uint32		nn;
 		uint32		m;
 
+		CHECK_FOR_INTERRUPTS();
 		if (ent == NULL || ent->type != jbvBinary)
 			continue;
 		/* an entry without a field-id is an unmapped column; skip it */
@@ -916,17 +930,15 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 		{
 			JsonbValue *nv = getIthJsonbValueFromContainer(narr, m);
 			char	   *nstr;
-			int			p;
 
 			if (nv == NULL || nv->type != jbvString)
 				continue;
 			nstr = pnstrdup(nv->val.string.val, nv->val.string.len);
-			for (p = 0; p < n; p++)
-				if (strcmp(names[p], nstr) == 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_DATA_CORRUPTED),
-							 errmsg("iceberg: name \"%s\" appears more than once in \"%s\" schema.name-mapping.default",
-									nstr, path)));
+			if (n >= ICE_MAX_NAME_MAPPING)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("iceberg: \"%s\" schema.name-mapping.default has more than %d names",
+								path, ICE_MAX_NAME_MAPPING)));
 			if (n == cap)
 			{
 				cap *= 2;
@@ -938,6 +950,29 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 			n++;
 		}
 	}
+
+	/* the spec requires names to be unique. Detect a duplicate by sorting a
+	 * copy of the name pointers and scanning adjacent pairs -- O(n log n), not
+	 * the O(n^2) of an each-against-all scan over an attacker-sized mapping. */
+	if (n > 1)
+	{
+		char	  **sorted = (char **) palloc(sizeof(char *) * n);
+		int			i;
+
+		memcpy(sorted, names, sizeof(char *) * n);
+		qsort(sorted, n, sizeof(char *), ice_cmp_namep);
+		for (i = 1; i < n; i++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			if (strcmp(sorted[i - 1], sorted[i]) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: name \"%s\" appears more than once in \"%s\" schema.name-mapping.default",
+								sorted[i], path)));
+		}
+		pfree(sorted);
+	}
+
 	*names_out = names;
 	*ids_out = ids;
 	*nout = n;
