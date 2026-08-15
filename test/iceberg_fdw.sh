@@ -121,6 +121,50 @@ if [ -f "$FX/warehouse_datepart/db/byday/metadata/00001-08bb95d5-d5eb-442f-b2f4-
 		"$(fp "SELECT * FROM evd WHERE dt=DATE '2020-01-01'")" "0"
 fi
 
+# ---- bucket[N] partition pruning (murmur3 cross-checked vs pyiceberg) --------
+# warehouse_bucket is partitioned by bucket[8](id); pyiceberg wrote the buckets
+# (1->4, 4->6, 3->3), so a green same-oracle read proves the C murmur3/bucket
+# agrees with Iceberg. 5 files (buckets 1,3,4,6,7); WHERE id=k keeps one.
+if [ -f "$FX/warehouse_bucket/db/byid/data/id_bucket=4/00000-0-aa63bd5e-94cd-4a44-a529-fde21cc16eab.parquet" ]; then
+	BDEST="$PGC_WORKDIR/whb"; rm -rf "$BDEST"; mkdir -p "$BDEST"
+	cp -r "$FX/warehouse_bucket/db" "$BDEST/db"; chmod -R u+rwX "$BDEST"
+	MDB="$(ls "$BDEST"/db/byid/metadata/*.metadata.json | sort | tail -1)"
+	q "CREATE FOREIGN TABLE evb (id bigint, val text, amount int)
+	   SERVER ice OPTIONS (metadata_path '$MDB')" >/dev/null
+	check "the bucket FDW reads the whole table (8 rows)" \
+		"$(q "SELECT count(*) FROM evb")" "8"
+	check "id = 1 keeps only its bucket file (Files Pruned: 4)" \
+		"$(fp "SELECT * FROM evb WHERE id = 1")" "4"
+	check "id = 1 returns row 1" \
+		"$(q "SELECT string_agg(id::text||'|'||val, ',' ORDER BY id) FROM evb WHERE id = 1")" \
+		"1|v1"
+	check "id = 4 keeps only its bucket file (Files Pruned: 4)" \
+		"$(fp "SELECT * FROM evb WHERE id = 4")" "4"
+	check "id = 4 returns row 4" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evb WHERE id = 4")" "4"
+	check_text "a bucket-pruned equality matches iceberg_scan (murmur3 oracle)" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evb WHERE id = 3")" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+		      FROM pgcolumnar.iceberg_scan('$MDB') AS t(id bigint, val text, amount int)
+		      WHERE id = 3")"
+	check "id = 3 returns row 3" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evb WHERE id = 3")" "3"
+	# id=5 (bucket 7): metrics alone keeps bucket-3 [3,7] AND bucket-7 (prunes 3),
+	# but bucket pruning drops bucket-3 too (prunes 4). This distinguishes bucket
+	# pruning from metrics, so it is the removal-proof target.
+	check "id = 5 bucket-prunes past metrics (Files Pruned: 4)" \
+		"$(fp "SELECT * FROM evb WHERE id = 5")" "4"
+	check "id = 5 returns row 5" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evb WHERE id = 5")" "5"
+	# a RANGE predicate cannot bucket-prune (the hash destroys order); metrics
+	# pruning still applies to id's own min/max, so 2 all-<=4 bucket files drop.
+	check "id > 4 prunes by metrics not bucket, correctly (Files Pruned: 2)" \
+		"$(fp "SELECT * FROM evb WHERE id > 4")" "2"
+	check "id > 4 still returns the right rows" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evb WHERE id > 4")" \
+		"5,6,7,8"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1

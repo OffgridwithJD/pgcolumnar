@@ -67,6 +67,7 @@ typedef struct IceFdwState
 	List	   *partQuals;		/* compiled quals over identity-partition columns */
 	TupleTableSlot *partSlot;
 	List	   *metricQuals;	/* IceMetricQual*, min/max prune on int/bool cols */
+	List	   *bucketQuals;	/* IceBucketQual*, equality prune on bucket parts */
 	int64		filesPruned;
 }			IceFdwState;
 
@@ -81,6 +82,121 @@ typedef struct IceMetricQual
 	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
 	int64		constval;
 }			IceMetricQual;
+
+/*
+ * A "bucket-column = constant" predicate a bucket[N] partition can decide. The
+ * bucket of the constant does not depend on the file, so it is computed once:
+ * `target` is bucket(const, N), and a file whose stored bucket cell at `pos`
+ * differs from it cannot contain a matching row.
+ */
+typedef struct IceBucketQual
+{
+	int			pos;			/* partition-tuple position of the bucket cell */
+	int32		target;			/* bucket(const, N) */
+}			IceBucketQual;
+
+/* murmur3 x86 32-bit (seed 0), the hash Iceberg's bucket transform uses. */
+static uint32
+ice_murmur3_32(const unsigned char *data, int len)
+{
+	uint32		h = 0;
+	int			nblocks = len / 4;
+	const uint32 c1 = 0xcc9e2d51;
+	const uint32 c2 = 0x1b873593;
+	int			i;
+	const unsigned char *tail;
+	uint32		k1 = 0;
+
+	for (i = 0; i < nblocks; i++)
+	{
+		uint32		k = (uint32) data[i * 4] |
+			((uint32) data[i * 4 + 1] << 8) |
+			((uint32) data[i * 4 + 2] << 16) |
+			((uint32) data[i * 4 + 3] << 24);
+
+		k *= c1;
+		k = (k << 15) | (k >> 17);
+		k *= c2;
+		h ^= k;
+		h = (h << 13) | (h >> 19);
+		h = h * 5 + 0xe6546b64;
+	}
+	tail = data + nblocks * 4;
+	switch (len & 3)
+	{
+		case 3:
+			k1 ^= (uint32) tail[2] << 16;
+			/* FALLTHROUGH */
+		case 2:
+			k1 ^= (uint32) tail[1] << 8;
+			/* FALLTHROUGH */
+		case 1:
+			k1 ^= (uint32) tail[0];
+			k1 *= c1;
+			k1 = (k1 << 15) | (k1 >> 17);
+			k1 *= c2;
+			h ^= k1;
+			break;
+	}
+	h ^= (uint32) len;
+	h ^= h >> 16;
+	h *= 0x85ebca6b;
+	h ^= h >> 13;
+	h *= 0xc2b2ae35;
+	h ^= h >> 16;
+	return h;
+}
+
+/* Iceberg bucket[N] of the already-serialized value bytes. */
+static int32
+ice_bucket_of(const unsigned char *data, int len, int n)
+{
+	uint32		h = ice_murmur3_32(data, len);
+
+	return (int32) ((h & 0x7fffffff) % (uint32) n);
+}
+
+/*
+ * Compute bucket(const, N) for a bucket-partition source column, serializing the
+ * constant the way Iceberg hashes it (int/long as 8-byte little-endian long,
+ * string as UTF-8 bytes). Returns false for a type this increment does not hash,
+ * so the file is not pruned.
+ */
+static bool
+ice_fdw_bucket_of_const(Const *c, int n, int32 *out)
+{
+	if (c->constisnull)
+		return false;
+	switch (c->consttype)
+	{
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+			{
+				int64		v = (c->consttype == INT8OID) ? DatumGetInt64(c->constvalue)
+					: (c->consttype == INT4OID) ? (int64) DatumGetInt32(c->constvalue)
+					: (int64) DatumGetInt16(c->constvalue);
+				unsigned char b[8];
+				int			i;
+
+				for (i = 0; i < 8; i++)
+					b[i] = (unsigned char) ((uint64) v >> (i * 8));
+				*out = ice_bucket_of(b, 8, n);
+				return true;
+			}
+		case TEXTOID:
+		case VARCHAROID:
+			{
+				text	   *t = DatumGetTextPP(c->constvalue);
+				int			len = VARSIZE_ANY_EXHDR(t);
+
+				*out = ice_bucket_of((const unsigned char *) VARDATA_ANY(t), len, n);
+				return true;
+			}
+		default:
+			return false;
+	}
+}
 
 /* a named option of a foreign table, or NULL */
 static char *
@@ -431,6 +547,86 @@ ice_fdw_metric_quals(ForeignScanState *node, TupleDesc tupdesc,
 }
 
 /*
+ * Compile "bucket-source-column = const" predicates into IceBucketQuals. A
+ * bucket[N] partition stores the bucket of the source value; an equality
+ * predicate on the source column can prune a file whose stored bucket differs
+ * from bucket(const, N). Only "=" prunes (the hash destroys order).
+ */
+static List *
+ice_fdw_bucket_quals(ForeignScanState *node, TupleDesc tupdesc,
+					 const int *bpos, const int *battno, const int *bn, int bcount)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	if (bcount == 0)
+		return NIL;
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) lfirst(lc);
+		Node	   *larg;
+		Node	   *rarg;
+		Var		   *var;
+		Const	   *con;
+		int			strategy = 0;
+		ListCell   *ic;
+		List	   *interp;
+		int			bi;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		larg = (Node *) linitial(op->args);
+		rarg = (Node *) lsecond(op->args);
+		if (IsA(larg, Var) && IsA(rarg, Const))
+		{
+			var = (Var *) larg;
+			con = (Const *) rarg;
+		}
+		else if (IsA(larg, Const) && IsA(rarg, Var))
+		{
+			var = (Var *) rarg;
+			con = (Const *) larg;
+		}
+		else
+			continue;
+		if (var->varattno < 1 || contain_volatile_functions((Node *) op))
+			continue;
+
+		interp = PgColumnarGetOpInterpretation(op->opno);
+		foreach(ic, interp)
+		{
+			PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+
+			strategy = PgColumnarOpInterpStrategy(o);
+			if (strategy == BTEqualStrategyNumber)
+				break;
+			strategy = 0;
+		}
+		if (strategy != BTEqualStrategyNumber)
+			continue;			/* bucket prunes on equality only */
+
+		/* is this Var the source column of a bucket partition field? */
+		for (bi = 0; bi < bcount; bi++)
+		{
+			int32		target;
+			IceBucketQual *bq;
+
+			if (battno[bi] != var->varattno)
+				continue;
+			if (!ice_fdw_bucket_of_const(con, bn[bi], &target))
+				continue;		/* unhashable const type: cannot prune */
+			bq = (IceBucketQual *) palloc(sizeof(IceBucketQual));
+			bq->pos = bpos[bi];
+			bq->target = target;
+			out = lappend(out, bq);
+		}
+	}
+	return out;
+}
+
+/*
  * The per-file filter passed to PgColumnarIcebergScanCore: return true to prune
  * (skip) a data file that provably yields no matching row -- because its column
  * min/max bounds exclude a predicate, or its identity-partition value does. A
@@ -468,6 +664,26 @@ ice_fdw_file_excludes(void *arg, const PgColumnarIceFileMeta *meta)
 			continue;			/* a nonsense bound: never prune on it */
 		if (ice_fdw_metric_excludes(mq->strategy, mq->constval, lo, hi))
 			return true;
+	}
+
+	/* bucket pruning: an equality predicate on a bucket-partitioned source
+	 * column excludes a file whose stored bucket differs from bucket(const). */
+	if (st->bucketQuals != NIL && meta->spec_id == st->specid)
+	{
+		foreach(lc, st->bucketQuals)
+		{
+			IceBucketQual *bq = (IceBucketQual *) lfirst(lc);
+
+			if (bq->pos < 0 || bq->pos >= meta->ncells)
+				continue;
+			/* the stored cell is the bucket number: an integer, non-null */
+			if (meta->cells[bq->pos].isnull ||
+				meta->cells[bq->pos].is_bytes ||
+				!meta->cells[bq->pos].comparable)
+				continue;
+			if (meta->cells[bq->pos].ival != bq->target)
+				return true;
+		}
 	}
 
 	if (st->partQuals == NIL || meta->spec_id != st->specid ||
@@ -593,6 +809,19 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 		st->metricQuals = ice_fdw_metric_quals(node, tupdesc, attFieldId);
 	}
 
+	/* bucket pruning: equality over a bucket[N]-partitioned source column */
+	{
+		int		   *bpos;
+		int		   *battno;
+		int		   *bn;
+		int			bcount;
+		int32		bspec;
+
+		PgColumnarIcebergBucketMap(st->metadata_path, NULL, tupdesc,
+								   &bpos, &battno, &bn, &bcount, &bspec);
+		st->bucketQuals = ice_fdw_bucket_quals(node, tupdesc, bpos, battno, bn, bcount);
+	}
+
 	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 	st->started = false;
@@ -613,7 +842,8 @@ icefdwIterateForeignScan(ForeignScanState *node)
 	if (!st->started)
 	{
 		/* read the surviving files (pruned by the filter) into the tuplestore */
-		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL);
+		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL ||
+							 st->bucketQuals != NIL);
 
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,

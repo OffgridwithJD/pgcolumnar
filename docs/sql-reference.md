@@ -897,10 +897,12 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
 Exposes an Apache Iceberg table as a foreign table. Unlike `iceberg_scan`, which
 is a set-returning function that receives no predicate, the foreign table gets
 the query's quals and prunes data files two ways. A predicate on an
-identity-partitioned column removes whole files by their partition value. A
-predicate on an integer or boolean column removes whole files whose stored
-minimum and maximum exclude it. An unpartitioned column can prune this way. Both
-read the value from the manifest, so a file is skipped without a read. Pruning is only an optimization. A file that is not pruned is read
+identity-partitioned column removes whole files by their partition value. An
+equality predicate on a `bucket[N]`-partitioned column removes files whose stored
+bucket differs from the constant's. A predicate on an integer or boolean column
+removes whole files whose stored minimum and maximum exclude it. An unpartitioned
+column can prune this way. All read from the manifest, so a file is skipped
+without a read. Pruning is only an optimization. A file that is not pruned is read
 normally, so a predicate the wrapper cannot decide never changes the rows
 returned. Field-id projection and every delete rule are those of `iceberg_scan`.
 
@@ -908,10 +910,11 @@ The one table option is `metadata_path`, the table's current `metadata.json`
 (a local path or an object-storage URL). The wrapper requires the
 `pg_read_server_files` role. `EXPLAIN (ANALYZE)` reports `Files Pruned`.
 
-Partition pruning covers identity partitioning only. A table partitioned by a
-transform such as `bucket`, `truncate`, or a temporal function is read in full,
-which is correct but not yet optimized. Metrics pruning covers integer and
-boolean columns; other column types are read in full.
+Partition pruning covers identity partitioning, and `bucket[N]` partitioning for
+an equality predicate on the source column. A table partitioned by `truncate` or
+a temporal function is read in full, which is correct but not yet optimized.
+Metrics pruning covers integer and boolean columns; other column types are read
+in full.
 
 ```sql
 CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;

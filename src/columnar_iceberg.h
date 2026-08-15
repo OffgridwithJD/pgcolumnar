@@ -86,4 +86,16 @@ extern int *PgColumnarIcebergColumnFieldIds(const char *path,
 											const PgColumnarObjStoreConfig *cfg,
 											TupleDesc tupdesc);
 
+/*
+ * Map the current spec's bucket[N] fields to columns for FDW bucket pruning: per
+ * bucket field, its partition-tuple position (*out_pos), source column attno
+ * (*out_attno), and bucket count (*out_n); *out_count fields; *out_specid the
+ * current spec id. palloc'd in the current context.
+ */
+extern void PgColumnarIcebergBucketMap(const char *path,
+									   const PgColumnarObjStoreConfig *cfg,
+									   TupleDesc tupdesc, int **out_pos,
+									   int **out_attno, int **out_n,
+									   int *out_count, int32 *out_specid);
+
 #endif							/* COLUMNAR_ICEBERG_H */
