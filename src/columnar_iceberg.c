@@ -964,10 +964,11 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);
  * Iceberg selects columns by id, not name or position.
  *
  * Position deletes are applied: a delete file drops the listed row ordinals of
- * the data file it names, when the delete's data sequence number is greater than
- * the data file's (deletes affect data written before them). Equality deletes
- * are not yet supported and are refused. Only PARQUET data files are read.
- * Superuser / pg_read_server_files; materialize-mode SRF.
+ * the data file it names, when the data file's data sequence number is less than
+ * or equal to the delete's (the spec rule -- a position delete applies to data
+ * written in the same commit or earlier, so the same-sequence upsert case counts).
+ * Equality deletes are not yet supported and are refused. Only PARQUET data files
+ * are read. Superuser / pg_read_server_files; materialize-mode SRF.
  */
 Datum
 pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
@@ -1051,12 +1052,16 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 							d->file_path, d->file_format)));
 
 		/* gather the ordinals to drop: position deletes that target this file
-		 * and whose sequence number is greater than the data file's */
+		 * and whose data sequence number is >= the data file's. The spec rule is
+		 * data_seq <= delete_seq (a position delete applies to data written in the
+		 * same commit or earlier), so the comparison is >=, not > -- an equal
+		 * sequence number (a single-commit upsert) still applies. Equality deletes,
+		 * when added, use strict < instead. */
 		foreach(lc2, posdels)
 		{
 			IcePosDel  *pd = (IcePosDel *) lfirst(lc2);
 
-			if (pd->seq > d->seq &&
+			if (pd->seq >= d->seq &&
 				strcmp(ice_strip_scheme(pd->dpath), dp) == 0)
 			{
 				if (nskip == cap)

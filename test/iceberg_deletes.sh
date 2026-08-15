@@ -65,13 +65,15 @@ check "position deletes apply under column projection (id only -> 1,3,5)" \
 	      FROM pgcolumnar.iceberg_scan('$MDIR/apply.metadata.json') AS t(id bigint)")" \
 	"1,3,5"
 
-# ---- sequence-number ordering: a too-old delete does NOT apply -------------
-# same delete file, but at a sequence number not greater than the data's, so by
-# the spec it must not apply -- all five rows survive.
-check "a delete with seq not greater than the data does not apply (5 rows)" \
+# ---- sequence-number ordering ----------------------------------------------
+# The apply arm above uses a delete at the SAME sequence number as the data (5),
+# which the spec says applies (data_seq <= delete_seq) -- the boundary that a
+# strict > would wrongly exclude. This arm is the other side: a delete OLDER than
+# the data (seq 4 < data seq 5) must NOT apply, so all five rows survive.
+check "a delete older than the data (lower seq) does not apply (5 rows)" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/noapply.metadata.json')
 	      AS t(id bigint, region text, amount int)")" "5"
-check "the would-be-deleted ids survive when the delete is too old" \
+check "the would-be-deleted ids survive when the delete is older than the data" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/noapply.metadata.json')
 	      AS t(id bigint, region text, amount int) WHERE id IN (2,4)")" "2"
 

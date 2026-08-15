@@ -126,8 +126,9 @@ pq.write_table(posdel, os.path.join(OUT, "db", "t", "data", "posdel.parquet"))
 md = os.path.join(OUT, "db", "t", "metadata")
 SNAP = 7766554433221100
 DM = f"{LOC}/metadata/data-manifest.avro"
+DATA_SEQ = 5
 open(os.path.join(md, "data-manifest.avro"), "wb").write(
-    ocf(ENTRY_SCHEMA, entry(1, 1, 0, DATA_PATH, "PARQUET", 5, 1000)))
+    ocf(ENTRY_SCHEMA, entry(1, DATA_SEQ, 0, DATA_PATH, "PARQUET", 5, 1000)))
 
 schema = {"schema-id": 0, "type": "struct", "fields": [
     {"id": 1, "name": "id", "required": False, "type": "long"},
@@ -151,7 +152,7 @@ def emit_variant(tag, del_content, del_seq, entry_seq="explicit"):
     sync = b"\x00" * 16
     meta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
     ml = b"Obj\x01" + meta + sync
-    for rec in (mfile(DM, 0, 1, SNAP, 1, 5),
+    for rec in (mfile(DM, 0, DATA_SEQ, SNAP, 1, 5),
                 mfile(xm, 1, del_seq, SNAP, 1, len(DELETED_POS))):
         ml += zz(1) + zz(len(rec)) + rec + sync
     open(os.path.join(md, ml_name), "wb").write(ml)
@@ -159,7 +160,7 @@ def emit_variant(tag, del_content, del_seq, entry_seq="explicit"):
         "format-version": 2, "location": LOC, "current-schema-id": 0,
         "schemas": [schema], "current-snapshot-id": SNAP,
         "snapshots": [{
-            "snapshot-id": SNAP, "sequence-number": max(2, del_seq),
+            "snapshot-id": SNAP, "sequence-number": max(DATA_SEQ, del_seq),
             "timestamp-ms": 0,
             "manifest-list": f"{LOC}/metadata/{ml_name}",
             "summary": {"operation": "overwrite"}, "schema-id": 0}],
@@ -167,15 +168,17 @@ def emit_variant(tag, del_content, del_seq, entry_seq="explicit"):
     open(os.path.join(md, f"{tag}.metadata.json"), "w").write(json.dumps(metadata))
 
 
-# apply:   a position delete at seq 2 > the data's seq 1 -> the rows are dropped
-# noapply: a position delete at seq 1, NOT greater than the data's -> no-op
-# equality: an equality (content 2) delete -> refused, not applied
-emit_variant("apply", 1, 2)
-emit_variant("noapply", 1, 1)
-emit_variant("equality", 2, 2)
-# a position delete whose entry sequence number is NULL, inheriting seq 2 from
-# the manifest (the way real writers record it); it still applies over seq-1 data
-emit_variant("inherit", 1, 2, entry_seq=None)
+# apply:   a position delete at seq 5, EQUAL to the data's seq 5 -> applies, per
+#          the spec's data_seq <= delete_seq (the same-commit upsert case). This
+#          is the boundary that distinguishes the correct >= from a strict >.
+# noapply: a position delete at seq 4, OLDER than the data's seq 5 -> no-op.
+# equality: an equality (content 2) delete -> refused, not applied.
+emit_variant("apply", 1, DATA_SEQ)
+emit_variant("noapply", 1, DATA_SEQ - 1)
+emit_variant("equality", 2, DATA_SEQ)
+# a position delete whose entry sequence number is NULL, inheriting seq 5 from
+# the manifest (the way real writers record it); it applies over the seq-5 data
+emit_variant("inherit", 1, DATA_SEQ, entry_seq=None)
 
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]

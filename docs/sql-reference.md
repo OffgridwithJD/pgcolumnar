@@ -703,8 +703,10 @@ a mixed-case name in the column definition list to preserve its case. Only
 Parquet data files are read.
 
 Position deletes are applied: a delete file drops the row ordinals it lists from
-the data file it names, when the delete's data sequence number is greater than
-that data file's (a delete affects data written before it, never after).
+the data file it names, when that data file's data sequence number is less than
+or equal to the delete's (the Iceberg rule: a position delete affects data
+written in the same commit or earlier, so a delete and the rows it removes may
+share a sequence number).
 Equality deletes are not yet supported and are refused rather than ignored, so a
 table using them errors instead of returning rows it should have removed. The
 recorded file paths are rebased onto the table's actual location and resolved
