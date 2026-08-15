@@ -164,10 +164,31 @@ ice_fdw_partition_quals(ForeignScanState *node, TupleDesc tupdesc,
 	return compiled;
 }
 
+/* Is `typid` an identity-partition column type this increment can prune on? Only
+ * these are put in the partition mask, so a qual over, say, a date-partitioned
+ * column is never compiled and its files are read in full (sound). */
+static bool
+ice_fdw_type_supported(Oid typid)
+{
+	switch (typid)
+	{
+		case TEXTOID:
+		case VARCHAROID:
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case BOOLOID:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /* Convert one already-transformed partition cell to a Datum of `typid`, for the
- * identity types this increment prunes. Sets *ok=false for a type/cell it does
- * not handle (the caller then leaves the column NULL, so a qual on it cannot
- * prune -- always sound). */
+ * identity types this increment prunes. Sets *ok=false for a cell it cannot
+ * convert (a type mismatch or an incomparable value); the caller must then treat
+ * the file as UNDECIDABLE and not prune it -- a present-but-unconverted value is
+ * unknown, NOT null, so a qual on it must never drop the file. */
 static Datum
 ice_fdw_cell_datum(const PgColumnarAvroPartCell *c, Oid typid, bool *ok)
 {
@@ -244,13 +265,24 @@ ice_fdw_file_excludes(void *arg, const PgColumnarAvroPartCell *cells,
 			continue;
 		if (cells[k].isnull)
 		{
-			st->partSlot->tts_isnull[a - 1] = true;	/* NULL partition value */
+			st->partSlot->tts_isnull[a - 1] = true;	/* a real NULL: prunable */
 			continue;
 		}
 		typid = TupleDescAttr(tupdesc, a - 1)->atttypid;
 		d = ice_fdw_cell_datum(&cells[k], typid, &ok);
 		if (!ok)
-			continue;			/* unsupported: leave NULL, cannot prune on it */
+		{
+			/*
+			 * A present value we cannot convert (a type mismatch or an
+			 * incomparable cell) is UNKNOWN, not null. Leaving it null would let
+			 * a qual like "col = X" evaluate NULL -> false and prune a file that
+			 * may well match: dropped rows. So do not prune this file at all --
+			 * it is read and its rows are re-filtered by the recheckable qual.
+			 * (The compile-time type filter already keeps unsupported-type
+			 * columns out of the mask; this covers a per-file mismatch.)
+			 */
+			return false;
+		}
 		st->partSlot->tts_values[a - 1] = d;
 		st->partSlot->tts_isnull[a - 1] = false;
 	}
@@ -305,7 +337,16 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 	{
 		int			a = st->partAttno[k];
 
-		if (a >= 1 && a <= tupdesc->natts)
+		/*
+		 * Only mask a column whose type this increment can convert a partition
+		 * cell to. A column of an unsupported type (date, timestamp, numeric,
+		 * uuid, ...) is left unmasked, so no qual over it is compiled and its
+		 * files are read in full -- correct, if not yet optimized. This is the
+		 * compile-time half of the "never over-prune" guarantee; the filter
+		 * covers a per-file mismatch of a supported-type column at read time.
+		 */
+		if (a >= 1 && a <= tupdesc->natts &&
+			ice_fdw_type_supported(TupleDescAttr(tupdesc, a - 1)->atttypid))
 		{
 			partMask[a - 1] = true;
 			any = true;

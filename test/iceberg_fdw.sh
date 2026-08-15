@@ -79,6 +79,30 @@ check "the non-partition predicate still returns the right rows" \
 	"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev WHERE amount > 25")" \
 	"3,4,5"
 
+# ---- a DATE identity partition must NOT over-prune (the #660 bug) ------------
+# the FDW cannot convert a date partition cell, so it must read the file in full
+# and let the recheck qual filter -- never NULL-fill and prune, which would drop
+# rows. dt=2020-01-01 -> ids 1,2 ; dt=2020-02-01 -> ids 3,4.
+if [ -f "$FX/warehouse_datepart/db/byday/metadata/00001-08bb95d5-d5eb-442f-b2f4-11b44457c66a.metadata.json" ]; then
+	DDEST="$PGC_WORKDIR/whd"; rm -rf "$DDEST"; mkdir -p "$DDEST"
+	cp -r "$FX/warehouse_datepart/db" "$DDEST/db"; chmod -R u+rwX "$DDEST"
+	MDD="$(ls "$DDEST"/db/byday/metadata/*.metadata.json | sort | tail -1)"
+	q "CREATE FOREIGN TABLE evd (id bigint, dt date, amount int)
+	   SERVER ice OPTIONS (metadata_path '$MDD')" >/dev/null
+	check "a date-partitioned FDW reads the whole table (4 rows)" \
+		"$(q "SELECT count(*) FROM evd")" "4"
+	check "dt='2020-01-01' returns its rows, not over-pruned to zero" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evd WHERE dt=DATE '2020-01-01'")" \
+		"1,2"
+	check_text "the date FDW matches iceberg_scan under the same predicate" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evd WHERE dt=DATE '2020-01-01'")" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+		      FROM pgcolumnar.iceberg_scan('$MDD') AS t(id bigint, dt date, amount int)
+		      WHERE dt=DATE '2020-01-01'")"
+	check "a date partition prunes nothing in this release (Files Pruned: 0)" \
+		"$(fp "SELECT * FROM evd WHERE dt=DATE '2020-01-01'")" "0"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
