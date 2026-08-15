@@ -613,9 +613,10 @@ Decodes an Apache Iceberg Avro manifest file and reports its data-file entries.
 Each row is one entry: the file path, format, row count, byte size, the
 partition rendered as `name=value`, and the entry's data sequence number. The
 sequence number is NULL when the entry inherits it from the manifest (the usual
-case for a freshly written manifest); a delete file applies only to data files
-with a lower sequence number, so it is the ordering key for reading tables with
-deletes. The caller needs the `pg_read_server_files` role, which superusers
+case for a freshly written manifest); a position delete applies to data files
+with a lower or equal sequence number (the same commit or earlier), an equality
+delete to a strictly lower one, so it is the ordering key for reading tables
+with deletes. The caller needs the `pg_read_server_files` role, which superusers
 hold. This is the first step of Iceberg support (#388). It is a standalone Avro
 object-container reader, decoded against the schema embedded in the file, so a
 v3 manifest reads structurally. It reads a local file. It does not resolve a
@@ -700,11 +701,18 @@ id. The caller needs the `pg_read_server_files` role, which superusers hold.
 The output column names must be fields of the table's current schema; a name
 that is not is an error. Matching is case sensitive against the schema, so quote
 a mixed-case name in the column definition list to preserve its case. Only
-Parquet data files are read. A table whose current snapshot carries any delete
-file is refused, not read with the deletes ignored (that is a later step, #388
-phase 4). The recorded file paths are rebased onto the table's actual location
-and resolved against a path boundary, so a relocated table reads and a path
-pointing outside the table is refused.
+Parquet data files are read.
+
+Position deletes are applied: a delete file drops the row ordinals it lists from
+the data file it names, when that data file's data sequence number is less than
+or equal to the delete's (the Iceberg rule: a position delete affects data
+written in the same commit or earlier, so a delete and the rows it removes may
+share a sequence number).
+Equality deletes are not yet supported and are refused rather than ignored, so a
+table using them errors instead of returning rows it should have removed. The
+recorded file paths are rebased onto the table's actual location and resolved
+against a path boundary, so a relocated table reads and a path pointing outside
+the table is refused.
 
 ```sql
 SELECT id, region, sum(amount)

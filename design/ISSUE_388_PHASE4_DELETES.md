@@ -23,12 +23,22 @@ Two merge-on-read delete kinds, both tracked in **delete manifests**
   by the manifest entry's `equality_ids`. Any data row equal to a delete row on
   those columns is dropped.
 
-**Sequence-number ordering is the correctness crux.** A delete file applies only
-to data files with a **lower** data sequence number (deletes affect data written
-before them). Get this wrong and the table reads subtly wrong -- deletes bleed
-onto newer data, or fail to apply to older data. Every delete application is
-gated on `delete.sequence_number > datafile.sequence_number` (position deletes
-also match `file_path`).
+**Sequence-number ordering is the correctness crux, and the rule differs by
+delete kind** (Iceberg spec, Scan Planning):
+
+- a **position** delete applies when `datafile.sequence_number <=
+  delete.sequence_number` -- i.e. `delete.sequence_number >=
+  datafile.sequence_number`. The `<=` (not strict `<`) is deliberate: a position
+  delete affects data written in the **same commit** or earlier, so a delete and
+  the rows it removes may share a sequence number (a single-commit upsert).
+- an **equality** delete applies when `datafile.sequence_number <
+  delete.sequence_number` -- strictly lower (it targets pre-existing data only).
+
+Get this wrong and the table reads subtly wrong -- deletes bleed onto newer data,
+or fail to apply to same-commit or older data. Gate **per kind**, never one
+shared operator (position deletes also match `file_path`). Getting this backwards
+-- a strict `>` for position deletes -- silently dropped same-commit deletes and
+was the blocking bug of the first 4a review; do not repeat it in 4b.
 
 ## Fixture tooling (the gating constraint)
 
@@ -48,10 +58,11 @@ independent engine:
    (no independent delete writer exists), and cross-check the crafted manifest by
    decoding it back through `read_manifest_list` / `read_avro_manifest`.
 
-A sequence-number arm is essential precisely because the oracle is ours: craft a
-delete whose sequence number is NOT greater than the data file's and assert the
-row survives (the delete must NOT apply), so the ordering rule is load-bearing,
-not decorative.
+A sequence-number arm is essential precisely because the oracle is ours, and it
+must sit on the boundary: craft the "apply" delete at a sequence number EQUAL to
+the data file's (a position delete must apply -- the case a strict `>` wrongly
+excludes) and the "no-apply" delete at a strictly LOWER one (must not apply), so
+the `>=` rule is load-bearing, not decorative.
 
 ## Architecture
 
@@ -76,10 +87,22 @@ opened here too -- same content-leak surface as data files).
 
 ## Sub-increments (each its own PR, each provable)
 
-- **4a - position deletes.** The common case. Single data file, a path-scoped
-  position-delete file dropping known ordinals; oracle = data minus those rows.
-  Plus the sequence-number arm (a too-old delete does not apply). Still refuse
-  equality (`content = 2`) and v3 until their increments.
+- **4a - position deletes. DONE.** `pq_read_rows` gained a sorted `skipPos` set
+  (dropping rows by file ordinal, computed as sum-of-prior-row-group-rows + r);
+  `PgColumnarReadParquetByFieldId` threads it. The walk grew a `collect_deletes`
+  mode: the lister still refuses deletes, the scan collects position-delete
+  entries (still refusing equality) and resolves each entry's data sequence
+  number (inheriting the manifest's when null). `iceberg_scan` reads the
+  position-delete Parquet files (by their reserved field ids 2147483546/545),
+  and for each data file drops the ordinals its deletes name whose sequence
+  number is `>=` the data file's (position-delete rule; equal = same commit).
+  Fixture is hand-crafted (`warehouse_del`, generator `gen_delete_fixture.py`)
+  with `apply` (equal seq) / `noapply` (strictly older) / `inherit` / `equality`
+  / `wrongpath` / `badseq` variants. Removal proofs: defeating the reader skip
+  keeps the deleted rows; reverting the gate to strict `>` reds the equal-seq
+  apply; dropping the path match applies a wrong-file delete.
+  PG17/18/19 (PG19 needed `TupleDescFinalize` on the manual pos-delete tupdesc)
+  + ASAN; the Parquet family and 3a/3b/3c suites are unregressed.
 - **4b - equality deletes.** Add equality evaluation on `equality_ids` columns.
 - **4c - v3 deletion vectors (Puffin).** A new container format (Puffin) holding
   a roaring bitmap of deleted positions -- a decoder like the Avro one. Largest.
