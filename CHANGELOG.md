@@ -14,6 +14,22 @@ which was true until that script existed.
 
 ### Added
 
+- Read-only Apache Iceberg support, filesystem-backed, at a table's current
+  snapshot (#388). `pgcolumnar.iceberg_scan(metadata_path)` reads a table given
+  a column definition list, resolving each output column to a schema field id so
+  a data file written before a column rename still reads. It applies **position
+  deletes** -- a position delete drops the row ordinals it names from a data file
+  whose data sequence number is at or below the delete's (same commit or
+  earlier). Equality deletes are not yet supported and are refused rather than
+  ignored, so a table using them errors instead of returning rows it should have
+  removed. Supporting introspection functions: `iceberg_current_snapshot` and
+  `iceberg_data_files` (which refuses any delete), and the Avro building blocks
+  `read_avro_manifest` and `read_manifest_list`. Only Parquet data files are
+  read; recorded paths are rebased onto the table's actual location and refused
+  if they resolve outside it. `read_parquet` also gained a `field_ids` form that
+  projects columns by Parquet field id. See
+  [Iceberg](docs/sql-reference.md#pgcolumnariceberg_scanmetadata_path-text-returns-setof-record).
+
 - The Parquet read and export functions and the foreign-data wrapper read from
   and write to object storage (#393, #394). A path may be an `s3://`,
   `http://`, or `https://` URL wherever it may be a local path. `s3://` requests

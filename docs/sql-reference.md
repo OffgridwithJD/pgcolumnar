@@ -613,9 +613,10 @@ Decodes an Apache Iceberg Avro manifest file and reports its data-file entries.
 Each row is one entry: the file path, format, row count, byte size, the
 partition rendered as `name=value`, and the entry's data sequence number. The
 sequence number is NULL when the entry inherits it from the manifest (the usual
-case for a freshly written manifest); a delete file applies only to data files
-with a lower sequence number, so it is the ordering key for reading tables with
-deletes. The caller needs the `pg_read_server_files` role, which superusers
+case for a freshly written manifest); a position delete applies to data files
+with a lower or equal sequence number (the same commit or earlier), an equality
+delete to a strictly lower one, so it is the ordering key for reading tables
+with deletes. The caller needs the `pg_read_server_files` role, which superusers
 hold. This is the first step of Iceberg support (#388). It is a standalone Avro
 object-container reader, decoded against the schema embedded in the file, so a
 v3 manifest reads structurally. It reads a local file. It does not resolve a
