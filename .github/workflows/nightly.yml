@@ -155,6 +155,14 @@ jobs:
           python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow", pyarrow.__version__)'
           sudo python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow as root ok")'
 
+      - name: Resolve the object-storage suite host names
+        # objstore_addressing and objstore_listing exercise virtual-host-style
+        # S3 addressing (pgc-bucket.s3.local) against their own loopback
+        # fixture server. The names must resolve; a suite whose capability
+        # check fails is a FAILURE unless explicitly waived (pgc_skip), so
+        # resolution is part of the environment the gate provides.
+        run: echo "127.0.0.1 s3.local pgc-bucket.s3.local" | sudo tee -a /etc/hosts
+
       - name: Stop the packaged cluster
         run: sudo systemctl stop postgresql || true
 
@@ -206,6 +214,14 @@ jobs:
           # that would create a postgres user, so make one.
           id postgres >/dev/null 2>&1 || sudo useradd -m postgres
           sudo -u postgres python3 -c 'import pyarrow, pyarrow.parquet; print("pyarrow ok for postgres")'
+
+      - name: Resolve the object-storage suite host names
+        # objstore_addressing and objstore_listing exercise virtual-host-style
+        # S3 addressing (pgc-bucket.s3.local) against their own loopback
+        # fixture server. The names must resolve; a suite whose capability
+        # check fails is a FAILURE unless explicitly waived (pgc_skip), so
+        # resolution is part of the environment the gate provides.
+        run: echo "127.0.0.1 s3.local pgc-bucket.s3.local" | sudo tee -a /etc/hosts
 
       - name: Cache the instrumented PostgreSQL
         id: san-cache
@@ -394,6 +410,14 @@ jobs:
             grep -E '^Get:[0-9]+ https?://' /tmp/apt-install.log
             exit 1
           fi
+
+      - name: Resolve the object-storage suite host names
+        # objstore_addressing and objstore_listing exercise virtual-host-style
+        # S3 addressing (pgc-bucket.s3.local) against their own loopback
+        # fixture server. The names must resolve; a suite whose capability
+        # check fails is a FAILURE unless explicitly waived (pgc_skip), so
+        # resolution is part of the environment the gate provides.
+        run: echo "127.0.0.1 s3.local pgc-bucket.s3.local" | sudo tee -a /etc/hosts
 
       - name: Stop the packaged cluster
         run: sudo systemctl stop postgresql || true
