@@ -85,6 +85,14 @@ check "a position delete with an inherited (null-entry) sequence number applies"
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/inherit.metadata.json')
 	      AS t(id bigint, region text, amount int)")" "3"
 
+# ---- per-file scoping: a delete naming a different data file does not apply -
+# the delete is applicable by sequence, but its rows target another data file, so
+# none of data.parquet's rows may be dropped (proves the path match excludes, not
+# just includes -- a basename-only or always-true match would wrongly delete).
+check "a position delete naming a different data file deletes nothing (5 rows)" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/wrongpath.metadata.json')
+	      AS t(id bigint, region text, amount int)")" "5"
+
 # ---- equality deletes are refused, not misapplied --------------------------
 check "an equality delete is refused (0A000)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/equality.metadata.json')

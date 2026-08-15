@@ -122,6 +122,16 @@ posdel = pa.table({
 ]))
 pq.write_table(posdel, os.path.join(OUT, "db", "t", "data", "posdel.parquet"))
 
+# a second position-delete file whose file_path column names a DIFFERENT data
+# file (not in the snapshot), to prove per-file scoping: applied against
+# data.parquet it must delete nothing, because the paths do not match.
+WRONG_DEL_PATH = f"{LOC}/data/posdel-wrong.parquet"
+posdel_wrong = pa.table({
+    "file_path": pa.array([f"{LOC}/data/OTHER.parquet"] * len(DELETED_POS), pa.string()),
+    "pos": pa.array(DELETED_POS, pa.int64()),
+}, schema=posdel.schema)
+pq.write_table(posdel_wrong, os.path.join(OUT, "db", "t", "data", "posdel-wrong.parquet"))
+
 # ---- the manifests, manifest list, metadata -------------------------------
 md = os.path.join(OUT, "db", "t", "metadata")
 SNAP = 7766554433221100
@@ -136,17 +146,18 @@ schema = {"schema-id": 0, "type": "struct", "fields": [
     {"id": 3, "name": "amount", "required": False, "type": "int"}]}
 
 
-def emit_variant(tag, del_content, del_seq, entry_seq="explicit"):
+def emit_variant(tag, del_content, del_seq, entry_seq="explicit", del_file=DEL_PATH):
     """Write a (delete manifest, manifest list, metadata) triple: a delete file
     of the given data_file content (1 position, 2 equality) at data sequence
     number del_seq, over the shared data manifest (content 0, seq 1). entry_seq
     "explicit" writes del_seq on the entry; None leaves it null so the reader must
-    inherit del_seq from the manifest_file in the manifest list."""
+    inherit del_seq from the manifest_file in the manifest list. del_file is the
+    position-delete Parquet the entry points at."""
     xm_name = f"delete-manifest-{tag}.avro"
     ml_name = f"manifest-list-{tag}.avro"
     eseq = del_seq if entry_seq == "explicit" else None
     open(os.path.join(md, xm_name), "wb").write(
-        ocf(ENTRY_SCHEMA, entry(1, eseq, del_content, DEL_PATH, "PARQUET",
+        ocf(ENTRY_SCHEMA, entry(1, eseq, del_content, del_file, "PARQUET",
                                 len(DELETED_POS), 500)))
     xm = f"{LOC}/metadata/{xm_name}"
     sync = b"\x00" * 16
@@ -179,6 +190,9 @@ emit_variant("equality", 2, DATA_SEQ)
 # a position delete whose entry sequence number is NULL, inheriting seq 5 from
 # the manifest (the way real writers record it); it applies over the seq-5 data
 emit_variant("inherit", 1, DATA_SEQ, entry_seq=None)
+# a position delete (applicable by sequence) whose rows name a DIFFERENT data
+# file; per-file scoping means it must delete nothing from data.parquet
+emit_variant("wrongpath", 1, DATA_SEQ, del_file=WRONG_DEL_PATH)
 
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
