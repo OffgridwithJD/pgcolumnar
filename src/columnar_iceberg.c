@@ -607,10 +607,19 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 									   e->file_path)));
 			}
 
-			/* resolve the data sequence number: a null entry sequence number
-			 * inherits the manifest's (from the manifest list) */
+			/* resolve the data sequence number. The spec inherits a null entry
+			 * sequence number from the manifest ONLY for ADDED (status 1)
+			 * entries; an EXISTING (0) or DELETED (2) entry must carry it
+			 * explicitly, so a null one there is corrupt metadata, not an
+			 * inheritance -- inheriting the current (too-new) manifest number
+			 * could wrongly keep a row a delete should have removed. */
 			if (!e->has_sequence_number)
 			{
+				if (e->status != 1)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("iceberg: a status-%d manifest entry for \"%s\" has no sequence number",
+									e->status, e->file_path)));
 				e->sequence_number = mfs[mi].sequence_number;
 				e->has_sequence_number = true;
 			}
@@ -880,6 +889,7 @@ ice_read_pos_deletes(IceScanCtx *c)
 	TupleDesc	dtd;
 	TupleTableSlot *wslot;
 	TupleTableSlot *rslot;
+	MemoryContext filectx;
 	int			fids[2];
 
 	if (c->posdel == NIL)
@@ -899,11 +909,21 @@ ice_read_pos_deletes(IceScanCtx *c)
 	fids[0] = ICE_POSDEL_PATH_ID;
 	fids[1] = ICE_POSDEL_POS_ID;
 
+	/* each delete file's Parquet footer + metadata (which pq_read_file_into
+	 * leaves for its caller to reclaim) live in this scratch context, reset per
+	 * file so an upsert-heavy table's many delete files do not accumulate
+	 * O(files) footers. The (dpath, pos, seq) rows we keep are allocated in the
+	 * outer context so they survive the reset. */
+	filectx = AllocSetContextCreate(CurrentMemoryContext,
+									"pgcolumnar iceberg_scan posdel",
+									ALLOCSET_DEFAULT_SIZES);
+
 	foreach(lc, c->posdel)
 	{
 		IceEntry   *pd = (IceEntry *) lfirst(lc);
 		char	   *safe;
 		Tuplestorestate *ts;
+		MemoryContext old;
 
 		/* v2 position deletes are Parquet; a Puffin/other delete file is a later
 		 * step, refused here with a clear cause rather than a parse error */
@@ -913,10 +933,10 @@ ice_read_pos_deletes(IceScanCtx *c)
 					 errmsg("iceberg: position-delete file \"%s\" has format %s; only PARQUET position deletes are supported",
 							pd->file_path, pd->file_format)));
 
+		old = MemoryContextSwitchTo(filectx);
 		safe = ice_open_path(c->recorded_root, c->actual_root,
 							 pd->file_path, "position-delete", c->mdpath);
 		ts = tuplestore_begin_heap(false, false, work_mem);
-
 		(void) PgColumnarReadParquetByFieldId(safe, dtd, fids, 2, ts, wslot, NULL, 0);
 		while (tuplestore_gettupleslot(ts, true, false, rslot))
 		{
@@ -927,16 +947,23 @@ ice_read_pos_deletes(IceScanCtx *c)
 
 			if (!n1 && !n2)
 			{
-				IcePosDel  *r = (IcePosDel *) palloc(sizeof(IcePosDel));
+				IcePosDel  *r;
 
+				/* keep the row in the outer context, not the per-file scratch */
+				MemoryContextSwitchTo(old);
+				r = (IcePosDel *) palloc(sizeof(IcePosDel));
 				r->dpath = text_to_cstring(DatumGetTextPP(d1));
 				r->pos = DatumGetInt64(d2);
 				r->seq = pd->seq;
 				out = lappend(out, r);
+				MemoryContextSwitchTo(filectx);
 			}
 		}
 		tuplestore_end(ts);
+		MemoryContextSwitchTo(old);
+		MemoryContextReset(filectx);
 	}
+	MemoryContextDelete(filectx);
 	ExecDropSingleTupleTableSlot(wslot);
 	ExecDropSingleTupleTableSlot(rslot);
 	return out;
@@ -1086,9 +1113,12 @@ pgcolumnar_iceberg_scan(PG_FUNCTION_ARGS)
 			nskip = w;
 		}
 
+		/* resolve and read inside the per-file context so the opened path string
+		 * and the reader's footer/metadata are reclaimed by the reset, not left
+		 * to accumulate one-per-data-file across the scan */
+		old = MemoryContextSwitchTo(ctx.filectx);
 		safe = ice_open_path(ctx.recorded_root, ctx.actual_root, d->file_path,
 							 "data-file", ctx.mdpath);
-		old = MemoryContextSwitchTo(ctx.filectx);
 		(void) PgColumnarReadParquetByFieldId(safe, ctx.tupdesc, ctx.field_ids,
 											  ctx.nfield, ctx.tupstore, ctx.slot,
 											  skip, nskip);

@@ -194,6 +194,26 @@ emit_variant("inherit", 1, DATA_SEQ, entry_seq=None)
 # file; per-file scoping means it must delete nothing from data.parquet
 emit_variant("wrongpath", 1, DATA_SEQ, del_file=WRONG_DEL_PATH)
 
+# spec violation: an EXISTING (status 0) data entry with a NULL sequence number.
+# The spec inherits a null sequence number only for ADDED (status 1) entries; on
+# an EXISTING entry it is corrupt, and inheriting the (too-new) manifest number
+# could wrongly keep rows a delete should remove. The reader must refuse it.
+sync = b"\x00" * 16
+mlmeta = zz(2) + s(b"avro.schema") + s(MFILE_SCHEMA) + s(b"avro.codec") + s(b"null") + zz(0)
+open(os.path.join(md, "data-manifest-badseq.avro"), "wb").write(
+    ocf(ENTRY_SCHEMA, entry(0, None, 0, DATA_PATH, "PARQUET", 5, 1000)))
+DMB = f"{LOC}/metadata/data-manifest-badseq.avro"
+mlb = b"Obj\x01" + mlmeta + sync
+recb = mfile(DMB, 0, DATA_SEQ, SNAP, 1, 5)
+mlb += zz(1) + zz(len(recb)) + recb + sync
+open(os.path.join(md, "manifest-list-badseq.avro"), "wb").write(mlb)
+open(os.path.join(md, "badseq.metadata.json"), "w").write(json.dumps({
+    "format-version": 2, "location": LOC, "current-schema-id": 0,
+    "schemas": [schema], "current-snapshot-id": SNAP,
+    "snapshots": [{"snapshot-id": SNAP, "sequence-number": DATA_SEQ, "timestamp-ms": 0,
+                   "manifest-list": f"{LOC}/metadata/manifest-list-badseq.avro",
+                   "summary": {"operation": "append"}, "schema-id": 0}]}))
+
 # oracle: the surviving rows (id, region, amount), deleted positions removed
 rows = [(1, "eu", 10), (2, "eu", 20), (3, "us", 30), (4, "us", 40), (5, "us", 50)]
 survive = [r for i, r in enumerate(rows) if i not in DELETED_POS]

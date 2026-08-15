@@ -3158,11 +3158,20 @@ pq_read_rows(PqFile *pf, PqSource *src,
 	MemoryContext rowCtx;
 	bool	   *needLeaf;
 	int64		total = 0;
-	int64		grpBase = 0;	/* file ordinal of the current row group's row 0 */
+	int64		grpBase = 0;	/* file ordinal of row 0 of row group rgFrom */
 	int			skipIdx = 0;	/* moving cursor into the sorted skipPos array */
 	int			i;
 	int			rg;
 	int			t0;
+
+	/*
+	 * skipPos ordinals are file-relative, but grpBase starts at 0, so it is the
+	 * true file ordinal only when this call covers the file from its first row
+	 * group. Every skipPos caller passes rgFrom == 0 (whole file); the per-group
+	 * FDW path passes skipPos == NULL. Pin that coupling: reading a subset of row
+	 * groups with a skip set would need grpBase seeded to the ordinal of rgFrom.
+	 */
+	Assert(skipPos == NULL || rgFrom == 0);
 
 	/*
 	 * Projection pushdown: needTop[t] says whether target column t is referenced

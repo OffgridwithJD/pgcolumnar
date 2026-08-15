@@ -99,4 +99,13 @@ check "an equality delete is refused (0A000)" \
 	                AS t(id bigint, region text, amount int)")" "0A000"
 check "backend still up after the equality refusal" "$(q 'SELECT 1')" "1"
 
+# ---- spec: inheritance is ADDED-only; a null seq on an EXISTING entry is bad --
+# the spec inherits a null sequence number only for status-1 (ADDED) entries; an
+# EXISTING (status 0) entry with a null sequence number is corrupt, and silently
+# inheriting the too-new manifest number could keep rows a delete should remove.
+check "an EXISTING entry with a null sequence number is refused (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/badseq.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+check "backend still up after the bad-sequence refusal" "$(q 'SELECT 1')" "1"
+
 pgc_summary
