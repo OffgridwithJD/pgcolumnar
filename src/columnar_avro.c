@@ -618,6 +618,15 @@ av_decode_entry(AvReader *r, AvSchema *s, PgColumnarAvroManifestEntry *e)
 
 		if (strcmp(nm, "status") == 0)
 			e->status = (int32) av_read_long(r, ft, &have);
+		/* the data sequence number; "sequence_number" in v2 manifests as
+		 * pyiceberg writes them, "data_sequence_number" in the newer spec name.
+		 * Nullable: null means inherit the manifest's sequence number. */
+		else if (strcmp(nm, "sequence_number") == 0 ||
+				 strcmp(nm, "data_sequence_number") == 0)
+		{
+			e->sequence_number = av_read_long(r, ft, &have);
+			e->has_sequence_number = have;
+		}
 		else if (strcmp(nm, "data_file") == 0)
 		{
 			bool		isnull;
@@ -1068,8 +1077,8 @@ pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
 
 	for (i = 0; i < n; i++)
 	{
-		Datum		values[7];
-		bool		nulls[7] = {false, false, false, false, false, false, false};
+		Datum		values[8];
+		bool		nulls[8] = {false, false, false, false, false, false, false, false};
 		PgColumnarAvroManifestEntry *e = &entries[i];
 
 		values[0] = Int32GetDatum(e->status);
@@ -1088,6 +1097,11 @@ pgcolumnar_read_avro_manifest(PG_FUNCTION_ARGS)
 			values[6] = CStringGetTextDatum(e->partition);
 		else
 			nulls[6] = true;
+		/* the data sequence number, NULL when the entry inherits it */
+		if (e->has_sequence_number)
+			values[7] = Int64GetDatum(e->sequence_number);
+		else
+			nulls[7] = true;
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	}
 	return (Datum) 0;

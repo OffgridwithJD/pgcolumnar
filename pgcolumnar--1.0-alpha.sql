@@ -910,7 +910,8 @@ COMMENT ON FUNCTION pgcolumnar.read_parquet(text, integer[])
 CREATE FUNCTION pgcolumnar.read_avro_manifest(path text)
 	RETURNS TABLE(status integer, content integer, file_path text,
 				  file_format text, record_count bigint,
-				  file_size_in_bytes bigint, partition text)
+				  file_size_in_bytes bigint, partition text,
+				  sequence_number bigint)
 	LANGUAGE C STRICT
 	AS 'MODULE_PATHNAME', 'pgcolumnar_read_avro_manifest';
 
