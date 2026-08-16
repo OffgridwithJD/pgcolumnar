@@ -109,6 +109,7 @@ SUITES=(
 	native_agg_addcolumn
 	native_agg_deletes
 	native_backend_crash
+	native_batch_fold_projection
 	native_bloom
 	native_cancel
 	native_cluster

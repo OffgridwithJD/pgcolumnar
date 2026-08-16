@@ -14,6 +14,12 @@ which was true until that script existed.
 
 ### Fixed
 
+- The ungrouped batch fold's per-row gather now steps over the columns a query
+  references rather than all of a table's columns. On a wide table a scan that
+  reads a few columns walked every column per row (twice on a deferred group),
+  which is loop overhead proportional to the table width. It now iterates compact
+  key/payload lists; a 46-column single-aggregate fold measured about 23% faster
+  with no change in results. Regression test: native_batch_fold_projection.
 - The grouped vector aggregate's input-scan estimate is now shared with the
   columnar scan node's, via one pgcolumnar_refined_scan_cost helper. Its
   no-serial-survivor fallback used the bare seqscan formula, which omitted the
