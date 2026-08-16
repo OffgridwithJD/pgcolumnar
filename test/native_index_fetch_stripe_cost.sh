@@ -28,7 +28,7 @@ c2="$(topcost)"
 echo "-- index-scan total cost: stripe_row_limit=2000 -> $c1 ; =150000 -> $c2"
 
 check "the index-fetch cost responds to the per-table stripe_row_limit (c1 is a number)" \
-	"$(echo "$c1" | grep -qE '^[0-9.]+$' && echo num)" "num"
+	"$(case "$c1" in ''|*[!0-9.]*) ;; *) echo num ;; esac)" "num"
 check "changing the per-table stripe_row_limit changes the estimated cost" \
 	"$([ -n "$c1" ] && [ -n "$c2" ] && [ "$c1" != "$c2" ] && echo differ)" "differ"
 check "backend alive" "$(q 'SELECT 1')" "1"
