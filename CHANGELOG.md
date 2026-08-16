@@ -14,6 +14,12 @@ which was true until that script existed.
 
 ### Fixed
 
+- The index-fetch cost penalty now sizes row groups by a relation's effective
+  `stripe_row_limit` (the per-table option when set, else the GUC), matching the
+  writer and the zone-map survival estimate. It read only the GUC, so it
+  mis-priced the row-group decode for a table that set the option, and could steer
+  the planner toward or away from an index scan on that table. The effective-limit
+  lookup is now one shared helper. Regression test: native_index_fetch_stripe_cost.
 - The Iceberg foreign-data wrapper now estimates a scan's row count from the
   manifests (the sum of the live data files' record counts) instead of a constant
   1000. The constant mis-sized every scan and corrupted join planning above a

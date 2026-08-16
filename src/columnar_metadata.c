@@ -2676,6 +2676,25 @@ PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts)
 	return found;
 }
 
+/*
+ * The stripe (row group) row limit in force for a relation: the per-table
+ * `stripe_row_limit` option when set, else the GUC default. The writer honors
+ * the per-table override, so every consumer that reasons about how many row
+ * groups a table has (the writer, the zone-map survival estimate, the index-
+ * fetch cost penalty) must read the same effective value. Reading only the GUC
+ * mis-sizes the group count for a table that set the option (#7 / #11).
+ */
+int
+pgcolumnar_effective_stripe_row_limit(Oid relid)
+{
+	PgColumnarOptions opts;
+
+	if (PgColumnarReadOptions(relid, &opts) &&
+		opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
+		return opts.stripeRowLimit;
+	return pgcolumnar_stripe_row_limit;
+}
+
 
 /*
  * PgColumnarReadSortBy

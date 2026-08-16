@@ -458,6 +458,7 @@ extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */
 extern bool PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts);
+extern int pgcolumnar_effective_stripe_row_limit(Oid relid);
 
 /* declared physical sort key (#288); List of pstrdup'd column names, NIL if
  * none is declared. Names (not attnums) so the value survives dump/restore. */

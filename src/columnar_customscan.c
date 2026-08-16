@@ -833,10 +833,10 @@ pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
  * decode of R rows across the columns the scan needs.
  */
 static Cost
-pgcolumnar_index_fetch_penalty(RelOptInfo *rel, double rows, double rho,
+pgcolumnar_index_fetch_penalty(RelOptInfo *rel, Oid relid, double rows, double rho,
 							 int nproj, double decodedWidth, bool tid_ordered)
 {
-	double		R = (double) pgcolumnar_stripe_row_limit;
+	double		R = (double) pgcolumnar_effective_stripe_row_limit(relid);
 	double		N = (rel->tuples > 0) ? rel->tuples : rows;
 	double		n_groups,
 				pages_per_stripe,
@@ -1111,12 +1111,8 @@ pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
 	 * cost model that is otherwise wrong by an order of magnitude.
 	 */
 	{
-		PgColumnarOptions opts;
-		int			limit = pgcolumnar_stripe_row_limit;
+		int			limit = pgcolumnar_effective_stripe_row_limit(heapRelid);
 
-		if (PgColumnarReadOptions(heapRelid, &opts) &&
-			opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
-			limit = opts.stripeRowLimit;
 		if (limit <= 0)
 			return 1.0;
 		groups = ceil(rel->tuples / (double) limit);
@@ -1296,13 +1292,13 @@ pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 			IndexPath  *ip = castNode(IndexPath, p);
 			double		rho = pgcolumnar_index_correlation(ip->indexinfo, relid);
 
-			add = pgcolumnar_index_fetch_penalty(rel, p->rows, rho, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, rho, nproj,
 											   decodedWidth, false);
 		}
 		else if (p->pathtype == T_BitmapHeapScan)
 		{
 			/* a bitmap heap scan fetches in TID (row-number) order */
-			add = pgcolumnar_index_fetch_penalty(rel, p->rows, 1.0, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, 1.0, nproj,
 											   decodedWidth, true);
 		}
 		/* T_IndexOnlyScan and the custom scans do no heap fetch */
