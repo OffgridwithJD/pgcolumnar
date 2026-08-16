@@ -14,6 +14,14 @@ which was true until that script existed.
 
 ### Fixed
 
+- Concurrent `UPDATE` or `DELETE` of the same columnar row now serializes on the
+  row identity, so the losing writer gets a retryable `serialization_failure`
+  instead of duplicating the row and losing an update (issue #5, the UPDATE facet).
+  Two sessions updating one row without a covering unique index each kept their own
+  new version. The fix takes a transaction-scoped advisory lock on the row, then
+  re-reads the committed delete vector under a fresh snapshot before writing. New
+  GUCs `pgcolumnar.enable_row_update_lock` (default on) and
+  `pgcolumnar.row_lock_buckets` (default 1024). Regression test: update_conc.
 - The ungrouped batch fold's per-row gather now steps over the columns a query
   references rather than all of a table's columns. On a wide table a scan that
   reads a few columns walked every column per row (twice on a deferred group),

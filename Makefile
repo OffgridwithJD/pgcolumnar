@@ -18,6 +18,7 @@ OBJS = \
 	src/columnar_vector.o \
 	src/columnar_vacuum.o \
 	src/columnar_unique.o \
+	src/columnar_row_lock.o \
 	src/columnar_arrow.o \
 	src/columnar_flatbuffers.o \
 	src/columnar_thrift.o \

@@ -226,6 +226,7 @@ SUITES=(
 	temporal
 	ungrouped_vector_agg
 	unique_conc
+	update_conc
 	vacuum_lock_privilege
 	vacuum_stripe_count
 	vm_privilege

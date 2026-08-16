@@ -790,6 +790,7 @@ extern char *PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
 #define PGCOLUMNAR_LOCKCLASS_DELETE_VECTOR	101
 #define PGCOLUMNAR_LOCKCLASS_STORAGE_ROW	102
 #define PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY		103
+#define PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY	104
 
 /* -------------------------------------------------------------------------
  * concurrent unique-key insert serialization (pgcolumnar_unique.c, issue #5)
@@ -803,6 +804,20 @@ extern char *PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
  * ------------------------------------------------------------------------- */
 extern void PgColumnarLockUniqueKeys(Relation rel, TupleTableSlot *slot);
 extern void PgColumnarUniqueInit(void);
+
+/* -------------------------------------------------------------------------
+ * concurrent same-row UPDATE/DELETE serialization (pgcolumnar_row_lock.c,
+ * issue #5, the UPDATE facet). The write paths call PgColumnarRowWriteConflict
+ * before marking the old row deleted, to serialize on the row identity and turn
+ * a lost update into a retryable serialization_failure. See columnar_row_lock.c.
+ * ------------------------------------------------------------------------- */
+extern bool pgcolumnar_enable_row_update_lock;
+extern int	pgcolumnar_row_lock_buckets;
+extern bool PgColumnarLockRowIdentity(Relation rel, uint64 rowNumber, bool wait);
+extern bool PgColumnarRowCommittedDeleted(Relation rel, uint64 rowNumber);
+extern bool PgColumnarRowWriteConflict(Relation rel, ItemPointer otid,
+									   CommandId cid, bool wait,
+									   TM_FailureData *tmfd, TM_Result *result);
 
 /* -------------------------------------------------------------------------
  * planner integration (pgcolumnar_customscan.c, spec 8.3, 9)
