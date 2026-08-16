@@ -1,9 +1,11 @@
 # How-to guides
 
 Task-focused recipes for each pgColumnar feature. Each recipe ends with a short
-tuning note, and a permissions note where one applies. For full function
-signatures see the [SQL reference](sql-reference.md). For every server setting see
-the [Configuration reference](configuration.md).
+tuning note, and a permissions note where one applies. For the advice behind these
+tuning notes, collected by decision rather than by task, see the
+[Best practices](best-practices.md) guide. For full function signatures see the
+[SQL reference](sql-reference.md). For every server setting see the
+[Configuration reference](configuration.md).
 
 Load `pgcolumnar` in `shared_preload_libraries` before you begin. It installs the
 planner and executor hooks that every backend needs.

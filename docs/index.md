@@ -19,6 +19,7 @@ licensed under the MIT License.
 | Install the extension and load it into a server | [Installation](installation.md) |
 | Create columnar tables, load data, and query them | [User guide](user-guide.md) |
 | Follow a recipe for one feature, with a tuning note | [How-to guides](how-to.md) |
+| Design, compress, lay out, and maintain a table well | [Best practices](best-practices.md) |
 | Read Parquet or Apache Iceberg data in place | [User guide](user-guide.md) and [SQL reference](sql-reference.md) |
 | Operate columnar tables in production | [Administration](administration.md) |
 | Look up a setting and its default | [Configuration reference](configuration.md) |
