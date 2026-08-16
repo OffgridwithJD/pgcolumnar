@@ -148,4 +148,126 @@ good = json.dumps({"type": "record", "name": "manifest_entry",
 open(os.path.join(af, "evil.avro"), "wb").write(ocf(evil, []))
 open(os.path.join(af, "good.avro"), "wb").write(ocf(good, []))
 
+# ============================ nullseq (v2, #644 defect #4) ==
+# A manifest_file.sequence_number that is the union's NULL branch was decoded
+# silently as 0. A v2/v3 list always carries a concrete number, so a null is
+# corrupt: an ADDED entry that must inherit it would take 0 and mis-apply an
+# older delete -> a dropped row.
+def mfile_v2_seq(path, content, seq, snap):
+    # seq None -> the sequence_number union's NULL branch (branch 0); else branch 1
+    seqb = zz(0) if seq is None else (zz(1) + zz(seq))
+    return s(path.encode()) + zz(1000) + zz(0) + zz(content) + seqb + \
+        zz(seq or 0) + zz(snap)
+
+
+def write_posdel_parquet(dest, data_path, positions):
+    t = pa.table({"file_path": pa.array([data_path] * len(positions), pa.string()),
+                  "pos": pa.array(positions, pa.int64())},
+                 schema=pa.schema([
+                     pa.field("file_path", pa.string(), nullable=False,
+                              metadata={b"PARQUET:field_id": b"2147483546"}),
+                     pa.field("pos", pa.int64(), nullable=False,
+                              metadata={b"PARQUET:field_id": b"2147483545"})]))
+    pq.write_table(t, dest)
+
+
+# --- decode-level: a bare manifest list read directly by read_manifest_list ---
+nsml = os.path.join(OUT, "nullseq_ml"); os.makedirs(nsml)
+open(os.path.join(nsml, "ml.avro"), "wb").write(
+    ocf(MFILE_V2, [mfile_v2_seq(f"file://{ROOT}/x/dm.avro", 0, None, SNAP)]))
+open(os.path.join(nsml, "ml_ctl.avro"), "wb").write(
+    ocf(MFILE_V2, [mfile_v2_seq(f"file://{ROOT}/x/dm.avro", 0, 5, SNAP)]))
+
+
+# --- scan-level: a data file whose ADDED entry inherits the null manifest seq,
+#     plus a seq-3 position delete dropping ordinal 0 (id 1) of data.parquet ----
+def build_nullseq(name, data_mfile_seq):
+    root = os.path.join(OUT, name)
+    md = os.path.join(root, "db", "t", "metadata")
+    dd = os.path.join(root, "db", "t", "data")
+    os.makedirs(md); os.makedirs(dd)
+    loc = f"file://{ROOT}/{name}/db/t"
+    write_data_parquet(os.path.join(dd, "data.parquet"))                 # ids 1..5
+    write_posdel_parquet(os.path.join(dd, "posdel.parquet"),
+                         f"{loc}/data/data.parquet", [0])                # drop id 1
+    dfp = zz(1) + s(f"{loc}/data/data.parquet".encode())                 # file_path branch 1
+    dent = zz(1) + zz(0) + zz(0) + dfp + s(b"PARQUET") + zz(5) + zz(1000)   # status1, seq NULL, content0
+    open(os.path.join(md, "dm.avro"), "wb").write(ocf(ENTRY_NULLPATH, [dent]))
+    xfp = zz(1) + s(f"{loc}/data/posdel.parquet".encode())
+    xent = zz(1) + (zz(1) + zz(3)) + zz(1) + xfp + s(b"PARQUET") + zz(1) + zz(500)  # status1, seq3, content1
+    open(os.path.join(md, "xm.avro"), "wb").write(ocf(ENTRY_NULLPATH, [xent]))
+    open(os.path.join(md, "ml.avro"), "wb").write(ocf(MFILE_V2, [
+        mfile_v2_seq(f"{loc}/metadata/dm.avro", 0, data_mfile_seq, SNAP),  # THE null under test
+        mfile_v2_seq(f"{loc}/metadata/xm.avro", 1, 3, SNAP)]))
+    open(os.path.join(md, "t.metadata.json"), "w").write(
+        metadata_json(loc, "ml.avro", 2, 5))
+
+
+build_nullseq("nullseq", None)      # RED   : data manifest seq is NULL
+build_nullseq("nullseq_ctl", 5)     # control: data manifest seq is 5 (concrete)
+
+
+# ============================ danglingschema (#644 defect #8 stale-schema) ==
+# STALE top-level schema maps "amount" -> field id 4 (a SECOND int column,
+# values 100..500); the correct schema (schemas[0]) maps "amount" -> id 3
+# (10..50). Both are int, so a dangling fallback is a SILENT wrong read -- same
+# type, different values -- NOT masked by a type mismatch (id-vs-int would be).
+STALE_FIELDS = [
+    {"id": 4, "name": "amount", "required": False, "type": "int"},
+    {"id": 1, "name": "id",     "required": False, "type": "long"},
+    {"id": 2, "name": "region", "required": False, "type": "string"}]
+
+
+def write_data_parquet4(dest):
+    data = pa.table({
+        "id": pa.array([1, 2, 3, 4, 5], pa.int64()),
+        "region": pa.array(["eu", "eu", "us", "us", "us"], pa.string()),
+        "amount": pa.array([10, 20, 30, 40, 50], pa.int32()),
+        "other": pa.array([100, 200, 300, 400, 500], pa.int32()),
+    }, schema=pa.schema([
+        pa.field("id", pa.int64(), metadata={b"PARQUET:field_id": b"1"}),
+        pa.field("region", pa.string(), metadata={b"PARQUET:field_id": b"2"}),
+        pa.field("amount", pa.int32(), metadata={b"PARQUET:field_id": b"3"}),
+        pa.field("other", pa.int32(), metadata={b"PARQUET:field_id": b"4"}),
+    ]))
+    pq.write_table(data, dest, row_group_size=2)
+
+
+def build_schema_variant(name, meta_obj):
+    root = os.path.join(OUT, name)
+    md = os.path.join(root, "db", "t", "metadata")
+    dd = os.path.join(root, "db", "t", "data")
+    os.makedirs(md); os.makedirs(dd)
+    loc = f"file://{ROOT}/{name}/db/t"
+    write_data_parquet4(os.path.join(dd, "data.parquet"))
+    fp = zz(1) + s(f"{loc}/data/data.parquet".encode())          # union branch 1: present
+    ent = zz(1) + (zz(1) + zz(5)) + zz(0) + fp + s(b"PARQUET") + zz(5) + zz(1000)
+    open(os.path.join(md, "dm.avro"), "wb").write(ocf(ENTRY_NULLPATH, [ent]))
+    open(os.path.join(md, "ml.avro"), "wb").write(
+        ocf(MFILE_V2, [mfile_v2(f"{loc}/metadata/dm.avro", 0, 5, SNAP)]))
+    m = dict(meta_obj)
+    m["location"] = loc
+    m["current-snapshot-id"] = SNAP
+    m["snapshots"] = [{"snapshot-id": SNAP, "timestamp-ms": 0,
+                       "manifest-list": f"{loc}/metadata/ml.avro",
+                       "summary": {"operation": "append"},
+                       "sequence-number": 5, "schema-id": 0}]
+    open(os.path.join(md, "t.metadata.json"), "w").write(json.dumps(m))
+
+
+# dangling: current-schema-id 99 is absent from schemas[]; a stale top-level
+# "schema" exists -> main silently binds through it (amount -> id 1 -> 1..5)
+build_schema_variant("danglingschema", {
+    "format-version": 2, "current-schema-id": 99,
+    "schemas": [SCHEMA],
+    "schema": {"type": "struct", "fields": STALE_FIELDS}})
+# control: SAME table, current-schema-id 0 resolves in schemas[] (amount -> 10..50)
+build_schema_variant("danglingschema_ctl", {
+    "format-version": 2, "current-schema-id": 0, "schemas": [SCHEMA]})
+# legacy control: no "schemas" array, no current-schema-id, only top-level
+# "schema" -> the else-branch must read it (all 5 rows, amount 10..50)
+build_schema_variant("legacyschema", {
+    "format-version": 2, "schema": {"type": "struct", "fields": ICE_FIELDS}})
+
+
 print("malformed fixtures written under", OUT)
