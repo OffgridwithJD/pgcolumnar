@@ -20,6 +20,12 @@ which was true until that script existed.
   length prefix out of that garbage (silent wrong results, or an out-of-bounds
   read). `decode_dict` now requires the decoded length to equal the declared raw
   length, mirroring the FSST path. Regression test: native_dict_underfill.
+- Fixed an out-of-bounds read in the Parquet dictionary decode path. A file whose
+  RLE_DICTIONARY data page carried an index with the high bit set (reachable at
+  bit_width 32) passed a signed bounds check that sign-extended it to a negative
+  int, and the dictionary was then read far out of bounds, crashing the backend
+  from a single crafted file. The bounds check is now unsigned and the index is
+  rejected. Regression test: native_parquet_dict_oob.
 
 ### Added
 
