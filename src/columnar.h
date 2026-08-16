@@ -813,11 +813,11 @@ extern void PgColumnarUniqueInit(void);
  * ------------------------------------------------------------------------- */
 extern bool pgcolumnar_enable_row_update_lock;
 extern int	pgcolumnar_row_lock_buckets;
-extern bool PgColumnarLockRowIdentity(Relation rel, uint64 rowNumber, bool wait);
-extern bool PgColumnarRowCommittedDeleted(Relation rel, uint64 rowNumber);
 extern bool PgColumnarRowWriteConflict(Relation rel, ItemPointer otid,
 									   CommandId cid, bool wait,
 									   TM_FailureData *tmfd, TM_Result *result);
+extern void PgColumnarSerializeFlushRows(uint64 storageId, const uint64 *rows,
+										 int nrows);
 
 /* -------------------------------------------------------------------------
  * planner integration (pgcolumnar_customscan.c, spec 8.3, 9)

@@ -426,6 +426,24 @@ check "unique/RC heap composes with no error (sqlstate 00000)" "$H_SS" "00000"
 check "unique/RC columnar loser errors where heap composes (not transparent)" \
 	"$([ "$C_SS" != "00000" ] && echo errored)" "errored"
 
+# ---------------------------------------------------------------------------
+# savepoint: a subtransaction that updates a row then rolls back must discard both
+# the delete mark and the appended new version, and must not wedge on the
+# transaction-scoped row lock. Single session, deterministic. Final state must
+# match the heap oracle: the pre-savepoint value survives, the rolled-back one does
+# not, and the row is not duplicated.
+# ---------------------------------------------------------------------------
+sp_arm() {  # tbl -> "count/values" for id=1 after a savepoint rollback
+	seed1 "$1"
+	ctl_q "BEGIN; UPDATE $1 SET v=10 WHERE id=1; SAVEPOINT sp; UPDATE $1 SET v=99 WHERE id=1; ROLLBACK TO sp; COMMIT;" >/dev/null 2>&1
+	ctl_q "SELECT count(*)||'/'||coalesce(string_agg(v::text, ',' ORDER BY v),'') FROM $1 WHERE id=1;"
+}
+echo; echo "### savepoint: subxact rollback discards the update, no wedge"
+H_SP="$(sp_arm t_heap)"; C_SP="$(sp_arm t_col)"
+echo "-- heap=$H_SP ; col=$C_SP"
+check "savepoint columnar final state matches heap oracle" "$C_SP" "$H_SP"
+check "savepoint columnar kept the pre-savepoint value, no duplicate (1/10)" "$C_SP" "1/10"
+
 send s1 "\\q"
 send s2 "\\q"
 

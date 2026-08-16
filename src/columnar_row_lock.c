@@ -11,31 +11,41 @@
  * own new version: the old row is deleted once and both new rows survive, so the
  * row is duplicated and one update is lost. A heap serializes this transparently.
  *
- * This module gives the write paths a row-identity guard, modeled on the
- * concurrent unique-key insert serialization in columnar_unique.c and the
- * chunk-group advisory lock in columnar_metadata.c (issue #4). Before a write
- * marks the old row deleted it:
+ * The serialization happens at delete-vector FLUSH time, not per row in the
+ * table-AM callbacks, so the row-identity locks can be acquired in a single
+ * sorted batch. This mirrors the issue #4 discipline in delete_vector_flush_buffer
+ * (list_sort before taking the chunk-group locks): every transaction acquires in
+ * the same order, so no AB-BA cycle forms. Acquiring incrementally per row (in
+ * scan order) would take the bucketed locks in a transaction-dependent order and
+ * deadlock two transactions touching unrelated rows that share a bucket.
  *
- *   1. If the row is already marked deleted in THIS command's own buffer, the
- *      same command is modifying it twice (a self-join UPDATE ... FROM). Return
- *      TM_SelfModified so core resolves it exactly as it does for a heap.
- *   2. Take a transaction-scoped advisory lock on the row identity
- *      (storage id, row number). A concurrent writer of the same row waits here
- *      until this transaction commits. A no-wait caller that would block gets
- *      TM_BeingModified.
- *   3. Re-read the row's liveness in the LATEST committed state (not the caller
- *      snapshot, which PgColumnarCatalogSnapshot only copies). If a concurrent
- *      transaction has committed a delete of this row, raise a retryable
- *      serialization_failure. The lock is the authority for waiting out the
- *      competitor; this fresh-snapshot re-read is the authority for whether a
- *      conflict actually happened, so a hash-bucket collision can only add
- *      waiting, never a false failure.
+ * The flow, gated by pgcolumnar.enable_row_update_lock:
+ *   1. PgColumnarRowWriteConflict, called by pgcolumnar_tuple_update and
+ *      pgcolumnar_tuple_delete BEFORE marking the old row deleted, reports a
+ *      same-command self-modify (the row is already in this command's own buffer)
+ *      as TM_SelfModified, so a self-join UPDATE ... FROM resolves as it does for
+ *      a heap. This runs even with the GUC off; it is a deterministic correctness
+ *      fix independent of concurrency.
+ *   2. PgColumnarSerializeFlushRows, called from delete_vector_flush_buffer before
+ *      the delete-vector upsert, sorts the flushed rows by lock key, takes a
+ *      transaction-scoped advisory lock on each (all held to commit), then re-reads
+ *      the LATEST committed state (GetLatestSnapshot, not the caller snapshot,
+ *      which PgColumnarCatalogSnapshot only copies) and raises a retryable
+ *      serialization_failure if any of these rows was committed-deleted by a
+ *      concurrent transaction. The lock waits out the competitor; the committed
+ *      re-read decides whether a conflict actually happened, so a hash-bucket
+ *      collision can only add waiting, never a false failure.
  *
- * The net contract at every isolation level is one retryable serialization
- * failure for the losing writer of a same-row race, matching what a heap gives
- * at REPEATABLE READ and what columnar already gives at SERIALIZABLE. READ
- * COMMITTED becomes stricter than a heap (the loser retries rather than
- * re-applying transparently via EvalPlanQual); see docs/limitations.md.
+ * A conflict is a row whose COMMITTED group still EXISTS and whose bit is set. A
+ * row whose group is gone (retired by a concurrent rewrite) is left to the
+ * flush-time Phase F3b check in PgColumnarUpsertDeleteVector, which raises its own
+ * "row group was compacted concurrently" error; it is also the read-your-writes
+ * case for a row this transaction just inserted, which is not a conflict.
+ *
+ * The loser gets one retryable serialization_failure at every isolation level,
+ * matching a heap at REPEATABLE READ and what columnar already gave at
+ * SERIALIZABLE. READ COMMITTED is stricter than a heap: the loser retries rather
+ * than re-applying via EvalPlanQual. See docs/limitations.md.
  *
  * Written fresh for pgColumnar. It reuses no upstream source; it derives from the
  * issue #5 design analysis and the public PostgreSQL API. See PROVENANCE.md.
@@ -48,16 +58,16 @@
 #include "access/xact.h"
 #include "miscadmin.h"
 #include "storage/lock.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
 #include "columnar_delete_vector.h"
 
 /*
- * GUCs. enable_row_update_lock is USERSET so it can be turned off for a session
- * that wants the old behavior. row_lock_buckets is POSTMASTER because the bucket
- * count is part of the advisory lock tag: two backends racing the same row must
- * compute the same bucket, which they only do when they agree on this value
- * (identical to unique_lock_buckets).
+ * GUCs. enable_row_update_lock is USERSET so a session can turn the serialization
+ * off. row_lock_buckets is POSTMASTER because the bucket count is part of the
+ * advisory lock tag: two backends racing the same row must compute the same
+ * bucket, which they only do when they agree on this value (as unique_lock_buckets).
  */
 bool		pgcolumnar_enable_row_update_lock = true;
 int			pgcolumnar_row_lock_buckets = 1024;
@@ -66,10 +76,8 @@ int			pgcolumnar_row_lock_buckets = 1024;
  * row_identity_lock_key
  *		Mix (storage id, row number) into a 64-bit advisory-lock key, with the
  *		same FNV-1a plus splitmix64 finalizer as delete_vector_chunk_lock_key and
- *		the unique-key hash, so the avalanche spreads the bits. A collision only
- *		makes two unrelated rows serialize needlessly; it never affects
- *		correctness, because the exact-row committed re-read below is what decides
- *		a real conflict.
+ *		the unique-key hash. A collision only makes two unrelated rows serialize
+ *		needlessly; the exact-row committed re-read is what decides a real conflict.
  */
 static uint64
 row_identity_lock_key(uint64 storageId, uint64 rowNumber)
@@ -89,73 +97,13 @@ row_identity_lock_key(uint64 storageId, uint64 rowNumber)
 }
 
 /*
- * PgColumnarLockRowIdentity
- *		Take the transaction-scoped exclusive advisory lock for one row identity.
- *		Returns true when the lock is held. With wait == false it returns false
- *		instead of blocking when another transaction holds the row. The lock is
- *		held until this transaction ends (the concurrent writer must not run its
- *		committed re-read until our delete is committed and visible to it), which
- *		is why it is a transaction lock, exactly like the delete-vector and
- *		unique-key locks.
- *
- *		The bucket bounds the transaction's distinct held row locks to at most
- *		row_lock_buckets per storage, so a bulk UPDATE cannot exhaust the lock
- *		table; unrelated rows sharing a bucket only over-serialize.
- */
-bool
-PgColumnarLockRowIdentity(Relation rel, uint64 rowNumber, bool wait)
-{
-	uint64		storageId = PgColumnarStorageId(rel);
-	uint32		numBuckets = (uint32) Max(1, pgcolumnar_row_lock_buckets);
-	uint64		key = row_identity_lock_key(storageId, rowNumber);
-	uint32		bucket = (uint32) (key % numBuckets);
-	LOCKTAG		tag;
-	LockAcquireResult res;
-
-	SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
-						 (uint32) storageId, bucket,
-						 PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY);
-
-	res = LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
-					  !wait /* dontWait */ );
-	return res != LOCKACQUIRE_NOT_AVAIL;
-}
-
-/*
- * PgColumnarRowCommittedDeleted
- *		Is the row deleted in the LATEST committed state? Used only after the
- *		row-identity lock is held, so any concurrent writer has already committed
- *		or aborted. GetLatestSnapshot (pushed active for the catalog scan, as PG18
- *		asserts) sees a delete a concurrent transaction committed after our own
- *		snapshot, which PgColumnarCatalogSnapshot(caller) would not. The caller
- *		must check the in-memory buffer (PgColumnarDeleteVectorBufferedDeleted)
- *		first, so this only runs when the row is not our own buffered delete; a
- *		row with no covering committed group (concurrently compacted) reads as
- *		deleted, which is the correct conflict verdict.
- */
-bool
-PgColumnarRowCommittedDeleted(Relation rel, uint64 rowNumber)
-{
-	bool		live;
-
-	PushActiveSnapshot(GetLatestSnapshot());
-	live = PgColumnarRowIsLive(rel, GetActiveSnapshot(), rowNumber);
-	PopActiveSnapshot();
-
-	return !live;
-}
-
-/*
  * PgColumnarRowWriteConflict
- *		The shared row-identity guard for pgcolumnar_tuple_update and
- *		pgcolumnar_tuple_delete, run BEFORE the write marks the old row deleted.
- *
- *		Returns true when the write must not proceed; then *result holds the
- *		TM_Result to return and tmfd is filled for the self-modified and
- *		being-modified cases. Raises a serialization_failure (does not return) on
- *		a committed concurrent delete. Returns false when the write may proceed.
- *		Does not set *lockmode; the update callback sets it when this returns a
- *		blocking result, since tuple_delete has no lockmode.
+ *		Self-modify guard for pgcolumnar_tuple_update and pgcolumnar_tuple_delete,
+ *		run before the write marks the old row deleted. Returns true when the write
+ *		must not proceed; then *result is TM_SelfModified and tmfd is filled.
+ *		Returns false when the write may proceed. The row-identity locking and the
+ *		committed-conflict check happen later, in PgColumnarSerializeFlushRows at
+ *		flush time, so they can be taken in one sorted batch.
  */
 bool
 PgColumnarRowWriteConflict(Relation rel, ItemPointer otid, CommandId cid,
@@ -163,14 +111,14 @@ PgColumnarRowWriteConflict(Relation rel, ItemPointer otid, CommandId cid,
 {
 	uint64		rowNumber = PgColumnarItemPointerToRowNumber(otid);
 
+	(void) wait;
+
 	/*
-	 * Same command modifying the same row twice (a self-join UPDATE ... FROM):
-	 * the old row is already marked deleted in this command's own buffer. Report
-	 * it as self-modified so core resolves it as it does for a heap, rather than
-	 * writing a second new version. cmax == the current command id makes core
-	 * treat it as already handled by this command. This is a deterministic
-	 * correctness fix independent of concurrency, so it runs even when the
-	 * row-lock GUC is off.
+	 * Same command modifying the same row twice (a self-join UPDATE ... FROM): the
+	 * old row is already marked deleted in this command's own buffer. Report it as
+	 * self-modified so core resolves it as it does for a heap, rather than writing
+	 * a second new version. cmax == the current command id makes core treat it as
+	 * already handled by this command. This runs even when the row-lock GUC is off.
 	 */
 	if (PgColumnarDeleteVectorBufferedDeleted(rel, rowNumber))
 	{
@@ -181,33 +129,205 @@ PgColumnarRowWriteConflict(Relation rel, ItemPointer otid, CommandId cid,
 		return true;
 	}
 
-	if (!pgcolumnar_enable_row_update_lock)
-		return false;
+	return false;
+}
 
-	/*
-	 * Serialize against any concurrent writer of this exact row. With wait the
-	 * loser blocks here until the winner commits; a no-wait caller that would
-	 * block is told so.
-	 */
-	if (!PgColumnarLockRowIdentity(rel, rowNumber, wait))
+/* one { lock key, row number } pair, sorted by key for ordered acquisition */
+typedef struct RowLockEntry
+{
+	uint64		key;
+	uint64		rowNumber;
+} RowLockEntry;
+
+static int
+rowlockentry_cmp(const void *a, const void *b)
+{
+	const RowLockEntry *ra = (const RowLockEntry *) a;
+	const RowLockEntry *rb = (const RowLockEntry *) b;
+
+	if (ra->key < rb->key)
+		return -1;
+	if (ra->key > rb->key)
+		return 1;
+	if (ra->rowNumber < rb->rowNumber)
+		return -1;
+	if (ra->rowNumber > rb->rowNumber)
+		return 1;
+	return 0;
+}
+
+/* a committed row group plus its merged delete mask, for the batch conflict check */
+typedef struct CommittedGroup
+{
+	uint64		firstRowNumber;
+	uint64		rowCount;
+	char	   *mask;
+	uint32		maskLen;
+} CommittedGroup;
+
+/*
+ * committed_deleted_in
+ *		Is rowNumber deleted in the committed groups array (sorted by
+ *		firstRowNumber)? True only when a covering group EXISTS and the bit is set;
+ *		a missing group is not a conflict (left to Phase F3b / read-your-writes).
+ */
+static bool
+committed_deleted_in(CommittedGroup *groups, int ngroups, uint64 rowNumber)
+{
+	int			lo = 0;
+	int			hi = ngroups - 1;
+
+	while (lo <= hi)
 	{
-		ItemPointerCopy(otid, &tmfd->ctid);
-		tmfd->xmax = InvalidTransactionId;
-		tmfd->cmax = InvalidCommandId;
-		*result = TM_BeingModified;
-		return true;
+		int			mid = (lo + hi) / 2;
+		CommittedGroup *g = &groups[mid];
+
+		if (rowNumber < g->firstRowNumber)
+			hi = mid - 1;
+		else if (rowNumber >= g->firstRowNumber + g->rowCount)
+			lo = mid + 1;
+		else
+		{
+			uint64		bit = rowNumber - g->firstRowNumber;
+
+			return (g->mask != NULL && (bit >> 3) < g->maskLen &&
+					(g->mask[bit >> 3] & (1 << (bit & 7))) != 0);
+		}
+	}
+	return false;				/* no committed group covers it: not our conflict */
+}
+
+static int
+committedgroup_cmp(const void *a, const void *b)
+{
+	const CommittedGroup *ga = (const CommittedGroup *) a;
+	const CommittedGroup *gb = (const CommittedGroup *) b;
+
+	if (ga->firstRowNumber < gb->firstRowNumber)
+		return -1;
+	if (ga->firstRowNumber > gb->firstRowNumber)
+		return 1;
+	return 0;
+}
+
+/*
+ * PgColumnarSerializeFlushRows
+ *		Serialize the rows about to be flushed as deleted (the delete half of every
+ *		UPDATE and every DELETE in this flush) against concurrent writers of the
+ *		same rows. Acquire a transaction-scoped advisory lock on each row IN SORTED
+ *		KEY ORDER (deadlock-free, as every transaction acquires in the same order),
+ *		then raise a retryable serialization_failure if any of these rows was
+ *		committed-deleted by another transaction. Called from
+ *		delete_vector_flush_buffer before the delete-vector upsert, so it runs
+ *		inside the same flush that already serializes the chunk-group writes.
+ */
+void
+PgColumnarSerializeFlushRows(uint64 storageId, const uint64 *rows, int nrows)
+{
+	MemoryContext tmp;
+	MemoryContext old;
+	RowLockEntry *ents;
+	uint32		numBuckets;
+	Snapshot	meta;
+	List	   *rgList;
+	CommittedGroup *groups;
+	int			ngroups;
+	int			i;
+	ListCell   *lc;
+	bool		conflict = false;
+
+	if (!pgcolumnar_enable_row_update_lock || nrows <= 0)
+		return;
+
+	tmp = AllocSetContextCreate(CurrentMemoryContext,
+								"columnar row serialize",
+								ALLOCSET_SMALL_SIZES);
+	old = MemoryContextSwitchTo(tmp);
+
+	/* sort the rows by lock key so the whole batch is acquired in one order */
+	ents = (RowLockEntry *) palloc(sizeof(RowLockEntry) * nrows);
+	for (i = 0; i < nrows; i++)
+	{
+		ents[i].key = row_identity_lock_key(storageId, rows[i]);
+		ents[i].rowNumber = rows[i];
+	}
+	qsort(ents, nrows, sizeof(RowLockEntry), rowlockentry_cmp);
+
+	numBuckets = (uint32) Max(1, pgcolumnar_row_lock_buckets);
+	for (i = 0; i < nrows; i++)
+	{
+		uint32		bucket = (uint32) (ents[i].key % numBuckets);
+		LOCKTAG		tag;
+
+		/* a repeated bucket is already held; LockAcquire makes it a no-op */
+		SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
+							 (uint32) storageId, bucket,
+							 PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY);
+		(void) LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
+						   false /* wait */ );
 	}
 
 	/*
-	 * The lock is now ours, so any competitor has resolved. If it committed a
-	 * delete of this row, our write would duplicate the row and lose an update;
-	 * fail with a retryable serialization error instead. The application retries.
+	 * With the locks held, read the latest committed groups and delete masks once,
+	 * then classify every flushed row against them. GetLatestSnapshot (pushed
+	 * active, as PG18 asserts for a catalog scan) sees a delete a concurrent
+	 * transaction committed after our own snapshot; our own not-yet-flushed deletes
+	 * are in the buffer, not this committed view, so they are not self-conflicts.
 	 */
-	if (PgColumnarRowCommittedDeleted(rel, rowNumber))
+	PushActiveSnapshot(GetLatestSnapshot());
+	meta = PgColumnarCatalogSnapshot(GetActiveSnapshot());
+	rgList = PgColumnarReadRowGroupList(storageId, meta);
+	ngroups = list_length(rgList);
+	groups = (CommittedGroup *) palloc0(sizeof(CommittedGroup) * Max(ngroups, 1));
+
+	i = 0;
+	foreach(lc, rgList)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+		List	   *maskList = PgColumnarReadDeleteVectorList(storageId,
+															  rg->groupNumber,
+															  meta);
+		uint32		want = (uint32) ((rg->rowCount + 7) / 8);
+		ListCell   *mc;
+
+		groups[i].firstRowNumber = rg->firstRowNumber;
+		groups[i].rowCount = rg->rowCount;
+		foreach(mc, maskList)
+		{
+			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mc);
+			uint32		b;
+
+			if (rm->bitmap == NULL || rm->bitmapLen == 0)
+				continue;
+			if (groups[i].mask == NULL)
+			{
+				groups[i].mask = (char *) palloc0(want > 0 ? want : 1);
+				groups[i].maskLen = want;
+			}
+			for (b = 0; b < rm->bitmapLen && b < want; b++)
+				groups[i].mask[b] |= rm->bitmap[b];
+		}
+		i++;
+	}
+	if (ngroups > 1)
+		qsort(groups, ngroups, sizeof(CommittedGroup), committedgroup_cmp);
+
+	for (i = 0; i < nrows; i++)
+	{
+		if (committed_deleted_in(groups, ngroups, ents[i].rowNumber))
+		{
+			conflict = true;
+			break;
+		}
+	}
+
+	PopActiveSnapshot();
+	MemoryContextSwitchTo(old);
+	MemoryContextDelete(tmp);
+
+	if (conflict)
 		ereport(ERROR,
 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 				 errmsg("columnar: could not serialize access due to concurrent update or delete of the same row"),
 				 errhint("Retry the transaction.")));
-
-	return false;
 }
