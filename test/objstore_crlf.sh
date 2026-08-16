@@ -31,4 +31,19 @@ check "a CR/LF in the URL path is rejected before the request is sent" "$rej" "1
 inj="$(grep -ciE 'X-Injected' "$CAP" 2>/dev/null | head -1)"
 check "no injected line reached the listener (no request splitting)" "$inj" "0"
 check "backend alive" "$(q 'SELECT 1')" "1"
+
+# ---- the REST catalog path is guarded too (objstore_http_request) ------------
+# The guard lives in os_connect, the single connect path, so the ABI http_request
+# the REST client uses is covered as well. A catalog_uri whose path carries CR/LF
+# must be rejected before the request is sent, not just the read_parquet path.
+CATURL="http://127.0.0.1:$PORT/x"$'\r'$'\n'"X-Injected: yes"
+q "CREATE SERVER cat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog OPTIONS (catalog_uri '$CATURL')" >/dev/null
+q "CREATE USER MAPPING FOR postgres SERVER cat OPTIONS (token 'x')" >/dev/null
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+	-c "SELECT pgcolumnar.iceberg_rest_table_location('cat', 'db', 'events')" \
+	>/dev/null 2>"$PGC_WORKDIR/rest.err"
+rej2="$(grep -ciE 'CR or LF' "$PGC_WORKDIR/rest.err" 2>/dev/null | head -1)"
+echo "-- REST path error:"; grep -iE 'ERROR' "$PGC_WORKDIR/rest.err" | head -1 | sed 's/^/     /'
+check "a CR/LF in a REST catalog_uri is rejected too (objstore_http_request path)" "$rej2" "1"
+check "backend alive after the REST attempt" "$(q 'SELECT 1')" "1"
 pgc_summary
