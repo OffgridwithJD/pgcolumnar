@@ -942,12 +942,14 @@ an equality predicate on the source column. `truncate[W]` prunes on a predicate
 on an integer source column. `day()` on a date source column prunes on a
 predicate on that column.
 
-The `year()`, `month()`, `day()`, and `hour()` transforms on a `timestamp`
-source column also prune on a range or equality predicate. Each of these buckets
-spans a range of source values. So a file whose bucket equals the predicate
-constant's bucket is read, not skipped, and the row filter runs on it. A
-`timestamp with time zone` source column is read in full. Metrics pruning covers
-integer and boolean columns; other column types are read in full.
+The `year()`, `month()`, `day()`, and `hour()` transforms also prune on a range
+or equality predicate. They apply to a `timestamp` or `timestamp with time zone`
+source column, and `year()` and `month()` apply to a `date` column as well.
+`day()` on a date keeps the exact path above. Each of these buckets spans a range
+of source values. So a file whose bucket equals the predicate constant's bucket
+is read, not skipped, and the row filter runs on it. A `timestamp with time zone`
+value is compared as its UTC instant, matching the catalog. Metrics pruning
+covers integer and boolean columns; other column types are read in full.
 
 ```sql
 CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;

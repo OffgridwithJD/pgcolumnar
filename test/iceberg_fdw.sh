@@ -287,6 +287,73 @@ if ftmp ty byyear && ftmp tm bymonth && ftmp td bydayts && ftmp th byhour; then
 		"$(oracle th "ts >= TIMESTAMP '2021-03-01 01:00:00'")"
 fi
 
+# ---- coarse temporal on a DATE (year/month) and a TIMESTAMPTZ (all four) ------
+# warehouse_temporal_xt covers the source types beyond plain timestamp: year() and
+# month() on a DATE column (day() on a date keeps the exact path), and all four on
+# a TIMESTAMPTZ column, whose stored value is the UTC instant. Same coarse rule and
+# boundary proof; pyiceberg-core wrote the buckets, so the same-oracle read is the
+# cross-check. The timestamptz literals are absolute (+00), so the result is
+# timezone-independent.
+ftmpx() {   # rel sub "coldef"; foreign table over warehouse_temporal_xt/db/<sub>
+	local rel="$1" sub="$2" coldef="$3" md
+	md="$(ls "$FX/warehouse_temporal_xt/db/$sub"/metadata/*.metadata.json 2>/dev/null | sort | tail -1)"
+	[ -n "$md" ] || return 1
+	local dest="$PGC_WORKDIR/wx_$sub"; rm -rf "$dest"; mkdir -p "$dest"
+	cp -r "$FX/warehouse_temporal_xt/db/$sub" "$dest/$sub"; chmod -R u+rwX "$dest"
+	md="$(ls "$dest/$sub"/metadata/*.metadata.json | sort | tail -1)"
+	eval "MD_$rel=\"$md\""; eval "COL_$rel=\"$coldef\""
+	q "CREATE FOREIGN TABLE $rel (id bigint, $coldef)
+	   SERVER ice OPTIONS (metadata_path '$md')" >/dev/null
+}
+oraclex() {   # rel where; ids from iceberg_scan of MD_<rel> under the same WHERE
+	local rel="$1" where="$2" md coldef
+	eval "md=\$MD_$rel"; eval "coldef=\$COL_$rel"
+	q "SELECT string_agg(id::text, ',' ORDER BY id)
+	   FROM pgcolumnar.iceberg_scan('$md') AS t(id bigint, $coldef) WHERE $where"
+}
+if ftmpx yd byyear_d "dt date" && ftmpx mo bymonth_d "dt date" \
+	&& ftmpx yz byyear_tz "tt timestamptz" && ftmpx mz bymonth_tz "tt timestamptz" \
+	&& ftmpx dz byday_tz "tt timestamptz" && ftmpx hz byhour_tz "tt timestamptz"; then
+
+	# year() / month() on a DATE column
+	check "year()-on-date prunes the 2020 file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM yd WHERE dt > DATE '2021-01-01'")" "1"
+	check_text "year()-on-date: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM yd WHERE dt > DATE '2021-01-01'")" \
+		"$(oraclex yd "dt > DATE '2021-01-01'")"
+	check "year()-on-date equality prunes to one file (Files Pruned: 2)" \
+		"$(fp "SELECT * FROM yd WHERE dt = DATE '2021-06-01'")" "2"
+	check "year()-on-date equality returns id 2" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM yd WHERE dt = DATE '2021-06-01'")" "2"
+	check "month()-on-date prunes the Jan file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM mo WHERE dt >= DATE '2021-02-01'")" "1"
+	check_text "month()-on-date: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM mo WHERE dt >= DATE '2021-02-01'")" \
+		"$(oraclex mo "dt >= DATE '2021-02-01'")"
+
+	# year / month / day / hour on a TIMESTAMPTZ column (UTC instants)
+	check "year()-on-timestamptz prunes the 2020 file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM yz WHERE tt > TIMESTAMPTZ '2021-01-01 00:00:00+00'")" "1"
+	check_text "year()-on-timestamptz: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM yz WHERE tt > TIMESTAMPTZ '2021-01-01 00:00:00+00'")" \
+		"$(oraclex yz "tt > TIMESTAMPTZ '2021-01-01 00:00:00+00'")"
+	check "month()-on-timestamptz prunes the Jan file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM mz WHERE tt >= TIMESTAMPTZ '2021-02-01 00:00:00+00'")" "1"
+	check_text "month()-on-timestamptz: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM mz WHERE tt >= TIMESTAMPTZ '2021-02-01 00:00:00+00'")" \
+		"$(oraclex mz "tt >= TIMESTAMPTZ '2021-02-01 00:00:00+00'")"
+	check "day()-on-timestamptz prunes the Mar-01 file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM dz WHERE tt >= TIMESTAMPTZ '2021-03-02 00:00:00+00'")" "1"
+	check_text "day()-on-timestamptz: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM dz WHERE tt >= TIMESTAMPTZ '2021-03-02 00:00:00+00'")" \
+		"$(oraclex dz "tt >= TIMESTAMPTZ '2021-03-02 00:00:00+00'")"
+	check "hour()-on-timestamptz prunes the 00h file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM hz WHERE tt >= TIMESTAMPTZ '2021-03-01 01:00:00+00'")" "1"
+	check_text "hour()-on-timestamptz: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM hz WHERE tt >= TIMESTAMPTZ '2021-03-01 01:00:00+00'")" \
+		"$(oraclex hz "tt >= TIMESTAMPTZ '2021-03-01 01:00:00+00'")"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
