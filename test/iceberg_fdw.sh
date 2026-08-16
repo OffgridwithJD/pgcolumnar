@@ -224,6 +224,69 @@ if ls "$FX"/warehouse_day/db/byday/metadata/*.metadata.json >/dev/null 2>&1; the
 		      WHERE dt >= DATE '2020-02-01'")"
 fi
 
+# ---- coarse temporal pruning: year/month/hour/day() on a TIMESTAMP -----------
+# warehouse_temporal has four tables partitioned by year(ts), month(ts), day(ts),
+# hour(ts) with column metrics disabled, so the temporal transform is the sole
+# mechanism. Each transform's bucket is coarse (spans a range), so at the boundary
+# bucket V == b the file MUST be read: the ">" predicates below keep the file
+# whose bucket equals the constant's bucket AND that file holds a matching row, so
+# a wrong exact-[V,V] rule would over-prune and drop it. pyiceberg-core wrote the
+# buckets (year 2020->50; month 2021-06->617; day 2021-03-01->18687; hour ->448488),
+# so the same-oracle read is the transform cross-check.
+ftmp() {   # create a foreign table `rel` over warehouse_temporal/db/<sub>
+	local rel="$1" sub="$2" md
+	md="$(ls "$FX/warehouse_temporal/db/$sub"/metadata/*.metadata.json 2>/dev/null | sort | tail -1)"
+	[ -n "$md" ] || return 1
+	local dest="$PGC_WORKDIR/wt_$sub"; rm -rf "$dest"; mkdir -p "$dest"
+	cp -r "$FX/warehouse_temporal/db/$sub" "$dest/$sub"; chmod -R u+rwX "$dest"
+	md="$(ls "$dest/$sub"/metadata/*.metadata.json | sort | tail -1)"
+	eval "MD_$rel=\"$md\""
+	q "CREATE FOREIGN TABLE $rel (id bigint, ts timestamp)
+	   SERVER ice OPTIONS (metadata_path '$md')" >/dev/null
+}
+oracle() {   # ids from iceberg_scan of MD_<rel> under the same WHERE
+	local rel="$1" where="$2" md
+	eval "md=\$MD_$rel"
+	q "SELECT string_agg(id::text, ',' ORDER BY id)
+	   FROM pgcolumnar.iceberg_scan('$md') AS t(id bigint, ts timestamp) WHERE $where"
+}
+if ftmp ty byyear && ftmp tm bymonth && ftmp td bydayts && ftmp th byhour; then
+	# year(ts): 2020,2021,2023
+	check "the year() FDW reads the whole table (3 rows)" "$(q 'SELECT count(*) FROM ty')" "3"
+	check "ts > 2021-01-01 year-prunes the 2020 file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM ty WHERE ts > TIMESTAMP '2021-01-01 00:00:00'")" "1"
+	check "ts > 2021-01-01 keeps the boundary-year file, returns ids 2,3" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ty WHERE ts > TIMESTAMP '2021-01-01 00:00:00'")" "2,3"
+	check_text "year(): boundary read matches iceberg_scan (no over-prune)" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ty WHERE ts > TIMESTAMP '2021-01-01 00:00:00'")" \
+		"$(oracle ty "ts > TIMESTAMP '2021-01-01 00:00:00'")"
+	check "ts = 2021-06-01 year-prunes to one file (Files Pruned: 2)" \
+		"$(fp "SELECT * FROM ty WHERE ts = TIMESTAMP '2021-06-01 00:00:00'")" "2"
+	check "ts = 2021-06-01 returns id 2" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM ty WHERE ts = TIMESTAMP '2021-06-01 00:00:00'")" "2"
+
+	# month(ts): 2021-01,-02,-06
+	check "ts >= 2021-02-01 month-prunes the Jan file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM tm WHERE ts >= TIMESTAMP '2021-02-01 00:00:00'")" "1"
+	check_text "month(): boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM tm WHERE ts >= TIMESTAMP '2021-02-01 00:00:00'")" \
+		"$(oracle tm "ts >= TIMESTAMP '2021-02-01 00:00:00'")"
+
+	# day(ts): 2021-03-01,-02,-05 (coarse: a whole day of timestamps per bucket)
+	check "ts >= 2021-03-02 day-prunes the Mar-01 file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM td WHERE ts >= TIMESTAMP '2021-03-02 00:00:00'")" "1"
+	check_text "day()-on-timestamp: boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM td WHERE ts >= TIMESTAMP '2021-03-02 00:00:00'")" \
+		"$(oracle td "ts >= TIMESTAMP '2021-03-02 00:00:00'")"
+
+	# hour(ts): 2021-03-01 00,01,05
+	check "ts >= 2021-03-01 01:00 hour-prunes the 00h file (Files Pruned: 1)" \
+		"$(fp "SELECT * FROM th WHERE ts >= TIMESTAMP '2021-03-01 01:00:00'")" "1"
+	check_text "hour(): boundary read matches iceberg_scan" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM th WHERE ts >= TIMESTAMP '2021-03-01 01:00:00'")" \
+		"$(oracle th "ts >= TIMESTAMP '2021-03-01 01:00:00'")"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
