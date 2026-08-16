@@ -29,7 +29,8 @@ On PostgreSQL 15 and later:
 ALTER TABLE events SET ACCESS METHOD pgcolumnar;
 ```
 
-On any supported major, including 13 and 14, the extension provides a helper:
+On any supported major, and on 13 and 14 which build but are outside the tested
+matrix, the extension provides a helper:
 
 ```sql
 SELECT pgcolumnar.alter_table_set_access_method('events', 'pgcolumnar');
@@ -231,8 +232,8 @@ depth), or a
 glob pattern. `EXPLAIN (ANALYZE)` shows how much the scan skipped:
 
 ```sql
-EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events WHERE ts >= '2026-01-01';
---   Foreign Scan on events
+EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events_parquet WHERE ts >= '2026-01-01';
+--   Foreign Scan on events_parquet
 --     Row Groups: 12
 --     Row Groups Skipped: 9
 --     Columns Read: 2
