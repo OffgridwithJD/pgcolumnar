@@ -789,29 +789,46 @@ The request is carried by the `pgcolumnar_objstore` module, so no additional TLS
 library is loaded into the server process. HTTPS requires the module to be built
 with OpenSSL, as for object storage.
 
-When the catalog requires authentication, the bearer token is read from the
-`PGCOLUMNAR_ICEBERG_REST_TOKEN` variable in the server process environment. It is
-never a function argument, so it does not appear in the statement log or in
+The first argument is either a catalog URI or the name of a foreign server. A
+value beginning with `http://` or `https://` is a URI. Any other value names a
+server. A server name can never look like a URI, so the two forms never collide.
+
+When the first argument is a URI, the token comes from the environment. It is
+read from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` variable in the server process. It
+is never a function argument, so it does not appear in the statement log or in
 `pg_stat_activity`. A catalog that needs no token is queried without one.
+
+When the first argument names a server, the catalog URI comes from the server
+and the token comes from the current role's user mapping. The token lives in
+`pg_user_mapping`, which is not world-readable, so one role's token is not
+visible to another. A role with no mapping and no token is refused. A superuser,
+or a mapping that sets `credentials_required 'false'`, uses the environment token
+instead.
 
 Multi-level namespaces are given dot-separated, and the function requires the
 `pg_read_server_files` role, like the other Iceberg functions.
 
 ```sql
--- token, if any, comes from the server environment, not the query
+-- URI form: the token, if any, comes from the server environment, not the query
 SELECT pgcolumnar.iceberg_rest_table_location(
          'https://catalog.example.com', 'analytics', 'events');
 --> s3://warehouse/analytics/events/metadata/00042-....metadata.json
 
+-- server form: the token is per-role and stays in pg_user_mapping
+CREATE SERVER cat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+  OPTIONS (catalog_uri 'https://catalog.example.com');
+CREATE USER MAPPING FOR analyst SERVER cat OPTIONS (token 's3cr3t');
+
 SELECT count(*) FROM pgcolumnar.iceberg_scan(
-  pgcolumnar.iceberg_rest_table_location('https://catalog.example.com',
-                                         'analytics', 'events'))
+  pgcolumnar.iceberg_rest_table_location('cat', 'analytics', 'events'))
   AS t(id bigint, region text, amount int);
 ```
 
-Per-catalog credentials can move to a foreign server and user mapping. The
-catalog can issue temporary storage credentials. See issue #656 and the later
-phase 7 work.
+The `pgcolumnar_iceberg_catalog` wrapper has a validator but no handler, so its
+servers cannot be selected from as tables. It accepts only `catalog_uri` on a
+server, and only `token` and `credentials_required` on a user mapping. A secret
+on a server, where options are world-readable, is rejected. Setting
+`credentials_required 'false'` is restricted to a superuser.
 
 ### pgcolumnar.iceberg_rest_scan(catalog_uri text, namespace text, table_name text) returns setof record
 

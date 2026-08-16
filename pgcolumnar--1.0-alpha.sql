@@ -1039,6 +1039,19 @@ CREATE FOREIGN DATA WRAPPER pgcolumnar_iceberg
 COMMENT ON FOREIGN DATA WRAPPER pgcolumnar_iceberg
 	IS 'read an Apache Iceberg table as a foreign table, pruning data files by a predicate on an identity-partition column; table option: metadata_path (#388)';
 
+CREATE FUNCTION pgcolumnar.iceberg_catalog_fdw_validator(text[], oid)
+	RETURNS void
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_catalog_validator';
+
+-- Validator-only wrapper (no HANDLER): a REST catalog creates no foreign tables.
+-- A SERVER under it holds catalog_uri; a USER MAPPING holds the per-role token.
+CREATE FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+	VALIDATOR pgcolumnar.iceberg_catalog_fdw_validator;
+
+COMMENT ON FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+	IS 'name an Iceberg REST catalog: a SERVER holds catalog_uri, a USER MAPPING holds the bearer token; the iceberg_rest_* functions accept a server name in place of a catalog URI (#656)';
+
 CREATE FUNCTION pgcolumnar.vm_selftest(rel regclass, blk int)
 	RETURNS boolean
 	LANGUAGE C

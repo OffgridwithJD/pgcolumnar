@@ -21,14 +21,20 @@
  */
 #include "postgres.h"
 
+#include "access/reloptions.h"
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_type_d.h"
+#include "catalog/pg_user_mapping.h"
+#include "commands/defrem.h"
 #include "fmgr.h"
+#include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
+#include "utils/syscache.h"
 #include "utils/tuplestore.h"
 
 #include "funcapi.h"
@@ -88,6 +94,115 @@ rest_objstore(void)
 				 errmsg("iceberg: the object-store module is required for a REST catalog"),
 				 errhint("Install the pgcolumnar_objstore module.")));
 	return api;
+}
+
+/*
+ * Resolve a FOREIGN SERVER (pgcolumnar_iceberg_catalog) into its catalog_uri and
+ * the current role's bearer token. The token comes from the role's USER MAPPING
+ * (or the PUBLIC mapping), which lives in pg_user_mapping and is not
+ * world-readable. When the mapping carries no token, fall back to the
+ * environment token only if ambient use is allowed (a superuser, or a mapping
+ * that set credentials_required 'false'); otherwise refuse (28000). *out_token
+ * may be NULL for an anonymous catalog.
+ */
+static void
+rest_resolve_server(const char *name, char **out_uri, char **out_token)
+{
+	ForeignServer *srv = GetForeignServerByName(name, false);
+	ListCell   *lc;
+	char	   *uri = NULL;
+	char	   *token = NULL;
+	bool		credRequired = true;
+	HeapTuple	tp;
+
+	foreach(lc, srv->options)
+	{
+		DefElem    *d = (DefElem *) lfirst(lc);
+
+		if (strcmp(d->defname, "catalog_uri") == 0)
+			uri = defGetString(d);
+	}
+	if (uri == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("iceberg: server \"%s\" has no \"catalog_uri\" option", name)));
+
+	/* the current role's mapping, else the PUBLIC (InvalidOid) mapping */
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(srv->serverid));
+	if (!HeapTupleIsValid(tp))
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(srv->serverid));
+	if (HeapTupleIsValid(tp))
+	{
+		Datum		datum;
+		bool		isnull;
+
+		datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+								Anum_pg_user_mapping_umoptions, &isnull);
+		if (!isnull)
+		{
+			List	   *umopts = untransformRelOptions(datum);
+			ListCell   *l2;
+
+			foreach(l2, umopts)
+			{
+				DefElem    *d = (DefElem *) lfirst(l2);
+
+				if (strcmp(d->defname, "token") == 0)
+					token = pstrdup(defGetString(d));
+				else if (strcmp(d->defname, "credentials_required") == 0)
+					credRequired = defGetBoolean(d);
+			}
+		}
+		ReleaseSysCache(tp);
+	}
+
+	if (token == NULL)
+	{
+		bool		ambientOk = superuser() || !credRequired;
+
+		if (ambientOk)
+		{
+			const char *env = getenv(REST_TOKEN_ENV);
+
+			if (env != NULL && env[0] != '\0')
+				token = pstrdup(env);
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					 errmsg("iceberg: no bearer token for REST catalog server \"%s\"",
+							name),
+					 errhint("Create a USER MAPPING with a token option for this role, "
+							 "or set credentials_required 'false' on it.")));
+	}
+
+	*out_uri = pstrdup(uri);
+	*out_token = token;
+}
+
+/*
+ * Resolve the first function argument, which is EITHER a catalog URI (http(s)://,
+ * with the token from the environment, the phase-7 form) OR a FOREIGN SERVER name
+ * (with the URI and token from the catalog). A server name can never look like a
+ * URL, so the two are unambiguous.
+ */
+static void
+rest_resolve(const char *arg0, char **out_uri, char **out_token)
+{
+	if (pg_strncasecmp(arg0, "http://", 7) == 0 ||
+		pg_strncasecmp(arg0, "https://", 8) == 0)
+	{
+		const char *env = getenv(REST_TOKEN_ENV);
+
+		*out_uri = pstrdup(arg0);
+		*out_token = (env != NULL && env[0] != '\0') ? pstrdup(env) : NULL;
+	}
+	else
+		rest_resolve_server(arg0, out_uri, out_token);
 }
 
 /* Append `s` percent-encoded (RFC 3986 unreserved kept), for one path segment. */
@@ -184,10 +299,9 @@ rest_json_string_opt(JsonbContainer *c, const char *key)
  */
 static Jsonb *
 rest_get_json(const char *catalog_uri, const char *resource_path,
-			  const char *what)
+			  const char *what, const char *token)
 {
 	const PgColumnarObjStoreApi *api = rest_objstore();
-	const char *token = getenv(REST_TOKEN_ENV);
 	StringInfoData url;
 	const char *headers[2];
 	int			nheaders = 0;
@@ -219,8 +333,8 @@ rest_get_json(const char *catalog_uri, const char *resource_path,
 				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
 				 errmsg("iceberg: the REST catalog refused the request (HTTP %d)",
 						r.status),
-				 errhint("Set %s in the server environment, or check its value.",
-						 REST_TOKEN_ENV)));
+				 errhint("Provide the catalog's bearer token via a USER MAPPING "
+						 "or the %s server environment variable.", REST_TOKEN_ENV)));
 	if (r.status == 404)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_TABLE),
@@ -245,7 +359,7 @@ rest_get_json(const char *catalog_uri, const char *resource_path,
  */
 static Jsonb *
 rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
-					char **out_location)
+					const char *token, char **out_location)
 {
 	Jsonb	   *cfg;
 	char	   *prefix;
@@ -259,7 +373,7 @@ rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
 				 errmsg("iceberg: a REST catalog URI must be http:// or https://")));
 
 	/* config: {overrides, defaults}; a prefix, if any, is spliced after /v1/ */
-	cfg = rest_get_json(catalog_uri, "/v1/config", "config");
+	cfg = rest_get_json(catalog_uri, "/v1/config", "config", token);
 	/*
 	 * The config body is untrusted (a compromised or hostile allow-listed
 	 * catalog). getKeyJsonValueFromContainer Asserts object-ness before its
@@ -294,7 +408,7 @@ rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
 	appendStringInfoString(&rp, "/tables/");
 	rest_pct_encode(&rp, table);
 
-	lt = rest_get_json(catalog_uri, rp.data, "table");
+	lt = rest_get_json(catalog_uri, rp.data, "table", token);
 	if (out_location != NULL)
 		*out_location = rest_json_string(&lt->root, "metadata-location",
 										 "loadTable response");
@@ -392,11 +506,12 @@ rest_vended_cfg(JsonbContainer *lt, const char *metadata_location)
  */
 char *
 PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
-									   const char *ns, const char *table)
+									   const char *ns, const char *table,
+									   const char *token)
 {
 	char	   *loc;
 
-	(void) rest_load_table_doc(catalog_uri, ns, table, &loc);
+	(void) rest_load_table_doc(catalog_uri, ns, table, token, &loc);
 	return loc;
 }
 
@@ -410,9 +525,11 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_table_location);
 Datum
 pgcolumnar_iceberg_rest_table_location(PG_FUNCTION_ARGS)
 {
-	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *arg0 = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	char	   *ns = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char	   *table = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	char	   *catalog_uri;
+	char	   *token;
 	char	   *loc;
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
@@ -420,7 +537,8 @@ pgcolumnar_iceberg_rest_table_location(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 
-	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table);
+	rest_resolve(arg0, &catalog_uri, &token);
+	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table, token);
 	PG_RETURN_TEXT_P(cstring_to_text(loc));
 }
 
@@ -436,11 +554,13 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_scan);
 Datum
 pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 {
-	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *arg0 = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	char	   *ns = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char	   *table = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
+	char	   *catalog_uri;
+	char	   *token;
 	Jsonb	   *lt;
 	char	   *loc;
 	PgColumnarObjStoreConfig *cfg;
@@ -460,8 +580,9 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 				 errmsg("pgcolumnar.iceberg_rest_scan requires a column definition list"),
 				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_rest_scan(uri, ns, tbl) AS t(col1 type1, ...).")));
 
+	rest_resolve(arg0, &catalog_uri, &token);
 	/* one loadTable: the metadata-location AND the vended storage creds (if any) */
-	lt = rest_load_table_doc(catalog_uri, ns, table, &loc);
+	lt = rest_load_table_doc(catalog_uri, ns, table, token, &loc);
 	cfg = rest_vended_cfg(&lt->root, loc);
 	/*
 	 * A metadata-location is a URI. The reader's remote path handles s3:// and
@@ -483,10 +604,12 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_namespaces);
 Datum
 pgcolumnar_iceberg_rest_namespaces(PG_FUNCTION_ARGS)
 {
-	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *arg0 = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Tuplestorestate *ts;
 	TupleDesc	td;
+	char	   *catalog_uri;
+	char	   *token;
 	Jsonb	   *doc;
 	JsonbValue	vbuf;
 	JsonbValue *nsv;
@@ -499,7 +622,8 @@ pgcolumnar_iceberg_rest_namespaces(PG_FUNCTION_ARGS)
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 	ts = rest_text_srf_setup(rsinfo, &td);
 
-	doc = rest_get_json(catalog_uri, "/v1/namespaces", "namespaces");
+	rest_resolve(arg0, &catalog_uri, &token);
+	doc = rest_get_json(catalog_uri, "/v1/namespaces", "namespaces", token);
 	if (!JsonContainerIsObject(&doc->root))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -551,11 +675,13 @@ PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_rest_tables);
 Datum
 pgcolumnar_iceberg_rest_tables(PG_FUNCTION_ARGS)
 {
-	char	   *catalog_uri = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *arg0 = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	char	   *ns = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Tuplestorestate *ts;
 	TupleDesc	td;
+	char	   *catalog_uri;
+	char	   *token;
 	StringInfoData rp;
 	Jsonb	   *doc;
 	JsonbValue	vbuf;
@@ -569,11 +695,12 @@ pgcolumnar_iceberg_rest_tables(PG_FUNCTION_ARGS)
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 	ts = rest_text_srf_setup(rsinfo, &td);
 
+	rest_resolve(arg0, &catalog_uri, &token);
 	initStringInfo(&rp);
 	appendStringInfoString(&rp, "/v1/namespaces/");
 	rest_append_namespace(&rp, ns);
 	appendStringInfoString(&rp, "/tables");
-	doc = rest_get_json(catalog_uri, rp.data, "table list");
+	doc = rest_get_json(catalog_uri, rp.data, "table list", token);
 	if (!JsonContainerIsObject(&doc->root))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -603,4 +730,64 @@ pgcolumnar_iceberg_rest_tables(PG_FUNCTION_ARGS)
 		tuplestore_putvalues(ts, td, values, nulls);
 	}
 	return (Datum) 0;
+}
+
+/* -------------------------------------------------------------------------
+ * The pgcolumnar_iceberg_catalog foreign-data wrapper (#656). It creates no
+ * foreign tables -- a catalog is a service endpoint plus a per-role token -- so
+ * the wrapper is validator-only. A CREATE SERVER under it holds catalog_uri (a
+ * non-secret, world-readable option); a CREATE USER MAPPING holds the bearer
+ * token (a secret, which pg_user_mapping keeps role-private).
+ * ------------------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_catalog_validator);
+
+Datum
+pgcolumnar_iceberg_catalog_validator(PG_FUNCTION_ARGS)
+{
+	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalog = PG_GETARG_OID(1);
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (catalog == ForeignServerRelationId)
+		{
+			/* srvoptions is world-readable: only the non-secret URI belongs here */
+			if (strcmp(def->defname, "catalog_uri") != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("invalid option \"%s\" for a pgcolumnar_iceberg_catalog server",
+								def->defname),
+						 errhint("Valid server option: catalog_uri. Secrets go on a USER MAPPING.")));
+		}
+		else if (catalog == UserMappingRelationId)
+		{
+			/* secrets live only here (pg_user_mapping is role-protected) */
+			if (strcmp(def->defname, "token") == 0)
+				 /* the bearer token */ ;
+			else if (strcmp(def->defname, "credentials_required") == 0)
+			{
+				(void) defGetBoolean(def);
+				if (!defGetBoolean(def) && !superuser())
+					ereport(ERROR,
+							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+							 errmsg("only a superuser may set credentials_required 'false'")));
+			}
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("invalid option \"%s\" for a pgcolumnar_iceberg_catalog user mapping",
+								def->defname),
+						 errhint("Valid user-mapping options: token, credentials_required.")));
+		}
+		else if (def->defname != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\" for pgcolumnar_iceberg_catalog",
+							def->defname)));
+	}
+	PG_RETURN_VOID();
 }
