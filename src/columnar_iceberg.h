@@ -108,4 +108,14 @@ extern void PgColumnarIcebergTruncateMap(const char *path,
 										 int **out_attno, int **out_w,
 										 int *out_count, int32 *out_specid);
 
+/*
+ * Map the current spec's day() fields to columns for FDW temporal pruning: per
+ * field its partition-tuple position and source attno. palloc'd.
+ */
+extern void PgColumnarIcebergDayMap(const char *path,
+									const PgColumnarObjStoreConfig *cfg,
+									TupleDesc tupdesc, int **out_pos,
+									int **out_attno, int *out_count,
+									int32 *out_specid);
+
 #endif							/* COLUMNAR_ICEBERG_H */

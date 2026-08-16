@@ -42,10 +42,16 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "datatype/timestamp.h"	/* POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE */
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
+
+/* Iceberg dates count days from the 1970 Unix epoch; PostgreSQL dates count from
+ * 2000. Add this to a PG date to get the Iceberg day value a day() cell stores. */
+#define ICE_DATE_EPOCH_OFFSET	(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
 
 #include "columnar_avro.h"
 #include "columnar_compat.h"
@@ -69,6 +75,7 @@ typedef struct IceFdwState
 	List	   *metricQuals;	/* IceMetricQual*, min/max prune on int/bool cols */
 	List	   *bucketQuals;	/* IceBucketQual*, equality prune on bucket parts */
 	List	   *truncQuals;		/* IceTruncQual*, range prune on truncate[W] parts */
+	List	   *dayQuals;		/* IceDayQual*, range prune on day() date parts */
 	int64		filesPruned;
 }			IceFdwState;
 
@@ -109,6 +116,18 @@ typedef struct IceTruncQual
 	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
 	int64		constval;
 }			IceTruncQual;
+
+/*
+ * A "date-column <op> const" predicate a day()-partitioned DATE column can
+ * decide. day() stores one date per file as an Iceberg day int; `dayval` is the
+ * constant converted to that same day scale, decided against the file's cell.
+ */
+typedef struct IceDayQual
+{
+	int			pos;			/* partition-tuple position of the day cell */
+	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
+	int64		dayval;			/* const as Iceberg days (PG date + epoch offset) */
+}			IceDayQual;
 
 /* murmur3 x86 32-bit (seed 0), the hash Iceberg's bucket transform uses. */
 static uint32
@@ -749,6 +768,113 @@ ice_fdw_trunc_quals(ForeignScanState *node, TupleDesc tupdesc,
 }
 
 /*
+ * Compile "date-column <op> const" predicates over day()-partitioned DATE
+ * columns into IceDayQuals. day() is order-preserving; the constant is converted
+ * from a PostgreSQL date (days from 2000) to the Iceberg day scale (from 1970).
+ */
+static List *
+ice_fdw_day_quals(ForeignScanState *node, TupleDesc tupdesc,
+				  const int *dpos, const int *dattno, int dcount)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	if (dcount == 0)
+		return NIL;
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) lfirst(lc);
+		Node	   *larg;
+		Node	   *rarg;
+		Var		   *var;
+		Const	   *con;
+		bool		varLeft;
+		int			strategy = 0;
+		ListCell   *ic;
+		List	   *interp;
+		int			di;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		larg = (Node *) linitial(op->args);
+		rarg = (Node *) lsecond(op->args);
+		if (IsA(larg, Var) && IsA(rarg, Const))
+		{
+			var = (Var *) larg;
+			con = (Const *) rarg;
+			varLeft = true;
+		}
+		else if (IsA(larg, Const) && IsA(rarg, Var))
+		{
+			var = (Var *) rarg;
+			con = (Const *) larg;
+			varLeft = false;
+		}
+		else
+			continue;
+		if (var->varattno < 1 || var->varattno > tupdesc->natts ||
+			contain_volatile_functions((Node *) op))
+			continue;
+		if (TupleDescAttr(tupdesc, var->varattno - 1)->atttypid != DATEOID)
+			continue;			/* day() on timestamp/other deferred */
+		if (con->constisnull || con->consttype != DATEOID)
+			continue;
+
+		interp = PgColumnarGetOpInterpretation(op->opno);
+		foreach(ic, interp)
+		{
+			PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+			int			s = PgColumnarOpInterpStrategy(o);
+
+			if (s >= BTLessStrategyNumber && s <= BTGreaterStrategyNumber)
+			{
+				strategy = s;
+				break;
+			}
+		}
+		if (strategy == 0)
+			continue;
+		if (!varLeft)
+		{
+			switch (strategy)
+			{
+				case BTLessStrategyNumber:
+					strategy = BTGreaterStrategyNumber;
+					break;
+				case BTLessEqualStrategyNumber:
+					strategy = BTGreaterEqualStrategyNumber;
+					break;
+				case BTGreaterStrategyNumber:
+					strategy = BTLessStrategyNumber;
+					break;
+				case BTGreaterEqualStrategyNumber:
+					strategy = BTLessEqualStrategyNumber;
+					break;
+				default:
+					break;
+			}
+		}
+
+		for (di = 0; di < dcount; di++)
+		{
+			IceDayQual *dq;
+
+			if (dattno[di] != var->varattno)
+				continue;
+			dq = (IceDayQual *) palloc(sizeof(IceDayQual));
+			dq->pos = dpos[di];
+			dq->strategy = strategy;
+			dq->dayval = (int64) DatumGetDateADT(con->constvalue) +
+				ICE_DATE_EPOCH_OFFSET;
+			out = lappend(out, dq);
+		}
+	}
+	return out;
+}
+
+/*
  * The per-file filter passed to PgColumnarIcebergScanCore: return true to prune
  * (skip) a data file that provably yields no matching row -- because its column
  * min/max bounds exclude a predicate, or its identity-partition value does. A
@@ -828,6 +954,26 @@ ice_fdw_file_excludes(void *arg, const PgColumnarIceFileMeta *meta)
 				continue;
 			hi = v + tq->w - 1;
 			if (ice_fdw_metric_excludes(tq->strategy, tq->constval, v, hi))
+				return true;
+		}
+	}
+
+	/* temporal day() pruning: a day() cell V is the file's single date (Iceberg
+	 * days); decide the predicate against [V, V]. */
+	if (st->dayQuals != NIL && meta->spec_id == st->specid)
+	{
+		foreach(lc, st->dayQuals)
+		{
+			IceDayQual *dq = (IceDayQual *) lfirst(lc);
+			int64		v;
+
+			if (dq->pos < 0 || dq->pos >= meta->ncells)
+				continue;
+			if (meta->cells[dq->pos].isnull || meta->cells[dq->pos].is_bytes ||
+				!meta->cells[dq->pos].comparable)
+				continue;
+			v = meta->cells[dq->pos].ival;
+			if (ice_fdw_metric_excludes(dq->strategy, dq->dayval, v, v))
 				return true;
 		}
 	}
@@ -981,6 +1127,18 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 		st->truncQuals = ice_fdw_trunc_quals(node, tupdesc, tpos, tattno, tw, tcount);
 	}
 
+	/* temporal pruning: range over a day()-partitioned date column */
+	{
+		int		   *dpos;
+		int		   *dattno;
+		int			dcount;
+		int32		dspec;
+
+		PgColumnarIcebergDayMap(st->metadata_path, NULL, tupdesc,
+								&dpos, &dattno, &dcount, &dspec);
+		st->dayQuals = ice_fdw_day_quals(node, tupdesc, dpos, dattno, dcount);
+	}
+
 	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 	st->started = false;
@@ -1002,7 +1160,8 @@ icefdwIterateForeignScan(ForeignScanState *node)
 	{
 		/* read the surviving files (pruned by the filter) into the tuplestore */
 		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL ||
-							 st->bucketQuals != NIL || st->truncQuals != NIL);
+							 st->bucketQuals != NIL || st->truncQuals != NIL ||
+							 st->dayQuals != NIL);
 
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,

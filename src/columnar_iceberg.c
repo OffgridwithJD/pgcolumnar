@@ -1421,6 +1421,115 @@ PgColumnarIcebergTruncateMap(const char *path, const PgColumnarObjStoreConfig *c
 }
 
 /*
+ * Map the current spec's day() fields to columns for FDW temporal pruning: per
+ * day() field its partition-tuple position (*out_pos) and source column attno
+ * (*out_attno); *out_count fields; *out_specid the current spec id. The stored
+ * cell is the day as an int (days since the 1970 epoch), one date per file.
+ */
+void
+PgColumnarIcebergDayMap(const char *path, const PgColumnarObjStoreConfig *cfg,
+						TupleDesc tupdesc, int **out_pos, int **out_attno,
+						int *out_count, int32 *out_specid)
+{
+	char	   *json = ice_slurp_text(path, cfg);
+	Jsonb	   *jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+													   CStringGetDatum(json)));
+	JsonbContainer *root = &jb->root;
+	JsonbContainer *fieldsc = ice_current_schema_fields(root, path);
+	uint32		nf = JsonContainerSize(fieldsc);
+	JsonbValue *dv;
+	JsonbValue *specs;
+	JsonbContainer *specfields = NULL;
+	uint32		nspec = 0;
+	uint32		k;
+	int64		defspec = 0;
+	int		   *pos;
+	int		   *attno;
+	int			cnt = 0;
+
+	*out_pos = NULL;
+	*out_attno = NULL;
+	*out_count = 0;
+	*out_specid = 0;
+
+	dv = ice_field(root, "default-spec-id");
+	if (dv != NULL)
+		(void) ice_num_int64(dv, &defspec);
+	*out_specid = (int32) defspec;
+
+	specs = ice_field(root, "partition-specs");
+	if (specs != NULL && specs->type == jbvBinary &&
+		JsonContainerIsArray(specs->val.binary.data))
+	{
+		uint32		ns = JsonContainerSize(specs->val.binary.data);
+		uint32		i;
+
+		for (i = 0; i < ns; i++)
+		{
+			JsonbValue *sp = getIthJsonbValueFromContainer(specs->val.binary.data, i);
+			JsonbValue *sid;
+			JsonbValue *flds;
+			int64		sv;
+
+			if (sp == NULL || sp->type != jbvBinary)
+				continue;
+			sid = ice_field(sp->val.binary.data, "spec-id");
+			if (sid == NULL || !ice_num_int64(sid, &sv) || sv != defspec)
+				continue;
+			flds = ice_field(sp->val.binary.data, "fields");
+			if (flds != NULL && flds->type == jbvBinary &&
+				JsonContainerIsArray(flds->val.binary.data))
+			{
+				specfields = flds->val.binary.data;
+				nspec = JsonContainerSize(specfields);
+			}
+			break;
+		}
+	}
+	if (specfields == NULL || nspec == 0)
+		return;
+
+	pos = (int *) palloc(sizeof(int) * nspec);
+	attno = (int *) palloc(sizeof(int) * nspec);
+	for (k = 0; k < nspec; k++)
+	{
+		JsonbValue *f = getIthJsonbValueFromContainer(specfields, k);
+		JsonbValue *tr;
+		JsonbValue *src;
+		int64		srcid;
+		int			a;
+
+		if (f == NULL || f->type != jbvBinary)
+			continue;
+		tr = ice_field(f->val.binary.data, "transform");
+		if (tr == NULL || tr->type != jbvString ||
+			tr->val.string.len != 3 ||
+			strncmp(tr->val.string.val, "day", 3) != 0)
+			continue;
+		src = ice_field(f->val.binary.data, "source-id");
+		if (src == NULL || !ice_num_int64(src, &srcid))
+			continue;
+		for (a = 0; a < tupdesc->natts; a++)
+		{
+			Form_pg_attribute att = TupleDescAttr(tupdesc, a);
+
+			if (att->attisdropped)
+				continue;
+			if (ice_field_id_by_name(fieldsc, nf, NameStr(att->attname)) == srcid)
+			{
+				pos[cnt] = (int) k;
+				attno[cnt] = a + 1;
+				cnt++;
+				break;
+			}
+		}
+	}
+	*out_pos = pos;
+	*out_attno = attno;
+	*out_count = cnt;
+}
+
+/*
  * Return, for each column of `tupdesc`, the current-schema field id of the
  * column with that name (0 when the table has no such column), for FDW metrics
  * pruning that keys a data file's bounds by field id. palloc'd, length natts.
