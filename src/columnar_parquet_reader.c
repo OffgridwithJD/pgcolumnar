@@ -2116,7 +2116,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 				uint32	   *idx;
 				int			bw;
 
-				if (dict == NULL || vallen < 1)
+				if (dict == NULL || vallen < 1 || dictCount < 1)
 					return false;
 				bw = valbuf[0];
 				idx = palloc(sizeof(uint32) * Max(nnn, 1));
@@ -2124,7 +2124,15 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					return false;
 				for (i = 0; i < nnn; i++)
 				{
-					if ((int) idx[i] >= dictCount)
+					/*
+					 * idx[i] is file-controlled and unsigned. The bounds test must
+					 * be unsigned too: a signed comparison sign-extends any index
+					 * with the high bit set (e.g. bit_width 32 yielding 0x80000000)
+					 * into a negative int that slips past the check, and dict[idx]
+					 * then reads far out of bounds. Compare as uint32 against a
+					 * dictCount already proven >= 1 above.
+					 */
+					if (idx[i] >= (uint32) dictCount)
 						return false;
 					pv[i] = dict[idx[i]];
 				}

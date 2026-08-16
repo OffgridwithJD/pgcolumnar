@@ -12,6 +12,15 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Security
+
+- Fixed an out-of-bounds read in the Parquet dictionary decode path. A file whose
+  RLE_DICTIONARY data page carried an index with the high bit set (reachable at
+  bit_width 32) passed a signed bounds check that sign-extended it to a negative
+  int, and the dictionary was then read far out of bounds, crashing the backend
+  from a single crafted file. The bounds check is now unsigned and the index is
+  rejected. Regression test: native_parquet_dict_oob.
+
 ### Added
 
 - Read-only Apache Iceberg support, filesystem-backed, at a table's current

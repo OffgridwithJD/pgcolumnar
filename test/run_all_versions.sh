@@ -136,6 +136,7 @@ SUITES=(
 	native_metadata_flush
 	native_ownership
 	native_parquet_codecs
+	native_parquet_dict_oob
 	native_parquet_fdw
 	native_parquet_fieldid
 	native_parquet_flba
