@@ -30,6 +30,7 @@ pgColumnar has two kinds of settings:
 | `pgcolumnar.compression` | enum | `zstd` | Default codec for new chunks. One of `none`, `pglz`, `lz4`, `zstd`. `lz4` and `zstd` are available only when the extension was built with those libraries. |
 | `pgcolumnar.compression_level` | integer | `3` | Level for the `zstd` codec. Range 1 to 22. Higher levels compress more and write more slowly. |
 | `pgcolumnar.fsst_min_gain_percent` | integer | `5` | Minimum size reduction, in percent, for FSST string encoding to be kept for a column chunk. Range 0 to 99. See below. |
+| `pgcolumnar.fsst_verdict_reuse` | integer | `16` | How many later row groups may reuse a column's FSST keep-or-drop verdict before it is decided again. Range 0 to INT_MAX. |
 | `pgcolumnar.parallel_flush` | boolean | `off` | Opt-in. When on, a stripe flush of two or more columns fans the per-column encode and compress work out to background workers. The stored bytes match the serial path. It helps one large flush of many numeric columns by up to 14 percent. A wide text-heavy flush regresses, because it copies the buffered bytes through shared memory. Frequent small flushes regress too, so it is off by default. Enable it for a wide numeric bulk load in the session that runs it. |
 
 To build the FSST codes for each vector is one of the larger costs of a load of
@@ -65,6 +66,8 @@ disk. It never changes the values that a table returns.
 | `pgcolumnar.enable_parallel_vector_agg` | boolean | `off` | Let the ungrouped batch fold run as a parallel partial aggregate under `Gather`, each worker folding its own row groups. Requires `pgcolumnar.enable_ungrouped_vector_agg`. Off by default. |
 | `pgcolumnar.enable_column_projection` | boolean | `on` | Read only the columns a query references rather than every column of the row group. |
 | `pgcolumnar.enable_index_fetch_penalty` | boolean | `on` | Charge a columnar index scan for the row-group decode its per-row heap fetches force, so the planner does not treat a columnar fetch as if it were a heap page read. Set to `off` to restore the pre-1.0-alpha planner behaviour. |
+| `pgcolumnar.enable_late_materialization` | boolean | `on` | Evaluate the scan qualifier before building the columns it does not read, so decode cost scales with rows emitted rather than rows scanned. |
+| `pgcolumnar.qual_skipvec_min_payload_cols` | integer | `20` | Minimum projected non-qual columns before per-vector qual gating skips a no-match 1024-row vector's payload decode. Range 0 to 100000. |
 
 ### Index-only scan and projections
 
@@ -94,6 +97,8 @@ schemes and the credential model.
 | --- | --- | --- | --- |
 | `pgcolumnar.objstore_allowed_endpoints` | string | `''` (empty) | The endpoints the module may connect to, comma-separated as `host` or `host:port`. Empty refuses every remote endpoint, so a role that can read or write server files cannot reach an arbitrary host through the extension. Link-local addresses, including `169.254.169.254`, are refused whether or not they are listed. Superuser-only, so a role cannot widen its own reach. |
 | `pgcolumnar.objstore_s3_addressing` | string | `path` | The S3 request addressing style. `path` sends `s3://bucket/key` to `endpoint/bucket/key`; `virtual` sends it to `bucket.endpoint/key`, which is what AWS now prefers. Under virtual-host addressing the allow-list still authorizes the endpoint, not the per-bucket hostname. |
+| `pgcolumnar.objstore_buffered` | boolean | `on` | Coalesce remote Parquet reads to one request per column chunk instead of many small ranged reads. |
+| `pgcolumnar.objstore_part_size` | integer | `0` | Multipart part size in bytes for a remote export. `0` uses the module default of 8 MiB. Raise it for a fast link. Range 0 to INT_MAX. |
 
 ### Concurrent unique inserts
 
@@ -104,13 +109,15 @@ schemes and the credential model.
 
 ### Internal settings
 
-One setting is registered but is not a tuning knob. It is listed here because it
-appears in `pg_settings` and a reader who finds it there deserves an answer.
+These settings are registered but are not tuning knobs. They are listed here
+because they appear in `pg_settings` and a reader who finds one there deserves an
+answer.
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pgcolumnar.bulk_parallel_writer` | boolean | `off` | Internal. Set by `pgcolumnar.parallel_copy` loader workers so they skip the storage-row creation lock when the row already exists committed, which is what lets several atomic writers load one table at once. Marked `GUC_NOT_IN_SAMPLE`; leave it alone. Setting it by hand is safe but pointless: the skip only fires when the storage row is already committed, which is exactly when the lock guards nothing. |
 | `pgcolumnar.maintenance_hold_ms` | integer | `0` | Internal, for tests. A maintenance verb holds `ShareUpdateExclusiveLock` this many milliseconds, interruptibly, so a test can observe the daemon yield to a stronger lock. `0` disables it. Range 0 to 600000. Leave it at `0`. |
+| `pgcolumnar.sink_fail_after` | integer | `-1` | Internal, for tests. A fault-injection point that fails an export write after this many bytes, by the path a full disk takes. `-1` disables it. Range -1 to INT_MAX. Leave it at `-1`. |
 
 ## Per-table storage options
 

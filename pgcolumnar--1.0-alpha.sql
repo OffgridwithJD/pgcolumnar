@@ -956,7 +956,7 @@ CREATE FUNCTION pgcolumnar.iceberg_scan(metadata_path text)
 	AS 'MODULE_PATHNAME', 'pgcolumnar_iceberg_scan';
 
 COMMENT ON FUNCTION pgcolumnar.iceberg_scan(text)
-	IS 'read an Apache Iceberg table at its current snapshot; supply a column definition list, whose names resolve to the table schema field ids, e.g. SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(id bigint, region text); refuses tables with delete files (#388)';
+	IS 'read an Apache Iceberg table at its current snapshot; supply a column definition list, whose names resolve to the table schema field ids, e.g. SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(id bigint, region text); applies position, equality, and deletion-vector deletes (#388)';
 
 CREATE FUNCTION pgcolumnar.iceberg_rest_table_location(catalog_uri text,
 													   namespace text,
