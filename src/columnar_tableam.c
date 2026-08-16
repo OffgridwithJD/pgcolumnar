@@ -1445,6 +1445,11 @@ static TM_Result
 pgcolumnar_tuple_delete(COLUMNAR_TUPLE_DELETE_ARGS)
 {
 	uint64		rowNumber = PgColumnarItemPointerToRowNumber(tid);
+	TM_Result	conflict;
+
+	/* issue #5: serialize on the row identity before marking it deleted */
+	if (PgColumnarRowWriteConflict(rel, tid, cid, wait, tmfd, &conflict))
+		return conflict;
 
 	PgColumnarMarkRowDeleted(rel, rowNumber);
 	return TM_Ok;
@@ -1465,6 +1470,20 @@ pgcolumnar_tuple_update(COLUMNAR_TUPLE_UPDATE_ARGS)
 	uint64		oldRowNumber = PgColumnarItemPointerToRowNumber(otid);
 	PgColumnarWriteState *writeState;
 	uint64		rowNumber;
+	TM_Result	conflict;
+
+	/*
+	 * issue #5: serialize on the row identity before marking the old row
+	 * deleted, so two transactions updating the same row do not each keep their
+	 * own new version. The loser gets a retryable serialization_failure (or
+	 * TM_SelfModified for a same-command self-join). lockmode is set for the
+	 * non-Ok returns as core expects.
+	 */
+	if (PgColumnarRowWriteConflict(rel, otid, cid, wait, tmfd, &conflict))
+	{
+		*lockmode = LockTupleExclusive;
+		return conflict;
+	}
 
 	PgColumnarMarkRowDeleted(rel, oldRowNumber);
 
@@ -2846,6 +2865,39 @@ _PG_init(void)
 							"this value.",
 							&pgcolumnar_unique_lock_buckets,
 							128,
+							1, 1048576,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pgcolumnar.enable_row_update_lock",
+							 "Serialize concurrent UPDATE/DELETE of the same "
+							 "columnar row so the losing writer gets a retryable "
+							 "serialization_failure instead of duplicating the "
+							 "row and losing an update (issue #5).",
+							 "On by default. Off restores the prior behavior, "
+							 "where two transactions updating the same row can "
+							 "each keep their own version.",
+							 &pgcolumnar_enable_row_update_lock,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgcolumnar.row_lock_buckets",
+							"Advisory-lock buckets per storage for same-row "
+							"UPDATE/DELETE serialization.",
+							"Bounds the transaction's held row locks to at most "
+							"this many per storage, so a bulk UPDATE cannot "
+							"exhaust the lock table. The same row always hashes to "
+							"the same bucket; unrelated rows may share one, which "
+							"only over-serializes. Fixed at server start because "
+							"the bucket is part of the advisory lock tag: two "
+							"backends racing the same row must compute the same "
+							"bucket, which they only do when they agree on this "
+							"value.",
+							&pgcolumnar_row_lock_buckets,
+							1024,
 							1, 1048576,
 							PGC_POSTMASTER,
 							0,

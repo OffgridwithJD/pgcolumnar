@@ -399,16 +399,20 @@ same way as a `CREATE INDEX` that is not concurrent. Turn projection scans off w
   commit. It then reads the committed mask again and merges its own bits. Thus
   both sets of delete marks survive. Writes to different row groups continue at
   the same time.
-- A concurrent `UPDATE` of the same row is a delete of the old version plus an
-  insert of the new one. The two writers do not serialize on the row itself.
-  Without a covering unique index, two sessions that update the same row can each
-  keep their own new version. The row is then duplicated and one update is lost.
-  A unique index on the updated key makes the writers go in sequence, and the
-  conflict is found. The second writer then gets a unique-violation error, which
-  the application retries. This is not the transparent serialization a heap gives,
-  where both updates apply. This is a known limitation. Add a unique index and
-  retry on conflict, or serialize the updates in your application, where
-  correctness needs it.
+- A concurrent `UPDATE` or `DELETE` of the same row serializes on the row
+  identity. The second writer waits for the first to commit. It then gets a
+  retryable `serialization_failure`, so the row is never duplicated and no update
+  is lost. This holds at every isolation level and needs no unique index. Retry
+  the transaction on this error, as you retry one at `REPEATABLE READ`. The
+  behavior is stricter than a heap at `READ COMMITTED`. A heap re-applies both
+  updates transparently there; pgColumnar makes the loser retry. The GUC
+  `pgcolumnar.enable_row_update_lock` (default on) controls this serialization.
+  The GUC `pgcolumnar.row_lock_buckets` (default 1024) bounds the held locks per
+  storage, so a bulk update cannot exhaust the lock table. Unrelated rows may
+  share a bucket, which only makes them wait when they need not. For the same
+  reason, two multi-statement transactions can rarely deadlock, even on disjoint
+  rows. This happens when their bucketed locks collide in opposite statement order.
+  Retry resolves it, as with any serialization failure.
 - Concurrent inserts of the same unique key go in sequence. The server therefore
   always finds the conflict. Before a new row reaches the uniqueness check, the
   access method takes an advisory lock with the scope of the transaction. The key

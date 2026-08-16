@@ -333,6 +333,50 @@ delete_vector_flush_buffer(DeleteVectorBuffer *buf)
 		pushedSnapshot = true;
 	}
 
+	/*
+	 * issue #5: before writing the delete marks, serialize the rows being flushed
+	 * as deleted against concurrent writers of the same rows, taking their
+	 * row-identity locks in one sorted batch (deadlock-free) and raising a
+	 * serialization_failure on a committed conflict. Collect the row numbers from
+	 * the sorted chunks first, so the batch is ordered the same way for every
+	 * transaction, exactly like the chunk-group locks below.
+	 */
+	{
+		uint64		nrows = 0;
+		uint64	   *rows;
+		uint64		ri = 0;
+		ListCell   *cc;
+
+		foreach(cc, buf->chunks)
+		{
+			DeleteVectorChunkBuffer *chunk = (DeleteVectorChunkBuffer *) lfirst(cc);
+			uint32		i;
+			int			bit;
+
+			for (i = 0; i < chunk->maskLen; i++)
+				for (bit = 0; bit < 8; bit++)
+					if (chunk->mask[i] & (1 << bit))
+						nrows++;
+		}
+		if (nrows > 0)
+		{
+			rows = (uint64 *) palloc(sizeof(uint64) * nrows);
+			foreach(cc, buf->chunks)
+			{
+				DeleteVectorChunkBuffer *chunk = (DeleteVectorChunkBuffer *) lfirst(cc);
+				uint32		i;
+				int			bit;
+
+				for (i = 0; i < chunk->maskLen; i++)
+					for (bit = 0; bit < 8; bit++)
+						if (chunk->mask[i] & (1 << bit))
+							rows[ri++] = chunk->startRowNumber + (uint64) (i * 8 + bit);
+			}
+			PgColumnarSerializeFlushRows(buf->storageId, rows, (int) nrows);
+			pfree(rows);
+		}
+	}
+
 	foreach(lc, buf->chunks)
 	{
 		DeleteVectorChunkBuffer *chunk = (DeleteVectorChunkBuffer *) lfirst(lc);
