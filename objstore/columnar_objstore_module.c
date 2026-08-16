@@ -366,6 +366,28 @@ os_addr_is_linklocal(const struct addrinfo *ai)
 	return false;
 }
 
+/*
+ * Request-line splitting guard. The request-target and host go verbatim into
+ * "%s %s HTTP/1.1\r\nHost: %s:%d\r\n" in every request builder, so a CR or LF in
+ * either (from a user-controlled URL or catalog_uri) would inject a second
+ * request line or header onto the connection. This is the same defense the
+ * caller-supplied header lines already carry. It lives in os_connect, the one
+ * path every request builder (GET, write, list, and the ABI http_request) goes
+ * through, so no emit site can be missed.
+ */
+static void
+os_reject_target_ctl(PgColumnarObjHandle *h)
+{
+	if (h->abspath != NULL && strpbrk(h->abspath, "\r\n") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("columnar: an HTTP request path may not contain CR or LF")));
+	if (h->host != NULL && strpbrk(h->host, "\r\n") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("columnar: an HTTP request host may not contain CR or LF")));
+}
+
 static void
 os_connect(PgColumnarObjHandle *h)
 {
@@ -379,6 +401,7 @@ os_connect(PgColumnarObjHandle *h)
 	Assert(h->fd < 0);
 
 	os_check_endpoint_allowed(h);
+	os_reject_target_ctl(h);
 
 	if (!h->fd_reserved)
 	{
@@ -1147,26 +1170,6 @@ os_sign_request(PgColumnarObjHandle *h, const char *method,
 /* ---------------------------------------------------------------- request */
 
 /*
- * Request-line splitting guard. The request-target and host go verbatim into
- * "%s %s HTTP/1.1\r\nHost: %s:%d\r\n", so a CR or LF in either would inject a
- * second request line or header onto the connection. This is the same defense
- * the caller-supplied header lines already carry; the request-target and host,
- * which can come from a user-controlled URL / catalog_uri, need it too.
- */
-static void
-os_reject_target_ctl(PgColumnarObjHandle *h)
-{
-	if (h->abspath != NULL && strpbrk(h->abspath, "\r\n") != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("columnar: an HTTP request path may not contain CR or LF")));
-	if (h->host != NULL && strpbrk(h->host, "\r\n") != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("columnar: an HTTP request host may not contain CR or LF")));
-}
-
-/*
  * One request/response cycle with a single reconnect on a stale keep-alive
  * connection. `off`/`n` describe the Range for GET; HEAD sends no Range.
  */
@@ -1178,7 +1181,6 @@ os_request(PgColumnarObjHandle *h, const char *method,
 	bool		isGet = (strcmp(method, "GET") == 0);
 	int			attempt;
 
-	os_reject_target_ctl(h);
 	initStringInfo(&req);
 	appendStringInfo(&req, "%s %s HTTP/1.1\r\nHost: %s:%d\r\n",
 					 method, h->abspath, h->host, h->port);
@@ -1816,7 +1818,6 @@ os_write_request(PgColumnarObjHandle *h, const char *method, const char *rawQuer
 	char		payloadHex[PG_SHA256_DIGEST_LENGTH * 2 + 1];
 	int			attempt;
 
-	os_reject_target_ctl(h);
 	os_sha256(body, (size_t) bodylen, phash);
 	os_hex(phash, sizeof(phash), payloadHex);
 
