@@ -94,6 +94,7 @@ typedef struct IceFdwState
 	List	   *dayQuals;		/* IceDayQual*, range prune on day() date parts */
 	List	   *temporalQuals;	/* IceTemporalQual*, coarse year/month/day/hour on ts */
 	int64		filesPruned;
+	const bool *needTop;		/* projection mask over tupdesc, or NULL for all */
 }			IceFdwState;
 
 /*
@@ -320,14 +321,30 @@ icefdwGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel,
 					 Oid foreigntableid, ForeignPath *best_path,
 					 List *tlist, List *scan_clauses, Plan *outer_plan)
 {
+	Bitmapset  *attrs = NULL;
+	List	   *needed = NIL;
+	int			x = -1;
+
 	/*
 	 * Clause evaluation stays with the executor: pruning here only drops whole
 	 * files a partition value cannot match, so every clause is still recheckable
 	 * and must remain in the plan qual.
 	 */
 	scan_clauses = extract_actual_clauses(scan_clauses, false);
+
+	/*
+	 * Projection pushdown: record the attributes the output tlist and the
+	 * recheck quals reference, so the reader decodes only those columns of each
+	 * surviving file. Passed as fdw_private and expanded to a per-column mask in
+	 * BeginForeignScan. A whole-row reference (attno 0) forces every column.
+	 */
+	pull_varattnos((Node *) baserel->reltarget->exprs, baserel->relid, &attrs);
+	pull_varattnos((Node *) scan_clauses, baserel->relid, &attrs);
+	while ((x = bms_next_member(attrs, x)) >= 0)
+		needed = lappend_int(needed, x + FirstLowInvalidHeapAttributeNumber);
+
 	return make_foreignscan(tlist, scan_clauses, baserel->relid,
-							NIL, NIL, NIL, NIL, outer_plan);
+							NIL, needed, NIL, NIL, outer_plan);
 }
 
 /* ------------------------------------------------------------------- pruning */
@@ -1376,6 +1393,30 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 	st = (IceFdwState *) palloc0(sizeof(IceFdwState));
 	st->node = node;
 	st->tupdesc = tupdesc;
+
+	/*
+	 * Expand the plan-time needed-attribute list (fdw_private) into a per-column
+	 * mask for the reader. A whole-row reference (attno 0) needs every column, so
+	 * the mask is NULL then; otherwise a column is decoded only if referenced, and
+	 * a scan that references nothing (count(*)) decodes nothing.
+	 */
+	{
+		ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+		List	   *needed = (List *) fs->fdw_private;
+
+		if (needed == NIL || list_member_int(needed, 0))
+			st->needTop = NULL;		/* whole-row, or nothing recorded: all columns */
+		else
+		{
+			bool	   *nt = (bool *) palloc0(sizeof(bool) * Max(tupdesc->natts, 1));
+			int			ci;
+
+			for (ci = 0; ci < tupdesc->natts; ci++)
+				if (list_member_int(needed, ci + 1))
+					nt[ci] = true;
+			st->needTop = nt;
+		}
+	}
 	st->metadata_path = ice_fdw_get_option(RelationGetRelid(rel), "metadata_path");
 	if (st->metadata_path == NULL)
 		ereport(ERROR,
@@ -1518,7 +1559,7 @@ icefdwIterateForeignScan(ForeignScanState *node)
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,
 													prune ? ice_fdw_file_excludes : NULL,
-													st);
+													st, st->needTop);
 		st->started = true;
 	}
 

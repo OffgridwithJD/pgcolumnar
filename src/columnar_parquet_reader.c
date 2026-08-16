@@ -3548,6 +3548,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 				  const char *const *nm_names, const int *nm_ids, int nm_count,
 				  bool missing_as_null,
 				  const uint64 *skipPos, int nSkipPos,
+				  const bool *needTop,
 				  const PgColumnarObjStoreConfig *cfg)
 {
 	PqSource	src;
@@ -3566,7 +3567,7 @@ pq_read_file_into(const char *path, TupleDesc tupdesc, TupleTableSlot *slot,
 	else
 		tops = build_imp_targets(tupdesc, &pf, &leaves, &ntops, NULL);
 	n = pq_read_rows(&pf, &src, tops, ntops, leaves,
-					 slot, sink, sinkarg, NULL, NULL, NULL, NULL, NULL,
+					 slot, sink, sinkarg, NULL, needTop, NULL, NULL, NULL,
 					 0, pf.nrowgroups, skipPos, nSkipPos);
 	pq_source_close(&src);
 	return n;
@@ -3588,7 +3589,7 @@ PgColumnarReadParquetByFieldId(const char *path, TupleDesc tupdesc,
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
 							 field_ids, nfield, NULL, NULL, 0, false,
-							 skipPos, nSkipPos, cfg);
+							 skipPos, nSkipPos, NULL, cfg);
 }
 
 /*
@@ -3608,11 +3609,12 @@ PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdesc,
 								 int nm_count,
 								 Tuplestorestate *tupstore, TupleTableSlot *slot,
 								 const uint64 *skipPos, int nSkipPos,
+								 const bool *needTop,
 								 const PgColumnarObjStoreConfig *cfg)
 {
 	return pq_read_file_into(path, tupdesc, slot, pq_tuplestore_sink, tupstore,
 							 field_ids, nfield, nm_names, nm_ids, nm_count,
-							 true, skipPos, nSkipPos, cfg);
+							 true, skipPos, nSkipPos, needTop, cfg);
 }
 
 /*
@@ -3679,7 +3681,7 @@ pgcolumnar_import_parquet(PG_FUNCTION_ARGS)
 
 		total += pq_read_file_into((char *) lfirst(lc), tupdesc, slot,
 								   pq_insert_sink, &sinkarg, NULL, 0,
-								   NULL, NULL, 0, false, NULL, 0, NULL);
+								   NULL, NULL, 0, false, NULL, 0, NULL, NULL);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}
@@ -3799,7 +3801,7 @@ pgcolumnar_read_parquet(PG_FUNCTION_ARGS)
 
 		(void) pq_read_file_into((char *) lfirst(lc), retdesc, slot,
 								 pq_tuplestore_sink, tupstore, field_ids, nfield,
-								 NULL, NULL, 0, false, NULL, 0, NULL);
+								 NULL, NULL, 0, false, NULL, 0, NULL, NULL);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(fileCtx);
 	}

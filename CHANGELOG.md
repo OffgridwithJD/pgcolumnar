@@ -14,6 +14,12 @@ which was true until that script existed.
 
 ### Fixed
 
+- The Iceberg foreign-data wrapper now pushes projection down: it decodes only
+  the columns a query references (from the output list and the recheck quals),
+  not every column of every surviving file. A narrow projection over a wide table
+  is much cheaper (a 1-of-40-column scan measured about 5x faster). The reader's
+  existing needTop mask carries it; the wrapper computes the mask and the results
+  are unchanged. Regression test: iceberg_fdw_projection.
 - The index-fetch cost penalty now sizes row groups by a relation's effective
   `stripe_row_limit` (the per-table option when set, else the GUC), matching the
   writer and the zone-map survival estimate. It read only the GUC, so it
