@@ -98,6 +98,60 @@ check "a catalog_uri option on the USER MAPPING is rejected (HV00D)" \
 	"$(sqlstate_of "ALTER USER MAPPING FOR postgres SERVER cat OPTIONS (ADD catalog_uri 'x')")" \
 	"HV00D"
 
+# ---- OAuth2 client-credentials: mint a bearer, then use it -------------------
+# A second fixture requires a client id/secret at POST /v1/oauth/tokens and, on a
+# match, mints OATOKEN -- which loadTable then requires. So a green read proves
+# the full mint->use flow, with NO env token and NO static mapping token. The
+# secret travels only in the POST body; it must appear in neither log.
+OCID="client-abc"; OCSEC="s3cr3t-oauth-secret"; OATOKEN="minted-bearer-777"
+OPORT="$(pgc_pick_free_port "$PGC_AUX_PORT_LO" "$PGC_AUX_PORT_HI")"
+OLOG="$PGC_WORKDIR/orest.log"
+python3 "$(dirname "${BASH_SOURCE[0]}")/iceberg_rest_server.py" \
+	--port "$OPORT" --log "$OLOG" --token "$OATOKEN" \
+	--oauth-client-id "$OCID" --oauth-client-secret "$OCSEC" \
+	--namespace db --table events --metadata-location "$MDLOC" \
+	> "$PGC_WORKDIR/orest.out" 2>&1 &
+OSRV_PID=$!
+for _ in $(seq 1 50); do grep -q READY "$PGC_WORKDIR/orest.out" 2>/dev/null && break; sleep 0.1; done
+OCAT="http://127.0.0.1:$OPORT"
+q "CREATE SERVER ocat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+   OPTIONS (catalog_uri '$OCAT')" >/dev/null
+q "CREATE USER MAPPING FOR postgres SERVER ocat
+   OPTIONS (oauth_client_id '$OCID', oauth_client_secret '$OCSEC')" >/dev/null
+
+check "a server with an OAuth2 mapping reads by a minted bearer" \
+	"$(q "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')")" \
+	"$MDLOC"
+check "the OAuth2 token endpoint was called (POST /v1/oauth/tokens)" \
+	"$(grep -c 'POST /v1/oauth/tokens' "$OLOG" 2>/dev/null)" "1"
+check "loadTable then carried the minted bearer (Authorization present)" \
+	"$(grep -c 'GET /v1/namespaces/db/tables/events AUTH=yes' "$OLOG" 2>/dev/null)" "1"
+check "the client secret never appears in the fixture request log" \
+	"$(grep -c "$OCSEC" "$OLOG" 2>/dev/null)" "0"
+q "ALTER SYSTEM SET log_statement='all'" >/dev/null
+q "SELECT pg_reload_conf()" >/dev/null
+q "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')" >/dev/null
+q "ALTER SYSTEM SET log_statement='none'" >/dev/null
+q "SELECT pg_reload_conf()" >/dev/null
+check "the client secret never appears in the PG server log" \
+	"$(grep -c "$OCSEC" "$PGC_LOGFILE" 2>/dev/null)" "0"
+
+q "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (SET oauth_client_secret 'wrong-secret')" >/dev/null
+check "a wrong OAuth2 client secret is refused (28000)" \
+	"$(sqlstate_of "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')")" \
+	"28000"
+q "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (DROP oauth_client_secret)" >/dev/null
+check "a half OAuth2 credential (id, no secret) is refused before any request (28000)" \
+	"$(sqlstate_of "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')")" \
+	"28000"
+check "oauth options are accepted on a USER MAPPING (no error)" \
+	"$(sqlstate_of "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (ADD oauth_scope 'catalog')")" \
+	""
+check "an oauth option on the SERVER is rejected (HV00D)" \
+	"$(sqlstate_of "CREATE SERVER bad2 FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog OPTIONS (catalog_uri '$OCAT', oauth_client_secret 'x')")" \
+	"HV00D"
+kill "$OSRV_PID" 2>/dev/null
+
 # ---- the URI form still works when the env token is present ------------------
 pg_restart_env "PGCOLUMNAR_ICEBERG_REST_TOKEN='$TOKEN'"
 q "ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints='127.0.0.1'" >/dev/null

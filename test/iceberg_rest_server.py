@@ -130,6 +130,30 @@ class Handler(BaseHTTPRequestHandler):
 
         self._not_found("no such resource")
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        self._logline("POST", path)     # never logs the body, so no secret leaks
+        if path != "/v1/oauth/tokens" or not ARGS.oauth_client_id:
+            self._not_found("no such path")
+            return
+        n = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(n).decode() if n > 0 else ""
+        form = urllib.parse.parse_qs(body)
+
+        def one(k):
+            v = form.get(k, [""])
+            return v[0] if v else ""
+        # client-credentials grant: the id and secret must match exactly. A wrong
+        # secret is 401, which the client maps to 28000 with no secret in the log.
+        if (one("grant_type") == "client_credentials"
+                and one("client_id") == ARGS.oauth_client_id
+                and one("client_secret") == ARGS.oauth_client_secret):
+            self._send_json(200, {"access_token": ARGS.token,
+                                  "token_type": "bearer", "expires_in": 3600})
+        else:
+            self._unauthorized()
+
     def _load_table(self, ns, table):
         if table == "toobig":
             # advertise a body far larger than any sane response cap, send none:
@@ -195,6 +219,8 @@ def main():
     ap.add_argument("--vend-region", default="")
     ap.add_argument("--vend-endpoint", default="")
     ap.add_argument("--storage-cred-prefix", default="")
+    ap.add_argument("--oauth-client-id", default="")
+    ap.add_argument("--oauth-client-secret", default="")
     ARGS = ap.parse_args()
     open(ARGS.log, "w").close()
     httpd = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)

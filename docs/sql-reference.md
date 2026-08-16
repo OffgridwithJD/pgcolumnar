@@ -805,6 +805,14 @@ visible to another. A role with no mapping and no token is refused. A superuser,
 or a mapping that sets `credentials_required 'false'`, uses the environment token
 instead.
 
+A user mapping may carry OAuth2 client credentials rather than a static token.
+When it sets `oauth_client_id` and `oauth_client_secret`, the catalog is asked to
+mint a bearer by the client-credentials grant. The request goes to
+`oauth_token_uri` when set, otherwise to `{catalog_uri}/v1/oauth/tokens`, with an
+optional `oauth_scope`. The client secret travels in the request body, never a
+URL or a log line. A mapping that sets only one of the pair is refused before any
+request is made.
+
 Multi-level namespaces are given dot-separated, and the function requires the
 `pg_read_server_files` role, like the other Iceberg functions.
 
@@ -826,9 +834,10 @@ SELECT count(*) FROM pgcolumnar.iceberg_scan(
 
 The `pgcolumnar_iceberg_catalog` wrapper has a validator but no handler, so its
 servers cannot be selected from as tables. It accepts only `catalog_uri` on a
-server, and only `token` and `credentials_required` on a user mapping. A secret
-on a server, where options are world-readable, is rejected. Setting
-`credentials_required 'false'` is restricted to a superuser.
+server. On a user mapping it accepts `token`, the OAuth2 options
+(`oauth_client_id`, `oauth_client_secret`, `oauth_scope`, `oauth_token_uri`), and
+`credentials_required`. A secret on a server, where options are world-readable,
+is rejected. Setting `credentials_required 'false'` is restricted to a superuser.
 
 ### pgcolumnar.iceberg_rest_scan(catalog_uri text, namespace text, table_name text) returns setof record
 

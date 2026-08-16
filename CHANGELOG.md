@@ -75,7 +75,12 @@ which was true until that script existed.
   `pg_user_mapping`, which is not world-readable, so one role's token is private
   from another. A role with neither a mapping token nor superuser rights is
   refused, and the validator keeps secrets off the world-readable server options.
-  When the catalog vends short-lived storage credentials in its
+  A user mapping may instead carry OAuth2 client credentials (`oauth_client_id`,
+  `oauth_client_secret`, and optionally `oauth_scope` and `oauth_token_uri`)
+  (#656). The catalog then mints a bearer by the client-credentials grant; the
+  secret travels in the request body, never a URL or a log line, and a half
+  credential is refused before any request. When the catalog vends short-lived
+  storage credentials in its
   `loadTable` reply (the flat `config` keys or the `storage-credentials` array,
   longest prefix selected), `iceberg_rest_scan` reads the table's files with
   those credentials rather than the server environment (#656). Vended
