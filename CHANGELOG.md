@@ -14,6 +14,15 @@ which was true until that script existed.
 
 ### Security
 
+- Fixed an HTTP request-line injection in the object-store client. A URL path or
+  host containing CR or LF was written verbatim into the request line, so a
+  crafted path could split the request and smuggle a second line to an
+  allow-listed endpoint. The request path and host are now rejected if they carry
+  CR or LF, as the caller-supplied header lines already were. Regression test:
+  objstore_crlf.
+
+### Security
+
 - Fixed an out-of-bounds read in the Parquet dictionary decode path. A file whose
   RLE_DICTIONARY data page carried an index with the high bit set (reachable at
   bit_width 32) passed a signed bounds check that sign-extended it to a negative

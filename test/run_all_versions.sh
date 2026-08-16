@@ -172,6 +172,7 @@ SUITES=(
 	objstore_addressing
 	objstore_allowlist
 	objstore_credentials
+	objstore_crlf
 	objstore_http_read
 	objstore_listing
 	objstore_module
