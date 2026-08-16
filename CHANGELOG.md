@@ -14,6 +14,12 @@ which was true until that script existed.
 
 ### Fixed
 
+- The grouped vector aggregate's input-scan estimate is now shared with the
+  columnar scan node's, via one pgcolumnar_refined_scan_cost helper. Its
+  no-serial-survivor fallback used the bare seqscan formula, which omitted the
+  projected-width I/O, the per-column decode CPU, and the zone-map survival
+  scaling the real scan applies, so it under-priced the node's input on a wide,
+  low-pruning scan. Regression test: native_groupagg_wide_cost.
 - The Iceberg foreign-data wrapper now estimates a scan's row count from the
   manifests (the sum of the live data files' record counts) instead of a constant
   1000. The constant mis-sized every scan and corrupted join planning above a

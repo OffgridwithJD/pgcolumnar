@@ -1328,6 +1328,48 @@ pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 }
 
 /*
+ * pgcolumnar_refined_scan_cost
+ *		The cost of one full columnar scan, refined past the inherited seqscan
+ *		number: the page-read part scaled by the projected width (#171), plus the
+ *		per-column decode CPU (#503), with the run cost scaled by zone-map
+ *		survival (#434). `seqpath` is the surviving seqscan path if core still has
+ *		one, else NULL to price the work directly.
+ *
+ *		One definition, two callers: the custom scan node here, and the grouped
+ *		vector-aggregate's input-scan estimate in columnar_vector.c, which builds
+ *		when no serial scan path survived and must price that scan the same way
+ *		rather than with the bare seqscan formula.
+ */
+void
+pgcolumnar_refined_scan_cost(RelOptInfo *rel, Oid relid, Path *seqpath,
+							 Cost *out_startup, Cost *out_total)
+{
+	Cost		full = pgcolumnar_full_scan_cost(rel, seqpath);
+	Cost		startup = (seqpath != NULL) ? seqpath->startup_cost
+		: rel->baserestrictcost.startup;
+	double		survival = pgcolumnar_zonemap_survival(rel, relid);
+	double		widthFrac = pgcolumnar_projected_width_fraction(rel, relid);
+	Cost		pageCost = seq_page_cost * (double) rel->pages;
+	Cost		run = full - startup;
+	double		ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
+
+	/* only the page-read part scales with the projected width (see #171) */
+	if (pageCost > 0.0 && widthFrac < 1.0)
+	{
+		Cost		saved = pageCost * (1.0 - widthFrac);
+
+		if (saved > run)
+			saved = run;
+		run -= saved;
+	}
+	/* per-column decode CPU (#503), scaled by survival like the rest */
+	run += cpu_operator_cost * ntuples * (double) pgcolumnar_projected_ncols(rel);
+
+	*out_startup = startup;
+	*out_total = startup + run * survival;
+}
+
+/*
  * PgColumnarSetRelPathlist
  *		set_rel_pathlist_hook: for a columnar base relation, replace the
  *		sequential-scan path with the columnar custom scan and drop parallel
@@ -1544,59 +1586,14 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * That is issue #171: a point lookup went from 23.75 ms to 1251.88 ms the
 	 * moment the table had statistics. Regression-tested in test/analyze_stats.sh.
 	 */
-	cpath->path.startup_cost = (seqpath != NULL) ? seqpath->startup_cost
-		: rel->baserestrictcost.startup;
-
 	/*
-	 * The run cost is scaled by what the zone maps leave to read (#434). Only
-	 * the run part: the startup is qual setup and is paid whatever gets skipped.
+	 * Startup, projected-width I/O scaling (#171), per-column decode CPU (#503),
+	 * and zone-map survival scaling of the run (#434), shared with the grouped
+	 * vector-aggregate's input estimate.
 	 */
-	{
-		Cost		full = pgcolumnar_full_scan_cost(rel, seqpath);
-		double		survival = pgcolumnar_zonemap_survival(rel, rte->relid);
-		double		widthFrac = pgcolumnar_projected_width_fraction(rel, rte->relid);
-		Cost		pageCost = seq_page_cost * (double) rel->pages;
-		Cost		run = full - cpath->path.startup_cost;
-		double		ntuples = (rel->tuples >= 0) ? rel->tuples : rel->rows;
-
-		/*
-		 * Only the page-read part scales with the projected width: the CPU terms
-		 * are per row and are paid whichever columns are decoded. Subtracting the
-		 * unread share of the I/O rather than scaling the whole run cost keeps a
-		 * narrow projection from being priced below the row-handling it still
-		 * does, which is the shape of #171.
-		 *
-		 * Guarded rather than assumed: rel->pages can exceed what the inherited
-		 * seqscan cost accounts for, and a negative run cost would make a full
-		 * scan free.
-		 */
-		if (pageCost > 0.0 && widthFrac < 1.0)
-		{
-			Cost		saved = pageCost * (1.0 - widthFrac);
-
-			if (saved > run)
-				saved = run;
-			run -= saved;
-		}
-
-		/*
-		 * Per-column decode CPU (#503). The inherited heap seqscan cost has no
-		 * term for decoding column values -- cpu_tuple_cost is per row, paid once
-		 * whatever the projection width. So a scan that decodes many columns is
-		 * priced the same as one that decodes one, and the planner cannot see the
-		 * CPU that a parallel plan would divide across workers: it declines the
-		 * partial path even where the parallel scan is measured 2.56x faster.
-		 *
-		 * Price one cpu_operator_cost per decoded value, ncols per row, added to
-		 * the run and scaled by survival like the rest (only surviving vectors
-		 * decode). This raises the full-scan cost, which is the safe direction for
-		 * #171 -- a pricier full scan makes the planner MORE likely to keep an
-		 * index scan, never less -- and analyze_stats/zonemap_cost pin that.
-		 */
-		run += cpu_operator_cost * ntuples * (double) pgcolumnar_projected_ncols(rel);
-
-		cpath->path.total_cost = cpath->path.startup_cost + run * survival;
-	}
+	pgcolumnar_refined_scan_cost(rel, rte->relid, seqpath,
+								 &cpath->path.startup_cost,
+								 &cpath->path.total_cost);
 	cpath->path.pathkeys = NIL;
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
