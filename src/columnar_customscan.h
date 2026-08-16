@@ -24,6 +24,10 @@ extern Bitmapset *PgColumnarProjectionFromAttnos(Bitmapset *needed, int natts,
 
 extern void PgColumnarCustomScanInit(void);
 
+extern void pgcolumnar_refined_scan_cost(RelOptInfo *rel, Oid relid,
+										 Path *seqpath, Cost *out_startup,
+										 Cost *out_total);
+
 extern void PgColumnarExplainPushedDown(int64 nfilters, ExplainState *es);
 
 extern void PgColumnarExplainVectorPredicates(int64 npreds, ExplainState *es);
