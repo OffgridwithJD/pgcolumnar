@@ -27,5 +27,14 @@ echo "-- planner estimate=$est  actual=$actual"
 check "the FDW estimates a positive row count from the manifests" \
 	"$([ -n "$est" ] && [ "$est" -gt 0 ] && echo yes)" "yes"
 check "the estimate is the real record count, not the old constant 1000" "$est" "$actual"
+
+# The sum is the base cardinality, so selectivity still applies: a filtered scan
+# must estimate fewer rows than the whole table (the old code set rows directly
+# and ignored the WHERE, estimating the full count under a filter too).
+filt="$(q "EXPLAIN (FORMAT text) SELECT * FROM ev WHERE region = 'eu'" | grep -oiE 'rows=[0-9]+' | head -1 | cut -d= -f2)"
+echo "-- filtered (region='eu') estimate=$filt of $actual"
+check "a filtered scan estimates fewer rows than the whole table (selectivity applied)" \
+	"$([ -n "$filt" ] && [ "$filt" -lt "$actual" ] && echo yes)" "yes"
+
 check "backend alive" "$(q 'SELECT 1')" "1"
 pgc_summary
