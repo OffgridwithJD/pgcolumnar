@@ -90,6 +90,10 @@ typedef struct PgColumnarAvroManifestFile
 										 * equality delete cannot be scoped then */
 	int32		content;		/* 0 DATA, 1 DELETES */
 	int64		sequence_number;
+	bool		has_sequence_number;	/* false when the field is null or
+										 * absent; a v2/v3 list always carries a
+										 * concrete number, so a null is corrupt
+										 * (#644) */
 	int64		min_sequence_number;
 	int64		added_snapshot_id;
 	int32		added_files_count;

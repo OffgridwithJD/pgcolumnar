@@ -1725,6 +1725,7 @@ pq_source_open_cfg(const char *path, PqSource *src, PqFile *pf,
 	}
 	else
 	{
+		PgColumnarRejectNonRegularFile(path);
 		src->f = AllocateFile(path, PG_BINARY_R);
 		if (src->f == NULL)
 			ereport(ERROR,

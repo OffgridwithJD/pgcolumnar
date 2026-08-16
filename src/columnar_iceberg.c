@@ -136,6 +136,7 @@ ice_slurp_text(const char *path, const PgColumnarObjStoreConfig *cfg)
 	if (PgColumnarPathIsRemote(path))
 		return (char *) ice_slurp_remote(path, &flen, cfg);
 
+	PgColumnarRejectNonRegularFile(path);
 	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
@@ -174,6 +175,7 @@ ice_slurp_bin(const char *path, int64 *outlen,
 	if (PgColumnarPathIsRemote(path))
 		return ice_slurp_remote(path, outlen, cfg);
 
+	PgColumnarRejectNonRegularFile(path);
 	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
@@ -843,6 +845,11 @@ ice_walk_data_files(const char *path, JsonbContainer *root,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("iceberg: a status-%d manifest entry for \"%s\" has no sequence number",
 									e->status, e->file_path)));
+				else if (!mfs[mi].has_sequence_number)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("iceberg: manifest \"%s\" has a null sequence number that an added entry for \"%s\" must inherit",
+									mfs[mi].manifest_path, e->file_path)));
 				else
 				{
 					e->sequence_number = mfs[mi].sequence_number;
@@ -984,6 +991,7 @@ ice_current_schema_fields(JsonbContainer *root, const char *path)
 		JsonbContainer *arr = schemas->val.binary.data;
 		uint32		ns = JsonContainerSize(arr);
 		uint32		k;
+		bool		matched = false;
 
 		for (k = 0; k < ns; k++)
 		{
@@ -995,12 +1003,26 @@ ice_current_schema_fields(JsonbContainer *root, const char *path)
 			if (ice_num_int64(ice_field(s->val.binary.data, "schema-id"), &sid) &&
 				sid == want)
 			{
+				matched = true;
 				fields = ice_field(s->val.binary.data, "fields");
 				break;
 			}
 		}
+
+		/*
+		 * The table named a current schema its own "schemas" array omits.
+		 * Refuse it as corruption rather than silently resolving to the
+		 * deprecated top-level "schema", which would bind every column through a
+		 * stale schema and misproject each row. Mirrors ice_current_snapshot's
+		 * treatment of a dangling current-snapshot-id (#644).
+		 */
+		if (!matched)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("iceberg: current-schema-id " INT64_FORMAT " in \"%s\" is not present in the schemas array",
+							want, path)));
 	}
-	if (fields == NULL)			/* v1: a single top-level "schema" object */
+	else						/* v1: a single top-level "schema" object */
 	{
 		JsonbValue *sch = ice_field(root, "schema");
 
@@ -2128,20 +2150,43 @@ ice_read_pos_deletes(IceScanCtx *c)
 						n2;
 			Datum		d1 = slot_getattr(rslot, 1, &n1);
 			Datum		d2 = slot_getattr(rslot, 2, &n2);
+			int64		pos;
+			IcePosDel  *r;
 
-			if (!n1 && !n2)
-			{
-				IcePosDel  *r;
+			/*
+			 * Per the Iceberg spec a position-delete row's file_path (field id
+			 * 2147483546) and pos (2147483545) are both REQUIRED. A null in
+			 * either is corruption: silently dropping the row (the old
+			 * "if (!n1 && !n2)" with no else) leaves a row the delete was meant
+			 * to remove -- a phantom row -- with no diagnostic (#644).
+			 */
+			if (n1 || n2)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: position-delete file \"%s\" has a null %s",
+								pd->file_path, n1 ? "file_path" : "pos")));
 
-				/* keep the row in the outer context, not the per-file scratch */
-				MemoryContextSwitchTo(old);
-				r = (IcePosDel *) palloc(sizeof(IcePosDel));
-				r->dpath = text_to_cstring(DatumGetTextPP(d1));
-				r->pos = DatumGetInt64(d2);
-				r->seq = pd->seq;
-				out = lappend(out, r);
-				MemoryContextSwitchTo(filectx);
-			}
+			/*
+			 * pos is a non-negative row ordinal; 0 (the first row) is valid. A
+			 * negative pos names no row and, cast to uint64 at apply time, would
+			 * become a huge ordinal that silently matches nothing -- refuse it
+			 * as corruption rather than swallow the delete (#644).
+			 */
+			pos = DatumGetInt64(d2);
+			if (pos < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("iceberg: position-delete file \"%s\" has a negative pos " INT64_FORMAT,
+								pd->file_path, pos)));
+
+			/* keep the row in the outer context, not the per-file scratch */
+			MemoryContextSwitchTo(old);
+			r = (IcePosDel *) palloc(sizeof(IcePosDel));
+			r->dpath = text_to_cstring(DatumGetTextPP(d1));
+			r->pos = pos;
+			r->seq = pd->seq;
+			out = lappend(out, r);
+			MemoryContextSwitchTo(filectx);
 		}
 		tuplestore_end(ts);
 		MemoryContextSwitchTo(old);
