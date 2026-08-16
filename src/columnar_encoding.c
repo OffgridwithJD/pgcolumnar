@@ -1411,6 +1411,18 @@ decode_dict(const char *enc, uint32 encLen, Form_pg_attribute att, uint32 n,
 		pos += dlen[code];
 	}
 	pfree(codes);
+
+	/*
+	 * The codes must fill the raw stream exactly. Without this, a descriptor
+	 * whose value_raw_length exceeds what the codes decode to leaves the tail of
+	 * the (unzeroed) raw buffer uninitialized; a varlena column then reads a
+	 * length prefix out of that garbage and dereferences out of bounds. The
+	 * pre-dispatch switch cannot check a DICT chunk's raw length up front (it is
+	 * the sum of the entry lengths, known only here), so the check lives here,
+	 * mirroring decode_fsst_shared.
+	 */
+	if (pos != rawLen)
+		DECODE_CORRUPT("DICT output length does not match raw length");
 	return raw;
 }
 

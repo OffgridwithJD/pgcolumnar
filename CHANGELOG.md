@@ -14,6 +14,12 @@ which was true until that script existed.
 
 ### Security
 
+- Fixed an uninitialized-memory read in the native DICT decode path. A chunk
+  whose descriptor declared a `value_raw_length` larger than its codes decode to
+  left the tail of the raw buffer uninitialized, and a varlena column then read a
+  length prefix out of that garbage (silent wrong results, or an out-of-bounds
+  read). `decode_dict` now requires the decoded length to equal the declared raw
+  length, mirroring the FSST path. Regression test: native_dict_underfill.
 - Fixed an out-of-bounds read in the Parquet dictionary decode path. A file whose
   RLE_DICTIONARY data page carried an index with the high bit set (reachable at
   bit_width 32) passed a signed bounds check that sign-extended it to a negative

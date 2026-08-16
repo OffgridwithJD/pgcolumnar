@@ -114,6 +114,7 @@ SUITES=(
 	native_ctas
 	native_decode_gate_width
 	native_decode_gating
+	native_dict_underfill
 	native_dml
 	native_encoding
 	native_exact_selection
