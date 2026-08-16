@@ -105,6 +105,10 @@ rest_objstore(void)
  * that set credentials_required 'false'); otherwise refuse (28000). *out_token
  * may be NULL for an anonymous catalog.
  */
+static char *rest_oauth_token(const char *catalog_uri, const char *token_uri,
+							  const char *client_id, const char *client_secret,
+							  const char *scope);
+
 static void
 rest_resolve_server(const char *name, char **out_uri, char **out_token)
 {
@@ -112,6 +116,10 @@ rest_resolve_server(const char *name, char **out_uri, char **out_token)
 	ListCell   *lc;
 	char	   *uri = NULL;
 	char	   *token = NULL;
+	char	   *oauthId = NULL;
+	char	   *oauthSecret = NULL;
+	char	   *oauthScope = NULL;
+	char	   *oauthUri = NULL;
 	bool		credRequired = true;
 	HeapTuple	tp;
 
@@ -153,11 +161,33 @@ rest_resolve_server(const char *name, char **out_uri, char **out_token)
 
 				if (strcmp(d->defname, "token") == 0)
 					token = pstrdup(defGetString(d));
+				else if (strcmp(d->defname, "oauth_client_id") == 0)
+					oauthId = pstrdup(defGetString(d));
+				else if (strcmp(d->defname, "oauth_client_secret") == 0)
+					oauthSecret = pstrdup(defGetString(d));
+				else if (strcmp(d->defname, "oauth_scope") == 0)
+					oauthScope = pstrdup(defGetString(d));
+				else if (strcmp(d->defname, "oauth_token_uri") == 0)
+					oauthUri = pstrdup(defGetString(d));
 				else if (strcmp(d->defname, "credentials_required") == 0)
 					credRequired = defGetBoolean(d);
 			}
 		}
 		ReleaseSysCache(tp);
+	}
+
+	/* OAuth2 client-credentials: a half credential (one of id/secret) is refused
+	 * before any request; a complete pair mints the bearer when no static token. */
+	if (token == NULL && (oauthId != NULL || oauthSecret != NULL))
+	{
+		if (oauthId == NULL || oauthSecret == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+					 errmsg("iceberg: incomplete OAuth2 credential for REST catalog server \"%s\"",
+							name),
+					 errhint("Set both oauth_client_id and oauth_client_secret on the "
+							 "USER MAPPING.")));
+		token = rest_oauth_token(uri, oauthUri, oauthId, oauthSecret, oauthScope);
 	}
 
 	if (token == NULL)
@@ -351,6 +381,96 @@ rest_get_json(const char *catalog_uri, const char *resource_path,
 
 	jd = DirectFunctionCall1(jsonb_in, CStringGetDatum(r.body));
 	return DatumGetJsonbP(jd);
+}
+
+/*
+ * POST a form body to an absolute URL and return the parsed JSON reply. Used for
+ * the OAuth2 token endpoint. No Authorization header is sent (this call obtains
+ * the bearer). The allow-list, link-local refusal, and header guards of the
+ * transport apply as for any request. A 401/403 is the catalog rejecting the
+ * client credentials, mapped to 28000 with no secret in the message.
+ */
+static Jsonb *
+rest_post_form(const char *url, const char *body, const char *what)
+{
+	const PgColumnarObjStoreApi *api = rest_objstore();
+	const char *headers[2];
+	int			nheaders = 0;
+	PgColumnarHttpResult r;
+	Datum		jd;
+
+	headers[nheaders++] = "Accept: application/json";
+	headers[nheaders++] = "Content-Type: application/x-www-form-urlencoded";
+
+	r = api->http_request(url, "POST", headers, nheaders,
+						  body, (int) strlen(body), REST_MAX_RESPONSE);
+
+	if (r.status == 400 || r.status == 401 || r.status == 403)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
+				 errmsg("iceberg: the REST catalog refused the OAuth2 %s (HTTP %d)",
+						what, r.status),
+				 errhint("Check oauth_client_id and oauth_client_secret on the "
+						 "USER MAPPING.")));
+	if (r.status != 200)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("iceberg: the REST catalog returned HTTP %d for the OAuth2 %s",
+						r.status, what)));
+	if (r.body == NULL || r.body_len == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: the REST catalog returned an empty OAuth2 %s", what)));
+
+	jd = DirectFunctionCall1(jsonb_in, CStringGetDatum(r.body));
+	return DatumGetJsonbP(jd);
+}
+
+/*
+ * Mint a bearer token by the OAuth2 client-credentials grant. POSTs
+ * grant_type=client_credentials with the client id/secret (and optional scope),
+ * each percent-encoded, to the token endpoint: `token_uri` when given, else
+ * {catalog}/v1/oauth/tokens. The secret travels in the body, never a query
+ * string, and is not logged. Returns the palloc'd access_token.
+ */
+static char *
+rest_oauth_token(const char *catalog_uri, const char *token_uri,
+				 const char *client_id, const char *client_secret,
+				 const char *scope)
+{
+	StringInfoData url;
+	StringInfoData body;
+	Jsonb	   *reply;
+
+	initStringInfo(&url);
+	if (token_uri != NULL && token_uri[0] != '\0')
+		appendStringInfoString(&url, token_uri);
+	else
+	{
+		appendStringInfoString(&url, catalog_uri);
+		while (url.len > 0 && url.data[url.len - 1] == '/')
+			url.data[--url.len] = '\0';
+		appendStringInfoString(&url, "/v1/oauth/tokens");
+	}
+
+	initStringInfo(&body);
+	appendStringInfoString(&body, "grant_type=client_credentials");
+	appendStringInfoString(&body, "&client_id=");
+	rest_pct_encode(&body, client_id);
+	appendStringInfoString(&body, "&client_secret=");
+	rest_pct_encode(&body, client_secret);
+	if (scope != NULL && scope[0] != '\0')
+	{
+		appendStringInfoString(&body, "&scope=");
+		rest_pct_encode(&body, scope);
+	}
+
+	reply = rest_post_form(url.data, body.data, "token exchange");
+	if (!JsonContainerIsObject(&reply->root))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: the OAuth2 token response is not a JSON object")));
+	return rest_json_string(&reply->root, "access_token", "OAuth2 token response");
 }
 
 /*
@@ -765,9 +885,14 @@ pgcolumnar_iceberg_catalog_validator(PG_FUNCTION_ARGS)
 		}
 		else if (catalog == UserMappingRelationId)
 		{
-			/* secrets live only here (pg_user_mapping is role-protected) */
-			if (strcmp(def->defname, "token") == 0)
-				 /* the bearer token */ ;
+			/* secrets live only here (pg_user_mapping is role-protected):
+			 * the static bearer token, or the OAuth2 client-credentials inputs */
+			if (strcmp(def->defname, "token") == 0 ||
+				strcmp(def->defname, "oauth_client_id") == 0 ||
+				strcmp(def->defname, "oauth_client_secret") == 0 ||
+				strcmp(def->defname, "oauth_scope") == 0 ||
+				strcmp(def->defname, "oauth_token_uri") == 0)
+				 /* a credential input */ ;
 			else if (strcmp(def->defname, "credentials_required") == 0)
 			{
 				(void) defGetBoolean(def);
@@ -781,7 +906,9 @@ pgcolumnar_iceberg_catalog_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 						 errmsg("invalid option \"%s\" for a pgcolumnar_iceberg_catalog user mapping",
 								def->defname),
-						 errhint("Valid user-mapping options: token, credentials_required.")));
+						 errhint("Valid user-mapping options: token, oauth_client_id, "
+								 "oauth_client_secret, oauth_scope, oauth_token_uri, "
+								 "credentials_required.")));
 		}
 		else if (def->defname != NULL)
 			ereport(ERROR,
