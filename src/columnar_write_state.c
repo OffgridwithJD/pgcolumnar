@@ -662,11 +662,7 @@ void
 PgColumnarEnsureStorageRow(Relation rel)
 {
 	NativeStorageMetadata s;
-	PgColumnarOptions opts;
-	int			stripeRowLimit = pgcolumnar_stripe_row_limit;
-
-	if (PgColumnarReadOptions(RelationGetRelid(rel), &opts) && opts.stripeRowLimitSet)
-		stripeRowLimit = opts.stripeRowLimit;
+	int			stripeRowLimit = pgcolumnar_effective_stripe_row_limit(RelationGetRelid(rel));
 
 	s.storageId = PgColumnarStorageId(rel);
 	s.relationOid = RelationGetRelid(rel);

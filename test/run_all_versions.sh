@@ -130,6 +130,7 @@ SUITES=(
 	native_gap
 	native_groupagg
 	native_index
+	native_index_fetch_stripe_cost
 	native_index_projection
 	native_ios
 	native_late_materialization
