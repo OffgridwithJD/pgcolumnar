@@ -88,6 +88,7 @@ SUITES=(
 	iceberg_deletes
 	iceberg_dv
 	iceberg_fdw
+	iceberg_fdw_estimate
 	iceberg_malformed
 	iceberg_name_mapping
 	iceberg_objstore
@@ -174,6 +175,7 @@ SUITES=(
 	objstore_addressing
 	objstore_allowlist
 	objstore_credentials
+	objstore_crlf
 	objstore_http_read
 	objstore_listing
 	objstore_module

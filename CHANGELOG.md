@@ -20,8 +20,19 @@ which was true until that script existed.
   mis-priced the row-group decode for a table that set the option, and could steer
   the planner toward or away from an index scan on that table. The effective-limit
   lookup is now one shared helper. Regression test: native_index_fetch_stripe_cost.
+- The Iceberg foreign-data wrapper now estimates a scan's row count from the
+  manifests (the sum of the live data files' record counts) instead of a constant
+  1000. The constant mis-sized every scan and corrupted join planning above a
+  large Iceberg table. Regression test: iceberg_fdw_estimate.
 
 ### Security
+
+- Fixed an HTTP request-line injection in the object-store client. A URL path or
+  host containing CR or LF was written verbatim into the request line, so a
+  crafted path could split the request and smuggle a second line to an
+  allow-listed endpoint. The request path and host are now rejected if they carry
+  CR or LF, as the caller-supplied header lines already were. Regression test:
+  objstore_crlf.
 
 - Fixed an uninitialized-memory read in the native DICT decode path. A chunk
   whose descriptor declared a `value_raw_length` larger than its codes decode to
