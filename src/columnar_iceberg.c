@@ -2003,6 +2003,7 @@ typedef struct IceScanCtx
 	char	   *actual_root;
 	char	   *mdpath;
 	const PgColumnarObjStoreConfig *cfg;	/* vended storage creds, or NULL */
+	const bool *needTop;		/* projection: which output columns to decode, or NULL for all */
 	List	   *data;			/* IceEntry* content 0 */
 	List	   *posdel;			/* IceEntry* content 1 */
 	List	   *eqdel;			/* IceEntry* content 2 */
@@ -2762,7 +2763,8 @@ int64
 PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 						  const PgColumnarObjStoreConfig *cfg,
 						  Tuplestorestate *tupstore,
-						  PgColumnarIceFileFilter filter, void *filterarg)
+						  PgColumnarIceFileFilter filter, void *filterarg,
+						  const bool *needTop)
 {
 	IceScanCtx	ctx;
 	char	   *json;
@@ -2776,6 +2778,7 @@ PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 	int64		pruned = 0;
 
 	ctx.cfg = cfg;				/* vended storage creds for every file, or NULL */
+	ctx.needTop = needTop;
 
 	/* map output column names -> field ids via the table's current schema */
 	json = ice_slurp_text(path, cfg);
@@ -2993,7 +2996,7 @@ PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 													(const char *const *) ctx.nm_names,
 													ctx.nm_ids, ctx.nm_count,
 													ctx.tupstore, ctx.slot,
-													skip, nskip, ctx.cfg);
+													skip, nskip, ctx.needTop, ctx.cfg);
 		MemoryContextSwitchTo(old);
 		MemoryContextReset(ctx.filectx);
 
@@ -3045,7 +3048,7 @@ PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
 	rsinfo->setDesc = outdesc;
 	MemoryContextSwitchTo(oldcxt);
 
-	(void) PgColumnarIcebergScanCore(path, outdesc, cfg, tupstore, NULL, NULL);
+	(void) PgColumnarIcebergScanCore(path, outdesc, cfg, tupstore, NULL, NULL, NULL);
 }
 
 PG_FUNCTION_INFO_V1(pgcolumnar_iceberg_scan);

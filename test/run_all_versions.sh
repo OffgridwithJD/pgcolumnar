@@ -89,6 +89,7 @@ SUITES=(
 	iceberg_dv
 	iceberg_fdw
 	iceberg_fdw_estimate
+	iceberg_fdw_projection
 	iceberg_malformed
 	iceberg_name_mapping
 	iceberg_objstore
