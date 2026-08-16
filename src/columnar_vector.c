@@ -1728,13 +1728,18 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		 * the same way PgColumnarSetRelPathlist costs its own fallback, instead of
 		 * borrowing whatever path happened to survive.
 		 */
-		QualCost	qcost = input_rel->baserestrictcost;
 		double		ntuples = (input_rel->tuples >= 0) ? input_rel->tuples
 			: input_rel->rows;
+		Cost		startup;
 
-		serialScanCost = qcost.startup +
-			seq_page_cost * (double) input_rel->pages +
-			(cpu_tuple_cost + qcost.per_tuple) * ntuples;
+		/*
+		 * Price the input scan the same way PgColumnarSetRelPathlist prices the
+		 * columnar scan node -- projected-width I/O, per-column decode CPU, and
+		 * zone-map survival -- not with the bare seqscan formula, which under-
+		 * priced this node's input on a wide, low-pruning scan.
+		 */
+		pgcolumnar_refined_scan_cost(input_rel, relid, NULL,
+									 &startup, &serialScanCost);
 		serialScanRows = (ntuples > 0) ? ntuples : input_rel->rows;
 	}
 	if (serialScanCost <= 0.0)

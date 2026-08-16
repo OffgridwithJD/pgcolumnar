@@ -108,8 +108,8 @@ SUITES=(
 	native_agg
 	native_agg_addcolumn
 	native_agg_deletes
-	native_batch_fold_projection
 	native_backend_crash
+	native_batch_fold_projection
 	native_bloom
 	native_cancel
 	native_cluster
@@ -132,6 +132,7 @@ SUITES=(
 	native_format
 	native_gap
 	native_groupagg
+	native_groupagg_wide_cost
 	native_index
 	native_index_fetch_stripe_cost
 	native_index_projection
