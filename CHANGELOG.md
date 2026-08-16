@@ -102,13 +102,15 @@ which was true until that script existed.
   differs from the constant's, computed with the Iceberg murmur3 hash. A
   predicate on a `truncate[W]`-partitioned integer column prunes files whose
   truncated value range excludes it, and a predicate on a `day()`-partitioned
-  date column prunes by day. A predicate on a `year()`, `month()`, `day()`, or
-  `hour()`-partitioned `timestamp` column prunes too: each bucket spans a range,
-  so a file whose bucket equals the constant's is read and its rows are
-  rechecked, never dropped at the boundary. Partition pruning covers identity,
-  `bucket[N]`, `truncate[W]` (integer), `day()` (date), and the year/month/day/hour
-  transforms (timestamp); metrics pruning covers integer and boolean columns;
-  other types and a `timestamptz` partition read in full. See
+  date column prunes by day. The `year()`, `month()`, `day()`, and `hour()`
+  transforms prune too, on a `timestamp` or `timestamp with time zone` column
+  (and `year()`/`month()` on a `date`): each bucket spans a range, so a file
+  whose bucket equals the constant's is read and its rows are rechecked, never
+  dropped at the boundary, and a timestamptz value is compared as its UTC
+  instant. Partition pruning covers identity, `bucket[N]`, `truncate[W]`
+  (integer), and the temporal transforms on date, timestamp, and timestamptz;
+  metrics pruning covers integer and boolean columns; other column types read in
+  full. See
   [Iceberg FDW](docs/sql-reference.md#the-pgcolumnar_iceberg-foreign-data-wrapper).
 
 - The Parquet read and export functions and the foreign-data wrapper read from

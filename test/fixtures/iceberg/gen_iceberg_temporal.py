@@ -27,6 +27,8 @@ from pyiceberg.types import NestedField, LongType, TimestampType
 from pyiceberg.partitioning import PartitionSpec, PartitionField
 from pyiceberg.transforms import (YearTransform, MonthTransform, DayTransform,
                                   HourTransform)
+from pyiceberg.types import DateType, TimestamptzType
+import datetime as _dtmod
 
 OUT = sys.argv[1]
 ROOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/pgc_ice_temporal"
@@ -41,17 +43,24 @@ def dt(y, mo, d, h=0):
     return datetime.datetime(y, mo, d, h, 0, 0)
 
 
-def make(name, transform, rows):
+# src is one of: "ts" (timestamp), "date", "tstz" (timestamp with UTC zone).
+def make(name, transform, rows, src="ts", col="ts"):
+    if src == "ts":
+        col_type, arrow = TimestampType(), pa.timestamp("us")
+    elif src == "date":
+        col_type, arrow = DateType(), pa.date32()
+    else:                       # tstz
+        col_type, arrow = TimestamptzType(), pa.timestamp("us", tz="UTC")
     schema = Schema(
         NestedField(1, "id", LongType(), required=False),
-        NestedField(2, "ts", TimestampType(), required=False),
+        NestedField(2, col, col_type, required=False),
     )
     spec = PartitionSpec(
         PartitionField(source_id=2, field_id=1000, transform=transform,
-                       name="ts_part"))
+                       name=col + "_part"))
     data = pa.table({
         "id": pa.array([r[0] for r in rows], pa.int64()),
-        "ts": pa.array([r[1] for r in rows], pa.timestamp("us")),
+        col: pa.array([r[1] for r in rows], arrow),
     })
     t = cat.create_table(f"db.{name}", schema=schema, partition_spec=spec,
                          properties={"write.metadata.metrics.default": "none"})
@@ -63,19 +72,42 @@ def make(name, transform, rows):
     shutil.copytree(os.path.join(loc, "metadata"),
                     os.path.join(dstroot, "metadata"))
     shutil.copytree(os.path.join(loc, "data"), os.path.join(dstroot, "data"))
-    # report the stored partition bucket integers, from the manifest scan
     parts = []
     for task in t.scan().plan_files():
         parts.append(task.file.partition[0])
     print(f"{name}: buckets={sorted(parts)} rows={[r[0] for r in rows]}")
 
 
-make("byyear", YearTransform(),
-     [(1, dt(2020, 6, 1)), (2, dt(2021, 6, 1)), (3, dt(2023, 6, 1))])
-make("bymonth", MonthTransform(),
-     [(1, dt(2021, 1, 15)), (2, dt(2021, 2, 15)), (3, dt(2021, 6, 15))])
-make("bydayts", DayTransform(),
-     [(1, dt(2021, 3, 1)), (2, dt(2021, 3, 2)), (3, dt(2021, 3, 5))])
-make("byhour", HourTransform(),
-     [(1, dt(2021, 3, 1, 0)), (2, dt(2021, 3, 1, 1)), (3, dt(2021, 3, 1, 5))])
+def d(y, mo, day):
+    return _dtmod.date(y, mo, day)
+
+
+def tz(y, mo, day, h=0):
+    return _dtmod.datetime(y, mo, day, h, 0, 0, tzinfo=_dtmod.timezone.utc)
+
+
+MODE = sys.argv[3] if len(sys.argv) > 3 else "ts"
+
+if MODE == "ts":
+    make("byyear", YearTransform(),
+         [(1, dt(2020, 6, 1)), (2, dt(2021, 6, 1)), (3, dt(2023, 6, 1))])
+    make("bymonth", MonthTransform(),
+         [(1, dt(2021, 1, 15)), (2, dt(2021, 2, 15)), (3, dt(2021, 6, 15))])
+    make("bydayts", DayTransform(),
+         [(1, dt(2021, 3, 1)), (2, dt(2021, 3, 2)), (3, dt(2021, 3, 5))])
+    make("byhour", HourTransform(),
+         [(1, dt(2021, 3, 1, 0)), (2, dt(2021, 3, 1, 1)), (3, dt(2021, 3, 1, 5))])
+else:                           # extended types: date year/month, tstz all four
+    make("byyear_d", YearTransform(),
+         [(1, d(2020, 6, 1)), (2, d(2021, 6, 1)), (3, d(2023, 6, 1))], src="date", col="dt")
+    make("bymonth_d", MonthTransform(),
+         [(1, d(2021, 1, 15)), (2, d(2021, 2, 15)), (3, d(2021, 6, 15))], src="date", col="dt")
+    make("byyear_tz", YearTransform(),
+         [(1, tz(2020, 6, 1)), (2, tz(2021, 6, 1)), (3, tz(2023, 6, 1))], src="tstz", col="tt")
+    make("bymonth_tz", MonthTransform(),
+         [(1, tz(2021, 1, 15)), (2, tz(2021, 2, 15)), (3, tz(2021, 6, 15))], src="tstz", col="tt")
+    make("byday_tz", DayTransform(),
+         [(1, tz(2021, 3, 1)), (2, tz(2021, 3, 2)), (3, tz(2021, 3, 5))], src="tstz", col="tt")
+    make("byhour_tz", HourTransform(),
+         [(1, tz(2021, 3, 1, 0)), (2, tz(2021, 3, 1, 1)), (3, tz(2021, 3, 1, 5))], src="tstz", col="tt")
 print("temporal root:", ROOT)

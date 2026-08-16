@@ -875,11 +875,66 @@ ice_temporal_bucket(IceTemporalKind kind, Timestamp ts, int64 *out)
 }
 
 /*
- * Compile "timestamp-column <op> const" predicates over a COARSE temporal
- * partition (year/month/day/hour on a TIMESTAMP column) into IceTemporalQuals.
- * Each transform is order-preserving, so the constant is mapped through the same
- * transform to a bucket and the file's cell is decided by the coarse rule. Only
- * a TIMESTAMP source is handled here; day() on a DATE keeps its exact path.
+ * The source column types this coarse path prunes for a given transform. A
+ * timestamp or timestamptz column takes all four transforms; a DATE column takes
+ * year() and month() (day() on a DATE keeps the exact ice_fdw_day_quals path, and
+ * hour() on a DATE is not a valid Iceberg transform).
+ */
+static bool
+ice_temporal_source_ok(IceTemporalKind kind, Oid typid)
+{
+	if (typid == TIMESTAMPOID || typid == TIMESTAMPTZOID)
+		return true;
+	if (typid == DATEOID)
+		return (kind == ICE_TEMPORAL_YEAR || kind == ICE_TEMPORAL_MONTH);
+	return false;
+}
+
+/*
+ * Convert a DATE/TIMESTAMP/TIMESTAMPTZ constant to a Timestamp (micros from
+ * 2000) for ice_temporal_bucket. A timestamptz's stored value is already UTC
+ * micros from 2000, the epoch Iceberg transforms count from, so it needs no
+ * shift. Returns false for a non-finite or out-of-range value, which has no
+ * bucket and must not prune.
+ */
+static bool
+ice_const_to_timestamp(Oid typid, Datum value, Timestamp *out)
+{
+	if (typid == TIMESTAMPOID)
+	{
+		Timestamp	t = DatumGetTimestamp(value);
+
+		if (TIMESTAMP_NOT_FINITE(t))
+			return false;
+		*out = t;
+	}
+	else if (typid == TIMESTAMPTZOID)
+	{
+		TimestampTz t = DatumGetTimestampTz(value);
+
+		if (TIMESTAMP_NOT_FINITE(t))
+			return false;
+		*out = (Timestamp) t;	/* same int64: UTC micros from 2000 */
+	}
+	else						/* DATEOID: midnight of the day, micros from 2000 */
+	{
+		DateADT		d = DatumGetDateADT(value);
+		int64		lim = PG_INT64_MAX / USECS_PER_DAY;
+
+		if (DATE_NOT_FINITE(d) || (int64) d > lim || (int64) d < -lim)
+			return false;		/* infinite or out of timestamp range */
+		*out = (Timestamp) ((int64) d * USECS_PER_DAY);
+	}
+	return true;
+}
+
+/*
+ * Compile "column <op> const" predicates over a COARSE temporal partition
+ * (year/month/day/hour) into IceTemporalQuals. Each transform is
+ * order-preserving, so the constant is mapped through the same transform to a
+ * bucket and the file's cell is decided by the coarse rule. Sources: a timestamp
+ * or timestamptz column (all four), or a DATE column (year/month). day() on a
+ * DATE keeps its exact path. The constant must have the column's own type.
  */
 static List *
 ice_fdw_temporal_quals(ForeignScanState *node, TupleDesc tupdesc,
@@ -928,12 +983,19 @@ ice_fdw_temporal_quals(ForeignScanState *node, TupleDesc tupdesc,
 		if (var->varattno < 1 || var->varattno > tupdesc->natts ||
 			contain_volatile_functions((Node *) op))
 			continue;
-		if (TupleDescAttr(tupdesc, var->varattno - 1)->atttypid != TIMESTAMPOID)
-			continue;			/* only timestamp (without zone) is handled */
-		if (con->constisnull || con->consttype != TIMESTAMPOID)
-			continue;
-		if (!ice_temporal_bucket(kind, DatumGetTimestamp(con->constvalue), &bucket))
-			continue;			/* non-finite const: cannot prune */
+		{
+			Oid			atttypid = TupleDescAttr(tupdesc, var->varattno - 1)->atttypid;
+			Timestamp	cts;
+
+			if (!ice_temporal_source_ok(kind, atttypid))
+				continue;
+			if (con->constisnull || con->consttype != atttypid)
+				continue;		/* only a constant of the column's own type */
+			if (!ice_const_to_timestamp(atttypid, con->constvalue, &cts))
+				continue;		/* non-finite/out-of-range const: cannot prune */
+			if (!ice_temporal_bucket(kind, cts, &bucket))
+				continue;
+		}
 
 		interp = PgColumnarGetOpInterpretation(op->opno);
 		foreach(ic, interp)

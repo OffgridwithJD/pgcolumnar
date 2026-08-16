@@ -27,9 +27,12 @@ mapped through the same transform. Only the constant needs mapping:
   path). On a TIMESTAMP it is `floor(micros_1970 / microsPerDay)`.
 - `hour(v)`  = `floor(micros_1970 / microsPerHour)`; defined on timestamps only.
 
-Source types handled: DATE (existing day path), TIMESTAMP without zone (year,
-month, day, hour). TIMESTAMPTZ is deferred and stays unpruned (sound: read the
-file).
+Source types handled: DATE (year, month; day keeps the exact path), TIMESTAMP,
+and TIMESTAMPTZ (all four). A timestamptz value is stored as UTC micros from
+2000, which is the epoch Iceberg's transforms count from, so the constant is
+mapped with no zone shift. A DATE constant is taken at midnight of the day. The
+constant must carry the column's own type. (The TIMESTAMPTZ and DATE-year/month
+cases were a follow-up increment after the initial timestamp-only landing.)
 
 PG-to-Iceberg epoch: PG dates are days from 2000-01-01 (`+10957` to reach 1970);
 PG timestamps are micros from 2000-01-01 (`+ 10957 * microsPerDay` micros to
@@ -92,5 +95,5 @@ match, so day-on-date keeps its tighter `[V, V]` decision and is left unchanged.
 
 ## Non-goals
 
-- TIMESTAMPTZ source columns (deferred, unpruned = sound).
+- (none remaining for source types: date, timestamp, and timestamptz all prune).
 - Writes, non-current snapshots, time travel (out of #388 read scope).
