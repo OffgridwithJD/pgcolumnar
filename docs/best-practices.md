@@ -25,13 +25,16 @@ write. It divides each row group into chunk groups of up to
 scan skips. A column within a chunk group is a chunk, compressed and encoded on its
 own. Small transactions produce small, poorly compressed row groups, and many of
 them to scan later. Prefer `COPY` or a multi-row `INSERT ... SELECT` over
-row-at-a-time inserts. Load in batches of at least one chunk group.
+row-at-a-time inserts. Load in batches that fill a row group
+(`pgcolumnar.stripe_row_limit`, default 150000 rows), so each row group compresses
+well.
 
 **Use `parallel_copy` for a large file.** `pgcolumnar.parallel_copy` splits a
-server-side file across workers and scales the load into one table. Give the cluster
-enough worker slots. Plan for the worker count plus two, in `max_worker_processes`
-and `max_parallel_workers`. Without the slots, the extra workers do no work. The
-caller needs the `pg_read_server_files` role.
+server-side file across workers and scales the load into one table. It runs a
+coordinator plus the loader workers, so it needs one worker slot more than the
+loader count, in `max_worker_processes` and `max_parallel_workers`. Without the
+extra slot, the load moves no rows. The caller needs the `pg_read_server_files`
+role.
 
 **Do not over-partition.** Native partitioning multiplies catalog and planning cost.
 Use it when a partition key genuinely bounds most queries, not by default. A single
@@ -83,8 +86,8 @@ to cluster on the column you filter by ranges. That column is most often a times
 - `pgcolumnar.sort_status(table)` reports how much of the table is in order. Measure
   before and after a sort rather than guess.
 
-Read `Chunk Groups Read` in `EXPLAIN (ANALYZE)` to confirm pruning happens.
-Correlation decides it, not intention. A column you believe is ordered, but that
+Read `Columnar Chunk Groups Removed by Filter` in `EXPLAIN (ANALYZE)` to confirm
+pruning happens. Correlation decides it, not intention. A column you believe is ordered, but that
 arrives interleaved, does not prune until you cluster it.
 
 ## Keep tables maintained
@@ -106,7 +109,7 @@ off by default. A background worker then calls only the two online verbs,
 so it does not block a session. It wakes every `pgcolumnar.autovacuum_naptime`
 (default 60s). It acts when a table crosses `pgcolumnar.autovacuum_compact_threshold`
 (default 0.2, the deleted fraction). It also acts on
-`pgcolumnar.autovacuum_recluster_threshold` (default 0.05, the unsorted fraction).
+`pgcolumnar.autovacuum_recluster_threshold` (default 0.05, the appended fraction).
 The worker registers as an autovacuum-kind process, so it yields when a session asks
 for a stronger lock.
 
@@ -140,7 +143,8 @@ block.
   executor always re-checks the snapshot, so an index-only answer never returns a row
   you should not see.
 - **Read the plan.** `EXPLAIN (ANALYZE)` reports `Files Pruned` for the Iceberg
-  wrapper and `Chunk Groups Read` for a local scan. If a range query is not pruning,
+  wrapper and `Columnar Chunk Groups Removed by Filter` for a local scan. If a range
+  query is not pruning,
   the table is not clustered on that column.
 
 ## Run object storage safely
@@ -171,7 +175,8 @@ it as narrow as the deployment allows.
 
 - **The reader is read-only and delete-correct.** `pgcolumnar.iceberg_scan` reads a
   table at its current snapshot. It applies all three delete kinds: position,
-  equality, and format-3 deletion vectors. It never returns a deleted row, and it
+  equality, and format-version 3 deletion vectors. It never returns a deleted row,
+  and it
   never writes the table.
 - **Use the foreign-data wrapper when you filter.** A bare `iceberg_scan` reads every
   data file. The `pgcolumnar_iceberg` wrapper receives the query predicate. It prunes
