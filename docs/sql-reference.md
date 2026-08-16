@@ -910,13 +910,18 @@ The one table option is `metadata_path`, the table's current `metadata.json`
 (a local path or an object-storage URL). The wrapper requires the
 `pg_read_server_files` role. `EXPLAIN (ANALYZE)` reports `Files Pruned`.
 
-Partition pruning covers four transforms. Identity partitioning prunes on any
-predicate. `bucket[N]` prunes on an equality predicate on the source column.
-`truncate[W]` prunes on a predicate on an integer source column. `day()` prunes
-on a predicate on a date source column. A table partitioned by `year`, `month`,
-or `hour`, or by `day` on a timestamp, is read in full, which is correct but not
-yet optimized. Metrics pruning covers integer and boolean columns; other column
-types are read in full.
+Partition pruning covers the identity, `bucket[N]`, `truncate[W]`, and temporal
+transforms. Identity partitioning prunes on any predicate. `bucket[N]` prunes on
+an equality predicate on the source column. `truncate[W]` prunes on a predicate
+on an integer source column. `day()` on a date source column prunes on a
+predicate on that column.
+
+The `year()`, `month()`, `day()`, and `hour()` transforms on a `timestamp`
+source column also prune on a range or equality predicate. Each of these buckets
+spans a range of source values. So a file whose bucket equals the predicate
+constant's bucket is read, not skipped, and the row filter runs on it. A
+`timestamp with time zone` source column is read in full. Metrics pruning covers
+integer and boolean columns; other column types are read in full.
 
 ```sql
 CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;

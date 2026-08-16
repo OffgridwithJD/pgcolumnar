@@ -47,11 +47,26 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"	/* timestamp2tm */
 #include "utils/tuplestore.h"
 
 /* Iceberg dates count days from the 1970 Unix epoch; PostgreSQL dates count from
  * 2000. Add this to a PG date to get the Iceberg day value a day() cell stores. */
 #define ICE_DATE_EPOCH_OFFSET	(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
+
+/* Same offset in microseconds, to move a PG timestamp (micros from 2000) to the
+ * 1970 epoch that Iceberg's day()/hour() count from. */
+#define ICE_TS_EPOCH_OFFSET_US	\
+	((int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY)
+
+/* The coarse temporal transforms this FDW prunes on a TIMESTAMP column. */
+typedef enum IceTemporalKind
+{
+	ICE_TEMPORAL_YEAR,
+	ICE_TEMPORAL_MONTH,
+	ICE_TEMPORAL_DAY,
+	ICE_TEMPORAL_HOUR
+}			IceTemporalKind;
 
 #include "columnar_avro.h"
 #include "columnar_compat.h"
@@ -76,6 +91,7 @@ typedef struct IceFdwState
 	List	   *bucketQuals;	/* IceBucketQual*, equality prune on bucket parts */
 	List	   *truncQuals;		/* IceTruncQual*, range prune on truncate[W] parts */
 	List	   *dayQuals;		/* IceDayQual*, range prune on day() date parts */
+	List	   *temporalQuals;	/* IceTemporalQual*, coarse year/month/day/hour on ts */
 	int64		filesPruned;
 }			IceFdwState;
 
@@ -128,6 +144,21 @@ typedef struct IceDayQual
 	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
 	int64		dayval;			/* const as Iceberg days (PG date + epoch offset) */
 }			IceDayQual;
+
+/*
+ * A "timestamp-column <op> const" predicate a COARSE temporal partition can
+ * decide: year(), month(), day(), or hour() on a TIMESTAMP column. Each maps a
+ * source value to an integer bucket that spans a range (a year, a month, a day,
+ * an hour), so `bucket` is the constant mapped through the same transform and the
+ * decision at the file's cell V is by the coarse rule (see ice_fdw_temporal_excludes):
+ * at V == bucket the file straddles the constant and is never pruned.
+ */
+typedef struct IceTemporalQual
+{
+	int			pos;			/* partition-tuple position of the temporal cell */
+	int			strategy;		/* BTLess..BTGreater, column-on-left normalized */
+	int64		bucket;			/* const mapped through the transform */
+}			IceTemporalQual;
 
 /* murmur3 x86 32-bit (seed 0), the hash Iceberg's bucket transform uses. */
 static uint32
@@ -443,6 +474,33 @@ ice_fdw_metric_excludes(int strategy, int64 c, int64 lo, int64 hi)
 			return (hi <= c);
 		case BTGreaterEqualStrategyNumber:	/* col >= c : possible iff hi >= c */
 			return (hi < c);
+		default:
+			return false;
+	}
+}
+
+/*
+ * The coarse-transform analogue of ice_fdw_metric_excludes, for a file whose
+ * temporal cell is the whole bucket V and whose predicate constant maps to bucket
+ * b. A file in bucket V holds every source value that transforms to V (a range),
+ * so at V == b the file straddles the constant and CANNOT be excluded; only a
+ * bucket strictly past the constant is. This is strictly weaker than the exact
+ * [V, V] test, which is why day() on a date (an exact one-to-one bucket) keeps
+ * its own tighter path.
+ */
+static bool
+ice_fdw_temporal_excludes(int strategy, int64 b, int64 v)
+{
+	switch (strategy)
+	{
+		case BTEqualStrategyNumber:
+			return (v != b);
+		case BTLessStrategyNumber:	/* col < c : some value < c iff V <= b */
+		case BTLessEqualStrategyNumber: /* col <= c : some value <= c iff V <= b */
+			return (v > b);
+		case BTGreaterStrategyNumber:	/* col > c : some value > c iff V >= b */
+		case BTGreaterEqualStrategyNumber:	/* col >= c : some value >= c iff V >= b */
+			return (v < b);
 		default:
 			return false;
 	}
@@ -767,6 +825,167 @@ ice_fdw_trunc_quals(ForeignScanState *node, TupleDesc tupdesc,
 	return out;
 }
 
+/* Floor division (toward negative infinity), matching Iceberg's day()/hour(). C
+ * integer division truncates toward zero, so a pre-1970 value needs the fix-up. */
+static int64
+ice_floordiv(int64 a, int64 b)
+{
+	int64		q = a / b;
+
+	if ((a % b != 0) && ((a < 0) != (b < 0)))
+		q--;
+	return q;
+}
+
+/*
+ * Map a PostgreSQL timestamp (micros from 2000) to the integer partition bucket
+ * an Iceberg `kind` transform stores, all from the 1970 epoch in UTC. Returns
+ * false for a non-finite timestamp (infinity), which has no bucket and must not
+ * prune. year()/month() decompose the calendar; day()/hour() are floors of the
+ * elapsed micros.
+ */
+static bool
+ice_temporal_bucket(IceTemporalKind kind, Timestamp ts, int64 *out)
+{
+	if (TIMESTAMP_NOT_FINITE(ts))
+		return false;
+
+	if (kind == ICE_TEMPORAL_YEAR || kind == ICE_TEMPORAL_MONTH)
+	{
+		struct pg_tm tm;
+		fsec_t		fsec;
+
+		if (timestamp2tm(ts, NULL, &tm, &fsec, NULL, NULL) != 0)
+			return false;
+		if (kind == ICE_TEMPORAL_YEAR)
+			*out = (int64) tm.tm_year - 1970;
+		else
+			*out = ((int64) tm.tm_year - 1970) * 12 + (tm.tm_mon - 1);
+	}
+	else
+	{
+		int64		us = ts + ICE_TS_EPOCH_OFFSET_US;
+
+		if (kind == ICE_TEMPORAL_DAY)
+			*out = ice_floordiv(us, USECS_PER_DAY);
+		else					/* ICE_TEMPORAL_HOUR */
+			*out = ice_floordiv(us, USECS_PER_HOUR);
+	}
+	return true;
+}
+
+/*
+ * Compile "timestamp-column <op> const" predicates over a COARSE temporal
+ * partition (year/month/day/hour on a TIMESTAMP column) into IceTemporalQuals.
+ * Each transform is order-preserving, so the constant is mapped through the same
+ * transform to a bucket and the file's cell is decided by the coarse rule. Only
+ * a TIMESTAMP source is handled here; day() on a DATE keeps its exact path.
+ */
+static List *
+ice_fdw_temporal_quals(ForeignScanState *node, TupleDesc tupdesc,
+					   IceTemporalKind kind, const int *tpos, const int *tattno,
+					   int tcount)
+{
+	ForeignScan *fs = (ForeignScan *) node->ss.ps.plan;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	if (tcount == 0)
+		return NIL;
+
+	foreach(lc, fs->scan.plan.qual)
+	{
+		OpExpr	   *op = (OpExpr *) lfirst(lc);
+		Node	   *larg;
+		Node	   *rarg;
+		Var		   *var;
+		Const	   *con;
+		bool		varLeft;
+		int			strategy = 0;
+		int64		bucket;
+		ListCell   *ic;
+		List	   *interp;
+		int			ti;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		larg = (Node *) linitial(op->args);
+		rarg = (Node *) lsecond(op->args);
+		if (IsA(larg, Var) && IsA(rarg, Const))
+		{
+			var = (Var *) larg;
+			con = (Const *) rarg;
+			varLeft = true;
+		}
+		else if (IsA(larg, Const) && IsA(rarg, Var))
+		{
+			var = (Var *) rarg;
+			con = (Const *) larg;
+			varLeft = false;
+		}
+		else
+			continue;
+		if (var->varattno < 1 || var->varattno > tupdesc->natts ||
+			contain_volatile_functions((Node *) op))
+			continue;
+		if (TupleDescAttr(tupdesc, var->varattno - 1)->atttypid != TIMESTAMPOID)
+			continue;			/* only timestamp (without zone) is handled */
+		if (con->constisnull || con->consttype != TIMESTAMPOID)
+			continue;
+		if (!ice_temporal_bucket(kind, DatumGetTimestamp(con->constvalue), &bucket))
+			continue;			/* non-finite const: cannot prune */
+
+		interp = PgColumnarGetOpInterpretation(op->opno);
+		foreach(ic, interp)
+		{
+			PgColumnarOpInterpretation *o = (PgColumnarOpInterpretation *) lfirst(ic);
+			int			s = PgColumnarOpInterpStrategy(o);
+
+			if (s >= BTLessStrategyNumber && s <= BTGreaterStrategyNumber)
+			{
+				strategy = s;
+				break;
+			}
+		}
+		if (strategy == 0)
+			continue;
+		if (!varLeft)
+		{
+			switch (strategy)
+			{
+				case BTLessStrategyNumber:
+					strategy = BTGreaterStrategyNumber;
+					break;
+				case BTLessEqualStrategyNumber:
+					strategy = BTGreaterEqualStrategyNumber;
+					break;
+				case BTGreaterStrategyNumber:
+					strategy = BTLessStrategyNumber;
+					break;
+				case BTGreaterEqualStrategyNumber:
+					strategy = BTLessEqualStrategyNumber;
+					break;
+				default:
+					break;
+			}
+		}
+
+		for (ti = 0; ti < tcount; ti++)
+		{
+			IceTemporalQual *tq;
+
+			if (tattno[ti] != var->varattno)
+				continue;
+			tq = (IceTemporalQual *) palloc(sizeof(IceTemporalQual));
+			tq->pos = tpos[ti];
+			tq->strategy = strategy;
+			tq->bucket = bucket;
+			out = lappend(out, tq);
+		}
+	}
+	return out;
+}
+
 /*
  * Compile "date-column <op> const" predicates over day()-partitioned DATE
  * columns into IceDayQuals. day() is order-preserving; the constant is converted
@@ -978,6 +1197,28 @@ ice_fdw_file_excludes(void *arg, const PgColumnarIceFileMeta *meta)
 		}
 	}
 
+	/* coarse temporal (year/month/day/hour on a timestamp): the cell V is the
+	 * file's bucket, spanning a range of source values. Prune only when the whole
+	 * bucket lies on the excluded side of the constant's bucket b; at V == b the
+	 * file straddles the constant and is read (see ice_fdw_temporal_excludes). */
+	if (st->temporalQuals != NIL && meta->spec_id == st->specid)
+	{
+		foreach(lc, st->temporalQuals)
+		{
+			IceTemporalQual *tq = (IceTemporalQual *) lfirst(lc);
+			int64		v;
+
+			if (tq->pos < 0 || tq->pos >= meta->ncells)
+				continue;
+			if (meta->cells[tq->pos].isnull || meta->cells[tq->pos].is_bytes ||
+				!meta->cells[tq->pos].comparable)
+				continue;
+			v = meta->cells[tq->pos].ival;
+			if (ice_fdw_temporal_excludes(tq->strategy, tq->bucket, v))
+				return true;
+		}
+	}
+
 	if (st->partQuals == NIL || meta->spec_id != st->specid ||
 		meta->ncells != st->npart)
 		return false;
@@ -1139,6 +1380,37 @@ icefdwBeginForeignScan(ForeignScanState *node, int eflags)
 		st->dayQuals = ice_fdw_day_quals(node, tupdesc, dpos, dattno, dcount);
 	}
 
+	/* coarse temporal pruning: year/month/day/hour on a timestamp column */
+	{
+		static const struct
+		{
+			const char *name;
+			IceTemporalKind kind;
+		}			kinds[] = {
+			{"year", ICE_TEMPORAL_YEAR},
+			{"month", ICE_TEMPORAL_MONTH},
+			{"day", ICE_TEMPORAL_DAY},
+			{"hour", ICE_TEMPORAL_HOUR},
+		};
+		int			ki;
+
+		for (ki = 0; ki < (int) lengthof(kinds); ki++)
+		{
+			int		   *tpos;
+			int		   *tattno;
+			int			tcount;
+			int32		tspec;
+
+			PgColumnarIcebergTemporalMap(st->metadata_path, NULL, tupdesc,
+										 kinds[ki].name, &tpos, &tattno,
+										 &tcount, &tspec);
+			st->temporalQuals = list_concat(st->temporalQuals,
+											ice_fdw_temporal_quals(node, tupdesc,
+																   kinds[ki].kind,
+																   tpos, tattno, tcount));
+		}
+	}
+
 	st->tupstore = tuplestore_begin_heap(false, false, work_mem);
 	st->readslot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsMinimalTuple);
 	st->started = false;
@@ -1161,7 +1433,7 @@ icefdwIterateForeignScan(ForeignScanState *node)
 		/* read the surviving files (pruned by the filter) into the tuplestore */
 		bool		prune = (st->partQuals != NIL || st->metricQuals != NIL ||
 							 st->bucketQuals != NIL || st->truncQuals != NIL ||
-							 st->dayQuals != NIL);
+							 st->dayQuals != NIL || st->temporalQuals != NIL);
 
 		st->filesPruned = PgColumnarIcebergScanCore(st->metadata_path, st->tupdesc,
 													NULL, st->tupstore,

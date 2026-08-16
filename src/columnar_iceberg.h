@@ -118,4 +118,11 @@ extern void PgColumnarIcebergDayMap(const char *path,
 									int **out_attno, int *out_count,
 									int32 *out_specid);
 
+extern void PgColumnarIcebergTemporalMap(const char *path,
+										 const PgColumnarObjStoreConfig *cfg,
+										 TupleDesc tupdesc,
+										 const char *transform,
+										 int **out_pos, int **out_attno,
+										 int *out_count, int32 *out_specid);
+
 #endif							/* COLUMNAR_ICEBERG_H */
