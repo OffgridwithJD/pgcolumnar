@@ -399,6 +399,16 @@ same way as a `CREATE INDEX` that is not concurrent. Turn projection scans off w
   commit. It then reads the committed mask again and merges its own bits. Thus
   both sets of delete marks survive. Writes to different row groups continue at
   the same time.
+- A concurrent `UPDATE` of the same row is a delete of the old version plus an
+  insert of the new one. The two writers do not serialize on the row itself.
+  Without a covering unique index, two sessions that update the same row can each
+  keep their own new version. The row is then duplicated and one update is lost.
+  A unique index on the updated key makes the writers go in sequence, and the
+  conflict is found. The second writer then gets a unique-violation error, which
+  the application retries. This is not the transparent serialization a heap gives,
+  where both updates apply. This is a known limitation. Add a unique index and
+  retry on conflict, or serialize the updates in your application, where
+  correctness needs it.
 - Concurrent inserts of the same unique key go in sequence. The server therefore
   always finds the conflict. Before a new row reaches the uniqueness check, the
   access method takes an advisory lock with the scope of the transaction. The key
