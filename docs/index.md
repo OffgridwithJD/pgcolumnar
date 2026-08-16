@@ -4,7 +4,8 @@ pgColumnar is a column-oriented storage extension for PostgreSQL, implemented as
 a table access method. A table created `USING pgcolumnar` stores its data by
 column, with per-column compression, chunk-group skipping, and a vectorized
 aggregate path. It targets analytic workloads: large scans, aggregates, and
-column projections over append-mostly data.
+column projections over append-mostly data. It also reads external Parquet and
+Apache Iceberg tables, from a local path or from object storage.
 
 pgColumnar builds from one source tree on PostgreSQL 15 through 18, with 19
 validated against 19beta2. It is
@@ -17,6 +18,8 @@ licensed under the MIT License.
 | See what pgColumnar provides | [Features](features.md) |
 | Install the extension and load it into a server | [Installation](installation.md) |
 | Create columnar tables, load data, and query them | [User guide](user-guide.md) |
+| Follow a recipe for one feature, with a tuning note | [How-to guides](how-to.md) |
+| Read Parquet or Apache Iceberg data in place | [User guide](user-guide.md) and [SQL reference](sql-reference.md) |
 | Operate columnar tables in production | [Administration](administration.md) |
 | Look up a setting and its default | [Configuration reference](configuration.md) |
 | Look up a `pgcolumnar.*` function | [SQL reference](sql-reference.md) |
@@ -78,6 +81,12 @@ WAL, replication, indexes, `COPY`, and `pg_dump`. The extension adds:
 - A set of catalog tables and functions in the `pgcolumnar` schema.
 - Planner and executor paths for columnar scans, aggregates, index-only scans,
   and projections, controlled by settings under the `pgcolumnar.` prefix.
+- Readers and foreign-data wrappers for external Parquet and Apache Iceberg
+  tables. They read a local path or object storage (`s3://`, `http://`,
+  `https://`), gated by `pgcolumnar.objstore_allowed_endpoints`.
+- Online maintenance that runs against a live table (`compact`, `compact_rewrite`,
+  `recluster`), and an optional `pgcolumnar.autovacuum` daemon that schedules
+  `compact_rewrite` and `recluster`.
 
 ## Design and internals
 

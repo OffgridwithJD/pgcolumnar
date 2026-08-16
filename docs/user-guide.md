@@ -202,8 +202,8 @@ INSERT INTO people VALUES (1, ARRAY['a','b'], ROW('Portland','97201')::addr);
 
 ## Read Parquet files in place
 
-You can query a server-side Parquet file without importing it, either as a
-set-returning function or as a foreign table. Both require the
+You can query a Parquet file without importing it, either as a set-returning
+function or as a foreign table. Reading a local server file requires the
 `pg_read_server_files` role, which superusers hold.
 
 ```sql
@@ -240,6 +240,74 @@ EXPLAIN (ANALYZE, COSTS OFF) SELECT id FROM events_parquet WHERE ts >= '2026-01-
 --     Columns Total: 3
 --     Files: 4
 ```
+
+The `path` may also be an object-storage URL. Every read and export function, and
+both foreign-data wrappers, accept an `s3://`, `http://`, or `https://` URL where
+they accept a local path.
+
+```sql
+SELECT count(*) FROM pgcolumnar.read_parquet('s3://bucket/events.parquet')
+  AS t(id int, ts timestamp);
+```
+
+Credentials come from the server process environment (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`).
+An administrator must first list the endpoint in the superuser-only
+`pgcolumnar.objstore_allowed_endpoints`, which is empty by default and refuses
+every host until then. See [Administration](administration.md#object-storage).
+
+## Read an Apache Iceberg table
+
+Read an Iceberg table at its current snapshot. Give a metadata path and a column
+definition list. The reader applies the table's delete files and resolves each
+column by schema field id.
+
+```sql
+SELECT region, sum(amount) FROM pgcolumnar.iceberg_scan(
+  '/warehouse/db/events/metadata/00042.metadata.json')
+  AS t(id bigint, region text, amount int)
+  GROUP BY region;
+```
+
+Name a table by a REST catalog instead of a metadata path. The catalog URI form
+takes its bearer token from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` server
+environment variable.
+
+```sql
+SELECT * FROM pgcolumnar.iceberg_rest_scan(
+  'https://catalog.example.com', 'analytics', 'events')
+  AS t(id bigint, region text, amount int);
+```
+
+For per-role credentials, pass a foreign server name as the first argument. The
+server holds the catalog URI, and the current role's user mapping supplies the
+token.
+
+```sql
+CREATE SERVER cat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+  OPTIONS (catalog_uri 'https://catalog.example.com');
+CREATE USER MAPPING FOR analyst SERVER cat OPTIONS (token 's3cr3t');
+
+SELECT * FROM pgcolumnar.iceberg_rest_scan('cat', 'analytics', 'events')
+  AS t(id bigint, region text, amount int);
+```
+
+For file pruning, use the `pgcolumnar_iceberg` foreign-data wrapper. It receives
+the query predicate, which `iceberg_scan` does not, so it removes whole data
+files before it opens them.
+
+```sql
+CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;
+CREATE FOREIGN TABLE events_iceberg (id bigint, region text, amount int)
+  SERVER ice OPTIONS (metadata_path '/warehouse/db/events/metadata/v3.metadata.json');
+
+-- EXPLAIN (ANALYZE) reports "Files Pruned"
+SELECT sum(amount) FROM events_iceberg WHERE region = 'eu';
+```
+
+The wrapper prunes by partition (identity, `bucket[N]`, `truncate[W]`, and the
+year, month, day, and hour transforms) and by integer and boolean metrics. See
+the [SQL reference](sql-reference.md) and the [how-to guides](how-to.md#query-an-apache-iceberg-table).
 
 ## Capture changes for replication or CDC
 
@@ -329,3 +397,8 @@ decoded unless the consumer filters them.
   [`pgcolumnar.vacuum_sorted`](sql-reference.md#pgcolumnarvacuum_sortedtablename-regclass-variadic-sort_columns-name).
 - Move data in and out of the Arrow and Parquet ecosystem:
   [import and export](sql-reference.md#import-and-export).
+- Reclaim space and re-sort a live table without an exclusive lock:
+  [`compact`, `compact_rewrite`, and `recluster`](administration.md#online-maintenance-and-disk-reclaim),
+  or schedule them with the [`pgcolumnar.autovacuum` daemon](administration.md#the-maintenance-daemon-pgcolumnarautovacuum).
+- Follow a task-focused recipe for any feature, each with a tuning note:
+  [how-to guides](how-to.md).

@@ -1,10 +1,11 @@
 # How-to guides
 
-Task-focused recipes for each pgColumnar feature. Every recipe ends with a short
-tuning note. For full signatures see the [SQL reference](sql-reference.md); for
-every server setting see the [Configuration reference](configuration.md).
+Task-focused recipes for each pgColumnar feature. Each recipe ends with a short
+tuning note, and a permissions note where one applies. For full function
+signatures see the [SQL reference](sql-reference.md). For every server setting see
+the [Configuration reference](configuration.md).
 
-Load `pgcolumnar` in `shared_preload_libraries` before you begin. It installs
+Load `pgcolumnar` in `shared_preload_libraries` before you begin. It installs the
 planner and executor hooks that every backend needs.
 
 ## Create a columnar table
@@ -25,7 +26,7 @@ METHOD` in place and keeps the table identity and dependents. On 13 and 14 it
 copies through a new table and swaps the names, so the original OID and its
 dependent objects are not preserved.
 
-**Tune it.** Columnar storage rewards wide scans over a few columns. Keep small,
+**Tuning.** Columnar storage rewards wide scans over a few columns. Keep small,
 highly selective point-lookup tables as heap. Put analytic and append-heavy
 tables on `pgcolumnar`.
 
@@ -45,10 +46,11 @@ SELECT pgcolumnar.parallel_copy('events', '/data/events.csv');   -- workers auto
 SELECT pgcolumnar.parallel_copy('events', '/data/events.csv', 8);
 ```
 
-**Tune it.** Prefer few large transactions over many small ones. Many small
-commits produce many small row groups, which read less efficiently. Run
-`pgcolumnar.vacuum` after a trickle load to combine them. The caller of
-`parallel_copy` needs the `pg_read_server_files` role.
+**Tuning.** Many small commits produce many small row groups, which read less
+efficiently. Run `pgcolumnar.vacuum` after a trickle load to combine them.
+
+**Permissions.** The caller of `parallel_copy` needs the `pg_read_server_files`
+role.
 
 ## Choose compression and encoding
 
@@ -69,15 +71,16 @@ The codec is one of `none`, `pglz`, `lz4`, or `zstd`. `compression_level`
 applies to `zstd` and ranges from 1 to 22, default 3. `encode_effort` is `full`
 by default, or `fast` to skip the costly FSST search on a text-heavy load.
 
-**Tune it.** Use `zstd` for the best ratio and `lz4` for the fastest
-decompression. Raise `compression_level` for cold, archival data. Set
-`encode_effort` to `fast` when a text load is CPU-bound and the ratio matters
-less. Re-run `pgcolumnar.vacuum` to re-encode existing data under new options.
+**Tuning.** Use `zstd` for the best ratio and `lz4` for the fastest
+decompression. Raise `compression_level` toward its maximum of 22 for cold data
+that is written once and read rarely. Set `encode_effort` to `fast` when a text
+load is CPU-bound and the ratio matters less. Re-run `pgcolumnar.vacuum` to
+re-encode existing data under new options.
 
-## Make queries skip data with a sort key
+## Sort a table to skip more chunk groups
 
-pgColumnar keeps a per-chunk minimum and maximum for every column. A query skips
-a chunk group when its filter cannot match that range. Sorting the table on the
+pgColumnar records a per-chunk minimum and maximum in a zone map. A scan skips a
+chunk group when its filter cannot match that range. Sorting the table on the
 columns you filter tightens those ranges, so more groups are skipped.
 
 ```sql
@@ -96,11 +99,11 @@ SELECT pgcolumnar.cluster('events', 'customer_id', 'amount');
 uses a Z-order curve, so filters on more than one of its columns all skip more
 groups. `cluster` takes numeric columns only.
 
-**Tune it.** Sort on the column your selective queries filter on. A sort is a
-trade. It groups one dimension tightly and spreads the others. For a live table
-use `pgcolumnar.recluster`, which re-establishes the same Z-order under a weaker
-lock so reads and writes continue. Read `pgcolumnar.sort_status` to see how much
-order remains, and re-sort when it decays.
+**Tuning.** Sort on the column your selective queries filter on. A sort is a
+trade-off: it groups one dimension tightly while spreading the others. For a live
+table use `pgcolumnar.recluster`, which re-establishes the same Z-order under a
+weaker lock so reads and writes continue. Read `pgcolumnar.sort_status` to see how
+much order remains, and re-sort when it decays.
 
 ```sql
 SELECT pgcolumnar.recluster('events', 'customer_id', 'amount');   -- online
@@ -123,23 +126,24 @@ against a live table. `compact_rewrite` rewrites groups whose dead fraction is a
 least `min_deleted_fraction` (default 0.2), and `max_groups` caps how many one
 call rewrites (0 means no cap). `vacuum` rewrites the whole relation.
 
-**Tune it.** Prefer `compact` and `compact_rewrite` for online reclaim. Reserve
-`vacuum` for a full reorganisation window. Cap `compact_rewrite` with `max_groups`
+**Tuning.** Prefer `compact` and `compact_rewrite` for online reclaim. Reserve
+`vacuum` for a full reorganization window. Cap `compact_rewrite` with `max_groups`
 to bound each call and keep it incremental.
 
 ## Keep tables optimized automatically
 
-A background daemon can compact and recluster tables on a schedule.
+A background daemon can compact and recluster tables on a schedule. The threshold
+values below are examples, not the defaults.
 
 ```sql
 -- postgresql.conf
 pgcolumnar.autovacuum = on
 pgcolumnar.autovacuum_naptime = '60s'
 pgcolumnar.autovacuum_compact_threshold = 0.2
-pgcolumnar.autovacuum_recluster_threshold = 0.2
+pgcolumnar.autovacuum_recluster_threshold = 0.1
 ```
 
-**Tune it.** Lower the thresholds to keep tables tighter at the cost of more
+**Tuning.** Lower the thresholds to keep tables tighter at the cost of more
 background work. The daemon calls the online operations only, so it does not take
 an exclusive lock. A table whose clustering is already intact reclusters as a
 fast no-op, so the daemon does not churn storage.
@@ -155,11 +159,11 @@ SELECT * FROM pgcolumnar.parquet_schema('/data/events.parquet');
 SELECT pgcolumnar.import_parquet('events', '/data/events.parquet');
 ```
 
-Export a table, in one call or in parallel.
+Export a table to one file, or in parallel to a directory of files.
 
 ```sql
-SELECT pgcolumnar.export_parquet('events', '/data/out.parquet');
-SELECT pgcolumnar.parallel_export_parquet('events', '/data/out.parquet', 8);
+SELECT pgcolumnar.export_parquet('events', '/data/events.parquet');
+SELECT pgcolumnar.parallel_export_parquet('events', '/data/events_out', 8);
 ```
 
 Expose a Parquet file, directory, or Hive layout as a foreign table.
@@ -170,10 +174,16 @@ CREATE FOREIGN TABLE events_parquet (id bigint, ts timestamptz, region text)
   SERVER pq OPTIONS (path '/data/events', partition_columns 'region');
 ```
 
-**Tune it.** Project only the columns you need, because the reader reads only
-those columns. A predicate on a `partition_columns` column removes whole files
-before they open. `EXPLAIN (ANALYZE)` reports `Files Pruned` and the row groups
-read and skipped. Reading needs the `pg_read_server_files` role, and
+`parallel_export_parquet` writes one `part-NNNN.parquet` file per worker into the
+directory, and `read_parquet` or the foreign table reads the directory back as one
+relation.
+
+**Tuning.** Project only the columns you need, because the reader reads only those
+columns. A predicate on a `partition_columns` column removes whole files before
+they open. `EXPLAIN (ANALYZE)` reports `Files Pruned` and the row groups read and
+skipped.
+
+**Permissions.** Reading needs the `pg_read_server_files` role, and
 `parallel_export_parquet` needs `pg_write_server_files`.
 
 ## Import and export Arrow
@@ -182,11 +192,11 @@ The Arrow IPC file format works the same way as Parquet.
 
 ```sql
 SELECT pgcolumnar.import_arrow('events', '/data/events.arrow');
-SELECT pgcolumnar.export_arrow('events', '/data/out.arrow');
+SELECT pgcolumnar.export_arrow('events', '/data/events.arrow');
 ```
 
-**Tune it.** Use Arrow to exchange data with an in-process analytic engine
-without a Parquet encode step. Use Parquet for durable, compressed files.
+**Tuning.** Use Arrow to exchange data with an in-process analytic engine without
+a Parquet encode step. Use Parquet for durable, compressed files.
 
 ## Use object storage
 
@@ -196,10 +206,10 @@ Every path that accepts a local path also accepts an `s3://`, `http://`, or
 ```sql
 SELECT * FROM pgcolumnar.read_parquet('s3://bucket/events.parquet')
   AS t(id bigint, region text);
-SELECT pgcolumnar.export_parquet('events', 's3://bucket/out.parquet');
+SELECT pgcolumnar.export_parquet('events', 's3://bucket/events.parquet');
 ```
 
-Set the endpoint allow-list first. It gates every remote scheme.
+Set the endpoint allow-list first, because it gates every remote scheme.
 
 ```sql
 -- postgresql.conf (a superuser setting)
@@ -210,9 +220,10 @@ The environment supplies `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_ENDPOINT_URL`. A host that resolves to
 a link-local or instance-metadata address is refused even when it is listed.
 
-**Tune it.** Raise `pgcolumnar.objstore_part_size` to use larger multipart chunks
-on a fast link. Choose `pgcolumnar.objstore_s3_addressing` to match your provider
-path or virtual-host style. Keep the allow-list as small as your buckets require.
+**Tuning.** Raise `pgcolumnar.objstore_part_size` to use larger multipart parts
+over a high-latency network. Choose `pgcolumnar.objstore_s3_addressing` to match
+your provider's path or virtual-host style. Keep the allow-list as small as your
+buckets require.
 
 ## Query an Apache Iceberg table
 
@@ -233,9 +244,10 @@ before a column rename still reads. It applies position deletes, equality
 deletes, and format-version 3 deletion vectors. The metadata path may be a local
 path or an `s3://`, `http://`, or `https://` URL.
 
-**Tune it.** Select only the columns you need. Read from object storage under the
-same allow-list as every other remote access. The function requires the
-`pg_read_server_files` role.
+**Tuning.** Select only the columns you need. Read from object storage under the
+same allow-list as every other remote access.
+
+**Permissions.** The function requires the `pg_read_server_files` role.
 
 ## Query an Iceberg REST catalog
 
@@ -271,15 +283,16 @@ CREATE USER MAPPING FOR analyst SERVER cat OPTIONS (
   oauth_client_id 'app', oauth_client_secret 's3cr3t', oauth_scope 'catalog');
 ```
 
-**Tune it.** A catalog can vend short-lived storage credentials in its reply.
+**Tuning.** A catalog can vend short-lived storage credentials in its reply.
 `iceberg_rest_scan` then reads the table files with those credentials, not the
 server environment. The client secret travels in the request body, never a URL or
 a log line.
 
 ## Prune Iceberg data files with the foreign-data wrapper
 
-`iceberg_scan` gets no query predicate, so it cannot skip files. The foreign-data
-wrapper gives Iceberg a predicate-bearing scan that prunes whole files.
+`iceberg_scan` receives no query predicate, so it cannot skip files. The
+foreign-data wrapper gives Iceberg a predicate-bearing scan that prunes whole
+files.
 
 ```sql
 CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;
@@ -291,12 +304,13 @@ SELECT sum(amount) FROM events WHERE region = 'eu';
 ```
 
 Partition pruning covers identity, `bucket[N]`, `truncate[W]`, and the temporal
-transforms `year`, `month`, `day`, and `hour` on date, timestamp, and timestamptz
-columns. Metrics pruning covers integer and boolean columns by their stored
-minimum and maximum. Pruning never changes the rows returned. A predicate the
-wrapper cannot decide simply reads the file.
+transforms. It prunes `year`, `month`, `day`, and `hour` on a timestamp or
+timestamptz column, and `year`, `month`, and `day` on a date column. Metrics
+pruning covers integer and boolean columns by their stored minimum and maximum.
+Pruning never changes the rows returned. A predicate the wrapper cannot decide
+simply reads the file.
 
-**Tune it.** Filter on a partition column to remove whole files. Filter on an
+**Tuning.** Filter on a partition column to remove whole files. Filter on an
 integer or boolean column to prune by metrics. Confirm the effect with
 `EXPLAIN (ANALYZE)`, which reports `Files Pruned`. A predicate on an unsupported
 type still returns correct rows, only without the pruning.
@@ -306,7 +320,7 @@ type still returns correct rows, only without the pruning.
 Inspect physical layout, sort quality, and query plans.
 
 ```sql
-SELECT * FROM pgcolumnar.stats('events');          -- per-stripe rows, dead rows, size
+SELECT * FROM pgcolumnar.stats('events');          -- per-row-group rows, dead rows, size
 SELECT * FROM pgcolumnar.sort_status('events');    -- sorted vs appended groups
 SELECT pgcolumnar.analyze('events');               -- refresh planner statistics
 EXPLAIN (ANALYZE) SELECT sum(amount) FROM events WHERE region = 'eu';
@@ -315,6 +329,6 @@ EXPLAIN (ANALYZE) SELECT sum(amount) FROM events WHERE region = 'eu';
 `EXPLAIN (ANALYZE)` on a columnar scan reports `Columnar Pushed-Down Filters`,
 `Columnar Usable Skip Predicates`, and `Columnar Chunk Groups Removed by Filter`.
 
-**Tune it.** Read `Columnar Chunk Groups Removed by Filter` to confirm a filter
+**Tuning.** Read `Columnar Chunk Groups Removed by Filter` to confirm a filter
 skips data. A low removal count on a selective filter means the sort key does not
 match the query. Re-sort on the filtered column, then check the count again.

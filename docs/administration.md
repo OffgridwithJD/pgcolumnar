@@ -319,6 +319,55 @@ no more restricted than the rest of the cluster. An independent validation on
 Both of those are little-endian. A move to a big-endian host is not supported and
 is not tested.
 
+## Object storage
+
+The Parquet functions, the Iceberg reader, and both foreign-data wrappers reach
+object storage. They accept an `s3://`, `http://`, or `https://` URL where they
+accept a local path. The support lives in a separate module,
+`pgcolumnar_objstore`, loaded on the first remote use.
+
+Remote access is default-deny. `pgcolumnar.objstore_allowed_endpoints` lists the
+hosts the module may reach, as `host` or `host:port`, comma-separated. It is empty
+by default, so no remote host is reachable until an administrator lists it. It is a
+superuser-only setting, so a role cannot widen its own reach. A link-local or
+instance-metadata address, including `169.254.169.254`, is refused even when it is
+listed, so the setting cannot open a path to cloud credentials.
+
+```ini
+# postgresql.conf
+pgcolumnar.objstore_allowed_endpoints = 's3.amazonaws.com, minio.internal:9000'
+```
+
+Credentials for the function API come from the server process environment:
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` or
+`AWS_DEFAULT_REGION`, and `AWS_ENDPOINT_URL`. The `pgcolumnar_parquet` foreign-data
+wrapper can take `access_key_id`, `secret_access_key`, `session_token`, and
+`credentials_required` from its server and user mapping instead, so each role uses
+its own credentials. An `s3://` request is signed with AWS Signature Version 4.
+
+`pgcolumnar.objstore_s3_addressing` selects path-style or virtual-host addressing,
+and `pgcolumnar.objstore_part_size` sets the multipart part size for an export. See
+the [Configuration reference](configuration.md#object-storage).
+
+## Apache Iceberg
+
+The Iceberg reader and the `pgcolumnar_iceberg` foreign-data wrapper read data,
+metadata, and delete files over the same object-storage transport. They are
+governed by the same `pgcolumnar.objstore_allowed_endpoints` allow-list and the
+same link-local refusal as every other remote access.
+
+A REST catalog needs a bearer token. It is read from the
+`PGCOLUMNAR_ICEBERG_REST_TOKEN` server environment variable, or per role from a
+foreign server and user mapping of the `pgcolumnar_iceberg_catalog` wrapper. The
+per-role token lives in `pg_user_mapping`, which is not world-readable, so one
+role's token is private from another. A token is never a function argument, so it
+does not appear in the statement log or in `pg_stat_activity`. A user mapping may
+carry OAuth2 client credentials instead, and the client secret travels only in the
+token-request body.
+
+The Iceberg functions require the `pg_read_server_files` role, like the other read
+functions.
+
 ## Security
 
 ### Server-side file access
@@ -345,6 +394,10 @@ A superuser holds both roles, so a superuser reaches every function. A read
 function needs `pg_read_server_files`. A write function needs
 `pg_write_server_files`. A role without the matching role is refused in C at the
 point of use.
+
+The same functions reach an object-storage URL where they reach a local path. A
+remote path is gated by a second control, the endpoint allow-list, in addition to
+the server-file role. See [Object storage](#object-storage) below.
 
 Two layers keep an unprivileged role out. The `pgcolumnar` schema does not grant
 `USAGE` to `PUBLIC`, so a role without schema access cannot reach the functions. A
