@@ -133,8 +133,36 @@ coverage.
   do not overlap. Range predicates and ordered scans therefore skip more chunk
   groups. The sort key also compresses better under the RLE and delta encodings. It is a one-time reorder, like `CLUSTER`: rows inserted afterward
   append in insert order until the next call.
+- `pgcolumnar.cluster(table, col [, col ...])` orders the rows by a Z-order
+  (Morton) curve on several numeric columns at once. Point and range filters on
+  more than one clustered column then skip more groups. It holds
+  `AccessExclusiveLock`, like core `CLUSTER`, so it is an eager bulk operation.
+
+### Online reclaim and clustering
+
+These verbs run against a live table under `ShareUpdateExclusiveLock`, so reads
+and writes continue.
+
+- `pgcolumnar.compact(table)` retires row groups that are fully deleted and drops
+  their metadata, so scans skip them.
+- `pgcolumnar.compact_rewrite(table, min_deleted_fraction, max_groups)` rewrites
+  partially deleted row groups to drop their dead rows and reclaim the space.
+  `max_groups` bounds how many one call rewrites.
+- `pgcolumnar.recluster(table, col [, col ...])` re-establishes the same Z-order
+  as `cluster` online. It is a fast no-op when the recorded key is intact.
+- `pgcolumnar.truncate(table)` returns the reclaimed end blocks to the operating
+  system, taking a brief `AccessExclusiveLock` only when it is free.
+
+### Reporting and the maintenance daemon
+
 - `pgcolumnar.stats(table)` reports per-row-group row counts, deleted-row counts,
-  chunk counts, and byte sizes.
+  chunk counts, and byte sizes. `pgcolumnar.sort_status(table)` reports how much of
+  the declared sort order remains. `pgcolumnar.maintenance_due(table, ...)` reports
+  whether a table has crossed the compact and recluster thresholds.
+- `pgcolumnar.autovacuum` is a background maintenance daemon. When on, a per-database
+  worker runs the online verbs above on a schedule for tables that
+  `maintenance_due` reports as due. It runs only the online operations, so it never
+  takes an exclusive lock, and it yields to a stronger lock a session requests.
 
 ## Parallel bulk ingest
 
@@ -211,3 +239,67 @@ coverage.
   not. A row group that
   predicate pushdown excludes is never read from disk at all, and
   `parquet_schema` reads only the footer.
+
+## Object storage
+
+- Every path that reads or writes a Parquet or Arrow file also accepts an
+  `s3://`, `http://`, or `https://` URL. This covers `read_parquet`,
+  `export_parquet`, `import_parquet`, `parquet_schema`, the `pgcolumnar_parquet`
+  foreign-data wrapper, and the Iceberg reader. The support lives in a separate
+  module, `pgcolumnar_objstore`, loaded on the first remote use.
+- `s3://` requests are signed with AWS Signature Version 4. An `https://` request
+  verifies the server certificate when the module is built with OpenSSL. An export
+  writes a small object in one request, and a large object as a multipart upload
+  that is visible only when it completes.
+- Credentials come from the server process environment: `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and
+  `AWS_ENDPOINT_URL`. The foreign-data wrapper can read them from its server and
+  user mapping instead.
+- `pgcolumnar.objstore_allowed_endpoints` gates every remote scheme. It is empty
+  by default, so no host is reachable until an administrator lists it. A
+  link-local or instance-metadata address is refused even when it is listed.
+
+## Apache Iceberg
+
+Read-only support for Apache Iceberg tables at their current snapshot.
+
+- `pgcolumnar.iceberg_scan(metadata_path) AS t(...)` reads a table given a column
+  definition list. It resolves each output column to a schema field id, so a data
+  file written before a column rename still reads. The metadata path may be local
+  or an object-storage URL.
+- It applies row-level deletes of all three kinds. A position delete drops named
+  row ordinals. An equality delete drops rows matching on its `equality_ids`,
+  including a partition-scoped delete. A format-version 3 deletion vector applies a
+  Puffin roaring bitmap. Each kind follows its own sequence rule.
+- A data file written outside Iceberg, with no field ids, is read through the
+  table's `schema.name-mapping.default` property. A file with neither field ids nor
+  such a mapping is refused rather than guessed.
+- `pgcolumnar.iceberg_current_snapshot` and `pgcolumnar.iceberg_data_files`
+  introspect a table. `pgcolumnar.read_avro_manifest` and
+  `pgcolumnar.read_manifest_list` read the Avro building blocks.
+
+### REST catalog
+
+- `pgcolumnar.iceberg_rest_scan(catalog_uri, namespace, table)` reads a table named
+  by a catalog rather than a metadata path. `iceberg_rest_table_location`,
+  `iceberg_rest_namespaces`, and `iceberg_rest_tables` resolve and list a catalog.
+- A bearer token comes from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` environment
+  variable. It can instead come per role from a foreign server and user mapping of
+  the `pgcolumnar_iceberg_catalog` wrapper. The mapping holds the token in
+  `pg_user_mapping`, where it is not world-readable.
+- A user mapping may carry OAuth2 client credentials instead of a static token.
+  The catalog then mints a short-lived bearer by the client-credentials grant.
+- A catalog can vend short-lived storage credentials in its reply. The reader then
+  reads the table files with those credentials, not the server environment.
+
+### Foreign-data wrapper and file pruning
+
+- The `pgcolumnar_iceberg` foreign-data wrapper exposes an Iceberg table as a
+  foreign table with a `metadata_path` option. Unlike `iceberg_scan`, it receives
+  the query predicate, so it prunes whole data files before it opens them.
+- Partition pruning covers identity, `bucket[N]` (murmur3), `truncate[W]`, and the
+  temporal transforms `year`, `month`, `day`, and `hour` on date, timestamp, and
+  timestamptz columns. Metrics pruning covers integer and boolean columns by their
+  stored minimum and maximum.
+- Pruning is only an optimization. A predicate the wrapper cannot decide reads the
+  file and returns the same rows. `EXPLAIN (ANALYZE)` reports `Files Pruned`.

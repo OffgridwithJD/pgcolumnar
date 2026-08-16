@@ -143,9 +143,11 @@ Lightweight, type-aware value-stream encodings, applied per chunk before the
 block codec and reversed after decompression, as reversible transforms of the
 raw value-stream bytes (so all downstream decode is unchanged). Encodings: RLE,
 frame-of-reference with bit-packing, delta and delta-of-delta (integer family),
-Gorilla XOR (float4/float8), and a dictionary (any fixed-width or varlena type,
-for low cardinality). `ColumnarEncodeChunk` measures each applicable encoding and
-keeps the smallest; `ColumnarDecodeChunk` reverses it. This file also holds the
+Gorilla XOR (float4/float8), a dictionary (any fixed-width or varlena type, for
+low cardinality), and FSST substring coding for text and other varlena values.
+`ColumnarEncodeChunk` measures each applicable encoding and keeps the smallest;
+`ColumnarDecodeChunk` reverses it. The `pgcolumnar.fsst_verdict_reuse` setting
+caps how often the FSST keep-or-drop decision is recomputed across row groups. This file also holds the
 compression-block run iterator (`ColumnarBlockReader`) that exposes a chunk as
 (value, run-length) pairs so an aggregate can fold a run at a time.
 
@@ -217,9 +219,27 @@ back into full stripes, and rebuilds the indexes so their item pointers address
 the renumbered rows. This combines small stripes and physically reclaims
 deleted-row space. `pgcolumnar.vacuum_sorted` runs the same rewrite but feeds the
 live rows through a tuplesort keyed on the chosen columns first, so the table is
-stored physically sorted (a one-time reorder; see gap 26). `pgcolumnar.stats`
-reports the per-stripe layout, and a storage-id lookup resolves a relation to its
-storage id.
+stored physically sorted (a one-time reorder; see gap 26). `pgcolumnar.cluster`
+reorders by a Z-order curve on several columns, and holds `AccessExclusiveLock`
+like the rewrite verbs above.
+
+This file also holds the online reclaim verbs. They run under
+`ShareUpdateExclusiveLock`, so reads and writes continue. `pgcolumnar.compact`
+retires fully-deleted row groups, and `pgcolumnar.compact_rewrite` rewrites
+partially-deleted groups. `pgcolumnar.recluster` re-establishes a Z-order online,
+and `pgcolumnar.truncate` returns reclaimed end blocks to the operating system.
+`pgcolumnar.stats` and `pgcolumnar.sort_status` report the per-stripe layout and
+the remaining sort order. `pgcolumnar.maintenance_due` reports the compact and
+recluster thresholds. A storage-id lookup resolves a relation to its storage id.
+
+### columnar_autovacuum.c
+The maintenance daemon (`pgcolumnar.autovacuum`). A background-worker launcher
+starts one short-lived worker per database on a schedule. Each worker consults
+`pgcolumnar.maintenance_due` for the tables that have crossed the compact or
+recluster thresholds, then runs the online reclaim verbs on them through SPI, each
+in its own transaction. It runs only the `ShareUpdateExclusiveLock` verbs, and it
+registers as an autovacuum-kind process so it yields to a stronger lock a session
+requests.
 
 ### columnar_unique.c
 Concurrent unique-key insert serialization (issue #5). Before a freshly inserted
@@ -380,6 +400,33 @@ Object storage reads **exact object keys**. A glob metacharacter in a remote pat
 is refused rather than expanded. Expanding one needs a LIST call, and its paged
 response would be a third parser written here for input an outside party
 controls.
+
+### columnar_iceberg.c and columnar_avro.c
+The Apache Iceberg read path (#388). `columnar_avro.c` reads the Avro manifest and
+manifest-list files. `columnar_iceberg.c` walks a table's current snapshot, reads
+each Parquet data file through the same reader as the Parquet FDW, and applies the
+three delete kinds: position deletes, equality deletes (including partition-scoped),
+and format-version 3 deletion vectors, whose Puffin roaring bitmap is decoded in
+`columnar_puffin.c` and `columnar_delete_vector.c`. It resolves each requested
+column to a schema field id, or to a name mapping for a file with no field ids.
+`pgcolumnar.iceberg_scan`, `iceberg_current_snapshot`, and `iceberg_data_files`
+are its SQL surface.
+
+### columnar_iceberg_rest.c
+The Iceberg REST catalog client. It calls `/v1/config` and `loadTable` over the
+object-store transport, resolves a table to its metadata location, and lists
+namespaces and tables. It obtains the bearer token from the environment, or from a
+foreign server and user mapping, and can mint one by an OAuth2 client-credentials
+exchange. It reads vended storage credentials from a `loadTable` reply.
+
+### columnar_iceberg_fdw.c
+The `pgcolumnar_iceberg` foreign-data wrapper. It gives the Iceberg read path the
+query predicate, which the bare `iceberg_scan` function does not receive, and
+prunes whole data files before they open. Partition pruning covers identity,
+`bucket[N]` (a murmur3 hash), `truncate[W]`, and the year, month, day, and hour
+temporal transforms on date, timestamp, and timestamptz columns. Metrics pruning
+reads a data file's stored minimum and maximum. `EXPLAIN (ANALYZE)` reports
+`Files Pruned`.
 
 ### columnar_visibilitymap.c
 Index-only-scan support (gap 28). A columnar visibility-map fork records which
