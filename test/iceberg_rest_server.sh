@@ -150,6 +150,24 @@ check "oauth options are accepted on a USER MAPPING (no error)" \
 check "an oauth option on the SERVER is rejected (HV00D)" \
 	"$(sqlstate_of "CREATE SERVER bad2 FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog OPTIONS (catalog_uri '$OCAT', oauth_client_secret 'x')")" \
 	"HV00D"
+
+# ---- SSRF: a hostile oauth_token_uri is refused by the endpoint allow-list ---
+# oauth_token_uri is user-controlled, and the mint POST rides the same guarded
+# transport as every catalog request, so a link-local (cloud-metadata) target is
+# refused BEFORE any request leaves the backend, not followed. The allow-list is
+# 127.0.0.1 here, so 169.254.169.254 is off-list AND link-local; the refusal is
+# 42501 (as objstore_allowlist.sh asserts for read_parquet). A complete OAuth
+# credential is restored first so the resolver reaches the mint, not the earlier
+# half-credential guard.
+q "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (ADD oauth_client_secret '$OCSEC')" >/dev/null 2>&1
+q "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (ADD oauth_token_uri 'http://169.254.169.254/v1/oauth/tokens')" >/dev/null
+check "a link-local oauth_token_uri is refused by the allow-list (42501)" \
+	"$(sqlstate_of "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')")" \
+	"42501"
+q "ALTER USER MAPPING FOR postgres SERVER ocat OPTIONS (SET oauth_token_uri 'http://10.11.12.13/v1/oauth/tokens')" >/dev/null
+check "an off-allow-list oauth_token_uri host is refused (42501)" \
+	"$(sqlstate_of "SELECT pgcolumnar.iceberg_rest_table_location('ocat','db','events')")" \
+	"42501"
 kill "$OSRV_PID" 2>/dev/null
 
 # ---- the URI form still works when the env token is present ------------------
