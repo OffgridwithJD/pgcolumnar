@@ -12,6 +12,15 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Security
+
+- Fixed an uninitialized-memory read in the native DICT decode path. A chunk
+  whose descriptor declared a `value_raw_length` larger than its codes decode to
+  left the tail of the raw buffer uninitialized, and a varlena column then read a
+  length prefix out of that garbage (silent wrong results, or an out-of-bounds
+  read). `decode_dict` now requires the decoded length to equal the declared raw
+  length, mirroring the FSST path. Regression test: native_dict_underfill.
+
 ### Added
 
 - Read-only Apache Iceberg support, filesystem-backed, at a table's current
