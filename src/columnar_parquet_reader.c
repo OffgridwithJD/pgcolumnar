@@ -2116,14 +2116,24 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 				uint32	   *idx;
 				int			bw;
 
-				if (dict == NULL || vallen < 1 || dictCount < 1)
-					return false;
-				bw = valbuf[0];
-				idx = palloc(sizeof(uint32) * Max(nnn, 1));
-				if (!rle_bitpack_decode(valbuf + 1, vallen - 1, bw, nnn, idx))
-					return false;
-				for (i = 0; i < nnn; i++)
+				/*
+				 * Decode indices only when the page has coded values. An
+				 * all-null page (nnn == 0) has zero indices and, for a column
+				 * that is entirely null, an empty dictionary (dictCount == 0);
+				 * the guards below would wrongly reject that valid case, so they
+				 * apply only when nnn > 0. When nnn > 0 a dictCount >= 1 is
+				 * required, which keeps (uint32) dictCount a valid bound.
+				 */
+				if (nnn > 0)
 				{
+					if (dict == NULL || vallen < 1 || dictCount < 1)
+						return false;
+					bw = valbuf[0];
+					idx = palloc(sizeof(uint32) * nnn);
+					if (!rle_bitpack_decode(valbuf + 1, vallen - 1, bw, nnn, idx))
+						return false;
+					for (i = 0; i < nnn; i++)
+					{
 					/*
 					 * idx[i] is file-controlled and unsigned. The bounds test must
 					 * be unsigned too: a signed comparison sign-extends any index
@@ -2132,9 +2142,10 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					 * then reads far out of bounds. Compare as uint32 against a
 					 * dictCount already proven >= 1 above.
 					 */
-					if (idx[i] >= (uint32) dictCount)
-						return false;
-					pv[i] = dict[idx[i]];
+						if (idx[i] >= (uint32) dictCount)
+							return false;
+						pv[i] = dict[idx[i]];
+					}
 				}
 			}
 			else if (h.encoding == PQE_PLAIN)
