@@ -132,10 +132,17 @@ PgColumnarRowWriteConflict(Relation rel, ItemPointer otid, CommandId cid,
 	return false;
 }
 
-/* one { lock key, row number } pair, sorted by key for ordered acquisition */
+/*
+ * one { lock bucket, row number } pair. Sorted by BUCKET, which is the actual
+ * lock resource (SET_LOCKTAG_ADVISORY takes the bucket, not the raw key). Sorting
+ * by the raw key would not order the buckets consistently, because bucket =
+ * key % numBuckets and modulo is not order-preserving, so two transactions could
+ * take the same two buckets in opposite order and deadlock. Ordering by the bucket
+ * makes every transaction acquire shared buckets ascending, so no cycle forms.
+ */
 typedef struct RowLockEntry
 {
-	uint64		key;
+	uint32		bucket;
 	uint64		rowNumber;
 } RowLockEntry;
 
@@ -145,9 +152,9 @@ rowlockentry_cmp(const void *a, const void *b)
 	const RowLockEntry *ra = (const RowLockEntry *) a;
 	const RowLockEntry *rb = (const RowLockEntry *) b;
 
-	if (ra->key < rb->key)
+	if (ra->bucket < rb->bucket)
 		return -1;
-	if (ra->key > rb->key)
+	if (ra->bucket > rb->bucket)
 		return 1;
 	if (ra->rowNumber < rb->rowNumber)
 		return -1;
@@ -244,24 +251,29 @@ PgColumnarSerializeFlushRows(uint64 storageId, const uint64 *rows, int nrows)
 								ALLOCSET_SMALL_SIZES);
 	old = MemoryContextSwitchTo(tmp);
 
-	/* sort the rows by lock key so the whole batch is acquired in one order */
+	/*
+	 * Compute each row's bucket (the actual lock resource) and sort by it, so the
+	 * whole batch, and every other transaction's batch, acquires shared buckets in
+	 * the same ascending order.
+	 */
+	numBuckets = (uint32) Max(1, pgcolumnar_row_lock_buckets);
 	ents = (RowLockEntry *) palloc(sizeof(RowLockEntry) * nrows);
 	for (i = 0; i < nrows; i++)
 	{
-		ents[i].key = row_identity_lock_key(storageId, rows[i]);
+		uint64		key = row_identity_lock_key(storageId, rows[i]);
+
+		ents[i].bucket = (uint32) (key % numBuckets);
 		ents[i].rowNumber = rows[i];
 	}
 	qsort(ents, nrows, sizeof(RowLockEntry), rowlockentry_cmp);
 
-	numBuckets = (uint32) Max(1, pgcolumnar_row_lock_buckets);
 	for (i = 0; i < nrows; i++)
 	{
-		uint32		bucket = (uint32) (ents[i].key % numBuckets);
 		LOCKTAG		tag;
 
 		/* a repeated bucket is already held; LockAcquire makes it a no-op */
 		SET_LOCKTAG_ADVISORY(tag, MyDatabaseId,
-							 (uint32) storageId, bucket,
+							 (uint32) storageId, ents[i].bucket,
 							 PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY);
 		(void) LockAcquire(&tag, ExclusiveLock, false /* transaction lock */ ,
 						   false /* wait */ );

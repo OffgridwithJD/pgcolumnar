@@ -409,7 +409,10 @@ same way as a `CREATE INDEX` that is not concurrent. Turn projection scans off w
   `pgcolumnar.enable_row_update_lock` (default on) controls this serialization.
   The GUC `pgcolumnar.row_lock_buckets` (default 1024) bounds the held locks per
   storage, so a bulk update cannot exhaust the lock table. Unrelated rows may
-  share a bucket, which only makes them wait when they need not.
+  share a bucket, which only makes them wait when they need not. For the same
+  reason, two multi-statement transactions can rarely deadlock, even on disjoint
+  rows. This happens when their bucketed locks collide in opposite statement order.
+  Retry resolves it, as with any serialization failure.
 - Concurrent inserts of the same unique key go in sequence. The server therefore
   always finds the conflict. Before a new row reaches the uniqueness check, the
   access method takes an advisory lock with the scope of the transaction. The key
