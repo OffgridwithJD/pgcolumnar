@@ -927,6 +927,43 @@ pgcolumnar_iceberg_data_files(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+/* Sum the live data files' record counts for a row estimate. Delete files are
+ * ignored, so the count is a slight overestimate on a table with deletes, which
+ * is the safe direction for a planner cardinality. collect_deletes is true so a
+ * table that carries deletes is estimated rather than refused. */
+static void
+ice_estimate_cb(void *ctx, PgColumnarAvroManifestEntry *e,
+				const PgColumnarAvroManifestFile *mf,
+				const char *recorded_root, const char *actual_root,
+				const char *mdpath, int64 snapshot_id)
+{
+	(void) mf;
+	(void) recorded_root;
+	(void) actual_root;
+	(void) mdpath;
+	(void) snapshot_id;
+	if (e->content == 0)		/* a data file; deletes do not add rows */
+		*(int64 *) ctx += e->record_count;
+}
+
+/*
+ * A planner row estimate for the current snapshot: the sum of the live data
+ * files' record counts, read from the manifests. Zero for a table with no
+ * current snapshot. Used by the foreign-data wrapper's GetForeignRelSize in
+ * place of a constant guess.
+ */
+int64
+PgColumnarIcebergEstimateRows(const char *path)
+{
+	Jsonb	   *jb;
+	int64		total = 0;
+
+	jb = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+											CStringGetDatum(ice_slurp_text(path, NULL))));
+	ice_walk_data_files(path, &jb->root, true, ice_estimate_cb, &total, NULL);
+	return total;
+}
+
 /*
  * Locate the "fields" array of the table's current schema in a parsed
  * metadata.json: the entry of "schemas" whose "schema-id" equals

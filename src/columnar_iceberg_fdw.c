@@ -38,6 +38,7 @@
 #include "foreign/foreign.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -283,7 +284,24 @@ static void
 icefdwGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 						Oid foreigntableid)
 {
-	baserel->rows = 1000.0;		/* a planning ballpark; the scan reads real rows */
+	char	   *mdpath = ice_fdw_get_option(foreigntableid, "metadata_path");
+	int64		est = 0;
+
+	/*
+	 * Estimate from the manifests the scan reads anyway: the sum of the live
+	 * data files' record counts. A constant guess (the old 1000) mis-sizes a
+	 * large table and corrupts every join decision above the scan. The metadata
+	 * is small, and the scan opens it regardless, so reading it here is cheap.
+	 *
+	 * The sum is the base-table cardinality (baserel->tuples), not the output
+	 * row count. Set it and let set_baserel_size_estimates apply the scan's
+	 * restriction clauses (baserestrictinfo is populated by now), so a filtered
+	 * scan estimates its filtered rows rather than the whole table.
+	 */
+	if (mdpath != NULL)
+		est = PgColumnarIcebergEstimateRows(mdpath);
+	baserel->tuples = (est > 0) ? (double) est : 1.0;
+	set_baserel_size_estimates(root, baserel);
 }
 
 static void

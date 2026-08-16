@@ -58,6 +58,7 @@ extern void PgColumnarIcebergScanInto(const char *path, TupleDesc tupdesc,
  * vehicle for the Iceberg FDW: it obtains the file list, prunes by the filter,
  * and reads the survivors (with their deletes applied) into the tuplestore.
  */
+extern int64 PgColumnarIcebergEstimateRows(const char *path);
 extern int64 PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 									   const PgColumnarObjStoreConfig *cfg,
 									   Tuplestorestate *tupstore,
