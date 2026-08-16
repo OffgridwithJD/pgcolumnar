@@ -19,7 +19,9 @@ which was true until that script existed.
   bit_width 32) passed a signed bounds check that sign-extended it to a negative
   int, and the dictionary was then read far out of bounds, crashing the backend
   from a single crafted file. The bounds check is now unsigned and the index is
-  rejected. Regression test: native_parquet_dict_oob.
+  rejected. The index decode runs only when the page has coded values, so an
+  all-null column with an empty dictionary page still reads. Regression tests:
+  native_parquet_dict_oob and native_parquet_streaming.
 
 ### Added
 
