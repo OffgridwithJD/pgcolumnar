@@ -93,6 +93,7 @@ SUITES=(
 	iceberg_objstore
 	iceberg_rest
 	iceberg_rest_scan
+	iceberg_rest_server
 	iceberg_rest_vended
 	iceberg_scan
 	import_deferred

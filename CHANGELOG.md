@@ -69,7 +69,13 @@ which was true until that script existed.
   second TLS stack enters the server process. A bearer token, when the catalog
   requires one, is read from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` server
   environment variable, never a function argument, so it does not appear in the
-  statement log. When the catalog vends short-lived storage credentials in its
+  statement log. The first argument may instead name a foreign server of the new
+  validator-only `pgcolumnar_iceberg_catalog` wrapper (#656). The server holds
+  `catalog_uri`, and the current role's user mapping holds the bearer `token` in
+  `pg_user_mapping`, which is not world-readable, so one role's token is private
+  from another. A role with neither a mapping token nor superuser rights is
+  refused, and the validator keeps secrets off the world-readable server options.
+  When the catalog vends short-lived storage credentials in its
   `loadTable` reply (the flat `config` keys or the `storage-credentials` array,
   longest prefix selected), `iceberg_rest_scan` reads the table's files with
   those credentials rather than the server environment (#656). Vended
