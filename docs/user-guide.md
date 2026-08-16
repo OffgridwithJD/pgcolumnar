@@ -269,13 +269,26 @@ SELECT region, sum(amount) FROM pgcolumnar.iceberg_scan(
   GROUP BY region;
 ```
 
-Name a table by a REST catalog instead of a metadata path. For per-role
-credentials, name a foreign server that holds the catalog URI, with the bearer
-token in the role's user mapping.
+Name a table by a REST catalog instead of a metadata path. The catalog URI form
+takes its bearer token from the `PGCOLUMNAR_ICEBERG_REST_TOKEN` server
+environment variable.
 
 ```sql
 SELECT * FROM pgcolumnar.iceberg_rest_scan(
   'https://catalog.example.com', 'analytics', 'events')
+  AS t(id bigint, region text, amount int);
+```
+
+For per-role credentials, pass a foreign server name as the first argument. The
+server holds the catalog URI, and the current role's user mapping supplies the
+token.
+
+```sql
+CREATE SERVER cat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog
+  OPTIONS (catalog_uri 'https://catalog.example.com');
+CREATE USER MAPPING FOR analyst SERVER cat OPTIONS (token 's3cr3t');
+
+SELECT * FROM pgcolumnar.iceberg_rest_scan('cat', 'analytics', 'events')
   AS t(id bigint, region text, amount int);
 ```
 

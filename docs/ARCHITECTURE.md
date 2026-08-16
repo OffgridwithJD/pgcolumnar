@@ -223,23 +223,25 @@ stored physically sorted (a one-time reorder; see gap 26). `pgcolumnar.cluster`
 reorders by a Z-order curve on several columns, and holds `AccessExclusiveLock`
 like the rewrite verbs above.
 
-This file also holds the online reclaim verbs. They run under
-`ShareUpdateExclusiveLock`, so reads and writes continue. `pgcolumnar.compact`
+This file also holds the online reclaim verbs, which run under
+`ShareUpdateExclusiveLock` so reads and writes continue. `pgcolumnar.compact`
 retires fully-deleted row groups, and `pgcolumnar.compact_rewrite` rewrites
-partially-deleted groups. `pgcolumnar.recluster` re-establishes a Z-order online,
-and `pgcolumnar.truncate` returns reclaimed end blocks to the operating system.
-`pgcolumnar.stats` and `pgcolumnar.sort_status` report the per-stripe layout and
-the remaining sort order. `pgcolumnar.maintenance_due` reports the compact and
-recluster thresholds. A storage-id lookup resolves a relation to its storage id.
+partially-deleted groups. `pgcolumnar.recluster` re-establishes a Z-order online.
+`pgcolumnar.truncate` returns reclaimed end blocks to the operating system. It
+takes a brief conditional `AccessExclusiveLock` for the physical shrink, and skips
+that step when the table is busy. `pgcolumnar.stats` and `pgcolumnar.sort_status` report the
+per-stripe layout and the remaining sort order. `pgcolumnar.maintenance_due`
+reports the compact-rewrite and recluster thresholds. A storage-id lookup resolves
+a relation to its storage id.
 
 ### columnar_autovacuum.c
 The maintenance daemon (`pgcolumnar.autovacuum`). A background-worker launcher
 starts one short-lived worker per database on a schedule. Each worker consults
-`pgcolumnar.maintenance_due` for the tables that have crossed the compact or
-recluster thresholds, then runs the online reclaim verbs on them through SPI, each
-in its own transaction. It runs only the `ShareUpdateExclusiveLock` verbs, and it
-registers as an autovacuum-kind process so it yields to a stronger lock a session
-requests.
+`pgcolumnar.maintenance_due` for the tables that have crossed the compact-rewrite
+or recluster thresholds, then runs `pgcolumnar.compact_rewrite` and
+`pgcolumnar.recluster` on them through SPI, each in its own transaction. It calls
+only those two `ShareUpdateExclusiveLock` verbs, and it registers as an
+autovacuum-kind process so it yields to a stronger lock a session requests.
 
 ### columnar_unique.c
 Concurrent unique-key insert serialization (issue #5). Before a freshly inserted
@@ -423,10 +425,10 @@ exchange. It reads vended storage credentials from a `loadTable` reply.
 The `pgcolumnar_iceberg` foreign-data wrapper. It gives the Iceberg read path the
 query predicate, which the bare `iceberg_scan` function does not receive, and
 prunes whole data files before they open. Partition pruning covers identity,
-`bucket[N]` (a murmur3 hash), `truncate[W]`, and the year, month, day, and hour
-temporal transforms on date, timestamp, and timestamptz columns. Metrics pruning
-reads a data file's stored minimum and maximum. `EXPLAIN (ANALYZE)` reports
-`Files Pruned`.
+`bucket[N]` (a murmur3 hash), `truncate[W]`, and the temporal transforms. It
+prunes year, month, day, and hour on a timestamp or timestamptz column, and year,
+month, and day on a date column. Metrics pruning reads a data file's stored minimum
+and maximum. `EXPLAIN (ANALYZE)` reports `Files Pruned`.
 
 ### columnar_visibilitymap.c
 Index-only-scan support (gap 28). A columnar visibility-map fork records which

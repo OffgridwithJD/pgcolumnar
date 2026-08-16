@@ -85,7 +85,8 @@ WAL, replication, indexes, `COPY`, and `pg_dump`. The extension adds:
   tables. They read a local path or object storage (`s3://`, `http://`,
   `https://`), gated by `pgcolumnar.objstore_allowed_endpoints`.
 - Online maintenance that runs against a live table (`compact`, `compact_rewrite`,
-  `recluster`), and an optional `pgcolumnar.autovacuum` daemon that schedules it.
+  `recluster`), and an optional `pgcolumnar.autovacuum` daemon that schedules
+  `compact_rewrite` and `recluster`.
 
 ## Design and internals
 
