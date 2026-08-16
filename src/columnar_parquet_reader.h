@@ -49,6 +49,7 @@ extern int64 PgColumnarReadParquetByFieldIdNM(const char *path, TupleDesc tupdes
 											   TupleTableSlot *slot,
 											   const uint64 *skipPos,
 											   int nSkipPos,
+											   const bool *needTop,
 											   const PgColumnarObjStoreConfig *cfg);
 
 #endif							/* COLUMNAR_PARQUET_READER_H */

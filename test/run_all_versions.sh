@@ -89,6 +89,7 @@ SUITES=(
 	iceberg_dv
 	iceberg_fdw
 	iceberg_fdw_estimate
+	iceberg_fdw_projection
 	iceberg_malformed
 	iceberg_name_mapping
 	iceberg_objstore
@@ -132,6 +133,7 @@ SUITES=(
 	native_groupagg
 	native_groupagg_wide_cost
 	native_index
+	native_index_fetch_stripe_cost
 	native_index_projection
 	native_ios
 	native_late_materialization

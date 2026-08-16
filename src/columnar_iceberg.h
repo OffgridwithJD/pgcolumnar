@@ -63,7 +63,8 @@ extern int64 PgColumnarIcebergScanCore(const char *path, TupleDesc tupdesc,
 									   const PgColumnarObjStoreConfig *cfg,
 									   Tuplestorestate *tupstore,
 									   PgColumnarIceFileFilter filter,
-									   void *filterarg);
+									   void *filterarg,
+									   const bool *needTop);
 
 /*
  * Map the current partition spec's IDENTITY fields to `tupdesc` columns for FDW
