@@ -100,6 +100,7 @@ nav:
       - Installation: installation.md
       - User guide: user-guide.md
       - How-to guides: how-to.md
+      - Best practices: best-practices.md
   - Concepts:
       - Features: features.md
       - Architecture: ARCHITECTURE.md
