@@ -3144,21 +3144,6 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	bool	   *ciskey = (bool *) palloc0(sizeof(bool) * natts);
 	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
 	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
-	/*
-	 * Compact needed-column lists, so the per-row loops step over the columns a
-	 * query actually reads rather than all natts (a count(x) on a 100-column
-	 * table needs one). keyCols and payloadCols split the needed set the way
-	 * ciskey does; phase1Cols is what phase 1 gathers (keys always, payload too
-	 * unless the group defers). Order is column order, and each column's state is
-	 * independent, so iterating the list is equivalent to the masked full range.
-	 */
-	int		   *keyCols = (int *) palloc(sizeof(int) * Max(natts, 1));
-	int		   *payloadCols = (int *) palloc(sizeof(int) * Max(natts, 1));
-	int		   *phase1Cols = (int *) palloc(sizeof(int) * Max(natts, 1));
-	int			nKeyCols = 0;
-	int			nPayCols = 0;
-	int			nPhase1 = 0;
-	int			ci;
 	int			npayload = 0;
 	int64		candRows = 0;	/* rows that reached the key check */
 	int64		survRows = 0;	/* rows that passed it */
@@ -3189,14 +3174,8 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 				ciskey[ka] = true;
 		}
 		for (col = 0; col < natts; col++)
-			if (cneeded[col])
-			{
-				if (ciskey[col])
-					keyCols[nKeyCols++] = col;
-				else
-					payloadCols[nPayCols++] = col;
-			}
-		npayload = nPayCols;
+			if (cneeded[col] && !ciskey[col])
+				npayload++;
 	}
 
 	/*
@@ -3259,17 +3238,6 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 		state->foldGroupsTotal++;
 		if (deferOn)
 			state->foldGroupsDeferred++;
-
-		/*
-		 * Phase 1 gathers the key columns always, and the payload too unless this
-		 * group defers it. deferOn is per group, so this list is rebuilt here.
-		 */
-		nPhase1 = 0;
-		for (ci = 0; ci < nKeyCols; ci++)
-			phase1Cols[nPhase1++] = keyCols[ci];
-		if (!deferOn)
-			for (ci = 0; ci < nPayCols; ci++)
-				phase1Cols[nPhase1++] = payloadCols[ci];
 
 		/*
 		 * This loop now honours skipVec, and it has to (#512, #452 phase 1b-i).
@@ -3367,9 +3335,10 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			 * here at all -- not even their cursors -- so the failing-row
 			 * path below can consume their slots without a fetch (#405).
 			 */
-			for (ci = 0; ci < nPhase1; ci++)
+			for (col = 0; col < natts; col++)
 			{
-				col = phase1Cols[ci];
+				if (!cneeded[col] || (deferOn && !ciskey[col]))
+					continue;
 				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
 				{
 					/*
@@ -3394,12 +3363,10 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			{
 				/* consume deferred payload slots; never read them (#405) */
 				if (deferOn)
-					for (ci = 0; ci < nPayCols; ci++)
-					{
-						col = payloadCols[ci];
-						if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
 							cpresent[col]++;
-					}
 				continue;
 			}
 
@@ -3408,12 +3375,10 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			if (del)
 			{
 				if (deferOn)
-					for (ci = 0; ci < nPayCols; ci++)
-					{
-						col = payloadCols[ci];
-						if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
 							cpresent[col]++;
-					}
 				continue;
 			}
 			candRows++;
@@ -3435,12 +3400,10 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			if (!pass)
 			{
 				if (deferOn)
-					for (ci = 0; ci < nPayCols; ci++)
-					{
-						col = payloadCols[ci];
-						if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+					for (col = 0; col < natts; col++)
+						if (cneeded[col] && !ciskey[col] &&
+							((cvalidity[col][r >> 3] >> (r & 7)) & 1))
 							cpresent[col]++;
-					}
 				continue;
 			}
 			survRows++;
@@ -3452,9 +3415,10 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 			 * rows times fetched payload values, never candidates.
 			 */
 			if (deferOn)
-				for (ci = 0; ci < nPayCols; ci++)
+				for (col = 0; col < natts; col++)
 				{
-					col = payloadCols[ci];
+					if (!cneeded[col] || ciskey[col])
+						continue;
 					if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
 					{
 						cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
