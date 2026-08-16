@@ -14,6 +14,13 @@ which was true until that script existed.
 
 ### Security
 
+- Fixed an HTTP request-line injection in the object-store client. A URL path or
+  host containing CR or LF was written verbatim into the request line, so a
+  crafted path could split the request and smuggle a second line to an
+  allow-listed endpoint. The request path and host are now rejected if they carry
+  CR or LF, as the caller-supplied header lines already were. Regression test:
+  objstore_crlf.
+
 - Fixed an uninitialized-memory read in the native DICT decode path. A chunk
   whose descriptor declared a `value_raw_length` larger than its codes decode to
   left the tail of the raw buffer uninitialized, and a varlena column then read a
