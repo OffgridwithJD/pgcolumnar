@@ -90,10 +90,11 @@ which was true until that script existed.
   predicate on a `bucket[N]`-partitioned column prunes files whose stored bucket
   differs from the constant's, computed with the Iceberg murmur3 hash. A
   predicate on a `truncate[W]`-partitioned integer column prunes files whose
-  truncated value range excludes it. Partition pruning covers identity,
-  `bucket[N]`, and `truncate[W]` (integer) partitioning, and metrics pruning
-  covers integer and boolean columns; temporal transforms and other types read
-  in full. See
+  truncated value range excludes it, and a predicate on a `day()`-partitioned
+  date column prunes by day. Partition pruning covers identity, `bucket[N]`,
+  `truncate[W]` (integer), and `day()` (date) partitioning, and metrics pruning
+  covers integer and boolean columns; the remaining temporal transforms and
+  other types read in full. See
   [Iceberg FDW](docs/sql-reference.md#the-pgcolumnar_iceberg-foreign-data-wrapper).
 
 - The Parquet read and export functions and the foreign-data wrapper read from

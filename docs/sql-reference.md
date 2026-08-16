@@ -910,11 +910,13 @@ The one table option is `metadata_path`, the table's current `metadata.json`
 (a local path or an object-storage URL). The wrapper requires the
 `pg_read_server_files` role. `EXPLAIN (ANALYZE)` reports `Files Pruned`.
 
-Partition pruning covers identity partitioning, `bucket[N]` for an equality
-predicate on the source column, and `truncate[W]` for a predicate on an integer
-source column. A table partitioned by a temporal function is read in full, which
-is correct but not yet optimized. Metrics pruning covers integer and boolean
-columns; other column types are read in full.
+Partition pruning covers four transforms. Identity partitioning prunes on any
+predicate. `bucket[N]` prunes on an equality predicate on the source column.
+`truncate[W]` prunes on a predicate on an integer source column. `day()` prunes
+on a predicate on a date source column. A table partitioned by `year`, `month`,
+or `hour`, or by `day` on a timestamp, is read in full, which is correct but not
+yet optimized. Metrics pruning covers integer and boolean columns; other column
+types are read in full.
 
 ```sql
 CREATE SERVER ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;

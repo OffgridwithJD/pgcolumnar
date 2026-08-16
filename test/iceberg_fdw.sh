@@ -194,6 +194,36 @@ if ls "$FX"/warehouse_trunc/db/bytr/metadata/*.metadata.json >/dev/null 2>&1; th
 		      WHERE amount >= 200")"
 fi
 
+# ---- day() temporal partition pruning (date, epoch-converted) ----------------
+# warehouse_day is partitioned by day(dt) with column metrics disabled, so day()
+# is the sole mechanism. The stored cell is Iceberg days (from 1970); the FDW
+# converts a PG date const (+10957). A wrong offset would drop the wrong file, so
+# the same-oracle read is the epoch cross-check. Dates 2020-01-01/02, 2020-03-15.
+if ls "$FX"/warehouse_day/db/byday/metadata/*.metadata.json >/dev/null 2>&1; then
+	YDEST="$PGC_WORKDIR/why"; rm -rf "$YDEST"; mkdir -p "$YDEST"
+	cp -r "$FX/warehouse_day/db" "$YDEST/db"; chmod -R u+rwX "$YDEST"
+	MDY="$(ls "$YDEST"/db/byday/metadata/*.metadata.json | sort | tail -1)"
+	q "CREATE FOREIGN TABLE evy (id bigint, dt date)
+	   SERVER ice OPTIONS (metadata_path '$MDY')" >/dev/null
+	check "the day() FDW reads the whole table (3 rows)" \
+		"$(q "SELECT count(*) FROM evy")" "3"
+	check "dt = 2020-01-02 day-prunes 2 files" \
+		"$(fp "SELECT * FROM evy WHERE dt = DATE '2020-01-02'")" "2"
+	check "dt = 2020-01-02 returns id 2" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evy WHERE dt = DATE '2020-01-02'")" "2"
+	check "dt < 2020-01-02 day-prunes 2 files" \
+		"$(fp "SELECT * FROM evy WHERE dt < DATE '2020-01-02'")" "2"
+	check "dt < 2020-01-02 returns id 1" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evy WHERE dt < DATE '2020-01-02'")" "1"
+	check "dt >= 2020-02-01 day-prunes 2 files" \
+		"$(fp "SELECT * FROM evy WHERE dt >= DATE '2020-02-01'")" "2"
+	check_text "a day()-pruned query matches iceberg_scan (epoch cross-check)" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id) FROM evy WHERE dt >= DATE '2020-02-01'")" \
+		"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+		      FROM pgcolumnar.iceberg_scan('$MDY') AS t(id bigint, dt date)
+		      WHERE dt >= DATE '2020-02-01'")"
+fi
+
 # ---- an invalid option is rejected by the validator -------------------------
 check "an unknown table option is refused (FDW_INVALID_OPTION_NAME)" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
