@@ -12,6 +12,13 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Iceberg foreign-data wrapper now estimates a scan's row count from the
+  manifests (the sum of the live data files' record counts) instead of a constant
+  1000. The constant mis-sized every scan and corrupted join planning above a
+  large Iceberg table. Regression test: iceberg_fdw_estimate.
+
 ### Security
 
 - Fixed an uninitialized-memory read in the native DICT decode path. A chunk

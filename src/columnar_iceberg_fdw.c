@@ -283,7 +283,18 @@ static void
 icefdwGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 						Oid foreigntableid)
 {
-	baserel->rows = 1000.0;		/* a planning ballpark; the scan reads real rows */
+	char	   *mdpath = ice_fdw_get_option(foreigntableid, "metadata_path");
+	int64		est = 0;
+
+	/*
+	 * Estimate from the manifests the scan reads anyway: the sum of the live
+	 * data files' record counts. A constant guess (the old 1000) mis-sizes a
+	 * large table and corrupts every join decision above the scan. The metadata
+	 * is small, and the scan opens it regardless, so reading it here is cheap.
+	 */
+	if (mdpath != NULL)
+		est = PgColumnarIcebergEstimateRows(mdpath);
+	baserel->rows = (est > 0) ? (double) est : 1.0;
 }
 
 static void
