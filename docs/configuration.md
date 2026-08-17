@@ -20,7 +20,7 @@ pgColumnar has two kinds of settings:
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pgcolumnar.stripe_row_limit` | integer | `150000` | Maximum rows per row group. The row group is the unit of write and the granularity at which whole segments are appended. Range 1000 to INT_MAX. |
-| `pgcolumnar.chunk_group_row_limit` | integer | `10000` | Maximum rows per vector. The vector is the unit of encoding and of min/max skipping. Range 100 to INT_MAX. |
+| `pgcolumnar.chunk_group_row_limit` | integer | `10000` | Maximum rows per chunk group. The chunk group is the band a scan skips as a unit when a filter cannot match its minimum and maximum. Within a chunk group each column is encoded in fixed 1024-value vectors. Range 100 to INT_MAX. |
 | `pgcolumnar.encoding_sample_rows` | integer | `2048` | The number of rows that the writer samples to select the value encoding of a vector. The writer estimates each candidate on a sample of windows. The windows contain consecutive values and have an equal distance between them. Thus the sample shows the global shape and also the local runs. The writer then applies only the two best candidates to the full vector. A value of `0` applies each candidate to each vector. This is the behaviour of earlier versions. The writer changes a value below 128 to `0`, because a smaller sample cannot put the candidates in order. This setting changes the write speed. It can also change the compression ratio. It does not change correctness. |
 
 ### Compression
@@ -100,12 +100,14 @@ schemes and the credential model.
 | `pgcolumnar.objstore_buffered` | boolean | `on` | Coalesce remote Parquet reads to one request per column chunk instead of many small ranged reads. |
 | `pgcolumnar.objstore_part_size` | integer | `0` | Multipart part size in bytes for a remote export. `0` uses the module default of 8 MiB. Raise it for a fast link. Range 0 to INT_MAX. |
 
-### Concurrent unique inserts
+### Concurrent writes
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pgcolumnar.enable_unique_insert_lock` | boolean | `on` | Serialize concurrent inserts of the same unique-index key with a transaction-scoped advisory lock, so overlapping same-key inserts conflict correctly. |
 | `pgcolumnar.unique_lock_buckets` | integer | `128` | Advisory-lock buckets per unique index. Bounds how many advisory locks a transaction holds per unique index. Equal keys always share a bucket; unrelated keys may share one, which only over-serializes. Range 1 to 1048576. Settable only at server start: the bucket is part of the lock tag, so backends that disagree on this value would not serialize against each other. |
+| `pgcolumnar.enable_row_update_lock` | boolean | `on` | Serialize a concurrent `UPDATE` or `DELETE` of the same row on the row identity, so the losing writer gets a retryable `serialization_failure` instead of duplicating the row and losing an update. Off restores the prior behavior. |
+| `pgcolumnar.row_lock_buckets` | integer | `1024` | Advisory-lock buckets per storage for same-row `UPDATE`/`DELETE` serialization. Bounds the row locks a transaction holds, so a bulk update cannot exhaust the lock table. Unrelated rows may share a bucket, which only over-serializes. Range 1 to 1048576. Settable only at server start: the bucket is part of the lock tag. |
 
 ### Internal settings
 

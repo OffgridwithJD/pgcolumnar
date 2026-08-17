@@ -64,9 +64,9 @@ figures below are theirs.
 | table size | 2604 MB | 2051 MB | 1.27x smaller |
 | narrow `GROUP BY` aggregate | 266 ms | 115 ms | **2.3x faster** |
 
-Read the last two rows with the others. Columnar storage still wins the narrow
-aggregate, which is what it is for. It wins little on size, because only about a
-quarter of the bytes are the kind that compress. Every row-wise operation loses.
+Read the last two rows with the others. Columnar storage still favors the narrow
+aggregate, its intended case. It gains little on size, because only about a
+quarter of the bytes are the kind that compress. Every row-wise operation is slower.
 
 Use heap when most of your bytes are one large value per row. Use heap when point
 lookups are the main access pattern. Use pgColumnar when queries read a few

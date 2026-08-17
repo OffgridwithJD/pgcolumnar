@@ -126,8 +126,8 @@ block.
 ## Make queries fast
 
 - **Project only the columns you need.** Column pruning decodes only the columns a
-  narrow `SELECT` names. `SELECT *` decodes everything. This is the largest and
-  cheapest single win on a wide table.
+  narrow `SELECT` names. `SELECT *` decodes everything. On a wide table this is
+  the single biggest reduction in decode cost.
 - **Late materialization is on by default** (`pgcolumnar.enable_late_materialization`).
   A row the filter rejects does not have its other columns built. Decode cost then
   scales with rows emitted. Leave it on.

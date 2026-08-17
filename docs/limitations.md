@@ -708,3 +708,22 @@ correct rows; these are the conditions under which it can skip at all:
 
 The `Row Groups Skipped` counter in `EXPLAIN ANALYZE` reports what was actually
 skipped.
+
+## Reading Apache Iceberg
+
+The Iceberg read surface (`iceberg_scan`, `iceberg_data_files`, the
+`pgcolumnar_iceberg` foreign-data wrapper, and the REST catalog client) reads a
+table at its current snapshot. It has these limits:
+
+- The metadata, manifests, and manifest lists are written by whoever authored the
+  table. They are input without trust, parsed by code this project wrote. An
+  honest caller names only the trusted `metadata.json`. Refer to Security in the
+  administration guide for the trust boundary.
+- The reader refuses malformed or hostile metadata rather than crashing or
+  returning wrong rows. It rejects a non-regular file, such as a FIFO, named as a
+  path. It also rejects a null manifest sequence number, a null or negative
+  position-delete position, and a `current-schema-id` that names no schema.
+- Reads apply position deletes, equality deletes, and format-version-3 deletion
+  vectors. The data files must be Parquet.
+- The reader does not write or commit to an Iceberg table, and it reads only the
+  current snapshot. Time travel to an older snapshot is not supported.

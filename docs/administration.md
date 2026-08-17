@@ -11,11 +11,11 @@ tables. pgColumnar puts data in this order:
 
 - A **row group** is the unit of write. Each write transaction appends one or
   more row groups of up to `pgcolumnar.stripe_row_limit` rows.
-- In a row group, pgColumnar keeps each column as a chunk and compresses each
-  chunk separately. pgColumnar encodes the values of a chunk in **vectors**. A vector
-  holds a maximum of `pgcolumnar.chunk_group_row_limit` rows. The vector is the
-  unit of the encoding cascade. It is also the unit of minimum and maximum
-  skipping.
+- pgColumnar divides each row group into **chunk groups** of up to
+  `pgcolumnar.chunk_group_row_limit` rows. Within a chunk group each column is a
+  **chunk**, compressed on its own and encoded in fixed 1024-value **vectors**. A
+  zone map holds the minimum and maximum of each chunk group. A scan skips a whole
+  chunk group when its filter cannot match that range.
 - Each chunk records its minimum and maximum and an optional bloom filter, and a
   per-vector zone map records the finer minimum and maximum ranges.
 
@@ -43,8 +43,8 @@ data, rewrite the table with [`pgcolumnar.vacuum`](sql-reference.md#pgcolumnarva
 ## Row-group sizing
 
 `pgcolumnar.chunk_group_row_limit` (default 10000) sets how many rows share one
-minimum and maximum in a vector. Smaller vectors skip more precisely on selective
-range filters but hold less data per vector. `pgcolumnar.stripe_row_limit` (default
+minimum and maximum in a chunk group. Smaller chunk groups skip more precisely on
+selective range filters but hold less data per group. `pgcolumnar.stripe_row_limit` (default
 150000) sets the write unit. The defaults suit most workloads. Change them for a
 table with `pgcolumnar.set_options` when a specific access pattern
 calls for it, and measure the result.
@@ -305,7 +305,7 @@ A columnar table is an ordinary WAL-logged relation.
 - **Physical backup** (`pg_basebackup`, file-system snapshots) and **physical
   replication** include columnar tables and their WAL.
 - **Logical backup** (`pg_dump`) writes the table definition, including `USING
-  columnar`, and its data with `COPY`. Restore requires the `pgcolumnar` extension
+  pgcolumnar`, and its data with `COPY`. Restore requires the `pgcolumnar` extension
   installed and present in `shared_preload_libraries` on the target server.
 
 Install and preload the extension on any server that restores or replicates a
