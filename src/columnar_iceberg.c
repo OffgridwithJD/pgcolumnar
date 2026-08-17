@@ -518,10 +518,24 @@ static char *
 ice_rebase(const char *recorded_root, const char *actual_root,
 		   const char *recorded_path, const char *what, const char *mdpath)
 {
-	const char *p = ice_strip_scheme(recorded_path);
+	const char *p;
 	size_t		rlen = strlen(recorded_root);
 	size_t		alen;
 	char	   *cand;
+
+	/*
+	 * A recorded path (a manifest, data, or delete path taken from the untrusted
+	 * manifest/manifest-list) must not be null. The manifest schema is embedded
+	 * and author-controlled, so a hostile writer can declare a path field as
+	 * union[null,string] and encode null; without this guard ice_strip_scheme
+	 * would strncmp(NULL) and crash the backend (#644 "refuse malformed, do not
+	 * crash"; #691). This also covers a null path exposed by any other means.
+	 */
+	if (recorded_path == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("iceberg: a %s path in \"%s\" is null", what, mdpath)));
+	p = ice_strip_scheme(recorded_path);
 
 	/* tolerate a trailing slash on the recorded location */
 	while (rlen > 1 && recorded_root[rlen - 1] == '/')

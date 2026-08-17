@@ -84,6 +84,13 @@ which was true until that script existed.
 
 ### Security
 
+- Fixed a backend crash on a hostile Iceberg manifest with a null path. The
+  reader decodes a manifest and manifest list against the schema embedded in the
+  file, which the table author controls, so a manifest_path (or data or delete
+  path) can be declared nullable and encoded null. `ice_rebase` then called
+  `strncmp` on the null pointer and segfaulted the backend. A null recorded path
+  is now refused as `DATA_CORRUPTED`, matching the read path's other
+  malformed-metadata refusals. Regression test: iceberg_malformed (#691).
 - Fixed an HTTP request-line injection in the object-store client. A URL path or
   host containing CR or LF was written verbatim into the request line, so a
   crafted path could split the request and smuggle a second line to an
