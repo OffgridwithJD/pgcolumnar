@@ -102,6 +102,33 @@ check "a position delete naming a different data file deletes nothing (5 rows)" 
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/wrongpath.metadata.json')
 	      AS t(id bigint, region text, amount int)")" "5"
 
+# ---- defect #5: a corrupt position-delete `pos` is refused, not swallowed ----
+# On current main a null pos is silently dropped (the `!n1 && !n2` filter) and a
+# negative pos is cast to a huge uint64 that matches nothing: the scan returns
+# the phantom row(s) with NO error. The reader must instead refuse (XX001).
+check "a position delete with a null pos is refused (XX001, not silently dropped)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nullpos.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+check "...and the null-pos refusal names pos" \
+	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nullpos.metadata.json')
+	              AS t(id bigint, region text, amount int)" | grep -c "null pos")" "1"
+check "backend still up after the null-pos refusal" "$(q 'SELECT 1')" "1"
+
+check "a position delete with a negative pos is refused (XX001, not cast inert)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/negpos.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "XX001"
+check "...and the negative-pos refusal names the negative pos" \
+	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/negpos.metadata.json')
+	              AS t(id bigint, region text, amount int)" | grep -c "negative pos")" "1"
+check "backend still up after the negative-pos refusal" "$(q 'SELECT 1')" "1"
+
+# RISK control: pos == 0 is a LEGITIMATE delete of the first row (id 1). It must
+# apply, not be rejected -- a `pos <= 0` guard would wrongly turn this red.
+check "a position delete of ordinal 0 deletes the first row (id 1 gone, 4 remain)" \
+	"$(q "SELECT string_agg(id::text, ',' ORDER BY id)
+	      FROM pgcolumnar.iceberg_scan('$MDIR/zeropos.metadata.json')
+	        AS t(id bigint, region text, amount int)")" "2,3,4,5"
+
 # ---- 4b: equality deletes are applied ---------------------------------------
 # per-variant surviving id list from the generator's oracle
 eq_oracle() {

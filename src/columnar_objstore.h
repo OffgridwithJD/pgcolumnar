@@ -176,4 +176,7 @@ extern const PgColumnarObjStoreApi *PgColumnarObjStoreGet(void);
 /* Does `path` look like a remote URL at all? Cheap, no module load. */
 extern bool PgColumnarPathIsRemote(const char *path);
 
+/* Refuse a local FIFO/socket/device/directory before it is opened (#644). */
+extern void PgColumnarRejectNonRegularFile(const char *path);
+
 #endif							/* COLUMNAR_OBJSTORE_H */

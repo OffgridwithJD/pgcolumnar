@@ -31,6 +31,7 @@
 #include "utils/tuplestore.h"
 
 #include "columnar_avro.h"
+#include "columnar_objstore.h"
 
 /* Caps so a hostile manifest cannot exhaust memory or spin the backend. */
 #define AV_MAX_FILE			((int64) 256 * 1024 * 1024)
@@ -934,7 +935,10 @@ av_decode_manifest_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestFile *e)
 		else if (strcmp(nm, "content") == 0)
 			e->content = (int32) av_read_long(r, ft, &have);
 		else if (strcmp(nm, "sequence_number") == 0)
+		{
 			e->sequence_number = av_read_long(r, ft, &have);
+			e->has_sequence_number = have;
+		}
 		else if (strcmp(nm, "min_sequence_number") == 0)
 			e->min_sequence_number = av_read_long(r, ft, &have);
 		else if (strcmp(nm, "added_snapshot_id") == 0)
@@ -1264,10 +1268,12 @@ PgColumnarAvroReadManifestList(const uint8 *buf, int64 len, int *nout)
 static uint8 *
 av_slurp_file(const char *path, int64 *outlen)
 {
-	FILE	   *f = AllocateFile(path, PG_BINARY_R);
+	FILE	   *f;
 	int64		flen;
 	uint8	   *buf;
 
+	PgColumnarRejectNonRegularFile(path);
+	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -1412,7 +1418,10 @@ pgcolumnar_read_manifest_list(PG_FUNCTION_ARGS)
 		values[7] = Int64GetDatum(e->added_rows_count);
 		values[8] = Int64GetDatum(e->existing_rows_count);
 		values[9] = Int64GetDatum(e->deleted_rows_count);
-		values[10] = Int64GetDatum(e->sequence_number);
+		if (e->has_sequence_number)
+			values[10] = Int64GetDatum(e->sequence_number);
+		else
+			nulls[10] = true;
 		values[11] = Int64GetDatum(e->min_sequence_number);
 		values[12] = Int64GetDatum(e->added_snapshot_id);
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);

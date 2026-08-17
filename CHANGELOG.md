@@ -14,6 +14,22 @@ which was true until that script existed.
 
 ### Fixed
 
+- The Iceberg read path now refuses four classes of malformed or hostile table
+  metadata that an adversarial re-audit (#644) found it mishandled. A non-regular
+  file (for example a FIFO) named as a metadata, manifest, or data path is
+  refused before it is opened, instead of blocking the backend in a
+  cancel-resistant `open(2)` (an availability denial of service). A manifest-list
+  `sequence_number` that is the Avro union's null branch is refused rather than
+  decoded as 0, which had understated a data file's sequence number and could
+  mis-apply an older delete and drop a live row. A position-delete row with a
+  null or negative `pos` is refused rather than silently dropped, which had left
+  a row the delete was meant to remove. A `current-schema-id` that names a schema
+  absent from the `schemas` array is refused rather than silently resolved to the
+  deprecated top-level `schema`, which had bound columns through a stale schema
+  and misprojected rows. A v1 table with only a top-level `schema` still reads.
+  The same non-regular-file guard also covers `pgcolumnar.import_arrow`, which
+  opened its path with the identical unguarded FIFO `open(2)` denial of service.
+  Regression tests: iceberg_malformed, iceberg_deletes, arrow_import.
 - Concurrent `UPDATE` or `DELETE` of the same columnar row now serializes on the
   row identity, so the losing writer gets a retryable `serialization_failure`
   instead of duplicating the row and losing an update (issue #5, the UPDATE facet).

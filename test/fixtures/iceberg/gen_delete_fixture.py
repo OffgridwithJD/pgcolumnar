@@ -132,6 +132,35 @@ posdel_wrong = pa.table({
 }, schema=posdel.schema)
 pq.write_table(posdel_wrong, os.path.join(OUT, "db", "t", "data", "posdel-wrong.parquet"))
 
+# ---- defect #5: corrupt position-delete `pos` values (#644) ----------------
+# A position delete's (file_path, pos) are both REQUIRED and pos is a
+# non-negative ordinal. These three files exercise the guard.
+# null pos: silently dropped by the old `!n1 && !n2`, leaving the row.
+NULLPOS_PATH = f"{LOC}/data/posdel-nullpos.parquet"
+pq.write_table(pa.table({
+    "file_path": pa.array([DATA_PATH, DATA_PATH], pa.string()),
+    "pos": pa.array([3, None], pa.int64()),          # pos 3 (id 4) valid, one null
+}, schema=pa.schema([
+    pa.field("file_path", pa.string(), nullable=False,
+             metadata={b"PARQUET:field_id": b"2147483546"}),
+    pa.field("pos", pa.int64(), nullable=True,        # nullable so None is writable
+             metadata={b"PARQUET:field_id": b"2147483545"}),
+])), os.path.join(OUT, "db", "t", "data", "posdel-nullpos.parquet"))
+
+# negative pos: cast to a huge uint64 at apply time, silently inert.
+NEGPOS_PATH = f"{LOC}/data/posdel-negpos.parquet"
+pq.write_table(pa.table({
+    "file_path": pa.array([DATA_PATH, DATA_PATH], pa.string()),
+    "pos": pa.array([3, -1], pa.int64()),             # pos 3 valid, -1 corrupt
+}, schema=posdel.schema), os.path.join(OUT, "db", "t", "data", "posdel-negpos.parquet"))
+
+# pos == 0: the RISK control -- the first row is a LEGITIMATE delete target.
+ZEROPOS_PATH = f"{LOC}/data/posdel-zeropos.parquet"
+pq.write_table(pa.table({
+    "file_path": pa.array([DATA_PATH], pa.string()),
+    "pos": pa.array([0], pa.int64()),                 # deletes row 0 == id 1
+}, schema=posdel.schema), os.path.join(OUT, "db", "t", "data", "posdel-zeropos.parquet"))
+
 # ---- the manifests, manifest list, metadata -------------------------------
 md = os.path.join(OUT, "db", "t", "metadata")
 SNAP = 7766554433221100
@@ -193,6 +222,13 @@ emit_variant("inherit", 1, DATA_SEQ, entry_seq=None)
 # a position delete (applicable by sequence) whose rows name a DIFFERENT data
 # file; per-file scoping means it must delete nothing from data.parquet
 emit_variant("wrongpath", 1, DATA_SEQ, del_file=WRONG_DEL_PATH)
+
+# defect #5: a position delete at the applicable seq 5 whose pos column is
+# corrupt (null / negative) -- must be REFUSED (XX001), not silently dropped.
+emit_variant("nullpos", 1, DATA_SEQ, del_file=NULLPOS_PATH)
+emit_variant("negpos",  1, DATA_SEQ, del_file=NEGPOS_PATH)
+# pos == 0 is valid (deletes the first row); proves the guard is `< 0`, not `<= 0`.
+emit_variant("zeropos", 1, DATA_SEQ, del_file=ZEROPOS_PATH)
 
 # spec violation: an EXISTING (status 0) data entry with a NULL sequence number.
 # The spec inherits a null sequence number only for ADDED (status 1) entries; on

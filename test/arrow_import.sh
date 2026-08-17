@@ -25,6 +25,23 @@ set -uo pipefail
 
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
+# Run one statement under a HARD wall-clock cap. A cancel-resistant open (a FIFO)
+# cannot be ended by statement_timeout, so the external timeout is the only
+# reliable detector. Prints the 5-char SQLSTATE, or HANG when psql was KILLed.
+sqlstate_or_hang() {
+	local out rc
+	out="$(timeout -s KILL 5 env PATH="$PGC_BINDIR:$PATH" psql \
+		-h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF
+\\set VERBOSITY sqlstate
+$1;
+SQLEOF
+)"
+	rc=$?
+	if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then echo HANG; return; fi
+	printf '%s\n' "$out" | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
+
 have_pyarrow=1
 python3 -c 'import pyarrow' 2>/dev/null || have_pyarrow=0
 
@@ -200,5 +217,16 @@ psql_run "SELECT pgcolumnar.import_arrow('ix_part', '$IXFILE');"
 check "partial index covers its rows after import" \
 	"$(q "$IDX_SETUP
 	      SELECT count(*) FROM ix_part WHERE id BETWEEN 100 AND 199;" | tail -1)" "100"
+
+# --- #686/#644: import_arrow must refuse a FIFO, not hang the backend ---------
+# fopen("rb") on a FIFO blocks in open(2); with SA_RESTART the block survives a
+# cancel/statement_timeout. RED (unguarded) is a wall-clock HANG; GREEN is XX001.
+echo "-- FIFO refusal"
+psql_run "CREATE TABLE ia_fifo (a int) USING pgcolumnar;"
+IAFIFO="$PGC_WORKDIR/ia.fifo"; mkfifo "$IAFIFO"
+check "import_arrow on a FIFO is refused, not a hang (XX001)" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.import_arrow('ia_fifo', '$IAFIFO')")" \
+	"XX001"; fifo_release "$IAFIFO"
+check "backend still up after the import_arrow FIFO refusal" "$(q 'SELECT 1')" "1"
 
 pgc_summary

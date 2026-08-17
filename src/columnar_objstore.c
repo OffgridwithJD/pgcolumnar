@@ -57,6 +57,40 @@ PgColumnarPathIsRemote(const char *path)
 	return false;
 }
 
+/*
+ * Refuse a LOCAL path that names anything but a regular file, BEFORE it is
+ * opened. AllocateFile()/fopen("rb") on a FIFO blocks in open(2) until a writer
+ * appears; because our signal handlers use SA_RESTART the blocked open resumes
+ * across SIGINT/SIGALRM, so neither a query cancel nor statement_timeout gets
+ * the backend back (a cancel-resistant availability DoS). An fstat AFTER the
+ * open cannot help -- the block is inside the open itself -- so screen first.
+ *
+ * A regular file (or a symlink to one; stat() follows) is allowed. A FIFO,
+ * socket, block/char device, or directory is refused. A path that does not
+ * exist / cannot be stat'd is left to the opener, which reports the errno by
+ * name (a typo must still be a clean "could not open file", not this error).
+ * Remote (s3://, http(s)://) paths are not filesystem objects: skipped.
+ *
+ * This must sit at EVERY local open the Iceberg/parquet read path can reach
+ * (ice_slurp_text, ice_slurp_bin, av_slurp_file, pq_source_open_cfg), not only
+ * in ice_open_path: the SQL-argument metadata pointer and the avro/parquet
+ * function APIs open without going through ice_open_path.
+ */
+void
+PgColumnarRejectNonRegularFile(const char *path)
+{
+	struct stat st;
+
+	if (PgColumnarPathIsRemote(path))
+		return;
+	if (stat(path, &st) != 0)
+		return;					/* leave errno reporting to the opener */
+	if (!S_ISREG(st.st_mode))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("columnar: \"%s\" is not a regular file", path)));
+}
+
 const PgColumnarObjStoreApi *
 PgColumnarObjStoreGet(void)
 {
