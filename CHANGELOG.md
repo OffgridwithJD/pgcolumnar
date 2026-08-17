@@ -27,7 +27,9 @@ which was true until that script existed.
   absent from the `schemas` array is refused rather than silently resolved to the
   deprecated top-level `schema`, which had bound columns through a stale schema
   and misprojected rows. A v1 table with only a top-level `schema` still reads.
-  Regression tests: iceberg_malformed, iceberg_deletes.
+  The same non-regular-file guard also covers `pgcolumnar.import_arrow`, which
+  opened its path with the identical unguarded FIFO `open(2)` denial of service.
+  Regression tests: iceberg_malformed, iceberg_deletes, arrow_import.
 - Concurrent `UPDATE` or `DELETE` of the same columnar row now serializes on the
   row identity, so the losing writer gets a retryable `serialization_failure`
   instead of duplicating the row and losing an update (issue #5, the UPDATE facet).

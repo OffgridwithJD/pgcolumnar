@@ -25,6 +25,7 @@
  */
 #include "columnar.h"
 #include "columnar_flatbuffers.h"
+#include "columnar_objstore.h"
 #include "columnar_sink.h"
 
 #include "fmgr.h"
@@ -1836,6 +1837,10 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 		imp_assign_buffers(&tops[i], &totalBuffers);
 	}
 
+	/* refuse a FIFO/non-regular file before the open, same as the Iceberg and
+	 * parquet read paths: fopen("rb") on a FIFO blocks in open(2) and the block
+	 * survives a cancel/statement_timeout (a DoS). See #644 / #686. */
+	PgColumnarRejectNonRegularFile(path);
 	f = AllocateFile(path, PG_BINARY_R);
 	if (f == NULL)
 	{
