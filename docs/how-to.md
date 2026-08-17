@@ -112,6 +112,65 @@ SELECT pgcolumnar.recluster('events', 'customer_id', 'amount');   -- online
 SELECT * FROM pgcolumnar.sort_status('events');
 ```
 
+## Skip more chunk groups on equality filters
+
+A bloom filter skips a chunk group when an equality filter names a value the group
+does not hold. It complements the minimum and maximum, which skip range filters
+only. Bloom filtering is on by default (`pgcolumnar.enable_bloom_filter`).
+
+```sql
+EXPLAIN (ANALYZE) SELECT * FROM events WHERE customer_id = 42;
+```
+
+**Tuning.** It works best on a clustered or sorted column, because equal values
+then sit in few chunk groups. Read `Columnar Chunk Groups Removed by Filter` to
+confirm the skip. A scattered high-cardinality column gains little. Turn the
+feature off with `SET pgcolumnar.enable_bloom_filter = off` to compare.
+
+## Add a projection for a second sort order
+
+A table has one physical sort order. A projection stores a column subset a second
+time under a different sort key, so a second access pattern also prunes well. The
+planner reads the projection instead of the base table when the projection covers
+every column the query needs and gives a lower cost.
+
+```sql
+SELECT pgcolumnar.add_projection(
+    'events', 'events_by_customer',
+    columns  => ARRAY['customer_id', 'amount', 'ts'],
+    sort_key => ARRAY['customer_id']);
+
+EXPLAIN SELECT sum(amount) FROM events WHERE customer_id = 42;
+```
+
+Adding a projection fills it from the existing rows. Later inserts write to the
+base table and to every projection, so each projection adds write cost. Drop one
+with `pgcolumnar.drop_projection('events', 'events_by_customer')`.
+
+**Tuning.** Add a projection only for a hot access pattern the base sort order
+serves poorly. Confirm the plan shows `Columnar Projection`. Keep the column list
+minimal, because a projection that misses one queried column is never used. See
+Projections in the administration guide for detail.
+
+## Add indexes and use index-only scans
+
+A columnar table supports B-tree and other index types. An index helps a highly
+selective point lookup that no chunk-group skip can serve. An index-only scan
+answers a query from the index alone when the chunk groups it reads are all
+visible.
+
+```sql
+CREATE INDEX ON events (order_id);
+VACUUM events;
+EXPLAIN (ANALYZE) SELECT order_id FROM events WHERE order_id = 9001;
+```
+
+**Tuning.** Keep `VACUUM` current, because any write clears the all-visible mark
+and forces a fetch from the row data. `pgcolumnar.enable_index_only_scan` and
+`pgcolumnar.enable_index_fetch_penalty` shape when the planner prefers an index
+over a scan. Prefer a sort key or a projection for a range query. Reserve an index
+for a selective point lookup.
+
 ## Reclaim space after deletes and updates
 
 A delete or update marks rows dead. Space returns when you compact.
@@ -310,12 +369,60 @@ transforms. It prunes `year`, `month`, `day`, and `hour` on a timestamp or
 timestamptz column, and `year`, `month`, and `day` on a date column. Metrics
 pruning covers integer and boolean columns by their stored minimum and maximum.
 Pruning never changes the rows returned. A predicate the wrapper cannot decide
-simply reads the file.
+reads the file and returns the same rows.
 
 **Tuning.** Filter on a partition column to remove whole files. Filter on an
 integer or boolean column to prune by metrics. Confirm the effect with
 `EXPLAIN (ANALYZE)`, which reports `Files Pruned`. A predicate on an unsupported
 type still returns correct rows, only without the pruning.
+
+## Tune concurrent writes
+
+pgColumnar serializes two conflicting writes so neither is lost. A concurrent
+insert of the same unique key, and a concurrent `UPDATE` or `DELETE` of the same
+row, each take a transaction-scoped advisory lock. The losing writer gets a
+retryable error, which the application repeats.
+
+```conf
+# postgresql.conf (both bucket counts are read at server start only)
+pgcolumnar.row_lock_buckets = 4096
+pgcolumnar.unique_lock_buckets = 512
+```
+
+**Tuning.** `pgcolumnar.enable_row_update_lock` and
+`pgcolumnar.enable_unique_insert_lock` are on by default and should stay on for
+correctness. Raise `row_lock_buckets` or `unique_lock_buckets` for a workload with
+many concurrent single-row writes, so fewer unrelated rows share a bucket. Retry a
+`serialization_failure` (SQLSTATE 40001) in the application. See Concurrency in the
+limitations guide.
+
+## Vectorize a GROUP BY aggregate
+
+The vectorized aggregate path computes an ungrouped aggregate over decoded
+vectors. An opt-in setting extends it to `GROUP BY`.
+
+```sql
+SET pgcolumnar.enable_group_vectorization = on;
+EXPLAIN (ANALYZE) SELECT region, sum(amount) FROM events GROUP BY region;
+```
+
+**Tuning.** Turn it on for a `GROUP BY` with a bounded number of distinct groups.
+The plan then shows `Columnar Vectorized Group Keys`. A query that exceeds
+`pgcolumnar.groupagg_max_groups` (default 1000000) raises an error, so leave the
+setting off for high-cardinality grouping.
+
+## Count rows quickly
+
+An unfiltered `count(*)` reads the per-chunk-group row counts from metadata and
+decodes no column data.
+
+```sql
+EXPLAIN (ANALYZE) SELECT count(*) FROM events;
+```
+
+**Tuning.** A filter, or a table with deleted rows, forces a fold over the
+surviving rows and decodes the filtered columns. Keep the filter on a sorted or
+bloomed column so chunk-group skipping removes most groups first.
 
 ## Measure and introspect
 
@@ -334,3 +441,19 @@ EXPLAIN (ANALYZE) SELECT sum(amount) FROM events WHERE region = 'eu';
 **Tuning.** Read `Columnar Chunk Groups Removed by Filter` to confirm a filter
 skips data. A low removal count on a selective filter means the sort key does not
 match the query. Re-sort on the filtered column, then check the count again.
+
+## Benchmark your own workload
+
+Reference numbers live in the benchmarks guide. Measure your own tables the same
+way.
+
+```sql
+\timing on
+EXPLAIN (ANALYZE, BUFFERS) SELECT sum(amount) FROM events WHERE region = 'eu';
+```
+
+**Tuning.** Warm the cache with one run and time the next. Read the `Columnar`
+counters in the plan to confirm the query took the path you measure, on both the
+columnar table and any row-store baseline. Compare a columnar table against a heap
+table of the same rows, not against a different query. Load enough rows to fill the
+row groups, because a small table hides the skipping and decode effects.

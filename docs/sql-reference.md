@@ -680,10 +680,9 @@ to a new directory therefore still reads. A recorded path that points outside
 the table location is refused, not read.
 
 Delete files are refused, not ignored. A snapshot that carries any delete
-manifest or delete entry raises an error. It does not return rows the table says
-are gone. Reading Iceberg tables that use deletes is a later step (#388
-phase 4). This lists data files from the manifests; opening each Parquet file
-and projecting its columns by field id is the following step (#388 phase 3c).
+manifest or delete entry raises an error here. It does not return rows the table
+says are gone. To read a table that uses deletes, use `iceberg_scan`, which
+applies position, equality, and deletion-vector deletes.
 
 ```sql
 SELECT file_path, record_count, partition

@@ -18,8 +18,9 @@ CREATE TABLE events (
 ) USING pgcolumnar;
 ```
 
-The table behaves like any PostgreSQL table for SQL purposes. It supports
-transactions, constraints, indexes, `COPY`, and `pg_dump`.
+The table behaves like an ordinary PostgreSQL table for most SQL. It supports
+transactions, constraints, indexes, `COPY`, and `pg_dump`. See
+[Limitations](limitations.md) for the exceptions.
 
 ## Convert an existing table
 
