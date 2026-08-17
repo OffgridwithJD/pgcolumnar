@@ -22,6 +22,18 @@ which was true until that script existed.
 
 ### Fixed
 
+- The Thrift and Avro field-skip loops are now interruptible. A Parquet footer
+  whose unknown field is a `list<bool>` with a file-declared count up to
+  `0xFFFFFFFF` (or a struct holding many such lists) drove billions of zero-byte
+  skips through `PgColumnarThriftSkip`, which checked stack depth but not
+  interrupts, so the backend spun uncancellably on a sub-2 KB file reached through
+  `parquet_schema()` / `read_parquet()`. `av_skip` had the same gap on an
+  `array<null>` manifest block, where its interrupt check ran once per block
+  rather than per element. Both now call `CHECK_FOR_INTERRUPTS` on the per-value
+  skip path, so `statement_timeout` and cancel apply. This is a denial-of-service
+  hardening in the same class as the parallel_copy FIFO fix. Regression test:
+  decode_skip_interrupts (functional cancel for Thrift; per-element placement
+  shape for both).
 - `pgcolumnar.read_manifest_list` now reports a null manifest-list
   `min_sequence_number` as SQL NULL instead of 0, matching `sequence_number`. The
   value is not used by the delete-application rules, so this is a display fix.
