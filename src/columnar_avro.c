@@ -330,6 +330,17 @@ av_skip(AvReader *r, AvSchema *s)
 	int64		cnt;
 
 	check_stack_depth();
+
+	/*
+	 * Per-element interrupt check. The AV_ARRAY/AV_MAP arms below check once per
+	 * block, before the count is read, but a single block declares a count up to
+	 * AV_MAX_OBJECTS (50,000,000) and AV_NULL consumes zero bytes, so the inner
+	 * element loop can run 50M no-op skips with nothing to yield on. Because every
+	 * element (and every record field) is one av_skip call, a check here bounds all
+	 * of them uniformly. av_skip only ever skips unconsumed metadata fields, never
+	 * the row data, so this is off the hot path.
+	 */
+	CHECK_FOR_INTERRUPTS();
 	if (r->error)
 		return;
 	switch (s->kind)
