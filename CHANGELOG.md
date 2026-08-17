@@ -35,6 +35,16 @@ which was true until that script existed.
 
 ### Fixed
 
+- Chunk-group skipping now applies to parameterized predicates. A qual like
+  `col >= $1` from a prepared statement, PL/pgSQL, or the extended protocol kept a
+  `Param` operand, and the scan-key builder accepted only a `Const`, so on a
+  generic plan the scan built no key and read every chunk group. Begin now freezes
+  execution-stable operands (a `PARAM_EXTERN`, or a subexpression with no `Var`,
+  no `PARAM_EXEC`, and no volatile function) into `Const`s before building the
+  keys. A correlated `PARAM_EXEC` changes per rescan and is deliberately not
+  frozen, so results stay correct; the executor still re-applies the original qual
+  to every surviving row. On a 20-group test a `>= $1` generic-plan scan went from
+  reading all 20 groups to reading 1. Regression test: native_param_pushdown.
 - Reads of the `delete_vector` catalog now use its `delete_vector_pkey` index
   instead of a sequential scan. `PgColumnarReadDeleteVectorList` (called once per
   row group while a scan builds its liveness cache), the reclaim deleted-count
