@@ -103,6 +103,7 @@ SUITES=(
 	import_export_privilege
 	index_only
 	isolation
+	local_open_race_free
 	logical_subscriber
 	maintenance_due
 	native_agg
