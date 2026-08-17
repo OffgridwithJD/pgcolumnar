@@ -832,8 +832,10 @@ SELECT count(*) FROM pgcolumnar.iceberg_scan(
 ```
 
 The `pgcolumnar_iceberg_catalog` wrapper has a validator but no handler, so its
-servers cannot be selected from as tables. It accepts only `catalog_uri` on a
-server. On a user mapping it accepts `token`, the OAuth2 options
+servers cannot be selected from as tables. It accepts `catalog_uri` and an
+optional `warehouse` on a server. The `warehouse` selects a warehouse on a
+multi-warehouse catalog and is sent as the `?warehouse=` parameter on the
+`GET /v1/config` request. On a user mapping it accepts `token`, the OAuth2 options
 (`oauth_client_id`, `oauth_client_secret`, `oauth_scope`, `oauth_token_uri`), and
 `credentials_required`. A secret on a server, where options are world-readable,
 is rejected. Setting `credentials_required 'false'` is restricted to a superuser.

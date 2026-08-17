@@ -14,7 +14,8 @@
  * ENVIRONMENT (PGCOLUMNAR_ICEBERG_REST_TOKEN), never a SQL argument: a token in
  * a function argument would land in pg_stat_activity and the statement log. The
  * per-catalog FOREIGN SERVER + USER MAPPING credential model, vended storage
- * credentials, and OAuth2 token exchange are tracked as #656.
+ * credentials, OAuth2 token exchange, and the warehouse server option are
+ * implemented (issue #656); secrets live only on the USER MAPPING.
  *
  * See design/ISSUE_388_PHASE7_REST_CATALOG.md.
  *-------------------------------------------------------------------------
@@ -110,11 +111,13 @@ static char *rest_oauth_token(const char *catalog_uri, const char *token_uri,
 							  const char *scope);
 
 static void
-rest_resolve_server(const char *name, char **out_uri, char **out_token)
+rest_resolve_server(const char *name, char **out_uri, char **out_token,
+					char **out_warehouse)
 {
 	ForeignServer *srv = GetForeignServerByName(name, false);
 	ListCell   *lc;
 	char	   *uri = NULL;
+	char	   *warehouse = NULL;
 	char	   *token = NULL;
 	char	   *oauthId = NULL;
 	char	   *oauthSecret = NULL;
@@ -129,6 +132,8 @@ rest_resolve_server(const char *name, char **out_uri, char **out_token)
 
 		if (strcmp(d->defname, "catalog_uri") == 0)
 			uri = defGetString(d);
+		else if (strcmp(d->defname, "warehouse") == 0)
+			warehouse = defGetString(d);
 	}
 	if (uri == NULL)
 		ereport(ERROR,
@@ -212,6 +217,8 @@ rest_resolve_server(const char *name, char **out_uri, char **out_token)
 
 	*out_uri = pstrdup(uri);
 	*out_token = token;
+	if (out_warehouse != NULL)
+		*out_warehouse = (warehouse != NULL) ? pstrdup(warehouse) : NULL;
 }
 
 /*
@@ -221,7 +228,8 @@ rest_resolve_server(const char *name, char **out_uri, char **out_token)
  * URL, so the two are unambiguous.
  */
 static void
-rest_resolve(const char *arg0, char **out_uri, char **out_token)
+rest_resolve(const char *arg0, char **out_uri, char **out_token,
+			 char **out_warehouse)
 {
 	if (pg_strncasecmp(arg0, "http://", 7) == 0 ||
 		pg_strncasecmp(arg0, "https://", 8) == 0)
@@ -230,9 +238,11 @@ rest_resolve(const char *arg0, char **out_uri, char **out_token)
 
 		*out_uri = pstrdup(arg0);
 		*out_token = (env != NULL && env[0] != '\0') ? pstrdup(env) : NULL;
+		if (out_warehouse != NULL)
+			*out_warehouse = NULL;	/* a bare URI carries no warehouse */
 	}
 	else
-		rest_resolve_server(arg0, out_uri, out_token);
+		rest_resolve_server(arg0, out_uri, out_token, out_warehouse);
 }
 
 /* Append `s` percent-encoded (RFC 3986 unreserved kept), for one path segment. */
@@ -479,12 +489,13 @@ rest_oauth_token(const char *catalog_uri, const char *token_uri,
  */
 static Jsonb *
 rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
-					const char *token, char **out_location)
+					const char *token, const char *warehouse, char **out_location)
 {
 	Jsonb	   *cfg;
 	char	   *prefix;
 	Jsonb	   *lt;
 	StringInfoData rp;
+	StringInfoData cfgpath;
 
 	if (pg_strncasecmp(catalog_uri, "http://", 7) != 0 &&
 		pg_strncasecmp(catalog_uri, "https://", 8) != 0)
@@ -492,8 +503,17 @@ rest_load_table_doc(const char *catalog_uri, const char *ns, const char *table,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("iceberg: a REST catalog URI must be http:// or https://")));
 
-	/* config: {overrides, defaults}; a prefix, if any, is spliced after /v1/ */
-	cfg = rest_get_json(catalog_uri, "/v1/config", "config", token);
+	/* config: {overrides, defaults}; a prefix, if any, is spliced after /v1/.
+	 * A warehouse option selects a warehouse on a multi-warehouse catalog and is
+	 * sent as the ?warehouse= query parameter (Iceberg REST spec). */
+	initStringInfo(&cfgpath);
+	appendStringInfoString(&cfgpath, "/v1/config");
+	if (warehouse != NULL && warehouse[0] != '\0')
+	{
+		appendStringInfoString(&cfgpath, "?warehouse=");
+		rest_pct_encode(&cfgpath, warehouse);
+	}
+	cfg = rest_get_json(catalog_uri, cfgpath.data, "config", token);
 	/*
 	 * The config body is untrusted (a compromised or hostile allow-listed
 	 * catalog). getKeyJsonValueFromContainer Asserts object-ness before its
@@ -627,11 +647,11 @@ rest_vended_cfg(JsonbContainer *lt, const char *metadata_location)
 char *
 PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
 									   const char *ns, const char *table,
-									   const char *token)
+									   const char *token, const char *warehouse)
 {
 	char	   *loc;
 
-	(void) rest_load_table_doc(catalog_uri, ns, table, token, &loc);
+	(void) rest_load_table_doc(catalog_uri, ns, table, token, warehouse, &loc);
 	return loc;
 }
 
@@ -650,6 +670,7 @@ pgcolumnar_iceberg_rest_table_location(PG_FUNCTION_ARGS)
 	char	   *table = text_to_cstring(PG_GETARG_TEXT_PP(2));
 	char	   *catalog_uri;
 	char	   *token;
+	char	   *warehouse;
 	char	   *loc;
 
 	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
@@ -657,8 +678,9 @@ pgcolumnar_iceberg_rest_table_location(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 
-	rest_resolve(arg0, &catalog_uri, &token);
-	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table, token);
+	rest_resolve(arg0, &catalog_uri, &token, &warehouse);
+	loc = PgColumnarIcebergRestLoadTableLocation(catalog_uri, ns, table, token,
+												 warehouse);
 	PG_RETURN_TEXT_P(cstring_to_text(loc));
 }
 
@@ -681,6 +703,7 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 	TupleDesc	tupdesc;
 	char	   *catalog_uri;
 	char	   *token;
+	char	   *warehouse;
 	Jsonb	   *lt;
 	char	   *loc;
 	PgColumnarObjStoreConfig *cfg;
@@ -700,9 +723,9 @@ pgcolumnar_iceberg_rest_scan(PG_FUNCTION_ARGS)
 				 errmsg("pgcolumnar.iceberg_rest_scan requires a column definition list"),
 				 errhint("Call it as SELECT * FROM pgcolumnar.iceberg_rest_scan(uri, ns, tbl) AS t(col1 type1, ...).")));
 
-	rest_resolve(arg0, &catalog_uri, &token);
+	rest_resolve(arg0, &catalog_uri, &token, &warehouse);
 	/* one loadTable: the metadata-location AND the vended storage creds (if any) */
-	lt = rest_load_table_doc(catalog_uri, ns, table, token, &loc);
+	lt = rest_load_table_doc(catalog_uri, ns, table, token, warehouse, &loc);
 	cfg = rest_vended_cfg(&lt->root, loc);
 	/*
 	 * A metadata-location is a URI. The reader's remote path handles s3:// and
@@ -742,7 +765,7 @@ pgcolumnar_iceberg_rest_namespaces(PG_FUNCTION_ARGS)
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 	ts = rest_text_srf_setup(rsinfo, &td);
 
-	rest_resolve(arg0, &catalog_uri, &token);
+	rest_resolve(arg0, &catalog_uri, &token, NULL);
 	doc = rest_get_json(catalog_uri, "/v1/namespaces", "namespaces", token);
 	if (!JsonContainerIsObject(&doc->root))
 		ereport(ERROR,
@@ -815,7 +838,7 @@ pgcolumnar_iceberg_rest_tables(PG_FUNCTION_ARGS)
 				 errmsg("must be superuser or a member of the pg_read_server_files role to read a REST catalog")));
 	ts = rest_text_srf_setup(rsinfo, &td);
 
-	rest_resolve(arg0, &catalog_uri, &token);
+	rest_resolve(arg0, &catalog_uri, &token, NULL);
 	initStringInfo(&rp);
 	appendStringInfoString(&rp, "/v1/namespaces/");
 	rest_append_namespace(&rp, ns);
@@ -875,13 +898,16 @@ pgcolumnar_iceberg_catalog_validator(PG_FUNCTION_ARGS)
 
 		if (catalog == ForeignServerRelationId)
 		{
-			/* srvoptions is world-readable: only the non-secret URI belongs here */
-			if (strcmp(def->defname, "catalog_uri") != 0)
+			/* srvoptions is world-readable: only non-secret options belong here.
+			 * catalog_uri is the endpoint; warehouse selects a warehouse on a
+			 * multi-warehouse catalog and is sent on GET /v1/config. */
+			if (strcmp(def->defname, "catalog_uri") != 0 &&
+				strcmp(def->defname, "warehouse") != 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 						 errmsg("invalid option \"%s\" for a pgcolumnar_iceberg_catalog server",
 								def->defname),
-						 errhint("Valid server option: catalog_uri. Secrets go on a USER MAPPING.")));
+						 errhint("Valid server options: catalog_uri, warehouse. Secrets go on a USER MAPPING.")));
 		}
 		else if (catalog == UserMappingRelationId)
 		{

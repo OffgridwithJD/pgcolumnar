@@ -12,6 +12,14 @@ which was true until that script existed.
 
 ## [Unreleased]
 
+### Added
+
+- The Iceberg REST catalog `FOREIGN SERVER` now accepts a `warehouse` option
+  alongside `catalog_uri`. It selects a warehouse on a multi-warehouse catalog
+  and is sent as the `?warehouse=` query parameter on the `GET /v1/config`
+  request. This completes the per-catalog credential model (issue #656).
+  Regression test: iceberg_rest_server.
+
 ### Fixed
 
 - The Iceberg read path now refuses four classes of malformed or hostile table
