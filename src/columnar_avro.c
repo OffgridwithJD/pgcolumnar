@@ -330,6 +330,17 @@ av_skip(AvReader *r, AvSchema *s)
 	int64		cnt;
 
 	check_stack_depth();
+
+	/*
+	 * Per-element interrupt check. The AV_ARRAY/AV_MAP arms below check once per
+	 * block, before the count is read, but a single block declares a count up to
+	 * AV_MAX_OBJECTS (50,000,000) and AV_NULL consumes zero bytes, so the inner
+	 * element loop can run 50M no-op skips with nothing to yield on. Because every
+	 * element (and every record field) is one av_skip call, a check here bounds all
+	 * of them uniformly. av_skip only ever skips unconsumed metadata fields, never
+	 * the row data, so this is off the hot path.
+	 */
+	CHECK_FOR_INTERRUPTS();
 	if (r->error)
 		return;
 	switch (s->kind)
@@ -1271,33 +1282,11 @@ PgColumnarAvroReadManifestList(const uint8 *buf, int64 len, int *nout)
 static uint8 *
 av_slurp_file(const char *path, int64 *outlen)
 {
-	FILE	   *f;
-	int64		flen;
 	uint8	   *buf;
 
-	PgColumnarRejectNonRegularFile(path);
-	f = AllocateFile(path, PG_BINARY_R);
-	if (f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	if (fseeko(f, 0, SEEK_END) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	flen = (int64) ftello(f);
-	if (flen < 0 || flen > AV_MAX_FILE)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("columnar: Avro file \"%s\" is too large", path)));
-	if (fseeko(f, 0, SEEK_SET) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	buf = (uint8 *) palloc(Max(flen, 1));
-	if (flen > 0 && fread(buf, 1, flen, f) != (size_t) flen)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not read \"%s\": %m", path)));
-	FreeFile(f);
-	*outlen = flen;
+	/* Race-free local open (rejects a FIFO without a stat-before-open window). */
+	buf = (uint8 *) PgColumnarSlurpLocalRegularFile(path, AV_MAX_FILE,
+													"Avro file", outlen);
 	return buf;
 }
 
