@@ -22,6 +22,18 @@ which was true until that script existed.
 
 ### Changed
 
+- The native encoding-descriptor wire layout is single-sourced. The descriptor
+  is a column chunk's writer-to-reader contract for its per-vector encoding; its
+  byte layout was hand-packed in `columnar_write_state.c` and hand-parsed in three
+  passes in `columnar_reader.c`, so a field change had to be made in five disjoint
+  places or a reader stride would land mid-field. Because the version byte does
+  not move on a field change, the version guard would pass and the mismatch would
+  surface as `DATA_CORRUPTED` or wrong values, not a clean rejection. A new
+  `columnar_encdesc.h` owns the layout (`PgColumnarEncdescPut*` / `ReadEntry`), and
+  a `StaticAssert` ties the entry length to the field widths. The on-disk bytes are
+  unchanged (verified byte-identical to the hand-packed form). Regression test:
+  native_encdesc_golden (pins the layout; catches a field-order change that the
+  self-consistent round-trip suites cannot).
 - The delete-vector visibility logic is single-sourced. The fold that ORs a row
   group's delete bitmaps into one mask was duplicated in the sequential scan and
   the index-fetch liveness cache, and the per-row bit test was open-coded in five

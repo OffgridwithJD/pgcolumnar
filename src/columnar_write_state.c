@@ -12,6 +12,7 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_encdesc.h"
 
 #include "columnar_metadata.h"
 #include "columnar_storage.h"
@@ -42,6 +43,17 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+
+/*
+ * The encoding-descriptor entry and header lengths must equal the field widths
+ * columnar_encdesc.h packs and columnar_reader.c parses. If a field is added or
+ * a width changed without updating these, a reader stride lands mid-field; pin it
+ * at compile time so the mismatch is a build error, not a DATA_CORRUPTED at read.
+ */
+StaticAssertDecl(COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN == 1 + 3 * (int) sizeof(uint32),
+				 "encdesc entry length drifted from its field widths");
+StaticAssertDecl(COLUMNAR_NATIVE_ENCDESC_HEADER_LEN == 2 + (int) sizeof(uint32),
+				 "encdesc header length drifted from its field widths");
 
 #ifndef DSM_HANDLE_INVALID
 #define DSM_HANDLE_INVALID 0
@@ -1094,8 +1106,6 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	uint64		rowIdx = 0;
 	StringInfo	encoded = makeStringInfo();
 	StringInfo	desc = makeStringInfo();
-	uint8		descVersion = COLUMNAR_NATIVE_ENCDESC_VERSION;
-	uint8		descReserved = 0;
 	uint32		vectorCount = (uint32) list_length(chunkGroups);
 	char	   *fsstTable = NULL;	/* chunk-shared FSST table (E3b), or NULL */
 	uint32		fsstTableLen = 0;
@@ -1143,10 +1153,8 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	}
 	appendBinaryStringInfo(chunk, (char *) validity, validityBytes);
 
-	/* descriptor header */
-	appendBinaryStringInfo(desc, (char *) &descVersion, 1);
-	appendBinaryStringInfo(desc, (char *) &descReserved, 1);
-	appendBinaryStringInfo(desc, (char *) &vectorCount, sizeof(uint32));
+	/* descriptor header (columnar_encdesc.h owns the wire layout) */
+	PgColumnarEncdescPutHeader(desc, vectorCount);
 
 	/*
 	 * E3b: build one FSST symbol table for the whole column chunk from a
@@ -1311,10 +1319,8 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 		entryType = (uint8) encType;
 		entryValueCount = (uint32) col->valueCount;
 		entryRawLen = (uint32) col->valueStream.len;
-		appendBinaryStringInfo(desc, (char *) &entryType, 1);
-		appendBinaryStringInfo(desc, (char *) &entryValueCount, sizeof(uint32));
-		appendBinaryStringInfo(desc, (char *) &entryRawLen, sizeof(uint32));
-		appendBinaryStringInfo(desc, (char *) &encLen, sizeof(uint32));
+		PgColumnarEncdescPutEntry(desc, entryType, entryValueCount,
+								  entryRawLen, encLen);
 
 		/* per-vector zone map (native spec 7.1, D5) */
 		{
