@@ -179,6 +179,33 @@ open(os.path.join(nsml, "ml_ctl.avro"), "wb").write(
     ocf(MFILE_V2, [mfile_v2_seq(f"file://{ROOT}/x/dm.avro", 0, 5, SNAP)]))
 
 
+# ============================ nullminseq (#686/#691 cosmetic) ==
+# A manifest_file.min_sequence_number that is the union's NULL branch was decoded
+# silently as 0. It is not consumed by the delete rules, so this is cosmetic, but
+# read_manifest_list should report SQL NULL, matching sequence_number.
+MFILE_NULLMIN = json.dumps({"type": "record", "name": "manifest_file", "fields": [
+    {"name": "manifest_path", "type": "string"},
+    {"name": "manifest_length", "type": "long"},
+    {"name": "partition_spec_id", "type": "int"},
+    {"name": "content", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "min_sequence_number", "type": ["null", "long"]},
+    {"name": "added_snapshot_id", "type": "long"}]}).encode()
+
+
+def mfile_nullmin(path, content, seq, minseq, snap):
+    seqb = zz(0) if seq is None else (zz(1) + zz(seq))
+    minb = zz(0) if minseq is None else (zz(1) + zz(minseq))
+    return s(path.encode()) + zz(1000) + zz(0) + zz(content) + seqb + minb + zz(snap)
+
+
+nmml = os.path.join(OUT, "nullminseq_ml"); os.makedirs(nmml)
+open(os.path.join(nmml, "ml.avro"), "wb").write(
+    ocf(MFILE_NULLMIN, [mfile_nullmin(f"file://{ROOT}/x/dm.avro", 0, 5, None, SNAP)]))
+open(os.path.join(nmml, "ml_ctl.avro"), "wb").write(
+    ocf(MFILE_NULLMIN, [mfile_nullmin(f"file://{ROOT}/x/dm.avro", 0, 5, 7, SNAP)]))
+
+
 # --- scan-level: a data file whose ADDED entry inherits the null manifest seq,
 #     plus a seq-3 position delete dropping ordinal 0 (id 1) of data.parquet ----
 def build_nullseq(name, data_mfile_seq):

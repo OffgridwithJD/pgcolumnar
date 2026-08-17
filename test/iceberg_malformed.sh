@@ -52,6 +52,7 @@ FX="$(dirname "${BASH_SOURCE[0]}")/fixtures/iceberg"
 WHM="$FX/warehouse_malformed"
 [ -f "$WHM/nullpath/db/t/metadata/t.metadata.json" ] \
 	&& [ -f "$WHM/nullseq_ml/ml.avro" ] \
+	&& [ -f "$WHM/nullminseq_ml/ml.avro" ] \
 	&& [ -f "$WHM/nullmanifestpath/db/t/metadata/t.metadata.json" ] \
 	&& [ -f "$WHM/danglingschema/db/t/metadata/t.metadata.json" ] \
 	|| pgc_skip fixture "malformed iceberg fixtures are missing"
@@ -170,6 +171,14 @@ check "a null manifest-list sequence_number decodes as NULL, not 0" \
 check "control: a present manifest-list sequence_number decodes to its value" \
 	"$(q "SELECT sequence_number FROM pgcolumnar.read_manifest_list('$NSML/ml_ctl.avro')")" \
 	"5"
+# #686/#691: a null min_sequence_number should read as SQL NULL, not 0 (cosmetic).
+NMML="$DEST/nullminseq_ml"
+check "a null manifest-list min_sequence_number decodes as NULL, not 0 (#686)" \
+	"$(q "SELECT min_sequence_number IS NULL FROM pgcolumnar.read_manifest_list('$NMML/ml.avro')")" \
+	"t"
+check "control: a present min_sequence_number decodes to its value (#686)" \
+	"$(q "SELECT min_sequence_number FROM pgcolumnar.read_manifest_list('$NMML/ml_ctl.avro')")" \
+	"7"
 
 NS="$DEST/nullseq/db/t/metadata/t.metadata.json"
 NSC="$DEST/nullseq_ctl/db/t/metadata/t.metadata.json"
