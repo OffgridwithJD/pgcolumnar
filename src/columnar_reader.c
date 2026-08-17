@@ -137,6 +137,7 @@ struct PgColumnarReadState
 	char	   *nativeBuffer;		/* whole current row group, in groupContext */
 	char	  **nativeValidity;		/* [natts]; NULL if the column is absent */
 	char	  **nativeValueCursor;	/* [natts]; advancing values cursor */
+	char	  **nativeValueEnd;		/* [natts]; one past the last value byte, for bounds */
 
 	/*
 	 * Per-vector (1024-row) skipping within a loaded group (Phase D5b). When any
@@ -298,7 +299,7 @@ PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
  *		stripe buffer's next reset.
  */
 Datum
-PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
+PgColumnarDecodeValue(Form_pg_attribute att, char **cursor, const char *end,
 					MemoryContext targetContext)
 {
 	char	   *p = *cursor;
@@ -306,20 +307,29 @@ PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 
 	if (att->attbyval)
 	{
+		if (p + att->attlen > end)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
 		result = fetch_att(p, true, att->attlen);
 		*cursor = p + att->attlen;
 	}
 	else if (att->attlen > 0)
 	{
-		char	   *copy = MemoryContextAlloc(targetContext, att->attlen);
+		char	   *copy;
 
+		if (p + att->attlen > end)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
+		copy = MemoryContextAlloc(targetContext, att->attlen);
 		memcpy(copy, p, att->attlen);
 		result = PointerGetDatum(copy);
 		*cursor = p + att->attlen;
 	}
 	else
 	{
-		Size		len = PgColumnarVarSizeAnyUnaligned(p);
+		Size		len = PgColumnarVarSizeAnyUnalignedBounded(p, end);
 		char	   *copy = MemoryContextAlloc(targetContext, len);
 
 		memcpy(copy, p, len);
@@ -345,14 +355,20 @@ PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
  * and sits next to it so a change to that cursor arithmetic cannot miss this.
  */
 static inline void
-pgcolumnar_skip_value(Form_pg_attribute att, char **cursor)
+pgcolumnar_skip_value(Form_pg_attribute att, char **cursor, const char *end)
 {
 	char	   *p = *cursor;
 
 	if (att->attbyval || att->attlen > 0)
+	{
+		if (p + att->attlen > end)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
 		*cursor = p + att->attlen;
+	}
 	else
-		*cursor = p + PgColumnarVarSizeAnyUnaligned(p);
+		*cursor = p + PgColumnarVarSizeAnyUnalignedBounded(p, end);
 }
 
 /*
@@ -400,7 +416,7 @@ pgcolumnar_row_read_column(PgColumnarReadState *rs, int c, Datum *values, bool *
 		}
 		else
 			values[c] = PgColumnarDecodeValue(att, &rs->nativeValueCursor[c],
-											rs->rowContext);
+											rs->nativeValueEnd[c], rs->rowContext);
 		nulls[c] = false;
 	}
 	else
@@ -429,7 +445,7 @@ pgcolumnar_row_skip_column(PgColumnarReadState *rs, int c, Datum *values, bool *
 		return;
 
 	if ((vbits[rs->rowInGroup >> 3] >> (rs->rowInGroup & 7)) & 1)
-		pgcolumnar_skip_value(att, &rs->nativeValueCursor[c]);
+		pgcolumnar_skip_value(att, &rs->nativeValueCursor[c], rs->nativeValueEnd[c]);
 }
 
 /* -------------------------------------------------------------------------
@@ -804,7 +820,8 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 							 char *values, uint32 valuesLen,
 							 const char *desc, uint32 descLen, int blockCodec,
 							 uint32 **outVecRawLen, int *outVecCount,
-							 const bool *skipVec, int *outVecDecoded)
+							 const bool *skipVec, int *outVecDecoded,
+							 Size *outRawTotal)
 {
 	int			decodedCount = 0;
 	uint32		vectorCount;
@@ -982,6 +999,8 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		*outVecRawLen = vecRawLen;
 	if (outVecCount != NULL)
 		*outVecCount = (int) vectorCount;
+	if (outRawTotal != NULL)
+		*outRawTotal = (Size) rawTotal;
 	/*
 	 * Reported from the loop that did the work, never derived from the mask the
 	 * caller passed in. Deriving it is the first thing anyone writes here and it
@@ -1163,7 +1182,8 @@ pgcolumnar_native_refine_skipvec(PgColumnarReadState *rs, int vecCount)
 				if (!((rs->nativeValidity[col][r >> 3] >> (r & 7)) & 1))
 					continue;	/* NULL: satisfies no btree comparison */
 
-				val = PgColumnarDecodeValue(att, &vecCur, scratch);
+				val = PgColumnarDecodeValue(att, &vecCur,
+											rs->nativeValueEnd[col], scratch);
 
 				/* every predicate on THIS column, conjunctively */
 				ok = true;
@@ -1218,9 +1238,9 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 		return false;
 
 	cur = (char *) z->minimum;
-	minv = PgColumnarDecodeValue(att, &cur, cx);
+	minv = PgColumnarDecodeValue(att, &cur, z->minimum + z->minimumLen, cx);
 	cur = (char *) z->maximum;
-	maxv = PgColumnarDecodeValue(att, &cur, cx);
+	maxv = PgColumnarDecodeValue(att, &cur, z->maximum + z->maximumLen, cx);
 
 	switch (pred->strategy)
 	{
@@ -2121,6 +2141,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 
 	rs->nativeValidity = palloc0(sizeof(char *) * rs->natts);
 	rs->nativeValueCursor = palloc0(sizeof(char *) * rs->natts);
+	rs->nativeValueEnd = palloc0(sizeof(char *) * rs->natts);
 	rs->nativeVecRawLen = (uint32 **) palloc0(sizeof(uint32 *) * rs->natts);
 	validityBytes = (int) ((rg->rowCount + 7) / 8);
 	maxVecCount = 0;
@@ -2249,8 +2270,10 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
 		{
 			/* D2b baseline: raw present values follow the validity bitmap; no
-			 * per-vector structure, so per-vector skipping is disabled below */
+			 * per-vector structure, so per-vector skipping is disabled below. The
+			 * value region runs from the bitmap end to the chunk end. */
 			rs->nativeValueCursor[cc->columnIndex] = base + validityBytes;
+			rs->nativeValueEnd[cc->columnIndex] = base + cc->pageLength;
 			allDescriptor = false;
 		}
 		else
@@ -2259,6 +2282,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			uint32	   *vraw = NULL;
 			int			vcount = 0;
 			int			vdecoded = 0;
+			Size		rawTotal = 0;
 
 			/* D4: reconstruct the raw present-value stream from the descriptor */
 			rs->nativeValueCursor[cc->columnIndex] =
@@ -2267,7 +2291,9 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 											 cc->encodingDescriptor,
 											 cc->encodingDescriptorLen,
 											 cc->blockCodec, &vraw, &vcount,
-											 rs->nativeSkipVec, &vdecoded);
+											 rs->nativeSkipVec, &vdecoded, &rawTotal);
+			rs->nativeValueEnd[cc->columnIndex] =
+				rs->nativeValueCursor[cc->columnIndex] + rawTotal;
 			rs->nativeVecRawLen[cc->columnIndex] = vraw;
 			if (vcount > maxVecCount)
 				maxVecCount = vcount;
@@ -3053,6 +3079,7 @@ typedef struct PgColumnarFetchGroup
 
 	NativeColumnChunkMetadata **ccForCol;	/* [natts] */
 	char	  **rawBuf;			/* [natts]; NULL until that column is decoded */
+	uint32	   *rawBufLen;		/* [natts]; byte length of rawBuf[c], for bounds */
 
 	/*
 	 * Position indexes, built with rawBuf and holding for as long as it does
@@ -3188,7 +3215,8 @@ pgcolumnar_rank_before(const char *vbits, const uint32 *prefix, uint64 row)
  *		their k-th value is at k * attlen and needs no table.
  */
 static uint32 *
-pgcolumnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues)
+pgcolumnar_build_val_offsets(Form_pg_attribute att, char *rawBuf,
+							 const char *rawEnd, uint32 nvalues)
 {
 	uint32	   *offsets = (uint32 *) palloc(sizeof(uint32) * (nvalues + 1));
 	char	   *cursor = rawBuf;
@@ -3197,7 +3225,7 @@ pgcolumnar_build_val_offsets(Form_pg_attribute att, char *rawBuf, uint32 nvalues
 	for (k = 0; k < nvalues; k++)
 	{
 		offsets[k] = (uint32) (cursor - rawBuf);
-		cursor += PgColumnarVarSizeAnyUnaligned(cursor);
+		cursor += PgColumnarVarSizeAnyUnalignedBounded(cursor, rawEnd);
 
 		/*
 		 * A chunk holds as many values as chunk_group_row_limit allows, which is
@@ -3494,6 +3522,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		entry->vbits = palloc0(sizeof(char *) * natts);
 		entry->ccForCol = palloc0(sizeof(NativeColumnChunkMetadata *) * natts);
 		entry->rawBuf = palloc0(sizeof(char *) * natts);
+		entry->rawBufLen = palloc0(sizeof(uint32) * natts);
 		entry->rankPrefix = palloc0(sizeof(uint32 *) * natts);
 		entry->valOffset = palloc0(sizeof(uint32 *) * natts);
 		entry->colCx = palloc0(sizeof(MemoryContext) * natts);
@@ -3555,6 +3584,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
 		char	   *vbits;
 		char	   *rawBuf;
+		uint32		rawBufLen = 0;	/* byte length of rawBuf, for bounds checks */
 		char	   *cursor;
 		uint64		present;
 		bool		justDecoded;	/* this fetch decoded it; may not fit */
@@ -3604,6 +3634,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		if (entry->rawBuf[c] != NULL)
 		{
 			rawBuf = entry->rawBuf[c];
+			rawBufLen = entry->rawBufLen[c];
 			justDecoded = false;
 		}
 		else
@@ -3647,15 +3678,23 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 
 			decOld = MemoryContextSwitchTo(decCx);
 			if (baseline)
+			{
 				rawBuf = vstream;
+				rawBufLen = vlen;
+			}
 			else
+			{
+				Size		rawTotal = 0;
+
 				rawBuf =
 					pgcolumnar_native_decode_chunk(decCx, att,
 												 vstream, vlen,
 												 cc->encodingDescriptor,
 												 cc->encodingDescriptorLen,
 												 cc->blockCodec, NULL, NULL,
-												 NULL, NULL);
+												 NULL, NULL, &rawTotal);
+				rawBufLen = (uint32) rawTotal;
+			}
 			MemoryContextSwitchTo(decOld);
 
 			/*
@@ -3684,7 +3723,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 						COLUMNAR_RANK_BLOCK_ROWS;
 
 					entry->valOffset[c] =
-						pgcolumnar_build_val_offsets(att, rawBuf,
+						pgcolumnar_build_val_offsets(att, rawBuf, rawBuf + rawBufLen,
 												   entry->rankPrefix[c][nblocks]);
 				}
 				MemoryContextSwitchTo(idxOld);
@@ -3693,6 +3732,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			if (decCx != tmp)
 			{
 				entry->rawBuf[c] = rawBuf;
+				entry->rawBufLen[c] = rawBufLen;
 				/*
 				 * Baseline columns get a context too, now that their stream is
 				 * their own allocation rather than an interior pointer into a
@@ -3719,7 +3759,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		else
 			cursor = rawBuf + entry->valOffset[c][present];
 
-		values[c] = PgColumnarDecodeValue(att, &cursor, target);
+		values[c] = PgColumnarDecodeValue(att, &cursor, rawBuf + rawBufLen, target);
 		nulls[c] = false;
 
 		/*

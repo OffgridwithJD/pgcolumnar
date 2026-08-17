@@ -741,7 +741,9 @@ buffered_build_offsets(ColumnChunkBuffer *col, Form_pg_attribute att,
 			(uint32) (cursor - col->valueStream.data);
 
 		if (col->existsStream.data[i])
-			(void) PgColumnarDecodeValue(att, &cursor, scratch);
+			(void) PgColumnarDecodeValue(att, &cursor,
+										 col->valueStream.data + col->valueStream.len,
+										 scratch);
 	}
 
 	MemoryContextDelete(scratch);
@@ -1040,7 +1042,9 @@ PgColumnarBufferedRowByNumber(Relation rel, uint64 rowNumber,
 
 				if (existsBytes[posInGroup])
 				{
-					values[c] = PgColumnarDecodeValue(att, &cursor, target);
+					values[c] = PgColumnarDecodeValue(att, &cursor,
+													  col->valueStream.data + col->valueStream.len,
+													  target);
 					nulls[c] = false;
 				}
 				else
