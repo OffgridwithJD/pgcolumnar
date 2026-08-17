@@ -1761,7 +1761,7 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 	int			ncols;
 	ImpNode    *tops;
 	int			totalBuffers = 0;
-	FILE	   *f;
+	int			fd;
 	TupleTableSlot *slot;
 	PgColumnarIndexInsertState *indexes;
 	CommandId	cid;
@@ -1840,15 +1840,9 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 	/* refuse a FIFO/non-regular file before the open, same as the Iceberg and
 	 * parquet read paths: fopen("rb") on a FIFO blocks in open(2) and the block
 	 * survives a cancel/statement_timeout (a DoS). See #644 / #686. */
-	PgColumnarRejectNonRegularFile(path);
-	f = AllocateFile(path, PG_BINARY_R);
-	if (f == NULL)
-	{
-		table_close(rel, RowExclusiveLock);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	}
+	/* Race-free local open (rejects a FIFO without a stat-before-open window);
+	 * it raises on failure, and the RowExclusiveLock releases at abort. */
+	fd = PgColumnarOpenLocalRegularFile(path, NULL);
 
 	slot = table_slot_create(rel, NULL);
 	cid = GetCurrentCommandId(true);
@@ -1879,11 +1873,11 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 		uint8		headerType;
 
 		/* message framing: [0xFFFFFFFF] [metaLen] or [metaLen] (legacy) */
-		if (fread(&first, 4, 1, f) != 1)
+		if (!PgColumnarReadExact(fd, &first, 4))
 			break;				/* clean EOF */
 		if (first == 0xFFFFFFFF)
 		{
-			if (fread(&metaLen, 4, 1, f) != 1)
+			if (!PgColumnarReadExact(fd, &metaLen, 4))
 				IMPORT_CORRUPT("truncated continuation");
 		}
 		else
@@ -1892,7 +1886,7 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 			break;				/* end-of-stream marker */
 
 		meta = palloc(metaLen);
-		if (fread(meta, 1, metaLen, f) != metaLen)
+		if (!PgColumnarReadExact(fd, meta, metaLen))
 			IMPORT_CORRUPT("truncated metadata");
 
 		msg = pgc_fb_indirect(meta, metaLen, 0);
@@ -1908,7 +1902,7 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 		if (bodyLength > 0)
 		{
 			body = palloc((Size) bodyLength);
-			if (fread(body, 1, bodyLength, f) != (size_t) bodyLength)
+			if (!PgColumnarReadExact(fd, body, (size_t) bodyLength))
 				IMPORT_CORRUPT("truncated body");
 		}
 
@@ -2030,7 +2024,7 @@ pgcolumnar_import_arrow(PG_FUNCTION_ARGS)
 		pfree(meta);
 	}
 
-	FreeFile(f);
+	CloseTransientFile(fd);
 	MemoryContextDelete(rowCtx);
 	if (indexes != NULL)
 		PgColumnarIndexInsertEnd(indexes);

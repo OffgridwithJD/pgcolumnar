@@ -12,7 +12,11 @@
 #include "fmgr.h"
 #include "utils/elog.h"
 #include "miscadmin.h"
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include "storage/fd.h"
 
 #include "columnar.h"
 #include "columnar_objstore.h"
@@ -58,37 +62,132 @@ PgColumnarPathIsRemote(const char *path)
 }
 
 /*
- * Refuse a LOCAL path that names anything but a regular file, BEFORE it is
- * opened. AllocateFile()/fopen("rb") on a FIFO blocks in open(2) until a writer
- * appears; because our signal handlers use SA_RESTART the blocked open resumes
- * across SIGINT/SIGALRM, so neither a query cancel nor statement_timeout gets
- * the backend back (a cancel-resistant availability DoS). An fstat AFTER the
- * open cannot help -- the block is inside the open itself -- so screen first.
+ * Open a LOCAL regular file for reading with no stat-before-open race.
  *
- * A regular file (or a symlink to one; stat() follows) is allowed. A FIFO,
- * socket, block/char device, or directory is refused. A path that does not
- * exist / cannot be stat'd is left to the opener, which reports the errno by
- * name (a typo must still be a clean "could not open file", not this error).
- * Remote (s3://, http(s)://) paths are not filesystem objects: skipped.
+ * AllocateFile()/fopen("rb") on a FIFO blocks in open(2) until a writer appears;
+ * because our signal handlers use SA_RESTART the blocked open resumes across
+ * SIGINT/SIGALRM, so neither a query cancel nor statement_timeout gets the
+ * backend back (a cancel-resistant availability DoS, #644/#686). A plain stat()
+ * before the open avoids the block but races: a local principal who can write the
+ * directory can swap the checked regular file for a FIFO between the stat and the
+ * open, re-introducing the block.
  *
- * This must sit at EVERY local open the Iceberg/parquet read path can reach
- * (ice_slurp_text, ice_slurp_bin, av_slurp_file, pq_source_open_cfg), not only
- * in ice_open_path: the SQL-argument metadata pointer and the avro/parquet
- * function APIs open without going through ice_open_path.
+ * So open once, O_NONBLOCK (a FIFO then returns immediately instead of blocking),
+ * fstat the fd we hold -- the file we checked is the file we opened -- refuse a
+ * non-regular file, then clear O_NONBLOCK for the read. This is the same pattern
+ * as pcopy_open_regular_file, and it is the single opener every local Iceberg,
+ * Avro, Parquet, and Arrow read reaches. The DATA_CORRUPTED code matches the
+ * malformed-metadata refusals the read path already raises.
+ *
+ * A regular file (or a symlink to one; the open follows it) is allowed. A path
+ * that does not exist is left as the open's errno-by-name error. Remote paths are
+ * excluded by the caller (they are not filesystem objects).
  */
-void
-PgColumnarRejectNonRegularFile(const char *path)
+int
+PgColumnarOpenLocalRegularFile(const char *path, off_t *size_out)
 {
+	int			fd;
+	int			flags;
 	struct stat st;
 
-	if (PgColumnarPathIsRemote(path))
-		return;
-	if (stat(path, &st) != 0)
-		return;					/* leave errno reporting to the opener */
+	fd = OpenTransientFile(path, O_RDONLY | O_NONBLOCK | PG_BINARY);
+	if (fd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\" for reading: %m", path)));
+	if (fstat(fd, &st) != 0)
+	{
+		int			save_errno = errno;
+
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not stat file \"%s\": %m", path)));
+	}
 	if (!S_ISREG(st.st_mode))
+	{
+		CloseTransientFile(fd);
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("columnar: \"%s\" is not a regular file", path)));
+	}
+	flags = fcntl(fd, F_GETFL);
+	if (flags == -1 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1)
+	{
+		int			save_errno = errno;
+
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not clear nonblocking mode on file \"%s\": %m", path)));
+	}
+	if (size_out != NULL)
+		*size_out = st.st_size;
+	return fd;
+}
+
+/* Read exactly n bytes; true on success, false on early EOF or error (errno set). */
+bool
+PgColumnarReadExact(int fd, void *buf, size_t n)
+{
+	char	   *p = (char *) buf;
+	size_t		done = 0;
+
+	while (done < n)
+	{
+		ssize_t		r;
+
+		CHECK_FOR_INTERRUPTS();
+		r = read(fd, p + done, n - done);
+		if (r < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			return false;
+		}
+		if (r == 0)
+			return false;		/* EOF before n */
+		done += (size_t) r;
+	}
+	return true;
+}
+
+/* Slurp a whole local regular file into a palloc'd buffer via the race-free opener. */
+char *
+PgColumnarSlurpLocalRegularFile(const char *path, int64 maxlen,
+								const char *what, int64 *outlen)
+{
+	off_t		sz = 0;
+	int			fd = PgColumnarOpenLocalRegularFile(path, &sz);
+	int64		flen = (int64) sz;
+	char	   *buf;
+
+	if (flen < 0 || flen > maxlen)
+	{
+		CloseTransientFile(fd);
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("columnar: %s \"%s\" is too large", what, path)));
+	}
+	/* flen + 1 and a trailing NUL so text callers can treat it as a cstring;
+	 * binary callers use *outlen and ignore the extra byte. */
+	buf = (char *) palloc(flen + 1);
+	if (flen > 0 && !PgColumnarReadExact(fd, buf, (size_t) flen))
+	{
+		int			save_errno = errno;
+
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m", path)));
+	}
+	CloseTransientFile(fd);
+	buf[flen] = '\0';
+	*outlen = flen;
+	return buf;
 }
 
 const PgColumnarObjStoreApi *

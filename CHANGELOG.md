@@ -20,6 +20,19 @@ which was true until that script existed.
   request. This completes the per-catalog credential model (issue #656).
   Regression test: iceberg_rest_server.
 
+### Changed
+
+- The delete-vector visibility logic is single-sourced. The fold that ORs a row
+  group's delete bitmaps into one mask was duplicated in the sequential scan and
+  the index-fetch liveness cache, and the per-row bit test was open-coded in five
+  places across the sequential scan, the index-only scan, the per-row fetch, and
+  the buffered read-your-writes path. A change to one (a new bitmap encoding, a
+  bound) could silently diverge the others, invisible until one access path hit
+  the changed row. The fold is now `pgcolumnar_merge_delete_vectors` and the bit
+  test `dv_row_deleted`; every path routes through them. Behavior is unchanged.
+  Regression test: native_delete_visibility_paths (asserts all paths agree on the
+  deleted set; a mutation of the shared bit test fails every path).
+
 ### Fixed
 
 - Reads of the `delete_vector` catalog now use its `delete_vector_pkey` index
@@ -31,6 +44,18 @@ which was true until that script existed.
   was `O(row_groups * delete_vector_rows)`. The sibling metadata tables already
   index their reads this way; `delete_vector` now matches. Regression test:
   native_delete_vector_index (asserts the reads take the index, seq_scan = 0).
+- The Thrift and Avro field-skip loops are now interruptible. A Parquet footer
+  whose unknown field is a `list<bool>` with a file-declared count up to
+  `0xFFFFFFFF` (or a struct holding many such lists) drove billions of zero-byte
+  skips through `PgColumnarThriftSkip`, which checked stack depth but not
+  interrupts, so the backend spun uncancellably on a sub-2 KB file reached through
+  `parquet_schema()` / `read_parquet()`. `av_skip` had the same gap on an
+  `array<null>` manifest block, where its interrupt check ran once per block
+  rather than per element. Both now call `CHECK_FOR_INTERRUPTS` on the per-value
+  skip path, so `statement_timeout` and cancel apply. This is a denial-of-service
+  hardening in the same class as the parallel_copy FIFO fix. Regression test:
+  decode_skip_interrupts (functional cancel for Thrift; per-element placement
+  shape for both).
 - `pgcolumnar.read_manifest_list` now reports a null manifest-list
   `min_sequence_number` as SQL NULL instead of 0, matching `sequence_number`. The
   value is not used by the delete-application rules, so this is a display fix.
@@ -97,6 +122,19 @@ which was true until that script existed.
 
 ### Security
 
+- Closed a stat-before-open race in the local file read path. The
+  non-regular-file guard that keeps a FIFO from blocking the backend in `open(2)`
+  (a cancel-resistant denial of service) screened the path with `stat()` before a
+  separate `open()`, so a local principal who can write the directory could swap
+  the checked regular file for a FIFO in the window between them and re-introduce
+  the block. The five transient-fd local openers (the Iceberg metadata and
+  manifest reads, the Avro manifest read, `import_arrow`, and the Parquet source)
+  now go through one helper that opens `O_NONBLOCK`, `fstat`s the fd it holds,
+  refuses a non-regular file, then clears the flag, so the file checked is the
+  file opened. The Parquet source reads positionally with `pg_pread`. The
+  parallel-copy partition coordinator (`pcopy_partition_aligned_offsets`), which
+  needs a stdio `FILE*` for `getline`, applies the same `O_NONBLOCK` open plus
+  `fstat` inline. Regression tests: local_open_race_free, parallel_copy.
 - Fixed a backend crash on a hostile Iceberg manifest with a null path. The
   reader decodes a manifest and manifest list against the schema embedded in the
   file, which the table author controls, so a manifest_path (or data or delete

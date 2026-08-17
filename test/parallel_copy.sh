@@ -458,4 +458,16 @@ check "parallel_copy on a FIFO is refused, not a hang (42809)" \
 exec 9<>"$PCFIFO" 2>/dev/null; exec 9>&- 2>/dev/null    # release any blocked opener
 check "backend still up after the parallel_copy FIFO refusal" "$(q 'SELECT 1')" "1"
 
+# The partition-aligned coordinator (pcopy_partition_aligned_offsets, reached only
+# for a PARTITIONED target) opens the file via getline() and had the same
+# stat-before-open FIFO hazard the single-file path fixed (#696). A FIFO named to a
+# partitioned target must also be refused, not hang.
+mkpart t_fifo_part 3
+PCFIFO2="$PGC_WORKDIR/pc2.fifo"; mkfifo "$PCFIFO2"
+check "parallel_copy on a FIFO via the partitioned coordinator is refused, not a hang (42809)" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.parallel_copy('t_fifo_part'::regclass, '$PCFIFO2', 3)")" \
+	"42809"
+exec 9<>"$PCFIFO2" 2>/dev/null; exec 9>&- 2>/dev/null
+check "backend still up after the partitioned-coordinator FIFO refusal" "$(q 'SELECT 1')" "1"
+
 pgc_summary
