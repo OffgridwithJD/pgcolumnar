@@ -20,6 +20,19 @@ which was true until that script existed.
   request. This completes the per-catalog credential model (issue #656).
   Regression test: iceberg_rest_server.
 
+### Changed
+
+- The delete-vector visibility logic is single-sourced. The fold that ORs a row
+  group's delete bitmaps into one mask was duplicated in the sequential scan and
+  the index-fetch liveness cache, and the per-row bit test was open-coded in five
+  places across the sequential scan, the index-only scan, the per-row fetch, and
+  the buffered read-your-writes path. A change to one (a new bitmap encoding, a
+  bound) could silently diverge the others, invisible until one access path hit
+  the changed row. The fold is now `pgcolumnar_merge_delete_vectors` and the bit
+  test `dv_row_deleted`; every path routes through them. Behavior is unchanged.
+  Regression test: native_delete_visibility_paths (asserts all paths agree on the
+  deleted set; a mutation of the shared bit test fails every path).
+
 ### Fixed
 
 - `pgcolumnar.read_manifest_list` now reports a null manifest-list
