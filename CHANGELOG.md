@@ -22,6 +22,15 @@ which was true until that script existed.
 
 ### Fixed
 
+- Reads of the `delete_vector` catalog now use its `delete_vector_pkey` index
+  instead of a sequential scan. `PgColumnarReadDeleteVectorList` (called once per
+  row group while a scan builds its liveness cache), the reclaim deleted-count
+  sum, and `PgColumnarStorageHasDeleteVector` each passed `InvalidOid` to
+  `systable_beginscan`, so every call sequentially scanned the whole
+  `delete_vector` catalog filtered by scan key. On a table with deletes the cost
+  was `O(row_groups * delete_vector_rows)`. The sibling metadata tables already
+  index their reads this way; `delete_vector` now matches. Regression test:
+  native_delete_vector_index (asserts the reads take the index, seq_scan = 0).
 - `pgcolumnar.read_manifest_list` now reports a null manifest-list
   `min_sequence_number` as SQL NULL instead of 0, matching `sequence_number`. The
   value is not used by the delete-application rules, so this is a display fix.
