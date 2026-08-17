@@ -22,6 +22,10 @@ which was true until that script existed.
 
 ### Fixed
 
+- `pgcolumnar.read_manifest_list` now reports a null manifest-list
+  `min_sequence_number` as SQL NULL instead of 0, matching `sequence_number`. The
+  value is not used by the delete-application rules, so this is a display fix.
+  Regression test: iceberg_malformed (#686, #691).
 - `pgcolumnar.parallel_copy` no longer hangs the backend when its path names a
   FIFO. `pcopy_open_regular_file` opened the path `O_RDONLY` and then checked for
   a regular file, but a FIFO blocks inside that `open(2)` and the block survives a

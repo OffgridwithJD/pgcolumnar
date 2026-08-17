@@ -940,7 +940,10 @@ av_decode_manifest_file(AvReader *r, AvSchema *s, PgColumnarAvroManifestFile *e)
 			e->has_sequence_number = have;
 		}
 		else if (strcmp(nm, "min_sequence_number") == 0)
+		{
 			e->min_sequence_number = av_read_long(r, ft, &have);
+			e->has_min_sequence_number = have;
+		}
 		else if (strcmp(nm, "added_snapshot_id") == 0)
 			e->added_snapshot_id = av_read_long(r, ft, &have);
 		else if (strcmp(nm, "added_files_count") == 0)
@@ -1422,7 +1425,10 @@ pgcolumnar_read_manifest_list(PG_FUNCTION_ARGS)
 			values[10] = Int64GetDatum(e->sequence_number);
 		else
 			nulls[10] = true;
-		values[11] = Int64GetDatum(e->min_sequence_number);
+		if (e->has_min_sequence_number)
+			values[11] = Int64GetDatum(e->min_sequence_number);
+		else
+			nulls[11] = true;
 		values[12] = Int64GetDatum(e->added_snapshot_id);
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 	}

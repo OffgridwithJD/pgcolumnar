@@ -95,6 +95,7 @@ typedef struct PgColumnarAvroManifestFile
 										 * concrete number, so a null is corrupt
 										 * (#644) */
 	int64		min_sequence_number;
+	bool		has_min_sequence_number;	/* false when null or absent (#686) */
 	int64		added_snapshot_id;
 	int32		added_files_count;
 	int32		existing_files_count;
