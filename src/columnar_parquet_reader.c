@@ -1511,7 +1511,7 @@ typedef struct PqSourceOps
 struct PqSource
 {
 	const PqSourceOps *ops;		/* the implementation; never NULL once opened */
-	FILE	   *f;				/* AllocateFile handle (buffered), local only */
+	int			fd;				/* transient fd (pread), local only; -1 when none */
 	void	   *priv;			/* remote implementation's own state */
 	const PgColumnarObjStoreApi *api;	/* remote only; NULL for local */
 	const char *path;			/* for error messages; palloc'd by the caller */
@@ -1541,35 +1541,38 @@ struct PqSource
 static void
 pq_source_read_local(PqSource *src, int64 off, void *buf, size_t n)
 {
+	char	   *p = (char *) buf;
+	size_t		done = 0;
+
 	Assert(off >= 0 && n <= (size_t) (src->len - off));
-	if (fseeko(src->f, (off_t) off, SEEK_SET) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not seek in \"%s\": %m", src->path)));
-	if (fread(buf, 1, n, src->f) != n)
+	while (done < n)
 	{
-		/*
-		 * A short read is not an I/O error, so errno holds whatever a previous
-		 * call left there; reporting %m would name an unrelated cause. Only a
-		 * real stream error gets %m.
-		 */
-		if (ferror(src->f))
+		ssize_t		r = pg_pread(src->fd, p + done, n - done, (off_t) (off + done));
+
+		if (r < 0)
+		{
+			if (errno == EINTR)
+				continue;
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not read \"%s\": %m", src->path)));
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("unexpected end of file in \"%s\"", src->path)));
+		}
+		if (r == 0)
+			/* short of n before EOF: a truncated/corrupt Parquet file */
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("unexpected end of file in \"%s\"", src->path)));
+		done += (size_t) r;
 	}
 }
 
 static void
 pq_source_close_local(PqSource *src)
 {
-	if (src->f != NULL)
+	if (src->fd >= 0)
 	{
-		FreeFile(src->f);
-		src->f = NULL;
+		CloseTransientFile(src->fd);
+		src->fd = -1;
 	}
 }
 
@@ -1670,6 +1673,7 @@ pq_source_open_cfg(const char *path, PqSource *src, PqFile *pf,
 
 	memset(src, 0, sizeof(*src));
 	src->path = path;
+	src->fd = -1;
 
 	/*
 	 * Set before anything below can raise, so an error path never leaves a
@@ -1725,19 +1729,11 @@ pq_source_open_cfg(const char *path, PqSource *src, PqFile *pf,
 	}
 	else
 	{
-		PgColumnarRejectNonRegularFile(path);
-		src->f = AllocateFile(path, PG_BINARY_R);
-		if (src->f == NULL)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not open file \"%s\" for reading: %m", path)));
-		/* off_t, not long: a 32-bit long would cap a readable file at 2GB */
-		if (fseeko(src->f, 0, SEEK_END) != 0 || (src->len = ftello(src->f)) < 0)
-		{
-			FreeFile(src->f);
-			ereport(ERROR, (errcode_for_file_access(),
-							errmsg("could not size \"%s\": %m", path)));
-		}
+		off_t		sz = 0;
+
+		/* Race-free local open; see PgColumnarOpenLocalRegularFile. */
+		src->fd = PgColumnarOpenLocalRegularFile(path, &sz);
+		src->len = (int64) sz;
 	}
 
 	if (src->len < 12)

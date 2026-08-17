@@ -176,7 +176,27 @@ extern const PgColumnarObjStoreApi *PgColumnarObjStoreGet(void);
 /* Does `path` look like a remote URL at all? Cheap, no module load. */
 extern bool PgColumnarPathIsRemote(const char *path);
 
-/* Refuse a local FIFO/socket/device/directory before it is opened (#644). */
-extern void PgColumnarRejectNonRegularFile(const char *path);
+/*
+ * Open a local regular file for reading with no stat-before-open race: opens
+ * O_NONBLOCK so a FIFO cannot block the open(2), fstats the held fd, refuses a
+ * non-regular file (DATA_CORRUPTED), then clears O_NONBLOCK. Returns a transient
+ * fd (close with CloseTransientFile). *size_out, if non-NULL, receives the size.
+ * The caller must have already excluded remote paths (PgColumnarPathIsRemote).
+ */
+extern int PgColumnarOpenLocalRegularFile(const char *path, off_t *size_out);
+
+/*
+ * Read exactly n bytes from fd into buf (handling short reads and EINTR).
+ * Returns true on success, false on EOF-before-n or error (errno set).
+ */
+extern bool PgColumnarReadExact(int fd, void *buf, size_t n);
+
+/*
+ * Slurp a whole local regular file into a palloc'd buffer via the race-free
+ * opener above. Refuses a file larger than maxlen (PROGRAM_LIMIT_EXCEEDED, with
+ * `what` naming the object, e.g. "Iceberg manifest"). *outlen receives the size.
+ */
+extern char *PgColumnarSlurpLocalRegularFile(const char *path, int64 maxlen,
+											 const char *what, int64 *outlen);
 
 #endif							/* COLUMNAR_OBJSTORE_H */

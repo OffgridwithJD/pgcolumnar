@@ -125,6 +125,19 @@ PgColumnarThriftSkip(TCReader *r, int ftype)
 	 */
 	check_stack_depth();
 
+	/*
+	 * check_stack_depth bounds recursion depth but not width, and it does not
+	 * process interrupts. TC_BOOL_TRUE, TC_BOOL_FALSE and the default arm consume
+	 * zero bytes and never set r->error, so a TC_LIST of bool with a file-declared
+	 * size up to 0xFFFFFFFF (or a struct holding many such lists) spins billions of
+	 * no-op iterations that touch neither the cursor nor the error flag. Without
+	 * this check that loop ignores SIGINT and statement_timeout -- an
+	 * uninterruptible backend hang from a sub-2 KB footer. It fires once per
+	 * skipped value (each list element is one Skip call) and Skip is off the hot
+	 * data path, so it is free in the honest case and bounds the hostile one.
+	 */
+	CHECK_FOR_INTERRUPTS();
+
 	switch (ftype)
 	{
 		case TC_BOOL_TRUE:

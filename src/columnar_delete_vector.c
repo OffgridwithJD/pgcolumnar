@@ -300,8 +300,7 @@ PgColumnarDeleteVectorBufferedDeleted(Relation rel, uint64 rowNumber)
 				rowNumber > chunk->endRowNumber)
 				continue;
 			bitIndex = rowNumber - chunk->startRowNumber;
-			if ((bitIndex >> 3) < chunk->maskLen &&
-				(chunk->mask[bitIndex >> 3] & (1 << (bitIndex & 7))) != 0)
+			if (dv_row_deleted(chunk->mask, chunk->maskLen, bitIndex))
 				return true;
 		}
 	}

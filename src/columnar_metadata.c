@@ -509,6 +509,7 @@ PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 	HeapTuple	gtuple;
 	Snapshot	snap;
 	List	   *groups = NIL;
+	Oid			dvIdx = pgcolumnar_index_oid("delete_vector_pkey");
 
 	snap = RegisterSnapshot(GetLatestSnapshot());
 
@@ -548,7 +549,7 @@ PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 					F_INT8EQ, Int64GetDatum((int64) storageId));
 		ScanKeyInit(&mkey[1], Anum_delete_vector_group_number, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) groupNumber));
-		mscan = systable_beginscan(mrel, InvalidOid, false, snap, 2, mkey);
+		mscan = systable_beginscan(mrel, dvIdx, OidIsValid(dvIdx), snap, 2, mkey);
 		while (HeapTupleIsValid(mtuple = systable_getnext(mscan)))
 		{
 			TransactionId mxmin = HeapTupleHeaderGetXmin(mtuple->t_data);
@@ -1296,13 +1297,14 @@ PgColumnarReadDeleteVectorList(uint64 storageId, uint64 stripeId, Snapshot snaps
 	SysScanDesc scan;
 	HeapTuple	tuple;
 	List	   *result = NIL;
+	Oid			dvIdx = pgcolumnar_index_oid("delete_vector_pkey");
 
 	ScanKeyInit(&key[0], Anum_delete_vector_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_delete_vector_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) stripeId));
 
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	scan = systable_beginscan(rel, dvIdx, OidIsValid(dvIdx), snapshot, 2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		DeleteVectorMetadata *rm = palloc0(sizeof(DeleteVectorMetadata));
@@ -1351,10 +1353,11 @@ PgColumnarStorageHasDeleteVector(uint64 storageId, Snapshot snapshot)
 	ScanKeyData key[1];
 	SysScanDesc scan;
 	bool		found;
+	Oid			dvIdx = pgcolumnar_index_oid("delete_vector_pkey");
 
 	ScanKeyInit(&key[0], Anum_delete_vector_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	scan = systable_beginscan(rel, dvIdx, OidIsValid(dvIdx), snapshot, 1, key);
 	found = HeapTupleIsValid(systable_getnext(scan));
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);

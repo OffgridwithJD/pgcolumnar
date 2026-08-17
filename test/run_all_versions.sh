@@ -64,6 +64,7 @@ SUITES=(
 	concurrent_diff
 	corruption
 	decode_interrupts
+	decode_skip_interrupts
 	dependency_estimate
 	differential
 	docs_style
@@ -103,6 +104,7 @@ SUITES=(
 	import_export_privilege
 	index_only
 	isolation
+	local_open_race_free
 	logical_subscriber
 	maintenance_due
 	native_agg
@@ -117,6 +119,8 @@ SUITES=(
 	native_ctas
 	native_decode_gate_width
 	native_decode_gating
+	native_delete_vector_index
+	native_delete_visibility_paths
 	native_dict_underfill
 	native_dml
 	native_encoding

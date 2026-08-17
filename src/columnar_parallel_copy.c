@@ -597,31 +597,65 @@ pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_
 	seg_start[0] = 0;
 
 	/*
-	 * Read via AllocateFile/FreeFile (PostgreSQL-tracked stdio) so getline() can do
-	 * the line parsing: OpenTransientFile + fdopen + fclose would close the OS fd
-	 * but leave fd.c's transient-file bookkeeping dangling ("temporary files not
-	 * closed at end-of-transaction"). The caller has already checked
-	 * pg_read_server_files; re-check it is a regular file here (AllocateFile does
-	 * not), matching pcopy_open_regular_file.
+	 * Open O_NONBLOCK so a FIFO cannot block the open(2) -- a cancel-resistant
+	 * availability DoS (#644/#686) -- then fstat the fd we hold and reject a
+	 * non-regular file, with no stat-before-open race: the file checked is the
+	 * file opened. Clear O_NONBLOCK and fdopen for getline(), which needs stdio.
+	 * A raw open + fdopen (not OpenTransientFile) is used so fclose fully closes it
+	 * without leaving fd.c's transient-file bookkeeping dangling; every error path
+	 * here closes the fd, and the getline loop's fclose runs under the PG_TRY
+	 * below. The caller has already checked pg_read_server_files.
 	 */
 	{
+		int			fd = open(path, O_RDONLY | O_NONBLOCK | PG_BINARY);
 		struct stat st;
+		int			flags;
 
-		if (stat(path, &st) != 0)
+		if (fd < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open file \"%s\" for reading: %m", path)));
+		if (fstat(fd, &st) != 0)
+		{
+			int			save_errno = errno;
+
+			close(fd);
+			errno = save_errno;
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m", path)));
+		}
 		if (!S_ISREG(st.st_mode))
+		{
+			close(fd);
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("\"%s\" is not a regular file", path)));
+		}
+		flags = fcntl(fd, F_GETFL);
+		if (flags == -1 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1)
+		{
+			int			save_errno = errno;
+
+			close(fd);
+			errno = save_errno;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not clear nonblocking mode on file \"%s\": %m", path)));
+		}
 		size = st.st_size;
+		fp = fdopen(fd, PG_BINARY_R);
+		if (fp == NULL)
+		{
+			int			save_errno = errno;
+
+			close(fd);
+			errno = save_errno;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open file \"%s\" for reading: %m", path)));
+		}
 	}
-	fp = AllocateFile(path, PG_BINARY_R);
-	if (fp == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
 
 	/*
 	 * Wrap the scan so every exit path -- including an implicit throw from
@@ -687,13 +721,13 @@ pcopy_partition_aligned_offsets(Relation parent, const char *path, int *workers_
 	{
 		if (line)
 			free(line);
-		FreeFile(fp);
+		fclose(fp);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	if (line)
 		free(line);				/* getline() uses malloc, not palloc */
-	FreeFile(fp);
+	fclose(fp);
 
 	while (cur < nseg - 1)
 		seg_start[++cur] = size;

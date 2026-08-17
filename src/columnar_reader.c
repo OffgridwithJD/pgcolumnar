@@ -1262,6 +1262,40 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 }
 
 /*
+ * pgcolumnar_merge_delete_vectors
+ *		OR a group's delete_vector bitmaps into one mask of `want` bytes, in the
+ *		current memory context. The single source of the fold: the seqscan
+ *		(native_load_group) and the index-fetch liveness cache both build the
+ *		group's combined delete mask this way, so a change to the encoding or the
+ *		bounding stays in one place. *outMask is NULL and *outLen 0 when the group
+ *		has no non-empty delete vector (allocated lazily on the first one).
+ */
+static void
+pgcolumnar_merge_delete_vectors(List *maskList, uint32 want,
+								char **outMask, uint32 *outLen)
+{
+	ListCell   *mlc;
+
+	*outMask = NULL;
+	*outLen = 0;
+	foreach(mlc, maskList)
+	{
+		DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mlc);
+		uint32		i;
+
+		if (rm->bitmap == NULL || rm->bitmapLen == 0)
+			continue;
+		if (*outMask == NULL)
+		{
+			*outMask = palloc0(want > 0 ? want : 1);
+			*outLen = want;
+		}
+		for (i = 0; i < rm->bitmapLen && i < want; i++)
+			(*outMask)[i] |= rm->bitmap[i];
+	}
+}
+
+/*
  * pgcolumnar_native_group_can_match
  *		Decide whether a native row group could hold a row satisfying every
  *		pushed-down predicate, using its whole-chunk zone maps (native spec 7.1,
@@ -1877,9 +1911,8 @@ pgcolumnar_native_qual_skipvec(PgColumnarReadState *rs, int vecCount)
 
 			rs->rowInGroup = r;
 
-			deleted = (rs->nativeDeleteMask != NULL &&
-					   (r >> 3) < rs->nativeDeleteMaskLen &&
-					   (rs->nativeDeleteMask[r >> 3] & (1 << (r & 7))) != 0);
+			deleted = dv_row_deleted(rs->nativeDeleteMask,
+									 rs->nativeDeleteMaskLen, r);
 
 			MemoryContextReset(rs->rowContext);
 			oldContext = MemoryContextSwitchTo(rs->rowContext);
@@ -2017,24 +2050,11 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 		List	   *maskList = PgColumnarReadDeleteVectorList(rs->storageId,
 													   rg->groupNumber,
 													   rs->metaSnapshot);
-		ListCell   *mlc;
 		uint32		want = (uint32) ((rg->rowCount + 7) / 8);
 
-		foreach(mlc, maskList)
-		{
-			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mlc);
-			uint32		i;
-
-			if (rm->bitmap == NULL || rm->bitmapLen == 0)
-				continue;
-			if (rs->nativeDeleteMask == NULL)
-			{
-				rs->nativeDeleteMask = palloc0(want > 0 ? want : 1);
-				rs->nativeDeleteMaskLen = want;
-			}
-			for (i = 0; i < rm->bitmapLen && i < want; i++)
-				rs->nativeDeleteMask[i] |= rm->bitmap[i];
-		}
+		pgcolumnar_merge_delete_vectors(maskList, want,
+										&rs->nativeDeleteMask,
+										&rs->nativeDeleteMaskLen);
 	}
 
 	/*
@@ -2414,10 +2434,8 @@ pgcolumnar_native_next_row(PgColumnarReadState *rs, Datum *values, bool *nulls,
 		 * even for a deleted row so the cursors stay aligned for the next row; a
 		 * deleted row is simply not emitted (D6b).
 		 */
-		deleted = (rs->nativeDeleteMask != NULL &&
-				   (rs->rowInGroup >> 3) < rs->nativeDeleteMaskLen &&
-				   (rs->nativeDeleteMask[rs->rowInGroup >> 3] &
-					(1 << (rs->rowInGroup & 7))) != 0);
+		deleted = dv_row_deleted(rs->nativeDeleteMask, rs->nativeDeleteMaskLen,
+								 rs->rowInGroup);
 
 		MemoryContextReset(rs->rowContext);
 		oldContext = MemoryContextSwitchTo(rs->rowContext);
@@ -2840,7 +2858,6 @@ PgColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
 		LiveStripeEntry *e = &cache->stripes[i++];
 		List	   *rml;
-		ListCell   *mc;
 		uint32		want = (uint32) ((rg->rowCount + 7) / 8);
 
 		e->firstRowNumber = rg->firstRowNumber;
@@ -2851,21 +2868,7 @@ PgColumnarBuildLivenessCache(Relation rel, Snapshot snapshot)
 		e->maskLens = palloc0(sizeof(uint32) * 1);
 
 		rml = PgColumnarReadDeleteVectorList(storageId, rg->groupNumber, metaSnapshot);
-		foreach(mc, rml)
-		{
-			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mc);
-			uint32		b;
-
-			if (rm->bitmap == NULL || rm->bitmapLen == 0)
-				continue;
-			if (e->masks[0] == NULL)
-			{
-				e->masks[0] = palloc0(want > 0 ? want : 1);
-				e->maskLens[0] = want;
-			}
-			for (b = 0; b < rm->bitmapLen && b < want; b++)
-				e->masks[0][b] |= rm->bitmap[b];
-		}
+		pgcolumnar_merge_delete_vectors(rml, want, &e->masks[0], &e->maskLens[0]);
 	}
 
 	if (cache->nstripes > 1)
@@ -2899,9 +2902,7 @@ PgColumnarLivenessCacheIsLive(PgColumnarLivenessCache *cache, uint64 rowNumber)
 			uint64		inGroup = off - (uint64) chunkId * (uint64) e->chunkRowCount;
 
 			if (chunkId >= 0 && chunkId < e->chunkGroupCount &&
-				e->masks[chunkId] != NULL &&
-				(inGroup >> 3) < e->maskLens[chunkId] &&
-				(e->masks[chunkId][inGroup >> 3] & (1 << (inGroup & 7))) != 0)
+				dv_row_deleted(e->masks[chunkId], e->maskLens[chunkId], inGroup))
 				return false;	/* deleted */
 			return true;		/* covered and not deleted */
 		}
@@ -3392,8 +3393,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		{
 			DeleteVectorMetadata *rm = (DeleteVectorMetadata *) lfirst(mlc);
 
-			if (rm->bitmap != NULL && (rowInGrp >> 3) < rm->bitmapLen &&
-				(rm->bitmap[rowInGrp >> 3] & (1 << (rowInGrp & 7))) != 0)
+			if (dv_row_deleted(rm->bitmap, rm->bitmapLen, rowInGrp))
 				deleted = true;
 		}
 		if (deleted)

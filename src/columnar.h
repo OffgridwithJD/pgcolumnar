@@ -333,6 +333,22 @@ typedef struct DeleteVectorMetadata
 } DeleteVectorMetadata;
 
 /*
+ * Is `row` (a 0-based index within a chunk group) marked deleted in a delete
+ * vector bitmap of maskLen bytes? The single source of the delete-vector bit
+ * test: the seqscan, index fetch, index-only scan, per-row fetch, and buffered
+ * delete-vector paths all consult it, so the bounds check and the bit math stay
+ * in one place. A NULL or too-short mask means "not deleted" (the row is beyond
+ * what the mask covers), which is the conservative, correct answer.
+ */
+static inline bool
+dv_row_deleted(const char *mask, uint32 maskLen, uint64 row)
+{
+	return mask != NULL &&
+		(row >> 3) < maskLen &&
+		(mask[row >> 3] & (1 << (row & 7))) != 0;
+}
+
+/*
  * One columnar.projection row (gap 26, format 2.2). A projection is a named,
  * ordered column subset stored as its own columnar storage (projStorageId),
  * sorted on sortKey, sharing the table's row-number identity space.
