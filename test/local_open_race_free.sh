@@ -53,6 +53,21 @@ check "the opener never stats a path before opening it (no TOCTOU)" \
 check "the racy stat-before-open helper is gone" \
 	"$(grep -rc 'PgColumnarRejectNonRegularFile' "$SRC" | awk -F: '{s+=$2} END{print s+0}')" "0"
 
+# The parallel-copy partition coordinator opens the file itself (getline needs a
+# FILE*, so it cannot use the transient-fd helper). It must still open O_NONBLOCK
+# and fstat, never stat a path before opening it. Body from its definition line to
+# the next function at column zero.
+PC="$SRC/columnar_parallel_copy.c"
+pcopy_part_body() {
+	awk '/^pcopy_partition_aligned_offsets\(/{f=1}
+	     f && NR>1 && /^[A-Za-z_].*\(/ && !/^pcopy_partition_aligned_offsets\(/ {exit}
+	     f {print}' "$PC"
+}
+check "the partition coordinator opens O_NONBLOCK (a FIFO cannot block its open)" \
+	"$([ "$(pcopy_part_body | grep -c 'O_NONBLOCK')" -ge 1 ] && echo yes || echo no)" "yes"
+check "the partition coordinator never stats a path before opening it (no TOCTOU)" \
+	"$(pcopy_part_body | grep -Ec 'stat\((const )?path|stat\("|stat\(path')" "0"
+
 # --- functional arm: each newly-converted entry point refuses a FIFO ----------
 # A static FIFO is refused by both the old and new code, so this does not prove
 # the race is closed; it proves the entry point reaches the guard and returns a

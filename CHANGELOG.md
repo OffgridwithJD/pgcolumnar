@@ -93,12 +93,14 @@ which was true until that script existed.
   (a cancel-resistant denial of service) screened the path with `stat()` before a
   separate `open()`, so a local principal who can write the directory could swap
   the checked regular file for a FIFO in the window between them and re-introduce
-  the block. All five local openers (the Iceberg metadata and manifest reads, the
-  Avro manifest read, `import_arrow`, and the Parquet source) now go through one
-  helper that opens `O_NONBLOCK`, `fstat`s the fd it holds, refuses a non-regular
-  file, then clears the flag, so the file checked is the file opened. The Parquet
-  source reads positionally with `pg_pread`. Regression test:
-  local_open_race_free.
+  the block. The five transient-fd local openers (the Iceberg metadata and
+  manifest reads, the Avro manifest read, `import_arrow`, and the Parquet source)
+  now go through one helper that opens `O_NONBLOCK`, `fstat`s the fd it holds,
+  refuses a non-regular file, then clears the flag, so the file checked is the
+  file opened. The Parquet source reads positionally with `pg_pread`. The
+  parallel-copy partition coordinator (`pcopy_partition_aligned_offsets`), which
+  needs a stdio `FILE*` for `getline`, applies the same `O_NONBLOCK` open plus
+  `fstat` inline. Regression tests: local_open_race_free, parallel_copy.
 - Fixed a backend crash on a hostile Iceberg manifest with a null path. The
   reader decodes a manifest and manifest list against the schema embedded in the
   file, which the table author controls, so a manifest_path (or data or delete
