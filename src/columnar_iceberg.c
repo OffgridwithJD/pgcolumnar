@@ -129,37 +129,15 @@ ice_slurp_remote(const char *url, int64 *outlen,
 static char *
 ice_slurp_text(const char *path, const PgColumnarObjStoreConfig *cfg)
 {
-	FILE	   *f;
 	int64		flen;
-	char	   *buf;
 
 	if (PgColumnarPathIsRemote(path))
 		return (char *) ice_slurp_remote(path, &flen, cfg);
 
-	PgColumnarRejectNonRegularFile(path);
-	f = AllocateFile(path, PG_BINARY_R);
-	if (f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	if (fseeko(f, 0, SEEK_END) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	flen = (int64) ftello(f);
-	if (flen < 0 || flen > ICE_MAX_METADATA)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("columnar: Iceberg metadata \"%s\" is too large", path)));
-	if (fseeko(f, 0, SEEK_SET) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	buf = (char *) palloc(flen + 1);
-	if (flen > 0 && fread(buf, 1, flen, f) != (size_t) flen)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not read \"%s\": %m", path)));
-	buf[flen] = '\0';
-	FreeFile(f);
-	return buf;
+	/* Race-free local open (rejects a FIFO without a stat-before-open window),
+	 * NUL-terminated so the JSON parser can treat it as a cstring. */
+	return PgColumnarSlurpLocalRegularFile(path, ICE_MAX_METADATA,
+										   "Iceberg metadata", &flen);
 }
 
 /* slurp a whole binary file (a manifest list, manifest, or Puffin file) into a
@@ -168,37 +146,12 @@ static uint8 *
 ice_slurp_bin(const char *path, int64 *outlen,
 			  const PgColumnarObjStoreConfig *cfg)
 {
-	FILE	   *f;
-	int64		flen;
-	uint8	   *buf;
-
 	if (PgColumnarPathIsRemote(path))
 		return ice_slurp_remote(path, outlen, cfg);
 
-	PgColumnarRejectNonRegularFile(path);
-	f = AllocateFile(path, PG_BINARY_R);
-	if (f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	if (fseeko(f, 0, SEEK_END) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	flen = (int64) ftello(f);
-	if (flen < 0 || flen > ICE_MAX_METADATA)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("columnar: Iceberg manifest \"%s\" is too large", path)));
-	if (fseeko(f, 0, SEEK_SET) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	buf = (uint8 *) palloc(Max(flen, 1));
-	if (flen > 0 && fread(buf, 1, flen, f) != (size_t) flen)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not read \"%s\": %m", path)));
-	FreeFile(f);
-	*outlen = flen;
-	return buf;
+	/* Race-free local open; see PgColumnarOpenLocalRegularFile. */
+	return (uint8 *) PgColumnarSlurpLocalRegularFile(path, ICE_MAX_METADATA,
+													 "Iceberg manifest", outlen);
 }
 
 /*

@@ -1282,33 +1282,11 @@ PgColumnarAvroReadManifestList(const uint8 *buf, int64 len, int *nout)
 static uint8 *
 av_slurp_file(const char *path, int64 *outlen)
 {
-	FILE	   *f;
-	int64		flen;
 	uint8	   *buf;
 
-	PgColumnarRejectNonRegularFile(path);
-	f = AllocateFile(path, PG_BINARY_R);
-	if (f == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for reading: %m", path)));
-	if (fseeko(f, 0, SEEK_END) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	flen = (int64) ftello(f);
-	if (flen < 0 || flen > AV_MAX_FILE)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("columnar: Avro file \"%s\" is too large", path)));
-	if (fseeko(f, 0, SEEK_SET) != 0)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not seek \"%s\": %m", path)));
-	buf = (uint8 *) palloc(Max(flen, 1));
-	if (flen > 0 && fread(buf, 1, flen, f) != (size_t) flen)
-		ereport(ERROR, (errcode_for_file_access(),
-						errmsg("could not read \"%s\": %m", path)));
-	FreeFile(f);
-	*outlen = flen;
+	/* Race-free local open (rejects a FIFO without a stat-before-open window). */
+	buf = (uint8 *) PgColumnarSlurpLocalRegularFile(path, AV_MAX_FILE,
+													"Avro file", outlen);
 	return buf;
 }
 
