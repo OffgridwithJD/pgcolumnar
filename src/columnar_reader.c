@@ -1273,32 +1273,43 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 static bool
 pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 {
-	List	   *zones;
-	NativeZoneMapMetadata **byCol;
+	NativeZoneMapMetadata **byColZone = NULL;
+	bool	   *zoneLookedUp = NULL;
 	NativeBloomMetadata **byColBloom = NULL;
 	bool	   *bloomLookedUp = NULL;
-	ListCell   *lc;
 	int			p;
 
 	if (rs->numPredicates == 0)
 		return true;
-
-	zones = PgColumnarReadZoneMapList(rs->storageId, groupNumber, rs->metaSnapshot);
-	byCol = palloc0(sizeof(NativeZoneMapMetadata *) * rs->natts);
-	foreach(lc, zones)
-	{
-		NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
-
-		if (z->columnIndex >= 0 && z->columnIndex < rs->natts)
-			byCol[z->columnIndex] = z;
-	}
 
 	for (p = 0; p < rs->numPredicates; p++)
 	{
 		SkipPredicate *pred = &rs->predicates[p];
 		Form_pg_attribute att = TupleDescAttr(rs->tupdesc, pred->attidx);
 
-		if (native_zone_excludes(pred, att, byCol[pred->attidx], rs->skipContext))
+		/*
+		 * Fetch this column's zone map on first use, not the whole group's. A
+		 * predicate probes one column, so a scan needs the zone maps of the
+		 * columns carrying predicates and no others; reading every attribute's
+		 * min/max is buffer traffic proportional to the table width (#314, the
+		 * same saving the per-column bloom fetch below already makes).
+		 * zoneLookedUp records the fetch, not the result, so a column with no
+		 * zone map is looked up once rather than on every predicate.
+		 */
+		if (byColZone == NULL)
+		{
+			byColZone = palloc0(sizeof(NativeZoneMapMetadata *) * rs->natts);
+			zoneLookedUp = palloc0(sizeof(bool) * rs->natts);
+		}
+		if (!zoneLookedUp[pred->attidx])
+		{
+			byColZone[pred->attidx] =
+				PgColumnarReadZoneMapForColumn(rs->storageId, groupNumber,
+											   pred->attidx, rs->metaSnapshot);
+			zoneLookedUp[pred->attidx] = true;
+		}
+
+		if (native_zone_excludes(pred, att, byColZone[pred->attidx], rs->skipContext))
 			return false;
 
 		/*
@@ -1528,7 +1539,7 @@ PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc, List *qual,
 static void
 pgcolumnar_native_build_skipvec(PgColumnarReadState *rs, uint64 groupNumber, int vecCount)
 {
-	List	   *zones;
+	List	   *spanZones;
 	NativeZoneMapMetadata ***byColVec;
 	uint32	   *span;
 	bool	   *skip;
@@ -1557,33 +1568,59 @@ pgcolumnar_native_build_skipvec(PgColumnarReadState *rs, uint64 groupNumber, int
 	if (rs->numPredicates == 0 && rs->nativeQualFilter == NULL)
 		return;
 
-	zones = PgColumnarReadZoneMapVectors(rs->storageId, groupNumber, rs->metaSnapshot);
-	if (zones == NIL)
-		return;					/* legacy: no per-vector zone maps */
-
 	/* per-predicate-column lookup [column][vector] */
 	byColVec = (NativeZoneMapMetadata ***)
 		palloc0(sizeof(NativeZoneMapMetadata **) * rs->natts);
+
+	/*
+	 * Read only the predicate columns' per-vector zone maps, plus one column's
+	 * for the vector spans. Reading every attribute's per-vector rows up front is
+	 * buffer traffic proportional to the table width, for a scan that consults
+	 * one or two columns (#314, the per-column bloom fetch makes the same saving).
+	 */
+	spanZones = NIL;
 	for (p = 0; p < rs->numPredicates; p++)
 	{
 		int			col = rs->predicates[p].attidx;
+		List	   *cz;
 
-		if (col >= 0 && col < rs->natts && byColVec[col] == NULL)
-			byColVec[col] = (NativeZoneMapMetadata **)
-				palloc0(sizeof(NativeZoneMapMetadata *) * vecCount);
+		if (col < 0 || col >= rs->natts || byColVec[col] != NULL)
+			continue;
+		cz = PgColumnarReadZoneMapVectorsForColumn(rs->storageId, groupNumber,
+												   col, rs->metaSnapshot);
+		byColVec[col] = (NativeZoneMapMetadata **)
+			palloc0(sizeof(NativeZoneMapMetadata *) * vecCount);
+		foreach(lc, cz)
+		{
+			NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
+
+			if (z->vectorIndex >= 0 && z->vectorIndex < vecCount)
+				byColVec[col][z->vectorIndex] = z;
+		}
+		if (spanZones == NIL && cz != NIL)
+			spanZones = cz;
 	}
 
+	/*
+	 * The spans are the same for every column, so a predicate column's rows
+	 * supply them. When no predicate column has per-vector rows (a phase-2
+	 * qual-only scan, or legacy predicate columns), fall back to the whole-group
+	 * read purely to size the spans; correctness never depends on which column
+	 * supplied them.
+	 */
+	if (spanZones == NIL)
+		spanZones = PgColumnarReadZoneMapVectors(rs->storageId, groupNumber,
+												 rs->metaSnapshot);
+	if (spanZones == NIL)
+		return;					/* legacy: no per-vector zone maps */
+
 	span = (uint32 *) palloc0(sizeof(uint32) * vecCount);
-	foreach(lc, zones)
+	foreach(lc, spanZones)
 	{
 		NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
 
-		if (z->vectorIndex < 0 || z->vectorIndex >= vecCount)
-			continue;
-		span[z->vectorIndex] = (uint32) (z->valueCount + z->nullCount);
-		if (z->columnIndex >= 0 && z->columnIndex < rs->natts &&
-			byColVec[z->columnIndex] != NULL)
-			byColVec[z->columnIndex][z->vectorIndex] = z;
+		if (z->vectorIndex >= 0 && z->vectorIndex < vecCount)
+			span[z->vectorIndex] = (uint32) (z->valueCount + z->nullCount);
 	}
 
 	MemoryContextReset(rs->skipContext);

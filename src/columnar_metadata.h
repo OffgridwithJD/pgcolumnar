@@ -69,6 +69,9 @@ extern List *PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber,
 
 extern List *PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber,
 										Snapshot snapshot);
+extern List *PgColumnarReadZoneMapVectorsForColumn(uint64 storageId,
+										uint64 groupNumber, int columnIndex,
+										Snapshot snapshot);
 
 extern NativeBloomMetadata *PgColumnarReadBloomForColumn(uint64 storageId,
 													   uint64 groupNumber,

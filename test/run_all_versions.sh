@@ -175,6 +175,7 @@ SUITES=(
 	native_vecskip
 	native_writer
 	native_zonemap
+	native_zonemap_narrow
 	objstore_addressing
 	objstore_allowlist
 	objstore_credentials

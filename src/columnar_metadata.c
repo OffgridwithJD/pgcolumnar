@@ -2262,6 +2262,10 @@ PgColumnarReadBloomForColumn(uint64 storageId, uint64 groupNumber,
 	return b;
 }
 
+static NativeZoneMapMetadata *zonemap_from_tuple(HeapTuple tuple,
+					TupleDesc tupdesc, uint64 storageId,
+					uint64 groupNumber, int32 vecIndex);
+
 /*
  * PgColumnarReadZoneMapVectors
  *		The per-vector zone maps (vector_index >= 0) of one row group, for
@@ -2289,48 +2293,63 @@ PgColumnarReadZoneMapVectors(uint64 storageId, uint64 groupNumber, Snapshot snap
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
-		NativeZoneMapMetadata *z;
 		bool		isnull;
-		int32		vecIndex;
-		Datum		d;
-
-		vecIndex = DatumGetInt32(
+		int32		vecIndex = DatumGetInt32(
 			heap_getattr(tuple, Anum_zone_map_vector_index, tupdesc, &isnull));
+
 		if (vecIndex < 0)
 			continue;			/* per-vector rows only */
 
-		z = palloc0(sizeof(NativeZoneMapMetadata));
-		z->storageId = storageId;
-		z->groupNumber = groupNumber;
-		z->columnIndex = DatumGetInt16(
-			heap_getattr(tuple, Anum_zone_map_column_index, tupdesc, &isnull));
-		z->vectorIndex = vecIndex;
+		result = lappend(result,
+						 zonemap_from_tuple(tuple, tupdesc, storageId,
+											groupNumber, vecIndex));
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
 
-		d = heap_getattr(tuple, Anum_zone_map_minimum, tupdesc, &isnull);
-		if (!isnull)
-		{
-			bytea	   *bmin = DatumGetByteaPP(d);
-			Datum		dmax = heap_getattr(tuple, Anum_zone_map_maximum,
-											tupdesc, &isnull);
+	return result;
+}
 
-			if (!isnull)
-			{
-				bytea	   *bmax = DatumGetByteaPP(dmax);
+/*
+ * PgColumnarReadZoneMapVectorsForColumn
+ *		The per-vector zone maps of ONE column of a row group. Mirrors
+ *		PgColumnarReadZoneMapForColumn: per-vector skipping consults only the
+ *		predicate columns, and every column's per-vector rows carry the same
+ *		value/null counts, so a scan reads the predicate columns' rows plus one
+ *		column's for the vector spans, not every attribute's. Probes zone_map_pkey
+ *		on (storage_id, group_number, column_index).
+ */
+List *
+PgColumnarReadZoneMapVectorsForColumn(uint64 storageId, uint64 groupNumber,
+									  int columnIndex, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	Oid			idxOid;
+	HeapTuple	tuple;
+	List	   *result = NIL;
 
-				z->minimumLen = VARSIZE_ANY_EXHDR(bmin);
-				z->minimum = (const char *) memcpy(palloc(z->minimumLen + 1),
-												   VARDATA_ANY(bmin), z->minimumLen);
-				z->maximumLen = VARSIZE_ANY_EXHDR(bmax);
-				z->maximum = (const char *) memcpy(palloc(z->maximumLen + 1),
-												   VARDATA_ANY(bmax), z->maximumLen);
-				z->hasMinMax = true;
-			}
-		}
-		z->valueCount = (uint64) DatumGetInt64(
-			heap_getattr(tuple, Anum_zone_map_value_count, tupdesc, &isnull));
-		z->nullCount = (uint64) DatumGetInt64(
-			heap_getattr(tuple, Anum_zone_map_null_count, tupdesc, &isnull));
-		result = lappend(result, z);
+	ScanKeyInit(&key[0], Anum_zone_map_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) groupNumber));
+	ScanKeyInit(&key[2], Anum_zone_map_column_index, BTEqualStrategyNumber,
+				F_INT2EQ, Int16GetDatum((int16) columnIndex));
+	idxOid = pgcolumnar_index_oid("zone_map_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 3, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		int32		vecIndex = DatumGetInt32(
+			heap_getattr(tuple, Anum_zone_map_vector_index, tupdesc, &isnull));
+
+		if (vecIndex < 0)
+			continue;			/* per-vector rows only */
+		result = lappend(result,
+						 zonemap_from_tuple(tuple, tupdesc, storageId,
+											groupNumber, vecIndex));
 	}
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
@@ -2471,6 +2490,61 @@ PgColumnarReadColumnChunkList(uint64 storageId, uint64 groupNumber, Snapshot sna
 }
 
 /*
+ * zonemap_from_tuple
+ *		Build a NativeZoneMapMetadata from one whole-chunk zone_map tuple. Shared
+ *		by the whole-group reader and the per-column probe; the caller has
+ *		confirmed vector_index == -1 and holds the relation open. min/max/sum are
+ *		copied into the current memory context.
+ */
+static NativeZoneMapMetadata *
+zonemap_from_tuple(HeapTuple tuple, TupleDesc tupdesc,
+				   uint64 storageId, uint64 groupNumber, int32 vecIndex)
+{
+	NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
+	bool		isnull;
+	Datum		d;
+
+	z->storageId = storageId;
+	z->groupNumber = groupNumber;
+	z->columnIndex = DatumGetInt16(
+		heap_getattr(tuple, Anum_zone_map_column_index, tupdesc, &isnull));
+	z->vectorIndex = vecIndex;
+
+	d = heap_getattr(tuple, Anum_zone_map_minimum, tupdesc, &isnull);
+	if (!isnull)
+	{
+		bytea	   *bmin = DatumGetByteaPP(d);
+		Datum		dmax = heap_getattr(tuple, Anum_zone_map_maximum, tupdesc, &isnull);
+
+		if (!isnull)
+		{
+			bytea	   *bmax = DatumGetByteaPP(dmax);
+
+			z->minimumLen = VARSIZE_ANY_EXHDR(bmin);
+			z->minimum = (const char *) memcpy(palloc(z->minimumLen + 1),
+											   VARDATA_ANY(bmin), z->minimumLen);
+			z->maximumLen = VARSIZE_ANY_EXHDR(bmax);
+			z->maximum = (const char *) memcpy(palloc(z->maximumLen + 1),
+											   VARDATA_ANY(bmax), z->maximumLen);
+			z->hasMinMax = true;
+		}
+	}
+
+	d = heap_getattr(tuple, Anum_zone_map_sum, tupdesc, &isnull);
+	if (!isnull)
+	{
+		z->sum = datumCopy(d, false, -1);	/* numeric is varlena */
+		z->hasSum = true;
+	}
+
+	z->valueCount = (uint64) DatumGetInt64(
+		heap_getattr(tuple, Anum_zone_map_value_count, tupdesc, &isnull));
+	z->nullCount = (uint64) DatumGetInt64(
+		heap_getattr(tuple, Anum_zone_map_null_count, tupdesc, &isnull));
+	return z;
+}
+
+/*
  * PgColumnarReadZoneMapList
  *		The whole-chunk zone maps (vector_index -1) of one row group, for group
  *		skipping (native spec 7.1, Phase D5b). The caller indexes the result by
@@ -2497,56 +2571,61 @@ PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapsho
 							  2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
-		NativeZoneMapMetadata *z;
 		bool		isnull;
-		int32		vecIndex;
-		Datum		d;
-
-		vecIndex = DatumGetInt32(
+		int32		vecIndex = DatumGetInt32(
 			heap_getattr(tuple, Anum_zone_map_vector_index, tupdesc, &isnull));
+
 		if (vecIndex != -1)
 			continue;			/* whole-chunk rows only, for group skipping */
 
-		z = palloc0(sizeof(NativeZoneMapMetadata));
-		z->storageId = storageId;
-		z->groupNumber = groupNumber;
-		z->columnIndex = DatumGetInt16(
-			heap_getattr(tuple, Anum_zone_map_column_index, tupdesc, &isnull));
-		z->vectorIndex = vecIndex;
+		result = lappend(result,
+						 zonemap_from_tuple(tuple, tupdesc, storageId, groupNumber, -1));
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
 
-		d = heap_getattr(tuple, Anum_zone_map_minimum, tupdesc, &isnull);
-		if (!isnull)
-		{
-			bytea	   *bmin = DatumGetByteaPP(d);
-			Datum		dmax = heap_getattr(tuple, Anum_zone_map_maximum,
-											tupdesc, &isnull);
+	return result;
+}
 
-			if (!isnull)
-			{
-				bytea	   *bmax = DatumGetByteaPP(dmax);
+/*
+ * PgColumnarReadZoneMapForColumn
+ *		The whole-chunk zone map of ONE column of a row group, for group skipping.
+ *		Mirrors PgColumnarReadBloomForColumn: a scan wants the zone maps of only
+ *		the columns carrying predicates, so reading a whole group's worth (all
+ *		attributes) is wasted work and buffer traffic on a wide table. zone_map_pkey
+ *		is (storage_id, group_number, column_index, vector_index), so this probes
+ *		the exact column. Returns NULL when the column has no whole-chunk zone map.
+ */
+NativeZoneMapMetadata *
+PgColumnarReadZoneMapForColumn(uint64 storageId, uint64 groupNumber,
+							   int columnIndex, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[3];
+	SysScanDesc scan;
+	Oid			idxOid;
+	HeapTuple	tuple;
+	NativeZoneMapMetadata *result = NULL;
 
-				z->minimumLen = VARSIZE_ANY_EXHDR(bmin);
-				z->minimum = (const char *) memcpy(palloc(z->minimumLen + 1),
-												   VARDATA_ANY(bmin), z->minimumLen);
-				z->maximumLen = VARSIZE_ANY_EXHDR(bmax);
-				z->maximum = (const char *) memcpy(palloc(z->maximumLen + 1),
-												   VARDATA_ANY(bmax), z->maximumLen);
-				z->hasMinMax = true;
-			}
-		}
+	ScanKeyInit(&key[0], Anum_zone_map_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	ScanKeyInit(&key[1], Anum_zone_map_group_number, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) groupNumber));
+	ScanKeyInit(&key[2], Anum_zone_map_column_index, BTEqualStrategyNumber,
+				F_INT2EQ, Int16GetDatum((int16) columnIndex));
+	idxOid = pgcolumnar_index_oid("zone_map_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 3, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		int32		vecIndex = DatumGetInt32(
+			heap_getattr(tuple, Anum_zone_map_vector_index, tupdesc, &isnull));
 
-		d = heap_getattr(tuple, Anum_zone_map_sum, tupdesc, &isnull);
-		if (!isnull)
-		{
-			z->sum = datumCopy(d, false, -1);	/* numeric is varlena */
-			z->hasSum = true;
-		}
-
-		z->valueCount = (uint64) DatumGetInt64(
-			heap_getattr(tuple, Anum_zone_map_value_count, tupdesc, &isnull));
-		z->nullCount = (uint64) DatumGetInt64(
-			heap_getattr(tuple, Anum_zone_map_null_count, tupdesc, &isnull));
-		result = lappend(result, z);
+		if (vecIndex != -1)
+			continue;			/* whole-chunk row only */
+		result = zonemap_from_tuple(tuple, tupdesc, storageId, groupNumber, -1);
+		break;
 	}
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
