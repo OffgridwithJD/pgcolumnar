@@ -14,7 +14,7 @@
  * This puts the field offsets and widths in ONE place. The writer appends
  * through PgColumnarEncdescPut*, the readers advance through
  * PgColumnarEncdescReadEntry, and COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN is tied to
- * the field widths by a StaticAssert (columnar_encdesc.c), so a field change is
+ * the field widths by a StaticAssert (in columnar_write_state.c), so a field change is
  * one edit here that cannot silently desync the two sides.
  *
  * The on-disk bytes are unchanged from the hand-packed form: the Put helpers make
