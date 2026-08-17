@@ -63,6 +63,7 @@
 #include "statistics/statistics.h"
 #include "catalog/pg_statistic_ext.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/rel.h"
@@ -534,6 +535,136 @@ PgColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 
 	*nkeys = n;
 	return keys;
+}
+
+/*
+ * True if the node contains a Var or a PARAM_EXEC parameter: a value that can
+ * differ per row, or per rescan of a correlated (nestloop) inner scan. Such an
+ * operand is not safe to freeze into a scan key, because the keys are built once
+ * at Begin and are not rebuilt on rescan.
+ */
+static bool
+pgcolumnar_operand_unstable_walker(Node *node, void *ctx)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+		return true;
+	if (IsA(node, Param) && ((Param *) node)->paramkind == PARAM_EXEC)
+		return true;
+	return expression_tree_walker(node, pgcolumnar_operand_unstable_walker, ctx);
+}
+
+/*
+ * Evaluate a scan-key operand to a Const, guarded. Returns NULL if evaluation
+ * raises (e.g. a stable function that errors, or a param not yet bound under a
+ * plain EXPLAIN), so the caller leaves the clause as-is rather than turning a
+ * scan that might otherwise prune the operand away into an error.
+ */
+static Node *
+pgcolumnar_try_eval_const(Node *expr, PlanState *ps, ExprContext *econtext)
+{
+	Node	   *result = NULL;
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		ExprState  *es = ExecInitExpr((Expr *) expr, ps);
+		bool		isnull;
+		Datum		d = ExecEvalExprSwitchContext(es, econtext, &isnull);
+		Oid			typ = exprType(expr);
+		int16		typlen;
+		bool		typbyval;
+
+		get_typlenbyval(typ, &typlen, &typbyval);
+		if (!isnull && !typbyval)
+			d = datumCopy(d, typbyval, typlen);
+		result = (Node *) makeConst(typ, exprTypmod(expr), exprCollation(expr),
+									(int) typlen, isnull ? (Datum) 0 : d,
+									isnull, typbyval);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		result = NULL;
+	}
+	PG_END_TRY();
+	return result;
+}
+
+/*
+ * Freeze execution-stable non-Const operands of a scan qual into Consts, so a
+ * predicate like "col >= $1" (a PARAM_EXTERN from a prepared statement or
+ * PL/pgSQL, or a stable subexpression) can drive chunk-group skipping.
+ * pgcolumnar_clause_to_scankey only accepts a Const operand, so without this a
+ * parameterized scan disables pruning entirely and reads every chunk group.
+ *
+ * Only operands that cannot change within this execution are frozen: no Var, no
+ * PARAM_EXEC, and no volatile function. Freezing an unstable operand would be a
+ * wrong-results bug (a group wrongly skipped is never rechecked); freezing a
+ * stable one is exact, and the executor still re-applies the original qual to
+ * every surviving row. Returns the qual unchanged when no expression context is
+ * available yet.
+ */
+static List *
+pgcolumnar_stabilize_quals(List *qual, PlanState *ps)
+{
+	ExprContext *econtext;
+	List	   *out = NIL;
+	ListCell   *lc;
+
+	if (qual == NIL || ps == NULL || ps->ps_ExprContext == NULL)
+		return qual;
+	econtext = ps->ps_ExprContext;
+
+	foreach(lc, qual)
+	{
+		Node	   *clause = (Node *) lfirst(lc);
+		OpExpr	   *op;
+		List	   *newargs = NIL;
+		ListCell   *alc;
+		bool		changed = false;
+
+		if (!IsA(clause, OpExpr) || list_length(((OpExpr *) clause)->args) != 2)
+		{
+			out = lappend(out, clause);
+			continue;
+		}
+		op = (OpExpr *) clause;
+		foreach(alc, op->args)
+		{
+			Node	   *arg = (Node *) lfirst(alc);
+			Node	   *bare = arg;
+
+			if (IsA(bare, RelabelType))
+				bare = (Node *) ((RelabelType *) bare)->arg;
+			if (!IsA(bare, Const) &&
+				!pgcolumnar_operand_unstable_walker(arg, NULL) &&
+				!contain_volatile_functions(arg))
+			{
+				Node	   *c = pgcolumnar_try_eval_const(arg, ps, econtext);
+
+				if (c != NULL)
+				{
+					newargs = lappend(newargs, c);
+					changed = true;
+					continue;
+				}
+			}
+			newargs = lappend(newargs, arg);
+		}
+		if (changed)
+		{
+			OpExpr	   *nop = copyObject(op);
+
+			nop->args = newargs;
+			out = lappend(out, (Node *) nop);
+		}
+		else
+			out = lappend(out, clause);
+	}
+	return out;
 }
 
 /*
@@ -2100,8 +2231,14 @@ PgColumnarBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	cstate->projectedColumns =
 		pgcolumnar_projected_columns(cscan, tupdesc->natts, &cstate->nProjected);
+	/*
+	 * Freeze stable parameters (e.g. "col >= $1" from a prepared statement) into
+	 * Consts so they drive chunk-group skipping; a plain Const qual is unchanged.
+	 */
 	cstate->scanKeys =
-		PgColumnarBuildScanKeys(cscan->scan.plan.qual, cscan->scan.scanrelid,
+		PgColumnarBuildScanKeys(pgcolumnar_stabilize_quals(cscan->scan.plan.qual,
+														   &node->ss.ps),
+							  cscan->scan.scanrelid,
 							  tupdesc, &cstate->nScanKeys);
 
 	/* the projection the planner chose (gap 26); reported by EXPLAIN */
