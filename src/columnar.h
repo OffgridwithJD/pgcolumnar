@@ -470,6 +470,9 @@ extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *rel
 extern List *PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
 extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
 									 Snapshot snapshot);
+extern NativeZoneMapMetadata *PgColumnarReadZoneMapForColumn(uint64 storageId,
+									 uint64 groupNumber, int columnIndex,
+									 Snapshot snapshot);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */

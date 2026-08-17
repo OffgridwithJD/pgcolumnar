@@ -35,6 +35,17 @@ which was true until that script existed.
 
 ### Fixed
 
+- Group and per-vector skipping now read only the predicate columns' zone maps.
+  `pgcolumnar_native_group_can_match` and the per-vector skip builder read the
+  whole group's zone maps (every attribute's min/max) up front and used only the
+  columns carrying predicates, so on a wide table a scan that consults one or two
+  columns paid min/max buffer traffic proportional to the table width. Both now
+  probe per column via `zone_map_pkey`'s `column_index`, exactly as the per-column
+  bloom fetch already did; the per-vector spans (identical across columns) come
+  from a predicate column, falling back to the whole-group read only when no
+  predicate column has per-vector rows. On a 30-column table a one-predicate scan
+  went from about 1200 zone-map row fetches to 30, matching the 2-column table.
+  Regression test: native_zonemap_narrow.
 - Chunk-group skipping now applies to parameterized predicates. A qual like
   `col >= $1` from a prepared statement, PL/pgSQL, or the extended protocol kept a
   `Param` operand, and the scan-key builder accepted only a `Const`, so on a
