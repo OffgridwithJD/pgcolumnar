@@ -433,4 +433,29 @@ check "single table: a bad row fails the whole load" \
 check "single table: failed load leaves the target empty" "$(q "SELECT count(*) FROM t_single")" 0
 check "single table: no prepared-transaction leak after failure" "$(q "SELECT count(*) FROM pg_prepared_xacts")" 0
 
+# --- #686: parallel_copy must refuse a FIFO, not hang the backend -------------
+# pcopy_open_regular_file opened O_RDONLY then fstat, so a FIFO blocked in open(2)
+# (cancel-resistant, its own S_ISREG check unreachable). It must open O_NONBLOCK,
+# reject the non-regular file (42809), and never block. RED (unguarded) is a
+# wall-clock HANG; GREEN is 42809.
+sqlstate_or_hang() {
+	local out rc
+	out="$(timeout -s KILL 5 env PATH="$PGC_BINDIR:$PATH" psql \
+		-h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA 2>&1 <<SQLEOF
+\\set VERBOSITY sqlstate
+$1;
+SQLEOF
+)"
+	rc=$?
+	if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then echo HANG; return; fi
+	printf '%s\n' "$out" | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+psql_run "DROP TABLE IF EXISTS t_fifo; CREATE TABLE t_fifo (id int, txt text) USING pgcolumnar;" >/dev/null
+PCFIFO="$PGC_WORKDIR/pc.fifo"; mkfifo "$PCFIFO"
+check "parallel_copy on a FIFO is refused, not a hang (42809)" \
+	"$(sqlstate_or_hang "SELECT pgcolumnar.parallel_copy('t_fifo'::regclass, '$PCFIFO', 2)")" \
+	"42809"
+exec 9<>"$PCFIFO" 2>/dev/null; exec 9>&- 2>/dev/null    # release any blocked opener
+check "backend still up after the parallel_copy FIFO refusal" "$(q 'SELECT 1')" "1"
+
 pgc_summary

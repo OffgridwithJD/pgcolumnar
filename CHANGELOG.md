@@ -14,6 +14,13 @@ which was true until that script existed.
 
 ### Fixed
 
+- `pgcolumnar.parallel_copy` no longer hangs the backend when its path names a
+  FIFO. `pcopy_open_regular_file` opened the path `O_RDONLY` and then checked for
+  a regular file, but a FIFO blocks inside that `open(2)` and the block survives a
+  cancel or `statement_timeout`, a denial of service. It now opens with
+  `O_NONBLOCK`, rejects a non-regular file, then clears the flag, which also
+  closes the stat-before-open race. Regression test: parallel_copy (#686).
+
 - The Iceberg read path now refuses four classes of malformed or hostile table
   metadata that an adversarial re-audit (#644) found it mishandled. A non-regular
   file (for example a FIFO) named as a metadata, manifest, or data path is

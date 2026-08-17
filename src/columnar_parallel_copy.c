@@ -113,7 +113,16 @@ pcopy_open_regular_file(const char *path, off_t *size_out)
 	int			fd;
 	struct stat st;
 
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	/*
+	 * Open with O_NONBLOCK so a FIFO open(2) returns immediately instead of
+	 * blocking until a writer appears. A blocking open on a FIFO is uninterruptible
+	 * across a cancel or statement_timeout (SA_RESTART), a denial of service. We
+	 * then fstat the fd we hold and reject anything that is not a regular file, so
+	 * there is no stat-before-open race: the file we checked is the file we opened.
+	 * A regular file has O_NONBLOCK cleared below; it is a no-op on regular reads,
+	 * but leaving it set on some platforms is untidy.
+	 */
+	fd = OpenTransientFile(path, O_RDONLY | O_NONBLOCK | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -134,6 +143,20 @@ pcopy_open_regular_file(const char *path, off_t *size_out)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a regular file", path)));
+	}
+	{
+		int			flags = fcntl(fd, F_GETFL);
+
+		if (flags == -1 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == -1)
+		{
+			int			save_errno = errno;
+
+			CloseTransientFile(fd);
+			errno = save_errno;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not clear nonblocking mode on file \"%s\": %m", path)));
+		}
 	}
 	if (size_out != NULL)
 		*size_out = st.st_size;
