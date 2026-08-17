@@ -23,13 +23,17 @@ These environment variables control the harnesses:
   `PATH`.
 
 The numbers below come from `bench/run_bench.sh`. The storage, query, and mutation
-tables were re-run on 2026-08-14 at commit `122fd5c`. They are materially unchanged
-from the 2026-08-12 run at `2fe6596` (Merge #592). Today's work is on the
-maintenance path. It does not touch the scan, storage, or write paths these tables
-measure. Spot checks match: heap 707 MB against columnar-zstd 6.1 MB, and
-`count(*)` at 0.04 ms. The new [Online maintenance](#online-maintenance) section
-measures today's changes. The conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows,
-an 8-column table, the median of 5 repetitions, 16 cores and 62 GB of memory.
+tables were re-run on 2026-08-17 at commit `7c873d5`. They are materially unchanged
+from the 2026-08-14 run at `122fd5c`. The main write-path change since then is issue
+#5's row-identity lock. It serializes a concurrent `UPDATE` or `DELETE` of the same
+row and is on by default. It adds no measurable cost here. The single-row `UPDATE`
+is 1.91 ms, unchanged, and that path takes the lock on the one row. An isolated
+on-and-off control of that operation, on a narrower table, measured 0.59 ms and
+0.63 ms, so the lock adds about 0.04 ms. Spot checks match: heap 707 MB against
+columnar-zstd
+5.95 MB, and `count(*)` at 0.04 ms. The
+conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows, an 8-column table, the
+median of 5 repetitions, 16 cores and 62 GB of memory.
 
 The previous record of this section was 2026-08-04 at commit `aeb7882`, on
 PostgreSQL 18.4 and an 8-core machine with 12 GB. The harness itself did not change
@@ -712,6 +716,25 @@ path and are measured in [Online maintenance](#online-maintenance):
   measurably affect foreground scan latency while maintaining.
 - **`pgcolumnar.maintenance_due()` (#607).** Reports when a verb is worth running,
   and takes no lock. Not a throughput change; it is the daemon's policy input.
+
+Re-run on 2026-08-17 at `7c873d5`. The storage, query, and mutation numbers above
+are materially unchanged. The code deltas since `122fd5c` that touch a measured
+path:
+
+- **Issue #5's row-identity lock (#684).** A concurrent `UPDATE` or `DELETE` of the
+  same row now serializes on the row. The losing writer gets a retryable
+  `serialization_failure` instead of duplicating the row. It is on by default and
+  costs nothing measurable on the write path. The single-row `UPDATE` is 1.91 ms,
+  unchanged, and that path takes the lock for the one row. An isolated on-and-off
+  control of it, on a narrower table, measured 0.59 ms and 0.63 ms with
+  `pgcolumnar.enable_row_update_lock` off and on. The lock adds about 0.04 ms. The
+  scattered
+  1000-row `UPDATE` re-measured at about 70 ms, the same band as before. It is the
+  noisiest number here.
+- **Iceberg read-path hardening (#685) and cost-model refinements (#679, #681,
+  #682).** The Iceberg work is on the Iceberg read path. It does not touch the scan,
+  storage, or write paths these tables measure. The cost-model changes adjust
+  planner estimates, not runtime scan speed, and did not move these numbers.
 
 ## Joins
 
