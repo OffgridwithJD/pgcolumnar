@@ -27,8 +27,9 @@ tables were re-run on 2026-08-17 at commit `7c873d5`. They are materially unchan
 from the 2026-08-14 run at `122fd5c`. The main write-path change since then is issue
 #5's row-identity lock. It serializes a concurrent `UPDATE` or `DELETE` of the same
 row and is on by default. It adds no measurable cost here. The single-row `UPDATE`
-is 1.90 ms, unchanged, and that path takes the lock on the one row. Turning the lock
-off does not change the time. Spot checks match: heap 707 MB against columnar-zstd
+is 1.91 ms, unchanged, and that path takes the lock on the one row. An isolated
+on-and-off control of that operation measured 0.59 ms and 0.63 ms, so the lock adds
+about 0.04 ms. Spot checks match: heap 707 MB against columnar-zstd
 5.95 MB, and `count(*)` at 0.04 ms. The
 conditions were PostgreSQL 18.4 non-assert, 6,000,000 rows, an 8-column table, the
 median of 5 repetitions, 16 cores and 62 GB of memory.
@@ -722,9 +723,10 @@ path:
 - **Issue #5's row-identity lock (#684).** A concurrent `UPDATE` or `DELETE` of the
   same row now serializes on the row. The losing writer gets a retryable
   `serialization_failure` instead of duplicating the row. It is on by default and
-  costs nothing measurable on the write path. The single-row `UPDATE` is 1.90 ms,
-  unchanged, and that path takes the lock for the one row. Setting
-  `pgcolumnar.enable_row_update_lock = off` does not change the time. The scattered
+  costs nothing measurable on the write path. The single-row `UPDATE` is 1.91 ms,
+  unchanged, and that path takes the lock for the one row. An isolated on-and-off
+  control of it measured 0.59 ms with `pgcolumnar.enable_row_update_lock = off` and
+  0.63 ms on, so the lock adds about 0.04 ms. The scattered
   1000-row `UPDATE` re-measured at about 70 ms, the same band as before. It is the
   noisiest number here.
 - **Iceberg read-path hardening (#685) and cost-model refinements (#679, #681,
