@@ -14,6 +14,7 @@
 extern char *PgColumnarIcebergRestLoadTableLocation(const char *catalog_uri,
 													const char *ns,
 													const char *table,
-													const char *token);
+													const char *token,
+													const char *warehouse);
 
 #endif							/* COLUMNAR_ICEBERG_REST_H */

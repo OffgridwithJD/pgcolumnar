@@ -84,7 +84,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        self._logline("GET", path)
+        # log the full request target (path + any query) so a test can assert a
+        # query parameter such as ?warehouse=; routing still uses the bare path.
+        self._logline("GET", self.path)
 
         if not path.startswith("/v1/"):
             self._not_found("no such path")

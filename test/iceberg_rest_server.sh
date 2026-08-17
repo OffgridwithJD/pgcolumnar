@@ -98,6 +98,21 @@ check "a catalog_uri option on the USER MAPPING is rejected (HV00D)" \
 	"$(sqlstate_of "ALTER USER MAPPING FOR postgres SERVER cat OPTIONS (ADD catalog_uri 'x')")" \
 	"HV00D"
 
+# ---- #656: a warehouse SERVER option is accepted and sent on GET /v1/config --
+# On current main the validator rejects any server option but catalog_uri, so
+# CREATE SERVER ... OPTIONS (warehouse ...) fails HV00D. It must be accepted and
+# forwarded to GET /v1/config as ?warehouse=, to select a warehouse on a
+# multi-warehouse catalog.
+check "a warehouse option on the SERVER is accepted (not HV00D)" \
+	"$(sqlstate_of "CREATE SERVER whcat FOREIGN DATA WRAPPER pgcolumnar_iceberg_catalog OPTIONS (catalog_uri '$CAT', warehouse 'wh1')")" \
+	""
+q "CREATE USER MAPPING FOR postgres SERVER whcat OPTIONS (token '$TOKEN')" >/dev/null
+check "a warehouse-configured server resolves a table location" \
+	"$(q "SELECT pgcolumnar.iceberg_rest_table_location('whcat','db','events')")" \
+	"$MDLOC"
+check "the warehouse was sent on GET /v1/config (?warehouse=wh1)" \
+	"$(grep -c 'GET /v1/config?warehouse=wh1 ' "$REST_LOG" 2>/dev/null)" "1"
+
 # ---- OAuth2 client-credentials: mint a bearer, then use it -------------------
 # A second fixture requires a client id/secret at POST /v1/oauth/tokens and, on a
 # match, mints OATOKEN -- which loadTable then requires. So a green read proves
