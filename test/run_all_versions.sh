@@ -123,6 +123,7 @@ SUITES=(
 	native_delete_visibility_paths
 	native_dict_underfill
 	native_dml
+	native_encdesc_golden
 	native_encoding
 	native_exact_selection
 	native_fastdecode

@@ -13,6 +13,7 @@
  *-------------------------------------------------------------------------
  */
 #include "columnar.h"
+#include "columnar_encdesc.h"
 
 #include "columnar_delete_vector.h"
 #include "columnar_metadata.h"
@@ -827,7 +828,7 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgcolumnar: unrecognized native encoding descriptor")));
-	memcpy(&vectorCount, desc + 2, sizeof(uint32));
+	vectorCount = PgColumnarEncdescReadVectorCount(desc);
 
 	/*
 	 * Version 2 (E3b) appends a trailing region { uint32 sharedTableLen, bytes }
@@ -853,14 +854,11 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 	dp = desc + COLUMNAR_NATIVE_ENCDESC_HEADER_LEN;
 	for (v = 0; v < vectorCount; v++)
 	{
-		uint32		rawLen;
-		uint32		encLen;
+		PgColumnarEncdescEntry e;
 
-		memcpy(&rawLen, dp + 1 + sizeof(uint32), sizeof(uint32));
-		memcpy(&encLen, dp + 1 + 2 * sizeof(uint32), sizeof(uint32));
-		encTotal += encLen;
-		rawTotal += rawLen;
-		dp += COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN;
+		dp = PgColumnarEncdescReadEntry(dp, &e);
+		encTotal += e.encLen;
+		rawTotal += e.rawLen;
 	}
 
 	/*
@@ -904,12 +902,13 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 		uint32		valueCount;
 		uint32		rawLen;
 		uint32		encLen;
+		PgColumnarEncdescEntry e;
 
-		encType = (uint8) dp[0];
-		memcpy(&valueCount, dp + 1, sizeof(uint32));
-		memcpy(&rawLen, dp + 1 + sizeof(uint32), sizeof(uint32));
-		memcpy(&encLen, dp + 1 + 2 * sizeof(uint32), sizeof(uint32));
-		dp += COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN;
+		dp = PgColumnarEncdescReadEntry(dp, &e);
+		encType = e.type;
+		valueCount = e.valueCount;
+		rawLen = e.rawLen;
+		encLen = e.encLen;
 
 		vecRawLen[v] = rawLen;
 		if (rawLen > 0)
@@ -2174,7 +2173,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 				continue;
 			}
 
-			memcpy(&vc, cc->encodingDescriptor + 2, sizeof(uint32));
+			vc = PgColumnarEncdescReadVectorCount(cc->encodingDescriptor);
 			if ((int) vc > maxVecCount)
 				maxVecCount = (int) vc;
 		}
