@@ -270,4 +270,27 @@ build_schema_variant("legacyschema", {
     "format-version": 2, "schema": {"type": "struct", "fields": ICE_FIELDS}})
 
 
+# ============================ nullmanifestpath (#691, live #644-class crash) ==
+# A hostile manifest-list whose manifest_file.manifest_path is the union NULL
+# branch. The reader decodes against the embedded (untrusted) schema, so this is
+# reachable; without a guard ice_rebase strncmp(NULL)s and crashes the backend.
+MFILE_NULLPATH = json.dumps({"type": "record", "name": "manifest_file", "fields": [
+    {"name": "manifest_path", "type": ["null", "string"]},
+    {"name": "manifest_length", "type": "long"},
+    {"name": "partition_spec_id", "type": "int"},
+    {"name": "content", "type": "int"},
+    {"name": "sequence_number", "type": ["null", "long"]},
+    {"name": "min_sequence_number", "type": "long"},
+    {"name": "added_snapshot_id", "type": "long"}]}).encode()
+
+nmp = os.path.join(OUT, "nullmanifestpath", "db", "t", "metadata")
+os.makedirs(nmp)
+nmp_loc = f"file://{ROOT}/nullmanifestpath/db/t"
+# manifest_path null branch (zz(0)); the rest minimal and well-formed
+mfrec = zz(0) + zz(1000) + zz(0) + zz(0) + (zz(1) + zz(5)) + zz(5) + zz(SNAP)
+open(os.path.join(nmp, "ml.avro"), "wb").write(ocf(MFILE_NULLPATH, [mfrec]))
+open(os.path.join(nmp, "t.metadata.json"), "w").write(
+    metadata_json(nmp_loc, "ml.avro", 2, 5))
+
+
 print("malformed fixtures written under", OUT)

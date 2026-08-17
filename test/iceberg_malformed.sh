@@ -52,6 +52,7 @@ FX="$(dirname "${BASH_SOURCE[0]}")/fixtures/iceberg"
 WHM="$FX/warehouse_malformed"
 [ -f "$WHM/nullpath/db/t/metadata/t.metadata.json" ] \
 	&& [ -f "$WHM/nullseq_ml/ml.avro" ] \
+	&& [ -f "$WHM/nullmanifestpath/db/t/metadata/t.metadata.json" ] \
 	&& [ -f "$WHM/danglingschema/db/t/metadata/t.metadata.json" ] \
 	|| pgc_skip fixture "malformed iceberg fixtures are missing"
 python3 -c 'import json' 2>/dev/null || pgc_skip python "python3 is needed"
@@ -91,6 +92,17 @@ check "backend still up after the scan refusal" "$(q 'SELECT 1')" "1"
 check "control: a present file_path lists one data file" \
 	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_data_files('$DEST/nullpath_ctl/db/t/metadata/t.metadata.json')")" \
 	"1"
+
+# =========================================================================
+# #691  a hostile manifest-list whose manifest_file.manifest_path is the Avro
+#     union NULL branch reached ice_rebase -> ice_strip_scheme(NULL) and crashed
+#     the backend (strncmp of NULL). The embedded manifest schema is
+#     author-controlled, so this is reachable. Refuse it as DATA_CORRUPTED.
+# =========================================================================
+NMP="$DEST/nullmanifestpath/db/t/metadata/t.metadata.json"
+check "a NULL manifest_path is refused, not a crash (XX001)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_data_files('$NMP')")" "XX001"
+check "backend still up after the null-manifest_path refusal" "$(q 'SELECT 1')" "1"
 
 # =========================================================================
 # #1  a non-regular file (FIFO) named on any Iceberg-reachable open must be
