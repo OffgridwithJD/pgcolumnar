@@ -39,7 +39,12 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-SQLFILE="$(dirname "${BASH_SOURCE[0]}")/../pgcolumnar--1.0-alpha.sql"
+# Derive the base install script from default_version, so a version bump that
+# renames pgcolumnar--<ver>.sql does not silently point this at a missing file
+# (which reads as zero declared symbols, not as a failure of the thing under test).
+_epp_root="$(dirname "${BASH_SOURCE[0]}")/.."
+_epp_ver="$(sed -n "s/^default_version *= *'\(.*\)'.*/\1/p" "$_epp_root/pgcolumnar.control")"
+SQLFILE="$_epp_root/pgcolumnar--$_epp_ver.sql"
 
 # Functions that take no relation and therefore have no relation-level bar to
 # decide. Written out by name on purpose: adding a new no-relation function

@@ -2,8 +2,8 @@
 
 ## Release status
 
-pgColumnar is pre-release. The version marker is `1.0-alpha`, recorded in `VERSION`,
-and `v1.0-alpha` is tagged and published as a pre-release.
+pgColumnar is pre-release. The version marker is `1.0-alpha2`, recorded in `VERSION`,
+and `v1.0-alpha2` is tagged and published as a pre-release.
 
 An alpha is still an alpha: treat a columnar table as reloadable and keep the source
 the data was loaded from. The extension is appropriate today for evaluation, for analytical
@@ -91,7 +91,8 @@ A physical copy does not replace the source across a version change.
 The same posture covers the extension's own catalog, not only the on-disk data
 format. The install script of a build defines the `pgcolumnar` catalog tables for a fresh
 `CREATE EXTENSION`. An `ALTER EXTENSION UPDATE` script ships when a build needs one.
-The 1.0-dev to 1.0-alpha script is the first.
+The 1.0-dev to 1.0-alpha and 1.0-alpha to 1.0-alpha2 scripts are the first two, and
+a single `ALTER EXTENSION pgcolumnar UPDATE` walks the chain from either.
 
 **Replacing the shared library is not sufficient on its own.** After installing a new
 build, run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the extension.
