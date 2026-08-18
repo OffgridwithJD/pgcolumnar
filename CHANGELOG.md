@@ -155,6 +155,19 @@ which was true until that script existed.
 
 ### Security
 
+- The native varlena decoder now bounds a value's stored length against its
+  buffer. A varying-length value in a column chunk (and a zone map's min/max)
+  carries its own length prefix, which `PgColumnarDecodeValue`,
+  `pgcolumnar_skip_value`, and `pgcolumnar_build_val_offsets` read and `memcpy`d
+  with no check that the value fit; a corrupt chunk or catalog row could then
+  declare a value running past the buffer (an out-of-bounds read), and a prefix
+  carrying the external-TOAST tag would be detoasted through a bogus pointer. The
+  decode sites now pass the value stream's end and read through a bounded reader
+  that refuses an over-long length or an external tag with `DATA_CORRUPTED`. This
+  is the trusted-storage boundary (bit rot, a hand-written stripe), not a
+  file-author-reachable one, but a clean error beats a crash. Regression test:
+  native_varlena_bound (a min/max whose header claims ~1 GB now errors instead of
+  crashing the backend; a mutation removing the bound reddens it).
 - Closed a stat-before-open race in the local file read path. The
   non-regular-file guard that keeps a FIFO from blocking the backend in `open(2)`
   (a cancel-resistant denial of service) screened the path with `stat()` before a

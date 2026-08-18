@@ -177,6 +177,7 @@ SUITES=(
 	native_toasted_write
 	native_truncate
 	native_vacuum_race
+	native_varlena_bound
 	native_vecdecode
 	native_vecskip
 	native_writer

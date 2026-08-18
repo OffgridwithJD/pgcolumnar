@@ -680,7 +680,7 @@ typedef struct PgColumnarVector
 extern void PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
 								Datum value);
 extern Datum PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
-								 MemoryContext targetContext);
+								 const char *end, MemoryContext targetContext);
 
 /* -------------------------------------------------------------------------
  * lightweight value-stream encodings (pgcolumnar_encoding.c, I1)
@@ -981,6 +981,43 @@ PgColumnarVarSizeAnyUnaligned(const char *p)
 #else
 	return (hdr >> 2) & 0x3FFFFFFF;
 #endif
+}
+
+/*
+ * Bounded variant, for a varlena decoded from native storage. The value's length
+ * prefix is stored, not computed, so a corrupt native chunk (bit rot, or a
+ * hand-written stripe) can declare a value that runs past its decoded buffer --
+ * an out-of-bounds read -- and if the prefix carries the external-TOAST tag, the
+ * value is later detoasted through a pointer that points at nothing. `end` is one
+ * past the last valid byte of the value stream. This refuses a value that starts
+ * at or past `end`, a 4-byte header whose bytes are not all in range, an external
+ * TOAST tag (native storage stores only inline, detoasted values), or a length
+ * that would read past `end`. A valid inline value is unaffected: its stored
+ * length always fits. Returns the value's total size in bytes.
+ */
+static inline uint32
+PgColumnarVarSizeAnyUnalignedBounded(const char *p, const char *end)
+{
+	uint32		len;
+
+	if (p >= end)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgcolumnar: varlena value starts at or past the value stream end")));
+	if (VARATT_IS_EXTERNAL(p))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgcolumnar: external TOAST pointer in a native value stream")));
+	if (!VARATT_IS_1B(p) && (Size) (end - p) < sizeof(uint32))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgcolumnar: varlena header runs past the value stream end")));
+	len = PgColumnarVarSizeAnyUnaligned(p);
+	if (len < 1 || (Size) (end - p) < (Size) len)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgcolumnar: varlena value length runs past the value stream end")));
+	return len;
 }
 
 #endif							/* PGCOLUMNAR_H */

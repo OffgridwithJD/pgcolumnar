@@ -2868,7 +2868,9 @@ pgcolumnar_fill_native_metadata_agg(PgColumnarAggScanState *state, int *ndirty)
 							MemoryContextSwitchTo(state->resultContext);
 						char	   *cur = (spec->kind == COLUMNAR_AGG_MIN)
 							? (char *) z->minimum : (char *) z->maximum;
-						Datum		v = PgColumnarDecodeValue(att, &cur,
+						const char *curEnd = (spec->kind == COLUMNAR_AGG_MIN)
+							? z->minimum + z->minimumLen : z->maximum + z->maximumLen;
+						Datum		v = PgColumnarDecodeValue(att, &cur, curEnd,
 														state->resultContext);
 
 						if (!spec->sawValue)
