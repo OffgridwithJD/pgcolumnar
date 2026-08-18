@@ -698,3 +698,51 @@ REVOKE ALL ON FUNCTION pgcolumnar.require_caller_select(regclass) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgcolumnar.vm_is_visible(regclass,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgcolumnar.vm_selftest(regclass,integer) FROM PUBLIC;
 
+
+-- function comments (pg_get_functiondef does not carry them, so the new and
+-- DROP-recreated functions above have none until set here; applied for every
+-- pgcolumnar function so the upgraded catalog's comments match a fresh install)
+COMMENT ON FUNCTION pgcolumnar."analyze"(regclass,text[]) IS 'collect per-column statistics by reading one column at a time rather than sampling every column (#414); null_frac, n_distinct and the most-common frequencies all come from that read, so they describe one population (#485); core ANALYZE remains the correctness path and nothing schedules this, see #415';
+COMMENT ON FUNCTION pgcolumnar.add_projection(regclass,text,text[],text[]) IS 'declare a physical projection: a named column subset sorted on sort_key (gap 26)';
+COMMENT ON FUNCTION pgcolumnar.alter_table_set_access_method(text,text) IS 'convert a table between heap and columnar storage';
+COMMENT ON FUNCTION pgcolumnar.cluster(regclass,name[]) IS 'eager reorg: rewrite a columnar table with rows ordered by the Z-order space-filling curve over the given columns. Holds AccessExclusiveLock like CLUSTER/VACUUM FULL; the online incremental path is Phase F3';
+COMMENT ON FUNCTION pgcolumnar.compact(regclass) IS 'lazy online compaction: retire row groups that are fully deleted, dropping their metadata so scans skip them. Holds only ShareUpdateExclusiveLock (concurrent reads and writes). Returns the number of groups retired (Phase F3a)';
+COMMENT ON FUNCTION pgcolumnar.compact_rewrite(regclass,double precision,integer) IS 'lazy online space reclaim: rewrite partially-deleted row groups (deleted fraction >= min_deleted_fraction) to drop their dead rows, under ShareUpdateExclusiveLock (concurrent reads and writes). Returns the number of groups rewritten (Phase F3b)';
+COMMENT ON FUNCTION pgcolumnar.drop_projection(regclass,text) IS 'drop a declared projection and free its storage (gap 26)';
+COMMENT ON FUNCTION pgcolumnar.export_arrow(regclass,text) IS 'export a columnar table to an Arrow IPC stream file; returns rows written';
+COMMENT ON FUNCTION pgcolumnar.export_parquet(regclass,text) IS 'export a columnar table to a Parquet file; returns rows written';
+COMMENT ON FUNCTION pgcolumnar.file_split_offsets(text,integer) IS 'byte offsets that split a COPY text-format file into N record-aligned ranges (#300)';
+COMMENT ON FUNCTION pgcolumnar.get_storage_id(regclass) IS 'storage id linking a columnar table to its metadata rows';
+COMMENT ON FUNCTION pgcolumnar.iceberg_current_snapshot(text) IS 'read an Apache Iceberg table metadata.json and report its current snapshot (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_data_files(text) IS 'list the live data files of an Apache Iceberg table current snapshot; refuses tables with delete files (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_namespaces(text) IS 'list the namespaces of an Iceberg REST catalog, one per row, multi-level namespaces dot-joined (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_scan(text,text,text) IS 'read a table named by an Iceberg REST catalog at its current snapshot; supply a column definition list, as for iceberg_scan; the metadata location is resolved through the catalog and read like any other Iceberg table (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_table_location(text,text,text) IS 'resolve the current metadata-location of a table named by an Iceberg REST catalog (catalog URI + namespace + table); the bearer token is read from the server environment variable PGCOLUMNAR_ICEBERG_REST_TOKEN, never a SQL argument (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_rest_tables(text,text) IS 'list the table names in a namespace of an Iceberg REST catalog, one per row (#388)';
+COMMENT ON FUNCTION pgcolumnar.iceberg_scan(text) IS 'read an Apache Iceberg table at its current snapshot; supply a column definition list, whose names resolve to the table schema field ids, e.g. SELECT * FROM pgcolumnar.iceberg_scan(path) AS t(id bigint, region text); applies position, equality, and deletion-vector deletes (#388)';
+COMMENT ON FUNCTION pgcolumnar.import_arrow(regclass,text) IS 'insert rows from an Arrow IPC stream file into a columnar table; returns rows inserted';
+COMMENT ON FUNCTION pgcolumnar.import_parquet(regclass,text) IS 'insert rows from a Parquet file, directory, or glob into a table; returns rows inserted (gap 27)';
+COMMENT ON FUNCTION pgcolumnar.maintenance_due(regclass,double precision,double precision) IS 'report whether an online maintenance verb (compact_rewrite, recluster) is worth running, from table statistics alone; thresholds are parameters with defaults measured on #415; pure report, takes no lock and rewrites nothing (#415)';
+COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass,text,integer) IS 'atomic parallel bulk load of a COPY text file into a columnar table using background workers: a single columnar table (any row order), or a RANGE-partitioned columnar table sorted by the partition key with one distinct partition set per worker (#300)';
+COMMENT ON FUNCTION pgcolumnar.parallel_export_parquet(regclass,text,integer) IS 'parallel Parquet export using read-only background workers into a directory readable by pgcolumnar.read_parquet: a single columnar table split by row-group ranges, or a partitioned columnar table one file per partition; returns rows written (#300)';
+COMMENT ON FUNCTION pgcolumnar.parquet_schema(text) IS 'report the leaf columns of a Parquet file and the PostgreSQL type each maps to; for a directory or glob, of its first file; field_id is the SchemaElement field id Iceberg projects by, NULL when the writer emitted none (Phase G scan core, #388)';
+COMMENT ON FUNCTION pgcolumnar.read_avro_manifest(text) IS 'decode an Apache Iceberg Avro manifest file and report its data-file entries; the first step of Iceberg read support (#388)';
+COMMENT ON FUNCTION pgcolumnar.read_manifest_list(text) IS 'decode an Apache Iceberg snapshot manifest-list Avro file and report the manifest files it points at (#388)';
+COMMENT ON FUNCTION pgcolumnar.read_parquet(text) IS 'read a Parquet file, directory, or glob in place as a set of rows; requires a column definition list covering every leaf column, e.g. SELECT * FROM pgcolumnar.read_parquet(path) AS t(id int, name text) (Phase G)';
+COMMENT ON FUNCTION pgcolumnar.read_parquet(text,integer[]) IS 'read a Parquet file by field id: output column i is bound to the file column whose Parquet field id equals field_ids[i], reading only those columns in that order, e.g. SELECT * FROM pgcolumnar.read_parquet(path, ARRAY[12,7]) AS t(c int, a int) (#388)';
+COMMENT ON FUNCTION pgcolumnar.read_projection(regclass,text) IS 'read a projection''s stored columns (live rows), joined by | -- verification/debug (gap 26)';
+COMMENT ON FUNCTION pgcolumnar.rebuild_projections(regclass) IS 'materialize declared projections that have no storage, after a logical restore (#266)';
+COMMENT ON FUNCTION pgcolumnar.recluster(regclass,name[]) IS 'lazy online reclustering: re-establish global Z-order clustering over the given columns under ShareUpdateExclusiveLock (concurrent reads and writes), unlike the eager cluster() which holds AccessExclusiveLock. Returns the number of groups reclustered (Phase F3c)';
+COMMENT ON FUNCTION pgcolumnar.reconstruct_via_projection(regclass,text) IS 'read all live rows via a projection, reconstructing non-covered columns from the base by row number (gap 26)';
+COMMENT ON FUNCTION pgcolumnar.require_caller_select(regclass) IS 'raise unless the calling role may SELECT the relation; for SECURITY DEFINER callers (#560)';
+COMMENT ON FUNCTION pgcolumnar.reset_options(regclass,boolean,boolean,boolean,boolean,boolean,boolean) IS 'reset per-table columnar options to the instance defaults';
+COMMENT ON FUNCTION pgcolumnar.set_options(regclass,integer,integer,name,integer,name,name[]) IS 'set per-table columnar options; NULL leaves a value unchanged. sort_by declares the physical sort key applied by vacuum_sorted() with no explicit columns (#288); it is NOT auto-maintained -- rows inserted after a sort append in insert order, so re-run vacuum_sorted() to re-establish it, like PostgreSQL CLUSTER';
+COMMENT ON FUNCTION pgcolumnar.sort_status(regclass) IS 'how much of an ordered columnar table is still in its ordered run (#301)';
+COMMENT ON FUNCTION pgcolumnar.stats(regclass) IS 'per-row-group statistics for a columnar table';
+COMMENT ON FUNCTION pgcolumnar.truncate(regclass) IS 'physical end-truncation: return trailing reclaimed blocks to the OS. Best-effort -- takes AccessExclusiveLock conditionally for the brief physical step and returns 0 without waiting if the table is busy. Only removes space freed before the oldest-xmin horizon. Gated by pgcolumnar.enable_end_truncation. Returns the number of blocks truncated (Phase F)';
+COMMENT ON FUNCTION pgcolumnar.vacuum(regclass,integer) IS 'compact a columnar table by combining stripes and reclaiming deleted rows';
+COMMENT ON FUNCTION pgcolumnar.vacuum_full(name,real,integer) IS 'compact every columnar table in a schema';
+COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass) IS 'apply the table''s declared sort_by key from set_options (#288); errors if none is declared. Equivalent to a bare CLUSTER re-applying a remembered index.';
+COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass,name[]) IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text (unlike the numeric-only Z-order cluster()). One-shot: not auto-maintained.';
+COMMENT ON FUNCTION pgcolumnar.vm_is_visible(regclass,integer) IS 'gap 28: is the synthetic block marked all-visible in the VM fork?';
+COMMENT ON FUNCTION pgcolumnar.vm_selftest(regclass,integer) IS 'gap 28 phase-1 self-test: set a VM-fork all-visible bit and read it back';

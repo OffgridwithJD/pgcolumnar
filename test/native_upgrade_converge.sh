@@ -36,9 +36,14 @@
 #
 # The snapshot compares, across the pgcolumnar schema: every function's full
 # definition (pg_get_functiondef, which includes the AS '...','symbol' clause, so
-# a wrong link symbol shows up here) and its ACL; every relation's kind and ACL;
-# every column's type and NOT NULL; every non-base type; and every foreign-data
-# wrapper's handler and validator. Convergence = an empty diff on all of it.
+# a wrong link symbol shows up here), its ACL, and its comment; every relation's
+# kind, ACL, and comment; every column's type, NOT NULL, and comment; every
+# non-base type; and every foreign-data wrapper's handler and validator.
+# Convergence = an empty diff on all of it. The comment (pg_description) is in the
+# snapshot on purpose: pg_get_functiondef does NOT emit COMMENT, so without this a
+# generator that diffs only function definitions is blind to a missing comment,
+# and an upgraded install silently loses the 44 function comments a fresh install
+# carries (found in review of this release).
 #
 # Removal proof: this test caught three defects in the generated upgrade script
 # before it went green -- psql command tags captured into the SQL body, function
@@ -77,11 +82,11 @@ P() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres 
 # Comprehensive catalog snapshot of the pgcolumnar schema, one line per object.
 snap() {
 	P -d "$1" -F'|' -c "
-	  SELECT 'FN|'||p.oid::regprocedure||'|'||md5(pg_get_functiondef(p.oid))||'|'||coalesce(p.proacl::text,'(def)')
+	  SELECT 'FN|'||p.oid::regprocedure||'|'||md5(pg_get_functiondef(p.oid))||'|'||coalesce(p.proacl::text,'(def)')||'|'||md5(coalesce(obj_description(p.oid,'pg_proc'),''))
 	    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='pgcolumnar'
-	  UNION ALL SELECT 'REL|'||c.relkind::text||'|'||c.relname||'|'||coalesce(c.relacl::text,'(def)')
+	  UNION ALL SELECT 'REL|'||c.relkind::text||'|'||c.relname||'|'||coalesce(c.relacl::text,'(def)')||'|'||md5(coalesce(obj_description(c.oid,'pg_class'),''))
 	    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='pgcolumnar'
-	  UNION ALL SELECT 'COL|'||c.relname||'.'||a.attname||'|'||format_type(a.atttypid,a.atttypmod)||'|'||a.attnotnull::text
+	  UNION ALL SELECT 'COL|'||c.relname||'.'||a.attname||'|'||format_type(a.atttypid,a.atttypmod)||'|'||a.attnotnull::text||'|'||md5(coalesce(col_description(c.oid,a.attnum),''))
 	    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid
 	    WHERE n.nspname='pgcolumnar' AND c.relkind IN ('r','p') AND a.attnum>0 AND NOT a.attisdropped
 	  UNION ALL SELECT 'TYP|'||t.typname||'|'||t.typtype::text FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
