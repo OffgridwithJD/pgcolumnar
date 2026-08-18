@@ -26,6 +26,15 @@
 # fetch, the vector aggregate) share the one bounded reader, so they are bounded
 # by the same fix; the min/max path is the one a catalog UPDATE can reach.
 #
+# Reproducing the removal proof (two traps that both come back falsely GREEN):
+#   - Do a fresh (make clean) build, NOT PGC_SKIP_BUILD=1. The bounded reader is a
+#     header inline; PGXS does not track header deps, so a skip build tests the
+#     old .so and the gutted guard never takes effect (gate-environment stale-.so).
+#   - Poison column_index=1 (txt), not 0. Column 0 is the int id and has no varlena
+#     min/max, so corrupting its zone map does not reach the varlena decoder.
+# With a clean build and column 1 poisoned, the ungutted bound gives XX001; the
+# gutted one turns the ~1 GB claim into a memcpy that SIGSEGVs the backend.
+#
 # Usage:  test/native_varlena_bound.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 
