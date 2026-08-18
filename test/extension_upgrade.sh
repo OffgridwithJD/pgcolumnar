@@ -170,10 +170,16 @@ fi
 # they did move, ALTER EXTENSION UPDATE is the only route back that keeps user tables,
 # so its absence is itself the failure.
 new_default=$(grep -oE "default_version = '[^']+'" "$SRCDIR/pgcolumnar.control" | sed "s/.*'\(.*\)'/\1/")
-if [ "$new_default" != "$old_ver" ] && \
-   [ ! -f "$SHAREDIR/extension/pgcolumnar--$old_ver--$new_default.sql" ]; then
-	echo "  FAIL  default_version moved $old_ver -> $new_default with no"
-	echo "        pgcolumnar--$old_ver--$new_default.sql, so an existing install cannot upgrade"
+# A single direct pgcolumnar--OLD--NEW.sql is not the only valid route: PostgreSQL
+# will walk a chain of upgrade scripts, and this release ships one (the v1.0-alpha
+# tag installs 1.0-dev, which reaches 1.0-alpha2 via dev->alpha->alpha2). Ask the
+# server whether any update path exists rather than assuming a one-hop file, so a
+# correctly chained upgrade is not reported as a missing script.
+haspath=$(q "SELECT count(*) FROM pg_extension_update_paths('pgcolumnar')
+             WHERE source='$old_ver' AND target='$new_default' AND path IS NOT NULL")
+if [ "$new_default" != "$old_ver" ] && [ "${haspath:-0}" = "0" ]; then
+	echo "  FAIL  default_version moved $old_ver -> $new_default with no update path"
+	echo "        (need pgcolumnar--$old_ver--$new_default.sql or a chain of upgrade scripts)"
 	fail=1
 fi
 
@@ -216,6 +222,49 @@ if [ -n "$missing" ]; then
 	fail=1
 else
 	echo "  PASS  every C function's link name is namespaced"
+fi
+
+# ---- 5. the upgraded catalog must MATCH a fresh install of the new version -----------
+# The checks above prove the upgraded extension works; they do not prove the upgrade
+# script is COMPLETE. A missed REVOKE leaves an internal function world-executable, a
+# missed CREATE OR REPLACE leaves a stale definition or link symbol, a missed new
+# function or column is simply absent -- all with every functional check still green.
+# Diff the upgraded schema against a fresh CREATE EXTENSION of the new default, object
+# by object: every function's definition (which carries its link symbol) and ACL, every
+# relation's kind and ACL, every column's type and NOT NULL, every non-base type, and
+# every foreign-data wrapper. This runs the real released upgrade path (dev->alpha2 via
+# the chain) to convergence, which a single-library test cannot reach.
+snap () {
+	runpg "$BINDIR/psql" -h /tmp -p "$PORT" -d "$1" -X -F'|' -Atc "
+	  SELECT 'FN|'||p.oid::regprocedure||'|'||md5(pg_get_functiondef(p.oid))||'|'||coalesce(p.proacl::text,'(def)')
+	    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='pgcolumnar'
+	  UNION ALL SELECT 'REL|'||c.relkind::text||'|'||c.relname||'|'||coalesce(c.relacl::text,'(def)')
+	    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='pgcolumnar'
+	  UNION ALL SELECT 'COL|'||c.relname||'.'||a.attname||'|'||format_type(a.atttypid,a.atttypmod)||'|'||a.attnotnull::text
+	    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid
+	    WHERE n.nspname='pgcolumnar' AND c.relkind IN ('r','p') AND a.attnum>0 AND NOT a.attisdropped
+	  UNION ALL SELECT 'TYP|'||t.typname||'|'||t.typtype::text FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+	    WHERE n.nspname='pgcolumnar' AND t.typtype<>'b'
+	  UNION ALL SELECT 'FDW|'||w.fdwname||'|'||coalesce(h.oid::regproc::text,'-')||'|'||coalesce(v.oid::regproc::text,'-')
+	    FROM pg_foreign_data_wrapper w LEFT JOIN pg_proc h ON h.oid=w.fdwhandler LEFT JOIN pg_proc v ON v.oid=w.fdwvalidator
+	    WHERE w.fdwname LIKE 'pgcolumnar%'
+	  ORDER BY 1;" 2>&1 | sort
+}
+runpg "$BINDIR/createdb" -h /tmp -p "$PORT" extfresh >/dev/null 2>&1
+fresh_err=$(runpg "$BINDIR/psql" -h /tmp -p "$PORT" -d extfresh -X -Atc "CREATE EXTENSION pgcolumnar" 2>&1)
+fresh_snap=$(snap extfresh)
+if [ -z "$fresh_snap" ]; then
+	echo "  FAIL  could not stand up a fresh $new_default install to compare against: $fresh_err"
+	fail=1
+else
+	conv_diff=$(diff <(printf '%s\n' "$fresh_snap") <(snap extupg) || true)
+	if [ -z "$conv_diff" ]; then
+		echo "  PASS  upgraded catalog is byte-identical to a fresh $new_default install ($(printf '%s\n' "$fresh_snap" | grep -c .) objects)"
+	else
+		echo "  FAIL  upgraded catalog diverges from a fresh $new_default install:"
+		printf '%s\n' "$conv_diff" | head -40 | sed 's/^/      /'
+		fail=1
+	fi
 fi
 
 echo "== extension_upgrade: $([ $fail -eq 0 ] && echo PASS || echo FAIL)"

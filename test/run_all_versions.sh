@@ -176,6 +176,7 @@ SUITES=(
 	native_sort_by
 	native_toasted_write
 	native_truncate
+	native_upgrade_converge
 	native_vacuum_race
 	native_varlena_bound
 	native_vecdecode
