@@ -147,12 +147,20 @@ conversion happens. Only the catalog entry is stale.
 
 Do not run `DROP EXTENSION`. It removes your columnar tables with it.
 
-### Upgrading from 1.0-dev to 1.0-alpha
+### Upgrading to 1.0-alpha2
 
-This release renames the extension's C symbols into the `pgcolumnar` namespace,
-so that two extensions named `columnar` can be loaded without colliding. That is
-the change step 3 applies. The SQL you write does not change. Function names,
-settings and table syntax are all the same.
+`1.0-alpha2` is the current release. `ALTER EXTENSION pgcolumnar UPDATE` (step 3
+above) reaches it from either previously published version: `1.0-dev`, which the
+`v1.0-alpha` tag installed, or `1.0-alpha`. PostgreSQL applies the shipped upgrade
+scripts in sequence, so a `1.0-dev` install is carried `1.0-dev` to `1.0-alpha` to
+`1.0-alpha2` by that one command.
+
+The `1.0-alpha` cycle renamed the extension's C symbols into the `pgcolumnar`
+namespace, so that two extensions named `columnar` can be loaded without
+colliding. That rename is why the update is mandatory rather than cosmetic. The
+recorded symbol names must be rewritten to match the new library, and only
+`ALTER EXTENSION UPDATE` does that. The SQL you write does not change. Function
+names, settings and table syntax are all the same.
 
 The source records the on-disk format version. The specification also records it,
 in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).

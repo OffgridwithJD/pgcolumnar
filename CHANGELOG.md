@@ -2,18 +2,36 @@
 
 All notable changes to pgColumnar are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). pgColumnar is
-pre-release; the version marker is `1.0-alpha`, recorded in `VERSION`. New tables
+pre-release; the version marker is `1.0-alpha2`, recorded in `VERSION`. New tables
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's `default_version` is `1.0-alpha`, and an upgrade script ships with
-it. Older notes in this file describe `default_version` as pinned at `1.0-dev`,
-which was true until that script existed.
+The extension's `default_version` is `1.0-alpha2`, and upgrade scripts from both
+previously shipped versions (`1.0-dev`, which the v1.0-alpha tag installed, and
+`1.0-alpha`) ship with it, so a single `ALTER EXTENSION pgcolumnar UPDATE` reaches
+`1.0-alpha2` from either. Older notes in this file describe `default_version` as
+pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+## [1.0-alpha2] - 2026-08-18
+
 ### Added
 
+- The extension packages a `1.0-alpha` to `1.0-alpha2` upgrade script, generated
+  from the catalog delta between the two versions (16 new functions, 3 changed,
+  two foreign-data wrappers, two `pgcolumnar.storage` columns, and the PUBLIC
+  execute revokes on the internal projection and visibility-map functions). A
+  convergence test, `native_upgrade_converge`, installs `1.0-alpha`, runs
+  `ALTER EXTENSION pgcolumnar UPDATE`, and asserts the result is byte-identical to
+  a fresh `1.0-alpha2` across every function definition and ACL, relation, column,
+  type, and foreign-data wrapper. The full `1.0-dev` to `1.0-alpha2` path,
+  including that an existing columnar table still reads unchanged across the
+  C-symbol rename, is covered by a two-library test, `upgrade_from_dev_twolib`.
+  This test caught three defects in the generated script before it converged
+  (psql command tags captured into the SQL, function definitions concatenated
+  without a terminating semicolon, and the ACL revokes omitted because a
+  definition-only diff cannot see an ACL-only change).
 - The Iceberg REST catalog `FOREIGN SERVER` now accepts a `warehouse` option
   alongside `catalog_uri`. It selects a warehouse on a multi-warehouse catalog
   and is sent as the `?warehouse=` query parameter on the `GET /v1/config`

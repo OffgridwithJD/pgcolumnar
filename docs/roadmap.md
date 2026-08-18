@@ -10,7 +10,7 @@ being worked now.
 ## Status
 
 pgColumnar is [pre-release](limitations.md#release-status). The version marker is
-`1.0-alpha`. A table `USING pgcolumnar` is stored in the native on-disk format, PGCN v1.
+`1.0-alpha2`. A table `USING pgcolumnar` is stored in the native on-disk format, PGCN v1.
 
 ## Done
 
