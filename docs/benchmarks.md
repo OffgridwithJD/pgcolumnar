@@ -428,8 +428,10 @@ suite. This section is a separate, larger run. It compares pgColumnar with heap,
 TimescaleDB, and Citus on the TSBS `cpu` workload, at 100,000,000 rows across 21
 columns. The data is loaded byte for byte the same way into each engine.
 
-The bench host has 16 vCPU and 62 GB. Each engine uses the configuration its own
-users would choose:
+The bench host has 16 vCPU and 62 GB. The comparison engines are built from
+source against the same non-assert PostgreSQL. The exact versions and build
+flags are pinned by `bench/build_timescaledb.sh` and `bench/build_citus.sh`.
+Each engine uses the configuration its own users would choose:
 
 - pgColumnar: columnar scan, storage in load order. One btree on
   `(hostname, time DESC)`. The load order is not globally sorted on either key. It is
