@@ -173,6 +173,7 @@ SUITES=(
 	native_rewrite
 	native_rewrite_conc
 	native_roundtrip
+	native_saop_pushdown
 	native_skip
 	native_sort_by
 	native_toasted_write

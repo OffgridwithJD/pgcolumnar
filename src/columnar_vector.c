@@ -3028,6 +3028,22 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		return false;
 
 	/*
+	 * LOAD-BEARING: this gate is what keeps an IN-list's CONSERVATIVE scan
+	 * keys out of the fold. PgColumnarBuildScanKeys emits keys weaker than
+	 * their clause for a ScalarArrayOpExpr (a [min, max] range, #704), and
+	 * the fold's only per-row filter is the key loop, so such a key used
+	 * here counts rows the clause rejects. The SAOP is excluded only
+	 * because pgcolumnar_clause_to_predicate accepts nothing but OpExpr --
+	 * if you teach it about ScalarArrayOpExpr, you must first give keys an
+	 * exactness marker and gate the fold on it (#715 is the same hole from
+	 * the other side: a convertible clause that builds NO key, and an
+	 * anchored LIKE (#426), whose keys are also conservative, is a strict
+	 * OpExpr that PASSES this gate and is kept out of the fold only by the
+	 * byval gather guard below). native_saop_pushdown.sh's vector-agg arms
+	 * go red if this regresses.
+	 */
+
+	/*
 	 * Every column the fold will GATHER must be passed BY VALUE (#423).
 	 *
 	 * The gather does pointer arithmetic on attlen and hardcodes attbyval:
@@ -3051,8 +3067,9 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 	 * The type check below is not this check and cannot stand in for it. It walks
 	 * the SCAN KEYS and asks whether each type is comparable, while the gather
 	 * walks state->projected and needs to know whether each type is fixed width.
-	 * A text column filtered with LIKE is in projected and not in the keys, since
-	 * LIKE is not a pushable scan key, so it reached the gather unchecked. That is
+	 * A text column filtered with an unanchored LIKE is in projected and not in
+	 * the keys (an anchored LIKE builds only conservative range keys, #426; an
+	 * unanchored one builds none), so it reached the gather unchecked. That is
 	 * exactly ClickBench q21, SELECT COUNT(*) FROM hits WHERE URL LIKE '%google%'.
 	 *
 	 * Falling back to the row path is what the ADD COLUMN case already does.
