@@ -16,6 +16,14 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The object-store write path (export sink, delete, list) now refuses a URL
+  with userinfo (`user@host`) with the same error the read path always gave.
+  Before, the write parse admitted the URL and failed closed downstream by
+  accident: the allow-list cannot match a host with an embedded `@`, and a
+  `user:pass@` URL split at the wrong colon into a rejected port. A new
+  suite, `objstore_userinfo`, pins all three entry points on the SQLSTATE
+  and the guard's own message. (#706)
+
 - A merge join over index-fetched columnar rows no longer aborts with `pfree is
   not supported by the bump memory allocator` on PostgreSQL 17 and later. A
   columnar index scan returns a deferred slot, and when a sort materialises it
