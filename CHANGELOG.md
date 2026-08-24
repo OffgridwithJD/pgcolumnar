@@ -63,6 +63,28 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- The grouped vectorized aggregate (`pgcolumnar.enable_group_vectorization`)
+  now folds column at a time instead of row at a time. Where every group key is
+  a plain column, every aggregate is one the fold accumulates (`count`, `sum`
+  and `avg` over integer and float columns), and the whole `WHERE` is expressed
+  exactly by scan keys, the node walks row groups and reads each column's
+  packed values directly. The row path paid, for every row scanned,
+  `PgColumnarReadNextRow`, an expression context reset, staging the row into a
+  virtual slot, `ExecQual`, and one expression evaluation per group key; the
+  fold pays none of those, and the group hash and the probe equality are inline
+  for integer, `oid`, `date`, `time` and `timestamp` keys. Float keys keep the
+  type's own hash and equality functions, because `-0.0` and `0.0` are one
+  group with two bit patterns. Measured on 4,000,000 rows with 8 groups, 5
+  repetitions, counting instructions retired by the backend: 15,850,896,522
+  before and 7,352,675,551 after without a filter (2.16x), and 13,899,374,785
+  before and 6,292,504,808 after with one (2.21x). `EXPLAIN` reports
+  `Columnar Batch Fold` on the grouped node, as it already did on the ungrouped
+  one, so a plan states whether the fold ran. Shapes the fold declines, among
+  them a by-reference key such as `text`, an expression key, `min` and `max`,
+  and a filter no scan key expresses exactly, run the row path and return the
+  same results. A new suite, `native_groupagg_batch`, proves the results
+  against a heap mirror and proves the work separately from them. (#708)
+
 - An index or bitmap fetch no longer reads the whole row-group list out of
   the catalog for every row. The list is memoized per command and snapshot,
   with a refresh on any miss, so a group flushed earlier in the same

@@ -650,6 +650,19 @@ typedef struct PgColumnarGroupKey
 	bool		byval;
 	FmgrInfo	hashFn;			/* type hash function */
 	FmgrInfo	eqFn;			/* type equality operator function */
+
+	/*
+	 * Batch fold (#708). attidx is the base column this key reads when the key
+	 * is a plain Var of the scanned relation, and -1 otherwise; the fold takes
+	 * the value straight out of the gathered column instead of running
+	 * ExecEvalExpr per row, and refuses the shape when any key is -1.
+	 *
+	 * simple says the type's equality IS bitwise equality of the Datum, so the
+	 * fold can hash the bits and compare with ==. See
+	 * pgcolumnar_groupagg_simple_key for what that excludes and why.
+	 */
+	int			attidx;
+	bool		simple;
 } PgColumnarGroupKey;
 
 typedef struct PgColumnarGroupEntry
@@ -695,6 +708,16 @@ typedef struct PgColumnarGroupAggScanState
 	int			emitPos;		/* next entry index to emit */
 
 	/*
+	 * Batch fold (#708). batchEligible is decided at Begin from the query shape
+	 * alone, so a plain EXPLAIN can report what will be attempted; batchFolded
+	 * records that the fold actually ran. They disagree exactly where the
+	 * ungrouped node's pair does (#602): a column added after some row groups is
+	 * predicted eligible and then refused at execution.
+	 */
+	bool		batchEligible;
+	bool		batchFolded;
+
+	/*
 	 * Parallel grouped fold (#349). A partial node emits each group's per-worker
 	 * transition state instead of the finalized value, and its reader claims
 	 * distinct row groups through parallelCounter -- the same shared atomic the
@@ -725,6 +748,10 @@ typedef struct PgColumnarGroupAggScanState
 
 static const CustomExecMethods pgcolumnar_groupagg_exec_methods;
 static const CustomExecMethods pgcolumnar_groupagg_parallel_exec_methods;
+static bool pgcolumnar_groupagg_simple_key(Oid typ);
+static bool pgcolumnar_groupagg_batch_eligible(PgColumnarGroupAggScanState *state,
+											 TupleDesc tupdesc, ScanKey *keysOut,
+											 int *nkeysOut);
 static void PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 									RelOptInfo *output_rel, void *extra);
 static bool pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state,
@@ -2998,17 +3025,33 @@ pgcolumnar_batch_agg_ok(PgColumnarAggKind kind)
 }
 
 /*
- * pgcolumnar_batch_shape_eligible
- *		Whether this aggregate's shape can use the batch fold: every aggregate is
- *		batch-accumulable, the whole WHERE converts to scan keys (no residual), and
- *		every key is a supported btree comparison on a batch-readable column. When
- *		keysOut is non-NULL the built scan keys are returned for the fold to reuse;
- *		otherwise they are only inspected. Deterministic from the query shape, so
- *		Begin can report it in EXPLAIN before execution.
+ * pgcolumnar_batch_gates_ok
+ *		The batch fold's shape gates, shared by the ungrouped node
+ *		(pgcolumnar_native_batch_fold) and the grouped one
+ *		(pgcolumnar_groupagg_batch_fold, #708).
+ *
+ *		Every aggregate is batch-accumulable, the whole WHERE converts to scan
+ *		keys EXACTLY (no residual, no merely-conservative key), every column the
+ *		fold will gather is passed by value, and every scan key is a supported
+ *		btree comparison on a batch-readable column. When keysOut is non-NULL the
+ *		built scan keys are returned for the fold to reuse; otherwise they are
+ *		only inspected. Deterministic from the query shape, so Begin can report
+ *		it in EXPLAIN before execution.
+ *
+ *		Single-sourced rather than copied per node ON PURPOSE. Both folds gather
+ *		packed column values themselves and filter rows with a scan-key loop and
+ *		nothing else, so both need exactly these guarantees, and every one of
+ *		them below was added to fix a wrong answer or a crash. A second fold
+ *		arriving with a stale copy of the list is precisely how #715 comes back.
+ *
+ *		The GROUPED caller has one further requirement of its own -- each group
+ *		key must be a plain Var it can read out of a gathered column -- which is
+ *		specific to that node and stays there.
  */
 static bool
-pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc,
-							  ScanKey *keysOut, int *nkeysOut)
+pgcolumnar_batch_gates_ok(const PgColumnarAggSpec *specs, int naggs,
+						List *quals, Index scanrelid, Bitmapset *projected,
+						TupleDesc tupdesc, ScanKey *keysOut, int *nkeysOut)
 {
 	ScanKey		keys;
 	int			nkeys = 0;
@@ -3018,11 +3061,11 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 	int			k;
 	bool		ok = true;
 
-	for (a = 0; a < state->naggs; a++)
-		if (!pgcolumnar_batch_agg_ok(state->specs[a].kind))
+	for (a = 0; a < naggs; a++)
+		if (!pgcolumnar_batch_agg_ok(specs[a].kind))
 			return false;
 
-	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+	PgColumnarCountConvertibleQuals(quals, scanrelid, tupdesc,
 								  &npred, &allConvertible);
 	if (!allConvertible)
 		return false;
@@ -3045,7 +3088,7 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 	 * native_saop_pushdown.sh's vector-agg arms and ungrouped_vector_agg.sh's
 	 * #715 arms go red if this regresses.
 	 */
-	if (!PgColumnarQualsExactlyKeyed(state->quals, state->scanrelid, tupdesc))
+	if (!PgColumnarQualsExactlyKeyed(quals, scanrelid, tupdesc))
 		return false;
 
 	/*
@@ -3082,7 +3125,7 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 	{
 		int			c = -1;
 
-		while ((c = bms_next_member(state->projected, c)) >= 0)
+		while ((c = bms_next_member(projected, c)) >= 0)
 		{
 			if (c < 0 || c >= tupdesc->natts)
 				continue;
@@ -3091,7 +3134,7 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		}
 	}
 
-	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc, &nkeys);
+	keys = PgColumnarBuildScanKeys(quals, scanrelid, tupdesc, &nkeys);
 	for (k = 0; k < nkeys; k++)
 	{
 		ScanKey		key = &keys[k];
@@ -3118,6 +3161,19 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		*nkeysOut = nkeys;
 	}
 	return true;
+}
+
+/*
+ * pgcolumnar_batch_shape_eligible
+ *		The ungrouped node's view of pgcolumnar_batch_gates_ok.
+ */
+static bool
+pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc,
+							  ScanKey *keysOut, int *nkeysOut)
+{
+	return pgcolumnar_batch_gates_ok(state->specs, state->naggs, state->quals,
+								   state->scanrelid, state->projected, tupdesc,
+								   keysOut, nkeysOut);
 }
 
 /* Reset the accumulators to their initial state (for a clean fall-back). */
@@ -4056,6 +4112,70 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->nscankeys = PgColumnarCountScanKeys(state->quals, state->scanrelid,
 											 basedesc);
 
+	/*
+	 * Everything the batch fold's eligibility depends on is a property of the
+	 * PLAN, not of executor state, so it is settled here -- ahead of the
+	 * EXPLAIN-only return, and ahead of any ExecInitExpr. A plain EXPLAIN must
+	 * be able to report what the fold will attempt, and the ungrouped node
+	 * learned the hard way (#423) that deciding eligibility against a projected
+	 * set that had not been built yet reports "yes" for a shape that falls back
+	 * at execution.
+	 *
+	 * The per-key executor machinery (ExecInitExpr, the hash and equality
+	 * FmgrInfos) stays below the return, where it belongs: an EXPLAIN-only node
+	 * must not initialise executor state.
+	 */
+	for (k = 0; k < state->nkeys; k++)
+	{
+		PgColumnarGroupKey *key = &state->keys[k];
+		Oid			type = exprType((Node *) key->expr);
+
+		key->type = type;
+		key->collation = exprCollation((Node *) key->expr);
+		get_typlenbyval(type, &key->typlen, &key->byval);
+
+		/*
+		 * A key the fold can read straight out of a gathered column: a plain Var
+		 * of the relation this node scans. Anything else -- an expression, a
+		 * cast, a Var from another level -- keeps attidx at -1 and the fold
+		 * declines the shape rather than growing an expression evaluator.
+		 */
+		key->attidx = -1;
+		if (IsA(key->expr, Var))
+		{
+			Var		   *v = (Var *) key->expr;
+
+			if (v->varno == state->scanrelid && v->varlevelsup == 0 &&
+				v->varattno >= 1 && v->varattno <= basedesc->natts)
+				key->attidx = v->varattno - 1;
+		}
+		key->simple = key->byval && pgcolumnar_groupagg_simple_key(type);
+
+		keyExprList = lappend(keyExprList, key->expr);
+	}
+
+	/* project the columns the keys, WHERE and aggregates reference */
+	pull_varattnos((Node *) keyExprList, state->scanrelid, &proj);
+	pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
+	x = -1;
+	while ((x = bms_next_member(proj, x)) >= 0)
+	{
+		AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
+
+		if (attno > 0)
+			projected = bms_add_member(projected, attno - 1);
+	}
+	for (a = 0; a < state->naggs; a++)
+		if (state->aggTemplate[a].attidx >= 0)
+			projected = bms_add_member(projected, state->aggTemplate[a].attidx);
+	if (projected == NULL)
+		projected = bms_make_singleton(0);	/* count(*) with no keys touched */
+	state->projected = projected;
+
+	state->batchEligible =
+		pgcolumnar_groupagg_batch_eligible(state, basedesc, NULL, NULL);
+	state->batchFolded = false;
+
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
 		table_close(rel, AccessShareLock);
@@ -4070,22 +4190,21 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->baseSlot = MakeSingleTupleTableSlot(CreateTupleDescCopy(basedesc),
 											   &TTSOpsVirtual);
 
-	/* group-key ExprStates and their hash/equality machinery */
+	/*
+	 * The group keys' executor machinery. Their type, collation, width and
+	 * fold-readability were settled above, before the EXPLAIN-only return; what
+	 * is left is the state an executing node needs.
+	 */
 	for (k = 0; k < state->nkeys; k++)
 	{
 		PgColumnarGroupKey *key = &state->keys[k];
-		Oid			type = exprType((Node *) key->expr);
-		TypeCacheEntry *tce = lookup_type_cache(type,
+		TypeCacheEntry *tce = lookup_type_cache(key->type,
 												TYPECACHE_HASH_PROC_FINFO |
 												TYPECACHE_EQ_OPR_FINFO);
 
 		key->exprState = ExecInitExpr(key->expr, &node->ss.ps);
-		key->type = type;
-		key->collation = exprCollation((Node *) key->expr);
-		get_typlenbyval(type, &key->typlen, &key->byval);
 		fmgr_info_copy(&key->hashFn, &tce->hash_proc_finfo, estate->es_query_cxt);
 		fmgr_info_copy(&key->eqFn, &tce->eq_opr_finfo, estate->es_query_cxt);
-		keyExprList = lappend(keyExprList, key->expr);
 	}
 
 	/* residual WHERE recheck (the scan keys only prune groups) */
@@ -4112,25 +4231,85 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 		}
 	}
 
-	/* project the columns the keys, WHERE and aggregates reference */
-	pull_varattnos((Node *) keyExprList, state->scanrelid, &proj);
-	pull_varattnos((Node *) state->quals, state->scanrelid, &proj);
-	x = -1;
-	while ((x = bms_next_member(proj, x)) >= 0)
-	{
-		AttrNumber	attno = x + FirstLowInvalidHeapAttributeNumber;
-
-		if (attno > 0)
-			projected = bms_add_member(projected, attno - 1);
-	}
-	for (a = 0; a < state->naggs; a++)
-		if (state->aggTemplate[a].attidx >= 0)
-			projected = bms_add_member(projected, state->aggTemplate[a].attidx);
-	if (projected == NULL)
-		projected = bms_make_singleton(0);	/* count(*) with no keys touched */
-	state->projected = projected;
-
 	table_close(rel, AccessShareLock);
+}
+
+/*
+ * pgcolumnar_groupagg_simple_key
+ *		Whether a group-key type's equality operator is exactly bitwise equality
+ *		of the Datum, and every value of it has one representation. For such a
+ *		type the hash probe can hash the Datum's bits and compare Datums with ==
+ *		instead of paying an fmgr call per key per row (#708).
+ *
+ *		The HASH is private to this hash table and never leaves it, so any hash
+ *		consistent with the equality relation is correct. The EQUALITY is the
+ *		part that has to match how core groups, and that is what this list is
+ *		asserting -- one entry at a time.
+ *
+ *		STATE THE INVARIANT PRECISELY, because the next person to extend this
+ *		list will read this sentence instead of re-deriving it. The requirement
+ *		is NOT "the type's equality is an integer compare of the stored width".
+ *		It is that two values this type calls EQUAL must produce identical Datum
+ *		BITS *after fetch_att* -- which is a property of the GATHER as much as of
+ *		the equality operator.
+ *
+ *		oid is the entry that shows the difference. fetch_att SIGN-EXTENDS a
+ *		len-4 column, so an oid above 2^31 arrives with the high half set, which
+ *		the narrower rule does not describe at all. It is still correct here,
+ *		and only because the sign extension is CONSISTENT: the same oid always
+ *		yields the same bits, so equal values stay equal and unequal values stay
+ *		unequal. A type for which that did not hold would satisfy the narrower
+ *		rule and still group wrongly. (Found in review, by probing oid values
+ *		above 2^31 against a heap oracle rather than by reading the list.)
+ *
+ *		float4 and float8 are deliberately ABSENT even though they are passed by
+ *		value and the fold reads them happily: -0.0 and 0.0 are ONE group and
+ *		have different bit patterns, so a bitwise probe would split them into
+ *		two. They keep the type's own hash and equality functions and still
+ *		fold, just without this shortcut. test/native_groupagg_batch.sh's
+ *		"float8 zero" arms go red if float8 is ever added here, which is the
+ *		removal proof for the exclusion.
+ *
+ *		By-reference types cannot reach this at all: the fold's gather passes
+ *		attbyval = true to fetch_att (#423) and pgcolumnar_batch_gates_ok
+ *		already requires it of every projected column.
+ */
+static bool
+pgcolumnar_groupagg_simple_key(Oid typ)
+{
+	switch (typ)
+	{
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case OIDOID:
+		case DATEOID:
+		case TIMEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * A cheap, well-mixed hash of a Datum's bits, for the key types
+ * pgcolumnar_groupagg_simple_key admits. It does not have to agree with the
+ * type's own hash function -- only with itself -- because the table it indexes
+ * is private to this node.
+ */
+static inline uint32
+pgcolumnar_groupagg_hash_datum(Datum d)
+{
+	uint64		x = (uint64) d;
+
+	x ^= x >> 33;
+	x *= UINT64CONST(0xff51afd7ed558ccd);
+	x ^= x >> 33;
+	x *= UINT64CONST(0xc4ceb9fe1a85ec53);
+	x ^= x >> 33;
+	return (uint32) x;
 }
 
 /*
@@ -4152,6 +4331,13 @@ pgcolumnar_groupagg_keys_equal(PgColumnarGroupAggScanState *state,
 			return false;
 		if (keynulls[k])
 			continue;
+		if (state->keys[k].simple)
+		{
+			/* bitwise equality IS this type's equality (#708) */
+			if (e->keys[k] != keyvals[k])
+				return false;
+			continue;
+		}
 		if (!DatumGetBool(FunctionCall2Coll(&state->keys[k].eqFn,
 											state->keys[k].collation,
 											e->keys[k], keyvals[k])))
@@ -4237,6 +4423,8 @@ pgcolumnar_groupagg_lookup(PgColumnarGroupAggScanState *state,
 
 		if (keynulls[k])
 			h = 0x9e3779b9u;	/* fixed contribution for a null key */
+		else if (state->keys[k].simple)
+			h = pgcolumnar_groupagg_hash_datum(keyvals[k]);	/* #708 */
 		else
 			h = DatumGetUInt32(FunctionCall1Coll(&state->keys[k].hashFn,
 												 state->keys[k].collation,
@@ -4302,6 +4490,321 @@ pgcolumnar_groupagg_lookup(PgColumnarGroupAggScanState *state,
 }
 
 /*
+ * pgcolumnar_groupagg_batch_eligible
+ *		Whether this grouped aggregate can use the batch fold: the shape gates
+ *		every fold needs (pgcolumnar_batch_gates_ok), plus the one this node adds
+ *		of its own -- every group key must be a plain Var of the scanned
+ *		relation, so the fold can take the key value out of a gathered column
+ *		instead of evaluating an expression per row.
+ *
+ *		Decided from the query shape alone, so Begin can report it before there
+ *		is any execution to report.
+ */
+static bool
+pgcolumnar_groupagg_batch_eligible(PgColumnarGroupAggScanState *state,
+								 TupleDesc tupdesc, ScanKey *keysOut,
+								 int *nkeysOut)
+{
+	int			k;
+
+	if (state->nkeys <= 0)
+		return false;			/* the grouped node is never planned without one */
+
+	for (k = 0; k < state->nkeys; k++)
+	{
+		if (state->keys[k].attidx < 0)
+			return false;
+
+		/*
+		 * The fold reads the key out of cval[attidx], which is only gathered for
+		 * columns in the projected set. Begin builds that set from these very
+		 * key expressions, so this cannot fail today; it is here so that the
+		 * fold's dependency is stated where the fold is decided rather than left
+		 * as an invariant two functions apart, and so that a future change to
+		 * the projected set is refused instead of reading an ungathered slot.
+		 */
+		if (!bms_is_member(state->keys[k].attidx, state->projected))
+			return false;
+	}
+
+	return pgcolumnar_batch_gates_ok(state->aggTemplate, state->naggs,
+								   state->quals, state->scanrelid,
+								   state->projected, tupdesc,
+								   keysOut, nkeysOut);
+}
+
+/*
+ * pgcolumnar_groupagg_reset_table
+ *		Drop everything the fold accumulated, so the row path can redo the whole
+ *		scan from an empty hash table. Used only on the mid-scan fall-back below.
+ */
+static void
+pgcolumnar_groupagg_reset_table(PgColumnarGroupAggScanState *state)
+{
+	MemoryContextReset(state->keyContext);
+	MemoryContextReset(state->specContext);
+	MemoryContextReset(state->hashContext);
+	state->entries = NULL;
+	state->capacity = 0;
+	state->nGroups = 0;
+}
+
+/*
+ * pgcolumnar_groupagg_batch_fold
+ *		Fold the whole grouped scan column-at-a-time (#708). Returns false --
+ *		having folded nothing the caller cannot redo -- when the shape is not
+ *		eligible or a group is missing a needed column, in which case the caller
+ *		runs the always-correct row path.
+ *
+ *		This is the grouped twin of pgcolumnar_native_batch_fold, and it is
+ *		deliberately the same loop: walk row groups, gather each needed column's
+ *		packed values, honour the delete mask and the skipped-vector map, apply
+ *		the scan keys inline, then probe and fold. What the row path pays per row
+ *		and this does not: PgColumnarReadNextRow, ResetExprContext, staging the
+ *		row into a virtual slot, ExecStoreVirtualTuple, ExecQual, and one
+ *		ExecEvalExpr per group key. What is left of the fmgr traffic -- the hash
+ *		and the probe equality -- goes inline for the key types
+ *		pgcolumnar_groupagg_simple_key admits.
+ *
+ *		It does NOT take the ungrouped fold's payload deferral (#405). Group key
+ *		columns are needed for every surviving row by definition, so only the
+ *		aggregate payload could ever be deferred, and the two-phase gather is
+ *		surface this path has no measured need of yet.
+ *
+ *		The per-value delete/skip/scan-key handling below is load-bearing in
+ *		exactly the ways the ungrouped fold documents at length, and the reasons
+ *		are not repeated here: read pgcolumnar_native_batch_fold for why the
+ *		present index must advance across a skipped or deleted row, why skipVec
+ *		is exact rather than merely safe, and why an absent column cannot be
+ *		fallen back from under a parallel partial node.
+ */
+static bool
+pgcolumnar_groupagg_batch_fold(PgColumnarGroupAggScanState *state, Relation rel,
+							 TupleDesc tupdesc)
+{
+	EState	   *estate = state->css.ss.ps.state;
+	ScanKey		keys = NULL;
+	int			nScanKeys = 0;
+	int			natts = tupdesc->natts;
+	PgColumnarReadState *rs;
+	const char **cvalidity = (const char **) palloc0(sizeof(char *) * natts);
+	const char **cpacked = (const char **) palloc0(sizeof(char *) * natts);
+	int16	   *cattlen = (int16 *) palloc0(sizeof(int16) * natts);
+	uint64	   *cpresent = (uint64 *) palloc0(sizeof(uint64) * natts);
+	bool	   *cneeded = (bool *) palloc0(sizeof(bool) * natts);
+	Datum	   *cval = (Datum *) palloc0(sizeof(Datum) * natts);
+	bool	   *cisnull = (bool *) palloc0(sizeof(bool) * natts);
+	/*
+	 * The compact list of columns to gather, so the per-row loop steps over the
+	 * columns this query reads rather than all natts. Order is column order and
+	 * each column's cursor is independent, so walking the list is equivalent to
+	 * walking the full range under the cneeded mask.
+	 */
+	int		   *needCols = (int *) palloc(sizeof(int) * Max(natts, 1));
+	int			nNeed = 0;
+	Datum	   *keyvals = (Datum *) palloc(sizeof(Datum) * Max(state->nkeys, 1));
+	bool	   *keynulls = (bool *) palloc(sizeof(bool) * Max(state->nkeys, 1));
+	int			a;
+	int			k;
+	int			col;
+	int			ci;
+
+	if (!pgcolumnar_groupagg_batch_eligible(state, tupdesc, &keys, &nScanKeys))
+		return false;
+
+	col = -1;
+	while ((col = bms_next_member(state->projected, col)) >= 0)
+		if (col >= 0 && col < natts)
+			cneeded[col] = true;
+	for (col = 0; col < natts; col++)
+		if (cneeded[col])
+			needCols[nNeed++] = col;
+
+	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
+						   nScanKeys, keys);
+
+	/*
+	 * Parallel partial run (#349): claim row groups through the shared atomic so
+	 * each worker folds a distinct set and the core Finalize combines them by
+	 * key. A partial node with no counter would fold every group in every worker
+	 * and the Finalize would sum the duplicates -- a wrong answer, not a crash.
+	 */
+	if (state->parallelCounter != NULL)
+		PgColumnarReadSetParallelCounter(rs, state->parallelCounter);
+	else if (state->isPartial)
+	{
+		PgColumnarEndRead(rs);
+		elog(ERROR, "parallel columnar grouped aggregate ran without a shared group counter");
+	}
+
+	while (PgColumnarReadFoldNextGroup(rs))
+	{
+		uint64		nrows;
+		const char *dmask;
+		uint32		dlen;
+		const bool *skipVec;
+		bool		decodeSkipped;
+		const uint32 *vecStart;
+		int			vcount;
+		int			curVec;
+		uint64		r;
+
+		PgColumnarReadFoldGroupInfo(rs, &nrows, &dmask, &dlen,
+								  &skipVec, &decodeSkipped, &vecStart, &vcount);
+
+		if (decodeSkipped && (skipVec == NULL || vecStart == NULL || vcount <= 0))
+			elog(ERROR,
+				 "pgcolumnar: the grouped vectorized aggregate cannot fold a row "
+				 "group whose decode skipped vectors without the per-vector map (#512)");
+
+		for (ci = 0; ci < nNeed; ci++)
+		{
+			const char *vbits;
+			const char *pk;
+			int16		al;
+			const uint32 *vrl;
+
+			col = needCols[ci];
+			cpresent[col] = 0;
+			if (!PgColumnarReadFoldColumn(rs, col, &vbits, &pk, &al, &vrl))
+			{
+				/*
+				 * The column is absent from this group (a later ADD COLUMN). The
+				 * batch path cannot supply its missing value, so throw away what
+				 * has been folded and let the caller redo the whole scan on the
+				 * row path, which handles it.
+				 *
+				 * A parallel partial node cannot take that fall-back: this group
+				 * and the ones before it were already claimed through the shared
+				 * counter, so the row path would re-open with the counter
+				 * advanced past them and undercount. Fail cleanly rather than
+				 * return a wrong answer.
+				 */
+				PgColumnarEndRead(rs);
+				pgcolumnar_groupagg_reset_table(state);
+				if (state->isPartial)
+					elog(ERROR, "parallel columnar grouped aggregate cannot fold a "
+						 "relation with a column added after some row groups; "
+						 "set pgcolumnar.enable_parallel_vector_agg = off");
+				return false;
+			}
+			cvalidity[col] = vbits;
+			cpacked[col] = pk;
+			cattlen[col] = al;
+		}
+
+		curVec = 0;
+		for (r = 0; r < nrows; r++)
+		{
+			bool		pass = true;
+			bool		vecSkipped = false;
+			PgColumnarGroupEntry *e;
+
+			CHECK_FOR_INTERRUPTS();
+
+			/*
+			 * Which vector holds this row, and was it ruled out? vecStart is
+			 * cumulative row spans with a [vcount] terminator and r only ever
+			 * increases, so this walk costs one step per vector boundary across
+			 * the group rather than a search per row.
+			 */
+			if (skipVec != NULL && vecStart != NULL && vcount > 0)
+			{
+				while (curVec < vcount && r >= vecStart[curVec + 1])
+					curVec++;
+				vecSkipped = (curVec < vcount && skipVec[curVec]);
+			}
+
+			/*
+			 * Gather. The present index advances for every present value whether
+			 * or not the value is read: the stream is packed by presence, so a
+			 * skipped row's slot is consumed either way, and getting that wrong
+			 * misaligns every later vector rather than losing one row. A skipped
+			 * vector's bytes were never decoded, so consume the slot and do not
+			 * read it.
+			 */
+			for (ci = 0; ci < nNeed; ci++)
+			{
+				col = needCols[ci];
+				if ((cvalidity[col][r >> 3] >> (r & 7)) & 1)
+				{
+					if (!vecSkipped)
+					{
+						cval[col] = fetch_att(cpacked[col] + cpresent[col] * cattlen[col],
+											  true, cattlen[col]);
+						cisnull[col] = false;
+					}
+					cpresent[col]++;
+				}
+				else
+					cisnull[col] = true;
+			}
+
+			if (vecSkipped)
+				continue;
+			if (dmask != NULL && (r >> 3) < dlen &&
+				(dmask[r >> 3] & (1 << (r & 7))) != 0)
+				continue;		/* deleted */
+
+			for (k = 0; k < nScanKeys; k++)
+			{
+				ScanKey		key = &keys[k];
+				int			attidx = key->sk_attno - 1;
+
+				if (cisnull[attidx] ||
+					!pgcolumnar_batch_key_pass(TupleDescAttr(tupdesc, attidx)->atttypid,
+											 cval[attidx], key->sk_strategy,
+											 key->sk_argument))
+				{
+					pass = false;
+					break;
+				}
+			}
+			if (!pass)
+				continue;
+
+			/*
+			 * The group keys are plain Vars (eligibility requires it), so the
+			 * value is already gathered and there is no expression to evaluate.
+			 */
+			for (k = 0; k < state->nkeys; k++)
+			{
+				int			ai = state->keys[k].attidx;
+
+				keyvals[k] = cval[ai];
+				keynulls[k] = cisnull[ai];
+			}
+
+			e = pgcolumnar_groupagg_lookup(state, keyvals, keynulls);
+
+			for (a = 0; a < state->naggs; a++)
+			{
+				PgColumnarAggSpec *spec = &e->specs[a];
+
+				if (spec->attidx >= 0)
+					pgcolumnar_apply_one(state->specContext, spec,
+									   cval[spec->attidx], cisnull[spec->attidx]);
+				else
+					pgcolumnar_apply_one(state->specContext, spec, (Datum) 0, true);
+			}
+		}
+	}
+
+	PgColumnarReadStats(rs, &state->groupsRead, &state->groupsSkipped,
+					  &state->groupsTotal);
+	state->usablePreds = PgColumnarReadUsablePredicates(rs);
+	state->vectorsSkipped = PgColumnarVectorsSkipped(rs);
+	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
+	state->vectorDecodes = PgColumnarVectorDecodes(rs);
+	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
+	state->haveStats = true;
+	state->batchFolded = true;
+
+	PgColumnarEndRead(rs);
+	return true;
+}
+
+/*
  * pgcolumnar_groupagg_build
  *		Scan the relation once and fold every surviving row into its group. The
  *		reader prunes groups and vectors with the pushed-down WHERE; each row is
@@ -4327,6 +4830,17 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 
 	PgColumnarFlushWriteStateForRelation(state->relid);
 	PgColumnarFlushDeleteVectorForRelation(rel);
+
+	/*
+	 * Fold column-at-a-time when the shape allows it (#708). A false return
+	 * means nothing was folded and nothing was claimed, so the row path below
+	 * runs the whole scan from an empty table exactly as it did before.
+	 */
+	if (pgcolumnar_groupagg_batch_fold(state, rel, basedesc))
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
 
 	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
 								 &nScanKeys);
@@ -4494,6 +5008,7 @@ PgColumnarReScanGroupAggScan(CustomScanState *node)
 	state->capacity = 0;
 	state->entries = NULL;
 	state->haveStats = false;
+	state->batchFolded = false;
 	MemoryContextReset(state->keyContext);
 	MemoryContextReset(state->specContext);
 	MemoryContextReset(state->hashContext);
@@ -4509,6 +5024,22 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 						   state->nkeys, es);
 	ExplainPropertyInteger("Columnar Vectorized Aggregates", NULL,
 						   state->naggs, es);
+
+	/*
+	 * The work-done line for #708, and the only assertion that goes red when
+	 * this fold stops folding: the answers are identical either way, so no
+	 * correctness check can see the difference (the #545 rule).
+	 *
+	 * Plain EXPLAIN has no execution to report and so shows the shape
+	 * prediction; once the node has run, report what actually happened, because
+	 * a predicted-eligible fold can still fall back to the row path (a column
+	 * added after some row groups). Printing the prediction under ANALYZE is the
+	 * #602 defect, and this node inherits the pattern that caused it.
+	 */
+	ExplainPropertyText("Columnar Batch Fold",
+						(state->haveStats ? state->batchFolded
+										  : state->batchEligible)
+						? "yes" : "no", es);
 	PgColumnarExplainPushedDown(state->nscankeys, es);
 	PgColumnarExplainVectorPredicates(state->npreds, es);
 
