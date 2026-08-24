@@ -3,8 +3,9 @@
 # pgColumnar fetch-path interrupt guard (#212).
 #
 # pgcolumnar_fetch_row is reached once per candidate item pointer by
-# _bt_check_unique() during a unique INSERT, and each call reads the row-group
-# list out of the catalog. Before #212 that path had no CHECK_FOR_INTERRUPTS --
+# _bt_check_unique() during a unique INSERT, and each such call reads the
+# row-group list out of the catalog (the unique check runs under SnapshotDirty,
+# which #709's memo never serves). Before #212 that path had no CHECK_FOR_INTERRUPTS --
 # the three checks already in columnar_reader.c are all on the scan/decode path,
 # which a unique liveness check never enters -- so a unique INSERT whose conflict
 # check did a lot of fetch work could not be cancelled and never noticed
@@ -40,13 +41,25 @@ check "pgcolumnar_fetch_row carries an interrupt check" \
 	"$(printf '%s\n' "$body" | grep -c 'CHECK_FOR_INTERRUPTS' | awk '{print ($1>=1)?"yes":"no"}')" \
 	"yes"
 
-# And it has to run before the per-fetch catalog read it guards, or the fetch
+# And it has to run before the row-group resolution it guards, or the fetch
 # does its work before ever reaching a cancellation point -- which is the state
-# #212 was in. Assert the check precedes the PgColumnarReadRowGroupList call.
+# #212 was in. Since #709 the per-fetch catalog read lives behind
+# pgcolumnar_lookup_row_group (memoized, but a miss or an uncached snapshot
+# still reads the catalog), so that call is the guarded work; assert the
+# check precedes it, and separately that the lookup helper is really where
+# the catalog read moved, so this arm cannot rot into comparing against a
+# call that no longer does the work.
 cfi_line="$(printf '%s\n' "$body" | grep -n 'CHECK_FOR_INTERRUPTS' | head -1 | cut -d: -f1)"
-rgl_line="$(printf '%s\n' "$body" | grep -n 'PgColumnarReadRowGroupList' | head -1 | cut -d: -f1)"
-check "the interrupt check precedes the per-fetch catalog read" \
+# match the CALL, with its paren -- the bare name also appears in a comment
+# above the call, and a comment must not satisfy a placement check
+rgl_line="$(printf '%s\n' "$body" | grep -n 'pgcolumnar_lookup_row_group(' | head -1 | cut -d: -f1)"
+check "the interrupt check precedes the row-group resolution" \
 	"$( [ -n "$cfi_line" ] && [ -n "$rgl_line" ] && [ "$cfi_line" -lt "$rgl_line" ] && echo yes || echo no )" \
+	"yes"
+
+lookup_body="$(awk '/^pgcolumnar_lookup_row_group\(/{p=1} p{print} p&&/^}/{exit}' "$SRC/columnar_reader.c")"
+check "the row-group resolution is where the catalog read lives" \
+	"$(printf '%s\n' "$lookup_body" | grep -c 'PgColumnarReadRowGroupList' | awk '{print ($1>=1)?"yes":"no"}')" \
 	"yes"
 
 pgc_summary

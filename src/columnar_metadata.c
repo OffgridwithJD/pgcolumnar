@@ -14,6 +14,7 @@
 #include "columnar_metadata.h"
 #include "fmgr.h"
 #include "columnar_compat.h"
+#include "columnar_reader.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
@@ -779,6 +780,22 @@ PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 					  Anum_bloom_group_number, storageId, groupNumber);
 	delete_group_rows("row_group", Anum_row_group_storage_id,
 					  Anum_row_group_group_number, storageId, groupNumber);
+
+	/*
+	 * A group-list memo built earlier in the SAME command would serve this
+	 * group after these deletes -- with its delete vectors just gone,
+	 * resurrecting rows -- so drop the memo with the group (#709). This
+	 * reset was once removed on the theory that every reachable
+	 * same-command retirement crosses a CommandCounterIncrement first
+	 * (changing the memo's key), and on PG17 the rewrite path does. On PG18
+	 * it does not: the same-statement rewrite arm of
+	 * native_fetch_group_memo.sh read one doubled row there (the first
+	 * post-rewrite probe hit the stale memo through the old index entry
+	 * before refresh-on-miss healed it). The CCI is an accident of the
+	 * flush's storage-row update, major-dependent, and nothing to lean on;
+	 * that arm is this reset's removal proof.
+	 */
+	PgColumnarGroupMemoReset(true);
 
 	if (haveRange && byteLength > 0)
 		record_free_space(storageId, fileOffset, byteLength);
@@ -1629,6 +1646,19 @@ PgColumnarDeleteMetadata(uint64 storageId)
 	delete_rows_by_storage_id("free_space", Anum_free_space_storage_id, storageId);
 	delete_rows_by_storage_id("row_group", Anum_row_group_storage_id, storageId);
 	delete_rows_by_storage_id("storage", Anum_native_storage_storage_id, storageId);
+
+	/*
+	 * The third row-group loss path (#709, #721 review). The vacuum-family
+	 * callers pass an OLD storage id a memo cannot be keyed on, but the
+	 * TRUNCATE path (pgcolumnar_relation_nontransactional_truncate) wipes
+	 * the metadata of the SAME storage id a memo may hold. Today a stale HIT
+	 * is additionally masked by TRUNCATE marking the command id used, so the
+	 * next fetch's cid differs -- but that is a cid accident of the current
+	 * truncate path, exactly the class of unstated invariant the retirement
+	 * reset above was once wrongly rested on (it held on PG17 and broke on
+	 * PG18). Reset here so the memo's correctness does not depend on it.
+	 */
+	PgColumnarGroupMemoReset(true);
 }
 
 /*

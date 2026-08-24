@@ -45,6 +45,18 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   assert build. `bench/provision.sh check` continues to report their presence;
   installing them is now a scripted, pinned step instead of a manual one (#702).
 
+### Changed
+
+- An index or bitmap fetch no longer reads the whole row-group list out of
+  the catalog for every row. The list is memoized per command and snapshot,
+  with a refresh on any miss, so a group flushed earlier in the same
+  statement stays visible. Measured on 3000 index-fetched rows: 6001 catalog
+  index scans before, 2 after. The memo resets on subtransaction abort and
+  on row-group retirement, and a new suite, `native_fetch_group_memo`,
+  proves both by resurrection: through an open cursor after ROLLBACK TO
+  SAVEPOINT, and through stale index entries after a same-statement
+  compaction. (#709)
+
 ### Fixed
 
 - The ungrouped vectorized aggregate (`pgcolumnar.enable_ungrouped_vector_agg`)

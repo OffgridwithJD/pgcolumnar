@@ -34,6 +34,7 @@
 #include "port/pg_bitutils.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/typcache.h"
 
 /*
@@ -3291,6 +3292,280 @@ PgColumnarDiscardFetchCache(void)
 	columnarFetchFmtOk = false;
 }
 
+/* -------------------------------------------------------------------------
+ * Row-group-list memo (#709).
+ *
+ * pgcolumnar_fetch_row used to read the ENTIRE row-group list out of the
+ * catalog on every call -- twice per index-fetched row (a liveness settle and
+ * the deferred decode, #157), so K fetched rows cost ~2K catalog index scans.
+ * The memo keeps one list per (storage, command, snapshot CONTENT) and walks
+ * it with a last-hit fast path, the shape delete_vector_find_row_group
+ * already proved. No sorted array and no binary search: the catalog read is
+ * the cost the memo removes, the residual walk over tens of groups is noise,
+ * and a comparator would be code no test could turn red.
+ *
+ * What makes a HIT sound: within one (cid, snapshot content), the visible
+ * row_group set can GAIN rows (a flush in this very command becomes visible
+ * because PgColumnarCatalogSnapshot advances curcid) but can lose them only
+ * through events this memo is explicitly reset on. Gains are covered by
+ * refresh-on-miss: a rowNumber no memoized group covers triggers one fresh
+ * catalog read under the fetch's own snapshot -- the exact read the old code
+ * did every time -- so the post-refresh answer is the old answer. Losses:
+ *
+ *  - a SUBTRANSACTION ABORT flips the xmin verdict of a group flushed under
+ *    the savepoint with NO change in snapshot content or cid, so the subxact
+ *    callback resets the memo (the decoded-group cache survives the same
+ *    event only because the per-fetch list read answered first -- the memo
+ *    takes over that role and must reset);
+ *  - a same-command RETIREMENT (compaction is callable mid-statement and
+ *    does not CommandCounterIncrement unconditionally) deletes row_group
+ *    rows a HIT would resurrect, so PgColumnarRetireGroup resets the memo;
+ *  - a METADATA WIPE for the same storage id (the TRUNCATE table-AM path)
+ *    deletes every group at once, so PgColumnarDeleteMetadata resets the
+ *    memo too. Today that path also advances the command id before the
+ *    next fetch, but the retirement reset's history says not to lean on a
+ *    cid accident.
+ *
+ * Cross-transaction deletions cannot invalidate a HIT: they are invisible to
+ * the same MVCC snapshot content by definition. Non-MVCC snapshots (the
+ * unique check's SnapshotDirty, a trigger re-fetch's SnapshotAny) never use
+ * the memo: dirty visibility changes as other transactions commit, and the
+ * unique path relies on seeing current state per probe.
+ *
+ * The snapshot key is compared by CONTENT (xmin, xmax, curcid, xip, subxip,
+ * suboverflowed, takenDuringRecovery), never by pointer: equal content means
+ * every catalog tuple gets the same MVCC verdict, and pointer reuse cannot
+ * alias. Contexts hang off TopTransactionContext like the group cache's; the
+ * xact-end reset only clears descriptors and leaves the contexts to die with
+ * their parent (the callback runs before the transaction's memory teardown,
+ * so they are still live there -- just already spoken for); mid-transaction
+ * resets free the contexts themselves.
+ * ------------------------------------------------------------------------- */
+
+#define COLUMNAR_GROUP_MEMO_ENTRIES	4
+
+typedef struct PgColumnarGroupMemo
+{
+	MemoryContext cx;			/* NULL = slot empty; child of TopTransactionContext */
+	uint64		storageId;
+	CommandId	cid;
+	Snapshot	snap;			/* content copy incl. xip/subxip, in cx */
+	List	   *groups;			/* NativeRowGroupMetadata nodes, in cx */
+	NativeRowGroupMetadata *lastGroup;	/* last hit, into groups */
+	uint64		lastUsed;
+} PgColumnarGroupMemo;
+
+static PgColumnarGroupMemo columnarGroupMemo[COLUMNAR_GROUP_MEMO_ENTRIES];
+static uint64 columnarGroupMemoClock = 0;
+
+/*
+ * PgColumnarGroupMemoReset
+ *		Forget every memoized list. contextsLive=true (subxact abort, group
+ *		retirement, executor end) deletes the memo contexts; false (the
+ *		transaction-end and prepare callbacks) only clears the descriptors,
+ *		leaving the still-live contexts to fall with TopTransactionContext
+ *		moments later.
+ */
+void
+PgColumnarGroupMemoReset(bool contextsLive)
+{
+	int			i;
+
+	for (i = 0; i < COLUMNAR_GROUP_MEMO_ENTRIES; i++)
+	{
+		if (contextsLive && columnarGroupMemo[i].cx != NULL)
+			MemoryContextDelete(columnarGroupMemo[i].cx);
+		memset(&columnarGroupMemo[i], 0, sizeof(columnarGroupMemo[i]));
+	}
+	columnarGroupMemoClock = 0;
+}
+
+/* equal MVCC read verdict on every catalog tuple, by content */
+static bool
+pgcolumnar_snapshot_same_read(Snapshot a, Snapshot b)
+{
+	if (a->xmin != b->xmin || a->xmax != b->xmax || a->curcid != b->curcid)
+		return false;
+	if (a->takenDuringRecovery != b->takenDuringRecovery ||
+		a->suboverflowed != b->suboverflowed)
+		return false;
+	if (a->xcnt != b->xcnt || a->subxcnt != b->subxcnt)
+		return false;
+	if (a->xcnt > 0 &&
+		memcmp(a->xip, b->xip, a->xcnt * sizeof(TransactionId)) != 0)
+		return false;
+	if (a->subxcnt > 0 &&
+		memcmp(a->subxip, b->subxip, a->subxcnt * sizeof(TransactionId)) != 0)
+		return false;
+	return true;
+}
+
+/* copy the fields pgcolumnar_snapshot_same_read reads, into cx */
+static Snapshot
+pgcolumnar_snapshot_content_copy(Snapshot src, MemoryContext cx)
+{
+	Snapshot	copy = (Snapshot) MemoryContextAlloc(cx, sizeof(SnapshotData));
+
+	*copy = *src;
+	copy->xip = NULL;
+	copy->subxip = NULL;
+	copy->regd_count = 0;
+	copy->active_count = 0;
+	copy->copied = true;
+	if (src->xcnt > 0)
+	{
+		copy->xip = (TransactionId *)
+			MemoryContextAlloc(cx, src->xcnt * sizeof(TransactionId));
+		memcpy(copy->xip, src->xip, src->xcnt * sizeof(TransactionId));
+	}
+	if (src->subxcnt > 0)
+	{
+		copy->subxip = (TransactionId *)
+			MemoryContextAlloc(cx, src->subxcnt * sizeof(TransactionId));
+		memcpy(copy->subxip, src->subxip, src->subxcnt * sizeof(TransactionId));
+	}
+	return copy;
+}
+
+/* read the list and the snapshot copy into the slot's (empty) context */
+static void
+pgcolumnar_group_memo_fill(PgColumnarGroupMemo *m, uint64 storageId,
+						   CommandId cid, Snapshot metaSnapshot)
+{
+	MemoryContext oldcx = MemoryContextSwitchTo(m->cx);
+
+	m->storageId = storageId;
+	m->cid = cid;
+	m->snap = pgcolumnar_snapshot_content_copy(metaSnapshot, m->cx);
+	m->groups = PgColumnarReadRowGroupList(storageId, metaSnapshot);
+	m->lastGroup = NULL;
+	MemoryContextSwitchTo(oldcx);
+}
+
+/* the covering group in this memo, or NULL */
+static NativeRowGroupMetadata *
+pgcolumnar_group_memo_walk(PgColumnarGroupMemo *m, uint64 rowNumber)
+{
+	ListCell   *lc;
+
+	if (m->lastGroup != NULL &&
+		rowNumber >= m->lastGroup->firstRowNumber &&
+		rowNumber < m->lastGroup->firstRowNumber + m->lastGroup->rowCount)
+		return m->lastGroup;
+
+	foreach(lc, m->groups)
+	{
+		NativeRowGroupMetadata *g = (NativeRowGroupMetadata *) lfirst(lc);
+
+		if (rowNumber >= g->firstRowNumber &&
+			rowNumber < g->firstRowNumber + g->rowCount)
+		{
+			m->lastGroup = g;
+			return g;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * pgcolumnar_lookup_row_group
+ *		The row group covering rowNumber under metaSnapshot, memoized for MVCC
+ *		snapshots, or NULL. The uncached read allocates in the CALLER's current
+ *		context (the fetch's scratch), exactly as the old inline read did.
+ */
+static NativeRowGroupMetadata *
+pgcolumnar_lookup_row_group(uint64 storageId, Snapshot metaSnapshot,
+							uint64 rowNumber)
+{
+	CommandId	cid;
+	PgColumnarGroupMemo *m = NULL;
+	NativeRowGroupMetadata *rg;
+	int			i;
+
+	/*
+	 * SNAPSHOT_MVCC exactly, not IsMVCCSnapshot: that macro also admits
+	 * SNAPSHOT_HISTORIC_MVCC, whose xip array carries the INVERTED meaning
+	 * (committed xids), so a content-equal compare would equate snapshots
+	 * with opposite verdicts. No current caller reaches this with a historic
+	 * snapshot; excluding it costs that caller the memo, never correctness.
+	 */
+	if (metaSnapshot == NULL || metaSnapshot->snapshot_type != SNAPSHOT_MVCC)
+	{
+		List	   *rgList = PgColumnarReadRowGroupList(storageId, metaSnapshot);
+		ListCell   *lc;
+
+		foreach(lc, rgList)
+		{
+			NativeRowGroupMetadata *g = (NativeRowGroupMetadata *) lfirst(lc);
+
+			if (rowNumber >= g->firstRowNumber &&
+				rowNumber < g->firstRowNumber + g->rowCount)
+				return g;
+		}
+		return NULL;
+	}
+
+	cid = GetCurrentCommandId(false);
+	for (i = 0; i < COLUMNAR_GROUP_MEMO_ENTRIES; i++)
+	{
+		PgColumnarGroupMemo *e = &columnarGroupMemo[i];
+
+		if (e->cx != NULL && e->storageId == storageId && e->cid == cid &&
+			pgcolumnar_snapshot_same_read(e->snap, metaSnapshot))
+		{
+			m = e;
+			break;
+		}
+	}
+
+	if (m != NULL)
+	{
+		m->lastUsed = ++columnarGroupMemoClock;
+		rg = pgcolumnar_group_memo_walk(m, rowNumber);
+		if (rg != NULL)
+			return rg;
+
+		/*
+		 * Refresh once: the row may be in a group flushed after this memo was
+		 * built, in this very command. The re-read is the exact read the
+		 * unmemoized path performs, under the same snapshot the key was
+		 * computed from. A row still absent (buffered, deleted, nonexistent)
+		 * costs one read per fetch -- the old cost, no worse.
+		 */
+		MemoryContextReset(m->cx);
+		pgcolumnar_group_memo_fill(m, storageId, cid, metaSnapshot);
+		return pgcolumnar_group_memo_walk(m, rowNumber);
+	}
+
+	/* no slot: reuse an empty one or evict the least recently used */
+	for (i = 0; i < COLUMNAR_GROUP_MEMO_ENTRIES; i++)
+		if (columnarGroupMemo[i].cx == NULL)
+		{
+			m = &columnarGroupMemo[i];
+			break;
+		}
+	if (m == NULL)
+	{
+		uint64		oldest = UINT64_MAX;
+
+		for (i = 0; i < COLUMNAR_GROUP_MEMO_ENTRIES; i++)
+			if (columnarGroupMemo[i].lastUsed < oldest)
+			{
+				oldest = columnarGroupMemo[i].lastUsed;
+				m = &columnarGroupMemo[i];
+			}
+		MemoryContextDelete(m->cx);
+		memset(m, 0, sizeof(*m));
+	}
+	m->cx = AllocSetContextCreate(TopTransactionContext,
+								  "columnar group memo",
+								  ALLOCSET_DEFAULT_SIZES);
+	m->lastUsed = ++columnarGroupMemoClock;
+	pgcolumnar_group_memo_fill(m, storageId, cid, metaSnapshot);
+	/* a fresh build IS the unmemoized read; no second attempt needed */
+	return pgcolumnar_group_memo_walk(m, rowNumber);
+}
+
 /*
  * Find the entry for this group in this command, or prepare an empty one.
  * Returns NULL when nothing should be cached, in which case the caller decodes
@@ -3384,8 +3659,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	MemoryContext tmp;
 	MemoryContext oldContext;
 	Snapshot	metaSnapshot;
-	List	   *rgList;
-	NativeRowGroupMetadata *rg = NULL;
+	NativeRowGroupMetadata *rg;
 	PgColumnarFetchGroup *entry;
 	bool		hit;
 	int			validityBytes;
@@ -3444,21 +3718,13 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * and unique enforcement call this. A deleted row (in the group's delete vector or
 	 * a not-yet-flushed buffered delete) is not visible.
 	 *
-	 * The row-group list is read per fetch and deliberately not cached: a group
-	 * flushed earlier in this same statement has to become visible here.
+	 * The lookup is memoized per (storage, command, snapshot content) with a
+	 * refresh on miss (#709), which preserves what the old per-fetch catalog
+	 * read guaranteed: a group flushed earlier in this same statement is
+	 * visible here. See the memo block above pgcolumnar_lookup_row_group for
+	 * the reset events that keep a memo HIT sound.
 	 */
-	rgList = PgColumnarReadRowGroupList(storageId, metaSnapshot);
-	foreach(nlc, rgList)
-	{
-		NativeRowGroupMetadata *g = (NativeRowGroupMetadata *) lfirst(nlc);
-
-		if (rowNumber >= g->firstRowNumber &&
-			rowNumber < g->firstRowNumber + g->rowCount)
-		{
-			rg = g;
-			break;
-		}
-	}
+	rg = pgcolumnar_lookup_row_group(storageId, metaSnapshot, rowNumber);
 	if (rg == NULL)
 	{
 		MemoryContextSwitchTo(oldContext);

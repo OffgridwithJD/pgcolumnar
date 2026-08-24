@@ -20,6 +20,7 @@
 #include "columnar.h"
 
 extern void PgColumnarDiscardFetchCache(void);
+extern void PgColumnarGroupMemoReset(bool contextsLive);
 
 extern bool PgColumnarReadNextRowFiltered(PgColumnarReadState *readState,
 										Datum *values, bool *nulls,
