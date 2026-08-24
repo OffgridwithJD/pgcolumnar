@@ -3028,20 +3028,25 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		return false;
 
 	/*
-	 * LOAD-BEARING: this gate is what keeps an IN-list's CONSERVATIVE scan
-	 * keys out of the fold. PgColumnarBuildScanKeys emits keys weaker than
-	 * their clause for a ScalarArrayOpExpr (a [min, max] range, #704), and
-	 * the fold's only per-row filter is the key loop, so such a key used
-	 * here counts rows the clause rejects. The SAOP is excluded only
-	 * because pgcolumnar_clause_to_predicate accepts nothing but OpExpr --
-	 * if you teach it about ScalarArrayOpExpr, you must first give keys an
-	 * exactness marker and gate the fold on it (#715 is the same hole from
-	 * the other side: a convertible clause that builds NO key, and an
-	 * anchored LIKE (#426), whose keys are also conservative, is a strict
-	 * OpExpr that PASSES this gate and is kept out of the fold only by the
-	 * byval gather guard below). native_saop_pushdown.sh's vector-agg arms
-	 * go red if this regresses.
+	 * LOAD-BEARING. allConvertible only means every clause is a strict OpExpr
+	 * the fold could evaluate; it does NOT mean the clause becomes a scan key.
+	 * The fold's only per-row filter is the scan-key loop, so a clause that
+	 * produces no key (`<>`, strict but with no btree strategy) or only a
+	 * conservative pruning key would let non-matching rows be counted (#715).
+	 *
+	 * The gate below is exactly the exactness marker the conservative keys need
+	 * kept out of the fold: PgColumnarBuildScanKeys emits keys WEAKER than their
+	 * clause for a ScalarArrayOpExpr ([min, max] range, #704) and for an anchored
+	 * LIKE (#426), and pgcolumnar_clause_to_scankey now reports that inexactness.
+	 * PgColumnarQualsExactlyKeyed demands one EXACT key per clause, so those keys
+	 * never serve as the fold's WHERE even if pgcolumnar_clause_to_predicate were
+	 * later taught to accept a SAOP. The byval gather guard below is a second,
+	 * independent reason LIKE and other varlena filters fall back. Both
+	 * native_saop_pushdown.sh's vector-agg arms and ungrouped_vector_agg.sh's
+	 * #715 arms go red if this regresses.
 	 */
+	if (!PgColumnarQualsExactlyKeyed(state->quals, state->scanrelid, tupdesc))
+		return false;
 
 	/*
 	 * Every column the fold will GATHER must be passed BY VALUE (#423).

@@ -27,6 +27,19 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The ungrouped vectorized aggregate (`pgcolumnar.enable_ungrouped_vector_agg`)
+  no longer returns wrong results for a filter whose operator has no btree
+  strategy, such as `<>`. The batch fold's only per-row filter is the scan-key
+  loop, but eligibility only checked that each clause was a strict comparison,
+  not that it became a scan key. A `<>` clause is strict yet builds no key, so on
+  an all-by-value shape the fold engaged and counted the excluded rows
+  (`count(*) WHERE x <> 5` over-counted by one). Eligibility now requires every
+  clause to be expressed exactly by scan keys (`PgColumnarQualsExactlyKeyed`);
+  conservative prune-only keys (anchored LIKE, and the IN-list ranges added
+  above for #704) are marked inexact and also disqualify the fold, which then
+  falls back to the correct scalar path. Covered by new cases in
+  `ungrouped_vector_agg` (#715).
+
 - A corrupt `column_chunk.page_offset` no longer crashes the backend on a
   whole-group (unprojected) read. The projected read already refused a chunk
   lying outside its row group; the whole-group decode path derived

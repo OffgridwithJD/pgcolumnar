@@ -911,6 +911,8 @@ typedef struct PgColumnarGroupStats
 
 extern ScanKey PgColumnarBuildScanKeys(List *qual, Index scanrelid,
 									 TupleDesc tupdesc, int *nkeys);
+extern bool PgColumnarQualsExactlyKeyed(List *qual, Index scanrelid,
+									  TupleDesc tupdesc);
 
 /*
  * How many chunk groups the planner samples when estimating how much a

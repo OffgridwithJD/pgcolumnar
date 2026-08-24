@@ -584,7 +584,7 @@ pgcolumnar_saop_range_scankey(ScalarArrayOpExpr *saop, Index scanrelid,
 
 static int
 pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
-						   ScanKey key)
+						   ScanKey key, bool *exact)
 {
 	OpExpr	   *op;
 	Node	   *leftop;
@@ -595,7 +595,21 @@ pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	TypeCacheEntry *tce;
 	StrategyNumber strat;
 
-	/* `col IN (...)` / `col = ANY(array)` becomes a [min, max] range (#704) */
+	/*
+	 * An EXACT key expresses its clause completely: a row satisfies the clause
+	 * iff it satisfies the key. Only the plain btree comparison below is exact.
+	 * Conservative keys that merely PRUNE (the anchored-LIKE bound, #426; the
+	 * IN-list [min, max] range, #704) leave exact = false, so a caller that
+	 * re-checks keys as its whole filter (the batch fold, #715) can refuse them.
+	 * Default false; a dropped clause (return 0) is not exact either.
+	 */
+	*exact = false;
+
+	/*
+	 * `col IN (...)` / `col = ANY(array)` becomes a [min, max] range (#704). Its
+	 * keys are conservative, so this returns with exact still false and the fold
+	 * refuses them (#715).
+	 */
 	if (IsA(clause, ScalarArrayOpExpr))
 		return pgcolumnar_saop_range_scankey((ScalarArrayOpExpr *) clause,
 											 scanrelid, tupdesc, key);
@@ -685,6 +699,7 @@ pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	key->sk_collation = con->constcollid;
 	key->sk_argument = con->constvalue;
 
+	*exact = true;
 	return 1;
 }
 
@@ -713,11 +728,50 @@ PgColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 	 */
 	keys = (ScanKey) palloc0(sizeof(ScanKeyData) * 2 * list_length(qual));
 	foreach(lc, qual)
+	{
+		bool		exact;	/* not needed here; skipping is conservative-safe */
+
 		n += pgcolumnar_clause_to_scankey((Node *) lfirst(lc), scanrelid, tupdesc,
-										&keys[n]);
+										&keys[n], &exact);
+	}
 
 	*nkeys = n;
 	return keys;
+}
+
+/*
+ * PgColumnarQualsExactlyKeyed
+ *		Whether the entire restriction list is expressed EXACTLY by scan keys:
+ *		every clause produces at least one key AND every one of those keys is
+ *		exact (a plain btree comparison), not a conservative prune-only key.
+ *
+ *		PgColumnarBuildScanKeys silently drops a clause it cannot turn into a key
+ *		(for example `<>`, which has no btree strategy) and emits conservative
+ *		bounds for others (anchored LIKE, #426; IN-list ranges once #704 lands).
+ *		That is correct for chunk-group skipping, where the executor still
+ *		re-applies the clause as a filter. It is WRONG for the batch fold, whose
+ *		only per-row filter IS the scan-key loop: a dropped or merely-pruning
+ *		clause lets non-matching rows be counted (issue #715). The fold gates on
+ *		this; an empty qual list is exactly keyed (there is nothing to filter).
+ */
+bool
+PgColumnarQualsExactlyKeyed(List *qual, Index scanrelid, TupleDesc tupdesc)
+{
+	ListCell   *lc;
+
+	foreach(lc, qual)
+	{
+		ScanKeyData scratch[2];	/* an anchored LIKE writes two keys */
+		bool		exact = false;
+		int			n;
+
+		n = pgcolumnar_clause_to_scankey((Node *) lfirst(lc), scanrelid, tupdesc,
+									   &scratch[0], &exact);
+		if (n < 1 || !exact)
+			return false;
+	}
+
+	return true;
 }
 
 /*
