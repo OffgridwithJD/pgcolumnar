@@ -198,4 +198,23 @@ check "a fixed-width BY-REFERENCE column also falls back (uuid)" \
 check "and name, which is 64 bytes by reference" \
 	"$(fold_of "SELECT count(nm) FROM vfold WHERE i > 100")" "Columnar Batch Fold: no"
 
+# issue #715: a strict operator with NO btree strategy (`<>`) passes the
+# convertibility check but builds no scan key, and the fold's only per-row filter
+# IS the scan-key loop. On an all-by-value shape (count/sum over int i) the fold
+# used to engage and count the rows the filter excludes. It must fall back off the
+# fold, not fold and over-count. i ranges 1..200000, so `i <> 100` drops one row.
+check "issue #715: count(*) WHERE i <> 100 agrees with heap" \
+	"$(vq "SELECT count(*) FROM vfold WHERE i <> 100")" \
+	"$(q  "SELECT count(*) FROM vfoldh WHERE i <> 100")"
+check "issue #715: sum(i) WHERE i <> 100 agrees with heap" \
+	"$(vq "SELECT sum(i) FROM vfold WHERE i <> 100")" \
+	"$(q  "SELECT sum(i) FROM vfoldh WHERE i <> 100")"
+check "issue #715: the no-scan-key op (<>) falls back off the fold" \
+	"$(fold_of "SELECT count(*) FROM vfold WHERE i <> 100")" "Columnar Batch Fold: no"
+# control: an exact btree op on the SAME by-value column still folds and is right,
+# so the gate rejects only the unkeyable clause, not every filter on that column.
+check "control: i > 100 (exact key) still folds and agrees with heap" \
+	"$(vq "SELECT count(*) FROM vfold WHERE i > 100")" \
+	"$(q  "SELECT count(*) FROM vfoldh WHERE i > 100")"
+
 pgc_summary

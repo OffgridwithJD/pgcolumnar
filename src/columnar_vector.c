@@ -3028,6 +3028,17 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		return false;
 
 	/*
+	 * allConvertible only means every clause is a strict OpExpr the fold could
+	 * evaluate; it does NOT mean the clause becomes a scan key. The fold's only
+	 * per-row filter is the scan-key loop, so a clause that produces no key
+	 * (`<>`, strict but with no btree strategy) or only a conservative pruning
+	 * key would let non-matching rows be counted (#715). Require every clause to
+	 * be expressed EXACTLY by scan keys before folding.
+	 */
+	if (!PgColumnarQualsExactlyKeyed(state->quals, state->scanrelid, tupdesc))
+		return false;
+
+	/*
 	 * Every column the fold will GATHER must be passed BY VALUE (#423).
 	 *
 	 * The gather does pointer arithmetic on attlen and hardcodes attbyval:
