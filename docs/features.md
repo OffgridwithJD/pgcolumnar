@@ -56,7 +56,11 @@ settings see the [configuration reference](configuration.md); for constraints se
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
   aggregate over the scan instead. An opt-in path vectorizes `GROUP BY` too. Set
   `pgcolumnar.enable_group_vectorization` to `on` to group and aggregate in one
-  pass over the reader. It is off by default.
+  pass over the reader. It is off by default. Where the query groups by plain
+  columns, aggregates with `count`, `sum` or `avg`, and filters only with
+  comparisons the scan keys express, that pass reads each column's values
+  directly instead of one row at a time. `EXPLAIN` reports `Columnar Batch Fold`
+  on the node, and other shapes read row at a time and return the same results.
 - Column statistics. `ANALYZE` samples rows from across the row groups. It stores
   the null fraction, the distinct counts, the most-common values, the histograms
   and the correlation. The planner then estimates predicate selectivity from that

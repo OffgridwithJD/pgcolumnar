@@ -140,6 +140,7 @@ SUITES=(
 	native_format
 	native_gap
 	native_groupagg
+	native_groupagg_batch
 	native_groupagg_wide_cost
 	native_index
 	native_index_fetch_stripe_cost
