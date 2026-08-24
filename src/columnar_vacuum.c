@@ -2105,6 +2105,14 @@ pgcolumnar_debug_advance_reserved_offset(PG_FUNCTION_ARGS)
 	int32		npages = PG_GETARG_INT32(1);
 	Relation	rel;
 
+	/*
+	 * Owner-only, checked before table_open like the other maintenance verbs
+	 * (#568, #707). This function ships unbound, but a binding is one CREATE
+	 * FUNCTION away (the test suites do exactly that), and a storage-metadata
+	 * mutator with no gate is a footgun waiting for that binding.
+	 */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	if (npages < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -2140,6 +2148,9 @@ pgcolumnar_debug_set_metapage_version(PG_FUNCTION_ARGS)
 	int32		major = PG_GETARG_INT32(1);
 	int32		minor = PG_GETARG_INT32(2);
 	Relation	rel;
+
+	/* owner-only before the open, same as advance_reserved_offset (#707) */
+	PgColumnarRequireTableOwnerByOid(relid);
 
 	rel = table_open(relid, RowExclusiveLock);
 	if (!PgColumnarIsColumnarRelation(relid))
