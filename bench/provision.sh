@@ -22,7 +22,8 @@
 #   * It does not install Citus or TimescaleDB. Both must be built against one
 #     exact PostgreSQL, and picking that version silently is how a comparison
 #     ends up measuring the wrong engine. `check` reports whether they are
-#     present; installing them is still manual and issue #505 says so.
+#     present; building them is a deliberate separate step, pinned by
+#     bench/build_citus.sh and bench/build_timescaledb.sh (issue #702).
 #   * It does not download the ClickBench dataset (~70 GB unpacked). `check`
 #     reports whether it is there.
 #   * It does not install DuckDB. `check` reports whether `duckdb` is on PATH;
@@ -139,7 +140,7 @@ do_check() {
 		fi
 	done
 
-	echo "== comparison engines (this script does not install these)"
+	echo "== comparison engines (installed by bench/build_citus.sh and bench/build_timescaledb.sh, not here)"
 	local n18="$PREFIX_ROOT/$WANT_PG_BENCH/lib/postgresql"
 	for m in citus timescaledb; do
 		if ls "$n18"/${m}*.so >/dev/null 2>&1; then

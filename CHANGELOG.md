@@ -25,6 +25,13 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   stays correct. A new suite, `native_saop_pushdown`, proves the pruning,
   the conservativeness, and both freeze rules. (#704)
 
+- The cross-engine benchmark arms are now reproducible from the repository.
+  `bench/build_timescaledb.sh` pins TimescaleDB 2.29.0 with the exact cmake
+  options recovered from the original benchmark build, and `bench/build_citus.sh`
+  pins Citus v14.1.0, each built against one explicit `pg_config` and refusing an
+  assert build. `bench/provision.sh check` continues to report their presence;
+  installing them is now a scripted, pinned step instead of a manual one (#702).
+
 ### Fixed
 
 - The ungrouped vectorized aggregate (`pgcolumnar.enable_ungrouped_vector_agg`)
