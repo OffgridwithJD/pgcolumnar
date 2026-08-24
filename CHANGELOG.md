@@ -16,6 +16,15 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- `IN (...)` and `= ANY(array)` predicates now drive chunk-group skipping.
+  The scan-key builder derives a conservative `[min, max]` range over the
+  array's non-NULL elements. A single-valued list becomes an equality key,
+  which keeps the bloom-filter probe. A parameterized array on a generic
+  plan is frozen at executor start, like scalar parameters. That includes a
+  mixed list such as `IN (1, $1)`. A correlated array is not frozen and
+  stays correct. A new suite, `native_saop_pushdown`, proves the pruning,
+  the conservativeness, and both freeze rules. (#704)
+
 - The cross-engine benchmark arms are now reproducible from the repository.
   `bench/build_timescaledb.sh` pins TimescaleDB 2.29.0 with the exact cmake
   options recovered from the original benchmark build, and `bench/build_citus.sh`

@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+#
+# pgColumnar chunk-group skipping works for IN-list / = ANY(array) predicates.
+#
+# The scan-key builder (pgcolumnar_clause_to_scankey) accepted only OpExpr, so a
+# ScalarArrayOpExpr -- `col IN (...)` or `col = ANY(array)` -- built no scan key
+# and the scan read every row group, while every comparable predicate shape
+# (equality, range, anchored LIKE, parameterized scalar) already pruned (#704).
+#
+# The fix derives a conservative [min, max] range over the array's non-NULL
+# elements and emits two range keys. The executor still rechecks exact
+# membership on surviving rows, so pruning can only be conservative: a group
+# inside the range but holding none of the listed values is read and filtered,
+# never skipped wrongly. A NULL element cannot make `= ANY` true, so ignoring
+# NULLs for the range is exact.
+#
+# The correctness hazards, each with an arm below: a negated SAOP must build no
+# keys (NOT IN admits everything outside the list); an empty or all-NULL array
+# must not crash or mis-count; a parameterized array ($1 on a generic plan) is
+# frozen at Begin like #697's scalars, but a correlated PARAM_EXEC array changes
+# per rescan and must NOT be frozen.
+#
+# Usage:  test/native_saop_pushdown.sh [PG_CONFIG]
+# Written fresh for pgColumnar.
+
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
+# 40000 rows / 2000 = 20 monotonic groups; values >= 39000 live in the last one.
+# ov = (g%40)*2+10 gives every group the same even-valued range [10,88], so an
+# odd probe value is inside every group's [min,max] but present in none: range
+# keys prune nothing there, only the bloom probe can, which isolates the
+# single-value-list equality-key refinement.
+q "SET pgcolumnar.stripe_row_limit=2000;
+   CREATE DOMAIN intdom AS int;
+   CREATE TABLE t (id int, ts int, txt text COLLATE \"C\", ov int) USING pgcolumnar;
+   INSERT INTO t SELECT g, g, lpad(g::text, 8, '0'), (g % 40)*2 + 10
+     FROM generate_series(1,40000) g;
+   CREATE TABLE thr (lo int[]); INSERT INTO thr VALUES ('{39100}'),('{100,200}');" >/dev/null
+
+psql_c() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -c "$1" 2>&1; }
+
+# Chunk groups removed by a query, from EXPLAIN ANALYZE. Prints the count, or
+# NOSCAN when the plan did not use the columnar scan at all -- so a plan-shape
+# change reads as its own failure, not as "0 groups removed".
+groups_removed() {
+	local plan
+	plan="$(psql_c "EXPLAIN (ANALYZE, TIMING off, SUMMARY off) $1")"
+	case "$plan" in
+		*"Chunk Groups Removed by Filter"*)
+			sed -n 's/.*Chunk Groups Removed by Filter: \([0-9]*\).*/\1/p' <<<"$plan" | head -1 ;;
+		*) echo "NOSCAN($plan)" ;;
+	esac
+}
+
+# --- pruning arms (RED before the fix: each reads 0) ---
+
+# The full instrument on the primary arm: the plan pushed both range keys
+# (intent), the reader accepted both as skip predicates (usable), and 19
+# groups were in fact removed (work done). The three lines are distinct
+# counters precisely so intent cannot impersonate work (#477/#479).
+saop_plan="$(psql_c 'EXPLAIN (ANALYZE, TIMING off, SUMMARY off) SELECT count(*) FROM t WHERE ts IN (39100, 39200);')"
+check "an IN-list pushes two filters (intent)" \
+	"$(sed -n 's/.*Columnar Pushed-Down Filters: \([0-9]*\).*/\1/p' <<<"$saop_plan" | head -1)" "2"
+check "both IN-list keys are usable skip predicates" \
+	"$(sed -n 's/.*Columnar Usable Skip Predicates: \([0-9]*\).*/\1/p' <<<"$saop_plan" | head -1)" "2"
+check "an IN-list confined to the last group prunes (19 of 20 removed)" \
+	"$(sed -n 's/.*Chunk Groups Removed by Filter: \([0-9]*\).*/\1/p' <<<"$saop_plan" | head -1)" "19"
+
+check "IN-list count matches the OR-literal equivalent" \
+	"$(q 'SELECT count(*) FROM t WHERE ts IN (39100, 39200);')" \
+	"$(q 'SELECT count(*) FROM t WHERE ts = 39100 OR ts = 39200;')"
+
+check "a NULL element is ignored for the range, not a bailout (19 removed)" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ts = ANY (ARRAY[39100, NULL]::int[]);')" "19"
+
+check "NULL-element count is exact" \
+	"$(q 'SELECT count(*) FROM t WHERE ts = ANY (ARRAY[39100, NULL]::int[]);')" "1"
+
+check "a cross-type element array (int col, bigint[] list) prunes (19 removed)" \
+	"$(groups_removed "SELECT count(*) FROM t WHERE ts = ANY ('{39100,39200}'::bigint[]);")" "19"
+
+check "cross-type count is exact" \
+	"$(q "SELECT count(*) FROM t WHERE ts = ANY ('{39100,39200}'::bigint[]);")" "2"
+
+check "a C-collated text IN-list prunes (19 removed)" \
+	"$(groups_removed "SELECT count(*) FROM t WHERE txt IN ('00039100', '00039200');")" "19"
+
+check "text IN-list count is exact" \
+	"$(q "SELECT count(*) FROM t WHERE txt IN ('00039100', '00039200');")" "2"
+
+# Characterization: a domain-element cast arrives with the BASE type's OID in
+# the array header (probed: literal cast, ArrayExpr cast, and a domain-array
+# param all prune with no domain resolution in the builder), so no getBaseType
+# is needed. These arms lock that in; if a PG version changes the header OID,
+# they go red and the builder needs #483's resolution.
+check "a domain-element array prunes (19 removed)" \
+	"$(groups_removed "SELECT count(*) FROM t WHERE ts = ANY ('{39100,39200}'::intdom[]);")" "19"
+
+check "domain-element count is exact" \
+	"$(q "SELECT count(*) FROM t WHERE ts = ANY ('{39100,39200}'::intdom[]);")" "2"
+
+# Fixture premises first (assert-the-fixture-premise). The range probe pins
+# that 25 lies INSIDE every group's stored [min, max] -- range keys alone
+# prune nothing -- so the 20-removed arms below can only be the bloom probe.
+# If the ov formula or the stripe size ever drifts so some group's range
+# excludes 25, this goes red instead of the removal proof quietly dissolving.
+check "fixture premise: 25 is inside every group's range (range keys prune 0)" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ov >= 25 AND ov <= 25;')" "0"
+
+check "fixture premise: equality on the overlap column bloom-prunes all 20" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ov = 25;')" "20"
+
+# `IN (25)` parses to plain `= 25` (the parser collapses a one-element list),
+# so it exercises the OpExpr path; the `= ANY('{25,25}')` arm below is the
+# SAOP shape and is the removal proof for the single-distinct-value
+# equality-key refinement (as two range keys it removes 0).
+check "a one-element IN-list (parser-collapsed to =) bloom-prunes (20 removed)" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ov IN (25);')" "20"
+
+check "a single-DISTINCT-value SAOP list ('{25,25}') bloom-prunes (20 removed)" \
+	"$(groups_removed "SELECT count(*) FROM t WHERE ov = ANY ('{25,25}'::int[]);")" "20"
+
+check "single-value IN-list count is exact (0 rows)" \
+	"$(q 'SELECT count(*) FROM t WHERE ov IN (25);')" "0"
+
+# --- conservativeness arms (must hold before AND after the fix) ---
+
+# A list spanning the whole range prunes nothing but must count exactly: the
+# range is conservative, membership is the executor's recheck.
+check "a range-spanning IN-list is conservative (0 removed, exact count)" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ts IN (100, 39900);')/$(q 'SELECT count(*) FROM t WHERE ts IN (100, 39900);')" \
+	"0/2"
+
+# The NOT IN list is confined to ONE group on purpose: a builder that wrongly
+# derived the positive [19000, 19500] range from the negated clause would skip
+# the 19 other groups -- all full of matching rows -- and the count would
+# collapse to 1998. A list spanning the table could not catch that, because a
+# wrong range intersecting every group prunes nothing. The removed=0 companion
+# pins that no keys are built at all.
+check "NOT IN builds no range (0 removed) and stays correct" \
+	"$(groups_removed 'SELECT count(*) FROM t WHERE ts NOT IN (19000, 19500);')/$(q 'SELECT count(*) FROM t WHERE ts NOT IN (19000, 19500);')" \
+	"0/39998"
+
+check "an empty array counts zero and does not crash" \
+	"$(q "SELECT count(*) FROM t WHERE ts = ANY ('{}'::int[]);")" "0"
+
+check "an all-NULL array counts zero and does not crash" \
+	"$(q "SELECT count(*) FROM t WHERE ts = ANY (ARRAY[NULL,NULL]::int[]);")" "0"
+
+# --- parameterized arms (#697 machinery extended to array args) ---
+
+gp_removed() {
+	psql_c "SET plan_cache_mode=force_generic_plan;
+		DEALLOCATE ALL;
+		PREPARE p(int[]) AS SELECT count(*) FROM t WHERE ts = ANY (\$1);
+		EXPLAIN (ANALYZE, TIMING off, SUMMARY off) EXECUTE p('{39100,39200}');" \
+		| sed -n 's/.*Chunk Groups Removed by Filter: \([0-9]*\).*/\1/p' | head -1
+}
+
+check "a generic-plan parameterized array prunes (19 removed)" \
+	"$(gp_removed)" "19"
+
+check "parameterized array count matches the literal count" \
+	"$(psql_c "SET plan_cache_mode=force_generic_plan;
+		DEALLOCATE ALL;
+		PREPARE c(int[]) AS SELECT count(*) FROM t WHERE ts = ANY (\$1);
+		EXECUTE c('{39100,39200}');" | tail -1)" "2"
+
+# A MIXED list -- `IN (literal, $1)` -- stays an unfolded ArrayExpr in a
+# generic plan (eval_const_expressions folds an ArrayExpr only when every
+# element is Const), so it prunes only because the freeze evaluates the WHOLE
+# array argument, not just a bare Param. This is the shape #697 existed for.
+mixed_removed() {
+	psql_c "SET plan_cache_mode=force_generic_plan;
+		DEALLOCATE ALL;
+		PREPARE m(int) AS SELECT count(*) FROM t WHERE ts IN (39100, \$1);
+		EXPLAIN (ANALYZE, TIMING off, SUMMARY off) EXECUTE m(39200);" \
+		| sed -n 's/.*Chunk Groups Removed by Filter: \([0-9]*\).*/\1/p' | head -1
+}
+
+check "a mixed literal+param IN-list prunes on a generic plan (19 removed)" \
+	"$(mixed_removed)" "19"
+
+# The vectorized-aggregate guard: SAOP-derived keys are CONSERVATIVE (a
+# [min,max] range, weaker than the clause), so they must never serve as the
+# batch fold's exact row filter. Today the fold's eligibility gate rejects
+# the clause; if anyone teaches it about SAOP without an exactness marker,
+# this count goes wrong (see #715 for the same hole reached via <>).
+vec_plan="$(psql_c "SET pgcolumnar.enable_ungrouped_vector_agg=on;
+	EXPLAIN (ANALYZE, TIMING off, SUMMARY off) SELECT count(*) FROM t WHERE ts IN (39100, 39150);")"
+check "vector-agg path engaged for the guard arm (plan shape)" \
+	"$(grep -c 'Columnar Vectorized Aggregates' <<<"$vec_plan")" "1"
+# The no/yes pair proves the CLAUSE gate is what excludes the SAOP, not some
+# other eligibility rule: the same aggregate over the equivalent exact range
+# quals folds, so the fold is reachable for this query shape and only the
+# IN-list is refused. If a later change makes count(*)-with-qual take the row
+# path for another reason, the yes-arm goes red and the guard is known dead.
+check "the batch fold refuses the IN-list (Batch Fold: no)" \
+	"$(grep -c 'Columnar Batch Fold: no' <<<"$vec_plan")" "1"
+check "the batch fold accepts the equivalent exact range quals (Batch Fold: yes)" \
+	"$(psql_c "SET pgcolumnar.enable_ungrouped_vector_agg=on;
+		EXPLAIN (ANALYZE, TIMING off, SUMMARY off)
+		SELECT count(*) FROM t WHERE ts >= 39100 AND ts <= 39150;" \
+		| grep -c 'Columnar Batch Fold: yes')" "1"
+check "vector-agg count over an IN-list is exact (conservative keys not folded)" \
+	"$(psql_c "SET pgcolumnar.enable_ungrouped_vector_agg=on;
+		SELECT count(*) FROM t WHERE ts IN (39100, 39150);" | tail -1)" "2"
+
+# A correlated PARAM_EXEC array (LATERAL, array from the outer row) changes per
+# rescan and must not be frozen. The two thr rows land in DIFFERENT chunk
+# groups with different cardinalities (39100 in the last group; 100 and 200 in
+# the first), so a builder that froze the first rescan's array would prune the
+# other rescan's group away and the sum would drop below 1 + 2 = 3.
+check "a correlated PARAM_EXEC array is not mis-pruned (results stay correct)" \
+	"$(q 'SELECT sum(c) FROM thr, LATERAL (SELECT count(*) c FROM t WHERE t.ts = ANY (thr.lo)) s;')" \
+	"3"
+
+check "backend alive" "$(q 'SELECT 1;')" "1"
+
+pgc_summary
