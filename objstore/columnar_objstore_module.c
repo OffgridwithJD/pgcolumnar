@@ -1698,6 +1698,21 @@ os_write_handle(const char *url, const PgColumnarObjStoreConfig *cfg)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("columnar: \"%s\" has no object path", url)));
+
+		/*
+		 * Same userinfo refusal as os_open and http_request (#706). Without
+		 * it a `user@host` write target parsed with the '@' embedded in the
+		 * host (or, with `user:pass@`, split at the userinfo colon into a
+		 * garbage port). Both shapes still failed closed downstream -- the
+		 * allow-list cannot match an '@'-carrying host, and port 0 is
+		 * refused -- but by accident and with the wrong diagnostic, and the
+		 * userinfo bytes rode along in the handle's url.
+		 */
+		if (memchr(authority, '@', slash - authority) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("columnar: userinfo in \"%s\" is not supported", url)));
+
 		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 		h->abspath = pstrdup(slash);
 		colon = memchr(authority, ':', slash - authority);

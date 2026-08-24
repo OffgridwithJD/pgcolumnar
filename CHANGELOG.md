@@ -16,6 +16,13 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The object-store write path (export sink, delete, list) now refuses a URL
+  with userinfo (`user@host`) with the same error the read path always gave.
+  Before, the write parse admitted the URL and failed closed downstream by
+  accident: the allow-list cannot match a host with an embedded `@`, and a
+  `user:pass@` URL split at the wrong colon into a rejected port. A new
+  suite, `objstore_userinfo`, pins all three entry points on the SQLSTATE
+  and the guard's own message. (#706)
 - The debug metadata mutators (`pgcolumnar_debug_advance_reserved_offset`,
   `pgcolumnar_debug_set_metapage_version`) are now owner-only, checked
   before the table is opened like the other maintenance verbs. They ship
