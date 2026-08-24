@@ -77,19 +77,25 @@ PLAIN_PFX="EXPLAIN (COSTS OFF)"
 # its heap mirror and require byte-identical ordered output. TBL is substituted.
 # Both sides must be non-empty, so a query that errors on one arm fails here
 # rather than comparing nothing with nothing (#418).
-agree() {	# agree LABEL "SELECT ... FROM %T ..."
-	local label="$1" tmpl="$2" col heap
-	col="$(q "$(printf '%s' "${tmpl//%T/gbb}")" | sort | md5sum | cut -d' ' -f1)"
-	heap="$(q "$(printf '%s' "${tmpl//%T/gbb_h}")" | sort | md5sum | cut -d' ' -f1)"
+# The table pair is a parameter, not a constant. It was hardcoded to gbb/gbb_h
+# at first, so the later gbs fixture substituted the WRONG table into %T, the
+# query errored on a column that table does not have, and the arm reported "the
+# columnar arm returned no rows" -- which reads exactly like over-aggressive
+# vector skipping returning an empty result, and was not.
+agree_in() {	# agree_in TABLE LABEL "SELECT ... FROM %T ..."
+	local tbl="$1" label="$2" tmpl="$3" col heap
+	col="$(q "${tmpl//%T/$tbl}" | sort | md5sum | cut -d' ' -f1)"
+	heap="$(q "${tmpl//%T/${tbl}_h}" | sort | md5sum | cut -d' ' -f1)"
 	# md5 of empty input is a fixed string, so require the columnar arm produced
 	# rows at all before trusting the comparison.
-	if [ -z "$(q "$(printf '%s' "${tmpl//%T/gbb}")" | head -1)" ]; then
+	if [ -z "$(q "${tmpl//%T/$tbl}" | head -1)" ]; then
 		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAIL=1
 		echo "FAIL  $label: the columnar arm returned no rows, so nothing was compared"
 		return 1
 	fi
 	check_text "$label" "$col" "$heap"
 }
+agree() { agree_in gbb "$1" "$2"; }
 
 # ---- fixture ---------------------------------------------------------------
 # 200k rows over several row groups. k is the ordinary integer group key (8
@@ -256,6 +262,59 @@ check_num "float8 zero: -0.0 and 0.0 are one group, exactly as the heap says" \
 check_text "float8 zero: the grouped sums match the heap" \
 	"$(q 'SELECT f, sum(v) FROM gbz GROUP BY f ORDER BY 1' | md5sum)" \
 	"$(q 'SELECT f, sum(v) FROM gbz_h GROUP BY f ORDER BY 1' | md5sum)"
+
+# ---- the skipped-vector cursor, actually exercised --------------------------
+# The fold's per-row loop must advance each column's present index across a
+# SKIPPED vector without reading it: the stream is packed by presence, so a
+# skipped row's slot is consumed whether or not its value is read, and getting
+# that wrong misaligns every later vector rather than losing one row. It is
+# silent, and it only shows on data whose zone maps rule something out.
+#
+# Every arm above runs with `Columnar Vectors Skipped: 0`, so none of them reach
+# that code at all. The loop was present and unexecuted, and a check that cannot
+# reach the code it names is not evidence. This fixture makes the skip happen
+# and asserts that it did before comparing anything: a small vector against a
+# large row group, and a selector that matches in only a few vectors, so group
+# level pruning cannot remove the whole row group and vector level skipping is
+# what is left to do the work.
+psql_run "CREATE TABLE gbs(k int, sel int, p1 int, p2 int, p3 int, p4 int, p5 int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('gbs', stripe_row_limit => 65536, chunk_group_row_limit => 1024);"
+SGEN="SELECT g % 8, CASE WHEN (g / 1024) % 40 = 0 THEN 1 ELSE 0 END,
+             g, g % 3, g % 5, g % 7, g % 11
+      FROM generate_series(1,200000) g"
+psql_run "INSERT INTO gbs $SGEN;"
+psql_run "CREATE TABLE gbs_h(k int, sel int, p1 int, p2 int, p3 int, p4 int, p5 int);"
+psql_run "INSERT INTO gbs_h $SGEN;"
+
+Q_SKIP="SELECT k, count(*), sum(p1) FROM %T WHERE sel = 1 GROUP BY k"
+skip_plan="$(q "$ANALYZE_PFX ${Q_SKIP//%T/gbs}")"
+check_text "skipped vectors: the fold ran" \
+	"$(grep 'Columnar Batch Fold' <<<"$skip_plan" | grep -oE 'yes|no' | head -1)" yes
+# THE PREMISE, and the whole point of this fixture. Without it the arm below is
+# satisfied by a scan that skipped nothing, which is what every other arm here
+# already is.
+skipped="$(grep 'Columnar Vectors Skipped' <<<"$skip_plan" | grep -oE '[0-9]+' | head -1)"
+check_num "skipped vectors: premise: the scan really skipped vectors" \
+	"$([ -n "$skipped" ] && [ "$skipped" -gt 0 ] && echo 1 || echo 0)" 1
+echo "      (Columnar Vectors Skipped = ${skipped:-unset})"
+# And the row group was NOT pruned whole: if it had been there would be no
+# surviving vectors for the cursor to step over, and the skip count above would
+# be describing a scan that read nothing.
+groups_read="$(grep 'Columnar Chunk Groups Read' <<<"$skip_plan" | grep -oE '[0-9]+' | head -1)"
+check_num "skipped vectors: premise: a row group was still read" \
+	"$([ -n "$groups_read" ] && [ "$groups_read" -gt 0 ] && echo 1 || echo 0)" 1
+agree_in gbs "skipped vectors: answers match the heap mirror" "$Q_SKIP"
+# Aggregates over four payload columns, so a cursor that misaligns on any one of
+# them shows up as a wrong sum instead of being masked by a column that happens
+# to stay in step. Four and not five: at five payload aggregates the cost model
+# prefers core's GroupAggregate and this node is not chosen at all, which would
+# make the arm test nothing. The node assertion below is what would say so.
+Q_SKIP4="SELECT k, count(*), sum(p1), sum(p2), sum(p3), sum(p4) FROM %T WHERE sel = 1 GROUP BY k"
+check_text "skipped vectors: premise: the wide arm is still the grouped node" \
+	"$(is_groupvec "${Q_SKIP4//%T/gbs}")" yes
+check_text "skipped vectors: four payload columns all stay in step" \
+	"$(fold_of "$ANALYZE_PFX" "${Q_SKIP4//%T/gbs}")" yes
+agree_in gbs "skipped vectors: and their sums match the heap mirror" "$Q_SKIP4"
 
 # ---- the parallel partial grouped fold --------------------------------------
 # The fold has its own isPartial branch: each worker claims row groups through

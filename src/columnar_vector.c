@@ -4244,8 +4244,23 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
  *		The HASH is private to this hash table and never leaves it, so any hash
  *		consistent with the equality relation is correct. The EQUALITY is the
  *		part that has to match how core groups, and that is what this list is
- *		asserting -- one entry at a time, for types whose equality function is a
- *		plain integer compare of the stored width.
+ *		asserting -- one entry at a time.
+ *
+ *		STATE THE INVARIANT PRECISELY, because the next person to extend this
+ *		list will read this sentence instead of re-deriving it. The requirement
+ *		is NOT "the type's equality is an integer compare of the stored width".
+ *		It is that two values this type calls EQUAL must produce identical Datum
+ *		BITS *after fetch_att* -- which is a property of the GATHER as much as of
+ *		the equality operator.
+ *
+ *		oid is the entry that shows the difference. fetch_att SIGN-EXTENDS a
+ *		len-4 column, so an oid above 2^31 arrives with the high half set, which
+ *		the narrower rule does not describe at all. It is still correct here,
+ *		and only because the sign extension is CONSISTENT: the same oid always
+ *		yields the same bits, so equal values stay equal and unequal values stay
+ *		unequal. A type for which that did not hold would satisfy the narrower
+ *		rule and still group wrongly. (Found in review, by probing oid values
+ *		above 2^31 against a heap oracle rather than by reading the list.)
  *
  *		float4 and float8 are deliberately ABSENT even though they are passed by
  *		value and the fold reads them happily: -0.0 and 0.0 are ONE group and
