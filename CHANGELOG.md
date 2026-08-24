@@ -14,6 +14,17 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- `IN (...)` and `= ANY(array)` predicates now drive chunk-group skipping.
+  The scan-key builder derives a conservative `[min, max]` range over the
+  array's non-NULL elements. A single-valued list becomes an equality key,
+  which keeps the bloom-filter probe. A parameterized array on a generic
+  plan is frozen at executor start, like scalar parameters. That includes a
+  mixed list such as `IN (1, $1)`. A correlated array is not frozen and
+  stays correct. A new suite, `native_saop_pushdown`, proves the pruning,
+  the conservativeness, and both freeze rules. (#704)
+
 ### Fixed
 
 - The ungrouped vectorized aggregate (`pgcolumnar.enable_ungrouped_vector_agg`)
@@ -24,10 +35,10 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   an all-by-value shape the fold engaged and counted the excluded rows
   (`count(*) WHERE x <> 5` over-counted by one). Eligibility now requires every
   clause to be expressed exactly by scan keys (`PgColumnarQualsExactlyKeyed`);
-  conservative prune-only keys (anchored LIKE, and IN-list ranges once #704
-  lands) are marked inexact and also disqualify the fold, which then falls back
-  to the correct scalar path. Covered by new cases in `ungrouped_vector_agg`
-  (#715).
+  conservative prune-only keys (anchored LIKE, and the IN-list ranges added
+  above for #704) are marked inexact and also disqualify the fold, which then
+  falls back to the correct scalar path. Covered by new cases in
+  `ungrouped_vector_agg` (#715).
 
 ## [1.0-alpha2] - 2026-08-18
 

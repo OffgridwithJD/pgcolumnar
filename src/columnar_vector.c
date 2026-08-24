@@ -3028,12 +3028,22 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 		return false;
 
 	/*
-	 * allConvertible only means every clause is a strict OpExpr the fold could
-	 * evaluate; it does NOT mean the clause becomes a scan key. The fold's only
-	 * per-row filter is the scan-key loop, so a clause that produces no key
-	 * (`<>`, strict but with no btree strategy) or only a conservative pruning
-	 * key would let non-matching rows be counted (#715). Require every clause to
-	 * be expressed EXACTLY by scan keys before folding.
+	 * LOAD-BEARING. allConvertible only means every clause is a strict OpExpr
+	 * the fold could evaluate; it does NOT mean the clause becomes a scan key.
+	 * The fold's only per-row filter is the scan-key loop, so a clause that
+	 * produces no key (`<>`, strict but with no btree strategy) or only a
+	 * conservative pruning key would let non-matching rows be counted (#715).
+	 *
+	 * The gate below is exactly the exactness marker the conservative keys need
+	 * kept out of the fold: PgColumnarBuildScanKeys emits keys WEAKER than their
+	 * clause for a ScalarArrayOpExpr ([min, max] range, #704) and for an anchored
+	 * LIKE (#426), and pgcolumnar_clause_to_scankey now reports that inexactness.
+	 * PgColumnarQualsExactlyKeyed demands one EXACT key per clause, so those keys
+	 * never serve as the fold's WHERE even if pgcolumnar_clause_to_predicate were
+	 * later taught to accept a SAOP. The byval gather guard below is a second,
+	 * independent reason LIKE and other varlena filters fall back. Both
+	 * native_saop_pushdown.sh's vector-agg arms and ungrouped_vector_agg.sh's
+	 * #715 arms go red if this regresses.
 	 */
 	if (!PgColumnarQualsExactlyKeyed(state->quals, state->scanrelid, tupdesc))
 		return false;
@@ -3062,8 +3072,9 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 	 * The type check below is not this check and cannot stand in for it. It walks
 	 * the SCAN KEYS and asks whether each type is comparable, while the gather
 	 * walks state->projected and needs to know whether each type is fixed width.
-	 * A text column filtered with LIKE is in projected and not in the keys, since
-	 * LIKE is not a pushable scan key, so it reached the gather unchecked. That is
+	 * A text column filtered with an unanchored LIKE is in projected and not in
+	 * the keys (an anchored LIKE builds only conservative range keys, #426; an
+	 * unanchored one builds none), so it reached the gather unchecked. That is
 	 * exactly ClickBench q21, SELECT COUNT(*) FROM hits WHERE URL LIKE '%google%'.
 	 *
 	 * Falling back to the row path is what the ADD COLUMN case already does.
