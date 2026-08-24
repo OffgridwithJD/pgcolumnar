@@ -286,12 +286,27 @@ pgcolumnar_slot_decode_upto(TupleTableSlot *slot, int natts)
 {
 	PgColumnarSlot *cslot = (PgColumnarSlot *) slot;
 	Bitmapset  *needed = NULL;
+	MemoryContext scratch;
+	MemoryContext oldContext;
 	int			i;
 
 	Assert(cslot->deferred);
 
+	/*
+	 * Build the needed-column set in a private context, not the caller's. This
+	 * runs from a slot materialization during tuplesort_puttupleslot, whose
+	 * current context on PG17 is a bump context that forbids pfree (#720); a
+	 * Bitmapset built and freed there would trip "pfree is not supported by the
+	 * bump memory allocator". The reader below still writes its decoded values
+	 * into the caller's context (palloc is fine there); only the transient set
+	 * lives here, and deleting the context frees it without a pfree upstream.
+	 */
+	scratch = AllocSetContextCreate(CurrentMemoryContext, "columnar decode-upto",
+									ALLOCSET_SMALL_SIZES);
+	oldContext = MemoryContextSwitchTo(scratch);
 	for (i = 0; i < natts; i++)
 		needed = bms_add_member(needed, i);
+	MemoryContextSwitchTo(oldContext);
 
 	/*
 	 * Visibility was settled when the slot was filled, so this cannot fail for a
@@ -306,7 +321,7 @@ pgcolumnar_slot_decode_upto(TupleTableSlot *slot, int natts)
 		(void) PgColumnarBufferedRowByNumber(cslot->rel, cslot->rowNumber,
 										   slot->tts_values, slot->tts_isnull);
 
-	bms_free(needed);
+	MemoryContextDelete(scratch);
 
 	/*
 	 * Attributes past the prefix hold nothing meaningful yet. tts_nvalid is what
