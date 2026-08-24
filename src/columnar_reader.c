@@ -1800,9 +1800,16 @@ pgcolumnar_native_read_projected(PgColumnarReadState *rs,
 		 * read never had to check this because it read the group as one span;
 		 * reading per chunk turns a bad catalog row into an out-of-bounds write,
 		 * so it is checked rather than assumed.
+		 *
+		 * Written to be free of unsigned overflow: page_offset and page_length
+		 * are uint64 read from a signed bigint catalog column, so a corrupt
+		 * negative value arrives as a value near UINT64_MAX. The first two tests
+		 * make the subtraction in the third safe (no wraparound), so
+		 * page_offset = -1 is rejected here rather than wrapping past the sum.
 		 */
-		if (cc->pageOffset < rg->fileOffset ||
-			cc->pageOffset + cc->pageLength > groupEnd)
+		if (cc->pageLength > rg->byteLength ||
+			cc->pageOffset < rg->fileOffset ||
+			cc->pageOffset - rg->fileOffset > rg->byteLength - cc->pageLength)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("columnar chunk for column %d lies outside row group " UINT64_FORMAT,
@@ -2261,6 +2268,28 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 		 */
 		if (!rs->colWanted[cc->columnIndex])
 			continue;
+
+		/*
+		 * The chunk must lie inside its row group before base is derived from
+		 * page_offset. The projected read checks this while computing its read
+		 * ranges, but the whole-group read (allColumnsWanted) reads the group as
+		 * one span and never validated each chunk, so a corrupt page_offset here
+		 * would index base outside nativeBuffer and read out of bounds. Check on
+		 * the shared decode path so both reads are covered; same shape and
+		 * message as the projected read's guard, and overflow-safe for the same
+		 * reason (a corrupt page_offset = -1 arrives as ~UINT64_MAX).
+		 */
+		if (cc->pageLength > rg->byteLength ||
+			cc->pageOffset < rg->fileOffset ||
+			cc->pageOffset - rg->fileOffset > rg->byteLength - cc->pageLength)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("columnar chunk for column %d lies outside row group " UINT64_FORMAT,
+							cc->columnIndex + 1, rg->groupNumber),
+					 errdetail("Chunk spans [" UINT64_FORMAT ", " UINT64_FORMAT ") but the row group is ["
+							   UINT64_FORMAT ", " UINT64_FORMAT ").",
+							   cc->pageOffset, cc->pageOffset + cc->pageLength,
+							   rg->fileOffset, rg->fileOffset + rg->byteLength)));
 
 		base = rs->nativeBuffer + (cc->pageOffset - rg->fileOffset);
 		rs->nativeValidity[cc->columnIndex] = base;
