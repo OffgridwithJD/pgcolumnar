@@ -63,6 +63,7 @@ SUITES=(
 	concurrency
 	concurrent_diff
 	corruption
+	debug_hook_privilege
 	decode_interrupts
 	decode_skip_interrupts
 	dependency_estimate

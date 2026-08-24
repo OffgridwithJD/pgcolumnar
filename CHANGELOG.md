@@ -23,6 +23,14 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   `user:pass@` URL split at the wrong colon into a rejected port. A new
   suite, `objstore_userinfo`, pins all three entry points on the SQLSTATE
   and the guard's own message. (#706)
+- The debug metadata mutators (`pgcolumnar_debug_advance_reserved_offset`,
+  `pgcolumnar_debug_set_metapage_version`) are now owner-only, checked
+  before the table is opened like the other maintenance verbs. They ship
+  unbound, but a binding is one `CREATE FUNCTION` away, and one of them can
+  overwrite a table's metapage version and brick every later read. A new
+  suite, `debug_hook_privilege`, binds them the way the test suites do and
+  proves the gate as a non-owner role, by SQLSTATE and the owner message.
+  (#707)
 
 - A merge join over index-fetched columnar rows no longer aborts with `pfree is
   not supported by the bump memory allocator` on PostgreSQL 17 and later. A
