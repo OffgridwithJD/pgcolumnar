@@ -146,6 +146,7 @@ SUITES=(
 	native_lazy_slot
 	native_metadata_flush
 	native_ownership
+	native_page_offset_bound
 	native_param_pushdown
 	native_parquet_codecs
 	native_parquet_dict_oob

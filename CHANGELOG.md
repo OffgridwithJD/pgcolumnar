@@ -32,6 +32,23 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   assert build. `bench/provision.sh check` continues to report their presence;
   installing them is now a scripted, pinned step instead of a manual one (#702).
 
+### Fixed
+
+- A corrupt `column_chunk.page_offset` no longer crashes the backend on a
+  whole-group (unprojected) read. The projected read already refused a chunk
+  lying outside its row group; the whole-group decode path derived
+  `base = nativeBuffer + (page_offset - file_offset)` without the same check, so
+  a poisoned offset (or one below the group start, wrapping the subtraction)
+  read out of bounds and took SIGSEGV. The containment check now sits on the
+  shared decode path, so both reads raise `ERRCODE_DATA_CORRUPTED` and survive.
+  The containment test on both the shared and projected paths is written free of
+  unsigned overflow, so a `page_offset` of `-1` (storable in the signed `bigint`
+  column, read back as `~UINT64_MAX`) is rejected here rather than wrapping past
+  the `page_offset + page_length` sum into an out-of-bounds read. New suite
+  `native_page_offset_bound` reproduces the crash and the fix, including the
+  `-1` wrap on both paths; it closes the `page_offset` gap in `corruption.sh`,
+  which only ever corrupted `page_length` through a projected scan.
+
 ## [1.0-alpha2] - 2026-08-18
 
 ### Added
