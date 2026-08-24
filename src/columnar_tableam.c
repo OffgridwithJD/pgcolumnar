@@ -1921,6 +1921,16 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 		case XACT_EVENT_PREPARE:
 			PgColumnarFlushAllPendingWrites();
 			PgColumnarFlushAllDeleteVectors();
+
+			/*
+			 * PREPARE deletes TopTransactionContext without ever reaching the
+			 * COMMIT/ABORT arms below, so a memo slot populated outside any
+			 * executor lifecycle (a fetch during a utility command has no
+			 * executor-end reset) would keep a dangling context pointer into
+			 * the next transaction. Descriptors only; the contexts are still
+			 * live here and fall with the transaction's memory.
+			 */
+			PgColumnarGroupMemoReset(false);
 			break;
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_ABORT:
@@ -1929,6 +1939,12 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 			PgColumnarDiscardAllPendingWrites();
 			PgColumnarDiscardAllDeleteVectors();
 			PgColumnarDiscardFetchCache();
+			/*
+			 * Descriptors only: the memo contexts are TopTransactionContext
+			 * children, still live at callback time but taken by the
+			 * transaction's memory teardown right after.
+			 */
+			PgColumnarGroupMemoReset(false);
 			break;
 		default:
 			break;
@@ -1948,6 +1964,16 @@ pgcolumnar_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 		case SUBXACT_EVENT_ABORT_SUB:
 			PgColumnarWriteStateDiscardSubXact(mySubid);
 			PgColumnarDeleteVectorDiscardSubXact(mySubid);
+
+			/*
+			 * The abort flips the xmin verdict on any group the savepoint
+			 * flushed, with no change in snapshot content or command id --
+			 * the two things the group-list memo keys on -- so a memo built
+			 * while the subxact was live would keep serving the aborted
+			 * group's rows. The per-fetch catalog read this memo replaced
+			 * re-judged xmin every time; the reset restores that. (#709)
+			 */
+			PgColumnarGroupMemoReset(true);
 			break;
 		case SUBXACT_EVENT_COMMIT_SUB:
 			PgColumnarWriteStatePromoteSubXact(mySubid, parentSubid);
@@ -1988,6 +2014,8 @@ pgcolumnar_executor_end(QueryDesc *queryDesc)
 	 * in transaction after one UPDATE holds them indefinitely.
 	 */
 	PgColumnarDiscardFetchCache();
+	/* same statement scope for the group-list memo; its contexts are live */
+	PgColumnarGroupMemoReset(true);
 }
 
 /* -------------------------------------------------------------------------

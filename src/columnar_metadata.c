@@ -14,6 +14,7 @@
 #include "columnar_metadata.h"
 #include "fmgr.h"
 #include "columnar_compat.h"
+#include "columnar_reader.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
@@ -779,6 +780,22 @@ PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 					  Anum_bloom_group_number, storageId, groupNumber);
 	delete_group_rows("row_group", Anum_row_group_storage_id,
 					  Anum_row_group_group_number, storageId, groupNumber);
+
+	/*
+	 * A group-list memo built earlier in the SAME command would serve this
+	 * group after these deletes -- with its delete vectors just gone,
+	 * resurrecting rows -- so drop the memo with the group (#709). This
+	 * reset was once removed on the theory that every reachable
+	 * same-command retirement crosses a CommandCounterIncrement first
+	 * (changing the memo's key), and on PG17 the rewrite path does. On PG18
+	 * it does not: the same-statement rewrite arm of
+	 * native_fetch_group_memo.sh read one doubled row there (the first
+	 * post-rewrite probe hit the stale memo through the old index entry
+	 * before refresh-on-miss healed it). The CCI is an accident of the
+	 * flush's storage-row update, major-dependent, and nothing to lean on;
+	 * that arm is this reset's removal proof.
+	 */
+	PgColumnarGroupMemoReset(true);
 
 	if (haveRange && byteLength > 0)
 		record_free_space(storageId, fileOffset, byteLength);

@@ -129,6 +129,7 @@ SUITES=(
 	native_fastdecode
 	native_fetch_bigcap
 	native_fetch_cache
+	native_fetch_group_memo
 	native_fetch_interrupt
 	native_fetch_position
 	native_fetch_projection
