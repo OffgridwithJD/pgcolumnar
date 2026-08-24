@@ -199,6 +199,7 @@ SUITES=(
 	objstore_sink_write
 	objstore_stash_recovery
 	objstore_tls_read
+	objstore_userinfo
 	parallel
 	parallel_copy
 	parallel_degree
