@@ -3416,6 +3416,18 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * cannot misread. Memoized per command (see the slot above) so a large index
 	 * scan pays one catalog check rather than one per row.
 	 */
+	tmp = AllocSetContextCreate(CurrentMemoryContext, "columnar fetch",
+								ALLOCSET_SMALL_SIZES);
+	oldContext = MemoryContextSwitchTo(tmp);
+
+	/*
+	 * The format-version check opens a catalog table and scans it, and that
+	 * scan frees a btree search stack with pfree. It must run inside this
+	 * AllocSet context, not the caller's: this path is reached from a slot
+	 * materialization during tuplesort_puttupleslot, whose current context on
+	 * PG17 is a bump context that does not support pfree (#720). Running it here
+	 * keeps the transient catalog allocations in a pfree-supporting context.
+	 */
 	if (wantValues &&
 		!(columnarFetchFmtOk && columnarFetchFmtOkStorageId == storageId))
 	{
@@ -3423,10 +3435,6 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		columnarFetchFmtOkStorageId = storageId;
 		columnarFetchFmtOk = true;
 	}
-
-	tmp = AllocSetContextCreate(CurrentMemoryContext, "columnar fetch",
-								ALLOCSET_SMALL_SIZES);
-	oldContext = MemoryContextSwitchTo(tmp);
 
 	metaSnapshot = PgColumnarCatalogSnapshot(snapshot);
 

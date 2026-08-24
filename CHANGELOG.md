@@ -14,6 +14,19 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- A merge join over index-fetched columnar rows no longer aborts with `pfree is
+  not supported by the bump memory allocator` on PostgreSQL 17 and later. A
+  columnar index scan returns a deferred slot, and when a sort materialises it
+  the current context is PostgreSQL 17's bump context, which forbids `pfree`. The
+  deferred decode pfreed there twice: the needed-column `Bitmapset`
+  (`bms_add_member`/`bms_free`) and, on a storage's first fetch, the
+  format-version check's catalog scan (which frees a btree search stack). Both
+  now run in a private pfree-supporting context; the decoded values are
+  unaffected because they were already copied into the caller's context, where
+  `palloc` is legal. Covered by a new suite, `native_fetch_sort_context` (#720).
+
 ### Added
 
 - `IN (...)` and `= ANY(array)` predicates now drive chunk-group skipping.

@@ -132,6 +132,7 @@ SUITES=(
 	native_fetch_interrupt
 	native_fetch_position
 	native_fetch_projection
+	native_fetch_sort_context
 	native_fold_deferral
 	native_fold_skipguard
 	native_format
