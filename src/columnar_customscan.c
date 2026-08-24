@@ -31,6 +31,7 @@
 #include <math.h>
 
 #include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/parallel.h"
 #include "access/relation.h"
 #include "access/relscan.h"
@@ -62,6 +63,7 @@
 #include "optimizer/restrictinfo.h"
 #include "statistics/statistics.h"
 #include "catalog/pg_statistic_ext.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -405,6 +407,181 @@ pgcolumnar_like_prefix_scankey(OpExpr *op, Var *var, Const *con,
 	return 1;
 }
 
+/*
+ * pgcolumnar_saop_range_scankey
+ *		Turn `col = ANY(array)` -- the planner's form of `col IN (...)` -- into
+ *		the [min, max] range it implies, so zone maps can skip groups whose
+ *		range cannot intersect any listed value (#704).
+ *
+ * Range keys rather than per-element equality keys, because the skip
+ * predicates conjoin: pgcolumnar_group_can_match requires a group to satisfy
+ * EVERY predicate, and a list has no group satisfying `= a AND = b`. The range
+ * is the disjunction's projection onto that AND-only structure, and it is
+ * conservative by construction: the executor still rechecks exact membership
+ * on every surviving row, so a group inside the range holding none of the
+ * listed values is read and filtered, never skipped wrongly. The cost of that
+ * shape is no bloom probe (equality-only, columnar_reader.c) and little
+ * pruning from a list that spans the column's range. Because these keys are
+ * WEAKER than their clause, they must never serve as an exact row filter:
+ * the batch-fold eligibility gate in columnar_vector.c is what keeps them
+ * out of the vectorized fold, and its comment names this function.
+ *
+ * Only `useOr` equality: `= ALL (list)` is a conjunction already and is
+ * satisfiable only for a single-valued list, and a negated operator admits
+ * everything outside the list, so neither yields this range. NULL elements
+ * cannot make `= ANY` true (each yields NULL, and OR ignores NULL beside a
+ * true), so they are ignored for the range; a list with no non-NULL element
+ * matches nothing and builds no keys rather than a degenerate range.
+ *
+ * The element ordering proc comes from the COLUMN type's btree opfamily, for
+ * the element type pair -- the same family that supplied the equality
+ * operator's strategy, so "min of the list" and "compares below the group's
+ * max" agree on one ordering. A cross-type list (int column, bigint elements)
+ * therefore orders its elements with the element type's own proc from that
+ * family, and the reader resolves the (column, element) comparison the same
+ * way it does for any cross-type range key (#477).
+ *
+ * Same collation rule as the OpExpr path, same reason (spec 9): the stored
+ * min/max are ordered under the column's collation, so only a comparison
+ * under that collation may drive skipping. That rule, not a determinism
+ * check, is what text needs here: under a nondeterministic collation a value
+ * equal to a listed element sorts equal to it, so it lies inside the range.
+ */
+static int
+pgcolumnar_saop_range_scankey(ScalarArrayOpExpr *saop, Index scanrelid,
+							  TupleDesc tupdesc, ScanKey key)
+{
+	Node	   *leftop;
+	Node	   *rightop;
+	Var		   *var;
+	Const	   *con;
+	TypeCacheEntry *tce;
+	Oid			cmpProc;
+	FmgrInfo	cmpFn;
+	ArrayType  *arr;
+	Oid			elemtype;
+	int16		elmlen;
+	bool		elmbyval;
+	char		elmalign;
+	Datum	   *elems;
+	bool	   *nulls;
+	int			nelems;
+	int			i;
+	Datum		minVal = (Datum) 0;
+	Datum		maxVal = (Datum) 0;
+	bool		have = false;
+
+	if (!saop->useOr)
+		return 0;
+	if (list_length(saop->args) != 2)
+		return 0;
+
+	leftop = (Node *) linitial(saop->args);
+	rightop = (Node *) lsecond(saop->args);
+	if (IsA(leftop, RelabelType))
+		leftop = (Node *) ((RelabelType *) leftop)->arg;
+	if (!IsA(leftop, Var) || !IsA(rightop, Const))
+		return 0;
+	var = (Var *) leftop;
+	con = (Const *) rightop;
+
+	if (var->varno != scanrelid)
+		return 0;
+	if (var->varattno < 1 || var->varattno > tupdesc->natts)
+		return 0;
+	if (con->constisnull)
+		return 0;
+	if (saop->inputcollid !=
+		TupleDescAttr(tupdesc, var->varattno - 1)->attcollation)
+		return 0;
+
+	tce = lookup_type_cache(var->vartype, TYPECACHE_BTREE_OPFAMILY);
+	if (!OidIsValid(tce->btree_opf))
+		return 0;
+	if (get_op_opfamily_strategy(saop->opno, tce->btree_opf) !=
+		BTEqualStrategyNumber)
+		return 0;
+
+	arr = DatumGetArrayTypeP(con->constvalue);
+
+	/*
+	 * No getBaseType on the element type, deliberately. Every reachable
+	 * domain-array shape (`'{...}'::intdom[]` literal, an ArrayExpr cast,
+	 * and a prepared `$1::intdom[]` under a generic plan) arrives with the
+	 * BASE type's OID in the array header, so a domain resolution here can
+	 * never fire -- probed by removing it and watching the domain arms of
+	 * native_saop_pushdown.sh stay green. An element type the opfamily
+	 * cannot order (below) bails to "no keys", which is conservative.
+	 */
+	elemtype = ARR_ELEMTYPE(arr);
+	cmpProc = get_opfamily_proc(tce->btree_opf, elemtype, elemtype,
+								BTORDER_PROC);
+	if (!OidIsValid(cmpProc))
+		return 0;
+	fmgr_info(cmpProc, &cmpFn);
+
+	get_typlenbyvalalign(elemtype, &elmlen, &elmbyval, &elmalign);
+	deconstruct_array(arr, elemtype, elmlen, elmbyval, elmalign,
+					  &elems, &nulls, &nelems);
+
+	for (i = 0; i < nelems; i++)
+	{
+		if (nulls[i])
+			continue;
+		if (!have)
+		{
+			minVal = maxVal = elems[i];
+			have = true;
+			continue;
+		}
+		if (DatumGetInt32(FunctionCall2Coll(&cmpFn, saop->inputcollid,
+											elems[i], minVal)) < 0)
+			minVal = elems[i];
+		if (DatumGetInt32(FunctionCall2Coll(&cmpFn, saop->inputcollid,
+											elems[i], maxVal)) > 0)
+			maxVal = elems[i];
+	}
+	if (!have)
+		return 0;
+
+	/*
+	 * A list with one distinct value is an equality, and emitting it as one
+	 * beats [v, v]: the reader's bloom probe fires only for an equality key
+	 * (columnar_reader.c), so `x IN (7)` keeps the pruning power of `x = 7`
+	 * on a column whose per-group ranges all contain 7.
+	 */
+	if (DatumGetInt32(FunctionCall2Coll(&cmpFn, saop->inputcollid,
+										minVal, maxVal)) == 0)
+	{
+		MemSet(&key[0], 0, sizeof(ScanKeyData));
+		key[0].sk_flags = 0;
+		key[0].sk_attno = var->varattno;
+		key[0].sk_strategy = BTEqualStrategyNumber;
+		key[0].sk_subtype = elemtype;
+		key[0].sk_collation = saop->inputcollid;
+		key[0].sk_argument = minVal;
+		return 1;
+	}
+
+	MemSet(&key[0], 0, sizeof(ScanKeyData));
+	key[0].sk_flags = 0;
+	key[0].sk_attno = var->varattno;
+	key[0].sk_strategy = BTGreaterEqualStrategyNumber;
+	key[0].sk_subtype = elemtype;
+	key[0].sk_collation = saop->inputcollid;
+	key[0].sk_argument = minVal;
+
+	MemSet(&key[1], 0, sizeof(ScanKeyData));
+	key[1].sk_flags = 0;
+	key[1].sk_attno = var->varattno;
+	key[1].sk_strategy = BTLessEqualStrategyNumber;
+	key[1].sk_subtype = elemtype;
+	key[1].sk_collation = saop->inputcollid;
+	key[1].sk_argument = maxVal;
+
+	return 2;
+}
+
 static int
 pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 						   ScanKey key)
@@ -417,6 +594,11 @@ pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	bool		varOnLeft;
 	TypeCacheEntry *tce;
 	StrategyNumber strat;
+
+	/* `col IN (...)` / `col = ANY(array)` becomes a [min, max] range (#704) */
+	if (IsA(clause, ScalarArrayOpExpr))
+		return pgcolumnar_saop_range_scankey((ScalarArrayOpExpr *) clause,
+											 scanrelid, tupdesc, key);
 
 	if (!IsA(clause, OpExpr))
 		return 0;
@@ -525,8 +707,9 @@ PgColumnarBuildScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc,
 		return NULL;
 
 	/*
-	 * Two slots per clause: an anchored LIKE yields a lower and an upper bound
-	 * from one clause (#426), and everything else yields at most one.
+	 * Two slots per clause: an anchored LIKE (#426) and an IN-list range
+	 * (#704) each yield a lower and an upper bound from one clause, and
+	 * everything else yields at most one.
 	 */
 	keys = (ScanKey) palloc0(sizeof(ScanKeyData) * 2 * list_length(qual));
 	foreach(lc, qual)
@@ -621,18 +804,30 @@ pgcolumnar_stabilize_quals(List *qual, PlanState *ps)
 	foreach(lc, qual)
 	{
 		Node	   *clause = (Node *) lfirst(lc);
-		OpExpr	   *op;
+		List	   *args;
 		List	   *newargs = NIL;
 		ListCell   *alc;
 		bool		changed = false;
 
-		if (!IsA(clause, OpExpr) || list_length(((OpExpr *) clause)->args) != 2)
+		/*
+		 * The same freeze serves `col = ANY($1)` (#704): the array argument of
+		 * a ScalarArrayOpExpr is one operand like any other, judged by the
+		 * same stability rule below. The Var side is never frozen (the walker
+		 * sees it), and a correlated PARAM_EXEC array is refused exactly as a
+		 * scalar one is.
+		 */
+		if (IsA(clause, OpExpr) &&
+			list_length(((OpExpr *) clause)->args) == 2)
+			args = ((OpExpr *) clause)->args;
+		else if (IsA(clause, ScalarArrayOpExpr) &&
+				 list_length(((ScalarArrayOpExpr *) clause)->args) == 2)
+			args = ((ScalarArrayOpExpr *) clause)->args;
+		else
 		{
 			out = lappend(out, clause);
 			continue;
 		}
-		op = (OpExpr *) clause;
-		foreach(alc, op->args)
+		foreach(alc, args)
 		{
 			Node	   *arg = (Node *) lfirst(alc);
 			Node	   *bare = arg;
@@ -656,10 +851,13 @@ pgcolumnar_stabilize_quals(List *qual, PlanState *ps)
 		}
 		if (changed)
 		{
-			OpExpr	   *nop = copyObject(op);
+			Node	   *nclause = (Node *) copyObject(clause);
 
-			nop->args = newargs;
-			out = lappend(out, (Node *) nop);
+			if (IsA(nclause, OpExpr))
+				((OpExpr *) nclause)->args = newargs;
+			else
+				((ScalarArrayOpExpr *) nclause)->args = newargs;
+			out = lappend(out, nclause);
 		}
 		else
 			out = lappend(out, clause);
