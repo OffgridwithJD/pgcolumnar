@@ -222,6 +222,27 @@ check "a DELETE is visible to the very next fetch (delete vectors uncached)" \
 		SELECT count(x.v) FROM (VALUES (77)) t(p), LATERAL (SELECT v FROM f WHERE f.id = t.p) x;" | tail -1)" \
 	"0"
 
+# --- characterization: same-transaction TRUNCATE then fetch -------------------
+# The third loss path (PgColumnarDeleteMetadata resets the memo; see the
+# ledger). No removal proof is constructible on current majors -- TRUNCATE
+# advances the command id, which rebuilds the memo anyway -- so this arm pins
+# the behavior the reset guarantees independently of that cid accident: after
+# a same-transaction TRUNCATE + reinsert, fetches see exactly the new rows.
+check "same-transaction TRUNCATE then fetch sees only the new rows" \
+	"$(psql_c "SET pgcolumnar.stripe_row_limit=2000;
+	$FORCE
+	BEGIN;
+	CREATE TABLE tw (id int, v text) USING pgcolumnar;
+	INSERT INTO tw SELECT g, 'o'||g FROM generate_series(1,5000) g;
+	CREATE INDEX tw_id ON tw (id);
+	SELECT count(x.v) FROM generate_series(1,50) g, LATERAL (SELECT v FROM tw WHERE tw.id = g) x;
+	TRUNCATE tw;
+	INSERT INTO tw SELECT g, 'w'||g FROM generate_series(1,100) g;
+	SELECT count(*) FROM generate_series(1,5000) g, LATERAL (SELECT v FROM tw WHERE tw.id = g) x;
+	SELECT count(x.v) FROM generate_series(1,5000) g, LATERAL (SELECT v FROM tw WHERE tw.id = g) x;
+	COMMIT;" | grep -E '^[0-9]+$' | tr '\n' '/')" \
+	"50/100/100/"
+
 check "backend alive" "$(q 'SELECT 1;')" "1"
 
 pgc_summary

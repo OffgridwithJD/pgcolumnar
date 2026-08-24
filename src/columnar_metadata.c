@@ -1646,6 +1646,19 @@ PgColumnarDeleteMetadata(uint64 storageId)
 	delete_rows_by_storage_id("free_space", Anum_free_space_storage_id, storageId);
 	delete_rows_by_storage_id("row_group", Anum_row_group_storage_id, storageId);
 	delete_rows_by_storage_id("storage", Anum_native_storage_storage_id, storageId);
+
+	/*
+	 * The third row-group loss path (#709, #721 review). The vacuum-family
+	 * callers pass an OLD storage id a memo cannot be keyed on, but the
+	 * TRUNCATE path (pgcolumnar_relation_nontransactional_truncate) wipes
+	 * the metadata of the SAME storage id a memo may hold. Today a stale HIT
+	 * is additionally masked by TRUNCATE marking the command id used, so the
+	 * next fetch's cid differs -- but that is a cid accident of the current
+	 * truncate path, exactly the class of unstated invariant the retirement
+	 * reset above was once wrongly rested on (it held on PG17 and broke on
+	 * PG18). Reset here so the memo's correctness does not depend on it.
+	 */
+	PgColumnarGroupMemoReset(true);
 }
 
 /*

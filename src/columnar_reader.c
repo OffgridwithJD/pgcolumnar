@@ -3319,7 +3319,12 @@ PgColumnarDiscardFetchCache(void)
  *    takes over that role and must reset);
  *  - a same-command RETIREMENT (compaction is callable mid-statement and
  *    does not CommandCounterIncrement unconditionally) deletes row_group
- *    rows a HIT would resurrect, so PgColumnarRetireGroup resets the memo.
+ *    rows a HIT would resurrect, so PgColumnarRetireGroup resets the memo;
+ *  - a METADATA WIPE for the same storage id (the TRUNCATE table-AM path)
+ *    deletes every group at once, so PgColumnarDeleteMetadata resets the
+ *    memo too. Today that path also advances the command id before the
+ *    next fetch, but the retirement reset's history says not to lean on a
+ *    cid accident.
  *
  * Cross-transaction deletions cannot invalidate a HIT: they are invisible to
  * the same MVCC snapshot content by definition. Non-MVCC snapshots (the

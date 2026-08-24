@@ -77,6 +77,18 @@ cid)`), reusing the delete-vector reader's refresh-on-miss discipline
      deleted group is refused by `compact_rewrite` — measured: rewrote 0 —
      and is retired only by vacuum-family commands, which cannot run inside
      another statement; that shape stays unreachable.)
+   - **on a same-storage metadata wipe** (`PgColumnarDeleteMetadata`, the
+     TRUNCATE table-AM path) — the third loss case, surfaced in cross-review
+     after this ledger claimed the enumeration complete. The vacuum-family
+     callers wipe an OLD storage id no memo can be keyed on; the TRUNCATE
+     path wipes the SAME storage id. A stale HIT is not constructible today
+     because TRUNCATE marks the command id used, so the next fetch's cid
+     differs and the memo rebuilds (probed in review: truncate-then-fetch
+     returns the new data, zero nulls) — but that is precisely the shape of
+     unstated cid invariant the retirement reset was once wrongly rested on.
+     The reset ships; the suite pins the truncate behavior with a
+     characterization arm rather than a removal proof, and this entry is the
+     record of why no removal proof exists for it on current majors.
 6. **The refresh reads under the FETCH's snapshot argument**, i.e. the same
    `PgColumnarCatalogSnapshot(snapshot)` the per-fetch read uses today — NOT
    `GetActiveSnapshot()` as the delete-vector sibling does. One MVCC caller
