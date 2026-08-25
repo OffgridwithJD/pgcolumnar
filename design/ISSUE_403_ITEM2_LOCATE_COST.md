@@ -18,7 +18,7 @@ linear cost is dominated by something cheaper to fix.
 
 ## What the code actually does (read, not assumed)
 
-`pgcolumnar_native_load_group` (`src/columnar_reader.c:2083`) walks the row-group
+`pgcolumnar_native_load_group` (`src/columnar_reader.c:2063`) walks the row-group
 list and for each candidate calls `pgcolumnar_native_group_can_match`
 (`src/columnar_reader.c:1347`), which for each pushed-down predicate calls
 `PgColumnarReadZoneMapForColumn` (`src/columnar_metadata.c:2633`).
@@ -211,6 +211,10 @@ it):
 Residuals against the fit: +0.07%, +0.17%, -0.27%, +0.06% at N = 80, 160, 320,
 640. At N = 20 it is -5.5%, which is why the fit starts at 80.
 
+Residuals are `(measured - fit) / measured`, stated because the other convention,
+`(measured - fit) / fit`, puts N = 20 at -5.2% and a reader recomputing it will
+otherwise get a different number and not know which of you is wrong.
+
 Two independent instruments agree on the structure. In buffers the probe is
 6.00 and everything else is 0.09, i.e. the catalog probe is the entire buffer
 cost. In instructions the probe is 25,185 of 30,582, and the remaining 5,397 is
@@ -226,6 +230,12 @@ reporting an impossible number.
 ## The answer to the question this document was opened to settle
 
 Share of a pruning query's own execution spent deciding which group to read:
+
+Totals in this table are the MEASURED per-execution figures. The speedup table
+further down uses the FITTED totals instead, because it is comparing two lines
+rather than reporting an observation, and the two differ by the residuals above
+(0.07% to 0.17%). Neither substitutes for the other and no conclusion turns on
+which is used.
 
 | chunk groups | rows | locate | total | share |
 | ---: | ---: | ---: | ---: | ---: |
@@ -256,7 +266,18 @@ min/max comparison.** #403 describes the cost as "66,700 min/max comparisons".
 The comparisons are nearly free. What is expensive is that reaching them opens a
 relation, takes a lock, and resolves two names, per group, per predicate column.
 
-Removing that cost alone, with no new on-disk structure, is worth:
+**What the next table prices is removing the probe ENTIRELY, so it is an upper
+bound and not the value of the cheap route.** `S2 - S1` isolates one whole
+`PgColumnarReadZoneMapForColumn` call: the schema oid, both `get_relname_relid`
+calls, `table_open`, the `systable_beginscan`/`getnext`/`endscan`, and
+`table_close`. Route 1 below hoists the open and the two name lookups out of the
+loop but leaves the index probe inside it, once per group per predicate column,
+so route 1 delivers some fraction of this and route 2 approaches all of it.
+
+Splitting 25,185 into its open-and-lookup half and its index-probe half is what
+would price route 1 honestly, and it is a smaller measurement than the ones
+already done here. It has not been made, so this table must not be read as the
+price of hoisting two name lookups:
 
 | chunk groups | now | probe cost removed | speedup | locate share after |
 | ---: | ---: | ---: | ---: | ---: |
@@ -265,7 +286,10 @@ Removing that cost alone, with no new on-disk structure, is worth:
 
 So the order is: make the existing zone-map read cheap first, then re-measure. At
 640 groups the residue is still 25%, which is where a sparse index earns its
-place; below roughly 160 groups it would be attacking 8%.
+place; below roughly 160 groups it would be attacking 8%. Those two percentages
+inherit the upper bound above: they are what is left after the probe is removed
+ENTIRELY, so they are the most favourable case for step 2, not a forecast for
+route 1.
 
 Two routes for the first step, neither implemented or measured here:
 
