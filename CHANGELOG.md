@@ -16,6 +16,17 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The FSST decoder now checks for interrupts inside its decode loop. Every
+  other value decoder already did. The loop is bounded by the encoded length
+  of one vector, so this is a latency bound rather than the uncancellable hang
+  the Thrift and Avro skip loops had, but a large vector could still hold a
+  backend past a cancel or a `statement_timeout`. The check uses an iteration
+  counter rather than a byte offset, because the stride is a mask and a code
+  that advances the pointer by two can step over the exact multiple and never
+  fire. `decode_interrupts` now covers this decoder, and asserts the check sits
+  in the decode loop rather than in the bounded symbol-table parse above it.
+  (#712)
+
 - The object-store write path (export sink, delete, list) now refuses a URL
   with userinfo (`user@host`) with the same error the read path always gave.
   Before, the write parse admitted the URL and failed closed downstream by
