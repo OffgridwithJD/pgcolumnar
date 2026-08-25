@@ -42,6 +42,19 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   unchanged on every reachable input. A new suite, `parquet_level_width`,
   pins the parts no query can reach. (#710)
 
+- The Iceberg name-mapping parse sizes its first allocation by the name cap
+  rather than by the element count the file declares. The cap
+  (`ICE_MAX_NAME_MAPPING`, 100000) was applied inside the loop, after an
+  allocation taken from the document, so a mapping declaring N entries asked
+  for 12N bytes up front however few names it actually held. The surplus is
+  never written, so it costs address space rather than resident memory, and
+  the effect on peak RSS measured 28 kB out of 1196 MB; this is
+  defense-in-depth rather than a memory saving, independent of the 64 MB
+  metadata bound several layers away that was the only other thing limiting
+  it. `iceberg_name_mapping` gains arms at and one over the cap, built as a
+  single entry carrying many names, which is the shape where the opening
+  capacity and the real ceiling are furthest apart. (#711)
+
 - The object-store write path (export sink, delete, list) now refuses a URL
   with userinfo (`user@host`) with the same error the read path always gave.
   Before, the write parse admitted the URL and failed closed downstream by

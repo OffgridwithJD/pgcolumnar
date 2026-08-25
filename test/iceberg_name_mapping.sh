@@ -122,4 +122,60 @@ check "...and its other columns still carry real data" \
 	      AS t(id bigint, region text, amount int) ORDER BY id LIMIT 1")" "eu"
 check "backend still up after the null-fill reads" "$(q 'SELECT 1')" "1"
 
+# ---- the name cap, and the allocation that opens for it (#711) --------------
+# ICE_MAX_NAME_MAPPING bounds the NAME count, and the entry count is not an
+# upper bound on it: one entry carries a whole list of names, so a single entry
+# can drive the count to the cap on its own. These fixtures are built that way
+# on purpose -- one entry, many names -- because that is the shape where the
+# array's opening capacity (taken from the entry count) and its real ceiling
+# (the cap) are furthest apart, and it is the shape the growth path has to
+# handle correctly.
+CAP=100000
+python3 - "$MDIR" "$CAP" <<'PY_CAP'
+import json, sys
+d, cap = sys.argv[1], int(sys.argv[2])
+base = json.load(open(d + "/nmapply.metadata.json"))
+real = json.loads(base["properties"]["schema.name-mapping.default"])
+
+def write(tag, extra):
+    md = json.loads(json.dumps(base))
+    # one entry carrying `extra` unique filler names, beside the real mapping
+    filler = {"field-id": 1, "names": ["f%d" % i for i in range(extra)]}
+    md["properties"]["schema.name-mapping.default"] = json.dumps(real + [filler])
+    open(d + "/" + tag + ".metadata.json", "w").write(json.dumps(md))
+
+# the real mapping already contributes 3 names, so `cap - 3` reaches exactly the
+# cap and `cap - 2` is the first document over it
+write("nmcap_at", cap - 3)
+write("nmcap_over", cap - 2)
+PY_CAP
+
+# At the cap: accepted, and the mapping still binds. A fixture that errored here
+# would make the over-cap arm below vacuous, since both would just be errors.
+check "a mapping with exactly the cap in names is accepted" \
+	"$(q "SELECT count(*) FROM pgcolumnar.iceberg_scan('$MDIR/nmcap_at.metadata.json')
+	      AS t(id bigint, region text, amount int)")" "5"
+
+# One over: refused, by SQLSTATE and not by message text. 54000 comes from
+# ERRCODE_PROGRAM_LIMIT_EXCEEDED and nothing else on this path returns it.
+check "one name over the cap is refused" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmcap_over.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "54000"
+check "...and the refusal names the cap" \
+	"$(errmsg_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDIR/nmcap_over.metadata.json')
+	              AS t(id bigint, region text, amount int)" | grep -c "more than $CAP names")" "1"
+
+# The opening allocation is sized by the cap, not by the count the file declares.
+# This is a source check because it is not observable from SQL: the surplus is
+# palloc'd and never written, and untouched pages never become resident, so it
+# costs address space rather than memory and no query can see it. Measured: a
+# 6.4 MB mapping moved peak RSS by 28 kB out of 1,196 MB with and without the
+# fix. (That 1,196 MB is a separate and much larger defect, filed as #731; it is
+# not this one, and this arm deliberately does not claim it.)
+ICE_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/columnar_iceberg.c"
+check "the opening capacity is bounded by the cap, not by the declared count" \
+	"$(grep -c 'cap = Max(Min(ne, (uint32) ICE_MAX_NAME_MAPPING), 1)' "$ICE_SRC")" "1"
+
+check "backend still up after the cap reads" "$(q 'SELECT 1')" "1"
+
 pgc_summary
