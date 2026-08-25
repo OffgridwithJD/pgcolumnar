@@ -14,6 +14,21 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- A predicate on `date_trunc(unit, ts) = constant` now drives chunk-group
+  skipping. A zone map holds `ts`, so a predicate about a function of `ts` could
+  exclude nothing and the scan read every group. It is rewritten to a range on
+  `ts`, which prunes with the machinery that already exists. Measured on 500,000
+  rows clustered by time in 50 chunk groups: the equivalent explicit range read
+  2 groups, the `date_trunc` form read all 50, and it now reads 2. The derived
+  keys are conservative, so the executor still applies the original clause. Only
+  the `timestamp` form is rewritten: `date_trunc` on `timestamptz` truncates in
+  the session time zone, so a key frozen at executor start could be wrong if the
+  zone changed. Units outside a known list, and a constant that is not itself
+  truncated, are declined rather than approximated. A new suite,
+  `preimage_rewrite`, measures the pruning and pins each declined shape. (#403)
+
 ### Fixed
 
 - The vectorized aggregates now bound their per-execution memory with one

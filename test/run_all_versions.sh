@@ -216,6 +216,7 @@ SUITES=(
 	parquet_nested
 	parquet_nested_import
 	pg19_vacuum_options
+	preimage_rewrite
 	pg_dump_roundtrip
 	phase2
 	phase3
