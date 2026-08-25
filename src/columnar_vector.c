@@ -3787,21 +3787,59 @@ PgColumnarExecAggScan(CustomScanState *node)
 	PgColumnarFlushDeleteVectorForRelation(frel);
 	table_close(frel, AccessShareLock);
 
-	if (state->scanFold)
+	/*
+	 * Run the scan in a scratch context deleted when it returns (#727).
+	 *
+	 * This node re-executes on every rescan of a LATERAL or parameterized
+	 * aggregate sub-scan, and everything it allocates in the caller's context --
+	 * the per-row value and null arrays, the projected set on the metadata path,
+	 * whatever the flushes and the reader leave behind -- lived until
+	 * ExecutorEnd. Measured at ~178 bytes a rescan attributable to this node,
+	 * above what the columnar scan under it already costs.
+	 *
+	 * Wrapped at the CALL SITE rather than inside the function, so that every
+	 * return path is covered by construction: the batch fold's early return, the
+	 * ADD COLUMN fall-back and the normal end would otherwise each need their
+	 * own restore, and missing one leaks the context instead of the memory.
+	 *
+	 * Nothing allocated inside needs to outlive the call. The accumulators are
+	 * passed state->resultContext explicitly and land there; the scan keys have
+	 * their own context (#717); the statistics are scalars in the node. The
+	 * projected set the metadata path builds IS local and dies here, which is
+	 * what is wanted; the scan-fold path's set was built at Begin in another
+	 * context and is not touched by this delete.
+	 */
 	{
-		/*
-		 * A filter, or a sum/avg no zone map answers (#289): scan every row once
-		 * and fold it. pgcolumnar_native_scan_agg builds the scan keys, rechecks the
-		 * WHERE, and captures the EXPLAIN stats.
-		 */
-		pgcolumnar_native_scan_agg(state, NULL, 0);
-	}
-	else
-	{
-		dirtyGroups = pgcolumnar_fill_native_metadata_agg(state, &nDirtyGroups);
-		if (nDirtyGroups > 0)
-			pgcolumnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
-		state->haveStats = false;
+		MemoryContext scanCxt = AllocSetContextCreate(CurrentMemoryContext,
+													  "columnar vec agg scan",
+													  ALLOCSET_DEFAULT_SIZES);
+		MemoryContext oldCxt = MemoryContextSwitchTo(scanCxt);
+
+		if (state->scanFold)
+		{
+			/*
+			 * A filter, or a sum/avg no zone map answers (#289): scan every row
+			 * once and fold it. pgcolumnar_native_scan_agg builds the scan keys,
+			 * rechecks the WHERE, and captures the EXPLAIN stats.
+			 */
+			pgcolumnar_native_scan_agg(state, NULL, 0);
+		}
+		else
+		{
+			/*
+			 * dirtyGroups is deliberately allocated OUTSIDE this context, below
+			 * in the caller's, because it is read after the scratch is gone.
+			 */
+			MemoryContextSwitchTo(oldCxt);
+			dirtyGroups = pgcolumnar_fill_native_metadata_agg(state, &nDirtyGroups);
+			MemoryContextSwitchTo(scanCxt);
+			if (nDirtyGroups > 0)
+				pgcolumnar_native_scan_agg(state, dirtyGroups, nDirtyGroups);
+			state->haveStats = false;
+		}
+
+		MemoryContextSwitchTo(oldCxt);
+		MemoryContextDelete(scanCxt);
 	}
 
 	/*

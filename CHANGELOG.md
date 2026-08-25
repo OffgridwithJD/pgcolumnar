@@ -102,6 +102,17 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- The vectorized aggregate no longer grows query memory on every rescan. The
+  node re-executes for each outer row of a LATERAL or parameterized sub-scan,
+  and what it allocated in the caller's context each time, the per-row value and
+  null arrays, the projected set on the metadata path, and what the flushes and
+  the reader left behind, lived until the query ended. It now runs in a scratch
+  context released when the scan returns. Measured against the same query over a
+  heap table with identical data, so the figure is what pgcolumnar adds and not
+  what re-executing any node costs: 376 bytes per rescan against a 33 byte heap
+  floor before, 31 against 27 after. The ordinary columnar scan beneath it has a
+  separate per-rescan cost that this does not change. (#727)
+
 - The vectorized aggregates no longer stack a fresh set of pushdown scan keys
   in query memory on every rescan. The scalar scan builds its keys once at
   Begin; these paths rebuild them at execution, and did so into a context that
