@@ -211,6 +211,7 @@ SUITES=(
 	parquet_count_bounds
 	parquet_export
 	parquet_import
+	parquet_level_width
 	parquet_nested
 	parquet_nested_import
 	pg19_vacuum_options
