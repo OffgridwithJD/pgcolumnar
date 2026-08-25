@@ -859,15 +859,6 @@ rle_bitpack_decode(const uint8 *buf, size_t len, int bit_width,
 	return true;
 }
 
-static int
-bits_for(int maxval)
-{
-	int			b = 0;
-
-	while ((1 << b) <= maxval)
-		b++;
-	return b;
-}
 
 /* -------------------------------------------------------------------------
  * Per-column import plan derived from the target tuple descriptor.
@@ -2021,14 +2012,14 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 				{
 					preps = palloc(sizeof(uint32) * npage);
 					if (!rle_bitpack_decode(levels, h.rep_levels_len,
-											bits_for(max_rep), npage, preps))
+											pq_bits_for(max_rep), npage, preps))
 						return false;
 				}
 				if (max_def > 0)
 				{
 					pdefs = palloc(sizeof(uint32) * npage);
 					if (!rle_bitpack_decode(levels + h.rep_levels_len,
-											h.def_levels_len, bits_for(max_def),
+											h.def_levels_len, pq_bits_for(max_def),
 											npage, pdefs))
 						return false;
 				}
@@ -2072,7 +2063,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					if (off + llen > pblen)
 						return false;
 					preps = palloc(sizeof(uint32) * npage);
-					if (!rle_bitpack_decode(pb + off, llen, bits_for(max_rep),
+					if (!rle_bitpack_decode(pb + off, llen, pq_bits_for(max_rep),
 											npage, preps))
 						return false;
 					off += llen;
@@ -2088,7 +2079,7 @@ decode_leaf_entries(PqSource *src, PqChunk *ch,
 					if (off + llen > pblen)
 						return false;
 					pdefs = palloc(sizeof(uint32) * npage);
-					if (!rle_bitpack_decode(pb + off, llen, bits_for(max_def),
+					if (!rle_bitpack_decode(pb + off, llen, pq_bits_for(max_def),
 											npage, pdefs))
 						return false;
 					off += llen;

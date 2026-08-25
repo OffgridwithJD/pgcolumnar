@@ -87,4 +87,43 @@
 #define TC_SET					10
 #define TC_STRUCT				12
 
+/*
+ * pq_bits_for
+ *		The bit width the RLE/bit-pack level encoding uses for a maximum
+ *		definition or repetition level: the smallest b with maxval < 2^b.
+ *
+ *		Shared rather than duplicated for the reason this whole header exists.
+ *		The writer and the reader each had their own copy, byte-identical and
+ *		with nothing making them stay that way, and a writer and a reader that
+ *		disagree on a level width produce a file that is silently wrong rather
+ *		than one that fails to parse (#710).
+ *
+ *		The shift is UNSIGNED and the loop is BOUNDED, and both matter:
+ *
+ *		`1 << b` is signed, so it is undefined once b reaches 31, which the loop
+ *		reaches for any maxval >= 2^30. Not reachable from a real schema --
+ *		levels accumulate one per nesting level from a recursion that
+ *		check_stack_depth bounds -- but it is undefined behaviour sitting in a
+ *		decoder that reads attacker-authored files, and the compiler is entitled
+ *		to assume it cannot happen.
+ *
+ *		`1u << b` alone is NOT the whole fix. It makes the comparison unsigned,
+ *		so a negative maxval converts to a huge unsigned value and the loop runs
+ *		to b == 32, where the unsigned shift is undefined in its own right. The
+ *		non-positive guard and the b < 31 bound close both ends, and make the
+ *		function correct over the whole int domain instead of resting on a
+ *		caller property two files away.
+ */
+static inline int
+pq_bits_for(int maxval)
+{
+	int			b = 0;
+
+	if (maxval <= 0)
+		return 0;				/* zero needs no bits, and negatives have none */
+	while (b < 31 && (1u << b) <= (unsigned int) maxval)
+		b++;
+	return b;
+}
+
 #endif							/* PGCOLUMNAR_PARQUET_FORMAT_H */
