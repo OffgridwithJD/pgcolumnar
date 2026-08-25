@@ -180,8 +180,117 @@ echo "      (peaks: with ${with_small} -> ${with_large}; without ${without_small
 # the defect and far above the noise.
 excess="$(awk -v a="$with_slope" -v b="$without_slope" 'BEGIN { d = a - b; print (d < 0 ? 0 : d) }')"
 echo "      excess attributable to the IN-list: ${excess} bytes per rescan"
-check_num "an IN-list does not add per-rescan query memory (#717)" \
+# NAMED FOR THE INVARIANT, NOT FOR ONE FIX, and that distinction is the point.
+#
+# This arm was written for #717 and labelled with it. Since #727 wrapped the
+# ungrouped scan in a per-call scratch context, it no longer tests #717
+# SPECIFICALLY: reverting #717's scan-key contexts entirely, keeping #727,
+# leaves this arm GREEN, because the broader wrap reclaims those allocations
+# too. An arm that stays green when the fix it names is removed is falsely
+# attributing, whatever else it is doing.
+#
+# It is still a sound lock on the INVARIANT, and its removal proof is that
+# reverting BOTH mechanisms reddens it at 179,927 bytes per rescan. So it is
+# named for the property now, and the proof is stated as the joint one it
+# actually has. #717 keeps its own targeted guard for the grouped node and the
+# Begin-time eligibility build, where #727's wrap does not reach.
+check_num "an IN-list does not add per-rescan query memory (jointly #717, #727)" \
 	"$([ "$excess" -lt 20000 ] && echo 1 || echo 0)" 1
+
+# ---- the node's own per-rescan footprint, against core's floor (#727) -------
+# #717 above is about the scan KEYS. This is the rest of what the node allocated
+# per rescan and never freed: the per-row value and null arrays, the projected
+# set on the metadata path, and whatever the flushes and the reader left in the
+# caller's context. It re-executes on every rescan of a LATERAL sub-scan, and all
+# of it lived until ExecutorEnd.
+#
+# THE FLOOR IS A HEAP TABLE, not zero. Re-executing any node costs something per
+# rescan, and asserting an absolute figure would charge this node for PostgreSQL's
+# own cost and would move with every release. The same query shape over a heap
+# table with identical data measures that floor directly, and the excess over it
+# is what pgcolumnar adds.
+#
+# Measured before the fix: 376 B per rescan against a 33 B heap floor. After it,
+# 31 B against 27 B -- the node is no longer distinguishable from core.
+# The driver needs enough rows for the two rescan counts below to DIFFER. It was
+# sized for the #717 arms (LARGE=3200), and the first version of the arms below
+# asked for LIMIT 5000 and LIMIT 40000 against it: both clamped to 3200, both
+# arms drove the same number of rescans, and the slope divided a real difference
+# of zero by an assumed 35000. It reported ~0 bytes per rescan whether the defect
+# was present or not. The premise that catches that is asserted explicitly below.
+RS_LO=5000
+RS_HI=40000
+psql_run "INSERT INTO vam_drv SELECT g FROM generate_series($(( LARGE + 1 )), $RS_HI) g;"
+check_num "premise: the driver has enough rows for the larger rescan count" \
+	"$(q1 "SELECT (count(*) >= $RS_HI)::int FROM vam_drv;")" 1
+check_num "premise: and the two rescan counts really differ" \
+	"$(q1 "SELECT ((SELECT count(*) FROM (SELECT i FROM vam_drv LIMIT $RS_HI) a)
+	             > (SELECT count(*) FROM (SELECT i FROM vam_drv LIMIT $RS_LO) b))::int;")" 1
+
+# A SMALL table for these arms, and deliberately so. What is being measured is
+# allocation per RESCAN, which does not depend on how many rows each rescan
+# reads, so scanning the 50000-row fixture 40000 times would spend two billion
+# row reads to measure the same slope. 5000 rows keeps the arms to a couple of
+# minutes and changes nothing about the quantity.
+psql_run "CREATE TABLE vam_rs(k int, v int) USING pgcolumnar;"
+psql_run "INSERT INTO vam_rs SELECT g % 500, g FROM generate_series(1,5000) g;"
+psql_run "CREATE TABLE vam_heap(k int, v int);"
+psql_run "INSERT INTO vam_heap SELECT k, v FROM vam_rs;"
+psql_run "ANALYZE vam_rs; ANALYZE vam_heap;"
+check_num "premise: the heap mirror has the same rows" \
+	"$(q1 'SELECT count(*) FROM vam_heap;')" "$(q1 'SELECT count(*) FROM vam_rs;')"
+
+# Peak RSS, which is monotone and so cannot be missed by a sampler.
+rescan_peak() {	# rescan_peak TABLE NROWS -> kB above idle, or empty
+	local tbl="$1" nrows="$2" fifo pid="" n=0 base pk query
+	query="SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT $nrows) d, LATERAL (SELECT count(*) c FROM $tbl WHERE v > d.i) s"
+	fifo="$PGC_WORKDIR/rs.$tbl.$nrows"; rm -f "$fifo"; mkfifo "$fifo"
+	env PATH="$PGC_BINDIR:$PATH" PGAPPNAME="pgc727_${tbl}_$nrows" \
+		psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		< "$fifo" > "$fifo.out" 2>&1 &
+	exec 9> "$fifo"
+	echo "SELECT 1;" >&9
+	while [ -z "$pid" ] && [ $n -lt 200 ]; do
+		pid="$(q1 "SELECT pid FROM pg_stat_activity WHERE application_name = 'pgc727_${tbl}_$nrows' LIMIT 1;")"
+		n=$((n+1)); [ -z "$pid" ] && sleep 0.1
+	done
+	if [ -z "$pid" ]; then exec 9>&-; echo ""; return 1; fi
+	base=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)
+	echo "$GUC $query;" >&9
+	n=0
+	while [ "$(q1 "SELECT count(*) FROM pg_stat_activity WHERE pid = $pid AND state = 'idle';")" != 1 ] && [ $n -lt 4000 ]; do
+		n=$((n+1)); sleep 0.1
+	done
+	pk=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)
+	exec 9>&-; wait 2>/dev/null; rm -f "$fifo" "$fifo.out"
+	[ -n "$base" ] && [ -n "$pk" ] && echo $(( pk - base )) || echo ""
+}
+rescan_slope() {	# rescan_slope TABLE -> bytes per rescan
+	local tbl="$1" lo hi
+	lo="$(rescan_peak "$tbl" "$RS_LO")"; hi="$(rescan_peak "$tbl" "$RS_HI")"
+	[ -z "$lo" ] || [ -z "$hi" ] && { echo ""; return 1; }
+	awk -v a="$hi" -v b="$lo" -v d="$(( RS_HI - RS_LO ))" 'BEGIN { printf "%d", ((a - b) * 1024) / d }'
+}
+# The columnar arm must really be OUR node, or it is measuring the plain scan.
+check_text "premise: the columnar rescan arm is the vectorized aggregate" \
+	"$(q "$GUC EXPLAIN (COSTS OFF) SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 100) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s" |
+	   grep -q 'Columnar Vectorized Aggregates' && echo yes || echo no)" yes
+vec_slope="$(rescan_slope vam_rs)"
+heap_slope="$(rescan_slope vam_heap)"
+echo "      per-rescan growth: columnar vectorized aggregate = ${vec_slope:-unset} B, heap floor = ${heap_slope:-unset} B"
+check_num "premise: both rescan slopes were measured" \
+	"$([ -n "$vec_slope" ] && [ -n "$heap_slope" ] && echo 1 || echo 0)" 1
+# The excess over core. 100 B gates three times under the 343 B defect and well
+# above the few bytes that remain.
+rescan_excess="$(awk -v a="$vec_slope" -v b="$heap_slope" 'BEGIN { d = a - b; print (d < 0 ? 0 : d) }')"
+echo "      excess over the heap floor: ${rescan_excess} B per rescan"
+check_num "the vectorized aggregate does not grow query memory per rescan (#727)" \
+	"$([ "$rescan_excess" -lt 100 ] && echo 1 || echo 0)" 1
+# And the answers are unchanged, so the arm above measures the saving and is not
+# standing in for correctness.
+check_num "the rescanned aggregate still returns the heap's answer" \
+	"$(q1 "$GUC SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s;")" \
+	"$(q1 "SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_heap WHERE v > d.i) s;")"
 
 # ---- the row path's keys, pinned as WORK ------------------------------------
 # The two halves of this change fail very differently, and only one of them is
