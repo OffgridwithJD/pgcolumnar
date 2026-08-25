@@ -16,6 +16,16 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- A columnar scan no longer grows query memory on every rescan. A rescan reuses
+  the read state rather than closing and re-opening it, and each restart rebuilt
+  the row-group list and its per-group metadata into the read state's own
+  context without reclaiming the previous one, so a LATERAL or parameterized
+  scan accumulated one list per outer row. The list now has a context the
+  rescan resets. Measured against the same query over a heap table with
+  identical data, so the figure is what pgcolumnar adds rather than what
+  re-executing any node costs: 198 bytes per rescan against a 33 byte heap
+  floor before, 33 against 33 after. (#734)
+
 - A plain `EXPLAIN` of the ungrouped vectorized aggregate now reports the
   filters it pushes down. The counts were assigned after the node's
   EXPLAIN-only return, so a plain plan printed zero for both

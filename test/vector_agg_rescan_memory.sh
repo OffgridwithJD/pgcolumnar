@@ -241,8 +241,8 @@ check_num "premise: the heap mirror has the same rows" \
 	"$(q1 'SELECT count(*) FROM vam_heap;')" "$(q1 'SELECT count(*) FROM vam_rs;')"
 
 # Peak RSS, which is monotone and so cannot be missed by a sampler.
-rescan_peak() {	# rescan_peak TABLE NROWS -> kB above idle, or empty
-	local tbl="$1" nrows="$2" fifo pid="" n=0 base pk query
+rescan_peak() {	# rescan_peak TABLE NROWS [GUC] -> kB above idle, or empty
+	local tbl="$1" nrows="$2" guc="${3:-$GUC}" fifo pid="" n=0 base pk query
 	query="SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT $nrows) d, LATERAL (SELECT count(*) c FROM $tbl WHERE v > d.i) s"
 	fifo="$PGC_WORKDIR/rs.$tbl.$nrows"; rm -f "$fifo"; mkfifo "$fifo"
 	env PATH="$PGC_BINDIR:$PATH" PGAPPNAME="pgc727_${tbl}_$nrows" \
@@ -256,7 +256,7 @@ rescan_peak() {	# rescan_peak TABLE NROWS -> kB above idle, or empty
 	done
 	if [ -z "$pid" ]; then exec 9>&-; echo ""; return 1; fi
 	base=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)
-	echo "$GUC $query;" >&9
+	echo "$guc $query;" >&9
 	n=0
 	while [ "$(q1 "SELECT count(*) FROM pg_stat_activity WHERE pid = $pid AND state = 'idle';")" != 1 ] && [ $n -lt 4000 ]; do
 		n=$((n+1)); sleep 0.1
@@ -265,9 +265,9 @@ rescan_peak() {	# rescan_peak TABLE NROWS -> kB above idle, or empty
 	exec 9>&-; wait 2>/dev/null; rm -f "$fifo" "$fifo.out"
 	[ -n "$base" ] && [ -n "$pk" ] && echo $(( pk - base )) || echo ""
 }
-rescan_slope() {	# rescan_slope TABLE -> bytes per rescan
-	local tbl="$1" lo hi
-	lo="$(rescan_peak "$tbl" "$RS_LO")"; hi="$(rescan_peak "$tbl" "$RS_HI")"
+rescan_slope() {	# rescan_slope TABLE [GUC] -> bytes per rescan
+	local tbl="$1" guc="${2:-$GUC}" lo hi
+	lo="$(rescan_peak "$tbl" "$RS_LO" "$guc")"; hi="$(rescan_peak "$tbl" "$RS_HI" "$guc")"
 	[ -z "$lo" ] || [ -z "$hi" ] && { echo ""; return 1; }
 	awk -v a="$hi" -v b="$lo" -v d="$(( RS_HI - RS_LO ))" 'BEGIN { printf "%d", ((a - b) * 1024) / d }'
 }
@@ -290,6 +290,38 @@ check_num "the vectorized aggregate does not grow query memory per rescan (#727)
 # standing in for correctness.
 check_num "the rescanned aggregate still returns the heap's answer" \
 	"$(q1 "$GUC SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s;")" \
+	"$(q1 "SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_heap WHERE v > d.i) s;")"
+
+# ---- the PLAIN columnar scan's own per-rescan footprint (#734) --------------
+# The arms above cover the vectorized aggregate. This covers the scan UNDER it,
+# which is a different code path with a different lifetime and was measured
+# separately: with the vectorized aggregate turned off, the columnar scan alone
+# still grew query memory per rescan while the heap did not.
+#
+# The mechanism, pinned by a memory-context dump rather than guessed: the growth
+# is in the read state's own "columnar read" context, and it is the ROW-GROUP
+# LIST. A rescan reuses the read state (PgColumnarRescanRead, not an end and
+# re-open), that function sets rowGroupList to NIL without freeing it, and the
+# next start rebuilds a fresh list and a fresh metadata struct per group into the
+# same context. Nothing reclaims the previous one.
+GUC_OFF="SET pgcolumnar.enable_ungrouped_vector_agg=off; SET pgcolumnar.enable_group_vectorization=off; SET enable_material=off;"
+check_text "premise: with the aggregate off the arm is the plain columnar scan" \
+	"$(q "$GUC_OFF EXPLAIN (COSTS OFF) SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 100) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s" |
+	   grep -q 'Custom Scan (PgColumnarScan)' && echo yes || echo no)" yes
+check_text "premise: and it is NOT the vectorized aggregate node" \
+	"$(q "$GUC_OFF EXPLAIN (COSTS OFF) SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 100) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s" |
+	   grep -q 'Columnar Vectorized Aggregates' && echo yes || echo no)" no
+plain_slope="$(rescan_slope vam_rs "$GUC_OFF")"
+plain_heap="$(rescan_slope vam_heap "$GUC_OFF")"
+echo "      per-rescan growth: plain columnar scan = ${plain_slope:-unset} B, heap floor = ${plain_heap:-unset} B"
+check_num "premise: both plain-scan slopes were measured" \
+	"$([ -n "$plain_slope" ] && [ -n "$plain_heap" ] && echo 1 || echo 0)" 1
+plain_excess="$(awk -v a="$plain_slope" -v b="$plain_heap" 'BEGIN { d = a - b; print (d < 0 ? 0 : d) }')"
+echo "      excess over the heap floor: ${plain_excess} B per rescan"
+check_num "the plain columnar scan does not grow query memory per rescan (#734)" \
+	"$([ "$plain_excess" -lt 100 ] && echo 1 || echo 0)" 1
+check_num "the rescanned plain scan still returns the heap's answer" \
+	"$(q1 "$GUC_OFF SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_rs WHERE v > d.i) s;")" \
 	"$(q1 "SELECT sum(s.c) FROM (SELECT i FROM vam_drv LIMIT 200) d, LATERAL (SELECT count(*) c FROM vam_heap WHERE v > d.i) s;")"
 
 # ---- the row path's keys, pinned as WORK ------------------------------------

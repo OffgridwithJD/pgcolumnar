@@ -133,7 +133,16 @@ struct PgColumnarReadState
 	 * bitmap and nativeValueCursor[c] advances through its uncompressed values.
 	 * Both stay NULL for a column that was not read.
 	 */
-	List	   *rowGroupList;		/* NativeRowGroupMetadata* */
+	List	   *rowGroupList;		/* NativeRowGroupMetadata*, in groupListContext */
+	/*
+	 * The row-group list's own context (#734). A rescan REUSES the read state
+	 * rather than ending and re-opening it, so anything the (re)start allocates
+	 * in readContext lives for every rescan that follows. This list and its
+	 * per-group metadata are rebuilt on each start, so they need a context a
+	 * rescan can reset; readContext itself cannot be reset, since the read state
+	 * and its missing values live there too.
+	 */
+	MemoryContext groupListContext;
 	int			rowGroupIndex;		/* next row group to load */
 	NativeRowGroupMetadata *nativeGroup;
 	char	   *nativeBuffer;		/* whole current row group, in groupContext */
@@ -546,6 +555,9 @@ PgColumnarBeginReadWithStorage(Relation rel, Snapshot snapshot,
 	readState->skipContext = AllocSetContextCreate(readContext,
 												   "columnar read skip",
 												   ALLOCSET_DEFAULT_SIZES);
+	readState->groupListContext = AllocSetContextCreate(readContext,
+														"columnar read group list",
+														ALLOCSET_SMALL_SIZES);
 
 	if (pgcolumnar_enable_qual_pushdown)
 		pgcolumnar_build_predicates(readState, nkeys, keys);
@@ -796,7 +808,14 @@ pgcolumnar_read_start(PgColumnarReadState *readState)
 
 	if (!readState->exhausted)
 	{
-		MemoryContext oldContext = MemoryContextSwitchTo(readState->readContext);
+		/*
+		 * Into groupListContext, not readContext (#734). Built fresh on every
+		 * start, and a rescan is a start: in readContext the previous list and
+		 * its per-group metadata were simply dropped, so a LATERAL scan
+		 * accumulated one list per outer row. Measured at ~165 bytes a rescan
+		 * above what re-executing any node costs.
+		 */
+		MemoryContext oldContext = MemoryContextSwitchTo(readState->groupListContext);
 
 		readState->rowGroupList =
 			PgColumnarReadRowGroupList(readState->storageId,
@@ -4188,6 +4207,15 @@ PgColumnarRescanRead(PgColumnarReadState *readState)
 	MemoryContextReset(readState->stripeContext);
 	readState->started = false;
 	readState->exhausted = false;
+
+	/*
+	 * Reclaim the previous start's row-group list (#734). Clearing the pointer
+	 * below is not enough on its own: the list is rebuilt on the next start, and
+	 * without this the old one stayed in the read state's memory for the life of
+	 * the scan. Safe here because every pointer into it -- rowGroupList itself
+	 * and nativeGroup -- is cleared immediately below.
+	 */
+	MemoryContextReset(readState->groupListContext);
 
 	/* native format cursors */
 	readState->rowGroupList = NIL;
