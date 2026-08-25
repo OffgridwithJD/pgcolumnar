@@ -183,4 +183,44 @@ echo "      excess attributable to the IN-list: ${excess} bytes per rescan"
 check_num "an IN-list does not add per-rescan query memory (#717)" \
 	"$([ "$excess" -lt 20000 ] && echo 1 || echo 0)" 1
 
+# ---- the row path's keys, pinned as WORK ------------------------------------
+# The two halves of this change fail very differently, and only one of them is
+# loud.
+#
+# On the FOLD path the scan keys ARE the per-row filter, so a key set freed
+# while in use is immediately fatal: injecting exactly that (reset the context
+# after the gates build the keys) takes SIGSEGV on a plain
+# `count(*) ... WHERE k > 500`, and three suites go from a verdict to no verdict
+# at all.
+#
+# On the ROW path the same injection is SILENT. There the keys only prune row
+# groups, and every surviving row is rechecked against the full WHERE anyway, so
+# freed keys change which groups are read and NOT the answer: the four suites
+# run against that injection all returned correct results and passed.
+#
+# So correctness checks cannot cover the row path's key lifetime, and this arm
+# is the one that can. It pins the PRUNING as work: with live keys the reader
+# skips row groups the zone maps rule out; with a freed or corrupted key set it
+# skips none and reads everything, while still answering correctly.
+psql_run "CREATE TABLE vam_prune(k int, s text) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('vam_prune', stripe_row_limit => 10000);"
+psql_run "INSERT INTO vam_prune SELECT g, 'x' || g FROM generate_series(1,200000) g;"
+
+# A by-reference column in the projection is what keeps this on the row path
+# (the fold's gather is by-value only, #423), which is the path being pinned.
+prune_plan="$(q "$GUC EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF, SUMMARY OFF) SELECT count(s) FROM vam_prune WHERE k > 190000")"
+check_text "premise: the pruning arm is on the ROW path, not the fold" \
+	"$(grep 'Columnar Batch Fold' <<<"$prune_plan" | grep -oE 'yes|no' | head -1)" no
+check_text "premise: and it is the vectorized aggregate node" \
+	"$(grep -q 'Columnar Vectorized Aggregates' <<<"$prune_plan" && echo yes || echo no)" yes
+removed="$(grep 'Columnar Chunk Groups Removed by Filter' <<<"$prune_plan" | grep -oE '[0-9]+' | head -1)"
+total="$(grep 'Columnar Chunk Groups Total' <<<"$prune_plan" | grep -oE '[0-9]+' | head -1)"
+echo "      row-path pruning: removed ${removed:-unset} of ${total:-unset} chunk groups"
+check_num "the row path's scan keys still prune (work done, #717)" \
+	"$([ -n "$removed" ] && [ "$removed" -gt 0 ] && echo 1 || echo 0)" 1
+# And the answer stays right, so the arm above is measuring the saving and not
+# standing in for correctness.
+check_num "row path: the pruned query still answers correctly" \
+	"$(q1 'SELECT count(s) FROM vam_prune WHERE k > 190000;')" 10000
+
 pgc_summary
