@@ -54,10 +54,25 @@ make -C "$SRCDIR" PG_CONFIG="$PGC" COPT="--coverage" install >/dev/null 2>&1 || 
 
 # Every suite except the drivers, the libraries, and the ones that build their
 # own server or need two majors. Kept in step with harness_selftest.sh's list.
+#
+# The two upgrade suites are excluded TOGETHER, and that pairing is the point
+# (#741). run_all_versions.sh gates both behind PGC_RUN_UPGRADE, in one block and
+# for one reason: they build a second copy of the extension and need an old
+# source this runner has no way to supply. pg_upgrade was excluded here when it
+# was written and extension_upgrade was not, so this runner discovered it, ran it
+# with no old source, and its ref fallback could not resolve in a tagless CI
+# checkout. run_coverage maps only rc 66 to SKIP, so that environment shortfall
+# was counted as a failed suite and the nightly read "1 failed
+# ( extension_upgrade)" every night while nothing was wrong with the product.
+#
+# Deciding to run an opt-in guard is run_all_versions.sh's job, not this one's.
+# test/selftest/220 derives the gated list from that block and asserts every name
+# in it is refused here, so a third upgrade suite cannot repeat this.
 not_a_suite() {
 	case "$1" in
 		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild) return 0 ;;
-		native_scale|build_san|run_san|run_coverage|pg_upgrade) return 0 ;;
+		native_scale|build_san|run_san|run_coverage) return 0 ;;
+		pg_upgrade|extension_upgrade) return 0 ;;
 		*) return 1 ;;
 	esac
 }

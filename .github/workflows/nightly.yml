@@ -443,3 +443,107 @@ jobs:
           name: coverage-info
           path: coverage/coverage.info
           retention-days: 14
+
+  # The extension-upgrade guard (#382), which until #741 ran nowhere.
+  #
+  # What it catches is invisible to a build and to every other job here: each
+  # SQL-callable function records its C link name in pg_proc.prosrc at CREATE
+  # EXTENSION time, so renaming a link name leaves every EXISTING install
+  # pointing at a symbol the new library no longer exports. It compiles, it
+  # links, every suite passes on a fresh install, and every upgraded install is
+  # inert. Only a real previous release, carrying data, upgraded in place, shows
+  # it.
+  #
+  # Nightly rather than per-PR: it builds the extension twice, and the suite's
+  # own header calls it a second gate beside the matrix rather than part of it.
+  upgrade-guard:
+    name: extension upgrade guard (PG 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar'
+    # Named ONCE. Two steps consume it, and a tag spelled separately in each is
+    # the kind of duplication that goes stale in one place and not the other.
+    env:
+      PGC_OLD_TAG: v1.0-alpha
+    steps:
+      # fetch-depth: 0 for the tags. The coverage job's plain checkout is why
+      # this suite could not resolve its old source at all (#741): actions/checkout
+      # fetches no tags by default, and the suite's ref fallback then fails.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Asserted, and asserted BEFORE the expensive setup, because "the old
+      # source was not available" is precisely the state that made this guard
+      # look like it was running when it was not. A tagless checkout must be a
+      # loud red here, never a skip.
+      - name: Confirm the previous release is present
+        run: |
+          set -euo pipefail
+          git rev-parse --verify -q "$PGC_OLD_TAG^{commit}"
+          echo "$PGC_OLD_TAG resolves to $(git rev-parse "$PGC_OLD_TAG^{commit}")"
+
+      # The DIRECTORY form, which the suite documents, rather than its git-ref
+      # form. The suite runs under sudo (its runpg is an unconditional
+      # `runuser -u postgres`), and a root `git clone` of a workspace owned by
+      # the runner user trips git's dubious-ownership refusal. `git archive` runs
+      # as the ordinary user and yields a plain tree with no .git, which is
+      # exactly the case the directory form exists for.
+      #
+      # Passing it explicitly also sets the suite's EXPLICIT flag, so its
+      # "not a git checkout" SKIP branch is unreachable from here. A guard that
+      # can quietly skip is the failure this job exists to end.
+      - name: Materialise the previous release as a plain tree
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/pgc_old_alpha
+          mkdir -p /tmp/pgc_old_alpha
+          git archive "$PGC_OLD_TAG" | tar -x -C /tmp/pgc_old_alpha
+          test -f /tmp/pgc_old_alpha/Makefile
+          echo "old source: $(find /tmp/pgc_old_alpha -maxdepth 1 | wc -l) top-level entries"
+
+      - name: Add the PGDG repository and refresh the package lists
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL --connect-timeout 15 --max-time 120 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      - name: Install PostgreSQL 18 and the codec headers
+        run: |
+          set -euo pipefail
+          sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            postgresql-18 postgresql-server-dev-18 \
+            liblz4-dev libzstd-dev zlib1g-dev
+
+      - name: Stop the packaged cluster
+        run: sudo systemctl stop postgresql || true
+
+      # Exit 2 is the suite's "the environment could not supply an old source".
+      # run_all_versions.sh maps that to SKIP, which is right for a developer's
+      # box and wrong here: this job's entire purpose is that the guard actually
+      # ran, so an environment shortfall is a failure of the job, not a waiver.
+      - name: Run the extension-upgrade guard
+        run: |
+          # `set +e`, NOT `set -uo pipefail`. GitHub runs a `run:` step as
+          # `bash -e {0}`, and -uo pipefail does not cancel that -e: the step
+          # would abort at the suite line and rc, the annotation and the exit
+          # below would never execute. The gate still held -- a non-zero exit
+          # fails the job either way -- but the one case the comment singles out
+          # was the one case that could never announce itself. Only `set +e`
+          # restores the intent (#741 review).
+          set +e
+          sudo -E env "PATH=$PATH" \
+            bash test/extension_upgrade.sh \
+              /usr/lib/postgresql/18/bin/pg_config /tmp/pgc_old_alpha
+          rc=$?
+          if [ "$rc" = 2 ]; then
+            echo "::error::the guard skipped for want of an old source; in this job that is a failure"
+          fi
+          exit "$rc"

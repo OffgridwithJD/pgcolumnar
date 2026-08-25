@@ -303,7 +303,9 @@ behaviour.
 **Nightly at 06:00 UTC** (`.github/workflows/nightly.yml`): the full packaged
 suite matrix across 15 to 18 on x86_64, and the current major on aarch64. The
 nightly run also includes the ASAN and UBSAN sanitizer gate, against an
-instrumented PostgreSQL, and the coverage report. The sanitizer build stays in a cache, because it takes longer to build
+instrumented PostgreSQL, and the coverage report. It also runs the
+extension-upgrade guard. That guard builds the previous release on PostgreSQL
+18, loads data into it, and upgrades it in place. The sanitizer build stays in a cache, because it takes longer to build
 than to run the suites against it.
 
 The aarch64 run executes the suites rather than only building them. Misaligned

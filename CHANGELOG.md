@@ -31,6 +31,22 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The extension-upgrade guard now runs in CI, and had never verified an upgrade
+  before. `test/extension_upgrade.sh` catches a break that is invisible until a
+  user upgrades: a renamed C link name leaves every existing install pointing at
+  a symbol the new library no longer exports. No workflow set `PGC_RUN_UPGRADE`,
+  so it ran nowhere, and the one runner that did reach it, the coverage report,
+  discovered it through `not_a_suite()` and invoked it with no old source, then
+  counted the resulting environment shortfall as a failed suite. A nightly job
+  now builds the previous release on PostgreSQL 18, loads data into it and
+  upgrades it in place, and both upgrade suites are excluded from the coverage
+  runner together. Running it also exposed a defect in the suite itself: every
+  connection used `psql -h /tmp`, while the socket directory is decided by how
+  PostgreSQL was built, `/tmp` for a source build and `/var/run/postgresql` for
+  the Debian and PGDG packages, so the suite had never been runnable against a
+  packaged server and reported the connection failure as "old install did not
+  store rows". It now states the directory it connects to. (#741)
+
 - The vectorized aggregates now bound their per-execution memory with one
   mechanism instead of two. The scan-key context added for #717 covered the
   scan keys; the scratch context added for #727 covered the whole scan and so
