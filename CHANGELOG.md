@@ -16,6 +16,16 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- A plain `EXPLAIN` of the ungrouped vectorized aggregate now reports the
+  filters it pushes down. The counts were assigned after the node's
+  EXPLAIN-only return, so a plain plan printed zero for both
+  `Columnar Pushed-Down Filters` and `Columnar Vector Predicates` however many
+  there really were, while `EXPLAIN ANALYZE` of the same query reported them
+  correctly. A hard zero reads as pushdown not happening rather than as a number
+  that was never filled in, and it left the two vectorized nodes disagreeing
+  about one label, since the grouped node has always counted before its own
+  return. Both counts are catalog and plan work only. (#726)
+
 - The FSST decoder now checks for interrupts inside its decode loop. Every
   other value decoder already did. The loop is bounded by the encoded length
   of one vector, so this is a latency bound rather than the uncancellable hang
