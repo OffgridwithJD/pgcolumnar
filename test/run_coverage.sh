@@ -186,6 +186,15 @@ echo "-- counters returned beside their objects: $_moved"
 _gcno=$(find "$SRCDIR" -name '*.gcno' | wc -l)
 _gcda=$(find "$SRCDIR" -name '*.gcda' | wc -l)
 echo "-- counters: $_gcda .gcda from $_gcno instrumented objects"
+# Broken down by directory, because the two totals differ on the runner (34 of
+# 49) and a bare ratio invites the reading that a third of the objects went
+# uncovered. The report's scope is src/ alone -- `lcov --extract` below restricts
+# it -- so what matters is that every src object has a counter, not that the
+# totals match. Printed from the data rather than argued.
+find "$SRCDIR" \( -name '*.gcno' -o -name '*.gcda' \) -printf '%h %f\n' 2>/dev/null |
+	sed 's/.*\.\(gcno\|gcda\)$/\1/;s#^\(.*\) [^ ]*\.\(gcno\|gcda\)$#\1 \2#' |
+	awk '{ n[$1" "$2]++ } END { for (k in n) printf "     %-6s %s\n", n[k], k }' |
+	sort -k3 | head -20
 if [ "$_gcda" = 0 ]; then
 	echo "FAIL  no .gcda counters were written, so this measures no coverage" >&2
 	echo "      gcov writes them beside the objects, as the user that ran the" >&2
