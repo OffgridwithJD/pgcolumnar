@@ -21,10 +21,16 @@
 # and each has its own arm:
 #
 #   * a NON-TRUNCATED constant. `date_trunc('day', ts) = '2024-02-01 12:00'`
-#     matches nothing, because date_trunc never returns 12:00. Emitting
-#     [12:00, next day) would admit rows the original excludes. It must return
-#     zero rows, and it must return them by declining rather than by pruning to
-#     a wrong range.
+#     matches nothing, because date_trunc never returns 12:00. The code declines
+#     it, and that decline is DEFENCE IN DEPTH rather than a correctness
+#     requirement -- a distinction established by removing the guard and
+#     watching this suite stay green, including the arm below. Pruning to a
+#     wrong range cannot return wrong rows while the keys are conservative and
+#     the executor re-applies the clause, and the derived range is never
+#     NARROWER than the true matching set, which here is empty and so contained
+#     in every range. It becomes load-bearing the moment these keys are marked
+#     exact, because the batch fold then uses them as its only row filter
+#     (#715) with no recheck behind it.
 #   * a timestamptz column. date_trunc(text, timestamptz) truncates in the
 #     session TimeZone, so a key frozen at plan time is wrong if TimeZone
 #     changes. Excluded deliberately; the arm pins that it stays excluded.
@@ -97,8 +103,12 @@ check_text "the actual ROWS match the heap, not just the count" \
 	"$(q "SELECT v FROM pre_h WHERE date_trunc('day', ts) = $DAY ORDER BY v" | md5sum)"
 
 # ---- the shapes that must DECLINE ------------------------------------------
-# A non-truncated constant is unsatisfiable. The danger is not a wrong count, it
-# is a rewrite that turns it into a range and returns rows.
+# A non-truncated constant is unsatisfiable, and these arms assert the ANSWER,
+# which is all they can assert: with conservative keys and an executor recheck,
+# a rewrite that turned this into a range would still return zero rows. They do
+# not, and cannot, show that the decline is load-bearing -- removing the guard
+# leaves them green. They are the arms that would catch it if the keys were ever
+# marked exact, which is when the decline starts protecting an answer.
 NOTRUNC="SELECT count(*) FROM pre_c WHERE date_trunc('day', ts) = timestamp '2024-02-01 12:00'"
 check_num "a non-truncated constant returns no rows" "$(q1 "$NOTRUNC;")" 0
 check_num "...and the heap agrees it is unsatisfiable" \
