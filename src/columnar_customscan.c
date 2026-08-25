@@ -2669,12 +2669,28 @@ PgColumnarReScanCustomScan(CustomScanState *node)
 int
 PgColumnarCountScanKeys(List *qual, Index scanrelid, TupleDesc tupdesc)
 {
-	ScanKey		keys;
+	MemoryContext tmp;
+	MemoryContext old;
 	int			nkeys = 0;
 
-	keys = PgColumnarBuildScanKeys(qual, scanrelid, tupdesc, &nkeys);
-	if (keys != NULL)
-		pfree(keys);
+	/*
+	 * This builds keys only to count them, and throws them away. pfree'ing the
+	 * ScanKeyData array was not enough: for a SAOP the build also detoasts the
+	 * array constant and deconstructs it into elems and nulls, and those were
+	 * left behind in whatever context the caller was in (#717). Build in a
+	 * scratch context and delete the whole thing.
+	 *
+	 * Bounded rather than growing -- every caller is a Begin, which runs once
+	 * per execution -- so this is not the O(rescans) growth #717 is about. It is
+	 * the same defect in miniature, and cheaper to fix than to explain.
+	 */
+	tmp = AllocSetContextCreate(CurrentMemoryContext,
+								"columnar scan key count",
+								ALLOCSET_SMALL_SIZES);
+	old = MemoryContextSwitchTo(tmp);
+	(void) PgColumnarBuildScanKeys(qual, scanrelid, tupdesc, &nkeys);
+	MemoryContextSwitchTo(old);
+	MemoryContextDelete(tmp);
 	return nkeys;
 }
 

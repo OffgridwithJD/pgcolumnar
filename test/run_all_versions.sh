@@ -245,6 +245,7 @@ SUITES=(
 	update_conc
 	vacuum_lock_privilege
 	vacuum_stripe_count
+	vector_agg_rescan_memory
 	vm_privilege
 	wal_envelope
 	write_fsst_compressed

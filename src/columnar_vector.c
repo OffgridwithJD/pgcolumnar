@@ -560,6 +560,18 @@ typedef struct PgColumnarAggScanState
 	int			nscankeys;		/* scan keys, the shared label's quantity (#493) */
 
 	MemoryContext resultContext;	/* holds min/max running values */
+
+	/*
+	 * Scan keys are rebuilt on every execution of this node, not once at Begin
+	 * like the scalar custom scan's (#717). They live here rather than in
+	 * es_query_cxt so that a rescan reclaims the previous build instead of
+	 * stacking it: for a SAOP the build also detoasts the array constant and
+	 * deconstructs it, so the growth is O(rescans x array size) and reached
+	 * 346 MB over 2000 rescans of a LATERAL aggregate with a 20000-element
+	 * IN-list. Reset at the top of each build; the keys stay valid for the whole
+	 * scan that uses them.
+	 */
+	MemoryContext scanKeyContext;
 	bool		done;			/* the single result row was emitted */
 
 	/*
@@ -700,6 +712,7 @@ typedef struct PgColumnarGroupAggScanState
 	int			nGroups;
 	int			maxGroups;		/* GUC cap enforced at execution (pgcolumnar_groupagg_lookup) */
 
+	MemoryContext scanKeyContext;	/* pushdown scan keys, rebuilt per exec (#717) */
 	MemoryContext keyContext;	/* copied key Datums */
 	MemoryContext specContext;	/* per-group specs + running min/max/numeric */
 	MemoryContext hashContext;	/* the entries array itself */
@@ -2090,6 +2103,9 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->resultContext = AllocSetContextCreate(estate->es_query_cxt,
 												 "columnar vec agg result",
 												 ALLOCSET_SMALL_SIZES);
+	state->scanKeyContext = AllocSetContextCreate(estate->es_query_cxt,
+												  "columnar vec agg scan keys",
+												  ALLOCSET_SMALL_SIZES);
 	state->done = false;
 	state->haveStats = false;
 
@@ -3171,9 +3187,23 @@ static bool
 pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc,
 							  ScanKey *keysOut, int *nkeysOut)
 {
-	return pgcolumnar_batch_gates_ok(state->specs, state->naggs, state->quals,
-								   state->scanrelid, state->projected, tupdesc,
-								   keysOut, nkeysOut);
+	MemoryContext old;
+	bool		ok;
+
+	/*
+	 * The gates BUILD scan keys to inspect them, and for a SAOP that detoasts
+	 * and deconstructs the array constant (#717). Build into the node's own
+	 * context so a rescan reclaims the previous attempt: this runs once per
+	 * execution, and the keys it hands back are used for the whole scan that
+	 * follows, so resetting on entry is the right moment.
+	 */
+	MemoryContextReset(state->scanKeyContext);
+	old = MemoryContextSwitchTo(state->scanKeyContext);
+	ok = pgcolumnar_batch_gates_ok(state->specs, state->naggs, state->quals,
+								 state->scanrelid, state->projected, tupdesc,
+								 keysOut, nkeysOut);
+	MemoryContextSwitchTo(old);
+	return ok;
 }
 
 /* Reset the accumulators to their initial state (for a clean fall-back). */
@@ -3647,8 +3677,20 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 
 	/* push the WHERE down for group and vector pruning; the recheck is exact */
 	if (state->scanFold && state->quals != NIL)
+	{
+		/*
+		 * Reached only when the fold declined, so any keys it built are already
+		 * dead (it ended its read before returning false) and resetting here is
+		 * safe. Rebuilt on every rescan, hence the node's own context (#717).
+		 */
+		MemoryContext oldcxt;
+
+		MemoryContextReset(state->scanKeyContext);
+		oldcxt = MemoryContextSwitchTo(state->scanKeyContext);
 		keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, tupdesc,
 									 &nScanKeys);
+		MemoryContextSwitchTo(oldcxt);
+	}
 
 	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, projected,
 						   nScanKeys, keys);
@@ -4084,6 +4126,9 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	int			a;
 	int			x;
 
+	state->scanKeyContext = AllocSetContextCreate(estate->es_query_cxt,
+												  "columnar groupagg scan keys",
+												  ALLOCSET_SMALL_SIZES);
 	state->specContext = AllocSetContextCreate(estate->es_query_cxt,
 											   "columnar groupagg specs",
 											   ALLOCSET_SMALL_SIZES);
@@ -4527,10 +4572,20 @@ pgcolumnar_groupagg_batch_eligible(PgColumnarGroupAggScanState *state,
 			return false;
 	}
 
-	return pgcolumnar_batch_gates_ok(state->aggTemplate, state->naggs,
-								   state->quals, state->scanrelid,
-								   state->projected, tupdesc,
-								   keysOut, nkeysOut);
+	{
+		MemoryContext old;
+		bool		ok;
+
+		/* build the inspected keys in the node's own context (#717) */
+		MemoryContextReset(state->scanKeyContext);
+		old = MemoryContextSwitchTo(state->scanKeyContext);
+		ok = pgcolumnar_batch_gates_ok(state->aggTemplate, state->naggs,
+									 state->quals, state->scanrelid,
+									 state->projected, tupdesc,
+									 keysOut, nkeysOut);
+		MemoryContextSwitchTo(old);
+		return ok;
+	}
 }
 
 /*
@@ -4842,8 +4897,16 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 		return;
 	}
 
-	keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
-								 &nScanKeys);
+	{
+		/* same lifetime as the ungrouped row path above (#717) */
+		MemoryContext oldcxt;
+
+		MemoryContextReset(state->scanKeyContext);
+		oldcxt = MemoryContextSwitchTo(state->scanKeyContext);
+		keys = PgColumnarBuildScanKeys(state->quals, state->scanrelid, basedesc,
+									 &nScanKeys);
+		MemoryContextSwitchTo(oldcxt);
+	}
 	rs = PgColumnarBeginRead(rel, estate->es_snapshot, NULL, state->projected,
 						   nScanKeys, keys);
 
