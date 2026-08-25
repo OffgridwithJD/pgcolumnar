@@ -65,6 +65,8 @@
 #include "catalog/pg_statistic_ext.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/timestamp.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
@@ -273,6 +275,212 @@ pgcolumnar_commute_strategy(StrategyNumber s)
 		default:
 			return InvalidStrategy;
 	}
+}
+
+/*
+ * pgcolumnar_preimage_range_scankey
+ *		Rewrite `f(col) = const` into a range on col, for a function whose
+ *		preimage of a single value is a contiguous interval (#403, from the
+ *		ClickHouse VLDB 2024 paper's monotonicity traits).
+ *
+ *		A zone map holds col; a predicate about f(col) is about something the
+ *		zone map does not store, so nothing can exclude a group from it and the
+ *		scan reads everything. Measured on a time-clustered fixture: the explicit
+ *		range read 2 of 50 chunk groups, `date_trunc('day', ts) = ...` read all
+ *		50, for the same 10,000 rows.
+ *
+ *		Dispatched on funcid rather than written as a branch inside the general
+ *		comparison path, because the technique is a function property plus a
+ *		rewrite (the objection #369 raised against a special case). Adding a
+ *		second function means adding its preimage beside this one.
+ *
+ *		Being straight about the shape: this first cut inverts exactly one
+ *		function, and the step it uses comes from a small table of unit names,
+ *		not from date_trunc itself. A month is not a fixed number of seconds, so
+ *		the step has to be an interval applied by calendar arithmetic. The
+ *		generality is in where the rewrite HAPPENS, not yet in how many
+ *		functions it knows.
+ *
+ *		Emits `col >= lo` and `col < hi`, so two keys, and returns 2. Returns 0
+ *		for anything it cannot inarguably invert; declining always costs a scan,
+ *		never an answer.
+ */
+static int
+pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc,
+								ScanKey key)
+{
+	Node	   *leftop;
+	Node	   *rightop;
+	FuncExpr   *f;
+	Const	   *con;
+	Var		   *var;
+	Const	   *unitCon;
+	Node	   *arg1;
+	Form_pg_attribute att;
+	TypeCacheEntry *tce;
+	Datum		lo;
+	Datum		hi;
+	Datum		roundTrip;
+	Interval   *step;
+	text	   *unit;
+
+	if (list_length(op->args) != 2)
+		return 0;
+	leftop = (Node *) linitial(op->args);
+	rightop = (Node *) lsecond(op->args);
+	if (IsA(leftop, RelabelType))
+		leftop = (Node *) ((RelabelType *) leftop)->arg;
+	if (IsA(rightop, RelabelType))
+		rightop = (Node *) ((RelabelType *) rightop)->arg;
+
+	/* f(col) = const, either way round; equality only in this first cut */
+	if (IsA(leftop, FuncExpr) && IsA(rightop, Const))
+	{
+		f = (FuncExpr *) leftop;
+		con = (Const *) rightop;
+	}
+	else if (IsA(rightop, FuncExpr) && IsA(leftop, Const))
+	{
+		f = (FuncExpr *) rightop;
+		con = (Const *) leftop;
+	}
+	else
+		return 0;
+	if (con->constisnull)
+		return 0;
+
+	/*
+	 * date_trunc(unit, timestamp) only.
+	 *
+	 * The timestamptz forms are DELIBERATELY absent. date_trunc(text,
+	 * timestamptz) truncates in the session TimeZone, so the interval this
+	 * computes depends on a GUC that can change after the key is frozen at
+	 * executor start, and the key would then exclude groups that do match.
+	 * Plain timestamp has no such dependence. The three-argument form takes an
+	 * explicit zone and could be added by reading it.
+	 */
+	if (f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMP)
+		return 0;
+	if (list_length(f->args) != 2)
+		return 0;
+
+	unitCon = (Const *) linitial(f->args);
+	arg1 = (Node *) lsecond(f->args);
+	if (IsA(arg1, RelabelType))
+		arg1 = (Node *) ((RelabelType *) arg1)->arg;
+	if (!IsA(unitCon, Const) || unitCon->constisnull)
+		return 0;			/* a unit we cannot read at plan time */
+	if (!IsA(arg1, Var))
+		return 0;
+	var = (Var *) arg1;
+	if (var->varno != scanrelid || var->varlevelsup != 0)
+		return 0;
+	if (var->varattno < 1 || var->varattno > tupdesc->natts)
+		return 0;
+	att = TupleDescAttr(tupdesc, var->varattno - 1);
+	if (att->atttypid != TIMESTAMPOID || con->consttype != TIMESTAMPOID)
+		return 0;
+
+	/*
+	 * The operator must be equality on timestamp, and the ordering the reader
+	 * will use must be the column's own, exactly as the plain comparison path
+	 * requires.
+	 */
+	tce = lookup_type_cache(TIMESTAMPOID, TYPECACHE_BTREE_OPFAMILY);
+	if (!OidIsValid(tce->btree_opf))
+		return 0;
+	if (get_op_opfamily_strategy(op->opno, tce->btree_opf) != BTEqualStrategyNumber)
+		return 0;
+
+	/*
+	 * A CONSTANT THAT IS NOT ITSELF TRUNCATED MATCHES NOTHING.
+	 * date_trunc('day', ts) never returns 12:00, so
+	 * `date_trunc('day', ts) = '2024-02-01 12:00'` is unsatisfiable.
+	 *
+	 * DEFENCE IN DEPTH, not a correctness requirement, and the distinction was
+	 * established by removing this check and watching the suite stay green. The
+	 * keys only prune and the executor re-applies the clause, and the derived
+	 * range is never NARROWER than the true matching set -- here the empty set,
+	 * which every range contains -- so no row can be wrongly admitted or
+	 * dropped. It would become load-bearing if these keys were ever marked
+	 * exact, since the batch fold then uses them as its only row filter (#715).
+	 * Two lines, and both of those conditions can change without anyone
+	 * revisiting this, so it stays.
+	 */
+	unit = DatumGetTextPP(unitCon->constvalue);
+	roundTrip = DirectFunctionCall2(timestamp_trunc,
+									PointerGetDatum(unit),
+									con->constvalue);
+	if (DatumGetTimestamp(roundTrip) != DatumGetTimestamp(con->constvalue))
+		return 0;
+
+	/*
+	 * hi is where the NEXT bucket starts, so the step is one unit wide.
+	 *
+	 * This IS a table of unit names, and it is the honest way to do it: the
+	 * step for `month` is not a fixed number of seconds, so it has to be
+	 * expressed as an interval and applied by the calendar arithmetic that
+	 * knows about month lengths. Units not listed here are DECLINED rather than
+	 * approximated -- `date_trunc` accepts more of them (microseconds, decade,
+	 * century, millennium), and each would need its own entry proved before it
+	 * could be trusted.
+	 *
+	 * The comparison is case-insensitive because date_trunc's own is.
+	 */
+	{
+		static const struct
+		{
+			const char *unit;
+			const char *step;
+		}			units[] = {
+			{"second", "1 second"},
+			{"minute", "1 minute"},
+			{"hour", "1 hour"},
+			{"day", "1 day"},
+			{"week", "1 week"},
+			{"month", "1 month"},
+			{"quarter", "3 months"},
+			{"year", "1 year"},
+		};
+		char	   *unitStr = text_to_cstring(unit);
+		const char *stepStr = NULL;
+		int			i;
+
+		for (i = 0; i < (int) (sizeof(units) / sizeof(units[0])); i++)
+			if (pg_strcasecmp(unitStr, units[i].unit) == 0)
+			{
+				stepStr = units[i].step;
+				break;
+			}
+		if (stepStr == NULL)
+			return 0;
+
+		step = DatumGetIntervalP(DirectFunctionCall3(interval_in,
+													 CStringGetDatum(stepStr),
+													 ObjectIdGetDatum(InvalidOid),
+													 Int32GetDatum(-1)));
+		lo = con->constvalue;
+		hi = DirectFunctionCall2(timestamp_pl_interval, lo,
+								 IntervalPGetDatum(step));
+	}
+
+	MemSet(&key[0], 0, sizeof(ScanKeyData));
+	key[0].sk_flags = 0;
+	key[0].sk_attno = var->varattno;
+	key[0].sk_strategy = BTGreaterEqualStrategyNumber;
+	key[0].sk_subtype = TIMESTAMPOID;
+	key[0].sk_collation = att->attcollation;
+	key[0].sk_argument = lo;
+
+	MemSet(&key[1], 0, sizeof(ScanKeyData));
+	key[1].sk_flags = 0;
+	key[1].sk_attno = var->varattno;
+	key[1].sk_strategy = BTLessStrategyNumber;
+	key[1].sk_subtype = TIMESTAMPOID;
+	key[1].sk_collation = att->attcollation;
+	key[1].sk_argument = hi;
+
+	return 2;
 }
 
 /*
@@ -619,6 +827,20 @@ pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	op = (OpExpr *) clause;
 	if (list_length(op->args) != 2)
 		return 0;
+
+	/*
+	 * `f(col) = const` for an invertible f becomes a range on col (#403). Like
+	 * the IN-list rewrite above these keys merely PRUNE, so exact stays false
+	 * and the batch fold refuses them (#715); the executor re-checks the
+	 * original clause. The pruning is the whole measured prize.
+	 */
+	{
+		int			n = pgcolumnar_preimage_range_scankey(op, scanrelid, tupdesc,
+														 key);
+
+		if (n > 0)
+			return n;
+	}
 
 	leftop = (Node *) linitial(op->args);
 	rightop = (Node *) lsecond(op->args);
