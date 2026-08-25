@@ -75,6 +75,27 @@ if [ "$(id -u)" = 0 ]; then
 		chown postgres $_covdirs
 		echo "-- counter directories made writable by the server user:" \
 			"$(printf '%s' "$_covdirs" | tr '\n' ' ')"
+
+		# Prove it, rather than assume the chown was sufficient. Creating a file
+		# needs write AND execute on the directory, and execute on every ancestor
+		# of it, so an ownership change alone is not the whole condition. The
+		# first version of this fix stopped at the chown, and CI still captured
+		# zero counters while reporting the directories as "made writable" (#740).
+		for _d in $_covdirs; do
+			if runuser -u postgres -- test -w "$_d" 2>/dev/null &&
+			   runuser -u postgres -- touch "$_d/.pgc_gcov_probe" 2>/dev/null; then
+				rm -f "$_d/.pgc_gcov_probe"
+			else
+				echo "-- WARNING: the server user cannot create files in $_d" \
+					"($(stat -c '%U:%G %a' "$_d"))"
+				# The ancestors, because traversal is the usual reason.
+				_p="$_d"
+				while [ "$_p" != "/" ]; do
+					echo "     $(stat -c '%U:%G %a' "$_p") $_p"
+					_p="$(dirname "$_p")"
+				done
+			fi
+		done
 	fi
 fi
 
@@ -162,6 +183,15 @@ if [ "$_gcda" = 0 ]; then
 	echo "      gcov writes them beside the objects, as the user that ran the" >&2
 	echo "      code. Check that the server user can write to the directories" >&2
 	echo "      holding the .gcno files." >&2
+	# Say WHERE they went, if anywhere. A path mismatch and a permission refusal
+	# look identical from "0 counters", and they have different fixes.
+	_stray=$(find / -xdev -name '*.gcda' 2>/dev/null | head -5)
+	if [ -n "$_stray" ]; then
+		echo "      counters DO exist elsewhere, so this is a path mismatch:" >&2
+		printf '        %s\n' $_stray >&2
+	else
+		echo "      no .gcda anywhere on this filesystem, so nothing wrote them" >&2
+	fi
 	exit 1
 fi
 
