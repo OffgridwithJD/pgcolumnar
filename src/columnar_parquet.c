@@ -506,15 +506,6 @@ shred_top(TopColumn *tc, PqLeaf *leaves, Datum d, bool isnull)
 	}
 }
 
-static int
-bits_for(int m)
-{
-	int			b = 0;
-
-	while ((1 << b) <= m)
-		b++;
-	return b;
-}
 
 /*
  * Build an RLE/bit-packed hybrid level section (one bit-packed run at the given
@@ -581,9 +572,9 @@ build_leaf_body(StringInfo body, PqLeaf *c)
 {
 	if (c->max_rep > 0)
 		build_rle_levels(body, (const uint8 *) c->reps.data, c->nEntries,
-						 bits_for(c->max_rep));
+						 pq_bits_for(c->max_rep));
 	build_rle_levels(body, (const uint8 *) c->defs.data, c->nEntries,
-					 bits_for(c->max_def));
+					 pq_bits_for(c->max_def));
 	build_values(body, c);
 }
 

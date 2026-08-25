@@ -26,6 +26,21 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   fire. `decode_interrupts` now covers this decoder, and asserts the check sits
   in the decode loop rather than in the bounded symbol-table parse above it.
   (#712)
+- The Parquet level-width helper no longer performs a signed left shift that
+  is undefined for a maximum level at or above 2^30, and no longer has two
+  copies. It computed `1 << b` with `b` reaching 31; real schemas cannot get
+  there, because levels accumulate one per nesting level from a bounded
+  recursion, but it was undefined behaviour in a decoder that reads files it
+  did not write. Making the shift unsigned is not the whole fix on its own: it
+  makes the comparison unsigned too, so a negative maximum converts to a huge
+  value and the loop runs to a 32-place shift that is undefined in turn, and
+  does not terminate under a recovering sanitizer. The helper now returns
+  early for a non-positive maximum and bounds the loop. It also moved to
+  `columnar_parquet_format.h`, which the writer and the reader already share,
+  because a writer and a reader that disagree on a level width produce a file
+  that is silently wrong rather than one that fails to parse. Values are
+  unchanged on every reachable input. A new suite, `parquet_level_width`,
+  pins the parts no query can reach. (#710)
 
 - The object-store write path (export sink, delete, list) now refuses a URL
   with userinfo (`user@host`) with the same error the read path always gave.
