@@ -180,21 +180,21 @@ echo "      (peaks: with ${with_small} -> ${with_large}; without ${without_small
 # the defect and far above the noise.
 excess="$(awk -v a="$with_slope" -v b="$without_slope" 'BEGIN { d = a - b; print (d < 0 ? 0 : d) }')"
 echo "      excess attributable to the IN-list: ${excess} bytes per rescan"
-# NAMED FOR THE INVARIANT, NOT FOR ONE FIX, and that distinction is the point.
+# ONE MECHANISM, ONE ARM, and the history is worth keeping because it is how a
+# green check stopped meaning anything for a while.
 #
-# This arm was written for #717 and labelled with it. Since #727 wrapped the
-# ungrouped scan in a per-call scratch context, it no longer tests #717
-# SPECIFICALLY: reverting #717's scan-key contexts entirely, keeping #727,
-# leaves this arm GREEN, because the broader wrap reclaims those allocations
-# too. An arm that stays green when the fix it names is removed is falsely
-# attributing, whatever else it is doing.
+# Written for #717 and labelled with it. #727 then wrapped the ungrouped scan in
+# a per-call scratch context, which reclaimed the same allocations, and this arm
+# stayed GREEN with #717's contexts fully reverted -- falsely attributing, since
+# the fix it named was gone and it could not tell. It was relabelled to the
+# invariant and given the joint removal proof.
 #
-# It is still a sound lock on the INVARIANT, and its removal proof is that
-# reverting BOTH mechanisms reddens it at 179,927 bytes per rescan. So it is
-# named for the property now, and the proof is stated as the joint one it
-# actually has. #717 keeps its own targeted guard for the grouped node and the
-# Begin-time eligibility build, where #727's wrap does not reach.
-check_num "an IN-list does not add per-rescan query memory (jointly #717, #727)" \
+# The scan-key contexts have since been removed outright: the scratch wrap now
+# covers both nodes, both row paths and both Begin-time eligibility builds, so
+# there is exactly one mechanism behind this property again. Removing it reddens
+# this arm on its own, at 180,843 bytes per rescan. The label can mean what it
+# says.
+check_num "an IN-list does not add per-rescan query memory" \
 	"$([ "$excess" -lt 20000 ] && echo 1 || echo 0)" 1
 
 # ---- the node's own per-rescan footprint, against core's floor (#727) -------

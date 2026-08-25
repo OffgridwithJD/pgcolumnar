@@ -16,6 +16,15 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The vectorized aggregates now bound their per-execution memory with one
+  mechanism instead of two. The scan-key context added for #717 covered the
+  scan keys; the scratch context added for #727 covered the whole scan and so
+  covered the keys as well, on the ungrouped node. The grouped node now has the
+  same scratch wrap, the two Begin-time eligibility checks build in a temporary
+  context they delete, and the scan-key context is gone. No behaviour changes
+  and no measurement moves; what changes is that one thing owns the lifetime,
+  and the regression check for it can name what enforces it again. (#717, #727)
+
 - A columnar scan no longer grows query memory on every rescan. A rescan reuses
   the read state rather than closing and re-opening it, and each restart rebuilt
   the row-group list and its per-group metadata into the read state's own
