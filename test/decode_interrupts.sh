@@ -71,7 +71,7 @@ checks_in() {  # function-name -> count of interrupt checks in its body
 # Every decoder that walks values one at a time. bitunpack is included because
 # the bit-packed decoders reach their value count through it.
 for f in bitunpack decode_rle decode_for decode_delta decode_gorilla decode_dod \
-         decode_alp decode_dict; do
+         decode_alp decode_dict decode_fsst_shared; do
 	check "$f was found" \
 		"$([ "$(range_of "$f")" != "0 0" ] && echo yes || echo no)" "yes"
 	check "$f checks for interrupts" \
@@ -92,6 +92,22 @@ check "decode_rle's inner value loop was found" \
 check "decode_rle checks inside its value loop, not only around it" \
 	"$(awk -v s="$inner" -v e="$rle_e" \
 		'NR > s && NR <= e && /COLUMNAR_DECODE_INTERRUPT\(/ {n++} END {print n+0}' "$FN" \
+		| awk '{print ($1 >= 1) ? "yes" : "no"}')" "yes"
+
+# decode_fsst_shared is the second place where placement matters rather than
+# presence (#712). It has TWO loops: a symbol-table parse bounded by tableLen,
+# which is a few KB, and the decode loop bounded by encLen, which is a whole
+# vector's code stream. A check in the first satisfies "checks for interrupts"
+# above while leaving the loop that needs it unguarded, so assert the check sits
+# after the decode loop begins.
+fsst_r="$(range_of decode_fsst_shared)"
+fsst_loop="$(awk -v s="${fsst_r% *}" -v e="${fsst_r#* }" \
+	'NR >= s && NR <= e && /while \(p < end\)/ {print NR; exit}' "$FN")"
+check "decode_fsst_shared's decode loop was found" \
+	"$([ -n "$fsst_loop" ] && echo yes || echo no)" "yes"
+check "decode_fsst_shared checks inside its decode loop, not only in the table parse" \
+	"$(awk -v s="$fsst_loop" -v e="${fsst_r#* }" \
+		'NR >= s && NR <= e && /COLUMNAR_DECODE_INTERRUPT\(/ {n++} END {print n+0}' "$FN" \
 		| awk '{print ($1 >= 1) ? "yes" : "no"}')" "yes"
 
 # The stride is what makes the check cheap enough to sit in a per-value loop. A
