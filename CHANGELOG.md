@@ -63,6 +63,18 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- The vectorized aggregates no longer stack a fresh set of pushdown scan keys
+  in query memory on every rescan. The scalar scan builds its keys once at
+  Begin; these paths rebuild them at execution, and did so into a context that
+  lives until the query ends, so a LATERAL or parameterized aggregate sub-scan
+  grew with the rescan count. An `IN (...)` key made it material, because
+  building one also detoasts the array constant and deconstructs it. Measured on
+  a LATERAL aggregate with a 20000-element list: adding the list cost 179,222
+  bytes of query memory per rescan before, and nothing measurable after, against
+  a no-list control that is unchanged. The keys now live in a per-node context
+  that is reset at each build. A new suite, `vector_agg_rescan_memory`, measures
+  the two arms and asserts the difference. (#717)
+
 - The grouped vectorized aggregate (`pgcolumnar.enable_group_vectorization`)
   now folds column at a time instead of row at a time. Where every group key is
   a plain column, every aggregate is one the fold accumulates (`count`, `sum`
