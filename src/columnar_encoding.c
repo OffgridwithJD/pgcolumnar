@@ -2044,6 +2044,7 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 	uint32		nSym;
 	uint32		outPos = 0;
 	uint32		i;
+	uint32		iter = 0;		/* decode-loop iterations, for the interrupt stride */
 
 	/* parse the shared table (pointers reference the caller's descriptor bytes) */
 	if (tableLen < 1)
@@ -2069,9 +2070,25 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 		tp += L;
 	}
 
+	/*
+	 * The decode loop, and the one that needs the interrupt check (#712). The
+	 * symbol-table parse above is bounded by tableLen, a few KB at most; this
+	 * one is bounded by encLen, which is a whole vector's code stream.
+	 *
+	 * A separate iteration counter rather than a byte offset, because the stride
+	 * check is a mask: `p` advances by one or two per code, so a test on
+	 * (p - enc) can STEP OVER the exact multiple and never fire. Counting
+	 * iterations advances by exactly one and cannot skip the boundary. Starting
+	 * at zero also means the first iteration always checks, so a vector shorter
+	 * than the stride is still interruptible at its start.
+	 */
 	while (p < end)
 	{
-		unsigned char c = (unsigned char) *p++;
+		unsigned char c;
+
+		COLUMNAR_DECODE_INTERRUPT(iter);
+		iter++;
+		c = (unsigned char) *p++;
 
 		if (c == FSST_ESCAPE)
 		{
