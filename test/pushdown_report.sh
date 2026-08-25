@@ -290,6 +290,59 @@ check "ungrouped: the usable arm removes chunk groups" \
 check "ungrouped: the unusable arm removes none" \
 	"$(field "$u_unusable" 'Columnar Chunk Groups Removed by Filter')" "0"
 
+# ---- plain EXPLAIN must report the count too (#726) -------------------------
+# Every arm in this file so far uses EXPLAIN ANALYZE, and that is exactly how
+# this went unnoticed. The ungrouped node assigns nscankeys and npreds AFTER its
+# EXEC_FLAG_EXPLAIN_ONLY return, so under ANALYZE the numbers are right and under
+# a plain EXPLAIN they are still their palloc0 zero -- whatever the truth is.
+#
+# It is the #602 shape on a different line: a plain-EXPLAIN value that was never
+# computed. `Columnar Pushed-Down Filters` is a line people read to decide
+# whether pushdown is working, and a hard zero reads as "pushdown is not
+# happening" rather than "this number was not filled in". It is also the line a
+# pushdown measurement pins its premise on, and a premise that is always zero
+# cannot fail for the right reason.
+#
+# The GROUPED node has always done this correctly, so the two vectorized nodes
+# disagreed about the same label -- which is what #493 exists to prevent.
+plainplan() {  # plainplan <guc> <sql>
+	q "SET pgcolumnar.enable_qual_pushdown = on;
+	   SET $1 = on;
+	   EXPLAIN (COSTS OFF) $2;"
+}
+PDR_Q="SELECT count(*), sum(b) FROM pdr_u WHERE plain > $((ROWS - 10000))"
+u_plain="$(plainplan $UAGG "$PDR_Q")"
+
+check "premise: the plain EXPLAIN arm is the ungrouped vectorized aggregate" \
+	"$(has "$u_plain" 'Columnar Vectorized Aggregates')" "yes"
+# The premise that makes a zero meaningful: under ANALYZE the number is NOT zero,
+# so a zero on the plain plan is a value that was never filled in rather than an
+# honest report of no pushdown.
+check "premise: the same query under ANALYZE reports a non-zero count" \
+	"$([ "$(field "$u_usable" 'Columnar Pushed-Down Filters')" -gt 0 ] && echo yes || echo no)" "yes"
+
+check "plain EXPLAIN reports the ungrouped node's pushed-down filters (#726)" \
+	"$(field "$u_plain" 'Columnar Pushed-Down Filters')" \
+	"$(field "$u_usable" 'Columnar Pushed-Down Filters')"
+check "plain EXPLAIN reports the ungrouped node's vector predicates (#726)" \
+	"$(field "$u_plain" 'Columnar Vector Predicates')" \
+	"$(field "$u_usable" 'Columnar Vector Predicates')"
+
+# And the two vectorized nodes must agree with each other on a plain plan, which
+# is the property that was actually broken: one label, one quantity, every node.
+# The same shape the grouped arms below already use, so the node is genuinely
+# planned. Written first with a GROUP BY on a column this table does not have,
+# which errored, reported "no such node", and SKIPPED -- a check that proves
+# nothing while looking like coverage. The node assertion below is what turns
+# that into a failure instead of a shrug.
+g_plain="$(plainplan pgcolumnar.enable_group_vectorization \
+	"SELECT b, count(*) FROM pdr_u WHERE plain > $((ROWS - 10000)) GROUP BY 1")"
+check "premise: the grouped node IS planned for the cross-node arm" \
+	"$(has "$g_plain" 'Columnar Vectorized Group Keys')" "yes"
+check "plain EXPLAIN: the grouped node agrees with the ungrouped one (#493, #726)" \
+	"$(field "$g_plain" 'Columnar Pushed-Down Filters')" \
+	"$(field "$u_plain" 'Columnar Pushed-Down Filters')"
+
 # One label, one quantity, on every node (#493).
 #
 # "Columnar Pushed-Down Filters" used to come from PgColumnarCountConvertibleQuals

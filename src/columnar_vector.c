@@ -2151,6 +2151,37 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 			pgcolumnar_batch_shape_eligible(state, tupdesc, NULL, NULL);
 	}
 
+	/*
+	 * The EXPLAIN counts, settled BEFORE the EXPLAIN-only return (#726).
+	 *
+	 * They were assigned below it, so a plain EXPLAIN of this node printed the
+	 * palloc0 zero for both, whatever the truth was: a query whose filter really
+	 * did become scan keys still reported "Columnar Pushed-Down Filters: 0".
+	 * Under ANALYZE the same plan reported the real number, which is why every
+	 * existing arm in pushdown_report.sh missed it.
+	 *
+	 * That is the #602 shape on another line, a plain-EXPLAIN value that was
+	 * never computed, and it left the two vectorized nodes disagreeing about one
+	 * label: the grouped node has always counted before its own return. Both
+	 * calls are catalog and plan only and do no I/O, which is the same argument
+	 * the scalar node already makes for computing its keys in EXPLAIN-only mode.
+	 *
+	 * Only the count survives, and only EXPLAIN reads it. The predicate array was
+	 * stored here and never read: what would have applied it had no call site
+	 * anywhere in the tree and is deleted (issue #200).
+	 *
+	 * The call stays rather than the count being hardcoded to zero. This path is
+	 * only chosen when the relation has no quals, so the count is always zero
+	 * today and the call looks redundant, but that is an inference from a
+	 * planner early return several hundred lines away, and it is the kind that
+	 * stops being true without anyone noticing. Computing it costs one walk of
+	 * an empty list.
+	 */
+	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
+								  &state->npreds, &allConvertible);
+	state->nscankeys = PgColumnarCountScanKeys(state->quals, state->scanrelid,
+											 tupdesc);
+
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 	{
 		table_close(rel, AccessShareLock);
@@ -2186,23 +2217,6 @@ PgColumnarBeginAggScan(CustomScanState *node, EState *estate, int eflags)
 			spec->typlen = att->attlen;
 		}
 	}
-
-	/*
-	 * Only the count survives, and only EXPLAIN reads it. The predicate array was
-	 * stored here and never read: what would have applied it had no call site
-	 * anywhere in the tree and is deleted (issue #200).
-	 *
-	 * The call stays rather than the count being hardcoded to zero. This path is
-	 * only chosen when the relation has no quals, so the count is always zero
-	 * today and the call looks redundant, but that is an inference from a
-	 * planner early return several hundred lines away, and it is the kind that
-	 * stops being true without anyone noticing. Computing it costs one walk of
-	 * an empty list.
-	 */
-	PgColumnarCountConvertibleQuals(state->quals, state->scanrelid, tupdesc,
-								  &state->npreds, &allConvertible);
-	state->nscankeys = PgColumnarCountScanKeys(state->quals, state->scanrelid,
-											 tupdesc);
 
 	/*
 	 * Scan-fold mode reads and rechecks every surviving row (#289): a virtual
