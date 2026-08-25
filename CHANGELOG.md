@@ -42,6 +42,19 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   unchanged on every reachable input. A new suite, `parquet_level_width`,
   pins the parts no query can reach. (#710)
 
+- The Iceberg name-mapping parse reclaims its per-entry scratch instead of
+  holding it for the whole document. Walking one entry allocates a `JsonbValue`
+  per container lookup, and none of it is needed once that entry's names are
+  copied out; left in the caller's context it accumulated across the mapping.
+  Measured as memory attributable to pgcolumnar above the cost of core parsing
+  the identical string: 100 bytes per entry before, 3 after, which is 78 MB
+  down to 4 MB over an 800000-entry mapping. The larger part of such a
+  document's cost is core's own `jsonb` parsing and is unchanged; an
+  unprivileged session can reach more of it with a plain cast, so this is a
+  bounded improvement to one loop and not a limit on what a mapping can cost.
+  A new suite, `iceberg_name_mapping_memory`, measures the difference against
+  core's own parse rather than a total. (#731)
+
 - The Iceberg name-mapping parse sizes its first allocation by the name cap
   rather than by the element count the file declares. The cap
   (`ICE_MAX_NAME_MAPPING`, 100000) was applied inside the loop, after an

@@ -1738,6 +1738,8 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 	int		   *ids;
 	int			n = 0;
 	int			cap;
+	MemoryContext callerCxt = CurrentMemoryContext;
+	MemoryContext entryCxt;
 
 	*names_out = NULL;
 	*ids_out = NULL;
@@ -1783,14 +1785,47 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 	names = (char **) palloc(sizeof(char *) * cap);
 	ids = (int *) palloc(sizeof(int) * cap);
 
+	/*
+	 * Per-entry scratch, reclaimed each iteration (#731).
+	 *
+	 * Walking one entry allocates a JsonbValue per getIthJsonbValueFromContainer
+	 * and per ice_field, and none of it is needed once the entry's names have
+	 * been copied out. Left in the caller's context it accumulated for the whole
+	 * document: measured at ~100 bytes an entry, about 78 MB over an 800000-entry
+	 * mapping, held until the call returned.
+	 *
+	 * This is the smaller half of what #731 was filed for and worth saying so:
+	 * the other 87% of that document's cost is core's jsonb_in parsing the
+	 * property string, which this code does not control. An unprivileged session
+	 * can reach a larger version of it with a plain `::jsonb` cast.
+	 *
+	 * The parsed document itself (arrjb) stays in the caller's context, so the
+	 * containers these JsonbValues point INTO are untouched by the reset; only
+	 * the per-entry wrappers are reclaimed. Retained names are copied in the
+	 * caller's context explicitly, below.
+	 */
+	entryCxt = AllocSetContextCreate(callerCxt,
+									 "iceberg name-mapping entry",
+									 ALLOCSET_SMALL_SIZES);
+
 	for (k = 0; k < ne; k++)
 	{
-		JsonbValue *ent = getIthJsonbValueFromContainer(arr, k);
+		JsonbValue *ent;
 		int64		fid;
 		JsonbValue *namesv;
 		JsonbContainer *narr;
 		uint32		nn;
 		uint32		m;
+
+		/*
+		 * Reset at the TOP, not after the body. Every `continue` below would
+		 * otherwise skip the reclaim, and those are the common paths: an entry
+		 * with no field-id is exactly the shape that made this measurable.
+		 */
+		MemoryContextReset(entryCxt);
+		MemoryContextSwitchTo(entryCxt);
+
+		ent = getIthJsonbValueFromContainer(arr, k);
 
 		CHECK_FOR_INTERRUPTS();
 		if (ent == NULL || ent->type != jbvBinary)
@@ -1817,6 +1852,8 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 
 			if (nv == NULL || nv->type != jbvString)
 				continue;
+			/* the retained name must outlive the per-entry reset */
+			MemoryContextSwitchTo(callerCxt);
 			nstr = pnstrdup(nv->val.string.val, nv->val.string.len);
 			if (n >= ICE_MAX_NAME_MAPPING)
 				ereport(ERROR,
@@ -1832,8 +1869,18 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 			names[n] = nstr;
 			ids[n] = (int) fid;
 			n++;
+			MemoryContextSwitchTo(entryCxt);
 		}
 	}
+
+	/*
+	 * Leave the scratch context before anything below allocates in it, and
+	 * before deleting it. A `continue` can exit the loop body while it is still
+	 * current, so this restore is unconditional rather than paired with a switch
+	 * inside the loop.
+	 */
+	MemoryContextSwitchTo(callerCxt);
+	MemoryContextDelete(entryCxt);
 
 	/* the spec requires names to be unique. Detect a duplicate by sorting a
 	 * copy of the name pointers and scanning adjacent pairs -- O(n log n), not

@@ -94,6 +94,7 @@ SUITES=(
 	iceberg_fdw_projection
 	iceberg_malformed
 	iceberg_name_mapping
+	iceberg_name_mapping_memory
 	iceberg_objstore
 	iceberg_rest
 	iceberg_rest_scan
