@@ -136,6 +136,22 @@ runpg "$BINDIR/initdb" -D "$DATA" --locale=C -U postgres >/dev/null 2>&1 \
 {
 	echo "shared_preload_libraries='pgcolumnar'"
 	echo "port=$PORT"
+	# Every connection below is `psql -h /tmp`, and where the socket actually
+	# lands is a property of how PostgreSQL was BUILT, not of this suite: a
+	# source build defaults to /tmp, while the Debian and PGDG packages compile
+	# in /var/run/postgresql. So against a packaged server every psql here failed
+	# with `connection to server on socket "/tmp/.s.PGSQL.NNNN" failed`, and the
+	# suite reported "old install did not store rows" -- a connection fault
+	# wearing the costume of a product failure.
+	#
+	# It went unseen because the two never met: developers run this against
+	# source builds, and #741 is the issue that CI had never run it at all. The
+	# first CI run after wiring it up failed here.
+	#
+	# Stated rather than inherited, so -h /tmp is true by construction on either
+	# kind of build. lib.sh sidesteps the whole question by connecting over TCP;
+	# this suite carries its own harness and connects by socket.
+	echo "unix_socket_directories='/tmp'"
 } >> "$DATA/postgresql.conf"
 runpg "$BINDIR/pg_ctl" -D "$DATA" -l "$LOG" -w start >/dev/null 2>&1 \
 	|| { echo "FAIL  start"; tail -10 "$LOG"; exit 1; }
