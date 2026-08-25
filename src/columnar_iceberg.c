@@ -1760,7 +1760,26 @@ ice_name_mapping(JsonbContainer *root, const char *path,
 						path)));
 	arr = &arrjb->root;
 	ne = JsonContainerSize(arr);
-	cap = Max(ne, 1);
+
+	/*
+	 * Size the FIRST allocation by the cap, not by the element count the file
+	 * declares (#711).
+	 *
+	 * ne is attacker-controlled and is not an upper bound on the name count
+	 * anyway -- one entry carries a list of names, so n can exceed ne -- which
+	 * is why the array grows by doubling below. It is only an opening guess,
+	 * and taking it from the file meant a document of N tiny entries asked for
+	 * 12N bytes up front: about four bytes of allocation per byte of input,
+	 * from a path whose only other bound is the 64 MB metadata slurp several
+	 * layers away, which protects a different thing and could change without
+	 * this being reconsidered.
+	 *
+	 * ICE_MAX_NAME_MAPPING is the real ceiling: the loop below refuses the
+	 * document once n reaches it, so n can never exceed it and any capacity
+	 * beyond it could never be used. The doubling may still overshoot the cap
+	 * by up to one step, which is bounded and not worth a second clamp.
+	 */
+	cap = Max(Min(ne, (uint32) ICE_MAX_NAME_MAPPING), 1);
 	names = (char **) palloc(sizeof(char *) * cap);
 	ids = (int *) palloc(sizeof(int) * cap);
 
