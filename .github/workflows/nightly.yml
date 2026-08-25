@@ -428,6 +428,22 @@ jobs:
           sudo -E env "PATH=$PATH" \
             bash test/run_coverage.sh /usr/lib/postgresql/18/bin/pg_config
 
+      # The per-suite logs, which were never uploaded. Only coverage/html and
+      # coverage.info were, so when a suite failed inside this job the detail
+      # went away with the runner and the tally line was all anyone could see.
+      # That is how #741's failing suite stayed invisible: the job printed
+      # "1 failed ( extension_upgrade)" every night and the reason was
+      # unreachable. `if: always()` because a failed run is exactly when they
+      # are wanted.
+      - name: Upload the per-suite logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-suite-logs
+          path: coverage/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Upload the HTML report
         if: always()
         uses: actions/upload-artifact@v4

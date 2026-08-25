@@ -52,6 +52,32 @@ fi
 make -C "$SRCDIR" PG_CONFIG="$PGC" COPT="--coverage" install >/dev/null 2>&1 || {
 	echo "FAIL  install failed" >&2; exit 1; }
 
+# gcov writes each .gcda beside its object, at the absolute path recorded at
+# COMPILE time, and it writes it as the process that ran the code. This runner is
+# invoked under sudo in CI, so the build is root-owned, while lib.sh runs the
+# server as `postgres` whenever it is root (lib.sh:150). The backend could not
+# create a counter file next to a root-owned object, no .gcda was ever written,
+# and `lcov --capture` had nothing to find: the report has measured nothing since
+# the job was added (#740).
+#
+# The directories are DERIVED from where the instrumentation actually landed, not
+# named. Objects are in src/ and objstore/ today, and a hardcoded src/ would
+# silently stop covering a directory added later -- and would leave the backend
+# unable to write there, which gcov reports as noise on stderr rather than as a
+# failure.
+#
+# Only when root. Run as an ordinary user the build and the server are the same
+# user and there is nothing to fix.
+if [ "$(id -u)" = 0 ]; then
+	_covdirs=$(find "$SRCDIR" -name '*.gcno' -printf '%h\n' | sort -u)
+	if [ -n "$_covdirs" ]; then
+		# shellcheck disable=SC2086
+		chown postgres $_covdirs
+		echo "-- counter directories made writable by the server user:" \
+			"$(printf '%s' "$_covdirs" | tr '\n' ' ')"
+	fi
+fi
+
 # Every suite except the drivers, the libraries, and the ones that build their
 # own server or need two majors. Kept in step with harness_selftest.sh's list.
 #
@@ -121,6 +147,22 @@ echo "-- suites: $pass passed, $fail failed${failed:+ ($failed)}, $skip skipped$
 if [ "$pass" = 0 ]; then
 	echo "-- NO SUITE RAN, so this measures no coverage"
 	fail=$((fail + 1))
+fi
+
+# A report built from no counters is not a report, which is the same reasoning as
+# the `pass = 0` guard above and the case that has actually been happening (#740).
+# Asserted HERE rather than left to lcov: `lcov --capture` failing on an empty
+# tree reports "capture produced nothing", which reads as a broken tool and sent
+# nobody to look at the permissions for 25 nights.
+_gcno=$(find "$SRCDIR" -name '*.gcno' | wc -l)
+_gcda=$(find "$SRCDIR" -name '*.gcda' | wc -l)
+echo "-- counters: $_gcda .gcda from $_gcno instrumented objects"
+if [ "$_gcda" = 0 ]; then
+	echo "FAIL  no .gcda counters were written, so this measures no coverage" >&2
+	echo "      gcov writes them beside the objects, as the user that ran the" >&2
+	echo "      code. Check that the server user can write to the directories" >&2
+	echo "      holding the .gcno files." >&2
+	exit 1
 fi
 
 echo "-- collect"
