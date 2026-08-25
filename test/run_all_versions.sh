@@ -216,7 +216,6 @@ SUITES=(
 	parquet_nested
 	parquet_nested_import
 	pg19_vacuum_options
-	preimage_rewrite
 	pg_dump_roundtrip
 	phase2
 	phase3
@@ -224,6 +223,7 @@ SUITES=(
 	phase5
 	phase6
 	planner_choice_quality
+	preimage_rewrite
 	projection_privilege
 	projections
 	pushdown_report
