@@ -531,7 +531,14 @@ jobs:
       # ran, so an environment shortfall is a failure of the job, not a waiver.
       - name: Run the extension-upgrade guard
         run: |
-          set -uo pipefail
+          # `set +e`, NOT `set -uo pipefail`. GitHub runs a `run:` step as
+          # `bash -e {0}`, and -uo pipefail does not cancel that -e: the step
+          # would abort at the suite line and rc, the annotation and the exit
+          # below would never execute. The gate still held -- a non-zero exit
+          # fails the job either way -- but the one case the comment singles out
+          # was the one case that could never announce itself. Only `set +e`
+          # restores the intent (#741 review).
+          set +e
           sudo -E env "PATH=$PATH" \
             bash test/extension_upgrade.sh \
               /usr/lib/postgresql/18/bin/pg_config /tmp/pgc_old_alpha

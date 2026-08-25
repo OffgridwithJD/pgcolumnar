@@ -18,12 +18,29 @@
 # Most suites are immune for a different reason: lib.sh connects over TCP
 # (-h 127.0.0.1, with listen_addresses set to match), so the socket location
 # never arises. This check is about the ones that carry their own harness.
+#
+# The discriminator matches a -h argument that is a PATH or a VARIABLE, quoted or
+# not, on a non-comment line. Every part of that earns its place:
+#
+#   -h /tmp          extension_upgrade
+#   -h '$WORKDIR'    concurrency, unique_conc, update_conc  (single quotes)
+#   -h 127.0.0.1     NOT a socket user, and must stay out
+#
+# The first version asked only for `-h /` and found ONE suite. It missed three,
+# because the spelling that actually dominates the tree is the quoted variable.
+# A population of one that looks complete is the thing the premise below cannot
+# see, so the population is printed beside the claim (#741 review).
+#
+# Comment lines are excluded deliberately, not incidentally: fuzz_parquet carries
+# `-h "$PGC_WORKDIR"` in a comment describing what an EARLIER version did, and it
+# connects over TCP. Matching it would put a TCP suite in the population and
+# report a defect that does not exist -- the too-loose direction, which costs an
+# afternoon chasing nothing.
 
 _sock_users=""
 _sock_missing=""
 for _f in "$TESTDIR"/*.sh; do
-	# A filesystem path, not 127.0.0.1. `-h /` is the discriminator.
-	grep -qE '\-h /' "$_f" || continue
+	grep -qE "^[^#]*-h ['\"]?[/\$]" "$_f" || continue
 	_b="$(basename "$_f" .sh)"
 	_sock_users="$_sock_users $_b"
 	grep -q 'unix_socket_directories' "$_f" || _sock_missing="$_sock_missing $_b"
@@ -38,8 +55,15 @@ check "premise: at least one suite connects by a socket path, so this is not vac
 
 # And the discriminator must not simply match everything: the TCP suites must NOT
 # be in the population, or "they all set it" would be meaningless.
-check "premise: a TCP suite is not counted as a socket user" \
-	"$(grep -qE '\-h /' "$TESTDIR/lib.sh" && echo counted || echo not-counted)" "not-counted"
+# Three named TCP users, not one: lib.sh (every ordinary suite), fuzz_parquet
+# (whose comment names the old socket spelling) and isolation (PGHOST=127.0.0.1).
+# If any of them enters the population the discriminator has gone too loose.
+_sock_tcp=""
+for _t in lib fuzz_parquet isolation; do
+	grep -qE "^[^#]*-h ['\"]?[/\$]" "$TESTDIR/$_t.sh" 2>/dev/null && _sock_tcp="$_sock_tcp $_t"
+done
+check "premise: no TCP suite is counted as a socket user" \
+	"$(printf '%s' "$_sock_tcp" | sed 's/^ //')" ""
 
 check "every suite that connects by socket path sets unix_socket_directories" \
 	"$(printf '%s' "$_sock_missing" | sed 's/^ //')" ""
