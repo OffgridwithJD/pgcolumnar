@@ -38,11 +38,14 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   harness runs the server as `postgres` whenever it is root. gcov writes each
   `.gcda` beside its object, as the process that ran the code, so the backend
   could not create one and there was nothing to capture. The counter directories
-  are now made writable by the server user, derived from where the `.gcno` files
-  actually are rather than named, because objects are in both `src` and
-  `objstore`. Measured in the failing configuration: 0 counters before and 34
-  after, through `lcov` and `genhtml` to a report, with 210 suites passing and
-  93.4 percent of lines covered. The runner also refuses a run that captured no
+  are now redirected with `GCOV_PREFIX` to a directory under `/tmp`, which is
+  writable and traversable whoever the server runs as, and returned beside their
+  objects before the report is built. Making the object directories writable was
+  tried first and is not sufficient: creating a file also needs execute on every
+  ancestor, and in CI the tree sits under the runner's home. Measured in a
+  configuration with an ancestor the server user cannot traverse, which defeats
+  the ownership fix: 0 counters before and 33 after, through `lcov` and `genhtml`
+  to a report. The runner also refuses a run that captured no
   counters, and says where they should have been, instead of leaving `lcov` to
   report an empty tree as a tool failure. The per-suite logs are uploaded, so a
   suite that fails inside this job no longer has its detail discarded when the

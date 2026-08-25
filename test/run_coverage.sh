@@ -56,73 +56,30 @@ make -C "$SRCDIR" PG_CONFIG="$PGC" COPT="--coverage" install >/dev/null 2>&1 || 
 # COMPILE time, and it writes it as the process that ran the code. This runner is
 # invoked under sudo in CI, so the build is root-owned, while lib.sh runs the
 # server as `postgres` whenever it is root (lib.sh:150). The backend could not
-# create a counter file next to a root-owned object, no .gcda was ever written,
-# and `lcov --capture` had nothing to find: the report has measured nothing since
+# create a counter file next to a root-owned object, so no .gcda was ever written
+# and `lcov --capture` had nothing to find. The report has measured nothing since
 # the job was added (#740).
 #
-# The directories are DERIVED from where the instrumentation actually landed, not
-# named. Objects are in src/ and objstore/ today, and a hardcoded src/ would
-# silently stop covering a directory added later -- and would leave the backend
-# unable to write there, which gcov reports as noise on stderr rather than as a
-# failure.
+# The counters are REDIRECTED rather than the source tree being opened up.
+# Chowning the object directories to the server user was the first fix and it is
+# not sufficient: creating a file needs execute on every ANCESTOR too, and in CI
+# the tree sits under the runner's home. Proved by construction -- with an
+# ancestor at mode 700 the chown succeeds, the directories are writable in
+# themselves, and zero counters are still written.
 #
-# Only when root. Run as an ordinary user the build and the server are the same
-# user and there is nothing to fix.
-if [ "$(id -u)" = 0 ]; then
-	_covdirs=$(find "$SRCDIR" -name '*.gcno' -printf '%h\n' | sort -u)
-	if [ -n "$_covdirs" ]; then
-		# shellcheck disable=SC2086
-		chown postgres $_covdirs
-		echo "-- counter directories made writable by the server user:" \
-			"$(printf '%s' "$_covdirs" | tr '\n' ' ')"
-
-		# Prove it, rather than assume the chown was sufficient. Creating a file
-		# needs write AND execute on the directory, and execute on every ancestor
-		# of it, so an ownership change alone is not the whole condition. The
-		# first version of this fix stopped at the chown, and CI still captured
-		# zero counters while reporting the directories as "made writable" (#740).
-		for _d in $_covdirs; do
-			if runuser -u postgres -- test -w "$_d" 2>/dev/null &&
-			   runuser -u postgres -- touch "$_d/.pgc_gcov_probe" 2>/dev/null; then
-				rm -f "$_d/.pgc_gcov_probe"
-			else
-				echo "-- WARNING: the server user cannot create files in $_d" \
-					"($(stat -c '%U:%G %a' "$_d"))"
-				# The ancestors, because traversal is the usual reason.
-				_p="$_d"
-				while [ "$_p" != "/" ]; do
-					echo "     $(stat -c '%U:%G %a' "$_p") $_p"
-					_p="$(dirname "$_p")"
-				done
-			fi
-		done
-	fi
-fi
-
-# Every suite except the drivers, the libraries, and the ones that build their
-# own server or need two majors. Kept in step with harness_selftest.sh's list.
-#
-# The two upgrade suites are excluded TOGETHER, and that pairing is the point
-# (#741). run_all_versions.sh gates both behind PGC_RUN_UPGRADE, in one block and
-# for one reason: they build a second copy of the extension and need an old
-# source this runner has no way to supply. pg_upgrade was excluded here when it
-# was written and extension_upgrade was not, so this runner discovered it, ran it
-# with no old source, and its ref fallback could not resolve in a tagless CI
-# checkout. run_coverage maps only rc 66 to SKIP, so that environment shortfall
-# was counted as a failed suite and the nightly read "1 failed
-# ( extension_upgrade)" every night while nothing was wrong with the product.
-#
-# Deciding to run an opt-in guard is run_all_versions.sh's job, not this one's.
-# test/selftest/220 derives the gated list from that block and asserts every name
-# in it is refused here, so a third upgrade suite cannot repeat this.
-not_a_suite() {
-	case "$1" in
-		lib|portlib|run_all_versions|build_all_versions|devloop|rebuild) return 0 ;;
-		native_scale|build_san|run_san|run_coverage) return 0 ;;
-		pg_upgrade|extension_upgrade) return 0 ;;
-		*) return 1 ;;
-	esac
-}
+# GCOV_PREFIX makes gcov write to $GCOV_PREFIX/<absolute path>.gcda instead.
+# /tmp is world-writable and world-traversable, so this works whoever the server
+# runs as and wherever the tree lives. GCOV_PREFIX_STRIP=0 keeps the full path,
+# which is what lets the counters be put back exactly where their .gcno are.
+# runuser passes the environment through, so the postmaster and its backends
+# inherit both variables.
+GCOV_PREFIX="${PGC_COV_GCOV_PREFIX:-/tmp/pgc-gcov}"
+GCOV_PREFIX_STRIP=0
+export GCOV_PREFIX GCOV_PREFIX_STRIP
+rm -rf "$GCOV_PREFIX"
+mkdir -p "$GCOV_PREFIX"
+chmod 1777 "$GCOV_PREFIX"
+echo "-- counters redirected to $GCOV_PREFIX"
 
 SUITES="${PGC_COV_SUITES:-}"
 if [ -z "$SUITES" ]; then
@@ -169,6 +126,22 @@ if [ "$pass" = 0 ]; then
 	echo "-- NO SUITE RAN, so this measures no coverage"
 	fail=$((fail + 1))
 fi
+
+# Put the counters back beside their .gcno, which is where lcov and gcov both
+# expect them. Done as this user, which is root under sudo, so no permission on
+# the source tree is needed at all.
+_moved=0
+if [ -d "$GCOV_PREFIX" ]; then
+	while IFS= read -r _f; do
+		[ -n "$_f" ] || continue
+		_dest="${_f#$GCOV_PREFIX}"
+		[ -d "$(dirname "$_dest")" ] || continue
+		cp -p "$_f" "$_dest" 2>/dev/null && _moved=$((_moved + 1))
+	done <<EOF
+$(find "$GCOV_PREFIX" -name '*.gcda' 2>/dev/null)
+EOF
+fi
+echo "-- counters returned beside their objects: $_moved"
 
 # A report built from no counters is not a report, which is the same reasoning as
 # the `pass = 0` guard above and the case that has actually been happening (#740).

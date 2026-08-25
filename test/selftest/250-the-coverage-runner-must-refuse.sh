@@ -33,8 +33,31 @@ check "the coverage runner refuses zero counters before it calls lcov (#740)" \
 	"$([ -n "$_cov_guard" ] && [ -n "$_cov_lcov" ] &&
 	   [ "$_cov_guard" -lt "$_cov_lcov" ] && echo yes || echo no)" "yes"
 
-# And the directories it makes writable are DERIVED from where the
-# instrumentation landed. Objects are in src/ and objstore/ today; a hardcoded
-# src/ would stop covering a directory added later, silently.
-check "the counter directories are derived from the .gcno files, not named (#740)" \
-	"$(awk '/id -u/,/^fi$/' "$_cov" | grep -c 'gcno')" "1"
+# ---- and the counters must be redirected somewhere always writable ---------
+#
+# Chowning the object directories to the server user was the first fix and it is
+# NOT sufficient: creating a file needs execute on every ANCESTOR too, and in CI
+# the tree sits under the runner's home. With an ancestor at mode 700 the chown
+# succeeds, the directories are writable in themselves, and zero counters are
+# still written. GCOV_PREFIX sidesteps the whole question by sending them to
+# /tmp, which is world-writable and world-traversable.
+#
+# Two ORDERING facts carry the fix, and order is what these check. Neither is
+# visible from the presence of the lines alone.
+_cov_export=$(grep -n '^export GCOV_PREFIX' "$_cov" | cut -d: -f1 | head -1)
+_cov_run=$(grep -n 'bash "\$SRCDIR/test/\${s}\.sh"' "$_cov" | cut -d: -f1 | head -1)
+_cov_back=$(grep -n 'counters returned beside their objects' "$_cov" | cut -d: -f1 | head -1)
+
+check "premise: the redirect, the suite invocation and the copy-back were located" \
+	"$([ -n "$_cov_export" ] && [ -n "$_cov_run" ] && [ -n "$_cov_back" ] &&
+	   echo yes || echo no)" "yes"
+
+# Set after the suites have run, it redirects nothing.
+check "GCOV_PREFIX is exported before the suites run (#740)" \
+	"$([ -n "$_cov_export" ] && [ -n "$_cov_run" ] &&
+	   [ "$_cov_export" -lt "$_cov_run" ] && echo yes || echo no)" "yes"
+
+# Copied back after the refusal, the refusal always sees zero.
+check "the counters are returned beside their objects before the refusal (#740)" \
+	"$([ -n "$_cov_back" ] && [ -n "$_cov_guard" ] &&
+	   [ "$_cov_back" -lt "$_cov_guard" ] && echo yes || echo no)" "yes"
