@@ -54,6 +54,21 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The columnar scan resolved `pgcolumnar.zone_map` once per chunk group per
+  predicate column instead of once per scan. Every group a predicate could
+  exclude ran a relation open with a lock and two catalog name lookups, then
+  closed again; the reuse cache that the write path uses for the same catalogs
+  is gated on a flag only the write path sets, so the read path never reached
+  it. The scan now holds the relation and the resolved index for its own
+  duration. Measured at 640 chunk groups with one predicate column, the same
+  binary with the session bypassed, backend instructions pinned to one PMU and
+  normalised by completed queries: 29,694,459 per query before and 26,676,590
+  after, a saving of 4,715 per chunk group and 1.113x on the query. That is 15%
+  of the cost #744 measured for locating the surviving groups at that size, so
+  the systable index probe, which stays inside the loop, remains the larger
+  part. Buffer counts are unchanged, which is the expected shape: a catcache or
+  relcache lookup reads no buffers once warm, so the buffers a probe costs are
+  the index scan. (#744)
 - A `date_trunc` predicate within one bucket of the end of the `timestamp` range
   raised `ERROR: timestamp out of range` on a columnar table instead of
   answering. The rewrite computes the next bucket boundary as `lo + step`, and

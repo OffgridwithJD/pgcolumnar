@@ -470,9 +470,35 @@ extern void PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *rel
 extern List *PgColumnarReadRowGroupList(uint64 storageId, Snapshot snapshot);
 extern List *PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber,
 									 Snapshot snapshot);
+/*
+ * #744: one scan's handle on pgcolumnar.zone_map.
+ *
+ * The skip loop probes zone_map once per chunk group per predicate column, and
+ * each probe used to open the relation and resolve two names. This holds them
+ * for the scan instead. It lives in the scan's own read state rather than in a
+ * static, deliberately: a scan that ereports never runs its end hook, and a
+ * shared static would then carry a Relation the resource owner has already
+ * released into the NEXT scan. Per-scan, the pointer dies with the scan, and on
+ * abort the resource owner releases the relation silently (resowner.c prints
+ * leak warnings only when isCommit).
+ *
+ * probes and opens are the pair that makes the saving measurable rather than
+ * asserted: without the cache they are equal, with it opens is 1.
+ */
+typedef struct PgColumnarZoneMapSession
+{
+	Relation	rel;
+	Oid			idxOid;
+	uint64		probes;
+	uint64		opens;
+} PgColumnarZoneMapSession;
+
+/* sess may be NULL, which is the old open-per-probe behaviour. */
 extern NativeZoneMapMetadata *PgColumnarReadZoneMapForColumn(uint64 storageId,
 									 uint64 groupNumber, int columnIndex,
-									 Snapshot snapshot);
+									 Snapshot snapshot,
+									 PgColumnarZoneMapSession *sess);
+extern void PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* per-table options catalog (spec 7.4) */
