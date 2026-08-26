@@ -197,13 +197,25 @@ echo "-- counters: $_gcda .gcda from $_gcno instrumented objects in src/"
 # (34 .gcda from 49 .gcno) and a bare ratio invites the reading that a third of
 # the objects went uncovered. Printed from the data rather than argued.
 find "$SRCDIR" \( -name '*.gcno' -o -name '*.gcda' \) -printf '%h %f\n' 2>/dev/null |
-	awk -v root="$SRCDIR/" '
+	awk -v srcdir="$SRCDIR" -v root="$SRCDIR/" '
 		{ ext = $2; sub(/.*\./, "", ext)
-		  dir = (index($1, root) == 1) ? substr($1, length(root) + 1) : $1
+		  dir = $1
+		  if (dir == srcdir) dir = "."
+		  else if (index(dir, root) == 1) dir = substr(dir, length(root) + 1)
 		  n[dir " " ext]++ }
 		END { for (k in n) { split(k, a, " ")
 			printf "     %-5s %-4s %s\n", n[k], a[2], a[1] } }' |
 	sort -k3,3 -k2,2
+# And NAMED, for anything outside the captured scope. The run above reported 13
+# instrumented objects at the repository root and 3 under objstore/, against 1
+# under objstore/ in the container, and a count is a shape rather than an
+# answer. This is the line that says what they are.
+_outside=$(find "$SRCDIR" -name '*.gcno' -not -path "$SRCDIR/src/*" \
+	-printf '%P\n' 2>/dev/null | sort)
+if [ -n "$_outside" ]; then
+	echo "-- instrumented objects outside src/, which the report does not cover:"
+	printf '     %s\n' $_outside | head -20
+fi
 if [ "$_gcda" = 0 ]; then
 	echo "FAIL  no .gcda counters were written, so this measures no coverage" >&2
 	echo "      gcov writes them beside the objects, as the user that ran the" >&2
@@ -211,7 +223,23 @@ if [ "$_gcda" = 0 ]; then
 	echo "      holding the .gcno files." >&2
 	# Say WHERE they went, if anywhere. A path mismatch and a permission refusal
 	# look identical from "0 counters", and they have different fixes.
-	_stray=$(find / -xdev -name '*.gcda' 2>/dev/null | head -5)
+	#
+	# GCOV_PREFIX is asked FIRST, and deliberately not left to the tree-wide
+	# walk below. That walk carries -xdev, which by definition will not cross a
+	# mount boundary, and /tmp is a separate tmpfs on this project's own dev
+	# container and on most systemd distributions. Counters sitting exactly
+	# where the redirect put them are invisible to it, and the run then reports
+	# "nothing wrote them" -- the opposite diagnosis, sending the reader to
+	# permissions when the counters exist and it is the copy-back that missed.
+	# Measured, one file under a tmpfs /tmp and none elsewhere: 0 found with
+	# -xdev, 1 without it, 1 probing the prefix.
+	#
+	# The tree-wide walk is kept as the fallback, because it answers a
+	# different question: gcov ignoring the redirect altogether and writing
+	# beside an object outside src/, which is on the same filesystem as the
+	# tree and which the src-scoped count above would not see.
+	_stray=$(find "$GCOV_PREFIX" -name '*.gcda' 2>/dev/null | head -5)
+	[ -n "$_stray" ] || _stray=$(find / -xdev -name '*.gcda' 2>/dev/null | head -5)
 	if [ -n "$_stray" ]; then
 		echo "      counters DO exist elsewhere, so this is a path mismatch:" >&2
 		printf '        %s\n' $_stray >&2

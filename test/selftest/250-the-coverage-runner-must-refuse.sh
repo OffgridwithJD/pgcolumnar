@@ -87,3 +87,31 @@ check "premise: the guard's count directory and the capture's were both located"
 
 check "the zero-counter guard counts the directory lcov captures (#740)" \
 	"$_cov_count_dir" "$_cov_cap_dir"
+
+# ---- and when it refuses, it must look where the redirect put them ---------
+#
+# Reported on the #745 cloud review. The refusal's second job is to separate a
+# path mismatch from a permission refusal, which look identical from "0
+# counters" and have different fixes. It did that with `find / -xdev`, and
+# -xdev by definition will not cross a mount boundary, while GCOV_PREFIX
+# defaults under /tmp -- a separate tmpfs on this project's own dev container
+# and on most systemd distributions. Counters sitting exactly where the
+# redirect put them are invisible to that walk, so the run reports "nothing
+# wrote them" and sends the reader to permissions.
+#
+# Measured, one file under a tmpfs /tmp and none elsewhere on the root
+# filesystem: -xdev found 0, the same walk without it found 1, probing the
+# prefix found 1.
+#
+# So GCOV_PREFIX must be asked BEFORE the tree-wide walk. Asked after, the
+# walk's answer wins and the misdiagnosis returns; present but unordered, this
+# reads as fixed and is not.
+_cov_prefix_probe=$(grep -n '_stray=\$(find "\$GCOV_PREFIX"' "$_cov" | cut -d: -f1 | head -1)
+_cov_xdev_probe=$(grep -n 'find / -xdev' "$_cov" | cut -d: -f1 | head -1)
+
+check "premise: both stray-counter probes were located" \
+	"$([ -n "$_cov_prefix_probe" ] && [ -n "$_cov_xdev_probe" ] && echo yes || echo no)" "yes"
+
+check "the refusal looks in GCOV_PREFIX before the tree-wide walk (#740)" \
+	"$([ -n "$_cov_prefix_probe" ] && [ -n "$_cov_xdev_probe" ] &&
+	   [ "$_cov_prefix_probe" -lt "$_cov_xdev_probe" ] && echo yes || echo no)" "yes"
