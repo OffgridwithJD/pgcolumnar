@@ -37,15 +37,15 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   closed again; the reuse cache that the write path uses for the same catalogs
   is gated on a flag only the write path sets, so the read path never reached
   it. The scan now holds the relation and the resolved index for its own
-  duration. Measured at 160 chunk groups with one predicate column, the same
-  binary with only the cache defeated, backend instructions pinned to one PMU:
-  18,280,385 per query before and 14,013,418 after, a saving of 26,669 per
-  chunk group and 1.304x on the query. That is 87% of the cost #744 measured
-  for locating the surviving groups at that size; the remainder is the index
-  probe itself. Buffer counts are unchanged, which is the expected shape: a
-  catcache or relcache lookup reads no buffers once warm, so the buffers a
-  probe costs are the index scan and the CPU it costs was mostly the open.
-  (#744)
+  duration. Measured at 640 chunk groups with one predicate column, the same
+  binary with the session bypassed, backend instructions pinned to one PMU and
+  normalised by completed queries: 29,694,459 per query before and 26,676,590
+  after, a saving of 4,715 per chunk group and 1.113x on the query. That is 15%
+  of the cost #744 measured for locating the surviving groups at that size, so
+  the systable index probe, which stays inside the loop, remains the larger
+  part. Buffer counts are unchanged, which is the expected shape: a catcache or
+  relcache lookup reads no buffers once warm, so the buffers a probe costs are
+  the index scan. (#744)
 
 - The nightly coverage report now measures something. It had never captured any
   coverage: the job failed every night from the night it was added on

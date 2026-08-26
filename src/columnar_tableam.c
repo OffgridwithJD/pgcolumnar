@@ -1954,7 +1954,6 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 			PgColumnarDiscardAllPendingWrites();
 			PgColumnarDiscardAllDeleteVectors();
 			PgColumnarDiscardFetchCache();
-
 			/*
 			 * Descriptors only: the memo contexts are TopTransactionContext
 			 * children, still live at callback time but taken by the

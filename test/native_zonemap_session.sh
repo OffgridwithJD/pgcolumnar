@@ -11,19 +11,31 @@
 # md_flush reuse cache could not help: it is gated on md_flush.active, which only
 # columnar_write_state.c ever sets, so the read path never reached it.
 #
-# Measured at 160 chunk groups, one predicate column, the same binary with only
-# the cache defeated, backend instructions with the process pinned to one PMU:
+# Measured at 640 chunk groups, one predicate column, the same binary with the
+# session bypassed (sess = NULL, which is byte-for-byte the old open-and-close
+# path), backend instructions pinned to one PMU and normalised by the number of
+# queries that completed in the window:
 #
-#     baseline  18,280,385 instructions per query
-#     cached    14,013,418
-#     saved     4,266,968  =  26,669 per chunk group,  1.304x
+#     baseline  29,699,977 / 29,688,941   ->  29,694,459 per query
+#     session   26,674,578 / 26,678,602   ->  26,676,590
+#     saved     3,017,869  =  4,715 per chunk group,  1.113x
 #
-# That is 87% of the whole locate cost #744 priced at this size, so what remains
-# is the systable index probe. Buffers did NOT move (186/314/567 at N=40/80/160
-# on both arms): a catcache or relcache lookup reads no buffers once warm, so
-# the buffer cost of a probe is the index scan alone and the CPU cost was mostly
-# the open. The two instruments measure different halves and neither alone
-# prices this.
+# Within-arm spread is 0.04% and 0.02% against a 10.2% effect. That is 15% of
+# the locate cost #744 priced at this size, so the systable index probe, which
+# stays inside the loop, is the larger part and #403 item 2 is not diminished
+# by this change.
+#
+# An earlier version of this comment claimed 1.304x and 87%. Both were wrong,
+# and the cause is worth keeping: the baseline arm defeated the cache with
+# `if (1)` while leaving `sess` non-NULL, so every probe opened a relation and
+# NONE of them closed, because the close is gated on `sess == NULL`. That arm
+# leaked a reference per group and did strictly more work than the code it was
+# standing in for. The tell was arithmetic: the "saving" exceeded the entire
+# cost of the component being optimised. Bypass with sess = NULL, which is the
+# real path, not a mutation of it.
+#
+# Buffers did NOT move on either arm: a catcache or relcache lookup reads no
+# buffers once warm, so the buffer cost of a probe is the index scan alone.
 #
 # WHAT THIS SUITE ASSERTS is the work done, not the answer. A scan returns the
 # same rows either way, so a correctness test cannot see this land or regress.
