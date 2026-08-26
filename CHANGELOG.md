@@ -31,6 +31,22 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The columnar scan resolved `pgcolumnar.zone_map` once per chunk group per
+  predicate column instead of once per scan. Every group a predicate could
+  exclude ran a relation open with a lock and two catalog name lookups, then
+  closed again; the reuse cache that the write path uses for the same catalogs
+  is gated on a flag only the write path sets, so the read path never reached
+  it. The scan now holds the relation and the resolved index for its own
+  duration. Measured at 160 chunk groups with one predicate column, the same
+  binary with only the cache defeated, backend instructions pinned to one PMU:
+  18,280,385 per query before and 14,013,418 after, a saving of 26,669 per
+  chunk group and 1.304x on the query. That is 87% of the cost #744 measured
+  for locating the surviving groups at that size; the remainder is the index
+  probe itself. Buffer counts are unchanged, which is the expected shape: a
+  catcache or relcache lookup reads no buffers once warm, so the buffers a
+  probe costs are the index scan and the CPU it costs was mostly the open.
+  (#744)
+
 - The nightly coverage report now measures something. It had never captured any
   coverage: the job failed every night from the night it was added on
   2026-07-31, always at `lcov capture produced nothing`. `test/run_coverage.sh`
