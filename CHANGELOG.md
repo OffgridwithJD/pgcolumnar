@@ -51,6 +51,24 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   suite that fails inside this job no longer has its detail discarded when the
   runner is torn down. (#740)
 
+- Five differential assertions named an `ORDER BY` they could not fail on. The
+  oracle in `test/lib.sh` hashes `string_agg(_row::text, chr(10) ORDER BY t)`,
+  which sorts the rendered rows before comparing them: two results holding the
+  same rows in opposite orders hash identically. That is the right comparison for
+  the ~150 call sites that do not name an order, and no comparison at all for the
+  five that did: two in `differential.sh`, one in `native_format.sh`, and two in
+  `sorted_projection.sh`, whose whole subject is sorted output. Measured on the
+  oracle expression itself: five rows forward and the same five reversed both
+  hash to `2603e60e802d02d5370794d279cb522a`, while a genuinely different row set
+  hashes differently, so it was order-blind rather than broken. A second oracle,
+  `pgc_seq_hash`, hashes `ORDER BY row_number() OVER ()` and so keeps the query's
+  own output order; `diff_query_ordered` is its comparison helper, and the five
+  sites now use it. It keeps the `EMPTY` and unique `QUERY_ERROR.$seq` sentinels,
+  so empty-versus-empty and error-versus-error still cannot pass vacuously
+  (#418). A new `test/selftest` part enforces the split in both directions: a
+  `diff_query` whose query names an `ORDER BY` now fails the harness self-test,
+  as does a `diff_query_ordered` whose query names none.
+
 - The extension-upgrade guard now runs in CI, and had never verified an upgrade
   before. `test/extension_upgrade.sh` catches a break that is invisible until a
   user upgrades: a renamed C link name leaves every existing install pointing at

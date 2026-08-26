@@ -783,6 +783,42 @@ SQL
 	printf '%s\n' "$res"
 }
 
+# pgc_seq_hash QUERY -> md5 over the rendered rows IN THE ORDER THE QUERY
+# RETURNED THEM, or EMPTY for a genuinely empty result set.
+#
+# The sibling pgc_set_hash sorts the rendered rows before hashing them
+# (string_agg(... ORDER BY t)). That is what makes it a SET comparison, and it is
+# right for the ~150 diff_query sites that do not name an order. It is wrong for
+# the ones that do: an ORDER BY the oracle cannot fail on is not an assertion.
+# Measured on the oracle itself -- five rows forward and the same five reversed
+# both hash to 2603e60e802d02d5370794d279cb522a, while a genuinely different row
+# set does hash differently, so the set oracle is order-blind rather than broken.
+#
+# row_number() OVER () numbers the rows as they arrive from the subquery and
+# string_agg then orders on that number, so what is hashed is the query's own
+# output order. The sentinels are pgc_set_hash's, unchanged: a genuinely empty
+# result hashes to EMPTY, and a query that errored returns a unique
+# QUERY_ERROR.$seq so two failing queries can never compare equal and pass
+# vacuously (#418).
+pgc_seq_hash() {
+	local query="$1" out res
+	out="$PGC_SQLDIR/q.$$.$RANDOM.sql"
+	cat > "$out" <<SQL
+SELECT coalesce(md5(string_agg(t, chr(10) ORDER BY n)), \$e\$EMPTY\$e\$)
+FROM (SELECT row_number() OVER () AS n, _row::text AS t
+      FROM ( $query ) _row) _s;
+SQL
+	res="$(psql_file "$out")"
+	rm -f "$out"
+	if [ -z "$res" ]; then
+		local seq
+		seq=$(( $(cat "$PGC_WORKDIR/.query_error_seq" 2>/dev/null || echo 0) + 1 ))
+		echo "$seq" > "$PGC_WORKDIR/.query_error_seq"
+		res="QUERY_ERROR.$seq"
+	fi
+	printf '%s\n' "$res"
+}
+
 # diff_query LABEL "QUERY with %T placeholder for the table name"
 # Runs QUERY against t_heap and t_col and asserts identical result sets.
 diff_query() {
@@ -796,6 +832,43 @@ diff_query() {
 	check "$label" "$hc" "$hq"
 }
 
+# diff_query_ordered LABEL "QUERY with %T placeholder for the table name"
+# As diff_query, but the row ORDER is part of the assertion. Use this for any
+# query that names an ORDER BY, and diff_query for everything else. Keeping the
+# two apart is deliberate: most comparisons here want set semantics, and only a
+# query that asks for an order can be wrong about one. test/selftest enforces the
+# split so a new ordered site cannot quietly land on the order-blind oracle.
+diff_query_ordered() {
+	local label="$1" tmpl="$2"
+	local hq hc
+	hq="$(pgc_seq_hash "${tmpl//%T/t_heap}")"
+	hc="$(pgc_seq_hash "${tmpl//%T/t_col}")"
+	# A blank result means the query errored; surface it as a distinct value.
+	[ -z "$hq" ] && hq="HEAP_ERROR"
+	[ -z "$hc" ] && hc="COL_ERROR"
+	check "$label" "$hc" "$hq"
+}
+# pgc_check_ordered_oracle
+# The premise behind every diff_query_ordered call: the ordered oracle must be
+# able to fail on row order, and the set oracle must deliberately not be. Run it
+# once in any suite that uses diff_query_ordered. Without it those assertions
+# could pass by construction, which is the failure this whole split is about --
+# an assertion that cannot fail for the reason it names is not an assertion.
+# Static checks cannot see this; it runs against the cluster under test.
+pgc_check_ordered_oracle() {
+	local fwd rev sfwd srev again
+	fwd="$(pgc_seq_hash 'SELECT g FROM generate_series(1,5) g ORDER BY g')"
+	rev="$(pgc_seq_hash 'SELECT g FROM generate_series(1,5) g ORDER BY g DESC')"
+	again="$(pgc_seq_hash 'SELECT g FROM generate_series(1,5) g ORDER BY g')"
+	sfwd="$(pgc_set_hash 'SELECT g FROM generate_series(1,5) g ORDER BY g')"
+	srev="$(pgc_set_hash 'SELECT g FROM generate_series(1,5) g ORDER BY g DESC')"
+	check "premise: the ordered oracle is order-sensitive" \
+		"$([ "$fwd" != "$rev" ] && echo yes || echo no)" "yes"
+	check "premise: the ordered oracle agrees with itself" \
+		"$([ "$fwd" = "$again" ] && echo yes || echo no)" "yes"
+	check "control: the set oracle is order-blind by design" \
+		"$([ "$sfwd" = "$srev" ] && echo yes || echo no)" "yes"
+}
 # ---- pair construction -----------------------------------------------------
 
 # make_pair "COLUMN DEFS" ["WITH options for columnar"]

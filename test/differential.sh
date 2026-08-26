@@ -126,8 +126,11 @@ diff_query "c_jsonb eq" "SELECT id FROM %T WHERE c_jsonb = jsonb_build_object('n
 diff_query "c_arr eq"   "SELECT id FROM %T WHERE c_arr = ARRAY[600,601,-600]"
 
 # Ordered projections with LIMIT (deterministic order on unique id).
-diff_query "order limit head" "SELECT id, c_int, c_text FROM %T ORDER BY id LIMIT 25"
-diff_query "order limit tail" "SELECT id, c_num, c_vc FROM %T ORDER BY id DESC LIMIT 25"
+# The premise behind the ordered comparisons below (test/lib.sh).
+pgc_check_ordered_oracle
+
+diff_query_ordered "order limit head" "SELECT id, c_int, c_text FROM %T ORDER BY id LIMIT 25"
+diff_query_ordered "order limit tail" "SELECT id, c_num, c_vc FROM %T ORDER BY id DESC LIMIT 25"
 
 # Compound predicate mixing several columns.
 diff_query "compound" "SELECT id FROM %T WHERE c_int > 0 AND c_bool AND c_vc IS NOT NULL AND c_num < 8000"

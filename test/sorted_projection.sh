@@ -52,7 +52,10 @@ load_pair "SELECT g, ((g*7919)%1000), g::bigint*2, 'r'||g FROM generate_series(1
 echo "-- results identical to heap before sorting"
 diff_query "pre range"      "SELECT id, v, t FROM %T WHERE k BETWEEN 100 AND 120"
 diff_query "pre equality"   "SELECT id FROM %T WHERE k = 500"
-diff_query "pre order-by"   "SELECT k, v FROM %T ORDER BY k, v"
+# The premise behind the ordered comparisons below (test/lib.sh).
+pgc_check_ordered_oracle
+
+diff_query_ordered "pre order-by"   "SELECT k, v FROM %T ORDER BY k, v"
 diff_query "pre aggregate"  "SELECT k, count(*), sum(v) FROM %T GROUP BY k"
 diff_query "pre star"       "SELECT * FROM %T WHERE id % 997 = 0"
 
@@ -69,7 +72,7 @@ q "SELECT pgcolumnar.vacuum_sorted('t_col', 'k');" >/dev/null
 echo "-- results still identical to heap after sorting"
 diff_query "post range"     "SELECT id, v, t FROM %T WHERE k BETWEEN 100 AND 120"
 diff_query "post equality"  "SELECT id FROM %T WHERE k = 500"
-diff_query "post order-by"  "SELECT k, v FROM %T ORDER BY k, v"
+diff_query_ordered "post order-by"  "SELECT k, v FROM %T ORDER BY k, v"
 diff_query "post aggregate" "SELECT k, count(*), sum(v) FROM %T GROUP BY k"
 diff_query "post star"      "SELECT * FROM %T WHERE id % 997 = 0"
 

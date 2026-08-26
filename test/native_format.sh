@@ -62,7 +62,9 @@ check "native vector_length is 1024" \
 	"$(q "SELECT vector_length FROM pgcolumnar.storage WHERE storage_id = $sid;")" "1024"
 
 # Within a version, columnar must return exactly what heap returns for every type.
-diff_query "diverse-type round-trip matches heap" "SELECT * FROM %T ORDER BY id"
+# The premise behind the ordered comparison below (test/lib.sh).
+pgc_check_ordered_oracle
+diff_query_ordered "diverse-type round-trip matches heap" "SELECT * FROM %T ORDER BY id"
 
 # --- 2: unsupported metapage version is rejected, not misread ----------------
 psql_run "CREATE TABLE bad (id int, v text) USING pgcolumnar;"
