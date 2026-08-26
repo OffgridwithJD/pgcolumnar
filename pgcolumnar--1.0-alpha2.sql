@@ -374,6 +374,49 @@ CREATE FUNCTION pgcolumnar.set_options(
 DECLARE
 	col name;
 BEGIN
+	/*
+	 * The options are per-relation and are read by the columnar writer, so a row
+	 * recorded for a relation that is not columnar can never be used. Storing one
+	 * is not merely useless: the drop hook that clears pgcolumnar.options fires
+	 * only for columnar relations, so the row outlives the table and is left
+	 * keyed to a dangling oid that a later relation reusing that oid inherits.
+	 * Measured before this guard, on the same cluster: set_options on a heap
+	 * table stored a row, DROP TABLE left it behind, and regclass then rendered
+	 * as the bare oid; the identical sequence on a columnar table cleaned up.
+	 *
+	 * Rejecting is safe for the one workflow that could want the other order:
+	 * ALTER TABLE ... SET ACCESS METHOD pgcolumnar keeps the relation's oid
+	 * (measured), so options set after the conversion apply to the same relation
+	 * a caller would have been trying to name before it.
+	 *
+	 * relkind is part of the test, and it is what makes the guard match the
+	 * cleanup rather than merely look strict. The drop hook returns before it
+	 * examines the access method for anything that is not an ordinary table
+	 * (columnar_tableam.c: `if (get_rel_relkind(objectId) != RELKIND_RELATION)
+	 * return;`), so 'r' is exactly the set of relations whose options row can
+	 * ever be cleaned up. From PG17 a PARTITIONED table may carry an access
+	 * method, so `relam = pgcolumnar` alone admits a parent that has no storage,
+	 * that the writer never writes, and whose row the hook will never clear.
+	 * Measured on 17.6 with the amname-only test: accepted, one row recorded,
+	 * and the row still there after DROP TABLE keyed to the dropped oid, while
+	 * an ordinary columnar table in the same run cleaned up. PG16 and earlier
+	 * cannot reach it -- they refuse `PARTITION BY ... USING pgcolumnar`
+	 * outright, checked on 16.14 -- so this is PG17, 18 and 19.
+	 */
+	IF NOT EXISTS (SELECT 1 FROM pg_class c
+					 JOIN pg_am a ON a.oid = c.relam
+					WHERE c.oid = table_name
+					  AND a.amname = 'pgcolumnar'
+					  AND c.relkind = 'r') THEN
+		RAISE EXCEPTION 'relation "%" is not a columnar table', table_name
+			USING HINT = 'Per-table options are read by the columnar writer and '
+				'apply only to an ordinary table using the pgcolumnar access '
+				'method. A partitioned table has no storage of its own: set the '
+				'options on each partition. Otherwise convert the table first '
+				'with ALTER TABLE ... SET ACCESS METHOD pgcolumnar, then set '
+				'the options.';
+	END IF;
+
 	IF encode_effort IS NOT NULL AND
 	   encode_effort NOT IN ('full', 'fast') THEN
 		RAISE EXCEPTION 'unknown columnar encode_effort "%"', encode_effort

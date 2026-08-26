@@ -605,6 +605,146 @@ CREATE OR REPLACE FUNCTION pgcolumnar.require_caller_select(rel regclass)
 AS '$libdir/pgcolumnar', $function$pgcolumnar_require_caller_select$function$
 ;
 
+-- set_options gained a guard in 1.0-alpha2: it now rejects a relation that
+-- does not use the pgcolumnar access method, rather than recording a row in
+-- pgcolumnar.options that nothing can read and that the drop hook (columnar
+-- relations only) would leave behind as a dangling oid.
+CREATE OR REPLACE FUNCTION pgcolumnar.set_options(
+	table_name regclass,
+	chunk_group_row_limit int DEFAULT NULL,
+	stripe_row_limit int DEFAULT NULL,
+	compression name DEFAULT NULL,
+	compression_level int DEFAULT NULL,
+	encode_effort name DEFAULT NULL,
+	sort_by name[] DEFAULT NULL)
+	RETURNS void
+	LANGUAGE plpgsql
+	AS $set_options$
+DECLARE
+	col name;
+BEGIN
+	/*
+	 * The options are per-relation and are read by the columnar writer, so a row
+	 * recorded for a relation that is not columnar can never be used. Storing one
+	 * is not merely useless: the drop hook that clears pgcolumnar.options fires
+	 * only for columnar relations, so the row outlives the table and is left
+	 * keyed to a dangling oid that a later relation reusing that oid inherits.
+	 * Measured before this guard, on the same cluster: set_options on a heap
+	 * table stored a row, DROP TABLE left it behind, and regclass then rendered
+	 * as the bare oid; the identical sequence on a columnar table cleaned up.
+	 *
+	 * Rejecting is safe for the one workflow that could want the other order:
+	 * ALTER TABLE ... SET ACCESS METHOD pgcolumnar keeps the relation's oid
+	 * (measured), so options set after the conversion apply to the same relation
+	 * a caller would have been trying to name before it.
+	 *
+	 * relkind is part of the test, and it is what makes the guard match the
+	 * cleanup rather than merely look strict. The drop hook returns before it
+	 * examines the access method for anything that is not an ordinary table
+	 * (columnar_tableam.c: `if (get_rel_relkind(objectId) != RELKIND_RELATION)
+	 * return;`), so 'r' is exactly the set of relations whose options row can
+	 * ever be cleaned up. From PG17 a PARTITIONED table may carry an access
+	 * method, so `relam = pgcolumnar` alone admits a parent that has no storage,
+	 * that the writer never writes, and whose row the hook will never clear.
+	 * Measured on 17.6 with the amname-only test: accepted, one row recorded,
+	 * and the row still there after DROP TABLE keyed to the dropped oid, while
+	 * an ordinary columnar table in the same run cleaned up. PG16 and earlier
+	 * cannot reach it -- they refuse `PARTITION BY ... USING pgcolumnar`
+	 * outright, checked on 16.14 -- so this is PG17, 18 and 19.
+	 */
+	IF NOT EXISTS (SELECT 1 FROM pg_class c
+					 JOIN pg_am a ON a.oid = c.relam
+					WHERE c.oid = table_name
+					  AND a.amname = 'pgcolumnar'
+					  AND c.relkind = 'r') THEN
+		RAISE EXCEPTION 'relation "%" is not a columnar table', table_name
+			USING HINT = 'Per-table options are read by the columnar writer and '
+				'apply only to an ordinary table using the pgcolumnar access '
+				'method. A partitioned table has no storage of its own: set the '
+				'options on each partition. Otherwise convert the table first '
+				'with ALTER TABLE ... SET ACCESS METHOD pgcolumnar, then set '
+				'the options.';
+	END IF;
+
+	IF encode_effort IS NOT NULL AND
+	   encode_effort NOT IN ('full', 'fast') THEN
+		RAISE EXCEPTION 'unknown columnar encode_effort "%"', encode_effort
+			USING HINT = 'Valid values are "full" and "fast".';
+	END IF;
+
+	IF compression IS NOT NULL AND
+	   compression NOT IN ('none', 'pglz', 'lz4', 'zstd') THEN
+		RAISE EXCEPTION 'unknown columnar compression "%"', compression;
+	END IF;
+
+	/*
+	 * Bound the integer limits to the same valid ranges as the instance-wide
+	 * GUCs (pgcolumnar.chunk_group_row_limit, pgcolumnar.stripe_row_limit,
+	 * pgcolumnar.compression_level). A per-table value outside these ranges is
+	 * rejected here rather than stored: a limit of zero or below would produce
+	 * a stripe whose recorded chunk_row_count is zero and make the row-number
+	 * arithmetic (chunk id = offset / chunk_row_count) divide by zero on
+	 * delete, update, and index fetch.
+	 */
+	IF chunk_group_row_limit IS NOT NULL AND chunk_group_row_limit < 100 THEN
+		RAISE EXCEPTION 'chunk_group_row_limit must be at least 100';
+	END IF;
+	IF stripe_row_limit IS NOT NULL AND stripe_row_limit < 1000 THEN
+		RAISE EXCEPTION 'stripe_row_limit must be at least 1000';
+	END IF;
+	IF compression_level IS NOT NULL AND
+	   (compression_level < 1 OR compression_level > 22) THEN
+		RAISE EXCEPTION 'compression_level must be between 1 and 22';
+	END IF;
+
+	/*
+	 * sort_by declares the physical sort key applied by vacuum_sorted() with no
+	 * explicit columns (#288). This is a cheap early check only: each named
+	 * column must exist, not be dropped, and not be a VIRTUAL generated column
+	 * (its value is not stored, so it cannot be sorted on). Orderability
+	 * (a default btree ordering operator) is NOT checked here -- the C apply
+	 * path is authoritative and re-resolves and re-validates the names every
+	 * run, because a column can be dropped or altered after it is declared.
+	 * attgenerated is '' or 's' before PG18; 'v' only exists from PG18, so the
+	 * "<> 'v'" test is correct and inert on older majors.
+	 */
+	IF sort_by IS NOT NULL THEN
+		FOREACH col IN ARRAY sort_by LOOP
+			IF NOT EXISTS (SELECT 1 FROM pg_attribute a
+						   WHERE a.attrelid = table_name
+							 AND a.attname = col
+							 AND a.attnum > 0
+							 AND NOT a.attisdropped
+							 AND a.attgenerated <> 'v') THEN
+				RAISE EXCEPTION 'column "%" cannot be used in sort_by for table %',
+					col, table_name
+					USING HINT = 'The column must exist, must not be dropped, '
+						'and must not be a VIRTUAL generated column.';
+			END IF;
+		END LOOP;
+	END IF;
+
+	INSERT INTO pgcolumnar.options AS o
+		(regclass, chunk_group_row_limit, stripe_row_limit,
+		 compression, compression_level, encode_effort, sort_by)
+	VALUES (table_name, chunk_group_row_limit, stripe_row_limit,
+			compression, compression_level, encode_effort, sort_by)
+	ON CONFLICT (regclass) DO UPDATE SET
+		chunk_group_row_limit =
+			COALESCE(EXCLUDED.chunk_group_row_limit, o.chunk_group_row_limit),
+		stripe_row_limit =
+			COALESCE(EXCLUDED.stripe_row_limit, o.stripe_row_limit),
+		compression =
+			COALESCE(EXCLUDED.compression, o.compression),
+		compression_level =
+			COALESCE(EXCLUDED.compression_level, o.compression_level),
+		encode_effort =
+			COALESCE(EXCLUDED.encode_effort, o.encode_effort),
+		sort_by =
+			COALESCE(EXCLUDED.sort_by, o.sort_by);
+END;
+$set_options$;
+
 CREATE OR REPLACE FUNCTION pgcolumnar.sort_status(rel regclass, OUT sort_key name[], OUT total_groups bigint, OUT sorted_groups bigint, OUT appended_groups bigint, OUT sorted_rows bigint, OUT appended_rows bigint)
  RETURNS record
  LANGUAGE plpgsql

@@ -212,12 +212,74 @@ expect_error "reject stripe_row_limit 5" \
 expect_error "reject compression_level 99" \
 	"SELECT pgcolumnar.set_options('opt'::regclass, compression_level => 99);"
 
+# A relation that is not columnar must be refused rather than recorded. The drop
+# hook that clears pgcolumnar.options fires only for columnar relations, so a row
+# stored for a heap table outlives the table and is left keyed to a dangling oid,
+# which a later relation reusing that oid inherits. Measured before the guard, on
+# one cluster: the heap table's row survived DROP TABLE and regclass then rendered
+# as the bare oid, while the identical sequence on a columnar table cleaned up.
+q "CREATE TABLE opt_heap (a int) USING heap;" >/dev/null
+expect_error "reject set_options on a heap table" \
+	"SELECT pgcolumnar.set_options('opt_heap'::regclass, chunk_group_row_limit => 1000);"
+# expect_error passes on ANY error, including a typo in this file's own SQL, so
+# assert the reason too. Captured and then matched: piping an erroring psql into
+# grep reports on the pipeline rather than on the message.
+# `|| true` because this file runs under `set -e` and the call is EXPECTED to
+# fail: without it the assignment takes the non-zero status and aborts the suite
+# right here, which is what it did the first time. expect_error above survives
+# only because it sits inside an `if`.
+opt_heap_err="$(run_pg "$PSQL -c \"SELECT pgcolumnar.set_options('opt_heap'::regclass, chunk_group_row_limit => 1000);\"" 2>&1 || true)"
+check "the refusal says the relation is not columnar" \
+	"$(case "$opt_heap_err" in *"is not a columnar table"*) echo yes ;; *) echo "no [$opt_heap_err]" ;; esac)" \
+	"yes"
+check "nothing was recorded for the heap table" \
+	"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass = 'opt_heap'::regclass;")" "0"
+q "DROP TABLE opt_heap;" >/dev/null
+
+# A PARTITIONED parent is the same leak through a different door, and the access
+# method alone does not close it. From PG17 a partitioned table may carry an
+# access method, so `relam = pgcolumnar` admits a parent that has no storage of
+# its own, that the writer never writes, and whose options row the drop hook will
+# never clear: the hook returns early for anything that is not RELKIND_RELATION
+# (columnar_tableam.c). Measured on 17.6 before the relkind test was added:
+# accepted, one row recorded, and the row still present after DROP TABLE keyed to
+# the dropped oid. PG16 and earlier refuse `PARTITION BY ... USING pgcolumnar`
+# outright (checked on 16.14), so the arm is gated rather than skipped silently.
+audit_srv="$(q 'SHOW server_version_num')"
+if [ "$audit_srv" -ge 170000 ]; then
+	q "CREATE TABLE opt_part (id int, v text) PARTITION BY RANGE (id) USING pgcolumnar;" >/dev/null
+	# relkind is type "char", so it needs the cast: without it the concatenation
+	# raises `operator is not unique: "char" || unknown`, the premise returns empty,
+	# and the arm below would be believed on no evidence.
+	check "premise: this major really lets a partitioned parent carry the AM" \
+		"$(q "SELECT c.relkind::text || '/' || a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.relname = 'opt_part';")" \
+		"p/pgcolumnar"
+	expect_error "reject set_options on a partitioned parent" \
+		"SELECT pgcolumnar.set_options('opt_part'::regclass, chunk_group_row_limit => 1000);"
+	check "nothing was recorded for the partitioned parent" \
+		"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass = 'opt_part'::regclass;")" "0"
+	# And the leaf, which is an ordinary table, must still be accepted -- the guard
+	# has to refuse the parent without refusing the thing that actually stores rows.
+	q "CREATE TABLE opt_part_1 PARTITION OF opt_part FOR VALUES FROM (0) TO (100);" >/dev/null
+	q "SELECT pgcolumnar.set_options('opt_part_1'::regclass, chunk_group_row_limit => 1000);" >/dev/null
+	check "the partition itself is still accepted" \
+		"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass = 'opt_part_1'::regclass;")" "1"
+	q "DROP TABLE opt_part;" >/dev/null
+else
+	echo "-- PG$((audit_srv / 10000)) refuses PARTITION BY ... USING pgcolumnar; parent arm not applicable"
+fi
+
 # valid values are accepted, and delete/update work (no divide-by-zero)
 q "SELECT pgcolumnar.set_options('opt'::regclass,
      chunk_group_row_limit => 1000, stripe_row_limit => 2000, compression_level => 9);" >/dev/null
 q "INSERT INTO opt SELECT g FROM generate_series(1,10) g;" >/dev/null
 q "DELETE FROM opt WHERE a=5;" >/dev/null
 check "valid options delete works" "$(q "SELECT count(*) FROM opt;")" "9"
+# The positive control for the refusal above: the same call, on a columnar table,
+# is accepted AND recorded. Without this the deny arm could pass because
+# set_options rejects everything.
+check "the same call on a columnar table is recorded" \
+	"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass = 'opt'::regclass;")" "1"
 q "DROP TABLE opt;" >/dev/null
 
 # ---------------------------------------------------------------------------
