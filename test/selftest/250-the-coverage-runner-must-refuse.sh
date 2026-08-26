@@ -94,8 +94,9 @@ check "the zero-counter guard counts the directory lcov captures (#740)" \
 # path mismatch from a permission refusal, which look identical from "0
 # counters" and have different fixes. It did that with `find / -xdev`, and
 # -xdev by definition will not cross a mount boundary, while GCOV_PREFIX
-# defaults under /tmp -- a separate tmpfs on this project's own dev container
-# and on most systemd distributions. Counters sitting exactly where the
+# defaults under /tmp -- a separate tmpfs on both boxes this was measured on,
+# this project's dev container and the development host. How common that is
+# elsewhere I have not measured. Counters sitting exactly where the
 # redirect put them are invisible to that walk, so the run reports "nothing
 # wrote them" and sends the reader to permissions.
 #

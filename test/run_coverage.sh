@@ -240,8 +240,9 @@ if [ "$_gcda" = 0 ]; then
 	#
 	# GCOV_PREFIX is asked FIRST, and deliberately not left to the tree-wide
 	# walk below. That walk carries -xdev, which by definition will not cross a
-	# mount boundary, and /tmp is a separate tmpfs on this project's own dev
-	# container and on most systemd distributions. Counters sitting exactly
+	# mount boundary, and /tmp is a separate tmpfs on both boxes this was
+	# measured on, this project's dev container and the development host.
+	# How common that is elsewhere I have not measured. Counters sitting exactly
 	# where the redirect put them are invisible to it, and the run then reports
 	# "nothing wrote them" -- the opposite diagnosis, sending the reader to
 	# permissions when the counters exist and it is the copy-back that missed.
