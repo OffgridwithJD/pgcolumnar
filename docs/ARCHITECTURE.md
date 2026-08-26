@@ -190,7 +190,12 @@ parallel paths, so plans are stable). The custom scan computes the referenced
 column set from the target list and restriction clauses and pushes it into the
 reader (projection pushdown), and translates simple `column op const` clauses
 into scan keys so the reader's zone maps remove row groups and vectors that
-cannot match (qual pushdown). The executor always re-applies the full
+cannot match (qual pushdown). A clause of the form `f(column) op const` is also
+translated, when `f` is a function whose preimage is a contiguous interval. The
+only such function today is `date_trunc` on `timestamp`. A zone map holds the
+column and not the function of it, so without this the scan reads every group.
+Equality becomes two keys, one for each end of the bucket. The ordered
+comparisons become one key each. The executor always re-applies the full
 restriction clauses as a filter, so skipping never changes results. The scan is
 the scalar per-row path (`PgColumnarScanNext`). Through a `create_upper_paths_hook`
 the module adds the vectorized aggregate path for a supported

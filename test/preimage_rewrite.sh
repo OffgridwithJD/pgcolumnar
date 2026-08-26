@@ -102,6 +102,96 @@ check_text "the actual ROWS match the heap, not just the count" \
 	"$(q "SELECT v FROM pre_c WHERE date_trunc('day', ts) = $DAY ORDER BY v" | md5sum)" \
 	"$(q "SELECT v FROM pre_h WHERE date_trunc('day', ts) = $DAY ORDER BY v" | md5sum)"
 
+# ---- the ordered operators (#403 item 1 residue) ---------------------------
+#
+# #739 inverted equality only. Monotonicity is what makes the ORDERED operators
+# invertible too, and they are the shape a time-series filter actually takes:
+# `date_trunc('day', ts) >= X` reads every chunk group today while the range it
+# is equivalent to reads two.
+#
+# Each arm names the explicit range it is equivalent to and asserts against THAT
+# and against the heap. Deriving the expected answer here rather than hardcoding
+# it is deliberate: the fixture carries NULL, 'infinity' and '-infinity' rows, and
+# the heap mirror is the only oracle that gets those right without me restating
+# date_trunc's semantics in the test.
+ord_arm() {	# ord_arm <label> <trunc-predicate> <equivalent-range-predicate>
+	local label="$1" tp="$2" rp="$3"
+	local r g
+	r="$(removed "SELECT count(*) FROM pre_c WHERE $rp")"
+	g="$(removed "SELECT count(*) FROM pre_c WHERE $tp")"
+	check_num "premise: the range for [$label] prunes, so there is something to remove" \
+		"$([ -n "$r" ] && [ "$r" -gt 0 ] && echo 1 || echo 0)" 1
+	check_num "[$label] prunes chunk groups" \
+		"$([ -n "$g" ] && [ "$g" -gt 0 ] && echo 1 || echo 0)" 1
+	check_num "[$label] prunes as well as the equivalent explicit range" "$g" "$r"
+	check_num "[$label] returns the range's answer" \
+		"$(q1 "SELECT count(*) FROM pre_c WHERE $tp;")" \
+		"$(q1 "SELECT count(*) FROM pre_c WHERE $rp;")"
+	check_num "[$label] returns the heap's answer" \
+		"$(q1 "SELECT count(*) FROM pre_c WHERE $tp;")" \
+		"$(q1 "SELECT count(*) FROM pre_h WHERE $tp;")"
+	check_text "[$label] returns the heap's ROWS, not just its count" \
+		"$(q "SELECT v FROM pre_c WHERE $tp ORDER BY v" | md5sum)" \
+		"$(q "SELECT v FROM pre_h WHERE $tp ORDER BY v" | md5sum)"
+}
+
+NEXT="timestamp '2024-02-02'"
+ord_arm "ts_trunc >= c"  "date_trunc('day', ts) >= $DAY"  "ts >= $DAY"
+ord_arm "ts_trunc > c"   "date_trunc('day', ts) > $DAY"   "ts >= $NEXT"
+ord_arm "ts_trunc < c"   "date_trunc('day', ts) < $DAY"   "ts < $DAY"
+ord_arm "ts_trunc <= c"  "date_trunc('day', ts) <= $DAY"  "ts < $NEXT"
+
+# The operand order is swapped. For equality that is a no-op; for these it
+# COMMUTES the strategy, and reusing the unswapped one inverts the bound and
+# drops rows. `c < f(ts)` is `f(ts) > c`, not `f(ts) < c`.
+ord_arm "c < ts_trunc (reversed)"  "$DAY < date_trunc('day', ts)"  "ts >= $NEXT"
+ord_arm "c >= ts_trunc (reversed)" "$DAY >= date_trunc('day', ts)" "ts < $NEXT"
+
+# A constant that is not itself truncated. Under equality this is unsatisfiable
+# and #739 declines it. Under the ordered operators it is SATISFIABLE, and the
+# bound moves to the next boundary because date_trunc only ever returns truncated
+# values. Treating it the way equality treats it would lose every row in the
+# partial bucket.
+HALF="timestamp '2024-02-01 12:00'"
+ord_arm "ts_trunc >= c, c not truncated" "date_trunc('day', ts) >= $HALF" "ts >= $NEXT"
+ord_arm "ts_trunc < c, c not truncated"  "date_trunc('day', ts) < $HALF"  "ts < $NEXT"
+
+# ---- near the end of the timestamp range, the rewrite must DECLINE ---------
+#
+# hi = lo + step raises `timestamp out of range` within one step of the maximum,
+# and an ereport in the planner fails the whole query instead of declining to
+# prune. This was reachable on main before the ordered operators existed:
+# `date_trunc('year', ts) = timestamp '294276-01-01'` answered ERROR on a
+# columnar table while the heap returned the row. Inverting the ordered
+# operators reaches the same arithmetic from four more predicates.
+#
+# A separate fixture, because putting a near-maximum row in pre_c would move
+# every count and premise above it.
+psql_run "CREATE TABLE pre_edge(ts timestamp, v int) USING pgcolumnar;"
+psql_run "INSERT INTO pre_edge SELECT timestamp '2024-01-01' + g * interval '1 day', g
+          FROM generate_series(1,1000) g;"
+psql_run "INSERT INTO pre_edge VALUES ('294276-12-31 23:00', -1), ('infinity', -2);"
+psql_run "CREATE TABLE pre_edgeh(ts timestamp, v int);"
+psql_run "INSERT INTO pre_edgeh SELECT * FROM pre_edge;"
+MAXY="timestamp '294276-01-01'"
+edge_arm() {	# edge_arm <label> <predicate>
+	check_num "[$1] answers instead of raising, and agrees with the heap" \
+		"$(q1 "SELECT count(*) FROM pre_edge WHERE $2;")" \
+		"$(q1 "SELECT count(*) FROM pre_edgeh WHERE $2;")"
+}
+# 2, not 1: the near-maximum row AND 'infinity' both satisfy this.
+check_num "premise: the near-maximum row is really there" \
+	"$(q1 "SELECT count(*) FROM pre_edgeh WHERE ts > timestamp '294276-01-01';")" 2
+edge_arm "year = max"  "date_trunc('year', ts) = $MAXY"
+edge_arm "year >= max" "date_trunc('year', ts) >= $MAXY"
+edge_arm "year > max"  "date_trunc('year', ts) > $MAXY"
+edge_arm "year <= max" "date_trunc('year', ts) <= $MAXY"
+edge_arm "year < max"  "date_trunc('year', ts) < $MAXY"
+# Infinity is exempt: interval arithmetic saturates there rather than
+# overflowing, so those predicates still rewrite and still prune.
+edge_arm "day >= infinity" "date_trunc('day', ts) >= timestamp 'infinity'"
+edge_arm "day < infinity"  "date_trunc('day', ts) < timestamp 'infinity'"
+
 # ---- the shapes that must DECLINE ------------------------------------------
 # A non-truncated constant is unsatisfiable, and these arms assert the ANSWER,
 # which is all they can assert: with conservative keys and an executor recheck,
