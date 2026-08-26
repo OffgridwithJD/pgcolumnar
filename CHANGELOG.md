@@ -78,7 +78,7 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   `ERRCODE_WRONG_OBJECT_TYPE`. A caller keying on SQLSTATE, which is what this
   project's own privilege suites do deliberately, got different answers depending
   on which path refused it. The guard now sets `wrong_object_type` explicitly and
-  `audit.sh` asserts the code. (#403)
+  `audit.sh` asserts the code. (#757)
 - A `date_trunc` predicate within one bucket of the end of the `timestamp` range
   raised `ERROR: timestamp out of range` on a columnar table instead of
   answering. The rewrite computes the next bucket boundary as `lo + step`, and
