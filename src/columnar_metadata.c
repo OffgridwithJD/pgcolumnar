@@ -325,6 +325,31 @@ PgColumnarResetMetadataFlush(void)
 }
 
 /*
+ * #744: close one scan's zone_map handle.
+ *
+ * Called from PgColumnarEndRead on the normal path. On an error path it is not
+ * called at all, and must not be: the resource owner has already released the
+ * relation by then, and it does so silently because leak warnings are printed
+ * only when isCommit (resowner.c). The session lives in the scan's read state,
+ * so the pointer goes away with the scan and can never reach another one.
+ */
+void
+PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess)
+{
+	if (sess == NULL)
+		return;
+	if (sess->rel != NULL)
+	{
+		table_close(sess->rel, AccessShareLock);
+		sess->rel = NULL;
+	}
+	sess->idxOid = InvalidOid;
+	if (message_level_is_interesting(DEBUG1))
+		elog(DEBUG1, "pgcolumnar zone map read: probes=%lu opens=%lu",
+			 (unsigned long) sess->probes, (unsigned long) sess->opens);
+}
+
+/*
  * pgcolumnar_index_oid
  *		The OID of one of the metadata indexes, by name. Returns InvalidOid when
  *		it cannot be resolved, which callers pass through to systable_beginscan
@@ -2631,15 +2656,39 @@ PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapsho
  */
 NativeZoneMapMetadata *
 PgColumnarReadZoneMapForColumn(uint64 storageId, uint64 groupNumber,
-							   int columnIndex, Snapshot snapshot)
+							   int columnIndex, Snapshot snapshot,
+							   PgColumnarZoneMapSession *sess)
 {
-	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
-	TupleDesc	tupdesc = RelationGetDescr(rel);
+	Relation	rel;
+	TupleDesc	tupdesc;
 	ScanKeyData key[3];
 	SysScanDesc scan;
 	Oid			idxOid;
 	HeapTuple	tuple;
 	NativeZoneMapMetadata *result = NULL;
+
+	/*
+	 * #744. Inside a read session the relation and the index oid are resolved
+	 * once and held for the scan; outside one this behaves exactly as before.
+	 */
+	if (sess != NULL)
+	{
+		sess->probes++;
+		if (sess->rel == NULL)
+		{
+			sess->rel = open_columnar_table("zone_map", AccessShareLock);
+			sess->idxOid = pgcolumnar_index_oid("zone_map_pkey");
+			sess->opens++;
+		}
+		rel = sess->rel;
+		idxOid = sess->idxOid;
+	}
+	else
+	{
+		rel = open_columnar_table("zone_map", AccessShareLock);
+		idxOid = pgcolumnar_index_oid("zone_map_pkey");
+	}
+	tupdesc = RelationGetDescr(rel);
 
 	ScanKeyInit(&key[0], Anum_zone_map_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
@@ -2661,7 +2710,8 @@ PgColumnarReadZoneMapForColumn(uint64 storageId, uint64 groupNumber,
 		break;
 	}
 	systable_endscan(scan);
-	table_close(rel, AccessShareLock);
+	if (sess == NULL)
+		table_close(rel, AccessShareLock);
 
 	return result;
 }
