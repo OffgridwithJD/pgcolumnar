@@ -61,3 +61,29 @@ check "GCOV_PREFIX is exported before the suites run (#740)" \
 check "the counters are returned beside their objects before the refusal (#740)" \
 	"$([ -n "$_cov_back" ] && [ -n "$_cov_guard" ] &&
 	   [ "$_cov_back" -lt "$_cov_guard" ] && echo yes || echo no)" "yes"
+
+# ---- and it must count the directory that is actually captured -------------
+#
+# Reported on the #745 review. The refusal counted .gcda across the WHOLE tree
+# while `lcov --capture` is scoped to src/. objstore/ is a separate shared
+# library built alongside this one (Makefile:127) and contributes its own .gcno
+# and .gcda, so a tree with zero counters in src/ and one in objstore/ gives the
+# guard a non-zero count, it passes, and lcov captures nothing: the "capture
+# produced nothing" message this guard exists to pre-empt, back again.
+#
+# Constructed and confirmed rather than argued: 33 .gcno in src/ with no
+# counters, one .gcda in objstore/, tree-wide count 1 (passes), src-scoped
+# count 0 (refuses).
+#
+# Compared as SOURCE TEXT, so this pins the two to each other. Widening the
+# capture later without widening the count re-opens the same hole.
+_cov_count_dir=$(grep '^_gcda=\$(find ' "$_cov" |
+	sed -n 's/.*find "\([^"]*\)".*/\1/p' | head -1)
+_cov_cap_dir=$(grep 'lcov --directory .*--capture' "$_cov" |
+	sed -n 's/.*--directory "\([^"]*\)".*/\1/p' | head -1)
+
+check "premise: the guard's count directory and the capture's were both located" \
+	"$([ -n "$_cov_count_dir" ] && [ -n "$_cov_cap_dir" ] && echo yes || echo no)" "yes"
+
+check "the zero-counter guard counts the directory lcov captures (#740)" \
+	"$_cov_count_dir" "$_cov_cap_dir"

@@ -183,18 +183,27 @@ echo "-- counters returned beside their objects: $_moved"
 # Asserted HERE rather than left to lcov: `lcov --capture` failing on an empty
 # tree reports "capture produced nothing", which reads as a broken tool and sent
 # nobody to look at the permissions for 25 nights.
-_gcno=$(find "$SRCDIR" -name '*.gcno' | wc -l)
-_gcda=$(find "$SRCDIR" -name '*.gcda' | wc -l)
-echo "-- counters: $_gcda .gcda from $_gcno instrumented objects"
-# Broken down by directory, because the two totals differ on the runner (34 of
-# 49) and a bare ratio invites the reading that a third of the objects went
-# uncovered. The report's scope is src/ alone -- `lcov --extract` below restricts
-# it -- so what matters is that every src object has a counter, not that the
-# totals match. Printed from the data rather than argued.
+#
+# Counted over the directory lcov CAPTURES, not tree-wide. objstore/ is a
+# separate shared library, built alongside but never linked in (Makefile:127),
+# and the report is scoped to src/ by the --extract below. So a tree-wide count
+# can be non-zero while the captured directory holds nothing: one objstore
+# counter satisfies the guard and leaves lcov with an empty tree, which is the
+# exact "capture produced nothing" this guard exists to pre-empt.
+_gcno=$(find "$SRCDIR/src" -name '*.gcno' | wc -l)
+_gcda=$(find "$SRCDIR/src" -name '*.gcda' | wc -l)
+echo "-- counters: $_gcda .gcda from $_gcno instrumented objects in src/"
+# The whole tree, broken down, because the totals differ on the GitHub runner
+# (34 .gcda from 49 .gcno) and a bare ratio invites the reading that a third of
+# the objects went uncovered. Printed from the data rather than argued.
 find "$SRCDIR" \( -name '*.gcno' -o -name '*.gcda' \) -printf '%h %f\n' 2>/dev/null |
-	sed 's/.*\.\(gcno\|gcda\)$/\1/;s#^\(.*\) [^ ]*\.\(gcno\|gcda\)$#\1 \2#' |
-	awk '{ n[$1" "$2]++ } END { for (k in n) printf "     %-6s %s\n", n[k], k }' |
-	sort -k3 | head -20
+	awk -v root="$SRCDIR/" '
+		{ ext = $2; sub(/.*\./, "", ext)
+		  dir = (index($1, root) == 1) ? substr($1, length(root) + 1) : $1
+		  n[dir " " ext]++ }
+		END { for (k in n) { split(k, a, " ")
+			printf "     %-5s %-4s %s\n", n[k], a[2], a[1] } }' |
+	sort -k3,3 -k2,2
 if [ "$_gcda" = 0 ]; then
 	echo "FAIL  no .gcda counters were written, so this measures no coverage" >&2
 	echo "      gcov writes them beside the objects, as the user that ran the" >&2
