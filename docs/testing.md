@@ -91,9 +91,32 @@ already merged, which is worse than either state alone.
 
 `test/differential.sh`, `recovery`, `fuzz`, `hardening`, and `concurrent_diff`
 share `test/lib.sh`. It is a differential oracle that compares heap with
-columnar. A query runs against a heap mirror and against the columnar table. The
-harness compares the two results as a result-set hash that does not depend on
-row order. Heap is therefore the oracle for correctness.
+columnar. A query runs against a heap mirror and against the columnar table.
+Heap is therefore the oracle for correctness.
+
+There are two comparisons, and which one a query needs depends on whether it
+asks for an order:
+
+| Helper | Compares | Use it for |
+| --- | --- | --- |
+| `diff_query` | A result-set hash that does not depend on row order | Any query that does not name an `ORDER BY`. Most of them. |
+| `diff_query_ordered` | The rows in the order the query returned them | Any query that names an `ORDER BY`. |
+
+`diff_query` sorts the rendered rows before hashing them, so it cannot fail on a
+wrong row order. That is correct for a query that never asked for an order. It is
+wrong for a query that did: an `ORDER BY` the oracle cannot fail on is not an
+assertion. Use `diff_query_ordered` there. `test/selftest` enforces the split in
+both directions, so a new ordered comparison cannot land on the order-blind
+oracle and go unnoticed.
+
+One caution, because the guard pushes new comparisons toward the ordered helper.
+`diff_query_ordered` makes the row order part of the assertion. The query's
+`ORDER BY` must therefore be a **total** order over the rows it returns. If it is not, the
+two sides can differ in how they break a tie and the test flaps instead of
+getting stronger. Order on a unique column, or on enough columns to leave no
+ties. All five current ordered sites satisfy this: three order on a unique `id`,
+and `sorted_projection`'s `ORDER BY k, v` selects exactly `k, v`, so tied rows are
+identical.
 
 `test/pbt/run.sh` is a separate, PostgreSQL-independent C property test of the
 value-stream codecs (round-trip over randomized and boundary inputs):
