@@ -170,6 +170,20 @@ if [ -d "$GCOV_PREFIX" ]; then
 	while IFS= read -r _f; do
 		[ -n "$_f" ] || continue
 		_dest="${_f#$GCOV_PREFIX}"
+		# The destination must be INSIDE the tree, and this is not a tidiness
+		# check. $GCOV_PREFIX is a fixed path at mode 1777 and this loop runs as
+		# root under sudo, so without it any local unprivileged user chooses both
+		# the content and the destination: plant
+		# $GCOV_PREFIX/<anywhere>/x.gcda and root copies it to <anywhere>/x.gcda.
+		# Demonstrated with the loop exactly as it stood, a file planted as
+		# `postgres` and written by root outside the tree. Constrained to names
+		# ending .gcda, and not reachable on GitHub's single-tenant ephemeral
+		# runner, but reachable on any shared or developer box -- which this
+		# script's own header invites, since it documents being run under sudo.
+		case "$_dest" in
+			"$SRCDIR"/*) ;;
+			*) continue ;;
+		esac
 		[ -d "$(dirname "$_dest")" ] || continue
 		cp -p "$_f" "$_dest" 2>/dev/null && _moved=$((_moved + 1))
 	done <<EOF

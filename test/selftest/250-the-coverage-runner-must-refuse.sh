@@ -115,3 +115,30 @@ check "premise: both stray-counter probes were located" \
 check "the refusal looks in GCOV_PREFIX before the tree-wide walk (#740)" \
 	"$([ -n "$_cov_prefix_probe" ] && [ -n "$_cov_xdev_probe" ] &&
 	   [ "$_cov_prefix_probe" -lt "$_cov_xdev_probe" ] && echo yes || echo no)" "yes"
+
+# ---- and the copy-back must not write outside the tree ---------------------
+#
+# Reported on the #745 review. $GCOV_PREFIX is a fixed path at mode 1777 and the
+# copy-back runs as root under sudo, while _dest is the found path with the
+# prefix stripped. Without a constraint, any local unprivileged user chooses both
+# the content and the destination: plant $GCOV_PREFIX/<anywhere>/x.gcda and root
+# copies it to <anywhere>/x.gcda.
+#
+# Demonstrated with the loop exactly as it stood, a file planted as `postgres`
+# and written by root to a directory outside the tree, then blocked by the
+# constraint while a legitimate counter under $SRCDIR/src still copied. Both
+# arms, because a containment that refuses everything is not a fix.
+#
+# Constrained to names ending .gcda and not reachable on GitHub's single-tenant
+# ephemeral runner, but reachable on any shared or developer box, which this
+# script's header invites by documenting sudo.
+_cov_contain=$(grep -n '"\$SRCDIR"/\*)' "$_cov" | cut -d: -f1 | head -1)
+_cov_cp=$(grep -n 'cp -p "\$_f" "\$_dest"' "$_cov" | cut -d: -f1 | head -1)
+
+check "premise: the containment and the copy were both located" \
+	"$([ -n "$_cov_contain" ] && [ -n "$_cov_cp" ] && echo yes || echo no)" "yes"
+
+# Placed after the copy it is not a containment, it is a comment.
+check "the copy-back refuses a destination outside the tree (#740)" \
+	"$([ -n "$_cov_contain" ] && [ -n "$_cov_cp" ] &&
+	   [ "$_cov_contain" -lt "$_cov_cp" ] && echo yes || echo no)" "yes"
