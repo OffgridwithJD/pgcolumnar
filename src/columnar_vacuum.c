@@ -191,7 +191,7 @@ PgColumnarRequireTableOwner(Relation rel)
  * not own until its own lock request was resolved, so it has to be turned away
  * before the lock is requested rather than after it is held.
  */
-static void
+void
 PgColumnarRequireTableOwnerByOid(Oid relid)
 {
 	if (!COLUMNAR_TABLE_OWNERCHECK(relid))
