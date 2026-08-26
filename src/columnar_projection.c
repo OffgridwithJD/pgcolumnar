@@ -292,13 +292,21 @@ pgcolumnar_drop_projection(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	projname = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
+	/*
+	 * Ownership FIRST, then the relation type. Both precede table_open so a
+	 * non-owner never reaches the lock manager, and doing them in this order
+	 * means a non-owner is told only that they are not the owner: asking about
+	 * an arbitrary relation must not report back whether it is columnar. The
+	 * sibling entry points in columnar_vacuum.c and columnar_visibilitymap.c
+	 * are ordered the same way.
+	 */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a columnar table",
 						get_rel_name(relid))));
-
-	PgColumnarRequireTableOwnerByOid(relid);
 
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 	storageId = PgColumnarStorageId(rel);

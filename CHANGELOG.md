@@ -54,6 +54,20 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- Five entry points requested a relation lock before checking that the caller
+  owns the table. `pgcolumnar.add_projection` takes a `ShareLock`, and
+  `drop_projection`, `recluster`, `compact_rewrite` and `compact` take a
+  `ShareUpdateExclusiveLock`; each opened the relation first and validated
+  ownership after. An unprivileged caller could therefore queue in the lock
+  manager on a table it has no rights to, blocking readers and writers until it
+  was refused. Measured against a held `AccessExclusiveLock`: the call reached a
+  four second lock timeout before the ownership error, where it now returns the
+  ownership error immediately. Ownership is now checked before the lock, which
+  is the ordering `pgcolumnar.vacuum`, `vacuum_sorted` and `cluster` already
+  used. `drop_projection` also reported whether an arbitrary relation was
+  columnar to a caller who does not own it; it now reports only that they are
+  not the owner, matching the four entry points beside it. (#749)
+
 - The columnar scan resolved `pgcolumnar.zone_map` once per chunk group per
   predicate column instead of once per scan. Every group a predicate could
   exclude ran a relation open with a lock and two catalog name lookups, then
