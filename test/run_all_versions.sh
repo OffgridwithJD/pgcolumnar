@@ -191,6 +191,7 @@ SUITES=(
 	native_writer
 	native_zonemap
 	native_zonemap_narrow
+	native_zonemap_session
 	objstore_addressing
 	objstore_allowlist
 	objstore_credentials

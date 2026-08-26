@@ -218,6 +218,13 @@ struct PgColumnarReadState
 	MemoryContext groupContext;		/* reset per chunk group (decompressed) */
 	MemoryContext rowContext;		/* reset per row */
 	MemoryContext skipContext;		/* scratch for skip-list evaluation */
+
+	/*
+	 * #744: this scan's zone_map handle, so the skip loop resolves the relation
+	 * and the index once instead of once per chunk group per predicate column.
+	 * Per-scan rather than static: see the comment on the type.
+	 */
+	PgColumnarZoneMapSession zmSession;
 };
 
 static void pgcolumnar_build_predicates(PgColumnarReadState *readState,
@@ -1378,7 +1385,8 @@ pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 		{
 			byColZone[pred->attidx] =
 				PgColumnarReadZoneMapForColumn(rs->storageId, groupNumber,
-											   pred->attidx, rs->metaSnapshot);
+											   pred->attidx, rs->metaSnapshot,
+											   &rs->zmSession);
 			zoneLookedUp[pred->attidx] = true;
 		}
 
@@ -4236,6 +4244,8 @@ PgColumnarRescanRead(PgColumnarReadState *readState)
 void
 PgColumnarEndRead(PgColumnarReadState *readState)
 {
+	/* Before the context goes: readState itself is allocated inside it. */
+	PgColumnarCloseZoneMapSession(&readState->zmSession);
 	MemoryContextDelete(readState->readContext);
 }
 

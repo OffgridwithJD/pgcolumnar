@@ -16,6 +16,29 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- A predicate on `date_trunc(unit, ts)` now drives chunk-group skipping for the
+  ORDERED comparisons too, not only equality. #739 inverted `=` and declined
+  every other operator, so `date_trunc('day', ts) >= '2024-02-01'` still read
+  every chunk group, which is the shape a time-series filter usually takes.
+  Monotonicity is what makes the ordered operators invertible, so they come from
+  the same unit table for one scan key each rather than equality's two. Measured
+  on the existing 500,000-row time-clustered fixture, chunk groups removed by the
+  filter, `date_trunc` form against the explicit range it is equivalent to:
+
+  | predicate | before | after | the equivalent range |
+  | --- | ---: | ---: | ---: |
+  | `date_trunc('day', ts) >= c` | 0 | 30 | 30 |
+  | `date_trunc('day', ts) > c` | 0 | 31 | 31 |
+  | `date_trunc('day', ts) < c` | 0 | 19 | 19 |
+  | `date_trunc('day', ts) <= c` | 0 | 18 | 18 |
+
+  Two cases carry their own risk and their own arms. With the constant on the
+  LEFT the strategy has to be commuted, because `c < f(ts)` is `f(ts) > c`; for
+  equality that was a no-op, which is why it never came up before. And an
+  untruncated constant, which equality treats as unsatisfiable, is satisfiable
+  here and moves the bound to the next bucket boundary instead of emptying the
+  result. `timestamptz` stays declined for the reason #739 gives. (#403)
+
 - A predicate on `date_trunc(unit, ts) = constant` now drives chunk-group
   skipping. A zone map holds `ts`, so a predicate about a function of `ts` could
   exclude nothing and the scan read every group. It is rewritten to a range on
@@ -30,6 +53,31 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   `preimage_rewrite`, measures the pruning and pins each declined shape. (#403)
 
 ### Fixed
+
+- The columnar scan resolved `pgcolumnar.zone_map` once per chunk group per
+  predicate column instead of once per scan. Every group a predicate could
+  exclude ran a relation open with a lock and two catalog name lookups, then
+  closed again; the reuse cache that the write path uses for the same catalogs
+  is gated on a flag only the write path sets, so the read path never reached
+  it. The scan now holds the relation and the resolved index for its own
+  duration. Measured at 640 chunk groups with one predicate column, the same
+  binary with the session bypassed, backend instructions pinned to one PMU and
+  normalised by completed queries: 29,694,459 per query before and 26,676,590
+  after, a saving of 4,715 per chunk group and 1.113x on the query. That is 15%
+  of the cost #744 measured for locating the surviving groups at that size, so
+  the systable index probe, which stays inside the loop, remains the larger
+  part. Buffer counts are unchanged, which is the expected shape: a catcache or
+  relcache lookup reads no buffers once warm, so the buffers a probe costs are
+  the index scan. (#744)
+- A `date_trunc` predicate within one bucket of the end of the `timestamp` range
+  raised `ERROR: timestamp out of range` on a columnar table instead of
+  answering. The rewrite computes the next bucket boundary as `lo + step`, and
+  that addition throws near the maximum, which fails the whole query rather than
+  declining to prune. Reachable on `main` before this release through equality
+  alone: `date_trunc('year', ts) = timestamp '294276-01-01'` errored while the
+  heap returned the row. The rewrite now declines within one step of the end.
+  Infinities are unaffected, because interval arithmetic on them saturates rather
+  than overflowing. (#403)
 
 - The nightly coverage report now measures something. It had never captured any
   coverage: the job failed every night from the night it was added on
