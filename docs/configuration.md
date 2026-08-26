@@ -128,6 +128,18 @@ apply to the data that the writer writes after the change. The data that is
 already on disk does not change. It changes only when a command rewrites the
 table, for example `pgcolumnar.vacuum`.
 
+The table must already be an ordinary table using the `pgcolumnar` access method.
+Setting options on anything else raises `relation "..." is not a columnar table`.
+
+A partitioned table is rejected as well. It holds no data of its own, so options
+set on it would never be read. Set them on each partition, which is where the
+rows are written. For an ordinary table, convert it first, then set its options:
+
+```sql
+ALTER TABLE events SET ACCESS METHOD pgcolumnar;
+SELECT pgcolumnar.set_options('events', compression => 'zstd');
+```
+
 ```sql
 SELECT pgcolumnar.set_options(
     'events',
@@ -139,7 +151,7 @@ SELECT pgcolumnar.set_options(
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `table_name` | regclass | The columnar table to change. |
+| `table_name` | regclass | The columnar table to change. Anything that is not an ordinary table using the `pgcolumnar` access method is rejected, including a partitioned table. |
 | `chunk_group_row_limit` | integer | Per-table override of `pgcolumnar.chunk_group_row_limit`. |
 | `stripe_row_limit` | integer | Per-table override of `pgcolumnar.stripe_row_limit`. |
 | `compression` | name | One of `none`, `pglz`, `lz4`, `zstd`. |

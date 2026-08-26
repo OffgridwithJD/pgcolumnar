@@ -85,6 +85,39 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   packaged server and reported the connection failure as "old install did not
   store rows". It now states the directory it connects to. (#741)
 
+- `pgcolumnar.set_options` accepted a relation that is not columnar, and silently
+  recorded options for it. The row was not merely useless, because options are
+  read by the columnar writer and a heap table has none. It also leaked: the object
+  access hook that clears `pgcolumnar.options` fires only for columnar relations,
+  so the row outlived the table. Measured on one cluster: `set_options` on a
+  `USING heap` table stored a row, `DROP TABLE` left it behind, and `regclass`
+  then rendered as the bare oid, which a later relation reusing that oid would
+  inherit; the identical sequence on a columnar table cleaned up. `set_options`
+  now raises `relation "..." is not a columnar table`, matching the wording the C
+  paths already use, with a hint pointing at `ALTER TABLE ... SET ACCESS METHOD`.
+  The test is on the access method **and** on `relkind`, which is what makes it
+  match the cleanup rather than merely look strict: the drop hook returns before
+  it examines the access method for anything that is not an ordinary table, so
+  `'r'` is exactly the set whose options row can ever be cleared. That matters
+  from PG17, where a partitioned table may itself carry an access method: an
+  access-method test alone accepted a partitioned parent, which has no storage,
+  which the writer never writes, and whose row the hook would never clear.
+  Measured on 17.6: accepted, one row recorded, still present after `DROP TABLE`
+  keyed to the dropped oid, while an ordinary columnar table in the same run
+  cleaned up. PG16 and earlier refuse `PARTITION BY ... USING pgcolumnar`
+  outright (checked on 16.14). Partitions themselves are ordinary tables and are
+  still accepted, which is where the options belong. A materialized view is
+  refused for the same reason: `CREATE MATERIALIZED VIEW ... USING pgcolumnar`
+  works and its rows read back, but options recorded for one are inert, measured
+  against a live fixture that moves the same measurement from 3 to 21 on an
+  ordinary table, and its row leaks on `DROP` exactly as the others do.
+  That conversion keeps the relation's oid (measured), so the one workflow that
+  might have wanted the old order, options first and convert second, is served by
+  setting them after the conversion. Nothing in the test corpus called
+  `set_options` on a non-columnar relation. The guard is mirrored into the
+  `1.0-alpha` → `1.0-alpha2` upgrade script, so an upgraded catalog still matches
+  a fresh install. (#432 follow-up)
+
 - The vectorized aggregates now bound their per-execution memory with one
   mechanism instead of two. The scan-key context added for #717 covered the
   scan keys; the scratch context added for #727 covered the whole scan and so
