@@ -234,6 +234,27 @@ check "the refusal says the relation is not columnar" \
 	"yes"
 check "nothing was recorded for the heap table" \
 	"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass = 'opt_heap'::regclass;")" "0"
+
+# The SQLSTATE, not the message text. The C paths raise this same sentence with
+# ERRCODE_WRONG_OBJECT_TYPE (42809), so a caller that keys on SQLSTATE -- which
+# is what this project's own privilege suites do, deliberately -- has to get the
+# same answer whichever path refuses it. plpgsql's RAISE EXCEPTION defaults to
+# P0001 unless an ERRCODE is given, and the guard shipped without one.
+#
+# VERBOSITY=verbose makes psql print `ERROR:  <sqlstate>: <message>`, which is
+# read here instead of a DO block: this suite passes SQL through `bash -lc`, and
+# a dollar-quoted block nested in that is the quoting trap the tree already has
+# scars from.
+sqlstate() {	# sqlstate <sql> -> the SQLSTATE of the failure, or empty
+	local out
+	out="$(run_pg "$PSQL -v ON_ERROR_STOP=0 -v VERBOSITY=verbose -c \"$1\"" 2>&1 || true)"
+	printf '%s\n' "$out" | grep -oE '^ERROR:  [0-9A-Z]{5}' | awk '{print $2}' | head -1
+}
+check "premise: the SQLSTATE probe reads a known code" \
+	"$(sqlstate 'SELECT 1/0;')" "22012"
+check "set_options on a non-columnar relation raises 42809, not P0001" \
+	"$(sqlstate "SELECT pgcolumnar.set_options('opt_heap'::regclass, chunk_group_row_limit => 1000);")" \
+	"42809"
 q "DROP TABLE opt_heap;" >/dev/null
 
 # A PARTITIONED parent is the same leak through a different door, and the access
