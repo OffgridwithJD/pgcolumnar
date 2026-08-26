@@ -279,7 +279,7 @@ pgcolumnar_commute_strategy(StrategyNumber s)
 
 /*
  * pgcolumnar_preimage_range_scankey
- *		Rewrite `f(col) = const` into a range on col, for a function whose
+ *		Rewrite `f(col) OP const` into a bound on col, for a function whose
  *		preimage of a single value is a contiguous interval (#403, from the
  *		ClickHouse VLDB 2024 paper's monotonicity traits).
  *
@@ -294,15 +294,18 @@ pgcolumnar_commute_strategy(StrategyNumber s)
  *		rewrite (the objection #369 raised against a special case). Adding a
  *		second function means adding its preimage beside this one.
  *
- *		Being straight about the shape: this first cut inverts exactly one
+ *		Being straight about the shape: this inverts exactly one
  *		function, and the step it uses comes from a small table of unit names,
  *		not from date_trunc itself. A month is not a fixed number of seconds, so
  *		the step has to be an interval applied by calendar arithmetic. The
  *		generality is in where the rewrite HAPPENS, not yet in how many
  *		functions it knows.
  *
- *		Emits `col >= lo` and `col < hi`, so two keys, and returns 2. Returns 0
- *		for anything it cannot inarguably invert; declining always costs a scan,
+ *		Equality is the bounded interval: `col >= lo` and `col < hi`, two keys,
+ *		returns 2. The ordered operators need ONE bound each and return 1 --
+ *		monotonicity is exactly what makes them invertible, so they come from the
+ *		same unit table for less work than equality, not more. Returns 0 for
+ *		anything it cannot inarguably invert; declining always costs a scan,
  *		never an answer.
  */
 static int
@@ -323,6 +326,9 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 	Datum		roundTrip;
 	Interval   *step;
 	text	   *unit;
+	StrategyNumber strat;
+	bool		constOnLeft = false;
+	bool		truncated;
 
 	if (list_length(op->args) != 2)
 		return 0;
@@ -343,6 +349,7 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 	{
 		f = (FuncExpr *) rightop;
 		con = (Const *) leftop;
+		constOnLeft = true;
 	}
 	else
 		return 0;
@@ -389,8 +396,30 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 	tce = lookup_type_cache(TIMESTAMPOID, TYPECACHE_BTREE_OPFAMILY);
 	if (!OidIsValid(tce->btree_opf))
 		return 0;
-	if (get_op_opfamily_strategy(op->opno, tce->btree_opf) != BTEqualStrategyNumber)
-		return 0;
+	strat = get_op_opfamily_strategy(op->opno, tce->btree_opf);
+
+	/*
+	 * With the constant on the LEFT the strategy has to be COMMUTED, because
+	 * `c < f(ts)` is `f(ts) > c` and not `f(ts) < c`. For equality this is a
+	 * no-op, which is why #739 could take either operand order without doing it
+	 * and be right. For the ordered operators, reusing the unswapped strategy
+	 * inverts the bound and silently drops every row it should return, so this
+	 * is the line the reversed-operand arms in preimage_rewrite.sh exist to pin.
+	 */
+	if (constOnLeft)
+		strat = pgcolumnar_commute_strategy(strat);
+
+	switch (strat)
+	{
+		case BTEqualStrategyNumber:
+		case BTLessStrategyNumber:
+		case BTLessEqualStrategyNumber:
+		case BTGreaterEqualStrategyNumber:
+		case BTGreaterStrategyNumber:
+			break;
+		default:
+			return 0;
+	}
 
 	/*
 	 * A CONSTANT THAT IS NOT ITSELF TRUNCATED MATCHES NOTHING.
@@ -411,8 +440,19 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 	roundTrip = DirectFunctionCall2(timestamp_trunc,
 									PointerGetDatum(unit),
 									con->constvalue);
-	if (DatumGetTimestamp(roundTrip) != DatumGetTimestamp(con->constvalue))
+	truncated = (DatumGetTimestamp(roundTrip) ==
+				 DatumGetTimestamp(con->constvalue));
+	if (!truncated && strat == BTEqualStrategyNumber)
 		return 0;
+
+	/*
+	 * For the ORDERED operators an untruncated constant is satisfiable, and it
+	 * moves the bound to the next boundary rather than emptying the result.
+	 * date_trunc only ever returns truncated values, so with lo < c < hi:
+	 * `f(k) >= c` admits exactly the buckets at hi and above, and `f(k) < c`
+	 * exactly those below hi. Treating it the way equality treats it would drop
+	 * every row in the partial bucket instead of returning them.
+	 */
 
 	/*
 	 * hi is where the NEXT bucket starts, so the step is one unit wide.
@@ -459,17 +499,92 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 													 CStringGetDatum(stepStr),
 													 ObjectIdGetDatum(InvalidOid),
 													 Int32GetDatum(-1)));
-		lo = con->constvalue;
+		/*
+		 * lo is the TRUNCATED constant, not the constant. They are the same
+		 * value whenever the constant is already truncated, which is the only
+		 * case that reached here before the ordered operators were added -- so
+		 * the shipped equality path was right by construction and this line
+		 * carried a latent assumption. With an untruncated constant admitted,
+		 * `con` would put hi half a bucket late (12:00 rather than 00:00 for a
+		 * day) and the `>=` key would then exclude rows that do match. Measured
+		 * before the fix: 180,001 rows returned against the heap's 180,002, and
+		 * one chunk group over-pruned.
+		 */
+		lo = roundTrip;
+
+		/*
+		 * hi = lo + step RAISES near the end of the timestamp range, and an
+		 * ereport here fails the whole query rather than declining to prune.
+		 * This is not new: on main today
+		 * `date_trunc('year', ts) = timestamp '294276-01-01'` already answers
+		 * `ERROR: timestamp out of range` on a columnar table while the heap
+		 * returns the row. Inverting the ordered operators reaches the same
+		 * arithmetic from four more predicates, so it is fixed here rather than
+		 * left to widen.
+		 *
+		 * Declining conservatively rather than catching the error: the widest
+		 * step in the table above is one year, so anything within 366 days of
+		 * END_TIMESTAMP is refused. The comparison is `>=` and not `>` because
+		 * the case that motivated it lands exactly on the bound: lo for
+		 * `294276-01-01` is 9223339708800000000, and
+		 * END_TIMESTAMP - 366 * USECS_PER_DAY is the same number, so `>` left
+		 * the guard silent on the one value it was written for. Infinities are exempt because interval
+		 * arithmetic on them saturates instead of overflowing, which the
+		 * `date_trunc('day', ts) >= 'infinity'` arm measures.
+		 */
+		if (!TIMESTAMP_NOT_FINITE(DatumGetTimestamp(lo)) &&
+			DatumGetTimestamp(lo) >=
+			END_TIMESTAMP - (int64) 366 * USECS_PER_DAY)
+			return 0;
+
 		hi = DirectFunctionCall2(timestamp_pl_interval, lo,
 								 IntervalPGetDatum(step));
 	}
 
+	/*
+	 * Emit the preimage. Equality is the bounded interval and needs two keys;
+	 * each ordered operator needs ONE, and which boundary it takes depends on
+	 * the operator and on whether the constant was already truncated:
+	 *
+	 *     predicate      c truncated      c not truncated
+	 *     f(k) >= c      k >= lo          k >= hi
+	 *     f(k) >  c      k >= hi          k >= hi
+	 *     f(k) <  c      k <  lo          k <  hi
+	 *     f(k) <= c      k <  hi          k <  hi
+	 */
 	MemSet(&key[0], 0, sizeof(ScanKeyData));
 	key[0].sk_flags = 0;
 	key[0].sk_attno = var->varattno;
-	key[0].sk_strategy = BTGreaterEqualStrategyNumber;
 	key[0].sk_subtype = TIMESTAMPOID;
 	key[0].sk_collation = att->attcollation;
+
+	switch (strat)
+	{
+		case BTGreaterEqualStrategyNumber:
+			key[0].sk_strategy = BTGreaterEqualStrategyNumber;
+			key[0].sk_argument = truncated ? lo : hi;
+			return 1;
+
+		case BTGreaterStrategyNumber:
+			key[0].sk_strategy = BTGreaterEqualStrategyNumber;
+			key[0].sk_argument = hi;
+			return 1;
+
+		case BTLessStrategyNumber:
+			key[0].sk_strategy = BTLessStrategyNumber;
+			key[0].sk_argument = truncated ? lo : hi;
+			return 1;
+
+		case BTLessEqualStrategyNumber:
+			key[0].sk_strategy = BTLessStrategyNumber;
+			key[0].sk_argument = hi;
+			return 1;
+
+		default:
+			break;				/* equality: the bounded interval below */
+	}
+
+	key[0].sk_strategy = BTGreaterEqualStrategyNumber;
 	key[0].sk_argument = lo;
 
 	MemSet(&key[1], 0, sizeof(ScanKeyData));
