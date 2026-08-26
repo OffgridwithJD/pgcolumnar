@@ -52,6 +52,45 @@ fi
 make -C "$SRCDIR" PG_CONFIG="$PGC" COPT="--coverage" install >/dev/null 2>&1 || {
 	echo "FAIL  install failed" >&2; exit 1; }
 
+# gcov writes each .gcda beside its object, at the absolute path recorded at
+# COMPILE time, and it writes it as the process that ran the code. This runner is
+# invoked under sudo in CI, so the build is root-owned, while lib.sh runs the
+# server as `postgres` whenever it is root (lib.sh:150). The backend could not
+# create a counter file next to a root-owned object, so no .gcda was ever written
+# and `lcov --capture` had nothing to find. The report has measured nothing since
+# the job was added (#740).
+#
+# The counters are REDIRECTED rather than the source tree being opened up.
+# Chowning the object directories to the server user was the first fix and it is
+# not sufficient: creating a file needs execute on every ANCESTOR too. Measured
+# on the runner, with the object directories already chowned:
+#
+#     postgres:runner 755 /home/runner/work/pgcolumnar/pgcolumnar/src
+#     postgres:runner 755 /home/runner/work/pgcolumnar/pgcolumnar
+#     runner:runner   755 /home/runner/work/pgcolumnar
+#     runner:runner   755 /home/runner/work
+#     runner:runner   750 /home/runner        <-- no execute for postgres
+#     root:root       755 /home
+#
+# /home/runner is 750 and postgres is neither its owner nor in the runner group,
+# so it cannot traverse into the workspace at all, however the leaf directories
+# are owned. That route could only work by chmod'ing the runner's home, which is
+# not a thing to do to a shared runner.
+#
+# GCOV_PREFIX makes gcov write to $GCOV_PREFIX/<absolute path>.gcda instead.
+# /tmp is world-writable and world-traversable, so this works whoever the server
+# runs as and wherever the tree lives. GCOV_PREFIX_STRIP=0 keeps the full path,
+# which is what lets the counters be put back exactly where their .gcno are.
+# runuser passes the environment through, so the postmaster and its backends
+# inherit both variables.
+GCOV_PREFIX="${PGC_COV_GCOV_PREFIX:-/tmp/pgc-gcov}"
+GCOV_PREFIX_STRIP=0
+export GCOV_PREFIX GCOV_PREFIX_STRIP
+rm -rf "$GCOV_PREFIX"
+mkdir -p "$GCOV_PREFIX"
+chmod 1777 "$GCOV_PREFIX"
+echo "-- counters redirected to $GCOV_PREFIX"
+
 # Every suite except the drivers, the libraries, and the ones that build their
 # own server or need two majors. Kept in step with harness_selftest.sh's list.
 #
@@ -121,6 +160,108 @@ echo "-- suites: $pass passed, $fail failed${failed:+ ($failed)}, $skip skipped$
 if [ "$pass" = 0 ]; then
 	echo "-- NO SUITE RAN, so this measures no coverage"
 	fail=$((fail + 1))
+fi
+
+# Put the counters back beside their .gcno, which is where lcov and gcov both
+# expect them. Done as this user, which is root under sudo, so no permission on
+# the source tree is needed at all.
+_moved=0
+if [ -d "$GCOV_PREFIX" ]; then
+	while IFS= read -r _f; do
+		[ -n "$_f" ] || continue
+		_dest="${_f#$GCOV_PREFIX}"
+		# The destination must be INSIDE the tree, and this is not a tidiness
+		# check. $GCOV_PREFIX is a fixed path at mode 1777 and this loop runs as
+		# root under sudo, so without it any local unprivileged user chooses both
+		# the content and the destination: plant
+		# $GCOV_PREFIX/<anywhere>/x.gcda and root copies it to <anywhere>/x.gcda.
+		# Demonstrated with the loop exactly as it stood, a file planted as
+		# `postgres` and written by root outside the tree. Constrained to names
+		# ending .gcda, and not reachable on GitHub's single-tenant ephemeral
+		# runner, but reachable on any shared or developer box -- which this
+		# script's own header invites, since it documents being run under sudo.
+		case "$_dest" in
+			"$SRCDIR"/*) ;;
+			*) continue ;;
+		esac
+		[ -d "$(dirname "$_dest")" ] || continue
+		cp -p "$_f" "$_dest" 2>/dev/null && _moved=$((_moved + 1))
+	done <<EOF
+$(find "$GCOV_PREFIX" -name '*.gcda' 2>/dev/null)
+EOF
+fi
+echo "-- counters returned beside their objects: $_moved"
+
+# A report built from no counters is not a report, which is the same reasoning as
+# the `pass = 0` guard above and the case that has actually been happening (#740).
+# Asserted HERE rather than left to lcov: `lcov --capture` failing on an empty
+# tree reports "capture produced nothing", which reads as a broken tool and sent
+# nobody to look at the permissions for 25 nights.
+#
+# Counted over the directory lcov CAPTURES, not tree-wide. objstore/ is a
+# separate shared library, built alongside but never linked in (Makefile:127),
+# and the report is scoped to src/ by the --extract below. So a tree-wide count
+# can be non-zero while the captured directory holds nothing: one objstore
+# counter satisfies the guard and leaves lcov with an empty tree, which is the
+# exact "capture produced nothing" this guard exists to pre-empt.
+_gcno=$(find "$SRCDIR/src" -name '*.gcno' | wc -l)
+_gcda=$(find "$SRCDIR/src" -name '*.gcda' | wc -l)
+echo "-- counters: $_gcda .gcda from $_gcno instrumented objects in src/"
+# The whole tree, broken down, because the totals differ on the GitHub runner
+# (34 .gcda from 49 .gcno) and a bare ratio invites the reading that a third of
+# the objects went uncovered. Printed from the data rather than argued.
+find "$SRCDIR" \( -name '*.gcno' -o -name '*.gcda' \) -printf '%h %f\n' 2>/dev/null |
+	awk -v srcdir="$SRCDIR" -v root="$SRCDIR/" '
+		{ ext = $2; sub(/.*\./, "", ext)
+		  dir = $1
+		  if (dir == srcdir) dir = "."
+		  else if (index(dir, root) == 1) dir = substr(dir, length(root) + 1)
+		  n[dir " " ext]++ }
+		END { for (k in n) { split(k, a, " ")
+			printf "     %-5s %-4s %s\n", n[k], a[2], a[1] } }' |
+	sort -k3,3 -k2,2
+# And NAMED, for anything outside the captured scope. The run above reported 13
+# instrumented objects at the repository root and 3 under objstore/, against 1
+# under objstore/ in the container, and a count is a shape rather than an
+# answer. This is the line that says what they are.
+_outside=$(find "$SRCDIR" -name '*.gcno' -not -path "$SRCDIR/src/*" \
+	-printf '%P\n' 2>/dev/null | sort)
+if [ -n "$_outside" ]; then
+	echo "-- instrumented objects outside src/, which the report does not cover:"
+	printf '     %s\n' $_outside | head -20
+fi
+if [ "$_gcda" = 0 ]; then
+	echo "FAIL  no .gcda counters were written, so this measures no coverage" >&2
+	echo "      gcov writes them beside the objects, as the user that ran the" >&2
+	echo "      code. Check that the server user can write to the directories" >&2
+	echo "      holding the .gcno files." >&2
+	# Say WHERE they went, if anywhere. A path mismatch and a permission refusal
+	# look identical from "0 counters", and they have different fixes.
+	#
+	# GCOV_PREFIX is asked FIRST, and deliberately not left to the tree-wide
+	# walk below. That walk carries -xdev, which by definition will not cross a
+	# mount boundary, and /tmp is a separate tmpfs on both boxes this was
+	# measured on, this project's dev container and the development host.
+	# How common that is elsewhere I have not measured. Counters sitting exactly
+	# where the redirect put them are invisible to it, and the run then reports
+	# "nothing wrote them" -- the opposite diagnosis, sending the reader to
+	# permissions when the counters exist and it is the copy-back that missed.
+	# Measured, one file under a tmpfs /tmp and none elsewhere: 0 found with
+	# -xdev, 1 without it, 1 probing the prefix.
+	#
+	# The tree-wide walk is kept as the fallback, because it answers a
+	# different question: gcov ignoring the redirect altogether and writing
+	# beside an object outside src/, which is on the same filesystem as the
+	# tree and which the src-scoped count above would not see.
+	_stray=$(find "$GCOV_PREFIX" -name '*.gcda' 2>/dev/null | head -5)
+	[ -n "$_stray" ] || _stray=$(find / -xdev -name '*.gcda' 2>/dev/null | head -5)
+	if [ -n "$_stray" ]; then
+		echo "      counters DO exist elsewhere, so this is a path mismatch:" >&2
+		printf '        %s\n' $_stray >&2
+	else
+		echo "      no .gcda anywhere on this filesystem, so nothing wrote them" >&2
+	fi
+	exit 1
 fi
 
 echo "-- collect"

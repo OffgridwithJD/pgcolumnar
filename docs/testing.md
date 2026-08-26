@@ -280,7 +280,9 @@ test/run_coverage.sh /path/to/pg_config
 ```
 
 Builds instrumented, runs the suites against that build, and writes an HTML
-report to `coverage/html`. It runs nightly and uploads the report as an artifact.
+report to `coverage/html`. It runs nightly and uploads the report as an
+artifact. The per-suite logs are uploaded with it, so a suite that fails inside
+the coverage job can be read rather than only counted.
 
 There is no threshold and nothing fails on the number, deliberately. A coverage
 threshold creates pressure to write tests that execute lines rather than tests

@@ -31,6 +31,26 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The nightly coverage report now measures something. It had never captured any
+  coverage: the job failed every night from the night it was added on
+  2026-07-31, always at `lcov capture produced nothing`. `test/run_coverage.sh`
+  runs under `sudo` in CI, so the instrumented build is owned by root, while the
+  harness runs the server as `postgres` whenever it is root. gcov writes each
+  `.gcda` beside its object, as the process that ran the code, so the backend
+  could not create one and there was nothing to capture. The counter directories
+  are now redirected with `GCOV_PREFIX` to a directory under `/tmp`, which is
+  writable and traversable whoever the server runs as, and returned beside their
+  objects before the report is built. Making the object directories writable was
+  tried first and is not sufficient: creating a file also needs execute on every
+  ancestor, and in CI the tree sits under the runner's home. Measured in a
+  configuration with an ancestor the server user cannot traverse, which defeats
+  the ownership fix: 0 counters before and 33 after, through `lcov` and `genhtml`
+  to a report. The runner also refuses a run that captured no
+  counters, and says where they should have been, instead of leaving `lcov` to
+  report an empty tree as a tool failure. The per-suite logs are uploaded, so a
+  suite that fails inside this job no longer has its detail discarded when the
+  runner is torn down. (#740)
+
 - The extension-upgrade guard now runs in CI, and had never verified an upgrade
   before. `test/extension_upgrade.sh` catches a break that is invisible until a
   user upgrades: a renamed C link name leaves every existing install pointing at
