@@ -187,6 +187,8 @@ pgcolumnar_add_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("projection name \"%s\" is too long", projname)));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	/*
 	 * ShareLock: block concurrent INSERT/UPDATE/DELETE (RowExclusiveLock) while
 	 * we back-fill the projection from existing rows, so no concurrently written
@@ -194,7 +196,6 @@ pgcolumnar_add_projection(PG_FUNCTION_ARGS)
 	 * unaffected. (A CONCURRENTLY variant is future work.)
 	 */
 	rel = table_open(relid, ShareLock);
-	PgColumnarRequireTableOwner(rel);
 	storageId = PgColumnarStorageId(rel);
 
 	existing = PgColumnarListProjections(storageId);
@@ -297,8 +298,9 @@ pgcolumnar_drop_projection(PG_FUNCTION_ARGS)
 				 errmsg("\"%s\" is not a columnar table",
 						get_rel_name(relid))));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, ShareUpdateExclusiveLock);
-	PgColumnarRequireTableOwner(rel);
 	storageId = PgColumnarStorageId(rel);
 	existing = PgColumnarListProjections(storageId);
 

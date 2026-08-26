@@ -191,7 +191,7 @@ PgColumnarRequireTableOwner(Relation rel)
  * not own until its own lock request was resolved, so it has to be turned away
  * before the lock is requested rather than after it is held.
  */
-static void
+void
 PgColumnarRequireTableOwnerByOid(Oid relid)
 {
 	if (!COLUMNAR_TABLE_OWNERCHECK(relid))
@@ -776,6 +776,8 @@ pgcolumnar_recluster(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("Z-order clustering supports at most 8 columns")));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	/* the lazy lock: concurrent reads and writes during the recluster */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
@@ -787,8 +789,6 @@ pgcolumnar_recluster(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	tupdesc = RelationGetDescr(rel);
 	atts = palloc(ncols * sizeof(AttrNumber));
@@ -882,6 +882,8 @@ pgcolumnar_compact_rewrite(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("min_deleted_fraction must be between 0 and 1")));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
 	if (!PgColumnarIsColumnarRelation(relid))
@@ -892,8 +894,6 @@ pgcolumnar_compact_rewrite(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	/* dev/test: hold SUEL so the daemon's yield is observable (#415) */
 	pgcolumnar_maintenance_hold();
@@ -1859,6 +1859,8 @@ pgcolumnar_compact(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("table name cannot be null")));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	/* the lazy lock: concurrent reads and writes are allowed during compaction */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
@@ -1870,8 +1872,6 @@ pgcolumnar_compact(PG_FUNCTION_ARGS)
 				 errmsg("relation \"%s\" is not a columnar table",
 						RelationGetRelationName(rel))));
 	}
-
-	PgColumnarRequireTableOwner(rel);
 
 	/* self-heal a truncate crash-residual so the no-overlap assert holds eagerly,
 	 * even though compact does not reuse (see PgColumnarReconcileFreeList) */
