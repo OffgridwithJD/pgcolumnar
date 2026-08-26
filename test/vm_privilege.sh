@@ -53,10 +53,26 @@ run_as() {	# role sql -> combined output
 # Heap on purpose. The function never checked that its argument was columnar, so
 # the reachable blast radius was every table in the database, and a columnar-only
 # fixture would understate it.
-psql_run "CREATE TABLE vmvictim (id int primary key, secret text);"
+# #748 changed what this suite can assert, and the change is a strengthening.
+# These entry points now refuse ANY relation that is not columnar, so the
+# heap blast radius described above is closed by construction rather than by
+# an ownership check. That makes two fixtures necessary:
+#
+#   vmvictim  columnar -- the ownership boundary still applies here, so this is
+#                         where the refused/allowed arms and the wrong-answers
+#                         consequence are asserted.
+#   vmheap    heap     -- refused for EVERYONE now, owner included. That arm is
+#                         the one that pins #748, and it is stronger than the
+#                         ownership arm it replaces: no caller can reach a heap
+#                         relation's visibility map at all.
+psql_run "CREATE TABLE vmvictim (id int, secret text) USING pgcolumnar;"
 psql_run "INSERT INTO vmvictim SELECT g, 'secret-'||g FROM generate_series(1,20000) g;"
 psql_run "DELETE FROM vmvictim WHERE id % 2 = 0;"
 psql_run "ANALYZE vmvictim;"
+psql_run "CREATE TABLE vmheap (id int primary key, secret text);"
+psql_run "INSERT INTO vmheap SELECT g, 'secret-'||g FROM generate_series(1,20000) g;"
+psql_run "DELETE FROM vmheap WHERE id % 2 = 0;"
+psql_run "ANALYZE vmheap;"
 
 # TWO roles, because the fix has two layers and a single role would let one of
 # them be deleted with this suite still green -- the question CONTEXT.md asks of
@@ -92,8 +108,10 @@ check "premise: the test role cannot read the victim" \
 	"$(q "SELECT has_table_privilege('t_vmnone','vmvictim','SELECT');")" "f"
 check "premise: the test role does reach the schema (so it meets the C gate)" \
 	"$(q "SELECT has_schema_privilege('t_vmnone','pgcolumnar','USAGE');")" "t"
-check "premise: the victim is a heap relation, not columnar" \
-	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vmvictim';")" "heap"
+check "premise: the boundary victim is columnar, where the gate still applies" \
+	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vmvictim';")" "pgcolumnar"
+check "premise: the heap fixture really is heap, or the #748 arm is vacuous" \
+	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.relname='vmheap';")" "heap"
 check "premise: no all-visible bit is set yet" \
 	"$(q "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass,0);")" "f"
 check "premise: the fixture spans more than one block" \
@@ -105,17 +123,21 @@ check "premise: the fixture spans more than one block" \
 # check between the two comparing whole multi-line strings PASSED against unfixed
 # code -- a check that could not fail, found by running the red step and reading
 # it rather than by trusting the exit status.
+# On the HEAP fixture. A columnar relation plans as Custom Scan
+# (PgColumnarScan) and offers no Index Only Scan to corrupt, and the heap table
+# is where the original blast radius was, so this is where the consequence is
+# still observable.
 ios_count() {	# the count as an index-only scan sees it
 	q "SET enable_seqscan=off; SET enable_bitmapscan=off;
-	          SELECT count(*) FROM vmvictim WHERE id > 0;" | tail -1
+	          SELECT count(*) FROM vmheap WHERE id > 0;" | tail -1
 }
 seq_count() {	# the same count with the index taken away
 	q "SET enable_indexonlyscan=off; SET enable_indexscan=off;
-	          SELECT count(*) FROM vmvictim WHERE id > 0;" | tail -1
+	          SELECT count(*) FROM vmheap WHERE id > 0;" | tail -1
 }
 
 plan="$(psql_run "SET enable_seqscan=off; SET enable_bitmapscan=off;
-                  EXPLAIN (COSTS OFF) SELECT count(*) FROM vmvictim WHERE id > 0;")"
+                  EXPLAIN (COSTS OFF) SELECT count(*) FROM vmheap WHERE id > 0;")"
 check "premise: the query under test really is an Index Only Scan" \
 	"$(grep -qi 'Index Only Scan' <<<"$plan" && echo yes || echo no)" "yes"
 check_num "premise: the index-only scan is correct BEFORE anything is attempted" \
@@ -164,6 +186,54 @@ check "the owner can still call vm_selftest" \
 	"$(q "SELECT pgcolumnar.vm_selftest('vmvictim'::regclass, 0);")" "t"
 check "the owner can still call vm_is_visible" \
 	"$(q "SELECT pgcolumnar.vm_is_visible('vmvictim'::regclass, 0);")" "t"
+
+# ---- #748: a non-columnar relation is refused, whoever asks ---------------------
+#
+# The original defect reached every table in the database. Ownership alone did not
+# close that: the OWNER of a heap table could still mark its pages all-visible
+# through these functions, and a wrongly-set all-visible bit makes an index-only
+# scan skip the heap visibility check. The relation-type gate closes it for every
+# caller.
+#
+# SQLSTATE and not message text: 42809 is wrong_object_type, raised in C. A grep
+# for "not a columnar table" would also be satisfied by the plpgsql guard on
+# set_options, which raises a different SQLSTATE for the same sentence.
+sqlstate_of() {	# sqlstate_of <sql> -> SQLSTATE=xxxxx, or empty when it succeeded
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -v ON_ERROR_STOP=0 \
+		-c "DO \$p\$ BEGIN PERFORM $1; EXCEPTION WHEN OTHERS THEN
+		     RAISE NOTICE 'SQLSTATE=%', SQLSTATE; END \$p\$;" 2>&1 |
+		grep -oE 'SQLSTATE=[0-9A-Z]{5}' | head -1
+}
+check "vm_selftest refuses a heap relation even for its owner (#748)" \
+	"$(sqlstate_of "pgcolumnar.vm_selftest('vmheap'::regclass, 0)")" "SQLSTATE=42809"
+check "vm_is_visible refuses a heap relation even for its owner (#748)" \
+	"$(sqlstate_of "pgcolumnar.vm_is_visible('vmheap'::regclass, 0)")" "SQLSTATE=42809"
+
+# The consequence, not just the error: nothing was written to the heap fork, so
+# the index-only scan still agrees with the sequential one.
+# CONTROLS, and labelled as such because they do not discriminate. The owner
+# sweeps every block, which on unfixed code is permitted and does set the bits --
+# but the index-only scan still returned 10000 on both arms when I ran it, so
+# these stay green with the fix reverted and are NOT the removal proof. The two
+# SQLSTATE checks above are. They earn their place as a guard against a future
+# change that refuses the call while still writing to the fork, which is the
+# shape of the original defect; they do not prove this one.
+heap_blocks="$(q "SELECT pg_relation_size('vmheap')/8192;")"
+for b in $(seq 0 $(( ${heap_blocks:-1} - 1 ))); do
+	q "SELECT pgcolumnar.vm_selftest('vmheap'::regclass, $b);" >/dev/null 2>&1
+done
+check "premise: the heap sweep covered more than one block" \
+	"$([ "${heap_blocks:-0}" -gt 1 ] && echo yes || echo no)" "yes"
+check "the heap index-only scan still returns only live rows after the sweep (#748)" \
+	"$(ios_count)" "10000"
+check "and it still agrees with the sequential scan (#748)" \
+	"$(ios_count)" "$(seq_count)"
+
+# And the positive control, because a guard that refused everything would satisfy
+# both arms above: the same call on the columnar victim is accepted.
+check "the same call on a columnar relation is still accepted (#748 control)" \
+	"$(sqlstate_of "pgcolumnar.vm_is_visible('vmvictim'::regclass, 0)")" ""
 
 # ---- coverage ------------------------------------------------------------------
 # A future vm_* entry point that forgets the gate should turn this red rather than
