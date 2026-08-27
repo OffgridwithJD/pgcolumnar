@@ -366,6 +366,12 @@ for shape in "${SHAPE_A[@]}"; do
 	#
 	# The median is still printed, because the two disagreeing is the signal that
 	# the run was contended.
+	#
+	# MIN-OF-N IS NOT SCALE-FREE. It decreases weakly with N, so a min of 9 reps
+	# is not comparable to a min of 3 or of 20. The header prints `reps:` for this
+	# run, but ANY FIGURE QUOTED OUT OF THIS TABLE MUST CARRY THE REP COUNT WITH
+	# IT, or a later run at a different BENCH_REPS reads as a shift that is purely
+	# the statistic.
 	printf '%-4s %-32s %11s %11s %9s %9s %19s\n' id shape 'heap min' 'col min' 'col/heap' '(median)' 'col min..max'
 	for shp in $SHAPE_IDS; do
 		hm="${MN["$shape:$shp:heap"]:-}"
@@ -402,6 +408,10 @@ for shape in "${SHAPE_A[@]}"; do
 done
 echo "S0 against S1 is the finding: the same aggregate over the same rows, with"
 echo "and without a join. Read those two lines together before anything else."
+echo
+echo "Ratios are taken from MIN, not median: contention only makes a run slower,"
+echo "so the noise is one-sided and a median is not robust against it. Min of"
+echo "$REPS reps -- min is not scale-free, so quote the rep count with any figure."
 echo
 echo "S0W exists so S4 can be attributed. S4 projects eight float8 columns and a"
 echo "single float8 column already costs more to decode than an int one, so S4"
