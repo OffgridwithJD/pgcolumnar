@@ -106,6 +106,7 @@ SUITES=(
 	import_exclusion
 	import_export_privilege
 	index_only
+	int8_agg_int128
 	isolation
 	local_open_race_free
 	logical_decoding_cdc_recipe

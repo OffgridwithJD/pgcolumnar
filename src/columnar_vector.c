@@ -293,6 +293,9 @@ typedef struct PgColumnarAggSpec
 	float8		fsxx;			/* avg(float): Youngs-Cramer Sxx, for overflow parity */
 	Datum		nsum;			/* numeric running total (in resultContext) */
 	bool		nsumSet;		/* nsum initialized */
+#ifdef HAVE_INT128
+	int128		i128sum;		/* sum/avg over int8: 128-bit running total (#785) */
+#endif
 } PgColumnarAggSpec;
 
 /*
@@ -2369,6 +2372,52 @@ pgcolumnar_float4_pl(float4 a, float4 b)
 	return r;
 }
 
+#ifdef HAVE_INT128
+/*
+ * pgcolumnar_int128_to_numeric
+ *		Convert a 128-bit accumulator to numeric, once, at finalize (#785).
+ *
+ *		sum(int8) and avg(int8) return numeric, and this path used to reach that
+ *		by converting EVERY value to numeric and calling numeric_add per row: two
+ *		pallocs and a full numeric addition for each of 8,000,000 rows. A profile
+ *		of the enabled path was 13.0% make_result_opt_error, 9.3% add_abs, 8.1%
+ *		init_var_from_num and 8.5% AllocSet alloc/free -- all of it the numeric
+ *		machinery, none of it the aggregate. Core does not do that either: its
+ *		int8 accumulators are int128 and convert once.
+ *
+ *		The fast case is the only one that will ever run in practice: a sum that
+ *		fits in int64 converts directly. The split below covers the rest. It is
+ *		exact because C division truncates toward zero, so hi and lo carry the
+ *		same sign and hi * 10^18 + lo reconstructs v.
+ *
+ *		hi must fit in int64, which bounds |v| at 9.2e36. A sum of N int64 values
+ *		is bounded by N * 9.2e18, so that is N <= 1e18 rows. The int128 itself
+ *		overflows first, at about 1.8e19 rows. Neither is reachable, and core
+ *		makes the same assumption for the same reason.
+ */
+static Datum
+pgcolumnar_int128_to_numeric(int128 v)
+{
+	const int128 base = (int128) INT64CONST(1000000000000000000);
+	int64		hi;
+	int64		lo;
+	Datum		nhi;
+	Datum		nlo;
+
+	if (v >= (int128) PG_INT64_MIN && v <= (int128) PG_INT64_MAX)
+		return DirectFunctionCall1(int8_numeric, Int64GetDatum((int64) v));
+
+	hi = (int64) (v / base);
+	lo = (int64) (v % base);
+	nhi = DirectFunctionCall2(numeric_mul,
+							  DirectFunctionCall1(int8_numeric, Int64GetDatum(hi)),
+							  DirectFunctionCall1(int8_numeric,
+												  Int64GetDatum(INT64CONST(1000000000000000000))));
+	nlo = DirectFunctionCall1(int8_numeric, Int64GetDatum(lo));
+	return DirectFunctionCall2(numeric_add, nhi, nlo);
+}
+#endif
+
 /*
  * pgcolumnar_apply_one
  *		Fold one value (or a null) into an aggregate accumulator. This is the
@@ -2480,6 +2529,32 @@ pgcolumnar_apply_one(MemoryContext resultContext, PgColumnarAggSpec *spec,
 		case COLUMNAR_AGG_AVG_INT8:
 		case COLUMNAR_AGG_SUM_NUMERIC:
 		case COLUMNAR_AGG_AVG_NUMERIC:
+#ifdef HAVE_INT128
+			/*
+			 * int8 accumulates in 128 bits and converts once at finalize
+			 * (#785). The numeric kinds cannot: their input is already numeric
+			 * and has a scale, so they keep the running-numeric path below.
+			 */
+			if (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
+				spec->kind == COLUMNAR_AGG_AVG_INT8)
+			{
+				if (!isnull)
+				{
+					spec->i128sum += (int128) DatumGetInt64(val);
+					spec->nsumSet = true;
+					spec->count++;
+					/*
+					 * Set for parity with the numeric path below rather than
+					 * because this kind reads it. Two paths that are meant to be
+					 * equivalent should not leave a state field diverging: the
+					 * next reader of sawValue would then behave differently
+					 * depending on which one ran.
+					 */
+					spec->sawValue = true;
+				}
+				break;
+			}
+#endif
 			if (!isnull)
 			{
 				bool		is_int8 = (spec->kind == COLUMNAR_AGG_SUM_INT8 ||
@@ -2737,6 +2812,10 @@ pgcolumnar_agg_finalize(PgColumnarAggSpec *spec, bool *isnull)
 				*isnull = true;
 				return (Datum) 0;
 			}
+#ifdef HAVE_INT128
+			if (spec->kind == COLUMNAR_AGG_SUM_INT8)
+				return pgcolumnar_int128_to_numeric(spec->i128sum);
+#endif
 			return spec->nsum;
 
 		case COLUMNAR_AGG_AVG_INT8:
@@ -2746,7 +2825,14 @@ pgcolumnar_agg_finalize(PgColumnarAggSpec *spec, bool *isnull)
 				*isnull = true;
 				return (Datum) 0;
 			}
-			return DirectFunctionCall2(numeric_div, spec->nsum,
+			return DirectFunctionCall2(numeric_div,
+#ifdef HAVE_INT128
+									   spec->kind == COLUMNAR_AGG_AVG_INT8
+									   ? pgcolumnar_int128_to_numeric(spec->i128sum)
+									   : spec->nsum,
+#else
+									   spec->nsum,
+#endif
 									   DirectFunctionCall1(int8_numeric,
 														   Int64GetDatum(spec->count)));
 
