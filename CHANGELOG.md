@@ -16,6 +16,29 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- The harness now refuses a `pgcolumnar.set_options` call whose value the
+  function will reject. `set_options` raises on an out-of-range limit, so a
+  suite that calls it and discards the output runs on **default** limits while
+  the script reads as configured, and every later assertion is about a fixture
+  that was never built. Found in review probes that passed
+  `stripe_row_limit => 500`, which errors with "must be at least 1000".
+
+  The naive form of that guard would be wrong. Measured on this tree before
+  writing it: 182 `set_options` calls and exactly three out-of-range literals,
+  all in `test/audit.sh`, all deliberate, all wrapped in `expect_error` because
+  rejecting them is what that suite tests. A guard flagging every out-of-range
+  value is wrong on three of three. The discriminator is whether the call's
+  result is inspected or discarded, so calls passed to `expect_error` are
+  skipped and exactly the silent class remains.
+
+  Line continuations are joined before matching, because two of those three
+  calls are backslash-continued and a line-based scan sees neither the value nor
+  the `expect_error`. That direction fails safe; the same blindness fails open
+  on a real multi-line offender. Proved: without the join, those three become
+  false positives.
+
+### Changed
+
 - `docs/configuration.md` now says why `pgcolumnar.enable_group_vectorization`
   is off by default, which #755 records as not visible from outside the code.
   Measured rather than reasoned: on 4,000,000 rows in 200,000 groups the setting
