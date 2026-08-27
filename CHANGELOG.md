@@ -42,6 +42,73 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- `sum()` and `avg()` over `bigint` are no longer **slower** on the vectorized
+  path than off it (#785). `pgcolumnar.enable_ungrouped_vector_agg` describes
+  itself as the fast path for "sum/avg over int8/float/numeric", and for `bigint`
+  it was a pessimisation: 2.03x slower for `sum`, 1.91x for `avg`.
+
+  The path converted every value to `numeric` and called `numeric_add` per row,
+  which is two allocations and a full numeric addition for each row. A profile of
+  it was 13.0% `make_result_opt_error`, 9.3% `add_abs`, 8.1% `init_var_from_num`
+  and 8.5% `AllocSet` alloc and free: the numeric machinery, not the aggregate.
+  PostgreSQL's own `bigint` accumulators are 128-bit and convert once, and this
+  now does the same.
+
+  Measured on 8,000,000 rows, interleaved, minimum of seven, with the plan and
+  the answer asserted on both arms:
+
+  | | Before | After |
+  | --- | ---: | ---: |
+  | `sum(bigint)` | 2.03x slower | **1.65x faster** |
+  | `avg(bigint)` | 1.91x slower | **1.74x faster** |
+
+  `float4` and `float8` were already large wins on this path (3.18x and 2.88x
+  here), so the setting is now a gain for three of the four families it names.
+  `numeric` remains about 1.14x slower and is unchanged by this: its input is
+  already `numeric` with a scale, so it cannot use an integer accumulator. That
+  residue is recorded on #785 rather than fixed here.
+
+### Changed
+
+- `docs/configuration.md` now documents when `encode_effort` changes anything at
+  all, and what it costs on read (#768). The section described the setting as a
+  trade between load speed and compression ratio, which reads as though the
+  choice has no consequence after the load.
+
+  The writer builds the FSST symbol table, then compares the result against the
+  same data without it **after the block codec has run**, and keeps the table
+  only when the saving clears `pgcolumnar.fsst_min_gain_percent`, default 5.
+
+  **That decision depends on the data and cannot be predicted.** It is made for
+  each column chunk, and two people who both write "text-shaped" test data get
+  opposite answers. In four shapes measured for this entry the table was dropped
+  every time, so `full` and `fast` produced byte-identical storage and equal read
+  times. A second set of measurements found shapes where it survives and `full`
+  is 31.8% and 9.6% smaller, at read times of 1.08x and 0.99x, because the extra
+  decoding is paid back by reading fewer bytes.
+
+  So the section gives the reader a way to measure their own column rather than a
+  verdict. An earlier draft of this entry concluded that at default settings the
+  option changes nothing but write time. That was true of the shapes it was
+  measured on and false in general, and a reader who acted on it could have paid
+  a third more storage.
+
+  The read-cost table is scoped to `compression = 'none'`, which is the only
+  setting that keeps the table unconditionally, and is labelled as isolating the
+  encoding rather than describing a default installation:
+
+  | Text shape | `full` | `fast` | `fast` is |
+  | --- | ---: | ---: | ---: |
+  | 128-char hex | 267.6 ms | 143.9 ms | 1.86x faster |
+  | URL-shaped text | 131.5 ms | 96.0 ms | 1.37x faster |
+
+  Those replaced 2.69x and 3.84x, which were measured before the reader learned
+  to decode a symbol with one machine word. The section names the reader version
+  its figures came from.
+
+
+### Fixed
+
 - `ORDER BY` no longer returns unordered rows after a column rename, and neither
   ordering self-gate skips work it must do (#778). Both follow from one cause:
   nothing maintained the recorded sort key across a rename. `pgcolumnar.storage` records

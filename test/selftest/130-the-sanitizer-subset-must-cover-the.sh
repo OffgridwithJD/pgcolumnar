@@ -55,3 +55,25 @@ check "premise: at least one suite drives the C-level encoding selftest" \
 check "the sanitizer subset runs every suite that drives the encoding selftest" \
 	"$(printf '%s' "$_san_missing" | sed 's/^ //')" ""
 
+
+# ---- NOT a check: FSST slack coverage, and why there is no arm for it --------
+#
+# decode_fsst_shared stores each symbol as one fixed 8-byte write and allocates
+# FSST_DECODE_SLACK bytes past rawLen so the tail of that write stays inside the
+# allocation (#768). Nothing in the ordinary matrix can see the slack removed:
+# the over-write lands 1 to 7 bytes past a palloc'd chunk, which does not fault
+# and changes no answer. The sanitizer catches it precisely -- with the slack
+# deleted, write_fsst_compressed reports
+# `heap-buffer-overflow ... columnar_encoding.c in decode_fsst_shared`.
+#
+# I wrote an arm here requiring the subset to keep a suite that drives FSST, and
+# then removed it, because it cannot fail. `encode_effort = full` is the DEFAULT,
+# so FSST decoding is exercised by essentially every suite that stores text, and
+# the subset holds many: native_encoding, write_fsst_compressed, differential,
+# arrow_export among them. Measured: deleting all three of the suites I first
+# named from the subset left the check green, because others still matched.
+#
+# So the coverage is not at risk in the way an arm here would guard, and a check
+# that cannot go red is worse than none -- it reads as protection. The comment
+# stays because the REASON matters: if the sanitizer subset ever narrowed to
+# suites that store no varlena data, the slack would lose its only detector.
