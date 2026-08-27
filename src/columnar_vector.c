@@ -830,9 +830,17 @@ pgcolumnar_agg_metadata_answerable(PgColumnarAggKind kind)
  *		already holds and a core Finalize can combine (#289 phase 5/6): count(*),
  *		count(col), and sum/avg over int2/int4/float4/float8. The transition types:
  *		count/sum(int) -> int8, sum(float) -> the identity float, avg(int) -> the
- *		int8[2] {N,sum} array, avg(float) -> the _float8 {N,Sx,Sxx} array. The
- *		internal-transtype kinds (sum/avg over int8/numeric) are not batch-eligible
- *		and stay on the serial node or the ordinary core Agg.
+ *		int8[2] {N,sum} array, avg(float) -> the _float8 {N,Sx,Sxx} array.
+ *
+ *		The internal-transtype kinds (sum/avg over int8/numeric) stay OUT OF THIS
+ *		PREDICATE, and still should: an int128 running total is not a partial
+ *		state a core Finalize can combine, whatever else changes.
+ *
+ *		This header used to add "and are not batch-eligible", which was a claim
+ *		about a DIFFERENT predicate asserted inside this one. Batch eligibility
+ *		is pgcolumnar_batch_agg_ok, which has its own callers, and since #755 q3
+ *		it admits the int8 kinds while this one does not. Two predicates, two
+ *		answers; one sentence used to give both (OffgridwithJD, #755 review).
  */
 static bool
 pgcolumnar_parallel_agg_ok(PgColumnarAggKind kind)
@@ -3242,6 +3250,28 @@ pgcolumnar_batch_agg_ok(PgColumnarAggKind kind)
 		case COLUMNAR_AGG_SUM_FLOAT:
 		case COLUMNAR_AGG_AVG_FLOAT:
 			return true;
+#ifdef HAVE_INT128
+		case COLUMNAR_AGG_SUM_INT8:
+		case COLUMNAR_AGG_AVG_INT8:
+			/*
+			 * #755 q3. The fold reads a column at a time and then calls
+			 * pgcolumnar_apply_one per value, so a kind is foldable when its
+			 * accumulate is cheap, not when it has a combinable transtype. Since
+			 * #786 the int8 kinds accumulate into an int128 and allocate
+			 * nothing, which is what makes them eligible here.
+			 *
+			 * This is NOT parallel eligibility. pgcolumnar_parallel_agg_ok is a
+			 * separate predicate with its own callers, and int8 stays out of it
+			 * on its own merits: an int128 running total is not a partial state
+			 * a core Finalize can combine.
+			 *
+			 * Guarded on HAVE_INT128 because without it apply_one takes the
+			 * per-row numeric path, which allocates twice per value, and the
+			 * fold would be folding the expensive accumulate faster rather than
+			 * making it cheap.
+			 */
+			return true;
+#endif
 		default:
 			return false;
 	}
