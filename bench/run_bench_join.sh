@@ -347,18 +347,33 @@ echo "rows: $SCALE   reps: $REPS   serial   $(nproc) cores"
 echo
 for shape in "${SHAPE_A[@]}"; do
 	echo "-- data shape: $shape"
-	printf '%-4s %-32s %12s %12s %10s %19s\n' id shape heap columnar 'col/heap' 'col min..max'
+	# THE HEADLINE RATIO IS TAKEN FROM MIN, NOT MEDIAN, and that is not the usual
+	# instinct. Contention on a shared box can only make a run SLOWER, never
+	# faster, so the contamination here is ONE-SIDED. A median is robust against
+	# SYMMETRIC outliers; it is not robust against a one-sided contamination that
+	# shifts most of the samples, because then most of the samples ARE the
+	# contamination. The min is the run where least was stolen.
+	#
+	# This dataset says so directly. On the S0 columnar arm, one run's MEDIAN
+	# (46.020) agrees with another run's MIN (44.888) to 2.5%, while the two
+	# MEDIANS disagree by 31%. And in that run min 44.888 / median 60.488 / max
+	# 66.376 puts the median 73% of the way from min to max -- a right-skewed
+	# distribution, not scatter about a centre.
+	#
+	# That is also why more reps did not converge the narrow finding: more
+	# samples improve a median's estimate of a distribution whose centre is
+	# itself moving with ambient load. You cannot out-sample that.
+	#
+	# The median is still printed, because the two disagreeing is the signal that
+	# the run was contended.
+	printf '%-4s %-32s %11s %11s %9s %9s %19s\n' id shape 'heap min' 'col min' 'col/heap' '(median)' 'col min..max'
 	for shp in $SHAPE_IDS; do
-		h="${MS["$shape:$shp:heap"]:-}"
-		c="${MS["$shape:$shp:columnar"]:-}"
-		r=$(ratio "$c" "$h")
-		# The spread is printed for every row because the impossible-heap-ratio
-		# warning below is ONE-SIDED: it can only fire when noise happens to push
-		# the heap ratio under 1.0, which is about half the runs in which the same
-		# error is present. Its silence is not a clean bill. Min and max make the
-		# scatter directly visible instead, which is strictly more informative.
+		hm="${MN["$shape:$shp:heap"]:-}"
+		cm="${MN["$shape:$shp:columnar"]:-}"
+		r=$(ratio "$cm" "$hm")
+		rmed=$(ratio "${MS["$shape:$shp:columnar"]:-}" "${MS["$shape:$shp:heap"]:-}")
 		sp="${MN["$shape:$shp:columnar"]:-}..${MX["$shape:$shp:columnar"]:-}"
-		printf '%-4s %-32s %12s %12s %10s %19s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r" "$sp"
+		printf '%-4s %-32s %11s %11s %9s %9s %19s\n' "$shp" "$(q_desc $shp)" "$hm" "$cm" "$r" "$rmed" "$sp"
 	done
 	# The join's own contribution, per arm, with decode divided out. Printed for
 	# BOTH arms on purpose: adding a join, a second table and a filter is strictly
@@ -367,8 +382,8 @@ for shape in "${SHAPE_A[@]}"; do
 	# it cannot be read as a measurement -- the noise is larger than the effect.
 	# Hiding this line would leave the impossibility to be rediscovered by
 	# arithmetic, which is how a number gets quoted that should not have been.
-	jh=$(ratio "${MS["$shape:S4:heap"]:-}" "${MS["$shape:S0W:heap"]:-}")
-	jc=$(ratio "${MS["$shape:S4:columnar"]:-}" "${MS["$shape:S0W:columnar"]:-}")
+	jh=$(ratio "${MN["$shape:S4:heap"]:-}" "${MN["$shape:S0W:heap"]:-}")
+	jc=$(ratio "${MN["$shape:S4:columnar"]:-}" "${MN["$shape:S0W:columnar"]:-}")
 	printf '%-4s %-32s %12s %12s %10s\n' "" "S4/S0W (the join, decode removed)" "$jh" "$jc" \
 		"$(awk -v a="$jc" -v b="$jh" 'BEGIN { if (b+0 > 0) printf "%.2f", a / b; else print "-" }')"
 	if awk -v h="$jh" 'BEGIN { exit !(h+0 < 1.0 && h+0 > 0) }'; then
