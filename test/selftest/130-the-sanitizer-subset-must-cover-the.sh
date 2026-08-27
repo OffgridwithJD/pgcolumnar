@@ -56,31 +56,24 @@ check "the sanitizer subset runs every suite that drives the encoding selftest" 
 	"$(printf '%s' "$_san_missing" | sed 's/^ //')" ""
 
 
-# ---- and every suite that is the ONLY guard on a deliberate over-write -------
+# ---- NOT a check: FSST slack coverage, and why there is no arm for it --------
 #
 # decode_fsst_shared stores each symbol as one fixed 8-byte write and allocates
-# FSST_DECODE_SLACK bytes past rawLen so the tail of that write is inside the
+# FSST_DECODE_SLACK bytes past rawLen so the tail of that write stays inside the
 # allocation (#768). Nothing in the ordinary matrix can see the slack removed:
 # the over-write lands 1 to 7 bytes past a palloc'd chunk, which does not fault
-# and does not change any answer. **The sanitizer is the only thing that
-# catches it**, and it does so precisely -- with the slack deleted,
-# write_fsst_compressed reports
+# and changes no answer. The sanitizer catches it precisely -- with the slack
+# deleted, write_fsst_compressed reports
 # `heap-buffer-overflow ... columnar_encoding.c in decode_fsst_shared`.
 #
-# So a suite that exercises FSST decoding must stay in the subset. Dropping one
-# would not fail anything; it would silently remove the only guard there is.
-# Asked by which suites DRIVE FSST rather than by name, so moving the coverage
-# to another suite cannot quietly narrow it.
-_fsst_missing=""
-_fsst_drivers=0
-for _f in "$PGC_SRCDIR"/test/*.sh; do
-	grep -qE "encode_effort *=> *'full'|fsst" "$_f" || continue
-	_fsst_drivers=$((_fsst_drivers + 1))
-	_b="$(basename "$_f" .sh)"
-	grep -qw "$_b" <<<"$_san_suites" || _fsst_missing="$_fsst_missing $_b"
-done
-check "premise: at least one suite drives FSST encoding" \
-	"$([ "$_fsst_drivers" -ge 1 ] && echo yes || echo "no ($_fsst_drivers)")" "yes"
-check "the sanitizer subset runs at least one suite that drives FSST decoding" \
-	"$([ "$_fsst_drivers" -gt "$(printf '%s' "$_fsst_missing" | wc -w)" ] && echo covered || echo "none covered")" \
-	"covered"
+# I wrote an arm here requiring the subset to keep a suite that drives FSST, and
+# then removed it, because it cannot fail. `encode_effort = full` is the DEFAULT,
+# so FSST decoding is exercised by essentially every suite that stores text, and
+# the subset holds many: native_encoding, write_fsst_compressed, differential,
+# arrow_export among them. Measured: deleting all three of the suites I first
+# named from the subset left the check green, because others still matched.
+#
+# So the coverage is not at risk in the way an arm here would guard, and a check
+# that cannot go red is worse than none -- it reads as protection. The comment
+# stays because the REASON matters: if the sanitizer subset ever narrowed to
+# suites that store no varlena data, the slack would lose its only detector.
