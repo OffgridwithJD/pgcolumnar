@@ -21,6 +21,40 @@
 set -uo pipefail
 
 PG_CONFIG="${1:-/usr/local/pg18_uring/bin/pg_config}"
+
+# ---------------------------------------------------------------------------
+# The non-assert requirement, ENFORCED rather than documented
+# ---------------------------------------------------------------------------
+#
+# This script's header has always said to run against a non-assert build. It
+# said so and checked nothing, and the invocation that measured #755, #768, #752
+# and #753 passed an --enable-cassert prefix. That is the failure shape this
+# repository keeps finding: the rule existed, the check did not.
+#
+# Refuse rather than warn, because a benchmark's whole output is numbers and a
+# warning above a table does not travel with the table. The override exists
+# because a comparison between two assert builds is still valid, and because an
+# assert build is sometimes the only one to hand -- but then every figure has to
+# be labelled, which is what the banner does.
+#
+# On the one measurement where the size of the skew was checked rather than
+# reasoned about, it was 2.5% (#768's per-column ladder, assert against
+# non-assert). Small here; it is allocation- and reset-shaped, so it is not
+# small everywhere, and the point is that nobody knew which case they had.
+BENCH_CASSERT="$("$PG_CONFIG" --configure 2>/dev/null | grep -c 'enable-cassert' || true)"
+if [ "${BENCH_CASSERT:-0}" != "0" ]; then
+	if [ -n "${BENCH_ALLOW_CASSERT:-}" ]; then
+		echo "== WARNING: --enable-cassert build. Every number below includes"
+		echo "   validation a production build never runs, and is comparable only"
+		echo "   against another assert build."
+	else
+		echo "FATAL: $("$PG_CONFIG" --bindir) is an --enable-cassert build."
+		echo "       This benchmark's numbers would carry assert-only validation."
+		echo "       Use a non-assert build, or set BENCH_ALLOW_CASSERT=1 to run"
+		echo "       anyway and have the output labelled as such."
+		exit 1
+	fi
+fi
 BINDIR="$("$PG_CONFIG" --bindir)"
 PORT="${BENCH_PORT:-55490}"
 ROWS="${BENCH_ROWS:-60000000}"
