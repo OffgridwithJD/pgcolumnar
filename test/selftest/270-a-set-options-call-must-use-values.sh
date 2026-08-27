@@ -89,10 +89,19 @@ check "premise: the set_options sweep read a substantial number of calls" \
 # data (the positive control writes an out-of-range call that is deliberately
 # not wrapped in expect_error), so sweeping it would flag the probe that proves
 # the sweep works. Keyed on BASH_SOURCE so it cannot drift into a
-# hand-maintained list of exceptions.
+# hand-maintained list of exceptions. Matched with grep -vxF against the FULL
+# path: -vF on the basename would be a substring match against the whole path,
+# which is still a name match and not what this comment promises.
+#
+# LATENT, and named rather than fixed: --include='*.sh' bounds BOTH sides of the
+# premise, so a .sql calling set_options would be invisible to the sweep and to
+# the completeness check alike -- the same accidental-completeness argument one
+# level over. Checked on 011389f: the only .sql mentioning set_options is
+# test/fixtures/pgcolumnar--1.0-alpha.sql, which DEFINES the function rather
+# than calling it (OffgridwithJD, #780 review).
 _so_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 _so_have="$(grep -rl 'set_options(' --include='*.sh' "$PGC_SRCDIR" 2>/dev/null \
-	| grep -vF "$(basename "$_so_self")" | LC_ALL=C sort -u)"
+	| grep -vxF "$_so_self" | LC_ALL=C sort -u)"
 _so_read="$(_so_calls | cut -d: -f1 | LC_ALL=C sort -u)"
 _so_missed="$(LC_ALL=C comm -23 <(printf '%s\n' "$_so_have") <(printf '%s\n' "$_so_read"))"
 [ -n "$_so_missed" ] && printf '%s\n' "$_so_missed" | sed 's/^/    unswept: /'
