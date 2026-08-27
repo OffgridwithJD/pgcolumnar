@@ -140,19 +140,52 @@ check "sum(numeric) keeps its scale and still agrees" "$(trio d8 'sum(v)')" \
 check "avg(numeric) too" "$(trio d8 'avg(v)')" \
 	"agree:$(q 'SELECT avg(v)::text FROM d8_h;')"
 
-# ---- where the arm that can SEE this fix removed lives ----------------------
+# ---- WORK DONE: the vectorized path must not be SLOWER than the scalar one ---
 #
-# Not here. The 22 value arms above cannot detect the fix being reverted:
-# reverting it restores the per-row numeric accumulation, which is CORRECT and
-# merely slow, so every one of them stays green. The defect #785 records was
-# speed, so the only arm that can guard it measures speed.
+# The 22 value arms above cannot see this fix removed. Reverting it restores the
+# per-row numeric accumulation, which is CORRECT and merely slow, so all 22 stay
+# green. The defect #785 records was speed, so the arm that guards it has to
+# measure speed.
 #
-# That arm is test/int8_agg_int128_timing.sh, on its own, because
-# PGC_SKIP_TIMING=1 is set in ci.yml and nightly.yml. A wall-clock ratio living
-# in this file would be skipped there while these 22 arms still passed, and the
-# suite would report PASSED with its subject dropped. Split out, the driver
-# names it skipped in the "(N ran, M skipped)" line and a reader can see the
-# guard was not run. Same reasoning run_all_versions.sh already records for
-# planner_choice_quality.
+# It uses check_ratio and NOT check_ratio_timing, and that distinction is the
+# whole reason this arm runs at all: PGC_SKIP_TIMING=1 is set in ci.yml and in
+# nightly.yml, so the _timing form would run in no automated gate while these 22
+# arms still reported PASSED. That is a suite passing with its subject dropped.
+#
+# The exemption is the one cancel_decode.sh already states for itself: this is a
+# ratio between two readings taken back to back in the same run on the same
+# machine, not a ratio against a data-volume baseline. Both readings move
+# together under load, which is what makes it safe on shared hardware where the
+# wall-clock ratio suites are not.
+#
+# THE ASSERTION IS A BOUND, NOT A TARGET. "Not slower than the scalar path" is
+# exactly the defect, and it does not encode how fast this machine is. The gap
+# is wide: 2.03x slower before the fix, 1.65x faster after, and reverting it
+# measures 3.63x to 3.68x against a 1.10x bound. A false red needs the machine
+# to make the fixed arm more than 2x slower than it measures here.
+psql_run "DROP TABLE IF EXISTS perf8;"
+psql_run "CREATE TABLE perf8 (v bigint) USING pgcolumnar;"
+psql_run "INSERT INTO perf8 SELECT (g % 1000)::bigint FROM generate_series(1,4000000) g;"
+check_num "premise: the timing fixture loaded every row" \
+	"$(q 'SELECT count(*) FROM perf8;')" "4000000"
+check_num "premise: and the vectorized node really runs, so the ratio compares two paths" \
+	"$(vecplan 'sum(v)' perf8)" "1"
+
+# min of 5 each, INTERLEAVED, which is what makes the ratio self-normalising.
+ms() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -q \
+		-c "SET pgcolumnar.enable_ungrouped_vector_agg=$1" -c '\timing on' \
+		-c "SELECT sum(v) FROM perf8" 2>/dev/null \
+	| grep -o 'Time: [0-9.]*' | tail -1 | cut -d' ' -f2
+}
+BON=""; BOFF=""
+for _ in 1 2 3 4 5; do
+	x="$(ms on)"; y="$(ms off)"
+	[ -z "$BON" ] && BON="$x"; [ -z "$BOFF" ] && BOFF="$y"
+	BON="$(awk -v a="$BON" -v b="$x" 'BEGIN{print (b<a)?b:a}')"
+	BOFF="$(awk -v a="$BOFF" -v b="$y" 'BEGIN{print (b<a)?b:a}')"
+done
+echo "-- sum(bigint): vectorized $BON ms, scalar $BOFF ms"
+check_ratio "the vectorized path is not slower than the scalar one" "$BON" "$BOFF" "1.10"
 
 pgc_summary

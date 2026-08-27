@@ -107,7 +107,6 @@ SUITES=(
 	import_export_privilege
 	index_only
 	int8_agg_int128
-	int8_agg_int128_timing
 	isolation
 	local_open_race_free
 	logical_decoding_cdc_recipe
@@ -567,13 +566,6 @@ declare -a SUMMARY
 is_timing_suite() {
 	case "$1" in
 		native_fetch_position|native_cancel|native_agg_deletes) return 0 ;;
-		# int8_agg_int128_timing's only assertion is a wall-clock ratio, and it is
-		# the only arm that can see #785's fix removed -- the value arms in
-		# int8_agg_int128 stay green when it is reverted, because the old path was
-		# correct and merely slow. Listed here so PGC_SKIP_TIMING drops the SUITE
-		# and the driver names it, rather than letting it report PASSED with its
-		# subject skipped.
-		int8_agg_int128_timing) return 0 ;;
 		# planner_choice_quality's only assertion is a wall-clock ratio. Left out
 		# of this list it still RAN under PGC_SKIP_TIMING, skipped the ratio, and
 		# reported PASS on the strength of its premises -- so a regression of #434
