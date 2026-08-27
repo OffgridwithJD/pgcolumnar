@@ -36,6 +36,14 @@
 #   S2  unselective join, the dimension barely filters, so the join does real work
 #   S3  multi-dimension star, where join order starts to matter
 #   S4  wide projection under a join, does the join force decoding of columns
+#
+#   S0 and S0W are the no-join controls, and S0W exists because S0 alone cannot
+#   serve S4. S4 projects EIGHT float8 columns, and #768 measures a single float8
+#   column at 1.52x the heap with no join anywhere in sight -- so some unknown
+#   part of S4's ratio is per-column decode cost rather than anything the join
+#   did. S4 divided by S0W is the join's contribution with decode divided out.
+#   Near 1 means S4 belongs to #768 and a runtime filter pushdown would not move
+#   it. Without S0W the wide row cannot be attributed at all.
 #       nothing needs
 #
 # Arms: heap and pgColumnar. See the BENCH_ARMS note below for why TimescaleDB is
@@ -233,6 +241,7 @@ done
 q_for() {  # q_for <shape-id>
 	case "$1" in
 		S0) echo "SELECT avg(m1) FROM %T" ;;
+		S0W) echo "SELECT avg(m1+m2+m3+m4+m5+m6+m7+m8) FROM %T" ;;
 		S1) echo "SELECT avg(f.m1) FROM %T f JOIN hosts h USING (host_id) WHERE h.tier = 3" ;;
 		S2) echo "SELECT avg(f.m1) FROM %T f JOIN hosts h USING (host_id) WHERE h.tier < 5" ;;
 		S3) echo "SELECT r.continent, avg(f.m1) FROM %T f JOIN hosts h USING (host_id)
@@ -245,13 +254,14 @@ q_for() {  # q_for <shape-id>
 q_desc() {
 	case "$1" in
 		S0) echo "no join (control)" ;;
+		S0W) echo "no join, wide projection (control for S4)" ;;
 		S1) echo "selective dimension join" ;;
 		S2) echo "unselective join" ;;
 		S3) echo "multi-dimension star" ;;
 		S4) echo "wide projection under a join" ;;
 	esac
 }
-SHAPE_IDS="S0 S1 S2 S3 S4"
+SHAPE_IDS="S0 S0W S1 S2 S3 S4"
 
 # One timed run, in milliseconds.
 timed() {  # timed <table> <sql-with-%T>
@@ -288,6 +298,18 @@ for shape in "${SHAPE_A[@]}"; do
 	require "[$shape] a join between scan and aggregate disables it" \
 		"$(grep -qi 'Vectorized' <<<"$p1" && echo yes || echo no)" "no" || fail=1
 
+	# S0W's premise is the OPPOSITE of S0's, and it has to be, or S4/S0W stops
+	# meaning what the header says. S4 is unvectorized because a join sits
+	# between the scan and the aggregate. S0W is unvectorized for a different
+	# reason -- its target-list entry is an EXPRESSION over columns rather than a
+	# bare Aggref, which the vectorized path also declines -- and that coincidence
+	# is what makes the division like-for-like. If S0W ever starts vectorizing,
+	# the ratio silently becomes "the join plus the loss of the fold path"
+	# instead of "the join", and nothing else here would notice.
+	p0w=$(plan_of "$ct" "$(q_for S0W)")
+	require "[$shape] the wide no-join control is NOT vectorized, so S4/S0W is like-for-like" \
+		"$(grep -qi 'Vectorized' <<<"$p0w" && echo yes || echo no)" "no" || fail=1
+
 	# A different join method either side makes the comparison meaningless.
 	for shp in S1 S2 S4; do
 		hm=$(plan_of "$(fact_name heap "$shape")" "$(q_for $shp)" | grep -oE 'Hash Join|Merge Join|Nested Loop' | head -1)
@@ -302,7 +324,7 @@ done
 # One shape at a time across every arm before moving on. A sweep gives its first
 # arm the cold cache and every later arm a warm one (#271).
 note "== timings (median of $REPS, interleaved across arms)"
-declare -A MS
+declare -A MS MN MX
 for shape in "${SHAPE_A[@]}"; do
 	for shp in $SHAPE_IDS; do
 		for arm in "${ARM_A[@]}"; do
@@ -310,6 +332,8 @@ for shape in "${SHAPE_A[@]}"; do
 			runs=()
 			for r in $(seq 1 "$REPS"); do runs+=("$(timed "$t" "$(q_for $shp)")"); done
 			MS["$shape:$shp:$arm"]=$(median "${runs[@]}")
+			MN["$shape:$shp:$arm"]=$(printf '%s\n' "${runs[@]}" | sort -n | awk 'NR==1{print $1}')
+			MX["$shape:$shp:$arm"]=$(printf '%s\n' "${runs[@]}" | sort -n | awk 'END{print $1}')
 		done
 		printf '   %-10s %-3s' "$shape" "$shp"
 		for arm in "${ARM_A[@]}"; do printf ' %-9s=%-10s' "$arm" "${MS["$shape:$shp:$arm"]}"; done
@@ -326,13 +350,59 @@ echo "rows: $SCALE   reps: $REPS   serial   $(nproc) cores"
 echo
 for shape in "${SHAPE_A[@]}"; do
 	echo "-- data shape: $shape"
-	printf '%-4s %-32s %12s %12s %10s\n' id shape heap columnar 'col/heap'
+	# THE HEADLINE RATIO IS TAKEN FROM MIN, NOT MEDIAN, and that is not the usual
+	# instinct. Contention on a shared box can only make a run SLOWER, never
+	# faster, so the contamination here is ONE-SIDED. A median is robust against
+	# SYMMETRIC outliers; it is not robust against a one-sided contamination that
+	# shifts most of the samples, because then most of the samples ARE the
+	# contamination. The min is the run where least was stolen.
+	#
+	# This dataset says so directly. On the S0 columnar arm, one run's MEDIAN
+	# (46.020) agrees with another run's MIN (44.888) to 2.5%, while the two
+	# MEDIANS disagree by 31%. And in that run min 44.888 / median 60.488 / max
+	# 66.376 puts the median 73% of the way from min to max -- a right-skewed
+	# distribution, not scatter about a centre.
+	#
+	# That is also why more reps did not converge the narrow finding: more
+	# samples improve a median's estimate of a distribution whose centre is
+	# itself moving with ambient load. You cannot out-sample that.
+	#
+	# The median is still printed, because the two disagreeing is the signal that
+	# the run was contended.
+	#
+	# MIN-OF-N IS NOT SCALE-FREE. It decreases weakly with N, so a min of 9 reps
+	# is not comparable to a min of 3 or of 20. The header prints `reps:` for this
+	# run, but ANY FIGURE QUOTED OUT OF THIS TABLE MUST CARRY THE REP COUNT WITH
+	# IT, or a later run at a different BENCH_REPS reads as a shift that is purely
+	# the statistic.
+	printf '%-4s %-32s %11s %11s %9s %9s %19s\n' id shape 'heap min' 'col min' 'col/heap' '(median)' 'col min..max'
 	for shp in $SHAPE_IDS; do
-		h="${MS["$shape:$shp:heap"]:-}"
-		c="${MS["$shape:$shp:columnar"]:-}"
-		r=$(ratio "$c" "$h")
-		printf '%-4s %-32s %12s %12s %10s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r"
+		hm="${MN["$shape:$shp:heap"]:-}"
+		cm="${MN["$shape:$shp:columnar"]:-}"
+		r=$(ratio "$cm" "$hm")
+		rmed=$(ratio "${MS["$shape:$shp:columnar"]:-}" "${MS["$shape:$shp:heap"]:-}")
+		sp="${MN["$shape:$shp:columnar"]:-}..${MX["$shape:$shp:columnar"]:-}"
+		printf '%-4s %-32s %11s %11s %9s %9s %19s\n' "$shp" "$(q_desc $shp)" "$hm" "$cm" "$r" "$rmed" "$sp"
 	done
+	# The join's own contribution, per arm, with decode divided out. Printed for
+	# BOTH arms on purpose: adding a join, a second table and a filter is strictly
+	# MORE work, so a heap ratio below 1.00 is physically impossible and is the
+	# scatter of this pair made visible. If it is there, the columnar ratio beside
+	# it cannot be read as a measurement -- the noise is larger than the effect.
+	# Hiding this line would leave the impossibility to be rediscovered by
+	# arithmetic, which is how a number gets quoted that should not have been.
+	jh=$(ratio "${MN["$shape:S4:heap"]:-}" "${MN["$shape:S0W:heap"]:-}")
+	jc=$(ratio "${MN["$shape:S4:columnar"]:-}" "${MN["$shape:S0W:columnar"]:-}")
+	printf '%-4s %-32s %12s %12s %10s\n' "" "S4/S0W (the join, decode removed)" "$jh" "$jc" \
+		"$(awk -v a="$jc" -v b="$jh" 'BEGIN { if (b+0 > 0) printf "%.2f", a / b; else print "-" }')"
+	if awk -v h="$jh" 'BEGIN { exit !(h+0 < 1.0 && h+0 > 0) }'; then
+		printf '%-4s %s\n' "" "^ heap S4/S0W is BELOW 1.00, which is impossible: a join cannot"
+		printf '%-4s %s\n' "" "  make the same scan faster. The columnar figure beside it is an"
+		printf '%-4s %s\n' "" "  upper bound on the join's share, not a measurement of it."
+		printf '%-4s %s\n' "" "  This check is ONE-SIDED: when noise pushes the heap ratio the other"
+		printf '%-4s %s\n' "" "  way the same error is present and invisible, so its SILENCE is not"
+		printf '%-4s %s\n' "" "  evidence of a clean pair. Read the min..max column for that."
+	fi
 	hs=$($P -c "SELECT pg_total_relation_size('$(fact_name heap $shape)')")
 	cs=$($P -c "SELECT pg_total_relation_size('$(fact_name columnar $shape)')")
 	printf '%-4s %-32s %12s %12s %10s\n' "" "total relation size (bytes)" "$hs" "$cs" \
@@ -341,6 +411,14 @@ for shape in "${SHAPE_A[@]}"; do
 done
 echo "S0 against S1 is the finding: the same aggregate over the same rows, with"
 echo "and without a join. Read those two lines together before anything else."
+echo
+echo "Ratios are taken from MIN, not median: contention only makes a run slower,"
+echo "so the noise is one-sided and a median is not robust against it. Min of"
+echo "$REPS reps -- min is not scale-free, so quote the rep count with any figure."
+echo
+echo "S0W exists so S4 can be attributed. S4 projects eight float8 columns and a"
+echo "single float8 column already costs more to decode than an int one, so S4"
+echo "mixes the join with per-column decode. S4/S0W divides the decode out."
 if [ "$fail" != 0 ]; then
 	echo
 	echo "A PREMISE FAILED. Do not quote these numbers."
