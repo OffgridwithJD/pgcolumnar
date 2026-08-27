@@ -389,18 +389,55 @@ check "REFUSE: one updated row is a row outside the run" \
 check "and ORDER BY k LIMIT 1 finds the updated row" \
 	"$(q 'SELECT k FROM upc ORDER BY k LIMIT 1;')" "-1"
 
-# --- a column rename makes the recorded name stop resolving -----------------
+# --- a column rename: the mark follows it, so the claim survives (#778) ------
+#
+# This arm used to assert the opposite, and it was right to at the time: nothing
+# maintained the mark, so after a rename the recorded name stopped resolving and
+# the pathkey code refused to claim an ordering. #778 made the mark follow the
+# rename, because a rename does not move data -- the rows really are still
+# ordered by whichever column now carries the name -- so the claim is now both
+# available and TRUE, and the needless Sort goes away.
+#
+# The refusal still has to exist for a name that genuinely cannot be resolved,
+# which is the second half below.
 
 psql_run "CREATE TABLE rnc (LIKE c) USING pgcolumnar;"
 psql_run "SELECT pgcolumnar.set_options('rnc', stripe_row_limit => 2000, chunk_group_row_limit => 500);"
 psql_run "INSERT INTO rnc SELECT * FROM h;"
 psql_run "SELECT pgcolumnar.vacuum_sorted('rnc', 'k', 'j');"
+check "premise: the claim is live before the rename" \
+	"$(sorts 'SELECT k FROM rnc ORDER BY k')" "no"
 psql_run "ALTER TABLE rnc RENAME COLUMN k TO kk;"
-check "premise: the recorded key still names the old column" \
+check "the recorded key FOLLOWS the rename (#778)" \
 	"$(q "SELECT sorted_by::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('rnc');")" \
+	"{kk,j}"
+check "so the claim survives the rename instead of being refused" \
+	"$(sorts 'SELECT kk FROM rnc ORDER BY kk')" "no"
+# ...and the claim is not merely available, it is true: no Sort AND the rows
+# really do come out ordered. A plan with no Sort over unordered rows is the
+# wrong answer, which is the whole risk of claiming a pathkey.
+check "and the rows really are ordered by the renamed column (no Sort AND correct)" \
+	"$(q "SELECT count(*) FROM (SELECT kk < lag(kk) OVER () AS d FROM rnc) z WHERE d;")" "0"
+
+# a name that truly cannot be resolved must still refuse
+psql_run "CREATE TABLE rnd (LIKE c) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('rnd', stripe_row_limit => 2000, chunk_group_row_limit => 500);"
+psql_run "INSERT INTO rnd SELECT * FROM h;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('rnd', 'k', 'j');"
+# Drop the FIRST key column, not the second. Dropping the second leaves {k} as a
+# resolvable prefix, and a prefix of a sort key is a sound claim -- ORDER BY k
+# legitimately needs no Sort, so that shape cannot test a refusal at all. With
+# the first column gone nothing about the remaining order can be claimed: j is
+# ordered only WITHIN equal k, so claiming j alone would be a wrong answer.
+psql_run "ALTER TABLE rnd DROP COLUMN k;"
+check "premise: the recorded key still names the dropped column" \
+	"$(q "SELECT sorted_by::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('rnd');")" \
 	"{k,j}"
+check "premise: and j alone really is NOT ordered, so a claim on it would be wrong" \
+	"$([ "$(q "SELECT count(*) FROM (SELECT j < lag(j) OVER () AS d FROM rnd) z WHERE d;")" -gt 0 ] && echo unordered || echo ordered)" \
+	"unordered"
 check "REFUSE: a recorded name that no longer resolves is not a claim" \
-	"$(sorts 'SELECT kk FROM rnc ORDER BY kk')" "yes"
+	"$(sorts 'SELECT j FROM rnd ORDER BY j')" "yes"
 
 # --- the GUC is the escape hatch and it works both ways ---------------------
 

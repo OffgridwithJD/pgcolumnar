@@ -44,6 +44,7 @@
 #define Anum_options_compression 5
 #define Anum_options_encode_effort 6
 #define Anum_options_sort_by 7
+#define Natts_options 7
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
 #define Anum_projection_declaration_rel 1
@@ -1883,6 +1884,159 @@ insert_row:
 	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
 	metadata_flush_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarRenameDeclaredSortByColumn
+ *		Follow a column rename through the DECLARED sort key in
+ *		pgcolumnar.options (#778).
+ *
+ *		options.sort_by is what pgcolumnar.vacuum_sorted(t) resolves when it is
+ *		called with no explicit columns, and it holds NAMES for a deliberate
+ *		reason the catalog comment gives: options is the one pgcolumnar catalog
+ *		carried through pg_dump and restore, where attnums renumber and names do
+ *		not. So names are correct there, and maintaining them across a rename is
+ *		the only correction available.
+ *
+ *		Maintaining it here is not optional once the ordering mark is
+ *		maintained. Before, both were consistently stale and a bare
+ *		vacuum_sorted(t) at least agreed with the mark. Renaming only the mark
+ *		makes the two catalogs point at DIFFERENT columns, so the same call with
+ *		the same declared intent silently rewrites on a different physical key
+ *		than it did yesterday.
+ */
+void
+PgColumnarRenameDeclaredSortByColumn(Oid relid, const char *oldName,
+									 const char *newName)
+{
+	Relation	rel;
+	TupleDesc	tupdesc;
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	CommandCounterIncrement();
+
+	rel = open_columnar_table("options", RowExclusiveLock);
+	tupdesc = RelationGetDescr(rel);
+	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_options_sort_by, tupdesc, &isnull);
+
+		if (!isnull)
+		{
+			ArrayType  *arr = DatumGetArrayTypeP(d);
+			Datum	   *elems;
+			bool	   *elnulls;
+			int			n;
+			int			i;
+			bool		hit = false;
+
+			deconstruct_array(arr, NAMEOID, NAMEDATALEN, false, 'c',
+							  &elems, &elnulls, &n);
+			for (i = 0; i < n; i++)
+			{
+				if (elnulls[i])
+					continue;
+				if (strcmp(NameStr(*DatumGetName(elems[i])), oldName) == 0)
+				{
+					elems[i] = DirectFunctionCall1(namein,
+												   CStringGetDatum((char *) newName));
+					hit = true;
+				}
+			}
+
+			/* a rename touching no declared column must not rewrite the row */
+			if (hit)
+			{
+				Datum		values[Natts_options];
+				bool		nulls[Natts_options];
+				bool		replace[Natts_options];
+				HeapTuple	newTuple;
+
+				memset(values, 0, sizeof(values));
+				memset(nulls, false, sizeof(nulls));
+				memset(replace, false, sizeof(replace));
+				values[Anum_options_sort_by - 1] =
+					PointerGetDatum(construct_array(elems, n, NAMEOID,
+													NAMEDATALEN, false,
+													TYPALIGN_CHAR));
+				replace[Anum_options_sort_by - 1] = true;
+				newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
+				CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);
+				heap_freetuple(newTuple);
+			}
+		}
+	}
+	systable_endscan(scan);
+	metadata_flush_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarRenameSortKeyColumn
+ *		Follow an ALTER TABLE ... RENAME COLUMN through the ordering mark (#778).
+ *
+ *		pgcolumnar.storage records the applied sort key as a list of column
+ *		NAMES, and both ordering self-gates compare that list against the
+ *		CURRENT attname of the columns they were asked about -- vacuum_sorted's
+ *		gate (#760) and the online recluster's (#415). Column names are not
+ *		stable, and nothing else maintains the mark.
+ *
+ *		A three-statement swap (a->tmp, b->a, tmp->b) therefore leaves the
+ *		stored name resolving to a DIFFERENT column: the gate reports "already
+ *		in this order" about a column that was never sorted and skips the
+ *		rewrite. For vacuum_sorted that is the failure #760 exists to prevent,
+ *		reached through another door, and the table ends up neither ordered nor
+ *		reclaimed with no error raised.
+ *
+ *		Renaming the entry rather than clearing the mark is deliberate. The
+ *		DATA has not moved, so the ordering is still true of whichever column
+ *		now carries the name, and following the rename keeps that fact instead
+ *		of throwing away a real optimisation on every rename. It composes
+ *		correctly through the swap above: {a} -> {tmp} -> {tmp} -> {b}, which is
+ *		the column the rows are actually ordered by.
+ *
+ *		Called after the rename has executed, so a rename that ERRORS leaves the
+ *		mark untouched.
+ */
+void
+PgColumnarRenameSortKeyColumn(uint64 storageId, const char *oldName,
+							  const char *newName)
+{
+	int64		sfrom,
+				sthrough;
+	List	   *skey;
+	char	   *skind;
+	List	   *renamed = NIL;
+	ListCell   *lc;
+	bool		hit = false;
+
+	PgColumnarGetSortedInfo(storageId, &sfrom, &sthrough, &skey, &skind);
+	if (skey == NIL || skind == NULL)
+		return;					/* no mark to maintain */
+
+	foreach(lc, skey)
+	{
+		char	   *nm = (char *) lfirst(lc);
+
+		if (strcmp(nm, oldName) == 0)
+		{
+			renamed = lappend(renamed, pstrdup(newName));
+			hit = true;
+		}
+		else
+			renamed = lappend(renamed, pstrdup(nm));
+	}
+
+	/* a rename that touches no sort-key column must not rewrite the row */
+	if (!hit)
+		return;
+
+	PgColumnarSetSortedExtent(storageId, sfrom, sthrough, renamed, skind);
 }
 
 /*

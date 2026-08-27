@@ -245,6 +245,7 @@ SUITES=(
 	smoke
 	sort_status
 	sort_status_privilege
+	sorted_mark_rename
 	sorted_pathkeys
 	sorted_projection
 	stats_privilege
