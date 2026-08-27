@@ -167,8 +167,10 @@ limit or a level.
 ### Why grouped vectorization is off by default
 
 `pgcolumnar.enable_group_vectorization` is a real speed-up. Take 4,000,000 rows
-grouped into 200,000 keys. `SELECT k, sum(m) FROM t GROUP BY k` runs in 266.9 ms
-with it on and 488.1 ms with it off. The answers are identical.
+grouped into 200,000 keys. `SELECT k, sum(m) FROM t GROUP BY k` runs in 403.7 ms
+with it on and 781.0 ms with it off, a factor of 1.93. The answers are
+identical. That figure is the minimum of seven interleaved pairs on one machine.
+Your own factor depends on the group count, the key width and the aggregate.
 
 It stays off because of how it fails, not because of how it performs. The
 grouped path builds a hash table that does not spill, so
