@@ -114,6 +114,30 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   truncated, are declined rather than approximated. A new suite,
   `preimage_rewrite`, measures the pruning and pins each declined shape. (#403)
 
+### Added
+
+- A suite for the claim under `docs/limitations.md`'s "Replication and backup":
+  that a columnar table is not a logical decoding source. The whole of #754 rests
+  on that sentence and nothing asserted it. The only other logical-replication
+  coverage, `logical_subscriber`, tests the opposite direction, a heap publisher
+  into a columnar subscriber.
+
+  Measured through a `test_decoding` slot created before any row is written, on a
+  heap table and a columnar table of identical shape holding the same 50 rows:
+
+  | | decoded changes |
+  | --- | ---: |
+  | `public.heap_t` (control) | 50 |
+  | `public.col_t` (columnar) | **0** |
+  | `pgcolumnar.*` (internal) | 8 |
+
+  The heap control is the load-bearing arm, because zero decoded changes is also
+  what a broken slot, a mis-built plugin or a query against the wrong slot looks
+  like. The second documented behaviour is asserted too: the slot is not silent,
+  it carries pgcolumnar's own catalog writes, and that churn scales with row
+  groups and chunks rather than rows. 100 times the rows gives 8 records against
+  10, not 800. New suite `logical_decoding_source`. (#754)
+
 ### Fixed
 
 - `docs/limitations.md`'s account of parallel scans stated two things that are

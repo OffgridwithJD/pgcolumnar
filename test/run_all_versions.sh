@@ -108,6 +108,7 @@ SUITES=(
 	index_only
 	isolation
 	local_open_race_free
+	logical_decoding_source
 	logical_subscriber
 	maintenance_due
 	native_agg
