@@ -69,6 +69,16 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   part. Buffer counts are unchanged, which is the expected shape: a catcache or
   relcache lookup reads no buffers once warm, so the buffers a probe costs are
   the index scan. (#744)
+
+- `pgcolumnar.set_options` refused a non-columnar relation with SQLSTATE `P0001`
+  rather than `42809`. plpgsql's `RAISE EXCEPTION` defaults to `P0001` unless an
+  `ERRCODE` is given, and the guard shipped without one, so the identical message
+  `relation "..." is not a columnar table` carried one SQLSTATE from this
+  function and another from the C paths, which raise it with
+  `ERRCODE_WRONG_OBJECT_TYPE`. A caller keying on SQLSTATE, which is what this
+  project's own privilege suites do deliberately, got different answers depending
+  on which path refused it. The guard now sets `wrong_object_type` explicitly and
+  `audit.sh` asserts the code. (#757)
 - A `date_trunc` predicate within one bucket of the end of the `timestamp` range
   raised `ERROR: timestamp out of range` on a columnar table instead of
   answering. The rewrite computes the next bucket boundary as `lo + step`, and

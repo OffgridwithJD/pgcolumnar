@@ -638,6 +638,12 @@ BEGIN
 	 * (measured), so options set after the conversion apply to the same relation
 	 * a caller would have been trying to name before it.
 	 *
+	 * The ERRCODE is explicit. plpgsql's RAISE EXCEPTION defaults to P0001, and
+	 * the C paths raise this same sentence with ERRCODE_WRONG_OBJECT_TYPE
+	 * (42809). Without it the identical message carried two different SQLSTATEs
+	 * depending on which path refused the caller, in a tree whose own privilege
+	 * suites deliberately assert SQLSTATE rather than message text.
+	 *
 	 * relkind is part of the test, and it is what makes the guard match the
 	 * cleanup rather than merely look strict. The drop hook returns before it
 	 * examines the access method for anything that is not an ordinary table
@@ -658,7 +664,8 @@ BEGIN
 					  AND a.amname = 'pgcolumnar'
 					  AND c.relkind = 'r') THEN
 		RAISE EXCEPTION 'relation "%" is not a columnar table', table_name
-			USING HINT = 'Per-table options are read by the columnar writer and '
+			USING ERRCODE = 'wrong_object_type',
+				HINT = 'Per-table options are read by the columnar writer and '
 				'apply only to an ordinary table using the pgcolumnar access '
 				'method. A partitioned table has no storage of its own: set the '
 				'options on each partition. Otherwise convert the table first '
