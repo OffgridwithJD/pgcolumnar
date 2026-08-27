@@ -44,6 +44,7 @@
 #define Anum_options_compression 5
 #define Anum_options_encode_effort 6
 #define Anum_options_sort_by 7
+#define Natts_options 7
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
 #define Anum_projection_declaration_rel 1
@@ -1882,6 +1883,96 @@ insert_row:
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
+	metadata_flush_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarRenameDeclaredSortByColumn
+ *		Follow a column rename through the DECLARED sort key in
+ *		pgcolumnar.options (#778).
+ *
+ *		options.sort_by is what pgcolumnar.vacuum_sorted(t) resolves when it is
+ *		called with no explicit columns, and it holds NAMES for a deliberate
+ *		reason the catalog comment gives: options is the one pgcolumnar catalog
+ *		carried through pg_dump and restore, where attnums renumber and names do
+ *		not. So names are correct there, and maintaining them across a rename is
+ *		the only correction available.
+ *
+ *		Maintaining it here is not optional once the ordering mark is
+ *		maintained. Before, both were consistently stale and a bare
+ *		vacuum_sorted(t) at least agreed with the mark. Renaming only the mark
+ *		makes the two catalogs point at DIFFERENT columns, so the same call with
+ *		the same declared intent silently rewrites on a different physical key
+ *		than it did yesterday.
+ */
+void
+PgColumnarRenameDeclaredSortByColumn(Oid relid, const char *oldName,
+									 const char *newName)
+{
+	Relation	rel;
+	TupleDesc	tupdesc;
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+
+	CommandCounterIncrement();
+
+	rel = open_columnar_table("options", RowExclusiveLock);
+	tupdesc = RelationGetDescr(rel);
+	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_options_sort_by, tupdesc, &isnull);
+
+		if (!isnull)
+		{
+			ArrayType  *arr = DatumGetArrayTypeP(d);
+			Datum	   *elems;
+			bool	   *elnulls;
+			int			n;
+			int			i;
+			bool		hit = false;
+
+			deconstruct_array(arr, NAMEOID, NAMEDATALEN, false, 'c',
+							  &elems, &elnulls, &n);
+			for (i = 0; i < n; i++)
+			{
+				if (elnulls[i])
+					continue;
+				if (strcmp(NameStr(*DatumGetName(elems[i])), oldName) == 0)
+				{
+					elems[i] = DirectFunctionCall1(namein,
+												   CStringGetDatum((char *) newName));
+					hit = true;
+				}
+			}
+
+			/* a rename touching no declared column must not rewrite the row */
+			if (hit)
+			{
+				Datum		values[Natts_options];
+				bool		nulls[Natts_options];
+				bool		replace[Natts_options];
+				HeapTuple	newTuple;
+
+				memset(values, 0, sizeof(values));
+				memset(nulls, false, sizeof(nulls));
+				memset(replace, false, sizeof(replace));
+				values[Anum_options_sort_by - 1] =
+					PointerGetDatum(construct_array(elems, n, NAMEOID,
+													NAMEDATALEN, false,
+													TYPALIGN_CHAR));
+				replace[Anum_options_sort_by - 1] = true;
+				newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
+				CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);
+				heap_freetuple(newTuple);
+			}
+		}
+	}
+	systable_endscan(scan);
 	metadata_flush_close(rel, RowExclusiveLock);
 }
 

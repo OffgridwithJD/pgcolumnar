@@ -115,6 +115,109 @@ psql_run "SELECT pgcolumnar.vacuum_sorted('vr_o','a');"
 check "and the gate still fires" \
 	"$([ "$S" = "$(storid vr_o)" ] && echo noop || echo rewrote)" "noop"
 
+# ==================== inheritance and partitions =============================
+# A column rename CASCADES to children, which are separate relations with their
+# own storage and their own marks. PostgreSQL refuses
+# "ALTER TABLE child RENAME COLUMN" with "cannot rename inherited column", so
+# for a columnar partition the parent is the ONLY route: a hook that looked at
+# the relation named in the statement would never fire for the child at all.
+#
+# This is the wrong-ANSWER half of #778, not the redundant-work half. The stale
+# name still resolves, so #751's pathkey code reads the mark and claims an
+# ordering that does not hold: ORDER BY plans no Sort and returns unordered rows.
+
+# ---- declarative partition -------------------------------------------------
+psql_run "CREATE TABLE prt (k int, j int) PARTITION BY RANGE (k);"
+psql_run "CREATE TABLE prt1 PARTITION OF prt FOR VALUES FROM (0) TO (100000) USING pgcolumnar;"
+psql_run "INSERT INTO prt SELECT (g*7919::bigint)%2000, (g*104729::bigint)%2000
+          FROM generate_series(1,20000) g;"
+check_num "premise: the partition holds every row" "$(q "SELECT count(*) FROM prt1;")" "20000"
+psql_run "SELECT pgcolumnar.vacuum_sorted('prt1','k');"
+check "premise: the partition is ordered by k and its mark says so" \
+	"$([ "$(descents prt1 k)" -eq 0 ] && echo ordered || echo unordered)/$(markof prt1)" \
+	"ordered/{k}/lexicographic"
+check "premise: the parent is NOT itself columnar, so gating on it would skip the child" \
+	"$(q "SELECT COALESCE((SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid=c.relam WHERE c.relname='prt'),'none');")" \
+	"none"
+# the rename can only be issued on the parent
+psql_run "ALTER TABLE prt RENAME COLUMN k TO tmp_swap;"
+psql_run "ALTER TABLE prt RENAME COLUMN j TO k;"
+psql_run "ALTER TABLE prt RENAME COLUMN tmp_swap TO j;"
+check "premise: after the swap the partition's ordered column is named j" \
+	"$([ "$(descents prt1 j)" -eq 0 ] && echo ordered || echo unordered)" "ordered"
+check "premise: and the column now named k is NOT ordered" \
+	"$([ "$(descents prt1 k)" -gt 0 ] && echo unordered || echo ordered)" "unordered"
+check "the PARTITION's mark follows a rename issued on the parent" "$(markof prt1)" "{j}/lexicographic"
+S="$(storid prt1)"
+psql_run "SELECT pgcolumnar.vacuum_sorted('prt1','k');"
+check "so vacuum_sorted on the partition does the work" \
+	"$([ "$S" = "$(storid prt1)" ] && echo "SKIPPED (gate fired wrongly)" || echo rewrote)" "rewrote"
+check_num "and the partition really is ordered by k afterwards" "$(descents prt1 k)" "0"
+
+# ---- INHERITS child --------------------------------------------------------
+psql_run "CREATE TABLE inp (k int, j int);"
+psql_run "CREATE TABLE inc (LIKE inp) INHERITS (inp) USING pgcolumnar;"
+psql_run "INSERT INTO inc SELECT (g*7919::bigint)%2000, (g*104729::bigint)%2000
+          FROM generate_series(1,20000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('inc','k');"
+check "premise: the inheritance child is ordered by k" \
+	"$([ "$(descents inc k)" -eq 0 ] && echo ordered || echo unordered)" "ordered"
+psql_run "ALTER TABLE inp RENAME COLUMN k TO tmp_swap;"
+psql_run "ALTER TABLE inp RENAME COLUMN j TO k;"
+psql_run "ALTER TABLE inp RENAME COLUMN tmp_swap TO j;"
+check "the CHILD's mark follows a rename issued on the parent" "$(markof inc)" "{j}/lexicographic"
+S="$(storid inc)"
+psql_run "SELECT pgcolumnar.vacuum_sorted('inc','k');"
+check "so vacuum_sorted on the child does the work" \
+	"$([ "$S" = "$(storid inc)" ] && echo "SKIPPED (gate fired wrongly)" || echo rewrote)" "rewrote"
+
+# ---- the WRONG-ANSWER shape: ORDER BY with no Sort over unordered rows ------
+# This is why the cascade is not a cosmetic gap. #751 reads the same mark to
+# claim a pathkey, so a stale mark makes the planner drop the Sort.
+sorts() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-c "EXPLAIN (COSTS OFF) $1" 2>/dev/null \
+		| grep -qE '^ *(->)? *(Incremental )?Sort' && echo yes || echo no
+}
+psql_run "CREATE TABLE wp (k int, j int) PARTITION BY RANGE (k);"
+psql_run "CREATE TABLE wp1 PARTITION OF wp FOR VALUES FROM (0) TO (100000) USING pgcolumnar;"
+psql_run "INSERT INTO wp SELECT (g*7919::bigint)%2000, (g*104729::bigint)%2000
+          FROM generate_series(1,20000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('wp1','k');"
+check "premise: with the mark true, ORDER BY k needs no Sort" "$(sorts 'SELECT k FROM wp1 ORDER BY k')" "no"
+psql_run "ALTER TABLE wp RENAME COLUMN k TO tmp_swap;"
+psql_run "ALTER TABLE wp RENAME COLUMN j TO k;"
+psql_run "ALTER TABLE wp RENAME COLUMN tmp_swap TO j;"
+check "after the swap, ORDER BY on the now-unordered column plans a Sort" \
+	"$(sorts 'SELECT k FROM wp1 ORDER BY k')" "yes"
+check_num "THE WRONG-ANSWER ARM: and the rows really do come back ordered" \
+	"$(q "SELECT count(*) FROM (SELECT k < lag(k) OVER () AS d FROM (SELECT k FROM wp1 ORDER BY k) x) z WHERE d;")" \
+	"0"
+check "and ORDER BY on the column that IS ordered still needs no Sort" \
+	"$(sorts 'SELECT j FROM wp1 ORDER BY j')" "no"
+
+# ==================== the DECLARED key (options.sort_by) =====================
+# vacuum_sorted(t) with no columns resolves options.sort_by. Maintaining the
+# mark WITHOUT maintaining this would make the two catalogs name different
+# columns, so the same call with the same declared intent would silently rewrite
+# on a different physical key than it did yesterday.
+mk sb
+psql_run "SELECT pgcolumnar.set_options('sb', sort_by => ARRAY['a']);"
+psql_run "SELECT pgcolumnar.vacuum_sorted('sb');"
+check "premise: a bare vacuum_sorted() used the declared key" \
+	"$([ "$(descents sb a)" -eq 0 ] && echo ordered || echo unordered)" "ordered"
+swap sb
+check "the DECLARED key follows the rename too" \
+	"$(q "SELECT sort_by::text FROM pgcolumnar.options WHERE regclass = 'sb'::regclass;")" "{b}"
+check "so the two catalogs still agree after the rename" \
+	"$([ "$(q "SELECT sort_by::text FROM pgcolumnar.options WHERE regclass='sb'::regclass;")" \
+	    = "$(q "SELECT sorted_by::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('sb');")" ] \
+	  && echo agree || echo DISAGREE)" "agree"
+S="$(storid sb)"
+psql_run "SELECT pgcolumnar.vacuum_sorted('sb');"
+check "and a bare vacuum_sorted() is a no-op, not a rewrite on a different key" \
+	"$([ "$S" = "$(storid sb)" ] && echo noop || echo rewrote)" "noop"
+
 # ============================ recluster (#415) ===============================
 # The same comparison, character for character, in the online recluster gate.
 mkz() {

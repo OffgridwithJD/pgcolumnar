@@ -54,6 +54,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_constraint.h"
 #include "tcop/utility.h"
 #include "utils/fmgroids.h"
@@ -2334,13 +2335,57 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 		{
 			Oid			relid = RangeVarGetRelid(rs->relation, NoLock, true);
 
-			if (OidIsValid(relid) && PgColumnarIsColumnarRelation(relid))
+			if (OidIsValid(relid))
 			{
-				Relation	rel = relation_open(relid, NoLock);
+				List	   *kin;
+				ListCell   *lc;
 
-				PgColumnarRenameSortKeyColumn(PgColumnarStorageId(rel),
-											  rs->subname, rs->newname);
-				relation_close(rel, NoLock);
+				/*
+				 * Every INHERITANCE CHILD and PARTITION too, not just the
+				 * relation named in the statement. A column rename cascades to
+				 * descendants, which are separate relations with their own
+				 * storage and their own marks, and PostgreSQL REFUSES
+				 * "ALTER TABLE child RENAME COLUMN" with "cannot rename
+				 * inherited column" -- so for a columnar partition the parent is
+				 * the only route, and a hook that looked only at the named
+				 * relation would never fire for it at all.
+				 *
+				 * Not gated on the named relation being columnar, deliberately:
+				 * a partitioned parent is not itself a columnar relation, and
+				 * testing it here would close the door before the columnar
+				 * children are reached. The per-descendant test below is the
+				 * one that decides.
+				 *
+				 * The rename already holds the locks it needs on the whole
+				 * hierarchy, so NoLock here takes no new lock and cannot race.
+				 */
+				kin = find_all_inheritors(relid, NoLock, NULL);
+				foreach(lc, kin)
+				{
+					Oid			kid = lfirst_oid(lc);
+
+					if (!PgColumnarIsColumnarRelation(kid))
+						continue;
+
+					{
+						Relation	rel = relation_open(kid, NoLock);
+
+						PgColumnarRenameSortKeyColumn(PgColumnarStorageId(rel),
+													  rs->subname, rs->newname);
+						relation_close(rel, NoLock);
+					}
+
+					/*
+					 * And the DECLARED key, which vacuum_sorted(t) resolves
+					 * when called with no columns. Maintaining the mark without
+					 * this would make the two catalogs name different columns,
+					 * so the same call with the same declared intent would
+					 * silently rewrite on a different physical key.
+					 */
+					PgColumnarRenameDeclaredSortByColumn(kid, rs->subname,
+														 rs->newname);
+				}
+				list_free(kin);
 			}
 		}
 	}
