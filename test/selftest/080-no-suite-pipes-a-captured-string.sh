@@ -84,3 +84,26 @@ _epipe_scanned="$(grep -lE 'grep' "${_epipe_globs[@]}" 2>/dev/null | grep -c . |
 check "and the scan examined the suites rather than finding nothing to read" \
 	"$([ "${_epipe_scanned:-0}" -ge 20 ] && echo yes || echo "no (scanned $_epipe_scanned)")" "yes"
 
+# bench/ IS SEPARATELY ASSERTED, and the check above cannot stand in for it.
+# The bench glob is added conditionally, so if $TESTDIR/../bench ever stops
+# resolving -- bench moved or renamed, this file relocated, a differently laid
+# out worktree -- the && quietly drops it and the sweep reverts to test/ only.
+#
+# The count premise does not notice: test/*.sh alone matches 'grep' in 159 files
+# against a threshold of 20, so it passes with bench/ silently absent. A count of
+# files scanned is a premise that the sweep read SOMETHING. It is not a premise
+# that it read the directory this rule was widened to cover, and it cannot tell
+# "scanned test/ and bench/" from "scanned test/ and gave up on bench/".
+#
+# Which is this rule's own failure mode one level up: coverage narrowing with
+# nothing able to see that it narrowed.
+# Asserted on THE GLOB LIST THE SWEEP ACTUALLY USED, not by globbing bench/
+# again here. The first version of this check did the latter -- it counted
+# bench/*.sh matching 'grep' independently -- and so it asserted that bench/
+# EXISTS, not that the sweep read it. Deleting the bench glob from _epipe_globs
+# left it green. A check that cannot fail for the reason it names is the thing
+# this whole file is about, and it took its own removal proof to see it.
+_epipe_bench="$(printf '%s\n' "${_epipe_globs[@]}" | grep -c '/bench/' || true)"
+check "and bench/ was in the scan, which is the hole this rule had" \
+	"$([ "${_epipe_bench:-0}" -ge 1 ] && echo yes || echo "no (bench globs in sweep: $_epipe_bench)")" "yes"
+
