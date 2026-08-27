@@ -417,39 +417,60 @@ longer alive. Interrupting a run with Ctrl-C does the same cleanup.
 
 ## Documentation style
 
-The user-facing documentation follows the ASD-STE100 writing rules. These are:
+The user-facing documentation follows ISO 24495-1:2023, *Plain language - Part 1:
+Governing principles and guidelines*. The standard gives four governing
+principles. Readers get what they need. Readers can easily find what they need.
+Readers can easily understand what they find. Readers can easily use what they
+find.
 
-- one topic to a sentence
-- active voice
+Under the third principle, the project writes to these practices:
+
+- one main idea to a sentence
+- short sentences
+- familiar words, and a necessary term defined at first use
+- active voice, with the actor named
 - present tense
 - articles kept
-- no gerund used as a noun
+- a real verb rather than a noun built from one
 - one term for one thing
-- no idiom
- `test/docs_style.sh` checks
-the rules that a machine can check. It runs in the matrix, so a document that
-drifts goes red.
+- no idiom and no figurative language
+
+`test/docs_style.sh` checks the rules that a machine can check. It runs in the
+matrix, so a document that drifts goes red.
 
 ```sh
 test/docs_style.sh
 ```
 
-It enforces four rules over `docs/*.md` and `README.md`:
+It enforces four rules over `docs/*.md` and `README.md`. Two come from the
+standard and two are house rules:
 
-- no em dash and no en dash
-- no double hyphen used as a dash in prose
-- a maximum of 25 words to a sentence
-- no phrase from an idiom list
+- a maximum of 25 words to a sentence (a proxy for a principle of the standard)
+- no phrase from an idiom list (a proxy for a principle of the standard)
+- no em dash and no en dash (house rule)
+- no double hyphen used as a dash in prose (house rule)
+
+Two of those four rules take a principle from the standard and measure it with
+something this project chose. The standard asks for short sentences and does not
+give a number, so the 25-word limit is the proxy. The standard warns against
+figurative language and publishes no list, so the idiom list is the proxy too.
+That list is short and it is curated from the phrases these authors write, such
+as `fall back`, `hand-rolled` and `in flight`. Neither figure comes from ISO
+24495-1.
+
+The two dash rules are typographic preferences of this project. They are named
+as house rules so that nobody mistakes a preference for a requirement.
 
 `CHANGELOG.md` is a record of what happened at the time it happened. To rewrite a
 landed entry would edit history. The gate therefore checks it for dash characters
 only.
 
-**Full ASD-STE100 compliance is not claimed.** Compliance is defined against the
-licensed ASD Dictionary. That dictionary holds approximately 900 approved words.
-Each word has one approved meaning and one part of speech. That dictionary is not available to this
-project, so the approved-vocabulary rule is not enforced and is not claimed. An
-unverifiable claim of compliance would be worse than an honest partial one.
+**Conformity to ISO 24495-1 is not claimed.** Only one of the four principles has
+any mechanically checkable content, and only in part. The standard's own test for
+the fourth principle is that a reader acts on the document successfully. No
+checker can perform that test. A green run means the measurable subset holds. It
+does not mean the documentation is plain. An unverifiable claim of conformity
+would be worse than an honest partial one.
 
 `design/` holds internal engineering records and is not checked. Code comments
 are not checked either. Both exist to explain why a thing is the way it is, and

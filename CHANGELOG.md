@@ -14,6 +14,32 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation style gate is now based on ISO 24495-1:2023, *Plain language
+  - Part 1: Governing principles and guidelines*, in place of ASD-STE100. The
+  project's writing rules cite two standards and no others: ISO 24495-1:2023 for
+  language, and ISO 82079-1 for the structure of instructions.
+
+  **No check changed.** The gate enforces the same four rules over the same
+  files, and `docs_style` runs the same nine checks. What changed is the basis
+  each rule is attributed to, and the honesty of that attribution:
+
+  - the 25-word sentence limit and the idiom list come from the standard's
+    "understandable" principle;
+  - the two dash rules are this project's typographic house rules and are now
+    labelled as such, because ISO 24495-1 does not ask for them.
+
+  The 25-word figure is named as this project's measurable proxy rather than a
+  number quoted from the standard, which does not give one. `test/ste_check.py`
+  is renamed to `test/plain_language_check.py` so the file does not assert a
+  standard the project no longer cites.
+
+  Conformity is still not claimed, and the reason is now the accurate one. Only
+  one of the four governing principles has mechanically checkable content, and
+  the standard's own test for another is that a reader acts on the document
+  successfully, which no checker performs.
+
 ### Fixed
 
 - `sum()` and `avg()` over `bigint` are no longer **slower** on the vectorized
