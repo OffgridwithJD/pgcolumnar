@@ -73,8 +73,14 @@ printf '%s\n' "$RECIPE" > "$RECIPE_FILE"
 
 # An extractor that returns nothing, or the wrong block, makes every check below
 # vacuous. Assert what it CONTAINS rather than that it ran.
+# Test the VARIABLE, not the file. printf '%s\n' writes its newline even when
+# RECIPE is empty, so the file is one byte and [ -s ] is true no matter what the
+# extractor returned -- measured by the reviewer, who broke the section heading
+# so the awk matched nothing and watched this premise PASS. The seven content
+# premises below caught it, but eighth is the wrong place to learn the extractor
+# produced nothing.
 check "premise: the extraction is not empty" \
-	"$([ -s "$RECIPE_FILE" ] && echo nonempty || echo EMPTY)" "nonempty"
+	"$([ -n "$RECIPE" ] && echo nonempty || echo EMPTY)" "nonempty"
 for want in "CREATE TABLE events" "CREATE TABLE events_cdc" \
             "CREATE FUNCTION events_capture" "CREATE TRIGGER events_cdc_t" \
             "USING pgcolumnar" "TG_OP = 'DELETE'" "OLD.id"; do

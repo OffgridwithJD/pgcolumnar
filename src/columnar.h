@@ -207,7 +207,7 @@ extern bool pgcolumnar_enable_vectorization;	/* vectorized aggregate path */
 extern bool pgcolumnar_enable_group_vectorization;	/* GROUP BY vectorized agg (#289) */
 extern bool pgcolumnar_enable_ungrouped_vector_agg;	/* filtered/extended ungrouped agg (#289) */
 extern bool pgcolumnar_enable_parallel_vector_agg;	/* parallel-aware ungrouped batch fold (#289 phase 5/6) */
-extern int pgcolumnar_groupagg_max_groups;	/* execution-time group-count cap; over it the query ERRORS rather than falling back (#289) */
+extern int pgcolumnar_groupagg_max_groups;	/* plan-time group-count cap (#289) */
 extern bool pgcolumnar_enable_read_stream;	/* stream/prefetch block reads (PG17+) */
 extern bool pgcolumnar_enable_index_only_scan;	/* allow index-only scans (gap 28) */
 extern bool pgcolumnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
