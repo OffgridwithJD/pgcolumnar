@@ -1382,6 +1382,31 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 	 *
 	 * Declared in optimizer/paths.h with this signature on every supported
 	 * major, immediately above truncate_useless_pathkeys.
+	 *
+	 * THE TWO ARE NOT THE SAME PREDICATE, and the equivalence relied on here
+	 * comes from planner.c rather than from either function body.
+	 * truncate_useless_pathkeys counts strictly more sources than
+	 * has_useful_pathkeys tests:
+	 *
+	 *   PG15/16  truncate: merging, ordering
+	 *   PG17     truncate: merging, ordering, grouping, setop
+	 *   PG18/19  truncate: merging, ordering, grouping, distinct, setop
+	 *   all      has_useful: merging, grouping, query_pathkeys
+	 *
+	 * Read that way, a query whose only use for an ordering is DISTINCT or a
+	 * set operation looks like it would be skipped here while the old code kept
+	 * the claim. It is not, because standard_qp_callback assigns
+	 * root->query_pathkeys from whichever clause the query has -- group, else
+	 * window, else distinct, else sort, else setop, else NIL -- so every extra
+	 * source truncate counts is one of the five that funnel into query_pathkeys.
+	 * has_useful_pathkeys false therefore implies truncate_useless_pathkeys
+	 * would have returned NIL. Checked in planner.c on 15, 17, 18 and 19.
+	 *
+	 * That is worth stating because it is the assumption a later major can
+	 * break. If those five stop funnelling through query_pathkeys -- PG19 has
+	 * already restructured this area once -- this early return starts dropping
+	 * legitimate claims SILENTLY, and no test can see it: the result is a lost
+	 * optimisation, not a wrong answer.
 	 */
 	if (!has_useful_pathkeys(root, rel))
 		return NIL;
