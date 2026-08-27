@@ -128,7 +128,8 @@ struct PgColumnarReadState
 	/*
 	 * Native format (PGCN v1) read state. The scan reads row groups and column
 	 * chunks from the native catalog. The current row group's bytes are read into
-	 * nativeBuffer (in groupContext) -- whole, or only the projected columns'
+	 * nativeBuffer -- which is reused across groups and lives in readContext, not
+	 * groupContext (#768) -- whole, or only the projected columns'
 	 * ranges (#338); nativeValidity[c] points at each column chunk's validity
 	 * bitmap and nativeValueCursor[c] advances through its uncompressed values.
 	 * Both stay NULL for a column that was not read.
@@ -145,7 +146,38 @@ struct PgColumnarReadState
 	MemoryContext groupListContext;
 	int			rowGroupIndex;		/* next row group to load */
 	NativeRowGroupMetadata *nativeGroup;
-	char	   *nativeBuffer;		/* whole current row group, in groupContext */
+	char	   *nativeBuffer;		/* whole current row group; points into nativeBufferMem */
+
+	/*
+	 * The group buffer is REUSED across row groups rather than palloc'd per
+	 * group (#768). It lives in readContext, not groupContext, so the per-group
+	 * reset does not hand it back, and it only ever grows.
+	 *
+	 * Measured on 1,000,000 rows of 128-character text, non-assert: the
+	 * per-group buffer is stripe_row_limit x row width, which at the default
+	 * stripe_row_limit = 150000 is 19.8 MB. Allocated and freed per group it is
+	 * far past ALLOC_CHUNK_LIMIT, so it is its own malloc block, glibc returns
+	 * it to the kernel on free, and the next group faults every page back in:
+	 * 73,301 minor faults per query, 1.29 GB of anonymous memory for a 528 MB
+	 * column. Holding one buffer takes that to 1,513 faults and 467.6 -> 385.2
+	 * ms, 17.6%, on the same table with nothing else changed.
+	 *
+	 * The trade is resident memory: the buffer stays at the largest group's size
+	 * for the life of the read state instead of being returned between groups.
+	 * Only pages actually touched are ever resident either way -- a projected
+	 * read still reads only the wanted ranges -- so the cost is bounded by what
+	 * the scan already touched rather than by the allocation.
+	 *
+	 * Holding a pointer across the per-group reset is safe because readContext
+	 * is never reset, only deleted: the read state struct itself lives in it, so
+	 * a reset would destroy the struct that holds this pointer (see the rescan
+	 * note on rowGroupList above, which relies on the same invariant).
+	 * PgColumnarRescanRead clears nativeBuffer but deliberately leaves
+	 * nativeBufferMem and nativeBufferCap alone, so a rescan reuses the buffer
+	 * rather than paying for it again -- which is the case that gains most.
+	 */
+	char	   *nativeBufferMem;	/* reused group buffer, in readContext */
+	Size		nativeBufferCap;	/* its allocated size, grow-only */
 	char	  **nativeValidity;		/* [natts]; NULL if the column is absent */
 	char	  **nativeValueCursor;	/* [natts]; advancing values cursor */
 	char	  **nativeValueEnd;		/* [natts]; one past the last value byte, for bounds */
@@ -2157,13 +2189,44 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 										 rs->metaSnapshot);
 
 	/*
-	 * Column projection (#338). The buffer is always allocated at full group
-	 * size so the base = nativeBuffer + (pageOffset - fileOffset) arithmetic
-	 * below stays valid for every chunk; only the wanted ranges are read into
-	 * it. palloc does not touch the pages it hands back, so the regions that are
-	 * never read cost no resident memory.
+	 * Column projection (#338). The buffer is always sized to the full group so
+	 * the base = nativeBuffer + (pageOffset - fileOffset) arithmetic below stays
+	 * valid for every chunk; only the wanted ranges are read into it. Neither
+	 * palloc nor the kernel touches pages nobody writes, so the regions that are
+	 * never read cost no resident memory of their own. With the buffer reused
+	 * across groups (#768) that reads as "no ADDITIONAL resident memory": a page
+	 * a previous group touched stays resident, and one no group has touched
+	 * still costs nothing.
 	 */
-	rs->nativeBuffer = palloc(rg->byteLength > 0 ? rg->byteLength : 1);
+	{
+		Size		want = rg->byteLength > 0 ? (Size) rg->byteLength : 1;
+
+		/*
+		 * Grow-only, and allocated in readContext explicitly because we are
+		 * currently switched into groupContext, which is reset per group.
+		 *
+		 * Reusing the buffer means a region that is NOT read now holds the
+		 * previous group's bytes where it used to hold fresh (kernel-zeroed)
+		 * pages. That is safe only because no unread region is ever decoded:
+		 * the chunk loop below skips a column that is not projected, and says
+		 * so -- "its bytes were never read, so decoding it would read
+		 * uninitialized buffer" (#338). Reading uninitialized buffer was
+		 * already wrong before this change; it now reads stale instead of
+		 * zero, which is the same bug with a less forgiving symptom.
+		 */
+		if (want > rs->nativeBufferCap)
+		{
+			MemoryContext old = MemoryContextSwitchTo(rs->readContext);
+
+			if (rs->nativeBufferMem != NULL)
+				pfree(rs->nativeBufferMem);
+			rs->nativeBufferMem = palloc(want);
+			rs->nativeBufferCap = want;
+			MemoryContextSwitchTo(old);
+		}
+
+		rs->nativeBuffer = rs->nativeBufferMem;
+	}
 	if (rg->byteLength > 0)
 	{
 		if (rs->allColumnsWanted)

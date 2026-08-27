@@ -231,6 +231,7 @@ SUITES=(
 	projections
 	pushdown_report
 	read_stream
+	reader_buffer_reuse
 	recluster_extent
 	recluster_gate
 	recovery
