@@ -70,6 +70,7 @@ SUITES=(
 	differential
 	docs_style
 	drop_cleanup
+	eager_ordering_record
 	encode_effort
 	encode_invariants
 	entry_point_privilege

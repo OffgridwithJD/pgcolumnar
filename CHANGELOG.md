@@ -54,6 +54,43 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- Both eager ordering rewrites discarded the ordering they had just applied.
+  `pgcolumnar.storage.sorted_by` and `sorted_kind` exist to record which
+  ordering a rewrite left behind, and the base schema has always specified them
+  as `'zorder'` (`recluster`/`cluster`) or `'lexicographic'` (`vacuum_sorted`).
+  Only the online `recluster` wrote them: both eager paths reached the catalog
+  through one function that passed `NIL` and `NULL`, and the string
+  `lexicographic` had never been written to the catalog at all.
+
+  The two eager layouts were therefore identical in the catalog, and
+  `pgcolumnar.sort_status` falls back to the declared `options.sort_by` when the
+  recorded key is NULL, so both reported the same thing. Measured on 5,000 rows
+  with `sort_by => ARRAY['k']` declared on each:
+
+  | rewrite | `sorted_kind` | `sort_status.sort_key` | inversions on `k` |
+  | --- | --- | --- | ---: |
+  | `vacuum_sorted('t','k')` | was NULL, now `lexicographic` | `{k}` | 0 |
+  | `cluster('t','k','j')` | was NULL, now `zorder` | was `{k}`, now `{k,j}` | 930 |
+
+  Z-order over two or more columns is not a sort on any one of them, so the
+  second row reported an order the rows were not in. A single-column key cannot
+  show this, because single-column Z-order *is* lexicographic order.
+
+  Two consequences go with it. `sort_status` now reports the applied key rather
+  than the declared one on an eagerly clustered table, which is a visible output
+  change for anyone reading that column. And #415's recluster self-gate requires
+  `sorted_kind = 'zorder'`, so after `pgcolumnar.cluster('t','k','j')` it could
+  never fire: an immediately following `pgcolumnar.recluster('t','k','j')` on an
+  already-clustered relation paid a full rewrite of every group. It now returns
+  0 and rewrites nothing, which is the case the gate was written for.
+
+  A storage ordered by an earlier build still has NULL in both columns and still
+  falls back to the declared key, until its next ordering rewrite. A reader that
+  must not be wrong about the physical order should require
+  `sorted_kind = 'lexicographic'` from `pgcolumnar.storage` and treat NULL as
+  unknown, rather than read `sort_status`. An unsorted rewrite continues to
+  claim no ordering. New suite `eager_ordering_record`. (#758)
+
 - `pgcolumnar.vm_selftest` and `pgcolumnar.vm_is_visible` accepted any relation,
   including a plain heap table. `vm_selftest` does not only inspect the
   visibility map, it writes an all-visible bit into it, and a wrongly set bit is

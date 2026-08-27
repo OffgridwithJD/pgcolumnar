@@ -202,6 +202,8 @@ PgColumnarRequireTableOwnerByOid(Oid relid)
 static bool cluster_type_supported(Oid typid);
 static bytea *cluster_zorder_key(Datum *values, bool *isnull, AttrNumber *atts,
 								 int ncols, TupleDesc tupdesc);
+/* Names an ordering rewrite records as its key (defined later, #415) */
+static List *sort_key_names(TupleDesc tupdesc, AttrNumber *atts, int ncols);
 
 /* v1 refuses tables with more groups than this (one advisory lock per group) */
 #define RECLUSTER_MAX_GROUPS 8192
@@ -714,16 +716,8 @@ pgcolumnar_recluster_online(Relation rel, int ncols, AttrNumber *atts)
 		PgColumnarRetireGroup(storageId, oldGroups[i]);
 
 	/* record how far the reordered run reaches (#311) and BY WHAT (#415) */
-	{
-		List	   *keyNames = NIL;
-		int			ci;
-
-		for (ci = 0; ci < ncols; ci++)
-			keyNames = lappend(keyNames,
-							   pstrdup(NameStr(TupleDescAttr(tupdesc, atts[ci] - 1)->attname)));
-		record_online_sorted_extent(rel, storageId, writeState, stripeMark,
-									keyNames, "zorder");
-	}
+	record_online_sorted_extent(rel, storageId, writeState, stripeMark,
+								sort_key_names(tupdesc, atts, ncols), "zorder");
 
 	PopActiveSnapshot();
 	UnregisterSnapshot(snap);
@@ -1081,20 +1075,52 @@ pgcolumnar_relation_storageid(PG_FUNCTION_ARGS)
 }
 
 /*
+ * sort_key_names
+ *		The attribute names behind an ordering rewrite's key, as a list of
+ *		palloc'd strings for pgcolumnar.storage.sorted_by (#415).
+ *
+ *		Names, not attnums, because the column is read back long after the rewrite
+ *		and has to survive an ALTER that renumbers attributes, the same reason
+ *		pgcolumnar.options.sort_by stores names (#288).
+ */
+static List *
+sort_key_names(TupleDesc tupdesc, AttrNumber *atts, int ncols)
+{
+	List	   *names = NIL;
+	int			i;
+
+	for (i = 0; i < ncols; i++)
+		names = lappend(names,
+						pstrdup(NameStr(TupleDescAttr(tupdesc, atts[i] - 1)->attname)));
+	return names;
+}
+
+/*
  * record_sorted_extent
- *		Mark where the ordered run this rewrite just wrote ends (issue #301).
+ *		Mark where the ordered run this rewrite just wrote ends (issue #301), and
+ *		what ordering it is (#415, #758).
  *
  *		Called only by the rewrites that order every live row, after the write
  *		state is flushed, so every group they wrote is in pgcolumnar.row_group and
  *		nothing has been appended yet. The highest group number present is
  *		therefore the end of the run, and later inserts get higher numbers.
  *
+ *		sortByNames and sortedKind say WHICH ordering, and are not optional for a
+ *		caller that applied one. Both eager rewrites used to pass NIL and NULL, so
+ *		an eagerly sorted relation and an eagerly Z-ordered one were identical in
+ *		the catalog: same run extent, same NULL kind, and sort_status fell back to
+ *		reporting the DECLARED options.sort_by for both. Z-order over two or more
+ *		columns is not a sort on any one of them, so that fallback reported an
+ *		order the rows were not in. The base schema has always specified this
+ *		column as 'zorder' (recluster/cluster) or 'lexicographic' (vacuum_sorted);
+ *		only the online recluster wrote it.
+ *
  *		A rewrite that produced no groups at all, meaning the relation held no
  *		live rows, leaves the mark alone. There is no run to record, and the
  *		reader reports no decay because there are no groups.
  */
 static void
-record_sorted_extent(Relation rel)
+record_sorted_extent(Relation rel, List *sortByNames, const char *sortedKind)
 {
 	uint64		storageId = PgColumnarStorageId(rel);
 	List	   *groups;
@@ -1119,7 +1145,7 @@ record_sorted_extent(Relation rel)
 
 	if (haveGroup)
 		PgColumnarSetSortedExtent(storageId, (int64) firstGroup, (int64) lastGroup,
-								  NIL, NULL);
+								  sortByNames, sortedKind);
 }
 
 /*
@@ -1326,7 +1352,8 @@ pgcolumnar_compact_relation(Relation rel, int nsortkeys, AttrNumber *sortAtts)
 	 * there.
 	 */
 	if (tsort != NULL)
-		record_sorted_extent(rel);
+		record_sorted_extent(rel, sort_key_names(tupdesc, sortAtts, nsortkeys),
+							 "lexicographic");
 
 	if (tsort != NULL)
 		tuplesort_end(tsort);
@@ -1482,7 +1509,7 @@ pgcolumnar_compact_relation_zorder(Relation rel, int ncols, AttrNumber *atts)
 	PgColumnarFlushWriteStateForRelation(relid);
 
 	/* Z-order is an order, so the same extent applies (see record_sorted_extent). */
-	record_sorted_extent(rel);
+	record_sorted_extent(rel, sort_key_names(tupdesc, atts, ncols), "zorder");
 
 	tuplesort_end(tsort);
 	ExecDropSingleTupleTableSlot(augSlot);
