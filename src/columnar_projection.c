@@ -187,6 +187,8 @@ pgcolumnar_add_projection(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("projection name \"%s\" is too long", projname)));
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	/*
 	 * ShareLock: block concurrent INSERT/UPDATE/DELETE (RowExclusiveLock) while
 	 * we back-fill the projection from existing rows, so no concurrently written
@@ -194,7 +196,6 @@ pgcolumnar_add_projection(PG_FUNCTION_ARGS)
 	 * unaffected. (A CONCURRENTLY variant is future work.)
 	 */
 	rel = table_open(relid, ShareLock);
-	PgColumnarRequireTableOwner(rel);
 	storageId = PgColumnarStorageId(rel);
 
 	existing = PgColumnarListProjections(storageId);
@@ -291,6 +292,16 @@ pgcolumnar_drop_projection(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	projname = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
+	/*
+	 * Ownership FIRST, then the relation type. Both precede table_open so a
+	 * non-owner never reaches the lock manager, and doing them in this order
+	 * means a non-owner is told only that they are not the owner: asking about
+	 * an arbitrary relation must not report back whether it is columnar. The
+	 * sibling entry points in columnar_vacuum.c and columnar_visibilitymap.c
+	 * are ordered the same way.
+	 */
+	PgColumnarRequireTableOwnerByOid(relid);
+
 	if (!PgColumnarIsColumnarRelation(relid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -298,7 +309,6 @@ pgcolumnar_drop_projection(PG_FUNCTION_ARGS)
 						get_rel_name(relid))));
 
 	rel = table_open(relid, ShareUpdateExclusiveLock);
-	PgColumnarRequireTableOwner(rel);
 	storageId = PgColumnarStorageId(rel);
 	existing = PgColumnarListProjections(storageId);
 
