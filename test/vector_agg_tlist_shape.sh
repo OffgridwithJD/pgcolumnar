@@ -132,8 +132,93 @@ check "REFUSE: an unsupported aggregate declines the whole target list" \
 ansq "and it still answers correctly" \
 	"SELECT count(*)::text, length(string_agg(t, ',')) FROM %T"
 
+# --- the surface this change OPENS ------------------------------------------
+#
+# Before the relaxation these never reached pgcolumnar_classify_aggref at all:
+# the tlist-shape gate refused them first, because each is an aggregate wrapped
+# in something. Now the shape gate passes and classify_aggref is the ONLY thing
+# between a modifier the node cannot represent and a wrong answer. It rejects
+# aggorder, aggdistinct, aggfilter and aggvariadic in its first condition; these
+# arms are what keep that true.
+
+check "REFUSE: FILTER on a wrapped aggregate" \
+	"$([ "$(vec 'SELECT count(*) FILTER (WHERE a > 5)::text FROM c')" -gt 0 ] && echo yes || echo no)" "no"
+ansq "and FILTER still answers correctly" \
+	'SELECT count(*) FILTER (WHERE a > 5)::text FROM %T'
+
+check "REFUSE: DISTINCT on a wrapped aggregate" \
+	"$([ "$(vec 'SELECT count(DISTINCT b)::text FROM c')" -gt 0 ] && echo yes || echo no)" "no"
+ansq "and DISTINCT still answers correctly" 'SELECT count(DISTINCT b)::text FROM %T'
+
+check "REFUSE: FILTER inside an expression over aggregates" \
+	"$([ "$(vec 'SELECT avg(a) FILTER (WHERE b < 50) + 1 FROM c')" -gt 0 ] && echo yes || echo no)" "no"
+ansq "and it still answers correctly" 'SELECT avg(a) FILTER (WHERE b < 50) + 1 FROM %T'
+
+check "REFUSE: ORDER BY inside an aggregate, wrapped" \
+	"$([ "$(vec "SELECT length(string_agg(t, ',' ORDER BY a)) FROM c")" -gt 0 ] && echo yes || echo no)" "no"
+ansq "and it still answers correctly" \
+	"SELECT length(string_agg(t, ',' ORDER BY a NULLS LAST, id)) FROM %T"
+
+# --- empty and all-NULL, which a projection can get wrong quietly -----------
+
+psql_run "CREATE TABLE eh (LIKE h) USING heap;"
+psql_run "CREATE TABLE ec (LIKE h) USING pgcolumnar;"
+check "premise: the empty pair really is empty" "$(q 'SELECT count(*) FROM ec;')" "0"
+check_text "an empty relation answers the wrapped shape as heap does" \
+	"$(pgc_seq_hash 'SELECT count(*)::text, avg(a), avg(a)+avg(b) FROM ec')" \
+	"$(pgc_seq_hash 'SELECT count(*)::text, avg(a), avg(a)+avg(b) FROM eh')"
+
+psql_run "INSERT INTO eh SELECT g, NULL, NULL, NULL, NULL FROM generate_series(1,500) g;"
+psql_run "INSERT INTO ec SELECT * FROM eh;"
+check "premise: the all-NULL pair has rows but no values" \
+	"$([ "$(q 'SELECT count(*) FROM ec;')" -gt 0 ] && [ "$(q 'SELECT count(a) FROM ec;')" -eq 0 ] && echo yes || echo no)" "yes"
+check_text "an all-NULL relation answers the wrapped shape as heap does" \
+	"$(pgc_seq_hash 'SELECT count(*)::text, avg(a), avg(a)+avg(b) FROM ec')" \
+	"$(pgc_seq_hash 'SELECT count(*)::text, avg(a), avg(a)+avg(b) FROM eh')"
+
 check "REFUSE: an aggregate over an expression of two columns" \
 	"$([ "$(vec 'SELECT sum(a + b) FROM c')" -gt 0 ] && echo yes || echo no)" "no"
 ansq "and it still answers correctly" 'SELECT sum(a + b) FROM %T'
+
+# --- the parallel arm, which this change also unblocked ---------------------
+#
+# The serial gate returned before the parallel arm was reached, so refusing a
+# wrapped target list killed both. The parallel arm itself needed no change: it
+# uses core's partial grouping target, which is bare aggregates however the final
+# target is shaped.
+#
+# A METADATA-ANSWERABLE SHAPE CANNOT TEST THIS. count(*) and avg over int are
+# answered from the zone maps in microseconds, so no parallel plan can win and
+# the arm would measure nothing while looking green. The float8 column forces the
+# scan-fold path, and the Gather is asserted BEFORE any answer is believed.
+
+par() {  # par QUERY -> "<gather count> <workers planned> <vec count>"
+	env PATH="$PGC_BINDIR:$PATH" \
+		PGOPTIONS="-c max_parallel_workers_per_gather=4 -c parallel_setup_cost=0 -c min_parallel_table_scan_size=0 -c pgcolumnar.enable_ungrouped_vector_agg=on -c pgcolumnar.enable_parallel_vector_agg=on" \
+		psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-c "EXPLAIN (COSTS OFF) $1" 2>/dev/null | awk '
+			/Gather/ {g++} /Workers Planned: [0-9]+/ {match($0,/[0-9]+/); w=substr($0,RSTART,RLENGTH)}
+			/Columnar Vectorized Aggregates: [1-9]/ {v++}
+			END {printf "%d %d %d", g+0, w+0, v+0}'
+}
+par_ans() {  # the parallel answer, as text
+	env PATH="$PGC_BINDIR:$PATH" \
+		PGOPTIONS="-c max_parallel_workers_per_gather=4 -c parallel_setup_cost=0 -c min_parallel_table_scan_size=0 -c pgcolumnar.enable_ungrouped_vector_agg=on -c pgcolumnar.enable_parallel_vector_agg=on" \
+		psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -c "$1" 2>&1
+}
+
+read -r PG PW PV <<<"$(par 'SELECT avg(v) FROM c')"
+check "premise: a BARE aggregate on the scan-fold path really goes parallel" \
+	"$([ "$PG" -ge 1 ] && [ "$PW" -ge 1 ] && [ "$PV" -ge 1 ] && echo yes \
+	   || echo "no (gather=$PG workers=$PW vec=$PV)")" "yes"
+
+for pq in 'SELECT avg(v)+avg(v) FROM c' 'SELECT round(avg(v)::numeric,3) FROM c' 'SELECT avg(v)::text FROM c'; do
+	read -r G W V <<<"$(par "$pq")"
+	check "parallel accepts a wrapped target list: ${pq:7:34}" \
+		"$([ "$G" -ge 1 ] && [ "$W" -ge 1 ] && [ "$V" -ge 1 ] && echo yes \
+		   || echo "no (gather=$G workers=$W vec=$V)")" "yes"
+	check_text "and its answer matches the heap twin: ${pq:7:34}" \
+		"$(par_ans "$pq")" "$(q "${pq//FROM c/FROM h}")"
+done
 
 pgc_summary
