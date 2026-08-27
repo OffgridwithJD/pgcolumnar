@@ -223,31 +223,54 @@ benefit. For the other two shapes, the search gives a large benefit. You cannot
 know which condition applies to a column until you try it. For this reason the
 option applies to one table, and the default keeps the full search.
 
-#### Read cost
+#### When the setting changes anything at all
 
-The full search also costs time on every scan of the column, not only on the
-load. The reader must undo the encoding, and that work is larger than the work
-it saves in bytes read.
+The full search costs write time whenever it runs. It changes the stored bytes
+and the read time only when the writer **keeps** the symbol table it built.
+
+The writer builds the table, then asks whether the table still helps after the
+block codec has run. It often does not. FSST codes compress worse than the text
+they replace, so a table that shrinks every value can still enlarge the chunk.
+When the answer is no, the writer drops the table and the column takes its
+ordinary encoding.
+
+`pgcolumnar.compression` is `zstd` by default, and zstd usually wins that
+comparison. Measured on 1,000,000 rows of URL-shaped text, with the default
+codec:
+
+| | Stored bytes | Read time |
+| --- | ---: | ---: |
+| `encode_effort = full` | 3,111,366 | 105.1 ms |
+| `encode_effort = fast` | 3,111,366 | 102.3 ms |
+
+The stored bytes are identical and the read times are the same within noise.
+The chunk descriptors confirm the cause: with the default codec neither table
+holds an FSST symbol table, because the writer dropped it.
+
+So at default settings this option costs write time and changes nothing else.
+
+#### Read cost, when the table is kept
+
+Set `compression = 'none'` and the symbol table survives. Then the full search
+costs time on every scan of the column, because the reader must undo the
+encoding.
 
 Measured on 1,000,000 rows in one text column, `SELECT count(v)`, with the
-vectorized paths off so that the scan decodes every value. Both arms use
-`compression = 'none'`, so the figures are the encoding alone. The minimum of
-seven interleaved pairs:
+vectorized paths off so that the scan decodes every value. The minimum of seven
+interleaved pairs:
 
 | Text shape | Read with `full` | Read with `fast` | `fast` is | Storage with `fast` |
 | --- | ---: | ---: | ---: | ---: |
-| 128-char hex | 418.6 ms | 155.6 ms | 2.69x faster | 1.94x larger |
-| Repeating host and path strings | 352.5 ms | 91.8 ms | 3.84x faster | 6.50x larger |
+| 128-char hex | 267.6 ms | 143.9 ms | 1.86x faster | 1.94x larger |
+| URL-shaped text | 131.5 ms | 96.0 ms | 1.37x faster | 3.79x larger |
 
-Read the second row with care. The `full` arm holds 8.3 MB where the `fast` arm
-holds 53.7 MB. It reads 6.5 times fewer bytes and still takes 3.84 times as
-long, so the cost is the decoding and not the reading.
+Both figures are smaller than they were before the reader learned to decode a
+symbol with one machine word. Quote them with the version they came from.
 
-This is a trade and not a defect. A column that is scanned rarely and stored for
-a long time is the case `full` is for. A column on the hot path of a frequent
-query is the case `fast` is for. The extra space is the price of the scan speed.
+A column that is scanned rarely and stored a long time is the case `full` is
+for. A column on the hot path of a frequent query is the case `fast` is for.
 Measure your own column before you choose, because the effect depends on the
-data.
+data and on the codec.
 
 Use `fast` for a bulk load if you will compact the table later.
 `pgcolumnar.vacuum`, `pgcolumnar.compact_rewrite` and `pgcolumnar.recluster`
