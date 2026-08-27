@@ -63,9 +63,20 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
   Only the serial scan carries the claim. The parallel partial path and the
   projection path keep `NIL`: workers finish in any order, and a projection is a
-  separate layout with its own sort key. New GUC
-  `pgcolumnar.enable_sorted_pathkeys`, on by default. New suite
-  `sorted_pathkeys`, 84 checks. (#751)
+  separate layout with its own sort key.
+
+  A query that could not use an ordering does not pay to find one out. Deciding
+  whether to claim reads the whole row-group list, and a query with no `ORDER BY`
+  and no mergejoinable clause would have had any claim discarded at the end
+  anyway, so `has_useful_pathkeys` is asked first. Measured as buffers touched
+  during planning, on 1,000,000 rows in 1,000 row groups, a relation marked
+  lexicographic, `SELECT count(*) FROM t WHERE j = 3`: 142 with the feature on
+  against 121 with it off before, and 121 against 121 after. The query that can
+  use the ordering still reads, which is what stops that from being satisfied by
+  a function that reads nothing.
+
+  New GUC `pgcolumnar.enable_sorted_pathkeys`, on by default. New suite
+  `sorted_pathkeys`, 108 checks. (#751)
 
 - A predicate on `date_trunc(unit, ts)` now drives chunk-group skipping for the
   ORDERED comparisons too, not only equality. #739 inverted `=` and declined

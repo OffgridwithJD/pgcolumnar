@@ -445,6 +445,70 @@ CACHED="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 check_text "a cached ordered plan sees rows appended after it was planned" \
 	"$CACHED" "-600,-599,-598,-597,-596"
 
+# --- a query that cannot use an ordering must not pay to find one out -------
+#
+# Deciding whether to claim reads the whole row-group list, which grows with the
+# relation. A query with no ORDER BY and no mergejoinable clause would have had
+# any claim truncated to NIL at the end anyway, so the read is pure waste, and
+# it is per plan.
+#
+# The oracle is a COUNT (buffers touched during PLANNING), not a duration.
+# Planning-time milliseconds would answer the same question, and on this host
+# they are not a fair instrument; a buffer count cannot be moved by another
+# process. It is also a work-done check rather than a correctness one: the
+# answers are identical either way, so nothing else in this suite could see it.
+
+# The query is planned TWICE in one session and the SECOND reading is taken.
+# A first plan in a fresh backend also fills the catalog caches, and that
+# first-touch cost is a couple of buffers that differ between two psql
+# invocations. Asserted as equality it made this arm flake by 2 either way.
+planbuf() {	# planbuf GUC QUERY -> shared buffers hit+read during planning
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "SET pgcolumnar.enable_sorted_pathkeys=$1" \
+		-c "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) $2" \
+		-c "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) $2" 2>/dev/null \
+		| awk '/^Planning:/{p++;next} p==2&&/Buffers:/{h=0;r=0;
+			if (match($0,/shared hit=[0-9]+/)) h=substr($0,RSTART+11,RLENGTH-11);
+			if (match($0,/read=[0-9]+/)) r=substr($0,RSTART+5,RLENGTH-5);
+			print h+r; exit}'
+}
+psql_run "CREATE TABLE pb (id int, k int, j int) USING pgcolumnar;"
+# The row_group catalog holds one row per STRIPE, so stripe_row_limit is what
+# sets how many rows the plan-time read walks, not chunk_group_row_limit. It has
+# a floor of 1000, so the group count comes from the ROW count: a million rows
+# for a thousand groups. A hundred-group fixture put the unguarded delta at +6,
+# too close to the two-buffer noise floor for the arm to discriminate; at a
+# thousand groups it is +44.
+psql_run "SELECT pgcolumnar.set_options('pb', stripe_row_limit => 1000, chunk_group_row_limit => 500);"
+psql_run "INSERT INTO pb SELECT g, ((g::bigint*7919)%1000000)::int, g%17 FROM generate_series(1,1000000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('pb', 'k', 'j');"
+psql_run "ANALYZE pb;"
+PB_GROUPS="$(ss pb total_groups)"
+check "premise: the fixture has many groups, so a per-group read would show" \
+	"$([ "$PB_GROUPS" -ge 900 ] && echo yes || echo "no ($PB_GROUPS)")" "yes"
+check_text "premise: and it is marked, so the claim is not refused at condition 1" \
+	"$(q "SELECT sorted_kind FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('pb');")" \
+	"lexicographic"
+PB_NOORDER_ON="$(planbuf on  'SELECT count(*) FROM pb WHERE j = 3')"
+PB_NOORDER_OFF="$(planbuf off 'SELECT count(*) FROM pb WHERE j = 3')"
+check_num "premise: the planning buffer count is a measurement, not an empty string" \
+	"$PB_NOORDER_OFF" "$PB_NOORDER_OFF"
+# A tolerance rather than equality, because two backends differ by a couple of
+# buffers whatever this code does. It is set far below the effect it has to
+# detect: without the guard this arm read +44 on this fixture and grows
+# with the group count, while the control below pins that the instrument can
+# still see a real read.
+PB_DELTA=$(( PB_NOORDER_ON - PB_NOORDER_OFF ))
+[ "$PB_DELTA" -lt 0 ] && PB_DELTA=$(( -PB_DELTA ))
+check "a query with no ORDER BY does not read the group list to decide" \
+	"$([ "$PB_DELTA" -le 5 ] && echo yes || echo "no (on=$PB_NOORDER_ON off=$PB_NOORDER_OFF over $PB_GROUPS groups)")" "yes"
+# The control that stops the arm above from being satisfied by a function that
+# never reads anything: the query that CAN use the ordering must still pay.
+PB_ORDER_ON="$(planbuf on  'SELECT k FROM pb ORDER BY k LIMIT 10')"
+PB_ORDER_OFF="$(planbuf off 'SELECT k FROM pb ORDER BY k LIMIT 10')"
+check "control: a query that CAN use the ordering does read to decide" \
+	"$([ "$PB_ORDER_ON" -gt $(( PB_ORDER_OFF + 5 )) ] && echo yes || echo "no ($PB_ORDER_ON vs $PB_ORDER_OFF)")" "yes"
+
 # --- the two OTHER paths this hook could reach, which must claim nothing -----
 #
 # Three columnar paths are offered for a base relation and only the serial one
