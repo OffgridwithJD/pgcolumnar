@@ -86,6 +86,17 @@ SELECT pgcolumnar.set_options('events', sort_by => ARRAY['customer_id']);
 SELECT pgcolumnar.vacuum_sorted('events');                         -- declared key
 ```
 
+Re-running `vacuum_sorted` with the same key on a table that is still in that
+order is a fast no-op. It skips the rewrite on four conditions. The recorded
+key matches. The recorded kind is a sort and not a Z-order. The sorted run
+already covers every row group. No row group holds a deleted row.
+
+That last condition is part of the gate because `vacuum_sorted` both orders the
+rows and reclaims deleted-row space. A table that is in order but holds deleted
+rows is rewritten, so the space is still reclaimed. Deletes, inserts, a
+different key, or a table arranged by `cluster()` all fall through to the full
+rewrite.
+
 A sort key is a **trade** and not a free gain. A sort by a segment key puts the
 rows of each segment together, so a filter on that key skips most groups. It also
 spreads each *other* dimension across every group.

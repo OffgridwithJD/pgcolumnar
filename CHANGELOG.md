@@ -34,8 +34,54 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   `54000 grouped vectorized aggregate exceeded pgcolumnar.groupagg_max_groups`
   with it on. A default would carry that to tables nobody chose it for, where the
   failure arrives when the table grows rather than when anything changes.
+- The reader now reuses one row-group buffer instead of allocating and freeing
+  one per row group (#768). It materializes the whole group into a single
+  buffer, sized `stripe_row_limit` x row width, which at the default
+  `stripe_row_limit = 150000` is about 19.8 MB for a 128-character text column.
+  Allocated per group that is far past `ALLOC_CHUNK_LIMIT`, so it is its own
+  malloc block, glibc returns it to the kernel when the group context is reset,
+  and the next group faults every page back in.
+
+  Measured on the same cluster, the same table and the same query, with only the
+  installed library changing (1,000,000 rows of 128-character text,
+  `stripe_row_limit = 150000`, vectorized paths off so the scan really decodes):
+
+  | | minor faults per query | time |
+  | --- | ---: | ---: |
+  | before | 57,846 | 143.0 ms |
+  | after | 4,838 | 85.8 ms |
+
+  The trade is resident memory: the buffer stays at the largest group's size for
+  the life of the read state rather than being returned between groups. Only
+  pages a scan actually touched are ever resident either way, since a projected
+  read still reads only the columns it wants, so the cost is bounded by what the
+  scan already touched.
 
 ### Added
+
+- `pgcolumnar.vacuum_sorted()` now self-gates: when the relation is already
+  exactly the requested lexicographic run with nothing appended and nothing to
+  reclaim, it skips the rewrite instead of materializing every live row through
+  a tuplesort again. `pgcolumnar.recluster()` has had the ordering half of this
+  since #415 so a scheduler can call it speculatively;
+  `design/ISSUE_415_AUTOVACUUM.md` promised the mirror here.
+
+  The mirror is not a copy, and that is the whole of the change.
+  `vacuum_sorted` has two jobs: it orders the live rows and it physically
+  reclaims deleted-row space. The obvious gate -- "is it already in this
+  order", which is complete for `recluster` -- would answer yes on a relation
+  that is in order and full of dead rows, and silently stop reclaiming. Ported
+  unchanged into a tree carrying it, that gate leaves 10,000 deleted rows
+  stored where the un-gated call reclaims all of them, with no error and no
+  report.
+
+  So the skip condition is "already in this order AND there is nothing to
+  reclaim": a `lexicographic` run (a `zorder` run over the same columns is not
+  this order, because Z-order over two or more columns is not a sort on any one
+  of them), over exactly these columns in this order, covering every row group,
+  with no deleted row and no empty group. Anything else falls through to the
+  full rewrite, so re-sorting by a new key, re-sorting a Z-ordered table, and
+  reclaiming all still work.
 
 - The columnar scan now tells the planner the order a sorted rewrite left the
   rows in, so `ORDER BY` on that key plans no `Sort`. Every `pathkeys` field in
