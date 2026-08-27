@@ -2356,6 +2356,20 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 				 * children are reached. The per-descendant test below is the
 				 * one that decides.
 				 *
+				 * And the walk cannot be too WIDE, which is the natural worry
+				 * about it -- moving a mark for a descendant whose column never
+				 * changed. PostgreSQL refuses both halves of that. A child
+				 * alone is refused with "cannot rename inherited column", and
+				 * the parent alone is refused too: ALTER TABLE ONLY p RENAME
+				 * COLUMN gives "inherited column must be renamed in child
+				 * tables too". So every rename that reaches this hook has
+				 * already cascaded to the whole hierarchy, and walking it
+				 * unconditionally is CORRECT rather than merely safe.
+				 *
+				 * That is the argument to keep. Without it the walk reads as
+				 * over-broad and invites a later condition that reintroduces
+				 * the bug (ChronicallyJD, #779 review).
+				 *
 				 * The rename already holds the locks it needs on the whole
 				 * hierarchy, so NoLock here takes no new lock and cannot race.
 				 */
