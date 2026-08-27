@@ -1,6 +1,19 @@
 # Canonical author identity for pgColumnar.
 # Maps earlier commit identities to the jdatcmd account so git log, git shortlog,
 # and the GitHub contributor view show one author, without rewriting history.
+# The bare noreply forms too. The 136637981+ form below is the one GitHub uses
+# for web commits; the two without the id prefix come from other clients and are
+# what 49 commits were still authored under, showing as a separate contributor
+# despite the goal stated above. Verified with git shortlog -sne, which had
+# 1609 under the canonical identity plus 40 and 9 under these.
+#
+# The ChronicallyJD spellings stay HERE even though that account was renamed to
+# OffgridwithJD and the name now 404s on GitHub. These are historical commit
+# ADDRESSES baked into existing commits, not pointers to a live account: this is
+# the one place the old name is correct and load-bearing, and renaming it would
+# split the contributor view rather than repair it.
+Joshua D. Drake <jd@commandprompt.com> <ChronicallyJD@users.noreply.github.com>
+Joshua D. Drake <jd@commandprompt.com> <chronicallyjd@users.noreply.github.com>
 Joshua D. Drake <jd@commandprompt.com> <136637981+ChronicallyJD@users.noreply.github.com>
 Joshua D. Drake <jd@commandprompt.com> Joshua (D) Drake <136637981+ChronicallyJD@users.noreply.github.com>
 Joshua D. Drake <jd@commandprompt.com> <offgridwithjd@gmail.com>
