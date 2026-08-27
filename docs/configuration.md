@@ -225,35 +225,50 @@ option applies to one table, and the default keeps the full search.
 
 #### When the setting changes anything at all
 
-The full search costs write time whenever it runs. It changes the stored bytes
-and the read time only when the writer **keeps** the symbol table it built.
+The full search always costs write time. It changes the stored bytes and the
+read time only when the writer **keeps** the symbol table it built.
 
-The writer builds the table, then asks whether the table still helps after the
-block codec has run. It often does not. FSST codes compress worse than the text
-they replace, so a table that shrinks every value can still enlarge the chunk.
-When the answer is no, the writer drops the table and the column takes its
-ordinary encoding.
+The writer builds the table, then compares the result against the same data
+without it, after the block codec has run. It keeps the table only when the
+saving clears `pgcolumnar.fsst_min_gain_percent`, which is 5 by default.
+Otherwise it drops the table and the column takes its ordinary encoding.
 
-`pgcolumnar.compression` is `zstd` by default, and zstd usually wins that
-comparison. Measured on 1,000,000 rows of URL-shaped text, with the default
-codec:
+**The outcome depends on the data, and you cannot predict it.** The decision is
+made for each column chunk. Two people who both write "text-shaped" test data
+get opposite answers. Four shapes were measured here at the default codec. The
+table was dropped in every one. `full` and `fast` then produced byte-identical
+storage and equal read times:
 
-| | Stored bytes | Read time |
-| --- | ---: | ---: |
-| `encode_effort = full` | 3,111,366 | 105.1 ms |
-| `encode_effort = fast` | 3,111,366 | 102.3 ms |
+| Text shape | Table kept? | Bytes, `full` | Bytes, `fast` |
+| --- | --- | ---: | ---: |
+| Repeated small alphabet | dropped | 922,693 | 922,693 |
+| Timestamped log lines | dropped | 5,670,736 | 5,670,736 |
+| URL-shaped text | dropped | 3,111,366 | 3,111,366 |
+| Hex hashes | dropped | 35,520,180 | 35,520,180 |
 
-The stored bytes are identical and the read times are the same within noise.
-The chunk descriptors confirm the cause: with the default codec neither table
-holds an FSST symbol table, because the writer dropped it.
+On other shapes the table survives, and there `full` is a real storage win at
+almost no read cost. A second set of measurements found `full` 31.8% smaller on
+one shape and 9.6% smaller on another, with read times of 1.08x and 0.99x. The
+extra decoding is paid back by reading fewer bytes.
 
-So at default settings this option costs write time and changes nothing else.
+So the setting is worth measuring on your own column and not worth guessing.
+Write the column both ways and compare:
 
-#### Read cost, when the table is kept
+```sql
+SELECT sum(datalength) FROM pgcolumnar.stats('your_table');
+```
 
-Set `compression = 'none'` and the symbol table survives. Then the full search
-costs time on every scan of the column, because the reader must undo the
-encoding.
+If the two totals match, the writer dropped the table and `encode_effort` buys
+you nothing but load time on that column. If `full` is smaller, that is what it
+saves you, and the read cost is small when the codec is on.
+
+#### Read cost with the codec off
+
+`compression = 'none'` keeps the symbol table, because there is no codec to beat.
+That isolates the encoding, and it is the only setting under which the read cost
+is large. These figures measure the encoding on its own. They are not what a
+default installation sees, and the storage column is far larger than a default
+installation stores.
 
 Measured on 1,000,000 rows in one text column, `SELECT count(v)`, with the
 vectorized paths off so that the scan decodes every value. The minimum of seven
@@ -264,13 +279,8 @@ interleaved pairs:
 | 128-char hex | 267.6 ms | 143.9 ms | 1.86x faster | 1.94x larger |
 | URL-shaped text | 131.5 ms | 96.0 ms | 1.37x faster | 3.79x larger |
 
-Both figures are smaller than they were before the reader learned to decode a
-symbol with one machine word. Quote them with the version they came from.
-
-A column that is scanned rarely and stored a long time is the case `full` is
-for. A column on the hot path of a frequent query is the case `fast` is for.
-Measure your own column before you choose, because the effect depends on the
-data and on the codec.
+Both figures fell when the reader learned to decode a symbol with one machine
+word. Quote them with the version they came from.
 
 Use `fast` for a bulk load if you will compact the table later.
 `pgcolumnar.vacuum`, `pgcolumnar.compact_rewrite` and `pgcolumnar.recluster`

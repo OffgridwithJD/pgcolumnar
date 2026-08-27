@@ -17,32 +17,40 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 ### Changed
 
 - `docs/configuration.md` now documents when `encode_effort` changes anything at
-  all, and what it costs on read when it does (#768). The section described the
-  setting as a trade between load speed and compression ratio, which reads as
-  though the choice has no consequence after the load.
+  all, and what it costs on read (#768). The section described the setting as a
+  trade between load speed and compression ratio, which reads as though the
+  choice has no consequence after the load.
 
-  The larger correction is that **at default settings the option changes nothing
-  but write time.** The writer builds the FSST symbol table, then asks whether it
-  still helps after the block codec has run, and drops it when the answer is no.
-  FSST codes compress worse than the text they replace, and
-  `pgcolumnar.compression` is `zstd` by default, so zstd usually wins that
-  comparison. Measured on 1,000,000 rows of URL-shaped text with the default
-  codec, `full` and `fast` store 3,111,366 bytes each and read in 105.1 ms
-  against 102.3 ms. The chunk descriptors confirm the cause: neither carries an
-  FSST symbol table.
+  The writer builds the FSST symbol table, then compares the result against the
+  same data without it **after the block codec has run**, and keeps the table
+  only when the saving clears `pgcolumnar.fsst_min_gain_percent`, default 5.
 
-  With `compression = 'none'` the table survives and the read cost is real.
-  Minimum of seven interleaved pairs, vectorized paths off so the scan decodes
-  every value:
+  **That decision depends on the data and cannot be predicted.** It is made for
+  each column chunk, and two people who both write "text-shaped" test data get
+  opposite answers. In four shapes measured for this entry the table was dropped
+  every time, so `full` and `fast` produced byte-identical storage and equal read
+  times. A second set of measurements found shapes where it survives and `full`
+  is 31.8% and 9.6% smaller, at read times of 1.08x and 0.99x, because the extra
+  decoding is paid back by reading fewer bytes.
 
-  | Text shape | `full` | `fast` | `fast` is | Storage with `fast` |
-  | --- | ---: | ---: | ---: | ---: |
-  | 128-char hex | 267.6 ms | 143.9 ms | 1.86x faster | 1.94x larger |
-  | URL-shaped text | 131.5 ms | 96.0 ms | 1.37x faster | 3.79x larger |
+  So the section gives the reader a way to measure their own column rather than a
+  verdict. An earlier draft of this entry concluded that at default settings the
+  option changes nothing but write time. That was true of the shapes it was
+  measured on and false in general, and a reader who acted on it could have paid
+  a third more storage.
 
-  These figures are smaller than an earlier draft of this entry carried, because
-  that draft was measured before the reader learned to decode a symbol with one
-  machine word. The section names the reader version the figures came from.
+  The read-cost table is scoped to `compression = 'none'`, which is the only
+  setting that keeps the table unconditionally, and is labelled as isolating the
+  encoding rather than describing a default installation:
+
+  | Text shape | `full` | `fast` | `fast` is |
+  | --- | ---: | ---: | ---: |
+  | 128-char hex | 267.6 ms | 143.9 ms | 1.86x faster |
+  | URL-shaped text | 131.5 ms | 96.0 ms | 1.37x faster |
+
+  Those replaced 2.69x and 3.84x, which were measured before the reader learned
+  to decode a symbol with one machine word. The section names the reader version
+  its figures came from.
 
 
 ### Fixed
