@@ -96,6 +96,14 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   on a real multi-line offender. Proved: without the join, those three become
   false positives.
 
+  The guard also asserts that it swept **every** file containing such a call,
+  not merely that it swept something. Its globs are `test/*.sh` and `bench/*.sh`,
+  which do not match `test/selftest/*.sh` or `test/pbt/*.sh`, so it was complete
+  by accident of the tree's current shape rather than by construction. Comparing
+  the files that contain a call against the files actually read fails loudly the
+  day one appears anywhere new, including a directory nobody predicted, which a
+  wider glob cannot do.
+
 ### Changed
 
 - `docs/configuration.md` now says why `pgcolumnar.enable_group_vectorization`

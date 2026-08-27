@@ -3,9 +3,16 @@
 # pgcolumnar.set_options RAISES on an out-of-range limit. A suite that calls it
 # and discards the output therefore runs on DEFAULT limits while the script
 # reads as though it were configured, and every later assertion is about a
-# fixture that was never built. Found by ChronicallyJD on 2026-08-27: several
+# fixture that was never built. Found by OffgridwithJD on 2026-08-27: several
 # probes passed stripe_row_limit => 500, which errors with "must be at least
 # 1000", and the fixtures silently ran on defaults.
+#
+# SCOPE. This checks NUMERIC BOUNDS only. set_options also raises on an unknown
+# compression or encode_effort, and on a sort_by naming a column that does not
+# exist or is virtual -- silent in exactly the same way, and not checkable from
+# a literal without resolving the relation. Those are deliberately not covered,
+# so the title of this file is narrower than "every value set_options will
+# reject".
 #
 # WHY THE NAIVE FORM OF THIS GUARD WOULD BE REVERTED IN A WEEK. Measured on this
 # tree before writing it: 182 set_options calls, and exactly THREE out-of-range
