@@ -14,6 +14,21 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/configuration.md` now says why `pgcolumnar.enable_group_vectorization`
+  is off by default, which #755 records as not visible from outside the code.
+  Measured rather than reasoned: on 4,000,000 rows in 200,000 groups the setting
+  is worth 488.1 ms to 266.9 ms with identical answers, so performance is not the
+  reason. The reason is the failure mode. The grouped path builds a hash table
+  that does not spill, `pgcolumnar.groupagg_max_groups` bounds it, and the cap is
+  checked during execution against the real group count because the plan is fixed
+  by then and cannot fall back to an ordinary `Agg`. On a table with 1,500,000
+  distinct keys the same query succeeds with the setting off and raises
+  `54000 grouped vectorized aggregate exceeded pgcolumnar.groupagg_max_groups`
+  with it on. A default would carry that to tables nobody chose it for, where the
+  failure arrives when the table grows rather than when anything changes.
+
 ### Added
 
 - The columnar scan now tells the planner the order a sorted rewrite left the
