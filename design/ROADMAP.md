@@ -87,11 +87,12 @@ is and where the current numbers are; follow the link for figures.
    dictionary-coded grouping on the high-cardinality text key. The shapes where
    pgColumnar is furthest behind, and the two where it is slower than heap, are
    q6 and q8 in #289's table; nothing in flight addresses either.
-2. **Code comment audit** (#291) to the ASD-STE100 standard. The documentation
-   half landed in #298, which added `test/docs_style.sh` to the matrix as a
-   durable gate. The code comments remain, and no gate covers them: the licensed
-   ASD-STE100 vocabulary list cannot be checked mechanically, so any claim of
-   compliance there is unverifiable by construction.
+2. **Code comment audit** (#291) to ISO 24495-1:2023, the plain-language
+   standard the project's documentation follows. The documentation half landed
+   in #298, which added `test/docs_style.sh` to the matrix as a durable gate.
+   The code comments remain, and no gate covers them: most of ISO 24495-1 is not
+   mechanical (whether a reader got what they needed, whether they could act on
+   it), so any claim of conformity there is unverifiable by construction.
 
 Bulk ingest is done and #300 is closed. `pgcolumnar.parallel_copy` fans core COPY,
 unchanged, across background workers: partition-parallel in #323, single-table in

@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 #
-# Documentation style gate: the measurable ASD-STE100 rules (issue #291).
+# Documentation style gate: the measurable plain-language rules (issue #291).
 #
-# The project writes its user-facing documentation to the ASD-STE100 writing
-# rules. A rule that nothing checks is a rule the next writer does not know
-# about, and this project has been bitten by that shape before: an empty REGRESS
-# made `make installcheck` report success while running nothing. So the rules
-# that a machine can check are checked here, and a document that drifts goes red.
+# The project writes its user-facing documentation to ISO 24495-1:2023, Plain
+# language - Part 1: Governing principles and guidelines. A rule that nothing
+# checks is a rule the next writer does not know about, and this project has been
+# bitten by that shape before: an empty REGRESS made `make installcheck` report
+# success while running nothing. So the rules that a machine can check are
+# checked here, and a document that drifts goes red.
 #
-# WHAT IS NOT CLAIMED. Full ASD-STE100 compliance is defined against the licensed
-# ASD Dictionary of approximately 900 approved words, each with one approved
-# meaning and one part of speech. That dictionary is not available to this
-# project. The approved-vocabulary rule is therefore not enforced and is not
-# claimed, here or in the documentation. What is enforced is sentence length,
-# idiom, and dash characters. Saying so is the point: an unverifiable claim of
-# compliance would be worse than an honest partial one.
+# WHAT IS NOT CLAIMED. ISO 24495-1 gives four governing principles -- relevant,
+# findable, understandable, usable -- and only the third has any mechanically
+# checkable content, and only in part. Its own test for "usable" is that a reader
+# acts on the document successfully, which no checker performs. So a green run
+# means the measurable subset holds, NOT that the documentation is plain. Saying
+# so is the point: an unverifiable claim of conformity would be worse than an
+# honest partial one.
+#
+# Two of the four checks are this project's typographic house rules rather than
+# anything the standard requires: no em or en dash, and no double hyphen as a
+# dash in prose. They are named as house rules wherever they appear so nobody
+# mistakes a preference for a requirement.
 #
 # SCOPE, which is a decision rather than an oversight:
 #
@@ -54,10 +60,10 @@ echo "== pgColumnar test: docs_style.sh =="
 
 # The full rules over every user-facing document.
 docs=$(ls "$SRCDIR"/docs/*.md "$SRCDIR"/README.md 2>/dev/null)
-out="$(python3 "$SRCDIR/test/ste_check.py" $docs 2>&1)"
+out="$(python3 "$SRCDIR/test/plain_language_check.py" $docs 2>&1)"
 rc=$?
 echo "$out" | sed 's/^/  /'
-check "every user-facing document meets the measurable STE rules" "$rc" "0"
+check "every user-facing document meets the measurable plain-language rules" "$rc" "0"
 
 # The control. A checker that examines nothing reports nothing, and this suite
 # would then pass on an empty docs/ directory or a broken glob.
@@ -83,7 +89,7 @@ check "and the page that nav entry points at exists" \
 # in docs/limitations.md under "Vacuum and compaction", and every other check in
 # this file passed with them there, because they are valid Markdown text.
 #
-# The STE checker reads prose and the nav check reads mkdocs.yml. Neither asks
+# The prose checker reads prose and the nav check reads mkdocs.yml. Neither asks
 # whether the page is a coherent document. This does.
 conflicts=$(grep -rlE '^(<<<<<<< |>>>>>>> )' "$SRCDIR/docs" "$SRCDIR"/*.md 2>/dev/null | tr '\n' ' ')
 check "no document carries a merge conflict marker" \

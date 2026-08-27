@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 """
-Measurable ASD-STE100 rules for the pgColumnar documentation (issue #291).
+Measurable plain-language rules for the pgColumnar documentation.
 
-This checks the rules that a machine can check: sentence length, idiom, and dash
-characters. It deliberately does NOT claim ASD-STE100 compliance. Compliance is
-defined against the licensed ASD Dictionary of approximately 900 approved words,
-each with one approved meaning and one part of speech. That dictionary is not
-available to this project, so the approved-vocabulary rule is neither enforced
-here nor claimed anywhere in the documentation.
+The project writes its user-facing documentation to ISO 24495-1:2023, Plain
+language - Part 1: Governing principles and guidelines. This file checks the
+part of that standard a machine can check.
 
-What is enforced:
+ISO 24495-1 states four governing principles: readers get what they need
+(relevant), can easily find it (findable), can easily understand it
+(understandable), and can easily use it (usable). Only the third has any
+mechanically checkable content, and only in part. What is enforced here is that
+subset, and nothing is claimed beyond it.
+
+From the standard, under "understandable":
+
+  * A sentence carries at most 25 words. The standard asks for short sentences
+    that each carry one main idea. It does not give a number, so 25 is this
+    project's measurable proxy for that principle and not a figure quoted from
+    ISO 24495-1.
+  * No phrase from the idiom list below. The standard asks for familiar words
+    and warns against figurative language, which a reader without fluent English
+    cannot resolve. Idiom is the part a fluent reader does not notice, which
+    makes it the rule with the most value and the least visibility.
+
+House rules, which are this project's typographic choices and are NOT from the
+standard. They are listed separately so nobody mistakes a preference for a
+requirement:
 
   * No em dash or en dash, anywhere in the checked files.
   * No double hyphen used as a dash in prose. A double hyphen inside a fenced
     code block is a SQL comment and is left alone.
-  * A sentence carries at most 25 words, the STE limit for descriptive writing.
-  * No phrase from the idiom list below. Idiom is the part a fluent reader does
-    not notice and a reader without fluent English cannot resolve, which makes it
-    the rule with the most value and the least visibility.
+
+WHAT IS NOT CHECKED. Most of ISO 24495-1 is not mechanical: whether the reader
+got what they needed, whether the order suits their task, whether the document
+works when someone uses it. The standard's own test for "usable" is that a
+reader acts on the document successfully, which no checker can perform. A green
+run here means the measurable subset holds, not that the documentation is plain.
 
 Code blocks, tables, headings and link targets are excluded from the sentence
 measurement, because none of them is prose. A list item counts as its own
 sentence: joining the items of a list reports a long sentence that nobody wrote.
 
-Usage:  test/ste_check.py FILE [FILE ...]
+Usage:  test/plain_language_check.py FILE [FILE ...]
 Exit status is the number of violations, so a caller can test it directly.
 
 Written fresh for pgColumnar.
