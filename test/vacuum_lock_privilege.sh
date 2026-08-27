@@ -81,6 +81,46 @@ check "vacuum_sorted refuses a non-owner before taking the exclusive lock" \
 check "cluster refuses a non-owner before taking the exclusive lock" \
 	"$(outcome_under_contention "SELECT pgcolumnar.cluster('victim'::regclass, 'id');")" "owner"
 
+# ---- #749: the same ordering for the five maintenance/projection entries -----
+#
+# add_projection takes ShareLock and the other four take
+# ShareUpdateExclusiveLock, all of which conflict with the AccessExclusiveLock
+# held above, so an unfixed caller queues exactly as vacuum did. Asserting only
+# the SQLSTATE would NOT be a removal proof: on unfixed main these calls are
+# also eventually refused, just after the lock request. Contention is what
+# separates the two orderings, which is the argument this file already makes.
+check "add_projection refuses a non-owner before taking its lock (#749)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id']);")" "owner"
+check "drop_projection refuses a non-owner before taking its lock (#749)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1');")" "owner"
+check "recluster refuses a non-owner before taking its lock (#749)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.recluster('victim'::regclass, 'id');")" "owner"
+check "compact_rewrite refuses a non-owner before taking its lock (#749)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.compact_rewrite('victim'::regclass, 0.2);")" "owner"
+check "compact refuses a non-owner before taking its lock (#749)" \
+	"$(outcome_under_contention "SELECT pgcolumnar.compact('victim'::regclass);")" "owner"
+
+# A non-owner asking about a relation they do not own must learn only that they
+# are not the owner. drop_projection checked the relation TYPE first, so it
+# reported "is not a columnar table" for an arbitrary heap relation to a caller
+# with no rights to it, while the four entries beside it did not (#749 review).
+psql_run "CREATE TABLE heapvictim (id int);" >/dev/null 2>&1
+psql_run "REVOKE ALL ON heapvictim FROM PUBLIC;" >/dev/null 2>&1
+notowner_heap() {	# sql -> owner | typedisclosed | other
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U t_unpriv \
+		-d "$PGC_DB" -Atq -v ON_ERROR_STOP=0 -c "$1" 2>&1)"
+	case "$out" in
+		*"must be owner"*|*"permission denied for"*) echo owner ;;
+		*"is not a columnar table"*) echo typedisclosed ;;
+		*) echo "other:${out:0:40}" ;;
+	esac
+}
+check "drop_projection tells a non-owner nothing about the relation type (#749)" \
+	"$(notowner_heap "SELECT pgcolumnar.drop_projection('heapvictim'::regclass, 'p1');")" "owner"
+check "compact does the same, which is the behaviour drop_projection now matches" \
+	"$(notowner_heap "SELECT pgcolumnar.compact('heapvictim'::regclass);")" "owner"
+
 # The caller must never have entered the lock queue: no ungranted request from it.
 check "the refused caller left no lock request queued on victim" \
 	"$(q "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation JOIN pg_stat_activity a ON a.pid=l.pid WHERE c.relname='victim' AND a.usename='t_unpriv' AND NOT l.granted;")" "0"
@@ -92,5 +132,13 @@ wait "$holder_pid" 2>/dev/null || true
 # ---- allow arm: the owner is not broken (uncontended) -----------------------
 check "the owner can still vacuum the table" \
 	"$(as_super -c "SELECT pgcolumnar.vacuum('victim'::regclass);" | grep -c 'ERROR')" "0"
+
+# The positive controls for the #749 arms. Without these, a guard that refused
+# every caller would satisfy every deny arm above.
+check "the owner can still compact the table (#749 control)" \
+	"$(as_super -c "SELECT pgcolumnar.compact('victim'::regclass);" | grep -c 'ERROR')" "0"
+check "the owner can still add and drop a projection (#749 control)" \
+	"$(as_super -c "SELECT pgcolumnar.add_projection('victim'::regclass, 'p1', ARRAY['id']);" \
+	           -c "SELECT pgcolumnar.drop_projection('victim'::regclass, 'p1');" | grep -c 'ERROR')" "0"
 
 pgc_summary

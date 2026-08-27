@@ -445,6 +445,7 @@ extern bool pgcolumnar_enable_end_truncation;
 
 /* error unless the current user owns the relation (maintenance/DDL gate) */
 extern void PgColumnarRequireTableOwner(Relation rel);
+extern void PgColumnarRequireTableOwnerByOid(Oid relid);
 extern void PgColumnarRequireNoRowSecurity(Oid relid);
 
 /*
