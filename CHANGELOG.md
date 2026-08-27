@@ -20,9 +20,13 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   is off by default, which #755 records as not visible from outside the code.
   Measured rather than reasoned: on 4,000,000 rows in 200,000 groups the setting
   is worth 781.0 ms to 403.7 ms with identical answers, so performance is not the
-  reason. That is the minimum of seven interleaved pairs; an earlier figure here
-  ran all of one arm and then all of the other, which on a contended host
-  attributes drift to whichever arm ran second. The reason is the failure mode. The grouped path builds a hash table
+  reason. That is the minimum of seven interleaved pairs on a non-assert build; an
+  earlier figure here ran all of one arm and then all of the other, which on a
+  contended host attributes drift to whichever arm ran second. An assert build
+  measures about 2.2 instead, because `AllocSetCheck` runs per context RESET and
+  the ordinary `Agg` resets far more contexts than the vectorized fold, so the
+  skew lands one-sidedly on the slower arm. `src/columnar.h` also called the cap
+  a plan-time one, which contradicted the code and the new section. The reason is the failure mode. The grouped path builds a hash table
   that does not spill, `pgcolumnar.groupagg_max_groups` bounds it, and the cap is
   checked during execution against the real group count because the plan is fixed
   by then and cannot fall back to an ordinary `Agg`. On a table with 1,500,000
