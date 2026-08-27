@@ -78,6 +78,15 @@ check "premise: the set_options sweep read a substantial number of calls" \
 # tree has no set_options call outside the globs, so the guard is complete by
 # accident of its current shape rather than by construction.
 #
+# WHAT THE PREMISE IS FOR, which is not obvious from the premise. In every
+# unswept-file case the OFFENDER check still reports clean, because a file the
+# sweep never read cannot be examined -- so without this premise the guard would
+# assert "no suite calls set_options with a value it will reject" about a tree
+# containing exactly that. The generalisation is worth more than this file: any
+# content check over a swept set needs a companion premise that the sweep
+# covered the set, or its clean result means "found nothing" rather than "there
+# is nothing".
+#
 # Fixed with a premise rather than a wider glob, because a wider glob only ever
 # covers the directories someone thought of. Comparing the files that CONTAIN a
 # call against the files the sweep actually READ fails loudly the day one
