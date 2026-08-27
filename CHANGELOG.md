@@ -54,6 +54,19 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- `pgcolumnar.vm_selftest` and `pgcolumnar.vm_is_visible` accepted any relation,
+  including a plain heap table. `vm_selftest` does not only inspect the
+  visibility map, it writes an all-visible bit into it, and a wrongly set bit is
+  how an index-only scan skips the heap visibility check and returns rows it
+  should not. Both functions now refuse a relation that does not use the
+  `pgcolumnar` access method, with SQLSTATE `42809`, which is the same code the
+  other C entry points use for that condition. Both also check ownership before
+  opening the relation rather than after, so a caller who does not own the table
+  is turned away before it can request a lock. `test/vm_privilege.sh` is rewritten
+  around the change: the ownership boundary is asserted on a columnar table, where
+  it still applies, and a heap table asserts the stronger new guarantee that no
+  caller reaches its visibility map at all. (#748)
+
 - Five entry points requested a relation lock before checking that the caller
   owns the table. `pgcolumnar.add_projection` takes a `ShareLock`, and
   `drop_projection`, `recluster`, `compact_rewrite` and `compact` take a
