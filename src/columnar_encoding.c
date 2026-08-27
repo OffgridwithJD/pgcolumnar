@@ -1464,6 +1464,7 @@ decode_dict(const char *enc, uint32 encLen, Form_pg_attribute att, uint32 n,
 								 * codes) at negligible amortized cost. */
 #define FSST_MIN_RAWLEN 64		/* below this, table overhead cannot pay off */
 #define FSST_COUNT_SLOTS (1u << 17)	/* candidate-counting hash capacity */
+#define FSST_DECODE_SLACK 8		/* headroom so a symbol is one 8-byte store (#768) */
 
 typedef struct FsstTable
 {
@@ -2034,12 +2035,19 @@ static char *
 decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 				   uint32 tableLen, uint32 rawLen, MemoryContext cx)
 {
-	char	   *raw = MemoryContextAlloc(cx, rawLen > 0 ? rawLen : 1);
+	/*
+	 * FSST_DECODE_SLACK bytes of headroom past rawLen, so the decode loop can
+	 * store a symbol as one unaligned 8-byte write whatever its length. The
+	 * write starts at outPos, which the bounds check in the loop holds at
+	 * rawLen - L or less, so it reaches at most rawLen + 7.
+	 */
+	char	   *raw = MemoryContextAlloc(cx, (rawLen > 0 ? rawLen : 1) +
+										 FSST_DECODE_SLACK);
 	const char *p = enc;
 	const char *end = enc + encLen;
 	const char *tp;
 	const char *tend;
-	const char *symPtr[FSST_MAX_SYMBOLS];
+	uint64		symVal[FSST_MAX_SYMBOLS];	/* symbol bytes, memcpy'd in and out */
 	uint8		symLen[FSST_MAX_SYMBOLS];
 	uint32		nSym;
 	uint32		outPos = 0;
@@ -2066,7 +2074,27 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 		if ((uint32) (tend - tp) < L)
 			DECODE_CORRUPT("FSST shared table symbol bytes past end");
 		symLen[i] = L;
-		symPtr[i] = tp;
+		/*
+		 * Pack the symbol into a uint64 once, here, rather than copying L bytes
+		 * out of the table on every occurrence in the loop. nSym is at most 255
+		 * and this runs once per chunk.
+		 *
+		 * ENDIANNESS. This is safe on any byte order for one reason only: both
+		 * ends are a byte-wise memcpy, so the bytes round-trip, and symVal[i] is
+		 * NEVER INTERPRETED AS A NUMBER. Do not "clarify" this into
+		 * `v |= (uint64) tp[j] << (8 * j)`. That builds a little-endian integer,
+		 * is identical on x86, and is wrong on a big-endian machine, where the
+		 * store below would write the symbol reversed.
+		 *
+		 * The L < 1 || L > FSST_MAX_SYMLEN check above is load-bearing here in a
+		 * way it was not before: it is what keeps this memcpy inside the uint64.
+		 */
+		{
+			uint64		v = 0;
+
+			memcpy(&v, tp, L);
+			symVal[i] = v;
+		}
 		tp += L;
 	}
 
@@ -2107,7 +2135,14 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 			L = symLen[c];
 			if (L > rawLen - outPos)	/* outPos <= rawLen invariant */
 				DECODE_CORRUPT("FSST output exceeds raw length");
-			memcpy(raw + outPos, symPtr[c], L);
+			/*
+			 * One fixed 8-byte store rather than a variable-length memcpy. A
+			 * memcpy whose length is only known at run time cannot become a
+			 * single store; this can, and the slack allocated above makes the
+			 * over-write safe. Only symLen[c] bytes are kept: outPos advances
+			 * by L, so the next store overwrites the remainder.
+			 */
+			memcpy(raw + outPos, &symVal[c], sizeof(uint64));
 			outPos += L;
 		}
 	}

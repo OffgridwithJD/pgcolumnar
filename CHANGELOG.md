@@ -14,6 +14,40 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- FSST decoding is between 1.5 and 2.9 times faster, which makes a scan of an
+  FSST-encoded text column that much faster overall (#768). `encode_effort` is
+  `full` by default, so this applies to text columns generally rather than to an
+  opt-in.
+
+  A profile of a scan over a repetitive text column put **68.8% of the query's
+  CPU in `decode_fsst_shared`**, 147.4 ms of the 214.1 ms per query that the
+  profile measured. (The wall-clock minimum for the same query was 230.3 ms.
+  Those are two different quantities and an earlier draft of this entry divided
+  one by the other, which gives 64.0% and reconciles with nothing.) The loop copied each
+  symbol out of the table with a `memcpy` whose length is only known at run
+  time, which cannot become a single instruction. It now packs each symbol into
+  a `uint64` once when the table is parsed, and stores it with one fixed 8-byte
+  write, keeping only the symbol's own length by advancing the output cursor by
+  that much. The buffer is allocated with 8 bytes of headroom so the tail of
+  that write stays inside the allocation.
+
+  Measured on one cluster with only the installed library changing, 1,000,000
+  rows in one text column, `SELECT count(v)`, vectorized paths off so the scan
+  decodes every value, minimum of seven runs, and the column's `md5` identical
+  across both builds:
+
+  | Text shape | Before | After | |
+  | --- | ---: | ---: | ---: |
+  | Repeating host and path strings | 221.4 ms | 77.7 ms | 2.85x |
+  | 128-char hex | 302.0 ms | 200.9 ms | 1.50x |
+
+  The shape with more repeated substrings gains more, which is the shape FSST
+  is for. The transform is byte-identical in both directions and the on-disk
+  format does not change, so a table written by any earlier version reads the
+  same.
+
 ### Fixed
 
 - `ORDER BY` no longer returns unordered rows after a column rename, and neither
