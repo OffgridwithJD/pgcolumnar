@@ -36,6 +36,14 @@
 #   S2  unselective join, the dimension barely filters, so the join does real work
 #   S3  multi-dimension star, where join order starts to matter
 #   S4  wide projection under a join, does the join force decoding of columns
+#
+#   S0 and S0W are the no-join controls, and S0W exists because S0 alone cannot
+#   serve S4. S4 projects EIGHT float8 columns, and #768 measures a single float8
+#   column at 1.52x the heap with no join anywhere in sight -- so some unknown
+#   part of S4's ratio is per-column decode cost rather than anything the join
+#   did. S4 divided by S0W is the join's contribution with decode divided out.
+#   Near 1 means S4 belongs to #768 and a runtime filter pushdown would not move
+#   it. Without S0W the wide row cannot be attributed at all.
 #       nothing needs
 #
 # Arms: heap and pgColumnar. See the BENCH_ARMS note below for why TimescaleDB is
@@ -233,6 +241,7 @@ done
 q_for() {  # q_for <shape-id>
 	case "$1" in
 		S0) echo "SELECT avg(m1) FROM %T" ;;
+		S0W) echo "SELECT avg(m1+m2+m3+m4+m5+m6+m7+m8) FROM %T" ;;
 		S1) echo "SELECT avg(f.m1) FROM %T f JOIN hosts h USING (host_id) WHERE h.tier = 3" ;;
 		S2) echo "SELECT avg(f.m1) FROM %T f JOIN hosts h USING (host_id) WHERE h.tier < 5" ;;
 		S3) echo "SELECT r.continent, avg(f.m1) FROM %T f JOIN hosts h USING (host_id)
@@ -245,13 +254,14 @@ q_for() {  # q_for <shape-id>
 q_desc() {
 	case "$1" in
 		S0) echo "no join (control)" ;;
+		S0W) echo "no join, wide projection (control for S4)" ;;
 		S1) echo "selective dimension join" ;;
 		S2) echo "unselective join" ;;
 		S3) echo "multi-dimension star" ;;
 		S4) echo "wide projection under a join" ;;
 	esac
 }
-SHAPE_IDS="S0 S1 S2 S3 S4"
+SHAPE_IDS="S0 S0W S1 S2 S3 S4"
 
 # One timed run, in milliseconds.
 timed() {  # timed <table> <sql-with-%T>
@@ -284,6 +294,18 @@ for shape in "${SHAPE_A[@]}"; do
 		"$(grep -qi 'Vectorized' <<<"$p0" && echo yes || echo no)" "yes" || fail=1
 	require "[$shape] a join between scan and aggregate disables it" \
 		"$(grep -qi 'Vectorized' <<<"$p1" && echo yes || echo no)" "no" || fail=1
+
+	# S0W's premise is the OPPOSITE of S0's, and it has to be, or S4/S0W stops
+	# meaning what the header says. S4 is unvectorized because a join sits
+	# between the scan and the aggregate. S0W is unvectorized for a different
+	# reason -- its target-list entry is an EXPRESSION over columns rather than a
+	# bare Aggref, which the vectorized path also declines -- and that coincidence
+	# is what makes the division like-for-like. If S0W ever starts vectorizing,
+	# the ratio silently becomes "the join plus the loss of the fold path"
+	# instead of "the join", and nothing else here would notice.
+	p0w=$(plan_of "$ct" "$(q_for S0W)")
+	require "[$shape] the wide no-join control is NOT vectorized, so S4/S0W is like-for-like" \
+		"$(grep -qi 'Vectorized' <<<"$p0w" && echo yes || echo no)" "no" || fail=1
 
 	# A different join method either side makes the comparison meaningless.
 	for shp in S1 S2 S4; do
