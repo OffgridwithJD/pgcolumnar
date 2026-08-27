@@ -300,6 +300,64 @@ else
 		'SELECT k, id FROM %T ORDER BY k, id'
 fi
 
+# --- which types the collation refusal actually covers -----------------------
+#
+# The refusal is `OidIsValid(att->attcollation)`, and the claim is that this is
+# EXACT for "has an ordering that can change under us". A type where
+# attcollation is InvalidOid and the ordering can still change would be a wrong
+# answer the refusal does not reach. These arms pin the reason for each family
+# rather than the reasoning, because the reasoning is what would rot.
+
+psql_run "CREATE DOMAIN dom_t AS text COLLATE \"C\";"
+psql_run "CREATE TABLE t_dom (id int, k dom_t) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('t_dom', stripe_row_limit => 1000, chunk_group_row_limit => 250);"
+psql_run "INSERT INTO t_dom SELECT g, ('v' || g)::dom_t FROM generate_series(1,2000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('t_dom', 'k');"
+check "REFUSE: a DOMAIN over text carries the base type's collation" \
+	"$(sorts 'SELECT k FROM t_dom ORDER BY k')" "yes"
+
+psql_run "CREATE TABLE t_arr (id int, k text[]) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('t_arr', stripe_row_limit => 1000, chunk_group_row_limit => 250);"
+psql_run "INSERT INTO t_arr SELECT g, ARRAY['v' || g] FROM generate_series(1,2000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('t_arr', 'k');"
+check "REFUSE: an ARRAY of a collatable type is collatable" \
+	"$(sorts 'SELECT k FROM t_arr ORDER BY k')" "yes"
+
+# A COMPOSITE has attcollation InvalidOid while comparing by its FIELD
+# collations, which looks like a hole. It is closed by PostgreSQL, not by this
+# extension: a composite's attribute cannot be altered while any column uses the
+# type. The arm asserts the refusal, so if that ever stops being true this goes
+# red rather than going quietly wrong.
+psql_run "CREATE TYPE comp_t AS (a text COLLATE \"C\", b int);"
+psql_run "CREATE TABLE t_comp (id int, k comp_t) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('t_comp', stripe_row_limit => 1000, chunk_group_row_limit => 250);"
+psql_run "INSERT INTO t_comp SELECT g, ROW('v' || g, g)::comp_t FROM generate_series(1,2000) g;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('t_comp', 'k');"
+check "premise: a composite column's attcollation is InvalidOid, so it IS claimed" \
+	"$(q "SELECT (attcollation = 0)::text FROM pg_attribute WHERE attrelid = 't_comp'::regclass AND attname = 'k';")" \
+	"true"
+check "premise: and it is claimed" "$(sorts 'SELECT k FROM t_comp ORDER BY k')" "no"
+check_text "PostgreSQL refuses to change a composite's field collation while a column uses it" \
+	"$(psql_run "ALTER TYPE comp_t ALTER ATTRIBUTE a TYPE text COLLATE \"C\" CASCADE;" 2>&1 | grep -oE 'cannot alter type' | head -1)" \
+	"cannot alter type"
+
+# An ENUM also has attcollation InvalidOid. ALTER TYPE ... ADD VALUE ... BEFORE
+# slots a new value in without renumbering the existing ones, and the new value
+# cannot be in already-stored rows, so the stored order survives.
+psql_run "CREATE TYPE enum_t AS ENUM ('b','d','f');"
+psql_run "CREATE TABLE t_enum (id int, k enum_t) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('t_enum', stripe_row_limit => 1000, chunk_group_row_limit => 250);"
+psql_run "INSERT INTO t_enum SELECT g, (ARRAY['b','d','f'])[1+(g%3)]::enum_t FROM generate_series(1,2000) g;"
+psql_run "CREATE TABLE t_enum_h (id int, k enum_t) USING heap;"
+psql_run "INSERT INTO t_enum_h SELECT * FROM t_enum;"
+psql_run "SELECT pgcolumnar.vacuum_sorted('t_enum', 'k');"
+check "premise: an enum sort key is claimed" "$(sorts 'SELECT k FROM t_enum ORDER BY k')" "no"
+psql_run "ALTER TYPE enum_t ADD VALUE 'a' BEFORE 'b';"
+check "an enum ADD VALUE ... BEFORE does not renumber the values already stored" \
+	"$(sorts 'SELECT k FROM t_enum ORDER BY k')" "no"
+ansp  "and the ordered answer still matches heap" t_enum_h t_enum \
+	'SELECT k, id FROM %T ORDER BY k, id'
+
 # --- a rewrite that a type change forces retracts the claim -----------------
 
 psql_run "CREATE TABLE atc (id int, k int) USING pgcolumnar;"
