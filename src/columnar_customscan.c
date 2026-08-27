@@ -1415,6 +1415,23 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 	 * already restructured this area once -- this early return starts dropping
 	 * legitimate claims SILENTLY, and no test can see it: the result is a lost
 	 * optimisation, not a wrong answer.
+	 *
+	 * The risk that carries is bounded, and by the same yardstick the collation
+	 * refusal below uses. This is not a novel shortcut: it is the guard core puts
+	 * in front of a btree index's pathkeys. indxpath.c gates, builds, then
+	 * truncates, in that order, on every supported major:
+	 *
+	 *     pathkeys_possibly_useful = (scantype != ST_BITMAPSCAN &&
+	 *                                 has_useful_pathkeys(root, rel));
+	 *     if (index_is_ordered && pathkeys_possibly_useful) {
+	 *         index_pathkeys = build_index_pathkeys(...);
+	 *         useful_pathkeys = truncate_useless_pathkeys(root, rel, index_pathkeys);
+	 *     }
+	 *
+	 * has_useful_pathkeys has three callers in core and that one is structurally
+	 * identical to this. So if the funnel ever breaks, an ordered index on the
+	 * same column loses the same optimisation in the same query. No weaker than
+	 * an index is the bar, and it is met.
 	 */
 	if (!has_useful_pathkeys(root, rel))
 		return NIL;
