@@ -70,7 +70,16 @@ for _bp in "$(dirname "${BASH_SOURCE[0]}")/../bench/"run_*.sh; do
 	check "[$_bs] and offers a named override rather than only refusing" \
 		"$([ "$(grep -cE 'ALLOW_CASSERT' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
 	check "[$_bs] and exits non-zero rather than warning past it" \
-		"$([ "$(grep -A14 'enable-cassert' "$_bp" | grep -c 'exit 1')" -gt 0 ] && echo yes || echo no)" "yes"
+		"$([ "$(grep -A24 'enable-cassert' "$_bp" | grep -c 'exit 1')" -gt 0 ] && echo yes || echo no)" "yes"
+	# "not an assert build" and "could not tell" are different answers and only
+	# one of them is a pass. Written as a bare `--configure | grep -c`, a missing
+	# or failing pg_config gives empty output, grep -c gives 0, and the guard
+	# returns its cleanest verdict on the least information -- so it must capture
+	# the output and refuse an empty one.
+	check "[$_bs] refuses when it CANNOT TELL, rather than treating that as a pass" \
+		"$([ "$(grep -c 'produced no --configure output' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
+	check "[$_bs] and does not decide from an unbuffered pipe into grep -c" \
+		"$([ "$(grep -cE '\$\("\$PG_CONFIG" --configure[^)]*\| *grep -c' "$_bp")" -eq 0 ] && echo yes || echo no)" "yes"
 done
 
 # The control: the scan has to be reading files that exist, or four greps over

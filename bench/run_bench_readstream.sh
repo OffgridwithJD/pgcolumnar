@@ -41,7 +41,23 @@ PG_CONFIG="${1:-/usr/local/pg18_uring/bin/pg_config}"
 # reasoned about, it was 2.5% (#768's per-column ladder, assert against
 # non-assert). Small here; it is allocation- and reset-shaped, so it is not
 # small everywhere, and the point is that nobody knew which case they had.
-BENCH_CASSERT="$("$PG_CONFIG" --configure 2>/dev/null | grep -c 'enable-cassert' || true)"
+# --configure captured ONCE, and an empty capture is a REFUSAL rather than a
+# pass. Written as a single grep -c it could not tell "not an assert build" from
+# "could not tell": a missing, non-executable or failing pg_config gives empty
+# output, grep -c gives 0, and the 2>/dev/null swallows the evidence -- so the
+# guard returns its cleanest verdict on the least information. Reachable, not
+# theoretical: these scripts have default prefixes that do not exist on every
+# machine, so a no-arg invocation can pass a guard on a pg_config that never ran.
+#
+# Refuse when you cannot tell, for the same reason as when the answer is yes.
+BENCH_CONFIGURE="$("$PG_CONFIG" --configure 2>/dev/null || true)"
+if [ -z "$BENCH_CONFIGURE" ]; then
+	echo "FATAL: $PG_CONFIG produced no --configure output, so this script cannot"
+	echo "       tell whether it is an --enable-cassert build. Refusing rather than"
+	echo "       assuming it is not: check the path is right and executable."
+	exit 1
+fi
+BENCH_CASSERT="$(printf '%s' "$BENCH_CONFIGURE" | grep -c 'enable-cassert' || true)"
 if [ "${BENCH_CASSERT:-0}" != "0" ]; then
 	if [ -n "${BENCH_ALLOW_CASSERT:-}" ]; then
 		echo "== WARNING: --enable-cassert build. Every number below includes"
