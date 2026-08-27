@@ -116,6 +116,41 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- The vectorized aggregate now accepts a target list that CONTAINS aggregates,
+  not only one that IS them. It required every entry to be a bare aggregate, so
+  an entry that merely contained one fell off the path entirely, and on an
+  unfiltered columnar table that is the difference between answering from the
+  zone maps and scanning the whole relation. Measured on 8,000,000 rows:
+
+  | query | before | after |
+  | --- | ---: | ---: |
+  | `count(*)::text` | 634.1 ms | **0.057 ms** |
+  | `avg(a)+avg(b)` | 329.5 ms | **0.504 ms** |
+  | `max(a)-min(a)` | 245.4 ms | **0.430 ms** |
+  | `round(avg(a)::numeric, 2)` | 230.9 ms | **0.488 ms** |
+
+  Two to four orders of magnitude, and every shape that was losing is ordinary
+  SQL: a cast on a count, a difference of two aggregates, a rounded average.
+  `count(*)` itself was already 0.030 ms, so wrapping it in a cast was costing a
+  full scan of the table.
+
+  The node is unchanged and still emits one bare aggregate per output column. The
+  aggregates are pulled out of the target list, the node produces those, and a
+  projection above it computes the expressions, which is how core's own
+  `Agg` relates to an upper target. A target list that is already exactly the
+  aggregates keeps its previous plan with no projection added, so nothing that
+  worked before is planned differently.
+
+  The parallel arm needed no change and never did: it uses core's partial
+  grouping target, which is bare aggregates however the final target is shaped.
+  Refusing the shape in the serial gate was killing the parallel arm with it.
+
+  Unsupported aggregates, aggregates over expressions, and grouped queries
+  decline exactly as before. A filter still routes to the scan-fold path behind
+  `pgcolumnar.enable_ungrouped_vector_agg`, which is off by default; with it on,
+  a wrapped aggregate takes that path too. New suite
+  `vector_agg_tlist_shape`. (#755)
+
 - A suite for the claim under `docs/limitations.md`'s "Replication and backup":
   that a columnar table is not a logical decoding source. The whole of #754 rests
   on that sentence and nothing asserted it. The only other logical-replication

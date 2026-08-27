@@ -253,6 +253,7 @@ SUITES=(
 	vacuum_lock_privilege
 	vacuum_stripe_count
 	vector_agg_rescan_memory
+	vector_agg_tlist_shape
 	vm_privilege
 	wal_envelope
 	write_fsst_compressed

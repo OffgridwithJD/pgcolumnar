@@ -501,7 +501,12 @@ refuse it.
 ## Vectorized aggregate coverage
 
 The vectorized aggregate path covers one shape only. That shape is
-`SELECT agg(col) FROM t [WHERE ...]`, on one relation and with no grouping. The
+`SELECT agg(col) FROM t [WHERE ...]`, on one relation and with no grouping.
+
+The target list may contain expressions over those aggregates. `count(*)::text`,
+`avg(a)+avg(b)`, `round(avg(a), 2)` and `max(a)-min(a)` all take the path. What
+matters is that every aggregate in the list is a supported one, not that the list
+holds nothing else. The
 path also needs each aggregate, each column type and each filter clause to be
 supported. The supported set is:
 

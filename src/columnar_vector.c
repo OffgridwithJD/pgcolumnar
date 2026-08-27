@@ -865,6 +865,8 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	RangeTblEntry *rte;
 	Oid			relid;
 	List	   *tlist = output_rel->reltarget->exprs;
+	List	   *aggList;			/* the aggregates the tlist CONTAINS (#755) */
+	bool		tlistIsBare;		/* ... and whether the tlist already IS them */
 	ListCell   *lc;
 	int			naggs;
 	int			i;
@@ -927,19 +929,79 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	relid = rte->relid;
 
-	/* every target entry must be a bare, supported aggregate */
-	naggs = list_length(tlist);
+	/*
+	 * The aggregates the target list CONTAINS, which need not be the target list
+	 * (#755). This used to require every entry to BE an Aggref, so an entry that
+	 * merely contained one fell off the vectorized path entirely -- and on an
+	 * unfiltered columnar table that is the difference between answering from
+	 * the zone maps and scanning the whole relation. Measured on 8,000,000 rows:
+	 *
+	 *   count(*)                    0.030 ms      count(*)::text        634.1 ms
+	 *   avg(a)                      0.508 ms      avg(a)+avg(b)         329.5 ms
+	 *   min(a), max(a)              0.480 ms      max(a)-min(a)         245.4 ms
+	 *                                             round(avg(a)::numeric,2)  230.9 ms
+	 *
+	 * Two to four orders of magnitude, and every losing shape is ordinary SQL:
+	 * a cast on a count, a difference of two aggregates, a rounded average.
+	 *
+	 * The node itself is unchanged and still emits one bare aggregate per output
+	 * column -- PgColumnarCreateAggScanState rebuilds its specs from
+	 * custom_scan_tlist assuming exactly that. What changes is that when the
+	 * target list is not already bare, this path produces the AGGREGATES and a
+	 * projection above it computes the expressions, which is how core's own Agg
+	 * relates to an upper target.
+	 */
+	{
+		List	   *found = pull_var_clause((Node *) tlist,
+											PVC_INCLUDE_AGGREGATES |
+											PVC_INCLUDE_WINDOWFUNCS |
+											PVC_INCLUDE_PLACEHOLDERS);
+		ListCell   *fc;
+
+		/*
+		 * INCLUDE rather than RECURSE on all three, so anything that is not a
+		 * plain aggregate arrives here and is refused below rather than making
+		 * pull_var_clause elog. A bare Var cannot appear in a valid ungrouped
+		 * aggregate query, and a window function or placeholder is not a shape
+		 * this node computes.
+		 */
+		aggList = NIL;
+		foreach(fc, found)
+		{
+			Node	   *n = (Node *) lfirst(fc);
+
+			if (!IsA(n, Aggref))
+				return;
+			/* equal(), so avg(a)+avg(a) folds to one aggregate */
+			aggList = list_append_unique(aggList, n);
+		}
+		list_free(found);
+	}
+	naggs = list_length(aggList);
 	if (naggs == 0)
 		return;
+
+	/*
+	 * Whether the target list is ALREADY exactly the aggregates. When it is, the
+	 * path keeps output_rel->reltarget and no projection is added, so every plan
+	 * that worked before this change is planned identically to before.
+	 */
+	tlistIsBare = (list_length(tlist) == naggs);
+	if (tlistIsBare)
+	{
+		foreach(lc, tlist)
+			if (!IsA((Node *) lfirst(lc), Aggref))
+			{
+				tlistIsBare = false;
+				break;
+			}
+	}
+
 	specs = (PgColumnarAggSpec *) palloc0(sizeof(PgColumnarAggSpec) * naggs);
 	i = 0;
-	foreach(lc, tlist)
+	foreach(lc, aggList)
 	{
-		Node	   *expr = (Node *) lfirst(lc);
-
-		if (!IsA(expr, Aggref))
-			return;
-		if (!pgcolumnar_classify_aggref((Aggref *) expr, (int) input_rel->relid,
+		if (!pgcolumnar_classify_aggref((Aggref *) lfirst(lc), (int) input_rel->relid,
 									  true, false, &specs[i]))
 			return;
 		i++;
@@ -1014,7 +1076,24 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype = T_CustomScan;
 	cpath->path.parent = output_rel;
-	cpath->path.pathtarget = output_rel->reltarget;
+	/*
+	 * The aggregates, not the expressions over them, unless the target list is
+	 * already exactly the aggregates (#755). PlanCustomPath copies whatever core
+	 * derives from this into custom_scan_tlist, and the executor rebuilds its
+	 * per-aggregate specs from that list assuming each entry is an Aggref.
+	 */
+	if (tlistIsBare)
+		cpath->path.pathtarget = output_rel->reltarget;
+	else
+	{
+		PathTarget *aggTarget = create_empty_pathtarget();
+		ListCell   *ac;
+
+		foreach(ac, aggList)
+			add_column_to_pathtarget(aggTarget, (Expr *) lfirst(ac), 0);
+		set_pathtarget_cost_width(root, aggTarget);
+		cpath->path.pathtarget = aggTarget;
+	}
 	cpath->path.param_info = NULL;
 	cpath->path.parallel_aware = false;
 	cpath->path.parallel_safe = false;
@@ -1261,7 +1340,28 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 
 	/* the serial node is the fallback; skip it when the parallel arm was added */
 	if (!parallelAdded)
-		add_path(output_rel, &cpath->path);
+	{
+		if (tlistIsBare)
+			add_path(output_rel, &cpath->path);
+		else
+			/*
+			 * The node emits the aggregates; this evaluates the expressions over
+			 * them (#755). setrefs matches the projection's Aggrefs to the
+			 * subplan's by equal(), and they are the same nodes, pulled from this
+			 * very target list.
+			 *
+			 * The PARALLEL arm above needs nothing equivalent and never did: it
+			 * uses core's partial grouping target, which is bare Aggrefs however
+			 * the final target is shaped, and its Finalize Agg is created with
+			 * output_rel->reltarget, so core evaluates the expressions there. Only
+			 * this serial gate was refusing the shape, and refusing it early
+			 * killed the parallel arm with it.
+			 */
+			add_path(output_rel,
+					 (Path *) create_projection_path(root, output_rel,
+													 &cpath->path,
+													 output_rel->reltarget));
+	}
 }
 
 /*
