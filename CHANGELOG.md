@@ -14,6 +14,34 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sum()` and `avg()` over `bigint` are no longer **slower** on the vectorized
+  path than off it (#785). `pgcolumnar.enable_ungrouped_vector_agg` describes
+  itself as the fast path for "sum/avg over int8/float/numeric", and for `bigint`
+  it was a pessimisation: 2.03x slower for `sum`, 1.91x for `avg`.
+
+  The path converted every value to `numeric` and called `numeric_add` per row,
+  which is two allocations and a full numeric addition for each row. A profile of
+  it was 13.0% `make_result_opt_error`, 9.3% `add_abs`, 8.1% `init_var_from_num`
+  and 8.5% `AllocSet` alloc and free: the numeric machinery, not the aggregate.
+  PostgreSQL's own `bigint` accumulators are 128-bit and convert once, and this
+  now does the same.
+
+  Measured on 8,000,000 rows, interleaved, minimum of seven, with the plan and
+  the answer asserted on both arms:
+
+  | | Before | After |
+  | --- | ---: | ---: |
+  | `sum(bigint)` | 2.03x slower | **1.65x faster** |
+  | `avg(bigint)` | 1.91x slower | **1.74x faster** |
+
+  `float4` and `float8` were already large wins on this path (3.18x and 2.88x
+  here), so the setting is now a gain for three of the four families it names.
+  `numeric` remains about 1.14x slower and is unchanged by this: its input is
+  already `numeric` with a scale, so it cannot use an integer accumulator. That
+  residue is recorded on #785 rather than fixed here.
+
 ### Changed
 
 - FSST decoding is between 1.5 and 2.9 times faster, which makes a scan of an
