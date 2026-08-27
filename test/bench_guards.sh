@@ -67,6 +67,16 @@ for _bp in "$(dirname "${BASH_SOURCE[0]}")/../bench/"run_*.sh; do
 	_bs="$(basename "$_bp")"
 	check "[$_bs] refuses an assert build rather than documenting the requirement" \
 		"$([ "$(grep -c 'enable-cassert' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
+	# EVERY assertion here keys on shared TEXT, never on a prefix, and that is
+	# load-bearing rather than incidental: run_profile.sh uses PROFILE_* where
+	# the other five use BENCH_*, so a check written against `BENCH_ALLOW_CASSERT`
+	# would pass on five runners and silently stop covering the sixth. Proved:
+	# keying that one check on BENCH_ALLOW_CASSERT leaves run_profile.sh as the
+	# only red. The unprefixed match below is what keeps it in scope.
+	#
+	# If anyone tidies the prefixes to match, this comment says the checks need
+	# no change. If anyone tidies the CHECKS to match the prefixes, that is the
+	# moment coverage is lost with nothing going red.
 	check "[$_bs] and offers a named override rather than only refusing" \
 		"$([ "$(grep -cE 'ALLOW_CASSERT' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
 	check "[$_bs] and exits non-zero rather than warning past it" \
