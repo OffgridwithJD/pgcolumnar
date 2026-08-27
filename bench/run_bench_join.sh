@@ -321,7 +321,7 @@ done
 # One shape at a time across every arm before moving on. A sweep gives its first
 # arm the cold cache and every later arm a warm one (#271).
 note "== timings (median of $REPS, interleaved across arms)"
-declare -A MS
+declare -A MS MN MX
 for shape in "${SHAPE_A[@]}"; do
 	for shp in $SHAPE_IDS; do
 		for arm in "${ARM_A[@]}"; do
@@ -329,6 +329,8 @@ for shape in "${SHAPE_A[@]}"; do
 			runs=()
 			for r in $(seq 1 "$REPS"); do runs+=("$(timed "$t" "$(q_for $shp)")"); done
 			MS["$shape:$shp:$arm"]=$(median "${runs[@]}")
+			MN["$shape:$shp:$arm"]=$(printf '%s\n' "${runs[@]}" | sort -n | awk 'NR==1{print $1}')
+			MX["$shape:$shp:$arm"]=$(printf '%s\n' "${runs[@]}" | sort -n | awk 'END{print $1}')
 		done
 		printf '   %-10s %-3s' "$shape" "$shp"
 		for arm in "${ARM_A[@]}"; do printf ' %-9s=%-10s' "$arm" "${MS["$shape:$shp:$arm"]}"; done
@@ -345,12 +347,18 @@ echo "rows: $SCALE   reps: $REPS   serial   $(nproc) cores"
 echo
 for shape in "${SHAPE_A[@]}"; do
 	echo "-- data shape: $shape"
-	printf '%-4s %-32s %12s %12s %10s\n' id shape heap columnar 'col/heap'
+	printf '%-4s %-32s %12s %12s %10s %19s\n' id shape heap columnar 'col/heap' 'col min..max'
 	for shp in $SHAPE_IDS; do
 		h="${MS["$shape:$shp:heap"]:-}"
 		c="${MS["$shape:$shp:columnar"]:-}"
 		r=$(ratio "$c" "$h")
-		printf '%-4s %-32s %12s %12s %10s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r"
+		# The spread is printed for every row because the impossible-heap-ratio
+		# warning below is ONE-SIDED: it can only fire when noise happens to push
+		# the heap ratio under 1.0, which is about half the runs in which the same
+		# error is present. Its silence is not a clean bill. Min and max make the
+		# scatter directly visible instead, which is strictly more informative.
+		sp="${MN["$shape:$shp:columnar"]:-}..${MX["$shape:$shp:columnar"]:-}"
+		printf '%-4s %-32s %12s %12s %10s %19s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r" "$sp"
 	done
 	# The join's own contribution, per arm, with decode divided out. Printed for
 	# BOTH arms on purpose: adding a join, a second table and a filter is strictly
@@ -367,6 +375,9 @@ for shape in "${SHAPE_A[@]}"; do
 		printf '%-4s %s\n' "" "^ heap S4/S0W is BELOW 1.00, which is impossible: a join cannot"
 		printf '%-4s %s\n' "" "  make the same scan faster. The columnar figure beside it is an"
 		printf '%-4s %s\n' "" "  upper bound on the join's share, not a measurement of it."
+		printf '%-4s %s\n' "" "  This check is ONE-SIDED: when noise pushes the heap ratio the other"
+		printf '%-4s %s\n' "" "  way the same error is present and invisible, so its SILENCE is not"
+		printf '%-4s %s\n' "" "  evidence of a clean pair. Read the min..max column for that."
 	fi
 	hs=$($P -c "SELECT pg_total_relation_size('$(fact_name heap $shape)')")
 	cs=$($P -c "SELECT pg_total_relation_size('$(fact_name columnar $shape)')")
