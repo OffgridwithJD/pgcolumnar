@@ -116,6 +116,29 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- `docs/limitations.md`'s account of parallel scans stated two things that are
+  not true, and gave a cause the arithmetic does not support. It said a columnar
+  scan "ships fewer, already-decoded rows" than a heap scan, and that "a heap
+  scan on the same shape also flipped" at about half the default
+  `parallel_tuple_cost`.
+
+  Re-measured on 4,000,000 rows in a 14 column table with a heap twin holding the
+  same rows. The two plans ship the **same** number of rows, 999,987, so the
+  Gather charge is identical at 99,999; what differs is tuple width, three
+  projected columns against fourteen. And the heap does not flip at half the
+  default: columnar turns parallel at 0.060 and the heap at 0.030.
+
+  The effect itself is real and larger than recorded. Over the eleven query
+  shapes where the planner chose the serial scan, the parallel plan ran 1.8 to
+  2.5 times faster on the median, and in every shape the slowest parallel run
+  beat the fastest serial run, by 1.45 times at the narrowest margin. "Narrow"
+  turns out to mean narrow in **columns**. Two mechanisms produce it, both now
+  stated: `parallel_tuple_cost` is charged per row and is blind to width,
+  overstating a narrow row by about 1.9 times at a constant volume of data
+  shipped; and the columnar scan cost is two fifths to seven tenths of what its
+  real time implies, by an amount that is largest on the narrowest projection.
+  (#753)
+
 - Both eager ordering rewrites discarded the ordering they had just applied.
   `pgcolumnar.storage.sorted_by` and `sorted_kind` exist to record which
   ordering a rewrite left behind, and the base schema has always specified them

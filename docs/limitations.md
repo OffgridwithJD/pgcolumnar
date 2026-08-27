@@ -342,31 +342,47 @@ A columnar scan can run in parallel, and the planner builds a parallel path for
 it. On a wide projection it now chooses that path, because the per-column decode
 cost is priced and a parallel plan divides it across workers.
 
-On a narrow but selective scan the planner still prefers the serial plan even
-where the parallel one is faster. Measured: a three-column selective scan of a
-four-million-row table ran up to 2.5x faster in parallel, and the planner chose
-serial anyway.
+On a narrow projection the planner still prefers the serial plan where the
+parallel one is faster.
 
-The cause is the cost of the Gather node. The planner prices each row passed from
-a worker to the leader at `parallel_tuple_cost`, the same rate it uses for a heap
-scan. A columnar scan ships fewer, already-decoded rows, so that rate overstates
-its Gather cost. On the shape above the Gather cost reached almost the whole cost
-of the serial scan. The serial plan won on cost while losing on the clock.
+This was measured on 4,000,000 rows in a table of 14 columns. Eleven query shapes
+were tested, all of them shapes where the planner chose the serial scan. The
+parallel plan ran 1.8 to 2.5 times faster on the median. In every shape the
+slowest parallel run was still faster than the fastest serial run, by 1.45 times
+at the narrowest margin.
 
-The default rate is conservative for any row-returning parallel scan, not only a
-columnar one. A heap scan on the same shape also flipped and ran faster at the
-lower rate. A columnar scan is affected most, because its own cost is low and the
-Gather cost then dominates. About half the default rate picks the faster plan on
-the shape above.
+"Narrow" here means few columns, not few rows. A scan that reads three columns of
+fourteen decodes little. The serial plan is therefore cheap, and a fixed per row
+charge above it then decides the comparison.
 
-That rate is a global setting, applied through the core Gather cost. An access
-method cannot set its own value without a core change. Lowering the global setting
-is not the fix, because it changes the rate for every table on the system and the
-evidence is one workload.
+Two things produce this and both apply.
+
+First, the planner charges each row passed from a worker to the leader at
+`parallel_tuple_cost`. That is a fixed amount per row. It does not depend on how
+wide the row is.
+
+This was measured at a constant volume of data shipped. Tripling the row count
+and thirding the width raised the real cost of the transfer by 1.56 times. The
+charge rose by 3 times. The charge therefore overstates a narrow row by about 1.9
+times. This applies to any narrow projection, on a heap table as much as a
+columnar one.
+
+Second, the columnar scan cost is low against the time it takes. The same query
+was measured on a heap table holding the same rows, over a ladder of one to eight
+integer columns. The columnar scan is priced at two fifths to seven tenths of what
+its real time implies. The error is largest on the narrowest projection, which is
+where this problem lives. That is recorded separately, because it affects every
+plan comparison and not only this one.
+
+`parallel_tuple_cost` is a global setting applied through the core Gather cost.
+An access method cannot set its own value without a core change. Lowering the
+global setting is not a general fix, because it changes the rate for every table
+on the system.
 
 The workaround is to force the parallel plan when it helps, with `SET
 max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
-session.
+session. On the shape above the columnar plan turns parallel at 0.060. A heap
+plan on the same rows turns parallel at 0.030. The default is 0.100.
 
 ## Index-only scans
 
