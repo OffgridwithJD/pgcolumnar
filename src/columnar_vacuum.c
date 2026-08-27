@@ -1663,11 +1663,23 @@ vacuum_sorted_gate_is_noop(Relation rel, int ncols, AttrNumber *atts)
 		return false;
 
 	/*
-	 * Own pending work must be persisted before the group list and the delete
-	 * vectors are read, or an insert or delete made earlier in this same
-	 * transaction is invisible here and the gate fires on a relation that does
-	 * need the rewrite. Both flushes are idempotent, and
-	 * pgcolumnar_compact_relation repeats them on the fall-through path.
+	 * Persist own pending work before reading the group list and the delete
+	 * vectors, as pgcolumnar_compact_relation does on the fall-through path.
+	 * Both flushes are idempotent.
+	 *
+	 * Stated honestly: this is defensive, not a fix for an observed hole, and
+	 * no arm in test/vacuum_sorted_gate.sh goes red without it. The write
+	 * state and the delete vector are both flushed at end of statement, so by
+	 * the time a later vacuum_sorted() runs, everything an earlier statement
+	 * in the same transaction wrote is already in row_group (measured: a
+	 * 500-row insert below chunk_group_row_limit shows storedrows=20500
+	 * immediately, inside the transaction).
+	 *
+	 * It stays because the gate SKIPS A REWRITE on what it reads, so reading
+	 * stale state is a silent correctness bug, and the invariant that makes
+	 * the flush unnecessary belongs to another module. The transaction arms in
+	 * that suite pin the invariant rather than this flush: if end-of-statement
+	 * flushing ever stops holding, they go red and this becomes load-bearing.
 	 */
 	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
 	PgColumnarFlushDeleteVectorForRelation(rel);

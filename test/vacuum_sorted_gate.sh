@@ -175,25 +175,31 @@ psql_run "SELECT pgcolumnar.vacuum_sorted('vg_u','k','j');"
 check "so vacuum_sorted after a plain vacuum rewrites" "$(did_rewrite vg_u "$SU")" "yes"
 
 # ---- uncommitted work in the SAME transaction must not be missed -------------
-# The gate reads the row-group list and the delete vectors, so it must persist
-# this backend's pending writes first. Without the flush, work done earlier in
-# the same transaction is invisible and the gate fires on a relation that does
-# need the rewrite.
+# The gate SKIPS A REWRITE on what it reads, so reading stale state would be a
+# silent correctness bug. These arms pin the INVARIANT that makes it safe:
+# work done by an earlier statement in the same transaction is visible to a
+# later vacuum_sorted().
 #
-# The insert must be SMALLER than chunk_group_row_limit. A larger one flushes
-# complete groups during the INSERT itself, leaving nothing pending -- which is
-# what an earlier version of this arm did, and it stayed green with both
-# flushes deleted.
+# They do NOT prove the gate's own flush is load-bearing, and this file should
+# not claim they do -- deleting both flushes leaves every arm here green,
+# because the write state and the delete vector are flushed at end of
+# statement. Measured, not assumed: a 500-row insert below
+# chunk_group_row_limit reports storedrows=20500 from inside the transaction.
+# If that ever stops holding, these arms go red and the flush becomes the fix.
+#
+# The insert is still deliberately SMALLER than chunk_group_row_limit: a larger
+# one flushes complete groups during the INSERT itself, which is a weaker
+# fixture for the same claim.
 mk vg_x
 psql_run "SELECT pgcolumnar.vacuum_sorted('vg_x','k','j');"
-check_num "premise: the tail is smaller than the chunk group limit, so it stays PENDING" \
+check_num "premise: the tail is smaller than the chunk group limit" \
 	"$([ 500 -lt $CG ] && echo 1 || echo 0)" "1"
 psql_run "BEGIN;
           INSERT INTO vg_x SELECT g, (g*2654435761)::bigint % 1000, g % 97, md5(g::text)
             FROM generate_series(200001,200500) g;
           SELECT pgcolumnar.vacuum_sorted('vg_x','k','j');
           COMMIT;"
-check "a PENDING insert in the same transaction defeats the gate (rows come out ordered)" \
+check "an insert earlier in the same transaction defeats the gate (rows come out ordered)" \
 	"$(q "SELECT bool_and(ok) FROM (SELECT (k,j) >= lag((k,j)) OVER (ORDER BY ctid) IS NOT FALSE AS ok FROM vg_x) s;")" \
 	"t"
 check_num "and every row is still there" "$(liverows vg_x)" "20500"
@@ -206,7 +212,7 @@ psql_run "BEGIN;
           DELETE FROM vg_d WHERE id % 2 = 0;
           SELECT pgcolumnar.vacuum_sorted('vg_d','k','j');
           COMMIT;"
-check_num "a PENDING delete in the same transaction defeats the gate (space reclaimed)" \
+check_num "a delete earlier in the same transaction defeats the gate (space reclaimed)" \
 	"$(deadrows vg_d)" "0"
 check_num "and the rewrite really happened: the live rows are all that is stored" \
 	"$(q "SELECT COALESCE(sum(rowcount),0) FROM pgcolumnar.stats('vg_d');")" "10000"
