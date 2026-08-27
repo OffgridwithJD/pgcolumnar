@@ -80,7 +80,12 @@ check "no suite pipes a captured string into an early-exit reader" \
 
 # And the scan has to be looking at something. A glob that matched nothing, or a
 # TESTDIR that moved, would report zero hits and read as compliance.
-_epipe_scanned="$(grep -lE 'grep' "${_epipe_globs[@]}" 2>/dev/null | grep -c . || true)"
+#
+# BOTH premises below are computed from ONE list of the files the sweep actually
+# read, rather than from two independent re-derivations. That is the whole point:
+# a premise that recomputes its condition tests the world, not the code.
+_epipe_files="$(grep -lE 'grep' "${_epipe_globs[@]}" 2>/dev/null || true)"
+_epipe_scanned="$(printf '%s' "$_epipe_files" | grep -c . || true)"
 check "and the scan examined the suites rather than finding nothing to read" \
 	"$([ "${_epipe_scanned:-0}" -ge 20 ] && echo yes || echo "no (scanned $_epipe_scanned)")" "yes"
 
@@ -97,13 +102,19 @@ check "and the scan examined the suites rather than finding nothing to read" \
 #
 # Which is this rule's own failure mode one level up: coverage narrowing with
 # nothing able to see that it narrowed.
-# Asserted on THE GLOB LIST THE SWEEP ACTUALLY USED, not by globbing bench/
-# again here. The first version of this check did the latter -- it counted
-# bench/*.sh matching 'grep' independently -- and so it asserted that bench/
-# EXISTS, not that the sweep read it. Deleting the bench glob from _epipe_globs
-# left it green. A check that cannot fail for the reason it names is the thing
-# this whole file is about, and it took its own removal proof to see it.
-_epipe_bench="$(printf '%s\n' "${_epipe_globs[@]}" | grep -c '/bench/' || true)"
+# Counted from the FILES READ, not from the glob list, and this is the third
+# version of this one check. Each earlier one was a step short:
+#
+#   v1  globbed bench/*.sh again here      -> asserted bench/ EXISTS
+#   v2  counted entries in _epipe_globs    -> asserted bench/ is LISTED
+#   v3  counts bench paths among the files actually read
+#
+# v2 was one step short because bash leaves an UNMATCHED GLOB LITERAL unless
+# nullglob is set, and nothing in this harness sets it. So a bench/ holding no
+# .sh files still contributes one array entry -- the literal ".../bench/*.sh" --
+# and v2 passes while the sweep read nothing from it. Verified: an array built
+# over a nonexistent directory has size 1, not 0.
+_epipe_bench="$(printf '%s' "$_epipe_files" | grep -c '/bench/' || true)"
 check "and bench/ was in the scan, which is the hole this rule had" \
-	"$([ "${_epipe_bench:-0}" -ge 1 ] && echo yes || echo "no (bench globs in sweep: $_epipe_bench)")" "yes"
+	"$([ "${_epipe_bench:-0}" -ge 1 ] && echo yes || echo "no (bench files read: $_epipe_bench)")" "yes"
 
