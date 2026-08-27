@@ -16,6 +16,28 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- The documented CDC recipe is now tested end to end, and the decision behind it
+  is recorded rather than implied (#754). `test/logical_decoding_source.sh`
+  already pinned the limitation: a columnar table emits no decodable change.
+  Nothing pinned the workaround `docs/user-guide.md` offers in its place, which
+  is to capture rows into a heap table with a row trigger and decode that.
+
+  That recipe makes four factual claims, none of which was checked. Row triggers
+  fire on a columnar table and see the same rows a heap table would. An `UPDATE`
+  arrives as one `UPDATE` rather than as the storage's internal delete and
+  insert, which is the claim a CDC consumer would be broken by and the one most
+  likely to be false. The capture is transactional. The capture table decodes.
+  `test/logical_decoding_cdc_recipe.sh` transcribes the recipe from the guide and
+  asserts all four, plus the guide's warning that `FOR ALL TABLES` really does
+  pick up the `pgcolumnar` schema, and its cost claim of one heap row per changed
+  row.
+
+  `docs/limitations.md` now states plainly that this is a decision and not an
+  open item: emitting a decodable change for a columnar write needs a WAL record
+  type carrying tuple structure for columnar data, which is a new WAL semantic
+  and so out of scope by the same rule that keeps the extension installable on a
+  stock server.
+
 - The columnar scan now tells the planner the order a sorted rewrite left the
   rows in, so `ORDER BY` on that key plans no `Sort`. Every `pathkeys` field in
   the tree was `NIL`, so a table that `pgcolumnar.vacuum_sorted` had physically
