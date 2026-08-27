@@ -2311,6 +2311,39 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 	else
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+
+	/*
+	 * A column rename must be carried through the ordering mark (#778). The
+	 * mark records its sort key as column NAMES and both ordering self-gates
+	 * compare those against the current attname, so a rename that moves a name
+	 * onto another column makes a gate skip work it must do. See
+	 * PgColumnarRenameSortKeyColumn.
+	 *
+	 * AFTER the statement, deliberately: a rename that errors, or that names a
+	 * column or relation which does not exist, must leave the mark alone. By
+	 * this point the rename has committed to the catalog and holds
+	 * AccessExclusiveLock on the relation, so the lookup below cannot race and
+	 * needs no lock of its own.
+	 */
+	if (parsetree != NULL && IsA(parsetree, RenameStmt))
+	{
+		RenameStmt *rs = (RenameStmt *) parsetree;
+
+		if (rs->renameType == OBJECT_COLUMN && rs->relation != NULL &&
+			rs->subname != NULL && rs->newname != NULL)
+		{
+			Oid			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+
+			if (OidIsValid(relid) && PgColumnarIsColumnarRelation(relid))
+			{
+				Relation	rel = relation_open(relid, NoLock);
+
+				PgColumnarRenameSortKeyColumn(PgColumnarStorageId(rel),
+											  rs->subname, rs->newname);
+				relation_close(rel, NoLock);
+			}
+		}
+	}
 }
 
 static void

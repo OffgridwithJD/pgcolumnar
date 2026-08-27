@@ -47,6 +47,8 @@ extern void PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup,
 /* #415: the current run's clustering key (a list of column-name strings, NIL
  * if unknown) and kind ('zorder'/'lexicographic'/NULL), for recluster's
  * self-gate and sort_status. */
+extern void PgColumnarRenameSortKeyColumn(uint64 storageId, const char *oldName,
+										  const char *newName);
 extern void PgColumnarGetSortedInfo(uint64 storageId, int64 *firstGroup,
 									int64 *lastGroup, List **sortByNames,
 									char **sortedKind);

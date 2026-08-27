@@ -1886,6 +1886,69 @@ insert_row:
 }
 
 /*
+ * PgColumnarRenameSortKeyColumn
+ *		Follow an ALTER TABLE ... RENAME COLUMN through the ordering mark (#778).
+ *
+ *		pgcolumnar.storage records the applied sort key as a list of column
+ *		NAMES, and both ordering self-gates compare that list against the
+ *		CURRENT attname of the columns they were asked about -- vacuum_sorted's
+ *		gate (#760) and the online recluster's (#415). Column names are not
+ *		stable, and nothing else maintains the mark.
+ *
+ *		A three-statement swap (a->tmp, b->a, tmp->b) therefore leaves the
+ *		stored name resolving to a DIFFERENT column: the gate reports "already
+ *		in this order" about a column that was never sorted and skips the
+ *		rewrite. For vacuum_sorted that is the failure #760 exists to prevent,
+ *		reached through another door, and the table ends up neither ordered nor
+ *		reclaimed with no error raised.
+ *
+ *		Renaming the entry rather than clearing the mark is deliberate. The
+ *		DATA has not moved, so the ordering is still true of whichever column
+ *		now carries the name, and following the rename keeps that fact instead
+ *		of throwing away a real optimisation on every rename. It composes
+ *		correctly through the swap above: {a} -> {tmp} -> {tmp} -> {b}, which is
+ *		the column the rows are actually ordered by.
+ *
+ *		Called after the rename has executed, so a rename that ERRORS leaves the
+ *		mark untouched.
+ */
+void
+PgColumnarRenameSortKeyColumn(uint64 storageId, const char *oldName,
+							  const char *newName)
+{
+	int64		sfrom,
+				sthrough;
+	List	   *skey;
+	char	   *skind;
+	List	   *renamed = NIL;
+	ListCell   *lc;
+	bool		hit = false;
+
+	PgColumnarGetSortedInfo(storageId, &sfrom, &sthrough, &skey, &skind);
+	if (skey == NIL || skind == NULL)
+		return;					/* no mark to maintain */
+
+	foreach(lc, skey)
+	{
+		char	   *nm = (char *) lfirst(lc);
+
+		if (strcmp(nm, oldName) == 0)
+		{
+			renamed = lappend(renamed, pstrdup(newName));
+			hit = true;
+		}
+		else
+			renamed = lappend(renamed, pstrdup(nm));
+	}
+
+	/* a rename that touches no sort-key column must not rewrite the row */
+	if (!hit)
+		return;
+
+	PgColumnarSetSortedExtent(storageId, sfrom, sthrough, renamed, skind);
+}
+
+/*
  * PgColumnarSetSortedThrough
  *		Record the row group number the last ordering rewrite ended at, so a
  *		reader can tell how much of the layout is still ordered (issue #301).
