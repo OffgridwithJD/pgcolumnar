@@ -242,6 +242,7 @@ SUITES=(
 	smoke
 	sort_status
 	sort_status_privilege
+	sorted_pathkeys
 	sorted_projection
 	stats_privilege
 	temporal

@@ -38,6 +38,7 @@
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -2763,6 +2764,39 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 		s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
 		s.rowGroupLimit = writeState->stripeRowLimit;
 		PgColumnarInsertNativeStorageRow(&s);
+	}
+
+	/*
+	 * A group written OUTSIDE the recorded ordered run retracts the scan's claim
+	 * to be sorted (#751), and that claim lives in a PLAN rather than in a
+	 * catalog object the plan cache watches. Nothing invalidates a cached plan
+	 * on an append, so a plan prepared while the relation was fully ordered would
+	 * keep its ordered path and answer ORDER BY ... LIMIT from the run alone.
+	 *
+	 * That is a WRONG ANSWER, not a stale cost. Measured before this call
+	 * existed, on a relation sorted on k and then given 600 rows with k from -1
+	 * to -600: a prepared "SELECT k FROM pc ORDER BY k NULLS LAST LIMIT 5"
+	 * returned 0,0,0,0,0 instead of -600,-599,-598,-597,-596. Pinned by the
+	 * cached-plan arm of test/sorted_pathkeys.sh.
+	 *
+	 * Gated on the storage actually having a mark, and on this group falling
+	 * outside it, so an ordinary bulk load into an unordered relation invalidates
+	 * nothing. When it does fire it is once per row group, not once per row. A
+	 * rewrite's own groups do not fire it: a rewrite writes into a fresh storage
+	 * whose mark is not set until it finishes, and the relfilenode swap
+	 * invalidates the relation anyway.
+	 */
+	{
+		int64		sortedFrom,
+					sortedThrough;
+		List	   *sortedNames;
+		char	   *sortedKind;
+
+		PgColumnarGetSortedInfo(writeState->storageId, &sortedFrom, &sortedThrough,
+								&sortedNames, &sortedKind);
+		if (sortedThrough >= 0 &&
+			((int64) groupNumber > sortedThrough || (int64) groupNumber < sortedFrom))
+			CacheInvalidateRelcacheByRelid(writeState->relid);
 	}
 	/*
 	 * #445: share one open per metadata table across this flush's inserts. The

@@ -497,6 +497,20 @@ PgColumnarReindexRelation(Oid relid, int flags)
 #endif
 
 /* -------------------------------------------------------------------------
+ * build_expression_pathkey() lost its nullable_relids parameter in PG16, when
+ * outer-join-aware equivalence classes replaced it (core commit 2489d76c).
+ * Every caller here passes no nullable relids, so the wrapper takes the modern
+ * five arguments and fills NULL on PG15.
+ * ------------------------------------------------------------------------- */
+#if PG_VERSION_NUM >= 160000
+#define COLUMNAR_BUILD_EXPRESSION_PATHKEY(root, expr, opno, rel, create_it) \
+	build_expression_pathkey((root), (expr), (opno), (rel), (create_it))
+#else
+#define COLUMNAR_BUILD_EXPRESSION_PATHKEY(root, expr, opno, rel, create_it) \
+	build_expression_pathkey((root), (expr), NULL, (opno), (rel), (create_it))
+#endif
+
+/* -------------------------------------------------------------------------
  * Executor index maintenance on the import path (#168).
  *
  * Two signatures move independently here, so they get one macro each rather

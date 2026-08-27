@@ -2763,6 +2763,18 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pgcolumnar.enable_sorted_pathkeys",
+							 "Let the columnar scan advertise the order a sorted rewrite "
+							 "left the rows in, so ORDER BY on that key needs no Sort (#751).",
+							 "Only a lexicographic run recorded by pgcolumnar.vacuum_sorted "
+							 "and covering every row group is advertised. Off restores the "
+							 "behaviour of always planning a Sort.",
+							 &pgcolumnar_enable_sorted_pathkeys,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_index_fetch_penalty",
 							 "Add the cost of the row-group decodes a columnar index "
 							 "scan's per-row heap fetches force (#355).",
