@@ -88,7 +88,7 @@ check "a file with no field ids is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_parquet('$NOID', ARRAY[1]) AS t(x int)")" "22023"
 # a duplicate REQUESTED id (two output columns asking for one file column) is
 # refused up front with a clear cause, not left to fail deep in the decode with a
-# message that wrongly blames the file (ChronicallyJD's #638 note).
+# message that wrongly blames the file (OffgridwithJD's #638 note).
 check "a duplicate requested field id is refused (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.read_parquet('$FID', ARRAY[7,7]) AS t(a1 int, a2 int)")" "22023"
 check "the duplicate-requested-id error names the id, not the file" \

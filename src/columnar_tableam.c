@@ -2368,7 +2368,7 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 				 *
 				 * That is the argument to keep. Without it the walk reads as
 				 * over-broad and invites a later condition that reintroduces
-				 * the bug (ChronicallyJD, #779 review).
+				 * the bug (OffgridwithJD, #779 review).
 				 *
 				 * The rename already holds the locks it needs on the whole
 				 * hierarchy, so NoLock here takes no new lock and cannot race.
