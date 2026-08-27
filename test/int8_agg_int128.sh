@@ -147,7 +147,7 @@ check "avg(numeric) too" "$(trio d8 'avg(v)')" \
 # green. The defect #785 records was speed, so the arm that guards it has to
 # measure speed.
 #
-# It uses check_ratio and NOT check_ratio_timing, and that distinction is the
+# It uses check_ratio and NOT check_ratio_needs_quiet_machine, and that distinction is the
 # whole reason this arm runs at all: PGC_SKIP_TIMING=1 is set in ci.yml and in
 # nightly.yml, so the _timing form would run in no automated gate while these 22
 # arms still reported PASSED. That is a suite passing with its subject dropped.

@@ -51,6 +51,30 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- `check_ratio_timing` is renamed to `check_ratio_needs_quiet_machine`, and the
+  distinction it encodes is now written where it is decided (#787). The helper was
+  named for what it measures, a ratio of timings, rather than for what it does:
+  both `ci.yml` and `nightly.yml` set `PGC_SKIP_TIMING`, so a check written with it
+  runs in no automated gate at all.
+
+  Two kinds of timing assertion need different treatment and only one needs that.
+  A ratio against an absolute or cross-run baseline can be distorted by a loaded
+  machine. A ratio whose two arms are measured back to back in the same run and
+  compared by minimum cannot, because both readings move together under load, and
+  `test/cancel_decode.sh` had argued exactly that for its own ratio and run in CI
+  on the strength of it. An author holding the safe shape reached for the name
+  that matched their units and lost the check silently, which is how #786's guard
+  came to be skipped everywhere until it was moved to `check_ratio`.
+
+  No behaviour changed. The two call sites, both in
+  `test/planner_choice_quality.sh`, keep the guard they had; that suite is in
+  `is_timing_suite`, so the driver already names it as skipped rather than
+  reporting a pass over a dropped subject. What changed is that the reasoning now
+  sits beside the helper rather than being re-derived in three suite headers --
+  `bloom_sizing` for a size, `native_fetch_bigcap` for buffers, `cancel_decode`
+  for a same-run ratio -- which is the recurrence #253, #254 and #764 each fixed
+  for one suite.
+
 - The documentation style gate is now based on ISO 24495-1:2023, *Plain language
   - Part 1: Governing principles and guidelines*, in place of ASD-STE100. The
   project's writing rules cite two standards and no others: ISO 24495-1:2023 for

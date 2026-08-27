@@ -646,6 +646,10 @@ check_num() {
 # A zero numerator is "the thing we measured cost nothing", which is nearly
 # always "the thing we measured did not happen". A call site that genuinely needs
 # to permit zero should say so under its own name rather than get it by default.
+# Runs everywhere, including CI. For a ratio whose arms move together under
+# load -- measured back to back in the same run, compared by minimum. If the
+# ratio needs an idle machine to mean anything, use
+# check_ratio_needs_quiet_machine instead and read why there.
 check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 	local name="$1" a="$2" b="$3" max="$4" ratio
 
@@ -727,7 +731,29 @@ check_timing() {
 # the suite's copy of the condition agreed with this file's, which is exactly the
 # coupling this helper removes. Deciding whether to MEASURE is still the suite's
 # business; deciding whether to assert is this file's.
-check_ratio_timing() {  # check_ratio_timing <name> <a> <b> <bound>
+# A wall-clock ratio that is only meaningful on an unloaded machine.
+#
+# THIS HELPER REMOVES THE CHECK FROM EVERY AUTOMATED GATE. Both .github/workflows/
+# ci.yml and .github/workflows/nightly.yml set PGC_SKIP_TIMING, so a check written
+# with it runs only when someone runs the suite by hand. That is correct for a
+# ratio a shared runner can distort, and it is the whole cost of using it.
+#
+# USE IT when the ratio compares against an absolute or cross-run baseline, where
+# a loaded machine can move one side and not the other.
+#
+# DO NOT USE IT when the two arms are measured back to back in the same run and
+# compared by minimum. Both readings then move together under load, which is what
+# makes that shape safe on shared hardware -- use check_ratio, which runs
+# everywhere. test/cancel_decode.sh carries the worked argument for its own ratio
+# and test/int8_agg_int128.sh is a second instance.
+#
+# The name says what the helper DOES rather than what it measures. It was
+# check_ratio_timing, which read as "the helper for ratios of timings" -- so an
+# author holding the safe shape picked it by matching units and lost the check in
+# CI silently. Three suites had each derived the exemption for themselves in their
+# own headers (bloom_sizing a size, native_fetch_bigcap buffers, cancel_decode a
+# same-run ratio) and nothing said it here, where it is decided (#787).
+check_ratio_needs_quiet_machine() {  # <name> <a> <b> <bound>
 	if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
 		echo "SKIP  $1 (PGC_SKIP_TIMING: wall-clock ratio)"
 		return 0
