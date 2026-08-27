@@ -188,4 +188,43 @@ done
 echo "-- sum(bigint): vectorized $BON ms, scalar $BOFF ms"
 check_ratio "the vectorized path is not slower than the scalar one" "$BON" "$BOFF" "1.10"
 
+# ---- the FILTERED case, which is what #755 question 3 fixed -----------------
+#
+# Before the int8 kinds were admitted to the batch fold this was the arm that
+# lost: 1.13x to 1.21x SLOWER with the path on, while sum(float8) on the same
+# fixture was 2.4x faster. The asymmetry was the whole evidence for q3, so it
+# gets its own arm rather than riding on the unfiltered one.
+#
+# The fixture deliberately defeats run-length and dictionary encoding. A column
+# of `g % 1000` is answered from encoded runs in about a millisecond, and a fold
+# measured on that measures nothing -- the same trap as an FSST fixture that the
+# dictionary collapses before the encoder ever runs.
+psql_run "DROP TABLE IF EXISTS perf8f;"
+psql_run "CREATE TABLE perf8f (k int, v bigint) USING pgcolumnar;"
+psql_run "INSERT INTO perf8f SELECT g % 1000, ((g*2654435761)::bigint % 1000000007)
+          FROM generate_series(1,4000000) g;"
+check_num "premise: the filtered fixture loaded every row" \
+	"$(q 'SELECT count(*) FROM perf8f;')" "4000000"
+check "premise: its values are NOT low-cardinality, so the fold is not answered from runs" \
+	"$([ "$(q 'SELECT count(DISTINCT v) FROM perf8f;')" -gt 1000000 ] && echo varied || echo "collapsed")" \
+	"varied"
+check_num "premise: the vectorized node runs on the FILTERED query too" \
+	"$(q "$ON; EXPLAIN (COSTS OFF) SELECT sum(v) FROM perf8f WHERE k < 50;" | grep -c 'Columnar Vectorized Aggregates')" "1"
+
+msf() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -q \
+		-c "SET pgcolumnar.enable_ungrouped_vector_agg=$1" -c '\timing on' \
+		-c "SELECT sum(v) FROM perf8f WHERE k < 50" 2>/dev/null \
+	| grep -o 'Time: [0-9.]*' | tail -1 | cut -d' ' -f2
+}
+FON=""; FOFF=""
+for _ in 1 2 3 4 5; do
+	x="$(msf on)"; y="$(msf off)"
+	[ -z "$FON" ] && FON="$x"; [ -z "$FOFF" ] && FOFF="$y"
+	FON="$(awk -v a="$FON" -v b="$x" 'BEGIN{print (b<a)?b:a}')"
+	FOFF="$(awk -v a="$FOFF" -v b="$y" 'BEGIN{print (b<a)?b:a}')"
+done
+echo "-- sum(bigint) WHERE k < 50: vectorized $FON ms, scalar $FOFF ms"
+check_ratio "the FILTERED vectorized path is not slower than the scalar one" "$FON" "$FOFF" "1.10"
+
 pgc_summary

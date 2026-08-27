@@ -16,6 +16,41 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- `sum()` and `avg()` over `bigint` now take the batch fold, which closes the
+  filtered case that #786 left behind (#755 question 3). Before this, a filtered
+  `sum(bigint)` on the vectorized path was **slower** than not using it, while
+  `sum(float8)` on the same fixture was more than twice as fast. That asymmetry
+  was the whole evidence for the question, and it was the batch fold rather than
+  the aggregate: the int8 kinds folded row at a time while the float kinds folded
+  column at a time.
+
+  Measured on one cluster with only the installed library changing, 8,000,000
+  rows, values chosen to defeat run-length and dictionary encoding so the fold is
+  not answered from encoded runs, minimum of seven, answers identical:
+
+  | | Before | After |
+  | --- | ---: | ---: |
+  | `sum(bigint)` | 133.5 ms | **92.0 ms** |
+  | `sum(bigint) WHERE ...` | 228.2 ms | **99.4 ms** |
+  | `avg(bigint) WHERE ...` | 226.2 ms | **98.7 ms** |
+  | `sum(float8) WHERE ...` (control) | 85.2 ms | 86.6 ms |
+
+  The float control does not move, which is what says the change is specific to
+  the int8 kinds.
+
+  It is a two-line change because #786 did the work: the fold reads a column at a
+  time and then accumulates per value, so a kind is foldable when its accumulate
+  is cheap, and since #786 the int8 kinds accumulate into an `int128` and
+  allocate nothing. This does **not** make them parallel-eligible.
+  `pgcolumnar_parallel_agg_ok` is a separate predicate with its own callers, and
+  the int8 kinds stay out of it: an `int128` running total is not a partial state
+  a core `Finalize` can combine.
+
+  `sum`/`avg` over `numeric` are unchanged and still slower on this path. They
+  cannot use an integer accumulator, and that residue stays on #785.
+
+### Changed
+
 - The documentation style gate is now based on ISO 24495-1:2023, *Plain language
   - Part 1: Governing principles and guidelines*, in place of ASD-STE100. The
   project's writing rules cite two standards and no others: ISO 24495-1:2023 for
