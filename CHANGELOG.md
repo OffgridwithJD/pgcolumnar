@@ -14,6 +14,65 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ORDER BY` no longer returns unordered rows after a column rename, and neither
+  ordering self-gate skips work it must do (#778). Both follow from one cause:
+  nothing maintained the recorded sort key across a rename. `pgcolumnar.storage` records
+  the applied sort key as column **names**, and both gates compare that stored
+  list against the current `attname`: `pgcolumnar.vacuum_sorted`'s gate and the
+  online `pgcolumnar.recluster`'s. Nothing maintained the mark across a rename.
+
+  A three-statement swap made the stored name resolve to a different column:
+
+  ```sql
+  ALTER TABLE t RENAME COLUMN a TO tmp;
+  ALTER TABLE t RENAME COLUMN b TO a;
+  ALTER TABLE t RENAME COLUMN tmp TO b;
+  SELECT pgcolumnar.vacuum_sorted('t','a');   -- reported success, did nothing
+  ```
+
+  The gate reported "already in this order" about a column that was never
+  sorted, and the table was left neither ordered nor reclaimed with no error
+  raised. For `vacuum_sorted` that is the failure the gate exists to prevent,
+  reached through another door. `recluster` returned 0, which a scheduler reads
+  as "nothing to do".
+
+  The mark is renamed rather than cleared. A rename does not move data, so the
+  ordering is still true of whichever column now carries the name, and following
+  the rename keeps a real optimisation instead of discarding it on every rename.
+  It composes through the swap above: `{a}` to `{tmp}` to `{b}`, which is the
+  column the rows are ordered by. A rename that touches no sort-key column does
+  not rewrite the storage row at all.
+
+  The wrong-answer half is the more serious one. The sorted-pathkey code (#751)
+  reads the same mark, so a stale mark made the planner claim an ordering that
+  did not hold: after the swap above, `SELECT a FROM t ORDER BY a` planned with
+  no `Sort` node and returned 1,990 descents out of 2,000 rows.
+
+  The rename **cascades** to inheritance children and partitions, which are
+  separate relations with their own storage and their own marks, so the fix
+  walks every columnar descendant. PostgreSQL refuses
+  `ALTER TABLE child RENAME COLUMN` with "cannot rename inherited column", so
+  for a columnar partition the parent is the only route a user has, and a fix
+  that looked only at the relation named in the statement would never have fired
+  for it at all.
+
+  The declared key in `pgcolumnar.options` is maintained the same way, and it is
+  not optional once the mark is. Before, both were consistently stale; renaming
+  only the mark would make the two catalogs name different columns, so a bare
+  `pgcolumnar.vacuum_sorted(t)` would silently rewrite on a different physical
+  key than it did the day before, with no change to the call and no change to
+  the declared intent. `options.sort_by` holds names deliberately, because
+  `options` is the catalog carried through `pg_dump` where attnums renumber and
+  names do not, so maintaining them across a rename is the correct repair rather
+  than a workaround.
+
+  One behaviour improves as a result. The sorted-pathkey claim used to be
+  refused after a rename, because the recorded name stopped resolving; it now
+  survives, so `ORDER BY` on the renamed column plans no `Sort`. That claim is
+  sound for the same reason the mark is: the rows really are still in that
+  order.
 ### Changed
 
 - `docs/configuration.md` now says why `pgcolumnar.enable_group_vectorization`

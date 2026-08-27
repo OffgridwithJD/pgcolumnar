@@ -54,6 +54,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_constraint.h"
 #include "tcop/utility.h"
 #include "utils/fmgroids.h"
@@ -2311,6 +2312,97 @@ pgcolumnar_process_utility(PlannedStmt *pstmt, const char *queryString,
 	else
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+
+	/*
+	 * A column rename must be carried through the ordering mark (#778). The
+	 * mark records its sort key as column NAMES and both ordering self-gates
+	 * compare those against the current attname, so a rename that moves a name
+	 * onto another column makes a gate skip work it must do. See
+	 * PgColumnarRenameSortKeyColumn.
+	 *
+	 * AFTER the statement, deliberately: a rename that errors, or that names a
+	 * column or relation which does not exist, must leave the mark alone. By
+	 * this point the rename has committed to the catalog and holds
+	 * AccessExclusiveLock on the relation, so the lookup below cannot race and
+	 * needs no lock of its own.
+	 */
+	if (parsetree != NULL && IsA(parsetree, RenameStmt))
+	{
+		RenameStmt *rs = (RenameStmt *) parsetree;
+
+		if (rs->renameType == OBJECT_COLUMN && rs->relation != NULL &&
+			rs->subname != NULL && rs->newname != NULL)
+		{
+			Oid			relid = RangeVarGetRelid(rs->relation, NoLock, true);
+
+			if (OidIsValid(relid))
+			{
+				List	   *kin;
+				ListCell   *lc;
+
+				/*
+				 * Every INHERITANCE CHILD and PARTITION too, not just the
+				 * relation named in the statement. A column rename cascades to
+				 * descendants, which are separate relations with their own
+				 * storage and their own marks, and PostgreSQL REFUSES
+				 * "ALTER TABLE child RENAME COLUMN" with "cannot rename
+				 * inherited column" -- so for a columnar partition the parent is
+				 * the only route, and a hook that looked only at the named
+				 * relation would never fire for it at all.
+				 *
+				 * Not gated on the named relation being columnar, deliberately:
+				 * a partitioned parent is not itself a columnar relation, and
+				 * testing it here would close the door before the columnar
+				 * children are reached. The per-descendant test below is the
+				 * one that decides.
+				 *
+				 * And the walk cannot be too WIDE, which is the natural worry
+				 * about it -- moving a mark for a descendant whose column never
+				 * changed. PostgreSQL refuses both halves of that. A child
+				 * alone is refused with "cannot rename inherited column", and
+				 * the parent alone is refused too: ALTER TABLE ONLY p RENAME
+				 * COLUMN gives "inherited column must be renamed in child
+				 * tables too". So every rename that reaches this hook has
+				 * already cascaded to the whole hierarchy, and walking it
+				 * unconditionally is CORRECT rather than merely safe.
+				 *
+				 * That is the argument to keep. Without it the walk reads as
+				 * over-broad and invites a later condition that reintroduces
+				 * the bug (ChronicallyJD, #779 review).
+				 *
+				 * The rename already holds the locks it needs on the whole
+				 * hierarchy, so NoLock here takes no new lock and cannot race.
+				 */
+				kin = find_all_inheritors(relid, NoLock, NULL);
+				foreach(lc, kin)
+				{
+					Oid			kid = lfirst_oid(lc);
+
+					if (!PgColumnarIsColumnarRelation(kid))
+						continue;
+
+					{
+						Relation	rel = relation_open(kid, NoLock);
+
+						PgColumnarRenameSortKeyColumn(PgColumnarStorageId(rel),
+													  rs->subname, rs->newname);
+						relation_close(rel, NoLock);
+					}
+
+					/*
+					 * And the DECLARED key, which vacuum_sorted(t) resolves
+					 * when called with no columns. Maintaining the mark without
+					 * this would make the two catalogs name different columns,
+					 * so the same call with the same declared intent would
+					 * silently rewrite on a different physical key.
+					 */
+					PgColumnarRenameDeclaredSortByColumn(kid, rs->subname,
+														 rs->newname);
+				}
+				list_free(kin);
+			}
+		}
+	}
 }
 
 static void
