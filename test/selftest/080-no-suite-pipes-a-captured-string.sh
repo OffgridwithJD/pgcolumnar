@@ -50,8 +50,28 @@ check "control: piping a large string into grep -q reports a match as absent" \
 # Scoped to echo and printf deliberately for the same reason. A pipeline out of
 # psql or a file is a different question with a different answer, and a rule that
 # flagged those too would be argued with rather than kept.
-_epipe_hits="$(grep -rnE '(echo|printf)[^|]*\|[[:space:]]*grep -[a-zA-Z]*q' \
-	"$TESTDIR"/*.sh 2>/dev/null | grep -v '/harness_selftest.sh:' || true)"
+# bench/ IS SCANNED TOO, and it was not. The PATTERN scoping to echo and printf
+# is a stated decision above. The DIRECTORY scoping to test/ was never a decision
+# at all -- it fell out of writing "$TESTDIR"/*.sh -- and bench/ held six
+# instances of the exact shape this rule forbids, one of them guarding a premise
+# loop with `|| continue`, in files the rule never looked at.
+#
+# They were latent rather than live: each writer is a printf of a few arm names,
+# far under the 64 KB pipe buffer, so it completes before grep -q exits and never
+# takes EPIPE. That is precisely the "passes almost every time and then does not"
+# the control above demonstrates, which is the reason to fix them rather than to
+# record that they happen to work.
+#
+# NON-RECURSIVE, one glob per directory, which is what the original did: it
+# passed "$TESTDIR"/*.sh, so its -r never applied. Handing grep the DIRECTORIES
+# instead would activate it and sweep test/selftest/ -- where this file's own
+# explanation of the rule, and the deliberate piped() demo above, both match the
+# pattern they exist to describe. Sweeping the file that enforces a rule for
+# instances of that rule is selftest 260's mistake once removed.
+_epipe_globs=("$TESTDIR"/*.sh)
+[ -d "$TESTDIR/../bench" ] && _epipe_globs+=("$TESTDIR"/../bench/*.sh)
+_epipe_hits="$(grep -nE '(echo|printf)[^|]*\|[[:space:]]*grep -[a-zA-Z]*q' \
+	"${_epipe_globs[@]}" 2>/dev/null | grep -v '/harness_selftest.sh:' || true)"
 _epipe_count="$(printf '%s' "$_epipe_hits" | grep -c . || true)"
 [ -n "$_epipe_hits" ] || _epipe_count=0
 check "no suite pipes a captured string into an early-exit reader" \
@@ -60,7 +80,7 @@ check "no suite pipes a captured string into an early-exit reader" \
 
 # And the scan has to be looking at something. A glob that matched nothing, or a
 # TESTDIR that moved, would report zero hits and read as compliance.
-_epipe_scanned="$(grep -rlE 'grep' "$TESTDIR"/*.sh 2>/dev/null | grep -c . || true)"
+_epipe_scanned="$(grep -lE 'grep' "${_epipe_globs[@]}" 2>/dev/null | grep -c . || true)"
 check "and the scan examined the suites rather than finding nothing to read" \
 	"$([ "${_epipe_scanned:-0}" -ge 20 ] && echo yes || echo "no (scanned $_epipe_scanned)")" "yes"
 
