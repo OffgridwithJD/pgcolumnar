@@ -128,7 +128,8 @@ struct PgColumnarReadState
 	/*
 	 * Native format (PGCN v1) read state. The scan reads row groups and column
 	 * chunks from the native catalog. The current row group's bytes are read into
-	 * nativeBuffer (in groupContext) -- whole, or only the projected columns'
+	 * nativeBuffer -- which is reused across groups and lives in readContext, not
+	 * groupContext (#768) -- whole, or only the projected columns'
 	 * ranges (#338); nativeValidity[c] points at each column chunk's validity
 	 * bitmap and nativeValueCursor[c] advances through its uncompressed values.
 	 * Both stay NULL for a column that was not read.
@@ -2223,6 +2224,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			rs->nativeBufferCap = want;
 			MemoryContextSwitchTo(old);
 		}
+
 		rs->nativeBuffer = rs->nativeBufferMem;
 	}
 	if (rg->byteLength > 0)

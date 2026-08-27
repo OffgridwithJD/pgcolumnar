@@ -127,6 +127,60 @@ check "a short group after a full one still reads correctly" \
 	"$(q "SELECT count(*)||'/'||md5(string_agg(v, ',' ORDER BY id)) FROM rb;")" \
 	"$(q "SELECT count(*)||'/'||md5(string_agg(v, ',' ORDER BY id)) FROM rb_h;")"
 
+# ---- differential arms: the shapes where a stale read would actually show ----
+# These exist because of a finding on the #776 review: the arms above pass
+# unchanged when the reused buffer is filled with a poison pattern, so this file
+# did not cover the stale-bytes hazard that the code comment names as its safety
+# argument.
+#
+# I tried making the poison permanent under USE_ASSERT_CHECKING and then measured
+# whether it earned its place. It does not. With the not-projected skip deleted,
+# these arms redden IDENTICALLY with and without the poison -- decoding a chunk
+# out of zeroed buffer fails the same way as out of 0xA5. The poison could not be
+# shown to make any arm redder, so it was dropped rather than shipped with a
+# comment claiming coverage it does not have.
+#
+# What DOES cover the hazard is the differential below.
+#
+# What does exercise it is a DIFFERENTIAL against a heap twin over shapes where
+# only part of the buffer is filled: columns of different widths read in
+# subsets, a column added after the groups already exist, an all-NULL column,
+# and a column dropped. Each reads a different subset of each group's bytes, so
+# the unread remainder differs per query.
+psql_run "CREATE TABLE rbd (i int, s smallint, b bigint, t text, u text) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('rbd', stripe_row_limit => 20000, encode_effort => 'fast');"
+psql_run "INSERT INTO rbd SELECT g, (g%100)::smallint, g::bigint*1000,
+              md5(g::text), repeat(md5((g*7)::text), 3)
+          FROM generate_series(1, 120000) g;"
+psql_run "CREATE TABLE rbd_h AS SELECT * FROM rbd;"
+check "premise: the differential fixture spans several row groups" \
+	"$([ "$(q "SELECT count(*) FROM pgcolumnar.stats('rbd');")" -ge 3 ] && echo yes || echo no)" "yes"
+
+dq_pair() {   # same projection against columnar and its heap twin
+	local proj="$1"
+	local a b
+	a="$(q "SELECT md5(string_agg(x, ',' ORDER BY x)) FROM (SELECT ($proj)::text x FROM rbd) z;")"
+	b="$(q "SELECT md5(string_agg(x, ',' ORDER BY x)) FROM (SELECT ($proj)::text x FROM rbd_h) z;")"
+	[ -n "$a" ] && [ "$a" = "$b" ] && echo match || echo "differ($a vs $b)"
+}
+for proj in "i" "s" "b" "t" "u" "i||':'||t" "s||':'||u" "i||b::text||t||u"; do
+	check "projected subset [$proj] matches the heap twin" "$(dq_pair "$proj")" "match"
+done
+
+psql_run "ALTER TABLE rbd ADD COLUMN added int;"
+psql_run "ALTER TABLE rbd_h ADD COLUMN added int;"
+check "a column ADDED after the groups exist reads back NULL, as on heap" \
+	"$(dq_pair "coalesce(added::text,'N')||'|'||t")" "match"
+psql_run "ALTER TABLE rbd ADD COLUMN allnull text;"
+psql_run "ALTER TABLE rbd_h ADD COLUMN allnull text;"
+psql_run "UPDATE rbd SET allnull = NULL WHERE i <= 10;"
+psql_run "UPDATE rbd_h SET allnull = NULL WHERE i <= 10;"
+check "an all-NULL column beside a wide one matches" \
+	"$(dq_pair "coalesce(allnull,'N')||'|'||u")" "match"
+psql_run "ALTER TABLE rbd DROP COLUMN b;"
+psql_run "ALTER TABLE rbd_h DROP COLUMN b;"
+check "reads after DROP COLUMN match" "$(dq_pair "i||':'||t||':'||u")" "match"
+
 # ---- and a rescan reuses rather than rebuilding ------------------------------
 check "a rescan (nested loop) returns the same rows" \
 	"$(q "SELECT count(*) FROM (SELECT 1 FROM generate_series(1,3) s, rb WHERE rb.id <= 100) x;")" \
