@@ -315,8 +315,15 @@ pgcolumnar_vm_selftest(PG_FUNCTION_ARGS)
 	bool		before,
 				after;
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
+	if (!PgColumnarIsColumnarRelation(relid))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a columnar table",
+						get_rel_name(relid))));
+
 	rel = table_open(relid, RowExclusiveLock);
-	PgColumnarRequireTableOwner(rel);
 
 	before = PgColumnarVMIsVisible(rel, blk);
 	PgColumnarVMSetVisible(rel, blk);
@@ -342,8 +349,15 @@ pgcolumnar_vm_is_visible(PG_FUNCTION_ARGS)
 	Relation	rel;
 	bool		vis;
 
+	PgColumnarRequireTableOwnerByOid(relid);
+
+	if (!PgColumnarIsColumnarRelation(relid))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a columnar table",
+						get_rel_name(relid))));
+
 	rel = table_open(relid, AccessShareLock);
-	PgColumnarRequireTableOwner(rel);
 	vis = PgColumnarVMIsVisible(rel, blk);
 
 	table_close(rel, AccessShareLock);
