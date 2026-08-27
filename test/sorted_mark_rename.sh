@@ -95,8 +95,21 @@ mk vr_o
 psql_run "ALTER TABLE vr_o ADD COLUMN spare int;"
 psql_run "SELECT pgcolumnar.vacuum_sorted('vr_o','a');"
 M="$(markof vr_o)"
+# The mark's CONTENT is unchanged either way, because rewriting it with the same
+# names produces the same names. So content alone cannot see whether the write
+# was skipped; xmin can. Without the early return this arm goes red while every
+# other arm in the file stays green.
+XMIN="$(q "SELECT xmin::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('vr_o');")"
 psql_run "ALTER TABLE vr_o RENAME COLUMN spare TO spare2;"
 check "renaming an unrelated column does not disturb the mark" "$(markof vr_o)" "$M"
+check "and does not rewrite the storage row at all (xmin unchanged)" \
+	"$(q "SELECT xmin::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('vr_o');")" \
+	"$XMIN"
+check "premise: xmin CAN move, so the arm above is not comparing two constants" \
+	"$(psql_run "ALTER TABLE vr_o RENAME COLUMN a TO a2;" >/dev/null 2>&1;
+	   NEW="$(q "SELECT xmin::text FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('vr_o');")";
+	   psql_run "ALTER TABLE vr_o RENAME COLUMN a2 TO a;" >/dev/null 2>&1;
+	   [ "$NEW" != "$XMIN" ] && echo moved || echo stuck)" "moved"
 S="$(storid vr_o)"
 psql_run "SELECT pgcolumnar.vacuum_sorted('vr_o','a');"
 check "and the gate still fires" \
