@@ -176,20 +176,40 @@ check "so vacuum_sorted after a plain vacuum rewrites" "$(did_rewrite vg_u "$SU"
 
 # ---- uncommitted work in the SAME transaction must not be missed -------------
 # The gate reads the row-group list and the delete vectors, so it must persist
-# this backend's pending writes first. Without the flush an insert made earlier
-# in the same transaction is invisible and the gate fires on a relation that
-# does need the rewrite.
+# this backend's pending writes first. Without the flush, work done earlier in
+# the same transaction is invisible and the gate fires on a relation that does
+# need the rewrite.
+#
+# The insert must be SMALLER than chunk_group_row_limit. A larger one flushes
+# complete groups during the INSERT itself, leaving nothing pending -- which is
+# what an earlier version of this arm did, and it stayed green with both
+# flushes deleted.
 mk vg_x
 psql_run "SELECT pgcolumnar.vacuum_sorted('vg_x','k','j');"
+check_num "premise: the tail is smaller than the chunk group limit, so it stays PENDING" \
+	"$([ 500 -lt $CG ] && echo 1 || echo 0)" "1"
 psql_run "BEGIN;
-           INSERT INTO vg_x SELECT g, (g*2654435761)::bigint % 1000, g % 97, md5(g::text)
-             FROM generate_series(200001,203000) g;
-           SELECT pgcolumnar.vacuum_sorted('vg_x','k','j');
-           COMMIT;"
-check "an insert earlier in the SAME transaction defeats the gate (rows come out ordered)" \
+          INSERT INTO vg_x SELECT g, (g*2654435761)::bigint % 1000, g % 97, md5(g::text)
+            FROM generate_series(200001,200500) g;
+          SELECT pgcolumnar.vacuum_sorted('vg_x','k','j');
+          COMMIT;"
+check "a PENDING insert in the same transaction defeats the gate (rows come out ordered)" \
 	"$(q "SELECT bool_and(ok) FROM (SELECT (k,j) >= lag((k,j)) OVER (ORDER BY ctid) IS NOT FALSE AS ok FROM vg_x) s;")" \
 	"t"
-check_num "and every row is still there" "$(liverows vg_x)" "23000"
+check_num "and every row is still there" "$(liverows vg_x)" "20500"
+
+# the same for a PENDING delete, which lives in a different buffer
+mk vg_d
+psql_run "SELECT pgcolumnar.vacuum_sorted('vg_d','k','j');"
+check_num "premise: nothing is deleted before the transaction" "$(deadrows vg_d)" "0"
+psql_run "BEGIN;
+          DELETE FROM vg_d WHERE id % 2 = 0;
+          SELECT pgcolumnar.vacuum_sorted('vg_d','k','j');
+          COMMIT;"
+check_num "a PENDING delete in the same transaction defeats the gate (space reclaimed)" \
+	"$(deadrows vg_d)" "0"
+check_num "and the rewrite really happened: the live rows are all that is stored" \
+	"$(q "SELECT COALESCE(sum(rowcount),0) FROM pgcolumnar.stats('vg_d');")" "10000"
 
 # ---- correctness: a skipped rewrite changed nothing --------------------------
 psql_run "CREATE TABLE vg_h (id int, k int, j int, pad text);"
