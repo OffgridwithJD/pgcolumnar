@@ -518,7 +518,7 @@ done
 # fails on hits.Title and leaves an EMPTY table, and the queries then all "run"
 # while measuring nothing.
 DUCK_DB="$CB_DATA/clickbench.duckdb"
-if printf '%s\n' "${ARMS[@]}" | grep -qx duckdb; then
+if [ "$(printf '%s\n' "${ARMS[@]}" | grep -cx duckdb)" -gt 0 ]; then
 	command -v duckdb >/dev/null 2>&1 || die "the duckdb arm was asked for and duckdb is not on PATH"
 	note "== loading duckdb (persistent file, not in memory)"
 	rm -f "$DUCK_DB" "$DUCK_DB.wal"
@@ -677,7 +677,7 @@ require "the sample spans many counters, not a handful" \
 # The columnar arm must actually be reading through the columnar scan. If the
 # planner falls back, this measures PostgreSQL reading columnar storage badly
 # and reports it as a columnar result.
-if printf '%s\n' "${ARMS[@]}" | grep -qx columnar; then
+if [ "$(printf '%s\n' "${ARMS[@]}" | grep -cx columnar)" -gt 0 ]; then
 	plan=$($PSQL -At -c "EXPLAIN (COSTS OFF) SELECT count(*) FROM hits_col WHERE CounterID = 62" 2>&1)
 	require "the columnar arm plans a columnar scan" \
 		"$(grep -qi 'columnar' <<<"$plan" && echo yes || echo no)" "yes" || fail=1
@@ -686,7 +686,7 @@ fi
 # And the tuned arm must actually be vectorizing. EXPLAIN prints the same node
 # name, Custom Scan (ColumnarScan), whether or not the aggregate is vectorized,
 # so the node name cannot tell them apart. The property line can.
-if printf '%s\n' "${ARMS[@]}" | grep -qx columnar_tuned; then
+if [ "$(printf '%s\n' "${ARMS[@]}" | grep -cx columnar_tuned)" -gt 0 ]; then
 	vplan=$($PSQL -At -c "$(arm_settings columnar_tuned)
 		EXPLAIN (COSTS OFF) SELECT CounterID, count(*) FROM hits_col GROUP BY CounterID" 2>&1)
 	require "the tuned arm plans a vectorized aggregate" \
@@ -823,9 +823,9 @@ require "every query in the file ran" "$qn" "$NQUERIES" || fail=1
 echo
 echo "================= CLICKBENCH, pgColumnar $EXTVER ================="
 cb_cold_tag "$CB_DROP_HOW"
-printf '%s\n' "${ARMS[@]}" | grep -qx duckdb && \
+[ "$(printf '%s\n' "${ARMS[@]}" | grep -cx duckdb)" -gt 0 ] && \
 	echo "duckdb: PERSISTENT database file, not :memory:, so it stores what it loaded like the others"
-printf '%s\n' "${ARMS[@]}" | grep -qx citus && \
+[ "$(printf '%s\n' "${ARMS[@]}" | grep -cx citus)" -gt 0 ] && \
 	echo "citus:  citus_columnar USING columnar, co-loaded with pgcolumnar (possible since #429)"
 echo "rows: $TSV_ROWS    tries: $CB_TRIES    host: $(nproc) cores, $(( MEMKB / 1024 / 1024 )) GB"
 echo

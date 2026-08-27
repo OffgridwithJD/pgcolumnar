@@ -283,7 +283,10 @@ plan_of() {  # plan_of <table> <sql-with-%T>
 note "== premises on the plans"
 for shape in "${SHAPE_A[@]}"; do
 	ct=$(fact_name columnar "$shape")
-	printf '%s\n' "${ARM_A[@]}" | grep -q columnar || continue
+	# grep -c, not grep -q: -q exits on its first match, the printf takes
+	# SIGPIPE, and under pipefail the pipeline is called failed -- reporting the
+	# arm ABSENT whatever the list held (selftest 080). -c consumes its input.
+	[ "$(printf '%s\n' "${ARM_A[@]}" | grep -c '^columnar$')" -gt 0 ] || continue
 
 	# The claim this whole issue turns on: our vectorized aggregate sits directly
 	# above our scan, so a join between them disables it. Asserted on both sides,
