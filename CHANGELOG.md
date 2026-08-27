@@ -16,6 +16,57 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- The columnar scan now tells the planner the order a sorted rewrite left the
+  rows in, so `ORDER BY` on that key plans no `Sort`. Every `pathkeys` field in
+  the tree was `NIL`, so a table that `pgcolumnar.vacuum_sorted` had physically
+  ordered still paid a full sort to be read in that order, and
+  `ORDER BY ... LIMIT n` could not stop early.
+
+  Measured on 4,000,000 rows in 27 row groups, `vacuum_sorted('t','k','j')`,
+  `sort_status` reporting key `{k,j}`, 27 sorted groups, 0 appended, 0
+  inversions on `k` in scan order. Instructions retired by one pinned backend,
+  same query, `pgcolumnar.enable_sorted_pathkeys` off against on, and both arms
+  return byte-identical answers:
+
+  | query | Sort (off) | no Sort (on) | ratio |
+  | --- | ---: | ---: | ---: |
+  | `ORDER BY k, j LIMIT 10` | 5,545,800,871 | 14,133,342 | 392x |
+  | `ORDER BY k, j OFFSET 3999990` | 8,395,455,193 | 3,392,835,665 | 2.47x |
+
+  The second row is the whole relation consumed, so it is the sort itself:
+  2,099 instructions a row against 848, about 1,251 a row that the sort was
+  costing. The first is the early stop the sort made impossible. Re-run with the
+  arm order reversed the four figures reproduce within 0.8%.
+
+  **A claim the rows do not satisfy is a wrong answer, not a slow plan**, since
+  the `Sort` that would have fixed the order is gone. The claim is therefore
+  refused unless all of: the last ordering rewrite was lexicographic and
+  recorded itself as such (#758), so a Z-order run and an unknown one are
+  refused rather than guessed at; every row group lies inside the recorded run,
+  so one appended or updated row retracts it; no sort column is collatable; and
+  the requested ordering is a prefix of the recorded key, ascending, NULLS LAST,
+  which is what the rewrite's own tuplesort applies.
+
+  Collatable sort columns are refused because only the column names are
+  recorded. `ALTER TABLE t ALTER COLUMN k TYPE text COLLATE "en_US.utf8"` on a
+  column already `text COLLATE "C"` needs no transformation, so PostgreSQL
+  updates `pg_attribute` and leaves every row where it is: same storage, mark
+  intact, ordering silently a different one. A text sort key therefore gets no
+  ordered path. Lifting that needs the collations recorded beside the names.
+
+  The claim lives in a plan, and no catalog object the plan cache watches
+  changes when rows are appended, so a group written outside the run now
+  invalidates the relation's cached plans. Without it a prepared
+  `ORDER BY k NULLS LAST LIMIT 5` answered from the ordered run alone after 600
+  rows were appended below it. It fires once per row group and only on a
+  relation that has a mark.
+
+  Only the serial scan carries the claim. The parallel partial path and the
+  projection path keep `NIL`: workers finish in any order, and a projection is a
+  separate layout with its own sort key. New GUC
+  `pgcolumnar.enable_sorted_pathkeys`, on by default. New suite
+  `sorted_pathkeys`, 84 checks. (#751)
+
 - A predicate on `date_trunc(unit, ts)` now drives chunk-group skipping for the
   ORDERED comparisons too, not only equality. #739 inverted `=` and declined
   every other operator, so `date_trunc('day', ts) >= '2024-02-01'` still read

@@ -213,6 +213,7 @@ extern bool pgcolumnar_enable_index_only_scan;	/* allow index-only scans (gap 28
 extern bool pgcolumnar_bulk_parallel_writer;	/* internal: parallel_copy loader skips the storage-row creation lock (#300) */
 extern bool pgcolumnar_parallel_flush;	/* dispatch the per-column stripe flush across bgworkers (#445 slice 3) */
 extern bool pgcolumnar_enable_projection_scan;	/* scan a covering projection (gap 26) */
+extern bool pgcolumnar_enable_sorted_pathkeys;	/* advertise a sorted run's order (#751) */
 extern bool pgcolumnar_enable_index_fetch_penalty;	/* price a columnar index scan's per-row fetch (#355) */
 
 /*

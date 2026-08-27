@@ -26,6 +26,7 @@
  */
 #include "columnar.h"
 
+#include "columnar_metadata.h"
 #include "columnar_customscan.h"
 #include "columnar_reader.h"
 #include <math.h>
@@ -78,6 +79,7 @@
 bool		pgcolumnar_enable_custom_scan = true;
 /* GUC: let the planner scan a covering projection instead of the base (gap 26) */
 bool		pgcolumnar_enable_projection_scan = true;
+bool		pgcolumnar_enable_sorted_pathkeys = true;
 /* GUC: price a columnar index scan's per-row heap fetch (#355) */
 bool		pgcolumnar_enable_index_fetch_penalty = true;
 
@@ -1285,6 +1287,207 @@ PgColumnarPlanCustomPath(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * pgcolumnar_sorted_pathkeys
+ *		The ordering the stored rows are ACTUALLY in, as pathkeys, or NIL (#751).
+ *
+ *		pgcolumnar.vacuum_sorted physically orders every live row through a
+ *		tuplesort, and until #751 nothing told the planner: an ORDER BY on a
+ *		table already in that order planned a Sort over the whole scan, and an
+ *		ORDER BY ... LIMIT could not stop early.
+ *
+ *		WHAT MAKES THIS DANGEROUS is that claiming an order the rows are not in
+ *		is not a slow plan, it is a WRONG ANSWER: the Sort that would have fixed
+ *		the order is removed, so a LIMIT returns the wrong rows and a merge join
+ *		matches the wrong ones. No correctness test on unordered data would see
+ *		it, because such a test's plan keeps its Sort either way. So every
+ *		condition below is a refusal, and the default is NIL.
+ *
+ *		The rows are in a plain ascending lexicographic order on a known key
+ *		only when all of these hold:
+ *
+ *		1. The last ordering rewrite was a LEXICOGRAPHIC one and said so.
+ *		   pgcolumnar.cluster and pgcolumnar.recluster arrange rows on a Z-order
+ *		   curve, which is not a sort on any single column, and a NULL kind is a
+ *		   storage ordered before pgColumnar recorded which (#758). Both are
+ *		   refused here rather than guessed at, and neither can be told from a
+ *		   sorted run by the run extent alone.
+ *
+ *		2. Every row group lies inside the recorded run [sorted_from,
+ *		   sorted_through]. A group above it was appended after the rewrite, in
+ *		   insert order; a group below it was written by a concurrent writer
+ *		   whose stripe id was drawn first (#342). Either way the relation is a
+ *		   sorted run plus rows that are not in it, which is a merge and not a
+ *		   scan. An UPDATE lands in an appended group, so this also retracts the
+ *		   claim after any row is updated.
+ *
+ *		3. No sort key column is collatable. Only the column names are recorded,
+ *		   so nothing can tell whether the collation the rewrite sorted under is
+ *		   still the column's collation, and a collation-only ALTER changes it
+ *		   without rewriting a single row. See the refusal below for the measured
+ *		   wrong answer this prevents.
+ *
+ *		4. The requested ordering is a PREFIX of the recorded key, ascending,
+ *		   NULLS LAST, in the key's own collation. That is exactly what
+ *		   pgcolumnar_compact_relation's tuplesort applies: the type's default
+ *		   '<' operator, the column's own collation, nullsFirst = false. Asking
+ *		   build_expression_pathkey for that same '<' operator reproduces those
+ *		   three properties rather than restating them, so the claim cannot
+ *		   drift from the sort that produced it.
+ *
+ *		The scan returns groups in ascending group number (the reader sorts the
+ *		list with row_group_cmp) and rows within a group in stored order, so a
+ *		run that covers every group is returned in the order the rewrite wrote
+ *		it. Deleted rows are skipped, which removes rows but does not reorder
+ *		the ones that remain.
+ *
+ *		Column identity is by NAME, because that is what sorted_by records. A
+ *		renamed or dropped sort column stops resolving and the claim lapses,
+ *		which is the safe direction.
+ *
+ *		Only the serial scan may use this. The parallel path hands whole stripes
+ *		to workers that finish in any order, and a projection is a different
+ *		physical layout with its own sort key.
+ */
+static List *
+pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
+{
+	Relation	r;
+	TupleDesc	tupdesc;
+	uint64		storageId;
+	int64		sortedFrom,
+				sortedThrough;
+	List	   *keyNames;
+	char	   *sortedKind;
+	List	   *groups;
+	List	   *pathkeys = NIL;
+	ListCell   *lc;
+
+	if (!pgcolumnar_enable_sorted_pathkeys)
+		return NIL;
+
+	r = table_open(relid, AccessShareLock);
+	storageId = PgColumnarStorageId(r);
+	tupdesc = RelationGetDescr(r);
+
+	PgColumnarGetSortedInfo(storageId, &sortedFrom, &sortedThrough,
+							&keyNames, &sortedKind);
+
+	/* condition 1: a lexicographic run, recorded as one */
+	if (sortedKind == NULL || strcmp(sortedKind, "lexicographic") != 0 ||
+		keyNames == NIL || sortedFrom < 0 || sortedThrough < 0)
+	{
+		table_close(r, AccessShareLock);
+		return NIL;
+	}
+
+	/*
+	 * Condition 2. The list is sorted ascending by group number, so its first
+	 * and last bound every group. An empty relation is refused rather than
+	 * called trivially ordered: there is nothing to order, and a claim on it
+	 * would have to survive the rows that arrive next.
+	 */
+	groups = PgColumnarReadRowGroupList(storageId,
+										PgColumnarCatalogSnapshot(GetActiveSnapshot()));
+	if (groups == NIL ||
+		(int64) ((NativeRowGroupMetadata *) linitial(groups))->groupNumber < sortedFrom ||
+		(int64) ((NativeRowGroupMetadata *) llast(groups))->groupNumber > sortedThrough)
+	{
+		list_free_deep(groups);
+		table_close(r, AccessShareLock);
+		return NIL;
+	}
+	list_free_deep(groups);
+
+	/*
+	 * Conditions 3 and 4, one key column at a time, in the order the rewrite sorted
+	 * on. This mirrors core's build_index_pathkeys: a column the query has no
+	 * equivalence class for ends the useful prefix, because no lower-order
+	 * column can help once an earlier one is not being ordered on. A column
+	 * whose class is a constant (WHERE k = 5) or a repeat is skipped rather
+	 * than ending the prefix -- every row in the scan shares that value, so the
+	 * rows are ordered by what follows it.
+	 */
+	foreach(lc, keyNames)
+	{
+		char	   *colname = (char *) lfirst(lc);
+		AttrNumber	attno = get_attnum(relid, colname);
+		Form_pg_attribute att;
+		TypeCacheEntry *tce;
+		Var		   *var;
+		List	   *one;
+		PathKey    *pk;
+
+		if (attno == InvalidAttrNumber || attno <= 0 ||
+			attno > tupdesc->natts)
+			break;
+		att = TupleDescAttr(tupdesc, attno - 1);
+		if (att->attisdropped)
+			break;
+
+		/*
+		 * The same lookup pgcolumnar_compact_relation used to pick the sort
+		 * operator. Reproducing the lookup rather than a remembered operator
+		 * oid is what keeps the claim tied to the sort: build_expression_pathkey
+		 * derives ascending / NULLS LAST from this operator being the type's
+		 * '<', and the tuplesort derived the same three properties from it.
+		 */
+		tce = lookup_type_cache(att->atttypid, TYPECACHE_LT_OPR);
+		if (!OidIsValid(tce->lt_opr))
+			break;
+
+		/*
+		 * A COLLATABLE sort column is refused, and this is a real limitation
+		 * rather than caution. The rewrite sorted under the collation the column
+		 * had at the time, and only the column NAMES are recorded, so nothing here
+		 * can tell whether that is still the collation.
+		 *
+		 * It is reachable without a rewrite. "ALTER TABLE t ALTER COLUMN k TYPE
+		 * text COLLATE \"en_US.utf8\"" on a column already text COLLATE "C" needs
+		 * no transformation, so PostgreSQL updates pg_attribute and leaves the
+		 * stored rows alone: same storage id, mark intact, ordering silently now
+		 * a different one. Measured on 4,000 rows chosen so the two collations
+		 * disagree (in C, 'B' sorts before 'a'): ORDER BY k LIMIT 3 returned
+		 * AA1003|AA1011|AA1019, the C order, where the answer is aa10|aa1002|AA1003.
+		 * A wrong answer, from a plan with no Sort in it.
+		 *
+		 * Refusing on attcollation is exact for this: it is InvalidOid for every
+		 * type that has no collation to change. Lifting it means recording the
+		 * collations beside the names, which needs a catalog column.
+		 */
+		if (OidIsValid(att->attcollation))
+			break;
+
+		var = makeVar(rel->relid, attno, att->atttypid, att->atttypmod,
+					  att->attcollation, 0);
+		one = COLUMNAR_BUILD_EXPRESSION_PATHKEY(root, (Expr *) var, tce->lt_opr,
+												rel->relids, false);
+		if (one == NIL)
+			break;				/* not an ordering this query can use */
+
+		pk = (PathKey *) linitial(one);
+		if (!EC_MUST_BE_REDUNDANT(pk->pk_eclass))
+		{
+			bool		dup = false;
+			ListCell   *plc;
+
+			foreach(plc, pathkeys)
+				if (((PathKey *) lfirst(plc))->pk_eclass == pk->pk_eclass)
+				{
+					dup = true;
+					break;
+				}
+			if (!dup)
+				pathkeys = lappend(pathkeys, pk);
+		}
+	}
+
+	table_close(r, AccessShareLock);
+
+	/* drop any trailing keys this query has no use for */
+	return truncate_useless_pathkeys(root, rel, pathkeys);
+}
+
+/*
  * pgcolumnar_choose_projection
  *		Pick a projection that serves this scan better than the base: it must
  *		cover every referenced column (so no base reconstruction is needed at
@@ -2310,7 +2513,13 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	pgcolumnar_refined_scan_cost(rel, rte->relid, seqpath,
 								 &cpath->path.startup_cost,
 								 &cpath->path.total_cost);
-	cpath->path.pathkeys = NIL;
+	/*
+	 * The order the stored rows are actually in, when that is knowable and the
+	 * query can use it (#751). NIL for every other relation, and NIL for the
+	 * parallel and projection paths below: workers claim whole stripes and
+	 * finish in any order, and a projection is a separate physical layout.
+	 */
+	cpath->path.pathkeys = pgcolumnar_sorted_pathkeys(root, rel, rte->relid);
 	cpath->flags = 0;
 	cpath->custom_paths = NIL;
 	cpath->custom_private = NIL;

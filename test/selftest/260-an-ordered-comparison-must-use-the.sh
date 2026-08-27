@@ -88,7 +88,13 @@ check "sorted_projection's two comparisons are ordered, its subject being order"
 # library as a suite and made this check fail 4-vs-3 the first time it ran.
 # The call pattern also requires the name to stand alone on the line, so the
 # definition cannot match it again.
-_ord_users=$(grep -lE '^[[:space:]]*diff_query_ordered ' "$TESTDIR"/*.sh \
+# diff_query_ordered is the wrapper; pgc_seq_hash is the oracle underneath it,
+# and a suite that calls the oracle directly needs the same premise for the same
+# reason. sorted_pathkeys.sh does exactly that: it compares a columnar answer
+# against a heap one in ROW ORDER without going through the pair helpers,
+# because its tables are not t_heap/t_col. Counting only the wrapper made the
+# premise it does assert look like one premise too many.
+_ord_users=$(grep -lE '^[[:space:]]*diff_query_ordered |pgc_seq_hash ' "$TESTDIR"/*.sh \
 	| grep -cv '/lib\.sh$')
 _ord_premised=$(grep -lE '^[[:space:]]*pgc_check_ordered_oracle[[:space:]]*$' "$TESTDIR"/*.sh \
 	| grep -cv '/lib\.sh$')

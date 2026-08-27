@@ -75,6 +75,7 @@ disk. It never changes the values that a table returns.
 | --- | --- | --- | --- |
 | `pgcolumnar.enable_index_only_scan` | boolean | `on` | Allow index-only scans on columnar tables, served by the columnar visibility-map fork. Set to `off` to force a plain index scan. |
 | `pgcolumnar.enable_projection_scan` | boolean | `on` | Let the planner scan a covering projection instead of the base table when one serves the query better. |
+| `pgcolumnar.enable_sorted_pathkeys` | boolean | `on` | Let the columnar scan tell the planner the order a sorted rewrite left the rows in, so `ORDER BY` on that key needs no `Sort`. Only a lexicographic run recorded by `pgcolumnar.vacuum_sorted` that still covers every row group is advertised. Set to `off` to restore the behaviour of always planning a `Sort`. |
 
 ### Maintenance and disk reclaim
 
