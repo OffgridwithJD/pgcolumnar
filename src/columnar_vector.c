@@ -3240,6 +3240,11 @@ pgcolumnar_batch_agg_ok(PgColumnarAggKind kind)
 	 * uses is cleared there before adding one. The int8 kinds accumulate in
 	 * spec->i128sum (#786), which that function did not clear until the omission
 	 * was found while scoping #755 question 3.
+	 *
+	 * Admitting a kind here does NOT by itself make a stale accumulator
+	 * observable -- see the note on that function for why the one known
+	 * fall-back trigger cannot reach it -- so do not rely on a test to catch a
+	 * missing reset. Read it.
 	 */
 	switch (kind)
 	{
@@ -3443,16 +3448,30 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
  * Every accumulating field of PgColumnarAggSpec belongs here, and i128sum is
  * one -- it was added by #786 and this function was not updated with it.
  *
- * UNREACHABLE TODAY, and said plainly rather than left to look tested: the only
- * caller is the batch fold's fall-back, and pgcolumnar_batch_agg_ok does not
- * admit COLUMNAR_AGG_SUM_INT8 or COLUMNAR_AGG_AVG_INT8, so the fold is never
- * entered with an int8 spec and the stale accumulator can never be observed. No
- * test here can fail without that gate changing first.
+ * NO TEST CAN FAIL ON THIS, and the reason is stronger than it first looked.
  *
- * It is fixed now anyway, because the gate changing is exactly the open work on
- * #755 question 3, and a reset that silently keeps one accumulator is a
- * wrong-answer bug the moment it becomes reachable. pgcolumnar_batch_agg_ok
- * carries a note pointing back here for whoever makes that change.
+ * The only caller is the batch fold's fall-back, taken when a row group predates
+ * an ADD COLUMN. I first wrote that the stale accumulator becomes a wrong answer
+ * once the int8 kinds are admitted to pgcolumnar_batch_agg_ok. That was
+ * reasoning, and it is wrong. Instrumented by OffgridwithJD with the int8 kinds
+ * admitted: the fall-back is reached, once, with count = 0 and nothing
+ * accumulated, so the reset is a no-op and reverting this line changes no
+ * answer.
+ *
+ * The order looks structural rather than lucky. The groups lacking the column
+ * are exactly those written BEFORE the ADD COLUMN, so they carry the lowest
+ * group numbers and are scanned first; the fold trips the missing column on the
+ * first group it reads. Observing a stale accumulator needs a group folded
+ * successfully and THEN a group that trips the fall-back, which ADD COLUMN
+ * orders the wrong way round by construction.
+ *
+ * That is one route shown not to reach it, not a proof that none does, and it
+ * is not claimed as one.
+ *
+ * Fixed regardless. A function whose job is to reset every accumulator, that
+ * silently keeps one, is wrong whether or not today's callers can observe it,
+ * and it is one line. pgcolumnar_batch_agg_ok carries a note pointing back here
+ * so the next kind admitted gets checked against it.
  */
 static void
 pgcolumnar_agg_specs_reset(PgColumnarAggScanState *state)
