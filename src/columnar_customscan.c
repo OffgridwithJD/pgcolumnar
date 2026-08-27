@@ -1365,6 +1365,27 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 	if (!pgcolumnar_enable_sorted_pathkeys)
 		return NIL;
 
+	/*
+	 * Nothing in this query could use an ordering, so do not go and find out
+	 * what the ordering is. Condition 2 below reads the whole row-group list,
+	 * which grows with the relation, and every claim this function could return
+	 * here would be truncated to NIL by truncate_useless_pathkeys at the end
+	 * anyway. Same notion, computed before the expensive part instead of after
+	 * it.
+	 *
+	 * Measured before this early return, 1,000,000 rows in 1,000 groups, a
+	 * relation marked lexicographic, a query with no ORDER BY, planning time
+	 * from EXPLAIN (SUMMARY ON) over 15 interleaved reps: 1.079 ms against
+	 * 0.922 ms with the feature off, 1.17x. The control that makes it mechanism
+	 * rather than noise is a never-sorted relation, which returns at condition 1
+	 * and measured 1.01x.
+	 *
+	 * Declared in optimizer/paths.h with this signature on every supported
+	 * major, immediately above truncate_useless_pathkeys.
+	 */
+	if (!has_useful_pathkeys(root, rel))
+		return NIL;
+
 	r = table_open(relid, AccessShareLock);
 	storageId = PgColumnarStorageId(r);
 	tupdesc = RelationGetDescr(r);
@@ -1450,9 +1471,26 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 		 * AA1003|AA1011|AA1019, the C order, where the answer is aa10|aa1002|AA1003.
 		 * A wrong answer, from a plan with no Sort in it.
 		 *
-		 * Refusing on attcollation is exact for this: it is InvalidOid for every
-		 * type that has no collation to change. Lifting it means recording the
-		 * collations beside the names, which needs a catalog column.
+		 * Refusing on attcollation is exact for this, and the reason is an
+		 * invariant rather than a list of types, because a list rots. A type whose
+		 * attcollation is InvalidOid orders either by nothing collation-dependent
+		 * at all, or by a collation PostgreSQL will not let change under a stored
+		 * value: a range or multirange fixes its collation at CREATE TYPE and no
+		 * DDL reaches pg_range.rngcollation, and a composite orders by its field
+		 * collations, which cannot be altered while any table stores the type.
+		 * That last protection follows dependencies THROUGH arrays and THROUGH
+		 * nesting composites: a column of ctype[] , or of a composite that merely
+		 * nests ctype, still makes "ALTER TYPE ctype ALTER ATTRIBUTE ..." fail
+		 * with "cannot alter type because column uses it", with or without CASCADE.
+		 * An enum's ADD VALUE ... BEFORE does not renumber values already stored.
+		 *
+		 * Outside the trust boundary, and no differently than for a btree index
+		 * that would need a REINDEX: replacing a type's default btree opclass, or
+		 * CREATE OR REPLACE on a comparison function, changes ordering semantics
+		 * without touching the table and without any collation being involved.
+		 *
+		 * Lifting the refusal means recording the collations beside the names,
+		 * which needs a catalog column.
 		 */
 		if (OidIsValid(att->attcollation))
 			break;

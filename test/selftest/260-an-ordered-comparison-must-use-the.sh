@@ -94,11 +94,39 @@ check "sorted_projection's two comparisons are ordered, its subject being order"
 # against a heap one in ROW ORDER without going through the pair helpers,
 # because its tables are not t_heap/t_col. Counting only the wrapper made the
 # premise it does assert look like one premise too many.
-_ord_users=$(grep -lE '^[[:space:]]*diff_query_ordered |pgc_seq_hash ' "$TESTDIR"/*.sh \
-	| grep -cv '/lib\.sh$')
-_ord_premised=$(grep -lE '^[[:space:]]*pgc_check_ordered_oracle[[:space:]]*$' "$TESTDIR"/*.sh \
-	| grep -cv '/lib\.sh$')
+# COMMENTS ARE STRIPPED FIRST, as selftest 210 does for the same reason: this
+# file's own prose names both helpers, and so does the suite it added, so an
+# unstripped sweep counts the explanation of the rule as a use of it. The
+# alternation is grouped because in ERE `^[[:space:]]*a|b` anchors only the
+# first branch -- pgc_seq_hash is called mid-line inside $(...), so it must stay
+# unanchored, but leaving the group off makes the anchor silently decorative.
+# grep -cE, never grep -qE. `sed ... | grep -q` is the same EPIPE shape selftest
+# 080 forbids: the reader exits on its first match, sed takes SIGPIPE, and
+# pipefail calls the pipeline failed, so the file is silently NOT counted. It
+# bit exactly here, in the sweep that enforces a sibling rule, and 080's own
+# regex did not catch it because that regex scopes to echo and printf writers.
+# -c consumes all of its input, so the count is the answer.
+_ord_sweep() {	# _ord_sweep REGEX -> files matching it outside comments
+	local re="$1" f n
+	for f in "$TESTDIR"/*.sh; do
+		case "$f" in */lib.sh) continue ;; esac
+		n="$(sed 's/[[:space:]]*#.*$//' "$f" | grep -cE "$re")"
+		[ "${n:-0}" -gt 0 ] && printf '%s\n' "$f"
+	done
+	return 0
+}
+_ord_users=$(_ord_sweep '(^[[:space:]]*diff_query_ordered |pgc_seq_hash )' | grep -c . || true)
+_ord_premised=$(_ord_sweep '^[[:space:]]*pgc_check_ordered_oracle[[:space:]]*$' | grep -c . || true)
+
+# The counts can also cancel: a use without a premise and a premise without a
+# use net to equal. So the two SETS are compared, and the check below reports
+# which files differ rather than only that two numbers do.
+_ord_only_user=$(comm -23 \
+	<(_ord_sweep '(^[[:space:]]*diff_query_ordered |pgc_seq_hash )' | sort) \
+	<(_ord_sweep '^[[:space:]]*pgc_check_ordered_oracle[[:space:]]*$' | sort) | tr '\n' ' ')
 check "premise: some suite uses the ordered oracle, or the next check is vacuous" \
 	"$([ "$_ord_users" -gt 0 ] && echo yes || echo no)" "yes"
 check "every suite using the ordered oracle asserts its premise" \
 	"$_ord_premised" "$_ord_users"
+check "and it is the same suites, not merely the same count" \
+	"$(printf '%s' "$_ord_only_user" | tr -d '[:space:]" ')" ""
