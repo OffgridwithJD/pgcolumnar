@@ -63,6 +63,36 @@ _SO_CALLS="$(_so_calls | grep -c 'set_options(')"
 check "premise: the set_options sweep read a substantial number of calls" \
 	"$([ "${_SO_CALLS:-0}" -ge 100 ] && echo yes || echo "no ($_SO_CALLS)")" "yes"
 
+# ...and it must have read EVERYTHING. The premise above proves the sweep read
+# something; it cannot see a whole directory the glob does not reach. The globs
+# are test/*.sh and bench/*.sh, which do NOT match test/selftest/*.sh or
+# test/pbt/*.sh, so a suite added under either would be silently unguarded --
+# the exact fail-open class this file exists to prevent elsewhere. Today the
+# tree has no set_options call outside the globs, so the guard is complete by
+# accident of its current shape rather than by construction.
+#
+# Fixed with a premise rather than a wider glob, because a wider glob only ever
+# covers the directories someone thought of. Comparing the files that CONTAIN a
+# call against the files the sweep actually READ fails loudly the day one
+# appears anywhere new, with nobody having to predict where (OffgridwithJD,
+# #780 review).
+#
+# This file is the one legitimate exclusion, and it excludes ITSELF by path
+# rather than by name: it necessarily contains the bad pattern as its own test
+# data (the positive control writes an out-of-range call that is deliberately
+# not wrapped in expect_error), so sweeping it would flag the probe that proves
+# the sweep works. Keyed on BASH_SOURCE so it cannot drift into a
+# hand-maintained list of exceptions.
+_so_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+_so_have="$(grep -rl 'set_options(' --include='*.sh' "$PGC_SRCDIR" 2>/dev/null \
+	| grep -vF "$(basename "$_so_self")" | LC_ALL=C sort -u)"
+_so_read="$(_so_calls | cut -d: -f1 | LC_ALL=C sort -u)"
+_so_missed="$(LC_ALL=C comm -23 <(printf '%s\n' "$_so_have") <(printf '%s\n' "$_so_read"))"
+[ -n "$_so_missed" ] && printf '%s\n' "$_so_missed" | sed 's/^/    unswept: /'
+check "premise: every file containing a set_options call is in the sweep" \
+	"$([ -z "$_so_missed" ] && echo complete || echo "$(printf '%s\n' "$_so_missed" | wc -l) unswept")" \
+	"complete"
+
 # POSITIVE CONTROL. The three known out-of-range values in audit.sh are skipped
 # because they are expect_error, so their absence from the report proves nothing
 # on its own -- a detector that finds NOTHING would also pass. Run it over a
