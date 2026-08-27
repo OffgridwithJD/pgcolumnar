@@ -269,7 +269,7 @@ Reports how much of a table's sorted order is still in place. Returns one row:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `sort_key` | name[] | The clustering key in effect. It is the key the last `recluster` recorded, or the `sort_by` declared by `set_options`, or NULL. |
+| `sort_key` | name[] | The clustering key in effect. It is the key the last ordering rewrite recorded, or the `sort_by` declared by `set_options`, or NULL. |
 | `total_groups` | bigint | Row groups in the table. |
 | `sorted_groups` | bigint | Row groups written by the last ordering rewrite. |
 | `appended_groups` | bigint | Row groups written after it. |
@@ -294,6 +294,15 @@ FROM pgcolumnar.sort_status('events');
 A table that was never sorted reports zero sorted groups. An unsorted
 `pgcolumnar.vacuum` returns it to that state, because it rewrites the table
 without ordering it.
+
+`sort_key` names the columns, not the arrangement. `pgcolumnar.vacuum_sorted`
+sorts on those columns in order. `pgcolumnar.cluster` and
+`pgcolumnar.recluster` arrange the same columns on a Z-order curve, which is not
+a sort on any one of them.
+
+To read the arrangement, select `sorted_kind` from `pgcolumnar.storage`. It
+holds `lexicographic`, `zorder`, or NULL. NULL means the table was never
+ordered, or was ordered before pgColumnar recorded this.
 
 The row counts are stored rows. Deleted rows stay stored until a maintenance
 operation reclaims them, so they are still counted here. Use
