@@ -14,6 +14,42 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- The ordering mark now follows `ALTER TABLE ... RENAME COLUMN`, so neither
+  ordering self-gate skips work it must do (#778). `pgcolumnar.storage` records
+  the applied sort key as column **names**, and both gates compare that stored
+  list against the current `attname`: `pgcolumnar.vacuum_sorted`'s gate and the
+  online `pgcolumnar.recluster`'s. Nothing maintained the mark across a rename.
+
+  A three-statement swap made the stored name resolve to a different column:
+
+  ```sql
+  ALTER TABLE t RENAME COLUMN a TO tmp;
+  ALTER TABLE t RENAME COLUMN b TO a;
+  ALTER TABLE t RENAME COLUMN tmp TO b;
+  SELECT pgcolumnar.vacuum_sorted('t','a');   -- reported success, did nothing
+  ```
+
+  The gate reported "already in this order" about a column that was never
+  sorted, and the table was left neither ordered nor reclaimed with no error
+  raised. For `vacuum_sorted` that is the failure the gate exists to prevent,
+  reached through another door. `recluster` returned 0, which a scheduler reads
+  as "nothing to do".
+
+  The mark is renamed rather than cleared. A rename does not move data, so the
+  ordering is still true of whichever column now carries the name, and following
+  the rename keeps a real optimisation instead of discarding it on every rename.
+  It composes through the swap above: `{a}` to `{tmp}` to `{b}`, which is the
+  column the rows are ordered by. A rename that touches no sort-key column does
+  not rewrite the storage row at all.
+
+  One behaviour improves as a result. The sorted-pathkey claim used to be
+  refused after a rename, because the recorded name stopped resolving; it now
+  survives, so `ORDER BY` on the renamed column plans no `Sort`. That claim is
+  sound for the same reason the mark is: the rows really are still in that
+  order.
+
 ### Added
 
 - `pgcolumnar.vacuum_sorted()` now self-gates: when the relation is already
