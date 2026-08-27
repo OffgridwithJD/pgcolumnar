@@ -21,8 +21,20 @@
 #      nothing;
 #   4. the capture table decodes, so a slot really does carry the changes.
 #
-# The recipe is transcribed from the guide rather than rewritten, so the suite
-# fails if the guide drifts away from what works.
+# THE RECIPE IS EXTRACTED FROM THE GUIDE AT RUN TIME, not transcribed into this
+# file. An earlier version copied it here and claimed that made the suite fail if
+# the guide drifted; the reviewer refuted that by mutating docs/user-guide.md --
+# deleting the OLD branch, so the documented recipe lost every DELETE -- and
+# watching this suite pass 25/25 with test/ untouched. A comment naming a
+# document is not a dependency on it.
+#
+# So the SQL below is read out of docs/user-guide.md and executed. That makes the
+# guide the thing under test, which is what the claim always should have meant.
+#
+# An extractor is a new way for a suite to go vacuous: if it silently returns
+# zero bytes, or the wrong fence, every check afterwards runs against an empty
+# database and some of them still pass. The premises below therefore assert what
+# the extraction CONTAINS, not merely that it ran.
 #
 # Usage:  test/logical_decoding_cdc_recipe.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
@@ -41,30 +53,39 @@ fi
 check "premise: the server is running at wal_level=logical" \
 	"$(q "SHOW wal_level;")" "logical"
 
-# ---- the recipe, transcribed from docs/user-guide.md -------------------------
-psql_run "CREATE TABLE events (id bigint primary key, kind text, amount int)
-              USING pgcolumnar;"
-psql_run "CREATE TABLE events_cdc (
-              seq    bigserial primary key,
-              op     text,
-              id     bigint,
-              kind   text,
-              amount int
-          );"
-psql_run "CREATE FUNCTION events_capture() RETURNS trigger LANGUAGE plpgsql AS \$\$
-          BEGIN
-              IF TG_OP = 'DELETE' THEN
-                  INSERT INTO events_cdc (op, id, kind, amount)
-                      VALUES ('DELETE', OLD.id, OLD.kind, OLD.amount);
-              ELSE
-                  INSERT INTO events_cdc (op, id, kind, amount)
-                      VALUES (TG_OP, NEW.id, NEW.kind, NEW.amount);
-              END IF;
-              RETURN NULL;
-          END
-          \$\$;"
-psql_run "CREATE TRIGGER events_cdc_t AFTER INSERT OR UPDATE OR DELETE ON events
-              FOR EACH ROW EXECUTE FUNCTION events_capture();"
+# ---- the recipe, EXTRACTED from docs/user-guide.md and executed ---------------
+GUIDE="$PGC_SRCDIR/docs/user-guide.md"
+check "premise: the guide is where this suite expects it" \
+	"$([ -f "$GUIDE" ] && echo found || echo "missing ($GUIDE)")" "found"
+
+# The first ```sql fence inside the CDC section. Anchored on the heading so an
+# sql block added elsewhere in the guide cannot be picked up by accident.
+RECIPE="$(awk '
+	/^## Capture changes for replication or CDC/ { inSec = 1; next }
+	inSec && /^## / { exit }
+	inSec && /^```sql$/ && !seen { inSql = 1; seen = 1; next }
+	inSql && /^```$/ { exit }
+	inSql { print }
+' "$GUIDE")"
+
+RECIPE_FILE="$PGC_SQLDIR/cdc_recipe.sql"
+printf '%s\n' "$RECIPE" > "$RECIPE_FILE"
+
+# An extractor that returns nothing, or the wrong block, makes every check below
+# vacuous. Assert what it CONTAINS rather than that it ran.
+check "premise: the extraction is not empty" \
+	"$([ -s "$RECIPE_FILE" ] && echo nonempty || echo EMPTY)" "nonempty"
+for want in "CREATE TABLE events" "CREATE TABLE events_cdc" \
+            "CREATE FUNCTION events_capture" "CREATE TRIGGER events_cdc_t" \
+            "USING pgcolumnar" "TG_OP = 'DELETE'" "OLD.id"; do
+	check "premise: the extracted recipe contains [$want]" \
+		"$(grep -cF "$want" "$RECIPE_FILE" | awk '{print ($1>0)?"yes":"no"}')" "yes"
+done
+check "premise: and it is the whole block, not a fragment" \
+	"$([ "$(grep -c ';' "$RECIPE_FILE")" -ge 4 ] && echo yes || echo no)" "yes"
+
+# Run the guide's own SQL. If the guide stops working, this suite stops passing.
+psql_file "$RECIPE_FILE"
 
 # The recipe is worthless if the tables are not the access methods it assumes:
 # a heap "events" would pass every arm below and prove nothing about columnar.
