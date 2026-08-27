@@ -16,6 +16,24 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- `docs/configuration.md` now says why `pgcolumnar.enable_group_vectorization`
+  is off by default, which #755 records as not visible from outside the code.
+  Measured rather than reasoned: on 4,000,000 rows in 200,000 groups the setting
+  is worth 781.0 ms to 403.7 ms with identical answers, so performance is not the
+  reason. That is the minimum of seven interleaved pairs on a non-assert build; an
+  earlier figure here ran all of one arm and then all of the other, which on a
+  contended host attributes drift to whichever arm ran second. An assert build
+  measures about 2.2 instead, because `AllocSetCheck` runs per context RESET and
+  the ordinary `Agg` resets far more contexts than the vectorized fold, so the
+  skew lands one-sidedly on the slower arm. `src/columnar.h` also called the cap
+  a plan-time one, which contradicted the code and the new section. The reason is the failure mode. The grouped path builds a hash table
+  that does not spill, `pgcolumnar.groupagg_max_groups` bounds it, and the cap is
+  checked during execution against the real group count because the plan is fixed
+  by then and cannot fall back to an ordinary `Agg`. On a table with 1,500,000
+  distinct keys the same query succeeds with the setting off and raises
+  `54000 grouped vectorized aggregate exceeded pgcolumnar.groupagg_max_groups`
+  with it on. A default would carry that to tables nobody chose it for, where the
+  failure arrives when the table grows rather than when anything changes.
 - The reader now reuses one row-group buffer instead of allocating and freeing
   one per row group (#768). It materializes the whole group into a single
   buffer, sized `stripe_row_limit` x row width, which at the default
