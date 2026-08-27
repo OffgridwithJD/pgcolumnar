@@ -105,7 +105,18 @@ fi
 # treatment: refuse, rather than emit a number that looks like data. The override
 # exists because an assert build is still worth profiling when it is the only one
 # to hand, and a comparison between two assert builds is valid.
-CASSERT="$("$PG_CONFIG" --configure | grep -c 'enable-cassert' || true)"
+# An empty --configure capture is a REFUSAL, not a pass: a missing or failing
+# pg_config gives no output, grep -c gives 0, and the guard would return its
+# cleanest verdict on the least information. Refuse when you cannot tell, for the
+# same reason as when the answer is yes.
+PROFILE_CONFIGURE="$("$PG_CONFIG" --configure 2>/dev/null || true)"
+if [ -z "$PROFILE_CONFIGURE" ]; then
+	echo "FATAL: $PG_CONFIG produced no --configure output, so this script cannot"
+	echo "       tell whether it is an --enable-cassert build. Refusing rather than"
+	echo "       assuming it is not: check the path is right and executable."
+	exit 1
+fi
+CASSERT="$(printf '%s' "$PROFILE_CONFIGURE" | grep -c 'enable-cassert' || true)"
 if [ "${CASSERT:-0}" != "0" ]; then
 	if [ -n "${PROFILE_ALLOW_CASSERT:-}" ]; then
 		echo "-- WARNING: assert build (--enable-cassert). Percentages below include"

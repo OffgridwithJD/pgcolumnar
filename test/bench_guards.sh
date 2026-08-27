@@ -52,6 +52,61 @@ fi
 
 echo "== pgColumnar test: $(basename "$0") =="
 
+# ---- the non-assert requirement must be ENFORCED, not merely documented -----
+#
+# Every bench script's header said to run against a non-assert build. They said
+# so and checked nothing, and the invocations that produced the #755, #768, #752
+# and #753 figures passed an --enable-cassert prefix. A header that states a
+# requirement the script does not enforce is the same shape as selftest 080 not
+# scanning bench/: the rule existed, the check did not.
+#
+# Asserted on the SOURCE rather than by running the benchmarks, because running
+# them takes minutes and the question is whether the guard is present and shaped
+# right.
+for _bp in "$(dirname "${BASH_SOURCE[0]}")/../bench/"run_*.sh; do
+	_bs="$(basename "$_bp")"
+	check "[$_bs] refuses an assert build rather than documenting the requirement" \
+		"$([ "$(grep -c 'enable-cassert' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
+	# EVERY assertion here keys on shared TEXT, never on a prefix, and that is
+	# load-bearing rather than incidental: run_profile.sh uses PROFILE_* where
+	# the other five use BENCH_*, so a check written against `BENCH_ALLOW_CASSERT`
+	# would pass on five runners and silently stop covering the sixth. Proved:
+	# keying that one check on BENCH_ALLOW_CASSERT leaves run_profile.sh as the
+	# only red. The unprefixed match below is what keeps it in scope.
+	#
+	# If anyone tidies the prefixes to match, this comment says the checks need
+	# no change. If anyone tidies the CHECKS to match the prefixes, that is the
+	# moment coverage is lost with nothing going red.
+	check "[$_bs] and offers a named override rather than only refusing" \
+		"$([ "$(grep -cE 'ALLOW_CASSERT' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
+	check "[$_bs] and exits non-zero rather than warning past it" \
+		"$([ "$(grep -A24 'enable-cassert' "$_bp" | grep -c 'exit 1')" -gt 0 ] && echo yes || echo no)" "yes"
+	# "not an assert build" and "could not tell" are different answers and only
+	# one of them is a pass. Written as a bare `--configure | grep -c`, a missing
+	# or failing pg_config gives empty output, grep -c gives 0, and the guard
+	# returns its cleanest verdict on the least information -- so it must capture
+	# the output and refuse an empty one.
+	check "[$_bs] refuses when it CANNOT TELL, rather than treating that as a pass" \
+		"$([ "$(grep -c 'produced no --configure output' "$_bp")" -gt 0 ] && echo yes || echo no)" "yes"
+	check "[$_bs] and does not decide from an unbuffered pipe into grep -c" \
+		"$([ "$(grep -cE '\$\("\$PG_CONFIG" --configure[^)]*\| *grep -c' "$_bp")" -eq 0 ] && echo yes || echo no)" "yes"
+done
+
+# The control: the scan has to be reading files that exist, or four greps over
+# nothing would report compliance.
+# EVERY runner, derived from the directory rather than a hand-kept list: a new
+# bench script must not be able to arrive without this guard just because nobody
+# remembered to add it here. Proved by adding one -- a fresh runner with the
+# guard stripped is named by the loop above.
+#
+# A LOWER BOUND, not an equality. The premise's job is to show the scan read
+# something rather than globbing nothing; an equality would turn a legitimate new
+# benchmark into a red here, which is a check that punishes the thing it exists
+# to cover.
+_bench_runners="$(ls "$(dirname "${BASH_SOURCE[0]}")/../bench/"run_*.sh 2>/dev/null | grep -c .)"
+check "premise: every bench runner was read, not a hand-kept subset" \
+	"$([ "${_bench_runners:-0}" -ge 6 ] && echo yes || echo "no (found $_bench_runners)")" "yes"
+
 # ---- max_prepared_transactions must be preflighted, not discovered ----------
 #
 # Raising it needs a postmaster restart, so finding out during the load means the
