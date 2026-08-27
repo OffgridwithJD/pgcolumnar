@@ -206,8 +206,8 @@ schemes and the block codec all continue to operate. The same code reads a table
 that the writer wrote with either value. Thus this setting controls cost only.
 It does not control compatibility.
 
-The setting decreases the compression ratio and increases the load speed. The
-quantity of each effect depends fully on the data:
+The setting decreases the compression ratio, increases the load speed, and
+increases the read speed. The quantity of each effect depends fully on the data:
 
 | Text shape (1,000,000 rows, one column) | Load speed-up with `fast` | Extra space |
 | --- | --- | --- |
@@ -222,6 +222,32 @@ that is identical byte for byte. Thus the work that it did not do gave no
 benefit. For the other two shapes, the search gives a large benefit. You cannot
 know which condition applies to a column until you try it. For this reason the
 option applies to one table, and the default keeps the full search.
+
+#### Read cost
+
+The full search also costs time on every scan of the column, not only on the
+load. The reader must undo the encoding, and that work is larger than the work
+it saves in bytes read.
+
+Measured on 1,000,000 rows in one text column, `SELECT count(v)`, with the
+vectorized paths off so that the scan decodes every value. Both arms use
+`compression = 'none'`, so the figures are the encoding alone. The minimum of
+seven interleaved pairs:
+
+| Text shape | Read with `full` | Read with `fast` | `fast` is | Storage with `fast` |
+| --- | ---: | ---: | ---: | ---: |
+| 128-char hex | 418.6 ms | 155.6 ms | 2.69x faster | 1.94x larger |
+| Repeating host and path strings | 352.5 ms | 91.8 ms | 3.84x faster | 6.50x larger |
+
+Read the second row with care. The `full` arm holds 8.3 MB where the `fast` arm
+holds 53.7 MB. It reads 6.5 times fewer bytes and still takes 3.84 times as
+long, so the cost is the decoding and not the reading.
+
+This is a trade and not a defect. A column that is scanned rarely and stored for
+a long time is the case `full` is for. A column on the hot path of a frequent
+query is the case `fast` is for. The extra space is the price of the scan speed.
+Measure your own column before you choose, because the effect depends on the
+data.
 
 Use `fast` for a bulk load if you will compact the table later.
 `pgcolumnar.vacuum`, `pgcolumnar.compact_rewrite` and `pgcolumnar.recluster`

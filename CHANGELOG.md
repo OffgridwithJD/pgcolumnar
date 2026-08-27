@@ -14,6 +14,29 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/configuration.md` now documents what `encode_effort` costs on **read**,
+  which is the larger of its two costs and was not recorded (#768). The section
+  described the setting as a trade between load speed and compression ratio,
+  which reads as though the choice has no consequence after the load. It has one
+  on every scan of the column.
+
+  Measured on 1,000,000 rows in one text column, `SELECT count(v)`, vectorized
+  paths off so the scan decodes every value, `compression = 'none'` so the
+  figures are the encoding alone, minimum of seven interleaved pairs:
+
+  | Text shape | `full` | `fast` | `fast` is | Storage with `fast` |
+  | --- | ---: | ---: | ---: | ---: |
+  | 128-char hex | 418.6 ms | 155.6 ms | 2.69x faster | 1.94x larger |
+  | Repeating host and path strings | 352.5 ms | 91.8 ms | 3.84x faster | 6.50x larger |
+
+  The second row is the one worth reading twice. The `full` arm holds 8.3 MB
+  where the `fast` arm holds 53.7 MB, so it reads 6.5 times fewer bytes and
+  still takes 3.84 times as long. The cost is the decoding, not the reading.
+
+  This is a trade rather than a defect, and the default is unchanged.
+
 ### Fixed
 
 - `ORDER BY` no longer returns unordered rows after a column rename, and neither
