@@ -445,16 +445,21 @@ test/docs_style.sh
 It enforces four rules over `docs/*.md` and `README.md`. Two come from the
 standard and two are house rules:
 
-- a maximum of 25 words to a sentence (from the standard)
-- no phrase from an idiom list (from the standard)
+- a maximum of 25 words to a sentence (a proxy for a principle of the standard)
+- no phrase from an idiom list (a proxy for a principle of the standard)
 - no em dash and no en dash (house rule)
 - no double hyphen used as a dash in prose (house rule)
 
-The standard asks for short sentences. It does not give a number. The 25-word
-limit is this project's measurable proxy for that principle, not a figure quoted
-from ISO 24495-1. The two dash rules are typographic preferences of this project.
-They are named as house rules so that nobody mistakes a preference for a
-requirement.
+Two of those four rules take a principle from the standard and measure it with
+something this project chose. The standard asks for short sentences and does not
+give a number, so the 25-word limit is the proxy. The standard warns against
+figurative language and publishes no list, so the idiom list is the proxy too.
+That list is short and it is curated from the phrases these authors write, such
+as `fall back`, `hand-rolled` and `in flight`. Neither figure comes from ISO
+24495-1.
+
+The two dash rules are typographic preferences of this project. They are named
+as house rules so that nobody mistakes a preference for a requirement.
 
 `CHANGELOG.md` is a record of what happened at the time it happened. To rewrite a
 landed entry would edit history. The gate therefore checks it for dash characters

@@ -23,6 +23,13 @@ From the standard, under "understandable":
     cannot resolve. Idiom is the part a fluent reader does not notice, which
     makes it the rule with the most value and the least visibility.
 
+    The PRINCIPLE is the standard's; the LIST is this project's, in the same way
+    the 25-word limit is. ISO 24495-1 publishes no vocabulary, and the entries
+    below are curated from the phrases these authors actually write. So the
+    rule's name matters: it is "no phrase from an idiom list", not "no idiom",
+    and a mutation that reaches for an idiom which is not on the list gets a
+    green run and proves nothing.
+
 House rules, which are this project's typographic choices and are NOT from the
 standard. They are listed separately so nobody mistakes a preference for a
 requirement:
