@@ -140,6 +140,22 @@ ansq "and it still answers correctly" \
 # between a modifier the node cannot represent and a wrong answer. It rejects
 # aggorder, aggdistinct, aggfilter and aggvariadic in its first condition; these
 # arms are what keep that true.
+#
+# THE NODE DOES NOT FAIL ON A MODIFIER IT CANNOT REPRESENT. IT IGNORES IT AND
+# RETURNS THE UNMODIFIED AGGREGATE. Measured by removing aggdistinct and
+# aggfilter from that condition, on 20,000 rows:
+#
+#                                   correct   with the refusal removed
+#   count(*) FILTER (WHERE a > 5)     8,000            20,000
+#   count(DISTINCT b)                     7            20,000
+#   count(*)                         20,000            20,000
+#
+# Both collapse to the unmodified aggregate. A FILTER that removes 60% of the
+# rows returns the count of all of them, and a DISTINCT over 7 values returns
+# 20,000. No error, no plan tell, and a number that looks entirely plausible --
+# which is the worst failure direction available and the reason the refusal has
+# to live in classify_aggref rather than be inferred from a shape gate that used
+# to hide these before they got there.
 
 check "REFUSE: FILTER on a wrapped aggregate" \
 	"$([ "$(vec 'SELECT count(*) FILTER (WHERE a > 5)::text FROM c')" -gt 0 ] && echo yes || echo no)" "no"
