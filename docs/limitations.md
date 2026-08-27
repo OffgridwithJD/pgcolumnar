@@ -592,6 +592,19 @@ The results therefore never depend on the pushdown.
   CREATE PUBLICATION p FOR TABLE t WITH (publish = 'insert');
   ```
 
+  **This is a decision and not an open item.** pgColumnar uses only the WAL
+  mechanisms and record types that PostgreSQL already defines. A decodable
+  change for a columnar write needs a record type that carries tuple structure
+  for columnar data. That is a new WAL semantic. It is therefore out of scope,
+  by the same rule that keeps the extension installable on a stock server.
+
+  The supported way to feed a change consumer is a heap capture table written
+  by a row trigger. It is documented in
+  [capture changes for replication or CDC](user-guide.md#capture-changes-for-replication-or-cdc).
+  Tests pin both halves. `test/logical_decoding_source.sh` asserts that a
+  columnar table emits nothing. `test/logical_decoding_cdc_recipe.sh` asserts
+  that the capture recipe works and decodes.
+
   Updates and deletes are then skipped by design and the subscription keeps
   running. If a subscription is already wedged, the error in the subscriber log
   names this restriction and the option above.
