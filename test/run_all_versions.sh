@@ -586,12 +586,22 @@ is_timing_suite() {
 # PGC_SKIP_TIMING drops those in CI and replication must still run there. Serial
 # and skipped are different properties and were one list until this suite needed
 # one without the other.
-# planner_choice_quality wants the same split, the other way around from
-# replication. Its subject is a wall-clock ratio, so it cannot run beside five
-# others and mean anything. But it is deliberately not in is_timing_suite: its
-# premises are plan-shape assertions, and those are worth running in CI. Under
-# PGC_SKIP_TIMING the suite drops the ratios itself, through check_timing, and
-# does not execute the timed queries at all.
+# planner_choice_quality is here THROUGH is_timing_suite, not beside it, and
+# this comment used to say the opposite (#764): "deliberately not in
+# is_timing_suite: its premises are plan-shape assertions, and those are worth
+# running in CI". It is in that list, so under PGC_SKIP_TIMING the driver does
+# not invoke the suite at all and none of those plan-shape assertions runs in
+# CI. A reader who found this comment believed they did.
+#
+# The entry in is_timing_suite is the correct half and its own comment says why:
+# left out of that list the suite RAN, dropped the ratio, and reported PASS on
+# its premises alone, so a regression of #434 would have been green from the
+# suite that exists to catch it. Confirmed by running it directly with
+# PGC_SKIP_TIMING=1: PASSED, 7 checks, only the two wall-clock ratios skipped.
+#
+# The coverage that costs -- no plan-shape assertion from this suite in CI -- is
+# a real gap and #764 owns the decision. A planner change should carry its own
+# plan-shape arms in a suite CI invokes rather than lean on this one.
 runs_alone() {
 	case "$1" in
 		replication) return 0 ;;
