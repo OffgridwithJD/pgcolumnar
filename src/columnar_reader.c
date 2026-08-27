@@ -166,6 +166,14 @@ struct PgColumnarReadState
 	 * Only pages actually touched are ever resident either way -- a projected
 	 * read still reads only the wanted ranges -- so the cost is bounded by what
 	 * the scan already touched rather than by the allocation.
+	 *
+	 * Holding a pointer across the per-group reset is safe because readContext
+	 * is never reset, only deleted: the read state struct itself lives in it, so
+	 * a reset would destroy the struct that holds this pointer (see the rescan
+	 * note on rowGroupList above, which relies on the same invariant).
+	 * PgColumnarRescanRead clears nativeBuffer but deliberately leaves
+	 * nativeBufferMem and nativeBufferCap alone, so a rescan reuses the buffer
+	 * rather than paying for it again -- which is the case that gains most.
 	 */
 	char	   *nativeBufferMem;	/* reused group buffer, in readContext */
 	Size		nativeBufferCap;	/* its allocated size, grow-only */
