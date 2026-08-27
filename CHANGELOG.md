@@ -16,6 +16,30 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Added
 
+- `pgcolumnar.vacuum_sorted()` now self-gates: when the relation is already
+  exactly the requested lexicographic run with nothing appended and nothing to
+  reclaim, it skips the rewrite instead of materializing every live row through
+  a tuplesort again. `pgcolumnar.recluster()` has had the ordering half of this
+  since #415 so a scheduler can call it speculatively;
+  `design/ISSUE_415_AUTOVACUUM.md` promised the mirror here.
+
+  The mirror is not a copy, and that is the whole of the change.
+  `vacuum_sorted` has two jobs: it orders the live rows and it physically
+  reclaims deleted-row space. The obvious gate -- "is it already in this
+  order", which is complete for `recluster` -- would answer yes on a relation
+  that is in order and full of dead rows, and silently stop reclaiming. Ported
+  unchanged into a tree carrying it, that gate leaves 10,000 deleted rows
+  stored where the un-gated call reclaims all of them, with no error and no
+  report.
+
+  So the skip condition is "already in this order AND there is nothing to
+  reclaim": a `lexicographic` run (a `zorder` run over the same columns is not
+  this order, because Z-order over two or more columns is not a sort on any one
+  of them), over exactly these columns in this order, covering every row group,
+  with no deleted row and no empty group. Anything else falls through to the
+  full rewrite, so re-sorting by a new key, re-sorting a Z-ordered table, and
+  reclaiming all still work.
+
 - The columnar scan now tells the planner the order a sorted rewrite left the
   rows in, so `ORDER BY` on that key plans no `Sort`. Every `pathkeys` field in
   the tree was `NIL`, so a table that `pgcolumnar.vacuum_sorted` had physically

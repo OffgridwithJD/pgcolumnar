@@ -251,6 +251,7 @@ SUITES=(
 	unique_conc
 	update_conc
 	vacuum_lock_privilege
+	vacuum_sorted_gate
 	vacuum_stripe_count
 	vector_agg_rescan_memory
 	vector_agg_tlist_shape
