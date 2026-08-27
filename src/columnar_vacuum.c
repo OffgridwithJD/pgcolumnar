@@ -204,6 +204,8 @@ static bytea *cluster_zorder_key(Datum *values, bool *isnull, AttrNumber *atts,
 								 int ncols, TupleDesc tupdesc);
 /* Names an ordering rewrite records as its key (defined later, #415) */
 static List *sort_key_names(TupleDesc tupdesc, AttrNumber *atts, int ncols);
+static bool vacuum_sorted_gate_is_noop(Relation rel, int ncols,
+									   AttrNumber *atts);
 
 /* v1 refuses tables with more groups than this (one advisory lock per group) */
 #define RECLUSTER_MAX_GROUPS 8192
@@ -1591,6 +1593,138 @@ pgcolumnar_vacuum(PG_FUNCTION_ARGS)
 }
 
 /*
+ * vacuum_sorted_gate_is_noop
+ *		Would pgcolumnar.vacuum_sorted(rel, atts...) change anything?
+ *
+ *		#415 gave the online recluster a self-gate so a scheduler can call it
+ *		speculatively without paying a full rewrite each time;
+ *		design/ISSUE_415_AUTOVACUUM.md promises the mirror here, and #760 says
+ *		why the mirror cannot be a copy.
+ *
+ *		vacuum_sorted has TWO jobs, not one: it orders the live rows AND it
+ *		physically reclaims deleted-row space and combines small stripes
+ *		(docs/ARCHITECTURE.md). recluster only orders, so "is it already in
+ *		this order" is a complete skip condition there and is NOT one here --
+ *		it would answer yes on a relation that is in order and full of dead
+ *		rows, and silently stop reclaiming. That is a data-size regression
+ *		with no error and no report, which is worse than the rewrite it saves.
+ *
+ *		So the gate is "already in this order AND there is nothing to reclaim":
+ *
+ *		  1. the recorded run is lexicographic (a zorder run over the same
+ *		     columns is NOT this order -- Z-order over two or more columns is
+ *		     not a sort on any one of them);
+ *		  2. the recorded key is exactly these columns, in this order;
+ *		  3. every row group lies inside [sorted_from, sorted_through], so no
+ *		     group was appended past the run or drawn by a concurrent writer
+ *		     below it. This also covers stripe-combining: a group inside the
+ *		     run was produced BY the rewrite that set the mark, so it is
+ *		     already combined;
+ *		  4. no group carries a deleted row, and none is empty. This is the
+ *		     half recluster does not need and the reason #760 exists.
+ *
+ *		Any mismatch falls through to the full rewrite, so re-sorting by a new
+ *		key, re-sorting a Z-ordered table, and reclaiming all still work. A
+ *		mark written before sorted_from/sorted_kind existed leaves them unset
+ *		and never gates, which is the safe pre-#415 default.
+ */
+static bool
+vacuum_sorted_gate_is_noop(Relation rel, int ncols, AttrNumber *atts)
+{
+	uint64		storageId = PgColumnarStorageId(rel);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int64		sfrom,
+				sthrough;
+	List	   *skey;
+	char	   *skind;
+	Snapshot	snap;
+	List	   *rgList;
+	ListCell   *lc;
+	int			i;
+	bool		noop = true;
+
+	PgColumnarGetSortedInfo(storageId, &sfrom, &sthrough, &skey, &skind);
+
+	/* 1 + 2: a lexicographic run over exactly this key */
+	if (skind == NULL || strcmp(skind, "lexicographic") != 0)
+		return false;
+	if (list_length(skey) != ncols)
+		return false;
+	i = 0;
+	foreach(lc, skey)
+	{
+		const char *want = NameStr(TupleDescAttr(tupdesc, atts[i] - 1)->attname);
+
+		if (strcmp((char *) lfirst(lc), want) != 0)
+			return false;
+		i++;
+	}
+	if (sfrom < 0 || sthrough < 0)
+		return false;
+
+	/*
+	 * Persist own pending work before reading the group list and the delete
+	 * vectors, as pgcolumnar_compact_relation does on the fall-through path.
+	 * Both flushes are idempotent.
+	 *
+	 * Stated honestly: this is defensive, not a fix for an observed hole, and
+	 * no arm in test/vacuum_sorted_gate.sh goes red without it. The write
+	 * state and the delete vector are both flushed at end of statement, so by
+	 * the time a later vacuum_sorted() runs, everything an earlier statement
+	 * in the same transaction wrote is already in row_group (measured: a
+	 * 500-row insert below chunk_group_row_limit shows storedrows=20500
+	 * immediately, inside the transaction).
+	 *
+	 * It stays because the gate SKIPS A REWRITE on what it reads, so reading
+	 * stale state is a silent correctness bug, and the invariant that makes
+	 * the flush unnecessary belongs to another module. The transaction arms in
+	 * that suite pin the invariant rather than this flush: if end-of-statement
+	 * flushing ever stops holding, they go red and this becomes load-bearing.
+	 */
+	PgColumnarFlushWriteStateForRelation(RelationGetRelid(rel));
+	PgColumnarFlushDeleteVectorForRelation(rel);
+
+	snap = RegisterSnapshot(GetLatestSnapshot());
+	rgList = PgColumnarReadRowGroupList(storageId, snap);
+	if (rgList == NIL)
+		noop = false;			/* nothing written: let the ordinary path run */
+	foreach(lc, rgList)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+		List	   *rmList;
+		ListCell   *lc2;
+
+		/* 3: inside the recorded run */
+		if ((int64) rg->groupNumber < sfrom || (int64) rg->groupNumber > sthrough)
+		{
+			noop = false;
+			break;
+		}
+
+		/* 4: an empty group is space a rewrite would drop, so it is work */
+		if (rg->rowCount == 0)
+		{
+			noop = false;
+			break;
+		}
+		rmList = PgColumnarReadDeleteVectorList(storageId, rg->groupNumber, snap);
+		foreach(lc2, rmList)
+		{
+			if (((DeleteVectorMetadata *) lfirst(lc2))->deletedCount > 0)
+			{
+				noop = false;
+				break;
+			}
+		}
+		if (!noop)
+			break;
+	}
+	UnregisterSnapshot(snap);
+
+	return noop;
+}
+
+/*
  * pgcolumnar_vacuum_sorted
  *		SQL: columnar.vacuum_sorted(tablename regclass, VARIADIC sort_columns name[]).
  *		Like columnar.vacuum, but rewrites the live rows physically sorted
@@ -1736,7 +1870,17 @@ pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)
 		sortAtts[i++] = attno;
 	}
 
-	pgcolumnar_compact_relation(rel, ncols, sortAtts);
+	/*
+	 * Self-gate (#760): skip the rewrite when the relation is already exactly
+	 * this lexicographic run with nothing appended and nothing to reclaim. See
+	 * vacuum_sorted_gate_is_noop for why the reclaim half is not optional.
+	 */
+	if (vacuum_sorted_gate_is_noop(rel, ncols, sortAtts))
+		ereport(DEBUG1,
+				(errmsg("pgcolumnar: \"%s\" is already sorted on this key with nothing to reclaim, skipping rewrite",
+						RelationGetRelationName(rel))));
+	else
+		pgcolumnar_compact_relation(rel, ncols, sortAtts);
 
 	/* keep the lock until end of transaction */
 	table_close(rel, NoLock);
