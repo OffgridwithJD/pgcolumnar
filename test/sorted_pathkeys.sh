@@ -113,6 +113,19 @@ ans   "and LIMIT returns the same first rows as heap" \
 ans   "and a larger LIMIT does too" \
 	'SELECT k, j, id FROM %T ORDER BY k NULLS LAST, j, id LIMIT 500'
 
+# A constant leading key is SKIPPED and the prefix continues, mirroring core's
+# build_index_pathkeys. Every row the scan returns has k = 5, so within that
+# restriction the rows are ordered by j and ORDER BY j is satisfied by the run
+# on (k,j). Without the skip-and-continue this would end the prefix at k and
+# plan a Sort. The bare "ORDER BY j" refusal arm below is its control: j alone,
+# with no equality on k, is NOT an order the rows are in.
+check "premise: the equality really selects rows, so the arm is not empty" \
+	"$([ "$(q 'SELECT count(*) FROM c WHERE k = 5;')" -gt 1 ] && echo yes || echo no)" "yes"
+check "a constant leading key is skipped, so ORDER BY the next key plans no Sort" \
+	"$(sorts 'SELECT j FROM c WHERE k = 5 ORDER BY j')" "no"
+ansp  "and it answers in j order, matching heap" h c \
+	'SELECT j, id FROM %T WHERE k = 5 ORDER BY j, id'
+
 check "MIN over the sort key plans no Sort" "$(sorts 'SELECT k FROM c WHERE k IS NOT NULL ORDER BY k LIMIT 1')" "no"
 ans   "and the first row matches heap" \
 	'SELECT k FROM %T WHERE k IS NOT NULL ORDER BY k LIMIT 1'
