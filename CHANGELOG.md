@@ -21,8 +21,11 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   `full` by default, so this applies to text columns generally rather than to an
   opt-in.
 
-  A profile of a scan over a repetitive text column put **68.8% of the whole
-  query in `decode_fsst_shared`**, 147.4 ms of 230.3 ms. The loop copied each
+  A profile of a scan over a repetitive text column put **68.8% of the query's
+  CPU in `decode_fsst_shared`**, 147.4 ms of the 214.1 ms per query that the
+  profile measured. (The wall-clock minimum for the same query was 230.3 ms.
+  Those are two different quantities and an earlier draft of this entry divided
+  one by the other, which gives 64.0% and reconciles with nothing.) The loop copied each
   symbol out of the table with a `memcpy` whose length is only known at run
   time, which cannot become a single instruction. It now packs each symbol into
   a `uint64` once when the table is parsed, and stores it with one fixed 8-byte

@@ -2047,7 +2047,7 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 	const char *end = enc + encLen;
 	const char *tp;
 	const char *tend;
-	uint64		symVal[FSST_MAX_SYMBOLS];	/* symbol bytes packed low-first */
+	uint64		symVal[FSST_MAX_SYMBOLS];	/* symbol bytes, memcpy'd in and out */
 	uint8		symLen[FSST_MAX_SYMBOLS];
 	uint32		nSym;
 	uint32		outPos = 0;
@@ -2078,6 +2078,16 @@ decode_fsst_shared(const char *enc, uint32 encLen, const char *table,
 		 * Pack the symbol into a uint64 once, here, rather than copying L bytes
 		 * out of the table on every occurrence in the loop. nSym is at most 255
 		 * and this runs once per chunk.
+		 *
+		 * ENDIANNESS. This is safe on any byte order for one reason only: both
+		 * ends are a byte-wise memcpy, so the bytes round-trip, and symVal[i] is
+		 * NEVER INTERPRETED AS A NUMBER. Do not "clarify" this into
+		 * `v |= (uint64) tp[j] << (8 * j)`. That builds a little-endian integer,
+		 * is identical on x86, and is wrong on a big-endian machine, where the
+		 * store below would write the symbol reversed.
+		 *
+		 * The L < 1 || L > FSST_MAX_SYMLEN check above is load-bearing here in a
+		 * way it was not before: it is what keeps this memcpy inside the uint64.
 		 */
 		{
 			uint64		v = 0;
