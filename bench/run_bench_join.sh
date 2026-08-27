@@ -352,6 +352,22 @@ for shape in "${SHAPE_A[@]}"; do
 		r=$(ratio "$c" "$h")
 		printf '%-4s %-32s %12s %12s %10s\n' "$shp" "$(q_desc $shp)" "$h" "$c" "$r"
 	done
+	# The join's own contribution, per arm, with decode divided out. Printed for
+	# BOTH arms on purpose: adding a join, a second table and a filter is strictly
+	# MORE work, so a heap ratio below 1.00 is physically impossible and is the
+	# scatter of this pair made visible. If it is there, the columnar ratio beside
+	# it cannot be read as a measurement -- the noise is larger than the effect.
+	# Hiding this line would leave the impossibility to be rediscovered by
+	# arithmetic, which is how a number gets quoted that should not have been.
+	jh=$(ratio "${MS["$shape:S4:heap"]:-}" "${MS["$shape:S0W:heap"]:-}")
+	jc=$(ratio "${MS["$shape:S4:columnar"]:-}" "${MS["$shape:S0W:columnar"]:-}")
+	printf '%-4s %-32s %12s %12s %10s\n' "" "S4/S0W (the join, decode removed)" "$jh" "$jc" \
+		"$(awk -v a="$jc" -v b="$jh" 'BEGIN { if (b+0 > 0) printf "%.2f", a / b; else print "-" }')"
+	if awk -v h="$jh" 'BEGIN { exit !(h+0 < 1.0 && h+0 > 0) }'; then
+		printf '%-4s %s\n' "" "^ heap S4/S0W is BELOW 1.00, which is impossible: a join cannot"
+		printf '%-4s %s\n' "" "  make the same scan faster. The columnar figure beside it is an"
+		printf '%-4s %s\n' "" "  upper bound on the join's share, not a measurement of it."
+	fi
 	hs=$($P -c "SELECT pg_total_relation_size('$(fact_name heap $shape)')")
 	cs=$($P -c "SELECT pg_total_relation_size('$(fact_name columnar $shape)')")
 	printf '%-4s %-32s %12s %12s %10s\n' "" "total relation size (bytes)" "$hs" "$cs" \
@@ -360,6 +376,10 @@ for shape in "${SHAPE_A[@]}"; do
 done
 echo "S0 against S1 is the finding: the same aggregate over the same rows, with"
 echo "and without a join. Read those two lines together before anything else."
+echo
+echo "S0W exists so S4 can be attributed. S4 projects eight float8 columns and a"
+echo "single float8 column already costs more to decode than an int one, so S4"
+echo "mixes the join with per-column decode. S4/S0W divides the decode out."
 if [ "$fail" != 0 ]; then
 	echo
 	echo "A PREMISE FAILED. Do not quote these numbers."
