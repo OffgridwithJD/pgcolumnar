@@ -347,8 +347,9 @@ parallel one is faster.
 
 This was measured on 4,000,000 rows in a table of 14 columns. Eleven query shapes
 were tested, all of them shapes where the planner chose the serial scan. The
-parallel plan ran 1.8 to 2.6 times faster on the median. In every shape the
-slowest parallel run still beat the fastest serial run.
+parallel plan ran 1.8 to 2.5 times faster on the median. In every shape the
+slowest parallel run was still faster than the fastest serial run, by 1.45 times
+at the narrowest margin.
 
 "Narrow" here means few columns, not few rows. A scan that reads three columns of
 fourteen decodes little. The serial plan is therefore cheap, and a fixed per row
@@ -367,10 +368,11 @@ times. This applies to any narrow projection, on a heap table as much as a
 columnar one.
 
 Second, the columnar scan cost is low against the time it takes. The same query
-was measured on a heap table holding the same rows. The columnar scan is priced
-at a half to a fifth of what its real time implies. The size of that error changes
-with the number of columns read. That is recorded separately, because it affects
-every plan comparison and not only this one.
+was measured on a heap table holding the same rows, over a ladder of one to eight
+integer columns. The columnar scan is priced at two fifths to seven tenths of what
+its real time implies. The error is largest on the narrowest projection, which is
+where this problem lives. That is recorded separately, because it affects every
+plan comparison and not only this one.
 
 `parallel_tuple_cost` is a global setting applied through the core Gather cost.
 An access method cannot set its own value without a core change. Lowering the

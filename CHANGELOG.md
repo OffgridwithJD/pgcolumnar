@@ -130,13 +130,14 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
   The effect itself is real and larger than recorded. Over the eleven query
   shapes where the planner chose the serial scan, the parallel plan ran 1.8 to
-  2.6 times faster on the median, and in every shape the slowest parallel run
-  beat the fastest serial run. "Narrow" turns out to mean narrow in **columns**.
-  Two mechanisms produce it, both now stated: `parallel_tuple_cost` is charged
-  per row and is blind to width, overstating a narrow row by about 1.9 times at a
-  constant volume of data shipped; and the columnar scan cost is a half to a
-  fifth of what its real time implies, by an amount that varies with the number
-  of columns read. (#753)
+  2.5 times faster on the median, and in every shape the slowest parallel run
+  beat the fastest serial run, by 1.45 times at the narrowest margin. "Narrow"
+  turns out to mean narrow in **columns**. Two mechanisms produce it, both now
+  stated: `parallel_tuple_cost` is charged per row and is blind to width,
+  overstating a narrow row by about 1.9 times at a constant volume of data
+  shipped; and the columnar scan cost is two fifths to seven tenths of what its
+  real time implies, by an amount that is largest on the narrowest projection.
+  (#753)
 
 - Both eager ordering rewrites discarded the ordering they had just applied.
   `pgcolumnar.storage.sorted_by` and `sorted_kind` exist to record which
