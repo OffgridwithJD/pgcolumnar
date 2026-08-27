@@ -3226,6 +3226,13 @@ pgcolumnar_batch_type_ok(Oid typ)
 static bool
 pgcolumnar_batch_agg_ok(PgColumnarAggKind kind)
 {
+	/*
+	 * Admitting a kind here makes pgcolumnar_agg_specs_reset reachable for it,
+	 * on the batch fold's fall-back path. Check that every accumulator the kind
+	 * uses is cleared there before adding one. The int8 kinds accumulate in
+	 * spec->i128sum (#786), which that function did not clear until the omission
+	 * was found while scoping #755 question 3.
+	 */
 	switch (kind)
 	{
 		case COLUMNAR_AGG_COUNT_STAR:
@@ -3400,7 +3407,23 @@ pgcolumnar_batch_shape_eligible(PgColumnarAggScanState *state, TupleDesc tupdesc
 								   keysOut, nkeysOut);
 }
 
-/* Reset the accumulators to their initial state (for a clean fall-back). */
+/*
+ * Reset the accumulators to their initial state (for a clean fall-back).
+ *
+ * Every accumulating field of PgColumnarAggSpec belongs here, and i128sum is
+ * one -- it was added by #786 and this function was not updated with it.
+ *
+ * UNREACHABLE TODAY, and said plainly rather than left to look tested: the only
+ * caller is the batch fold's fall-back, and pgcolumnar_batch_agg_ok does not
+ * admit COLUMNAR_AGG_SUM_INT8 or COLUMNAR_AGG_AVG_INT8, so the fold is never
+ * entered with an int8 spec and the stale accumulator can never be observed. No
+ * test here can fail without that gate changing first.
+ *
+ * It is fixed now anyway, because the gate changing is exactly the open work on
+ * #755 question 3, and a reset that silently keeps one accumulator is a
+ * wrong-answer bug the moment it becomes reachable. pgcolumnar_batch_agg_ok
+ * carries a note pointing back here for whoever makes that change.
+ */
 static void
 pgcolumnar_agg_specs_reset(PgColumnarAggScanState *state)
 {
@@ -3419,6 +3442,9 @@ pgcolumnar_agg_specs_reset(PgColumnarAggScanState *state)
 		spec->fsxx = 0;
 		spec->nsum = (Datum) 0;
 		spec->nsumSet = false;
+#ifdef HAVE_INT128
+		spec->i128sum = 0;
+#endif
 	}
 }
 
