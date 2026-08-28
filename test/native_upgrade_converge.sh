@@ -62,12 +62,12 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 EXTDIR="$("$PGC_PG_CONFIG" --sharedir)/extension"
 TARGET="$(sed -n "s/^default_version *= *'\\(.*\\)'.*/\\1/p" "$HERE/../pgcolumnar.control")"
-check "control default_version is 1.0-alpha2" "$TARGET" "1.0-alpha2"
+check "control default_version is 1.0-alpha3" "$TARGET" "1.0-alpha3"
 
 # Stage the frozen old base install scripts so an old-version extension can be
 # created. These are fixtures, not shipped; remove them at the end.
 STAGED=()
-for v in 1.0-alpha; do
+for v in 1.0-alpha 1.0-alpha2; do
 	src="$HERE/fixtures/pgcolumnar--$v.sql"
 	dst="$EXTDIR/pgcolumnar--$v.sql"
 	if [ -f "$src" ] && [ ! -f "$dst" ]; then
@@ -106,7 +106,7 @@ check "fresh $TARGET install has objects to compare" \
 	"$([ "$(wc -l <"$REF")" -gt 100 ] && echo yes || echo no)" "yes"
 
 # Each released starting point must upgrade to an identical catalog.
-for from in 1.0-alpha; do
+for from in 1.0-alpha 1.0-alpha2; do
 	[ -f "$EXTDIR/pgcolumnar--$from.sql" ] || { check "fixture for $from present" "missing" "present"; continue; }
 	db="conv_from_$(echo "$from" | tr '.-' '__')"
 	P -d postgres -c "DROP DATABASE IF EXISTS $db;" >/dev/null

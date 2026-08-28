@@ -3658,8 +3658,13 @@ pgcolumnar_lookup_row_group(uint64 storageId, Snapshot metaSnapshot,
 
 /*
  * Find the entry for this group in this command, or prepare an empty one.
- * Returns NULL when nothing should be cached, in which case the caller decodes
- * into its own scratch context exactly as before.
+ *
+ * Always returns a usable slot, never NULL. A hit returns the live entry and
+ * sets *hit; a miss returns a reset entry with a fresh context for the caller
+ * to fill. Every caller dereferences the result unconditionally, so returning
+ * NULL here to mean "do not cache this one" would fault rather than fall back:
+ * expressing such a policy needs a scratch-context path in the callers first.
+ * The Asserts at the call sites hold this to be true.
  */
 static PgColumnarFetchGroup *
 pgcolumnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
@@ -3880,6 +3885,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	 * and the decode entirely.
 	 */
 	entry = pgcolumnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+	Assert(entry != NULL);
 
 	/*
 	 * The geometry the entry was filled with has to match the group just read
@@ -3899,6 +3905,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 	{
 		pgcolumnar_fetch_entry_reset(entry);
 		entry = pgcolumnar_fetch_group_slot(storageId, rg->groupNumber, &hit);
+		Assert(entry != NULL);
 		Assert(!hit);
 	}
 

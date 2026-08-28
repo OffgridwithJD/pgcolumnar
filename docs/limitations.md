@@ -2,8 +2,9 @@
 
 ## Release status
 
-pgColumnar is pre-release. The version marker is `1.0-alpha2`, recorded in `VERSION`,
-and `v1.0-alpha2` is tagged and published as a pre-release.
+pgColumnar is pre-release. The version marker is `1.0-alpha3`, recorded in `VERSION`.
+That version is in development and is not tagged. The latest published pre-release
+is `v1.0-alpha2`.
 
 An alpha is still an alpha: treat a columnar table as reloadable and keep the source
 the data was loaded from. The extension is appropriate today for evaluation, for analytical
@@ -91,8 +92,9 @@ A physical copy does not replace the source across a version change.
 The same posture covers the extension's own catalog, not only the on-disk data
 format. The install script of a build defines the `pgcolumnar` catalog tables for a fresh
 `CREATE EXTENSION`. An `ALTER EXTENSION UPDATE` script ships when a build needs one.
-The 1.0-dev to 1.0-alpha and 1.0-alpha to 1.0-alpha2 scripts are the first two, and
-a single `ALTER EXTENSION pgcolumnar UPDATE` walks the chain from either.
+Three such scripts ship today: 1.0-dev to 1.0-alpha, 1.0-alpha to 1.0-alpha2, and
+1.0-alpha2 to 1.0-alpha3. A single `ALTER EXTENSION pgcolumnar UPDATE` walks the
+chain from any of them.
 
 **Replacing the shared library is not sufficient on its own.** After installing a new
 build, run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the extension.
@@ -200,6 +202,11 @@ check that could refuse such a move. See
   conditions. One measurement shows the effect. On a table of ten text columns,
   with the same rows and the same plan, a query on the first column took 975 ms.
   A query on the tenth column took 194,798 ms.
+
+  The planner accounts for this. It charges the decode by the width of the columns
+  it must decode, not by their number. A wide table therefore moves to a full scan
+  at a lower row count than a narrow one. That is the order the measured times
+  follow.
 - A bulk `UPDATE` or `DELETE` through an index no longer costs the number of rows
   multiplied by the row group size. It still costs several times more than heap.
   The reason is that each changed row is marked and written again, and not
@@ -339,8 +346,11 @@ returning no rows.
 ## Parallel scans
 
 A columnar scan can run in parallel, and the planner builds a parallel path for
-it. On a wide projection it now chooses that path, because the per-column decode
-cost is priced and a parallel plan divides it across workers.
+it. On a wide projection it chooses that path, because the decode cost is priced
+by column width and a parallel plan divides it across workers. The wide query
+described below was measured on one machine. The parallel plan runs in about
+300 ms. The serial plan runs in about 600 ms. Two builds of the same table gave
+306 and 604, then 300 and 610.
 
 On a narrow projection the planner still prefers the serial plan where the
 parallel one is faster.
@@ -381,8 +391,58 @@ on the system.
 
 The workaround is to force the parallel plan when it helps, with `SET
 max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
-session. On the shape above the columnar plan turns parallel at 0.060. A heap
-plan on the same rows turns parallel at 0.030. The default is 0.100.
+session.
+
+The value at which a plan turns parallel depends on the table and on the worker
+count. Measure it on your own table rather than copying a number. One measured example follows. It is given as
+the SQL that builds it. A prose description does not pin a columnar table's
+size, and the size is what sets the threshold.
+
+```sql
+CREATE TABLE c753 (sel int4, a int4, b int4, c int4, d int4, e int4, f int4,
+    g int4, t1 text, t2 text, t3 text, t4 text, n1 numeric, n2 float8)
+    USING pgcolumnar;
+
+INSERT INTO c753 SELECT i,
+    hashint4(i), hashint4(i+1), hashint4(i+2), hashint4(i+3),
+    hashint4(i)%1000, hashint4(i)%100, hashint4(i)%10,
+    md5(hashint4(i)::text), md5(hashint4(i+1)::text),
+    md5(hashint4(i+2)::text), md5(hashint4(i+3)::text),
+    (hashint4(i)%100000)::numeric, (hashint4(i)%100000)::float8
+    FROM generate_series(1,4000000) i;
+
+CREATE TABLE h753 (LIKE c753);
+INSERT INTO h753 SELECT * FROM c753;
+ANALYZE c753;
+ANALYZE h753;
+```
+
+That gives 383 MB for `c753` against 823 MB for `h753`. Three of the `int4`
+columns hold values in a small range, and they compress well. Change them and
+the columnar size changes, and so does every number below.
+
+The narrow query is `SELECT sel, a, b FROM c753 WHERE sel <= 1000000`, which
+returns 1,000,000 rows. The wide query is
+`SELECT * FROM c753 WHERE sel <= 2000000`, which returns 2,000,000 rows.
+
+The values below come from sweeping `parallel_tuple_cost` down from the default
+0.100 in steps of 0.001. The threshold is the first value at which `EXPLAIN`
+shows a `Gather` node.
+
+| `max_parallel_workers_per_gather` | columnar turns parallel at | heap turns parallel at |
+| --- | --- | --- |
+| 2, the default | 0.009 to 0.010 | 0.026 to 0.027 |
+| 3 | 0.013 to 0.014 | 0.030 to 0.032 |
+| 4 | 0.015 to 0.016 | 0.034 to 0.035 |
+
+Each cell is a range because `ANALYZE` samples. Over nine draws the estimate for
+a query that returns 1,000,000 rows landed between 968,663 and 1,015,140. The
+heap threshold moves with that estimate. The columnar threshold barely moves.
+The ranges cover PostgreSQL 17 and PostgreSQL 18.
+
+A different table gives different values, and so does a different worker count.
+An earlier edition of this page quoted 0.060 for the columnar plan. It named
+neither the table nor the worker count, so a reader could not reproduce it.
 
 ## Index-only scans
 

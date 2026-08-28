@@ -2,15 +2,17 @@
 
 All notable changes to pgColumnar are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). pgColumnar is
-pre-release; the version marker is `1.0-alpha2`, recorded in `VERSION`. New tables
+pre-release; the version marker is `1.0-alpha3`, recorded in `VERSION`. New tables
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's `default_version` is `1.0-alpha2`, and upgrade scripts from both
-previously shipped versions (`1.0-dev`, which the v1.0-alpha tag installed, and
-`1.0-alpha`) ship with it, so a single `ALTER EXTENSION pgcolumnar UPDATE` reaches
-`1.0-alpha2` from either. Older notes in this file describe `default_version` as
-pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
+The extension's `default_version` is `1.0-alpha3`, which is in development and not
+yet tagged; the latest published pre-release is `v1.0-alpha2`. Upgrade scripts from
+every previously shipped version ship with it (`1.0-dev`, which the v1.0-alpha tag
+installed, `1.0-alpha`, and `1.0-alpha2`), so a single
+`ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha3` from any of them. Older
+notes in this file describe `default_version` as pinned at an earlier version, each
+true until the next version shipped.
 
 ## [Unreleased]
 
@@ -42,7 +44,105 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   resizes and reported that sizing removed 7 of 10 while it removed about a
   quarter of the rehashing, the work being dominated by the last two steps.
 
+### Added
+
+- `pgcolumnar.sort_status` reports `sorted_kind`, so the reporter can finally
+  express the distinction the catalog has recorded since #758 (#761). It holds
+  `lexicographic` after `pgcolumnar.vacuum_sorted`, `zorder` after
+  `pgcolumnar.cluster` and `pgcolumnar.recluster`, and NULL when the table was
+  never ordered or was ordered before the column existed.
+
+  `sort_key` names the columns and says nothing about the arrangement, and a
+  Z-order over two or more columns is not a sort on any one of them. The
+  documented way to read the kind was to select it from `pgcolumnar.storage`
+  directly. That table carries no `GRANT`, so only a superuser could follow that
+  advice, while `sort_status` is SECURITY DEFINER and gated on
+  `require_caller_select` and is therefore available to a table's own owner.
+
+### Changed
+
+- The extension's `default_version` is now `1.0-alpha3`, and
+  `pgcolumnar--1.0-alpha2--1.0-alpha3.sql` ships with it. Adding an OUT parameter
+  changes a function's signature, so #761 cannot be a `CREATE OR REPLACE`; it is
+  the change that opens this cycle. Every other `[Unreleased]` entry so far is
+  shared-library only and needs no catalog change.
+
+  `test/native_upgrade_converge.sh` now exercises both `1.0-alpha` and
+  `1.0-alpha2` as starting points, and asserts that each reaches a catalog
+  identical to a fresh `1.0-alpha3` install in function definition, ACL and
+  comment, relation kind, column type and comment, non-base types, and foreign
+  data wrappers. `1.0-alpha` reaches it by the chain through `1.0-alpha2`.
+
 ### Fixed
+
+- The index-fetch penalty now charges decode CPU by projected column WIDTH, not by
+  column count (#803). This is the same flatness #768 fixed for the sequential
+  scan, in the other cost site. `pgcolumnar_index_fetch_penalty`'s CPU term was
+  `cpu_operator_cost * R * nproj`, a count, so a 68-byte text column was charged
+  exactly what a 4-byte int4 column was.
+
+  Measured on two tables of identical shape whose columns differ only in type, so
+  the decoded prefix is four columns on both arms and only the bytes move. Read
+  out of an instrumented build, the decode CPU term was **200.00 on both arms**
+  across an 8.6x difference in decoded width (16 B against 138 B). The same
+  ~39,000-row index fetch took 4,385 ms on the narrow table and 88,352 ms on the
+  wide one, a 20.15x difference against a modelled 1.49x. Cost per millisecond
+  spanned 13.4x, inside the 13x-22x #768 measured for the scan path.
+
+  The consequence was an inverted ordering rather than a uniform under-charge. A
+  wider decoded prefix makes every row-group decode dearer, so a wide table should
+  abandon per-row fetches sooner; priced by count it did the opposite. The model
+  kept the index up to 120-161 rows on the wide table and only 40-60 on the narrow
+  one, while the measured crossovers are 40-120 wide and 120-279 narrow. At 120
+  rows the wide table's chosen index plan measured 239.6 ms against an 82.9 ms
+  scan.
+
+  `pgcolumnar_scan_decode_shape` now accumulates decode units over the prefix it
+  already walks, using the same reference width as the scan's
+  `pgcolumnar_projected_decode_units`, and the penalty charges those units.
+  Substituting `pgcolumnar_projected_decode_units` itself would have been wrong:
+  it sums the columns a query *references*, while the fetch decodes the *prefix*
+  up to the highest referenced column (#363), and the two differ on exactly the
+  shape #363 exists for.
+
+  An all-int prefix is priced exactly as before, because a 4-byte column is one
+  unit: the narrow arm's flip point is unchanged at 40-60 rows. The wide arm moves
+  to 7-15. Both arms now stop earlier than the measured crossover, which is the
+  direction the model already erred on the narrow arm before this change; the
+  #376 bound and the clustered-index and point-lookup guards in
+  `test/analyze_stats.sh` are unaffected and still pass.
+
+  `test/index_fetch_penalty_width.sh` pins the ordering from the plan rather than
+  the clock, so `PGC_SKIP_TIMING` does not apply to it. On the unfixed build its
+  seven premises pass and the ordering check fails with
+  `INVERTED (wide 138B fetches to 120 rows, narrow 16B only to 40)`.
+
+- `pgcolumnar_fetch_group_slot`'s header promised a NULL return that neither the
+  function nor its callers implement, and following it segfaults (#795). The
+  comment read "Returns NULL when nothing should be cached, in which case the
+  caller decodes into its own scratch context exactly as before". There is no
+  such path. The function has two returns, `return e` on a hit and
+  `return victim` on a miss, and `victim` cannot be NULL: the branch that runs
+  when every slot is live picks a least-recently-used entry. Both callers
+  dereference the result immediately, one through `entry->firstRowNumber` in the
+  geometry check and one through `MemoryContextSwitchTo(entry->cx)`, neither
+  guarded.
+
+  So the sentence did not describe an unimplemented option, it described a trap.
+  Forcing the documented return on an assert build of PostgreSQL 18.4 produced
+  `signal 11: Segmentation fault` in a backend. Nothing in `main` reaches it --
+  the function never returns NULL today, and the same fixture on a clean build is
+  correct -- but the comment invites the change that does.
+
+  The comment now states the guarantee the code makes, that a slot always comes
+  back and a miss returns a reset entry for the caller to fill, and records that
+  a "do not cache this one" policy needs a scratch-context path in the callers
+  before it can be expressed as a NULL. An `Assert(entry != NULL)` at each call
+  site holds that to be true rather than leaving it to the comment, which is what
+  rotted. With the Assert in place the same injected NULL return reports
+  `TRAP: failed Assert("entry != NULL"), File: "src/columnar_reader.c", Line:
+  3888` instead of faulting, so the next person to try it gets the line rather
+  than a core file.
 
 - The columnar scan's decode cost is now charged by projected column WIDTH, not
   by column count (#768). #503 gave the scan a per-value decode term, which

@@ -4,7 +4,7 @@
 # independent MIT implementation; the re-origination line builds from
 # design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md.
 comment = 'Columnar storage for PostgreSQL (pgColumnar)'
-default_version = '1.0-alpha2'
+default_version = '1.0-alpha3'
 module_pathname = '$libdir/pgcolumnar'
 relocatable = false
 schema = pgcolumnar

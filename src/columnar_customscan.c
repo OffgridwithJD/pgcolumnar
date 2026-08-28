@@ -1730,6 +1730,16 @@ pgcolumnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
 }
 
 /*
+ * A decode unit is one reference-width column. Width is divided by
+ * COLUMNAR_DECODE_REF_WIDTH so that a 4-byte column counts as exactly one and the
+ * cost of an int-only prefix is unchanged, and each unit is floored at one so a
+ * narrow column is never cheaper than the per-value work it still costs. Shared
+ * by the scan cost (pgcolumnar_projected_decode_units) and the index-fetch
+ * penalty, so the two cannot drift apart.
+ */
+#define COLUMNAR_DECODE_REF_WIDTH	4.0
+
+/*
  * pgcolumnar_scan_decode_shape
  *		How much a by-row-number fetch of this rel actually decodes: the number of
  *		columns and their summed width.
@@ -1753,13 +1763,14 @@ pgcolumnar_index_correlation(IndexOptInfo *index, Oid heapRelid)
  */
 static void
 pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
-						   int *nprefix, double *prefixWidth)
+						   double *prefixUnits, double *prefixWidth)
 {
 	Bitmapset  *attrs = NULL;
 	ListCell   *lc;
 	int			maxatt = 0;
 	int			x;
 	double		width = 0.0;
+	double		units = 0.0;
 	int			i;
 
 	pull_varattnos((Node *) rel->reltarget->exprs, rti, &attrs);
@@ -1787,7 +1798,7 @@ pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
 
 	if (maxatt < 1)
 	{
-		*nprefix = 1;
+		*prefixUnits = 1.0;
 		*prefixWidth = (rel->reltarget->width > 0) ? rel->reltarget->width : 1.0;
 		return;
 	}
@@ -1810,9 +1821,11 @@ pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
 			w = get_typavgwidth(typid, typmod);
 		}
 		width += (double) w;
+		units += ((double) w / COLUMNAR_DECODE_REF_WIDTH < 1.0)
+			? 1.0 : (double) w / COLUMNAR_DECODE_REF_WIDTH;
 	}
 
-	*nprefix = maxatt;
+	*prefixUnits = (units > 0.0) ? units : 1.0;
 	*prefixWidth = (width > 0.0) ? width : 1.0;
 }
 
@@ -1845,7 +1858,7 @@ pgcolumnar_scan_decode_shape(RelOptInfo *rel, Index rti, Oid relid,
  */
 static Cost
 pgcolumnar_index_fetch_penalty(RelOptInfo *rel, Oid relid, double rows, double rho,
-							 int nproj, double decodedWidth, bool tid_ordered)
+							 double decodeUnits, double decodedWidth, bool tid_ordered)
 {
 	double		R = (double) pgcolumnar_effective_stripe_row_limit(relid);
 	double		N = (rel->tuples > 0) ? rel->tuples : rows;
@@ -1868,7 +1881,7 @@ pgcolumnar_index_fetch_penalty(RelOptInfo *rel, Oid relid, double rows, double r
 	if (pages_per_stripe < 1)
 		pages_per_stripe = 1;
 	decode_per_group = seq_page_cost * pages_per_stripe
-		+ cpu_operator_cost * R * (double) nproj;
+		+ cpu_operator_cost * R * decodeUnits;
 
 	groups_min = ceil(rows / R);
 	groups_max = rows;
@@ -1986,8 +1999,6 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
  *		fallback, for the reason given on the width fraction below: a varlena
  *		column's type width is "we do not know".
  */
-#define COLUMNAR_DECODE_REF_WIDTH	4.0
-
 static double
 pgcolumnar_projected_decode_units(RelOptInfo *rel, Oid heapRelid)
 {
@@ -2307,7 +2318,7 @@ static void
 pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 								Cost fullScanCost)
 {
-	int			nproj;
+	double		decodeUnits;
 	double		decodedWidth;
 	Cost		cap;
 	bool		mutated = false;
@@ -2316,7 +2327,7 @@ pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 	if (!pgcolumnar_enable_index_fetch_penalty)
 		return;
 
-	pgcolumnar_scan_decode_shape(rel, rti, relid, &nproj, &decodedWidth);
+	pgcolumnar_scan_decode_shape(rel, rti, relid, &decodeUnits, &decodedWidth);
 
 	/*
 	 * The penalty is bounded by a multiple of one full scan (issue #376).
@@ -2363,13 +2374,13 @@ pgcolumnar_penalize_index_fetches(RelOptInfo *rel, Index rti, Oid relid,
 			IndexPath  *ip = castNode(IndexPath, p);
 			double		rho = pgcolumnar_index_correlation(ip->indexinfo, relid);
 
-			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, rho, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, rho, decodeUnits,
 											   decodedWidth, false);
 		}
 		else if (p->pathtype == T_BitmapHeapScan)
 		{
 			/* a bitmap heap scan fetches in TID (row-number) order */
-			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, 1.0, nproj,
+			add = pgcolumnar_index_fetch_penalty(rel, relid, p->rows, 1.0, decodeUnits,
 											   decodedWidth, true);
 		}
 		/* T_IndexOnlyScan and the custom scans do no heap fetch */
