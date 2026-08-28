@@ -644,6 +644,15 @@ extern uint64 PgColumnarVectorDecodes(PgColumnarReadState *readState);
 extern uint64 PgColumnarVectorsRuledOutByValue(PgColumnarReadState *readState);
 extern uint64 PgColumnarZoneMapProbes(PgColumnarReadState *readState);
 
+/* pgcolumnar.parallel_copy load dedup (#403 item 7) */
+extern bool PgColumnarLoadFingerprintSeen(Oid relationOid,
+										  const uint8 *fingerprint,
+										  int fingerprintLen,
+										  Snapshot snapshot);
+extern void PgColumnarRecordLoadFingerprint(Oid relationOid,
+											const uint8 *fingerprint,
+											int fingerprintLen, int64 rows);
+
 /*
  * How many of the scan keys the reader was handed became skip predicates it can
  * actually exclude a chunk group with (#479). Never larger than the scan-key

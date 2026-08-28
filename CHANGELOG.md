@@ -16,6 +16,40 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- `pgcolumnar.parallel_copy` can refuse a load it has already taken, with
+  `dedup => true` (#403 item 7). A load that commits, whose acknowledgement the
+  client never receives, is retried and the rows go in twice: measured, the same
+  file loaded twice gives 100,000 rows and then 200,000.
+
+  With `dedup`, the SHA-256 of the file is recorded in the new
+  `pgcolumnar.load_fingerprint` catalog after a successful load. A later load of
+  the same contents into the same table stores nothing, returns 0, and raises a
+  `NOTICE` rather than failing. A file whose contents changed is a different load
+  and is stored, even at the same path.
+
+  It is off by default, because discarding rows a caller asked to store is not
+  ordinary `INSERT` behavior.
+
+  The unit is the whole load rather than a "part". `parallel_copy` is atomic
+  through 2PC, proved by a malformed row at line 50,001 leaving 0 rows and 0
+  prepared transactions, so parts never commit independently and a part hash
+  would deduplicate nothing that is not already all-or-nothing.
+
+  The check runs after every worker has prepared and before anything commits,
+  which is the only point at which a repeat can be refused without charging every
+  load for it. A refused load therefore does its work and discards it. The
+  alternative, hashing before dispatch, costs 42% of a 264 MiB load; as
+  implemented the fingerprint has no measurable cost, because the coordinator
+  computes it while the loaders are already reading the same file.
+
+  Three limits, all stated in `docs/sql-reference.md`: the fingerprint is
+  recorded after the data commits, so a crash between them leaves data that a
+  retry will store again; two identical loads running at once both store, because
+  each checks the record before either writes it; and a refused load still reads
+  and parses the file.
+
 ### Changed
 
 - Chunk-group skip predicates are now evaluated most-selective-first, so a group

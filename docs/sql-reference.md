@@ -457,7 +457,7 @@ SELECT pgcolumnar.import_parquet('events_copy', '/tmp/events.parquet');
 SELECT pgcolumnar.import_parquet('events_copy', '/data/events/');
 ```
 
-### pgcolumnar.parallel_copy(target regclass, filename text, workers int DEFAULT NULL) returns bigint
+### pgcolumnar.parallel_copy(target regclass, filename text, workers int DEFAULT NULL, dedup boolean DEFAULT false) returns bigint
 
 Loads a text file into a columnar table with several background workers at once,
 as one atomic operation. Returns the number of rows loaded. The caller needs
@@ -485,6 +485,42 @@ count, because the load prepares one transaction per worker.
 When `workers` is omitted the function derives a value from the target. For a
 partitioned target it lowers `workers` to the partition count when the count is
 smaller.
+
+#### Refusing a load this table has already taken
+
+A load that commits, whose acknowledgement the client never receives, is retried,
+and the rows go in twice. Pass `dedup => true` to refuse the repeat.
+
+With `dedup`, the function records the SHA-256 of the file after a successful
+load, in `pgcolumnar.load_fingerprint`. A later load of a file with the same
+contents into the same table stores nothing, returns 0, and raises a `NOTICE`
+saying why. It does not fail. A file whose contents changed is a different load
+and is stored, even at the same path.
+
+`dedup` is off by default. Discarding rows a caller asked to store is not
+ordinary `INSERT` behavior, so it happens only when asked for, and only on this
+function.
+
+Three limits apply.
+
+The fingerprint is recorded after the data commits. A crash between the two
+leaves the data stored and unrecorded, so a later retry stores it again. That is
+the behavior without `dedup` and is the safe direction.
+
+Two identical loads running at the same time both store their rows. Each checks
+the record before either writes it. `dedup` refuses a load that follows a
+completed one; it does not serialize concurrent loads.
+
+A refused load still does the work. The rows are read, parsed and written, and
+then discarded without being made visible, because the check happens after every
+worker has prepared. The alternative costs every load a serial pass over the file
+before any worker starts. Measured on a 264 MiB file, that pass takes 42% of the
+load, while the fingerprint as implemented has no measurable cost.
+
+```sql
+-- refuse a repeat of a load this table has already taken
+SELECT pgcolumnar.parallel_copy('events', '/data/events.txt', 8, true);
+```
 
 ```sql
 -- single columnar table, any row order
