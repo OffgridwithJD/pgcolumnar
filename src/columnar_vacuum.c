@@ -60,6 +60,7 @@ PG_FUNCTION_INFO_V1(pgcolumnar_vacuum);
 PG_FUNCTION_INFO_V1(pgcolumnar_vacuum_sorted);
 PG_FUNCTION_INFO_V1(pgcolumnar_cluster);
 PG_FUNCTION_INFO_V1(pgcolumnar_compact);
+PG_FUNCTION_INFO_V1(pgcolumnar_expire);
 PG_FUNCTION_INFO_V1(pgcolumnar_compact_rewrite);
 PG_FUNCTION_INFO_V1(pgcolumnar_recluster);
 PG_FUNCTION_INFO_V1(pgcolumnar_truncate);
@@ -2018,6 +2019,167 @@ pgcolumnar_cluster(PG_FUNCTION_ARGS)
  *		file, or a later F3 pass. Rewriting partially-deleted groups online is
  *		Phase F3b.
  */
+/*
+ * pgcolumnar_expire
+ *		Drop every row group whose rows are ALL older than the retention declared
+ *		by set_options(ttl_column, ttl_interval) (#403 item 5a). Returns the
+ *		number of groups dropped.
+ *
+ *		The decision is a catalog read. A group's zone map records the maximum
+ *		value of each column in it, so a group whose maximum is below the cutoff
+ *		holds no row that is still within the retention. Nothing is decoded and
+ *		nothing is rewritten; the group's catalog rows are retired exactly as
+ *		pgcolumnar.compact retires a fully deleted one, under the same
+ *		ShareUpdateExclusiveLock, so readers and writers continue throughout.
+ *
+ *		A group that STRADDLES the cutoff is kept whole. Its expired rows survive
+ *		until every row in the group has expired. That is the price of deciding
+ *		by group rather than by row, and it is the safe direction: the
+ *		alternative drops rows that are still inside the retention.
+ *
+ *		This is called by name and never runs on its own. It deletes rows, and an
+ *		operation a user runs for maintenance must not do that silently, so it is
+ *		not wired into vacuum, compact or autovacuum.
+ */
+Datum
+pgcolumnar_expire(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel;
+	TupleDesc	tupdesc;
+	char	   *ttlColumn;
+	Interval   *ttlInterval;
+	AttrNumber	attno = InvalidAttrNumber;
+	Form_pg_attribute att;
+	Datum		cutoff;
+	TypeCacheEntry *tce;
+	uint64		storageId;
+	List	   *groups;
+	ListCell   *lc;
+	int64		retired = 0;
+	int			i;
+
+	PgColumnarRequireTableOwnerByOid(relid);
+
+	if (!PgColumnarReadTtl(relid, &ttlColumn, &ttlInterval))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("table \"%s\" has no declared retention",
+						get_rel_name(relid)),
+				 errhint("Declare one with pgcolumnar.set_options(..., ttl_column => ..., ttl_interval => ...).")));
+
+	/* the lazy lock, as compact takes: readers and writers continue */
+	rel = table_open(relid, ShareUpdateExclusiveLock);
+
+	if (!PgColumnarIsColumnarRelation(relid))
+	{
+		table_close(rel, ShareUpdateExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a columnar table",
+						RelationGetRelationName(rel))));
+	}
+
+	tupdesc = RelationGetDescr(rel);
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute a = TupleDescAttr(tupdesc, i);
+
+		if (!a->attisdropped && strcmp(NameStr(a->attname), ttlColumn) == 0)
+		{
+			attno = a->attnum;
+			break;
+		}
+	}
+	if (attno == InvalidAttrNumber)
+	{
+		table_close(rel, ShareUpdateExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("retention column \"%s\" does not exist in table \"%s\"",
+						ttlColumn, get_rel_name(relid))));
+	}
+
+	att = TupleDescAttr(tupdesc, attno - 1);
+
+	/*
+	 * The cutoff is computed in the column's own type, so the comparison below
+	 * is the type's own ordering rather than a coercion invented here.
+	 */
+	switch (att->atttypid)
+	{
+		case TIMESTAMPTZOID:
+			cutoff = DirectFunctionCall2(timestamptz_mi_interval,
+										 TimestampTzGetDatum(GetCurrentTimestamp()),
+										 IntervalPGetDatum(ttlInterval));
+			break;
+		case TIMESTAMPOID:
+			cutoff = DirectFunctionCall2(timestamp_mi_interval,
+										 DirectFunctionCall1(timestamptz_timestamp,
+															 TimestampTzGetDatum(GetCurrentTimestamp())),
+										 IntervalPGetDatum(ttlInterval));
+			break;
+		default:
+			table_close(rel, ShareUpdateExclusiveLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("retention column \"%s\" must be timestamp or timestamptz",
+							ttlColumn)));
+			cutoff = (Datum) 0;	/* keep the compiler quiet */
+			break;
+	}
+
+	tce = lookup_type_cache(att->atttypid, TYPECACHE_CMP_PROC_FINFO);
+	if (!OidIsValid(tce->cmp_proc_finfo.fn_oid))
+	{
+		table_close(rel, ShareUpdateExclusiveLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("retention column \"%s\" has no ordering to compare against",
+						ttlColumn)));
+	}
+
+	storageId = PgColumnarStorageId(rel);
+	groups = PgColumnarReadRowGroupList(storageId, GetActiveSnapshot());
+
+	foreach(lc, groups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+		NativeZoneMapMetadata *z;
+		char	   *cur;
+		Datum		maxv;
+		int32		c;
+
+		z = PgColumnarReadZoneMapForColumn(storageId, rg->groupNumber,
+										   attno - 1, GetActiveSnapshot(), NULL);
+
+		/*
+		 * No zone map, or one without min/max, means nothing is known about what
+		 * this group holds. Keeping it is the only safe reading: dropping on an
+		 * absent bound would drop groups whose contents were never examined.
+		 */
+		if (z == NULL || !z->hasMinMax)
+			continue;
+
+		cur = (char *) z->maximum;
+		maxv = PgColumnarDecodeValue(att, &cur, z->maximum + z->maximumLen,
+									 CurrentMemoryContext);
+
+		c = DatumGetInt32(FunctionCall2Coll(&tce->cmp_proc_finfo,
+										   att->attcollation, maxv, cutoff));
+		if (c < 0)
+		{
+			PgColumnarRetireGroup(storageId, rg->groupNumber);
+			retired++;
+		}
+	}
+
+	/* keep the lock until end of transaction, as compact does */
+	table_close(rel, NoLock);
+
+	PG_RETURN_INT64(retired);
+}
+
 Datum
 pgcolumnar_compact(PG_FUNCTION_ARGS)
 {

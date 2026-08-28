@@ -255,6 +255,7 @@ SUITES=(
 	sorted_projection
 	stats_privilege
 	temporal
+	ttl_expire
 	ungrouped_vector_agg
 	unique_conc
 	update_conc

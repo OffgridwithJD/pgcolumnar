@@ -44,6 +44,8 @@
 #define Anum_options_compression 5
 #define Anum_options_encode_effort 6
 #define Anum_options_sort_by 7
+#define Anum_options_ttl_column 8
+#define Anum_options_ttl_interval 9
 #define Natts_options 7
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
@@ -3108,6 +3110,63 @@ pgcolumnar_effective_stripe_row_limit(Oid relid)
  *		the same command-id-advanced snapshot as PgColumnarReadOptions so a
  *		sort_by set earlier in this transaction is visible.
  */
+/*
+ * PgColumnarReadTtl
+ *		The retention declared for this table by set_options (#403 item 5a), or
+ *		false when it has none. Read with the same command-id-advanced snapshot
+ *		as PgColumnarReadOptions, so a retention set earlier in this transaction
+ *		is visible.
+ *
+ *		Both halves must be present to mean anything: a column with no interval
+ *		names nothing to compare against, and an interval with no column has
+ *		nothing to compare. Either alone reads as "no retention", so a half
+ *		declaration cannot drop rows.
+ */
+bool
+PgColumnarReadTtl(Oid relid, char **column, Interval **interval)
+{
+	Relation	rel = open_columnar_table("options", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Snapshot	base;
+	Snapshot	snapshot;
+	bool		found = false;
+
+	*column = NULL;
+	*interval = NULL;
+
+	base = ActiveSnapshotSet() ? GetActiveSnapshot() : GetTransactionSnapshot();
+	snapshot = PgColumnarCatalogSnapshot(base);
+
+	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		bool		colnull;
+		bool		ivnull;
+		Datum		cold = heap_getattr(tuple, Anum_options_ttl_column,
+										tupdesc, &colnull);
+		Datum		ivd = heap_getattr(tuple, Anum_options_ttl_interval,
+									   tupdesc, &ivnull);
+
+		if (!colnull && !ivnull)
+		{
+			*column = pstrdup(NameStr(*DatumGetName(cold)));
+			*interval = (Interval *) palloc(sizeof(Interval));
+			memcpy(*interval, DatumGetIntervalP(ivd), sizeof(Interval));
+			found = true;
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return found;
+}
+
 List *
 PgColumnarReadSortBy(Oid relid)
 {
