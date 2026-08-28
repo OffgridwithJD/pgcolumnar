@@ -16,6 +16,60 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- The cost model reads the row-group geometry a table was **written** with,
+  not the geometry a write in the planning session would produce (#806).
+  `pgcolumnar.storage.row_group_limit` records what the writer used and nothing
+  read it back; the index-fetch penalty called
+  `pgcolumnar_effective_stripe_row_limit()`, which returns the per-table option
+  or else the planning session's `pgcolumnar.stripe_row_limit`.
+
+  The consequence is larger than a mis-costed table. A session that sets that
+  GUC -- before a bulk load, say -- repriced every columnar table it then
+  planned against, including tables it never touched. Measured on one unchanged
+  table of three row groups, varying only the GUC at plan time:
+
+  | plan-time `stripe_row_limit` | before | after |
+  | --- | ---: | ---: |
+  | 150000 | 775.26 | 775.28 |
+  | 20000 | 113.26 | 775.28 |
+  | 5000 | 36.26 | 775.28 |
+
+  A 21x swing on a table that did not change. `R` is not a minor term: it sets
+  the group count, the pages per group, the per-group decode CPU, and the
+  `decodedWidth * R` test against the 32 MB fetch-cache cap, so it can be wrong
+  in either direction there.
+
+  **One call site changed**, the index-fetch penalty, which is where the defect
+  was measured. Two others deliberately did not:
+
+  - `columnar_write_state.c` still asks `pgcolumnar_effective_stripe_row_limit()`,
+    because a writer deciding the geometry it is about to lay down is exactly
+    what that function answers;
+  - `pgcolumnar_zonemap_survival()` also still asks it. Substituting the written
+    geometry there moved `native_zonemap_narrow` from 30/30 zone-map reads on a
+    wide and a narrow table to 570/66 -- reads that scale with table width,
+    which is the property that suite exists to hold. There is no measured defect
+    at that site and there is a measured regression from changing it.
+
+  An explicit per-table `stripe_row_limit` still wins over the written geometry.
+  This is about the planning session's GUC, which has nothing to do with the
+  table; a per-table option is a durable statement by its owner, and
+  `native_index_fetch_stripe_cost` asserts the cost model can see it.
+
+  Two things this leaves, stated rather than hidden. Because the survival
+  estimate still reads the session GUC, a plan-time limit far enough below the
+  written one can still flip a plan through that path: at 5000 the table above
+  costs 87.79 rather than 775.07, because it stops being an index scan. And the
+  recorded limit is one number, the last writer's, so a table whose groups were
+  written under changing limits is still approximated -- the exact quantity is
+  the real group count, which would be a catalog scan proportional to the number
+  of groups on every plan.
+
+  New suite `test/cost_written_geometry.sh`. It asserts planner costs rather
+  than timings, so `PGC_SKIP_TIMING` does not drop it.
+
 ### Changed
 
 - Chunk-group skip predicates are now evaluated most-selective-first, so a group
