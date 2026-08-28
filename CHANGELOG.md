@@ -16,6 +16,37 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- `test/native_fetch_cache.sh`'s three cost guards now run in CI. They were
+  written with `check_timing`, which `PGC_SKIP_TIMING` drops, and that suite is
+  not in `is_timing_suite` -- so the suite ran, reported `PASSED`, and skipped all
+  three, including the two that guard named regressions (#353, #359). Three cost
+  guards in no automated gate (#792).
+
+  They were already the exempt shape by `test/cancel_decode.sh`'s argument: two
+  readings taken back to back in the same run, which move together under load.
+  But that argument has a second half -- *"the best of three readings, not the
+  average ... an average would let one descheduled run widen the ratio on its
+  own"* -- and these took a single reading per side. Measured on six busy cores
+  of an eight-core box before the change, the `one/many` ratio reached **2.39
+  against its bound of 3** on one run. Unguarding them as they stood would have
+  traded a check that is skipped everywhere for one that is flaky somewhere.
+
+  So each side is now the minimum of three, and then they are ordinary checks.
+  Under the same load afterwards, four runs: `one/many` 0.84 to 0.93, `wide/small`
+  0.98 to 1.00, `over/under` 1.18 to 1.23, against bounds of 3, 5 and 12. The
+  suite costs about 0.9 s more (4.4 s to 5.3 s, build excluded).
+
+  A repeated measurement must be idempotent, and this one was not: `upd_ms`
+  updated with `v = v + 1`, which is correct once and wrong three times. The
+  suite's own correctness arms caught it -- they assert `v = id + 1` -- so the
+  update now sets `v = id + 1`, which is the same work per row and true after any
+  number of runs.
+
+  `check_timing`'s skip message said "wall-clock ratio" on a helper that takes a
+  scalar, so it misdescribed every skip it printed. Its one remaining caller,
+  `test/native_cancel.sh`, is in `is_timing_suite`, so the driver names that suite
+  as skipped rather than reporting a pass over a dropped subject.
+
 - `sum()` and `avg()` over `bigint` now take the batch fold, which closes the
   filtered case that #786 left behind (#755 question 3). Before this, a filtered
   `sum(bigint)` on the vectorized path was **slower** than not using it, while

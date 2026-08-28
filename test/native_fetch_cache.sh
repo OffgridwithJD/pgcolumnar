@@ -55,21 +55,43 @@ upd_ms() {
 	psql_run "SET max_parallel_workers_per_gather = 0;
 		SET enable_seqscan = off;
 		SET enable_bitmapscan = off;
-		UPDATE $1 SET v = v + 1 WHERE id <= $UPD;" >/dev/null 2>&1
+		UPDATE $1 SET v = id + 1 WHERE id <= $UPD;" >/dev/null 2>&1
 	end=$(date +%s%N)
 	echo $(( (end - start) / 1000000 ))
+}
+
+# Best of three readings, not one and not the average.
+#
+# Scheduling noise on a shared runner only ever ADDS latency, so the minimum is
+# the reading least polluted by it, and a single descheduled run cannot widen the
+# ratio on its own. test/cancel_decode.sh makes this argument for its own ratio
+# and runs in CI on the strength of it; these three had the same-run half and not
+# this half, which is why they were guarded instead (#792).
+#
+# Measured before the change, six busy cores on an eight-core box: the one/many
+# ratio reached 2.39 against its bound of 3 on a single reading, where the best of
+# three across the same runs was 0.89 -- which is where the idle readings sit.
+#
+# A REPEATED MEASUREMENT MUST BE IDEMPOTENT. upd_ms updated with "v = v + 1",
+# which is fine once and wrong three times: the suite's own correctness arms below
+# assert v = id + 1, and they caught it. It sets "v = id + 1" now, which is the
+# same work per row and true after any number of runs.
+min3() {  # min3 FUNC ARG...
+	local a b c
+	a="$("$@")"; b="$("$@")"; c="$("$@")"
+	printf '%s\n' "$a" "$b" "$c" | sort -n | head -1
 }
 
 build fc_one "$ROWS"          # every row in a single row group
 build fc_many $((ROWS / 10))  # the same rows across ten
 
-one="$(upd_ms fc_one)"
-many="$(upd_ms fc_many)"
+one="$(min3 upd_ms fc_one)"
+many="$(min3 upd_ms fc_many)"
 echo "-- $UPD fetches: one group of $ROWS took ${one} ms; ten groups took ${many} ms"
 
 # Without the cache the single-group case decodes ten times as much per fetch and
 # lands near 10x. With it, both are dominated by the fetches and sit near 1x.
-check_timing "fetching from one big group is not far dearer than from ten small ones" \
+check "fetching from one big group is not far dearer than from ten small ones" \
 	"$( [ "$many" -gt 0 ] && [ $(( one / (many > 0 ? many : 1) )) -lt 3 ] && echo yes ||
 		echo "no (one=${one}ms ten=${many}ms)")" \
 	"yes"
@@ -125,9 +147,9 @@ w_ms() {  # index-driven point query over one host: many fetches into few groups
 }
 wbuild fc_wide 150000      # default stripe: one/two big groups, wide decoded prefix
 wbuild fc_wnarrow 20000    # smaller groups that fit under the cap regardless
-bigw="$(w_ms fc_wide)"; smallw="$(w_ms fc_wnarrow)"
+bigw="$(min3 w_ms fc_wide)"; smallw="$(min3 w_ms fc_wnarrow)"
 echo "-- #353 wide point query: default-stripe ${bigw} ms, small-stripe ${smallw} ms"
-check_timing "a wide group's fetch is not far dearer than a small group's (#353)" \
+check "a wide group's fetch is not far dearer than a small group's (#353)" \
 	"$( [ "$smallw" -gt 0 ] && [ $(( bigw / (smallw > 0 ? smallw : 1) )) -lt 5 ] && echo yes ||
 		echo "no (wide=${bigw}ms small=${smallw}ms)")" \
 	"yes"
@@ -182,10 +204,10 @@ w359_ms() {  # number of projected text columns
 	end=$(date +%s%N); echo $(( (end - start) / 1000000 ))
 }
 
-under="$(w359_ms 4)"   # ~30 MB decoded: fits
-over="$(w359_ms 5)"    # ~38 MB decoded: does not
+under="$(min3 w359_ms 4)"   # ~30 MB decoded: fits
+over="$(min3 w359_ms 5)"    # ~38 MB decoded: does not
 echo "-- #359 projection width: four columns ${under} ms, five columns ${over} ms"
-check_timing "crossing the fetch cache cap costs proportionally, not totally (#359)" \
+check "crossing the fetch cache cap costs proportionally, not totally (#359)" \
 	"$( [ "$under" -gt 0 ] && [ $(( over / (under > 0 ? under : 1) )) -lt 12 ] && echo yes ||
 		echo "no (four=${under}ms five=${over}ms)")" \
 	"yes"
