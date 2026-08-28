@@ -76,6 +76,24 @@ upd_ms() {
 # which is fine once and wrong three times: the suite's own correctness arms below
 # assert v = id + 1, and they caught it. It sets "v = id + 1" now, which is the
 # same work per row and true after any number of runs.
+# The three cost assertions below go through check_ratio rather than computing
+# the comparison here and passing yes/no to check. They were hand-rolled while
+# they used check_timing, which takes a scalar; now that they are ordinary checks
+# (#792) the ratio helper is available and is strictly better:
+#
+#   * it refuses a zero on EITHER side -- "a side of the ratio is zero, so
+#     nothing was measured". The hand-rolled form guarded only the denominator,
+#     so a numerator timing at 0 ms, which means the measurement fell below timer
+#     resolution, passed silently as a ratio of 0;
+#   * it compares as a float instead of truncating integer division, and prints
+#     the ratio with both sides in the verdict rather than a hand-built string.
+#
+# The bound moves by a hair and it is worth saying so exactly, since being exact
+# about it is the point. The old form failed at a ratio of exactly 3.0 (integer
+# division, "< 3"). check_ratio rounds to two places before comparing, so it
+# fails above 3.005 rather than above 3.0: a true 3.004 prints as 3.00 and
+# passes. Nothing observed on these shapes is within two whole units of that.
+
 min3() {  # min3 FUNC ARG...
 	local a b c
 	a="$("$@")"; b="$("$@")"; c="$("$@")"
@@ -91,10 +109,8 @@ echo "-- $UPD fetches: one group of $ROWS took ${one} ms; ten groups took ${many
 
 # Without the cache the single-group case decodes ten times as much per fetch and
 # lands near 10x. With it, both are dominated by the fetches and sit near 1x.
-check "fetching from one big group is not far dearer than from ten small ones" \
-	"$( [ "$many" -gt 0 ] && [ $(( one / (many > 0 ? many : 1) )) -lt 3 ] && echo yes ||
-		echo "no (one=${one}ms ten=${many}ms)")" \
-	"yes"
+check_ratio "fetching from one big group is not far dearer than from ten small ones" \
+	"$one" "$many" "3"
 
 # and the rows are still right
 check "the updated rows are correct" \
@@ -149,10 +165,8 @@ wbuild fc_wide 150000      # default stripe: one/two big groups, wide decoded pr
 wbuild fc_wnarrow 20000    # smaller groups that fit under the cap regardless
 bigw="$(min3 w_ms fc_wide)"; smallw="$(min3 w_ms fc_wnarrow)"
 echo "-- #353 wide point query: default-stripe ${bigw} ms, small-stripe ${smallw} ms"
-check "a wide group's fetch is not far dearer than a small group's (#353)" \
-	"$( [ "$smallw" -gt 0 ] && [ $(( bigw / (smallw > 0 ? smallw : 1) )) -lt 5 ] && echo yes ||
-		echo "no (wide=${bigw}ms small=${smallw}ms)")" \
-	"yes"
+check_ratio "a wide group's fetch is not far dearer than a small group's (#353)" \
+	"$bigw" "$smallw" "5"
 check "the wide-group point query is correct (#353)" \
 	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wide WHERE h='h1'")" \
 	"$(q "SELECT count(*) || '|' || coalesce(max(u)::text,'z') FROM fc_wnarrow WHERE h='h1'")"
@@ -207,10 +221,8 @@ w359_ms() {  # number of projected text columns
 under="$(min3 w359_ms 4)"   # ~30 MB decoded: fits
 over="$(min3 w359_ms 5)"    # ~38 MB decoded: does not
 echo "-- #359 projection width: four columns ${under} ms, five columns ${over} ms"
-check "crossing the fetch cache cap costs proportionally, not totally (#359)" \
-	"$( [ "$under" -gt 0 ] && [ $(( over / (under > 0 ? under : 1) )) -lt 12 ] && echo yes ||
-		echo "no (four=${under}ms five=${over}ms)")" \
-	"yes"
+check_ratio "crossing the fetch cache cap costs proportionally, not totally (#359)" \
+	"$over" "$under" "12"
 
 # The columns that overflow are re-decoded rather than skipped, so they must still
 # read correctly -- a cache that quietly returned nulls for them would be fast and

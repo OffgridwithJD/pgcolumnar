@@ -16,6 +16,32 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Changed
 
+- `test/native_fetch_cache.sh`'s three cost guards now assert through
+  `check_ratio` instead of computing the comparison in shell and passing
+  `yes`/`no` to `check`. They were hand-rolled while they used `check_timing`,
+  which takes a scalar; once #792 made them ordinary checks the ratio helper
+  became available, and it is strictly better.
+
+  `check_ratio` refuses a zero on **either** side. The hand-rolled form guarded
+  only the denominator, so a numerator timing at 0 ms, which means the
+  measurement fell below timer resolution, passed silently as a ratio of zero.
+  Demonstrated in both directions with the same injected reading:
+
+  ```
+  check_ratio:  FAIL  ... a side of the ratio is zero, so nothing was measured: a=[0] b=[26]
+  hand-rolled:  PASS  ...
+  ```
+
+  It also compares as a float rather than truncating integer division, and
+  prints the ratio with both sides, so a verdict now reads
+  `(1.39x, bound 3x, from a=39 b=28)` rather than a bare `yes`.
+
+  One boundary moves by a hair and the comment says so: the old form failed at a
+  ratio of exactly 3.0 and `check_ratio` fails above it. Nothing measured on
+  these shapes is near that.
+
+### Changed
+
 - `test/native_fetch_cache.sh`'s three cost guards now run in CI. They were
   written with `check_timing`, which `PGC_SKIP_TIMING` drops, and that suite is
   not in `is_timing_suite` -- so the suite ran, reported `PASSED`, and skipped all
