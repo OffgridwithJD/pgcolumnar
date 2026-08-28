@@ -16,6 +16,48 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The index-fetch penalty now charges decode CPU by projected column WIDTH, not by
+  column count (#803). This is the same flatness #768 fixed for the sequential
+  scan, in the other cost site. `pgcolumnar_index_fetch_penalty`'s CPU term was
+  `cpu_operator_cost * R * nproj`, a count, so a 68-byte text column was charged
+  exactly what a 4-byte int4 column was.
+
+  Measured on two tables of identical shape whose columns differ only in type, so
+  the decoded prefix is four columns on both arms and only the bytes move. Read
+  out of an instrumented build, the decode CPU term was **200.00 on both arms**
+  across an 8.6x difference in decoded width (16 B against 138 B). The same
+  ~39,000-row index fetch took 4,385 ms on the narrow table and 88,352 ms on the
+  wide one, a 20.15x difference against a modelled 1.49x. Cost per millisecond
+  spanned 13.4x, inside the 13x-22x #768 measured for the scan path.
+
+  The consequence was an inverted ordering rather than a uniform under-charge. A
+  wider decoded prefix makes every row-group decode dearer, so a wide table should
+  abandon per-row fetches sooner; priced by count it did the opposite. The model
+  kept the index up to 120-161 rows on the wide table and only 40-60 on the narrow
+  one, while the measured crossovers are 40-120 wide and 120-279 narrow. At 120
+  rows the wide table's chosen index plan measured 239.6 ms against an 82.9 ms
+  scan.
+
+  `pgcolumnar_scan_decode_shape` now accumulates decode units over the prefix it
+  already walks, using the same reference width as the scan's
+  `pgcolumnar_projected_decode_units`, and the penalty charges those units.
+  Substituting `pgcolumnar_projected_decode_units` itself would have been wrong:
+  it sums the columns a query *references*, while the fetch decodes the *prefix*
+  up to the highest referenced column (#363), and the two differ on exactly the
+  shape #363 exists for.
+
+  An all-int prefix is priced exactly as before, because a 4-byte column is one
+  unit: the narrow arm's flip point is unchanged at 40-60 rows. The wide arm moves
+  to 7-15. Both arms now stop earlier than the measured crossover, which is the
+  direction the model already erred on the narrow arm before this change; the
+  #376 bound and the clustered-index and point-lookup guards in
+  `test/analyze_stats.sh` are unaffected and still pass.
+
+  `test/index_fetch_penalty_width.sh` pins the ordering from the plan rather than
+  the clock, so `PGC_SKIP_TIMING` does not apply to it. On the unfixed build its
+  seven premises pass and the ordering check fails with
+  `INVERTED (wide 138B fetches to 120 rows, narrow 16B only to 40)`.
+
 - `pgcolumnar_fetch_group_slot`'s header promised a NULL return that neither the
   function nor its callers implement, and following it segfaults (#795). The
   comment read "Returns NULL when nothing should be cached, in which case the

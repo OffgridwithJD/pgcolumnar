@@ -200,6 +200,11 @@ check that could refuse such a move. See
   conditions. One measurement shows the effect. On a table of ten text columns,
   with the same rows and the same plan, a query on the first column took 975 ms.
   A query on the tenth column took 194,798 ms.
+
+  The planner accounts for this. It charges the decode by the width of the columns
+  it must decode, not by their number. A wide table therefore moves to a full scan
+  at a lower row count than a narrow one. That is the order the measured times
+  follow.
 - A bulk `UPDATE` or `DELETE` through an index no longer costs the number of rows
   multiplied by the row group size. It still costs several times more than heap.
   The reason is that each changed row is marked and written again, and not
