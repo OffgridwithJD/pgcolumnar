@@ -4871,6 +4871,9 @@ pgcolumnar_groupagg_grow(PgColumnarGroupAggScanState *state)
 {
 	int			oldCap = state->capacity;
 	int			newCap;
+	PgColumnarGroupEntry *newEntries;
+	MemoryContext old;
+	int			i;
 
 	/*
 	 * The table still STARTS at 1024 and is only sized up once the data has
@@ -4908,9 +4911,6 @@ pgcolumnar_groupagg_grow(PgColumnarGroupAggScanState *state)
 			newCap = (state->sizeHint < ceiling) ? state->sizeHint : ceiling;
 		}
 	}
-	PgColumnarGroupEntry *newEntries;
-	MemoryContext old;
-	int			i;
 
 	if (newCap > (1 << 30))
 		newCap = 1 << 30;
