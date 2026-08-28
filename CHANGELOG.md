@@ -20,19 +20,24 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   estimate the planner already made, instead of growing it from nothing
   (#403 item 6). The table is open-addressing and doubles at 70% load from
   capacity 0, so a query with 200,000 groups walked 1024, 2048, ... , 524288 and
-  rehashed every live entry at each step. Measured on 2,000,000 rows: 10
-  allocations and 366,280 entries rehashed before, one allocation and zero
-  rehashing after, with identical answers.
+  rehashed every live entry at each step. Measured on 2,000,000 rows with 200,000
+  groups: 10 allocations and 366,280 entries rehashed before, 3 allocations and
+  46,591 after, with identical answers.
 
-  The up-front allocation is clamped by `work_mem`, by
-  `pgcolumnar.groupagg_max_groups`, and by the existing 1<<30 entry ceiling, so a
-  wrong estimate cannot allocate an unbounded table. The clamp bounds only what
-  is allocated speculatively: the doubling ladder is unchanged, and a table whose
-  real group count exceeds `work_mem` still grows past it exactly as before.
-  Under-estimating therefore costs nothing new.
+  The table still starts at 1024 and is sized only once the data has proven it
+  must grow, and a grow jumps toward the estimate but never past 64 times what
+  the table has proven it holds. Both bounds are expressed in the live count
+  rather than in a memory budget, which is the point: an earlier version of this
+  change bounded the allocation by `work_mem` and so allocated 131,072 entries
+  for a query with 47 real groups, because `estimate_num_groups` cannot see
+  through a function and `GROUP BY date_trunc('day', ts)` reaches the node with
+  an estimate of every row. A query whose groups fit in the starting 1024 never
+  allocates more than it would on unpatched code. Under-estimating costs nothing
+  new.
 
   `EXPLAIN (ANALYZE)` reports `Columnar Group Table Entries Rehashed`, the work
-  done, alongside the allocation count and the initial capacity. Entries rehashed
+  done, alongside the allocation count and the table's peak capacity, which is the
+  memory cost. Entries rehashed
   rather than resizes because the two disagree: the first instrument counted
   resizes and reported that sizing removed 7 of 10 while it removed about a
   quarter of the rehashing, the work being dominated by the last two steps.
