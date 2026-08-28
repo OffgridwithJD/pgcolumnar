@@ -32,7 +32,7 @@
 #
 # PGC_SKIP_TIMING
 #
-# The ratio goes through check_ratio_timing, which lives in lib.sh and owns the
+# The ratio goes through check_ratio_needs_quiet_machine, which lives in lib.sh and owns the
 # decision. This file does NOT branch on the flag to decide whether to assert.
 #
 # Two earlier versions got this wrong in the same way. The first only SAID the
@@ -54,7 +54,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 PLAN_BOUND=${PGC_PLAN_BOUND:-3}
 # The only read of PGC_SKIP_TIMING in this file, and it governs COST alone: how
 # big a fixture to build, and whether to execute the timed queries. Whether to
-# assert a ratio is check_ratio_timing's decision, in lib.sh.
+# assert a ratio is check_ratio_needs_quiet_machine's decision, in lib.sh.
 PGC_MEASURING=1
 [ "${PGC_SKIP_TIMING:-0}" = 1 ] && PGC_MEASURING=0
 ROWS=${PGC_PLAN_ROWS:-200000}
@@ -146,11 +146,11 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 
 	# Everything below this line has a wall clock in it. An absent timing is the
 	# signal, not a second reading of the flag: when nothing was executed there is
-	# no ratio to judge, and check_ratio_timing decides whether that is a skip or a
+	# no ratio to judge, and check_ratio_needs_quiet_machine decides whether that is a skip or a
 	# failure. If the flag is set it announces a skip; if it is not, check_ratio
 	# rejects the empty side loudly. Either way this suite never asserts "" == "".
 	if [ -z "$cms" ]; then
-		check_ratio_timing "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative" \
+		check_ratio_needs_quiet_machine "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative" \
 			"$cms" "" "$PLAN_BOUND"
 		return
 	fi
@@ -213,7 +213,7 @@ choice_vs_best() {  # choice_vs_best <label> <sql>
 		check "[$label] the chosen plan finished within ${PLAN_TIMEOUT}s" "no" "yes"
 		return
 	fi
-	check_ratio_timing "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative ($bnode)" \
+	check_ratio_needs_quiet_machine "[$label] the chosen plan is within ${PLAN_BOUND}x of the best alternative ($bnode)" \
 		"$cms" "$best" "$PLAN_BOUND"
 }
 
