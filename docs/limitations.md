@@ -386,8 +386,8 @@ The workaround is to force the parallel plan when it helps, with `SET
 max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
 session.
 
-The value at which a plan turns parallel depends on the table, so measure it on
-yours rather than copying a number. One measured example follows. It is given as
+The value at which a plan turns parallel depends on the table and on the worker
+count. Measure it on your own table rather than copying a number. One measured example follows. It is given as
 the SQL that builds it. A prose description does not pin a columnar table's
 size, and the size is what sets the threshold.
 
@@ -418,16 +418,24 @@ The narrow query is `SELECT sel, a, b FROM c753 WHERE sel <= 1000000`, which
 returns 1,000,000 rows. The wide query is
 `SELECT * FROM c753 WHERE sel <= 2000000`, which returns 2,000,000 rows.
 
+The values below come from sweeping `parallel_tuple_cost` down from the default
+0.100 in steps of 0.001. The threshold is the first value at which `EXPLAIN`
+shows a `Gather` node.
 
-| plan | turns parallel at |
-| --- | --- |
-| columnar | 0.010 |
-| heap | 0.030 |
-| default setting | 0.100 |
+| `max_parallel_workers_per_gather` | columnar turns parallel at | heap turns parallel at |
+| --- | --- | --- |
+| 2, the default | 0.009 to 0.010 | 0.026 to 0.027 |
+| 3 | 0.013 to 0.014 | 0.030 to 0.032 |
+| 4 | 0.015 to 0.016 | 0.034 to 0.035 |
 
-A different table gives different values. An earlier edition of this page quoted
-0.060 for the columnar plan. It did not describe the table. A table built to the
-description above gives 0.010.
+Each cell is a range because `ANALYZE` samples. Over nine draws the estimate for
+a query that returns 1,000,000 rows landed between 968,663 and 1,015,140. The
+heap threshold moves with that estimate. The columnar threshold barely moves.
+The ranges cover PostgreSQL 17 and PostgreSQL 18.
+
+A different table gives different values, and so does a different worker count.
+An earlier edition of this page quoted 0.060 for the columnar plan. It named
+neither the table nor the worker count, so a reader could not reproduce it.
 
 ## Index-only scans
 
