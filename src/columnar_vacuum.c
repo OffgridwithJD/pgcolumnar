@@ -48,6 +48,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
+#include "utils/timestamp.h"
 #include "utils/rls.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
