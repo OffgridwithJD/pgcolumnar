@@ -748,11 +748,32 @@ typedef struct PgColumnarGroupAggScanState
 	uint64		vectorsRuledOutByValue;
 	uint64		groupsTotal;
 	int			usablePreds;	/* of npreds, how many can exclude (#479) */
+
+	/*
+	 * Resizes of the group table (#403 item 6). The work-done line for sizing it
+	 * from statistics: sizing it right and sizing it wrong give identical
+	 * answers, so no correctness check can see the difference. Counted where the
+	 * rehash actually happens, not where a capacity is predicted, because a
+	 * number derived from the estimate that drives the change reports a saving
+	 * whether or not one occurred.
+	 */
+	uint64		hashResizes;
+	uint64		hashRehashed;	/* live entries MOVED, which is the actual work */
+	int			peakCapacity;	/* largest table allocated: the memory cost */
+	int			sizeHint;		/* capacity the estimate justifies, 0 for none */
 } PgColumnarGroupAggScanState;
 
 static const CustomExecMethods pgcolumnar_groupagg_exec_methods;
 static const CustomExecMethods pgcolumnar_groupagg_parallel_exec_methods;
 static bool pgcolumnar_groupagg_simple_key(Oid typ);
+/*
+ * How far a single grow may jump beyond what the table has proven it needs. 64
+ * reaches any size in two steps from 1024 while bounding what a wrong estimate
+ * can allocate to 64x the live count.
+ */
+#define COLUMNAR_GROUPAGG_JUMP	64
+
+static int pgcolumnar_groupagg_size_hint(CustomScanState *node, int maxGroups);
 static bool pgcolumnar_groupagg_batch_eligible(PgColumnarGroupAggScanState *state,
 											 TupleDesc tupdesc, ScanKey *keysOut,
 											 int *nkeysOut);
@@ -4457,6 +4478,9 @@ PgColumnarCreateGroupAggScanState(CustomScan *cscan)
 
 	state->maxGroups = pgcolumnar_groupagg_max_groups;
 	state->capacity = 0;
+	state->hashResizes = 0;
+	state->hashRehashed = 0;
+	state->peakCapacity = 0;
 	state->nGroups = 0;
 	state->entries = NULL;
 
@@ -4490,6 +4514,10 @@ PgColumnarBeginGroupAggScan(CustomScanState *node, EState *estate, int eflags)
 	state->emitPos = 0;
 	state->nGroups = 0;
 	state->capacity = 0;
+	state->hashResizes = 0;
+	state->hashRehashed = 0;
+	state->peakCapacity = 0;
+	state->sizeHint = pgcolumnar_groupagg_size_hint(node, state->maxGroups);
 	state->entries = NULL;
 	state->haveStats = false;
 
@@ -4750,6 +4778,89 @@ pgcolumnar_groupagg_keys_equal(PgColumnarGroupAggScanState *state,
 }
 
 /*
+ * pgcolumnar_groupagg_size_hint
+ *		The capacity to allocate up front, from the group estimate the planner
+ *		already made (#403 item 6). Zero means "no useful estimate", and the
+ *		table then starts where it always did.
+ *
+ *		The table doubles at 70% load from a standing start, so a query with
+ *		200,000 groups walks 1024 to 524288 and rehashes every live entry ten
+ *		times. The estimate that would have avoided that is already computed:
+ *		estimate_num_groups at plan time, bounded since #369 by what the zone
+ *		maps say the column can hold, and carried on the plan as plan_rows.
+ *
+ *		Sizing from an estimate trades bounded rehashing for unbounded memory
+ *		unless the estimate is bounded, and an over-estimate is the common case
+ *		rather than the exotic one. Two bounds apply here:
+ *
+ *		- pgcolumnar.groupagg_max_groups, because a run that exceeds it errors,
+ *		  so allocating for more than it can hold is allocating for a failure;
+ *		- the existing 1<<30 entry ceiling.
+ *
+ *		The bound that does the real work is not here. It is
+ *		COLUMNAR_GROUPAGG_JUMP, applied at each grow in the caller, because it is
+ *		expressed in what the data has PROVEN it needs rather than in a budget
+ *		that has nothing to do with this query. That distinction is the whole
+ *		correction from the review of #810: a hint bounded only by work_mem still
+ *		allocated 131072 entries for 47 real groups.
+ *
+ *		Under-estimating costs nothing new: the table grows exactly as it does
+ *		today from wherever it started.
+ */
+static int
+pgcolumnar_groupagg_size_hint(CustomScanState *node, int maxGroups)
+{
+	double		est;
+	double		want;
+	uint64		cap;
+	uint64		limit;
+
+	if (node->ss.ps.plan == NULL)
+		return 0;
+
+	est = node->ss.ps.plan->plan_rows;
+	if (est <= 0.0 || isnan(est))
+		return 0;
+
+	/* the load factor the table maintains, so the estimate fits without a grow */
+	want = est * 10.0 / 7.0;
+	if (want < 1024.0)
+		return 0;				/* the default start already covers it */
+
+	/* round up to a power of two, which the index masking requires */
+	cap = 1024;
+	while ((double) cap < want && cap < (1u << 30))
+		cap *= 2;
+
+	limit = (uint64) (1u << 30);
+
+	/*
+	 * No work_mem bound here. It was in the first version of this change, to
+	 * bound what a wrong estimate could allocate. COLUMNAR_GROUPAGG_JUMP now
+	 * bounds that structurally, in terms of the live count this table has proven
+	 * it needs, which is the quantity that actually matters; and the doubling
+	 * ladder has never respected work_mem either, before or after this change,
+	 * so a work_mem bound on the hint alone could not make the claim it looked
+	 * like it was making. A second bound that no check can distinguish from the
+	 * first is decoration.
+	 */
+
+	/* what the execution-time group cap can ever hold */
+	if (maxGroups > 0)
+	{
+		uint64		byCap = (uint64) ((double) maxGroups * 10.0 / 7.0);
+
+		if (byCap < limit)
+			limit = byCap;
+	}
+
+	while (cap > limit && cap > 1024)
+		cap /= 2;
+
+	return (cap <= 1024) ? 0 : (int) cap;
+}
+
+/*
  * pgcolumnar_groupagg_grow
  *		Double the open-addressing table and reinsert live entries. Entry structs
  *		(and the key/spec pointers they carry) move by value; the pointed-at key
@@ -4759,15 +4870,57 @@ static void
 pgcolumnar_groupagg_grow(PgColumnarGroupAggScanState *state)
 {
 	int			oldCap = state->capacity;
-	int			newCap = (oldCap <= 0) ? 1024 : oldCap * 2;
+	int			newCap;
 	PgColumnarGroupEntry *newEntries;
 	MemoryContext old;
 	int			i;
+
+	/*
+	 * The table still STARTS at 1024 and is only sized up once the data has
+	 * proven it needs to grow (#403 item 6, corrected on review of #810).
+	 *
+	 * Allocating the estimate at Begin was wrong in the ordinary case rather
+	 * than an exotic one. estimate_num_groups cannot see through a function, so
+	 * GROUP BY date_trunc('day', ts) over a high-cardinality timestamp reaches
+	 * this node with rows=4000000 against 47 real groups, and the up-front
+	 * allocation was 131072 entries where growing from nothing would have used
+	 * 1024 and rehashed nothing. That is 128x the memory to save zero work, and
+	 * columnar_vector.c:1817 already documented the estimator's blindness here.
+	 *
+	 * A query whose real group count fits in 1024 now never reaches this
+	 * function at all, so it cannot be charged for a wrong estimate.
+	 *
+	 * When the table does grow, it jumps toward the estimate rather than
+	 * doubling, but never further than COLUMNAR_GROUPAGG_JUMP times what the
+	 * data has already proven it needs. A bounded jump keeps the saving, since
+	 * the rehashing cost is dominated by the last doublings, while bounding what
+	 * a wrong estimate can allocate to a multiple of the live count rather than
+	 * to work_mem.
+	 */
+	if (oldCap <= 0)
+		newCap = 1024;
+	else
+	{
+		newCap = oldCap * 2;
+
+		if (state->sizeHint > newCap)
+		{
+			int			ceiling = (oldCap > (1 << 30) / COLUMNAR_GROUPAGG_JUMP)
+				? (1 << 30) : oldCap * COLUMNAR_GROUPAGG_JUMP;
+
+			newCap = (state->sizeHint < ceiling) ? state->sizeHint : ceiling;
+		}
+	}
 
 	if (newCap > (1 << 30))
 		newCap = 1 << 30;
 	if (newCap <= oldCap)
 		return;					/* already at the ceiling; let probing lengthen */
+
+	/* counted here, after the ceiling refusal, so it counts rehashes done */
+	state->hashResizes++;
+	if (newCap > state->peakCapacity)
+		state->peakCapacity = newCap;
 
 	/*
 	 * The table can grow past what a plain palloc allows (MaxAllocSize is 1 GB;
@@ -4789,6 +4942,7 @@ pgcolumnar_groupagg_grow(PgColumnarGroupAggScanState *state)
 
 		if (!e->used)
 			continue;
+		state->hashRehashed++;
 		idx = e->hash & (uint32) (newCap - 1);
 		while (newEntries[idx].used)
 			idx = (idx + 1) & (uint32) (newCap - 1);
@@ -5478,6 +5632,18 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 	if (state->haveStats)
 	{
 		PgColumnarGroupStats gs;
+
+		/*
+		 * Work done, not work predicted. Under ANALYZE only, for the reason the
+		 * batch-fold line above records (#602): a plain EXPLAIN has nothing to
+		 * report because the table was never built.
+		 */
+		ExplainPropertyInteger("Columnar Group Table Resizes", NULL,
+							   state->hashResizes, es);
+		ExplainPropertyInteger("Columnar Group Table Entries Rehashed", NULL,
+							   state->hashRehashed, es);
+		ExplainPropertyInteger("Columnar Group Table Capacity", NULL,
+							   state->peakCapacity, es);
 
 		gs.usableSkipPredicates = state->usablePreds;
 		gs.groupsTotal = state->groupsTotal;
