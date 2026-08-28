@@ -58,6 +58,33 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
   seven premises pass and the ordering check fails with
   `INVERTED (wide 138B fetches to 120 rows, narrow 16B only to 40)`.
 
+- `pgcolumnar_fetch_group_slot`'s header promised a NULL return that neither the
+  function nor its callers implement, and following it segfaults (#795). The
+  comment read "Returns NULL when nothing should be cached, in which case the
+  caller decodes into its own scratch context exactly as before". There is no
+  such path. The function has two returns, `return e` on a hit and
+  `return victim` on a miss, and `victim` cannot be NULL: the branch that runs
+  when every slot is live picks a least-recently-used entry. Both callers
+  dereference the result immediately, one through `entry->firstRowNumber` in the
+  geometry check and one through `MemoryContextSwitchTo(entry->cx)`, neither
+  guarded.
+
+  So the sentence did not describe an unimplemented option, it described a trap.
+  Forcing the documented return on an assert build of PostgreSQL 18.4 produced
+  `signal 11: Segmentation fault` in a backend. Nothing in `main` reaches it --
+  the function never returns NULL today, and the same fixture on a clean build is
+  correct -- but the comment invites the change that does.
+
+  The comment now states the guarantee the code makes, that a slot always comes
+  back and a miss returns a reset entry for the caller to fill, and records that
+  a "do not cache this one" policy needs a scratch-context path in the callers
+  before it can be expressed as a NULL. An `Assert(entry != NULL)` at each call
+  site holds that to be true rather than leaving it to the comment, which is what
+  rotted. With the Assert in place the same injected NULL return reports
+  `TRAP: failed Assert("entry != NULL"), File: "src/columnar_reader.c", Line:
+  3888` instead of faulting, so the next person to try it gets the line rather
+  than a core file.
+
 - The columnar scan's decode cost is now charged by projected column WIDTH, not
   by column count (#768). #503 gave the scan a per-value decode term, which
   fixed "nine columns are priced like one"; it counted columns, so a 324-byte
