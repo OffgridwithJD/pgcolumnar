@@ -101,8 +101,8 @@ invariants above touched:
 
 1. Export the cold range to Parquet in object storage, with
    `pgcolumnar.export_parquet` or `pgcolumnar.parallel_export_parquet` (#394).
-2. Drop the local rows, with `pgcolumnar.expire` (#403 item 5a, PR #815, not yet
-   merged) or an ordinary `DELETE` plus `pgcolumnar.compact`.
+2. Drop the local rows, with `pgcolumnar.expire` (#403 item 5a) or an ordinary
+   `DELETE` plus `pgcolumnar.compact`.
 3. Read the exported data when it is needed, through the external Parquet reader
    or `iceberg_scan` (#388, #393).
 
