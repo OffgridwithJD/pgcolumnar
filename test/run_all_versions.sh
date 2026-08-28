@@ -69,6 +69,7 @@ SUITES=(
 	decode_skip_interrupts
 	dependency_estimate
 	differential
+	doc_parallel_premise
 	docs_style
 	drop_cleanup
 	eager_ordering_record
