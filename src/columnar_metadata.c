@@ -2427,7 +2427,7 @@ PgColumnarInsertBloomRow(const NativeBloomMetadata *b)
  *		Has this exact file already been loaded into this table by a committed
  *		pgcolumnar.parallel_copy (#403 item 7)?
  *
- *		Keyed by (relation_oid, fingerprint), which is load_fingerprint_pkey, so
+ *		Keyed by (relation_oid, fingerprint), which is load_fingerprint_idx, so
  *		this is an exact index lookup. The fingerprint is the SHA-256 of the
  *		file's bytes: a file that changed at the same path is a different load.
  */
@@ -2452,7 +2452,7 @@ PgColumnarLoadFingerprintSeen(Oid relationOid, const uint8 *fingerprint,
 	ScanKeyInit(&key[1], Anum_load_fingerprint_fingerprint, BTEqualStrategyNumber,
 				F_BYTEAEQ, PointerGetDatum(fp));
 
-	idxOid = pgcolumnar_index_oid("load_fingerprint_pkey");
+	idxOid = pgcolumnar_index_oid("load_fingerprint_idx");
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 2, key);
 	tuple = systable_getnext(scan);
 	found = HeapTupleIsValid(tuple);

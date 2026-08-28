@@ -29,6 +29,14 @@
 # is the safe direction. The reverse order would leave a fingerprint with no
 # data, and a later load would be refused for rows that were never stored.
 #
+# RUN THIS AGAINST A BUILD WITH OpenSSL. The coordinator fingerprints the file
+# from inside a transaction, and that is not tidiness: on a --with-openssl build
+# pg_cryptohash_create registers the hash context with CurrentResourceOwner,
+# which is NULL outside a transaction, and the coordinator segfaults. A build
+# without OpenSSL uses the in-core SHA-2, touches no resource owner, and passes.
+# This suite therefore passed on the local source builds and crashed on CI's
+# packaged PostgreSQL until the transaction was added.
+#
 # Usage:  test/parallel_copy_dedup.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 
