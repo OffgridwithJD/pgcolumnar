@@ -98,11 +98,20 @@ total_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Total: \([0-9]*\).*/
 # The post-#821 figure is 4212 x 3/10, and EXPLAIN ANALYZE reports "Chunk Groups
 # Read: 3 of 10", so the estimate now agrees with the scan it prices. The check
 # below asserts the ORDERING of the two costs, which holds on either side.
-serial_cost() {
+# Anchored on the scan node rather than on the first cost= in the plan.
+# `grep -m1` returns whatever node comes first, so the moment the plan gains a
+# node above the scan it reports that node's cost instead, silently and with the
+# right shape. That is the same class of defect this suite exists to catch, so
+# the suite should not contain one.
+plan_of() {
 	q "SET max_parallel_workers_per_gather = 0;
 	   SET pgcolumnar.stripe_row_limit = 20000;
-	   EXPLAIN SELECT sel, a, b FROM c753 WHERE $1 <= $(p25 "$1")" \
-	  | grep -m1 -oE 'cost=[0-9.]+\.\.[0-9.]+' | sed 's/.*\.\.//'
+	   EXPLAIN SELECT sel, a, b FROM c753 WHERE $1 <= $(p25 "$1")"
+}
+scan_lines() { plan_of "$1" | grep -c 'PgColumnarScan'; }
+serial_cost() {
+	plan_of "$1" | grep 'PgColumnarScan' \
+	  | grep -oE 'cost=[0-9.]+\.\.[0-9.]+' | sed 's/.*\.\.//' | head -1
 }
 
 doc_read=$(read_groups "$doc_col"); doc_tot=$(total_groups "$doc_col")
@@ -132,6 +141,10 @@ check "the documented column is not the one stored in order" \
 # Exact rather than bounded: reading more groups must cost more. A bound here
 # would need calibrating and the direction does not.
 if [ "$doc_col" != "sel" ]; then
+	for _c in "$doc_col" sel; do
+		check "premise: the $_c plan is exactly one columnar scan node" \
+			"$(scan_lines "$_c")" "1"
+	done
 	dc=$(serial_cost "$doc_col"); sc=$(serial_cost sel)
 	echo "-- serial cost: $doc_col $dc, sel $sc"
 	check "and the documented column is costed above the ordered one" \
