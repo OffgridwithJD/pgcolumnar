@@ -137,8 +137,12 @@ echo "-- sel (stored in order):            $sel_read of $sel_tot groups read"
 # --- 1. the defect this suite exists for ------------------------------------
 # The published speedup numbers were taken with every group read. If the page's
 # query prunes, the numbers beside it describe a different amount of work.
+# Defaults that CANNOT collide, so blank-versus-blank fails on its own rather
+# than relying on the premise above to catch it. `check "" ""` passes, so a check
+# fed by two extracted values must never be able to compare one blank with
+# another.
 check "the documented narrow query reads every chunk group" \
-	"$doc_read" "$doc_tot"
+	"${doc_read:-<no-read-counter>}" "${doc_tot:-<no-total-counter>}"
 
 # --- 2. the contrast the page now documents is real -------------------------
 check "and filtering the ordered column instead prunes some away" \
