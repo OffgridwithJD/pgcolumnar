@@ -352,9 +352,14 @@ width, and a parallel plan divides it across workers. At the default of 2 the
 planner still chooses the serial plan for the wide query below.
 
 The wide query was measured on one machine, on a build without assertions. The
-parallel plan runs in about 320 ms and the serial plan in about 640 ms. Both are
-the median of 7 interleaved readings at 4 workers. Two earlier readings of the
+parallel plan runs in about 275 ms and the serial plan in about 639 ms. Both are
+the fastest of 7 interleaved readings at 4 workers. Two earlier readings of the
 same query gave 306 and 604, then 300 and 610.
+
+The fastest reading is quoted rather than the middle one. This machine is shared,
+so scheduling noise only ever adds time, and the fastest reading is the one least
+polluted by it. The middle reading moved 31% between runs where the fastest moved
+2.5%.
 
 On a narrow projection the planner still prefers the serial plan where the
 parallel one is faster.
@@ -365,10 +370,11 @@ parallel plan ran 1.8 to 2.5 times faster on the median. In every shape the
 slowest parallel run was still faster than the fastest serial run, by 1.45 times
 at the narrowest margin.
 
-Those readings were taken on a build with assertions enabled. Re-measured on a
-build without them, the narrow query below ran 2.4 to 2.5 times faster on the
-median at 4 workers. The slowest parallel run beat the fastest serial run by
-1.60 times. Both arm orders were run and both agree.
+Those readings were taken on a build with assertions enabled. The narrow query
+below was re-measured on a build without them. Taking the fastest reading of each
+arm at 4 workers, it ran 2.5 to 2.7 times faster. On the middle reading it ran
+2.4 to 2.5 times faster. The slowest parallel run beat the fastest serial run by 1.60
+times. Both arm orders were run and both agree.
 
 Which column the narrow query filters on decides all of this. The section below
 on the predicate column gives the measurements and says why.
@@ -447,10 +453,12 @@ Filtering instead on `a`, which is `hashint4` derived and unordered, reads all 2
 groups for the same number of rows returned. The two differ by more than the
 clock:
 
-| narrow query filters on | chunk groups read | serial cost | parallel speedup |
-| --- | --- | --- | --- |
-| `sel`, stored in order | 7 of 27 | 22,428 | 1.24 to 1.31 times |
-| `a`, unordered | 27 of 27 | 83,305 | 2.43 to 2.51 times |
+| narrow query filters on | groups read | serial cost | speedup, fastest | speedup, middle | columnar turns parallel at | heap turns parallel at |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sel`, stored in order | 7 of 27 | 22,428 | 1.54 to 1.67 | 1.24 to 1.31 | 0.015 | 0.035 |
+| `a`, unordered | 27 of 27 | 83,305 | 2.54 to 2.67 | 2.43 to 2.51 | 0.060 | 0.035 |
+
+The last two columns are at 4 workers and are the causal evidence.
 
 On the ordered column the effect this section describes nearly disappears. The
 slowest parallel run is then slower than the fastest serial run, so the
@@ -458,9 +466,10 @@ non-overlap stated above does not hold there. The numbers in this section are
 measured on the unordered column, because that is the case where the planner's
 choice costs the most.
 
-A heap table shows no such split. Its threshold is the same for both predicates.
-That is what identifies zone map pruning as the cause, rather than anything about
-the two columns themselves.
+Read the last two columns together. The columnar threshold moves from 0.015 to
+0.060 between the two predicates. The heap threshold does not move at all. A heap
+has no zone map, so that is what identifies pruning as the cause, rather than
+anything about the two columns themselves.
 
 The values below come from sweeping `parallel_tuple_cost` down from the default
 0.100 in steps of 0.001. The threshold is the first value at which `EXPLAIN`
