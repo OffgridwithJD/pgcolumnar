@@ -88,9 +88,11 @@ upd_ms() {
 #   * it compares as a float instead of truncating integer division, and prints
 #     the ratio with both sides in the verdict rather than a hand-built string.
 #
-# The bound moves by a hair and it is worth saying so: the old form failed at a
-# ratio of exactly 3.0 (integer division, "< 3"), check_ratio fails above it
-# ("<= 3"). Nothing observed here is near that boundary.
+# The bound moves by a hair and it is worth saying so exactly, since being exact
+# about it is the point. The old form failed at a ratio of exactly 3.0 (integer
+# division, "< 3"). check_ratio rounds to two places before comparing, so it
+# fails above 3.005 rather than above 3.0: a true 3.004 prints as 3.00 and
+# passes. Nothing observed on these shapes is within two whole units of that.
 
 min3() {  # min3 FUNC ARG...
 	local a b c
