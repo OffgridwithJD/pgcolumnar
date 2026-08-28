@@ -3098,6 +3098,89 @@ pgcolumnar_effective_stripe_row_limit(Oid relid)
 	return pgcolumnar_stripe_row_limit;
 }
 
+/*
+ * pgcolumnar_written_stripe_row_limit
+ *		The row-group limit the table was actually WRITTEN with, read back from
+ *		pgcolumnar.storage.row_group_limit (#806).
+ *
+ *		The planner must ask this and not pgcolumnar_effective_stripe_row_limit.
+ *		That function answers "what limit would a write in THIS session use",
+ *		which is the right question for the writer -- columnar_write_state.c is
+ *		deciding the geometry it is about to lay down -- and the wrong one for a
+ *		cost model, which is describing geometry that already exists. A table
+ *		written while pgcolumnar.stripe_row_limit differed from the planning
+ *		session's value is otherwise costed against a shape it does not have:
+ *		measured at 20 groups of 20,000 rows being costed as 3 of 150,000.
+ *
+ *		Falls back to the session answer only when there is neither an explicit
+ *		per-table option nor a storage row -- a table that has never been
+ *		written. There is no written geometry to prefer then, and the next write
+ *		will use the session value anyway.
+ *
+ *		This is ONE number, the last writer's. A table whose groups were laid
+ *		down under changing limits is still approximated. The exact quantity is
+ *		the real group count, and reading it is a scan proportional to the number
+ *		of groups on every plan, which is too much to spend refining a term that
+ *		is approximate by construction.
+ *
+ *		Scanned without an index, like PgColumnarReadOptions immediately above:
+ *		the storage index is on storage_id and this looks up by relation_oid.
+ */
+int
+pgcolumnar_written_stripe_row_limit(Oid relid)
+{
+	PgColumnarOptions opts;
+	Relation	rel;
+	TupleDesc	tupdesc;
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	int32		limit = 0;
+
+	/*
+	 * An explicit per-table option still wins, and deliberately so. #806 is
+	 * about the PLANNING SESSION's GUC leaking into the cost of a table it has
+	 * nothing to do with. A per-table stripe_row_limit is the opposite: a
+	 * durable statement by the table's owner about that table, which
+	 * native_index_fetch_stripe_cost asserts the cost model can see.
+	 *
+	 * It is worth naming what this leaves unresolved. Setting the option does
+	 * not rewrite the table, so between the option and the next rewrite the
+	 * model describes the geometry the owner asked for rather than the one on
+	 * disk. That is a real gap, it predates this change, and narrowing #806 to
+	 * the session GUC is not the place to decide it.
+	 */
+	if (PgColumnarReadOptions(relid, &opts) &&
+		opts.stripeRowLimitSet && opts.stripeRowLimit > 0)
+		return opts.stripeRowLimit;
+
+	rel = open_columnar_table("storage", AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+
+	ScanKeyInit(&key[0], Anum_native_storage_relation_oid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relid));
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+
+	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		Datum		d = heap_getattr(tuple, Anum_native_storage_row_group_limit,
+									 tupdesc, &isnull);
+
+		if (!isnull)
+			limit = DatumGetInt32(d);
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	if (limit > 0)
+		return (int) limit;
+
+	/* never written and no option: the session's value is all there is */
+	return pgcolumnar_stripe_row_limit;
+}
+
 
 /*
  * PgColumnarReadSortBy
