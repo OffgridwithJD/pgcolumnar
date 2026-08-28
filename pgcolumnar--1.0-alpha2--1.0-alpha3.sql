@@ -33,7 +33,7 @@ CREATE TABLE pgcolumnar.load_fingerprint (
 -- check before either records, both commit, and the loser's record insert would
 -- fail, reporting failure for a load that succeeded. A duplicate record is
 -- harmless; a false failure is not.
-CREATE INDEX load_fingerprint_pkey
+CREATE INDEX load_fingerprint_idx
 	ON pgcolumnar.load_fingerprint USING btree (relation_oid, fingerprint);
 
 -- Declared retention for pgcolumnar.expire (#403 item 5a). Nothing drops rows on

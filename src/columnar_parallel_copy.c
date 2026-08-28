@@ -1260,10 +1260,19 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 			 * the pass overlaps the loaders instead of delaying them (#403
 			 * item 7). The decision it feeds is taken below, after every loader
 			 * has PREPAREd and before anything commits.
+			 *
+			 * INSIDE A TRANSACTION, which is not optional. On a build with
+			 * --with-openssl, pg_cryptohash_create registers the context with
+			 * CurrentResourceOwner, and outside a transaction that pointer is
+			 * NULL: the coordinator segfaults. A build without OpenSSL uses the
+			 * in-core SHA-2, which touches no resource owner and does not care,
+			 * which is why this passed on one build and crashed on another.
 			 */
 			if (hdr->dedup && !fingerprinted)
 			{
+				StartTransactionCommand();
 				pcopy_fingerprint_file(hdr->filename, hdr->fingerprint);
+				CommitTransactionCommand();
 				fingerprinted = true;
 			}
 			(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
@@ -1328,13 +1337,14 @@ pgcolumnar_parallel_copy_coordinator(Datum main_arg)
 			 */
 			if (hdr->dedup)
 			{
+				StartTransactionCommand();
+				PushActiveSnapshot(GetTransactionSnapshot());
+				/* inside the transaction, for the resource-owner reason above */
 				if (!fingerprinted)
 				{
 					pcopy_fingerprint_file(hdr->filename, hdr->fingerprint);
 					fingerprinted = true;
 				}
-				StartTransactionCommand();
-				PushActiveSnapshot(GetTransactionSnapshot());
 				duplicate = PgColumnarLoadFingerprintSeen(hdr->relid,
 														  hdr->fingerprint,
 														  PG_SHA256_DIGEST_LENGTH,
