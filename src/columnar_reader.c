@@ -648,10 +648,28 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 		Oid			argType;
 		bool		crossType;
 
-		/* only plain "column op const" comparison keys are usable */
+		/*
+		 * Only plain "column op const" comparison keys are usable.
+		 *
+		 * SK_SEARCHARRAY is in this list although nothing in this extension
+		 * currently sets it, and the reason is the point. A key carrying that
+		 * flag holds an ARRAY in sk_argument, not a scalar. Without this arm the
+		 * key falls through, compareValue is set to the array's Datum, and every
+		 * zone-map comparison below runs the column's scalar btree function
+		 * against a pointer to an array header. That is not a wrong answer that
+		 * a test would catch; it is a comparison of unrelated things whose
+		 * result is whatever the memory happens to say.
+		 *
+		 * It is guarded BEFORE anything can produce the shape rather than
+		 * beside it. #752 measures a per-element path for `= ANY` worth 13 to 16
+		 * chunk groups of 27, and the obvious way to build it is to stop
+		 * collapsing the array in pgcolumnar_saop_range_scankey and mark the key
+		 * SK_SEARCHARRAY. Whoever does that should have to add handling here
+		 * deliberately, not discover that this function accepted it silently.
+		 */
 		if (key->sk_flags & (SK_ISNULL | SK_ROW_HEADER | SK_ROW_MEMBER |
 							 SK_ROW_END | SK_SEARCHNULL | SK_SEARCHNOTNULL |
-							 SK_ORDER_BY))
+							 SK_ORDER_BY | SK_SEARCHARRAY))
 			continue;
 		if (key->sk_attno < 1 || key->sk_attno > natts)
 			continue;

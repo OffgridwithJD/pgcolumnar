@@ -218,6 +218,40 @@ check "a correlated PARAM_EXEC array is not mis-pruned (results stay correct)" \
 	"$(q 'SELECT sum(c) FROM thr, LATERAL (SELECT count(*) c FROM t WHERE t.ts = ANY (thr.lo)) s;')" \
 	"3"
 
+# --- an array scan key must be refused before one can be built ------------
+#
+# This is a source assertion, in the style of native_fetch_cache.sh, and the
+# reason is the same one that suite records: there is no behavioural test to
+# write, because nothing in the extension can currently produce the shape. The
+# builder above collapses every multi-element array into two range keys, so no
+# SK_SEARCHARRAY key ever reaches pgcolumnar_make_predicates.
+#
+# It is guarded anyway, and asserted here, because the defect it prevents is
+# silent. Such a key holds an ARRAY in sk_argument. Unrejected, it becomes a
+# SkipPredicate whose compareValue is the array's Datum, and the column's scalar
+# btree comparison then runs against a pointer to an array header. That is not a
+# wrong answer a suite could catch, it is a comparison of unrelated things.
+#
+# #752 measures a per-element path worth 13 to 16 chunk groups of 27, and the
+# obvious implementation marks the key SK_SEARCHARRAY. This check exists so that
+# whoever writes it has to add handling deliberately instead of finding that
+# make_predicates accepted it silently. The guard predates the capability on
+# purpose.
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
+
+check "an array scan key is refused by the predicate builder (#752)" \
+	"$(grep -c 'SK_ORDER_BY | SK_SEARCHARRAY' "$SRC/columnar_reader.c")" "1"
+
+# The control. The check above passes if the flag is named ANYWHERE in that
+# expression, so it must also be true that the builder still rejects the seven
+# flags it always did; a rewrite that dropped them while keeping the new one
+# would satisfy a bare grep for SK_SEARCHARRAY alone.
+for _f in SK_ISNULL SK_ROW_HEADER SK_ROW_MEMBER SK_ROW_END SK_SEARCHNULL \
+		  SK_SEARCHNOTNULL SK_ORDER_BY; do
+	check "and it still refuses $_f" \
+		"$(grep -c "$_f" "$SRC/columnar_reader.c")" "1"
+done
+
 check "backend alive" "$(q 'SELECT 1;')" "1"
 
 pgc_summary
