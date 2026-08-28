@@ -16,6 +16,16 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The columnar scan's decode cost is now charged by projected column WIDTH, not
+  by column count (#768). #503 gave the scan a per-value decode term, which
+  fixed "nine columns are priced like one"; it counted columns, so a 324-byte
+  text column was charged exactly what a 4-byte int4 column was. Measured on
+  4,000,000 rows, four 324-byte text columns were priced at 163,422 while taking
+  5875 ms, against 206,524 and 335 ms for eight int columns: priced below, and
+  17.5x slower. Cost per millisecond across those projections spanned 22x before
+  the change and 1.7x after it, with an int-only projection priced exactly as
+  before.
+
 - The shared test cluster no longer sets `pgcolumnar.unique_lock_buckets`
   (#799). `test/lib.sh` wrote `100003` into the cluster nearly every suite runs
   against, where the shipped default is `128`, so the whole tree ran 781x above

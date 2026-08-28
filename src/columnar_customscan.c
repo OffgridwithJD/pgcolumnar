@@ -1942,6 +1942,100 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
 }
 
 /*
+ * pgcolumnar_projected_decode_units
+ *		The decode-CPU multiplier for a scan's projection, in units of one
+ *		narrow (4-byte) column.
+ *
+ *		#503 gave the scan a per-value decode term, which fixed "nine columns are
+ *		priced like one". It counted COLUMNS, so a 324-byte text column was charged
+ *		exactly what a 4-byte int4 column was. Measured on 4,000,000 rows, PG17
+ *		non-assert, with the metadata and fold paths off so the scan really decodes:
+ *
+ *			marginal cost of one more projected column
+ *			  int4           4 bytes     24.0 ms
+ *			  text (md5)    36 bytes    247.0 ms	10.29x, for 9.00x the bytes
+ *			  text (long)  324 bytes   1420.3 ms
+ *
+ *		and what the planner charged, after ANALYZE, for the whole projection:
+ *
+ *			8 int4                     206,524   at   335 ms
+ *			4 text (324 bytes)         163,422   at  5875 ms
+ *
+ *		Four long-text columns priced BELOW eight int columns while taking 17.5x
+ *		as long: a 22x under-charge, and in the direction that makes the planner
+ *		prefer the plan that is slower (#768).
+ *
+ *		Decode cost tracks BYTES. Per byte, text measured 1.14x an int4 on the md5
+ *		fixture, and across an 81x width range the per-byte figures span 0.45x to
+ *		1.36x -- within ~1.5x, against 59x for a per-column model. The profile says
+ *		the same thing: the text arm's self time is 15.60% __memmove_avx against
+ *		2.88% on the int arm, so the extra time is spent copying the extra bytes.
+ *
+ *		Width is divided by COLUMNAR_DECODE_REF_WIDTH so that a 4-byte column
+ *		contributes exactly 1.0 and an int-only projection is priced exactly as
+ *		#503 priced it. That is deliberate: it keeps the existing calibration for
+ *		the narrow case that #503 was tuned against, and changes only the wide
+ *		case that was wrong.
+ *
+ *		The per-column floor of 1.0 exists because decoding a value is not free
+ *		even when the value is one byte: a bool column still costs a validity
+ *		check, a rank, and a store. Without the floor this would REDUCE the charge
+ *		for narrow columns below what #503 measured, which nothing here justifies.
+ *
+ *		Width comes from ANALYZE's stored average, with get_typavgwidth as the
+ *		fallback, for the reason given on the width fraction below: a varlena
+ *		column's type width is "we do not know".
+ */
+#define COLUMNAR_DECODE_REF_WIDTH	4.0
+
+static double
+pgcolumnar_projected_decode_units(RelOptInfo *rel, Oid heapRelid)
+{
+	Bitmapset  *needed = NULL;
+	Relation	r;
+	TupleDesc	tupdesc;
+	ListCell   *lc;
+	double		units = 0.0;
+	int			i;
+
+	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &needed);
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		pull_varattnos((Node *) rinfo->clause, rel->relid, &needed);
+	}
+
+	r = table_open(heapRelid, AccessShareLock);
+	tupdesc = RelationGetDescr(r);
+
+	for (i = 1; i <= tupdesc->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tupdesc, i - 1);
+		double		w;
+
+		if (att->attisdropped)
+			continue;
+		if (!bms_is_member(i - FirstLowInvalidHeapAttributeNumber, needed))
+			continue;
+
+		w = (double) get_attavgwidth(heapRelid, att->attnum);
+		if (w <= 0.0)
+			w = (double) get_typavgwidth(att->atttypid, att->atttypmod);
+		if (w <= 0.0)
+			w = 1.0;
+
+		w = w / COLUMNAR_DECODE_REF_WIDTH;
+		units += (w < 1.0) ? 1.0 : w;
+	}
+
+	table_close(r, AccessShareLock);
+	bms_free(needed);
+
+	return units;
+}
+
+/*
  * pgcolumnar_projected_width_fraction
  *		The share of a row's stored width this scan actually reads, in (0, 1].
  *		One means every column is referenced.
@@ -1967,40 +2061,6 @@ pgcolumnar_full_scan_cost(RelOptInfo *rel, Path *seqpath)
  *		Both the target list and the restriction clauses count: a qual on a
  *		column that is not selected still has to be decoded to be evaluated.
  */
-/*
- * pgcolumnar_projected_ncols
- *		How many distinct columns a scan decodes: the projected columns plus the
- *		columns any restriction reads. This is the multiplier for the per-value
- *		decode cost (#503); the inherited heap seqscan cost has no such term, so a
- *		wide projection is priced the same as a narrow one and the planner cannot
- *		see that decoding nine columns costs nine times the CPU of decoding one.
- *		Counted from the same "needed" set as the width fraction below, but as a
- *		count rather than a width, because decode cost is per value not per byte.
- */
-static int
-pgcolumnar_projected_ncols(RelOptInfo *rel)
-{
-	Bitmapset  *needed = NULL;
-	ListCell   *lc;
-	int			n = 0;
-	int			m = -1;
-
-	pull_varattnos((Node *) rel->reltarget->exprs, rel->relid, &needed);
-	foreach(lc, rel->baserestrictinfo)
-	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-
-		pull_varattnos((Node *) rinfo->clause, rel->relid, &needed);
-	}
-
-	while ((m = bms_next_member(needed, m)) >= 0)
-		if (m + FirstLowInvalidHeapAttributeNumber >= 1)		/* a real column, not a system attr */
-			n++;
-
-	bms_free(needed);
-	return n;
-}
-
 static double
 pgcolumnar_projected_width_fraction(RelOptInfo *rel, Oid heapRelid)
 {
@@ -2369,8 +2429,14 @@ pgcolumnar_refined_scan_cost(RelOptInfo *rel, Oid relid, Path *seqpath,
 			saved = run;
 		run -= saved;
 	}
-	/* per-column decode CPU (#503), scaled by survival like the rest */
-	run += cpu_operator_cost * ntuples * (double) pgcolumnar_projected_ncols(rel);
+	/*
+	 * Per-value decode CPU (#503), now weighted by each column's width
+	 * (#768), and scaled by survival like the rest. An int-only projection
+	 * is priced exactly as before; a wide one is priced for the bytes it
+	 * actually copies.
+	 */
+	run += cpu_operator_cost * ntuples *
+		pgcolumnar_projected_decode_units(rel, relid);
 
 	*out_startup = startup;
 	*out_total = startup + run * survival;

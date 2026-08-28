@@ -49,6 +49,59 @@ RATIO="$(awk -v w="$WIDE" -v n="$NARROW" 'BEGIN{ printf "%.3f", (n>0)?w/n:0 }')"
 check "a wide projection costs materially more than a narrow one (decode is priced)" \
 	"$(awk -v r="$RATIO" 'BEGIN{ print (r >= 1.5) ? "scaled" : "flat" }')" "scaled"
 
+# --- #768: the decode charge must scale with WIDTH, not just column count ------
+#
+# #503 above priced one cpu_operator_cost per decoded VALUE, which fixed "nine
+# columns cost the same as one". It left a second flatness: a 324-byte text
+# column is charged exactly what a 4-byte int4 column is. Measured on 4,000,000
+# rows, PG17 non-assert, metadata and fold paths off, min of interleaved reps:
+#
+#   marginal cost of one more projected column
+#     int4            4 bytes     24.0 ms
+#     text (md5)     36 bytes    247.0 ms      10.29x for 9.00x the bytes
+#     text (long)   324 bytes   1420.3 ms
+#
+#   and what the planner charged for the whole projection, after ANALYZE:
+#     8 int4                     206,524   at   335 ms
+#     4 text (324 bytes)         163,422   at  5875 ms
+#
+# Four long-text columns were priced BELOW eight int columns while taking 17.5
+# times as long -- a 22x under-charge. Decode cost tracks bytes to within ~1.5x
+# across an 81x width range; charging by column count is off by 59x across the
+# same range.
+#
+# The bound is deliberately weak. The measured time ratio is 17.5x and the fixed
+# model prices these ~40x apart on the decode term alone, but the assertion only
+# demands 2x, because the point is the SIGN of the comparison: the flat model
+# puts the text projection BELOW the int one at 0.79x, so 2x is unreachable
+# without width entering the charge, and the check does not encode one box's
+# calibration.
+TW=100000
+psql_run "CREATE TABLE cwide (a int4,b int4,c int4,d int4,e int4,f int4,g int4,h int4,
+	t1 text, t2 text, t3 text, t4 text) USING pgcolumnar;"
+psql_run "INSERT INTO cwide SELECT i,i,i,i,i,i,i,i,
+	repeat(md5(i::text),3), repeat(md5((i+1)::text),3),
+	repeat(md5((i+2)::text),3), repeat(md5((i+3)::text),3)
+	FROM generate_series(1,$TW) i;"
+psql_run "ANALYZE cwide;"
+
+# PREMISE: the fixture must actually be wide, and the planner must be able to SEE
+# that it is. A cost model that reads width from statistics is void as a subject
+# if the statistics are missing -- the arms would differ by nothing the model can
+# observe, and the check would be about ANALYZE rather than about costing.
+WT="$(q "SELECT avg_width FROM pg_stats WHERE tablename='cwide' AND attname='t1'")"
+WA="$(q "SELECT avg_width FROM pg_stats WHERE tablename='cwide' AND attname='a'")"
+check "premise: the wide column's width is in the statistics" 	"$([ "${WT:-0}" -ge 64 ] && echo "wide ($WT)" || echo "NOT WIDE (${WT:-none})")" "wide ($WT)"
+check "premise: and the narrow column's width is too, and is smaller" 	"$([ "${WA:-0}" -gt 0 ] && [ "${WA:-0}" -lt "${WT:-0}" ] && echo yes || echo "no (a=${WA:-none} t1=$WT)")" "yes"
+
+CTEXT="$(topcost 'SELECT t1,t2,t3,t4 FROM cwide')"
+CINT="$(topcost 'SELECT a,b,c,d,e,f,g,h FROM cwide')"
+check "premise: both projections priced" 	"$([ -n "$CTEXT" ] && [ -n "$CINT" ] && echo yes || echo no)" "yes"
+
+WRATIO="$(awk -v t="$CTEXT" -v i="$CINT" 'BEGIN{ printf "%.3f", (i>0)?t/i:0 }')"
+echo "-- #768: 4 wide text columns cost $CTEXT, 8 narrow int columns cost $CINT (${WRATIO}x)"
+check "four wide text columns cost more than eight narrow int ones (#768)" 	"$(awk -v r="$WRATIO" 'BEGIN{ print (r >= 2.0) ? "scaled" : "flat" }')" "scaled"
+
 # #171 guard: a point lookup on an indexed column must still choose the index,
 # not a full columnar scan. Raising the scan cost is the safe direction, but pin
 # it so a too-large term cannot push the planner off the index either.
