@@ -57,6 +57,14 @@ typedef struct SkipPredicate
 	bool		hasHash;
 	FmgrInfo	hashFn;
 	Oid			hashCollation;
+
+	/*
+	 * How many groups this predicate has excluded (#403 item 4). Drives the
+	 * evaluation order: the loop breaks on the first exclusion, so trying the
+	 * predicate that usually excludes first saves the catalog probes the others
+	 * would have made on a group that is thrown away anyway.
+	 */
+	uint64		excludes;
 } SkipPredicate;
 
 struct PgColumnarReadState
@@ -92,6 +100,7 @@ struct PgColumnarReadState
 	bool		allColumnsWanted;	/* true when colWanted is all true */
 
 	SkipPredicate *predicates;		/* [numPredicates], in readContext */
+	int		   *predOrder;		/* [numPredicates]: indices, most selective first */
 	int			numPredicates;
 
 	/*
@@ -785,10 +794,19 @@ pgcolumnar_build_predicates(PgColumnarReadState *readState, int nkeys, ScanKey k
 		return;
 
 	readState->predicates = palloc0(sizeof(SkipPredicate) * nkeys);
+	readState->predOrder = palloc0(sizeof(int) * nkeys);
 	readState->numPredicates =
 		pgcolumnar_make_predicates(readState->predicates, nkeys, keys,
 								   readState->tupdesc, readState->natts,
 								   readState->readContext);
+
+	/*
+	 * Seed the evaluation order with the order the keys arrived in, which is
+	 * attribute order rather than anything to do with selectivity, and let the
+	 * scan reorder it from what actually excludes (#403 item 4).
+	 */
+	for (int i = 0; i < readState->numPredicates; i++)
+		readState->predOrder[i] = i;
 }
 
 /*
@@ -1382,6 +1400,44 @@ pgcolumnar_merge_delete_vectors(List *maskList, uint32 want,
  *		of the 2.2 chunk catalog. A missing or non-orderable zone map is treated
  *		conservatively as "may match". Runs in rs->skipContext (caller-reset).
  */
+/*
+ * pgcolumnar_predicate_excluded
+ *		Record that the predicate at order position oi excluded a group, and move
+ *		it one place towards the front if it now excludes more often than the
+ *		predicate ahead of it (#403 item 4).
+ *
+ *		A transpose rather than a sort. It is O(1) per exclusion, it needs no
+ *		statistics the reader does not have, and it converges in one step for the
+ *		shape that matters: one selective predicate behind an unselective one.
+ *		The paper's caveat -- order only when a highly selective predicate is
+ *		present, or the ordering costs more than it saves -- falls out of the
+ *		mechanism rather than needing a threshold: a predicate that never
+ *		excludes never moves, so a query with no selective predicate keeps the
+ *		order it started with and pays nothing.
+ *
+ *		This cannot change an answer. The predicates are a conjunction, and a
+ *		conjunction is order-independent; the loop returns "cannot match" on the
+ *		first exclusion whichever one that is.
+ */
+static void
+pgcolumnar_predicate_excluded(PgColumnarReadState *rs, int oi)
+{
+	int			here = rs->predOrder[oi];
+	int			ahead;
+
+	rs->predicates[here].excludes++;
+
+	if (oi == 0)
+		return;
+
+	ahead = rs->predOrder[oi - 1];
+	if (rs->predicates[ahead].excludes < rs->predicates[here].excludes)
+	{
+		rs->predOrder[oi - 1] = here;
+		rs->predOrder[oi] = ahead;
+	}
+}
+
 static bool
 pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 {
@@ -1389,13 +1445,14 @@ pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 	bool	   *zoneLookedUp = NULL;
 	NativeBloomMetadata **byColBloom = NULL;
 	bool	   *bloomLookedUp = NULL;
-	int			p;
+	int			oi;
 
 	if (rs->numPredicates == 0)
 		return true;
 
-	for (p = 0; p < rs->numPredicates; p++)
+	for (oi = 0; oi < rs->numPredicates; oi++)
 	{
+		int			p = rs->predOrder[oi];
 		SkipPredicate *pred = &rs->predicates[p];
 		Form_pg_attribute att = TupleDescAttr(rs->tupdesc, pred->attidx);
 
@@ -1423,7 +1480,10 @@ pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 		}
 
 		if (native_zone_excludes(pred, att, byColZone[pred->attidx], rs->skipContext))
+		{
+			pgcolumnar_predicate_excluded(rs, oi);
 			return false;
+		}
 
 		/*
 		 * min/max did not rule the group out; for equality consult the per-chunk
@@ -1476,7 +1536,10 @@ pgcolumnar_native_group_can_match(PgColumnarReadState *rs, uint64 groupNumber)
 									  pred->compareValue));
 
 				if (!PgColumnarBloomProbe(b->filter, b->filterLen, h))
+				{
+					pgcolumnar_predicate_excluded(rs, oi);
 					return false;
+				}
 			}
 		}
 	}
@@ -4392,4 +4455,16 @@ uint64
 PgColumnarVectorsRuledOutByValue(PgColumnarReadState *readState)
 {
 	return readState->vectorsRuledOutByValue;
+}
+
+/*
+ * PgColumnarZoneMapProbes
+ *		Zone-map catalog probes this scan made (#403 item 4). Counted in the
+ *		session the probes go through, so it counts lookups performed rather
+ *		than lookups a caller intended.
+ */
+uint64
+PgColumnarZoneMapProbes(PgColumnarReadState *readState)
+{
+	return readState->zmSession.probes;
 }

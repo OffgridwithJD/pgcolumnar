@@ -642,6 +642,7 @@ extern uint64 PgColumnarVectorsSkipped(PgColumnarReadState *readState);
 extern uint64 PgColumnarVectorsDecoded(PgColumnarReadState *readState);
 extern uint64 PgColumnarVectorDecodes(PgColumnarReadState *readState);
 extern uint64 PgColumnarVectorsRuledOutByValue(PgColumnarReadState *readState);
+extern uint64 PgColumnarZoneMapProbes(PgColumnarReadState *readState);
 
 /*
  * How many of the scan keys the reader was handed became skip predicates it can
@@ -925,6 +926,15 @@ typedef struct PgColumnarGroupStats
 	 * does not move while the work done falls by a factor of the column count.
 	 */
 	uint64		vectorDecodes;
+
+	/*
+	 * Zone-map catalog probes (#403 item 4). One index scan per (group, column)
+	 * a predicate touches, so a conjunction whose EXCLUDING predicate is tried
+	 * last probes every other predicate's column first, on every group it then
+	 * throws away. This is the number predicate ordering moves; groups removed
+	 * cannot see it, because the same groups are removed either way.
+	 */
+	uint64		zoneMapProbes;
 
 	/*
 	 * The subset of vectorsSkipped that exact selection ruled out (#452 phase

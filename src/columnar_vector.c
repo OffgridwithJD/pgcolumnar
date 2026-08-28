@@ -618,6 +618,7 @@ typedef struct PgColumnarAggScanState
 	uint64		vectorsDecoded;
 	uint64		vectorDecodes;
 	uint64		vectorsRuledOutByValue;
+	uint64		zoneMapProbes;
 	uint64		groupsTotal;
 
 	/*
@@ -746,6 +747,7 @@ typedef struct PgColumnarGroupAggScanState
 	uint64		vectorsDecoded;
 	uint64		vectorDecodes;
 	uint64		vectorsRuledOutByValue;
+	uint64		zoneMapProbes;
 	uint64		groupsTotal;
 	int			usablePreds;	/* of npreds, how many can exclude (#479) */
 
@@ -3928,6 +3930,7 @@ pgcolumnar_native_batch_fold(PgColumnarAggScanState *state, Relation rel,
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->vectorDecodes = PgColumnarVectorDecodes(rs);
 	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
+	state->zoneMapProbes = PgColumnarZoneMapProbes(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 	PgColumnarEndRead(rs);
@@ -4074,6 +4077,7 @@ pgcolumnar_native_scan_agg(PgColumnarAggScanState *state,
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->vectorDecodes = PgColumnarVectorDecodes(rs);
 	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
+	state->zoneMapProbes = PgColumnarZoneMapProbes(rs);
 		state->haveStats = true;
 	}
 
@@ -4299,6 +4303,7 @@ PgColumnarExplainAggScan(CustomScanState *node, List *ancestors, ExplainState *e
 		gs.vectorsDecoded = state->vectorsDecoded;
 		gs.vectorDecodes = state->vectorDecodes;
 		gs.vectorsRuledOutByValue = state->vectorsRuledOutByValue;
+		gs.zoneMapProbes = state->zoneMapProbes;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }
@@ -5308,6 +5313,7 @@ pgcolumnar_groupagg_batch_fold(PgColumnarGroupAggScanState *state, Relation rel,
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->vectorDecodes = PgColumnarVectorDecodes(rs);
 	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
+	state->zoneMapProbes = PgColumnarZoneMapProbes(rs);
 	state->haveStats = true;
 	state->batchFolded = true;
 
@@ -5427,6 +5433,7 @@ pgcolumnar_groupagg_build(PgColumnarGroupAggScanState *state)
 	state->vectorsDecoded = PgColumnarVectorsDecoded(rs);
 	state->vectorDecodes = PgColumnarVectorDecodes(rs);
 	state->vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(rs);
+	state->zoneMapProbes = PgColumnarZoneMapProbes(rs);
 	state->haveStats = true;
 
 	PgColumnarEndRead(rs);
@@ -5606,6 +5613,7 @@ PgColumnarExplainGroupAggScan(CustomScanState *node, List *ancestors,
 		gs.vectorsDecoded = state->vectorsDecoded;
 		gs.vectorDecodes = state->vectorDecodes;
 		gs.vectorsRuledOutByValue = state->vectorsRuledOutByValue;
+		gs.zoneMapProbes = state->zoneMapProbes;
 		PgColumnarExplainGroupStats(&gs, es);
 	}
 }

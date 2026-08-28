@@ -3473,6 +3473,8 @@ PgColumnarExplainGroupStats(const PgColumnarGroupStats *stats, ExplainState *es)
 						   (int64) stats->vectorDecodes, es);
 	ExplainPropertyInteger("Columnar Vectors Ruled Out by Value", NULL,
 						   (int64) stats->vectorsRuledOutByValue, es);
+	ExplainPropertyInteger("Columnar Zone Map Probes", NULL,
+						   (int64) stats->zoneMapProbes, es);
 }
 
 /* -------------------------------------------------------------------------
@@ -3605,6 +3607,7 @@ PgColumnarExplainCustomScan(CustomScanState *node, List *ancestors,
 		gs.vectorsDecoded = PgColumnarVectorsDecoded(cstate->readState);
 		gs.vectorDecodes = PgColumnarVectorDecodes(cstate->readState);
 		gs.vectorsRuledOutByValue = PgColumnarVectorsRuledOutByValue(cstate->readState);
+		gs.zoneMapProbes = PgColumnarZoneMapProbes(cstate->readState);
 		PgColumnarExplainGroupStats(&gs, es);
 
 		/*

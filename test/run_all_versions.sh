@@ -233,6 +233,7 @@ SUITES=(
 	projection_privilege
 	projections
 	pushdown_report
+	qual_order_selectivity
 	read_stream
 	reader_buffer_reuse
 	recluster_extent
