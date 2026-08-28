@@ -41,6 +41,7 @@ fi
 echo "== pgColumnar build check across majors =="
 
 failed=0
+built=0
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
 		printf '  SKIP  %-34s (not executable)\n' "$pgc"
@@ -55,6 +56,7 @@ for pgc in "${CONFIGS[@]}"; do
 		# -Werror is not set, so a warning still builds; report it rather than
 		# let a new one accumulate unnoticed across majors.
 		warns="$(grep -cE '^[^ ].*\bwarning:' "$log")"
+		built=$((built + 1))
 		printf '  OK    %-34s %s warning(s)\n' "$ver" "$warns"
 		[ "$warns" != "0" ] && grep -E '^[^ ].*\bwarning:' "$log" | head -5 | sed 's/^/          /'
 	else
@@ -69,8 +71,30 @@ done
 # build against a different major would link objects compiled for this one.
 make -C "$SRCDIR" clean >/dev/null 2>&1 || true
 
+# What was actually compiled, next to what was asked for. Without this line the
+# verdict below collapses "built five" and "built none" into the same word: a
+# pg_config that is not executable is skipped above without touching `failed`,
+# so a run that invoked no compiler at all reached PASSED and exit 0 (#809). The
+# sibling run_all_versions.sh prints the same shape, `versions run: N of M`.
+echo "  built $built of ${#CONFIGS[@]}"
+
 if [ "$failed" != "0" ]; then
 	echo "build_all_versions.sh: FAILED"
+	exit 1
+fi
+
+# Zero is refused rather than reported. A preflight that compiled nothing has
+# not answered the question it was run to answer, and the most likely cause is
+# that this machine keeps its builds somewhere other than the default list --
+# which is a reason to name the paths, not a reason to call the run clean.
+#
+# A PARTIAL run is deliberately left passing. Whether three of five present
+# should fail or warn is a judgement about how people run this; the count above
+# makes it visible either way, and only the zero case is unambiguously wrong.
+if [ "$built" = "0" ]; then
+	echo "build_all_versions.sh: FAILED (built nothing: every pg_config was skipped)"
+	echo "       name the pg_config paths explicitly, e.g."
+	echo "       test/build_all_versions.sh /usr/local/pg15a/bin/pg_config ..."
 	exit 1
 fi
 echo "build_all_versions.sh: PASSED"

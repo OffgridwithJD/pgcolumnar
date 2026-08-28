@@ -68,6 +68,27 @@ true until the next version shipped.
   rather than resizes because the two disagree: the first instrument counted
   resizes and reported that sizing removed 7 of 10 while it removed about a
   quarter of the rehashing, the work being dominated by the last two steps.
+### Fixed
+
+- `test/build_all_versions.sh` now reports how many majors it built and refuses
+  a run that built none (#809). Its verdict read only the `failed` flag, which
+  only a build that RUNS and FAILS sets, so a `pg_config` that is not executable
+  was skipped without touching it. A run where every major was skipped reached
+  the end with `failed=0` and printed `PASSED` with exit 0, having invoked no
+  compiler.
+
+  That is not hypothetical: the default list is `/usr/local/pg15`, `pg16`,
+  `pg17`, `pgsql` and `pg19`, and a machine whose builds live elsewhere skips
+  all five. It was recorded as a green five-major preflight for a pull request
+  and caught by reading the body above the verdict rather than by any check.
+
+  The script now prints `built N of M` before its verdict, in the same shape
+  `test/run_all_versions.sh` already uses for `versions run: N of M configured`,
+  and fails on zero with the invocation that names the paths. A PARTIAL run is
+  deliberately left passing: whether three of five present should fail or warn
+  is a judgement about how people run this, and the count makes it visible
+  either way. A new `harness_selftest` case pins all three behaviours, since
+  nothing covered this script before.
 
 ### Added
 
