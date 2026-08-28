@@ -84,6 +84,7 @@ SUITES=(
 	fuzz_listing
 	fuzz_parquet
 	generated_columns
+	groupagg_table_sizing
 	hardening
 	harness_selftest
 	iceberg_catalog
