@@ -17,11 +17,13 @@
 # which is not the property. Reading the tag the running system actually took, then
 # trying to grab that exact tag through the SQL function, is.
 #
-# It also avoids a trap the first version of this file walked into: lib.sh sets
-# pgcolumnar.unique_lock_buckets=100003, so "hold every bucket" needs 100,003
-# advisory locks against a max_locks_per_transaction of 64. The holder failed, the
-# check passed with nobody holding anything, and the suite reported the same result
-# with and without the fix.
+# It also avoids a trap the first version of this file walked into: "hold every
+# bucket" needs one advisory lock per bucket against a max_locks_per_transaction
+# of 64, so the holder failed, the check passed with nobody holding anything, and
+# the suite reported the same result with and without the fix. That was found
+# when lib.sh globally set unique_lock_buckets=100003; the global is gone (#799)
+# and the shipped default is 128, but 128 still exceeds 64, so discovering the
+# tag rather than enumerating buckets remains the right shape.
 #
 # Usage:  test/advisory_lock_class.sh [PG_CONFIG]
 # Written fresh for pgColumnar.

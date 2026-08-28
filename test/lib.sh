@@ -223,10 +223,16 @@ pgc_setup() {
 		echo "bytea_output='hex'"
 		# Keep planner honest but let small tables use the custom scan.
 		echo "max_parallel_workers_per_gather=0"
-		# The unique-insert lock bucket count is fixed at server start (it is part
-		# of the advisory lock tag, so backends must agree on it). A large prime
-		# keeps unrelated keys out of the same bucket in unique_conc.
-		echo "pgcolumnar.unique_lock_buckets=100003"
+		# No pgcolumnar.* GUC is set here. A global override makes every suite
+		# in the tree measure something other than the shipped default, and the
+		# divergence is invisible from inside the suite that trips over it: this
+		# line used to read unique_lock_buckets=100003 against a shipped default
+		# of 128, so a 20,000-row insert into a table with a unique index
+		# exhausted max_locks_per_transaction and failed with "out of shared
+		# memory" -- an error that reads as a product defect and is not one
+		# (#799). unique_conc.sh sets the value on its own cluster, where it
+		# belongs; anything else that needs a non-default GUC has PGC_EXTRA_CONF
+		# below. Selftest 280 keeps this section free of them.
 		# Per-suite extra GUCs, set before the cluster starts (some, like
 		# max_prepared_transactions, are PGC_POSTMASTER and cannot be changed
 		# later). parallel_copy.sh uses this for 2PC capacity + worker slots.

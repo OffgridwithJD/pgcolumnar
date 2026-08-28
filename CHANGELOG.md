@@ -16,6 +16,16 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The shared test cluster no longer sets `pgcolumnar.unique_lock_buckets`
+  (#799). `test/lib.sh` wrote `100003` into the cluster nearly every suite runs
+  against, where the shipped default is `128`, so the whole tree ran 781x above
+  shipped behaviour to serve one suite that already sets the value on the
+  cluster it builds itself. The visible symptom was a 20,000-row insert into a
+  columnar table with a unique index failing with `out of shared memory` and a
+  hint to raise `max_locks_per_transaction`, which reads as a product defect and
+  is not one. A new harness selftest keeps the shared cluster config free of
+  `pgcolumnar.*` GUCs; `PGC_EXTRA_CONF` remains the per-suite mechanism.
+
 - The fetch cache cost guards in `test/native_fetch_cache.sh` now assert that
   they reach the per-row fetch path, and set
   `pgcolumnar.enable_index_fetch_penalty = off` so that they do (#797). They had
