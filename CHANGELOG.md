@@ -2,17 +2,48 @@
 
 All notable changes to pgColumnar are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). pgColumnar is
-pre-release; the version marker is `1.0-alpha2`, recorded in `VERSION`. New tables
+pre-release; the version marker is `1.0-alpha3`, recorded in `VERSION`. New tables
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's `default_version` is `1.0-alpha2`, and upgrade scripts from both
-previously shipped versions (`1.0-dev`, which the v1.0-alpha tag installed, and
-`1.0-alpha`) ship with it, so a single `ALTER EXTENSION pgcolumnar UPDATE` reaches
-`1.0-alpha2` from either. Older notes in this file describe `default_version` as
-pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
+The extension's `default_version` is `1.0-alpha3`, which is in development and not
+yet tagged; the latest published pre-release is `v1.0-alpha2`. Upgrade scripts from
+every previously shipped version ship with it (`1.0-dev`, which the v1.0-alpha tag
+installed, `1.0-alpha`, and `1.0-alpha2`), so a single
+`ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha3` from any of them. Older
+notes in this file describe `default_version` as pinned at an earlier version, each
+true until the next version shipped.
 
 ## [Unreleased]
+
+### Added
+
+- `pgcolumnar.sort_status` reports `sorted_kind`, so the reporter can finally
+  express the distinction the catalog has recorded since #758 (#761). It holds
+  `lexicographic` after `pgcolumnar.vacuum_sorted`, `zorder` after
+  `pgcolumnar.cluster` and `pgcolumnar.recluster`, and NULL when the table was
+  never ordered or was ordered before the column existed.
+
+  `sort_key` names the columns and says nothing about the arrangement, and a
+  Z-order over two or more columns is not a sort on any one of them. The
+  documented way to read the kind was to select it from `pgcolumnar.storage`
+  directly. That table carries no `GRANT`, so only a superuser could follow that
+  advice, while `sort_status` is SECURITY DEFINER and gated on
+  `require_caller_select` and is therefore available to a table's own owner.
+
+### Changed
+
+- The extension's `default_version` is now `1.0-alpha3`, and
+  `pgcolumnar--1.0-alpha2--1.0-alpha3.sql` ships with it. Adding an OUT parameter
+  changes a function's signature, so #761 cannot be a `CREATE OR REPLACE`; it is
+  the change that opens this cycle. Every other `[Unreleased]` entry so far is
+  shared-library only and needs no catalog change.
+
+  `test/native_upgrade_converge.sh` now exercises both `1.0-alpha` and
+  `1.0-alpha2` as starting points, and asserts that each reaches a catalog
+  identical to a fresh `1.0-alpha3` install in function definition, ACL and
+  comment, relation kind, column type and comment, non-base types, and foreign
+  data wrappers. `1.0-alpha` reaches it by the chain through `1.0-alpha2`.
 
 ### Fixed
 
