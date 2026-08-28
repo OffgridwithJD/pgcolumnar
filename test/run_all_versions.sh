@@ -269,7 +269,8 @@ SUITES=(
 	wal_envelope
 	write_fsst_compressed
 	write_minmax_fastpath
-	zonemap_cost)
+	zonemap_cost
+	zonemap_estimate_sample)
 
 
 # ---------------------------------------------------------------------------

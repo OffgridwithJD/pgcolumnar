@@ -493,6 +493,15 @@ typedef struct PgColumnarZoneMapSession
 	Oid			idxOid;
 	uint64		probes;
 	uint64		opens;
+	/*
+	 * What this session was opened for, used only in the DEBUG1 report. The
+	 * planner's survival estimate holds a session of its own, and its report has
+	 * to be told apart from a scan's: they interleave in one backend's log, and
+	 * native_zonemap_session counts scan reports to prove a scan around an
+	 * aborted one opens for itself. NULL reads as "read", so an executor scan's
+	 * line is byte-identical to what #744 shipped.
+	 */
+	const char *what;
 } PgColumnarZoneMapSession;
 
 /* sess may be NULL, which is the old open-per-probe behaviour. */

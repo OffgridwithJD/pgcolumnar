@@ -355,7 +355,8 @@ PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess)
 	}
 	sess->idxOid = InvalidOid;
 	if (message_level_is_interesting(DEBUG1))
-		elog(DEBUG1, "pgcolumnar zone map read: probes=%lu opens=%lu",
+		elog(DEBUG1, "pgcolumnar zone map %s: probes=%lu opens=%lu",
+			 sess->what != NULL ? sess->what : "read",
 			 (unsigned long) sess->probes, (unsigned long) sess->opens);
 }
 
@@ -2937,7 +2938,19 @@ PgColumnarReadZoneMapForColumn(uint64 storageId, uint64 groupNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
 	ScanKeyInit(&key[2], Anum_zone_map_column_index, BTEqualStrategyNumber,
 				F_INT2EQ, Int16GetDatum((int16) columnIndex));
-	idxOid = pgcolumnar_index_oid("zone_map_pkey");
+	/*
+	 * idxOid is already resolved above -- from the session when there is one,
+	 * by lookup when there is not. A second unconditional
+	 * pgcolumnar_index_oid("zone_map_pkey") stood here and overwrote both, so
+	 * #744's cache stored an index oid that every probe discarded and
+	 * re-derived. The `opens` counter never noticed, because it counts relation
+	 * opens, which the session really did save; the cache read as wholly
+	 * effective while half of what it cached was thrown away. A dead store
+	 * draws no compiler warning, which is how it survived.
+	 *
+	 * The sibling PgColumnarReadZoneMapVectorsForColumn was checked and has one
+	 * lookup, not two.
+	 */
 	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 3, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{

@@ -1597,14 +1597,20 @@ PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc, List *qual,
 	int			nkeys = 0;
 	SkipPredicate *preds;
 	int			npreds;
+	NativeZoneMapMetadata **byCol;
+	bool	   *lookedUp;
 	Snapshot	snap;
 	MemoryContext cx;
 	MemoryContext old;
+	PgColumnarZoneMapSession sess;
 	int			nsample;
 	int			i;
 	int			examined = 0;
 	int			survived = 0;
 	double		survival;
+
+	memset(&sess, 0, sizeof(sess));
+	sess.what = "estimate";
 
 	if (ngroups == 0 || tupdesc == NULL || qual == NIL)
 		return 1.0;
@@ -1646,47 +1652,97 @@ PgColumnarEstimatePruneSurvival(uint64 storageId, TupleDesc tupdesc, List *qual,
 		return 1.0;
 	}
 
+	byCol = palloc0(sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
+	lookedUp = palloc0(sizeof(bool) * tupdesc->natts);
+
 	for (i = 0; i < nsample; i++)
 	{
-		uint64		g = (uint64) (((double) i * (double) ngroups) / (double) nsample);
-		List	   *zones;
-		NativeZoneMapMetadata **byCol;
-		ListCell   *lc;
+		/*
+		 * Row group numbers are ONE-based, so the sample must be too.
+		 *
+		 * A group number is the stripe id reserved from the metapage when the
+		 * stripe began buffering (columnar_write_state.c, "the row group number
+		 * is the stripe id"), and the metapage starts reservedStripeId at 1.
+		 * There is no group 0 on any table, so the plain stride
+		 * i * ngroups / nsample spent its first probe on a number that cannot
+		 * exist and never reached group ngroups at all.
+		 *
+		 * The wasted probe was harmless -- an absent group narrows the sample
+		 * rather than biasing it -- but the missing one was not. When ngroups
+		 * fits in sampleTarget this loop is a CENSUS, and it was a census that
+		 * omitted the newest group every time, so the same predicate was priced
+		 * differently depending on WHERE in the table its groups sat. Measured
+		 * on ten groups of 2,000 rows, one clause, identical row estimates:
+		 * the six newest groups were priced at 166.89 and the six oldest at
+		 * 200.27; the two newest at 33.38 and the two oldest at 66.76, exactly
+		 * half. The under-priced half is the recency predicate this engine is
+		 * aimed at.
+		 */
+		uint64		g = 1 + (uint64) (((double) i * (double) ngroups) / (double) nsample);
 		bool		canMatch = true;
+		bool		present = false;
 		int			p;
 
 		CHECK_FOR_INTERRUPTS();
 
-		zones = PgColumnarReadZoneMapList(storageId, g, snap);
-		if (zones == NIL)
-			continue;			/* no such group: narrow the sample, do not bias it */
-
-		examined++;
-
-		byCol = palloc0(sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
-		foreach(lc, zones)
-		{
-			NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
-
-			if (z->columnIndex >= 0 && z->columnIndex < tupdesc->natts)
-				byCol[z->columnIndex] = z;
-		}
+		memset(byCol, 0, sizeof(NativeZoneMapMetadata *) * tupdesc->natts);
+		memset(lookedUp, 0, sizeof(bool) * tupdesc->natts);
 
 		for (p = 0; p < npreds; p++)
 		{
 			Form_pg_attribute att = TupleDescAttr(tupdesc, preds[p].attidx);
+			int			a = preds[p].attidx;
 
-			if (native_zone_excludes(&preds[p], att, byCol[preds[p].attidx], cx))
+			/*
+			 * One probe per PREDICATE COLUMN, not one per group.
+			 *
+			 * This asked PgColumnarReadZoneMapList for the whole group and then
+			 * dereferenced byCol[preds[p].attidx] alone. That call keys on
+			 * (storage_id, group_number) against a four-column index, so it
+			 * fetched every column's and every vector's row from the heap and
+			 * discarded the vector rows afterwards: 60 tuples per group on a
+			 * 30-column table to read one column's min and max.
+			 *
+			 * pgcolumnar_native_group_can_match already asks the per-column
+			 * question with a three-key probe (#314), and the estimator must ask
+			 * the same question the same way -- a discount taken by a different
+			 * rule than the one that priced it is how a plan gets chosen for a
+			 * saving it never realises. lookedUp records the fetch, not the
+			 * result, so two predicates on one column probe once and a column
+			 * with no zone map is not re-probed.
+			 */
+			if (!lookedUp[a])
+			{
+				byCol[a] = PgColumnarReadZoneMapForColumn(storageId, g, a,
+														  snap, &sess);
+				lookedUp[a] = true;
+			}
+			if (byCol[a] != NULL)
+				present = true;
+
+			if (native_zone_excludes(&preds[p], att, byCol[a], cx))
 			{
 				canMatch = false;
 				break;
 			}
 		}
 
+		/*
+		 * Absent group, decided by the predicate columns rather than by the
+		 * whole group's row list. When the group does not exist every probe
+		 * returns NULL; when it exists but the predicate columns carry no zone
+		 * map, nothing can prune on it and both readings give a survival of
+		 * 1.0, so the two cases need not be told apart.
+		 */
+		if (!present)
+			continue;			/* no such group: narrow the sample, do not bias it */
+
+		examined++;
 		if (canMatch)
 			survived++;
 	}
 
+	PgColumnarCloseZoneMapSession(&sess);
 	MemoryContextSwitchTo(old);
 
 	/*
