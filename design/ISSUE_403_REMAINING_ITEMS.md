@@ -45,6 +45,23 @@ Two structural facts that shape the ordering:
   manager. That is a real seam for tiering. It is also the reason tiering is not
   a small change: bytes outside the storage manager are outside crash recovery.
 
+## Outcome, 2026-08-28
+
+The plan is kept as written above, and this section records where each item
+actually landed. Two changed shape once measured, which is what the phases were
+ordered to find out early.
+
+| Item | Outcome |
+| --- | --- |
+| 6, hash table sizing | Merged, #810. Corrected on review: sizing at Begin allocated 131,072 entries for 47 real groups, so it now happens on the first grow and a grow is bounded by 64x the live count. |
+| 4, filter ordering | Merged, #811. The defect was worse than the issue described: the order was ATTRIBUTE order, and writing the selective predicate first in the query did not change it. 200 zone-map probes to 102. |
+| 3, set skipping index | **Not built. Measured and not justified.** On the shape #403 names, `os` and `arch` hold every distinct value in every row group, so a set index stores the whole domain and prunes nothing; the clumped columns are contiguous in sort order, where min/max is already exact. The `<>` pushdown proposed in its place was withdrawn after measurement too: the ceiling is freq(v), and sorting already achieves 90% of that bound. |
+| 7, idempotent inserts | PR #814. Whole-load fingerprint, not part hashes, because 2PC makes the load atomic. Opt-in, as decided. |
+| 5a, TTL | PR #815. `pgcolumnar.expire`, explicit rather than folded into a rewrite. |
+| 5b, tiering | **Rejected, not deferred.** design/OBJECT_STORAGE_TIERING.md. It removes columnar tables from physical replication, which is their only supported replication path, and keeping replication would need a new WAL record type the extension may not add. |
+
+Phase 3, the alpha3 cycle, was opened and merged as #812, carrying #761.
+
 ## Phases, in dependency order
 
 ### Phase 1: item 6, size the group hash table from runtime statistics
