@@ -782,6 +782,35 @@ pgc_is_columnar_scan() {	# query -> yes|no
 		| grep -q 'Columnar Projected Columns' && echo yes || echo no
 }
 
+# Does this query's plan drive the per-row fetch path?
+#
+# The fetch cache and its cap live in pgcolumnar_fetch_row(), which is reached
+# only from the index fetch. A cost guard that means to measure the cache must
+# assert this, because enable_seqscan=off and enable_bitmapscan=off do NOT
+# disable the columnar custom scan: the planner is free to answer the same query
+# with a group scan that never fetches a row, and the guard then times a
+# different mechanism and stays green forever (#797).
+#
+# The setup argument carries the SET statements the guard runs under, because
+# the plan depends on them -- pgcolumnar.enable_index_fetch_penalty in
+# particular decides this very choice. Passing them separately keeps them out of
+# the EXPLAIN target.
+#
+# A positive grep for "Index Scan using" rather than an absence test, for the
+# same reason as pgc_is_columnar_scan above: a plan that fell back has no line
+# to be absent, so an absence test passes for exactly the case worth catching.
+#
+# This asks about a SELECT that reaches the fetch path THROUGH AN INDEX SCAN. It
+# is the wrong premise for a DML guard: an UPDATE reaches pgcolumnar_fetch_row()
+# for every row it modifies while still planning as a custom scan, so this would
+# report "no" for a query that does exercise the cache. Measured: an UPDATE over
+# 2,000 rows made 20,366 fetch_row calls under a Custom Scan plan (#797).
+pgc_uses_row_fetch() {	# setup query -> yes|no
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "$1" -c "EXPLAIN (COSTS OFF) $2" 2>/dev/null \
+		| grep -q 'Index Scan using' && echo yes || echo no
+}
+
 # Order-independent set hash of an arbitrary query's result. The row is cast to
 # text as a whole composite so any column list works. No single quotes are used
 # in the wrapper (dollar-quoting + chr(10)) so the inner query may contain its
