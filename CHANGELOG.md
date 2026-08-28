@@ -79,6 +79,70 @@ true until the next version shipped.
 
 ### Fixed
 
+- The planner's zone-map sample is one-based, so it no longer under-prices a
+  scan for matching the **newest** rows (#817).
+
+  `pgcolumnar_zonemap_survival` samples row groups and asks the reader's own skip
+  predicates how many survive. It walked `g = i * ngroups / nsample` for `i` in
+  `[0, nsample)`, so it sampled `[0, ngroups)`. A row group number is the stripe
+  id reserved from the metapage, and the metapage starts `reservedStripeId` at 1:
+  **group 0 exists on no table.** The first probe was always spent on a number
+  that could not exist, and group `ngroups` was never probed at all.
+
+  The wasted probe was harmless -- an absent group narrows the sample rather than
+  biasing it. The missing one was not. When the group count fits in the sample
+  target the loop is a census, and it was a census that omitted the newest group
+  every time, so the same predicate was priced differently according to where in
+  the table its groups sat. Measured on ten groups of 2,000 rows, one clause
+  each, identical row estimates, the only difference being position:
+
+  | predicate | groups matched | before | after |
+  | --- | --- | ---: | ---: |
+  | `c1 > 8000` | 5..10, the six newest | 166.89 | 180.24 |
+  | `c1 <= 12000` | 1..6, the six oldest | 200.27 | 180.24 |
+  | `c1 > 17000` | 9,10, the two newest | 33.38 | 60.08 |
+  | `c1 <= 4000` | 1,2, the two oldest | 66.76 | 60.08 |
+
+  Exactly half, in the narrow pair. The under-priced half is the recency
+  predicate this engine is aimed at: on batch-loaded time-series, `WHERE ts >
+  now() - interval '1 hour'` selects the groups the sample never looked at.
+
+- The planner's zone-map sample reads only the predicate columns, as the executor
+  already does (#817).
+
+  It called `PgColumnarReadZoneMapList`, which keys on `(storage_id,
+  group_number)` against the four-column `zone_map_pkey`, so it fetched every
+  column's and every vector's row from the heap and then used one column's.
+  `pgcolumnar_native_group_can_match` has asked the per-column question with a
+  three-key probe since #314; the estimator now asks it the same way, through the
+  same `PgColumnarReadZoneMapForColumn` and the same session cache. Planning-time
+  `zone_map` fetches on a 30-column table go from 540 to 10, and no longer scale
+  with table width: 30 columns and 2 columns both read 10.
+
+  The estimator holds a #744 read session of its own, so it resolves `zone_map`
+  once for the whole sample rather than once per probe. Its `DEBUG1` report is
+  labelled `zone map estimate:` where a scan's stays `zone map read:`, because
+  the two interleave in one backend's log and `native_zonemap_session` counts
+  scan reports to prove that a scan around an aborted one opens for itself. A
+  scan's line is byte-identical to what #744 shipped.
+
+  **The two halves could not ship apart.** Fixing only the one-based sample makes
+  the whole-group probe reachable at the default `stripe_row_limit`, where the
+  single wasted probe had been hiding it, and `native_zonemap_narrow` correctly
+  reddens at wide 90 against narrow 34.
+
+- `PgColumnarReadZoneMapForColumn` no longer discards the index oid it just
+  cached (#817). #744 resolves `zone_map_pkey` once per read session and stores
+  it; an unconditional second `pgcolumnar_index_oid("zone_map_pkey")` stood
+  immediately before `systable_beginscan` and overwrote both that value and the
+  no-session branch's own lookup. The session's `opens` counter never noticed,
+  because it counts relation opens, which really were saved. Shown by poisoning
+  the cached value to `InvalidOid`: with the dead store present the poison is
+  inert (40 index fetches, 0 sequential scans, identical to the unpoisoned
+  control), and with it removed the poison reaches the scan and forces 20
+  sequential scans of `zone_map`. A dead store draws no compiler warning, which
+  is how it survived.
+
 - The cost model reads the row-group geometry a table was **written** with,
   not the geometry a write in the planning session would produce (#806).
   `pgcolumnar.storage.row_group_limit` records what the writer used and nothing
