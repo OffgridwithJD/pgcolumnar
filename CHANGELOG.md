@@ -79,6 +79,20 @@ true until the next version shipped.
 
 ### Fixed
 
+- `pgcolumnar.row_group.group_number` is documented as **one-based**, which is what
+  it has always been (#817). The column comment said "0-based row group ordinal".
+  A group number is the stripe id reserved from the metapage when the group began
+  buffering, and `PgColumnarInitMetapage` starts `reservedStripeId` at 1, so there
+  is no group 0 on any storage. Verified rather than reasoned: on a 27-group table,
+  `row_group` and `zone_map` both report `min = 1, max = 27` over 27 distinct
+  numbers.
+
+  This is a source comment, not a catalog one -- there is no `COMMENT ON` for the
+  table, so nothing reads it at runtime and `native_upgrade_converge`, which
+  compares `col_description`, cannot see it. It is corrected because a reader
+  believed it: the planner's zone-map sample walked `[0, ngroups)` and paid for it
+  in the defect fixed immediately below.
+
 - The planner's zone-map sample is one-based, so it no longer under-prices a
   scan for matching the **newest** rows (#817).
 

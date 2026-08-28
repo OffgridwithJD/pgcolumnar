@@ -214,7 +214,17 @@ CREATE UNIQUE INDEX storage_pkey
 
 CREATE TABLE pgcolumnar.row_group (
 	storage_id bigint NOT NULL,
-	group_number bigint NOT NULL,     -- 0-based row group ordinal
+	-- ONE-BASED. group_number is the stripe id reserved from the metapage when
+	-- the group began buffering, and PgColumnarInitMetapage starts
+	-- reservedStripeId at 1, so there is no group 0 on any storage. The same
+	-- numbering is used by column_chunk, zone_map, bloom and delete_vector.
+	--
+	-- This said "0-based row group ordinal" until #817. Nothing read the comment
+	-- at runtime, but a reader did: the planner's zone-map sample walked
+	-- [0, ngroups), so it spent its first probe on a number that cannot exist and
+	-- never probed the highest group at all, which priced a predicate differently
+	-- according to where in the table its groups sat.
+	group_number bigint NOT NULL,
 	file_offset bigint NOT NULL,      -- logical byte offset of the group
 	row_count bigint NOT NULL,
 	byte_length bigint NOT NULL,
