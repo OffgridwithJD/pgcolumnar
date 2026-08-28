@@ -18,6 +18,33 @@ true until the next version shipped.
 
 ### Added
 
+- `pgcolumnar.expire` drops row groups whose rows are all older than a declared
+  retention, without reading or rewriting them (#403 item 5a). Declare the
+  retention with `pgcolumnar.set_options(..., ttl_column => 'ts',
+  ttl_interval => '90 days')`; both halves are needed, and either alone means no
+  retention.
+
+  This is the tractable half of the paper's "merge-time data transformation".
+  The rewrites already retire whole row groups: `pgcolumnar.compact` drops every
+  group that is fully deleted. Retention is the same operation with a different
+  predicate, and the zone map already holds what decides it, so the decision is a
+  catalog read. Nothing is decoded and nothing is rewritten, and it holds only
+  `ShareUpdateExclusiveLock`.
+
+  **It is called by name and never runs on its own.** It deletes rows, and an
+  operation a user runs for maintenance must not do that silently, so it is not
+  wired into `VACUUM`, `compact` or autovacuum. A table with no declared
+  retention raises an error rather than reporting that it did nothing.
+
+  A group is kept whole or dropped whole. A group holding rows on both sides of
+  the cutoff is kept, so retention is approximate at the group boundary and errs
+  toward keeping data. Measured on 5,000 rows in 5 groups with 1,440 rows past a
+  three-day retention: one group dropped, 1,000 rows removed, and all 3,560 rows
+  still inside the retention kept, including the 440 expired rows sharing the
+  straddling group.
+
+  The retention column must be `timestamp` or `timestamptz`.
+
 - `pgcolumnar.parallel_copy` can refuse a load it has already taken, with
   `dedup => true` (#403 item 7). A load that commits, whose acknowledgement the
   client never receives, is retried and the rows go in twice: measured, the same

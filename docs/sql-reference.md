@@ -33,9 +33,18 @@ append in insertion order, so re-run `vacuum_sorted` to re-establish it, like
 PostgreSQL `CLUSTER`. Column names must exist and cannot be virtual generated
 columns.
 
+`ttl_column name` and `ttl_interval interval` declare a retention. They are read
+only by [`pgcolumnar.expire`](#pgcolumnarexpiretablename-regclass-returns-bigint),
+which you run yourself. Declaring a retention does not delete anything on its
+own. Both are needed: either one alone means no retention.
+
 ```sql
 SELECT pgcolumnar.set_options('events', sort_by => ARRAY['customer_id','ts']);
 SELECT pgcolumnar.reset_options('events', sort_by => true);   -- clear it
+
+-- declare a retention; nothing is deleted until you call expire
+SELECT pgcolumnar.set_options('events', ttl_column => 'ts',
+                              ttl_interval => '90 days');
 ```
 
 ### pgcolumnar.get_storage_id(rel regclass) returns bigint
@@ -154,6 +163,34 @@ Returns the number of groups retired.
 
 ```sql
 SELECT pgcolumnar.compact('events');
+```
+
+### pgcolumnar.expire(tablename regclass) returns bigint
+
+Drops row groups whose rows are all older than the retention declared by
+`set_options`. Returns the number of groups dropped. Holds only
+`ShareUpdateExclusiveLock`, so it runs against a live table.
+
+**This deletes rows.** It runs only when you call it. No other operation applies
+a retention, and `VACUUM` never does.
+
+It reads no data. A row group records the maximum value of each of its columns.
+A group whose maximum is older than the cutoff holds no row still inside the
+retention. Its metadata is dropped without decoding anything.
+
+A group is kept whole or dropped whole. A group holding rows on both sides of the
+cutoff is kept, and its expired rows stay until every row in that group has
+expired. Retention is therefore approximate at the group boundary, and it errs
+toward keeping data. A smaller `stripe_row_limit` narrows the boundary.
+
+The retention column must be `timestamp` or `timestamptz`. The table must have
+both `ttl_column` and `ttl_interval` declared, or the function raises an error
+rather than reporting that it did nothing.
+
+```sql
+SELECT pgcolumnar.set_options('events', ttl_column => 'ts',
+                              ttl_interval => '90 days');
+SELECT pgcolumnar.expire('events');    -- returns groups dropped
 ```
 
 ### pgcolumnar.compact_rewrite(tablename regclass, min_deleted_fraction float8 DEFAULT 0.2, max_groups int DEFAULT 0) returns bigint

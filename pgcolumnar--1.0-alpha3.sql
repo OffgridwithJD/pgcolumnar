@@ -55,7 +55,11 @@ CREATE TABLE pgcolumnar.options (
 	compression_level integer,
 	compression name,
 	encode_effort name,
-	sort_by name[]                     -- declared physical sort key (#288)
+	sort_by name[],                    -- declared physical sort key (#288)
+	-- Declared retention (#403 item 5a), read only by pgcolumnar.expire.
+	-- Nothing drops rows on its own: expire is called by name.
+	ttl_column name,
+	ttl_interval interval
 );
 
 /*
@@ -393,7 +397,9 @@ CREATE FUNCTION pgcolumnar.set_options(
 	compression name DEFAULT NULL,
 	compression_level int DEFAULT NULL,
 	encode_effort name DEFAULT NULL,
-	sort_by name[] DEFAULT NULL)
+	sort_by name[] DEFAULT NULL,
+	ttl_column name DEFAULT NULL,
+	ttl_interval interval DEFAULT NULL)
 	RETURNS void
 	LANGUAGE plpgsql
 	AS $set_options$
@@ -510,9 +516,11 @@ BEGIN
 
 	INSERT INTO pgcolumnar.options AS o
 		(regclass, chunk_group_row_limit, stripe_row_limit,
-		 compression, compression_level, encode_effort, sort_by)
+		 compression, compression_level, encode_effort, sort_by,
+		 ttl_column, ttl_interval)
 	VALUES (table_name, chunk_group_row_limit, stripe_row_limit,
-			compression, compression_level, encode_effort, sort_by)
+			compression, compression_level, encode_effort, sort_by,
+			ttl_column, ttl_interval)
 	ON CONFLICT (regclass) DO UPDATE SET
 		chunk_group_row_limit =
 			COALESCE(EXCLUDED.chunk_group_row_limit, o.chunk_group_row_limit),
@@ -525,11 +533,15 @@ BEGIN
 		encode_effort =
 			COALESCE(EXCLUDED.encode_effort, o.encode_effort),
 		sort_by =
-			COALESCE(EXCLUDED.sort_by, o.sort_by);
+			COALESCE(EXCLUDED.sort_by, o.sort_by),
+		ttl_column =
+			COALESCE(EXCLUDED.ttl_column, o.ttl_column),
+		ttl_interval =
+			COALESCE(EXCLUDED.ttl_interval, o.ttl_interval);
 END;
 $set_options$;
 
-COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int, name, name[])
+COMMENT ON FUNCTION pgcolumnar.set_options(regclass, int, int, name, int, name, name[], name, interval)
 	IS 'set per-table columnar options; NULL leaves a value unchanged. sort_by declares the physical sort key applied by vacuum_sorted() with no explicit columns (#288); it is NOT auto-maintained -- rows inserted after a sort append in insert order, so re-run vacuum_sorted() to re-establish it, like PostgreSQL CLUSTER';
 
 CREATE FUNCTION pgcolumnar.reset_options(
@@ -848,6 +860,14 @@ $sort_status$;
 
 COMMENT ON FUNCTION pgcolumnar.sort_status(regclass)
 	IS 'how much of an ordered columnar table is still in its ordered run, and by what kind of ordering (#301, #761)';
+
+CREATE FUNCTION pgcolumnar.expire(tablename regclass)
+	RETURNS bigint
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'pgcolumnar_expire';
+
+COMMENT ON FUNCTION pgcolumnar.expire(regclass)
+	IS 'drop row groups whose rows are all older than the retention declared by set_options(ttl_column, ttl_interval), without reading or rewriting them (#403)';
 
 CREATE FUNCTION pgcolumnar.vacuum(tablename regclass, stripe_count int DEFAULT 0)
 	RETURNS void

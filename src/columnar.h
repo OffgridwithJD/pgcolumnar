@@ -503,6 +503,9 @@ extern NativeZoneMapMetadata *PgColumnarReadZoneMapForColumn(uint64 storageId,
 extern void PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 
+/* declared retention, read by pgcolumnar.expire (#403 item 5a) */
+extern bool PgColumnarReadTtl(Oid relid, char **column, Interval **interval);
+
 /* per-table options catalog (spec 7.4) */
 extern bool PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts);
 extern int pgcolumnar_effective_stripe_row_limit(Oid relid);
