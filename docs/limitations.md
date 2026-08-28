@@ -340,10 +340,10 @@ returning no rows.
 
 A columnar scan can run in parallel, and the planner builds a parallel path for
 it. On a wide projection it chooses that path, because the decode cost is priced
-by column width and a parallel plan divides it across workers. The table
-described below was measured. A query reads all 14 columns and returns
-2,000,000 rows. The parallel plan runs in 306 ms. The serial plan runs in
-604 ms.
+by column width and a parallel plan divides it across workers. The wide query
+described below was measured on one machine. The parallel plan runs in about
+300 ms. The serial plan runs in about 600 ms. Two builds of the same table gave
+306 and 604, then 300 and 610.
 
 On a narrow projection the planner still prefers the serial plan where the
 parallel one is faster.
@@ -387,12 +387,37 @@ max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
 session.
 
 The value at which a plan turns parallel depends on the table, so measure it on
-yours rather than copying a number. To show the size of the gap, one measured
-example follows. The table holds 4,000,000 rows in 14 columns. There are eight `int4`,
-four `text` of 32 bytes, one `numeric` and one `float8`. Every value comes from
-`hashint4`, so little of it compresses. It occupies 383 MB against 823 MB for
-a heap table holding the same rows. The query reads three `int4` columns and
-returns about 1,000,000 rows.
+yours rather than copying a number. One measured example follows. It is given as
+the SQL that builds it. A prose description does not pin a columnar table's
+size, and the size is what sets the threshold.
+
+```sql
+CREATE TABLE c753 (sel int4, a int4, b int4, c int4, d int4, e int4, f int4,
+    g int4, t1 text, t2 text, t3 text, t4 text, n1 numeric, n2 float8)
+    USING pgcolumnar;
+
+INSERT INTO c753 SELECT i,
+    hashint4(i), hashint4(i+1), hashint4(i+2), hashint4(i+3),
+    hashint4(i)%1000, hashint4(i)%100, hashint4(i)%10,
+    md5(hashint4(i)::text), md5(hashint4(i+1)::text),
+    md5(hashint4(i+2)::text), md5(hashint4(i+3)::text),
+    (hashint4(i)%100000)::numeric, (hashint4(i)%100000)::float8
+    FROM generate_series(1,4000000) i;
+
+CREATE TABLE h753 (LIKE c753);
+INSERT INTO h753 SELECT * FROM c753;
+ANALYZE c753;
+ANALYZE h753;
+```
+
+That gives 383 MB for `c753` against 823 MB for `h753`. Three of the `int4`
+columns hold values in a small range, and they compress well. Change them and
+the columnar size changes, and so does every number below.
+
+The narrow query is `SELECT sel, a, b FROM c753 WHERE sel <= 1000000`, which
+returns 1,000,000 rows. The wide query is
+`SELECT * FROM c753 WHERE sel <= 2000000`, which returns 2,000,000 rows.
+
 
 | plan | turns parallel at |
 | --- | --- |
