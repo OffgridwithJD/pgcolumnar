@@ -1047,6 +1047,41 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 			return;
 
 		/*
+		 * sum/avg over numeric are refused HERE rather than in
+		 * pgcolumnar_classify_aggref (#785). This path is slower than the
+		 * ordinary Agg for them and there is no equivalent of #786's int128
+		 * accumulator to fix it: the input is already numeric and carries a
+		 * scale.
+		 *
+		 * Measured on 8,000,000 rows, interleaved, min of 7, plan and answers
+		 * asserted:
+		 *
+		 *   sum(numeric)               1.10x SLOWER on this path
+		 *   sum(float8)                2.73x faster
+		 *   sum(numeric), sum(float8)  1.00x -- no gain at all
+		 *
+		 * That last row is why this is unconditional. Classification is all or
+		 * nothing (the loop above returns on the first refusal), so refusing
+		 * numeric refuses the whole node -- and a mixed query gains NOTHING
+		 * today, because the numeric aggregate's cost swamps the float win. So
+		 * nothing is given up by refusing, and the numeric-only case improves.
+		 *
+		 * Refused here and not at classification because classify_aggref is
+		 * shared with the GROUPED path, which is a different implementation and
+		 * has not been measured for these kinds. This narrows only what was
+		 * measured.
+		 *
+		 * The reviewer established the other half: numeric is slower whether or
+		 * not chunk-group pruning happens (1.14x with 25 of 27 groups removed,
+		 * 1.56x with none), so this does not need to be conditional on the shape
+		 * of the data either.
+		 */
+		for (i = 0; i < naggs; i++)
+			if (specs[i].kind == COLUMNAR_AGG_SUM_NUMERIC ||
+				specs[i].kind == COLUMNAR_AGG_AVG_NUMERIC)
+				return;
+
+		/*
 		 * A pseudoconstant (gating) qual is a one-time filter, not a per-row
 		 * predicate; the recheck this path relies on runs per row and would never
 		 * apply it, so a false gate would wrongly return a row. Rare; fall back.
