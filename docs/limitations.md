@@ -346,11 +346,20 @@ returning no rows.
 ## Parallel scans
 
 A columnar scan can run in parallel, and the planner builds a parallel path for
-it. On a wide projection it chooses that path, because the decode cost is priced
-by column width and a parallel plan divides it across workers. The wide query
-described below was measured on one machine. The parallel plan runs in about
-300 ms. The serial plan runs in about 600 ms. Two builds of the same table gave
-306 and 604, then 300 and 610.
+it. On a wide projection it chooses that path when
+`max_parallel_workers_per_gather` is 4. The decode cost is priced by column
+width, and a parallel plan divides it across workers. At the default of 2 the
+planner still chooses the serial plan for the wide query below.
+
+The wide query was measured on one machine, on a build without assertions. The
+parallel plan runs in about 275 ms and the serial plan in about 639 ms. Both are
+the fastest of 7 interleaved readings at 4 workers. Two earlier readings of the
+same query gave 306 and 604, then 300 and 610.
+
+The fastest reading is quoted rather than the middle one. This machine is shared,
+so scheduling noise only ever adds time, and the fastest reading is the one least
+polluted by it. The middle reading moved 31% between runs where the fastest moved
+2.5%.
 
 On a narrow projection the planner still prefers the serial plan where the
 parallel one is faster.
@@ -360,6 +369,15 @@ were tested, all of them shapes where the planner chose the serial scan. The
 parallel plan ran 1.8 to 2.5 times faster on the median. In every shape the
 slowest parallel run was still faster than the fastest serial run, by 1.45 times
 at the narrowest margin.
+
+Those readings were taken on a build with assertions enabled. The narrow query
+below was re-measured on a build without them. Taking the fastest reading of each
+arm at 4 workers, it ran 2.5 to 2.7 times faster. On the middle reading it ran
+2.4 to 2.5 times faster. The slowest parallel run beat the fastest serial run by 1.60
+times. Both arm orders were run and both agree.
+
+Which column the narrow query filters on decides all of this. The section below
+on the predicate column gives the measurements and says why.
 
 "Narrow" here means few columns, not few rows. A scan that reads three columns of
 fourteen decodes little. The serial plan is therefore cheap, and a fixed per row
@@ -421,9 +439,37 @@ That gives 383 MB for `c753` against 823 MB for `h753`. Three of the `int4`
 columns hold values in a small range, and they compress well. Change them and
 the columnar size changes, and so does every number below.
 
-The narrow query is `SELECT sel, a, b FROM c753 WHERE sel <= 1000000`, which
-returns 1,000,000 rows. The wide query is
+The narrow query is `SELECT sel, a, b FROM c753 WHERE a <= -1073741824`, which
+returns 1,000,158 rows. The wide query is
 `SELECT * FROM c753 WHERE sel <= 2000000`, which returns 2,000,000 rows.
+
+### The predicate column must be unordered, or the zone map answers first
+
+The column a narrow query filters on decides how much work the serial plan does.
+`sel` is the `generate_series` counter, so it is stored in order. The zone
+map then excludes 20 of the table's 27 chunk groups before any row is read.
+
+Filtering instead on `a`, which is `hashint4` derived and unordered, reads all 27
+groups for the same number of rows returned. The two differ by more than the
+clock:
+
+| narrow query filters on | groups read | serial cost | speedup, fastest | speedup, middle | columnar turns parallel at | heap turns parallel at |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sel`, stored in order | 7 of 27 | 22,428 | 1.54 to 1.67 | 1.24 to 1.31 | 0.015 | 0.035 |
+| `a`, unordered | 27 of 27 | 83,305 | 2.54 to 2.67 | 2.43 to 2.51 | 0.060 | 0.035 |
+
+The last two columns are at 4 workers and are the causal evidence.
+
+On the ordered column the effect this section describes nearly disappears. The
+slowest parallel run is then slower than the fastest serial run, so the
+non-overlap stated above does not hold there. The numbers in this section are
+measured on the unordered column, because that is the case where the planner's
+choice costs the most.
+
+Read the last two columns together. The columnar threshold moves from 0.015 to
+0.060 between the two predicates. The heap threshold does not move at all. A heap
+has no zone map, so that is what identifies pruning as the cause, rather than
+anything about the two columns themselves.
 
 The values below come from sweeping `parallel_tuple_cost` down from the default
 0.100 in steps of 0.001. The threshold is the first value at which `EXPLAIN`
@@ -431,18 +477,22 @@ shows a `Gather` node.
 
 | `max_parallel_workers_per_gather` | columnar turns parallel at | heap turns parallel at |
 | --- | --- | --- |
-| 2, the default | 0.009 to 0.010 | 0.026 to 0.027 |
-| 3 | 0.013 to 0.014 | 0.030 to 0.032 |
-| 4 | 0.015 to 0.016 | 0.034 to 0.035 |
+| 2, the default | 0.039 | 0.026 |
+| 3 | 0.053 | 0.031 |
+| 4 | 0.060 | 0.035 |
 
-Each cell is a range because `ANALYZE` samples. Over nine draws the estimate for
-a query that returns 1,000,000 rows landed between 968,663 and 1,015,140. The
-heap threshold moves with that estimate. The columnar threshold barely moves.
-The ranges cover PostgreSQL 17 and PostgreSQL 18.
+Each value is one sweep on one build of the table. `ANALYZE` samples, so the row
+estimate moves between builds, and the heap threshold moves with it. The columnar
+threshold barely moves. An earlier edition reported these as ranges over repeated
+builds, and those ranges covered PostgreSQL 17 and PostgreSQL 18.
 
 A different table gives different values, and so does a different worker count.
-An earlier edition of this page quoted 0.060 for the columnar plan. It named
-neither the table nor the worker count, so a reader could not reproduce it.
+An earlier edition of this page quoted 0.060 for the columnar plan and named
+neither the table nor the worker count. That value is correct. It is this table
+at 4 workers, with the narrow query filtering on an unordered column. A later
+edition replaced it with 0.010, which is the same table at 2 workers with the
+query filtering on `sel`. Both are right for the case they measure, and neither
+edition recorded which case that was.
 
 ## Index-only scans
 
