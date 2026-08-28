@@ -18,6 +18,31 @@ true until the next version shipped.
 
 ### Changed
 
+- Chunk-group skip predicates are now evaluated most-selective-first, so a group
+  that is going to be pruned is no longer probed through every other predicate's
+  column on the way there (#403 item 4). The skip loop returns on the first
+  predicate that excludes, and each predicate's first use in a group fetches that
+  column's zone map from the catalog, so the order decides what a pruned group
+  costs.
+
+  The order used was the order the ScanKeys arrived in, which is attribute order.
+  Measured on 100 row groups with one predicate excluding 99 groups and one
+  excluding none: 200 zone-map probes, and writing the selective predicate first
+  in the query did not change that, because query order is not ScanKey order. The
+  order was arbitrary with respect to selectivity rather than merely suboptimal.
+  After: 102 probes, with the same 99 groups pruned.
+
+  The reordering is a transpose on each exclusion rather than a sort: O(1), no
+  statistics the reader does not already have, and it converges in one step for
+  one selective predicate behind an unselective one. The paper's caveat, that
+  ordering should apply only when a highly selective predicate is present, falls
+  out of the mechanism: a predicate that never excludes never moves, so a query
+  with nothing selective keeps the order it started with and pays nothing.
+
+  This cannot change an answer. The predicates are a conjunction, and the loop
+  returns on the first exclusion whichever one that is. `EXPLAIN (ANALYZE)`
+  reports `Columnar Zone Map Probes`, which is the only line that moves.
+
 - The vectorized grouped aggregate now sizes its hash table from the group
   estimate the planner already made, instead of growing it from nothing
   (#403 item 6). The table is open-addressing and doubles at 70% load from
