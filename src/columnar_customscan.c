@@ -1860,7 +1860,7 @@ static Cost
 pgcolumnar_index_fetch_penalty(RelOptInfo *rel, Oid relid, double rows, double rho,
 							 double decodeUnits, double decodedWidth, bool tid_ordered)
 {
-	double		R = (double) pgcolumnar_effective_stripe_row_limit(relid);
+	double		R = (double) pgcolumnar_written_stripe_row_limit(relid);
 	double		N = (rel->tuples > 0) ? rel->tuples : rows;
 	double		n_groups,
 				pages_per_stripe,
@@ -2193,6 +2193,22 @@ pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
 	 * cost model that is otherwise wrong by an order of magnitude.
 	 */
 	{
+		/*
+		 * NOT pgcolumnar_written_stripe_row_limit here, deliberately (#806).
+		 *
+		 * #806 measured the session GUC leaking into the index-fetch penalty and
+		 * fixed it there. Making the same substitution at this site is not the
+		 * same change: this one feeds the zone-map survival estimate, and
+		 * switching it moved native_zonemap_narrow's zone-map reads from
+		 * wide=30/narrow=30 to wide=570/narrow=66 -- reads that scale with table
+		 * width, which is the property that suite exists to hold.
+		 *
+		 * The written geometry is arguably the more correct input here too, and
+		 * the comment above says as much about which limit decides the group
+		 * count. But there is no measured defect at this site, there is a
+		 * measured regression from changing it, and #806's evidence is entirely
+		 * about the penalty. Left alone until someone has the measurement.
+		 */
 		int			limit = pgcolumnar_effective_stripe_row_limit(heapRelid);
 
 		if (limit <= 0)
