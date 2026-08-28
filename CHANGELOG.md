@@ -16,6 +16,17 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ### Fixed
 
+- The fetch cache cost guards in `test/native_fetch_cache.sh` now assert that
+  they reach the per-row fetch path, and set
+  `pgcolumnar.enable_index_fetch_penalty = off` so that they do (#797). They had
+  not exercised the cache since the penalty landed: `enable_seqscan = off` and
+  `enable_bitmapscan = off` do not disable the columnar custom scan, so the
+  planner answered these queries with a group scan and the guards timed a
+  different mechanism while staying green. The #353 guard was written 83 minutes
+  before the penalty existed. With the path restored the two guards read 2.00x
+  and 6.42x, against 0.98x and 1.21x before, and the 6.42x reproduces the 5.8x
+  recorded in the suite's own comment when the guard was written.
+
 - `sum()` and `avg()` over `numeric` no longer take the ungrouped vectorized
   path, where they were slower than the ordinary `Agg` (#785). This closes the
   last of the three families `pgcolumnar.enable_ungrouped_vector_agg` names.

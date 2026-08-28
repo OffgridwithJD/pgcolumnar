@@ -134,6 +134,16 @@ check "a hit re-checks the group geometry it was filled with" \
 check "the cache is released at executor end, not only at transaction end" \
 	"$(grep -c 'PgColumnarDiscardFetchCache' "$SRC/columnar_tableam.c")" "2"
 
+# The SETs every fetch-path guard below runs under, defined once because the
+# premise that asserts the plan and the measurement that depends on it must not
+# drift apart (#797). enable_seqscan/enable_bitmapscan alone are not enough:
+# neither disables the columnar custom scan, and pgcolumnar.enable_index_fetch_penalty
+# (on by default since #355) costs the per-row fetch highly enough that the
+# planner answers these queries with a group scan instead -- which is how these
+# guards spent months timing a mechanism they do not exercise.
+FETCH_PATH_SETS="SET max_parallel_workers_per_gather=0; SET enable_seqscan=off;
+	SET enable_bitmapscan=off; SET pgcolumnar.enable_index_fetch_penalty=off;"
+
 # --- #353: a wide group's decode scratch must not blow the fetch cap ----------
 # The by-row-number decode allocated its intermediates -- the decompressed region
 # and each vector's decoded buffer -- in the cached entry, ~3x the result. A wide
@@ -157,12 +167,17 @@ wbuild() {  # table, stripe
 w_ms() {  # index-driven point query over one host: many fetches into few groups
 	local start end
 	start=$(date +%s%N)
-	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off; SET enable_bitmapscan=off;
+	psql_run "$FETCH_PATH_SETS
 		SELECT count(*), max(u) FROM $1 WHERE h='h1';" >/dev/null 2>&1
 	end=$(date +%s%N); echo $(( (end - start) / 1000000 ))
 }
 wbuild fc_wide 150000      # default stripe: one/two big groups, wide decoded prefix
 wbuild fc_wnarrow 20000    # smaller groups that fit under the cap regardless
+for _t in fc_wide fc_wnarrow; do
+	check "the $_t point query really drives the fetch path (#797)" \
+		"$(pgc_uses_row_fetch "$FETCH_PATH_SETS" \
+			"SELECT count(*), max(u) FROM $_t WHERE h='h1'")" yes
+done
 bigw="$(min3 w_ms fc_wide)"; smallw="$(min3 w_ms fc_wnarrow)"
 echo "-- #353 wide point query: default-stripe ${bigw} ms, small-stripe ${smallw} ms"
 check_ratio "a wide group's fetch is not far dearer than a small group's (#353)" \
@@ -208,16 +223,20 @@ w359_ms() {  # number of projected text columns
 	local n=$1 sel="count(*)" i start end
 	for i in $(seq 1 "$n"); do sel="$sel, max(t$i)"; done
 	# warm, so the comparison is decode cost rather than first-touch I/O
-	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off;
-		SET enable_bitmapscan=off;
+	psql_run "$FETCH_PATH_SETS
 		SELECT $sel FROM fc_w359 WHERE h='h7';" >/dev/null 2>&1
 	start=$(date +%s%N)
-	psql_run "SET max_parallel_workers_per_gather=0; SET enable_seqscan=off;
-		SET enable_bitmapscan=off;
+	psql_run "$FETCH_PATH_SETS
 		SELECT $sel FROM fc_w359 WHERE h='h7';" >/dev/null 2>&1
 	end=$(date +%s%N); echo $(( (end - start) / 1000000 ))
 }
 
+for _n in 4 5; do
+	_sel="count(*)"; for _i in $(seq 1 "$_n"); do _sel="$_sel, max(t$_i)"; done
+	check "the $_n-column projection really drives the fetch path (#797)" \
+		"$(pgc_uses_row_fetch "$FETCH_PATH_SETS" \
+			"SELECT $_sel FROM fc_w359 WHERE h='h7'")" yes
+done
 under="$(min3 w359_ms 4)"   # ~30 MB decoded: fits
 over="$(min3 w359_ms 5)"    # ~38 MB decoded: does not
 echo "-- #359 projection width: four columns ${under} ms, five columns ${over} ms"
