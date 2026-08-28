@@ -78,14 +78,26 @@ explain_of() {  # column -> the EXPLAIN ANALYZE text for a 25% scan on it
 read_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Read: \([0-9]*\).*/\1/p' | head -1; }
 total_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Total: \([0-9]*\).*/\1/p' | head -1; }
 # The plan-time stripe_row_limit is set to the value this table was WRITTEN at.
-# That is a workaround for #817: pgcolumnar_zonemap_survival sizes the group
-# count from the planning session's GUC rather than from the written geometry,
-# and at the default of 150000 it believes a 200000-row table holds about two
-# groups. Zone map pruning then disappears from the cost entirely: both columns
-# cost 4212.00, where the written limit gives 4212.00 against 1404.00.
 #
-# The line is forward compatible. When #817 lands the planner reads the written
-# limit itself and this SET becomes redundant rather than wrong.
+# This is a workaround for the half of #817 that is still open: that
+# pgcolumnar_zonemap_survival sizes the group count from the planning SESSION's
+# GUC rather than from the written geometry. PR #821 fixed that estimator's
+# sample, NOT this. Do not delete this line on the strength of #817 being
+# referenced as fixed somewhere.
+#
+# ceil(200000/150000) is 2, so at the default the estimator models a 10-group
+# table as a 2-group one, and both groups it examines survive. Zone map pruning
+# then leaves the cost entirely: both columns cost 4212.00, where the written
+# limit prices the pruning. Measured on both sides of #821, which moved the
+# written-limit figure and left the default one untouched:
+#
+#                       plan-time 150000     plan-time 20000
+#   before #821         4212.00 / 4212.00    4212.00 / 1404.00
+#   after  #821         4212.00 / 4212.00    4212.00 / 1263.60
+#
+# The post-#821 figure is 4212 x 3/10, and EXPLAIN ANALYZE reports "Chunk Groups
+# Read: 3 of 10", so the estimate now agrees with the scan it prices. The check
+# below asserts the ORDERING of the two costs, which holds on either side.
 serial_cost() {
 	q "SET max_parallel_workers_per_gather = 0;
 	   SET pgcolumnar.stripe_row_limit = 20000;
