@@ -709,7 +709,7 @@ check_timing() {
 	local name="$1" got="$2" want="$3"
 
 	if [ "${PGC_SKIP_TIMING:-0}" = 1 ]; then
-		echo "SKIP  $name (PGC_SKIP_TIMING: wall-clock ratio)"
+		echo "SKIP  $name (PGC_SKIP_TIMING: wall-clock measurement)"
 		return 0
 	fi
 	check "$name" "$got" "$want"
