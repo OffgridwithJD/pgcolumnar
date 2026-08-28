@@ -213,6 +213,7 @@ SUITES=(
 	objstore_userinfo
 	parallel
 	parallel_copy
+	parallel_copy_dedup
 	parallel_degree
 	parallel_export_parquet
 	parallel_flush_optin

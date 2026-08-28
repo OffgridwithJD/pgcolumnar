@@ -9,9 +9,47 @@
  */
 \echo Use "ALTER EXTENSION pgcolumnar UPDATE" to load this file. \quit
 
--- sort_status gains an OUT parameter (#761), which changes its signature, so it
--- cannot be a CREATE OR REPLACE.
+-- New catalog for pgcolumnar.parallel_copy's opt-in load dedup (#403 item 7).
+-- Loads pgcolumnar.parallel_copy has already performed, for its opt-in dedup
+-- (#403 item 7). One row per (table, file fingerprint) that committed.
+--
+-- The fingerprint is the SHA-256 of the loaded file's bytes, so a file that
+-- changed at the same path is a different load. Path, size and mtime would all
+-- call that the same file.
+--
+-- The row is written AFTER the data commits, never before. A crash between the
+-- two leaves data with no fingerprint, so a retry loads again, which is the
+-- behaviour without this feature and is the safe direction. The reverse order
+-- would leave a fingerprint with no data and refuse rows that were never stored.
+CREATE TABLE pgcolumnar.load_fingerprint (
+	relation_oid oid NOT NULL,
+	fingerprint bytea NOT NULL,       -- SHA-256 of the file's bytes
+	rows bigint NOT NULL,
+	loaded_at timestamptz NOT NULL DEFAULT now()
+);
+-- NOT unique, deliberately. The lookup is an existence test, and a unique
+-- index would turn the one case that can produce a second row into an ERROR
+-- raised AFTER the data committed: two concurrent loads of the same file both
+-- check before either records, both commit, and the loser's record insert would
+-- fail, reporting failure for a load that succeeded. A duplicate record is
+-- harmless; a false failure is not.
+CREATE INDEX load_fingerprint_idx
+	ON pgcolumnar.load_fingerprint USING btree (relation_oid, fingerprint);
+
+-- Two functions gain a parameter, which changes their signatures, so neither can
+-- be a CREATE OR REPLACE: sort_status (#761) and parallel_copy (#403 item 7).
 DROP FUNCTION IF EXISTS pgcolumnar.sort_status(regclass);
+DROP FUNCTION IF EXISTS pgcolumnar.parallel_copy(regclass, text, int);
+
+CREATE FUNCTION pgcolumnar.parallel_copy(target regclass, filename text,
+										 workers int DEFAULT NULL,
+										 dedup boolean DEFAULT false)
+	RETURNS bigint
+	LANGUAGE C
+	AS 'MODULE_PATHNAME', 'pgcolumnar_parallel_copy';
+
+COMMENT ON FUNCTION pgcolumnar.parallel_copy(regclass, text, int, boolean)
+	IS 'atomic parallel bulk load of a COPY text file into a columnar table using background workers: a single columnar table (any row order), or a RANGE-partitioned columnar table sorted by the partition key with one distinct partition set per worker (#300). With dedup, a file already loaded into this table is refused rather than loaded twice (#403)';
 
 CREATE FUNCTION pgcolumnar.sort_status(
 	rel regclass,

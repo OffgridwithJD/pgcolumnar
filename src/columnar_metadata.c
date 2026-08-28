@@ -109,6 +109,13 @@
 #define Anum_bloom_filter 4
 #define Natts_bloom 4
 
+/* pgcolumnar.load_fingerprint (#403 item 7) */
+#define Anum_load_fingerprint_relation_oid 1
+#define Anum_load_fingerprint_fingerprint 2
+#define Anum_load_fingerprint_rows 3
+#define Anum_load_fingerprint_loaded_at 4
+#define Natts_load_fingerprint 4
+
 /* attribute numbers for columnar.free_space (Phase F physical reclaim) */
 #define Anum_free_space_storage_id 1
 #define Anum_free_space_file_offset 2
@@ -2408,6 +2415,84 @@ PgColumnarInsertBloomRow(const NativeBloomMetadata *b)
 	values[Anum_bloom_group_number - 1] = Int64GetDatum((int64) b->groupNumber);
 	values[Anum_bloom_column_index - 1] = Int16GetDatum((int16) b->columnIndex);
 	values[Anum_bloom_filter - 1] = PointerGetDatum(filt);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	metadata_flush_insert(rel, tuple);
+	heap_freetuple(tuple);
+	metadata_flush_close(rel, RowExclusiveLock);
+}
+
+/*
+ * PgColumnarLoadFingerprintSeen
+ *		Has this exact file already been loaded into this table by a committed
+ *		pgcolumnar.parallel_copy (#403 item 7)?
+ *
+ *		Keyed by (relation_oid, fingerprint), which is load_fingerprint_idx, so
+ *		this is an exact index lookup. The fingerprint is the SHA-256 of the
+ *		file's bytes: a file that changed at the same path is a different load.
+ */
+bool
+PgColumnarLoadFingerprintSeen(Oid relationOid, const uint8 *fingerprint,
+							  int fingerprintLen, Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("load_fingerprint", AccessShareLock);
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	Oid			idxOid;
+	HeapTuple	tuple;
+	bytea	   *fp;
+	bool		found;
+
+	fp = (bytea *) palloc(VARHDRSZ + fingerprintLen);
+	SET_VARSIZE(fp, VARHDRSZ + fingerprintLen);
+	memcpy(VARDATA(fp), fingerprint, fingerprintLen);
+
+	ScanKeyInit(&key[0], Anum_load_fingerprint_relation_oid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(relationOid));
+	ScanKeyInit(&key[1], Anum_load_fingerprint_fingerprint, BTEqualStrategyNumber,
+				F_BYTEAEQ, PointerGetDatum(fp));
+
+	idxOid = pgcolumnar_index_oid("load_fingerprint_idx");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 2, key);
+	tuple = systable_getnext(scan);
+	found = HeapTupleIsValid(tuple);
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	pfree(fp);
+
+	return found;
+}
+
+/*
+ * PgColumnarRecordLoadFingerprint
+ *		Record that this file has been loaded into this table (#403 item 7).
+ *
+ *		Called AFTER the data commits, never before. A crash between the two
+ *		leaves data with no fingerprint, so a retry loads again -- the behaviour
+ *		without this feature, and the safe direction. The reverse order would
+ *		leave a fingerprint with no data and refuse rows that were never stored.
+ */
+void
+PgColumnarRecordLoadFingerprint(Oid relationOid, const uint8 *fingerprint,
+								int fingerprintLen, int64 rows)
+{
+	Relation	rel = open_columnar_table("load_fingerprint", RowExclusiveLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	Datum		values[Natts_load_fingerprint];
+	bool		nulls[Natts_load_fingerprint];
+	HeapTuple	tuple;
+	bytea	   *fp;
+
+	memset(nulls, false, sizeof(nulls));
+	fp = (bytea *) palloc(VARHDRSZ + fingerprintLen);
+	SET_VARSIZE(fp, VARHDRSZ + fingerprintLen);
+	memcpy(VARDATA(fp), fingerprint, fingerprintLen);
+
+	values[Anum_load_fingerprint_relation_oid - 1] = ObjectIdGetDatum(relationOid);
+	values[Anum_load_fingerprint_fingerprint - 1] = PointerGetDatum(fp);
+	values[Anum_load_fingerprint_rows - 1] = Int64GetDatum(rows);
+	values[Anum_load_fingerprint_loaded_at - 1] =
+		TimestampTzGetDatum(GetCurrentTimestamp());
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	metadata_flush_insert(rel, tuple);
