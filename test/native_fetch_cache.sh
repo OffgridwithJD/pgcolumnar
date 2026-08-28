@@ -100,15 +100,88 @@ min3() {  # min3 FUNC ARG...
 	printf '%s\n' "$a" "$b" "$c" | sort -n | head -1
 }
 
-build fc_one "$ROWS"          # every row in a single row group
-build fc_many $((ROWS / 10))  # the same rows across ten
+# THE FIXTURE HAS TO BE REBUILT BETWEEN READINGS, because the measured statement
+# destroys the geometry it measures (#801).
+#
+# An UPDATE on a columnar table does not rewrite the group it read. It marks the
+# rows deleted and appends them as a NEW group. So the first reading of fc_one
+# leaves groups 1:20000 and 2:2000, and every later reading finds the rows it
+# targets in the small appended group -- exactly the geometry fc_many has. The
+# two arms stop differing after one reading.
+#
+# min3 then takes a minimum across two different fixtures, and the post-rewrite
+# readings are the fast ones, so it returns one of them every time. That is why
+# the guard could not fail. Measured with a per-fetch decode counter, against a
+# build whose fetch cache retains nothing so every fetch re-decodes:
+#
+#              reading 1   reading 2   reading 3     this suite's verdict
+#   reused      629 ms       81 ms       96 ms        PASS 0.98x   <- false
+#   rebuilt     617 ms      623 ms      620 ms        FAIL 6.13x   <- correct
+#
+# The per-reading times come from a standalone probe, which prints them. The
+# verdicts come from running this suite whole against that same .so, once with
+# each form of the fixture handling, so they are two runs and not one. The
+# rebuilt figure was 5.89x and 6.13x on the two runs of it.
+#
+# The #353 guard below fails on that .so as well, at 6.48x against its 5x
+# bound, which is what shows the ablation was real rather than a build that did
+# nothing. On a stock .so this ratio has read 0.63x, 0.76x, 0.77x, 0.92x and
+# 1.00x, the 0.76x under the matrix running six suites at once. So the bound of
+# 3 sits about three times above the worst passing reading and about half the
+# smallest failing one.
+#
+# The decode counter says the same thing in rows rather than milliseconds:
+# reused, fc_one decodes 40,000,000 rows on the first reading and 4,000,000 on
+# the next two; rebuilt, it decodes 40,000,000 on all three.
+min3_fresh() {  # table, rows-per-group -- rebuild before every reading
+	local a b c
+	build "$1" "$2" >/dev/null; geom_seen "$1"; a="$(upd_ms "$1")"
+	build "$1" "$2" >/dev/null; geom_seen "$1"; b="$(upd_ms "$1")"
+	build "$1" "$2" >/dev/null; geom_seen "$1"; c="$(upd_ms "$1")"
+	printf '%s\n' "$a" "$b" "$c" | sort -n | head -1
+}
 
-one="$(min3 upd_ms fc_one)"
-many="$(min3 upd_ms fc_many)"
+# The premise the ratio rests on, recorded at the moment of each reading rather
+# than once at the start: the number of row groups the table is laid out in.
+# A rebuild that stopped happening, or a stripe limit that stopped being
+# honoured, shows up here as "1 2 3" instead of "1 1 1" -- which is precisely
+# the state that produced the false green above.
+#
+# It doubles as the fixture's row-count premise. build's output is discarded so
+# that three rebuilds do not print three copies of its notices, so an INSERT
+# that died would otherwise be silent; an empty table has no row groups at all
+# and records "0 0 0" here.
+#
+# Both halves were proved by mutation, each changing one thing and nothing else.
+# Dropping the rebuild records "1 2 3" for fc_one and "10 11 12" for fc_many;
+# making the INSERT populate nothing records "0 0 0" for both. In BOTH mutants
+# the ratio check below still passed -- at 0.77x and at 1.14x -- so this premise
+# is the only thing standing between either fault and a green suite.
+#
+# A record accumulates in a file rather than a variable because each reading
+# runs inside the command substitution that captures the timing, so an
+# assignment would not survive it. xargs normalises the separators, so the
+# expected value below is not carrying an invisible trailing space.
+geom_seen() {  # table -- append this reading's group count to its record
+	q "SELECT count(*) FROM pgcolumnar.row_group r
+		JOIN pgcolumnar.storage s USING (storage_id)
+		WHERE s.relation_oid = '$1'::regclass" >> "$PGC_WORKDIR/geom.$1"
+}
+
+: > "$PGC_WORKDIR/geom.fc_one"
+: > "$PGC_WORKDIR/geom.fc_many"
+one="$(min3_fresh fc_one "$ROWS")"          # every row in a single row group
+many="$(min3_fresh fc_many $((ROWS / 10)))" # the same rows across ten
 echo "-- $UPD fetches: one group of $ROWS took ${one} ms; ten groups took ${many} ms"
 
-# Without the cache the single-group case decodes ten times as much per fetch and
-# lands near 10x. With it, both are dominated by the fetches and sit near 1x.
+check "every fc_one reading measured one row group (#801)" \
+	"$(xargs < "$PGC_WORKDIR/geom.fc_one")" "1 1 1"
+check "every fc_many reading measured ten row groups (#801)" \
+	"$(xargs < "$PGC_WORKDIR/geom.fc_many")" "10 10 10"
+
+# Without the cache the single-group case decodes ten times as much per fetch.
+# Measured at 6.13x on the build described above; with the cache both are
+# dominated by the fetches themselves and the ratio sits at or below 1x.
 check_ratio "fetching from one big group is not far dearer than from ten small ones" \
 	"$one" "$many" "3"
 
