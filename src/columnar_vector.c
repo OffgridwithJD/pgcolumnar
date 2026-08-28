@@ -1062,9 +1062,22 @@ PgColumnarCreateUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 		 *
 		 * That last row is why this is unconditional. Classification is all or
 		 * nothing (the loop above returns on the first refusal), so refusing
-		 * numeric refuses the whole node -- and a mixed query gains NOTHING
-		 * today, because the numeric aggregate's cost swamps the float win. So
-		 * nothing is given up by refusing, and the numeric-only case improves.
+		 * numeric refuses the whole node, and the obvious worry is that a mixed
+		 * query loses the float win with it.
+		 *
+		 * It does not, and the truth is stronger than "nothing is given up".
+		 * A mixed query was being actively HARMED. One cluster, one fixture,
+		 * only the .so changing:
+		 *
+		 *   sum(numeric)               391.0 -> 351.0 ms   1.11x faster
+		 *   sum(numeric), sum(float8)  412.4 -> 367.6 ms   1.12x faster
+		 *   sum(float8) (control)       78.8 ->  77.2 ms   flat
+		 *
+		 * So the mixed case is an argument FOR the refusal rather than a cost of
+		 * it. Stated this way deliberately: "gains nothing" invites someone to
+		 * restore a conditional later on the grounds that a mixed query might one
+		 * day benefit, when the measurement says it was paying for the numeric
+		 * aggregate twice over (OffgridwithJD, #796 review).
 		 *
 		 * Refused here and not at classification because classify_aggref is
 		 * shared with the GROUPED path, which is a different implementation and
