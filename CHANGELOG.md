@@ -14,6 +14,46 @@ pinned at `1.0-dev` or `1.0-alpha`, each true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sum()` and `avg()` over `numeric` no longer take the ungrouped vectorized
+  path, where they were slower than the ordinary `Agg` (#785). This closes the
+  last of the three families `pgcolumnar.enable_ungrouped_vector_agg` names.
+  `bigint` was fixed by giving it a cheap accumulator (#786); `numeric` cannot
+  have one, because its input already carries a scale.
+
+  Measured on 8,000,000 rows, interleaved, minimum of seven, plan and answers
+  asserted on both arms:
+
+  | query | before | after |
+  | --- | ---: | ---: |
+  | `sum(numeric)` | 1.10x slower | **1.04x faster** |
+  | `sum(float8)` | 2.73x faster | 2.74x faster |
+  | `sum(numeric), sum(float8)` | 1.00x, no gain | 1.01x, unchanged |
+
+  **The refusal is unconditional, and the mixed case is why.** Classification is
+  all or nothing, so refusing `numeric` refuses the whole node, and the obvious
+  worry is that a mixed query loses the float win with it. It does not. Measured
+  on one cluster with only the installed library changing, a mixed query was
+  being actively **harmed**:
+
+  | query | numeric admitted | numeric refused | |
+  | --- | ---: | ---: | ---: |
+  | `sum(numeric)` | 391.0 ms | 351.0 ms | 1.11x faster |
+  | `sum(numeric), sum(float8)` | 412.4 ms | 367.6 ms | 1.12x faster |
+  | `sum(float8)` (control) | 78.8 ms | 77.2 ms | flat |
+
+  So the mixed case is an argument for the refusal rather than a cost of it.
+
+  It is also not conditional on the data. The penalty holds whether or not
+  chunk-group pruning happens: 1.14x with 25 of 27 groups removed and 1.56x with
+  none.
+
+  The refusal is placed where the scan-fold path is chosen rather than in
+  `pgcolumnar_classify_aggref`, which is shared with the grouped path. The
+  grouped path is a different implementation and has not been measured for these
+  kinds, so this narrows only what was measured.
+
 ### Changed
 
 - `test/native_fetch_cache.sh`'s three cost guards now assert through

@@ -217,4 +217,46 @@ check "control: i > 100 (exact key) still folds and agrees with heap" \
 	"$(vq "SELECT count(*) FROM vfold WHERE i > 100")" \
 	"$(q  "SELECT count(*) FROM vfoldh WHERE i > 100")"
 
+# ---- numeric is refused from this path, deliberately (#785) ------------------
+#
+# sum/avg over numeric are SLOWER here than on the ordinary Agg, and there is no
+# equivalent of #786's int128 accumulator for them: the input is already numeric
+# and carries a scale. Measured on 8,000,000 rows, interleaved, min of 7:
+#
+#   sum(numeric)               1.10x SLOWER on this path
+#   sum(float8)                2.73x faster
+#   sum(numeric), sum(float8)  1.00x -- no gain at all
+#
+# The third row is why the refusal is unconditional rather than clever.
+# Classification is all or nothing, so refusing numeric refuses the whole node --
+# and a mixed query gained NOTHING beforehand, because the numeric aggregate's
+# cost swamped the float win. Nothing is given up.
+#
+# These arms pin the SHAPE, not the speed: which queries take the node. A timing
+# arm would be the wrong instrument, because the property is "we decline", and a
+# decline is visible in the plan.
+psql_run "CREATE TABLE vnum (c numeric, d float8, i int);"
+psql_run "INSERT INTO vnum SELECT (g%997)::numeric, (g%997)::float8, g FROM generate_series(1,20000) g;"
+psql_run "CREATE TABLE vnumc (LIKE vnum) USING pgcolumnar;"
+psql_run "INSERT INTO vnumc SELECT * FROM vnum;"
+
+vnode() { q "SET pgcolumnar.enable_ungrouped_vector_agg=on;
+             EXPLAIN (COSTS OFF) $1" | grep -c 'Columnar Vectorized Aggregates'; }
+
+check_num "premise: the node DOES run for float8, so a 0 below means refusal and not absence" \
+	"$(vnode 'SELECT sum(d) FROM vnumc WHERE i > 5')" "1"
+check_num "sum(numeric) is refused from the scan-fold path" \
+	"$(vnode 'SELECT sum(c) FROM vnumc WHERE i > 5')" "0"
+check_num "avg(numeric) too" \
+	"$(vnode 'SELECT avg(c) FROM vnumc WHERE i > 5')" "0"
+check_num "and a MIXED query is refused whole, because classification is all or nothing" \
+	"$(vnode 'SELECT sum(c), sum(d) FROM vnumc WHERE i > 5')" "0"
+
+# refusing must not change any answer: the ordinary Agg computes them instead
+for e in "sum(c)" "avg(c)" "sum(c)::text||'/'||sum(d)::text"; do
+	check "refused numeric still matches the heap oracle [$e]" \
+		"$(q "SET pgcolumnar.enable_ungrouped_vector_agg=on; SELECT ($e)::text FROM vnumc;" | tail -1)" \
+		"$(q "SELECT ($e)::text FROM vnum;" | tail -1)"
+done
+
 pgc_summary
