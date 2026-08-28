@@ -281,6 +281,7 @@ Reports how much of a table's sorted order is still in place. Returns one row:
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `sort_key` | name[] | The clustering key in effect. It is the key the last ordering rewrite recorded, or the `sort_by` declared by `set_options`, or NULL. |
+| `sorted_kind` | text | How that key is applied: `lexicographic`, `zorder`, or NULL. NULL means the table was never ordered, or was ordered before pgColumnar recorded this. |
 | `total_groups` | bigint | Row groups in the table. |
 | `sorted_groups` | bigint | Row groups written by the last ordering rewrite. |
 | `appended_groups` | bigint | Row groups written after it. |
@@ -293,8 +294,9 @@ therefore shrinks in proportion as the table grows. This function measures that
 proportion, so you can decide when another sort is worth its cost.
 
 ```sql
--- what fraction of the table is still in sorted order
+-- what fraction of the table is still in sorted order, and by what arrangement
 SELECT sort_key,
+       sorted_kind,
        sorted_rows,
        appended_rows,
        round(100.0 * sorted_rows / nullif(sorted_rows + appended_rows, 0), 1)
@@ -311,9 +313,9 @@ sorts on those columns in order. `pgcolumnar.cluster` and
 `pgcolumnar.recluster` arrange the same columns on a Z-order curve, which is not
 a sort on any one of them.
 
-To read the arrangement, select `sorted_kind` from `pgcolumnar.storage`. It
-holds `lexicographic`, `zorder`, or NULL. NULL means the table was never
-ordered, or was ordered before pgColumnar recorded this.
+Read `sorted_kind` to tell the two apart. Before 1.0-alpha3 this function could
+not report it, and the documented way to read it was `pgcolumnar.storage`. That
+table carries no `GRANT`, so only a superuser could follow that advice.
 
 The row counts are stored rows. Deleted rows stay stored until a maintenance
 operation reclaims them, so they are still counted here. Use
