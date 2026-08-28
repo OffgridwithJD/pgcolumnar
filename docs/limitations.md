@@ -339,8 +339,11 @@ returning no rows.
 ## Parallel scans
 
 A columnar scan can run in parallel, and the planner builds a parallel path for
-it. On a wide projection it now chooses that path, because the per-column decode
-cost is priced and a parallel plan divides it across workers.
+it. On a wide projection it chooses that path, because the decode cost is priced
+by column width and a parallel plan divides it across workers. The table
+described below was measured. A query reads all 14 columns and returns
+2,000,000 rows. The parallel plan runs in 306 ms. The serial plan runs in
+604 ms.
 
 On a narrow projection the planner still prefers the serial plan where the
 parallel one is faster.
@@ -381,8 +384,25 @@ on the system.
 
 The workaround is to force the parallel plan when it helps, with `SET
 max_parallel_workers_per_gather` and a lower `SET parallel_tuple_cost` for the
-session. On the shape above the columnar plan turns parallel at 0.060. A heap
-plan on the same rows turns parallel at 0.030. The default is 0.100.
+session.
+
+The value at which a plan turns parallel depends on the table, so measure it on
+yours rather than copying a number. To show the size of the gap, one measured
+example follows. The table holds 4,000,000 rows in 14 columns. There are eight `int4`,
+four `text` of 32 bytes, one `numeric` and one `float8`. Every value comes from
+`hashint4`, so little of it compresses. It occupies 383 MB against 823 MB for
+a heap table holding the same rows. The query reads three `int4` columns and
+returns about 1,000,000 rows.
+
+| plan | turns parallel at |
+| --- | --- |
+| columnar | 0.010 |
+| heap | 0.030 |
+| default setting | 0.100 |
+
+A different table gives different values. An earlier edition of this page quoted
+0.060 for the columnar plan. It did not describe the table. A table built to the
+description above gives 0.010.
 
 ## Index-only scans
 
