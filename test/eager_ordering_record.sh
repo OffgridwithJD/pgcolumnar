@@ -39,6 +39,10 @@ mk() {	# mk TABLE -- identical data in every arm, {k} declared as the sort_by
 skind() { q "SELECT coalesce(sorted_kind::text,'<NULL>') FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('$1');"; }
 sby()   { q "SELECT coalesce(sorted_by::text,'<NULL>')   FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('$1');"; }
 skey()  { q "SELECT coalesce(sort_key::text,'<NULL>') FROM pgcolumnar.sort_status('$1');"; }
+# The same fact through the REPORTER rather than the catalog (#761). storage
+# carries no GRANT and is superuser-only, so a table's owner could read the kind
+# nowhere until sort_status could express it.
+skindst() { q "SELECT coalesce(sorted_kind::text,'<NULL>') FROM pgcolumnar.sort_status('$1');"; }
 # Inversions in the order the scan actually returns rows. This is the physical
 # fact every other arm is about, and it is taken from the data, never assumed.
 inv()   { q "SELECT count(*) FROM (SELECT k, lag(k) OVER () AS p FROM $1) s WHERE p > k;"; }
@@ -52,6 +56,8 @@ check_num "premise: the lexicographic rewrite really ordered the rows on k" "$(i
 check "premise: it left no unsorted tail" \
 	"$(q "SELECT appended_groups FROM pgcolumnar.sort_status('lex');")" "0"
 check_text "eager vacuum_sorted records the kind it applied" "$(skind lex)" "lexicographic"
+check_text "and sort_status reports that kind to the table's owner (#761)" \
+	"$(skindst lex)" "lexicographic"
 check_text "eager vacuum_sorted records the key it applied" "$(sby lex)" "{k}"
 
 # ------------------------------------------------------ eager Z-order rewrite
@@ -68,6 +74,8 @@ check "premise: the Z-ordered table is NOT ordered on k" \
 check "premise: it too reports a full run with no tail" \
 	"$(q "SELECT appended_groups FROM pgcolumnar.sort_status('zo');")" "0"
 check_text "eager cluster records the kind it applied" "$(skind zo)" "zorder"
+check_text "and sort_status reports THAT kind, not the lexicographic one (#761)" \
+	"$(skindst zo)" "zorder"
 check_text "eager cluster records the key it applied" "$(sby zo)" "{k,j}"
 
 # The consequence, stated as the discrimination it buys: two tables that report
@@ -78,6 +86,13 @@ check_text "sort_status reports the APPLIED key on the Z-ordered table, not the 
 	"$(skey zo)" "{k,j}"
 check_text "sort_status still reports {k} on the lexicographically sorted table" \
 	"$(skey lex)" "{k}"
+
+# The point of #761, stated as the discrimination it buys. sort_key is {k} on one
+# table and {k,j} on the other here, but a one-column Z-order would report the
+# same key as a sort, and the reader could still not tell them apart. Only the
+# kind can.
+check "the two layouts are distinguishable through sort_status alone (#761)" \
+	"$([ "$(skindst lex)" != "$(skindst zo)" ] && echo yes || echo no)" "yes"
 
 # ------------------------------------------- the self-gate the record unblocks
 #
@@ -147,6 +162,8 @@ psql_run "SELECT pgcolumnar.vacuum_sorted('un', 'k');"
 check_text "premise: the mark is set before the unsorted rewrite" "$(skind un)" "lexicographic"
 psql_run "SELECT pgcolumnar.vacuum('un');"
 check_text "an unsorted rewrite claims no ordering" "$(skind un)" "<NULL>"
+check_text "and sort_status reports no kind either, rather than a stale one (#761)" \
+	"$(skindst un)" "<NULL>"
 check_text "and records no key" "$(sby un)" "<NULL>"
 
 # --------------------------------------------- the declared key is what is applied
