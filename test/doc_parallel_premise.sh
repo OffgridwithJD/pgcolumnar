@@ -114,16 +114,35 @@ serial_cost() {
 	  | grep -oE 'cost=[0-9.]+\.\.[0-9.]+' | sed 's/.*\.\.//' | head -1
 }
 
+# The scan-node premise comes FIRST, because every counter below is read out of
+# a columnar scan's EXPLAIN output and does not exist without one.
+for _c in "$doc_col" sel; do
+	check "premise: the $_c plan is exactly one columnar scan node" \
+		"$(scan_lines "$_c")" "1"
+done
+
 doc_read=$(read_groups "$doc_col"); doc_tot=$(total_groups "$doc_col")
 sel_read=$(read_groups sel);        sel_tot=$(total_groups sel)
+
+# A counter that was not printed is an EMPTY string, and `check "" ""` PASSES.
+# That is not hypothetical: with pgcolumnar.enable_custom_scan=off the plan is a
+# seq scan, every counter below is blank, and check 1 passed comparing one blank
+# with another. A check that passes on nothing is worse than no check.
+check "premise: the group counters were read, not blank" \
+	"$([ -n "$doc_read" ] && [ -n "$doc_tot" ] && [ -n "$sel_read" ] && [ -n "$sel_tot" ] \
+		&& echo yes || echo "doc=$doc_read/$doc_tot sel=$sel_read/$sel_tot")" "yes"
 echo "-- $doc_col (the documented column): $doc_read of $doc_tot groups read"
 echo "-- sel (stored in order):            $sel_read of $sel_tot groups read"
 
 # --- 1. the defect this suite exists for ------------------------------------
 # The published speedup numbers were taken with every group read. If the page's
 # query prunes, the numbers beside it describe a different amount of work.
+# Defaults that CANNOT collide, so blank-versus-blank fails on its own rather
+# than relying on the premise above to catch it. `check "" ""` passes, so a check
+# fed by two extracted values must never be able to compare one blank with
+# another.
 check "the documented narrow query reads every chunk group" \
-	"$doc_read" "$doc_tot"
+	"${doc_read:-<no-read-counter>}" "${doc_tot:-<no-total-counter>}"
 
 # --- 2. the contrast the page now documents is real -------------------------
 check "and filtering the ordered column instead prunes some away" \
@@ -141,11 +160,9 @@ check "the documented column is not the one stored in order" \
 # Exact rather than bounded: reading more groups must cost more. A bound here
 # would need calibrating and the direction does not.
 if [ "$doc_col" != "sel" ]; then
-	for _c in "$doc_col" sel; do
-		check "premise: the $_c plan is exactly one columnar scan node" \
-			"$(scan_lines "$_c")" "1"
-	done
 	dc=$(serial_cost "$doc_col"); sc=$(serial_cost sel)
+	check "premise: both costs were extracted, not blank" \
+		"$([ -n "$dc" ] && [ -n "$sc" ] && echo yes || echo "dc=$dc sc=$sc")" "yes"
 	echo "-- serial cost: $doc_col $dc, sel $sc"
 	check "and the documented column is costed above the ordered one" \
 		"$(awk -v a="$dc" -v b="$sc" 'BEGIN { print (a > b) ? "yes" : "no (" a " vs " b ")" }')" "yes"
