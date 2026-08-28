@@ -189,6 +189,29 @@ true until the next version shipped.
   is not one. A new harness selftest keeps the shared cluster config free of
   `pgcolumnar.*` GUCs; `PGC_EXTRA_CONF` remains the per-suite mechanism.
 
+- The `one/many` fetch cost guard in `test/native_fetch_cache.sh` now rebuilds
+  its fixture before every reading, and asserts the group geometry at each one
+  (#801). The guard could not fail. The `UPDATE` it times does not rewrite the
+  row group it reads: it marks the rows deleted and appends them as a new group,
+  so `fc_one` goes from one group of 20,000 rows to that group plus one of
+  2,000, and from the second reading on the rows it targets sit in the small
+  appended group. That is the geometry the `fc_many` control has, so the arms
+  stop differing after one reading, and `min3` returned one of the cheap
+  post-rewrite readings every run. Measured against a build whose fetch cache
+  retains nothing, so every fetch re-decodes: the guard read 0.98x and PASSED,
+  where rebuilding reads 5.89x and 6.13x on two runs and fails as it should. The
+  `#353` guard in the same file fails correctly on that build, which is what
+  shows the ablation was real. A per-fetch decode counter says it in rows rather
+  than milliseconds: `fc_one` decodes 40,000,000 rows on the first reading and
+  4,000,000 on the next two, and 40,000,000 on all three once the fixture is
+  rebuilt.
+
+  The new premise records the group count at each reading. Both faults it
+  covers were proved by mutation, each changing one thing: dropping the rebuild
+  records `1 2 3`, and an `INSERT` that populates nothing records `0 0 0`. The
+  timing check passed in both mutants, at 0.77x and 1.14x, so the premise is
+  what separates either fault from a green suite.
+
 - The fetch cache cost guards in `test/native_fetch_cache.sh` now assert that
   they reach the per-row fetch path, and set
   `pgcolumnar.enable_index_fetch_penalty = off` so that they do (#797). They had
