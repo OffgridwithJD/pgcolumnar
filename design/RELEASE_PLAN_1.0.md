@@ -92,8 +92,10 @@ it is 11 days into a 14-day cycle.
   is a sampling selector that chooses per block. High value at low to medium
   effort, and it changes what the writer emits.
 - **Parquet partition inference**, the one remaining item inside Parquet.
-- **Arrow C Data Interface zero-copy export**, which is new interoperability
-  surface and therefore alpha work.
+
+Two items rather than three, deliberately. The Arrow C Data Interface export was
+cut from this alpha on 2026-08-29. alpha6 is now the last one, and the series
+should not lose an item it needs to a slip in October.
 
 ## What compressing the series costs
 
@@ -110,14 +112,16 @@ reserve is what makes it bite.
 **The risk concentrates on the final alpha.** alpha6 carries three items, and it
 is now the last one. If the series is going to lose something, it loses it there.
 
-**A recommendation follows.** The owner has not yet decided it. Move the Arrow C
-Data Interface export out of alpha6, into the "not before beta 1" list.
+**That concentration was acted on.** The owner cut the Arrow C Data Interface
+export from alpha6 on 2026-08-29, moving it to the list below.
 
-It is the least load-bearing of the three. The cascade encoding selector changes
+It was the least load-bearing of the three. The cascade encoding selector changes
 written bytes, so it cannot be added later. Parquet partition inference completes
 a format we already ship. Zero-copy Arrow export is a new surface that nothing
-else depends on. Cutting it deliberately now beats losing it to a slip in
-October.
+else depends on. Cutting it deliberately beat losing it to a slip in October.
+
+The consequence is the freeze rule, stated once more because it now binds a real
+item: Arrow C Data Interface export is 2.0 work. It does not return in beta 2.
 
 ## Not before beta 1
 
@@ -132,6 +136,7 @@ alpha series.
 | FastLanes on-disk format generation | a new format generation, so 2.0 by definition |
 | ORC, Delta Lake, Hudi | each is a project the size of the Iceberg work |
 | Asynchronous write with background compaction | large, and gated on a measurement that has not been taken |
+| Arrow C Data Interface zero-copy export | cut from alpha6 on 2026-08-29 to protect the final cycle; a new surface nothing else depends on |
 
 ## Beta 1 entry test
 
