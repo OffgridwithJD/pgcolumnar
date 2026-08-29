@@ -448,6 +448,14 @@ emit_eq_variant("eqdotdot", [(2, EQ_SEQ, f"{LOC}/../../../../etc/hostname",
 emit_eq_variant("eqpctdot", [(2, EQ_SEQ,
                               f"{LOC}/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/hostname",
                               [1], 1)])
+#   the same climb-out with an encoded NUL in front of it. %00 decodes to a NUL
+#   byte, and every check past that point is NUL-terminated string work: the next
+#   decode pass measures with strlen and the ".."-segment walk uses strchr, so
+#   both stop at the NUL and never reach the "../" behind it. The guard must
+#   refuse on the encoded NUL itself rather than try to scan past it.
+emit_eq_variant("eqnulpct", [(2, EQ_SEQ,
+                              f"{LOC}/%00%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/hostname",
+                              [1], 1)])
 #   the same climb-out, but each ".." percent-encoded as "%2e%2e": a literal
 #   ".."-segment guard sees no "..", yet an http(s) origin/proxy that decodes
 #   "%2e%2e" -> ".." before serving would escape the table location. The remote

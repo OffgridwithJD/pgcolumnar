@@ -399,7 +399,7 @@ ice_hexval(char c, int *out)
  * digits becomes the decoded byte; anything else is copied verbatim. Sets
  * *changed if any escape was decoded. */
 static char *
-ice_percent_decode_once(const char *s, bool *changed)
+ice_percent_decode_once(const char *s, bool *changed, bool *sawnul)
 {
 	size_t		len = strlen(s);
 	char	   *out = palloc(len + 1);
@@ -414,6 +414,8 @@ ice_percent_decode_once(const char *s, bool *changed)
 		if (p[0] == '%' && p[1] != '\0' && p[2] != '\0' &&
 			ice_hexval(p[1], &hi) && ice_hexval(p[2], &lo))
 		{
+			if (((hi << 4) | lo) == 0)
+				*sawnul = true;
 			*w++ = (char) ((hi << 4) | lo);
 			p += 3;
 			*changed = true;
@@ -441,10 +443,28 @@ ice_has_encoded_dotdot(const char *s)
 {
 	char	   *cur = pstrdup(s);
 	bool		changed;
+	bool		sawnul = false;
 
 	for (;;)
 	{
-		cur = ice_percent_decode_once(cur, &changed);
+		cur = ice_percent_decode_once(cur, &changed, &sawnul);
+
+		/*
+		 * An encoded NUL truncates every check below this point. The next pass
+		 * measures with strlen and ice_has_dotdot walks with strchr, so both
+		 * stop at that byte and never reach the "../" behind it: a key of
+		 * "%00%2e%2e/%2e%2e/etc/hostname" decoded to a NUL followed by the
+		 * traversal, and this function returned false. The literal-".." guard
+		 * beside it sees no ".." either, because the segments are encoded, so
+		 * the path passed BOTH containment checks and was fetched.
+		 *
+		 * A NUL has no place in an object key or a path, and nothing downstream
+		 * can carry one safely, so refuse on the encoded NUL itself rather than
+		 * try to scan past it. Refusing is the same answer this function gives
+		 * any other smuggled traversal.
+		 */
+		if (sawnul)
+			return true;
 		if (!changed)
 			return false;		/* nothing left to decode; no hidden ".." */
 		if (ice_has_dotdot(cur))
