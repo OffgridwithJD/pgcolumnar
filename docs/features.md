@@ -117,6 +117,15 @@ coverage.
 - Concurrent inserts of the same unique key are serialized so the conflict is
   always caught, controlled by `pgcolumnar.enable_unique_insert_lock`. See
   [limitations](limitations.md) for the exact behavior.
+- `INSERT`, `UPDATE`, `DELETE` and `MERGE` all work on a columnar table.
+  `MERGE` needs no index on the target and takes all of its arms, including
+  `WHEN MATCHED ... DELETE`, `WHEN NOT MATCHED BY SOURCE`, and
+  `RETURNING merge_action()`. A columnar table can be the source as well as the
+  target.
+- A `MERGE` costs what its arms cost. Its updates and deletes mark rows rather
+  than rewriting row groups, exactly as a plain `UPDATE` or `DELETE` does, so
+  space returns only after `pgcolumnar.vacuum`. See
+  [workload and access patterns](limitations.md#workload-and-access-patterns).
 
 ## Schema changes
 
