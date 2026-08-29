@@ -293,3 +293,6 @@ $sort_status$;
 
 COMMENT ON FUNCTION pgcolumnar.sort_status(regclass)
 	IS 'how much of an ordered columnar table is still in its ordered run, and by what kind of ordering (#301, #761)';
+
+COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
+	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text and numeric, unlike Z-order cluster(), which takes integer, date/time, boolean and floating-point columns only. One-shot: not auto-maintained.';
