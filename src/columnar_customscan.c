@@ -586,6 +586,26 @@ pgcolumnar_preimage_range_scankey(OpExpr *op, Index scanrelid, TupleDesc tupdesc
 			break;				/* equality: the bounded interval below */
 	}
 
+	/*
+	 * Equality needs the interval to be non-empty, and at an infinity it is not.
+	 * The near-maximum decline above deliberately exempts infinities because
+	 * interval arithmetic saturates there instead of raising -- but saturating
+	 * is exactly the problem here: hi = lo + step returns lo again, so the
+	 * bounded interval becomes `k >= lo AND k < lo` and excludes the row it was
+	 * built to select. `date_trunc('day', ts) = 'infinity'` returned no rows
+	 * while the heap returned one.
+	 *
+	 * The ordered operators are unaffected and keep their exemption: each emits
+	 * ONE key, so lo == hi costs them nothing. That is why the two infinity arms
+	 * in preimage_rewrite.sh stayed green while equality was wrong.
+	 *
+	 * Declining rather than special-casing the value: this file's rule is that
+	 * anything it cannot inarguably invert returns 0, and a decline costs a scan
+	 * rather than an answer.
+	 */
+	if (DatumGetTimestamp(hi) <= DatumGetTimestamp(lo))
+		return 0;
+
 	key[0].sk_strategy = BTGreaterEqualStrategyNumber;
 	key[0].sk_argument = lo;
 
