@@ -36,8 +36,7 @@ rather than the date work starts.
 ## What is already done
 
 Read this before proposing anything for an alpha, because the list is longer than
-the tracker suggests. The tracker holds seven open issues and exactly one of them
-is a feature.
+the tracker suggests. Exactly one open issue is a feature.
 
 Storage and scan, maintenance, and projections. Arrow and Parquet in both
 directions, and external Parquet with pushdown. Object storage and Apache

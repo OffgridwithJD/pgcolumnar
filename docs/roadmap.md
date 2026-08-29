@@ -64,7 +64,8 @@ The large pieces that have shipped:
 
 ## Planned
 
-Nothing here is committed to a release. Each links to the issue that owns it.
+Where an item falls in the series is in the table above; nothing here is a further
+commitment. Each links to the issue that owns it.
 
 | area | item | issue |
 | --- | --- | --- |
@@ -85,5 +86,6 @@ Recorded so the work is visible, without implying it will be built:
 
 ## What this page is not
 
-It is not a commitment, and it is not a schedule. An item here means the work is
-recorded and reasoned about. It does not mean anyone is working on it.
+It is not a commitment. The dates above are the cadence this project has kept, not
+a promise. An item here means the work is recorded and reasoned about. It does not
+mean anyone is working on it.
