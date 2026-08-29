@@ -16,6 +16,23 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- `MERGE` is documented as working, which it has been all along. It needs no
+  index on the columnar target and takes every arm, including
+  `WHEN MATCHED ... DELETE`, `WHEN NOT MATCHED BY SOURCE`, and
+  `RETURNING merge_action()`. A columnar table can be the source as well as the
+  target. Verified rather than assumed, on PostgreSQL 17.10, in four shapes.
+
+  Nothing in the code changed. The gap was that a reader had no way to learn
+  this: `MERGE` appeared in no user-facing document, and its absence from
+  `docs/limitations.md` reads as easily as "unsupported" as "supported".
+
+  `docs/features.md` also records what a `MERGE` costs, because that is the part
+  a reader acts on: its updates and deletes mark rows rather than rewriting row
+  groups, exactly as a plain `UPDATE` or `DELETE` does, so space returns only
+  after `pgcolumnar.vacuum`.
+
 ### Fixed
 
 - The documentation is brought back into line with the code, and the version
