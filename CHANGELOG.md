@@ -35,6 +35,146 @@ true until the next version shipped.
 
 ### Fixed
 
+- Index entries for live rows are no longer destroyed (#838). A released version
+  is affected: this is present in `v1.0-alpha2`.
+
+  `pgcolumnar_index_delete_tuples` answered nbtree from the calling backend's MVCC
+  snapshot. `table_index_delete_tuples` asks a different question, whether an entry
+  is dead to everyone, which heapam answers from a global visibility test. nbtree
+  acts on the answer in `_bt_delitems_delete_check` by removing the items from the
+  leaf page physically, inside a critical section, and nothing restores them. A row
+  the current uncommitted transaction had deleted read as not live while remaining
+  live to every other session, so entries for live rows were erased.
+
+  Measured on 400 live rows given twelve committed rounds of churn on a column that
+  is not indexed: an index scan reached 0 of the 400 after a `ROLLBACK` and 228 of
+  400 after a `COMMIT`, while `SELECT count(*)` at shipped defaults answered 228
+  through an index only scan and `SELECT count(b)` answered 400 through the columnar
+  scan, on the same table in the same session. Two controls place the fault: churning
+  the indexed column instead makes `index_unchanged_by_update()` false so no
+  bottom up pass runs and nothing is lost, and a heap given the same hint loses
+  nothing.
+
+  Native storage carries no per row transaction id to compare against a global
+  horizon, because the delete vector is a bitmap whose visibility comes from the
+  MVCC catalog rows that hold it. It therefore cannot prove global deadness and now
+  vouches for nothing rather than guessing. The cost is that version churn no longer
+  reclaims leaf page space, which `docs/limitations.md` already described: stale
+  entries are reclaimed by `REINDEX`, not removed opportunistically.
+
+- A scrollable cursor no longer answers a backward fetch with forward rows (#842).
+  A released version is affected: this is present in `v1.0-alpha2`.
+
+  `pgcolumnar_scan_getnextslot` accepted a `ScanDirection` and never read it, so
+  every call advanced forward. The fetch succeeded, with SQLSTATE `00000`; it simply
+  returned rows that were not asked for. Measured on a 20 row fixture with the plan
+  asserted in both arms: `FETCH FORWARD 5` then `FETCH BACKWARD 3` gave `6 7 8`
+  where the heap gave `4 3 2`, and `FETCH LAST` returned nothing where the heap
+  returned row 20.
+
+  Forward is honoured, `NoMovement` returns no row, and backward is refused with
+  `feature_not_supported` rather than emulated. The reader walks row groups and
+  decodes vectors forwards, so scanning the other way is a feature rather than a
+  correction, and inventing an answer is the one thing that must not happen on this
+  path. At shipped defaults the planner gives a columnar relation a custom scan,
+  which serves these cursors correctly, so the refusal is reached only where that
+  path has been turned off.
+
+- An encoded NUL no longer defeats the Iceberg traversal guard (#844). A released
+  version is affected: this is present in `v1.0-alpha2`.
+
+  `ice_has_encoded_dotdot` catches a traversal smuggled through percent encoding,
+  because an http or https origin may decode a key before serving it. A `%00` in
+  front of the traversal defeated it: `ice_percent_decode_once` wrote the decoded
+  NUL and kept going, and everything downstream is NUL terminated string work, so
+  the next pass measured with `strlen` and the scan walked with `strchr`. Both
+  stopped at that byte and never reached the `../` behind it. The literal `..` guard
+  beside it saw nothing either, because the segments were encoded.
+
+  Measured over the S3 fixture with the delete path recorded as
+  `%00%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/hostname`: the literal and the plainly encoded
+  forms were both refused with `22023`, and the form behind an encoded NUL returned
+  `58P01`, meaning it was not refused but fetched, and failed only at the escaped
+  location. A NUL has no place in an object key or a path, so the encoded NUL is now
+  refused on its own rather than scanned past.
+
+- `pgcolumnar.vacuum_sorted`'s comment no longer calls `cluster()` numeric-only
+  (#827 follow-up). A released version is affected: the sentence is in
+  `v1.0-alpha2`, in the full script and in the upgrade script, so `\df+` prints it
+  to a user today.
+
+  It is wrong in both directions. `cluster_type_supported()` takes `boolean`,
+  `smallint`, `integer`, `bigint`, `real`, `double precision`, `date`, `timestamp`
+  and `timestamptz`, several of which are not numeric, and it does not take
+  `numeric` at all. The extension already contradicted the sentence: a rejected
+  column raises an errhint reading "Z-order clustering supports integer,
+  date/time, boolean, and floating-point columns". The comment now uses that
+  wording, so there is one description of the rule rather than two that disagree.
+
+  Measured with a positive control so the deny arms are not vacuous, on a 20,000
+  row table: `vacuum_sorted` accepts `numeric` and `text`; `cluster()` accepts
+  `int` and rejects `numeric` with "column n of type numeric cannot be used as a
+  clustering key", and rejects `text` likewise.
+
+  The `1.0-alpha2` to `1.0-alpha3` upgrade re-issues the comment, as
+  `set_options`, `expire`, `parallel_copy` and `sort_status` already do in that
+  script. Without that half, a fresh install and an upgraded one disagree and
+  `native_upgrade_converge` fails, which is the suite doing its job: it hashes
+  `obj_description(p.oid,'pg_proc')` for every function in the schema. Verified in
+  that order: 8 of 8 on unmodified main, failing on both the `1.0-alpha` and
+  `1.0-alpha2` paths with only the full script corrected, and 8 of 8 again once
+  the upgrade script carried it.
+
+- `pgcolumnar.set_options` no longer writes past three stack arrays during
+  `ALTER TABLE ... RENAME COLUMN` (#834). No released version is affected: the
+  defect was introduced and fixed inside this cycle.
+
+  `pgcolumnar.options` grew `ttl_column` and `ttl_interval` for retention and the
+  `Anum_options_*` constants were extended to 9, but `Natts_options` three lines
+  below them was left at 7. It sizes the `values`, `nulls` and `replace` arrays
+  handed to `heap_modify_tuple`, which iterates `tupdesc->natts`, so a rename on a
+  table with a declared `sort_by` read two slots past the end of all three and
+  aborted the backend, taking the cluster into crash recovery.
+
+  On an ordinary build the overrun lands in adjacent stack slots and is silent, so
+  the whole matrix passed. `test/catalog_natts.sh` now pins every `Natts_*` constant
+  against the width the live server reports, which makes it a check on every major
+  rather than a sanitizer only one.
+
+- `date_trunc(unit, ts) = 'infinity'` returns the matching row again (#836). No
+  released version is affected: the defect was introduced and fixed inside this
+  cycle.
+
+  The equality preimage builds the bounded interval `k >= lo AND k < hi`. Interval
+  arithmetic saturates at an infinity instead of raising, so `hi = lo + step`
+  returned `lo` again and the interval was empty, excluding the row it was built to
+  select. Measured on a 5000 row fixture holding exactly one `+infinity` and one
+  `-infinity` row, at default settings: the heap returned 1 and the columnar table
+  returned 0 for both, while a bare `ts = 'infinity'` returned 1 from both.
+
+  Equality now declines when the interval degenerates, which costs a scan rather
+  than an answer. The ordered operators keep their exemption and are unaffected,
+  because each emits one key, so `lo == hi` costs them nothing. That is why the two
+  infinity arms already in `test/preimage_rewrite.sh` stayed green while equality was
+  wrong: the suite carried infinity arms, and carried equality arms, and never their
+  intersection.
+
+- `sum(bigint)` and `avg(bigint)` no longer accumulate across a rescan (#840). No
+  released version is affected: the defect was introduced and fixed inside this
+  cycle.
+
+  With `pgcolumnar.enable_ungrouped_vector_agg` on, a re-executed aggregate node
+  added to the previous execution's running total. There were two accumulator reset
+  sites and they had drifted: `pgcolumnar_agg_specs_reset` cleared nine fields
+  including `spec->i128sum`, and `PgColumnarReScanAggScan` open coded the same loop
+  over eight and never cleared it. The int8 kinds accumulate there, so on a rescan
+  that total was never zeroed. Measured over four `LATERAL` iterations with the node
+  asserted chosen and asserted rescanned: 800022400060000, then 1600044799119997,
+  then 2400067196179988, where every true answer was near the first.
+
+  The second copy is deleted rather than corrected, so the next field added to
+  `PgColumnarAggSpec` is safe by construction rather than by remembering two places.
+
 - The documentation is brought back into line with the code, and the version
   check now covers the file that had drifted furthest (#753 follow-up).
 
