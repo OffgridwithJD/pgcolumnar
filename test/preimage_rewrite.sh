@@ -170,7 +170,8 @@ ord_arm "ts_trunc < c, c not truncated"  "date_trunc('day', ts) < $HALF"  "ts < 
 psql_run "CREATE TABLE pre_edge(ts timestamp, v int) USING pgcolumnar;"
 psql_run "INSERT INTO pre_edge SELECT timestamp '2024-01-01' + g * interval '1 day', g
           FROM generate_series(1,1000) g;"
-psql_run "INSERT INTO pre_edge VALUES ('294276-12-31 23:00', -1), ('infinity', -2);"
+psql_run "INSERT INTO pre_edge VALUES ('294276-12-31 23:00', -1), ('infinity', -2),
+          ('-infinity', -3);"
 psql_run "CREATE TABLE pre_edgeh(ts timestamp, v int);"
 psql_run "INSERT INTO pre_edgeh SELECT * FROM pre_edge;"
 MAXY="timestamp '294276-01-01'"
@@ -187,10 +188,27 @@ edge_arm "year >= max" "date_trunc('year', ts) >= $MAXY"
 edge_arm "year > max"  "date_trunc('year', ts) > $MAXY"
 edge_arm "year <= max" "date_trunc('year', ts) <= $MAXY"
 edge_arm "year < max"  "date_trunc('year', ts) < $MAXY"
-# Infinity is exempt: interval arithmetic saturates there rather than
-# overflowing, so those predicates still rewrite and still prune.
+# Infinity is exempt from the near-maximum decline: interval arithmetic saturates
+# there rather than overflowing, so those predicates still rewrite and still
+# prune.
 edge_arm "day >= infinity" "date_trunc('day', ts) >= timestamp 'infinity'"
 edge_arm "day < infinity"  "date_trunc('day', ts) < timestamp 'infinity'"
+# EQUALITY on an infinity is the case that exemption did not cover. The ordered
+# operators emit ONE key, so lo == hi is harmless to them and the two arms above
+# stayed green. Equality emits the bounded interval `k >= lo AND k < hi`, and
+# saturation makes hi equal lo, so the interval is empty and excludes the very
+# row that matches. The suite carried infinity arms, and carried equality arms,
+# and never their intersection.
+edge_arm "day = infinity"  "date_trunc('day', ts) = timestamp 'infinity'"
+edge_arm "day = -infinity" "date_trunc('day', ts) = timestamp '-infinity'"
+edge_arm "hour = infinity" "date_trunc('hour', ts) = timestamp 'infinity'"
+edge_arm "year = -infinity" "date_trunc('year', ts) = timestamp '-infinity'"
+# The premise those four rest on: both infinities are in the fixture, so a
+# columnar count of 0 is a lost row rather than an empty fixture.
+check_num "premise: the fixture holds one +infinity row" \
+	"$(q1 "SELECT count(*) FROM pre_edgeh WHERE ts = timestamp 'infinity';")" 1
+check_num "premise: the fixture holds one -infinity row" \
+	"$(q1 "SELECT count(*) FROM pre_edgeh WHERE ts = timestamp '-infinity';")" 1
 
 # ---- the shapes that must DECLINE ------------------------------------------
 # A non-truncated constant is unsatisfiable, and these arms assert the ANSWER,
