@@ -93,13 +93,18 @@ SELECT pgcolumnar.vacuum_sorted('events', 'region', 'ts');
 SELECT pgcolumnar.set_options('events', sort_by => ARRAY['region','ts']);
 SELECT pgcolumnar.vacuum_sorted('events');
 
--- Z-order (Morton) clustering over several numeric columns at once
+-- Z-order (Morton) clustering over several columns at once
 SELECT pgcolumnar.cluster('events', 'customer_id', 'amount');
 ```
 
 `vacuum_sorted` sorts ascending and tightens the first column most. `cluster`
 uses a Z-order curve, so filters on more than one of its columns all skip more
-groups. `cluster` takes numeric columns only.
+groups.
+
+`cluster` and `recluster` take at most eight key columns, and each must be a
+boolean, an integer, a floating-point, a `date` or a timestamp. They do not take
+`numeric` or `text`. Sort on a `numeric` or `text` column with
+`pgcolumnar.vacuum_sorted` instead.
 
 **Tuning.** Sort on the column your selective queries filter on. A sort is a
 trade-off: it groups one dimension tightly while spreading the others. For a live
@@ -190,6 +195,41 @@ call rewrites (0 means no cap). `vacuum` rewrites the whole relation.
 **Tuning.** Prefer `compact` and `compact_rewrite` for online reclaim. Reserve
 `vacuum` for a full reorganization window. Cap `compact_rewrite` with `max_groups`
 to bound each call and keep it incremental.
+
+## Drop data past its retention
+
+Declare how long rows are kept, then drop what has passed it.
+
+Before you start: the column must be `timestamp` or `timestamptz`, and you must
+own the table.
+
+1. Declare the retention. Both halves are required.
+
+```sql
+SELECT pgcolumnar.set_options('events',
+                              ttl_column => 'ts',
+                              ttl_interval => '90 days');
+```
+
+2. Drop what has expired.
+
+```sql
+SELECT pgcolumnar.expire('events');
+```
+
+The function returns the number of row groups it dropped.
+
+`expire` works on whole row groups. It drops a group only when every row in it
+has passed the retention, so a group holding one live row is kept whole. Some
+rows older than the interval therefore survive until the rest of their group
+ages out. Nothing inside the retention is ever dropped.
+
+It takes `ShareUpdateExclusiveLock`, so reads and writes continue. It never runs
+on its own: call it by name, or schedule it. Calling it on a table with no
+declared retention raises an error rather than doing nothing.
+
+`pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
+set `ttl_interval` to a span no row will reach.
 
 ## Keep tables optimized automatically
 

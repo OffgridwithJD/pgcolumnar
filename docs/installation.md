@@ -145,11 +145,15 @@ The fix is step 3. Run `ALTER EXTENSION pgcolumnar UPDATE;` in that database and
 the error goes away. **Your data is not affected.** The tables are intact and no
 conversion happens. Only the catalog entry is stale.
 
-Do not run `DROP EXTENSION`. It removes your columnar tables with it.
+Do not use `DROP EXTENSION` instead. A plain `DROP EXTENSION pgcolumnar` fails
+while columnar tables exist, because they depend on the access method. The
+form that succeeds is `DROP EXTENSION pgcolumnar CASCADE`, and it drops every
+columnar table with it.
 
-### Upgrading to 1.0-alpha2
+### Upgrading to 1.0-alpha3
 
-`1.0-alpha2` is the current release. `ALTER EXTENSION pgcolumnar UPDATE` (step 3
+`1.0-alpha3` is what this source tree installs. It is in development and not
+tagged; the latest published pre-release is `v1.0-alpha2`. `ALTER EXTENSION pgcolumnar UPDATE` (step 3
 above) reaches it from either previously published version: `1.0-dev`, which the
 `v1.0-alpha` tag installed, or `1.0-alpha`. PostgreSQL applies the shipped upgrade
 scripts in sequence, so a `1.0-dev` install is carried `1.0-dev` to `1.0-alpha` to

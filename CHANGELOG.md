@@ -16,6 +16,33 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- The documentation is brought back into line with the code, and the version
+  check now covers the file that had drifted furthest (#753 follow-up).
+
+  `README.md` said the version marker was `1.0-alpha` while `VERSION` said
+  `1.0-alpha3`, two versions behind. It drifted because `test/docs_style.sh`
+  compared `VERSION` against `CHANGELOG.md` and `docs/` and did not read
+  `README.md`, so the only file that was wrong was the one file the check could
+  not see. `README.md` is now in that comparison, and the badge is corrected and
+  resized for the longer string.
+
+  Corrected against the code: `docs/how-to.md` said `cluster` takes numeric
+  columns only, where the code accepts boolean, integer, floating-point, date
+  and timestamp keys and rejects `numeric` and `text`. `docs/installation.md`
+  said `DROP EXTENSION` removes columnar tables, where a plain `DROP EXTENSION`
+  fails while they exist and only `CASCADE` drops them. `docs/administration.md`
+  said there is no cache of decompressed chunk groups, where the fetch cache
+  holds four decoded row groups per backend per statement under a 32 MB cap.
+
+  Brought up to date: `docs/roadmap.md` listed five shipped features as planned,
+  all five of their issues closed, and repeated that we read local files only.
+  `docs/configuration.md` did not document `ttl_column` or `ttl_interval`.
+  `docs/features.md` omitted `pgcolumnar.expire` and the `dedup` argument of
+  `pgcolumnar.parallel_copy`. `docs/how-to.md` gains a retention recipe, so the
+  feature is reachable by task and not only by name.
+
 ### Added
 
 - `pgcolumnar.expire` drops row groups whose rows are all older than a declared

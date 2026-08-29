@@ -118,7 +118,10 @@ _ver="$(cat "$SRCDIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 check "premise: the VERSION file has a version to compare against" \
 	"$([ -n "$_ver" ] && echo yes || echo no)" "yes"
 
-_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+# README.md is in this list because it was NOT, and drifted two versions as a
+# result: it said `1.0-alpha` while VERSION said `1.0-alpha3`. The check that
+# would have caught it excluded the only file that was wrong.
+_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | sort)"
 check "premise: at least one document cites the VERSION file" \
 	"$([ -n "$_verdocs" ] && echo yes || echo no)" "yes"
 
