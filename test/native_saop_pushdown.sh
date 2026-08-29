@@ -226,30 +226,45 @@ check "a correlated PARAM_EXEC array is not mis-pruned (results stay correct)" \
 # builder above collapses every multi-element array into two range keys, so no
 # SK_SEARCHARRAY key ever reaches pgcolumnar_make_predicates.
 #
-# It is guarded anyway, and asserted here, because the defect it prevents is
-# silent. Such a key holds an ARRAY in sk_argument. Unrejected, it becomes a
-# SkipPredicate whose compareValue is the array's Datum, and the column's scalar
-# btree comparison then runs against a pointer to an array header. That is not a
-# wrong answer a suite could catch, it is a comparison of unrelated things.
+# It is guarded anyway, because the defect it prevents is silent. Such a key
+# holds an ARRAY in sk_argument. Unrejected, it becomes a SkipPredicate whose
+# compareValue is the array's Datum, and the column's scalar btree comparison
+# then runs against a pointer to an array header. That is not a wrong answer a
+# suite could catch, it is a comparison of unrelated things.
 #
-# #752 measures a per-element path worth 13 to 16 chunk groups of 27, and the
-# obvious implementation marks the key SK_SEARCHARRAY. This check exists so that
-# whoever writes it has to add handling deliberately instead of finding that
-# make_predicates accepted it silently. The guard predates the capability on
-# purpose.
+# THE ASSERTION IS ABOUT THE EXPRESSION, NOT ABOUT THE FILE, and that distinction
+# is the whole check. An earlier draft grepped each flag name over the whole
+# file, which is a claim about the file: deleting SK_ISNULL from the guard while
+# naming it in a nearby comment left the suite printing
+# "PASS  and it still refuses SK_ISNULL" on a tree that no longer refused it.
+# Measured, not supposed. The convention this very guard introduces -- explain in
+# prose why a flag is rejected -- is what would blind a file-wide grep for the
+# next flag anyone documents.
+#
+# So the reject expression is extracted once and membership is asserted inside
+# it. Extraction is a premise, because an expression that failed to extract is
+# an empty string and every "is this flag in it" test would then compare one
+# blank with another and pass (#823).
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
-check "an array scan key is refused by the predicate builder (#752)" \
-	"$(grep -c 'SK_ORDER_BY | SK_SEARCHARRAY' "$SRC/columnar_reader.c")" "1"
+check "premise: the predicate builder has exactly one sk_flags reject guard" \
+	"$(grep -c 'key->sk_flags &' "$SRC/columnar_reader.c")" "1"
 
-# The control. The check above passes if the flag is named ANYWHERE in that
-# expression, so it must also be true that the builder still rejects the seven
-# flags it always did; a rewrite that dropped them while keeping the new one
-# would satisfy a bare grep for SK_SEARCHARRAY alone.
+# From the `if (key->sk_flags & (` line through the closing `))`, comments
+# excluded by construction: the range starts at the `if`, so prose above it
+# cannot be captured.
+guard="$(awk '/if \(key->sk_flags & \(/,/\)\)/' "$SRC/columnar_reader.c" | tr -d ' \t\n')"
+
+check "premise: the reject expression was extracted, not blank" \
+	"$([ -n "$guard" ] && [ "${guard#*sk_flags}" != "$guard" ] && echo yes \
+		|| echo "extracted=<${guard:-empty}>")" "yes"
+
+# Membership, not adjacency. The flag list is a SET; asserting the order of it
+# would redden on a harmless reflow and would assert more than the code means.
 for _f in SK_ISNULL SK_ROW_HEADER SK_ROW_MEMBER SK_ROW_END SK_SEARCHNULL \
-		  SK_SEARCHNOTNULL SK_ORDER_BY; do
-	check "and it still refuses $_f" \
-		"$(grep -c "$_f" "$SRC/columnar_reader.c")" "1"
+		  SK_SEARCHNOTNULL SK_ORDER_BY SK_SEARCHARRAY; do
+	check "the predicate builder's reject expression contains $_f" \
+		"$(case "$guard" in *"$_f"*) echo yes ;; *) echo "absent from <$guard>" ;; esac)" "yes"
 done
 
 check "backend alive" "$(q 'SELECT 1;')" "1"
