@@ -138,6 +138,15 @@ check "a dotdot-escaping delete path is refused over s3 (22023)" \
 check "a percent-encoded dotdot delete path is refused over s3 (22023)" \
 	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqpctdot.metadata.json')
 	                AS t(id bigint, region text, amount int)")" "22023"
+# the same climb-out with an encoded NUL in front of it. %00 decodes to a NUL
+# byte, and every check past that point is NUL-terminated string work: the next
+# decode pass measures with strlen and the ".."-segment walk uses strchr, so both
+# stop at that byte and never see the "../" behind it. Without the guard this
+# path passes BOTH containment checks and is fetched, so the arm above can be
+# green while an encoded traversal still gets through.
+check "a percent-encoded dotdot behind an encoded NUL is refused over s3 (22023)" \
+	"$(sqlstate_of "SELECT * FROM pgcolumnar.iceberg_scan('$MDROOT/eqnulpct.metadata.json')
+	                AS t(id bigint, region text, amount int)")" "22023"
 check "backend still up after the s3 refusal" "$(q 'SELECT 1')" "1"
 
 # ---- an endpoint not on the allow-list is refused ---------------------------
