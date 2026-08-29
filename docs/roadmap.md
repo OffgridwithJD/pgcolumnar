@@ -4,8 +4,10 @@ What is done, what is planned, and where the detail lives.
 
 This page is the entry point. The working record is
 [design/ROADMAP.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/ROADMAP.md),
-which carries the full list with per-item history. Issues are the authority on anything
-being worked now.
+which carries the full list with per-item history. The release schedule and the test that
+gates beta 1 are in
+[design/RELEASE_PLAN_1.0.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/RELEASE_PLAN_1.0.md).
+Issues are the authority on anything being worked now.
 
 ## Status
 
@@ -13,6 +15,30 @@ pgColumnar is [pre-release](limitations.md#release-status). The version marker i
 `1.0-alpha3`, recorded in `VERSION`. That version is in development and not tagged; the
 latest published pre-release is `v1.0-alpha2`. A table `USING pgcolumnar` is stored in the
 native on-disk format, PGCN v1.
+
+## Releases to 1.0
+
+**An alpha may add features. Beta 1 and every release after it may not.**
+
+That rule decides the schedule. Anything a user can see must land in an alpha.
+After beta 1 the only changes are fixes, performance work that adds no surface,
+documentation, and tests. A feature deferred past beta 1 waits for 2.0.
+
+| release | target | theme |
+| --- | --- | --- |
+| `1.0-alpha3` | 2026-09-01 | feature complete: retention, load deduplication, sort reporting, more skipping |
+| `1.0-alpha4` | 2026-09-15 | skipping and layout |
+| `1.0-alpha5` | 2026-09-29 | join acceleration |
+| `1.0-alpha6` | 2026-10-13 | encoding and Parquet partition inference |
+| `1.0-beta1` | 2026-10-27 | feature freeze |
+
+Dates are a cadence, not a commitment. They follow the 14 days observed between
+`v1.0-alpha` and `v1.0-alpha2`, and each is the date a tag is cut.
+
+Beta 1 is a test rather than a date. It needs a frozen on-disk format and an
+upgrade path gated from every shipped version. It needs a green matrix on the tag
+and documentation current against the code. And it needs every open performance
+issue measured and answered. The plan linked above carries the full test.
 
 ## Done
 
