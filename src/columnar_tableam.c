@@ -1412,24 +1412,43 @@ pgcolumnar_compute_xid_horizon_for_tuples(Relation rel, ItemPointerData *tids,
 static TransactionId
 pgcolumnar_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
-	Snapshot	snapshot = ActiveSnapshotSet() ? GetActiveSnapshot()
-		: GetTransactionSnapshot();
-	int			i;
-
-	for (i = 0; i < delstate->ndeltids; i++)
-	{
-		uint64		rowNumber =
-			PgColumnarItemPointerToRowNumber(&delstate->deltids[i].tid);
-
-		/*
-		 * Only liveness matters here, and PgColumnarRowIsLive decodes nothing to
-		 * answer it. This used to reconstruct every column of the row and then
-		 * free the result unread, once per candidate index tuple, on a path
-		 * nbtree drives during deletion (issue #157).
-		 */
-		delstate->status[delstate->deltids[i].id].knowndeletable =
-			!PgColumnarRowIsLive(rel, snapshot, rowNumber);
-	}
+	/*
+	 * The question here is "is this entry dead to EVERYONE", not "is this row
+	 * invisible to me". nbtree acts on the answer in _bt_delitems_delete, which
+	 * removes the items from the leaf page physically, inside a critical
+	 * section, WAL-logged. Nothing restores them, and an abort does not.
+	 *
+	 * heapam answers from a global visibility test (InitNonVacuumableSnapshot
+	 * over GlobalVisTestFor). This used to answer from the calling backend's
+	 * MVCC snapshot, which is a different question with a different answer: a
+	 * row the current, still-uncommitted transaction has deleted reads as "not
+	 * live" while remaining live to everyone else, and PgColumnarRowIsLive
+	 * consults this backend's unflushed delete buffer as well. Entries for live
+	 * rows were therefore erased. Measured on 400 live rows churned on a
+	 * non-indexed column: an index scan reached 0 of them after a ROLLBACK, and
+	 * 228 of 400 after a COMMIT, while `count(*)` at shipped defaults answered
+	 * 228 through an index-only scan and `count(b)` answered 400 through the
+	 * columnar scan, on the same table in the same session.
+	 *
+	 * Native storage carries no per-row xid to compare against a global horizon:
+	 * the delete vector is a bitmap, and its visibility comes from the MVCC
+	 * catalog rows that hold it. So this cannot prove global deadness, and it
+	 * vouches for nothing instead.
+	 *
+	 * For a bottom-up caller that is free: the work is speculative by contract,
+	 * and _bt_delitems_delete_check returns cleanly on an empty deltids array
+	 * (its Assert there is Assert(delstate->bottomup)). The cost is that version
+	 * churn no longer reclaims leaf space on a columnar table, so such an index
+	 * grows where it used to be compacted. That is a space cost, not an answer.
+	 *
+	 * A simple-deletion caller has already marked its entries knowndeletable
+	 * from LP_DEAD hints and is not asking us to discover anything, so its marks
+	 * are left exactly as they arrived. Zeroing ndeltids there would be wrong
+	 * twice over: it would discard the caller's own findings and trip that
+	 * Assert.
+	 */
+	if (delstate->bottomup)
+		delstate->ndeltids = 0;
 
 	return InvalidTransactionId;
 }
