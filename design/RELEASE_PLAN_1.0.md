@@ -75,9 +75,14 @@ The features:
 - `pgcolumnar.vacuum_sorted()` self-gating when the relation is already sorted;
 - the vectorized aggregate accepting a target list that contains aggregates.
 
-Four further Added entries are test and benchmark work rather than user-visible
+Three further Added entries are test and benchmark work rather than user-visible
 features. They are the CDC recipe tested end to end, a suite for the replication
 and backup claim, and the cross-engine benchmark arms made reproducible.
+
+The arithmetic, since this section exists because an earlier draft got it wrong:
+twelve Added entries, of which nine are features and three are test work. The
+eight bullets above cover the nine, because the two `date_trunc` entries, the
+range form and the equality form, are one capability described in one bullet.
 
 Readiness was checked rather than assumed, on 2026-08-29. `VERSION` and
 `pgcolumnar.control` agree at `1.0-alpha3`. The upgrade script from `1.0-alpha2`
