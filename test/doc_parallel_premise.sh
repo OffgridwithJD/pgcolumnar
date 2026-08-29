@@ -77,27 +77,22 @@ explain_of() {  # column -> the EXPLAIN ANALYZE text for a 25% scan on it
 }
 read_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Read: \([0-9]*\).*/\1/p' | head -1; }
 total_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Total: \([0-9]*\).*/\1/p' | head -1; }
-# The plan-time stripe_row_limit is set to the value this table was WRITTEN at.
+# No plan-time stripe_row_limit here, and that is now load-bearing.
 #
-# This is a workaround for the half of #817 that is still open: that
-# pgcolumnar_zonemap_survival sizes the group count from the planning SESSION's
-# GUC rather than from the written geometry. PR #821 fixed that estimator's
-# sample, NOT this. Do not delete this line on the strength of #817 being
-# referenced as fixed somewhere.
+# This carried `SET pgcolumnar.stripe_row_limit = 20000` as a workaround for the
+# half of #817 that was still open: pgcolumnar_zonemap_survival sized the group
+# count from the planning SESSION's GUC, so at the 150,000 default it modelled
+# this 10-group table as a 2-group one and zone-map pruning left the cost
+# entirely -- both columns priced 4212.00. The survival site now reads the
+# WRITTEN geometry, so the session GUC no longer reaches this estimate and the
+# workaround is redundant.
 #
-# ceil(200000/150000) is 2, so at the default the estimator models a 10-group
-# table as a 2-group one, and both groups it examines survive. Zone map pruning
-# then leaves the cost entirely: both columns cost 4212.00, where the written
-# limit prices the pruning. Measured on both sides of #821, which moved the
-# written-limit figure and left the default one untouched:
+# Leaving it out is deliberate: it makes this suite a removal proof for that fix.
+# The check below asserts the documented column is costed ABOVE the ordered one,
+# and without the SET that only holds because the estimator reads the geometry
+# the table was written with. Put the SET back and the check passes for the wrong
+# reason; revert the fix and it fails here.
 #
-#                       plan-time 150000     plan-time 20000
-#   before #821         4212.00 / 4212.00    4212.00 / 1404.00
-#   after  #821         4212.00 / 4212.00    4212.00 / 1263.60
-#
-# The post-#821 figure is 4212 x 3/10, and EXPLAIN ANALYZE reports "Chunk Groups
-# Read: 3 of 10", so the estimate now agrees with the scan it prices. The check
-# below asserts the ORDERING of the two costs, which holds on either side.
 # Anchored on the scan node rather than on the first cost= in the plan.
 # `grep -m1` returns whatever node comes first, so the moment the plan gains a
 # node above the scan it reports that node's cost instead, silently and with the
@@ -105,7 +100,6 @@ total_groups() { explain_of "$1" | sed -n 's/.*Chunk Groups Total: \([0-9]*\).*/
 # the suite should not contain one.
 plan_of() {
 	q "SET max_parallel_workers_per_gather = 0;
-	   SET pgcolumnar.stripe_row_limit = 20000;
 	   EXPLAIN SELECT sel, a, b FROM c753 WHERE $1 <= $(p25 "$1")"
 }
 scan_lines() { plan_of "$1" | grep -c 'PgColumnarScan'; }

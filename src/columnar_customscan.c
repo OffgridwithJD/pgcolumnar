@@ -2194,22 +2194,33 @@ pgcolumnar_zonemap_survival(RelOptInfo *rel, Oid heapRelid)
 	 */
 	{
 		/*
-		 * NOT pgcolumnar_written_stripe_row_limit here, deliberately (#806).
+		 * The WRITTEN geometry, like the index-fetch penalty above (#806, #817).
 		 *
-		 * #806 measured the session GUC leaking into the index-fetch penalty and
-		 * fixed it there. Making the same substitution at this site is not the
-		 * same change: this one feeds the zone-map survival estimate, and
-		 * switching it moved native_zonemap_narrow's zone-map reads from
-		 * wide=30/narrow=30 to wide=570/narrow=66 -- reads that scale with table
-		 * width, which is the property that suite exists to hold.
+		 * This asked pgcolumnar_effective_stripe_row_limit, which answers "what
+		 * limit would a write in THIS session use" -- the right question for the
+		 * writer and the wrong one for a cost model describing geometry that
+		 * already exists. A table written at 20,000 rows per group and planned
+		 * from a session at the 150,000 default was modelled as holding
+		 * ceil(200000/150000) = 2 groups. A fraction-of-groups-surviving term
+		 * over two groups cannot express pruning at all, so zone-map pruning
+		 * left the cost entirely: two predicates that EXPLAIN ANALYZE shows
+		 * reading 10 of 10 and 3 of 10 chunk groups were both priced 4212.00.
 		 *
-		 * The written geometry is arguably the more correct input here too, and
-		 * the comment above says as much about which limit decides the group
-		 * count. But there is no measured defect at this site, there is a
-		 * measured regression from changing it, and #806's evidence is entirely
-		 * about the penalty. Left alone until someone has the measurement.
+		 * #806 declined this substitution, and was right to at the time: it then
+		 * moved native_zonemap_narrow from wide=30/narrow=30 to wide=570/
+		 * narrow=66, reads that scale with table width. That was the width-blind
+		 * whole-group probe, and #821 replaced it with a per-column probe. The
+		 * same substitution now measures wide=40/narrow=40 -- exactly
+		 * width-independent -- so the reason to decline is gone.
+		 *
+		 * Planning-time zone-map fetches on that fixture go from 1 to 10. The 1
+		 * was never a saving: it was this function examining a single group
+		 * because it believed a 200,000-row table held two. Ten is the estimator
+		 * sampling the ten groups that exist, bounded by
+		 * PGCOLUMNAR_PRUNE_SAMPLE_GROUPS and charged per predicate column rather
+		 * than per table column.
 		 */
-		int			limit = pgcolumnar_effective_stripe_row_limit(heapRelid);
+		int			limit = pgcolumnar_written_stripe_row_limit(heapRelid);
 
 		if (limit <= 0)
 			return 1.0;

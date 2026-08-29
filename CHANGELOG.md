@@ -79,6 +79,46 @@ true until the next version shipped.
 
 ### Fixed
 
+- The zone-map survival estimate reads the row-group geometry a table was
+  **written** with, so a plan's cost no longer moves with the planning session's
+  `pgcolumnar.stripe_row_limit` (#817). This is the half #806 left open; it fixed
+  the index-fetch penalty and deliberately declined the same substitution here.
+
+  `pgcolumnar_zonemap_survival` asked `pgcolumnar_effective_stripe_row_limit`,
+  which answers "what limit would a write in THIS session use". For a table with
+  no per-table option, that is the session GUC. A table written at 2,000 rows per
+  group and planned from a session at the 150,000 default was therefore modelled
+  as holding `ceil(20000/150000) = 1` group, the one sampled group survived, and
+  the discount vanished. Measured on one unchanged table, varying only the
+  plan-time GUC:
+
+  | plan-time `stripe_row_limit` | before | after |
+  | --- | ---: | ---: |
+  | 150000, the default | 306.00 | 61.20 |
+  | 2000, the written value | 61.20 | 61.20 |
+
+  A 5x swing on a table that did not change, and at the default the pruning
+  predicate was priced identically to a full scan of the same table -- pruning had
+  left the cost model entirely rather than merely drifting.
+
+  **Why this is now safe, and was not before.** #806 declined it because the
+  substitution then moved `native_zonemap_narrow` from wide=30/narrow=30 to
+  wide=570/narrow=66, zone-map reads that scale with table width. That was the
+  width-blind whole-group probe in the estimator, which #821 replaced with a
+  per-column probe. The same substitution now measures **wide=40/narrow=40**,
+  exactly width-independent.
+
+  Planning-time zone-map fetches go from 1 to 10 on that fixture. The 1 was never
+  a saving: it was the estimator examining a single group because it believed a
+  20,000-row table held one. Ten is the estimator sampling the ten groups that
+  exist, bounded by `PGCOLUMNAR_PRUNE_SAMPLE_GROUPS` and charged per predicate
+  column rather than per table column.
+
+  `test/doc_parallel_premise.sh` carried `SET pgcolumnar.stripe_row_limit = 20000`
+  as a workaround for exactly this. It is **removed**, which makes that suite a
+  removal proof: its cost-ordering check now holds only because the estimator
+  reads the written geometry.
+
 - `pgcolumnar.row_group.group_number` is documented as **one-based**, which is what
   it has always been (#817). The column comment said "0-based row group ordinal".
   A group number is the stripe id reserved from the metapage when the group began
