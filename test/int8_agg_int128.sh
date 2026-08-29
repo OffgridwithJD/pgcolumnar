@@ -227,4 +227,67 @@ done
 echo "-- sum(bigint) WHERE k < 50: vectorized $FON ms, scalar $FOFF ms"
 check_ratio "the FILTERED vectorized path is not slower than the scalar one" "$FON" "$FOFF" "1.10"
 
+# ---- the accumulator must be cleared on a RESCAN ---------------------------
+# The int8 kinds accumulate into spec->i128sum. There are two reset sites:
+# pgcolumnar_agg_specs_reset clears nine fields including that one, and
+# PgColumnarReScanAggScan open-coded the same loop with eight and no i128sum. On
+# a rescan the running int128 total was therefore never zeroed and each
+# re-execution added to the previous one.
+#
+# Nothing here reached it. This suite drives the int128 accumulator and never
+# rescans; vector_agg_rescan_memory.sh rescans and aggregates count(*), which
+# does not touch i128sum. Each condition was covered and their intersection was
+# not.
+#
+# A LATERAL over a small driver re-executes the aggregate node once per driver
+# row. enable_material=off keeps core from materialising the inner side, which
+# would hide the rescan entirely.
+psql_run "CREATE TABLE rs_drv(i bigint);"
+psql_run "INSERT INTO rs_drv SELECT g FROM generate_series(1,4) g;"
+RSGUC="$ON; SET enable_material=off; SET max_parallel_workers_per_gather=0;"
+RSLAT="SELECT d.i, s.c FROM rs_drv d, LATERAL (SELECT %A c FROM %T s2 WHERE s2.v > d.i) s ORDER BY d.i"
+
+rs_run() {  # rs_run <table> <agg>
+	# Separate declarations on purpose: bash expands the whole command line
+	# before assigning, so `local t="$1" sql="${RSLAT//%T/$t}"` reads t unset.
+	# Under `set -u` that aborted the function and both sides of a comparison
+	# came back as the SAME error text, which `check` then passed. An arm that
+	# cannot tell an error from an answer is not an arm.
+	local t="$1"
+	local a="$2"
+	local sql="${RSLAT//%T/$t}"
+	sql="${sql//%A/$a}"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "$RSGUC" -c "$sql" 2>&1
+}
+rs_plan() {
+	local sql="${RSLAT//%T/a8}"; sql="${sql//%A/sum(s2.v)}"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "$RSGUC" -c "EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF) $sql" 2>&1
+}
+
+RSPLAN="$(rs_plan)"
+check_num "premise: the rescan shape still takes the vectorized node" \
+	"$(grep -c 'Columnar Vectorized Aggregates' <<<"$RSPLAN")" "1"
+RSLOOPS="$(grep -oE 'loops=[0-9]+' <<<"$RSPLAN" | grep -oE '[0-9]+' | sort -rn | head -1)"
+echo "-- rescan loops observed: ${RSLOOPS:-none}"
+check "premise: the node really is re-executed, so a stale accumulator can show" \
+	"$([ "${RSLOOPS:-0}" -gt 1 ] && echo rescanned || echo "not rescanned")" "rescanned"
+
+# Premise before the comparisons: the rescan query returns one row per driver
+# row. Without it an error on BOTH sides compares equal and passes.
+RSOUT="$(rs_run a8 'sum(s2.v)')"
+check_num "premise: the rescan query returns a row per driver row, not an error" \
+	"$(printf '%s\n' "$RSOUT" | grep -c '^[0-9]')" "4"
+check "sum(bigint) across a rescan matches the heap" \
+	"$RSOUT" "$(rs_run a8_h 'sum(s2.v)')"
+check "avg(bigint) across a rescan matches the heap" \
+	"$(rs_run a8 'avg(s2.v)')" "$(rs_run a8_h 'avg(s2.v)')"
+check "sum(bigint) across a rescan on the >int64 fixture matches the heap" \
+	"$(rs_run big8 'sum(s2.v)')" "$(rs_run big8_h 'sum(s2.v)')"
+# The control: a kind that does NOT use i128sum must be right either way, which
+# places any failure above on the int128 accumulator rather than on rescan.
+check "control: count(*) across the same rescan matches the heap" \
+	"$(rs_run a8 'count(*)')" "$(rs_run a8_h 'count(*)')"
+
 pgc_summary

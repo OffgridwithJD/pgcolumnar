@@ -4224,7 +4224,6 @@ static void
 PgColumnarReScanAggScan(CustomScanState *node)
 {
 	PgColumnarAggScanState *state = (PgColumnarAggScanState *) node;
-	int			a;
 
 	state->done = false;
 	state->haveStats = false;
@@ -4232,27 +4231,27 @@ PgColumnarReScanAggScan(CustomScanState *node)
 	state->foldPayloadLoads = 0;
 	state->foldGroupsDeferred = 0;
 	state->foldGroupsTotal = 0;
-	MemoryContextReset(state->resultContext);
-	for (a = 0; a < state->naggs; a++)
-	{
-		PgColumnarAggSpec *spec = &state->specs[a];
 
-		spec->count = 0;
-		spec->sum = 0;
-		spec->sawValue = false;
-		spec->extreme = (Datum) 0;
-		/*
-		 * Also clear the running float/numeric accumulators. resultContext was
-		 * just reset, so nsum's storage is gone; leaving nsumSet true would make
-		 * the next scan add to (and free) a dangling pointer. Scan-fold mode
-		 * classifies these extended kinds (#289), so this reset is load-bearing on
-		 * a rescan, not only defensive.
-		 */
-		spec->fsum = 0;
-		spec->fsxx = 0;
-		spec->nsum = (Datum) 0;
-		spec->nsumSet = false;
-	}
+	/*
+	 * One reset, not two. This used to open-code the loop that
+	 * pgcolumnar_agg_specs_reset already contains, and the two copies were
+	 * identical except that this one never cleared spec->i128sum. The int8 kinds
+	 * accumulate there, so a rescan carried the previous execution's running
+	 * total into the next one and sum(bigint) came back cumulative: measured
+	 * 800022400060000 then 1600044799119997 then 2400067196179988 over four
+	 * LATERAL iterations whose true answers were all near the first.
+	 *
+	 * The comment on pgcolumnar_batch_agg_ok already said to check that every
+	 * accumulator a kind uses is cleared, and named i128sum. It points at
+	 * pgcolumnar_agg_specs_reset, which was right. Calling that function from
+	 * here is what makes the instruction reach both paths, rather than leaving a
+	 * second copy for the next accumulator to be forgotten in.
+	 *
+	 * The float and numeric clears are load-bearing rather than defensive:
+	 * resultContext has just been reset, so nsum's storage is gone and leaving
+	 * nsumSet true would make the next scan add to a dangling pointer.
+	 */
+	pgcolumnar_agg_specs_reset(state);
 }
 
 static void
