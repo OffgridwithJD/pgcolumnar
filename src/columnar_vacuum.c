@@ -1740,7 +1740,8 @@ vacuum_sorted_gate_is_noop(Relation rel, int ncols, AttrNumber *atts)
  *		declared sort_by key from pgcolumnar.options (#288), like a bare
  *		"CLUSTER t" re-applying a remembered index; it errors if none is set.
  *		Sorting supports any btree-orderable column, text included; the Z-order
- *		cluster() path is numeric-only.
+ *		cluster() path takes integer, date/time, boolean and floating-point
+ *		columns.
  */
 Datum
 pgcolumnar_vacuum_sorted(PG_FUNCTION_ARGS)

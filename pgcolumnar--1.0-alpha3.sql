@@ -895,7 +895,7 @@ CREATE FUNCTION pgcolumnar.vacuum_sorted(
 	AS 'MODULE_PATHNAME', 'pgcolumnar_vacuum_sorted';
 
 COMMENT ON FUNCTION pgcolumnar.vacuum_sorted(regclass, name[])
-	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text (unlike the numeric-only Z-order cluster()). One-shot: not auto-maintained.';
+	IS 'compact a columnar table, storing rows sorted ascending (NULLS LAST) on the given columns. With no columns, applies the table''s declared sort_by key from set_options (#288), like a bare CLUSTER re-applying a remembered index; errors if none is declared. Supports any btree-orderable column including text and numeric, unlike Z-order cluster(), which takes integer, date/time, boolean and floating-point columns only. One-shot: not auto-maintained.';
 
 /*
  * One-argument form: apply the declared sort_by key (#288). A VARIADIC function
