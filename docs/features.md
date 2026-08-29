@@ -156,6 +156,10 @@ and writes continue.
   `max_groups` bounds how many one call rewrites.
 - `pgcolumnar.recluster(table, col [, col ...])` re-establishes the same Z-order
   as `cluster` online. It is a fast no-op when the recorded key is intact.
+- `pgcolumnar.expire(table)` drops row groups whose rows have all passed the
+  retention declared with `set_options(ttl_column, ttl_interval)`. A group with
+  one live row is kept whole, so nothing inside the retention is dropped. It
+  never runs on its own; you call it by name.
 - `pgcolumnar.truncate(table)` returns the reclaimed end blocks to the operating
   system, taking a brief `AccessExclusiveLock` only when it is free.
 
@@ -173,9 +177,11 @@ and writes continue.
 
 ## Parallel bulk ingest
 
-- `pgcolumnar.parallel_copy(target, path [, workers])` loads a COPY text file with
-  several background workers at once, as one atomic operation. It returns the row
-  count. The columnar encode step is CPU bound, so more workers speed up a large
+- `pgcolumnar.parallel_copy(target, path [, workers [, dedup]])` loads a COPY text
+  file with several background workers at once, as one atomic operation. It
+  returns the row count. With `dedup => true` a repeat load of the same file
+  contents into the same table stores nothing and returns zero. A retry after a
+  failure therefore cannot double-load. The columnar encode step is CPU bound, so more workers speed up a large
   load, up to the physical core count.
 - Each worker runs core `COPY` over a byte range of the file, so parse and write
   behavior match `COPY FROM` exactly. There is no second parser to keep correct.

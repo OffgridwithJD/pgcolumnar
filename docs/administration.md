@@ -292,11 +292,26 @@ inserts of the same key conflict correctly. The setting is on by default. `pgcol
 locks a transaction holds per unique index. Leave the lock on unless you have a
 specific reason to change it.
 
-## Column cache
+## Decoded row-group cache
 
-There is no cache of decompressed chunk groups. A cache existed in an earlier
-build, but its only entry point lost its caller and the code did nothing. It was
-removed in #303 rather than left as a setting that changes nothing.
+An index scan on a columnar table fetches rows one row number at a time. Without
+a cache each fetch would decode the whole row group again, so the module keeps
+decoded columns between fetches.
+
+What a DBA needs to know about it:
+
+- It holds up to four row groups per backend, and it is per statement. The
+  entries are released when the statement ends, not at commit.
+- It caps the decoded bytes it retains at 32 MB. Over the cap a column is
+  released and decodes per fetch from then on. A wide row group therefore
+  degrades one column at a time rather than all at once.
+- It is not configurable. There is no setting to size or disable it.
+- The planner knows about the cap. It charges an index scan for the decode its
+  per-row fetches force, which is what `pgcolumnar.enable_index_fetch_penalty`
+  governs.
+
+An earlier and unrelated cache of decompressed chunk groups was removed in #303.
+Its only entry point had lost its caller, so the code did nothing.
 
 ## Backup and restore
 

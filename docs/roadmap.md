@@ -10,7 +10,9 @@ being worked now.
 ## Status
 
 pgColumnar is [pre-release](limitations.md#release-status). The version marker is
-`1.0-alpha2`. A table `USING pgcolumnar` is stored in the native on-disk format, PGCN v1.
+`1.0-alpha3`, recorded in `VERSION`. That version is in development and not tagged; the
+latest published pre-release is `v1.0-alpha2`. A table `USING pgcolumnar` is stored in the
+native on-disk format, PGCN v1.
 
 ## Done
 
@@ -21,7 +23,16 @@ The large pieces that have shipped:
 - **Interoperability.** Arrow and Parquet, import and export, flat and nested, with no
   libarrow or libparquet dependency. External Parquet read in place, with an FDW surface,
   projection and predicate pushdown, multi-file reads and partition pruning.
-- **Maintenance.** Vacuum, compaction, clustering and reclustering, projections.
+- **Maintenance.** Vacuum, compaction, clustering and reclustering, projections. Retention
+  through `pgcolumnar.expire`, and an optional background daemon for the online verbs.
+- **Object storage.** Reads and writes over S3-compatible endpoints for the Parquet
+  functions and both foreign-data wrappers, behind an endpoint allow-list that is empty by
+  default.
+- **Apache Iceberg.** Read a table at its current snapshot, applying row-level deletes of
+  every kind, with an FDW surface and a REST catalog client.
+- **Parallel bulk work.** `pgcolumnar.parallel_copy` loads one file with several background
+  workers as one atomic operation, and `pgcolumnar.parallel_export_parquet` exports in
+  parallel.
 - **PostgreSQL integration.** Read stream and asynchronous IO, virtual generated columns,
   temporal constraints, statistics collection for the planner.
 
@@ -31,24 +42,20 @@ Nothing here is committed to a release. Each links to the issue that owns it.
 
 | area | item | issue |
 | --- | --- | --- |
-| Storage | Object storage reads for external Parquet | [#393](https://github.com/commandprompt/pgcolumnar/issues/393) |
-| Storage | Object storage writes for the export functions | [#394](https://github.com/commandprompt/pgcolumnar/issues/394) |
-| Formats | Apache Iceberg support | [#388](https://github.com/commandprompt/pgcolumnar/issues/388) |
-| Planner | Grouped parallel aggregate arm, cost model | [#369](https://github.com/commandprompt/pgcolumnar/issues/369) |
-| Benchmarks | Join-heavy analytical measurement | [#401](https://github.com/commandprompt/pgcolumnar/issues/401) |
+| Planner | Join and aggregate acceleration, including runtime filters pushed into the scan | [#752](https://github.com/commandprompt/pgcolumnar/issues/752) |
 
-Object storage is a prerequisite for Iceberg rather than a parallel feature. Parquet and
-Iceberg data normally live on S3, GCS or ADLS, and today we read local files only.
+Everything this table listed before has shipped: object storage reads and writes, Apache
+Iceberg, the grouped parallel aggregate arm, and the join-heavy benchmark. See Done above.
 
 ## Under investigation
 
 Recorded so the work is visible, without implying it will be built:
 
 - Techniques from published columnar systems, ranked against what we already implement.
-  See [#403](https://github.com/commandprompt/pgcolumnar/issues/403) and
-  [#405](https://github.com/commandprompt/pgcolumnar/issues/405).
-- PostgreSQL 19 features we can adopt, and what the 20 branch may bring.
-  See [#390](https://github.com/commandprompt/pgcolumnar/issues/390).
+  See [#403](https://github.com/commandprompt/pgcolumnar/issues/403). Its companion
+  reading, [#405](https://github.com/commandprompt/pgcolumnar/issues/405), is closed, and
+  so is the PostgreSQL 19 and 20 survey,
+  [#390](https://github.com/commandprompt/pgcolumnar/issues/390).
 
 ## What this page is not
 
