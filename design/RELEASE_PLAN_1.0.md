@@ -65,9 +65,10 @@ it is 11 days into a 14-day cycle.
 
 ### 1.0-alpha4, target 2026-09-15. Theme: skipping and layout
 
-- **Hilbert curve clustering.** Z-order ships; Hilbert is the open half and gives
-  better locality on the same machinery. It is a new key kind for `cluster` and
-  `recluster`, so it is user-visible surface and cannot wait.
+- **Hilbert curve clustering.** Confirmed for 1.0 by the owner on 2026-08-29.
+  Z-order ships; Hilbert is the open half and gives better locality on the same
+  machinery. It is a new key kind for `cluster` and `recluster`, so it is
+  user-visible surface. Under the freeze rule it is this release or 2.0.
 - **Per-tier block compression defaults.** On fast local storage, block
   compression can cost more CPU than it saves in I/O. The finding reverses for
   object storage. Make the default depend on the tier. Low effort, and it changes
@@ -94,12 +95,29 @@ it is 11 days into a 14-day cycle.
 - **Arrow C Data Interface zero-copy export**, which is new interoperability
   surface and therefore alpha work.
 
-### 1.0-alpha7, target 2026-10-27. Theme: closing the surface
+## What compressing the series costs
 
-Reserved deliberately, and it is the last chance for anything user-visible.
-Whatever slipped from alpha4 through alpha6 lands here or is deferred to 2.0. If
-nothing slipped, this alpha is the documentation and upgrade-path pass instead,
-and it can be cut early.
+The owner chose on 2026-08-29 to compress and reach beta sooner. That removes the
+reserve alpha, and beta 1 moves from 2026-11-10 to 2026-10-27.
+
+The saving is real and so is the price. State the price plainly.
+
+**There is no longer a last chance.** With a reserve, an item that slipped moved
+one cycle. Without one, an item that slips past alpha6 is deferred to 2.0,
+because beta 1 will not take it. The deferral rule was always there; removing the
+reserve is what makes it bite.
+
+**The risk concentrates on the final alpha.** alpha6 carries three items, and it
+is now the last one. If the series is going to lose something, it loses it there.
+
+**A recommendation follows.** The owner has not yet decided it. Move the Arrow C
+Data Interface export out of alpha6, into the "not before beta 1" list.
+
+It is the least load-bearing of the three. The cascade encoding selector changes
+written bytes, so it cannot be added later. Parquet partition inference completes
+a format we already ship. Zero-copy Arrow export is a new surface that nothing
+else depends on. Cutting it deliberately now beats losing it to a slip in
+October.
 
 ## Not before beta 1
 
@@ -120,7 +138,7 @@ alpha series.
 Beta 1 is not a date. It is the first build that passes all of the following, and
 the date below is only where the cadence puts it if nothing slips.
 
-**Target 2026-11-10.**
+**Target 2026-10-27.**
 
 1. **The feature set is declared closed.** Every item in the alpha series above is
    either shipped or explicitly deferred to 2.0, in writing.
