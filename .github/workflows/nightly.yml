@@ -17,6 +17,18 @@
 name: nightly deep gate
 
 on:
+  # A tag runs the deep gate as well as the per-PR one. Beta 1 criterion 2 names
+  # both this workflow's matrix and its sanitizer gate, and asks for them green
+  # on the tag; a schedule cannot deliver that, because the nightly that follows
+  # a tag runs against whatever main holds by then.
+  #
+  # concurrency below is group: nightly with cancel-in-progress: false, so a tag
+  # run queues behind a scheduled one instead of killing it. The per-job
+  # `if: github.event_name == 'workflow_dispatch' || github.repository == ...`
+  # guards already admit a push on the canonical repository, so they need no
+  # change: a tag push there satisfies the second clause, and a fork still skips.
+  push:
+    tags: ['v*']
   schedule:
     - cron: "0 6 * * *" # nightly, 06:00 UTC
   workflow_dispatch:
