@@ -58,10 +58,34 @@ ones made here.
 
 ### 1.0-alpha3, target 2026-09-01
 
-**Already feature-complete.** Retention through `pgcolumnar.expire`, deduplicating
-`parallel_copy`, and `sort_status` reporting `sorted_kind`, plus the cost-model
-and zone-map estimator fixes of the last cycle. Nothing further should be added;
-it is 11 days into a 14-day cycle.
+**Already feature-complete**, and it carries more than an earlier draft of this
+document said. That draft named three items. The changelog's `[Unreleased]`
+section holds **twelve** entries under Added, because everything since the
+`v1.0-alpha2` tag of 2026-08-18 is alpha3 content.
+
+The features:
+
+- retention through `pgcolumnar.expire`;
+- `pgcolumnar.parallel_copy` refusing a load it has already taken;
+- `pgcolumnar.sort_status` reporting `sorted_kind`;
+- chunk-group skipping from a predicate on `date_trunc(unit, ts)`, both the
+  range and the equality form, which is #403's preimage item;
+- chunk-group skipping from `IN (...)` and `= ANY(array)`;
+- the scan reporting to the planner the order a sorted rewrite left behind;
+- `pgcolumnar.vacuum_sorted()` self-gating when the relation is already sorted;
+- the vectorized aggregate accepting a target list that contains aggregates.
+
+Four further Added entries are test and benchmark work rather than user-visible
+features. They are the CDC recipe tested end to end, a suite for the replication
+and backup claim, and the cross-engine benchmark arms made reproducible.
+
+Readiness was checked rather than assumed, on 2026-08-29. `VERSION` and
+`pgcolumnar.control` agree at `1.0-alpha3`. The upgrade script from `1.0-alpha2`
+ships alongside those from `1.0-dev` and `1.0-alpha`. A `COPT=-Werror` build is
+clean with zero warnings. `native_upgrade_converge` is 8 of 8, `docs_style` 9,
+and `harness_selftest` 168.
+
+Nothing further should be added. It is 11 days into a 14-day cycle.
 
 ### 1.0-alpha4, target 2026-09-15. Theme: skipping and layout
 
