@@ -159,10 +159,16 @@ SELECT pgcolumnar.set_options(
 | `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
 | `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
 | `sort_by` | name[] | Declared physical sort key (#288), applied by `pgcolumnar.vacuum_sorted(t)` with no columns. Column names, so it survives `pg_dump`/restore. Not auto-maintained; re-run after inserts. Cannot name a virtual generated column. Clear with `reset_options(t, sort_by => true)`. |
+| `ttl_column` | name | The `timestamp` or `timestamptz` column a retention is measured on. Set it with `ttl_interval`; neither works alone. Nothing is deleted until you call `pgcolumnar.expire(t)` by name. |
+| `ttl_interval` | interval | How long a row is kept, measured from `ttl_column`. `pgcolumnar.expire(t)` then drops row groups whose rows are all older than this. A group with one live row is kept whole. |
 
 The function does not change an argument that keeps its default value of
 `NULL`. The function refuses a value that is outside the permitted range of a
 limit or a level.
+
+`pgcolumnar.reset_options` has no `ttl_column` or `ttl_interval` argument. To
+clear a declared retention, set `ttl_interval` to a value long enough that no
+row reaches it, or recreate the table.
 
 ### Why grouped vectorization is off by default
 

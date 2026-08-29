@@ -171,4 +171,50 @@ check "a pruning predicate still returns the right rows" \
 check "a predicate matching nothing still returns no rows" \
 	"$(q 'SELECT count(*) FROM w WHERE c1 > 99999;')" "0"
 
+# ---- the estimate must not move with the planning session's GUC (#817) ------
+#
+# The two tables above carry an explicit per-table stripe_row_limit, so
+# pgcolumnar_effective_stripe_row_limit would return the option and the session
+# GUC could never have reached them. This one deliberately sets NO option and is
+# written under a session GUC instead, which is the only shape where the two
+# readings differ -- and it is the shape a user produces by setting the GUC before
+# a bulk load.
+#
+# Before #817's fix the survival site asked what limit a write in the PLANNING
+# session would use. At the 150,000 default that made this 10-group table a
+# ceil(20000/150000) = 1 group one, the single sampled group survived, and the
+# discount vanished: the same unchanged table was priced differently by two
+# sessions that had done nothing but SET a GUC.
+q "CREATE TABLE gsess (c1 int, c2 int) USING pgcolumnar;" >/dev/null
+q "SET pgcolumnar.stripe_row_limit = 2000;
+   INSERT INTO gsess SELECT g, g FROM generate_series(1,20000) g;" >/dev/null
+
+check "PREMISE: gsess carries NO per-table option, so the GUC is the only other input" \
+	"$(q "SELECT count(*) FROM pgcolumnar.options WHERE regclass='gsess'::regclass AND stripe_row_limit IS NOT NULL;")" "0"
+check "PREMISE: and it really was written at 2000, so it holds 10 groups" \
+	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = $(sid gsess);")" "10"
+
+# The SET and the EXPLAIN must share a session, so they go in one call.
+gcost() {
+	q "SET max_parallel_workers_per_gather = 0;
+	   SET pgcolumnar.stripe_row_limit = $1;
+	   EXPLAIN SELECT count(*) FROM gsess WHERE c1 <= 4000;" |
+	  sed -n 's/.*Custom Scan (PgColumnarScan) on gsess  (cost=[0-9.]*\.\.\([0-9.]*\) .*/\1/p'
+}
+DEF="$(gcost 150000)"   # the shipped default
+WRT="$(gcost 2000)"     # the value the table was written at
+echo "-- gsess cost, planned at the default GUC=$DEF ; at the written 2000=$WRT"
+check "a cost was extracted from both arms" \
+	"$([ -n "$DEF" ] && [ -n "$WRT" ] && echo yes || echo "def=$DEF wrt=$WRT")" "yes"
+check "the estimate does not move with the planning session's GUC (#817)" "$DEF" "$WRT"
+check "and the discount is real, not just stable (2 of 10 groups priced below a full scan)" \
+	"$(q "SET max_parallel_workers_per_gather = 0;
+	      EXPLAIN SELECT count(*) FROM gsess WHERE c1 <= 4000;" |
+	   sed -n 's/.*Custom Scan (PgColumnarScan) on gsess  (cost=[0-9.]*\.\.\([0-9.]*\) .*/\1/p' |
+	   awk -v f="$(q "SET max_parallel_workers_per_gather = 0;
+	                  EXPLAIN SELECT count(*) FROM gsess WHERE c1 >= 0;" |
+	               sed -n 's/.*Custom Scan (PgColumnarScan) on gsess  (cost=[0-9.]*\.\.\([0-9.]*\) .*/\1/p')" \
+	       '{ print ($1 < f) ? "yes" : "no (" $1 " vs full " f ")" }')" "yes"
+check "gsess reads back correctly" "$(q 'SELECT count(*) FROM gsess WHERE c1 <= 4000;')" "4000"
+
 pgc_summary

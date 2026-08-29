@@ -34,6 +34,20 @@
 #   are not checked either. Both explain WHY, and the reasoning in them is worth
 #   more than the uniformity would be.
 #
+#   RELEASE_NOTES_*.md, ANNOUNCEMENT_*.md, CONTEXT.md and PROVENANCE.md are NOT
+#   checked, and that was asked and answered on 2026-08-29 rather than assumed.
+#   Running the checker over them by hand finds 19, 6, 23 and 87 over-long
+#   sentences, so the exclusion is not a claim that they conform. A release note
+#   and an announcement describe one shipped version and are not revised after
+#   it; CONTEXT.md is written for agents working in this repository; and
+#   PROVENANCE.md is a clean-room record whose precision outranks its sentence
+#   length. The owner's decision was that these four stay outside the gate.
+#
+#   README.md's version marker is compared against VERSION by the check at the
+#   bottom of this file. It was NOT, until 2026-08-29, and it had drifted two
+#   versions as a result: it said 1.0-alpha while VERSION said 1.0-alpha3. The
+#   only file that was wrong was the one file the comparison could not see.
+#
 # Usage:  test/docs_style.sh [PG_CONFIG]
 # The argument is accepted and ignored; this suite needs no cluster.
 # Written fresh for pgColumnar.
@@ -118,7 +132,10 @@ _ver="$(cat "$SRCDIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 check "premise: the VERSION file has a version to compare against" \
 	"$([ -n "$_ver" ] && echo yes || echo no)" "yes"
 
-_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+# README.md is in this list because it was NOT, and drifted two versions as a
+# result: it said `1.0-alpha` while VERSION said `1.0-alpha3`. The check that
+# would have caught it excluded the only file that was wrong.
+_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | sort)"
 check "premise: at least one document cites the VERSION file" \
 	"$([ -n "$_verdocs" ] && echo yes || echo no)" "yes"
 

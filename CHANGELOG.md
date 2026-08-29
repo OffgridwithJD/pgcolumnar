@@ -16,6 +16,33 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- The documentation is brought back into line with the code, and the version
+  check now covers the file that had drifted furthest (#753 follow-up).
+
+  `README.md` said the version marker was `1.0-alpha` while `VERSION` said
+  `1.0-alpha3`, two versions behind. It drifted because `test/docs_style.sh`
+  compared `VERSION` against `CHANGELOG.md` and `docs/` and did not read
+  `README.md`, so the only file that was wrong was the one file the check could
+  not see. `README.md` is now in that comparison, and the badge is corrected and
+  resized for the longer string.
+
+  Corrected against the code: `docs/how-to.md` said `cluster` takes numeric
+  columns only, where the code accepts boolean, integer, floating-point, date
+  and timestamp keys and rejects `numeric` and `text`. `docs/installation.md`
+  said `DROP EXTENSION` removes columnar tables, where a plain `DROP EXTENSION`
+  fails while they exist and only `CASCADE` drops them. `docs/administration.md`
+  said there is no cache of decompressed chunk groups, where the fetch cache
+  holds four decoded row groups per backend per statement under a 32 MB cap.
+
+  Brought up to date: `docs/roadmap.md` listed five shipped features as planned,
+  all five of their issues closed, and repeated that we read local files only.
+  `docs/configuration.md` did not document `ttl_column` or `ttl_interval`.
+  `docs/features.md` omitted `pgcolumnar.expire` and the `dedup` argument of
+  `pgcolumnar.parallel_copy`. `docs/how-to.md` gains a retention recipe, so the
+  feature is reachable by task and not only by name.
+
 ### Added
 
 - `pgcolumnar.expire` drops row groups whose rows are all older than a declared
@@ -78,6 +105,46 @@ true until the next version shipped.
   and parses the file.
 
 ### Fixed
+
+- The zone-map survival estimate reads the row-group geometry a table was
+  **written** with, so a plan's cost no longer moves with the planning session's
+  `pgcolumnar.stripe_row_limit` (#817). This is the half #806 left open; it fixed
+  the index-fetch penalty and deliberately declined the same substitution here.
+
+  `pgcolumnar_zonemap_survival` asked `pgcolumnar_effective_stripe_row_limit`,
+  which answers "what limit would a write in THIS session use". For a table with
+  no per-table option, that is the session GUC. A table written at 2,000 rows per
+  group and planned from a session at the 150,000 default was therefore modelled
+  as holding `ceil(20000/150000) = 1` group, the one sampled group survived, and
+  the discount vanished. Measured on one unchanged table, varying only the
+  plan-time GUC:
+
+  | plan-time `stripe_row_limit` | before | after |
+  | --- | ---: | ---: |
+  | 150000, the default | 306.00 | 61.20 |
+  | 2000, the written value | 61.20 | 61.20 |
+
+  A 5x swing on a table that did not change, and at the default the pruning
+  predicate was priced identically to a full scan of the same table -- pruning had
+  left the cost model entirely rather than merely drifting.
+
+  **Why this is now safe, and was not before.** #806 declined it because the
+  substitution then moved `native_zonemap_narrow` from wide=30/narrow=30 to
+  wide=570/narrow=66, zone-map reads that scale with table width. That was the
+  width-blind whole-group probe in the estimator, which #821 replaced with a
+  per-column probe. The same substitution now measures **wide=40/narrow=40**,
+  exactly width-independent.
+
+  Planning-time zone-map fetches go from 1 to 10 on that fixture. The 1 was never
+  a saving: it was the estimator examining a single group because it believed a
+  20,000-row table held one. Ten is the estimator sampling the ten groups that
+  exist, bounded by `PGCOLUMNAR_PRUNE_SAMPLE_GROUPS` and charged per predicate
+  column rather than per table column.
+
+  `test/doc_parallel_premise.sh` carried `SET pgcolumnar.stripe_row_limit = 20000`
+  as a workaround for exactly this. It is **removed**, which makes that suite a
+  removal proof: its cost-ordering check now holds only because the estimator
+  reads the written geometry.
 
 - `pgcolumnar.row_group.group_number` is documented as **one-based**, which is what
   it has always been (#817). The column comment said "0-based row group ordinal".
