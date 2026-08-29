@@ -248,6 +248,7 @@ SUITES=(
 	rls_direct_storage
 	row_triggers
 	scan_decode_cost
+	scan_direction
 	server_file_privilege
 	smoke
 	sort_status

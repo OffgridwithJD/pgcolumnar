@@ -602,6 +602,37 @@ pgcolumnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
 
 	ExecClearTuple(slot);
 
+	/*
+	 * Honour the direction, or refuse it. This used to ignore the argument
+	 * entirely and advance forward whatever was asked, so a scrollable cursor
+	 * that reached the AM rather than the custom scan answered FETCH BACKWARD
+	 * with more forward rows -- 6 7 8 where the heap gave 4 3 2 -- and FETCH
+	 * LAST with nothing at all.
+	 *
+	 * NoMovement is a real request for no row and is answered as such.
+	 *
+	 * Backward is refused rather than emulated. The reader walks row groups and
+	 * decodes vectors forwards, so scanning the other way is a feature rather
+	 * than a correction, and inventing an answer is the one thing that must not
+	 * happen here. Refusing is visible, and at shipped defaults the custom scan
+	 * serves these cursors, so the refusal is reached only when that path has
+	 * been turned off.
+	 */
+	if (unlikely(direction != ForwardScanDirection))
+	{
+		if (direction == NoMovementScanDirection)
+			return false;
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("columnar tables do not support backward scans"),
+				 errdetail("A scrollable cursor over relation \"%s\" asked for a "
+						   "backward fetch, which native storage cannot serve.",
+						   RelationGetRelationName(scan->rs_base.rs_rd)),
+				 errhint("Leave pgcolumnar.enable_custom_scan on, or add an "
+						 "ORDER BY so the cursor is materialized.")));
+	}
+
 	if (!PgColumnarReadNextRow(pgcolumnar_scan_read_state(scan,
 													 slot->tts_tupleDescriptor),
 							 slot->tts_values, slot->tts_isnull, &rowNumber))
