@@ -46,7 +46,12 @@
 #define Anum_options_sort_by 7
 #define Anum_options_ttl_column 8
 #define Anum_options_ttl_interval 9
-#define Natts_options 7
+/* Nine, not seven: ttl_column and ttl_interval (#403 item 5a) widened the table
+ * and this constant was left behind. It sizes the values/nulls/replace arrays
+ * handed to heap_modify_tuple, which iterates tupdesc->natts, so a short value
+ * here reads past three stack arrays at once. test/catalog_natts.sh pins every
+ * Natts_* against the width the server reports. */
+#define Natts_options 9
 
 /* attribute numbers for columnar.projection (gap 26, format 2.2) */
 #define Anum_projection_declaration_rel 1
