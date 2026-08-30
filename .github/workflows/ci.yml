@@ -24,6 +24,19 @@ name: build and test
 on:
   push:
     branches: [main]
+    # Tags too, because the beta 1 entry test in design/RELEASE_PLAN_1.0.md asks
+    # for a green matrix "on the tag itself, not on a branch", and nothing here
+    # fired on a tag: v1.0-dev has no workflow run at all, and the runs against
+    # v1.0-alpha and v1.0-alpha2 are push-to-main runs that happen to share the
+    # commit. A criterion satisfiable only by remembering to dispatch one by hand
+    # is not a gate. actions/checkout takes the triggering ref, so this run is
+    # the tag's own.
+    #
+    # The duplicate run against a commit already built on main is the point
+    # rather than waste: it is what binds a green result to the release
+    # artifact. The concurrency group below keys on github.ref, and a tag ref is
+    # not refs/heads/main, so the two do not cancel each other.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
