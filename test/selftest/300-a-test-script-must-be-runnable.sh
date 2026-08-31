@@ -198,6 +198,27 @@ _tsm_named="$(grep -hoE '(^|[^/[:alnum:]_.-])(test|bench)/[A-Za-z0-9_./-]+\.(sh|
 check_num "premise: the documents name a population of commands, not none" \
 	"$([ "$(printf '%s\n' "$_tsm_named" | grep -c .)" -ge 40 ] && echo 1 || echo 0)" "1"
 
+# A TOTAL IS THE WRONG PREMISE FOR THIS CHECK, and a floor over it hides the
+# narrowing that matters. Measured on this tree: the documents name 83 scripts,
+# 76 under test/ and 7 under bench/. Delete docs/benchmarks.md and the bench/
+# half goes to ZERO while the total is still 75 -- comfortably over any floor,
+# so the premise stays green and C silently stops covering the directory #856
+# added it for. That is #853's own objection to a prose-derived population,
+# arriving where it actually bites.
+#
+# So the premise is per-directory, and it is the population's definition turned
+# into an assertion: a directory is swept BECAUSE it holds documented entry
+# points, so the documents must still name one. A directory added to the sweep
+# with nothing documented in it reddens here and says so.
+_tsm_uncovered=""
+for _tsm_d in "${_tsm_dirs[@]}"; do
+	_tsm_b="$(basename "$_tsm_d")"
+	printf '%s\n' "$_tsm_named" | grep -q "^$_tsm_b/" \
+		|| _tsm_uncovered="$_tsm_uncovered $_tsm_b"
+done
+check "premise: and they name at least one command in every swept directory" \
+	"[${_tsm_uncovered}]" "[]"
+
 _tsm_docbad=""; _tsm_docbad_n=0
 while IFS= read -r _tsm_s; do
 	[ -n "$_tsm_s" ] || continue
@@ -212,5 +233,6 @@ check "and every script a document names is executable" \
 	"$(_tsm_fmt "$_tsm_docbad_n" "$_tsm_docbad")" "[]"
 
 unset _tsm_root _tsm_scripts _tsm_dirs _tsm_docs _tsm_named _tsm_f _tsm_d _tsm_s
+unset _tsm_uncovered _tsm_b
 unset _tsm_noexec _tsm_noexec_n _tsm_nodecl _tsm_nodecl_n _tsm_docbad _tsm_docbad_n _tsm_c
 unset -f _tsm_has_shebang _tsm_verdict _tsm_fmt
