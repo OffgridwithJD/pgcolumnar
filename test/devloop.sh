@@ -45,6 +45,29 @@ echo "== devloop: sync $SRC -> $BUILD"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 (cd "$SRC" && tar cf - --exclude=.git .) | (cd "$BUILD" && tar xf -)
+
+# .git is excluded above because it is large -- 32 MB in the audit container --
+# and this loop is meant to be cheap enough to run constantly. But excluding it
+# leaves a tree that is not a checkout, and harness_selftest asks git two
+# questions about the tree it is running in: whether a compiled Python artifact
+# is tracked, and whether `.gitignore` covers one. Outside a repository both are
+# unanswerable, and the suite reported five failures on a tree with nothing wrong
+# with it (#854).
+#
+# A gitfile is the whole fix: one line, no bytes copied. git resolves it and
+# answers about the recorded tree, which is what the rule is about.
+# --absolute-git-dir rather than "$SRC/.git", because SRC may itself be a linked
+# worktree, where .git is a FILE and that path is not a git directory.
+#
+# Only the build dir gets the pointer, and it is wiped on every run. Do not run
+# git commands that WRITE in $BUILD: it shares $SRC's index.
+if _gd="$(git -C "$SRC" rev-parse --absolute-git-dir 2>/dev/null)"; then
+	printf 'gitdir: %s\n' "$_gd" > "$BUILD/.git"
+else
+	echo "devloop: $SRC is not a git checkout; harness_selftest's tracked-artifact" \
+		"checks cannot be answered in $BUILD"
+fi
+
 cd "$BUILD" || exit 1
 
 # Clean rebuild + install + symbol verification. Any failure here is fatal: there

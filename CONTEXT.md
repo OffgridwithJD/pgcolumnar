@@ -279,6 +279,13 @@ PostgreSQL 15 through 19 when given none.
 - Build out of the source tree, or clean between majors. A suite installs into
   the prefix its `pg_config` names, so two majors sharing a prefix will overwrite
   each other's `.so`.
+- **Build output is never committed.** `.gitignore` covers `*.o`, `*.so`, `*.bc`,
+  `__pycache__/` and `*.pyc`, and `harness_selftest` fails if a compiled Python
+  artifact is tracked or if either Python rule goes missing. A tracked artifact
+  does not stay still: `test/__pycache__/ste_check.cpython-312.pyc` outlived the
+  source it was compiled from, which had been renamed away, and re-committed
+  itself -- two bytes of PEP 552 timestamp -- inside an unrelated
+  logical-replication fix (#854).
 
 Where a development environment is containerised, or PostgreSQL is not on the
 host, that is a property of the machine rather than of the project, and belongs

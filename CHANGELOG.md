@@ -35,6 +35,36 @@ true until the next version shipped.
 
 ### Fixed
 
+- No compiled Python artifact is tracked, and the tree ignores the ones the
+  interpreter writes (#854). `test/__pycache__/ste_check.cpython-312.pyc` was
+  tracked. Its source, `test/ste_check.py`, was renamed to
+  `test/plain_language_check.py` in `e9de048`; the `.pyc` outlived it by 146
+  commits and was still tracked at `fe1f3a2`, the base of this change. So the
+  file was compiled code for a module that no longer existed and that CPython
+  would never open: it reads a `__pycache__` entry only when the matching source
+  sits beside it.
+
+  A tracked build artifact does not stay still. This one had already re-committed
+  itself inside an unrelated logical-replication fix, where the diffstat reads
+  `Bin 6028 -> 6028 bytes` and exactly two bytes differ -- the PEP 552
+  source-timestamp word. The compiled code was identical either side.
+
+  `.gitignore` gains `__pycache__/` and `*.pyc`, which it had neither of, and
+  `test/selftest/` gains a part that fails when a compiled Python artifact is
+  tracked or when either rule goes missing. Ignoring is not enough on its own and
+  the suite proves it: restoring the tracked file with both rules in place still
+  reds two checks, because `.gitignore` has no effect on a file git already
+  tracks.
+
+  `test/devloop.sh` stages its build directory with `tar --exclude=.git`, so the
+  tree the suites run out of was not a checkout and the new checks reported five
+  failures on a clean tree. It now writes a one-line gitfile into the build
+  directory instead: 45 bytes rather than the 32 MB of copying the object
+  database, and the loop stays as cheap as it was. Every check in the part also
+  answers `no-repo` where there is no repository, rather than the answer git
+  gives by default -- `ls-files` prints nothing, which reads as a clean tree, and
+  `check-ignore` says "not ignored", which reports a present rule as missing.
+
 - Every test script is executable, so the commands this project documents run as
   written (#852). No released version is affected: nothing in the extension
   changed, and this is test tooling only.
