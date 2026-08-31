@@ -35,6 +35,41 @@ true until the next version shipped.
 
 ### Fixed
 
+- A shebang and the execute bit go together, and every directory that documents
+  a command is swept (#856). Two things were left over from #852.
+
+  **The rule flagged both states, so a sourced fragment could not be correct.**
+  It reddened a file that declared an interpreter without the bit, and it also
+  reddened a file with no interpreter line at all. Its header documented the way
+  out as "drop its shebang and say why", and that way out did not exist: dropping
+  the shebang moved the file from one red to the other. `bench/cb_guards.sh` is
+  the file that proved it -- sourced by `bench/run_clickbench.sh` and
+  `test/bench_guards.sh`, its header saying "Sourced, not executed" since it was
+  written, and unfixable under the old rule. `CONTEXT.md` had described the rule
+  correctly all along, as failing "if one has either without the other"; it was
+  the code that was stricter than the documented rule.
+
+  The rule is now that biconditional, and a file with neither a shebang nor the
+  bit passes.
+
+  **That removed the exemptions.** `test/selftest/` and `test/fixtures/` were
+  pruned by path because the old rule would have reddened them wholesale.
+  Measured under the new one before the prune came out: `selftest/` is 31 scripts
+  and every one is already correct, `fixtures/` is 14 `.sh`/`.py` of which 13 are
+  the host tools this change gives the bit. Nothing is excluded now, so nothing
+  is concealed.
+
+  **`bench/` joins the population.** `docs/benchmarks.md` names five `bench/`
+  scripts as bare commands. All five are executable today, so all five work:
+  correct by habit with nothing checking it, which is what `test/` was before
+  #852.
+
+  **A third check, anchored on the documents, closes the hole the biconditional
+  opens.** Delete a documented command's shebang and its bit and the file is
+  internally consistent and still broken for a reader, so neither of the first
+  two rules can see it. The third requires every script a document names to be
+  executable.
+
 - No compiled Python artifact is tracked, and the tree ignores the ones the
   interpreter writes (#854). `test/__pycache__/ste_check.cpython-312.pyc` was
   tracked. Its source, `test/ste_check.py`, was renamed to
