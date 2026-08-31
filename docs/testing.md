@@ -25,6 +25,7 @@ test/index_only.sh       /path/to/pg_config  # index-only scan and the visibilit
 test/projections.sh      /path/to/pg_config  # multiple projections and projection scan
 test/arrow_export.sh     /path/to/pg_config  # Arrow IPC export read back with pyarrow
 test/parquet_export.sh   /path/to/pg_config  # Parquet export read back with pyarrow and DuckDB
+test/parquet_export_stats.sh /path/to/pg_config # row-group statistics in exported files
 test/arrow_import.sh     /path/to/pg_config  # Arrow IPC import
 test/parquet_import.sh   /path/to/pg_config  # Parquet import
 test/arrow_nested.sh     /path/to/pg_config  # nested Arrow export

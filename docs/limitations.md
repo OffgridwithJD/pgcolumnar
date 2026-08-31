@@ -854,6 +854,19 @@ correct rows; these are the conditions under which it can skip at all:
 The `Row Groups Skipped` counter in `EXPLAIN ANALYZE` reports what was actually
 skipped.
 
+From 1.0-alpha3, `pgcolumnar.export_parquet` writes per-row-group statistics.
+A table exported from pgColumnar skips on the same predicates as a file from any
+other writer. Two limits apply to what those files carry:
+
+- Bounds are written for the columns stored as INT32, INT64, FLOAT or DOUBLE.
+  That is the set the reader can skip on: `smallint`, `integer`, `bigint`,
+  `real`, `double precision`, `date`, `time`, `timestamp` and
+  `timestamp with time zone`. A `text`, `bytea`, `uuid`, `boolean` or
+  byte-array `numeric` column carries a null count and no bounds. A predicate on
+  one of those filters, but it never skips.
+- A file exported by 1.0-alpha2 or earlier carries no statistics. Nothing
+  rewrites it in place. Export it again to make it skippable.
+
 ## Reading Apache Iceberg
 
 The Iceberg read surface (`iceberg_scan`, `iceberg_data_files`, the

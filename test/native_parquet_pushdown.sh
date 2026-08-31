@@ -3,11 +3,15 @@
 # pgColumnar Parquet FDW predicate / row-group skipping (Phase G). The FDW reads
 # each row group's min/max statistics and skips groups that a pushable col-op-const
 # clause proves empty; the executor still rechecks every returned row, so a skip can
-# only save work, never drop rows. This suite needs a statistics-bearing file, which
-# our exporter does not write, so it uses pyarrow to produce a multi-row-group file
-# with per-group stats. It asserts correctness against a heap oracle (skipping never
-# changes results) AND that groups are actually skipped (via EXPLAIN ANALYZE's
-# "Row Groups Skipped" counter).
+# only save work, never drop rows. It asserts correctness against a heap oracle
+# (skipping never changes results) AND that groups are actually skipped (via
+# EXPLAIN ANALYZE's "Row Groups Skipped" counter).
+#
+# The file under test is written by pyarrow, deliberately: this suite is about
+# the READ side, and an independent writer keeps it from passing because our
+# reader and our writer share a misunderstanding. Our own exporter wrote no
+# statistics at all until #850 (1.0-alpha3), which is why that gap survived here
+# unseen; test/parquet_export_stats.sh covers the write side.
 #
 # Usage:  test/native_parquet_pushdown.sh [PG_CONFIG]
 # Written fresh for pgColumnar.

@@ -223,6 +223,7 @@ SUITES=(
 	parallel_vector_agg
 	parquet_count_bounds
 	parquet_export
+	parquet_export_stats
 	parquet_import
 	parquet_level_width
 	parquet_nested
