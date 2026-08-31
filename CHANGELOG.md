@@ -54,6 +54,15 @@ true until the next version shipped.
   reds two checks, because `.gitignore` has no effect on a file git already
   tracks.
 
+  `test/devloop.sh` stages its build directory with `tar --exclude=.git`, so the
+  tree the suites run out of was not a checkout and the new checks reported five
+  failures on a clean tree. It now writes a one-line gitfile into the build
+  directory instead: 45 bytes rather than the 32 MB of copying the object
+  database, and the loop stays as cheap as it was. Every check in the part also
+  answers `no-repo` where there is no repository, rather than the answer git
+  gives by default -- `ls-files` prints nothing, which reads as a clean tree, and
+  `check-ignore` says "not ignored", which reports a present rule as missing.
+
 - Every test script is executable, so the commands this project documents run as
   written (#852). No released version is affected: nothing in the extension
   changed, and this is test tooling only.
