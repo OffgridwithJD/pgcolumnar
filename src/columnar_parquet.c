@@ -26,6 +26,10 @@
 #include "columnar_sink.h"
 #include "columnar_thrift.h"
 
+/* isnan(), for the float statistics rules. PostgreSQL's own headers happen to
+ * reach it on 15 through 18 and do not on 19, where the build fails outright. */
+#include <math.h>
+
 #include "fmgr.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
@@ -126,6 +130,40 @@ numeric_to_int128(Datum numd, int scale, __int128 *out)
 
 
 /*
+ * Per-row-group statistics for one leaf, i.e. what goes in ColumnMetaData's
+ * Statistics (field 12). A reader skips a row group by proving its predicate
+ * cannot hold anywhere in [min_value, max_value], so a wrong bound loses rows
+ * silently -- the executor's recheck never sees a group that emitted nothing.
+ * Everything here is therefore conservative:
+ *
+ *   * Bounds are written only for the fixed-width physical types whose defined
+ *     sort order is the signed one we compare in: INT32, INT64, FLOAT and
+ *     DOUBLE. BOOLEAN, BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY get null_count and
+ *     nothing else. UTF8 sorts by unsigned bytes, which is not any PostgreSQL
+ *     collation, and a bound in the wrong order is worse than no bound.
+ *   * Values are accumulated in PHYSICAL space, inside write_leaf_value, from
+ *     the same expression that writes the data page. Deriving them a second
+ *     time is how a bound comes to disagree with the column by an epoch.
+ *   * A value with no Parquet representation (date and timestamp infinity, a
+ *     numeric too wide for its DECIMAL) is folded to null before it gets here,
+ *     so it counts as a null and cannot reach a bound.
+ *   * parquet.thrift's TYPE_ORDER rules for floats: NaN is never a bound,
+ *     nan_count is always written, a column whose non-null values are all NaN
+ *     gets no bounds at all, and a computed zero is written -0.0 as a minimum
+ *     and +0.0 as a maximum.
+ */
+typedef struct PqStats
+{
+	bool		hasBounds;		/* a non-NaN value has been seen */
+	int64		nulls;			/* nulls, folded values included */
+	int64		nans;			/* NaN values (float and double only) */
+	int64		iMin;			/* INT32/INT64 bounds, held widened */
+	int64		iMax;
+	float8		fMin;			/* FLOAT/DOUBLE bounds, held widened */
+	float8		fMax;
+}			PqStats;
+
+/*
  * A leaf column is one Parquet column chunk: a scalar column, an array's element,
  * or one field of a composite. Nesting is expressed through repetition and
  * definition levels (the Dremel model). For a plain scalar, max_rep is 0 and
@@ -150,6 +188,7 @@ typedef struct PqLeaf
 	StringInfoData values;		/* PLAIN values, non-null only */
 	StringInfoData boolbits;	/* 1 byte per non-null bool value */
 	int64		nEntries;		/* level entries in the current row group */
+	PqStats		st;				/* statistics for the current row group */
 }			PqLeaf;
 
 /* how a top-level column shreds into leaves */
@@ -181,6 +220,7 @@ typedef struct PqColMeta
 	int64		dataPageOffset;
 	int64		totalSize;		/* page header + body */
 	int64		numValues;		/* rows */
+	PqStats		st;				/* this group's statistics, taken at flush */
 }			PqColMeta;
 
 typedef struct PqRowGroup
@@ -190,6 +230,67 @@ typedef struct PqRowGroup
 	int64		numRows;
 }			PqRowGroup;
 
+/*
+ * Reset one leaf for the next row group. The statistics reset here rather than
+ * per file: a bound left over from the previous group would describe rows that
+ * are not in this one, and a file-wide bound on every chunk is a file that can
+ * never be skipped.
+ */
+static void
+pqstats_reset(PqStats *st)
+{
+	st->hasBounds = false;
+	st->nulls = 0;
+	st->nans = 0;
+	st->iMin = st->iMax = 0;
+	st->fMin = st->fMax = 0;
+}
+
+/* One non-null INT32/INT64 physical value, in physical space. */
+static inline void
+pqstats_int(PqStats *st, int64 v)
+{
+	if (!st->hasBounds)
+	{
+		st->iMin = st->iMax = v;
+		st->hasBounds = true;
+	}
+	else
+	{
+		if (v < st->iMin)
+			st->iMin = v;
+		if (v > st->iMax)
+			st->iMax = v;
+	}
+}
+
+/*
+ * One non-null FLOAT/DOUBLE value. A NaN is counted and discarded: parquet.thrift
+ * requires that a bound, when present, be computed from non-NaN values only, so
+ * that a reader may trust it for the non-NaN rows.
+ */
+static inline void
+pqstats_float(PqStats *st, float8 v)
+{
+	if (isnan(v))
+	{
+		st->nans++;
+		return;
+	}
+	if (!st->hasBounds)
+	{
+		st->fMin = st->fMax = v;
+		st->hasBounds = true;
+	}
+	else
+	{
+		if (v < st->fMin)
+			st->fMin = v;
+		if (v > st->fMax)
+			st->fMax = v;
+	}
+}
+
 static void
 pqleaf_reset(PqLeaf *c)
 {
@@ -197,6 +298,7 @@ pqleaf_reset(PqLeaf *c)
 	resetStringInfo(&c->reps);
 	resetStringInfo(&c->values);
 	resetStringInfo(&c->boolbits);
+	pqstats_reset(&c->st);
 	c->nEntries = 0;
 }
 
@@ -312,6 +414,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int32		v = (int32) DatumGetInt16(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 4);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_INT32:
@@ -319,6 +422,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int32		v = DatumGetInt32(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 4);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_INT64:
@@ -326,6 +430,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int64		v = DatumGetInt64(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 8);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_FLOAT:
@@ -333,6 +438,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				float4		v = DatumGetFloat4(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 4);
+				pqstats_float(&c->st, (float8) v);
 				break;
 			}
 		case P_DOUBLE:
@@ -340,6 +446,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				float8		v = DatumGetFloat8(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 8);
+				pqstats_float(&c->st, v);
 				break;
 			}
 		case P_DATE:
@@ -347,6 +454,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int32		v = (int32) (DatumGetDateADT(d) + PG_TO_UNIX_DAYS);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 4);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_TIME:
@@ -354,6 +462,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int64		v = (int64) DatumGetTimeADT(d);
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 8);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_TIMESTAMP:
@@ -361,6 +470,7 @@ write_leaf_value(PqLeaf *c, Datum d, __int128 dec)
 				int64		v = (int64) DatumGetTimestamp(d) + PG_TO_UNIX_USECS;
 
 				appendBinaryStringInfo(&c->values, (char *) &v, 8);
+				pqstats_int(&c->st, v);
 				break;
 			}
 		case P_UUID:
@@ -427,8 +537,16 @@ leaf_entry(PqLeaf *c, int def, int rep, bool hasValue, Datum d)
 	if (c->max_rep > 0)
 		appendStringInfoChar(&c->reps, (char) rep);
 	c->nEntries++;
+	/*
+	 * The null count is taken here rather than beside the accumulators, because
+	 * this is where a value that has no Parquet representation has just become a
+	 * null. Counting it in write_leaf_value would miss exactly those rows, and
+	 * miss them in the direction that makes the file look denser than it is.
+	 */
 	if (hasValue)
 		write_leaf_value(c, d, dec);
+	else
+		c->st.nulls++;
 }
 
 /* shred one top-level column value for a row into its leaf/leaves */
@@ -695,6 +813,93 @@ write_top_schema(StringInfo b, TopColumn *tc, PqLeaf *leaves)
 	}
 }
 
+/*
+ * Write ColumnMetaData's Statistics (field 12) for one column chunk.
+ *
+ * null_count is written for every chunk, including where it is zero:
+ * parquet.thrift says a reader MUST NOT assume null_count == 0 when the field is
+ * absent, so omitting it on a column with no nulls tells the reader less than
+ * writing a zero does.
+ *
+ * Bounds go in min_value (6) and max_value (5), PLAIN-encoded at the physical
+ * width. The deprecated min (2) and max (1) are not written: they are defined by
+ * signed comparison alone, and a current reader that has column_orders prefers
+ * the new pair anyway.
+ */
+static void
+write_statistics(StringInfo b, PqLeaf *c, PqColMeta *m)
+{
+	int16		slast = 0;
+	bool		isFloat = (c->ptype == PQ_FLOAT || c->ptype == PQ_DOUBLE);
+	bool		ordered = (c->ptype == PQ_INT32 || c->ptype == PQ_INT64 || isFloat);
+	bool		wide = (c->ptype == PQ_INT64 || c->ptype == PQ_DOUBLE);
+
+	PgColumnarThriftPutI64Field(b, &slast, 3, m->st.nulls);		/* null_count */
+
+	if (ordered && m->st.hasBounds)
+	{
+		char		lo[8];
+		char		hi[8];
+		int			n = wide ? 8 : 4;
+
+		if (isFloat)
+		{
+			/*
+			 * parquet.thrift, TYPE_ORDER: a computed maximum of either zero is
+			 * written +0.0, and a computed minimum of either zero is written
+			 * -0.0. C's comparison treats -0.0 == 0.0, so which zero the
+			 * accumulator kept is not decided by the data; normalising here
+			 * makes it not matter.
+			 */
+			float8		fmin = (m->st.fMin == 0.0) ? -0.0 : m->st.fMin;
+			float8		fmax = (m->st.fMax == 0.0) ? 0.0 : m->st.fMax;
+
+			if (wide)
+			{
+				memcpy(lo, &fmin, 8);
+				memcpy(hi, &fmax, 8);
+			}
+			else
+			{
+				float4		f4lo = (float4) fmin;
+				float4		f4hi = (float4) fmax;
+
+				memcpy(lo, &f4lo, 4);
+				memcpy(hi, &f4hi, 4);
+			}
+		}
+		else if (wide)
+		{
+			int64		i64lo = m->st.iMin;
+			int64		i64hi = m->st.iMax;
+
+			memcpy(lo, &i64lo, 8);
+			memcpy(hi, &i64hi, 8);
+		}
+		else
+		{
+			int32		i32lo = (int32) m->st.iMin;
+			int32		i32hi = (int32) m->st.iMax;
+
+			memcpy(lo, &i32lo, 4);
+			memcpy(hi, &i32hi, 4);
+		}
+
+		PgColumnarThriftPutStringField(b, &slast, 5, hi, n);	/* max_value */
+		PgColumnarThriftPutStringField(b, &slast, 6, lo, n);	/* min_value */
+	}
+
+	/*
+	 * nan_count must be set for the floating point types even when it is zero:
+	 * absent, a reader must assume NaNs may be present, which is the assumption
+	 * the bounds above are written to remove.
+	 */
+	if (isFloat)
+		PgColumnarThriftPutI64Field(b, &slast, 9, m->st.nans);
+
+	PgColumnarThriftPutStop(b);									/* end Statistics */
+}
+
 /* one column chunk for a leaf (path_in_schema is the full leaf path) */
 static void
 write_column_chunk(StringInfo b, PqLeaf *c, PqColMeta *m)
@@ -722,6 +927,8 @@ write_column_chunk(StringInfo b, PqLeaf *c, PqColMeta *m)
 	PgColumnarThriftPutI64Field(b, &mlast, 6, m->totalSize);		/* total_uncompressed_size */
 	PgColumnarThriftPutI64Field(b, &mlast, 7, m->totalSize);		/* total_compressed_size */
 	PgColumnarThriftPutI64Field(b, &mlast, 9, m->dataPageOffset);	/* data_page_offset */
+	PgColumnarThriftPutField(b, &mlast, 12, TC_STRUCT);				/* statistics */
+	write_statistics(b, c, m);
 	PgColumnarThriftPutStop(b);										/* end ColumnMetaData */
 	PgColumnarThriftPutStop(b);										/* end ColumnChunk */
 }
@@ -1058,6 +1265,12 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 				rg->cols[i].dataPageOffset = pageStart;
 				rg->cols[i].totalSize = ph.len + body.len;
 				rg->cols[i].numValues = leaves[i].nEntries;
+				/*
+				 * Take the statistics before pqleaf_reset() below clears them.
+				 * The footer is written after every row group has been flushed,
+				 * so by then the leaf holds only the last group's accumulator.
+				 */
+				rg->cols[i].st = leaves[i].st;
 				rg->totalByteSize += ph.len + body.len;
 
 				pfree(body.data);
@@ -1097,6 +1310,29 @@ PgColumnarWriteParquetFile(Relation rel, Snapshot snapshot, const char *filepath
 		for (i = 0; i < nrgs; i++)
 			write_row_group(&fmd, leaves, nleaves, &rgs[i]);
 		PgColumnarThriftPutStringField(&fmd, &last, 6, "pgColumnar", 10);	/* created_by */
+
+		/*
+		 * column_orders (7), one ColumnOrder per LEAF column in leaf order.
+		 * Not optional in practice: parquet.thrift states that without it the
+		 * meaning of min_value and max_value is undefined, and Arrow acts on
+		 * that by discarding them, so a file with statistics and no
+		 * column_orders skips nothing under pyarrow. The list length must equal
+		 * the leaf count exactly -- Arrow raises on a mismatch, which would make
+		 * the file unreadable rather than merely unskippable.
+		 *
+		 * TYPE_ORDER is the union's field 1, holding an empty TypeDefinedOrder:
+		 * one field header, then the inner struct's stop, then the union's.
+		 */
+		PgColumnarThriftPutField(&fmd, &last, 7, TC_LIST);
+		PgColumnarThriftPutListHeader(&fmd, nleaves, TC_STRUCT);
+		for (i = 0; i < nleaves; i++)
+		{
+			int16		olast = 0;
+
+			PgColumnarThriftPutField(&fmd, &olast, 1, TC_STRUCT);
+			PgColumnarThriftPutStop(&fmd);	/* end TypeDefinedOrder (empty) */
+			PgColumnarThriftPutStop(&fmd);	/* end ColumnOrder */
+		}
 		PgColumnarThriftPutStop(&fmd);
 
 		PgColumnarSinkWrite(snk, fmd.data, fmd.len);

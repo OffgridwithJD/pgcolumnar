@@ -35,6 +35,83 @@ true until the next version shipped.
 
 ### Fixed
 
+- `docs/limitations.md` states the constant-typing rule correctly. The previous
+  wording said `smallint` and `real` "always need a cast". That is false: an
+  unadorned quoted literal is `unknown` and takes the column's type, so
+  `smallint_col < '500'` skips. The rule is not special to the temporal types
+  either. Their literals are simply always quoted, which is why they skip as
+  written.
+
+  Two limits on that rule are stated with it, because the first revision of this
+  entry got both wrong. A literal that names its own type is that type rather
+  than `unknown`, so `timestamp_col < DATE '2026-01-01'` does not skip, which is
+  what the same page's conditions list has always said. And a digit string is an
+  `integer` only while the value fits in one: `integer_col < 5000000000` is an
+  `integer` column against a `bigint` constant and does not skip either.
+
+  Measured across the nine skippable types in three literal forms, with the
+  planner's own constant printed beside each skip count, and every row count
+  compared with a heap oracle. Nine checks in `test/parquet_export_stats.sh` now
+  pin the rule, and each can fail: three go red when the reader's
+  exact-constant-type refusal is deleted, four when the writer stops emitting
+  statistics, and the two plan-shape checks go red when the patterns they look
+  for are swapped.
+
+- Exported Parquet files carry row-group statistics, so a file pgColumnar wrote
+  can be skipped (#850). Reported from outside the project, and the report was
+  right: every condition `docs/limitations.md` documents for row-group skipping
+  could hold and `Row Groups Skipped` would still be 0.
+
+  `write_column_chunk()` emitted ColumnMetaData fields 1 through 7 and 9, and
+  never field 12, so no file we wrote carried a minimum or a maximum for the
+  reader to test a predicate against. The read side was never at fault. On the
+  reporter's own repro, a 1,000,000-row table exported to 16 row groups: 0 of 32
+  column chunks carried statistics, and the foreign scan decoded all 16 groups
+  for `id < 5000`. It now carries 32 of 32 and skips 15 of 16, decoding one.
+  The native chunk-group skip on the same data always worked, and is unchanged.
+
+  What the exporter now writes, per column chunk: `null_count` always, including
+  where it is zero, because `parquet.thrift` says a reader must not read an
+  absent count as zero; `min_value` and `max_value` for the columns stored as
+  INT32, INT64, FLOAT or DOUBLE, which is exactly the set the reader can skip
+  on; and `nan_count` for the floating point columns. A `text`, `bytea`, `uuid`,
+  `boolean` or byte-array `numeric` column gets the null count and no bounds:
+  UTF8 sorts by unsigned bytes, which is not any PostgreSQL collation, and a
+  bound in the wrong order is worse than no bound at all.
+
+  The file footer now also carries `column_orders`, one `TYPE_ORDER` per leaf
+  column. It is not decoration. `parquet.thrift` states that without it the
+  meaning of `min_value` and `max_value` is undefined, and Arrow acts on that by
+  discarding both, so statistics without `column_orders` would have left the file
+  exactly as unskippable under pyarrow as it was before. With it, pyarrow reports
+  `is_stats_set=True` on our files.
+
+  Three rules from the specification are followed for floats, and each is pinned
+  by a test: a NaN never becomes a bound, a column whose non-null values are all
+  NaN gets no bounds at all, and a computed zero is written `-0.0` as a minimum
+  and `+0.0` as a maximum. A value with no Parquet representation, such as an
+  infinite date or timestamp, is folded to null before the accumulator sees it,
+  so it counts as a null and cannot reach a bound.
+
+  `test/parquet_export_stats.sh` covers this, reading the footer bytes with
+  `test/parquet_stats.py` rather than asking a third-party library whether it
+  feels like surfacing them. Eight mutations of the fix were each run against the
+  suite and each turned a named check red.
+
+  One of the eight loses rows rather than merely losing the skip: taking a date
+  bound from the PostgreSQL epoch instead of the Unix one. That shift leaves a
+  well-ordered interval which is simply wrong, so no guard can see it, and the
+  single check standing between it and silent row loss is a predicate placed
+  past the end of the data, `d > DATE '2060-01-01'`.
+
+  Swapping the two bounds does not lose rows, which is worth knowing rather than
+  glossing: it inverts the interval, and the reader already refuses to skip on an
+  inverted one. `docs/limitations.md` documents that refusal, and it caught this
+  mutation. The swap loses 54 checks and no rows.
+
+  Files exported by 1.0-alpha2 or earlier carry no statistics, and nothing
+  rewrites them in place. Export again to make one skippable.
+
 - Index entries for live rows are no longer destroyed (#838). A released version
   is affected: this is present in `v1.0-alpha2`.
 

@@ -33,8 +33,9 @@ warnings on every major.
   since a skipped group emits nothing to recheck.
 - `pqfdwExplainForeignScan()` prints "Row Groups" / "Row Groups Skipped".
 - Test `test/native_parquet_pushdown.sh` uses pyarrow to write a stats-bearing
-  200k-row / 4-row-group file (our exporter does not write stats), asserts
-  correctness against a heap oracle, and asserts the skip counter.
+  200k-row / 4-row-group file (our exporter did not write statistics until #850,
+  in 1.0-alpha3), asserts correctness against a heap oracle, and asserts the
+  skip counter.
 
 ### The bug, and why the earlier diagnosis was wrong
 
