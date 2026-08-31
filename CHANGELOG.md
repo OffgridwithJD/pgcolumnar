@@ -39,7 +39,7 @@ true until the next version shipped.
   written (#852). No released version is affected: nothing in the extension
   changed, and this is test tooling only.
 
-  103 of the 260 top-level scripts in `test/` were mode 100644, and 30 documented
+  103 of the 262 top-level scripts in `test/` were mode 100644, and 30 documented
   invocations named one of them. `test/temporal.sh /path/to/pg_config` and the 29
   others died with `Permission denied` before running a single statement. The
   fix gives those 103 files the execute bit.

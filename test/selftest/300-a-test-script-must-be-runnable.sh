@@ -3,9 +3,14 @@
 # Every document that tells a reader how to run a script spells it as a command:
 # `test/temporal.sh /path/to/pg_config`, `PGC_RUN_UPGRADE=1
 # test/run_all_versions.sh`, `test/pbt/run.sh [seed] [iterations]`. 103 of the
-# 260 top-level scripts were mode 100644 when this was written, so 30 of those
-# documented invocations died with `Permission denied` before running a single
-# statement.
+# 262 top-level scripts were mode 100644 at the base this lands on, so 30 of
+# those documented invocations died with `Permission denied` before running a
+# single statement.
+#
+# THE DENOMINATOR MOVED UNDER THIS BRANCH AND THE NUMERATOR DID NOT. It was 260
+# when this was written; #851 landed first and added test/parquet_export_stats.sh
+# and test/parquet_stats.py, both 100755, so the population grew by two and the
+# defect did not. Re-measured on the rebased base rather than carried over.
 #
 # THE MATRIX NEVER SAW IT, AND THAT IS THE POINT. ci.yml:485 and nightly.yml:188
 # both call `bash test/run_all_versions.sh`, and the runner launches each suite
