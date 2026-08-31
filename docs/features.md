@@ -214,7 +214,8 @@ and writes continue.
   dependency. An exported Parquet file carries per-row-group
   statistics: a null count for every column, and bounds for the INT32, INT64,
   FLOAT and DOUBLE columns. A reader can then skip the row groups a predicate
-  excludes. See [Row-group skipping](limitations.md) for what carries a bound.
+  excludes. See [Row-group skipping](limitations.md#row-group-skipping) for what carries a
+  bound.
 - Parallel Parquet export: `pgcolumnar.parallel_export_parquet(table, dir, workers)`
   writes a columnar table to a directory of Parquet files with several read-only
   background workers, one file each. It gives a near-linear speedup, returns the

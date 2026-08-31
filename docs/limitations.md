@@ -830,6 +830,8 @@ The read-in-place surface (`read_parquet`, `parquet_schema`, and the
 - The column definition list, or a foreign table's column list, must cover every
   leaf column in the file. A shorter list is an error rather than a projection.
 
+### Row-group skipping
+
 Row-group skipping is narrower than the general statement that a group is skipped
 when its statistics exclude the predicate. A scan that skips nothing still returns
 correct rows; these are the conditions under which it can skip at all:
@@ -854,9 +856,9 @@ correct rows; these are the conditions under which it can skip at all:
 The `Row Groups Skipped` counter in `EXPLAIN ANALYZE` reports what was actually
 skipped.
 
-From 1.0-alpha3, `pgcolumnar.export_parquet` writes per-row-group statistics.
-A table exported from pgColumnar skips on the same predicates as a file from any
-other writer. Two limits apply to what those files carry:
+From 1.0-alpha3, `pgcolumnar.export_parquet` writes per-row-group statistics, so
+a file pgColumnar wrote can be skipped. Three limits apply to what those files
+carry:
 
 - Bounds are written for the columns stored as INT32, INT64, FLOAT or DOUBLE.
   That is the set the reader can skip on: `smallint`, `integer`, `bigint`,
@@ -864,8 +866,16 @@ other writer. Two limits apply to what those files carry:
   `timestamp with time zone`. A `text`, `bytea`, `uuid`, `boolean` or
   byte-array `numeric` column carries a null count and no bounds. A predicate on
   one of those filters, but it never skips.
+- The constant must still match the column's type exactly, per the condition
+  above. A bare integer literal is an `integer`, and a bare `50.0` is a
+  `numeric`. Of the types listed above, only `integer` skips without a cast.
+  Write `c_i8 < 100000::bigint`, not `c_i8 < 100000`.
 - A file exported by 1.0-alpha2 or earlier carries no statistics. Nothing
   rewrites it in place. Export it again to make it skippable.
+
+This exporter writes every `numeric` as a byte-array DECIMAL, so a `numeric`
+column in a file we wrote never skips. Another writer may store the same column
+as an INT32 or INT64 DECIMAL, which does skip.
 
 ## Reading Apache Iceberg
 

@@ -71,12 +71,21 @@ true until the next version shipped.
   infinite date or timestamp, is folded to null before the accumulator sees it,
   so it counts as a null and cannot reach a bound.
 
-  `test/parquet_export_stats.sh` covers this in 132 checks, reading the footer
-  bytes with `test/parquet_stats.py` rather than asking a third-party library
-  whether it feels like surfacing them. Eight mutations of the fix were each run
-  against the suite and each turned a named check red, including the two that
-  lose rows rather than merely lose the skip: swapping the bounds, and taking a
-  date bound from the PostgreSQL epoch instead of the Unix one.
+  `test/parquet_export_stats.sh` covers this, reading the footer bytes with
+  `test/parquet_stats.py` rather than asking a third-party library whether it
+  feels like surfacing them. Eight mutations of the fix were each run against the
+  suite and each turned a named check red.
+
+  One of the eight loses rows rather than merely losing the skip: taking a date
+  bound from the PostgreSQL epoch instead of the Unix one. That shift leaves a
+  well-ordered interval which is simply wrong, so no guard can see it, and the
+  single check standing between it and silent row loss is a predicate placed
+  past the end of the data, `d > DATE '2060-01-01'`.
+
+  Swapping the two bounds does not lose rows, which is worth knowing rather than
+  glossing: it inverts the interval, and the reader already refuses to skip on an
+  inverted one. `docs/limitations.md` documents that refusal, and it caught this
+  mutation. The swap loses 52 checks and no rows.
 
   Files exported by 1.0-alpha2 or earlier carry no statistics, and nothing
   rewrites them in place. Export again to make one skippable.

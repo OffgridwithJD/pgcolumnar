@@ -383,6 +383,11 @@ check "every ColumnOrder is TYPE_ORDER" "$(fileval order_ids)" "1"
 
 # ---- (g) the types this change does not claim ------------------------------
 
+check_num "no chunk carries the deprecated minimum (field 2)" \
+	"$(countchunks "$L_ID $L_I2 $L_I8 $L_F4 $L_D $L_TS $L_NUL $L_ALLN $L_T $L_B" has_dep_min 1)" "0"
+check_num "no chunk carries the deprecated maximum (field 1)" \
+	"$(countchunks "$L_ID $L_I2 $L_I8 $L_F4 $L_D $L_TS $L_NUL $L_ALLN $L_T $L_B" has_dep_max 1)" "0"
+
 check_num "the BYTE_ARRAY column carries no bounds" \
 	"$(countchunks "$L_T" has_min 1)" "0"
 check_num "the BOOLEAN column carries no bounds" \
@@ -413,10 +418,24 @@ check_num "a date predicate skips" \
 check_num "a timestamp predicate skips" \
 	"$(skipped_for "WHERE ts < TIMESTAMP '2000-01-01 00:30:00'")" "3"
 # Documented refusals, reachable from our own exported files for the first time.
-check_num "a float >= predicate still skips nothing (NaN is not in the bounds)" \
-	"$(skipped_for "WHERE f4 >= 1.0::real")" "0"
-check_num "a cross-type constant still skips nothing" \
-	"$(skipped_for "WHERE i8 > 5::int")" "0"
+#
+# Each runs beside a predicate that differs in ONE respect and does skip. Without
+# that pair the checks are worthless: every group's max(i8) exceeds 5 and every
+# group's max(f4) exceeds 1.0, so `i8 > 5` and `f4 >= 1.0` are unprunable on this
+# data whether the refusal exists or not, and a check that reads 0 either way is
+# not evidence of a refusal.
+check_num "control: the same column skips when the constant matches its type" \
+	"$(skipped_for "WHERE i8 < 5::bigint")" "$NGROUPS"
+check_num "a cross-type constant skips nothing, on the identical predicate" \
+	"$(skipped_for "WHERE i8 < 5::int")" "0"
+check_num "control: a float < predicate below every bound skips" \
+	"$(skipped_for "WHERE f4 < 0.4::real")" "$NGROUPS"
+# The reader refuses > and >= on a float column outright, because Parquet
+# excludes NaN from the bounds while PostgreSQL sorts NaN above every value. The
+# refusal does not depend on this column holding a NaN, and f4 holds none; the
+# NaN rules themselves are pinned on the nan_c fixture below.
+check_num "a float >= predicate above every bound still skips nothing" \
+	"$(skipped_for "WHERE f4 >= 200000.0::real")" "0"
 
 # Soundness. A skipped group emits nothing, and the executor's recheck cannot
 # recover a row that never arrived, so every predicate above must return exactly
@@ -454,6 +473,8 @@ pq.write_table(pa.table({"id": pa.array(range(200000), pa.int64())}),
 PY
 	check_num "control: the parser finds pyarrow's bounds" \
 		"$(python3 "$STATS_PY" "$PYQ" | grep -c 'has_min=1')" "4"
+	check_num "control: the parser reports the deprecated fields where they exist" \
+		"$(python3 "$STATS_PY" "$PYQ" | grep -c 'has_dep_min=1')" "4"
 else
 	echo "note: pyarrow absent, so the parser's can-report-presence control did not run"
 fi
