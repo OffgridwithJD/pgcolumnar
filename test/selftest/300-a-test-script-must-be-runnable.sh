@@ -180,10 +180,33 @@ check "and every executable script declares one" \
 # the only one that states #852's defect directly: the command in the manual
 # does not run.
 #
-# Over-inclusive on purpose. Any `test/x.sh` or `bench/x.sh` in a document that
-# is not directly preceded by an interpreter counts, prose or fenced, because a
-# reader who sees a path may well type it. The cost of a false positive is one
-# execute bit on a file that is an entry point anyway.
+# Over-inclusive on purpose, and more so than an earlier draft of this comment
+# claimed. EVERY `test/x.sh` or `bench/x.sh` in a document counts -- prose or
+# fenced, and including one an interpreter already precedes. The leading
+# character class admits a space, so `bash test/smoke.sh` in docs/testing.md is
+# counted like any other, which is the one occurrence of that shape today. That
+# is fine and it is deliberate: a reader who sees a path may well type it
+# without the interpreter, and the cost of a false positive is one execute bit
+# on a file that is an entry point anyway. The draft said the extraction skipped
+# interpreter-prefixed paths; it never did, and a comment describing a filter
+# the code does not implement is the defect this file exists to prevent.
+#
+# TWO THINGS ARE ASSERTED, NOT ONE. A document may name a script that does not
+# exist, and a reader who types it gets "No such file or directory" rather than
+# "Permission denied" -- #852's defect wearing a different error message, and C
+# is the check whose entire justification is that the command in the manual does
+# not run. So a named path must EXIST as well as be executable. An earlier draft
+# skipped a missing path with `[ -f ] || continue`, commented "a document may
+# name a path that moved", and that skip was a silent hole rather than a
+# decision. All 83 named paths resolve today, so this is a guard rather than a
+# fix.
+#
+# WHAT IS STILL ACCEPTED, with the number rather than a shrug: deleting one line
+# that names one script narrows C by one and stays green, because the count
+# premise below has 43 of slack over its floor. C is additive over A and B, so a
+# one-script narrowing weakens C alone and cannot make either sweep pass
+# falsely. The narrowing that WOULD matter -- a whole document going, taking a
+# directory's coverage with it -- is what the per-directory premise catches.
 
 _tsm_docs=()
 while IFS= read -r _tsm_d; do
@@ -220,14 +243,20 @@ check "premise: and they name at least one command in every swept directory" \
 	"[${_tsm_uncovered}]" "[]"
 
 _tsm_docbad=""; _tsm_docbad_n=0
+_tsm_docgone=""; _tsm_docgone_n=0
 while IFS= read -r _tsm_s; do
 	[ -n "$_tsm_s" ] || continue
-	[ -f "$_tsm_root/$_tsm_s" ] || continue          # a document may name a path that moved
-	if [ ! -x "$_tsm_root/$_tsm_s" ]; then
+	if [ ! -e "$_tsm_root/$_tsm_s" ]; then
+		_tsm_docgone_n=$((_tsm_docgone_n + 1))
+		[ "$_tsm_docgone_n" -le 5 ] && _tsm_docgone="$_tsm_docgone $_tsm_s"
+	elif [ ! -x "$_tsm_root/$_tsm_s" ]; then
 		_tsm_docbad_n=$((_tsm_docbad_n + 1))
 		[ "$_tsm_docbad_n" -le 5 ] && _tsm_docbad="$_tsm_docbad $_tsm_s"
 	fi
 done <<< "$_tsm_named"
+
+check "and every script a document names exists" \
+	"$(_tsm_fmt "$_tsm_docgone_n" "$_tsm_docgone")" "[]"
 
 check "and every script a document names is executable" \
 	"$(_tsm_fmt "$_tsm_docbad_n" "$_tsm_docbad")" "[]"
@@ -235,4 +264,5 @@ check "and every script a document names is executable" \
 unset _tsm_root _tsm_scripts _tsm_dirs _tsm_docs _tsm_named _tsm_f _tsm_d _tsm_s
 unset _tsm_uncovered _tsm_b
 unset _tsm_noexec _tsm_noexec_n _tsm_nodecl _tsm_nodecl_n _tsm_docbad _tsm_docbad_n _tsm_c
+unset _tsm_docgone _tsm_docgone_n
 unset -f _tsm_has_shebang _tsm_verdict _tsm_fmt

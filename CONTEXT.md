@@ -174,8 +174,10 @@ and ends with `pgc_summary`.
   `bash test/<name>.sh`, which never reads the mode, so only the documentation
   and a reader's shell ever see it: 103 scripts were 100644 when this rule was
   written, and 30 documented commands died with `Permission denied` (#852).
-- **And a script a document names as a bare command must be executable**,
-  whatever its first line says. That is the one check anchored on prose, and it
+- **And a script a document names as a bare command must exist and be
+  executable**, whatever its first line says. Both halves: a named path that has
+  been deleted or moved gives a reader `No such file or directory`, which is the
+  same defect as `Permission denied` in a different coat. That is the one check anchored on prose, and it
   is deliberately over-inclusive: it exists because a file that has lost both its
   shebang and its bit is internally consistent and still broken for the reader,
   so the sweep above cannot see it (#856).
