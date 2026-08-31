@@ -867,9 +867,12 @@ carry:
   byte-array `numeric` column carries a null count and no bounds. A predicate on
   one of those filters, but it never skips.
 - The constant must still match the column's type exactly, per the condition
-  above. A bare integer literal is an `integer`, and a bare `50.0` is a
-  `numeric`. Of the types listed above, only `integer` skips without a cast.
-  Write `c_i8 < 100000::bigint`, not `c_i8 < 100000`.
+  above. A bare literal is typed by its own value, not by the column. A quoted
+  date, time or timestamp literal takes the column's type, so those skip as
+  written. `integer` skips, and so does `double precision`, whose literal
+  promotes. `bigint` skips only when the literal is too large for an `integer`:
+  `bigint_col < 5000000000` skips, `bigint_col < 100000` does not. No literal is
+  typed `smallint` or `real`, so those two always need a cast.
 - A file exported by 1.0-alpha2 or earlier carries no statistics. Nothing
   rewrites it in place. Export it again to make it skippable.
 

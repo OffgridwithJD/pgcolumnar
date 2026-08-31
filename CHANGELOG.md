@@ -85,7 +85,7 @@ true until the next version shipped.
   Swapping the two bounds does not lose rows, which is worth knowing rather than
   glossing: it inverts the interval, and the reader already refuses to skip on an
   inverted one. `docs/limitations.md` documents that refusal, and it caught this
-  mutation. The swap loses 52 checks and no rows.
+  mutation. The swap loses 54 checks and no rows.
 
   Files exported by 1.0-alpha2 or earlier carry no statistics, and nothing
   rewrites them in place. Export again to make one skippable.
