@@ -38,9 +38,11 @@ true until the next version shipped.
 - No compiled Python artifact is tracked, and the tree ignores the ones the
   interpreter writes (#854). `test/__pycache__/ste_check.cpython-312.pyc` was
   tracked. Its source, `test/ste_check.py`, was renamed to
-  `test/plain_language_check.py` 135 commits earlier, so the file was compiled
-  code for a module that no longer existed and that CPython would never open: it
-  reads a `__pycache__` entry only when the matching source sits beside it.
+  `test/plain_language_check.py` in `e9de048`; the `.pyc` outlived it by 146
+  commits and was still tracked at `fe1f3a2`, the base of this change. So the
+  file was compiled code for a module that no longer existed and that CPython
+  would never open: it reads a `__pycache__` entry only when the matching source
+  sits beside it.
 
   A tracked build artifact does not stay still. This one had already re-committed
   itself inside an unrelated logical-replication fix, where the diffstat reads

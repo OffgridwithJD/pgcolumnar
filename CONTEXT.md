@@ -282,9 +282,10 @@ PostgreSQL 15 through 19 when given none.
 - **Build output is never committed.** `.gitignore` covers `*.o`, `*.so`, `*.bc`,
   `__pycache__/` and `*.pyc`, and `harness_selftest` fails if a compiled Python
   artifact is tracked or if either Python rule goes missing. A tracked artifact
-  does not stay still: `test/__pycache__/ste_check.cpython-312.pyc` outlived its
-  source by 135 commits and re-committed itself, two bytes of PEP 552 timestamp,
-  inside an unrelated logical-replication fix (#854).
+  does not stay still: `test/__pycache__/ste_check.cpython-312.pyc` outlived the
+  source it was compiled from, which had been renamed away, and re-committed
+  itself -- two bytes of PEP 552 timestamp -- inside an unrelated
+  logical-replication fix (#854).
 
 Where a development environment is containerised, or PostgreSQL is not on the
 host, that is a property of the machine rather than of the project, and belongs
