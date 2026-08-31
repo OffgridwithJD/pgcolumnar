@@ -35,6 +35,52 @@ true until the next version shipped.
 
 ### Fixed
 
+- Every test script is executable, so the commands this project documents run as
+  written (#852). No released version is affected: nothing in the extension
+  changed, and this is test tooling only.
+
+  103 of the 260 top-level scripts in `test/` were mode 100644, and 30 documented
+  invocations named one of them. `test/temporal.sh /path/to/pg_config` and the 29
+  others died with `Permission denied` before running a single statement. The
+  fix gives those 103 files the execute bit.
+
+  Every green run in this project's history is honest, and the reason is the
+  point. `ci.yml:485` and `nightly.yml:188` both invoke
+  `bash test/run_all_versions.sh`, and the runner starts each suite as
+  `bash "$builddir/test/${s}.sh"` at lines 712 and 749. An interpreter named on
+  the command line does not consult the execute bit, so a suite's own mode never
+  reached the matrix. The gap was between the documentation and a reader's shell,
+  and no green matrix could stand in it.
+
+  Two situations, not one. Exactly one 100755 to 100644 transition exists in the
+  whole history of `test/`: `56ae5f8eb`, a perf commit that added a line to
+  `SUITES` and stripped the bit on the way past. The other 102 files were born
+  100644, so one is a regression and the rest are a habit nothing contradicted.
+
+  `test/crlf_listener.py` was the only script with no interpreter line, and the
+  bit alone would have made it worse: `execve` returns `ENOEXEC`, the shell
+  retries the file under `/bin/sh`, and the reader gets a syntax error instead of
+  a clean refusal. It now declares `#!/usr/bin/env python3`, as its eleven
+  siblings do.
+
+  A new `harness_selftest` part pins both halves for every `.sh` and `.py` under
+  `test/`. The rule is anchored on the file's own first line rather than
+  on a name list or on what a document happens to mention: a script that opens
+  `#!/usr/bin/env bash` has said it is meant to be run, and a mode that forbids
+  running it contradicts the file itself. Run against the unfixed tree the check
+  reports 102 files without the bit and 1 without a shebang, which is the
+  population the issue measured, so the check is neither over nor under matching.
+  Stripping the bit from `run_all_versions.sh` alone, which is what `56ae5f8eb`
+  did, reddens it naming that one file.
+
+  The sweep exempts exactly two directories. The parts in `test/selftest/` and
+  the scripts under `test/fixtures/` are sourced or imported, never executed, so
+  the bit would advertise a way to run them that does not work. That is this same
+  defect pointing the other way. Every other directory is swept, which is what
+  covers `test/pbt/run.sh`: it is a documented command (`docs/testing.md:132`)
+  that lives one level down, it was already correct, and a sweep of the top level
+  alone would have left the file most like this defect outside the guard.
+
 - `docs/limitations.md` states the constant-typing rule correctly. The previous
   wording said `smallint` and `real` "always need a cast". That is false: an
   unadorned quoted literal is `unknown` and takes the column's type, so
@@ -111,6 +157,7 @@ true until the next version shipped.
 
   Files exported by 1.0-alpha2 or earlier carry no statistics, and nothing
   rewrites them in place. Export again to make one skippable.
+
 
 - Index entries for live rows are no longer destroyed (#838). A released version
   is affected: this is present in `v1.0-alpha2`.
