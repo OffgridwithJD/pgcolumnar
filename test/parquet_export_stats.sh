@@ -437,6 +437,46 @@ check_num "control: a float < predicate below every bound skips" \
 check_num "a float >= predicate above every bound still skips nothing" \
 	"$(skipped_for "WHERE f4 >= 200000.0::real")" "0"
 
+# How the literal is WRITTEN decides the constant's type, and therefore whether
+# the exact-type condition above is met at all. Each pair below differs in one
+# respect -- a pair of quotes, or the width of the value -- so the arm that reads
+# 0 is refusing rather than merely having nothing to prune. docs/limitations.md
+# states the rule; these are what make it a measurement.
+#
+# The i2 arms skip 1 and not $NGROUPS because i2 is deliberately not ascending in
+# this fixture: only the last group, the single row whose min equals its max, has
+# bounds that exclude 500. One skipped group is still a skip that a cross-type
+# constant cannot produce, which is what the pair is for.
+check_num "a quoted literal takes a bigint column's type and skips" \
+	"$(skipped_for "WHERE i8 < '5'")" "$NGROUPS"
+check_num "the same digits unquoted are an integer, and skip nothing" \
+	"$(skipped_for "WHERE i8 < 5")" "0"
+check_num "digits too wide for an integer are a bigint, and skip" \
+	"$(skipped_for "WHERE i8 < 5000000000")" "3"
+# A decimal-point literal is a `numeric`, and PostgreSQL resolves
+# `bigint < numeric` by casting the COLUMN. A skip count of 0 for that predicate
+# would be over-determined -- the matcher rejects a left argument that is not a
+# bare Var, AND the exact-type test would reject a numeric constant -- so no
+# single mutation could turn it red and it would not be evidence of anything.
+# The plan shape is what the documentation actually claims, so assert that, with
+# the quoted form beside it asserting the opposite resolution positively.
+filter_has() {  # filter_has WHERE PATTERN
+	q "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM es_ft $1" \
+		| grep -i 'filter' | grep -c "$2"
+}
+check_num "a decimal-point literal casts the column, not the constant" \
+	"$(filter_has "WHERE i8 < 5.0" '::numeric')" "1"
+check_num "control: the quoted form casts the constant to the column's type" \
+	"$(filter_has "WHERE i8 < '5'" '::bigint')" "1"
+check_num "a quoted literal takes a real column's type and skips" \
+	"$(skipped_for "WHERE f4 < '0.4'")" "$NGROUPS"
+check_num "the same literal unquoted is double precision, and skips nothing" \
+	"$(skipped_for "WHERE f4 < 0.4")" "0"
+check_num "a quoted literal takes a smallint column's type and skips" \
+	"$(skipped_for "WHERE i2 < '500'")" "1"
+check_num "the same digits unquoted are an integer, and skip nothing (int2)" \
+	"$(skipped_for "WHERE i2 < 500")" "0"
+
 # Soundness. A skipped group emits nothing, and the executor's recheck cannot
 # recover a row that never arrived, so every predicate above must return exactly
 # what the oracle returns.
@@ -451,6 +491,11 @@ for pred in \
 	"d > DATE '2060-01-01'" \
 	"ts < TIMESTAMP '2000-01-01 00:30:00'" \
 	"nul < 1000100" \
+	"i8 < '5'" \
+	"i8 < 5000000000" \
+	"f4 < '0.4'" \
+	"i2 < '500'" \
+	"i2 < 500" \
 	"alln IS NULL"
 do
 	check "the FDW result equals the oracle for [$pred]" \

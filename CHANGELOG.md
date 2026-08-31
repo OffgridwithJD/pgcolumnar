@@ -35,6 +35,21 @@ true until the next version shipped.
 
 ### Fixed
 
+- `docs/limitations.md` states the constant-typing rule correctly. The previous
+  wording said `smallint` and `real` "always need a cast". That is false: a
+  quoted literal is `unknown` and takes the column's type, so
+  `smallint_col < '500'` skips. The rule is not special to the temporal types
+  either. Their literals are simply always quoted, which is why they skip as
+  written.
+
+  Measured across the nine skippable types in three literal forms, with the
+  planner's own constant printed beside each skip count, and every row count
+  compared with a heap oracle. Nine checks in `test/parquet_export_stats.sh` now
+  pin the rule, and each can fail: three go red when the reader's
+  exact-constant-type refusal is deleted, four when the writer stops emitting
+  statistics, and the two plan-shape checks go red when the patterns they look
+  for are swapped.
+
 - Exported Parquet files carry row-group statistics, so a file pgColumnar wrote
   can be skipped (#850). Reported from outside the project, and the report was
   right: every condition `docs/limitations.md` documents for row-group skipping
