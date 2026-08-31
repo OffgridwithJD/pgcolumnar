@@ -867,19 +867,26 @@ carry:
   byte-array `numeric` column carries a null count and no bounds. A predicate on
   one of those filters, but it never skips.
 - The constant must still match the column's type exactly, per the condition
-  above. How the literal is written decides its type. Quote the literal, or cast
-  it, and all nine types skip: a quoted literal is `unknown` and takes the
-  column's type. That is why any quoted temporal literal skips as written. The
-  same holds for the numeric types: `smallint_col < '500'` skips, and
-  `smallint_col < 500` does not. An unquoted literal is typed by its own text
-  instead, so it matches the column only sometimes. A digit string is an
-  `integer`, or a `bigint` where the value is too wide for one. It matches
-  `integer` and `double precision` always, and `bigint` only at the wider
-  values: `bigint_col < 5000000000` skips, `bigint_col < 5` does not. A literal
-  with a decimal point is a `numeric`, and it matches `double precision` alone.
-  Against an integer column PostgreSQL casts the column rather than the
-  constant, so `bigint_col < 5.0` skips nothing. `smallint` and `real` match no
-  unquoted literal at all.
+  above. How the literal is written decides its type, in three ways.
+
+    - **Quoted, with no type named.** The literal is `unknown` and takes the
+      column's type, so all nine types skip. `smallint_col < '500'` skips.
+      `smallint_col < 500` does not. A temporal literal is usually written this
+      way, which is why it skips as written.
+    - **Named type, quoted or cast.** The literal is that type, not `unknown`.
+      The exact-type condition then applies to it like any other constant.
+      `DATE '2026-01-01'` is a `date`, so `date_col < DATE '2026-01-01'` skips
+      and `timestamp_col < DATE '2026-01-01'` does not.
+    - **Unquoted.** The literal is typed by its own text, so it matches the
+      column only sometimes. A digit string is an `integer` while the value fits
+      in one, and a `bigint` when it does not. It matches whichever of those two
+      widths the column is, and never the other: `bigint_col < 5000000000`
+      skips, while `bigint_col < 5` and `integer_col < 5000000000` do not. It
+      always matches `double precision`, whose operand is widened. A literal
+      with a decimal point is a `numeric`, and it matches `double precision`
+      alone. Against an integer column PostgreSQL casts the column rather than
+      the constant, so `bigint_col < 5.0` skips nothing. `smallint` and `real`
+      match no unquoted literal at all.
 - A file exported by 1.0-alpha2 or earlier carries no statistics. Nothing
   rewrites it in place. Export it again to make it skippable.
 

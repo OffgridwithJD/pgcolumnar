@@ -477,6 +477,41 @@ check_num "a quoted literal takes a smallint column's type and skips" \
 check_num "the same digits unquoted are an integer, and skip nothing (int2)" \
 	"$(skipped_for "WHERE i2 < 500")" "0"
 
+# ADORNED is not the same as quoted. A literal that names its own type is that
+# type, not `unknown`, so it does not take the column's and the exact-type
+# condition applies to it like any other constant. The three arms differ only in
+# how one date is written. The third is the form docs/limitations.md briefly
+# promised would skip, and the same page's conditions list said the opposite
+# twenty lines above; this is which of the two is true.
+check_num "an adorned literal of the column's own type skips" \
+	"$(skipped_for "WHERE d < DATE '2000-01-05'")" "3"
+check_num "the same date unadorned is unknown, takes the column's type and skips" \
+	"$(skipped_for "WHERE d < '2000-01-05'")" "3"
+check_num "the same date adorned as a timestamp does not skip" \
+	"$(skipped_for "WHERE d < TIMESTAMP '2000-01-05 00:00:00'")" "0"
+# That last arm is a documented-behaviour guard rather than evidence, and the
+# distinction is worth stating rather than leaving for a reader to discover.
+# Neither of this suite's two mutations reddens it: with the reader's
+# exact-constant-type refusal deleted, the timestamp datum read as a date lands
+# outside this fixture's range in the direction that prunes nothing, so the arm
+# still reports 0 for a second reason. What IS falsifiable is the typing the
+# sentence rests on, and the planner will say it: an adorned literal keeps its
+# own type beside a bare Var, while the unadorned form resolves to the column's.
+check_num "an adorned literal keeps its own type, not the column's" \
+	"$(filter_has "WHERE d < TIMESTAMP '2000-01-05 00:00:00'" '::timestamp')" "1"
+check_num "control: the unadorned form resolves to the column's type instead" \
+	"$(filter_has "WHERE d < '2000-01-05'" '::date')" "1"
+
+# Width decides which integer type a digit string is, so an `integer` column
+# refuses the wide form exactly as a `bigint` column refuses the narrow one.
+# Both arms return no rows, which is what makes the pair a measurement of the
+# refusal rather than of the data: on identical output one prunes every group
+# and the other prunes none.
+check_num "control: a digit string that fits an integer prunes every group" \
+	"$(skipped_for "WHERE id < -1")" "$NGROUPS"
+check_num "digits too wide for an integer are a bigint, so an int4 column refuses" \
+	"$(skipped_for "WHERE id < -5000000000")" "0"
+
 # Soundness. A skipped group emits nothing, and the executor's recheck cannot
 # recover a row that never arrived, so every predicate above must return exactly
 # what the oracle returns.
@@ -496,6 +531,10 @@ for pred in \
 	"f4 < '0.4'" \
 	"i2 < '500'" \
 	"i2 < 500" \
+	"d < '2000-01-05'" \
+	"d < TIMESTAMP '2000-01-05 00:00:00'" \
+	"id < -1" \
+	"id < -5000000000" \
 	"alln IS NULL"
 do
 	check "the FDW result equals the oracle for [$pred]" \

@@ -36,11 +36,18 @@ true until the next version shipped.
 ### Fixed
 
 - `docs/limitations.md` states the constant-typing rule correctly. The previous
-  wording said `smallint` and `real` "always need a cast". That is false: a
-  quoted literal is `unknown` and takes the column's type, so
+  wording said `smallint` and `real` "always need a cast". That is false: an
+  unadorned quoted literal is `unknown` and takes the column's type, so
   `smallint_col < '500'` skips. The rule is not special to the temporal types
   either. Their literals are simply always quoted, which is why they skip as
   written.
+
+  Two limits on that rule are stated with it, because the first revision of this
+  entry got both wrong. A literal that names its own type is that type rather
+  than `unknown`, so `timestamp_col < DATE '2026-01-01'` does not skip, which is
+  what the same page's conditions list has always said. And a digit string is an
+  `integer` only while the value fits in one: `integer_col < 5000000000` is an
+  `integer` column against a `bigint` constant and does not skip either.
 
   Measured across the nine skippable types in three literal forms, with the
   planner's own constant printed beside each skip count, and every row count
