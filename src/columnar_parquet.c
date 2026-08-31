@@ -26,6 +26,10 @@
 #include "columnar_sink.h"
 #include "columnar_thrift.h"
 
+/* isnan(), for the float statistics rules. PostgreSQL's own headers happen to
+ * reach it on 15 through 18 and do not on 19, where the build fails outright. */
+#include <math.h>
+
 #include "fmgr.h"
 #include "access/htup_details.h"
 #include "access/relation.h"
