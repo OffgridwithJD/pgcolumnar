@@ -34,12 +34,37 @@
 # exemption -- lib.sh carries a shebang and the bit, and portlib.sh gets the bit
 # here for the same reason every suite does.
 #
-# THE EXEMPTION IS TWO DIRECTORIES, NOT A LIST OF FILES. test/selftest/ (these
-# parts) and test/fixtures/ are SOURCED or imported, never executed:
-# harness_selftest.sh:53-56 sources every part, and a suite invokes a fixture
-# generator as `python3 test/fixtures/.../gen_x.py`. Giving those the bit would
-# advertise a way to run them that does not work, which is this defect pointing
-# the other way. Every OTHER directory under test/ is swept, so a runnable entry
+# THE EXEMPTION IS TWO DIRECTORIES, NOT A LIST OF FILES, AND THE TWO ARE EXEMPT
+# FOR DIFFERENT REASONS. An earlier version of this comment gave one reason for
+# both -- "SOURCED or imported, never executed" -- and it was false for
+# test/fixtures/ in both halves.
+#
+# test/selftest/ holds SOURCED fragments. harness_selftest.sh:53-56 sources every
+# part, and they carry no shebang precisely because nothing executes them. Giving
+# them the bit would advertise a way to run them that does not work, which is
+# this defect pointing the other way.
+#
+# test/fixtures/ is DATA. Nothing in test/ sources, imports or runs any of it:
+# every reference in test/*.sh is a PATH -- 18 of them, all of the shape
+# `FX="$(dirname "${BASH_SOURCE[0]}")/fixtures/iceberg"`, plus one .sql read in
+# native_upgrade_converge.sh:71 -- and no suite invokes a generator. Measured, on
+# main, rather than assumed. Of 406 tracked files there, 393 have no first line
+# to declare anything. The 13 that do are host tools rather than suite entry
+# points: three crosschecks, each documenting an explicit interpreter
+# (crosscheck_dv.py:23, `V/bin/python test/fixtures/iceberg/crosscheck_dv.py`),
+# and ten generators that record how a committed fixture was made, run by hand
+# when one is regenerated. An interpreter named on the command line does not
+# consult the execute bit, which is the same mechanism this file relies on for
+# the matrix above.
+#
+# AND WHAT THE EXEMPTION COSTS, said rather than left for a reader to find. Those
+# 13 are shebang-without-the-bit -- the exact state this file calls
+# self-contradictory -- and the way out below is taken for none of them. It is a
+# real gap in the rule's coverage, left deliberately because it is not #852's
+# defect: no documented command invokes any of them bare, so none of them is
+# broken today. Closing it is its own change.
+#
+# Every OTHER directory under test/ is swept, so a runnable entry
 # point in a new subdirectory is covered the day it is added. test/pbt/run.sh is
 # why that matters: it is a documented command (docs/testing.md:132) that lives
 # one level down, it is already correct, and a top-level-only sweep would have
