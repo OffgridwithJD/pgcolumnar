@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import socket, sys
 # Minimal capture listener: accept one connection, record the raw request bytes,
 # return a short 200 so the client does not hang, then exit.

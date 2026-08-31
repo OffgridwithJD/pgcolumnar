@@ -66,6 +66,12 @@ test/native_ios.sh       /path/to/pg_config  # native index-only scan
 test/native_projection.sh /path/to/pg_config # native projections
 ```
 
+Every script in that list is executable and names its interpreter on its first
+line. Run it directly, as shown, or as `bash test/smoke.sh` if you prefer. The
+matrix always uses the second form, so a script's own mode is invisible to it.
+`harness_selftest` checks the mode instead, because a documented command that
+fails with `Permission denied` is a defect a green matrix cannot see.
+
 ## Defects are fixed, not documented
 
 A limitation written into the documentation stops looking like a defect. It reads
