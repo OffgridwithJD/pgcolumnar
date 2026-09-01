@@ -272,6 +272,44 @@ check "no non-zero status is classified as a pass" \
 	"$(for _rvrc in 1 2 66 67 126 127 130; do pgc_classify_suite_rc "$_rvrc" "$_rvlog"; done | grep -c '^PASS$')" \
 	"0"
 
+# ---- and the DISPATCH must act on the verdict, not merely compute it --------
+#
+# The eight arms above test the classifier. The classifier was right and the
+# caller threw the answer away: the first INCOMPLETE branch set MAJOR_FAIL=1, a
+# variable written once and read nowhere, while the major verdict reads verfail.
+# So a state that had been failing the gate BY ACCIDENT -- 67 fell to the else,
+# which sets verfail=1 -- was routed explicitly to a branch that could not fail
+# it. A regression, introduced by the commit that made the state explicit.
+#
+# Testing a function and not its caller is how that survives review. The mapping
+# is now its own function that the loop CALLS, and this evals that text too.
+
+eval "$(sed -n '/^pgc_verdict_fails_major()/,/^}/p' "$_rv")"
+check "premise: the major-verdict mapping evalled out of the runner is callable" \
+	"$(type -t pgc_verdict_fails_major)" "function"
+
+check "an INCOMPLETE suite fails its major" \
+	"$(pgc_verdict_fails_major INCOMPLETE)" "yes"
+
+check "and a failing suite still does" \
+	"$(pgc_verdict_fails_major FAIL)" "yes"
+
+check "while a pass does not" \
+	"$(pgc_verdict_fails_major PASS)" "no"
+
+check "and a skip does not, which is the one that must stay true" \
+	"$(pgc_verdict_fails_major SKIP)" "no"
+
+# The dispatch is the thing that was wrong, so assert the runner CALLS it in the
+# INCOMPLETE branch rather than setting some variable of its own. Not a
+# re-derivation of the rule: the rule is evalled above. This asserts the wiring.
+check "the runner's INCOMPLETE branch calls the mapping rather than a local flag" \
+	"$(grep -c 'pgc_verdict_fails_major "\$_verdict"' "$_rv")" "1"
+
+check "and no write-only failure flag survives in the runner" \
+	"$(grep -c 'MAJOR_FAIL=' "$_rv")" "0"
+
+unset -f pgc_verdict_fails_major
 unset _rv _rvlog _rvrc
 unset -f pgc_classify_suite_rc
 unset _cur_drift _cnt_dir _cnt_sites _cnt_l _cnt_f _cnt_ln _cnt_bad _cnt_n

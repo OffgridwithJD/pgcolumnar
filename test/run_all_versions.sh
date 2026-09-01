@@ -762,6 +762,24 @@ for pgc in "${CONFIGS[@]}"; do
 # in the first place -- `set -e` propagates whatever status an aborting command
 # returned, so a bare code can be produced by accident. 67 gets the same
 # treatment: the code AND the line.
+# Does a suite verdict fail its major?
+#
+# Split out for the same reason the classifier was: the selftest evals THIS TEXT.
+# The first version of the INCOMPLETE branch set a write-only MAJOR_FAIL flag,
+# assigned once and read nowhere, so a state that had been failing the gate by
+# accident (67 fell to the else, which sets verfail=1) was routed explicitly to a
+# branch that could not fail it. The classifier was right and the dispatch threw
+# the answer away, which is why this is a function and not a line in a branch.
+#
+# The comment names the flag without spelling the assignment, because the arm in
+# selftest 320 greps for it: a test for a pattern must not contain the pattern.
+pgc_verdict_fails_major() {	# pgc_verdict_fails_major VERDICT -> yes|no
+	case "$1" in
+		PASS|SKIP) echo no ;;
+		*)         echo yes ;;
+	esac
+}
+
 pgc_classify_suite_rc() {	# pgc_classify_suite_rc RC LOGFILE -> PASS|SKIP|INCOMPLETE|FAIL
 	local rc="$1" log="$2"
 	if [ "$rc" = 0 ]; then
@@ -794,7 +812,7 @@ pgc_classify_suite_rc() {	# pgc_classify_suite_rc RC LOGFILE -> PASS|SKIP|INCOMP
 			results+="$s=INCOMPLETE "
 			suites_ran=$((suites_ran + 1))
 			suites_incomplete=$((suites_incomplete + 1))
-			MAJOR_FAIL=1
+			[ "$(pgc_verdict_fails_major "$_verdict")" = yes ] && verfail=1
 		elif [ "$_verdict" = SKIP ]; then
 			# Exit 2 is pgc_summary's third state: the suite ran no checks (#447).
 			# Not a pass, because it asserted nothing. Not a failure, because a
@@ -841,7 +859,7 @@ pgc_classify_suite_rc() {	# pgc_classify_suite_rc RC LOGFILE -> PASS|SKIP|INCOMP
 	# report a verdict without running a check when pyarrow is absent, and the old
 	# per-version line counted them among the passes. A count that includes suites
 	# nobody ran is the thing this project keeps having to unlearn.
-	echo "  suites that ran: $suites_ran of ${#SUITES[@]} (skipped: $suites_skipped)"
+	echo "  suites that ran: $suites_ran of ${#SUITES[@]} (skipped: $suites_skipped, incomplete: $suites_incomplete)"
 	if [ "$suites_skipped" != 0 ]; then
 		echo "  skipped:${skipped_names}"
 	fi
@@ -851,9 +869,9 @@ pgc_classify_suite_rc() {	# pgc_classify_suite_rc RC LOGFILE -> PASS|SKIP|INCOMP
 	fi
 
 	if [ "$verfail" = 0 ]; then
-		SUMMARY+=("PASS   PG$major  ($suites_ran ran, $suites_skipped skipped)  ${results}")
+		SUMMARY+=("PASS   PG$major  ($suites_ran ran, $suites_skipped skipped, $suites_incomplete incomplete)  ${results}")
 	else
-		SUMMARY+=("FAIL   PG$major  ($suites_ran ran, $suites_skipped skipped)  ${results}")
+		SUMMARY+=("FAIL   PG$major  ($suites_ran ran, $suites_skipped skipped, $suites_incomplete incomplete)  ${results}")
 		overall=1
 	fi
 	rm -rf "$builddir"
