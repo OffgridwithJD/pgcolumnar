@@ -89,7 +89,7 @@ agree_in() {	# agree_in TABLE LABEL "SELECT ... FROM %T ..."
 	# md5 of empty input is a fixed string, so require the columnar arm produced
 	# rows at all before trusting the comparison.
 	if [ -z "$(q "${tmpl//%T/$tbl}" | head -1)" ]; then
-		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAIL=1
+		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1)); PGC_FAIL=1
 		echo "FAIL  $label: the columnar arm returned no rows, so nothing was compared"
 		return 1
 	fi

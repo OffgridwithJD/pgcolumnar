@@ -72,7 +72,7 @@ for stash in "$MOD.away" "$MOD.probe"; do
 	if ! stash_is_debris; then
 		echo "FAIL  restored $stash to $MOD, but that is not a module either."
 		echo "      This installation needs 'make install' before the suite can run."
-		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 		PGC_FAIL=1
 		pgc_summary
 		exit 1

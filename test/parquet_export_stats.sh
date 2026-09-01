@@ -89,7 +89,7 @@ if ! python3 "$STATS_PY" "$PARQ" > "$S" 2>"$PGC_WORKDIR/stats.err"; then
 	echo "FAIL  the footer parser could not read the exported file:"
 	sed 's/^/      /' "$PGC_WORKDIR/stats.err"
 	PGC_FAIL=1
-	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 	pgc_summary
 fi
 
@@ -229,7 +229,7 @@ check_num "every bound is its physical width" \
 check_float() {  # check_float NAME GOT WANT
 	local name="$1" got="$2" want="$3"
 	if ! pgc_is_number "$got" || ! pgc_is_number "$want"; then
-		PGC_CHECKS=$((PGC_CHECKS + 1))
+		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 		PGC_FAIL=1
 		echo "FAIL  $name: not a measurement, so nothing was compared:" \
 			"got [$got] want [$want]"
@@ -372,7 +372,7 @@ if python3 "$STATS_PY" "$NANQ" > "$NS" 2>&1; then
 else
 	echo "FAIL  the footer parser could not read the NaN fixture:"
 	sed 's/^/      /' "$NS"
-	PGC_FAIL=1; PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAIL=1; PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 fi
 
 # ---- (f) column_orders, without which the bounds have no defined meaning ----

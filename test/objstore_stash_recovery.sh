@@ -53,12 +53,12 @@ if [ -z "${PGC_SKIP_BUILD:-}" ]; then
 	echo "-- building"
 	make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" >/dev/null || {
 		echo "FAIL  build failed, so nothing below measures the guard"
-		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAIL=1; pgc_summary
+		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1)); PGC_FAIL=1; pgc_summary
 	}
 	echo "-- installing"
 	make -C "$SRCDIR" install PG_CONFIG="$PG_CONFIG" >/dev/null || {
 		echo "FAIL  install failed, so nothing below measures the guard"
-		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAIL=1; pgc_summary
+		PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1)); PGC_FAIL=1; pgc_summary
 	}
 fi
 

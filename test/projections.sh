@@ -21,12 +21,13 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 # Run a statement expected to FAIL; PASS the check when it errors out.
 expect_fail() {
 	local name="$1" sql="$2"
-	PGC_CHECKS=$((PGC_CHECKS + 1))
+	# pgc_pass/pgc_fail rather than touching PGC_CHECKS: the counters are lib.sh's
+	# invariant and pgc_summary reconciles them. This helper counted ten checks
+	# per run and recorded no outcome for any of them.
 	if psql_run "$sql" >/dev/null 2>&1; then
-		echo "FAIL  $name: statement unexpectedly succeeded"
-		PGC_FAIL=1
+		pgc_fail "$name" "statement unexpectedly succeeded"
 	else
-		echo "PASS  $name"
+		pgc_pass "$name"
 	fi
 }
 

@@ -40,7 +40,7 @@ srv="$(q 'SHOW server_version_num')"
 # on an older major depends on it being 0. Asserting the premise must not destroy
 # the skip it guards.
 if ! pgc_is_number "$srv"; then
-	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 	PGC_FAIL=1
 	echo "FAIL  the server did not answer 'SHOW server_version_num': got [$srv]"
 	pgc_summary
