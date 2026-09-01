@@ -754,14 +754,48 @@ for pgc in "${CONFIGS[@]}"; do
 	# collect results in suite order for a stable, readable summary
 	suites_ran=0
 	suites_skipped=0
+# Classify one suite's exit status. A function, not four inline branches,
+# because the selftest evals THIS TEXT rather than re-deriving the condition: a
+# check that recomputes a rule tests the world instead of the code.
+#
+# Two independent signals for every non-pass state, which is why 66 was chosen
+# in the first place -- `set -e` propagates whatever status an aborting command
+# returned, so a bare code can be produced by accident. 67 gets the same
+# treatment: the code AND the line.
+pgc_classify_suite_rc() {	# pgc_classify_suite_rc RC LOGFILE -> PASS|SKIP|INCOMPLETE|FAIL
+	local rc="$1" log="$2"
+	if [ "$rc" = 0 ]; then
+		echo PASS
+	elif [ "$rc" = 66 ] && grep -q 'SKIPPED (ran no checks)' "$log" 2>/dev/null; then
+		echo SKIP
+	elif [ "$rc" = 67 ] && grep -q ': INCOMPLETE$' "$log" 2>/dev/null; then
+		# A check could not be evaluated (#858). NOT a pass: the suite reached a
+		# question it could not ask. Not a plain FAIL either, because nothing
+		# asserted false -- but it must never reach the PASS branch, and the
+		# reason travels with it.
+		echo INCOMPLETE
+	else
+		echo FAIL
+	fi
+}
+
 	skipped_names=""
+	suites_incomplete=${suites_incomplete:-0}
 	for s in "${SUITES[@]}"; do
 		_rc="$(cat "$builddir/${s}.rc" 2>/dev/null)"
-		if [ "$_rc" = 0 ]; then
+		_verdict="$(pgc_classify_suite_rc "$_rc" "$builddir/${s}.log")"
+		if [ "$_verdict" = PASS ]; then
 			echo "  PASS  $s"
 			results+="$s=PASS "
 			suites_ran=$((suites_ran + 1))
-		elif [ "$_rc" = 66 ] && grep -q 'SKIPPED (ran no checks)' "$builddir/${s}.log" 2>/dev/null; then
+		elif [ "$_verdict" = INCOMPLETE ]; then
+			echo "  INCOMPLETE  $s (a check could not be evaluated)"
+			grep -E '^UNRUN' "$builddir/${s}.log" | sed 's/^/      >> /'
+			results+="$s=INCOMPLETE "
+			suites_ran=$((suites_ran + 1))
+			suites_incomplete=$((suites_incomplete + 1))
+			MAJOR_FAIL=1
+		elif [ "$_verdict" = SKIP ]; then
 			# Exit 2 is pgc_summary's third state: the suite ran no checks (#447).
 			# Not a pass, because it asserted nothing. Not a failure, because a
 			# major without the feature and a box without an optional dependency

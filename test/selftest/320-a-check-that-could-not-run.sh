@@ -222,6 +222,58 @@ done
 check "every direct write to PGC_CHECKS records an outcome too" \
 	"$(_tsm_fmt_cnt "$_cnt_n" "$_cnt_bad")" "[]"
 
+# ---- and the RUNNER must not report an INCOMPLETE suite as a pass ------------
+#
+# lib.sh exiting 67 is only half the state. The runner decides what a status
+# MEANS, and until now 67 reached that decision through a catch-all else: safe
+# by accident, unasserted, and with the template for breaking it three lines
+# above -- copy the 66 branch, and an INCOMPLETE suite becomes a SKIP that the
+# matrix reports green.
+#
+# The classifier is EVALLED OUT OF run_all_versions.sh rather than re-stated
+# here. A check that recomputes the rule tests the world instead of the code:
+# selftest 070 learned that when a premise globbed bench/*.sh to prove bench/ was
+# swept, which asserts the directory EXISTS and not that the sweep read it.
+
+_rv="$PGC_TESTDIR/run_all_versions.sh"
+check "premise: the runner defines the classifier this part is about to eval" \
+	"$(grep -c '^pgc_classify_suite_rc()' "$_rv")" "1"
+
+eval "$(sed -n '/^pgc_classify_suite_rc()/,/^}/p' "$_rv")"
+check "premise: the classifier evalled out of the runner is callable" \
+	"$(type -t pgc_classify_suite_rc)" "function"
+
+_rvlog="$PGC_WORKDIR/rv.log"
+
+: > "$_rvlog"
+check "the runner calls a clean exit a pass" \
+	"$(pgc_classify_suite_rc 0 "$_rvlog")" "PASS"
+
+printf 'x.sh: SKIPPED (ran no checks)\n' > "$_rvlog"
+check "and 66 with its line a skip" \
+	"$(pgc_classify_suite_rc 66 "$_rvlog")" "SKIP"
+
+printf 'x.sh: INCOMPLETE\n' > "$_rvlog"
+check "and 67 with its line INCOMPLETE, which is not a pass" \
+	"$(pgc_classify_suite_rc 67 "$_rvlog")" "INCOMPLETE"
+
+# Two signals, the same discipline 66 has: a bare status can be produced by any
+# aborting command under set -e, so the code alone must not be believed.
+printf 'x.sh: PASSED\n' > "$_rvlog"
+check "67 without its line is a failure, not an INCOMPLETE taken on trust" \
+	"$(pgc_classify_suite_rc 67 "$_rvlog")" "FAIL"
+
+printf 'x.sh: FAILED\n' > "$_rvlog"
+check "and an ordinary failure is still a failure" \
+	"$(pgc_classify_suite_rc 1 "$_rvlog")" "FAIL"
+
+# The whole point, stated as its own arm: no status reaches PASS except 0.
+check "no non-zero status is classified as a pass" \
+	"$(for _rvrc in 1 2 66 67 126 127 130; do pgc_classify_suite_rc "$_rvrc" "$_rvlog"; done | grep -c '^PASS$')" \
+	"0"
+
+unset _rv _rvlog _rvrc
+unset -f pgc_classify_suite_rc
 unset _cur_drift _cnt_dir _cnt_sites _cnt_l _cnt_f _cnt_ln _cnt_bad _cnt_n
 unset _cur_lib _cur_dir
 unset -f _cur_make _cur_run _cur_out
