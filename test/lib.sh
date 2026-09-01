@@ -46,6 +46,29 @@ PGC_CHECKS=0
 # log before believing it. Two independent signals, because one was not enough.
 PGC_EXIT_SKIPPED=66
 
+# The status pgc_summary uses for "a check could not be evaluated".
+#
+# NOT 66. 66 means the suite ran no checks at all; a suite holding one unrunnable
+# check DID run checks, and collapsing the two loses the difference between "this
+# suite is inert" and "this suite could not evaluate one thing". 67 is chosen on
+# the same grounds 66 was -- bash produces 1, 2, 126, 127 and 128+n, psql 1, 2, 3,
+# make 1 and 2 -- and, as with 66, the code alone is not trusted: a runner must
+# also see the INCOMPLETE line in the log, because `set -e` propagates whatever
+# status an aborting command returned.
+PGC_EXIT_INCOMPLETE=67
+
+# Counts for the three states. Every state is in a total or it is a state that
+# can go missing, and pgc_summary reconciles them against PGC_CHECKS.
+PGC_PASSED=0
+PGC_UNRUN=0
+
+# The closed set of reasons a check could not be evaluated. Prose would have to
+# be rewritten at every call site the day anything wants to group these, so the
+# reason is a code plus a detail from the start. A code outside this set is a
+# FAILURE rather than a silent acceptance: an enum that accepts anything is not
+# an enum, and the first invented code would make it prose again.
+PGC_UNRUN_REASONS="MISSING_DEPENDENCY UNSUPPORTED_MAJOR ABSENT_FIXTURE UNAVAILABLE_ENDPOINT UNMET_PRECONDITION"
+
 # ---- cluster identity helpers ----------------------------------------------
 
 # Normalize a directory for comparison. `cd && pwd -P` is POSIX; realpath -m is
@@ -555,10 +578,41 @@ psql_file() {
 
 # ---- assertions ------------------------------------------------------------
 
+
+# A check that could not be evaluated is a third state, not a pass.
+#
+# When a check's INPUT is absent -- a fixture that did not build, a capability the
+# server lacks, an endpoint that is not reachable -- the check either passes
+# vacuously or fails for a reason unrelated to the property under test. Neither
+# answer is true, and "checks run: N" counts it either way, so a reader counting
+# greens counts one that never asked its question.
+#
+# pgc_skip already refuses to let a MISSING DEPENDENCY read as a pass at suite
+# granularity. This is the same honesty for one check.
+#
+# The suite exits PGC_EXIT_INCOMPLETE, so an unrunnable check cannot hide inside a
+# suite that reports PASSED. A failure still outranks it: a suite with both is
+# FAILED, because the failure is the more urgent fact.
+check_unrunnable() {	# check_unrunnable NAME REASON_CODE DETAIL
+	local name="$1" reason="${2:-}" detail="${3:-}"
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	case " $PGC_UNRUN_REASONS " in
+		*" $reason "*) ;;
+		*)
+			echo "FAIL  $name: unrunnable reason [$reason] is not one of: $PGC_UNRUN_REASONS"
+			PGC_FAIL=1
+			return
+			;;
+	esac
+	PGC_UNRUN=$((PGC_UNRUN + 1))
+	echo "UNRUN  $name: $reason: $detail"
+}
+
 check() {
 	local name="$1" got="$2" want="$3"
 	PGC_CHECKS=$((PGC_CHECKS + 1))
 	if [ "$got" = "$want" ]; then
+		PGC_PASSED=$((PGC_PASSED + 1))
 		echo "PASS  $name"
 	else
 		echo "FAIL  $name: got [$got] want [$want]"
@@ -1028,8 +1082,19 @@ pgc_skip() {  # pgc_skip <capability> <message>
 # count 2 separately and report how many suites actually ran, which is what #422
 # did one level up for how many VERSIONS actually ran.
 pgc_summary() {
+	local _failed=$((PGC_CHECKS - PGC_PASSED - PGC_UNRUN))
 	echo
 	echo "checks run: $PGC_CHECKS"
+	echo "checks unrunnable: $PGC_UNRUN"
+	# Every state in a total. A state that is not in a total is a state that can
+	# go missing, and this harness has 3,762 check sites -- far past what anyone
+	# notices by reading. If this line does not add up the harness is lying about
+	# its own arithmetic, so it is a failure rather than a note.
+	echo "accounting: $PGC_PASSED passed + $_failed failed + $PGC_UNRUN unrunnable = $PGC_CHECKS"
+	if [ "$_failed" -lt 0 ]; then
+		echo "FAIL  the summary does not reconcile: more passed+unrunnable than checks run"
+		PGC_FAIL=1
+	fi
 	if [ "$PGC_FAIL" != "0" ]; then
 		echo "$(basename "$0"): FAILED"
 		# A source-shape suite (wal_envelope, decode_interrupts) never calls
@@ -1066,6 +1131,10 @@ pgc_summary() {
 	if [ "$PGC_CHECKS" = "0" ]; then
 		echo "$(basename "$0"): SKIPPED (ran no checks)"
 		exit $PGC_EXIT_SKIPPED
+	fi
+	if [ "$PGC_UNRUN" != "0" ]; then
+		echo "$(basename "$0"): INCOMPLETE"
+		exit $PGC_EXIT_INCOMPLETE
 	fi
 	echo "$(basename "$0"): PASSED"
 	exit 0
