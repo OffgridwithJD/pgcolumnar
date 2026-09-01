@@ -166,15 +166,26 @@ and ends with `pgc_summary`.
 - Register every suite in `SUITES` in `test/run_all_versions.sh`. That array is
   **one name per line and sorted**; insert in sorted position, never at the end.
   `harness_selftest` fails if the order decays.
-- **A script is executable and declares its interpreter on line 1.**
-  `harness_selftest` sweeps every `.sh` and `.py` under `test/`, at any depth,
-  and fails if one has either without the other. Both halves are needed. The
-  matrix starts a suite as `bash test/<name>.sh`, which never reads the mode, so
-  only the documentation and a reader's shell ever see it: 103 scripts were
-  100644 when this rule was written, and 30 documented commands died with
-  `Permission denied` (#852). `test/selftest/` and `test/fixtures/` are exempt,
-  and only those two. Their contents are sourced or imported rather than run, so
-  the bit would advertise a way to run them that does not work.
+- **A script is executable and declares its interpreter on line 1, or it has
+  neither.** `harness_selftest` sweeps every `.sh` and `.py` under `test/` and
+  `bench/`, at any depth, with nothing excluded, and fails if one has either
+  without the other. A file with neither is a fragment meant to be sourced, and
+  that is the only self-consistent way to say so. The matrix starts a suite as
+  `bash test/<name>.sh`, which never reads the mode, so only the documentation
+  and a reader's shell ever see it: 103 scripts were 100644 when this rule was
+  written, and 30 documented commands died with `Permission denied` (#852).
+- **And a script a document names as a bare command must exist and be
+  executable**, whatever its first line says. Both halves: a named path that has
+  been deleted or moved gives a reader `No such file or directory`, which is the
+  same defect as `Permission denied` in a different coat. That is the one check anchored on prose, and it
+  is deliberately over-inclusive: it exists because a file that has lost both its
+  shebang and its bit is internally consistent and still broken for the reader,
+  so the sweep above cannot see it (#856).
+- The population is every directory that holds a documented entry point, which
+  today is `test/` and `bench/`. `docs/benchmarks.md` names five `bench/` scripts
+  as bare commands; before #856 nothing checked them, which is exactly what
+  `test/` was before #852. A new directory that documents a command belongs in
+  the sweep the day it is added.
 - Count suites by asking the runner, never by parsing the source:
   `bash test/run_all_versions.sh --list-suites | wc -l`. A text parser over the
   array disagrees with bash on exactly the mistake this invites, and the

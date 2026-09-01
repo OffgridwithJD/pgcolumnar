@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 #
 # Guards for the ClickBench harness (#465).
 #
