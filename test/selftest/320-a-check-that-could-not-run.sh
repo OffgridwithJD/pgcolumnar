@@ -27,6 +27,8 @@
 # in the log, because `set -e` can propagate any status an aborting command
 # returns.
 
+_tsm_fmt_cnt() { [ "$1" -eq 0 ] && { echo "[]"; return; }; echo "[$1:$2]"; }
+
 _cur_lib="$PGC_TESTDIR/lib.sh"
 
 check "premise: the harness library is where this part thinks it is" \
@@ -161,9 +163,15 @@ check "and the suite that holds it still passes" \
 
 # A drifting counter must be visible. Pass a check through a helper that counts
 # the check but records neither outcome, which is exactly what check_ratio did.
-_cur_make drift 'check "a" ok ok
-PGC_CHECKS=$((PGC_CHECKS + 1))
-echo "PASS  a check nothing counted"'
+#
+# The forbidden line is ASSEMBLED rather than written, because the sweep below
+# greps the tree for exactly this shape and a fixture that spells it out is
+# indistinguishable from the defect. A test for a pattern must not contain the
+# pattern -- the sweep found this fixture on its first run and was right to.
+_cur_drift="$(printf 'PGC_%s=$((PGC_%s + 1))' CHECKS CHECKS)"
+_cur_make drift "check \"a\" ok ok
+$_cur_drift
+echo \"PASS  a check nothing counted\""
 
 check "a counter that drifts is caught rather than absorbed" \
 	"$(_cur_out drift | grep -c '^FAIL  the summary does not reconcile')" "1"
@@ -171,5 +179,49 @@ check "a counter that drifts is caught rather than absorbed" \
 check "and the suite holding it fails rather than reporting PASSED" \
 	"$(_cur_run drift)" "1 FAILED"
 
+# ---- the counters are lib.sh's invariant, and only lib.sh may write them -----
+#
+# The reconciliation above turns PGC_CHECKS into an invariant that pgc_summary
+# checks. A suite that bumps it directly and prints its own PASS leaves the
+# totals short, and the reconciliation then reds a HEALTHY tree -- worse than the
+# miscount it exists to find. projections.sh did exactly that: an expect_fail()
+# with ten call sites, counting checks whose outcome nothing recorded, invisible
+# for as long as it existed because nothing reconciled the totals.
+#
+# Fixing those ten call sites alone would leave the next expect_fail someone
+# writes undetectable, which is the same argument that rejected fixing
+# check_ratio's counter without a real PGC_FAILED. So the rule is swept: a direct
+# write to PGC_CHECKS must record an outcome on the same line or in the lines
+# around it, and pgc_pass/pgc_fail exist so a suite-local helper need not.
+
+_cnt_dir="$PGC_TESTDIR"
+_cnt_sites=()
+while IFS= read -r _cnt_l; do
+	_cnt_sites+=("$_cnt_l")
+done < <(grep -rn 'PGC_CHECKS=\$((PGC_CHECKS' "$_cnt_dir"/*.sh "$_cnt_dir"/selftest/*.sh 2>/dev/null \
+	| grep -v '/lib\.sh:' | sort)
+
+check "premise: the sweep finds the direct writes it is meant to police" \
+	"$([ "${#_cnt_sites[@]}" -ge 5 ] && echo enough || echo "${#_cnt_sites[@]}")" "enough"
+
+# A file that keeps its OWN counters and never calls pgc_summary is not bound by
+# this invariant, because nothing reconciles it. Asserted rather than assumed:
+# the exemption is measured from the file, not from a name list.
+_cnt_bad=""; _cnt_n=0
+for _cnt_l in "${_cnt_sites[@]}"; do
+	_cnt_f="${_cnt_l%%:*}"
+	_cnt_ln="$(printf '%s' "$_cnt_l" | cut -d: -f2)"
+	grep -q 'pgc_summary' "$_cnt_f" || continue
+	if ! sed -n "$((_cnt_ln > 3 ? _cnt_ln - 3 : 1)),$((_cnt_ln + 6))p" "$_cnt_f" \
+		| grep -qE 'PGC_PASSED=|PGC_FAILED=|PGC_UNRUN='; then
+		_cnt_n=$((_cnt_n + 1))
+		[ "$_cnt_n" -le 5 ] && _cnt_bad="$_cnt_bad ${_cnt_f##*/}:$_cnt_ln"
+	fi
+done
+
+check "every direct write to PGC_CHECKS records an outcome too" \
+	"$(_tsm_fmt_cnt "$_cnt_n" "$_cnt_bad")" "[]"
+
+unset _cur_drift _cnt_dir _cnt_sites _cnt_l _cnt_f _cnt_ln _cnt_bad _cnt_n
 unset _cur_lib _cur_dir
 unset -f _cur_make _cur_run _cur_out

@@ -580,6 +580,33 @@ psql_file() {
 # ---- assertions ------------------------------------------------------------
 
 
+# Record an outcome for a check a SUITE-LOCAL helper counted.
+#
+# PGC_CHECKS is an invariant that only this file can keep, because pgc_summary
+# reconciles PASSED + FAILED + UNRUN against it. A suite that bumps PGC_CHECKS
+# itself and prints its own PASS or FAIL leaves the totals short, and the
+# reconciliation then reds a healthy tree -- which is a worse defect than the
+# miscount it exists to find. That is not hypothetical: projections.sh has an
+# expect_fail() with ten call sites that has been counting checks whose outcome
+# nothing recorded for as long as it has existed, and nothing could tell.
+#
+# A suite-local helper calls these instead of touching the counters. They are the
+# only supported way to add a check from outside this file, and selftest part 320
+# sweeps for direct PGC_CHECKS writes so the next expect_fail is caught when it
+# is written rather than when it reddens something.
+pgc_pass() {	# pgc_pass NAME
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_PASSED=$((PGC_PASSED + 1))
+	echo "PASS  $1"
+}
+
+pgc_fail() {	# pgc_fail NAME DETAIL
+	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_FAILED=$((PGC_FAILED + 1))
+	PGC_FAIL=1
+	if [ -n "${2:-}" ]; then echo "FAIL  $1: $2"; else echo "FAIL  $1"; fi
+}
+
 # A check that could not be evaluated is a third state, not a pass.
 #
 # When a check's INPUT is absent -- a fixture that did not build, a capability the

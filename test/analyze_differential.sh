@@ -55,7 +55,7 @@ ROWS=${PGC_ANALYZE_DIFF_ROWS:-50000}
 # one and reported as "supported, skipped".
 if ! pgc_is_number "${PGC_MAJOR:-}"; then
 	echo "FAIL  could not read the server major, so the gate below cannot be trusted: got [${PGC_MAJOR:-<none>}]"
-	PGC_CHECKS=$((PGC_CHECKS + 1))
+	PGC_CHECKS=$((PGC_CHECKS + 1)); PGC_FAILED=$((PGC_FAILED + 1))
 	PGC_FAIL=1
 	pgc_summary
 fi
