@@ -60,6 +60,7 @@ PGC_EXIT_INCOMPLETE=67
 # Counts for the three states. Every state is in a total or it is a state that
 # can go missing, and pgc_summary reconciles them against PGC_CHECKS.
 PGC_PASSED=0
+PGC_FAILED=0
 PGC_UNRUN=0
 
 # The closed set of reasons a check could not be evaluated. Prose would have to
@@ -601,6 +602,7 @@ check_unrunnable() {	# check_unrunnable NAME REASON_CODE DETAIL
 		*)
 			echo "FAIL  $name: unrunnable reason [$reason] is not one of: $PGC_UNRUN_REASONS"
 			PGC_FAIL=1
+			PGC_FAILED=$((PGC_FAILED + 1))
 			return
 			;;
 	esac
@@ -617,6 +619,7 @@ check() {
 	else
 		echo "FAIL  $name: got [$got] want [$want]"
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 	fi
 }
 
@@ -668,6 +671,7 @@ check_text() {
 	if [ -z "$got" ] || [ -z "$want" ]; then
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 		echo "FAIL  $name: a side is empty, so nothing was compared:" \
 			"got [$got] want [$want]"
 		return 1
@@ -681,6 +685,7 @@ check_num() {
 	if ! pgc_is_number "$got" || ! pgc_is_number "$want"; then
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 		echo "FAIL  $name: not a measurement, so nothing was compared:" \
 			"got [$got] want [$want]"
 		return 1
@@ -716,6 +721,7 @@ check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 	if ! pgc_is_number "$a" || ! pgc_is_number "$b" || ! pgc_is_number "$max"; then
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 		echo "FAIL  $name: not a measurement, so no ratio was formed:" \
 			"a=[$a] b=[$b] max=[$max]"
 		return 1
@@ -723,6 +729,7 @@ check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 	if [ "$(awk -v x="$a" -v y="$b" 'BEGIN { print (x + 0 == 0 || y + 0 == 0) ? "yes" : "no" }')" = yes ]; then
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 		echo "FAIL  $name: a side of the ratio is zero, so nothing was measured:" \
 			"a=[$a] b=[$b]"
 		return 1
@@ -730,10 +737,12 @@ check_ratio() {	# $1 label, $2 a, $3 b, $4 max
 	ratio="$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.2f", a / b }')"
 	PGC_CHECKS=$((PGC_CHECKS + 1))
 	if [ "$(awk -v r="$ratio" -v m="$max" 'BEGIN { print (r <= m) ? "yes" : "no" }')" = yes ]; then
+		PGC_PASSED=$((PGC_PASSED + 1))
 		echo "PASS  $name (${ratio}x, bound ${max}x, from a=$a b=$b)"
 	else
 		echo "FAIL  $name: ${ratio}x exceeds the ${max}x bound (a=$a b=$b)"
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 	fi
 }
 
@@ -749,6 +758,7 @@ pgc_require_tools() {
 		echo "FAIL  the tools this suite measures with are missing:$missing"
 		PGC_CHECKS=$((PGC_CHECKS + 1))
 		PGC_FAIL=1
+		PGC_FAILED=$((PGC_FAILED + 1))
 		return 1
 	fi
 	return 0
@@ -1058,6 +1068,7 @@ pgc_skip() {  # pgc_skip <capability> <message>
 	fi
 	PGC_CHECKS=$((PGC_CHECKS + 1))
 	PGC_FAIL=1
+	PGC_FAILED=$((PGC_FAILED + 1))
 	echo "FAIL  $2"
 	echo "      A missing dependency is an environment defect, not a pass. Install"
 	echo "      it, or set $allow_one=1 to run knowingly without this coverage."
@@ -1082,7 +1093,8 @@ pgc_skip() {  # pgc_skip <capability> <message>
 # count 2 separately and report how many suites actually ran, which is what #422
 # did one level up for how many VERSIONS actually ran.
 pgc_summary() {
-	local _failed=$((PGC_CHECKS - PGC_PASSED - PGC_UNRUN))
+	local _failed=$PGC_FAILED
+	local _sum=$((PGC_PASSED + PGC_FAILED + PGC_UNRUN))
 	echo
 	echo "checks run: $PGC_CHECKS"
 	echo "checks unrunnable: $PGC_UNRUN"
@@ -1091,8 +1103,18 @@ pgc_summary() {
 	# notices by reading. If this line does not add up the harness is lying about
 	# its own arithmetic, so it is a failure rather than a note.
 	echo "accounting: $PGC_PASSED passed + $_failed failed + $PGC_UNRUN unrunnable = $PGC_CHECKS"
-	if [ "$_failed" -lt 0 ]; then
-		echo "FAIL  the summary does not reconcile: more passed+unrunnable than checks run"
+	# A MEASUREMENT, not an identity. The failed count is its own counter rather
+	# than CHECKS - PASSED - UNRUN, because a derived third term makes
+	# P + (N-P-U) + U = N true for ANY values: a helper that counts a check and
+	# records no outcome drifts invisibly. That is not hypothetical -- check_ratio
+	# printed PASS and never touched PGC_PASSED, so every passing ratio check was
+	# reported as a failure in six shipped suites, and the first version of this
+	# line could not see it. Three counters maintained independently, reconciled
+	# against a fourth, is the only version of it that can fail.
+	if [ "$_sum" != "$PGC_CHECKS" ]; then
+		echo "FAIL  the summary does not reconcile: $PGC_PASSED passed + $PGC_FAILED failed + $PGC_UNRUN unrunnable = $_sum, but $PGC_CHECKS checks ran"
+		echo "      A check was counted whose outcome nothing recorded. Find the helper"
+		echo "      that bumps PGC_CHECKS without touching PGC_PASSED, PGC_FAILED or PGC_UNRUN."
 		PGC_FAIL=1
 	fi
 	if [ "$PGC_FAIL" != "0" ]; then

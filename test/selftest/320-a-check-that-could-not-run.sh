@@ -130,5 +130,46 @@ check "and a suite with no unrunnable checks reconciles too" \
 	"$(_cur_out onlypass | grep -oE 'accounting: [0-9]+ passed \+ [0-9]+ failed \+ [0-9]+ unrunnable = [0-9]+')" \
 	"accounting: 1 passed + 0 failed + 0 unrunnable = 1"
 
+# ---- the accounting must be a MEASUREMENT, not an identity ------------------
+#
+# The first version of this part derived the failed count as
+# CHECKS - PASSED - UNRUN and called the result an accounting line. That identity
+# is true for any values: a counter can drift arbitrarily and P + (N-P-U) + U = N
+# still holds, so the only reachable red was a negative. It is shape 12 from the
+# audit that produced this phase -- an accounting identity guaranteed by
+# construction rather than measured -- and it shipped inside the diff that exists
+# to catch shape 12.
+#
+# It was not hypothetical. check_ratio printed PASS and never touched PGC_PASSED,
+# so every passing ratio check was counted as a failure in six shipped suites
+# (column_projection, int8_agg_int128, native_fetch_bigcap, native_fetch_cache,
+# objstore_http_read, planner_choice_quality -- twelve call sites, none in a
+# subshell). The line meant to prove the states reconcile could not see it.
+#
+# Three counters are now maintained INDEPENDENTLY and reconciled against a
+# fourth. A helper that forgets any one of them reddens here.
+
+_cur_make ratio 'check "a" ok ok
+check_ratio "a ratio well inside its bound" 10 100 1.0'
+
+check "a passing ratio check is counted as a pass, not a failure" \
+	"$(_cur_out ratio | grep -oE 'accounting: [0-9]+ passed \+ [0-9]+ failed \+ [0-9]+ unrunnable = [0-9]+')" \
+	"accounting: 2 passed + 0 failed + 0 unrunnable = 2"
+
+check "and the suite that holds it still passes" \
+	"$(_cur_run ratio)" "0 PASSED"
+
+# A drifting counter must be visible. Pass a check through a helper that counts
+# the check but records neither outcome, which is exactly what check_ratio did.
+_cur_make drift 'check "a" ok ok
+PGC_CHECKS=$((PGC_CHECKS + 1))
+echo "PASS  a check nothing counted"'
+
+check "a counter that drifts is caught rather than absorbed" \
+	"$(_cur_out drift | grep -c '^FAIL  the summary does not reconcile')" "1"
+
+check "and the suite holding it fails rather than reporting PASSED" \
+	"$(_cur_run drift)" "1 FAILED"
+
 unset _cur_lib _cur_dir
 unset -f _cur_make _cur_run _cur_out
