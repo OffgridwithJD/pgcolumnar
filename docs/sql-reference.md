@@ -476,9 +476,9 @@ Inserts the rows of an Arrow IPC stream file at `path` into the existing table
 rows inserted.
 
 Temporal columns are read in the unit the file declares, not the unit
-`export_arrow` writes. A `date` column accepts `date32` and `date64`; a `time`
-column accepts `time32` in seconds or milliseconds and `time64` in microseconds
-or nanoseconds; a `timestamp` column accepts any of the four `Timestamp` units.
+`export_arrow` writes. A `date` column accepts `date32` and `date64`. A `time`
+column accepts `time32` in seconds or milliseconds, and `time64` in microseconds
+or nanoseconds. A `timestamp` column accepts any of the four `Timestamp` units.
 Values are converted to PostgreSQL's own units, and a value that cannot be
 represented is refused with `22008` rather than stored wrong.
 
@@ -487,7 +487,7 @@ stores. Narrowing floors, so an instant before 1970 reports the microsecond it
 falls in. Sub-microsecond precision is lost; nothing else is.
 
 A temporal Arrow type the target column cannot hold is refused with `42804`
-rather than read: a `time64` file does not import into a `date` column. A file
+rather than read. A `time64` file does not import into a `date` column. A file
 whose type is not temporal is unaffected.
 
 ### pgcolumnar.import_parquet(rel regclass, path text) returns bigint
