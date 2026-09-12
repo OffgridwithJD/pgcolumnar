@@ -148,6 +148,48 @@ PY
 check "best-practices names clustering on the join key" \
 	"$(_practices_jk)" "yes"
 
+# ---- the stripe floor is below a vector, and the pages must say so (#1017) ----
+#
+# A vector is a fixed 1024 values (COLUMNAR_NATIVE_VECTOR_LENGTH). A row group
+# smaller than one never fills it and FSST is not applied to text columns.
+# Measured, 200,000 rows, compression=none, against 12,800,000 raw bytes:
+#
+#     stripe_row_limit 1000   0 FSST tables   13,625,000   106.4% of raw
+#     stripe_row_limit 1200   166 tables       6,998,031    54.7% of raw
+#
+# The ACCEPTED MINIMUM IS 1000, so the most aggressive legal setting is the one
+# that pays this, and administration.md tells a reader to LOWER the setting for
+# point lookups. The warning has to sit in the block that gives that advice, not
+# in a reference table three pages away -- so these arms are scoped to the block
+# and not to the page. An earlier version grepped whole pages and passed on main,
+# which already says 1024 and FSST elsewhere.
+# ONE LINE CARRYING BOTH, which is the claim stated in one sentence rather than two
+# tokens that happen to be near each other.
+#
+# Two weaker versions were born green and the measurement is why they were replaced.
+# awk paragraph mode (RS='') made configuration.md's whole GUC table one record, so
+# `stripe_row_limit`'s row shared a record with `chunk_group_row_limit`'s "fixed
+# 1024-value vectors" -- green on main. A three-line proximity window failed the same
+# way, because those rows are adjacent. Measured on main: same-line is 0 for all
+# three pages, which is the only one of the three that is actually red there.
+#
+# The pytest twin splits on blank lines in python and did NOT have the paragraph
+# behaviour, so the two harnesses disagreed and the shell one was wrong. That is the
+# argument for keeping both, paid back the day it was written.
+_floor_line() {	# _floor_line FILE -- yes if one line names the setting and the floor
+	if grep -qE 'stripe_row_limit.*1024|1024.*stripe_row_limit' "$1"; then
+		echo yes
+	else
+		echo no
+	fi
+}
+check "configuration.md states the 1024 floor where it documents the setting" \
+	"$(_floor_line "$SRCDIR/docs/configuration.md")" "yes"
+check "administration.md states it beside the advice to lower the setting" \
+	"$(_floor_line "$SRCDIR/docs/administration.md")" "yes"
+check "best-practices.md carries it with the load-sizing advice" \
+	"$(_floor_line "$SRCDIR/docs/best-practices.md")" "yes"
+
 # ---- a document that quotes the version must quote the current one ----------
 #
 # Nothing reads the VERSION file mechanically: no Makefile rule, no CI step. Two

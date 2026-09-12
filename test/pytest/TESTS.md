@@ -75,6 +75,7 @@ behaviour, the source of that number is named.
 - [27. test_skip_loop_arms.py: a skipped arm records under its own name](#27-test_skip_loop_armspy-a-skipped-arm-records-under-its-own-name)
 - [28. test_docs_join_clustering.py: the runtime filter's layout precondition](#28-test_docs_join_clusteringpy-the-runtime-filters-layout-precondition)
 - [29. test_join_vector_agg.py: ungrouped fold over a unique-key join](#29-test_join_vector_aggpy-ungrouped-fold-over-a-unique-key-join)
+- [30. test_docs_stripe_floor.py: the stripe floor is below a vector](#30-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 
 ## 1. How to read a test in here
 
@@ -2797,3 +2798,55 @@ join.
 
 A non-equi join clause is the same kind of extra Join Filter. EXPLAIN has no
 vectorized agg node. The sum matches a heap twin.
+
+
+## 30. test_docs_stripe_floor.py: the stripe floor is below a vector
+
+A vector is a fixed 1024 values (`COLUMNAR_NATIVE_VECTOR_LENGTH`). A row group
+smaller than one never fills it, so the chunk-shared FSST symbol table is not built
+and a text column is stored plain.
+
+Measured on 200,000 rows, one text column, `compression = none`, against 12,800,000
+raw bytes, two identical passes:
+
+| `stripe_row_limit` | FSST tables | stored | of raw |
+| --- | --- | --- | --- |
+| 1000 | 0 | 13,625,000 | **106.4%** |
+| 1200 | 166 of 167 | 6,998,031 | 54.7% |
+| 2000 | 100 of 100 | 6,990,641 | 54.6% |
+
+**The accepted minimum is 1000**, enforced in `set_options`, so the most aggressive
+legal setting is the one that pays this — and at it the column costs more than
+storing the bytes uncompressed. `docs/administration.md` tells a reader to *lower*
+this setting for point-lookup-heavy tables, which is the path in, so the warning has
+to sit in the block that gives the advice rather than in a reference table.
+
+### Why every arm asserts ONE LINE, not a block or a window
+
+Two weaker signals were tried and **both were born green on `main`**:
+
+| signal | why it passed on main |
+| --- | --- |
+| blank-line block | `configuration.md`'s GUC table has no blank lines, so `stripe_row_limit`'s row shares a block with `chunk_group_row_limit`'s "fixed 1024-value vectors" |
+| three-line window | those same rows are adjacent |
+| **one line naming both** | **0 on all three pages on `main`** |
+
+Requiring one line is also a claim about the prose: the floor has to be stated in a
+sentence, not inferred from two tokens that happen to be neighbours.
+
+**The two harnesses disagreed, and the shell one was wrong.** The awk arm used
+paragraph mode and passed on `main` for two pages; the python twin split on blank
+lines and did not. That is the argument for keeping both halves, paid back the day
+it was written.
+
+| test | what it pins |
+| --- | --- |
+| `test_configuration_states_the_floor_where_it_documents_the_setting` | the floor is on the setting's own line |
+| `test_administration_states_it_beside_the_advice_to_lower_it` | it is on the page that tells readers to lower the setting, naming what is lost |
+| `test_best_practices_carries_the_floor_with_the_load_sizing_advice` | the load-sizing guidance states it too |
+
+### Removal proof
+
+Restore `main`'s three pages and **all three** arms go red. The shell twin is three
+arms in `docs_style.sh`; the two halves share no code, one matching in `grep` and the
+other in Python.
