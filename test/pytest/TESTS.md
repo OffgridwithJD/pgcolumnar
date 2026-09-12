@@ -75,7 +75,7 @@ behaviour, the source of that number is named.
 - [27. test_skip_loop_arms.py: a skipped arm records under its own name](#27-test_skip_loop_armspy-a-skipped-arm-records-under-its-own-name)
 - [28. test_docs_join_clustering.py: the runtime filter's layout precondition](#28-test_docs_join_clusteringpy-the-runtime-filters-layout-precondition)
 - [29. test_join_vector_agg.py: ungrouped fold over a unique-key join](#29-test_join_vector_aggpy-ungrouped-fold-over-a-unique-key-join)
-- [30. test_docs_stripe_floor.py: the stripe floor is below a vector](#30-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
+- [31. test_docs_stripe_floor.py: the stripe floor is below a vector](#31-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 
 ## 1. How to read a test in here
 
@@ -2800,7 +2800,7 @@ A non-equi join clause is the same kind of extra Join Filter. EXPLAIN has no
 vectorized agg node. The sum matches a heap twin.
 
 
-## 30. test_docs_stripe_floor.py: the stripe floor is below a vector
+## 31. test_docs_stripe_floor.py: the stripe floor is below a vector
 
 A vector is a fixed 1024 values (`COLUMNAR_NATIVE_VECTOR_LENGTH`). A row group
 smaller than one never fills it, so the chunk-shared FSST symbol table is not built
