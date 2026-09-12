@@ -158,7 +158,7 @@ SELECT pgcolumnar.set_options(
 | `stripe_row_limit` | integer | Per-table override of `pgcolumnar.stripe_row_limit`. |
 
 **A `stripe_row_limit` below 1024 disables FSST on text columns.** A vector is a
-fixed 1024 values, so a row group smaller than that never fills one, and the
+fixed 1024 values. A row group smaller than that never fills one, so the
 chunk-shared FSST symbol table is not built. Measured on 200,000 rows of a text
 column, `compression = none`, against 12,800,000 raw bytes:
 

@@ -99,6 +99,10 @@ true until the next version shipped.
   Documentation only. The minimum is unchanged: whether to raise it, make FSST work
   below a vector, or warn at `set_options` is still open on #1017.
 
+  The chunk-group limit does not affect this, and that is now measured rather than
+  assumed: `chunk_group_row_limit` at its floor of 100 stores 7,086,080 bytes, the same
+  byte count as 1024 and 10000. Measured by @OffgridwithJD.
+
   THE GUARD WAS BORN GREEN TWICE BEFORE IT WORKED, and the measurement is why it does
   now. A blank-line block reader passed on main, because `configuration.md`'s GUC table
   has no blank lines and `stripe_row_limit`'s row shares a block with
@@ -109,6 +113,12 @@ true until the next version shipped.
   The two harnesses disagreed while that was being found -- the awk arm used paragraph
   mode and passed on main for two pages, the python twin split on blank lines and did
   not -- which is the argument for keeping both halves, paid back the day it was written.
+
+  AND ONE LINE SAYS NOTHING ABOUT WHERE. Moving the line out of the advice block to the
+  end of administration.md, 402 lines away, left the arm passing while its name claimed
+  the floor was stated beside the advice. Reported by @OffgridwithJD. The arm now
+  asserts the SECTION: the floor and the lowering advice must sit under one `## `
+  heading. A heading is a declared boundary, which is what the paragraph reader lacked.
 
 - A check record names the PostgreSQL major it was observed under (#1010).
 

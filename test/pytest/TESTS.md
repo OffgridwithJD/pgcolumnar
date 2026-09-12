@@ -2957,32 +2957,51 @@ storing the bytes uncompressed. `docs/administration.md` tells a reader to *lowe
 this setting for point-lookup-heavy tables, which is the path in, so the warning has
 to sit in the block that gives the advice rather than in a reference table.
 
-### Why every arm asserts ONE LINE, not a block or a window
+### Why one line, and why the section as well
 
-Two weaker signals were tried and **both were born green on `main`**:
+Three signals were tried. Two were born green on `main`:
 
-| signal | why it passed on main |
+| signal | on `main` |
 | --- | --- |
-| blank-line block | `configuration.md`'s GUC table has no blank lines, so `stripe_row_limit`'s row shares a block with `chunk_group_row_limit`'s "fixed 1024-value vectors" |
-| three-line window | those same rows are adjacent |
-| **one line naming both** | **0 on all three pages on `main`** |
+| blank-line block | **passes** — `configuration.md`'s GUC table has no blank lines, so `stripe_row_limit`'s row shares a block with `chunk_group_row_limit`'s "fixed 1024-value vectors" |
+| three-line window | **passes** — those rows are adjacent |
+| one line naming both | **0 on all three pages** |
 
-Requiring one line is also a claim about the prose: the floor has to be stated in a
-sentence, not inferred from two tokens that happen to be neighbours.
+One line is also a claim about the prose: the floor has to be stated in a sentence,
+not inferred from two neighbouring tokens. That is why `best-practices.md` names the
+setting and the number together.
 
-**The two harnesses disagreed, and the shell one was wrong.** The awk arm used
-paragraph mode and passed on `main` for two pages; the python twin split on blank
-lines and did not. That is the argument for keeping both halves, paid back the day
-it was written.
+**And one line alone says nothing about WHERE.** @OffgridwithJD moved the line out of
+the advice block to the end of `administration.md` — **402 lines away** — and the arm
+still passed while its name claimed the floor was stated "beside the advice to lower
+the setting". Reproduced here before anything changed.
+
+So the `administration.md` arm asserts the **section**: the floor and the lowering
+advice must sit under one `## ` heading, both under `## Row-group sizing` today. A
+heading is a declared boundary, which is exactly what the paragraph reader lacked —
+blank lines are absent inside a markdown table and arbitrary in prose.
 
 | test | what it pins |
 | --- | --- |
 | `test_configuration_states_the_floor_where_it_documents_the_setting` | the floor is on the setting's own line |
-| `test_administration_states_it_beside_the_advice_to_lower_it` | it is on the page that tells readers to lower the setting, naming what is lost |
+| `test_administration_states_it_in_the_section_that_says_to_lower_it` | it is in the **same section** as the advice that leads there |
 | `test_best_practices_carries_the_floor_with_the_load_sizing_advice` | the load-sizing guidance states it too |
 
-### Removal proof
+### Removal proof, three ways
 
-Restore `main`'s three pages and **all three** arms go red. The shell twin is three
-arms in `docs_style.sh`; the two halves share no code, one matching in `grep` and the
-other in Python.
+| mutation | result |
+| --- | --- |
+| `main`'s three pages | all three arms red |
+| the floor line moved 402 lines from the advice | the administration arm red, the other two green |
+| the branch as it stands | all three green |
+
+The second row is the one the page-wide version could not produce.
+
+**The proof itself broke once and said so.** `git stash` on the three pages stopped
+reverting them the moment the change was committed rather than staged, so the
+"restore main's pages" step was restoring the branch's own pages and every arm passed.
+Checking the files out from `origin/main` explicitly is what makes the row mean
+anything.
+
+The shell twin is three arms in `docs_style.sh`: `grep` for the two one-line pages and
+an awk heading walker for `administration.md`. The two halves share no code.

@@ -163,19 +163,22 @@ check "best-practices names clustering on the join key" \
 # in a reference table three pages away -- so these arms are scoped to the block
 # and not to the page. An earlier version grepped whole pages and passed on main,
 # which already says 1024 and FSST elsewhere.
-# ONE LINE CARRYING BOTH, which is the claim stated in one sentence rather than two
-# tokens that happen to be near each other.
+# ONE LINE CARRYING BOTH, AND FOR administration.md THE RIGHT SECTION TOO.
 #
-# Two weaker versions were born green and the measurement is why they were replaced.
-# awk paragraph mode (RS='') made configuration.md's whole GUC table one record, so
-# `stripe_row_limit`'s row shared a record with `chunk_group_row_limit`'s "fixed
-# 1024-value vectors" -- green on main. A three-line proximity window failed the same
-# way, because those rows are adjacent. Measured on main: same-line is 0 for all
-# three pages, which is the only one of the three that is actually red there.
+# One line, because a blank-line block and a three-line window are both green on
+# main: configuration.md's GUC table has no blank lines, so stripe_row_limit's row
+# shares a block with chunk_group_row_limit's "fixed 1024-value vectors", and those
+# rows are adjacent. One line naming both is 0 on all three pages on main, and it
+# makes the prose state the floor in a sentence, which is what a warning needs.
 #
-# The pytest twin splits on blank lines in python and did NOT have the paragraph
-# behaviour, so the two harnesses disagreed and the shell one was wrong. That is the
-# argument for keeping both, paid back the day it was written.
+# THE SECTION, because one line alone says nothing about WHERE. @OffgridwithJD moved
+# the line out of the advice block to the end of administration.md, 402 lines away,
+# and the page-wide arm still passed while its name claimed the floor was stated
+# "beside the advice to lower the setting". Reproduced before changing anything.
+#
+# A `## ` heading is the boundary, not a blank line. That is what the paragraph
+# reader got wrong: blank lines are absent inside a markdown table and arbitrary in
+# prose, while a heading is declared.
 _floor_line() {	# _floor_line FILE -- yes if one line names the setting and the floor
 	if grep -qE 'stripe_row_limit.*1024|1024.*stripe_row_limit' "$1"; then
 		echo yes
@@ -183,10 +186,19 @@ _floor_line() {	# _floor_line FILE -- yes if one line names the setting and the 
 		echo no
 	fi
 }
+_floor_same_section() {	# _floor_same_section FILE ADVICE -- yes if both are under one `## `
+	awk -v advice="$2" '
+		/^## / { h = substr($0, 4) }
+		{
+			if (index(tolower($0), tolower(advice))) a[h] = 1
+			if (/stripe_row_limit/ && /1024/) f[h] = 1
+		}
+		END { for (k in a) if (k in f) { print "yes"; exit } print "no" }' "$1"
+}
 check "configuration.md states the 1024 floor where it documents the setting" \
 	"$(_floor_line "$SRCDIR/docs/configuration.md")" "yes"
-check "administration.md states it beside the advice to lower the setting" \
-	"$(_floor_line "$SRCDIR/docs/administration.md")" "yes"
+check "administration.md states it in the section that says to lower the setting" \
+	"$(_floor_same_section "$SRCDIR/docs/administration.md" "Lower this setting")" "yes"
 check "best-practices.md carries it with the load-sizing advice" \
 	"$(_floor_line "$SRCDIR/docs/best-practices.md")" "yes"
 

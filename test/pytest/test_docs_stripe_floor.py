@@ -24,42 +24,70 @@ ADMIN = ROOT / "docs" / "administration.md"
 PRACTICES = ROOT / "docs" / "best-practices.md"
 
 
-def _states_the_floor(path):
-    """True when ONE LINE names the setting and the floor together.
+def _floor_line_sections(path):
+    """The `##` headings under which a line names both the setting and the floor.
 
-    Not a block, and not a proximity window. Both were tried and both were born
-    green: `configuration.md`'s GUC table has no blank lines, so a paragraph reader
-    puts `stripe_row_limit`'s row and `chunk_group_row_limit`'s "fixed 1024-value
-    vectors" in one unit, and those rows are adjacent so a three-line window does
-    the same. Measured on `main`: block and window both say yes, one line says no
-    for all three pages.
+    ONE LINE, because a blank-line block and a three-line window are both green on
+    `main`: `configuration.md`'s GUC table has no blank lines, so
+    `stripe_row_limit`'s row shares a block with `chunk_group_row_limit`'s "fixed
+    1024-value vectors", and those rows are adjacent. One line naming both is 0 on
+    all three pages there, and it constrains the prose to state the floor in a
+    sentence, which is what a warning needs.
 
-    Requiring one line is also a claim about the PROSE -- the floor has to be stated
-    in a sentence, not inferred from two tokens that happen to be neighbours.
+    AND THE SECTION, because one line alone says nothing about WHERE. Reported by
+    @OffgridwithJD, who moved the line out of the advice block to the end of
+    `administration.md` -- 402 lines away -- and the arm still passed while claiming
+    the floor was stated "beside the advice to lower the setting". Reproduced here
+    before changing anything.
+
+    A `##` heading is the boundary, not a blank line. That is what the paragraph
+    reader got wrong: blank lines are absent inside a markdown table and arbitrary
+    in prose, while a heading is declared.
     """
+    out, heading = set(), None
     for line in path.read_text(encoding="utf-8").splitlines():
-        if "stripe_row_limit" in line and "1024" in line:
-            return True
-    return False
+        if line.startswith("## "):
+            heading = line[3:].strip()
+        elif "stripe_row_limit" in line and "1024" in line:
+            out.add(heading)
+    return out
+
+
+def _sections_containing(path, needle):
+    out, heading = set(), None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            heading = line[3:].strip()
+        elif needle.lower() in line.lower():
+            out.add(heading)
+    return out
 
 
 def test_configuration_states_the_floor_where_it_documents_the_setting(expect):
     expect.num(int(CONFIG.is_file()), 1, "premise: configuration.md is in the tree")
-    expect.num(int(_states_the_floor(CONFIG)), 1,
+    expect.num(int(len(_floor_line_sections(CONFIG)) > 0), 1,
                "configuration.md states the 1024 floor on the setting's own line")
 
 
-def test_administration_states_it_beside_the_advice_to_lower_it(expect):
+def test_administration_states_it_in_the_section_that_says_to_lower_it(expect):
     """`administration.md` tells a reader to LOWER this setting for point lookups.
-    That is the path into the cliff, so the floor has to be on this page."""
+
+    That is the path into the cliff, so the floor has to be in THAT section. The
+    arm asserts the section and not merely the page, because the page-wide version
+    passed with the two 402 lines apart.
+    """
     expect.num(int(ADMIN.is_file()), 1, "premise: administration.md is in the tree")
-    expect.num(int(_states_the_floor(ADMIN)), 1,
-               "administration.md states the floor beside the lowering advice")
+    advice = _sections_containing(ADMIN, "lower this setting")
+    expect.num(int(len(advice) > 0), 1,
+               "premise: administration.md still tells a reader to lower the setting")
+    floor = _floor_line_sections(ADMIN)
+    expect.num(int(len(advice & floor) > 0), 1,
+               "and the 1024 floor is stated in that same section")
     low = ADMIN.read_text(encoding="utf-8").lower()
     expect.num(int("fsst" in low), 1, "and names what lowering past it costs")
 
 
 def test_best_practices_carries_the_floor_with_the_load_sizing_advice(expect):
     expect.num(int(PRACTICES.is_file()), 1, "premise: best-practices.md is in the tree")
-    expect.num(int(_states_the_floor(PRACTICES)), 1,
+    expect.num(int(len(_floor_line_sections(PRACTICES)) > 0), 1,
                "the load-sizing advice states the floor on the same line")
