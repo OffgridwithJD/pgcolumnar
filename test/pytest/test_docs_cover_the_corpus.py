@@ -765,6 +765,79 @@ def test_every_in_document_link_in_this_directory_reaches_a_heading(expect):
                     "premise: and it parsed links rather than finding none")
 
 
+# A NUMBERED CONTENTS LIST MUST BE IN ORDER, which the link arms above cannot see.
+# They ask whether a link RESOLVES, and a shuffled list resolves perfectly. #1023's
+# merge put TESTS.md's TOC at `29, 31, 30` against sections `29, 30, 31`, and every
+# arm here stayed green.
+_NUMBERED_TOC = re.compile(r"^- \[(\d+)\. ", re.M)
+_NUMBERED_SECTION = re.compile(r"^## (\d+)\. ", re.M)
+
+
+def _numbering(text):
+    """-> (toc numbers, section numbers) as they appear, in document order."""
+    return ([int(n) for n in _NUMBERED_TOC.findall(text)],
+            [int(n) for n in _NUMBERED_SECTION.findall(text)])
+
+
+def _gaps(nums):
+    """-> [(a, b)] for every adjacent pair that is not b == a + 1."""
+    return [(a, b) for a, b in zip(nums, nums[1:]) if b != a + 1]
+
+
+def test_the_contents_list_is_numbered_in_order(expect):
+    """TESTS.md's contents list and its sections must both count 1..N with no gap.
+
+    THE SHAPE THIS CLOSES, measured rather than imagined. After #1023 merged, the
+    document on main read:
+
+        TOC       ... 29, 31, 30      three out-of-order transitions once 32 arrived
+        sections  ... 29, 30, 31      contiguous and correct
+
+    so the list disagreed with the order a reader scrolls through, and the two arms
+    above were green throughout: both orders RESOLVE, which is all they ask. A
+    contents list whose numbers are shuffled is a list the reader cannot scan, and it
+    is the first thing anyone adding a section copies.
+
+    BOTH SEQUENCES, not just the TOC. The collision that produced this is a section
+    NUMBER taken twice, so the sections are where a duplicate shows up first, and
+    `1..N with no gap` catches a duplicate and an omission in one rule.
+    """
+    text = (HERE / "TESTS.md").read_text(encoding="utf-8")
+    toc, sections = _numbering(text)
+    expect.at_least(len(toc), 20, "premise: the rule found a numbered contents list")
+    expect.at_least(len(sections), 20, "premise: and it found numbered sections")
+    expect.num(toc[0], 1, "the contents list starts at 1")
+    expect.text(str(_gaps(toc)) if _gaps(toc) else "none", "none",
+                "the contents list is numbered 1..N with no gap or inversion")
+    expect.text(str(_gaps(sections)) if _gaps(sections) else "none", "none",
+                "and the sections are numbered 1..N with no gap or inversion")
+    expect.num(len(toc), len(sections),
+               "with one contents entry per section")
+
+
+def test_a_shuffled_contents_list_is_caught_on_a_fixture(expect):
+    """The removal proof, on the exact shape that shipped.
+
+    `29, 31, 30` rather than a single swap, because that is what the merge produced
+    and because a rule keyed only on "is it sorted" would also flag a list that is
+    merely missing an entry. Both are caught here, and named apart.
+    """
+    clean = "- [1. a](#a)\n- [2. b](#b)\n- [3. c](#c)\n\n## 1. a\n\n## 2. b\n\n## 3. c\n"
+    toc, sections = _numbering(clean)
+    expect.num(len(_gaps(toc)), 0, "premise: the clean fixture is not flagged")
+    expect.num(len(sections), 3, "premise: and it read the sections too")
+
+    shuffled = clean.replace("- [2. b](#b)\n- [3. c](#c)", "- [3. c](#c)\n- [2. b](#b)")
+    stoc, _ = _numbering(shuffled)
+    expect.text(str(_gaps(stoc)), "[(1, 3), (3, 2)]",
+                "the inversion is caught, and named as the two transitions it is")
+
+    missing = clean.replace("- [2. b](#b)\n", "")
+    mtoc, _ = _numbering(missing)
+    expect.text(str(_gaps(mtoc)), "[(1, 3)]",
+                "and an omitted entry is caught as a gap, not confused with an inversion")
+
+
 # ---------------------------------------------------------------------------
 # Section 5's "what to add next" list must not name work that is already done.
 #

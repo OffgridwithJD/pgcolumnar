@@ -116,6 +116,40 @@ true until the next version shipped.
   same reason: `test_the_document_states_no_totals_for_a_merge_to_get_wrong` exists to keep
   a totals line OUT. A count in prose that no arm reads is a claim waiting to go wrong. The
   arms themselves are listed in the table above, where a reader can count them.
+- `TESTS.md`'s contents list was out of numeric order and no arm could see it (#1026).
+
+  After #1023 merged, the document read:
+
+      TOC       ... 29, 31, 30      and 29, 31, 30, 32 once the next section arrived
+      sections  ... 29, 30, 31      contiguous and correct
+
+  #1023's contents entry for section 30 landed after 31. Resolving this PR's conflict in
+  that same region meant choosing an order, so the fix lands here: TOC and sections are
+  both 1..32 with no gap and no inversion.
+
+  WHY NOTHING CAUGHT IT. `test_docs_cover_the_corpus.py` already sweeps every
+  contents-list link and asserts it reaches a heading. Both orders resolve, so that arm is
+  green either way. Measured by restoring the broken order under the new arm:
+
+      the new arm      FAIL  got '[(29, 31), (31, 30), (30, 32)]' want 'none'
+      the link arms    1 passed
+
+  So the link sweep is not a weaker version of this rule; it answers a different question,
+  and a shuffled contents list was outside both.
+
+  Two arms. The first reads TESTS.md. It requires the contents numbers and the section
+  numbers each to count 1..N with no gap, and one contents entry per section.
+
+  The second is the removal proof on a fixture. It uses the `29, 31, 30` shape that actually
+  shipped rather than a single swap. It also names an omitted entry apart from an inversion:
+  a missing entry gives `[(1, 3)]` and a shuffle gives `[(1, 3), (3, 2)]`.
+
+  THE GAP RULE CATCHES THE COLLISION TOO. Three open PRs each claimed a section number
+  another had taken, which is the cause rather than a coincidence. A number used twice
+  leaves a gap in the section sequence, so `1..N with no gap` reddens on a duplicate and on
+  an omission with one rule.
+
+  `guard_tests` 282 -> 284, re-derived by collection.
 
 - `native_ownership.sh` has a pytest twin, and it asserts the SQLSTATE (#432).
 
@@ -185,6 +219,29 @@ true until the next version shipped.
   hands back the SET's empty result. The first version collapsed that into a 0 and
   the arm reported "the OWNER cannot read its stats". Every call site now asserts the
   error is None rather than folding it into a value.
+- The docs gate checks that a markdown table is still a table (#1026).
+
+  `docs_style.sh` enforced seven rules over every user-facing page. Sentence length, the
+  idiom list, em and en dashes, prose double-hyphens, conflict markers, the nav entry, and
+  every `VERSION` citation. ALL SEVEN ARE ABOUT PROSE. So a table that had stopped being a
+  table passed the gate whose purpose is keeping those pages readable.
+
+  The measured case. A note and a second table were spliced into the middle of
+  `configuration.md`'s `set_options` argument table. That left six of the nine arguments as a
+  headerless block, and `docs_style.sh` passed with 14 checks.
+
+  It was the second splice in one day. The first gave the GUC table no blank lines, which
+  made an `awk RS=''` guard read two GUC rows as one record and pass on `main`. Both are the
+  same fact: a markdown table is a contiguous run of `|` lines, and a blank line is
+  structural.
+
+  Fences are tracked BY LINE rather than stripped with a regex. The regex form already in
+  that file is fine for counting, but it loses line numbers and it breaks on an unclosed
+  fence. State-tracking under-reports there instead, which is the safe direction.
+
+  MEASURED BEFORE LANDING, which is what a static guard here owes. 0 across the gate's own
+  scope, and 5 elsewhere in the tree. All five are REAL rather than false positives: 3 in
+  `test/pytest/TESTS.md` and 2 in a design document, none of which the gate covers.
 
 - The mutation ledger records WHICH MAJORS each check exists on (#1010).
 

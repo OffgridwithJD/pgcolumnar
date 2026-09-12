@@ -75,9 +75,10 @@ behaviour, the source of that number is named.
 - [27. test_skip_loop_arms.py: a skipped arm records under its own name](#27-test_skip_loop_armspy-a-skipped-arm-records-under-its-own-name)
 - [28. test_docs_join_clustering.py: the runtime filter's layout precondition](#28-test_docs_join_clusteringpy-the-runtime-filters-layout-precondition)
 - [29. test_join_vector_agg.py: ungrouped fold over a unique-key join](#29-test_join_vector_aggpy-ungrouped-fold-over-a-unique-key-join)
-- [31. test_native_ownership.py: every maintenance function is owner-only](#31-test_native_ownershippy-every-maintenance-function-is-owner-only)
 - [30. test_differential.py: the heap oracle, all seven parts](#30-test_differentialpy-the-heap-oracle-all-seven-parts)
+- [31. test_native_ownership.py: every maintenance function is owner-only](#31-test_native_ownershippy-every-maintenance-function-is-owner-only)
 - [32. test_stats_privilege.py: stats is readable only by a caller who may read the table](#32-test_stats_privilegepy-stats-is-readable-only-by-a-caller-who-may-read-the-table)
+- [33. test_docs_table_structure.py: a table must stay a table](#33-test_docs_table_structurepy-a-table-must-stay-a-table)
 
 ## 1. How to read a test in here
 
@@ -1041,6 +1042,8 @@ many times.
 | `test_the_anchor_rule_drops_punctuation_and_keeps_underscores` | GitHub's derivation, on the heading the defect was found in |
 | `test_an_anchor_that_strips_the_underscores_is_caught` | the exact broken link that shipped, with a control |
 | `test_every_in_document_link_in_this_directory_reaches_a_heading` | every contents-list link resolves, with a coverage premise |
+| `test_the_contents_list_is_numbered_in_order` | the contents list and the sections both count 1..N with no gap or inversion — the link arms above ask only whether a link RESOLVES, and a shuffled list resolves perfectly |
+| `test_a_shuffled_contents_list_is_caught_on_a_fixture` | **removal proof**: the `29, 31, 30` shape that shipped, with a clean control and an omitted entry named apart from an inversion |
 | `test_the_next_steps_list_is_anchored_to_the_inventory` | every section 5 entry names a mode id, so the entry can be checked at all |
 | `test_no_open_next_step_names_work_the_document_calls_done` | an un-struck entry whose id reached section 2 is stale work to do |
 | `test_a_stale_next_step_is_caught_on_a_fixture` | **removal proof**: the shape, planted, with the control beside it |
@@ -3169,3 +3172,34 @@ version collapsed that into a 0 and the arm reported *"the OWNER cannot read its
 stats"* — a product failure, from a driver behaviour. The helper now issues the SET
 as its own execute, and every call site asserts the error is `None` rather than
 folding it into a value.
+## 33. test_docs_table_structure.py: a table must stay a table
+
+`docs_style.sh` enforced seven rules over every user-facing page. Sentence length, the idiom
+list, em and en dashes, prose double-hyphens, conflict markers, the nav entry, and every
+`VERSION` citation. **All seven are about prose.** So a table that had stopped being a table
+passed the gate whose purpose is keeping those pages readable (#1026).
+
+The measured case. A note and a second table were spliced into the middle of
+`configuration.md`'s `set_options` argument table. That left six of the nine arguments as a
+headerless block, and `docs_style.sh` passed with 14 checks.
+
+It was the second splice that day. The first gave the GUC table no blank lines, which made an
+`awk RS=''` guard read two GUC rows as one record and pass on `main`. Both are the same fact:
+a markdown table is a contiguous run of `|` lines, and a blank line is structural.
+
+The rule is in `plain_language_check.py` beside the other four, because that file already
+walks every page and reports the per-file counts the shell asserts. It tracks fences **by
+line** rather than stripping them with a regex. The regex form loses line numbers, and a
+report that cannot say where is one somebody has to re-derive.
+
+| arm | what it holds |
+| --- | --- |
+| `test_a_well_formed_table_is_not_flagged` | THE CONTROL, first: a rule flagging every table would catch the defect and be switched off the same day |
+| `test_rows_orphaned_by_a_splice_are_flagged_with_their_line` | the defect, and the line the orphaned block starts at |
+| `test_a_pipe_inside_a_fenced_code_block_is_not_a_table` | a shell pipeline in a fence is not a table -- with the unfenced control, or the arm passes because nothing is ever flagged |
+| `test_an_unclosed_fence_does_not_swallow_the_rest_of_the_file` | the case the regex form gets wrong; state-tracking under-reports, which is the safe direction |
+| `test_the_documents_the_gate_checks_are_clean` | the false-positive budget as a standing arm rather than a number measured once |
+
+**Measured before landing**, which is what a static guard in this tree owes. 0 across the
+gate's own scope, and 5 elsewhere in the tree. All five are real: 3 in this file and 2 in a
+design document, none of which the gate covers.
