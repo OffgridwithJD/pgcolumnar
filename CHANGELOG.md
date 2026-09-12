@@ -18,6 +18,68 @@ true until the next version shipped.
 
 ### Added
 
+- The mutation ledger records WHICH MAJORS each check exists on (#1010).
+
+      suite<TAB>part<TAB>name<TAB>majors<TAB>last-red<TAB>mutations
+
+      rows            1179 -> 1197   (carried 1177, new 20, dropped 2)
+      checks_never_observed_red   1171 -> 1189
+      ever red           8 ->    8   (all carried, with their dates and one mutation)
+      major sets      1197 x "15;16;17;18;19"
+      covered         differential, harness_selftest, native_join_runtime_filter,
+                      native_join_vector_agg
+      suites_not_covered          249 (unchanged)
+
+  Every row claims all five majors, because all four covered suites are major-invariant:
+  934, 204, 46 and 13 records, identical on 15/16/17/18/19 in a five-major matrix. So the
+  census moves only by the twenty arms this change adds, and the diff is one field per
+  line.
+
+  The 20 new rows are part 410's arms about the majors field; the 2 dropped are the rows
+  whose checks this change RENAMED (`every committed row has five fields` became `six`).
+  The migration refuses to drop a row carrying history, for the reason `orphan-scan`
+  refuses it -- the catalogue of what has been seen red is the thing no run can recreate --
+  so a drop is only available for a row with nothing to lose, and the name has to be typed.
+
+  A check's existence depends on the major, so a ledger that cannot say where a check
+  exists cannot tell a deleted check from one that never ran here.
+  `test/analyze_differential.sh:61` emits ONE record on PG15-17 and a suite's worth on
+  PG18+; `test/fk_referencing.sh:287` emits DIFFERENT CHECK NAMES in its two branches.
+
+  THE MAJOR IS A FIELD, NOT PART OF THE KEY, and that is the design rather than an
+  implementation detail. Measured on a full matrix at `4d7c75ae`, 252 suites on PG15 and
+  PG18: 6367 of 6472 checks are identical on both majors and 105 exist on exactly one. A
+  `(major, check)` key would hold 6472 x 5 = 32,360 rows to express those 105 -- about 247
+  duplicate rows for every row that differs, each a second copy of one observation.
+  Keeping the key at `(suite, part, name)` also keeps `checks_never_observed_red` counting
+  CHECKS: under a pair key it would count pairs, and "5800 checks" in a tree holding 1150
+  of them is a number that lies by its own name.
+
+  The field is a sorted `;`-separated SET -- `15;18` -- and it ACCUMULATES. A plain
+  assignment was measured doing the wrong thing to last-red on #918: merging a PG15 log
+  after a PG18 log must not make the check stop existing on 18, because the order somebody
+  merges logs in is not a fact about the code.
+
+  NO WILDCARD. "Every major observed" would change meaning the day a major joins the
+  matrix, inheriting a claim nothing measured.
+
+  `unknown` is a token in the set like any other, and the common one:
+  `harness_selftest` never references `PGC_MAJOR`, so every record it emits carries it.
+
+  WHAT THIS FIXES is `orphan-scan`, not `gate`. The gate refuses a check in the LOG the
+  ledger has not seen, and a PG18-only check does not appear in a PG15 log, so it stayed
+  correct by never being asked. `orphan-scan` asks the opposite question, and a PG18-only
+  row is exactly what a deleted check looks like on PG15. It was saved only by the SKIP
+  rule -- `analyze_differential` emits a `check_skip` so its part was unprunable, while
+  `fk_referencing` emits `check` and has no SKIP at all, so once that suite is seeded a
+  PG15 run would have called its two PG17+ checks deleted. The fourth category already
+  said the true thing, so the scope gains an intersection and nothing else: no new
+  category and no grandfather rule.
+
+  The gate also cannot refuse a check on a major it holds no rows for, for the same reason
+  it cannot in a suite it has never seen -- otherwise adding PG20 would redden every check
+  at once, which is a gate somebody turns off. It tightens the moment one run on that
+  major is merged, and it says out loud when it is not enforcing.
 - The docs name 1024 as the floor for `stripe_row_limit` (#1017).
 
   A vector is a fixed 1024 values, so a row group smaller than one never fills it and
@@ -71,9 +133,17 @@ true until the next version shipped.
   decides which checks can exist.
 
   `unknown` is the one non-numeric value, and it is lib.sh's own word for a field the
-  harness did not set (it already uses it for an unset suite and part). It is a real
-  case rather than a courtesy: `harness_selftest` never references `PGC_MAJOR`, so every
-  record it emits says `unknown` truthfully -- 907 of the 1155 committed ledger rows.
+  harness did not set (it already uses it for an unset suite and part). It is a real case
+  rather than a courtesy: `PGC_MAJOR` is set in `pgc_setup`, and 14 suites need no cluster
+  so never call it. Measured on a full pg18 matrix, 544 of 6753 records carry it --
+  `audit`, `concurrency`, `decode_interrupts`, `hilbert_curve`, `objstore_stash_recovery`,
+  `phase2`-`phase6`, `smoke`, `unique_conc`, `update_conc`, `wal_envelope`.
+
+  It is ORDER-DEPENDENT in a suite that sources parts into one shell: a record emitted
+  before the first `pgc_setup` says `unknown` and one after it names the major.
+  `harness_selftest` is that shape, 10 of its 46 parts call `pgc_setup`, and on pg18 all
+  916 of its records named the major -- so the first setup precedes the first record
+  today, and a part added ahead of it would change that.
 
   The ledger itself is unchanged in SHAPE: it still keys on `(suite, part, name)` and
   discards the major. Keying on it is #1010's second step, and it needs a migration this
@@ -100,6 +170,11 @@ true until the next version shipped.
 
       checks_never_observed_red   1155 -> 1162
       covered                     native_join_vector_agg, 13 checks, last-red 2026-09-12
+      awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+
+  Field 5 because the entry above inserted the majors as field 4. At the moment this
+  change landed on its own it was field 4; both ship in the same release, so the form
+  here is the one that works on the shipped tree.
 
 - The mutation ledger covers a third suite: `differential`, 204 checks (#752).
 
@@ -119,6 +194,13 @@ true until the next version shipped.
   `never`:
 
       awk -F'\t' '$4=="never"' test/check_ledger.tsv | wc -l
+
+  SECOND CORRECTION, by the same rule that kept the first one visible: #1010 inserted
+  the majors a row claims as field 4, so on the shipped tree the last-red is field 5 and
+  the command above reads a major where it expects a date. The form that works is
+  `$5=="never"`, and `check_ledger_budget.txt` carries it. What the number COUNTS is
+  unchanged -- the key is still `(suite, part, name)`, so a row is still one check --
+  which is the reason the major is a set in a field rather than part of the key.
 
   A plain row count agrees with that only while nothing has ever been seen red, which
   is true of this tree today (1155 rows, 1155 never, 0 ever red) and stops being true

@@ -92,9 +92,9 @@ def test_a_green_run_records_debt_and_never_a_red_observation(tmp_path, expect):
     _run("merge", "--ledger", ledger, _w(tmp_path, "g.log", GREEN))
     rows = _rows(ledger)
     expect.num(len(rows), 2, "merging a green run records both checks")
-    expect.text(",".join(sorted({r[3] for r in rows})), "never",
+    expect.text(",".join(sorted({r[4] for r in rows})), "never",
                 "and records neither as ever having been red")
-    expect.num(len([r for r in rows if len(r) != 5]), 0, "every row has five fields")
+    expect.num(len([r for r in rows if len(r) != 6]), 0, "every row has six fields")
     expect.num(pathlib.Path(ledger).read_text().count("\t\n"), 0,
                "and no row ends in a tab, which was 614 of them")
 
@@ -109,13 +109,13 @@ def test_the_mutation_column_accumulates_rather_than_overwriting(tmp_path, expec
     ledger = _w(tmp_path, "l.tsv", "")
     red = _w(tmp_path, "r.log", RED)
     _run("merge", "--ledger", ledger, "--date", "2026-09-10", "--mutation", "SAOP 128 -> 0", red)
-    by = {r[2]: r[4] for r in _rows(ledger)}
+    by = {r[2]: r[5] for r in _rows(ledger)}
     expect.text(by["first check"], "SAOP 128 -> 0",
                 "a named mutation is recorded against the check that reddened")
     expect.text(by["second check"], "-", "and not against one that stayed green")
 
     _run("merge", "--ledger", ledger, "--date", "2026-09-10", "--mutation", "bloom neutered", red)
-    expect.text({r[2]: r[4] for r in _rows(ledger)}["first check"],
+    expect.text({r[2]: r[5] for r in _rows(ledger)}["first check"],
                 "SAOP 128 -> 0;bloom neutered",
                 "a second mutation accumulates rather than replacing the first")
 
@@ -246,7 +246,7 @@ def test_prune_drops_a_historyless_orphan_and_refuses_one_carrying_history(tmp_p
          _w(tmp_path, "h.log",
             "RESULT\tdemo\tpart1\tstill here\tPASS\t18\t\n"
             "RESULT\tdemo\tpart1\tgone tomorrow\tFAIL\t18\t\nchecks run: 2\n"))
-    expect.text({r[2]: r[3] for r in _rows(hist)}["gone tomorrow"], "2026-09-01",
+    expect.text({r[2]: r[4] for r in _rows(hist)}["gone tomorrow"], "2026-09-01",
                 "premise: the orphan now carries a date")
 
     out, rc = _run("orphan-scan", "--prune", "--ledger", hist, after)
@@ -345,7 +345,7 @@ def test_the_gate_refuses_a_new_check_only_in_a_suite_it_covers(tmp_path, expect
     expect.num(_run("gate", "--ledger", ledger, "--budget", b0,
                     "--registered", reg, other2)[1], 0,
                "regenerating the ledger lets the new check through")
-    expect.text({r[2]: r[3] for r in _rows(ledger)}["newly added"], "never",
+    expect.text({r[2]: r[4] for r in _rows(ledger)}["newly added"], "never",
                 "and it entered as debt, not as an observation nothing made")
 
 
@@ -422,11 +422,11 @@ def test_the_committed_ledger_and_budget_agree(expect):
     expect.text("yes" if budget.exists() else "no", "yes", "the budget is in the tree")
 
     rows = [l.split("\t") for l in ledger.read_text().splitlines() if l]
-    never = [r for r in rows if r[3] == "never"]
-    red = [r for r in rows if r[3] != "never"]
+    never = [r for r in rows if r[4] == "never"]
+    red = [r for r in rows if r[4] != "never"]
     print(f"  ledger: inputs={len(rows)} | observed red={len(red)}, never={len(never)}")
     expect.num(len(red) + len(never), len(rows), "the ledger partitions")
-    expect.num(len([r for r in rows if len(r) != 5]), 0, "every committed row has five fields")
+    expect.num(len([r for r in rows if len(r) != 6]), 0, "every committed row has six fields")
     expect.num(ledger.read_text().count("\t\n"), 0, "and none ends in a tab")
 
     nums = {}
@@ -466,7 +466,7 @@ def test_the_gate_refuses_a_census_that_contradicts_its_own_ledger(tmp_path, exp
     # holds two rows and both are `never`.
     rows = _rows(ledger)
     expect.num(len(rows), 2, "premise: the merged ledger holds two rows")
-    expect.num(len([r for r in rows if r[3] == "never"]), 2,
+    expect.num(len([r for r in rows if r[4] == "never"]), 2,
                "premise: both entered as never, so this ledger's census is 2")
 
     ok = _w(tmp_path, "ok.txt", "suites_not_covered 0\nchecks_never_observed_red 2\n")
@@ -537,8 +537,8 @@ def test_last_red_may_only_move_forward(tmp_path, expect):
     def stored():
         for line in pathlib.Path(led).read_text().splitlines():
             f = line.split("\t")
-            if len(f) > 3 and f[2] == "first check":
-                return f[3]
+            if len(f) > 4 and f[2] == "first check":
+                return f[4]
         return None
 
     _run("merge", "--reds-are-real", "--ledger", led, "--date", "2026-09-10", red)
@@ -573,7 +573,7 @@ def test_a_mutation_names_one_check_not_every_casualty(tmp_path, expect):
     one = _w(tmp_path, "one.log", RED)
     _run("merge", "--ledger", led, "--date", "2026-09-10", "--mutation", "M", one)
     rows = [l.split("\t") for l in pathlib.Path(led).read_text().splitlines() if l.strip()]
-    tagged = [r[2] for r in rows if len(r) > 4 and "M" in r[4].split(";")]
+    tagged = [r[2] for r in rows if len(r) > 5 and "M" in r[5].split(";")]
     expect.rows([[n] for n in sorted(tagged)], [["first check"]],
                 "and a single failure still carries it, on the check that reddened")
 
@@ -663,10 +663,10 @@ def test_a_record_that_does_not_name_its_major_is_not_evidence(tmp_path, expect)
                     "--registered", reg, good)[1], 1,
                "a record naming its major reaches the gate's own verdict")
 
-    # `unknown` is the emitter's word for a field the harness never set, and it is a
-    # REAL case rather than a courtesy: harness_selftest does not reference PGC_MAJOR
-    # anywhere, so its 907 rows have no major to name even in principle. It must be
-    # accepted and it must stay distinguishable from a number.
+    # `unknown` is the emitter's word for a field the harness never set, and it is a REAL
+    # case rather than a courtesy: PGC_MAJOR is set in pgc_setup, and 14 suites need no
+    # cluster so never call it -- measured, 544 of 6753 records on a full pg18 matrix. It
+    # must be accepted and it must stay distinguishable from a number.
     unk = _w(tmp_path, "unk.log",
              "RESULT\tdemo\tpart1\tfirst check\tPASS\tunknown\t\nchecks run: 1\n")
     expect.num(_run("gate", "--ledger", ledger, "--budget", budget,
@@ -695,3 +695,150 @@ def test_the_census_reports_the_major_it_read(tmp_path, expect):
     expect.num(majors.count("18"), 2, "and prints the major for each record that has one")
     expect.num(majors.count("unknown"), 1,
                "and prints `unknown` where the harness set none")
+
+
+def test_a_rows_major_set_accumulates_rather_than_replacing(tmp_path, expect):
+    """A check exists on a SET of majors, and the set is a row's field, not its key (#1010).
+
+    Keying on the major would store one fact once per major. Measured on a full matrix at
+    4d7c75ae: 6367 of 6472 checks are identical on PG15 and PG18, so `(major, check)`
+    would hold 6472 x 5 = 32,360 rows to express 105 keys' worth of difference -- about
+    247 duplicate rows per row that actually differs. The set keeps the key at
+    `(suite, part, name)`, which is also what keeps `checks_never_observed_red` counting
+    CHECKS, true to its own name.
+
+    The set ACCUMULATES, for the same reason the mutation column does and last-red does:
+    merging a PG15 log after a PG18 log must not make the check stop existing on 18. That
+    was measured as a plain assignment twice on this tool already (#918).
+    """
+    ledger = _w(tmp_path, "l.tsv", "")
+    r18 = _w(tmp_path, "r18.log",
+             "RESULT\tdemo\tpart1\teverywhere\tPASS\t18\t\n"
+             "RESULT\tdemo\tpart1\tpg18 only\tPASS\t18\t\nchecks run: 2\n")
+    r15 = _w(tmp_path, "r15.log",
+             "RESULT\tdemo\tpart1\teverywhere\tPASS\t15\t\nchecks run: 1\n")
+
+    _run("merge", "--ledger", ledger, "--date", "2026-09-12", r18)
+    majors = {r[2]: r[3] for r in _rows(ledger)}
+    expect.text(majors["pg18 only"], "18", "a check seen once names the one major it was seen on")
+
+    _run("merge", "--ledger", ledger, "--date", "2026-09-12", r15)
+    majors = {r[2]: r[3] for r in _rows(ledger)}
+    expect.text(majors["everywhere"], "15;18",
+                "a second major is ADDED to the set, sorted, not written over the first")
+    expect.text(majors["pg18 only"], "18",
+                "and a check the second run never mentioned keeps the set it had")
+    expect.num(len(_rows(ledger)), 2,
+               "two checks are two rows, whatever the majors: the key is not the major")
+
+    # `unknown` is a token in the set like any other, and what a suite needing no cluster
+    # emits: PGC_MAJOR is set in pgc_setup and 14 suites never call it.
+    runk = _w(tmp_path, "ru.log",
+              "RESULT\tdemo\tpart1\teverywhere\tPASS\tunknown\t\nchecks run: 1\n")
+    _run("merge", "--ledger", ledger, "--date", "2026-09-12", runk)
+    expect.text({r[2]: r[3] for r in _rows(ledger)}["everywhere"], "15;18;unknown",
+                "a harness that named no major adds its own token rather than a number")
+
+
+def test_a_run_speaks_only_for_the_majors_the_row_claims(tmp_path, expect):
+    """A PG15 run cannot orphan a check the ledger says exists only on PG18 (#1010).
+
+    This is the direction the missing dimension actually broke, and `gate` is not it: the
+    gate refuses a check in the LOG the ledger has not seen, and a PG18-only check does
+    not appear in a PG15 log, so the gate stays correct by never being asked.
+    `orphan-scan` asks the opposite question and a PG18-only row is exactly what a
+    deleted check looks like on PG15.
+
+    Until now it was saved only by the SKIP rule, and that was luck.
+    analyze_differential emits a check_skip on PG15-17 so its part was unprunable;
+    fk_referencing:287 emits `check` in its older-major branch and has no SKIP at all, so
+    once that suite is seeded a PG15 run would call its two PG17+ checks deleted.
+    Measured at 4d7c75ae: 24 keys shared, 2 only on PG18, 1 only on PG15.
+
+    The fourth category already says the true thing -- "this run does not contain them, so
+    it cannot speak about them" -- so this needs no new category and no grandfather rule.
+    """
+    # NO SKIP anywhere in the fixture, or the arm proves the wrong mechanism.
+    ledger = _w(tmp_path, "l.tsv",
+                "demo\tpart1\teverywhere\t15;18\tnever\t-\n"
+                "demo\tpart1\tpg18 only\t18\tnever\t-\n"
+                "demo\tpart1\tpg15 only\t15\tnever\t-\n")
+    log15 = _w(tmp_path, "r15.log",
+               "RESULT\tdemo\tpart1\teverywhere\tPASS\t15\t\n"
+               "RESULT\tdemo\tpart1\tpg15 only\tPASS\t15\t\nchecks run: 2\n")
+
+    out, rc = _run("orphan-scan", "--ledger", ledger, log15)
+    expect.num(out.count("orphan:"), 0,
+               "a PG15 run names no orphan: it saw every check the ledger claims for 15")
+    expect.num(out.count("ORPHAN CARRYING HISTORY"), 0, "and none carrying history either")
+    expect.num(out.count("not checked: 1 row"), 1,
+               "the PG18-only row is one this run cannot speak about, not one that vanished")
+    expect.num(rc, 0,
+               "and a run that cannot see another major's rows is not a failure -- a run "
+               "sees ONE major, so otherwise every correct run would return 1")
+
+    # THE CONTROL. Without it the arm above proves only that nothing is ever an orphan.
+    log15b = _w(tmp_path, "r15b.log",
+                "RESULT\tdemo\tpart1\teverywhere\tPASS\t15\t\nchecks run: 1\n")
+    out, rc = _run("orphan-scan", "--ledger", ledger, log15b)
+    expect.num(out.count("orphan: demo\tpart1\tpg15 only"), 1,
+               "control: a check the ledger claims for 15 and a PG15 run did not emit IS "
+               "an orphan")
+
+    # And the row claiming BOTH majors is checked on BOTH, which is the set's whole point:
+    # a stronger claim is held to a stronger test.
+    log18 = _w(tmp_path, "r18.log",
+               "RESULT\tdemo\tpart1\tpg18 only\tPASS\t18\t\nchecks run: 1\n")
+    out, rc = _run("orphan-scan", "--ledger", ledger, log18)
+    expect.num(out.count("orphan: demo\tpart1\teverywhere"), 1,
+               "a row claiming 15;18 is an orphan on a PG18 run that did not emit it")
+
+
+def test_the_gate_cannot_refuse_a_check_on_a_major_it_has_never_seen(tmp_path, expect):
+    """The same argument as suites_not_covered, one dimension over (#1010).
+
+    The gate cannot refuse a new check in a suite it has never seen, because it has no
+    idea which of that suite's checks are new. A major it has never seen is the identical
+    problem: adding PG20 to the matrix would make EVERY check new on 20 and redden the
+    whole run at once -- which is a gate somebody turns off, the failure this issue family
+    exists to prevent.
+
+    So the restriction is not a softening, it is the meaning of coverage. It tightens on
+    its own the moment one run on that major is merged.
+    """
+    ledger = _w(tmp_path, "l.tsv", "demo\tpart1\tknown check\t18\tnever\t-\n")
+    budget = _w(tmp_path, "b.txt", "suites_not_covered 0\n")
+    reg = _w(tmp_path, "reg", "demo\n")
+
+    # PG20: the ledger holds no row naming it, so it cannot say which of these are new.
+    log20 = _w(tmp_path, "r20.log",
+               "RESULT\tdemo\tpart1\tknown check\tPASS\t20\t\n"
+               "RESULT\tdemo\tpart1\tbrand new\tPASS\t20\t\nchecks run: 2\n")
+    out, rc = _run("gate", "--ledger", ledger, "--budget", budget, "--registered", reg, log20)
+    expect.num(out.count("not in the ledger"), 0,
+               "a major with no rows at all refuses nothing, as an uncovered suite does")
+    expect.num(rc, 0, "so a first run on a new major is not a failure")
+    expect.num(out.count("major 20"), 1, "and the gate says out loud that it covered no rows for 20")
+
+    # THE CONTROL: on a major it HAS seen, a new check is refused. Without this the arm
+    # above proves only that the gate refuses nothing at all.
+    log18 = _w(tmp_path, "r18.log",
+               "RESULT\tdemo\tpart1\tknown check\tPASS\t18\t\n"
+               "RESULT\tdemo\tpart1\tbrand new\tPASS\t18\t\nchecks run: 2\n")
+    out, rc = _run("gate", "--ledger", ledger, "--budget", budget, "--registered", reg, log18)
+    expect.num(out.count("not in the ledger"), 1, "control: on a covered major a new check is named")
+    expect.num(rc, 1, "and refused")
+
+    # And a check the ledger knows, seen on a major its row does NOT claim, is refused --
+    # the row is a claim about where the check exists, so widening it is a ledger edit.
+    led2 = _w(tmp_path, "l2.tsv",
+              "demo\tpart1\tknown check\t18\tnever\t-\n"
+              "demo\tpart1\tother\t15\tnever\t-\n")
+    log15 = _w(tmp_path, "r15.log",
+               "RESULT\tdemo\tpart1\tknown check\tPASS\t15\t\n"
+               "RESULT\tdemo\tpart1\tother\tPASS\t15\t\nchecks run: 2\n")
+    out, rc = _run("gate", "--ledger", led2, "--budget", budget, "--registered", reg, log15)
+    expect.num(out.count("known check"), 1,
+               "a known check on a major its row does not claim is named, because the row "
+               "is a claim about where it exists")
+    expect.num(rc, 1, "and refused until the ledger is regenerated")

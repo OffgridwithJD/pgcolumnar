@@ -1182,9 +1182,17 @@ pgc_record() {	# pgc_record VERDICT NAME DISPLAY [REASON]
 	# is misattributed and nothing in the log can contradict it.
 	#
 	# `unknown` is this function's OWN word for a field the harness did not set,
-	# already used two lines down for an unset suite and part, and it is a REAL
-	# case rather than a courtesy: harness_selftest never references PGC_MAJOR, so
-	# every one of its records says `unknown` truthfully.
+	# already used two lines down for an unset suite and part, and it is a REAL case
+	# rather than a courtesy: PGC_MAJOR is set in pgc_setup, and 14 suites need no
+	# cluster so never call it. Measured on a full pg18 matrix, 544 of 6753 records
+	# carry it -- audit, concurrency, decode_interrupts, hilbert_curve,
+	# objstore_stash_recovery, phase2-6, smoke, unique_conc, update_conc, wal_envelope.
+	#
+	# It is therefore ORDER-DEPENDENT inside a suite that sources parts into one shell:
+	# a record emitted before the first pgc_setup in that shell says `unknown` and one
+	# after it names the major. harness_selftest is that shape -- 10 of its 46 parts
+	# call pgc_setup -- and on pg18 all 916 of its records named the major, so the
+	# first setup precedes the first record today. A part added ahead of it would not.
 	printf 'RESULT\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"${PGC_SUITE:-unknown}" \
 		"${_part:-${PGC_SUITE:-unknown}}" \

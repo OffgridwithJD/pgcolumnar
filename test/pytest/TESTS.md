@@ -75,6 +75,7 @@ behaviour, the source of that number is named.
 - [27. test_skip_loop_arms.py: a skipped arm records under its own name](#27-test_skip_loop_armspy-a-skipped-arm-records-under-its-own-name)
 - [28. test_docs_join_clustering.py: the runtime filter's layout precondition](#28-test_docs_join_clusteringpy-the-runtime-filters-layout-precondition)
 - [29. test_join_vector_agg.py: ungrouped fold over a unique-key join](#29-test_join_vector_aggpy-ungrouped-fold-over-a-unique-key-join)
+- [30. test_differential.py: the heap oracle, type matrix](#30-test_differentialpy-the-heap-oracle-type-matrix)
 - [31. test_docs_stripe_floor.py: the stripe floor is below a vector](#31-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 
 ## 1. How to read a test in here
@@ -2399,6 +2400,42 @@ checks a log before merging it, so a major the tool validates and then drops can
 audited. Asserted on the FIELD rather than a substring: `18` appears inside a check name
 or a reason just as happily.
 
+### `test_a_rows_major_set_accumulates_rather_than_replacing`
+
+A check exists on a SET of majors, and the set is a row's field rather than part of its key
+(#1010). Keying on the major would store one fact once per major: measured on a full matrix
+at `4d7c75ae`, 6367 of 6472 checks are identical on PG15 and PG18, so `(major, check)` would
+hold 6472 x 5 = 32,360 rows to express 105 keys' worth of difference. Keeping the key at
+`(suite, part, name)` is also what keeps `checks_never_observed_red` counting CHECKS, true to
+its own name.
+
+The set accumulates, for the reason the mutation column and last-red both do: merging a PG15
+log after a PG18 log must not make the check stop existing on 18. `unknown` is a member of the
+set like any number: `PGC_MAJOR` is set in `pgc_setup`, and 14 suites need no cluster so never
+call it -- 544 of 6753 records on a full pg18 matrix.
+
+### `test_a_run_speaks_only_for_the_majors_the_row_claims`
+
+A PG15 run cannot orphan a check the ledger says exists only on PG18. This is the direction
+the missing dimension actually broke; `gate` is not it, because a PG18-only check never
+appears in a PG15 log and the gate stays correct by never being asked.
+
+Until #1010 it was saved only by the SKIP rule, and that was luck:
+`analyze_differential` emits a `check_skip` on PG15-17 so its part was unprunable, while
+`fk_referencing:287` emits `check` in its older-major branch and has no SKIP at all. The
+fixture therefore carries **no skip**, or the arm would prove the wrong mechanism. The scope
+is an INTERSECTION, so a row claiming `15;18` is checked on both -- a stronger claim held to
+both tests -- and the control deletes a check on its own major to show that a real
+disappearance is still named.
+
+### `test_the_gate_cannot_refuse_a_check_on_a_major_it_has_never_seen`
+
+The same argument as `suites_not_covered`, one dimension over. The gate cannot refuse a new
+check in a suite it has never seen, and a major it holds no rows for is the identical
+problem: adding PG20 would make every check new at once and redden the whole run, which is a
+gate somebody turns off. The control shows a new check IS refused on a covered major, so the
+arm does not merely prove the gate refuses nothing.
+
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 
 **Why this file exists.** `assert-inside-a-loop-over-zero-rows` in VACUITY_MODES.md 3.5
@@ -2799,6 +2836,105 @@ join.
 A non-equi join clause is the same kind of extra Join Filter. EXPLAIN has no
 vectorized agg node. The sum matches a heap twin.
 
+## 30. test_differential.py: the heap oracle, type matrix
+
+The governing property of `test/differential.sh`, and the reason it is the largest suite in
+the tree: load the same data into a heap table and a columnar one, and every query must
+answer identically. Heap is the oracle, so this catches encode/decode, null-handling and
+chunk-skipping bugs **generically** rather than one at a time.
+
+This is **part 1** of that port -- the type matrix. Twenty columns covering every type the
+suite exercises, 12,000 rows, a **different null modulus per column** so no two columns
+share a null pattern, small chunk-group and stripe limits so there is something to skip. The
+boundary, encoding, bloom and aggregate parts are separate slices.
+
+Names are the bash suite's character for character, which is what lets `compare_to_bash.py`
+diff the two harnesses by property. A port that renames a check asserts the same thing and
+reports a different one.
+
+**Row lists, not hashes.** `lib.sh` compares `md5(string_agg(...))` because bash has no
+structured result. Here the rows themselves are compared, so a failure prints what differs,
+and the vacuity layer can see a both-sides-empty comparison -- which a hash cannot.
+
+**Three of the bash arms cannot fail, and this port says so rather than reproducing them.**
+Each was found by the vacuity layer refusing the comparison, then measured:
+
+| arm | why it cannot fail | what the port asserts |
+|---|---|---|
+| `c_int eq` | probes `c_int = 600`; c_int is `g*7-100`, so 600 needs g=100, and `100%5=0` makes that row NULL. 0 rows, both sides `EMPTY` | keeps it with a stated reason, adds `c_int eq present` on 607 (g=101, untouched by any null modulus) |
+| `c_ztext is null` | c_ztext is `CASE WHEN g%2=0 THEN '' ELSE 'z'||g END` -- never NULL. 0 rows IS NULL, 6000 `= ''` | the empty-string count, which a decoder confusing `''` with NULL would move |
+| `c_f4`/`c_f8 sum/avg` | asserts exact equality of a float sum, which has no single answer | 1e-6 relative, stated, with a control that the bound is tight enough to have a direction |
+
+The float case is worth the detail. Measured on **heap alone**, one table, three row orders,
+`extra_float_digits = 3`:
+
+    ORDER BY id        -0.27597385772197924
+    ORDER BY id DESC   -0.2759738577219848
+    ORDER BY c_f8      -0.2759738578545523
+
+Three answers from one access method. So "columnar equals heap exactly" is false by
+construction, and the bash arm passes because `pgc_set_hash` hashes the **text** rendering
+and psql's default precision rounds the difference away at some magnitudes and not others.
+That is a real tolerance, implicit and magnitude-dependent. Exact comparison is kept for
+int, bigint, smallint and numeric, where a tolerance would hide the defect the arm exists to
+find.
+
+### `test_the_matrix_fixture_is_what_it_claims`
+
+A differential suite over an empty table passes every comparison, and one whose data fits in
+a single chunk group proves nothing about skipping. Row count, chunk groups and stripes are
+asserted.
+
+The fixture is **module-scoped** because 12,000 rows over twenty columns is too slow to
+rebuild per assertion, and that costs `pgc_conn`'s write watch -- so these three arms are
+what `watch_writes` would otherwise have done. The first version queried
+`pgcolumnar.chunk_group`, which does not exist; a guessed catalog name is a premise arm that
+errors instead of asserting.
+
+### `test_the_whole_row_agrees_across_every_column`
+
+Every column of every row in one comparison. The per-column arms localise a failure; this
+one catches a bug that only appears when columns are read together -- a projection offset, a
+shared null bitmap.
+
+### `test_every_column_projects_counts_and_places_its_nulls`
+
+Projection, non-null count, and the **positions** of the nulls, per column. Positions and not
+just the count: a decoder that loses the null bitmap's alignment returns the right number of
+nulls in the wrong rows.
+
+### `test_min_and_max_agree_for_every_ordered_type`
+
+min/max exercises the comparison operator the zone map also uses, so this and the range arms
+are the same property from two directions. uuid and bytea order under btree but have no
+min/max aggregate; their ordering is covered by the range predicates.
+
+### `test_sum_and_avg_agree_for_every_numeric_type`
+
+sum and avg read every non-null value, so they catch a decode error min/max cannot: min/max
+touch two rows, these touch all of them. See the float tolerance above.
+
+### `test_a_range_predicate_agrees_for_every_type_that_has_one`
+
+Range predicates drive chunk-group skipping. A wrong zone map shows here and nowhere else:
+the rows are present and correct, and the scan never looks at the group holding them.
+
+### `test_an_equality_predicate_agrees_for_every_type_that_has_one`
+
+Equality is what a bloom filter prunes on, and what a hash can get wrong for a type whose
+equality is not byte equality -- jsonb and int[] are here for that.
+
+### `test_an_ordered_projection_agrees_in_order`
+
+`row_set` is order-blind deliberately, which is right for every arm above and wrong for
+these: a query that asks for an order is the only kind that can be wrong about one. The
+premise comes first, because an oracle that cannot tell forward from reverse would pass both
+arms while asserting nothing.
+
+### `test_a_compound_predicate_over_several_columns_agrees`
+
+Four columns of four types in one WHERE, where a per-column arm cannot reach: the scan
+combines their skip decisions, and a predicate right alone can be wrong in conjunction.
 
 ## 31. test_docs_stripe_floor.py: the stripe floor is below a vector
 

@@ -96,13 +96,13 @@ check "control: a well-formed log still merges" \
 _led_run merge --reds-are-real --ledger "$_lw/date.tsv" --date 2026-09-10 "$_lw/red.log" >/dev/null
 _led_run merge --reds-are-real --ledger "$_lw/date.tsv" --date 2026-09-01 "$_lw/red.log" >/dev/null
 check "an older observation does not overwrite a newer one" \
-	"$(awk -F'\t' '$3=="first check"{print $4}' "$_lw/date.tsv")" "2026-09-10"
+	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/date.tsv")" "2026-09-10"
 _led_run merge --reds-are-real --ledger "$_lw/date.tsv" --date 2026-09-20 "$_lw/red.log" >/dev/null
 check "and a newer one does" \
-	"$(awk -F'\t' '$3=="first check"{print $4}' "$_lw/date.tsv")" "2026-09-20"
+	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/date.tsv")" "2026-09-20"
 _led_run merge --reds-are-real --ledger "$_lw/date.tsv" "$_lw/red.log" >/dev/null
 check "and an undated merge does not erase a known date" \
-	"$(awk -F'\t' '$3=="first check"{print $4}' "$_lw/date.tsv")" "2026-09-20"
+	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/date.tsv")" "2026-09-20"
 check "a date that is not a date is refused rather than stored" \
 	"$(_led_rc merge --ledger "$_lw/date.tsv" --date not-a-date "$_lw/red.log")" "2"
 
@@ -137,20 +137,20 @@ check "the gate refuses to run without the registered suite list" \
 _led_run merge --ledger "$_lw/ledger.tsv" --date 2026-09-10 "$_lw/green.log" >/dev/null
 check "merging a green run records both checks" "$(grep -c . "$_lw/ledger.tsv")" "2"
 check "and records neither as ever having been red" \
-	"$(cut -f4 "$_lw/ledger.tsv" | sort -u | tr '\n' ' ')" "never "
-check "every row has five fields and no trailing tab" \
-	"$(awk -F'\t' 'NF!=5' "$_lw/ledger.tsv" | grep -c . || true)" "0"
+	"$(cut -f5 "$_lw/ledger.tsv" | sort -u | tr '\n' ' ')" "never "
+check "every row has six fields and no trailing tab" \
+	"$(awk -F'\t' 'NF!=6' "$_lw/ledger.tsv" | grep -c . || true)" "0"
 check "and an empty mutation is a placeholder, not an empty last field" \
 	"$(grep -cP '\t$' "$_lw/ledger.tsv" || true)" "0"
 
 _led_run merge --reds-are-real --ledger "$_lw/ledger.tsv" --date 2026-09-10 "$_lw/red.log" >/dev/null
 check "a check observed red gains the date it was seen" \
-	"$(awk -F'\t' '$3=="first check"{print $4}' "$_lw/ledger.tsv")" "2026-09-10"
+	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/ledger.tsv")" "2026-09-10"
 check "and one that stayed green keeps its debt" \
-	"$(awk -F'\t' '$3=="second check"{print $4}' "$_lw/ledger.tsv")" "never"
+	"$(awk -F'\t' '$3=="second check"{print $5}' "$_lw/ledger.tsv")" "never"
 _led_run merge --ledger "$_lw/ledger.tsv" --date 2026-09-11 "$_lw/green.log" >/dev/null
 check "a later green run does not erase an observation" \
-	"$(awk -F'\t' '$3=="first check"{print $4}' "$_lw/ledger.tsv")" "2026-09-10"
+	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/ledger.tsv")" "2026-09-10"
 
 # ---- the mutation column ACCUMULATES ----------------------------------------
 #
@@ -162,14 +162,146 @@ check "a later green run does not erase an observation" \
 : > "$_lw/mut.tsv"
 _led_run merge --ledger "$_lw/mut.tsv" --date 2026-09-10 --mutation 'SAOP limit 128 -> 0' "$_lw/red.log" >/dev/null
 check "a named mutation is recorded against the check that reddened" \
-	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/mut.tsv")" "SAOP limit 128 -> 0"
+	"$(awk -F'\t' '$3=="first check"{print $6}' "$_lw/mut.tsv")" "SAOP limit 128 -> 0"
 check "and not against one that stayed green" \
-	"$(awk -F'\t' '$3=="second check"{print $5}' "$_lw/mut.tsv")" "-"
+	"$(awk -F'\t' '$3=="second check"{print $6}' "$_lw/mut.tsv")" "-"
 _led_run merge --ledger "$_lw/mut.tsv" --date 2026-09-10 --mutation 'bloom neutered' "$_lw/red.log" >/dev/null
 check "a second mutation ACCUMULATES rather than replacing the first" \
-	"$(awk -F'\t' '$3=="first check"{print $5}' "$_lw/mut.tsv")" "SAOP limit 128 -> 0;bloom neutered"
+	"$(awk -F'\t' '$3=="first check"{print $6}' "$_lw/mut.tsv")" "SAOP limit 128 -> 0;bloom neutered"
 check "one --mutation cannot be attributed across several runs at once" \
 	"$(_led_rc merge --ledger "$_lw/mut.tsv" --date 2026-09-10 --mutation X "$_lw/red.log" "$_lw/green.log")" "2"
+
+# ---- the majors a row CLAIMS, which is a set and not part of the key (#1010) --
+#
+# A check's existence depends on the major: analyze_differential.sh:61 emits ONE
+# record on PG15-17 and a suite's worth on PG18+, and fk_referencing.sh:287 emits
+# DIFFERENT CHECK NAMES in its two branches. The ledger has to record WHERE a check
+# exists. It does not follow that the major belongs in the KEY: measured on a full
+# matrix at 4d7c75ae, 6367 of 6472 checks are identical on PG15 and PG18, so a
+# (major, check) key would hold 6472 x 5 rows to express 105 keys' worth.
+#
+# THE SET ACCUMULATES, for the reason the mutation column above does. A plain
+# assignment would make merging a PG15 log after a PG18 log say the check stopped
+# existing on 18, and the order somebody merges logs in is not a fact about the code.
+
+printf 'RESULT	demo	part1	both majors	PASS	18	
+RESULT	demo	part1	pg18 only	PASS	18	
+checks run: 2
+' > "$_lw/m18.log"
+printf 'RESULT	demo	part1	both majors	PASS	15	
+checks run: 1
+' > "$_lw/m15.log"
+printf 'RESULT	demo	part1	both majors	PASS	unknown	
+checks run: 1
+' > "$_lw/munk.log"
+
+: > "$_lw/maj.tsv"
+_led_run merge --ledger "$_lw/maj.tsv" --date 2026-09-12 "$_lw/m18.log" >/dev/null
+check "a check seen once claims the one major it was seen on" 	"$(awk -F'	' '$3=="pg18 only"{print $4}' "$_lw/maj.tsv")" "18"
+
+_led_run merge --ledger "$_lw/maj.tsv" --date 2026-09-12 "$_lw/m15.log" >/dev/null
+check "a second major is ADDED to the set, sorted, not written over the first" 	"$(awk -F'	' '$3=="both majors"{print $4}' "$_lw/maj.tsv")" "15;18"
+check "and a check the second run never mentioned keeps the majors it claimed" 	"$(awk -F'	' '$3=="pg18 only"{print $4}' "$_lw/maj.tsv")" "18"
+check "two checks stay two rows whatever the majors, because the key is not the major" 	"$(grep -c . "$_lw/maj.tsv")" "2"
+
+# `unknown` is a token in the set like any other, and a real case: PGC_MAJOR is set in
+# pgc_setup, and 14 suites need no cluster so never call it -- 544 of 6753 records on a
+# full pg18 matrix. This suite is NOT one of them: 10 of its 46 parts call pgc_setup and
+# they share one shell, so its records name the major.
+_led_run merge --ledger "$_lw/maj.tsv" --date 2026-09-12 "$_lw/munk.log" >/dev/null
+check "a harness that named no major adds its own token rather than a number" 	"$(awk -F'	' '$3=="both majors"{print $4}' "$_lw/maj.tsv")" "15;18;unknown"
+
+# A row whose majors field is garbage is refused, in the LEDGER as well as in a log.
+# A ledger is hand-edited far more often than a log is generated.
+printf 'demo	part1	c	eighteen	never	-
+' > "$_lw/badmaj.tsv"
+check "a ledger row naming a major that is not a major is an integrity failure" 	"$(_led_rc orphan-scan --ledger "$_lw/badmaj.tsv" "$_lw/m18.log")" "2"
+printf 'demo	part1	c		never	-
+' > "$_lw/nomaj.tsv"
+check "and a row naming NO major says nothing about where its check exists" 	"$(_led_rc orphan-scan --ledger "$_lw/nomaj.tsv" "$_lw/m18.log")" "2"
+check "control: the same row with a real major is read without complaint" 	"$(printf 'demo	part1	both majors	18	never	-
+demo	part1	pg18 only	18	never	-
+' > "$_lw/okmaj.tsv"
+	   _led_rc orphan-scan --ledger "$_lw/okmaj.tsv" "$_lw/m18.log")" "0"
+
+# ---- a run speaks only for the majors a row claims ---------------------------
+#
+# THE DIRECTION THE MISSING DIMENSION BROKE, and it is orphan-scan rather than the
+# gate: the gate refuses a check in the LOG the ledger has not seen, and a PG18-only
+# check does not appear in a PG15 log, so it stayed correct by never being asked.
+#
+# Until now it was saved only by the SKIP rule, and that was luck.
+# analyze_differential emits a check_skip on PG15-17 so its part was unprunable;
+# fk_referencing:287 emits `check` in its older-major branch and has no SKIP at all,
+# so once that suite is seeded a PG15 run would have called its two PG17+ checks
+# deleted. THIS FIXTURE CARRIES NO SKIP, or the arm proves the wrong mechanism.
+
+printf 'demo	part1	both majors	15;18	never	-
+demo	part1	pg18 only	18	never	-
+demo	part1	pg15 only	15	never	-
+' > "$_lw/scope.tsv"
+printf 'RESULT	demo	part1	both majors	PASS	15	
+RESULT	demo	part1	pg15 only	PASS	15	
+checks run: 2
+' > "$_lw/s15.log"
+_scope="$(_led_run orphan-scan --ledger "$_lw/scope.tsv" "$_lw/s15.log")"
+check "a PG15 run names no orphan, having seen every check the ledger claims for 15" 	"$(printf '%s
+' "$_scope" | grep -c 'orphan:' || true)" "0"
+check "and the PG18-only row is one it cannot speak about, not one that vanished" 	"$(printf '%s
+' "$_scope" | grep -c 'not checked: 1 row' || true)" "1"
+check "and that is not a failure, because a run sees ONE major" 	"$(_led_rc orphan-scan --ledger "$_lw/scope.tsv" "$_lw/s15.log")" "0"
+
+# THE CONTROL. Without it the three arms above prove only that nothing is ever an
+# orphan. Same major, really gone.
+printf 'RESULT	demo	part1	both majors	PASS	15	
+checks run: 1
+' > "$_lw/s15b.log"
+check "control: a check the ledger claims for 15 that a PG15 run did not emit IS an orphan" 	"$(_led_run orphan-scan --ledger "$_lw/scope.tsv" "$_lw/s15b.log" | grep -c 'orphan: demo	part1	pg15 only' || true)" "1"
+
+# A row claiming BOTH majors is checked on BOTH: a stronger claim held to both tests,
+# which is the point of storing a set rather than one major per row.
+printf 'RESULT	demo	part1	pg18 only	PASS	18	
+checks run: 1
+' > "$_lw/s18.log"
+check "a row claiming 15;18 is an orphan on a PG18 run that did not emit it" 	"$(_led_run orphan-scan --ledger "$_lw/scope.tsv" "$_lw/s18.log" | grep -c 'orphan: demo	part1	both majors' || true)" "1"
+
+# ---- the gate cannot refuse a check on a major it holds no rows for ----------
+#
+# The same argument as suites_not_covered, one dimension over: it cannot refuse a
+# new check in a suite it has never seen, and a major it has never seen is the
+# identical problem. Adding PG20 would otherwise redden every check at once, which
+# is a gate somebody turns off.
+
+printf 'demo	part1	known check	18	never	-
+' > "$_lw/cov.tsv"
+printf 'RESULT	demo	part1	known check	PASS	20	
+RESULT	demo	part1	brand new	PASS	20	
+checks run: 2
+' > "$_lw/g20.log"
+_g20="$(_led_run gate --ledger "$_lw/cov.tsv" --budget "$_lw/budget.txt" --registered "$_lw/registered" "$_lw/g20.log")"
+check "a major the ledger holds no row for refuses nothing, as an uncovered suite does" 	"$(printf '%s
+' "$_g20" | grep -c 'not in the ledger' || true)" "0"
+check "and the gate says out loud that it covered no rows for that major" 	"$(printf '%s
+' "$_g20" | grep -c 'holds no row for major 20' || true)" "1"
+check "so a first run on a new major is not a failure" 	"$(_led_rc gate --ledger "$_lw/cov.tsv" --budget "$_lw/budget.txt" --registered "$_lw/registered" "$_lw/g20.log")" "0"
+
+# THE CONTROL: on a major it HAS seen, a new check is still refused.
+printf 'RESULT	demo	part1	known check	PASS	18	
+RESULT	demo	part1	brand new	PASS	18	
+checks run: 2
+' > "$_lw/g18.log"
+check "control: on a covered major a new check is named and refused" 	"$(_led_rc gate --ledger "$_lw/cov.tsv" --budget "$_lw/budget.txt" --registered "$_lw/registered" "$_lw/g18.log")" "1"
+
+# And a KNOWN check seen on a major its row does not claim is refused too: the row
+# is a claim about where the check exists, so widening it is a ledger edit.
+printf 'demo	part1	known check	18	never	-
+demo	part1	other	15	never	-
+' > "$_lw/cov2.tsv"
+printf 'RESULT	demo	part1	known check	PASS	15	
+RESULT	demo	part1	other	PASS	15	
+checks run: 2
+' > "$_lw/g15.log"
+check "a known check on a major its row does not claim is refused, because the row is a claim" 	"$(_led_rc gate --ledger "$_lw/cov2.tsv" --budget "$_lw/budget.txt" --registered "$_lw/registered" "$_lw/g15.log")" "1"
 
 # ---- two runs of a check are not a duplicate of it --------------------------
 #
@@ -197,7 +329,7 @@ printf 'RESULT\tdemo\tpart1\tthe old name\tFAIL\t18\t\nRESULT\tdemo\tpart1\ta st
 printf 'RESULT\tdemo\tpart1\tthe new name\tPASS\t18\t\nRESULT\tdemo\tpart1\ta stable check\tPASS\t18\t\nchecks run: 2\n' > "$_lw/after.log"
 _led_run merge --reds-are-real --ledger "$_lw/ren.tsv" --date 2026-09-01 "$_lw/before.log" >/dev/null
 check "premise: the check has history before the rename" \
-	"$(awk -F'\t' '$3=="the old name"{print $4}' "$_lw/ren.tsv")" "2026-09-01"
+	"$(awk -F'\t' '$3=="the old name"{print $5}' "$_lw/ren.tsv")" "2026-09-01"
 check "a name that appeared while another disappeared is reported as a rename" \
 	"$(_led_run rename-scan --ledger "$_lw/ren.tsv" "$_lw/after.log" \
 		| grep -c 'possible rename: the old name -> the new name')" "1"
@@ -278,7 +410,7 @@ check "a before-log and an after-log together are refused, as rename-scan refuse
 
 cp "$_lw/orph.tsv" "$_lw/prune.tsv"
 check "premise: the orphan about to be pruned carries no history" \
-	"$(awk -F'\t' '$3=="gone tomorrow"{print $4}' "$_lw/prune.tsv")" "never"
+	"$(awk -F'\t' '$3=="gone tomorrow"{print $5}' "$_lw/prune.tsv")" "never"
 check "--prune removes a historyless orphan and says which" \
 	"$(_led_run orphan-scan --prune --ledger "$_lw/prune.tsv" "$_lw/o_after.log" \
 		| grep -c 'pruned: demo	part1	gone tomorrow')" "1"
@@ -296,7 +428,7 @@ printf 'RESULT\tdemo\tpart1\tstill here\tPASS\t18\t\nRESULT\tdemo\tpart1\tgone t
 _led_run merge --reds-are-real --mutation "drop the guard" --ledger "$_lw/hist.tsv" \
 	--date 2026-09-01 "$_lw/h_before.log" >/dev/null
 check "premise: the orphan now carries a date and a mutation" \
-	"$(awk -F'\t' '$3=="gone tomorrow"{print $4"/"$5}' "$_lw/hist.tsv")" "2026-09-01/drop the guard"
+	"$(awk -F'\t' '$3=="gone tomorrow"{print $5"/"$6}' "$_lw/hist.tsv")" "2026-09-01/drop the guard"
 check "an orphan carrying history is reported as carrying it" \
 	"$(_led_run orphan-scan --ledger "$_lw/hist.tsv" "$_lw/o_after.log" \
 		| grep -c 'ORPHAN CARRYING HISTORY')" "1"
@@ -456,7 +588,7 @@ _led_run merge --ledger "$_lw/g.tsv" --date 2026-09-10 "$_lw/new.log" >/dev/null
 check "regenerating the ledger lets the new check through" \
 	"$(_led_rc gate --ledger "$_lw/g.tsv" --budget "$_lw/gb.txt" --registered "$_lw/registered" "$_lw/new.log")" "0"
 check "and it entered as debt, not as an observation nothing made" \
-	"$(awk -F'\t' '$3=="brand new"{print $4}' "$_lw/g.tsv")" "never"
+	"$(awk -F'\t' '$3=="brand new"{print $5}' "$_lw/g.tsv")" "never"
 
 # ---- the ceiling is monotone, mechanically ----------------------------------
 #
@@ -519,14 +651,14 @@ check "and it runs before the build directory is removed, which is the only plac
 # ---- the committed files agree ----------------------------------------------
 
 _l_total="$(grep -c . "$_ledger" || true)"
-_l_red="$(awk -F'\t' '$4!="never"' "$_ledger" | grep -c . || true)"
-_l_never="$(awk -F'\t' '$4=="never"' "$_ledger" | grep -c . || true)"
+_l_red="$(awk -F'\t' '$5!="never"' "$_ledger" | grep -c . || true)"
+_l_never="$(awk -F'\t' '$5=="never"' "$_ledger" | grep -c . || true)"
 echo "  ledger: inputs=$_l_total | observed red=$_l_red, never=$_l_never | sum=$((_l_red + _l_never))"
 check "the ledger partitions into observed and never" "$((_l_red + _l_never))" "$_l_total"
 check "premise: the ledger is not empty, so the partition means something" \
 	"$([ "$_l_total" -gt 0 ] && echo yes || echo no)" "yes"
-check "every committed row has five fields" \
-	"$(awk -F'\t' 'NF!=5' "$_ledger" | grep -c . || true)" "0"
+check "every committed row has six fields" \
+	"$(awk -F'\t' 'NF!=6' "$_ledger" | grep -c . || true)" "0"
 check "and none of them ends in a tab" "$(grep -cP '\t$' "$_ledger" || true)" "0"
 check "the committed census matches the committed ledger" \
 	"$(sed -n 's/^checks_never_observed_red //p' "$_budget")" "$_l_never"
@@ -551,7 +683,7 @@ _led_run merge --ledger "$_cw/led" --date 2026-09-10 "$_lw/green.log" >/dev/null
 check "premise: the fixture ledger holds two rows" \
 	"$(grep -c . "$_cw/led" || true)" "2"
 check "premise: both are never, so this ledger's census is two" \
-	"$(awk -F'\t' '$4=="never"' "$_cw/led" | grep -c . || true)" "2"
+	"$(awk -F'\t' '$5=="never"' "$_cw/led" | grep -c . || true)" "2"
 
 printf 'suites_not_covered 0\nchecks_never_observed_red 2\n' > "$_cw/ok.txt"
 check "a census that matches the ledger passes" \
@@ -802,7 +934,7 @@ _dist="$_lw/dist"; rm -rf "$_dist"; mkdir -p "$_dist"
   printf 'suites_not_covered 7\n' > b.txt && git add b.txt && git commit -qm base
   git branch -q oldbase
   for i in 1 2 3; do echo "x$i" > f; git add f; git commit -qm "c$i"; done ) >/dev/null 2>&1
-printf 's\tp\ta\tnever\t-\n' > "$_dist/led"
+printf 's\tp\ta\t18\tnever\t-\n' > "$_dist/led"
 printf 'RESULT\ts\tp\ta\tPASS\t18\t\nchecks run: 1\n' > "$_dist/log"
 printf 's\n' > "$_dist/reg"
 
@@ -874,7 +1006,7 @@ _rr="$_lw/refres"; rm -rf "$_rr"; mkdir -p "$_rr"
   git rm -q b.txt && git commit -qm "a commit without the budget"
   git branch -q nobudget
   git checkout -q hasbudget ) >/dev/null 2>&1
-printf 's\tp\ta\tnever\t-\n' > "$_rr/led"
+printf 's\tp\ta\t18\tnever\t-\n' > "$_rr/led"
 printf 'RESULT\ts\tp\ta\tPASS\t18\t\nchecks run: 1\n' > "$_rr/log"
 printf 's\n' > "$_rr/reg"
 
