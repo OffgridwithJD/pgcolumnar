@@ -72,6 +72,50 @@ true until the next version shipped.
   Verified on PG 18 in the container: `local_open_race_free.sh` PASSED, 11 checks;
   `native_recluster.sh` PASSED, 12 checks; both mutations red; main's arm green under the
   same mutation.
+- The vacuity inventory named one entry twice, and no arm could fail on it (#432).
+
+  `VACUITY_MODES.md` section 3.4 carried the same six-id bullet twice, verbatim, on two
+  lines each. It is deleted, and three arms in `test_docs_cover_the_corpus.py` now refuse
+  a duplicated entry.
+
+  WHY NOTHING CAUGHT IT, measured rather than guessed. Every count this document states
+  is checked. Every one of those checks is blind to this by construction:
+  `_named_modes_in` builds `set(MODE_ID.findall(chunk))` per section, so each total is
+  over distinct ids. Measured with the second copy present and then deleted:
+
+      with the duplicate      (28, 44, 72)
+      without the duplicate   (28, 44, 72)
+
+  So `test_the_mode_inventory_states_its_own_totals_correctly`, the prose-totals arm and
+  the sum arm were all green with a duplicated entry in the file. Deduping ids is right.
+  A total must not move because a line was pasted twice. The cost falls on the reader
+  instead: one group of open modes reads as two. So the new arm is about entries, and the
+  counting rule is unchanged.
+
+  MY OWN FIRST SWEEP MISSED IT, which decided the unit the rule uses. An adjacent
+  duplicate-LINE sweep over every document in the directory reported nothing. The
+  duplicate is a two-line bullet, so line 1 of the first copy and line 1 of the second
+  are not adjacent. Re-keyed on the bullet ENTRY, the same sweep found it, and found
+  exactly one tree-wide. Four sweeps here have now failed by keying on how something is
+  written rather than on what it contains. So the unit is named in the code, and both
+  fixture arms use a two-line bullet rather than a one-line one.
+
+  The rule carries its false-positive budget as an arm. The inventory legitimately repeats
+  short bullets, so entries under a 40-character floor are not compared. The budget is
+  measured at the boundary: the same bullet passes below the floor and is refused above
+  it.
+
+- The section that checks for stale documents carried a stale count (#432).
+
+  `TESTS.md` section 6 said "the five fixture arms". Five was correct at `3d6e1216`
+  (2026-09-09) and counted the arms taking `tmp_path`; there are eight of those now and
+  thirteen fixture arms in total. Nothing read the number, so it went stale in the
+  document whose whole subject is documents going stale.
+
+  It is removed rather than corrected. The paragraph above it already decided that for the
+  same reason: `test_the_document_states_no_totals_for_a_merge_to_get_wrong` exists to keep
+  a totals line OUT. A count in prose that no arm reads is a claim waiting to go wrong. The
+  arms themselves are listed in the table above, where a reader can count them.
 
 - `native_ownership.sh` has a pytest twin, and it asserts the SQLSTATE (#432).
 
