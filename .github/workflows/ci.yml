@@ -110,10 +110,138 @@ jobs:
           cd test/pytest
           FILES="$(python3 -c 'import sys; sys.path.insert(0, "."); from test_harness_deps import NO_CLUSTER; print(" ".join(NO_CLUSTER))')"
           test -n "$FILES"
+          # HOW MANY TESTS THIS MUST COLLECT, from the tracked file (#1016). pytest
+          # exits 0 having collected nothing, so this job could pass with a bad file
+          # list, an import error, or a rename that emptied the glob -- and did assert
+          # nothing about its own size until now. `test -n` matters as much as the
+          # number: an empty read would omit the flag and fail OPEN.
+          WANT="$(awk '$1=="guard_tests"{print $2}' expected_tests.txt)"
+          test -n "$WANT"
           # Printed, not stated: the count is a fact about the tree at this
           # commit, so it belongs in the output rather than in a comment.
           echo "running $(set -- $FILES; echo $#) database-free file(s): $FILES"
-          PYTHONPATH=. /tmp/pgcvenv/bin/pytest -q $FILES
+          echo "expecting $WANT collected test(s)"
+          PYTHONPATH=. /tmp/pgcvenv/bin/pytest -q --pgc-expect-tests "$WANT" $FILES
+
+  # THE OTHER HALF OF THE CORPUS (#1016). The files that need the driver and a cluster
+  # ran in NO job: ci.yml had one pytest job and it installs psycopg deliberately NOT,
+  # nightly.yml mentions pytest zero times, and run_all_versions.sh must mention it zero
+  # times because the two harnesses stay independent. They passed when somebody ran them
+  # by hand and nothing noticed when they stopped -- the shape of the nightly gate that
+  # sat red for 25 nights behind a green PR gate.
+  #
+  # NO COUNT HERE, and the arm in test_harness_deps.py enforces that over this comment
+  # as well as the job body: a number in a comment is the same hand-maintained derived
+  # value as a number in a list, and the last one went stale the day it was written. The
+  # job PRINTS what it ran, and the measured figures live in the CHANGELOG entry, which
+  # is dated. This comment was caught by that arm before the job ever ran.
+  #
+  # ONE MAJOR, not the matrix. conftest.py's default is an assert build that exists on
+  # the audit container and not here, so the pg_config is passed explicitly. Widening to
+  # a matrix is a separate decision: this job's purpose is that these tests RUN at all,
+  # and a matrix would multiply a cost nobody has measured yet before the first green.
+  pytest-cluster:
+    name: pytest (cluster tests, with the driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the PGDG repository and install PostgreSQL 18 with its headers
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          # Bounded and retried, for the reason the suites job gives: a plain
+          # "curl -fsSL" waits indefinitely on a stalled connection, which hung a
+          # step for 40 minutes on an otherwise healthy runner (#351).
+          sudo curl -fsSL --connect-timeout 15 --max-time 120 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo timeout 300 apt-get -o Acquire::Retries=5 update
+          sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            postgresql-18 postgresql-server-dev-18 \
+            liblz4-dev libzstd-dev zlib1g-dev
+          # NOT cached, deliberately. The suites job caches because it runs a matrix for
+          # an hour; a second copy of that cache-key derivation is a thing that goes
+          # stale silently, and this job is minutes long.
+
+      # ASSERTED, not assumed. A missing pg_config would otherwise surface as a
+      # confusing failure inside conftest's build rather than here.
+      - name: check the pg_config the tests will be given
+        run: |
+          set -euo pipefail
+          PGC="/usr/lib/postgresql/18/bin/pg_config"
+          test -x "$PGC"
+          echo "pg_config: $PGC"
+          "$PGC" --version
+          # pgc_cluster.py runs initdb as THIS user; root cannot, and the runner is not
+          # root. Said out loud because it is the assumption that breaks on a
+          # container.
+          echo "running as: $(id -un) (uid $(id -u))"
+          test "$(id -u)" -ne 0
+
+      # MAKE THE INSTALL TARGETS WRITABLE, because this job must stay non-root and
+      # therefore cannot install. `make install` writes the .so to pkglibdir and the
+      # control/SQL files to sharedir/extension, both root-owned on a PGDG install, so the
+      # first run of this job failed inside conftest's build with
+      #
+      #     RuntimeError: pgcolumnar failed to build or install from ...;
+      #                   refusing to report checks against whatever was installed before.
+      #
+      # Diagnosed by @jdatcmd, who also named why the suites job does not hit it: that one
+      # runs the whole matrix under `sudo -E` and lib.sh drops to `runuser -u postgres` for
+      # what must not be root. The pytest harness has no equivalent drop, so it is non-root
+      # throughout -- initdb refuses to run as root, so it has to be.
+      #
+      # Of the three ways out, this is the one that KEEPS the non-root assertion above,
+      # which is a decision rather than an accident.
+      - name: make the extension's install targets writable by this user
+        run: |
+          set -euo pipefail
+          PGC="/usr/lib/postgresql/18/bin/pg_config"
+          LIB="$("$PGC" --pkglibdir)"
+          SHARE="$("$PGC" --sharedir)"
+          sudo chown -R "$(id -un)" "$LIB" "$SHARE"
+          # ASSERTED, not assumed. A chown that changed nothing would surface as the same
+          # opaque build failure this step exists to remove, two steps later and in
+          # somebody else's traceback.
+          test -w "$LIB"
+          test -w "$SHARE/extension"
+          echo "writable by $(id -un): $LIB and $SHARE/extension"
+
+      - name: install pytest and the driver, pinned from requirements-test.txt
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/pgcvenv
+          # EVERY pin, including psycopg, which is what makes this job the other half of
+          # pytest-guards. Installing "whatever the runner carries" is what
+          # requirements-test.txt exists to prevent.
+          /tmp/pgcvenv/bin/pip install --quiet -r test/pytest/requirements-test.txt
+          # The control for pytest-guards' own assertion: that job proves the guard
+          # files need no driver by its ABSENCE, so this one states its presence.
+          /tmp/pgcvenv/bin/pip show psycopg >/dev/null
+
+      - name: run the tests that need a cluster
+        run: |
+          set -euo pipefail
+          cd test/pytest
+          # THE COMPLEMENT of NO_CLUSTER, derived rather than written here. A second
+          # hand-maintained copy of which file needs a database goes stale silently,
+          # which is why pytest-guards derives its list from the same place.
+          FILES="$(python3 -c 'import sys, pathlib; sys.path.insert(0, "."); from test_harness_deps import NO_CLUSTER; print(" ".join(p.name for p in sorted(pathlib.Path(".").glob("test_*.py")) if p.name not in NO_CLUSTER))')"
+          test -n "$FILES"
+          WANT="$(awk '$1=="cluster_tests"{print $2}' expected_tests.txt)"
+          test -n "$WANT"
+          echo "running $(set -- $FILES; echo $#) cluster file(s): $FILES"
+          echo "expecting $WANT collected test(s)"
+          PYTHONPATH=. /tmp/pgcvenv/bin/pytest -q \
+            --pg-config /usr/lib/postgresql/18/bin/pg_config \
+            --pgc-expect-tests "$WANT" \
+            $FILES
 
   # Build against every supported major. Fast, and it is what an API change
   # between majors trips first.

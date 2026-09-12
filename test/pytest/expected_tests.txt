@@ -1,0 +1,55 @@
+# How many tests each half of the pytest corpus must collect.
+#
+# IN A TRACKED FILE, not in the workflow and not in an environment variable, for the
+# reason check_ledger_budget.txt gives about its own numbers: a change to this is then a
+# diff a reviewer sees, and the diff sits next to the test that moved it. PGC_SKIP_TIMING
+# is the precedent for what the other choice costs -- set in two workflow files,
+# suppressing whole suites for months, with no diff ever showing it.
+#
+# WHY A NUMBER AT ALL. `pytest` exits 0 when it collects nothing. An import error in one
+# file, a bad file list, a venv missing the driver, a rename that empties a glob: each
+# produces a green job that ran no tests and said so only in a line nobody reads. This
+# repository has paid for that shape repeatedly -- a pending count that could not see a
+# job which never started, an `until` loop that exited instantly on zero, a `grep -q` that
+# closed its pipe. `--pgc-expect-tests` turns "collected fewer than it should" into a
+# failure, and it refuses 0 as vacuous rather than accepting it.
+#
+# THE NUMBERS ARE COLLECTED TESTS, NOT TEST FUNCTIONS. Parametrization expands one
+# function into several, and `--pgc-expect-tests` compares against what pytest collected.
+# Re-derive them with collection alone, which needs no cluster and no driver for the guard
+# half:
+#
+#     cd test/pytest
+#     G="$(python3 -c 'import sys; sys.path.insert(0,"."); from test_harness_deps import NO_CLUSTER; print(" ".join(NO_CLUSTER))')"
+#     PYTHONPATH=. pytest --collect-only -q $G | tail -1
+#
+# and for the cluster half, the complement of NO_CLUSTER, with the driver installed.
+#
+# THE SPLIT ITSELF IS DERIVED from NO_CLUSTER in test_harness_deps.py and is not repeated
+# here. Two copies of which file needs a database is a thing that goes stale silently.
+
+# The files NO_CLUSTER lists: the harness's own guards, which drive pytest inside pytest
+# and must run with psycopg ABSENT. The job that runs them is what proves they need no
+# database.
+#
+# This number moved 272 -> 274 when #1010's first step merged, which added two tests to
+# test_mutation_ledger.py. That is the mechanism doing its job rather than a nuisance: had
+# it not moved, the job would have failed with "collected 274 test(s) but expected 272" and
+# named the drift instead of running a different suite than the one declared.
+# 277 -> 280 when test_docs_stripe_floor.py landed: three arms over the
+# published pages.
+guard_tests 280
+
+# The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
+# in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
+# silent when they stopped.
+#
+# This number has moved FOUR times while the change was in review: 99 -> 101 when this PR
+# added two arms about the jobs, 101 -> 106 when #1012 merged test_join_vector_agg.py into
+# this half, and 106 -> 166 when #1020 merged test_differential.py into it. Every move was
+# re-derived during a rebase; had one been missed, the job would have failed naming the drift
+# rather than running a different suite than the one declared.
+#
+# The rate is the point. The ungated half grew by 67 tests in the time this took to review,
+# which is the argument for gating it rather than a detail about it.
+cluster_tests 166

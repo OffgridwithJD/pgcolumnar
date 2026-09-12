@@ -249,6 +249,31 @@ class Cluster:
                         "",
                         f"port={self.port}",
                         "listen_addresses='127.0.0.1'",
+                        # THE SOCKET DIRECTORY, pinned to this cluster's own datadir.
+                        #
+                        # A PACKAGED POSTGRES DEFAULTS IT SOMEWHERE THIS USER CANNOT WRITE,
+                        # and that is why the CI job could not start a cluster at all.
+                        # Measured, same box, same major:
+                        #
+                        #   /usr/lib/postgresql/18  (PGDG, --runstatedir=/run)
+                        #       #unix_socket_directories = '/var/run/postgresql'
+                        #   /usr/local/pg18a        (source build, no such flag)
+                        #       #unix_socket_directories = '/tmp'
+                        #
+                        # and /var/run/postgresql is drwxrwsr-x postgres postgres. So the
+                        # postmaster cannot create its lock file and FATALs, which reaches
+                        # the caller as nothing more than `pg_ctl: could not start server`.
+                        #
+                        # lib.sh does not pin this and does not need to: the suites job runs
+                        # under sudo and lib.sh drops to `runuser -u postgres`, which CAN
+                        # write that directory. This harness must be non-root throughout --
+                        # initdb refuses root -- and is not postgres either, so the default
+                        # is wrong for it on any packaged build.
+                        #
+                        # The datadir rather than /tmp: it already exists, it is already
+                        # this cluster's, it goes away with it, and two xdist workers cannot
+                        # collide in it.
+                        f"unix_socket_directories='{self.datadir}'",
                         "shared_preload_libraries='pgcolumnar'",
                         # Deterministic output so a hash oracle means the same thing
                         # on every machine. lib.sh sets the same three.
@@ -264,9 +289,22 @@ class Cluster:
             )
 
     def start(self):
-        _asroot(["pg_ctl", "-D", str(self.datadir), "-l",
-                 str(self.datadir / "server.log"), "-w", "start"],
-                self.bindir, self.datadir)
+        log = self.datadir / "server.log"
+        try:
+            _asroot(["pg_ctl", "-D", str(self.datadir), "-l", str(log), "-w", "start"],
+                    self.bindir, self.datadir)
+        except RuntimeError as e:
+            # `pg_ctl` says "Examine the log output." and then nothing examined it, so a
+            # cluster that would not start produced fifty identical errors naming the
+            # command and not one naming the cause. Measured on a GitHub runner: fifty
+            # errors, every one of them `pg_ctl: could not start server`, and the reason
+            # was in a file nobody read.
+            #
+            # lib.sh has had pgc_start_log_report since #537 for exactly this, and the
+            # two harnesses are meant to be parallel in FUNCTIONALITY. This is that
+            # function's job on this side, written here rather than called across the
+            # boundary.
+            raise RuntimeError(f"{e}\n{_start_log_report(log)}") from e
         self._started = True
 
     def stop(self):
@@ -498,8 +536,35 @@ def build_once(srcdir, pg_config, major, lock_path=None, runner=None):
     reintroduce the defect for anyone who runs the corpus twice against two
     majors.
     """
-    lock_path = lock_path or os.path.join(
-        tempfile.gettempdir(), "pgc-pytest-build.lock")
+    # A PER-USER DIRECTORY, because a fixed path in /tmp is not a collision, it is a
+    # permanent denial. `fs.protected_regular = 2` (default on this kernel) forbids opening
+    # a regular file for write in a world-writable STICKY directory when the file's owner is
+    # neither the directory's owner nor the caller -- so once one user creates
+    # /tmp/pgc-pytest-build.lock, every other user on the box is locked out of the corpus
+    # FOREVER, and so is root:
+    #
+    #     running as: root uid=0
+    #     lock: -rw-r--r-- 1 ciuser ciuser 0 /tmp/pgc-pytest-build.lock
+    #     PermissionError: [Errno 13] Permission denied
+    #
+    # Measured after running the corpus as one user and then as another; it cost two runs
+    # before I read the sysctl. CAP_DAC_OVERRIDE does not help, which is what makes it
+    # surprising.
+    #
+    # The DIRECTORY carries the uid, not the filename: a per-user directory is owned by that
+    # user and is not world-writable, so protected_regular does not apply inside it at all.
+    # A per-user FILENAME in /tmp would still be a file in a sticky shared directory.
+    #
+    # WHAT THIS GIVES UP, said out loud: the lock no longer serialises two DIFFERENT users
+    # installing into one shared prefix. That is already covered, and better, by the marker
+    # key -- it includes `installed_library(pg_config)` (#956), so another user's install
+    # invalidates this user's marker and forces a rebuild rather than being silently
+    # accepted. The lock's job is the xdist-worker race within one run, and workers share a
+    # uid.
+    if lock_path is None:
+        lock_dir = os.path.join(tempfile.gettempdir(), f"pgc-pytest-{os.getuid()}")
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+        lock_path = os.path.join(lock_dir, "build.lock")
     marker = lock_path + ".done"
     # THE FINGERPRINT IS PART OF THE KEY. Keying on pg_config and major alone
     # would skip the build after a source edit, which is the staleness this
@@ -562,6 +627,35 @@ def _run(argv, check=True):
     if check and proc.returncode != 0:
         raise RuntimeError(f"{argv!r} failed rc={proc.returncode}: {proc.stderr.strip()}")
     return proc.stdout
+
+
+# What the server log says about a cluster that would not start.
+#
+# FATAL lines first, with their line numbers, then a tail, and it SAYS SO when it found
+# neither: silence here reads as "there was nothing to say", which was the whole complaint
+# in #537. lib.sh's pgc_start_log_report is the same function on the other side; neither
+# calls the other, because the harnesses stay independent.
+_START_FATAL = re.compile(r"FATAL|PANIC|could not|No space|Permission denied", re.I)
+
+
+def _start_log_report(log, fatal_lines=5, tail_lines=20):
+    try:
+        text = pathlib.Path(log).read_text(errors="replace")
+    except OSError as e:
+        return f"---- server log unreadable at {log}: {e} ----"
+    if not text.strip():
+        return f"---- server log absent or empty at {log} ----"
+    lines = text.splitlines()
+    fatal = [f"  {n}: {l}" for n, l in enumerate(lines, 1) if _START_FATAL.search(l)]
+    out = []
+    if fatal:
+        out.append("---- why the cluster would not start ----")
+        out.extend(fatal[:fatal_lines])
+    else:
+        out.append("---- no FATAL in the server log; its tail follows ----")
+    out.append(f"---- server log tail ({log}) ----")
+    out.extend(f"  {l}" for l in lines[-tail_lines:])
+    return "\n".join(out)
 
 
 def _asroot(argv, bindir, datadir, check=True):

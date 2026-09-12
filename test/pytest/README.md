@@ -46,13 +46,23 @@ It compares the two by assertion NAME and exits non-zero if the bash suite asser
 a property the port does not. A port keeps this working by passing each assertion
 the same name string the bash check uses.
 
-## This is not in the gate yet
+## Both halves are in the gate (#1016)
 
-`test/run_all_versions.sh` does not run these tests, and neither does CI. That is a
-decision with a price, recorded in section 1a of the design document: `pgc_skip`
-treats a missing dependency as a failure rather than a skip, so registering this run
-in `SUITES` would redden every CI job until `ci.yml` installs from
-`requirements-test.txt`. Until someone takes that decision, run it by hand.
+`test/run_all_versions.sh` does not run these tests and must not: the two harnesses stay
+independent, and the shell runner invoking pytest is the cross-harness call the project
+forbids. Registering the run in `SUITES` was the plan recorded in section 1a of the design
+document, and it was the wrong mechanism for that reason. A second CI job is the right one.
+
+`ci.yml` runs two:
+
+- **`pytest-guards`** runs the files `NO_CLUSTER` names, in a venv where psycopg is
+  deliberately ABSENT. That absence is what proves those files need no database.
+- **`pytest-cluster`** runs the complement, with every pin from
+  `requirements-test.txt` and a PGDG PostgreSQL 18 with its headers.
+
+Both pass `--pgc-expect-tests` from `expected_tests.txt`, so a run that collects fewer
+tests than it should fails instead of reporting a green that means nothing. **Adding a test
+moves a number in that file**, and the diff sits next to the test that moved it.
 
 ## Warnings
 
