@@ -3451,8 +3451,8 @@ unchanged. The port emits ONE record named `UNMET_PRECONDITION` where bash emits
 box, and two of them have no counterpart in the port at all.
 
 That gap is NOT caused by the change above; the change is what made it visible, and it is
-filed separately rather than widened here, because widening the regex reddens a pair and
-is a port's worth of work rather than a tool fix. Eight more bash check helpers are
+filed as #1040 rather than widened here, because widening the regex reddens a pair and is
+a port's worth of work rather than a tool fix. Eight more bash check helpers are
 invisible to the same regex (`check_skip`, `check_structure`, `check_reconstruct`,
 `check_split_happened`, `check_ratio_needs_quiet_machine`, `check_float`,
 `check_stack_depth`, and `check_unrunnable` itself).

@@ -1140,8 +1140,8 @@ true until the next version shipped.
   side of it. `hilbert_locality.sh:574` and three lines after it check that property with
   `check_unrunnable`, which the bash extractor's `check(_num|_ratio|_text|_timing)?` does
   not match. Widening it by that one alternative and nothing else takes that pair from
-  `rc=0 missing=0` to `rc=1 missing=2`, every other pair unchanged. Filed separately: it
-  is a port's worth of work, not a tool fix, and this change is only what made it visible.
+  `rc=0 missing=0` to `rc=1 missing=2`, every other pair unchanged. Filed as #1040: it is a
+  port's worth of work, not a tool fix, and this change is only what made it visible.
 
   The positions live in a `_NAME_ARG` table, because the tool is deliberately standalone
   (`ast`, `re`, `sys`) and importing `Expect` to ask would pull in pytest. A
