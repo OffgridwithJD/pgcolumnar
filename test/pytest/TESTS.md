@@ -3508,7 +3508,8 @@ the tool was reporting the wrong string.
 
 | shape | read as |
 | --- | --- |
-| the last string argument | the name |
+| the last argument | the name, for the 14 helpers that put it there |
+| the last argument of `refusal`, `cannot_run`, `plan_marker`, `plan_node` | NOT the name -- see below |
 | an f-string | a `{}` template, matched against bash interpolations reduced the same way |
 | `"a" if cond else "b"` | both arms |
 | `@pytest.mark.parametrize("func,name", ROWS)` | the `name` column, resolved through module constants |
@@ -3518,6 +3519,144 @@ the tool was reporting the wrong string.
 template reducer missed every one of them, because its pattern required `[A-Za-z_]` after
 the dollar.
 
+### The name is not always the last argument (#1036)
+
+The fix above replaced "the first quoted argument" with "the last argument", and that is
+true of 14 of `Expect`'s 18 helpers. It is not a property of the helpers, only of most of
+them, and the four exceptions were then read wrong in silence -- the last argument is a
+real string in each case, so a wrong name looks exactly like a right one.
+
+| call | what the last argument is | the name it records |
+| --- | --- | --- |
+| `refusal(result, name, *patterns)` | a message PATTERN | `name`, argument 1 |
+| `cannot_run(reason, detail="")` | the DETAIL of one run | `reason`, argument 0 |
+| `plan_marker(plan, key, name=None)` | a plan KEY | the `name=` keyword only |
+| `plan_node(plan, ..., name=None)` | a field of the NODE | the `name=` keyword only |
+
+`refusal` is the worst of the four: the name goes MISSING and a fragment of an error
+message arrives as an EXTRA, so one call produces two false entries -- the same defect the
+section above closes, one helper along.
+
+`plan_marker` and `plan_node` contribute NOTHING when called without `name=`. The key is
+not the name even then, only a fragment of one (`plan_marker` records
+`name or f"plan carries {key!r}"`), and reporting no name states MISSING rather than
+inventing one.
+
+**Measured over the tree** at `73e8e3d`, with the table as the only variable (the count
+is labelled with the tree because it moves as pairs are added):
+
+| pair | extras before | after |
+| --- | --- | --- |
+| hilbert_locality | 3 | 2 |
+| every other pair | unchanged | unchanged |
+| **total** | **68** | **67** |
+
+Two false extras went (`Columnar Projected Columns`, a `plan_marker` key; and `the two
+partitions are not different ({})`, a `cannot_run` detail) and one appeared in their place:
+`UNMET_PRECONDITION`, the reason code `cannot_run` actually records. No pair's verdict
+moved, because `rc` is driven by MISSING and extras never moved it -- which is why nothing
+caught this.
+
+**`UNMET_PRECONDITION` is an extra only because the tool cannot see the bash side of it**,
+and saying otherwise would be the same mistake one level down. `hilbert_locality.sh:574`
+and three lines after it DO check that property:
+
+    check_unrunnable "box $box: groups read, Z-order" UNMET_PRECONDITION ...
+
+The bash extractor reads `check(_num|_ratio|_text|_timing)?`, and `check_unrunnable`
+matches no branch of it. Widening that regex by that one alternative and changing nothing
+else takes `hilbert_locality` from `rc=0 missing=0` to **`rc=1 missing=2`** -- `box $box:
+groups read, Hilbert` and `box $box: groups read, Z-order` -- with every other pair
+unchanged. The port emits ONE record named `UNMET_PRECONDITION` where bash emits four per
+box, and two of them have no counterpart in the port at all.
+
+That gap is NOT caused by the change above; the change is what made it visible, and it is
+filed as #1040 rather than widened here, because widening the regex reddens a pair and is
+a port's worth of work rather than a tool fix.
+
+Derived from `test/lib.sh` rather than swept for, because three different sweeps gave
+three different totals: **`lib.sh` defines 8 check helpers, the tool reads 5, and 3 are
+invisible** -- `check_unrunnable`, `check_skip`, `check_ratio_needs_quiet_machine`.
+Individual suites define four more of their own (`check_structure`,
+`check_reconstruct`, `check_split_happened` in `parallel_copy.sh`, `check_float` in
+`parquet_export_stats.sh`), invisible to the same regex.
+
+**50 invisible invocations over `test/*.sh`**, reconciled between two agents and two
+independent methods, which agree helper for helper: `check_unrunnable` 25, `check_skip` 23,
+`check_ratio_needs_quiet_machine` 2.
+
+**The population is half the number.** `test/*.sh` is the 265 top-level suites, which are
+the only files the tool grades. Globbing `test/**/*.sh` instead adds the harness selftests
+and gives **56**, the extra 6 all in `test/selftest/`, which `compare_to_bash.py` never
+reads. Neither number is wrong; a number without its population is.
+
+`test/selftest/` is out of scope for a second reason as well: it is the SHELL harness's
+own self-test, and the two harnesses stay independent, so counting it into a claim about
+what the pytest parity tool grades would cross that line even if the tool could read it.
+
+**And `git grep` will not give you that population.** Git pathspecs are wildmatch without
+`FNM_PATHNAME`, so `*` crosses `/` and the natural spelling is silently recursive:
+
+    git grep -e check_unrunnable REV -- 'test/*.sh'           9 files, 4 under selftest/
+    git grep -e check_unrunnable REV -- ':(glob)test/*.sh'    5 files, 0 under selftest/
+
+Measuring the number at an older revision means reaching for `git grep`, where the
+top-level spelling LOOKS right and is not. Use `:(glob)`.
+
+Getting there took four sweeps that read 89, 64, 54 and 50, and the three wrong ones were
+not method-sensitivity -- they were two defects, both worth knowing because any later
+re-derivation meets them:
+
+- **A `\bNAME\s` sweep counts each helper's own definition line.** `lib.sh:1231` is
+  `check_unrunnable() {<TAB># check_unrunnable NAME REASON_CODE DETAIL` -- the trailing
+  USAGE COMMENT repeats the name followed by a space, so the definition matches as though
+  it were a call. Same shape at `lib.sh:1407`. Two more matches were ordinary prose. That
+  is 89 (definitions included) and 54 (comments included).
+- **A command-position match misses an invocation after `&&`.** `hilbert_curve.sh:321` is
+  `[ -n "$_a" ] && check_unrunnable "$_a" "$2" "$3"`. Anchoring on `^` alone gives 24 for
+  that helper rather than 25.
+
+Strip trailing comments as well as whole-line ones, exclude definitions, and accept a call
+after `;`, `&&` or `||`, and the number is reproducible.
+
+`refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
+`test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
+extractor rather than a pair.
+
+### A second coincidence, inside the clause that fixed the first
+
+`-1` is a claim about the CALL SITE. The drift guard reads the SIGNATURE. They agree only
+while no OPTIONAL parameter sits after the name, because an optional one can still be
+passed positionally:
+
+| written | read as |
+| --- | --- |
+| `expect.rows(got, want, "THE NAME", "the reason")` | `the reason` |
+| `expect.plan_marker(plan, "key", "THE NAME")` | nothing at all |
+
+Both were legal, both read wrong, and every guard here stayed green. The second is worse:
+a DROPPED name reports the bash property MISSING, and MISSING is what drives `rc`.
+
+Latent rather than live -- no call site in the tree passes a trailing optional
+positionally -- but #1037 makes `allow_empty` a reason STRING, which is exactly the
+argument somebody writes positionally next to a name.
+
+**Closed in the signatures rather than patched in the reader.** `rows`, `row_set`,
+`plan_marker` and `plan_node` now take everything after the name as keyword-only, so the
+wrong call is a `TypeError` instead of a silently misread name:
+
+    Expect.rows() takes 4 positional arguments but 5 were given
+
+`test_no_later_argument_can_overtake_the_name` holds it, and it is a signature fact, which
+is what this guard is already good at reading. `cannot_run` needs no change: its name is
+argument 0 and nothing after it can overtake it.
+
+**The table is a hand-written derived value, so it is pinned.** The tool is deliberately
+standalone (`ast`, `re`, `sys`) and cannot import `Expect` to ask where each name sits.
+`test_the_tools_table_agrees_with_the_signatures_it_describes` reads the real signatures
+out of `pgc_vacuity.py`, recomputes every entry, and fails with the helper named when the
+two disagree.
+
 ### Removal proof
 
 | mutation | red |
@@ -3526,6 +3665,13 @@ the dollar.
 | drop the conditional-name case | its own arm, and the whole-tree arm |
 | drop parametrize resolution | its own arm, and the whole-tree arm |
 | read the name column by position instead of by its declared name | its own arm, and the whole-tree arm |
+| delete the `_NAME_ARG` table entirely | all four #1036 arms |
+| drop the `refusal` entry | its own arm, and the drift guard |
+| `plan_marker` `None` -> `-1`, taking the key | its own arm, and the drift guard |
+| `cannot_run` `0` -> `-1`, taking the detail | its own arm |
+| a wrong entry for a helper no BEHAVIOURAL arm covers (`at_least`) | the drift guard, and the whole-tree arm -- the four behavioural arms stay green, which is the point of it |
+| add a helper to `Expect` whose name is not last | the drift guard, naming it |
+| revert any one of the four `*` keyword-only markers | `test_no_later_argument_can_overtake_the_name`, naming the helper |
 
 `test_the_ported_suites_in_this_tree_are_graded_one_for_one` catches all four. It is the
 arm that matters: a guard over invented sources proves the extractor reads python, not that
@@ -3542,4 +3688,10 @@ the tool grades THIS tree.
 | `test_a_parametrized_name_is_resolved_from_the_decorator` | the idiom a repeated bash property should be ported to, with a no-`name` decorator as the control |
 | `test_the_parametrize_reader_takes_the_column_called_name` | the declared column, not position |
 | `test_the_two_harnesses_interpolations_land_on_one_template` | bash and python spell interpolation differently and must meet |
+| `test_refusal_names_its_second_argument_not_its_last_pattern` | the name is in the middle; the last argument is a pattern |
+| `test_refusal_with_no_pattern_is_not_the_arm_that_proves_it` | the control: that shape reads the same under either rule, so it proves nothing alone |
+| `test_cannot_run_names_its_reason_not_its_detail` | the only helper whose name is argument zero |
+| `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
+| `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
+| `test_no_later_argument_can_overtake_the_name` | nothing after the name may be passed positionally, so `-1` is true of every CALL and not just every signature |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |

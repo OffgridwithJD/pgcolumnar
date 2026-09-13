@@ -1232,6 +1232,56 @@ true until the next version shipped.
 
 ### Fixed
 
+- `compare_to_bash.py` read the wrong argument for the four helpers whose name is not
+  last (#432, #1036).
+
+  The previous fix replaced "the first quoted argument" with "the last argument". That
+  is true of 14 of `Expect`'s 18 helpers, but it is a property of most of them rather
+  than of the class, and the last argument is a real string in each of the other four --
+  so a wrong name looked exactly like a right one:
+
+  | call | last argument | the name it records |
+  | --- | --- | --- |
+  | `refusal(result, name, *patterns)` | a message PATTERN | `name`, argument 1 |
+  | `cannot_run(reason, detail="")` | the DETAIL of one run | `reason`, argument 0 |
+  | `plan_marker(plan, key, name=None)` | a plan KEY | the `name=` keyword only |
+  | `plan_node(plan, ..., name=None)` | a field of the NODE | the `name=` keyword only |
+
+  `refusal` is the worst: the real name goes MISSING and a fragment of an error message
+  arrives as an EXTRA, which is two false entries from one call.
+
+  Measured over every pair in the tree at `73e8e3d`, with the table as the only variable:
+  **68 extras, now 67.** Two were false -- a `plan_marker` key and a `cannot_run` detail,
+  both on `hilbert_locality` -- and `UNMET_PRECONDITION` appeared in their place, the
+  reason code `cannot_run` really records. No pair's verdict moved, because `rc` is driven
+  by MISSING and extras never moved it. That is why nothing caught this: the tool reported
+  a plausible list, and only the list was evidence either way.
+
+  `UNMET_PRECONDITION` is reported as an extra only because the tool cannot see the bash
+  side of it. `hilbert_locality.sh:574` and three lines after it check that property with
+  `check_unrunnable`, which the bash extractor's `check(_num|_ratio|_text|_timing)?` does
+  not match. Widening it by that one alternative and nothing else takes that pair from
+  `rc=0 missing=0` to `rc=1 missing=2`, every other pair unchanged. Filed as #1040: it is a
+  port's worth of work, not a tool fix, and this change is only what made it visible.
+
+  The positions live in a `_NAME_ARG` table, because the tool is deliberately standalone
+  (`ast`, `re`, `sys`) and importing `Expect` to ask would pull in pytest. A
+  hand-written derived value goes stale, so it is pinned: a drift guard reads the real
+  signatures out of `pgc_vacuity.py`, recomputes every entry, and fails with the helper
+  named. That guard first passed over a missing `refusal` entry -- `name` IS its last
+  DECLARED parameter, since `*patterns` is not -- and now accounts for the vararg.
+
+  A second coincidence sat inside the clause that fixed the first, found by
+  @OffgridwithJD in review. `-1` is a claim about the CALL SITE while the guard reads the
+  SIGNATURE, and they agree only while no optional parameter sits after the name:
+  `expect.rows(got, want, "THE NAME", "the reason")` read `the reason`, and
+  `expect.plan_marker(plan, "key", "THE NAME")` read nothing at all, dropping a name
+  silently. Latent rather than live -- no call site passes a trailing optional
+  positionally -- but #1037 makes `allow_empty` a reason string, which is exactly that
+  argument. Closed in the signatures rather than in the reader: `rows`, `row_set`,
+  `plan_marker` and `plan_node` take everything after the name as keyword-only, so the
+  wrong call is now a `TypeError`. No call site changed; all four already used keywords.
+
 - A BOGUS-verdict ledger record is refused by naming the verdict, not by field count (#1013).
 
 - The star-schema join how-to names clustering on the join key (#752).

@@ -64,7 +64,18 @@
 # correctly against a tree holding only their own arms and both be wrong for the merge --
 # measured by @jdatcmd on #1022, where two independent derivations of 280 had 283 as the
 # merged truth. Derived here by collection: `307 tests collected`.
-guard_tests 307
+# 298 -> 303 when the same file gained five arms for the helpers whose name is not the
+# last argument (#1036), four of them behavioural and one a drift guard over the table.
+# Re-derived by collection, not by adding five: `303 tests collected`.
+# 303 -> 304 when review found a second coincidence: `-1` is a claim about the CALL SITE
+# and the drift guard reads the SIGNATURE. Re-derived by collection: `304 tests collected`.
+# MERGED with #1035 (#982's six ledger arms), whose arms are disjoint from these.
+# Re-derived by collection on the merged tree, NOT by adding the two deltas.
+# MERGED with #1037 (#1031's three allow_empty arms). Its keyword-only change
+# and this branch's REASON check are complementary, and pgc_vacuity.py kept both.
+# Re-derived by collection on the merged tree: the two 307s and the 310 that
+# preceded this are each right for a DIFFERENT tree and none of them is this one.
+guard_tests 313
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
