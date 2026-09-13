@@ -1144,6 +1144,12 @@ SHELL_REFERENCES = {
     "test_mutation_ledger.py":
         "executes the matrix runner with its list flag to get the registered suite "
         "list, which is the same mechanism the entry above uses",
+    "test_compare_to_bash.py":
+        "reads the shell harness's helper library to re-derive the parity tool's "
+        "check-helper list from the definitions themselves, so the list the grader "
+        "matches on cannot become a hand-maintained copy that rots apart from it "
+        "(#1040, where five of eight helpers had been unreadable since the pattern "
+        "shipped)",
 }
 
 _SHELL_NAMES = re.compile(
