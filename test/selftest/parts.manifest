@@ -44,3 +44,4 @@
 450-a-red-nightly-must-be-findable.sh
 460-the-controller-must-record-the-binary.sh
 470-a-skipped-arm-records-under-its-own-name.sh
+480-an-unrunnable-record-names-its-check.sh

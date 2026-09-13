@@ -38,11 +38,20 @@ suites_not_covered 249
 #   HOW TO RE-DERIVE IT, written here because a changelog entry got it wrong and a
 #   derivation is only useful where the number is:
 #
-#       awk -F'\t' '$4=="never"' test/check_ledger.tsv | wc -l
+#       awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+#
+#   FIELD FIVE, and it said four until #1040. The command is only useful if it
+#   runs, and `$4` returned 0 on the shipped tree: #1010 inserted the majors a row
+#   claims as field 4, so the last-red moved to field 5 and the old form read a
+#   major where it expected a date. The CHANGELOG entry for #1010 says this file
+#   carries the corrected form; it did not, which is why the claim is worth as
+#   little as the recipe. Corrected here rather than filed because this change
+#   moves the number below, and a reviewer re-deriving it with the printed command
+#   would have got 0 against a stated 1198.
 #
 #   Rows whose LAST-RED is `never`, not the row count. The two agree only while
 #   nothing has ever been observed red, so a plain `grep -c` overcounts by exactly
 #   the number of attacked checks -- and it overcounts from the first moment this
 #   ledger does the job it exists for. The gate prints both quantities side by side
 #   (`rows=N | never observed red=M`) because they are different questions.
-checks_never_observed_red 1189
+checks_never_observed_red 1198

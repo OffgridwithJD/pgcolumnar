@@ -1136,6 +1136,15 @@ harness_selftest	470-a-skipped-arm-records-under-its-own-name	every comparable s
 harness_selftest	470-a-skipped-arm-records-under-its-own-name	premise: and it actually compared some of them	15;16;17;18;19	never	-
 harness_selftest	470-a-skipped-arm-records-under-its-own-name	premise: the sweep found skip loops at all	15;16;17;18;19	never	-
 harness_selftest	470-a-skipped-arm-records-under-its-own-name	premise: the sweep tool is present	15;16;17;18;19	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	and it stays silent on the same file with the names in agreement	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	every unrunnable record names a check its own suite asserts (#1040)	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	pgc_pass and pgc_fail are twins, because a check can be recorded through them	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	pgc_skip's name is read from argument TWO, not argument one	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	premise: and it compared them rather than writing them all off as dynamic	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	premise: the sweep found unrunnable sites at all	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	premise: the sweep tool is present	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	the refusal emitters are the two the tree defines	18	never	-
+harness_selftest	480-an-unrunnable-record-names-its-check	the sweep REPORTS a name the file records only in its refusal branch	18	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-
