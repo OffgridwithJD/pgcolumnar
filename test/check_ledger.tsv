@@ -1148,6 +1148,14 @@ harness_selftest	480-an-unrunnable-record-names-its-check	premise: the sweep too
 harness_selftest	480-an-unrunnable-record-names-its-check	the refusal emitters are the two the tree defines	15;16;17;18;19	never	-
 harness_selftest	480-an-unrunnable-record-names-its-check	the sweep EXITS non-zero when it reports a mismatch	15;16;17;18;19	never	-
 harness_selftest	480-an-unrunnable-record-names-its-check	the sweep REPORTS a name the file records only in its refusal branch	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	a body that never closes is NAMED rather than silently swallowing the file	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	a one-line wrapper that records nothing is NOT counted as a recorder (#1042)	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	control: a recorder whose body contains a nested block is still a recorder	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	control: and a file whose bodies all close is not named	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	control: and the recorder below it is still found, so the fixture discriminates	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the skip-loop tool is present	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool answers with an emitter set, so 'q is absent' is about q	15;16;17;18;19	never	-
+harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool reports an unclosed count at all, so a zero below means zero	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-

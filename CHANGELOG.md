@@ -18,6 +18,54 @@ true until the next version shipped.
 
 ### Added
 
+- `skip-loop-arms.py` read a one-line function body as everything below it, so a psql
+  wrapper counted as a check recorder (#1042).
+
+  The tool decides which functions record a check by reading each one's body, and it took
+  that body as everything up to the next brace at column zero:
+
+      test/audit.sh:122   q() { run_pg "$PSQL -c \"$1\""; }
+
+  `q`'s brace is not at column zero, so its body ran on into the NEXT function's and
+  swallowed every `check` call in between. `q` -- a psql wrapper that records nothing --
+  then classified as a RECORDER, and its first argument, SQL text, entered a set of valid
+  check names. The corpus has 199 one-line definitions, so this is the common form and not
+  an edge case. The body now ends at its own closing brace, counted per line.
+
+  IT CHANGED NO VERDICT ON THE TREE AS IT STOOD, which is why it needed an arm and not
+  only a fix. A/B between the two extractors on `db74d9e9c`: `loops 8 / compared 6 /
+  interpolated 1 / armless 1` from both, byte-identical. Two extractors that agree on
+  today's corpus are indistinguishable from the tool's own output, so a regression would
+  have been invisible to every existing check. That is a property of today's corpus and
+  not of the tool.
+
+  THE TOOL NOW SAYS WHEN A BODY NEVER CLOSES. Counting braces is defeated by an unbalanced
+  one inside a quoted string, and the corpus has exactly one -- `_us_unbound` in
+  `test/selftest/400-a-check-result-must-be-machine.sh`, whose `grep -oE '\$\{?...'` and
+  `tr -d '${'` leave the walk unterminated, so its body is 229 lines and runs to
+  end-of-file. That is NOT fixed here: one pathological definition in 909 does not buy a
+  shell lexer, and a lexer is a much larger thing to be wrong about. What is fixed is the
+  silence. `_us_unbound` is misclassified as a recorder today by the shipped tool AND by
+  this one -- the symmetric difference of the two emitter sets is empty -- so it predates
+  this change and survives it, and it is reported separately rather than folded in.
+
+  AND HEREDOC BODIES ARE BLANKED BEFORE SCANNING FOR DEFINITIONS, which this file already
+  did for its structure walk and did not do here. The guard for this very defect writes
+  `q() { ... }` into a fixture as heredoc content, so without it the tool reported the
+  test's own fixture as a finding in the real tree: `unclosed 2`, the second being the
+  guard's own `swallower`.
+
+  The new selftest part brackets the change in both directions, because no single mutation
+  can redden all three arms:
+
+      revert the body walk         the one-line wrapper arm reddens        1 FAIL
+      delete the unclosed report   the count premise and the NAMED arm     2 FAIL
+      report unconditionally       "a clean file is not named" reddens     1 FAIL
+                                   and the other two stay green
+
+  Each mutation was asserted to still PARSE before its red was believed, and each restore
+  was md5-asserted.
+
 - `test/hilbert_cluster.sh` has a pytest twin: the Hilbert clustering SQL surface, graded
   one-for-one (#432).
 
