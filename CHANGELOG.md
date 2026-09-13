@@ -18,6 +18,71 @@ true until the next version shipped.
 
 ### Added
 
+- An unrunnable record names the check it stands in for, so a refused check keeps
+  one ledger key instead of two (#1040).
+
+  `check_unrunnable NAME REASON DETAIL` gives one check the honesty `pgc_skip` gives a
+  whole suite: the check did not run, and the reader is told which. That only works if
+  the record carries the name the check uses when it DOES run. Two of the four sites in
+  one loop in `hilbert_locality.sh` carried a shortened name:
+
+      :574  check_unrunnable "box $box: groups read, Z-order"
+      :597  check_num        "box $box: groups read over $PLACEMENTS placements, Z-order"
+
+  while the other two matched their runnable twins exactly. So the property had two
+  ledger keys and which one appeared depended on whether that box's two partitions came
+  out different that day -- the key was a function of the data. `hilbert_locality` is not
+  a ledger-covered suite, so this was a wrong key waiting to be seeded rather than a
+  wrong number in `check_ledger.tsv`.
+
+  The convention is already near-universal, and that is what made the lapse invisible:
+  23 of the 25 `check_unrunnable` call sites in `test/*.sh` carry the runnable name
+  (`hilbert_cluster` 9 of 9, `projection_rewrite` 11 of 11), so a shorter name in a new
+  refusal branch reads as ordinary. Both halves of a two-branch site are rarely read
+  together.
+
+  A new selftest part asserts the property over the whole corpus, driving
+  `.github/scripts/unrunnable-arm-names.py`. The tool DERIVES three things a list of it
+  got wrong first: which functions record, from the `pgc_record` call in their body;
+  which argument is the name, because `pgc_skip` records `"$2"` and reading argument one
+  takes the capability where the check is called `arrow support is present`; and what
+  counts as a refusal, from the verdict rather than the helper's spelling. `check_skip`
+  is deliberately not swept -- a skipped arm has no runnable counterpart by construction,
+  so 21 of its 23 call sites have no twin and always will.
+
+  The part carries a positive control because the guard's steady state is zero and a
+  broken sweep reports zero too: it drives the real tool over a fixture whose refusal
+  branch names something the file never records, and over a control where the names
+  agree.
+
+  This also closes the only pair `compare_to_bash.py` fails once its extractor is
+  widened to all eight `lib.sh` helpers (#1040): with the two names fixed, all seven
+  ported suites grade one-for-one under the widened extractor, with no change to the
+  port and none to `pgc_vacuity.py`.
+
+  The sweep's exit code is the verdict. It was a flat zero in the first version, so the
+  tool printed two `MISMATCH` lines and reported success. The part gates on the parsed
+  output and was never fooled, which is exactly why the exit code needed its own arms
+  rather than an observation: the next caller is the one that trusts `$?`, and a gate that
+  cannot fail is a trap whether or not today's only caller steps in it. Three arms, because
+  pinning the non-zero side alone passes on a tool that always exits 1, and the clean side
+  alone passes on a corpus with nothing to find -- so the clean run uses a second fixture
+  directory that HAS a refusal site, with a premise asserting it. Reported by @jdatcmd.
+
+- The census re-derivation printed in `check_ledger_budget.txt` reads the wrong field
+  and returns zero (#1040).
+
+      awk -F'\t' '$4=="never"' test/check_ledger.tsv | wc -l     -> 0
+      awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l     -> 1189 on db74d9e
+
+  #1010 inserted the majors a row claims as field 4, moving the last-red to field 5, and
+  the recipe stayed on field 4. The entry for #1010 in this file states that
+  `check_ledger_budget.txt` carries the corrected form; it did not. The gate is
+  unaffected -- it computes the census itself and never runs this command -- so the harm
+  is a reviewer re-deriving the number by the printed method, getting 0, and correcting a
+  budget that was right. Fixed here rather than filed because this change moves that very
+  number, and a wrong recipe beside a number nobody can check is worse than no recipe.
+
 - `allow_empty` documented a rule the code did not enforce (#1031).
 
   `Expect.rows` documents the argument as taking *"a REASON, not a flag"*. The sentence even
