@@ -51,7 +51,10 @@
 # 290 -> 298 when test_compare_to_bash.py landed: eight arms over the parity tool's own
 # extractors. Re-derived by collection on the merged tree, per the recipe above:
 # `298 tests collected`.
-guard_tests 298
+# 298 -> 303 when the same file gained five arms for the helpers whose name is not the
+# last argument (#1036), four of them behavioural and one a drift guard over the table.
+# Re-derived by collection, not by adding five: `303 tests collected`.
+guard_tests 303
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

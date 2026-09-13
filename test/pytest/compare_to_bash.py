@@ -116,12 +116,40 @@ def _parametrized_names(tree):
     return out
 
 
+# WHERE THE NAME SITS, for the helpers where it is not the last argument (#1036).
+#
+# The rule for most of `Expect` is "the name is the last argument", and for 14 of its 18
+# helpers that is true. It is not a property of the helpers, though, only of most of them,
+# and the four below were read wrong in silence: the last argument is a real string in each
+# case, so a wrong name looked exactly like a right one.
+#
+#   refusal(result, name, *patterns)      the last argument is a PATTERN
+#   cannot_run(reason, detail="")         records `name=reason`, the FIRST argument
+#   plan_marker(plan, key, name=None)     the last argument is a plan KEY
+#   plan_node(plan, ..., name=None)       the last argument describes the NODE
+#
+# A value here is the index of the call argument carrying the name; `None` means no
+# positional argument carries it and only a `name=` keyword can. `-1`, the default for
+# every helper not listed, means the last one.
+#
+# This is a hand-written derived value, so it is pinned: the drift guard in
+# `test_compare_to_bash.py` re-derives every entry from the real signatures in
+# `pgc_vacuity.py` and fails with the helper named when the two disagree. Add a helper
+# whose name is not last and that arm goes red before this table is wrong in the field.
+_NAME_ARG = {
+    "refusal": 1,
+    "cannot_run": 0,
+    "plan_marker": None,
+    "plan_node": None,
+}
+
+
 def _py_names(src):
     """Every assertion name in the port, by parsing rather than matching.
 
     The name is the LAST argument of an `expect.<helper>(...)` call, or the value of
     a `name=` keyword, read through `_as_names` so a conditional carries both of
-    its arms.
+    its arms. Four helpers put it somewhere else and are read through `_NAME_ARG`.
     """
     tree = ast.parse(src)
     out = _parametrized_names(tree)
@@ -137,7 +165,12 @@ def _py_names(src):
                 out.extend(_as_names(kw.value))
         if not is_expect or not node.args:
             continue
-        out.extend(_as_names(node.args[-1]))
+        idx = _NAME_ARG.get(func.attr, -1)
+        if idx is None:
+            continue
+        if idx != -1 and len(node.args) <= idx:
+            continue
+        out.extend(_as_names(node.args[idx]))
     return out
 
 

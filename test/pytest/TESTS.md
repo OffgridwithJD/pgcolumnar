@@ -3388,7 +3388,8 @@ the tool was reporting the wrong string.
 
 | shape | read as |
 | --- | --- |
-| the last string argument | the name |
+| the last argument | the name, for the 14 helpers that put it there |
+| the last argument of `refusal`, `cannot_run`, `plan_marker`, `plan_node` | NOT the name -- see below |
 | an f-string | a `{}` template, matched against bash interpolations reduced the same way |
 | `"a" if cond else "b"` | both arms |
 | `@pytest.mark.parametrize("func,name", ROWS)` | the `name` column, resolved through module constants |
@@ -3398,6 +3399,53 @@ the tool was reporting the wrong string.
 template reducer missed every one of them, because its pattern required `[A-Za-z_]` after
 the dollar.
 
+### The name is not always the last argument (#1036)
+
+The fix above replaced "the first quoted argument" with "the last argument", and that is
+true of 14 of `Expect`'s 18 helpers. It is not a property of the helpers, only of most of
+them, and the four exceptions were then read wrong in silence -- the last argument is a
+real string in each case, so a wrong name looks exactly like a right one.
+
+| call | what the last argument is | the name it records |
+| --- | --- | --- |
+| `refusal(result, name, *patterns)` | a message PATTERN | `name`, argument 1 |
+| `cannot_run(reason, detail="")` | the DETAIL of one run | `reason`, argument 0 |
+| `plan_marker(plan, key, name=None)` | a plan KEY | the `name=` keyword only |
+| `plan_node(plan, ..., name=None)` | a field of the NODE | the `name=` keyword only |
+
+`refusal` is the worst of the four: the name goes MISSING and a fragment of an error
+message arrives as an EXTRA, so one call produces two false entries -- the same defect the
+section above closes, one helper along.
+
+`plan_marker` and `plan_node` contribute NOTHING when called without `name=`. The key is
+not the name even then, only a fragment of one (`plan_marker` records
+`name or f"plan carries {key!r}"`), and reporting no name states MISSING rather than
+inventing one.
+
+**Measured over the tree**, with the table as the only variable:
+
+| pair | extras before | after |
+| --- | --- | --- |
+| hilbert_locality | 3 | 2 |
+| every other pair | unchanged | unchanged |
+| **total** | **68** | **67** |
+
+Two false extras went (`Columnar Projected Columns`, a `plan_marker` key; and `the two
+partitions are not different ({})`, a `cannot_run` detail) and one TRUE extra appeared:
+`UNMET_PRECONDITION`, the reason code `cannot_run` actually records, which the bash suite
+has no check for. No pair's verdict moved, because `rc` is driven by MISSING and extras
+never moved it -- which is why nothing caught this.
+
+`refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
+`test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
+extractor rather than a pair.
+
+**The table is a hand-written derived value, so it is pinned.** The tool is deliberately
+standalone (`ast`, `re`, `sys`) and cannot import `Expect` to ask where each name sits.
+`test_the_tools_table_agrees_with_the_signatures_it_describes` reads the real signatures
+out of `pgc_vacuity.py`, recomputes every entry, and fails with the helper named when the
+two disagree.
+
 ### Removal proof
 
 | mutation | red |
@@ -3406,6 +3454,11 @@ the dollar.
 | drop the conditional-name case | its own arm, and the whole-tree arm |
 | drop parametrize resolution | its own arm, and the whole-tree arm |
 | read the name column by position instead of by its declared name | its own arm, and the whole-tree arm |
+| delete the `_NAME_ARG` table entirely | all four #1036 arms |
+| drop the `refusal` entry | its own arm, and the drift guard |
+| `plan_marker` `None` -> `-1`, taking the key | its own arm, and the drift guard |
+| `cannot_run` `0` -> `-1`, taking the detail | its own arm |
+| a wrong entry for a helper no arm covers (`at_least`) | the drift guard, and the whole-tree arm |
 
 `test_the_ported_suites_in_this_tree_are_graded_one_for_one` catches all four. It is the
 arm that matters: a guard over invented sources proves the extractor reads python, not that
@@ -3422,4 +3475,9 @@ the tool grades THIS tree.
 | `test_a_parametrized_name_is_resolved_from_the_decorator` | the idiom a repeated bash property should be ported to, with a no-`name` decorator as the control |
 | `test_the_parametrize_reader_takes_the_column_called_name` | the declared column, not position |
 | `test_the_two_harnesses_interpolations_land_on_one_template` | bash and python spell interpolation differently and must meet |
+| `test_refusal_names_its_second_argument_not_its_last_pattern` | the name is in the middle; the last argument is a pattern |
+| `test_refusal_with_no_pattern_is_not_the_arm_that_proves_it` | the control: that shape reads the same under either rule, so it proves nothing alone |
+| `test_cannot_run_names_its_reason_not_its_detail` | the only helper whose name is argument zero |
+| `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
+| `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |

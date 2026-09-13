@@ -160,6 +160,150 @@ def test_the_two_harnesses_interpolations_land_on_one_template(expect):
                 "a bare variable reference too")
 
 
+def test_refusal_names_its_second_argument_not_its_last_pattern(expect):
+    """`refusal(result, name, *patterns)` puts the name in the MIDDLE.
+
+    The last argument is a pattern -- a fragment of the message the refusal must carry --
+    so the last-argument rule read a substring of an error message as the property's name.
+    The real name went MISSING and the pattern arrived as an EXTRA: two false entries from
+    one call, which is the same defect this file exists to close, one helper along.
+    """
+    src = ('def t(expect):\n'
+           '    expect.refusal(result, "a role with no privilege is refused",\n'
+           '                   "permission denied", "for table")\n')
+    got = _names(src)
+    expect.text(", ".join(sorted(got)), "a role with no privilege is refused",
+                "the name is read and neither pattern is")
+    expect.num(len(got), 1, "one call contributes exactly one name")
+
+
+def test_refusal_with_no_pattern_is_not_the_arm_that_proves_it(expect):
+    """THE CONTROL that keeps the arm above honest.
+
+    `expect.refusal(result, NAME)` has the name last, so it is read correctly by the rule
+    this change replaces AND by the rule that replaces it. An arm built only on that shape
+    would pass against the defect, which is how the shape got missed in the first place.
+    """
+    src = 'def t(expect):\n    expect.refusal(result, "the write is refused")\n'
+    expect.text(", ".join(_names(src)), "the write is refused",
+                "the no-pattern shape reads the same either way, so it proves nothing alone")
+
+
+def test_cannot_run_names_its_reason_not_its_detail(expect):
+    """`cannot_run(reason, detail="")` records `name=reason`: the FIRST argument.
+
+    It is the only helper whose name is argument zero, and the detail beside it is prose
+    about one run -- "the two partitions are not different ({})" -- which can never match
+    a bash check name. Reading it produced an extra that no bash suite could ever satisfy.
+    """
+    src = ('def t(expect):\n'
+           '    expect.cannot_run("MISSING_DEPENDENCY",\n'
+           '                      "the two partitions are not different")\n')
+    got = _names(src)
+    expect.text(", ".join(got), "MISSING_DEPENDENCY",
+                "the reason CODE is the name, and the detail is not a name at all")
+    expect.num(len(got), 1, "the detail contributes nothing")
+
+
+def test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword(expect):
+    """`plan_marker` and `plan_node` carry no name positionally. Better absent than wrong.
+
+    `plan_marker(plan, key, name=None)` records `name or f"plan carries {key!r}"`, so the
+    KEY is not the name even when no name is given -- it is a fragment of one. The
+    last-argument rule emitted the bare key as a name the bash suite does not have, and
+    `Columnar Projected Columns` duly appeared as an extra on a pair that is complete.
+
+    With no name= the call contributes NOTHING, which reports MISSING rather than inventing
+    a name: the rule this file already applies to a name it cannot read.
+    """
+    named = _names('def t(expect):\n'
+                   '    expect.plan_marker(plan, "Columnar Projected Columns",\n'
+                   '                       name="the plan projects two columns")\n')
+    expect.text(", ".join(named), "the plan projects two columns",
+                "the name= keyword is the name, and the key is not also collected")
+    expect.num(len(named), 1, "one call, one name -- the key is not a second entry")
+
+    bare = _names('def t(expect):\n'
+                  '    expect.plan_marker(plan, "Columnar Projected Columns")\n')
+    expect.num(len(bare), 0, "with no name= the key is still not a name")
+
+    node = _names('def t(expect):\n'
+                  '    expect.plan_node(plan, provider="columnar",\n'
+                  '                     name="the scan is columnar")\n')
+    expect.text(", ".join(node), "the scan is columnar",
+                "plan_node reads its name= and not the arguments describing the node")
+
+
+def test_the_tools_table_agrees_with_the_signatures_it_describes(expect):
+    """THE DRIFT GUARD, and the reason the table is allowed to be a hand-written map.
+
+    `compare_to_bash.py` is deliberately standalone -- `ast`, `re`, `sys` -- so it cannot
+    import `Expect` to ask where each name sits, and a hand-written table is a derived
+    value that goes stale the day somebody adds a helper. This arm is what stops that: it
+    reads the REAL signatures out of `pgc_vacuity.py` and recomputes, for every public
+    helper, which call argument carries the name the helper records.
+
+    It is not a copy of the table. The table says where to look; this derives where to look
+    from the source of truth and compares. A helper added with its name anywhere but last,
+    or a signature reordered, fails here with the helper named.
+    """
+    from compare_to_bash import _NAME_ARG
+
+    # The ONE thing a signature cannot state: which parameter becomes the record's name.
+    # `cannot_run` records `name=reason`; every other helper calls its parameter `name`.
+    # Pinned below against the body, so this line cannot quietly become wrong either.
+    records_name_as = {"cannot_run": "reason"}
+
+    src = (HERE / "pgc_vacuity.py").read_text()
+    tree = ast.parse(src)
+    klass = [n for n in ast.walk(tree)
+             if isinstance(n, ast.ClassDef) and n.name == "Expect"]
+    expect.num(len(klass), 1, "premise: exactly one Expect class to read")
+
+    helpers = [f for f in klass[0].body
+               if isinstance(f, ast.FunctionDef) and not f.name.startswith("_")]
+    # `records` and `count` take no arguments and record no name.
+    helpers = [f for f in helpers if [a.arg for a in f.args.args if a.arg != "self"]]
+    expect.at_least(len(helpers), 15,
+                    "premise: the Expect helpers were found, not an empty list")
+
+    disagree, checked = [], 0
+    for f in helpers:
+        params = [a.arg for a in f.args.args if a.arg != "self"]
+        ndef = len(f.args.defaults)
+        required = params[:len(params) - ndef] if ndef else params
+        param = records_name_as.get(f.name, "name")
+        # Optional => no positional carries it; only a `name=` keyword can.
+        want = required.index(param) if param in required else None
+        got = _NAME_ARG.get(f.name, -1)
+        # -1 is "the last positional". That equals the name's own index only when the
+        # name really is last AT THE CALL SITE, and a `*args` AFTER it means it is not:
+        # `refusal(result, name, *patterns)` declares `name` last and is still called
+        # with patterns beyond it. Without that clause this arm accepted a missing
+        # `refusal` entry, which is the very shape it is here to catch.
+        if (got == -1 and want is not None and want == len(required) - 1
+                and f.args.vararg is None):
+            got = want
+        checked += 1
+        if got != want:
+            disagree.append(f"{f.name}: table says {got!r}, signature says {want!r}")
+
+    expect.num(checked, len(helpers), "inputs == sum(buckets): every helper was compared")
+    expect.text("; ".join(disagree) or "none", "none",
+                "every entry in the table matches the signature it describes")
+
+    # The one hand-written semantic claim above, pinned against the body it describes:
+    # read cannot_run's own `_record(...)` call and check which parameter it names.
+    fn = [f for f in helpers if f.name == "cannot_run"]
+    expect.num(len(fn), 1, "premise: cannot_run is among the helpers read")
+    recorded = [kw.value.id for call in ast.walk(fn[0])
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute) and call.func.attr == "_record"
+                for kw in call.keywords
+                if kw.arg == "name" and isinstance(kw.value, ast.Name)]
+    expect.text(", ".join(recorded), "reason",
+                "cannot_run really does record its reason as the name")
+
 def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     """THE STANDING ARM, and the reason this file is not only about fixtures.
 
