@@ -3422,7 +3422,8 @@ not the name even then, only a fragment of one (`plan_marker` records
 `name or f"plan carries {key!r}"`), and reporting no name states MISSING rather than
 inventing one.
 
-**Measured over the tree**, with the table as the only variable:
+**Measured over the tree** at `73e8e3d`, with the table as the only variable (the count
+is labelled with the tree because it moves as pairs are added):
 
 | pair | extras before | after |
 | --- | --- | --- |
@@ -3431,14 +3432,62 @@ inventing one.
 | **total** | **68** | **67** |
 
 Two false extras went (`Columnar Projected Columns`, a `plan_marker` key; and `the two
-partitions are not different ({})`, a `cannot_run` detail) and one TRUE extra appeared:
-`UNMET_PRECONDITION`, the reason code `cannot_run` actually records, which the bash suite
-has no check for. No pair's verdict moved, because `rc` is driven by MISSING and extras
-never moved it -- which is why nothing caught this.
+partitions are not different ({})`, a `cannot_run` detail) and one appeared in their place:
+`UNMET_PRECONDITION`, the reason code `cannot_run` actually records. No pair's verdict
+moved, because `rc` is driven by MISSING and extras never moved it -- which is why nothing
+caught this.
+
+**`UNMET_PRECONDITION` is an extra only because the tool cannot see the bash side of it**,
+and saying otherwise would be the same mistake one level down. `hilbert_locality.sh:574`
+and three lines after it DO check that property:
+
+    check_unrunnable "box $box: groups read, Z-order" UNMET_PRECONDITION ...
+
+The bash extractor reads `check(_num|_ratio|_text|_timing)?`, and `check_unrunnable`
+matches no branch of it. Widening that regex by that one alternative and changing nothing
+else takes `hilbert_locality` from `rc=0 missing=0` to **`rc=1 missing=2`** -- `box $box:
+groups read, Hilbert` and `box $box: groups read, Z-order` -- with every other pair
+unchanged. The port emits ONE record named `UNMET_PRECONDITION` where bash emits four per
+box, and two of them have no counterpart in the port at all.
+
+That gap is NOT caused by the change above; the change is what made it visible, and it is
+filed separately rather than widened here, because widening the regex reddens a pair and
+is a port's worth of work rather than a tool fix. Eight more bash check helpers are
+invisible to the same regex (`check_skip`, `check_structure`, `check_reconstruct`,
+`check_split_happened`, `check_ratio_needs_quiet_machine`, `check_float`,
+`check_stack_depth`, and `check_unrunnable` itself).
 
 `refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
 `test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
 extractor rather than a pair.
+
+### A second coincidence, inside the clause that fixed the first
+
+`-1` is a claim about the CALL SITE. The drift guard reads the SIGNATURE. They agree only
+while no OPTIONAL parameter sits after the name, because an optional one can still be
+passed positionally:
+
+| written | read as |
+| --- | --- |
+| `expect.rows(got, want, "THE NAME", "the reason")` | `the reason` |
+| `expect.plan_marker(plan, "key", "THE NAME")` | nothing at all |
+
+Both were legal, both read wrong, and every guard here stayed green. The second is worse:
+a DROPPED name reports the bash property MISSING, and MISSING is what drives `rc`.
+
+Latent rather than live -- no call site in the tree passes a trailing optional
+positionally -- but #1037 makes `allow_empty` a reason STRING, which is exactly the
+argument somebody writes positionally next to a name.
+
+**Closed in the signatures rather than patched in the reader.** `rows`, `row_set`,
+`plan_marker` and `plan_node` now take everything after the name as keyword-only, so the
+wrong call is a `TypeError` instead of a silently misread name:
+
+    Expect.rows() takes 4 positional arguments but 5 were given
+
+`test_no_later_argument_can_overtake_the_name` holds it, and it is a signature fact, which
+is what this guard is already good at reading. `cannot_run` needs no change: its name is
+argument 0 and nothing after it can overtake it.
 
 **The table is a hand-written derived value, so it is pinned.** The tool is deliberately
 standalone (`ast`, `re`, `sys`) and cannot import `Expect` to ask where each name sits.
@@ -3459,6 +3508,8 @@ two disagree.
 | `plan_marker` `None` -> `-1`, taking the key | its own arm, and the drift guard |
 | `cannot_run` `0` -> `-1`, taking the detail | its own arm |
 | a wrong entry for a helper no arm covers (`at_least`) | the drift guard, and the whole-tree arm |
+| add a helper to `Expect` whose name is not last | the drift guard, naming it |
+| revert any one of the four `*` keyword-only markers | `test_no_later_argument_can_overtake_the_name`, naming the helper |
 
 `test_the_ported_suites_in_this_tree_are_graded_one_for_one` catches all four. It is the
 arm that matters: a guard over invented sources proves the extractor reads python, not that
@@ -3480,4 +3531,5 @@ the tool grades THIS tree.
 | `test_cannot_run_names_its_reason_not_its_detail` | the only helper whose name is argument zero |
 | `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
 | `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
+| `test_no_later_argument_can_overtake_the_name` | nothing after the name may be passed positionally, so `-1` is true of every CALL and not just every signature |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |

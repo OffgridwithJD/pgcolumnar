@@ -304,6 +304,66 @@ def test_the_tools_table_agrees_with_the_signatures_it_describes(expect):
     expect.text(", ".join(recorded), "reason",
                 "cannot_run really does record its reason as the name")
 
+def test_no_later_argument_can_overtake_the_name(expect):
+    """`-1` is a claim about the CALL SITE, and the arm above only reads the SIGNATURE.
+
+    Found by @OffgridwithJD reviewing the change this file documents, inside the very
+    clause that fixed the vararg coincidence. The guard asks "which parameter carries the
+    name", which is a fact about the declaration. `-1` says "the last argument", which is
+    a fact about the call. They agree only while no OPTIONAL parameter sits after the
+    name, because an optional one may still be passed POSITIONALLY:
+
+        expect.rows(got, want, "THE NAME", "the reason")   -> read 'the reason'
+        expect.plan_marker(plan, "key", "THE NAME")        -> read nothing at all
+
+    Both were legal, both read wrong, and every guard in this file stayed green. The
+    second is the worse one: a DROPPED name reports the bash property MISSING, and
+    MISSING is what drives `rc`.
+
+    Latent rather than live -- no call site in the tree passes a trailing optional
+    positionally -- but #1037 makes `allow_empty` a reason STRING, which is exactly the
+    argument somebody writes positionally next to a name.
+
+    So the property is closed in the SIGNATURES rather than patched in the reader: every
+    parameter after the name is keyword-only, and this arm holds that. A wrong call is
+    then a `TypeError`, not a silently misread name.
+    """
+    src = (HERE / "pgc_vacuity.py").read_text()
+    klass = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.ClassDef) and n.name == "Expect"]
+    expect.num(len(klass), 1, "premise: exactly one Expect class to read")
+    helpers = [f for f in klass[0].body
+               if isinstance(f, ast.FunctionDef) and not f.name.startswith("_")
+               and [a.arg for a in f.args.args if a.arg != "self"]]
+    expect.at_least(len(helpers), 15, "premise: the helpers were found, not an empty list")
+
+    from compare_to_bash import _NAME_ARG
+
+    overtakable, checked = [], 0
+    for f in helpers:
+        params = [a.arg for a in f.args.args if a.arg != "self"]
+        checked += 1
+        if "name" not in params:
+            # Carried only as a keyword, or named something else (`cannot_run`, whose
+            # name is argument 0 and cannot be overtaken by anything after it).
+            continue
+        if _NAME_ARG.get(f.name, -1) is None:
+            # The table says NO positional argument carries the name, so the reader
+            # skips the call entirely. If `name` can still be written positionally the
+            # name is DROPPED, which reports the bash property MISSING and moves `rc`.
+            overtakable.append(f"{f.name}: the table reads no positional name, yet name "
+                               f"can be passed positionally")
+            continue
+        after = params[params.index("name") + 1:]
+        if after:
+            overtakable.append(f"{f.name}: {', '.join(after)} can be passed positionally "
+                               f"after name")
+
+    expect.num(checked, len(helpers), "inputs == sum(buckets): every helper was examined")
+    expect.text("; ".join(overtakable) or "none", "none",
+                "no positional argument can be written after the name and be read as it")
+
+
 def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     """THE STANDING ARM, and the reason this file is not only about fixtures.
 

@@ -438,7 +438,7 @@ class Expect:
         if got != want:
             raise AssertionError(f"{name}: got {got!r} want {want!r}")
 
-    def row_set(self, got, want, name, allow_empty=None):
+    def row_set(self, got, want, name, *, allow_empty=None):
         """Compare two result sets as SETS, order deliberately ignored.
 
         The counterpart to ordered_rows, and the port of pgc_set_hash. It exists so
@@ -645,7 +645,7 @@ class Expect:
 
     # -- row sets ----------------------------------------------------------
     @_resolving
-    def rows(self, got, want, name, allow_empty=None):
+    def rows(self, got, want, name, *, allow_empty=None):
         """Compare two result sets. Refuses two empty sides unless declared.
 
         Both sides empty is issue #418: it passes while asserting nothing, because
@@ -760,7 +760,7 @@ class Expect:
 
     # -- plans -------------------------------------------------------------
     @_resolving
-    def plan_node(self, plan, node_type=None, provider=None, name=None):
+    def plan_node(self, plan, *, node_type=None, provider=None, name=None):
         """Assert a node exists, by EXACT equality on a typed EXPLAIN JSON field.
 
         `EXPLAIN (FORMAT JSON)` arrives from psycopg as parsed Python, so there is
@@ -904,7 +904,7 @@ class Expect:
             )
 
     @_resolving
-    def plan_marker(self, plan, key, name=None, absent=False):
+    def plan_marker(self, plan, key, *, name=None, absent=False):
         """Assert a plan node carries (or does not carry) a Columnar property KEY.
 
         This is the faithful port of `pgc_is_columnar_scan` (`lib.sh`), which greps
