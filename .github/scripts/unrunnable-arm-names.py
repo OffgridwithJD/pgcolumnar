@@ -290,7 +290,13 @@ def main(testdir, show_emitters=False, keep_heredocs=False):
         print("refusal " + " ".join(f"{k}:{v}" for k, v in sorted(all_ref.items())))
         print("twins " + " ".join(f"{k}:{v}" for k, v in sorted(all_twin.items())))
         print("fixed " + " ".join(sorted(all_fixed)))
-    return 0
+    # THE EXIT CODE IS THE VERDICT. It was a flat 0 in the first version, so the
+    # tool printed two MISMATCH lines and reported success. Part 480 gates on the
+    # parsed output and was never fooled, but the next caller is the hazard: anyone
+    # wiring this into CI and trusting `$?` would get a gate that cannot fail.
+    # Reported by @jdatcmd, who re-measured it without a pipe before believing it,
+    # because the first reading was `tail`'s status and not this program's.
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

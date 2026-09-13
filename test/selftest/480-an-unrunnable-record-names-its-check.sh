@@ -92,18 +92,40 @@ check_num "the property, said one way" "$a" "$b"
 check_unrunnable "the property, said one way" UNMET_PRECONDITION "no fixture"
 PGC_FX_GOOD
 
-_un_fxout="$(python3 "$_un_py" "$_un_fx" 2>&1)" || _un_fxout="TOOL FAILED: $_un_fxout"
+# A SECOND FIXTURE DIRECTORY holding only the agreeing file, so the clean exit code
+# is measured on a corpus that HAS a refusal site rather than on one with nothing to
+# find -- those two report the same 0 and only one of them is evidence.
+_un_fxok="$(mktemp -d)"
+cp "$TESTDIR/lib.sh" "$_un_fxok/lib.sh"
+cp "$_un_fx/control.sh" "$_un_fxok/control.sh"
+
+# NO PIPE ON EITHER RUN. `$?` after a pipeline is the LAST stage's, which is how the
+# missing exit code first read as present (@jdatcmd).
+_un_fxout="$(python3 "$_un_py" "$_un_fx" 2>&1)"; _un_fxrc=$?
+_un_okout="$(python3 "$_un_py" "$_un_fxok" 2>&1)"; _un_okrc=$?
 
 check "the sweep REPORTS a name the file records only in its refusal branch" \
 	"$(printf '%s\n' "$_un_fxout" | grep -c '^MISMATCH offender.sh:2 the property, said another way$')" "1"
 check "and it stays silent on the same file with the names in agreement" \
 	"$(printf '%s\n' "$_un_fxout" | grep -c '^MISMATCH control.sh')" "0"
 
-rm -rf "$_un_fx"
+# THE EXIT CODE IS THE VERDICT, pinned in both directions. It was a flat 0 in the
+# first version of the tool: two MISMATCH lines printed and success reported. This
+# part gates on the parsed output and so was never fooled, which is exactly why the
+# hazard needs its own arm -- the next caller is the one that trusts `$?`.
+check "the sweep EXITS non-zero when it reports a mismatch" \
+	"$([ "$_un_fxrc" -ne 0 ] && echo yes || echo "no, rc=$_un_fxrc")" "yes"
+check "and exits zero on a corpus that has refusal sites and no mismatch" \
+	"$_un_okrc" "0"
+check "premise: that clean run had a refusal site to be silent ABOUT" \
+	"$(printf '%s\n' "$_un_okout" | sed -n 's/^compared \([0-9]*\)$/\1/p')" "1"
+
+rm -rf "$_un_fx" "$_un_fxok"
 
 # ---- the tree ---------------------------------------------------------------
 
 check "every unrunnable record names a check its own suite asserts (#1040)" \
 	"$_un_bad" ""
 
-unset _un_py _un_out _un_sites _un_dyn _un_cmp _un_ref _un_twins _un_bad _un_fx _un_fxout
+unset _un_py _un_out _un_sites _un_dyn _un_cmp _un_ref _un_twins _un_bad
+unset _un_fx _un_fxok _un_fxout _un_okout _un_fxrc _un_okrc

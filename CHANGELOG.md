@@ -60,6 +60,15 @@ true until the next version shipped.
   ported suites grade one-for-one under the widened extractor, with no change to the
   port and none to `pgc_vacuity.py`.
 
+  The sweep's exit code is the verdict. It was a flat zero in the first version, so the
+  tool printed two `MISMATCH` lines and reported success. The part gates on the parsed
+  output and was never fooled, which is exactly why the exit code needed its own arms
+  rather than an observation: the next caller is the one that trusts `$?`, and a gate that
+  cannot fail is a trap whether or not today's only caller steps in it. Three arms, because
+  pinning the non-zero side alone passes on a tool that always exits 1, and the clean side
+  alone passes on a corpus with nothing to find -- so the clean run uses a second fixture
+  directory that HAS a refusal site, with a premise asserting it. Reported by @jdatcmd.
+
 - The census re-derivation printed in `check_ledger_budget.txt` reads the wrong field
   and returns zero (#1040).
 
