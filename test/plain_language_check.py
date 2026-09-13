@@ -35,6 +35,18 @@ standard. They are listed separately so nobody mistakes a preference for a
 requirement:
 
   * No em dash or en dash, anywhere in the checked files.
+  * Every markdown table block carries a separator row. This is a STRUCTURE rule
+    rather than a language one, and it is here because nothing else in the gate
+    checks structure: the other four rules all pass over a table that has stopped
+    being a table. Measured case (#1026): a note and a second table spliced into
+    the middle of `configuration.md`'s argument table left six rows with no header,
+    and `docs_style.sh` passed with 14 checks. It was the second such splice in one
+    day; the first made an `awk RS=''` guard read two GUC rows as one record.
+
+    A blank line ends a markdown table, so a run of `|` lines that contains no
+    `| --- |` row renders as a headerless table or as literal pipes. Either way the
+    page is wrong in a way a reader sees and the gate did not.
+
   * No double hyphen used as a dash in prose. A double hyphen inside a fenced
     code block is a SQL comment and is left alone.
 
@@ -90,8 +102,49 @@ def sentences(text):
                     out.append(s)
     return out
 
+# A separator row: pipes, dashes, colons and spaces only. `| --- | :-: |` and
+# `|---|---|` both qualify; a row of prose does not.
+_SEPARATOR = re.compile(r'^\s*\|[\s:|-]+\|\s*$')
+
+
+def headerless_tables(text):
+    """[line numbers] of table blocks carrying no separator row.
+
+    BY LINE, tracking fences, rather than by stripping them with a regex. The regex
+    form used elsewhere in this file is fine for counting but loses line numbers, and
+    a report that cannot say WHERE is a report somebody has to re-derive. It also
+    survives an unclosed fence, where `re.sub(r'```.*?```')` does not.
+
+    A block is a contiguous run of lines whose first non-space character is a pipe.
+    A blank line, prose, or a heading ends it -- which is exactly the markdown rule
+    that makes the defect possible.
+    """
+    bad, in_fence, in_table, has_sep, start = [], False, False, False, 0
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            if in_table and not has_sep:
+                bad.append(start)
+            in_table = False
+            continue
+        if in_fence:
+            continue
+        is_row = line.lstrip().startswith("|")
+        if is_row and not in_table:
+            in_table, has_sep, start = True, False, n
+        elif not is_row and in_table:
+            if not has_sep:
+                bad.append(start)
+            in_table = False
+        if in_table and _SEPARATOR.match(line):
+            has_sep = True
+    if in_table and not has_sep:
+        bad.append(start)
+    return bad
+
+
 def violations(path):
-    """Count only the rules this project enforces: length, idiom, dashes."""
+    """Count only the rules this project enforces: length, idiom, dashes, tables."""
     t = open(path).read()
     sents = sentences(t)
     long_ = [s for s in sents if len(s.split()) > 25]
@@ -100,21 +153,25 @@ def violations(path):
     # A double hyphen in prose, but not one inside a fenced code block.
     prose = re.sub(r'```.*?```', '', t, flags=re.S)
     dbl = len(re.findall(r'\S -- \S', prose))
-    return long_, idiom, dashes, dbl
+    tables = headerless_tables(t)
+    return long_, idiom, dashes, dbl, tables
 
 
 def report(path):
-    long_, idiom, dashes, dbl = violations(path)
-    n = len(long_) + len(idiom) + dashes + dbl
+    long_, idiom, dashes, dbl, tables = violations(path)
+    n = len(long_) + len(idiom) + dashes + dbl + len(tables)
     if n == 0:
         print(f"  ok    {path}")
         return 0
     print(f"  FAIL  {path}: {len(long_)} long, {len(idiom)} idiom, "
-          f"{dashes} em/en dash, {dbl} prose double-hyphen")
+          f"{dashes} em/en dash, {dbl} prose double-hyphen, "
+          f"{len(tables)} headerless table")
     for s in long_[:5]:
         print(f"          {len(s.split())} words: {s[:88]}")
     for s in idiom[:5]:
         print(f"          idiom: {s[:88]}")
+    for ln in tables[:5]:
+        print(f"          headerless table block starting at line {ln}")
     return n
 
 if __name__ == '__main__':

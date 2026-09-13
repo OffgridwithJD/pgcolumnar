@@ -105,6 +105,7 @@ NO_CLUSTER = [
     # #752 docs. Reads docs/how-to.md and docs/best-practices.md. No cluster,
     # no driver: the public seam is the published page.
     "test_docs_join_clustering.py",
+    "test_docs_table_structure.py",
 ]
 
 
