@@ -36,13 +36,19 @@
 # test_mutation_ledger.py. That is the mechanism doing its job rather than a nuisance: had
 # it not moved, the job would have failed with "collected 274 test(s) but expected 272" and
 # named the drift instead of running a different suite than the one declared.
-# 277 -> 283 across two changes that each added three arms: test_docs_stripe_floor.py,
-# over the published pages, and test_docs_cover_the_corpus.py, about duplicated entries in
-# VACUITY_MODES.md. Both branches wrote 280, because each was derived against a tree that
-# held only its own three. The merge kept one of those lines and would have shipped 280
-# against a tree collecting 283. RE-DERIVED on the merged tree by the recipe above, which
-# is the only resolution a key-value file has: `283 tests collected`.
-guard_tests 283
+# 277 -> 290, across four changes that landed arms over the published pages and over
+# TESTS.md itself. WORTH THE PARAGRAPH, because the obvious resolution is wrong twice over.
+#
+# Three branches each added three arms to 277 and each derived 280, correctly, against a
+# tree holding only its own three. No number was a typo and no side was stale. Keeping
+# either side of such a merge ships a value no tree collects, and so does adding the deltas
+# up, because the deltas were measured against different trees.
+#
+# RE-DERIVE BY COLLECTION on the merged tree. That is the only resolution this file has, and
+# `--pgc-expect-tests` compares against exactly what collection reports:
+#
+#     290 tests collected
+guard_tests 290
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

@@ -108,6 +108,7 @@ NO_CLUSTER = [
     # #1017 docs. Reads configuration.md, administration.md and best-practices.md.
     # No cluster, no driver: the public seam is the published page.
     "test_docs_stripe_floor.py",
+    "test_docs_table_structure.py",
 ]
 
 
