@@ -18,6 +18,77 @@ true until the next version shipped.
 
 ### Added
 
+- `test/hilbert_cluster.sh` has a pytest twin: the Hilbert clustering SQL surface, graded
+  one-for-one (#432).
+
+  45 collected tests, 184 checks, across the bash suite's eight arms: the surface and its
+  refusals by SQLSTATE, "it only reorders", the recorded kind, the self-gate in every
+  direction, the single-column identity, the vacuum_sorted ruling, the daemon, and the
+  enumerations. `compare_to_bash.py` reports **0 MISSING** both as the tool ships today
+  (124 bash checks) and under the widened extractor in #1044 (133). The difference is that
+  suite's nine `check_unrunnable` sites, all of which are twinned, so this is the first
+  exercise of the widening on a suite that uses those helpers correctly rather than on the
+  one where they were broken.
+
+  TWO PLACES THE PORT ASSERTS SOMETHING THE ORIGINAL GETS FOR FREE, and they are one class:
+  wherever a port replaces a structural guarantee with a procedural one, it owes an arm the
+  original does not need.
+
+  The bash suite gives the daemon's naptime and thresholds to the server through
+  `PGC_EXTRA_CONF`, so they sit in `postgresql.conf` before the postmaster starts and the
+  suite cannot run without them. `pgc_cluster.py` has no such hook, so the port sets them
+  with `ALTER SYSTEM` and a reload, which is available because all three are `PGC_SIGHUP`
+  and which can silently fail to take effect. It would fail silently in the worst way: at
+  the default naptime the daemon still acts, the poll still sees the tail fold, and every
+  arm still passes while the values the fixture claims to have set were never in force. So
+  the three are read back from the server. The same for
+  `max_parallel_workers_per_gather = 0`, which the fixture set and nothing read until the
+  parity tool reported the bash suite's own premise as missing.
+
+  A RELOAD IS NOT A READ, and this one is inherited by any later port that changes
+  postmaster-level state. `ALTER SYSTEM SET pgcolumnar.autovacuum = on`, then
+  `pg_reload_conf()`, then `SHOW` on the same connection returned `off`: a reload signals
+  the postmaster and a backend already open absorbs it at its next command boundary, and
+  this module runs every statement through one connection by design. The bash suite never
+  meets it because every `q` is a fresh `psql`, so a new session here is the port of what
+  the original gets for free rather than a workaround.
+
+  Every conditional `check_unrunnable` in the bash suite is its own test here.
+  `expect.cannot_run()` records under the reason code, so two refusals in one test would
+  collapse onto a single `UNMET_PRECONDITION` record and neither could be told from the
+  other.
+
+  THE DAEMON ARM RECORDS HOW LONG IT WAITED, not only that it succeeded. A fixture one
+  poll from its window and one fourteen from it produce identical greens, so the count is
+  the only thing that distinguishes them and drift toward the bound is otherwise
+  invisible. Measured on all five assert builds, each run on its own:
+
+      PG15  PG16  PG17  PG18  PG19
+         1     1     1     1     1     poll(s) of 15, at a 2s naptime
+
+  READ THAT FOR WHAT IT DOES NOT SAY. One poll on every major means the loop NEVER
+  WAITED: the condition was true on the first check each time, so nothing in those runs
+  exercised the waiting at all, and a loop that always succeeds on poll one is
+  indistinguishable from no loop. The distribution is a SINGLE POINT, taken on an idle
+  container, and the case the bound will actually meet is a shared and loaded CI runner --
+  this repository has that divergence recorded elsewhere as 0 in 400 idle runs against 6
+  in 400 under load. So: **one poll on each of five majors on an idle container; the bound
+  of 5 is four above the only value ever observed; no loaded measurement exists.** A reader
+  who meets a red at six is the first person to see the loop do its job, rather than
+  someone looking at a regression.
+
+  The count is printed by the fixture, and pytest captures fixture stdout on a PASSING
+  run, so `-s` is what surfaces it; on a failing run the arm's own message carries the
+  number, which is where it is needed.
+
+  This is the one part of the change with a single source of evidence: @jdatcmd reviewed
+  the rest but has no PostgreSQL on their host, said so rather than offering a reading of
+  the loop, and the five-major measurement above is the only one that exists.
+
+  What the port does NOT buy is stated in the file: over one column the Hilbert index and
+  the Morton index are both the identity, so the single-column arm is green on a relabelled
+  Z-order implementation by construction. Four arms refuse one, and no others.
+
 - An unrunnable record names the check it stands in for, so a refused check keeps
   one ledger key instead of two (#1040).
 

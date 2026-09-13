@@ -82,6 +82,7 @@ behaviour, the source of that number is named.
 - [34. test_docs_stripe_floor.py: the stripe floor is below a vector](#34-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 - [35. test_projection_privilege.py: the projection read helpers are a privilege boundary](#35-test_projection_privilegepy-the-projection-read-helpers-are-a-privilege-boundary)
 - [36. test_compare_to_bash.py: the parity tool reads the NAME](#36-test_compare_to_bashpy-the-parity-tool-reads-the-name)
+- [37. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#37-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
 
 ## 1. How to read a test in here
 
@@ -3740,3 +3741,98 @@ the tool grades THIS tree.
 | `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
 | `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
+
+## 37. test_hilbert_cluster.py: the Hilbert clustering SQL surface
+
+The port of `test/hilbert_cluster.sh` (#432, #889's SQL half). The bash suite pins the SQL
+surface of `pgcolumnar.cluster_hilbert` and `recluster_hilbert`, the recorded
+`sorted_kind`, the self-gate and the daemon. `test/hilbert_curve.sh` pins the CURVE itself
+in C and neither file re-tests the other; this port keeps that division.
+
+**45 collected tests, 184 checks, over the bash suite's eight arms.** Graded one-for-one:
+`compare_to_bash.py` reports **0 MISSING** both as the tool ships (124 bash checks) and
+with #1044's widened extractor (133), the difference being the suite's nine
+`check_unrunnable` sites, all of which are twinned.
+
+### Where the port asserts something the original gets for free
+
+Two of them, and both are the same class: **wherever a port replaces a STRUCTURAL
+guarantee with a PROCEDURAL one, it owes an arm the original does not need** (@jdatcmd).
+
+The bash suite hands the daemon's naptime and thresholds to the server through
+`PGC_EXTRA_CONF`, so they are in `postgresql.conf` before the postmaster starts and the
+suite cannot run without them. `pgc_cluster.py` has no such hook, so the port sets them
+with `ALTER SYSTEM` and a reload -- available because all three are `PGC_SIGHUP`. That can
+silently not take effect, and then every S7 arm still passes: at default naptime the daemon
+still acts and the poll still sees the tail fold. So the three values are read back from
+the server. The arm failed on its first run with `got '2s/0.2/0.05'` -- `SHOW` returns the
+unit -- which is the cheapest demonstration that it reads the server rather than restating
+the `ALTER SYSTEM` above it.
+
+The same for `max_parallel_workers_per_gather = 0`: the fixture SET it and nothing read it
+back until the parity tool reported the bash suite's premise as MISSING.
+
+### A reload is not a read
+
+`ALTER SYSTEM SET pgcolumnar.autovacuum = on`, `pg_reload_conf()`, then `SHOW` on the same
+connection returned **`off`**. A reload signals the postmaster and a backend already open
+absorbs it at its next command boundary; this module runs every statement through ONE
+connection, by design. The bash suite never meets it because every `q` is a fresh `psql`.
+`_show_fresh()` opens a new session for post-reload reads -- the port of what the original
+gets for free, not a workaround, and inherited by any later port that changes
+postmaster-level state.
+
+### Three refusals that the port must express differently
+
+`expect.cannot_run()` records under the REASON code, so two refusals in one test collapse
+onto a single `UNMET_PRECONDITION` record. Every conditional `check_unrunnable` in the bash
+suite is therefore its own test here: S3's two curve comparisons, S4's three
+layout-after-a-gated-call arms, and S7's two daemon-layout arms.
+
+### What buys the curve, and what does not
+
+Four arms refuse a relabelled Z-order implementation, and no others: S3's two
+`three different physical orders` arms, S4(d)'s `is NOT the ZORDER rewrite`, and S7's
+`is NOT the zorder layout`. **S5 is green on a relabelled implementation by construction** --
+over one column the Hilbert index and the Morton index are both the identity -- so it buys
+the surface and the recorded kind and must never be read as evidence of Hilbertness.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_the_two_digests_are_the_instruments_this_file_thinks_they_are` | the ordered oracle is order-sensitive and the set oracle is not; invisible to the parity tool because the bash names live in `lib.sh` |
+| `test_parallelism_is_off_so_a_scan_order_is_a_fact_about_the_layout` | a digest is about the layout and not about scheduling |
+| `test_the_refusal_fixture_and_its_roles_are_this_runs` | the fixture holds rows, the role owns nothing, can open a session, and holds EXECUTE and schema USAGE -- so a 42501 can only be the owner check |
+| `test_each_new_verb_refuses_what_its_sibling_refuses` | four inputs x two verb pairs, each new verb's SQLSTATE compared against the established verb's on the identical input |
+| `test_the_probe_can_report_both_success_and_an_unreachable_session` | the probe can say noerror, and can say it never reached the server |
+| `test_the_reorder_fixture_is_measurable_before_anything_moves` | 20 groups, the set matches the heap mirror, the order digest is stable, the plan is the columnar scan |
+| `test_cluster_hilbert_reorders_without_changing_the_row_set` | same rows, different order -- neither half stands alone |
+| `test_physlayout_is_blind_to_an_eager_rewrite` | the instrument's limit, pinned on plain `cluster()` so it cannot be perturbed by #889 |
+| `test_the_three_fixtures_and_the_owner_role_are_measurable` | three fixtures from one generator, and the catalog really is closed to the owner |
+| `test_each_verb_moved_its_own_table_from_its_own_baseline` | without this, "different from each other" is satisfied by insert order |
+| `test_the_kind_is_recorded_and_the_owner_can_read_it` | both routes: the superuser catalog and the owner's reporter |
+| `test_the_owner_alone_can_tell_the_three_kinds_apart` | asserted as a NAMED SET, so no NULL can stand in for one |
+| `test_the_three_kinds_stand_for_three_physical_orders` | the eager verb's curve defence, UNRUN unless both legs moved |
+| `test_the_gate_is_closed_on_an_already_hilbert_table` | (a) 0 groups, kind untouched |
+| `test_the_gated_call_left_the_layout_byte_identical` | UNRUN unless the return really was 0 |
+| `test_the_same_call_does_work_once_a_tail_is_appended` | the positive control: the fifth direction, and what the daemon depends on |
+| `test_the_gate_closes_again_on_the_refolded_table` | (a3) |
+| `test_the_refolded_layout_is_byte_identical_again` | (a3), gated the same way |
+| `test_the_gate_opens_for_a_zorder_table_over_the_same_columns` | (b), with the label asserted WITH the bytes |
+| `test_plain_recluster_is_a_noop_on_a_hilbert_table` | (c) THE RULING: the curve is sticky |
+| `test_the_noop_recluster_left_the_layout_byte_identical` | (c), gated |
+| `test_a_different_key_rewrites_in_both_directions` | (d) the gate must DISCRIMINATE |
+| `test_the_online_hilbert_rewrite_is_not_the_zorder_rewrite` | the online verb's only curve defence, gated on both rewrites |
+| `test_over_one_column_both_curves_are_the_identity` | S5: surface and identity, never the curve |
+| `test_vacuum_sorted_leaves_a_hilbert_table_alone` | S6, the reading of the ruling this suite pins |
+| `test_vacuum_sorted_still_works_on_a_table_with_no_recorded_kind` | the removal proof: it must not no-op on everything |
+| `test_the_daemon_fixtures_are_built_with_the_daemon_off` | the launcher is up, the daemon is off, and the thresholds took |
+| `test_the_two_hand_driven_references_are_built_and_folded` | both references folded, and av_hi does not yet match |
+| `test_the_two_references_are_two_different_layouts` | UNRUN unless both folded |
+| `test_the_daemon_reclustered_the_decayed_hilbert_table` | THE RULING through the daemon, with its own log line naming the dispatch |
+| `test_the_layout_the_daemon_produced_is_a_hilbert_layout` | gated on av_hi not already matching |
+| `test_the_daemons_layout_is_not_the_zorder_layout` | the daemon's curve defence, gated the same way |
+| `test_the_install_script_and_the_catalog_agree_on_the_symbol_set` | S8, symbols resolved from the AS clause and never derived |
+| `test_each_new_verb_is_installed_and_its_symbol_declared` | installed once, C, and declared |
+| `test_each_new_verb_has_its_siblings_signature` | args, VARIADIC element and return type, compared against the sibling rather than retyped |

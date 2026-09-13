@@ -113,4 +113,9 @@ guard_tests 316
 # is not IN it.
 #
 # Re-derived by collection on the merged tree: `219 tests collected`.
-cluster_tests 219
+# 219 -> 264 when test_hilbert_cluster.py landed: the port of the Hilbert clustering
+# SQL surface (#432, #889's SQL half), 45 collected tests across the bash suite's eight
+# arms. FORTY-FIVE COLLECTED, NOT FORTY-FIVE FUNCTIONS -- S1's refusal matrix is one
+# function parametrized over four inputs and two verb pairs. Re-derived by collection on
+# the merged tree, per the recipe above: `264 tests collected`.
+cluster_tests 264

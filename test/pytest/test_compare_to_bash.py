@@ -475,6 +475,19 @@ def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
 
     Only the pairs that reach zero today are listed. A pair with a real gap is not pinned to
     its gap: that would turn the gap into the expected state.
+
+    THE LIST IS HAND-WRITTEN FOR THAT REASON AND NOTHING ENFORCES IT, which is a
+    different thing from the reason being wrong. The comment below already says a new
+    port belongs here; no arm reddens when one does not arrive. Today the list happens
+    to equal the pairs that exist, so nothing has ever been silently ungraded -- but an
+    eighth complete pair omitted would leave this arm passing while it graded seven,
+    which is absent-from-the-list and no-gap-found producing the same green.
+
+    #1046 TRACKS MAKING THIS ASSERTION TWO-DIRECTIONAL, in the shape `SHELL_REFERENCES`
+    already uses: derive the pairs that EXIST and require the declared list to equal that
+    set. It is not a tidy-up -- it changes what happens to an INCOMPLETE port, which is
+    quietly absent today and would have to redden, so the issue records the design
+    question rather than settling it. Kept out of the PR that added the eighth pair.
     """
     from compare_to_bash import main
     import contextlib
@@ -484,9 +497,9 @@ def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     # EVERY pair in the tree. When a new port lands it belongs here, and when one
     # cannot reach zero the reason belongs in its own file rather than in an omission
     # from this list.
-    complete = ["differential", "hilbert_locality", "native_ownership",
-                "native_projection", "projection_privilege", "stats_privilege",
-                "zonemap_boundaries"]
+    complete = ["differential", "hilbert_cluster", "hilbert_locality",
+                "native_ownership", "native_projection", "projection_privilege",
+                "stats_privilege", "zonemap_boundaries"]
     verdicts = {}
     for stem in complete:
         sh, py = root / "test" / f"{stem}.sh", HERE / f"test_{stem}.py"
