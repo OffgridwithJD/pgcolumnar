@@ -75,7 +75,12 @@
 # and this branch's REASON check are complementary, and pgc_vacuity.py kept both.
 # Re-derived by collection on the merged tree: the two 307s and the 310 that
 # preceded this are each right for a DIFFERENT tree and none of them is this one.
-guard_tests 313
+# 313 -> 316 when the bash-side extractor was widened to every check helper lib.sh
+# defines (#1040): a drift guard re-deriving that list from lib.sh's DEFINITIONS, a
+# shadowing arm (check_ratio is a prefix of check_ratio_needs_quiet_machine), and one
+# pinning the four suite-local helpers as knowingly out of scope.
+# Re-derived by collection against main 0d17a87: `316 tests collected`.
+guard_tests 316
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

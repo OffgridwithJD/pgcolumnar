@@ -35,6 +35,7 @@ would agree with itself.
 
 import ast
 import pathlib
+import re
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -294,6 +295,7 @@ def test_the_tools_table_agrees_with_the_signatures_it_describes(expect):
 
     # The one hand-written semantic claim above, pinned against the body it describes:
     # read cannot_run's own `_record(...)` call and check which parameter it names.
+    #
     fn = [f for f in helpers if f.name == "cannot_run"]
     expect.num(len(fn), 1, "premise: cannot_run is among the helpers read")
     recorded = [kw.value.id for call in ast.walk(fn[0])
@@ -362,6 +364,105 @@ def test_no_later_argument_can_overtake_the_name(expect):
     expect.num(checked, len(helpers), "inputs == sum(buckets): every helper was examined")
     expect.text("; ".join(overtakable) or "none", "none",
                 "no positional argument can be written after the name and be read as it")
+
+
+def test_the_extractor_reads_every_check_helper_lib_sh_defines(expect):
+    """THE BASH-SIDE DRIFT GUARD (#1040), and the mirror of the table guard above.
+
+    The extractor read five of the eight check helpers `lib.sh` defines. The other
+    three -- `check_unrunnable`, `check_skip`, `check_ratio_needs_quiet_machine` --
+    matched no branch of its pattern, so a bash property asserted through any of
+    them was invisible, was never reported MISSING, and could not move `rc`.
+
+    **A pair could therefore be declared one-for-one on the strength of the grader's
+    blind spot**, which is what `hilbert_locality` was: two of the four properties
+    its unrunnable branch records had no counterpart in the port at all.
+
+    The helper list is hand-written, for the same reason `_NAME_ARG` is: the tool
+    stays standalone. So it is pinned the same way -- this reads the DEFINITIONS out
+    of `lib.sh` and fails with the helper named when the two part company. Add a
+    `check_whatever()` to `lib.sh` and this goes red before a suite using it is
+    silently ungraded.
+
+    Suite-LOCAL helpers are deliberately not in scope here; that is asserted, with
+    its reason, in the arm below.
+    """
+    from compare_to_bash import _BASH_HELPERS
+
+    lib = (HERE.parent / "lib.sh").read_text()
+    # `check` or `check_<something>`. NOT `check[a-z_]*`, which also matches
+    # `checks_in` -- a COUNTING utility in decode_interrupts.sh that returns a
+    # number and records nothing. Define the population before counting it.
+    defined = set(re.findall(r'^(check(?:_[a-z_]+)?)\(\)\s*\{', lib, re.M))
+    expect.at_least(len(defined), 8,
+                    "premise: lib.sh's check helpers were found, not an empty set")
+
+    missing = sorted(defined - set(_BASH_HELPERS))
+    extra = sorted(set(_BASH_HELPERS) - defined)
+    expect.text(", ".join(missing) or "none", "none",
+                "every check helper lib.sh defines is one the extractor reads")
+    expect.text(", ".join(extra) or "none", "none",
+                "and the extractor claims no helper lib.sh does not define")
+    expect.num(len(_BASH_HELPERS), len(defined),
+               "inputs == sum(buckets): the two lists are the same size")
+
+
+def test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one(expect):
+    r"""`check_ratio` is a PREFIX of `check_ratio_needs_quiet_machine`.
+
+    THE PRE-#1040 PATTERN COULD NOT READ THE LONGER ONE AT ALL, and that is what this
+    holds. `check(?:_num|_ratio|_text|_timing)?\s+"` matches `check_ratio`, wants
+    whitespace, finds `_needs...`, backtracks to the empty option, wants whitespace
+    after `check`, and fails. Measured on the fixture below: the old form reads
+    `['short']`, the current one reads `['short', 'long']`.
+
+    WHAT THIS ARM DOES NOT HOLD, said out loud because the code reads as though it
+    does: the entries are listed longest-first, and that ordering is NOT load-bearing.
+    Python's `re` backtracks across alternatives, so a PURE REORDER putting
+    `check_ratio` first reads both names identically -- measured, and this arm stays
+    green under it. The order is the thing that looks decisive and is not; the pattern
+    SHAPE is the thing that is.
+    """
+    import re as _re
+    from compare_to_bash import _BASH_PATTERN
+    src = ('\tcheck_ratio "the short one" "$a" "$b" 2\n'
+           '\tcheck_ratio_needs_quiet_machine "the long one" "$a" "$b" 2\n')
+    got = _re.findall(_BASH_PATTERN, src)
+    expect.text(", ".join(sorted(got)), "the long one, the short one",
+                "both are read; the longer name is not eaten by the shorter")
+
+
+def test_the_suite_local_helpers_are_known_and_excluded(expect):
+    """Four helpers are defined by ONE suite each, and the extractor does not read
+    them. That is a scope decision and it is asserted rather than left implicit.
+
+    `compare_to_bash.py` grades a `test/<stem>.sh` against a
+    `test/pytest/test_<stem>.py`. None of the four suites defining its own helper
+    has a pytest twin, so none is graded and the exclusion costs nothing TODAY.
+    The day one of them is ported, this arm is what says the grader cannot see it.
+
+    The population is `check_<something>`, which is not the same as "starts with
+    check": `checks_in` in `decode_interrupts.sh` is a COUNTING utility returning a
+    number of interrupt checks in a function body, and records nothing. It was in
+    this list until the arm printed it and the definition was read.
+    """
+    root = HERE.parent
+    local = {}
+    for sh in sorted(root.glob("*.sh")):
+        if sh.name == "lib.sh":
+            continue
+        for h in re.findall(r'^(check_[a-z_]+)\(\)\s*\{', sh.read_text(), re.M):
+            local.setdefault(h, sh.name)
+    expect.text(", ".join(f"{h} ({f})" for h, f in sorted(local.items())),
+                "check_float (parquet_export_stats.sh), "
+                "check_reconstruct (parallel_copy.sh), "
+                "check_split_happened (parallel_copy.sh), "
+                "check_structure (parallel_copy.sh)",
+                "the suite-local helpers are exactly these four")
+    twinned = [f for h, f in local.items()
+               if (HERE / f"test_{f[:-3]}.py").exists()]
+    expect.num(len(twinned), 0,
+               "and none of their suites has a pytest twin, so none is graded today")
 
 
 def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
