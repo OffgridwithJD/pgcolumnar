@@ -1297,6 +1297,42 @@ true until the next version shipped.
 
 ### Fixed
 
+- `compare_to_bash.py` read five of the eight check helpers `lib.sh` defines
+  (#432, #1040).
+
+  The bash side of the parity tool matched
+  `check(?:_num|_ratio|_text|_timing)?`, so `check_unrunnable`, `check_skip` and
+  `check_ratio_needs_quiet_machine` were invisible. A property asserted through one of
+  the three was never reported MISSING and could not move `rc`, which means **a pair
+  could grade one-for-one on the strength of the grader's blind spot.**
+  `hilbert_locality` was exactly that, and #1041 closed the two properties it was
+  hiding.
+
+  It never drifted out of date: `0cbf574` introduced that pattern, and
+  `check_unrunnable` already had 21 call sites that day. Same defect shape as the
+  python side in #1036 and #1038 -- a rule true of most of a class taken for a
+  property of the class -- sitting on the other side of the same tool for five days.
+
+  The helper list is hand-written, so it is pinned the way `_NAME_ARG` is: an arm
+  re-derives it from `lib.sh`'s DEFINITIONS and fails with the helper named. Two more
+  arms state what the tool does not cover -- the four suite-local helpers
+  (`check_structure`, `check_reconstruct`, `check_split_happened`, `check_float`),
+  none of whose suites has a pytest twin, and the pattern shape that used to make a
+  prefix unreadable.
+
+  **The longest-first ordering is NOT what makes that work, and the code said
+  otherwise until it was measured.** Python's `re` backtracks across alternatives, so
+  a pure reorder reads both names identically. What the old pattern could not do was
+  read `check_ratio_needs_quiet_machine` at all: it matches `check_ratio`, wants
+  whitespace, finds `_needs`, backtracks to the empty option, wants whitespace after
+  `check`, and fails. Measured on a fixture holding both, the old form reads
+  `['short']` and this one reads `['short', 'long']`. The arm pins the pattern shape;
+  the ordering is readability.
+
+  The population is `check` or `check_<something>`, not `check[a-z_]*`: the loose form
+  also matches `checks_in` in `decode_interrupts.sh`, a counting utility that returns a
+  number and records nothing.
+
 - `compare_to_bash.py` read the wrong argument for the four helpers whose name is not
   last (#432, #1036).
 

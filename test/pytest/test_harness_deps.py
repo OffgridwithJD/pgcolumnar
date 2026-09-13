@@ -1127,6 +1127,18 @@ if __name__ == "__main__":
 # rather than by pattern, which is the only way to tell the first from a string the
 # code actually passes to bash.
 
+# THE SCAN IS THIS DIRECTORY, AND THAT IS DELIBERATE (jd, 2026-09-13). The inventory is
+# the PYTEST CORPUS'S SELF-GUARD. Tooling under `.github/scripts/` belongs to neither
+# harness -- it is CI's, and a tool there reading both sides is what it is for -- so it
+# is out of scope rather than exempt, and two such tools do read `test/*.sh` today.
+#
+# Recorded because the distinction is invisible from the output and was inferred wrongly
+# once: absent-from-the-report and outside-the-scan produce identical evidence, and a
+# reader who meets the second and concludes the first will also conclude that MOVING a
+# file to `.github/scripts/` deletes its crossing. Under this reading a move there is
+# defensible on design grounds -- that is where cross-harness tooling lives -- but never
+# because it makes this arm stop reporting the file.
+#
 # THE DESCRIPTIONS NAME NO FILE, and that is not squeamishness: the first version
 # spelled the helper library's path in them, and the detector flagged THIS file for its
 # own inventory -- four files where the tree has three. The mechanism is what the entry
@@ -1144,6 +1156,12 @@ SHELL_REFERENCES = {
     "test_mutation_ledger.py":
         "executes the matrix runner with its list flag to get the registered suite "
         "list, which is the same mechanism the entry above uses",
+    "test_compare_to_bash.py":
+        "reads the shell harness's helper library to re-derive the parity tool's "
+        "check-helper list from the definitions themselves, so the list the grader "
+        "matches on cannot become a hand-maintained copy that rots apart from it "
+        "(#1040, where five of eight helpers had been unreadable since the pattern "
+        "shipped)",
 }
 
 _SHELL_NAMES = re.compile(

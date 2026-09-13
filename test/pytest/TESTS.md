@@ -3657,6 +3657,48 @@ standalone (`ast`, `re`, `sys`) and cannot import `Expect` to ask where each nam
 out of `pgc_vacuity.py`, recomputes every entry, and fails with the helper named when the
 two disagree.
 
+### The BASH side had the same blind spot, and it shipped that way (#1040)
+
+Everything above is about the python side. The bash side read five of the eight check
+helpers `lib.sh` defines:
+
+    check  check_num  check_text  check_ratio  check_timing        READ
+    check_unrunnable  check_skip  check_ratio_needs_quiet_machine  INVISIBLE
+
+A property asserted through one of the three was never reported MISSING and could not
+move `rc`, so **a pair could grade one-for-one on the strength of the grader's blind
+spot.** `hilbert_locality` was exactly that: two of the four properties its unrunnable
+branch records had no counterpart in the port, and #1041 closed them.
+
+It never drifted out of date. `0cbf574` introduced the pattern, and `check_unrunnable`
+already had 21 call sites that day.
+
+All eight take the check NAME as `$1`, so one pattern serves them all. That is a
+property of these helpers rather than of bash, which is why the drift guard re-reads it
+from `lib.sh` instead of trusting it.
+
+`check_ratio` is a prefix of `check_ratio_needs_quiet_machine`, and **the old pattern
+shape could not read the longer one at all**: `check(?:_num|_ratio|_text|_timing)?\s+"`
+matches `check_ratio`, wants whitespace, finds `_needs...`, backtracks to the empty
+option, wants whitespace after `check`, and fails. Measured on a fixture holding both,
+the old form reads `['short']` and the current one reads `['short', 'long']`.
+
+**The entries are listed longest-first for readability, and that ordering is NOT what
+makes it work.** Python's `re` backtracks across alternatives, so a pure reorder reads
+both names identically -- measured, and the arm stays green under it. Said explicitly
+because the list LOOKS as though its order is load-bearing, and the arm pins the pattern
+shape rather than the order.
+
+**Suite-local helpers are out of scope, asserted rather than assumed.** Four suites
+define one of their own (`check_structure`, `check_reconstruct`, `check_split_happened`
+in `parallel_copy.sh`, `check_float` in `parquet_export_stats.sh`) and none has a pytest
+twin, so none is graded. An arm holds both halves, so the day one is ported the grader's
+limit is stated rather than discovered.
+
+The population is `check` or `check_<something>`, **not** `check[a-z_]*`: the loose form
+also matches `checks_in` in `decode_interrupts.sh`, a counting utility that returns a
+number and records nothing.
+
 ### Removal proof
 
 | mutation | red |
@@ -3694,4 +3736,7 @@ the tool grades THIS tree.
 | `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
 | `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
 | `test_no_later_argument_can_overtake_the_name` | nothing after the name may be passed positionally, so `-1` is true of every CALL and not just every signature |
+| `test_the_extractor_reads_every_check_helper_lib_sh_defines` | the BASH-side drift guard: the helper list re-derived from `lib.sh`'s definitions |
+| `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
+| `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |

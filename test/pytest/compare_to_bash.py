@@ -207,6 +207,51 @@ _BASH_INTERP = re.compile(
     r'\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9]+|\$[@*#?]')
 
 
+# EVERY CHECK HELPER `lib.sh` DEFINES, and the pattern built from it (#1040).
+#
+# This read five of the eight. `check_unrunnable`, `check_skip` and
+# `check_ratio_needs_quiet_machine` matched no branch, so a bash property asserted
+# through any of them was INVISIBLE: never reported MISSING, never able to move `rc`,
+# and therefore a pair could grade one-for-one because the grader could not see the
+# gap. `hilbert_locality` was exactly that -- two of the four properties its
+# unrunnable branch records had no counterpart in the port.
+#
+# All eight take the check NAME as `$1`, so one pattern serves them all; that is a
+# property of these helpers rather than of bash, and the drift guard re-reads it.
+#
+# `check_ratio` is a prefix of `check_ratio_needs_quiet_machine`, and the OLD pattern
+# shape could not read the longer one at all: `check(?:_num|_ratio|_text|_timing)?\s+"`
+# matches `check_ratio`, needs whitespace, finds `_needs...`, backtracks to the empty
+# option, needs whitespace after `check`, and fails. Measured on a fixture holding both:
+# the old form reads ['short'], this one reads ['short', 'long'].
+#
+# The entries are written longest-first for readability. **That ordering is NOT what
+# makes it work** -- Python's `re` backtracks across alternatives, so a pure reorder
+# reads both names identically (measured). An arm pins the BEHAVIOUR rather than the
+# order, because the order is the thing that looks load-bearing and is not.
+#
+# Hand-written so the tool stays standalone, and pinned like `_NAME_ARG`:
+# `test_compare_to_bash.py` reads the DEFINITIONS out of `lib.sh` and fails with the
+# helper named when the two part company.
+#
+# SUITE-LOCAL HELPERS ARE OUT OF SCOPE, deliberately. Four suites define one of their
+# own (`check_structure`, `check_reconstruct`, `check_split_happened` in
+# `parallel_copy.sh`, `check_float` in `parquet_export_stats.sh`) and none of the four
+# has a pytest twin, so none is graded. An arm asserts both halves of that.
+_BASH_HELPERS = (
+    "check_ratio_needs_quiet_machine",
+    "check_unrunnable",
+    "check_timing",
+    "check_ratio",
+    "check_text",
+    "check_skip",
+    "check_num",
+    "check",
+)
+
+_BASH_PATTERN = (r'\b(?:' + "|".join(_BASH_HELPERS) + r')\s+"([^"]+)"')
+
+
 def _template(name):
     """-> the name with every interpolation reduced to `{}`.
 
@@ -218,8 +263,7 @@ def _template(name):
 
 def main(bash_file, py_file):
     """-> the exit status: 1 when a bash property has no counterpart."""
-    bash_names = re.findall(
-        r'\bcheck(?:_num|_ratio|_text|_timing)?\s+"([^"]+)"', open(bash_file).read())
+    bash_names = re.findall(_BASH_PATTERN, open(bash_file).read())
     py_names = _py_names(open(py_file).read())
 
     bset, pset = set(bash_names), set(py_names)
