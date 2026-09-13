@@ -578,6 +578,26 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
+- A fetching index scan on a correlated key stayed cheaper than the custom scan
+  through ~50,000 rows, while doing about 27x the work (#913).
+
+  The index-fetch penalty prices distinct row-group decodes. On a clustered key
+  that count is ceil(rows / stripe), so it does not grow through the first group.
+  Core's heap-fetch cost grows with rows; the extra columnar work of reconstructing
+  each fetched row after the group is cached did not. The 50,000-row range then
+  stayed on the index (cost 2243 against the custom scan's 2504) while the point
+  lookup was already correctly on it.
+
+  The per-row term is `cpu_tuple_cost * rows * decodeUnits`, the same units #503
+  uses for a projection. It is not a conversion from heap instructions-per-cost:
+  #766 showed that conversion predicts the wrong winner. Uncapped it grows with
+  the whole table and costs a clustered ORDER BY off its index (#355). Cap it at
+  half a group: that is enough to move the 50,000-row range and small enough to
+  leave the ordered scan on the index.
+
+  Plan choice is the property, not a cost number: at 50,000 rows the planner now
+  picks the custom scan; a point lookup still uses the index; a clustered ORDER BY
+  stays on the index; both paths return the same aggregate.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
@@ -2301,6 +2321,7 @@ true until the next version shipped.
   rather than measured. It is the gap to close if the default is ever doubted.
 
 ### Fixed
+
 
 - The standing parity arm graded a hand-written list, and nothing enforced it
   (#432, #1046).

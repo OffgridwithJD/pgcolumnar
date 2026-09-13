@@ -89,6 +89,7 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
+- [44. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#44-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 
 ## 1. How to read a test in here
 
@@ -4338,3 +4339,20 @@ Removal proof, run on both harnesses: restore `META.json` as it shipped and the 
 substantive arms redden on each side while every premise stays green. The premises
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
+
+## 44. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
+
+#913. A fetching index scan on a correlated key is priced below the custom scan
+through ~50,000 rows, while it does about 27x the work. The penalty term exists
+for this; the measurement says it is too small. Split from #766, which closed
+on the opposite question.
+
+This file asserts the PLAN, not a cost number. Costs drift with the constants.
+The chosen node is the property.
+
+Independent of `test/index_fetch_penalty_crossover.sh`. Same public seam, own
+fixture, own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
