@@ -3461,9 +3461,14 @@ Individual suites define four more of their own (`check_structure`,
 `check_reconstruct`, `check_split_happened` in `parallel_copy.sh`, `check_float` in
 `parquet_export_stats.sh`), invisible to the same regex.
 
-**50 invisible invocations**, reconciled between two agents and two independent methods,
-which agree helper for helper: `check_unrunnable` 25, `check_skip` 23,
+**50 invisible invocations over `test/*.sh`**, reconciled between two agents and two
+independent methods, which agree helper for helper: `check_unrunnable` 25, `check_skip` 23,
 `check_ratio_needs_quiet_machine` 2.
+
+**The population is half the number.** `test/*.sh` is the 265 top-level suites, which are
+the only files the tool grades. Globbing `test/**/*.sh` instead adds the harness selftests
+and gives **56**, the extra 6 all in `test/selftest/`, which `compare_to_bash.py` never
+reads. Neither number is wrong; a number without its population is.
 
 Getting there took four sweeps that read 89, 64, 54 and 50, and the three wrong ones were
 not method-sensitivity -- they were two defects, both worth knowing because any later
