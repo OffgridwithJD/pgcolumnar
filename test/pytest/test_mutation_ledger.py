@@ -507,7 +507,7 @@ def test_a_log_that_does_not_parse_is_not_evidence(tmp_path, expect):
     led = _w(tmp_path, "l.tsv", "")
     cases = {
         "no reason field": "RESULT\tdemo\tpart1\ta name\tPASS\nchecks run: 1\n",
-        "a verdict the emitter cannot emit": "RESULT\tdemo\tpart1\ta name\tBOGUS\t\nchecks run: 1\n",
+        "a verdict the emitter cannot emit": "RESULT\tdemo\tpart1\ta name\tBOGUS\t18\t\nchecks run: 1\n",
         "an empty check name": "RESULT\tdemo\tpart1\t\tPASS\t18\t\nchecks run: 1\n",
         "a count that disagrees with the records": "RESULT\tdemo\tpart1\ta name\tPASS\t18\t\nchecks run: 2\n",
         "no count at all": "RESULT\tdemo\tpart1\ta name\tPASS\t18\t\n",
@@ -516,6 +516,14 @@ def test_a_log_that_does_not_parse_is_not_evidence(tmp_path, expect):
         log = _w(tmp_path, "bad.log", text)
         expect.num(_run("merge", "--ledger", led, "--date", "2026-09-10", log)[1], 2,
                    f"{label} is an integrity failure, not a merge")
+
+    # A six-field BOGUS record is a field-count failure, and that is not this
+    # arm. The message has to name the verdict or the arm stopped testing it.
+    bogus = _w(tmp_path, "bogus.log",
+               cases["a verdict the emitter cannot emit"])
+    out, _rc = _run("merge", "--ledger", led, "--date", "2026-09-10", bogus)
+    expect.num(out.count("'BOGUS'"), 1,
+               "and it names the verdict, so the author knows which record")
 
     # THE CONTROL. Five arms all reporting 2 prove nothing if the tool has simply
     # started refusing every log.

@@ -230,8 +230,6 @@ binds the exception and the body pins its SQLSTATE. See section 2.
   @jdatcmd on review. See TESTS.md section 20.
 - `same-broken-helper-both-sides`, `truthy-error-string`, `assert-not-unset-error`,
   `zero-on-both-arms`, `tuple-assert-always-true`, `approx-of-nothing`
-- `same-broken-helper-both-sides`, `truthy-error-string`, `assert-not-unset-error`,
-  `zero-on-both-arms`, `tuple-assert-always-true`, `approx-of-nothing`
 
 ### 3.5 The fixture built the wrong situation
 

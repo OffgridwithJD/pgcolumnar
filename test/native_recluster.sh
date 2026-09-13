@@ -75,10 +75,21 @@ check "row count after recluster" "$(q 'SELECT count(*) FROM n;')" "40960"
 
 # Online index maintenance: index scan returns each live row exactly once.
 check "index scan returns each row once" "$(idxcount)" "40960"
-check "unique still enforced" \
-	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -v ON_ERROR_STOP=1 \
-	    -c "INSERT INTO n VALUES (1, 0, 0, 'x');" >/dev/null 2>&1 && echo no || echo yes)" \
-	"yes"
+# THE SQLSTATE, NOT THE EXIT CODE. This arm was
+# `psql ... && echo no || echo yes`, which reports "yes" for every failure psql can
+# have. Measured on the identical expression: a missing table, a wrong port, psql
+# absent from PATH and a syntax error all produced "yes", so the arm passed with the
+# unique index doing nothing. 23505 is ERRCODE_UNIQUE_VIOLATION and comes from the
+# index; 42P01, 42601 and a connection failure do not. The project already reads
+# SQLSTATE this way in `arrow_import.sh` and `audit.sh`.
+dup_sqlstate() {	# -> the SQLSTATE of a duplicate insert, or empty if it succeeded
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -qtA -v ON_ERROR_STOP=0 -v VERBOSITY=sqlstate \
+		-c "INSERT INTO n VALUES (1, 0, 0, 'x');" 2>&1 \
+		| sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
+}
+check "unique still enforced, by SQLSTATE 23505 and not by any failure" \
+	"$(dup_sqlstate)" "23505"
 
 # Lock level: ShareUpdateExclusiveLock, never AccessExclusiveLock.
 locks="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \

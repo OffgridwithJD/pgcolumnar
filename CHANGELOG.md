@@ -18,6 +18,174 @@ true until the next version shipped.
 
 ### Added
 
+- A UNIQUE-constraint check passed on any psql failure, and a recursive sweep passed on a
+  tree it never read (#1033).
+
+  `native_recluster.sh` decided "unique still enforced" from psql's exit code:
+
+      psql ... -c "INSERT INTO n VALUES (1, 0, 0, 'x');" >/dev/null 2>&1 && echo no || echo yes
+
+  `|| echo yes` cannot tell a unique violation from any other failure, and
+  `>/dev/null 2>&1` discards the message so nothing else can either. Measured on the
+  identical expression: a missing table, a wrong port, psql absent from PATH and a syntax
+  error all produced `yes`.
+
+  THE CONTRAST, RUN END TO END on PG 18 rather than argued. The same mutation -- point the
+  probe at a table that does not exist -- against both versions of the arm:
+
+      main's arm    PASS  "unique still enforced"       suite PASSED, rc=0, 12 passed
+      this arm      FAIL  got [42P01] want [23505]      suite FAILED, rc=1
+
+  And the arm is observable in the direction that matters. Replace the unique index with a
+  plain one and the duplicate INSERT succeeds. The arm goes red there too, so it tests the
+  constraint rather than merely the SQLSTATE plumbing.
+
+  The arm now reads the SQLSTATE. 23505 is `ERRCODE_UNIQUE_VIOLATION` and comes from the
+  index; 42P01, 42601 and a connection failure do not. `arrow_import.sh` and `audit.sh`
+  already read SQLSTATE this way, so this is the convention rather than a new one.
+
+  SECOND, A SWEEP WITH NO POPULATION. `local_open_race_free.sh` asserted that a removed
+  helper leaves no trace:
+
+      "$(grep -rc 'PgColumnarRejectNonRegularFile' "$SRC" | awk -F: '{s+=$2} END{print s+0}')" "0"
+
+  `grep -rc` prints one `file:count` line per file and prints NOTHING for a path it cannot
+  open, and `END{print s+0}` then manufactures the `0` the check wants. The three arms above
+  it read `$OBJ`, not `$SRC`, so nothing established that `$SRC` was a source tree.
+  Measured:
+
+      SRC=src            files=56  premise=yes  arm=0   both agree
+      SRC=/no/such/tree  files=0   premise=no   arm=0   the premise catches it, the arm alone passes
+
+  A premise now counts the lines the recursive grep emitted, which is exactly what the
+  arm's `awk` sums over.
+
+  NEITHER SUITE NEEDS A LEDGER ROW, which is why these two and not a third.
+  `check_ledger.tsv` holds zero rows for `native_recluster` and `local_open_race_free`, so
+  the gate cannot refuse a new check there.
+
+  A third site has the same shape and is left alone: `selftest/400`'s tree-wide piped-loop
+  sweep. It lives in `harness_selftest`, which the ledger covers with 934 rows. Its detector
+  IS premised, since `:549` proves it fires on a planted offence, and only its glob
+  population is not. So it belongs to a change that carries the five-major ledger merge.
+
+  Verified on PG 18 in the container: `local_open_race_free.sh` PASSED, 11 checks;
+  `native_recluster.sh` PASSED, 12 checks; both mutations red; main's arm green under the
+  same mutation.
+- The vacuity inventory named one entry twice, and no arm could fail on it (#432).
+
+  `VACUITY_MODES.md` section 3.4 carried the same six-id bullet twice, verbatim, on two
+  lines each. It is deleted, and three arms in `test_docs_cover_the_corpus.py` now refuse
+  a duplicated entry.
+
+  WHY NOTHING CAUGHT IT, measured rather than guessed. Every count this document states
+  is checked. Every one of those checks is blind to this by construction:
+  `_named_modes_in` builds `set(MODE_ID.findall(chunk))` per section, so each total is
+  over distinct ids. Measured with the second copy present and then deleted:
+
+      with the duplicate      (28, 44, 72)
+      without the duplicate   (28, 44, 72)
+
+  So `test_the_mode_inventory_states_its_own_totals_correctly`, the prose-totals arm and
+  the sum arm were all green with a duplicated entry in the file. Deduping ids is right.
+  A total must not move because a line was pasted twice. The cost falls on the reader
+  instead: one group of open modes reads as two. So the new arm is about entries, and the
+  counting rule is unchanged.
+
+  MY OWN FIRST SWEEP MISSED IT, which decided the unit the rule uses. An adjacent
+  duplicate-LINE sweep over every document in the directory reported nothing. The
+  duplicate is a two-line bullet, so line 1 of the first copy and line 1 of the second
+  are not adjacent. Re-keyed on the bullet ENTRY, the same sweep found it, and found
+  exactly one tree-wide. Four sweeps here have now failed by keying on how something is
+  written rather than on what it contains. So the unit is named in the code, and both
+  fixture arms use a two-line bullet rather than a one-line one.
+
+  The rule carries its false-positive budget as an arm. The inventory legitimately repeats
+  short bullets, so entries under a 40-character floor are not compared. The budget is
+  measured at the boundary: the same bullet passes below the floor and is refused above
+  it.
+
+- The section that checks for stale documents carried a stale count (#432).
+
+  `TESTS.md` section 6 said "the five fixture arms". Five was correct at `3d6e1216`
+  (2026-09-09) and counted the arms taking `tmp_path`; there are eight of those now and
+  thirteen fixture arms in total. Nothing read the number, so it went stale in the
+  document whose whole subject is documents going stale.
+
+  It is removed rather than corrected. The paragraph above it already decided that for the
+  same reason: `test_the_document_states_no_totals_for_a_merge_to_get_wrong` exists to keep
+  a totals line OUT. A count in prose that no arm reads is a claim waiting to go wrong. The
+  arms themselves are listed in the table above, where a reader can count them.
+
+- `native_ownership.sh` has a pytest twin, and it asserts the SQLSTATE (#432).
+
+  Nine maintenance and DDL functions, each refused to a non-owner with 42501 rather
+  than with a grep for `must be owner`. `CLAUDE.md` already states the rule: 42501
+  comes only from `aclcheck_error`, and the refusal is
+  `aclcheck_error(ACLCHECK_NOT_OWNER, ...)` at `columnar_vacuum.c:189` and `:205`. A
+  text grep passes whatever code the server attached.
+
+  It also stops conflating refusal with login: the bash suite runs each call as a role
+  that must be able to connect, so a role that could not log in fails the arm for a
+  reason unrelated to ownership. `SET ROLE` changes the effective user without
+  authenticating.
+
+  A third arm states the ordering the bash comment asserts in prose: the check fires
+  before the work, so a non-owner is refused for a projection that does not exist.
+
+  THE PREMISE ARM CORRECTED ITS OWN DOCSTRING. Every refusal carries `premise: alice
+  reaches the table`, because each test runs in a private schema. Measured by removing
+  the grant, alice gets `42P01 relation does not exist` rather than the 42501 I had
+  claimed: an unqualified name resolves through `search_path` and an unusable schema
+  is skipped, so the arms fail rather than falsely pass. The false-pass case needs a
+  QUALIFIED reference, which raises 42501 for the schema.
+
+  AND THE PARITY TOOL CANNOT GRADE THIS PAIR. Both sides build names at runtime, so
+  `compare_to_bash.py` reports `PORT IS INCOMPLETE` for a complete port. Measured: 81
+  of 253 suites carry at least one interpolated check name. That bounds how much of
+  #432's parity the tool can certify, and it is a false red rather than a false green.
+- `stats_privilege.sh` has a pytest twin, and it asserts the SQLSTATE (#432).
+
+  The bash suite decides the refusal with a grep on the message. `CLAUDE.md` names
+  the rule: 42501 comes only from `aclcheck_error`, while a grep for "permission
+  denied" is also satisfied by other refusals.
+
+  WHICH ARMS ARE LOOSE, MEASURED RATHER THAN ASSERTED, because two rounds of review
+  narrowed this twice. The defect arm at `:82` uses `permission denied for table`,
+  which the schema message does NOT match -- so that arm is not confusable, and an
+  earlier version of this entry claiming otherwise was wrong. The two BARE greps are
+  at `:68` and `:70`, and both are premises:
+
+      :68  premise: the no-privilege role cannot read it by ordinary SQL
+      :70  premise: the catalog tables are NOT readable by these roles
+
+  So the risk is a premise satisfied for the wrong reason, which weakens what the
+  suite rests on, rather than a defect slipping through. The port asserts 42501 on
+  the premises and on the refusal, and that the refusal names the table.
+
+  Real logins rather than `SET ROLE`, because session-opening is a property this
+  suite tests and `SET ROLE` would assert it away.
+
+  SCOPE, MEASURED AND THEN CORRECTED. Across the corpus, 50 suites already assert a
+  refusal by SQLSTATE and 3 assert both. FIVE assert by text with no SQLSTATE
+  anywhere: `native_ownership`, `stats_privilege`, `projection_privilege`,
+  `rls_direct_storage` and `import_export_privilege`. Two are now ported; the class
+  closes at five, not at the whole corpus.
+
+  My first sweep said four. It missed `import_export_privilege.sh:76` because the
+  flag class `grep -[qic]*i?` does not cover the `E` in `grep -qiE`, so the line
+  never matched and a fifth member stayed invisible while the output looked complete.
+  Found by @OffgridwithJD. Four sweeps in one day across two sessions have now failed
+  this way, each keyed on how something was NAMED or SPELLED rather than on content:
+  key on content, and when a sweep returns a tidy number, grep for one known-present
+  member and check the sweep found it.
+
+  A HELPER TURNED A DRIVER DETAIL INTO A PRODUCT CLAIM. psycopg3 returns the FIRST
+  statement's result for a multi-statement execute, so `SET search_path ...; SELECT`
+  hands back the SET's empty result. The first version collapsed that into a 0 and
+  the arm reported "the OWNER cannot read its stats". Every call site now asserts the
+  error is None rather than folding it into a value.
+
 - The mutation ledger records WHICH MAJORS each check exists on (#1010).
 
       suite<TAB>part<TAB>name<TAB>majors<TAB>last-red<TAB>mutations
@@ -832,6 +1000,8 @@ true until the next version shipped.
   rather than measured. It is the gap to close if the default is ever doubted.
 
 ### Fixed
+
+- A BOGUS-verdict ledger record is refused by naming the verdict, not by field count (#1013).
 
 - The star-schema join how-to names clustering on the join key (#752).
 

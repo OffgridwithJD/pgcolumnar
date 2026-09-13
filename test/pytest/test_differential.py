@@ -156,8 +156,16 @@ def matrix(pgc_cluster):
         # skipping paths are only exercised when there is something to skip.
         conn.execute("SELECT pgcolumnar.set_options('t_col', "
                      "chunk_group_row_limit => 1000, stripe_row_limit => 5000)")
+        # GENERATED ONCE INTO HEAP, THEN COPIED, exactly as lib.sh's load_pair does and
+        # for the reason its comment gives: "both hold byte-identical logical contents
+        # regardless of any volatile generators". Running the generator twice produces two
+        # DIFFERENT tables the moment anything in it is volatile, and then the oracle is
+        # comparing two fixtures rather than two access methods.
+        #
+        # Every load in parts 1 and 2 happens to be deterministic, so this was right by
+        # luck rather than by construction until part 3 needed random().
         conn.execute(f"INSERT INTO t_heap {MATRIX_LOAD}")
-        conn.execute(f"INSERT INTO t_col {MATRIX_LOAD}")
+        conn.execute("INSERT INTO t_col SELECT * FROM t_heap")
         yield _Pair(conn)
     finally:
         try:
@@ -353,3 +361,550 @@ def test_a_compound_predicate_over_several_columns_agrees(matrix, expect):
     c, h = matrix.both("SELECT id FROM %T WHERE c_int > 0 AND c_bool "
                        "AND c_vc IS NOT NULL AND c_num < 8000")
     expect.row_set(c, h, "compound")
+
+
+# ---------------------------------------------------------------------------
+# Part 2: boundary conditions
+#
+# Part 1 asks whether the two access methods agree about DATA. This part asks whether
+# they agree at the SIZES where the format's structure changes: the row counts that
+# land exactly on a chunk-group or stripe limit, a table with no rows, a table with
+# one, a column that is entirely NULL, a whole chunk group that is, and the empty
+# string against NULL.
+#
+# Each fixture is built per test rather than shared, because the whole point is a
+# DIFFERENT geometry each time -- the options are the subject, so a module fixture
+# would have to pick one and the rest would go untested.
+# ---------------------------------------------------------------------------
+
+
+def _pair(conn, defs, load=None, options=None):
+    """Build a heap/columnar pair with the given shape, and return a _Pair over it.
+
+    `load` is a SELECT without INSERT, exactly as `load_pair` takes it in the bash
+    suite. It is generated ONCE into heap and then copied, which is not a detail: a
+    volatile generator run twice fills the two tables differently and the oracle then
+    compares two fixtures instead of two access methods.
+    """
+    conn.execute("DROP TABLE IF EXISTS t_heap")
+    conn.execute("DROP TABLE IF EXISTS t_col")
+    conn.execute(f"CREATE TABLE t_heap ({defs})")
+    conn.execute(f"CREATE TABLE t_col ({defs}) USING pgcolumnar")
+    if options:
+        conn.execute(f"SELECT pgcolumnar.set_options('t_col', {options})")
+    if load:
+        # ONE generation, then a copy -- see the module fixture above.
+        conn.execute(f"INSERT INTO t_heap {load}")
+        conn.execute("INSERT INTO t_col SELECT * FROM t_heap")
+    return _Pair(conn)
+
+
+def _groups(pair):
+    """Chunk groups, by lib.sh's own definition in chunk_group_count."""
+    return pair.one("SELECT count(*) FROM pgcolumnar.zone_map "
+                    "WHERE storage_id = pgcolumnar.get_storage_id('t_col') "
+                    "AND vector_index >= 0 AND column_index = 0")
+
+
+def _stripes(pair):
+    """Row groups, by lib.sh's own definition in stripe_count."""
+    return pair.one("SELECT count(*) FROM pgcolumnar.row_group "
+                    "WHERE storage_id = pgcolumnar.get_storage_id('t_col')")
+
+
+def test_an_empty_table_agrees_and_the_agreement_is_not_vacuous(pgc_conn, expect):
+    """Three arms on a table with no rows, and one of them cannot fail on its own.
+
+    `empty scan` compares two empty results. `pgc_set_hash` renders both `EMPTY`, they
+    compare equal, and the bash arm passes -- which is not nothing, because a columnar
+    scan that invented a row would break it, but it is an assertion whose only failing
+    input is a bug nobody has. The vacuity layer refuses it by default, so the reason
+    is stated and a POSITIVE CONTROL is added: the same query returns a row once one
+    exists, which is what proves the comparison can move at all.
+
+    `empty count` and `empty agg` are not vacuous -- 0 and a row of NULLs are values.
+    """
+    p = _pair(pgc_conn, "id int, v text")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, "empty scan",
+                   allow_empty="the table has no rows; the control below is what can fail")
+    c, h = p.both("SELECT count(*) FROM %T")
+    expect.row_set(c, h, "empty count")
+    c, h = p.both("SELECT min(id), max(id), sum(id) FROM %T")
+    expect.row_set(c, h, "empty agg")
+
+    # THE CONTROL. Without it "both sides empty" is the only thing the first arm has
+    # ever observed, and an oracle that always returns nothing would satisfy it.
+    pgc_conn.execute("INSERT INTO t_heap VALUES (1, 'x')")
+    pgc_conn.execute("INSERT INTO t_col VALUES (1, 'x')")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, "empty scan control: one row is visible to both")
+    expect.num(len(c), 1, "and the control really did put a row there")
+
+
+def test_a_single_row_agrees(pgc_conn, expect):
+    """One row is the smallest geometry that stores anything: a stripe, a chunk group,
+    and a value stream all of length one. A format that assumes a full vector anywhere
+    breaks here and nowhere else in this file."""
+    p = _pair(pgc_conn, "id int, v text", load="SELECT 1, 'only'")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, "single scan")
+    c, h = p.both("SELECT count(*) FROM %T")
+    expect.row_set(c, h, "single count")
+
+
+@pytest.mark.parametrize("n", [99, 100, 101, 200, 201, 250])
+def test_the_chunk_group_boundary_is_exact_and_the_data_survives_it(pgc_conn, n, expect):
+    """N-1, N and N+1 around a 100-row chunk-group limit, for two limits.
+
+    The GROUP COUNT is asserted as well as the data, because the data can agree while
+    the geometry is wrong: a writer that never closes a group produces one group and
+    the right rows, and only the count says so. `ceil(N/100)` is the claim, and 99,
+    100 and 101 are what distinguish an off-by-one in the close from a correct one --
+    exactly the boundary `test-the-exact-boundary-value` is about.
+    """
+    p = _pair(pgc_conn, "id int, v text",
+              load=f"SELECT g, 'r'||g FROM generate_series(1,{n}) g",
+              options="chunk_group_row_limit => 100, stripe_row_limit => 100000")
+    expect.num(_groups(p), (n + 99) // 100, f"cg boundary N={n} groups")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, f"cg boundary N={n} scan")
+    c, h = p.both(f"SELECT id FROM %T WHERE id BETWEEN 50 AND {n - 10}")
+    expect.row_set(c, h, f"cg boundary N={n} range")
+
+
+@pytest.mark.parametrize("n", [1000, 1001, 2000, 2001])
+def test_the_stripe_boundary_is_exact_and_the_data_survives_it(pgc_conn, n, expect):
+    """The same question one level up, at the 1000-row stripe limit the product allows.
+
+    1000 is the floor `set_options` enforces, so this is the smallest legal stripe and
+    the most boundaries per row. Note that it is also below one 1024-value vector,
+    which #1017 measures as a compression cliff -- that is a SIZE question and this is
+    a CORRECTNESS one, and the oracle here says the rows survive it either way.
+    """
+    p = _pair(pgc_conn, "id int, v text",
+              load=f"SELECT g, 'r'||g FROM generate_series(1,{n}) g",
+              options="chunk_group_row_limit => 100, stripe_row_limit => 1000")
+    expect.num(_stripes(p), (n + 999) // 1000, f"stripe boundary N={n} stripes")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, f"stripe boundary N={n} scan")
+    c, h = p.both("SELECT count(*), min(id), max(id), sum(id) FROM %T")
+    expect.row_set(c, h, f"stripe boundary N={n} agg")
+
+
+def test_a_column_that_is_entirely_null_agrees(pgc_conn, expect):
+    """A column with no values at all, across several chunk groups.
+
+    The zone map for such a column has no minimum and no maximum, and a scan that
+    treats a missing range as "matches nothing" loses every row of the table rather
+    than of the column. `minmax` is the arm that sees it: both sides must answer NULL,
+    NULL, and a columnar side that answered anything else would be reading a range it
+    does not have.
+    """
+    p = _pair(pgc_conn, "id int, allnull int, v text",
+              load="SELECT g, NULL::int, 'r'||g FROM generate_series(1,350) g",
+              options="chunk_group_row_limit => 100")
+    expect.at_least(_groups(p), 4, "premise: the all-null column spans several chunk groups")
+    for label, sql in (("allnull column scan",   "SELECT * FROM %T"),
+                       ("allnull column count",  "SELECT count(allnull) FROM %T"),
+                       ("allnull column isnull", "SELECT count(*) FROM %T WHERE allnull IS NULL"),
+                       ("allnull column minmax", "SELECT min(allnull), max(allnull) FROM %T")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_a_whole_chunk_group_that_is_null_agrees(pgc_conn, expect):
+    """Rows 101..200 are NULL and the rest are not, with 100-row groups -- so exactly
+    one group is entirely NULL and its neighbours are not.
+
+    That is the case a column-wide NULL cannot reach: the skip decision is per group,
+    so a group with no range sitting between two groups that have one is where a wrong
+    "cannot match" prunes live rows. The range arm straddles it deliberately: 150..250
+    starts inside the null group and ends inside the one after.
+    """
+    p = _pair(pgc_conn, "id int, sometimes int",
+              load="SELECT g, CASE WHEN g BETWEEN 101 AND 200 THEN NULL ELSE g END "
+                   "FROM generate_series(1,400) g",
+              options="chunk_group_row_limit => 100")
+    expect.num(p.one("SELECT count(*) FROM t_col WHERE sometimes IS NULL"), 100,
+               "premise: exactly one hundred rows are null, so one whole group is")
+    for label, sql in (("allnull chunk scan",   "SELECT * FROM %T"),
+                       ("allnull chunk range",  "SELECT id FROM %T WHERE sometimes BETWEEN 150 AND 250"),
+                       ("allnull chunk isnull", "SELECT id FROM %T WHERE sometimes IS NULL")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_the_empty_string_stays_distinct_from_null(pgc_conn, expect):
+    """Two different things that a null bitmap can confuse, and a count each.
+
+    A varlena column stores an empty string as a zero-length value and a NULL as a bit,
+    so a decoder that loses the bitmap returns '' where NULL was -- and both counts move
+    in opposite directions, which is why both are asserted rather than just the total.
+    """
+    p = _pair(pgc_conn, "id int, s text",
+              load="SELECT g, CASE WHEN g%2=0 THEN '' WHEN g%3=0 THEN NULL ELSE 'x'||g END "
+                   "FROM generate_series(1,300) g")
+    expect.at_least(p.one("SELECT count(*) FROM t_col WHERE s = ''"), 1,
+                    "premise: there are empty strings to confuse")
+    expect.at_least(p.one("SELECT count(*) FROM t_col WHERE s IS NULL"), 1,
+                    "premise: and nulls to confuse them with")
+    for label, sql in (("empty-vs-null scan",    "SELECT * FROM %T"),
+                       ("empty-vs-null empties", "SELECT count(*) FROM %T WHERE s = ''"),
+                       ("empty-vs-null nulls",   "SELECT count(*) FROM %T WHERE s IS NULL")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_a_wide_row_of_sixty_one_columns_agrees(pgc_conn, expect):
+    """Sixty-one columns, where a per-column offset error shows and a narrow table
+    hides it: every column after a wrong one reads the previous column's bytes, and a
+    projection of three scattered columns is what catches it without reading them all."""
+    defs = "id int, " + ", ".join(f"c{i} int" for i in range(1, 61))
+    sel = "g, " + ", ".join(f"(g*{i} - {i})" for i in range(1, 61))
+    p = _pair(pgc_conn, defs, load=f"SELECT {sel} FROM generate_series(1,500) g")
+    # VIA regclass, not information_schema.columns by name. The unqualified form counts
+    # every table called t_col in every schema, and the module-scoped matrix fixture has
+    # one of its own with twenty columns -- so this premise arm reported 81 and caught my
+    # own query rather than the tree. `'t_col'::regclass` resolves through search_path to
+    # THIS test's schema and nothing else.
+    expect.num(p.one("SELECT count(*) FROM pg_attribute "
+                     "WHERE attrelid = 't_col'::regclass "
+                     "AND attnum > 0 AND NOT attisdropped"), 61,
+               "premise: the table really is sixty-one columns wide")
+    c, h = p.both("SELECT * FROM %T")
+    expect.row_set(c, h, "wide row scan")
+    c, h = p.both("SELECT id, c1, c30, c60 FROM %T WHERE c30 > 5000")
+    expect.row_set(c, h, "wide row proj")
+
+
+# ---------------------------------------------------------------------------
+# Part 3: lightweight encodings
+#
+# Data shaped so each encoding is the one chosen, and the oracle proves the round trip.
+# Which encoding was APPLIED is the native_encoding suite's question; this asks only
+# that whatever was applied is reversible.
+#
+# THE i4 FIXTURE USES random(), which is why `_pair` generates once into heap and
+# copies. Run the generator twice and the two tables hold different numbers, and the
+# oracle then reports a columnar defect that is really two fixtures -- on the suite
+# whose whole purpose is to be believed when it says the two disagree.
+# ---------------------------------------------------------------------------
+
+_ENC_OPTS = ("chunk_group_row_limit => 2000, stripe_row_limit => 20000, "
+             "compression => 'none'")
+
+
+def test_the_integer_encodings_round_trip(pgc_conn, expect):
+    """Four shapes in one table, each the input a different encoding is chosen for.
+
+    `seqv` is g*3, so consecutive deltas are constant and delta-of-delta wins.
+    `lowcard` is g%4, four distinct values, so a dictionary wins. `constv` is one
+    value, so the column is a constant. `rnd` is a hash-spread bigint, so nothing
+    lightweight applies and it takes the ordinary path. Putting them in ONE table is
+    the point: the encodings are chosen per column, and a writer that applied one
+    column's verdict to another would pass a table with only one shape in it.
+
+    `compression => 'none'` so the codec cannot mask a wrong encoding by compressing
+    the damage away.
+    """
+    p = _pair(pgc_conn, "id int, seqv bigint, lowcard int, constv int, rnd bigint",
+              load="SELECT g, g::bigint*3, g%4, 42, ((g*2654435761)%1000000000)::bigint "
+                   "FROM generate_series(1,10000) g",
+              options=_ENC_OPTS)
+    expect.num(p.one("SELECT count(DISTINCT lowcard) FROM t_col"), 4,
+               "premise: the low-cardinality column really has four values")
+    expect.num(p.one("SELECT count(DISTINCT constv) FROM t_col"), 1,
+               "premise: and the constant column really has one")
+    for label, sql in (
+            ("enc whole-row",  "SELECT * FROM %T"),
+            ("enc seq range",  "SELECT id FROM %T WHERE seqv BETWEEN 100 AND 5000"),
+            ("enc lowcard eq", "SELECT id FROM %T WHERE lowcard = 2"),
+            ("enc const scan", "SELECT id FROM %T WHERE constv = 42"),
+            ("enc aggregate",  "SELECT sum(seqv), min(lowcard), max(lowcard), "
+                               "count(constv), sum(rnd) FROM %T")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_the_float_and_timestamp_encodings_round_trip(pgc_conn, expect):
+    """Gorilla and delta-of-delta, on the inputs each is chosen for (I4).
+
+    `alt` is a random walk: many distinct values so a dictionary bails, irregular bit
+    deltas so frame-of-reference and delta lose, small consecutive XOR so Gorilla wins.
+    `tsreg` is a fixed one-minute interval, so the delta of the delta is zero and DOD
+    beats plain delta. `fr` cycles through seven values, so frame-of-reference applies.
+
+    THE RANDOM WALK IS WHY THE PAIR IS COPIED RATHER THAN REGENERATED. Measured on this
+    fixture's generator, 2000 rows: regenerated, all 2000 rows differ; generated once
+    and copied, 0 differ. An oracle over two different fixtures is not an oracle.
+
+    min/max rather than sum for the floats, deliberately: a float sum has no single
+    right answer (part 1 measures three from heap alone by row order), and min/max does.
+    """
+    p = _pair(pgc_conn, "id int, alt float8, tsreg timestamp, fr float8",
+              load="SELECT g, (1000 + sum(random() - 0.5) OVER (ORDER BY g))::float8, "
+                   "TIMESTAMP '2020-01-01' + make_interval(mins => g), "
+                   "(100 + (g%7) * 0.25)::float8 FROM generate_series(1,10000) g",
+              options=_ENC_OPTS)
+    expect.at_least(p.one("SELECT count(DISTINCT alt) FROM t_col"), 9000,
+                    "premise: the random walk is high-cardinality, so a dictionary bails")
+    expect.num(p.one("SELECT count(DISTINCT fr) FROM t_col"), 7,
+               "premise: and the frame-of-reference column cycles through seven")
+    for label, sql in (
+            ("i4 whole-row", "SELECT * FROM %T"),
+            ("i4 float agg", "SELECT count(alt), min(alt), max(alt), "
+                             "count(fr), min(fr), max(fr) FROM %T"),
+            ("i4 ts range",  "SELECT id FROM %T WHERE tsreg >= TIMESTAMP '2020-01-05'"),
+            ("i4 ts minmax", "SELECT min(tsreg), max(tsreg) FROM %T")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_the_dictionary_encoding_round_trips_including_varlena(pgc_conn, expect):
+    """Dictionary (I5), including the text and varchar columns that had no lightweight
+    encoding before it.
+
+    `cat` has four values and `tag` six, so both are dictionary candidates; `hicard` is
+    an md5 per row, so it is not, and it is in the table to prove the verdict is per
+    column. `GROUP BY cat` is the arm a whole-row comparison cannot replace: it reads
+    the column through the grouping path rather than the projection path.
+    """
+    p = _pair(pgc_conn, "id int, cat text, tag varchar(16), code int, hicard text",
+              load="SELECT g, (ARRAY['north','south','east','west'])[1 + g%4], "
+                   "('t' || (g%6))::varchar(16), g%5, md5(g::text) "
+                   "FROM generate_series(1,10000) g",
+              options=_ENC_OPTS)
+    expect.num(p.one("SELECT count(DISTINCT cat) FROM t_col"), 4,
+               "premise: the dictionary column has four values")
+    expect.at_least(p.one("SELECT count(DISTINCT hicard) FROM t_col"), 9000,
+                    "premise: and the high-cardinality one is not a candidate")
+    for label, sql in (
+            ("dict whole-row",  "SELECT * FROM %T"),
+            ("dict text eq",    "SELECT id FROM %T WHERE cat = 'east'"),
+            ("dict text agg",   "SELECT count(cat), min(cat), max(cat), "
+                                "count(distinct tag) FROM %T"),
+            ("dict text group", "SELECT cat, count(*) FROM %T GROUP BY cat")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+def test_an_uncompressed_table_still_round_trips(pgc_conn, expect):
+    """Encoding is independent of the codec, so a table with compression off must still
+    decode. Without this arm every encoding above is only ever read back through a
+    codec, and a bug that the codec happens to mask would never show."""
+    p = _pair(pgc_conn, "id int, v bigint",
+              load="SELECT g, (g%7)::bigint FROM generate_series(1,5000) g",
+              options="compression => 'none'")
+    for label, sql in (("enc+nocompress scan", "SELECT * FROM %T"),
+                       ("enc+nocompress agg",  "SELECT count(*), sum(v), min(v), max(v) FROM %T")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+# ---------------------------------------------------------------------------
+# Part 4: aggregates over data with nulls and deletes
+#
+# The vectorized aggregate answers ungrouped count/sum/avg/min/max from the value
+# stream. Nulls are skipped by that stream and deletes force a per-group fallback, so a
+# fixture with both exercises the fast path AND its fallback in one table.
+# ---------------------------------------------------------------------------
+
+
+def test_aggregates_agree_with_nulls_and_deletes_present(pgc_conn, expect):
+    """Five columns, one with nulls, and one row in fifty deleted.
+
+    The DELETE is what makes this more than part 1's aggregate arms: a row group with a
+    delete cannot be answered from the value stream alone, so the scan falls back per
+    group -- and a fallback that double-counts or skips shows in `count(*)` while every
+    other arm stays green. Both tables get the same DELETE, so the oracle still holds.
+    """
+    p = _pair(pgc_conn, "id int, k int, big int, s smallint, nv int",
+              load="SELECT g, g%6, g*2, ((g%100)-50)::smallint, "
+                   "CASE WHEN g%9=0 THEN NULL ELSE g%13 END FROM generate_series(1,20000) g",
+              options="chunk_group_row_limit => 1000, stripe_row_limit => 5000")
+    before = p.one("SELECT count(*) FROM t_col")
+    pgc_conn.execute("DELETE FROM t_heap WHERE id % 50 = 0")
+    pgc_conn.execute("DELETE FROM t_col  WHERE id % 50 = 0")
+    after = p.one("SELECT count(*) FROM t_col")
+    expect.num(before - after, 400, "premise: the delete removed four hundred rows")
+    expect.at_least(p.one("SELECT count(*) FROM t_col WHERE nv IS NULL"), 1,
+                    "premise: and there are nulls for the value stream to skip")
+    for label, sql in (
+            ("agg count",  "SELECT count(*), count(k), count(nv) FROM %T"),
+            ("agg sum",    "SELECT sum(big), sum(k), sum(nv) FROM %T"),
+            ("agg avg",    "SELECT avg(k), avg(nv) FROM %T"),
+            ("agg minmax", "SELECT min(k), max(k), min(big), max(big), "
+                           "min(s), max(s), min(nv), max(nv) FROM %T")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+
+# ---------------------------------------------------------------------------
+# Part 5: bloom-filter equality skipping
+#
+# Values are hash-spread so every chunk's min/max spans the domain and cannot skip an
+# in-range equality probe. The bloom filter is what prunes it, and whether a bloom was
+# BUILT is the native_bloom suite's question -- these arms ask whether the answer is
+# right, which is the one thing a wrong bloom breaks and a missing one does not.
+# ---------------------------------------------------------------------------
+
+_BLOOM_OPTS = "chunk_group_row_limit => 1000, stripe_row_limit => 20000"
+
+
+def test_bloom_equality_agrees_on_numeric_and_uuid_keys(pgc_conn, expect):
+    """Hash-spread keys, so min/max cannot prune and only a bloom can.
+
+    The premise is the whole fixture: if the keys were ordered, every arm here would pass
+    on zone maps alone and say nothing about blooms. `(g*2654435761)%100000` spreads them,
+    so each chunk's range covers almost the whole domain -- asserted below rather than
+    assumed, because a fixture that quietly became ordered would make this suite vacuous
+    in a way no arm would report.
+    """
+    p = _pair(pgc_conn, "id int, k bigint, u uuid",
+              load="SELECT g, ((g*2654435761)%100000)::bigint, md5((g%99999)::text)::uuid "
+                   "FROM generate_series(1,20000) g",
+              options=_BLOOM_OPTS)
+    # Each chunk group's range must span most of the domain, or min/max alone prunes and
+    # the bloom is never the thing under test.
+    spread = p.one(
+        "SELECT min(width) FROM (SELECT max(k) - min(k) AS width FROM ("
+        "  SELECT k, ntile(20) OVER (ORDER BY id) AS grp FROM t_col) s GROUP BY grp) w")
+    expect.at_least(spread, 90000,
+                    "premise: every chunk's key range spans the domain, so min/max cannot skip")
+    for label, sql in (
+            ("bloom k present", "SELECT id FROM %T WHERE k = ((7*2654435761)%100000)::bigint"),
+            ("bloom u eq",      "SELECT count(*) FROM %T WHERE u = md5('123')::uuid"),
+            ("bloom k range",   "SELECT count(*) FROM %T WHERE k < 50000")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+
+    # A value strictly inside the global min/max that is present in NO row. Every
+    # hash-spread chunk's range contains it, so min/max cannot exclude it and the answer
+    # must still be nothing. Derived from the data rather than guessed, because a guessed
+    # "absent" value that turns out to be present asserts the opposite of the intent.
+    absent = p.one("SELECT v FROM generate_series((SELECT min(k)+1 FROM t_heap)::int, "
+                   "(SELECT max(k)-1 FROM t_heap)::int) v "
+                   "WHERE v NOT IN (SELECT k FROM t_heap) LIMIT 1")
+    expect.num(p.one(f"SELECT count(*) FROM t_heap WHERE k = {absent}::bigint"), 0,
+               "premise: the probe value really is absent from the oracle")
+    expect.num(p.one(f"SELECT count(*) FROM t_col WHERE k = {absent}::bigint"), 0,
+               "bloom absent correct")
+
+
+def test_text_bloom_equality_agrees_including_a_mismatched_collation(pgc_conn, expect):
+    """Deterministic-collation text is bloomed; an explicit mismatched COLLATE is not.
+
+    The last arm is the one that matters: a bloom built under one collation cannot be
+    used to skip a probe under another, so the filter must NOT be pushed -- and if it
+    were, the query would return too few rows rather than erroring. That is a wrong
+    answer, not a failure, which is why it is compared against the oracle rather than
+    checked for a plan shape.
+    """
+    p = _pair(pgc_conn, 'id int, tk text, tc text COLLATE "C"',
+              load="SELECT g, 'k' || ((g*2654435761)%50000), 'c' || ((g*40503)%50000) "
+                   "FROM generate_series(1,16000) g",
+              options=_BLOOM_OPTS)
+    # THE BASH ARM PROBES A VALUE THAT IS NOT THERE, and that is the fourth unfalsifiable
+    # arm this port has found -- the subtlest, because the arm is specifically built to
+    # catch a wrongly-pushed filter and a wrongly-pushed filter produces the same answer
+    # as the absent value.
+    #
+    # `tk` is 'k' || ((g*2654435761)%50000) over 16,000 rows of a 50,000-wide domain, so
+    # only 32% of values appear. Measured: `tk = 'k100'` matches 0 rows. A bloom wrongly
+    # pushed under a mismatched collation would skip the chunks holding the match and
+    # return 0 -- identical to the correct answer for an absent value. Both sides give 0,
+    # the arm passes, and the one defect it exists to detect is invisible to it.
+    #
+    # So the port probes a value that IS present, derived from the data rather than
+    # guessed. Then a wrongly-pushed filter returns 0 where the oracle returns 1, and the
+    # arm can fail for its own reason. The name is kept so compare_to_bash.py still pairs
+    # the two.
+    present = p.one("SELECT tk FROM t_heap ORDER BY id LIMIT 1")
+    expect.num(p.one(f"SELECT count(*) FROM t_heap WHERE tk = '{present}'"), 1,
+               "premise: the mismatched-collation probe value is present exactly once")
+    for label, sql in (
+            ("textbloom present",           "SELECT id FROM %T WHERE tk = 'k' || ((7*2654435761)%50000)"),
+            ("textbloom absent",            "SELECT count(*) FROM %T WHERE tk = 'zzzzzzzz'"),
+            ("textbloom C absent",          "SELECT count(*) FROM %T WHERE tc = 'zzzzzzzz'"),
+            ("textbloom C eq",              "SELECT count(*) FROM %T WHERE tc = 'c123'"),
+            ("textbloom collate-mismatch",
+             f"SELECT count(*) FROM %T WHERE tk = '{present}' COLLATE \"C\"")):
+        c, h = p.both(sql)
+        expect.row_set(c, h, label)
+    # AND THE DIRECTION IT MUST FAIL IN, stated as its own arm: the mismatched collation
+    # must return the row, not zero. Without this the comparison above is satisfied by
+    # both sides returning 0, which is what the bash arm does today.
+    expect.num(p.one(f"SELECT count(*) FROM t_col WHERE tk = '{present}' COLLATE \"C\""), 1,
+               "textbloom collate-mismatch returns the row rather than skipping it")
+
+
+# ---------------------------------------------------------------------------
+# Part 6: a selective filter with several wide output columns
+# ---------------------------------------------------------------------------
+
+
+def test_a_selective_filter_with_a_wide_projection_agrees(pgc_conn, expect):
+    """One filtered column, four projected, at four selectivities from one row to most.
+
+    `wide nomatch` matches nothing on both sides, which is the second arm in this file
+    that cannot fail on its own -- kept with a stated reason and a positive control, the
+    same treatment `empty scan` gets. The other three are values or non-empty sets.
+    """
+    p = _pair(pgc_conn, "id int, sel int, a text, b bigint, c numeric",
+              load="SELECT g, g, 'a'||g, g::bigint*2, g::numeric*1.5 "
+                   "FROM generate_series(1,20000) g",
+              options=_BLOOM_OPTS)
+    c, h = p.both("SELECT id, a, b, c FROM %T WHERE sel = 12345")
+    expect.row_set(c, h, "wide point")
+    c, h = p.both("SELECT id, a, b FROM %T WHERE sel BETWEEN 5000 AND 5100")
+    expect.row_set(c, h, "wide range")
+    c, h = p.both("SELECT id, a, b, c FROM %T WHERE sel = 999999")
+    expect.row_set(c, h, "wide nomatch",
+                   allow_empty="no row has sel = 999999; the control below is what can fail")
+    c, h = p.both("SELECT id, a FROM %T WHERE sel > 100")
+    expect.row_set(c, h, "wide most")
+    # THE CONTROL for `wide nomatch`: the same projection at a value that IS present must
+    # return a row, or "returns nothing" is the only behaviour that arm has ever observed.
+    c, h = p.both("SELECT id, a, b, c FROM %T WHERE sel = 19999")
+    expect.row_set(c, h, "wide nomatch control: a present value returns its row")
+    expect.num(len(c), 1, "and the control really did match one row")
+
+
+# ---------------------------------------------------------------------------
+# Part 7: covering count(*) from metadata
+#
+# count(*) with no filter is answered from each row group's stored row count minus the
+# visible-row-mask deletes, skipping the data scan. It must equal the oracle after
+# inserts, deletes AND updates, whether that path is taken or not.
+# ---------------------------------------------------------------------------
+
+
+def test_a_covering_count_agrees_with_the_path_on_and_off(pgc_conn, expect):
+    """The same count, both ways through `enable_vectorization`, after a delete and an
+    update.
+
+    An UPDATE on a columnar table appends the new row and masks the old, so the stored
+    per-group count and the visible count diverge -- which is exactly the arithmetic the
+    metadata path has to get right, and exactly what a plain scan gets right for free.
+    Running it both ways is what distinguishes "the fast path is correct" from "the fast
+    path was not taken".
+
+    `SET` on this connection rather than the bash suite's `ALTER DATABASE`: that form
+    exists because each psql invocation there is a new session, and this one is not.
+    """
+    p = _pair(pgc_conn, "id int, v int",
+              load="SELECT g, g%10 FROM generate_series(1,20000) g",
+              options="chunk_group_row_limit => 1000, stripe_row_limit => 3000")
+    pgc_conn.execute("DELETE FROM t_heap WHERE id % 13 = 0")
+    pgc_conn.execute("DELETE FROM t_col  WHERE id % 13 = 0")
+    pgc_conn.execute("UPDATE t_heap SET v = v + 1 WHERE id % 17 = 0")
+    pgc_conn.execute("UPDATE t_col  SET v = v + 1 WHERE id % 17 = 0")
+    expect.num(p.one("SELECT count(*) FROM t_heap"), 18462,
+               "premise: the delete and update leave a count neither one would give alone")
+
+    for mode in ("on", "off"):
+        pgc_conn.execute(f"SET pgcolumnar.enable_vectorization = {mode}")
+        c, h = p.both("SELECT count(*) FROM %T")
+        expect.row_set(c, h, f"count meta={mode}")
+    pgc_conn.execute("RESET pgcolumnar.enable_vectorization")

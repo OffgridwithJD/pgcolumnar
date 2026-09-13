@@ -50,6 +50,14 @@ check "the opener fstats the fd it holds (checks what it opened)" \
 	"$([ "$(opener_body | grep -c 'fstat(')" -ge 1 ] && echo yes || echo no)" "yes"
 check "the opener never stats a path before opening it (no TOCTOU)" \
 	"$(opener_body | grep -Ec 'stat\((const )?path|stat\("|stat\(path')" "0"
+# THE POPULATION, because this arm can pass on a tree it never read. `grep -rc`
+# prints `file:count` per file and prints NOTHING for a path it cannot open, and
+# `END{print s+0}` then manufactures the 0 the check wants. The three arms above read
+# `$OBJ`, not `$SRC`, so nothing here established that `$SRC` is a source tree. Counted
+# the same way the arm sums: one line of `grep -rc` output per file read.
+_lorf_files="$(grep -rc 'PgColumnarRejectNonRegularFile' "$SRC" 2>/dev/null | grep -c .)"
+check "premise: the recursive sweep read source files under \$SRC" \
+	"$([ "${_lorf_files:-0}" -ge 5 ] && echo yes || echo no)" "yes"
 check "the racy stat-before-open helper is gone" \
 	"$(grep -rc 'PgColumnarRejectNonRegularFile' "$SRC" | awk -F: '{s+=$2} END{print s+0}')" "0"
 
