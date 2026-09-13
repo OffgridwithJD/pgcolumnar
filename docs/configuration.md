@@ -155,7 +155,13 @@ SELECT pgcolumnar.set_options(
 | --- | --- | --- |
 | `table_name` | regclass | The columnar table to change. Anything that is not an ordinary table using the `pgcolumnar` access method is rejected, including a partitioned table. |
 | `chunk_group_row_limit` | integer | Per-table override of `pgcolumnar.chunk_group_row_limit`. |
-| `stripe_row_limit` | integer | Per-table override of `pgcolumnar.stripe_row_limit`. |
+| `stripe_row_limit` | integer | Per-table override of `pgcolumnar.stripe_row_limit`. See the note below: a value under 1024 costs text compression. |
+| `compression` | name | One of `none`, `pglz`, `lz4`, `zstd`. |
+| `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
+| `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
+| `sort_by` | name[] | Declared physical sort key (#288), applied by `pgcolumnar.vacuum_sorted(t)` with no columns. Column names, so it survives `pg_dump`/restore. Not auto-maintained; re-run after inserts. Cannot name a virtual generated column. Clear with `reset_options(t, sort_by => true)`. |
+| `ttl_column` | name | The `timestamp` or `timestamptz` column a retention is measured on. Set it with `ttl_interval`; neither works alone. Nothing is deleted until you call `pgcolumnar.expire(t)` by name. |
+| `ttl_interval` | interval | How long a row is kept, measured from `ttl_column`. `pgcolumnar.expire(t)` then drops row groups whose rows are all older than this. A group with one live row is kept whole. |
 
 **A `stripe_row_limit` below 1024 disables FSST on text columns.** A vector is a
 fixed 1024 values. A row group smaller than that never fills one, so the
@@ -172,12 +178,6 @@ At 1000 the column costs more than storing the bytes uncompressed. The accepted
 minimum is 1000 and the vector is 1024, so **the most aggressive legal setting is
 the one that pays this cost**. Use 1024 or more unless you have measured that you
 want the opposite (#1017).
-| `compression` | name | One of `none`, `pglz`, `lz4`, `zstd`. |
-| `compression_level` | integer | Level for the `zstd` codec, 1 to 22. |
-| `encode_effort` | name | `full` (default) or `fast`. How much work the writer spends choosing an encoding. See below. |
-| `sort_by` | name[] | Declared physical sort key (#288), applied by `pgcolumnar.vacuum_sorted(t)` with no columns. Column names, so it survives `pg_dump`/restore. Not auto-maintained; re-run after inserts. Cannot name a virtual generated column. Clear with `reset_options(t, sort_by => true)`. |
-| `ttl_column` | name | The `timestamp` or `timestamptz` column a retention is measured on. Set it with `ttl_interval`; neither works alone. Nothing is deleted until you call `pgcolumnar.expire(t)` by name. |
-| `ttl_interval` | interval | How long a row is kept, measured from `ttl_column`. `pgcolumnar.expire(t)` then drops row groups whose rows are all older than this. A group with one live row is kept whole. |
 
 The function does not change an argument that keeps its default value of
 `NULL`. The function refuses a value that is outside the permitted range of a
