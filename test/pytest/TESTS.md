@@ -3650,7 +3650,7 @@ two disagree.
 | drop the `refusal` entry | its own arm, and the drift guard |
 | `plan_marker` `None` -> `-1`, taking the key | its own arm, and the drift guard |
 | `cannot_run` `0` -> `-1`, taking the detail | its own arm |
-| a wrong entry for a helper no arm covers (`at_least`) | the drift guard, and the whole-tree arm |
+| a wrong entry for a helper no BEHAVIOURAL arm covers (`at_least`) | the drift guard, and the whole-tree arm -- the four behavioural arms stay green, which is the point of it |
 | add a helper to `Expect` whose name is not last | the drift guard, naming it |
 | revert any one of the four `*` keyword-only markers | `test_no_later_argument_can_overtake_the_name`, naming the helper |
 
