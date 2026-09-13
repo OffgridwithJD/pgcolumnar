@@ -51,7 +51,12 @@
 # 290 -> 298 when test_compare_to_bash.py landed: eight arms over the parity tool's own
 # extractors. Re-derived by collection on the merged tree, per the recipe above:
 # `298 tests collected`.
-guard_tests 298
+# 298 -> 304: six arms in test_mutation_ledger.py about one ledger key covering
+# more than one check (#982) -- the refusal, its uncovered-suite control, the two-runs
+# distinction, the false-positive budget, and two for the same class one level down, where a
+# duplicated row in the tracked ledger file collapsed silently and let the last line win.
+# Re-derived by collection on the merged tree, per the recipe above: `304 tests collected`.
+guard_tests 304
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -74,4 +79,14 @@ guard_tests 298
 # 205 -> 217 when test_projection_privilege.py landed: twelve arms over the two projection
 # read helpers, parametrised per function so each carries the bash suite's own check name.
 # Re-derived by collection.
-cluster_tests 217
+# 217 -> 219: two arms in test_harness_deps.py asserting THIS FILE states
+# each key exactly once (#982). A keep-both merge of three PRs each moving guard_tests produced
+# three of those lines, and the arm that read this file built a dict, so it could not see the
+# duplicate.
+#
+# IN THE CLUSTER HALF, NOT THE GUARD HALF, which I got wrong first and this mechanism caught
+# with `collected 283 test(s) but expected 285`: test_harness_deps.py DEFINES NO_CLUSTER and
+# is not IN it.
+#
+# Re-derived by collection on the merged tree: `219 tests collected`.
+cluster_tests 219
