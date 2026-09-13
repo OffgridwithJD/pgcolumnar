@@ -3452,10 +3452,19 @@ box, and two of them have no counterpart in the port at all.
 
 That gap is NOT caused by the change above; the change is what made it visible, and it is
 filed as #1040 rather than widened here, because widening the regex reddens a pair and is
-a port's worth of work rather than a tool fix. Eight more bash check helpers are
-invisible to the same regex (`check_skip`, `check_structure`, `check_reconstruct`,
-`check_split_happened`, `check_ratio_needs_quiet_machine`, `check_float`,
-`check_stack_depth`, and `check_unrunnable` itself).
+a port's worth of work rather than a tool fix.
+
+Derived from `test/lib.sh` rather than swept for, because three different sweeps gave
+three different totals: **`lib.sh` defines 8 check helpers, the tool reads 5, and 3 are
+invisible** -- `check_unrunnable`, `check_skip`, `check_ratio_needs_quiet_machine`.
+Individual suites define four more of their own (`check_structure`,
+`check_reconstruct`, `check_split_happened` in `parallel_copy.sh`, `check_float` in
+`parquet_export_stats.sh`), invisible to the same regex.
+
+No invocation TOTAL is quoted here on purpose. Counting them is method-sensitive -- a
+plain `grep -c`, a command-position match, and a comment-stripped pass disagree, and
+between two agents four sweeps produced 89, 64, 54 and 50. The structure above is stable
+under every method; the totals are not, so #1040 carries the method rather than a number.
 
 `refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
 `test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
