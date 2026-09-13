@@ -480,6 +480,114 @@ def test_the_two_halves_of_the_refused_sentence_sum_to_the_named_total(expect):
                "and the refused half is the count of ids section 2 claims")
 
 
+# A bullet ENTRY is the unit, not a line. The duplicate that motivated this is a
+# two-line bullet, and a line-keyed sweep cannot see it: line 1 of the first copy
+# and line 1 of the second are not adjacent. Four sweeps in this tree have now
+# failed by keying on the wrong unit, so the unit is named here and fixtured below.
+def _bullet_entries(text, floor=40):
+    """-> [(1-based start line, the entry joined)] for every bullet in TEXT.
+
+    A continuation is an indented non-blank line under a bullet, which is how every
+    multi-line entry in the inventory is written. Entries shorter than FLOOR
+    characters are dropped: the inventory legitimately repeats short bullets such as
+    a bare id, and a rule that flagged those would be switched off.
+    """
+    out, cur, start = [], None, 0
+    for i, line in enumerate(text.splitlines()):
+        if re.match(r"^\s*[-*] ", line):
+            if cur is not None:
+                out.append((start, cur))
+            cur, start = [line.strip()], i + 1
+        elif cur is not None and line.strip() and line[:1] in " \t":
+            cur.append(line.strip())
+        elif cur is not None:
+            out.append((start, cur))
+            cur = None
+    if cur is not None:
+        out.append((start, cur))
+    return [(s, " ".join(b)) for s, b in out if len(" ".join(b)) >= floor]
+
+
+def _duplicated_entries(text):
+    """-> [(first line, repeat line, the entry)] for every entry written twice."""
+    seen, dupes = {}, []
+    for start, entry in _bullet_entries(text):
+        if entry in seen:
+            dupes.append((seen[entry], start, entry))
+        else:
+            seen[entry] = start
+    return dupes
+
+
+def test_the_inventory_names_no_entry_twice(expect):
+    """A duplicated entry double-states the inventory, and the count guard is blind
+    to it BY CONSTRUCTION rather than by accident.
+
+    `_named_modes_in` builds `set(MODE_ID.findall(chunk))` per section, so every
+    total it states is over distinct ids. Measured on the document that motivated
+    this, with the second copy of a six-id bullet present and then deleted:
+
+        with the duplicate      (28, 44, 72)
+        without the duplicate   (28, 44, 72)
+
+    So no existing arm here can fail on it, and none did: the duplicate sat in
+    section 3.4 while `test_the_mode_inventory_states_its_own_totals_correctly`,
+    `test_the_prose_totals_match_the_counted_modes` and the sum arm above were all
+    green. The cost is to the reader rather than to the totals -- a six-id bullet
+    written twice reads as two distinct groups of open modes -- which is why this is
+    an arm over entries and not a correction to the counting rule. Deduping ids is
+    right; the totals must not move because someone pasted a line twice.
+
+    The counterpart to `test_no_test_name_is_defined_twice_in_the_corpus`, for the
+    document rather than the corpus.
+    """
+    doc = MODES_DOC.read_text()
+    entries = _bullet_entries(doc)
+    expect.at_least(len(entries), 20, "premise: the rule finds entries to compare")
+    dupes = _duplicated_entries(doc)
+    expect.text(
+        "; ".join(f"lines {a} and {b}" for a, b, _ in dupes) or "none", "none",
+        "the inventory names no entry twice")
+
+
+def test_a_duplicated_entry_is_caught_on_a_fixture(expect):
+    """Prove the rule fires, and fires on the shape that got through.
+
+    Two lines, not one, because a one-line fixture would pass against a sweep keyed
+    on adjacent identical LINES -- the sweep that missed the real duplicate.
+    """
+    entry = ("- `a-mode-named-once`, `a-second-mode-here`,\n"
+             "  `a-third-mode-on-the-continuation-line`\n")
+    clean = "## 3.4 A section\n\n" + entry + "\n- `something-else-entirely-here`, `and-another-mode-id`\n"
+    expect.num(len(_duplicated_entries(clean)), 0,
+               "premise: the clean fixture is not flagged")
+    spliced = clean.replace(entry, entry + "\n" + entry, 1)
+    dupes = _duplicated_entries(spliced)
+    expect.num(len(dupes), 1, "the duplicated two-line entry is caught")
+    expect.num(dupes[0][0], 3, "and the FIRST copy's line number is reported")
+    expect.at_least(dupes[0][1], 4, "with the repeat's line after it")
+
+
+def test_a_short_repeated_bullet_is_not_flagged(expect):
+    """The rule's false-positive budget, stated rather than assumed.
+
+    The inventory repeats short bullets -- a bare id under two headings is ordinary
+    -- and a guard that reddened on those would be removed, taking the real rule
+    with it. Measured at the floor: the same bullet below it passes, above it fails.
+    """
+    short = "## 3.4 A section\n\n- `a-b-c`\n\n- `a-b-c`\n"
+    expect.num(len(_duplicated_entries(short)), 0,
+               "a repeated bullet under the length floor is not a duplicate")
+    long_id = "- `" + "a-b-c-" * 9 + "d`\n"
+    doubled = "## 3.4 A section\n\n" + long_id + "\n" + long_id
+    expect.at_least(len(_bullet_entries(doubled)), 2,
+                    "premise: the long fixture clears the floor")
+    expect.num(len(_duplicated_entries(doubled)), 1,
+               "and the same bullet above the floor IS a duplicate")
+
+
+
+
 # ---------------------------------------------------------------------------
 # The counting rule's own edges, and the row reader's.
 #

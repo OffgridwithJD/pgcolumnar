@@ -1026,6 +1026,9 @@ many times.
 | `test_the_inventory_accounts_for_every_mode_the_run_found` | the admitted gap row is the run's total minus what is written down |
 | `test_the_prose_totals_match_the_counted_modes` | every sentence stating what the layer refuses today carries the counted number, not just the table |
 | `test_the_two_halves_of_the_refused_sentence_sum_to_the_named_total` | TESTS.md states the split twice in one sentence, and BOTH halves are checked against the inventory's own count — the gated half alone let 26 + 47 = 73 past a named total of 72 |
+| `test_the_inventory_names_no_entry_twice` | no bullet entry in VACUITY_MODES.md is written twice — the count guards dedupe ids, so a duplicated entry moves no total and nothing could fail on it |
+| `test_a_duplicated_entry_is_caught_on_a_fixture` | **removal proof**: the shape that got through, which is a TWO-LINE bullet, on a fixture with its clean control |
+| `test_a_short_repeated_bullet_is_not_flagged` | the rule's false-positive budget, measured at the length floor: below it a repeated bullet is ordinary, above it is a duplicate |
 | `test_an_undocumented_file_is_caught_with_the_tests_inside_it` | how 29 tests went missing at once |
 | `test_a_document_with_no_totals_line_states_none` | absent totals report `None`, which must not read as "they match" |
 | `test_a_stated_total_that_disagrees_with_disk_is_visible` | the count arm's own red |
@@ -1060,9 +1063,19 @@ mode id, and that no un-struck entry names an id section 2 already claims.
 With every entry now struck, the second arm has nothing to refuse on the real
 document. That is what the fixture arm is for.
 
-The five fixture arms exist because everything above them passes on a healthy tree,
-which is exactly what a guard that does nothing also does. They run the identical
-functions over a corpus built to be wrong.
+The fixture arms exist because everything above them passes on a healthy tree, which
+is exactly what a guard that does nothing also does. They run the identical functions
+over a corpus built to be wrong.
+
+**That sentence said "the five fixture arms" and nothing counted them.** Five was right
+when it was written, at `3d6e1216` on 2026-09-09. It counted the arms taking `tmp_path`.
+There are eight of those now, and thirteen fixture arms in total. So the number had gone
+stale in the document whose subject is stale documents.
+
+It is removed rather than corrected. One paragraph up,
+`test_the_document_states_no_totals_for_a_merge_to_get_wrong` already decided that for the
+same reason. A count in prose that no arm reads is a claim waiting to go wrong. The arms
+are listed in the table above, where a reader can count them.
 
 ### The twin, and which half has teeth
 
