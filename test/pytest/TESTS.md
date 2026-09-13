@@ -3461,10 +3461,25 @@ Individual suites define four more of their own (`check_structure`,
 `check_reconstruct`, `check_split_happened` in `parallel_copy.sh`, `check_float` in
 `parquet_export_stats.sh`), invisible to the same regex.
 
-No invocation TOTAL is quoted here on purpose. Counting them is method-sensitive -- a
-plain `grep -c`, a command-position match, and a comment-stripped pass disagree, and
-between two agents four sweeps produced 89, 64, 54 and 50. The structure above is stable
-under every method; the totals are not, so #1040 carries the method rather than a number.
+**50 invisible invocations**, reconciled between two agents and two independent methods,
+which agree helper for helper: `check_unrunnable` 25, `check_skip` 23,
+`check_ratio_needs_quiet_machine` 2.
+
+Getting there took four sweeps that read 89, 64, 54 and 50, and the three wrong ones were
+not method-sensitivity -- they were two defects, both worth knowing because any later
+re-derivation meets them:
+
+- **A `\bNAME\s` sweep counts each helper's own definition line.** `lib.sh:1231` is
+  `check_unrunnable() {<TAB># check_unrunnable NAME REASON_CODE DETAIL` -- the trailing
+  USAGE COMMENT repeats the name followed by a space, so the definition matches as though
+  it were a call. Same shape at `lib.sh:1407`. Two more matches were ordinary prose. That
+  is 89 (definitions included) and 54 (comments included).
+- **A command-position match misses an invocation after `&&`.** `hilbert_curve.sh:321` is
+  `[ -n "$_a" ] && check_unrunnable "$_a" "$2" "$3"`. Anchoring on `^` alone gives 24 for
+  that helper rather than 25.
+
+Strip trailing comments as well as whole-line ones, exclude definitions, and accept a call
+after `;`, `&&` or `||`, and the number is reproducible.
 
 `refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
 `test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
