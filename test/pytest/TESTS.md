@@ -82,6 +82,7 @@ behaviour, the source of that number is named.
 - [34. test_docs_stripe_floor.py: the stripe floor is below a vector](#34-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 - [35. test_projection_privilege.py: the projection read helpers are a privilege boundary](#35-test_projection_privilegepy-the-projection-read-helpers-are-a-privilege-boundary)
 - [36. test_compare_to_bash.py: the parity tool reads the NAME](#36-test_compare_to_bashpy-the-parity-tool-reads-the-name)
+- [37. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#37-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 
 ## 1. How to read a test in here
 
@@ -3423,3 +3424,21 @@ the tool grades THIS tree.
 | `test_the_parametrize_reader_takes_the_column_called_name` | the declared column, not position |
 | `test_the_two_harnesses_interpolations_land_on_one_template` | bash and python spell interpolation differently and must meet |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
+
+## 37. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
+
+#913. A fetching index scan on a correlated key is priced below the custom scan
+through ~50,000 rows, while it does about 27x the work. The penalty term exists
+for this; the measurement says it is too small. Split from #766, which closed
+on the opposite question.
+
+This file asserts the PLAN, not a cost number. Costs drift with the constants.
+The chosen node is the property.
+
+Independent of `test/index_fetch_penalty_crossover.sh`. Same public seam, own
+fixture, own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
+

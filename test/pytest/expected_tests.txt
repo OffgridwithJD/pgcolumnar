@@ -74,4 +74,6 @@ guard_tests 298
 # 205 -> 217 when test_projection_privilege.py landed: twelve arms over the two projection
 # read helpers, parametrised per function so each carries the bash suite's own check name.
 # Re-derived by collection.
-cluster_tests 217
+# 217 -> 218: test_index_fetch_penalty_crossover.py, the plan-choice arm for #913.
+# Re-derived by collection on this tree: `218 tests collected`.
+cluster_tests 218
