@@ -455,10 +455,13 @@ def test_a_covering_sort_key_query_reads_the_projection(planner, expect):
                     "projection chosen for covering + sort-key query")
         expect.row_set(_rows(cur, COVERING), _rows(cur, COVERING_H),
                        "projection-scan results match heap oracle")
-        expect.text(str(_rows(cur, "SELECT count(*), sum(a) FROM ps "
-                                   "WHERE c BETWEEN 100 AND 200")),
-                    str(_rows(cur, "SELECT count(*), sum(a) FROM ps_h "
-                                   "WHERE c BETWEEN 100 AND 200")),
+        # `rows`, not `text(str(...))`. Comparing the repr of two lists reports "these
+        # two strings differ" where `rows` names the differing row -- the same weakness
+        # as comparing hashes, wearing a Python spelling.
+        expect.rows(_rows(cur, "SELECT count(*), sum(a) FROM ps "
+                               "WHERE c BETWEEN 100 AND 200"),
+                    _rows(cur, "SELECT count(*), sum(a) FROM ps_h "
+                               "WHERE c BETWEEN 100 AND 200"),
                     "aggregate over projection scan matches oracle")
 
 
