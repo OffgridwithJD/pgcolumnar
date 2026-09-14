@@ -18,6 +18,37 @@ true until the next version shipped.
 
 ### Added
 
+- `test/pytest/test_projections.py`: the multiple-projections DDL, catalog and read
+  path, ported from `test/projections.sh` (#432). All 75 of its check names, one for
+  one.
+
+  A projection is a second copy of some columns, and every property is about the copy
+  staying honest: it holds the rows the base holds, it loses the rows the base loses, it
+  survives a vacuum that renumbers every row underneath it, and the planner reads it only
+  when it can answer the whole query from it. A wrong projection is a WRONG ANSWER rather
+  than a slow one, because nothing downstream re-checks.
+
+  THE PORT IS STRICTLY STRONGER IN ONE PLACE, and it is worth saying which way. The
+  original's `expect_fail` helper runs the statement and passes when it errors AT ALL, so
+  a misspelt table name satisfies every one of its eight refusal arms. The port asserts
+  the SQLSTATE, and every code was measured against this build rather than guessed --
+  42710, 42703, 22023, 42701, 22023, 42809, 22023, 42704, 42704. The names are the bash
+  suite's; the assertions are not.
+
+  Three other mechanism changes assert the same property by a stronger means: the
+  `EXPLAIN` grep becomes a typed JSON field and reads the projection NAME rather than its
+  presence; `pgc_set_hash` becomes `expect.row_set`, order-blind by declaration rather
+  than by construction; and the second MVCC session becomes a second connection rather
+  than a background `psql` on a fifo polled for a token, which removes the wait rather
+  than shortening it.
+
+  Mutation proof, each asserting it applied before its result was believed: removing the
+  #875 projection-writer reset reddens both directions of the latch (`got 105 want 116`
+  on the mid-transaction add, and the orphan storage the mid-transaction drop leaves);
+  forcing the planner to refuse every projection reddens the covering query and the
+  post-vacuum planner arm with `got None want 'pc'`, which is what proves the port reads
+  the name rather than the presence. Restored, byte-identical: 75 checks, 0 fail.
+
 - `test/pytest/test_sorted_pathkeys.py`: the ordered-scan surface, ported from
   `test/sorted_pathkeys.sh` (#432). All 110 of its check names, one for one.
 
