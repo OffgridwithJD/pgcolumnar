@@ -83,7 +83,8 @@ behaviour, the source of that number is named.
 - [35. test_projection_privilege.py: the projection read helpers are a privilege boundary](#35-test_projection_privilegepy-the-projection-read-helpers-are-a-privilege-boundary)
 - [36. test_compare_to_bash.py: the parity tool reads the NAME](#36-test_compare_to_bashpy-the-parity-tool-reads-the-name)
 - [37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface](#37-test_iceberg_fdwpy-the-iceberg-fdws-pruning-surface)
-- [38. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#38-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
+- [38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint](#38-test_objstore_endpoint_userinfopy-userinfo-in-an-object-store-endpoint)
+- [39. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#39-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
 
 ## 1. How to read a test in here
 
@@ -3879,6 +3880,19 @@ the tool grades THIS tree.
 
 ## 37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface
 
+## 38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint
+
+Not a port and not a pair: `objstore_endpoint_userinfo.sh` does not exist. These assert
+the same properties as `test/objstore_userinfo.sh`'s endpoint arms, independently,
+through the python harness.
+
+| test | asserts |
+| --- | --- |
+| `test_a_userinfo_endpoint_is_refused` | both shapes refuse at `22023`, naming userinfo and naming the ENDPOINT rather than the s3:// URL |
+| `test_the_guard_fires_without_a_region_configured` | the placement: with no region set the refusal is userinfo, not the region demand |
+| `test_a_clean_endpoint_is_not_refused_as_userinfo` | the control -- a clean endpoint gets past the guard and fails for another reason |
+| `test_an_at_sign_in_the_object_key_is_not_userinfo` | the other direction: `@` is legal in a key and is untouched |
+
 Ports `test/iceberg_fdw.sh`. 74 of its 76 check names, one for one; the two it cannot
 carry are `pgc_skip`'s refusal names, which are structural and declared in
 `INCOMPLETE` with their reason.
@@ -3913,7 +3927,7 @@ carry are `pgc_skip`'s refusal names, which are structural and declared in
 | `test_a_plan_with_no_pruning_marker_is_not_read_as_zero` | a plan that never mentions `Files Pruned` is not read as 0; needs no server |
 
 
-## 38. test_hilbert_cluster.py: the Hilbert clustering SQL surface
+## 39. test_hilbert_cluster.py: the Hilbert clustering SQL surface
 
 The port of `test/hilbert_cluster.sh` (#432, #889's SQL half). The bash suite pins the SQL
 surface of `pgcolumnar.cluster_hilbert` and `recluster_hilbert`, the recorded
