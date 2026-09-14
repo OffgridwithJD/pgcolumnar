@@ -42,7 +42,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
-                             _loop_names,
+                             _expanded_names, _loop_names,
+                             _matchable_names,
                              _derive_recorders, _names_in, _suite_recorders,
                              _parametrized_names, _py_names, _strip_comments,
                              _template, _words)
@@ -84,7 +85,7 @@ from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
 #
 # The shape is `SHELL_REFERENCES`' in `test_harness_deps.py`, asserted in both
 # directions for the same reason: a one-way list rots into a permanent exemption.
-COMPLETE = ["hilbert_cluster", "hilbert_locality",
+COMPLETE = ["differential", "hilbert_cluster", "hilbert_locality",
             "native_ownership", "native_projection", "projection_privilege",
             "stats_privilege", "zonemap_boundaries"]
 
@@ -102,17 +103,6 @@ INCOMPLETE = {
         "python side can express. #1040's phase 0b is the open question; declared "
         "here rather than worked around by naming a passing premise after a missing "
         "dependency, which would read as an assertion that the fixture is absent.",
-    "differential":
-        "17 of its 86 bash names have no counterpart the grader can see, and all 17 "
-        "are a SPELLING rather than a gap. The bash suite unrolls `c_int range` "
-        "through `c_text range` (11) and `c_int eq` through `c_arr eq` (6) as "
-        "literals; the port parametrises them over RANGES and EQUALITIES, which hold "
-        "the same 11 and the same 6 columns -- checked, not assumed. So a literal "
-        "name meets a templated one, and #1045 class 3 resolves that as MISSING. "
-        "It was 54 until the loop reader landed; the other 37 were the port's OWN "
-        "names, bound to a `for` variable (#1045 class 2). Whether a literal family "
-        "and its parametrised twin should match is a judgement the tool cannot make, "
-        "so it stays declared here rather than decided by widening `_template`."
 }
 
 
@@ -252,6 +242,161 @@ def test_the_loop_reader_invents_nothing_in_this_corpus(expect):
                 "build_refusal, differential, join_runtime_filter",
                 "and it is these files, so a fourth appearing is a diff a reviewer "
                 "sees rather than a number that moved")
+
+
+# A port that parametrises a family its bash twin unrolls, which is the whole of
+# #1045 class 3. Module-level so several arms share one subject.
+# WRITTEN AS CONCATENATED LINES, not a triple-quoted block, so no line of it starts
+# at column 0. `test_docs_cover_the_corpus.py` finds tests with `^def (test_\w+)` over
+# the file text, and a triple-quoted fixture puts its `def test_...` exactly there --
+# so the guard read this fixture as an undocumented test, correctly, because a text
+# scan cannot tell a fixture from a definition. Every other fixture in this file is
+# written this way for the same reason.
+_EXPAND_FIXTURE = (
+    'RANGES = {"c_int": "c_int > 1", "c_vc": "c_vc > \'a\'"}\n'
+    '@pytest.mark.parametrize("col", sorted(RANGES))\n'
+    'def test_a_range_agrees(matrix, col, expect):\n'
+    '    c, h = matrix.both(f"SELECT id FROM %T WHERE {RANGES[col]}")\n'
+    '    expect.row_set(c, h, f"{col} range")\n'
+)
+
+
+def test_a_parametrised_family_expands_to_the_names_bash_unrolls(expect):
+    """#1045 CLASS 3. The bash suite writes 11 literals where the port writes one
+    template over 11 columns, so the two never met and the port graded INCOMPLETE for
+    17 properties it asserts.
+
+    Resolved to CONCRETE names and matched literally, which is what keeps it
+    falsifiable -- see the arm below. Widening `_template` instead would match
+    `c_bytea range` against `{} range` whether or not the port covers `c_bytea`.
+    """
+    got = _expanded_names(ast.parse(_EXPAND_FIXTURE))
+    expect.text(", ".join(sorted(got)), "c_int range, c_vc range",
+                "the family expands to one concrete name per member")
+
+    # AND IT IS NOT AN ASSERTION. `_py_names` answers what the port asserts and the
+    # report prints that; the expansion answers which spellings a bash literal may be
+    # compared with. Conflating them made `differential` report 274 named assertions
+    # where the port has 100.
+    expect.num(sum(1 for n in _py_names(_EXPAND_FIXTURE) if n == "c_int range"), 0,
+               "the expansion is not counted as something the port asserts")
+    expect.num(sum(1 for n in _matchable_names(_EXPAND_FIXTURE) if n == "c_int range"), 1,
+               "but it IS matchable, which is the only thing it is for")
+
+
+def test_dropping_a_member_brings_the_divergence_back_named(expect):
+    """THE PROPERTY THAT MAKES EXPANSION RIGHT AND WIDENING WRONG.
+
+    Expansion produces literals on both sides, so the match stays decidable when the
+    port changes. Remove a column from the port's container and the bash name it
+    covered is reported MISSING, BY NAME. A widened template cannot do that: `{} range`
+    matches whatever the port happens to cover, so it buys the 17 by permanently
+    retiring the ability to notice those 17 breaking.
+    """
+    bash = ["c_int range", "c_vc range"]
+    full = set(_matchable_names(_EXPAND_FIXTURE))
+    expect.num(len([b for b in bash if b not in full]), 0,
+               "premise: with both members present, neither bash name is missing")
+
+    thinned = set(_matchable_names(_EXPAND_FIXTURE.replace(
+        '"c_vc": "c_vc > \'a\'"', '')))
+    lost = sorted(b for b in bash if b not in thinned
+                  and _template(b) not in {_template(n) for n in thinned})
+    expect.text(", ".join(lost), "c_vc range",
+                "and dropping a member reports exactly the bash name it covered, by "
+                "name rather than as a count")
+
+
+def test_a_templated_pair_is_not_orphaned_by_the_expansion(expect):
+    """THE ADDITIVE CONSTRAINT, and it is the regression this design otherwise causes.
+
+    Where BOTH sides are templated, the TEMPLATE is the match. 11 of
+    `hilbert_locality`'s 30 bash names and 10 of `hilbert_cluster`'s match that way,
+    so replacing the port's template with concrete names orphans them. Measured:
+    replacing breaks three green pairs and takes `differential` to 13 rather than 0.
+
+    NO `differential` FIXTURE CATCHES THIS. The regression appears only where both
+    sides are templated, and `differential`'s range and eq families are asymmetric by
+    construction -- literals on one side, a template on the other. An implementer
+    testing against the motivating pair alone ships the break, which is why this arm
+    runs the real pair.
+
+    It is also INDEPENDENT of the refusals below: those bash names are themselves
+    templated, so dropping the port's templated form orphans them whether or not
+    anything else is ever expanded.
+    """
+    import io, contextlib
+    from compare_to_bash import main
+    for stem in ("hilbert_locality", "hilbert_cluster", "native_ownership"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = main(str(HERE.parent / f"{stem}.sh"), str(HERE / f"test_{stem}.py"))
+        expect.num(rc, 0, f"{stem} still grades one-for-one after the expansion")
+
+
+def test_the_expansion_refuses_what_it_cannot_spell(expect):
+    """THREE REFUSALS, each costing a false MISSING at worst.
+
+    A MODULE CONSTANT does not render the way its source spells it -- `FLOAT_RTOL =
+    1e-6` becomes `1e-06` in an f-string -- and the bash side carries no such name. A
+    resolvable value is not one that renders the way the other side spells it.
+
+    TWO OR MORE DISTINCT COLUMNS is a cartesian product, and expanding one while
+    holding the other invents names that exist nowhere. Three sites in this tree, all
+    in `hilbert_cluster`, which grades clean and stays clean because refusing means
+    not ADDING. Built when a pair needs it, against a real example.
+
+    A NON-LITERAL CONTAINER cannot be resolved without running the file.
+    """
+    constant = ('FLOAT_RTOL = 1e-6\n'
+                '@pytest.mark.parametrize("col", ["c_int"])\n'
+                'def test_x(col, expect):\n'
+                '    expect.num(g, 1, f"{col} within {FLOAT_RTOL} relative")\n')
+    expect.num(len(_expanded_names(ast.parse(constant))), 0,
+               "a name interpolating a module constant is refused, because 1e-6 "
+               "renders as 1e-06 and bash carries neither")
+
+    multi = ('@pytest.mark.parametrize("old", ["a"])\n'
+             '@pytest.mark.parametrize("new", ["b"])\n'
+             'def test_x(old, new, expect):\n'
+             '    expect.num(g, 1, f"{new} has {old}\'s signature")\n')
+    expect.num(len(_expanded_names(ast.parse(multi))), 0,
+               "two distinct parametrised columns are refused rather than expanded "
+               "one at a time")
+
+    computed = ('@pytest.mark.parametrize("col", CASES)\n'
+                'def test_x(col, expect):\n'
+                '    expect.num(g, 1, f"{col} range")\n')
+    expect.num(len(_expanded_names(ast.parse(computed))), 0,
+               "a container that is not a literal is refused rather than guessed")
+
+    # THE CONTROL, so the three above are decisions and not a broken expander.
+    expect.num(len(_expanded_names(ast.parse(_EXPAND_FIXTURE))), 2,
+               "control: the readable form still expands")
+
+
+def test_the_expansion_reads_only_the_name_argument(expect):
+    """AND NOTHING ELSE, through `_name_argument`.
+
+    Expanding every f-string in a body instead emits SQL as check names -- measured on
+    `differential`, 240 names where the restricted form emits 144, 96 of them
+    `SELECT ... FROM %T`. That form resolves the 17 as well, so it LOOKS like it works
+    and only its own output says otherwise.
+
+    A second copy of "which argument holds the name" drifts: @jdatcmd's prototype
+    returned ZERO expansions because it re-implemented the decision, and an empty list
+    reads as "expansion achieves nothing" rather than as an error.
+    """
+    src = ('@pytest.mark.parametrize("col", ["c_int"])\n'
+           'def test_x(col, expect, matrix):\n'
+           '    c, h = matrix.both(f"SELECT id, {col} FROM %T")\n'
+           '    expect.row_set(c, h, f"{col} project")\n')
+    got = _expanded_names(ast.parse(src))
+    expect.text(", ".join(got), "c_int project",
+                "the name argument expands")
+    expect.num(sum(1 for n in got if "SELECT" in n), 0,
+               "and an f-string in another argument contributes nothing, however "
+               "expandable it looks")
 
 
 def test_a_call_whose_name_is_not_a_literal_contributes_nothing(expect):

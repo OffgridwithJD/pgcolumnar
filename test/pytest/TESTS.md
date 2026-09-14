@@ -3840,6 +3840,11 @@ the tool grades THIS tree.
 | `test_a_literal_column_survives_an_interpolated_neighbour` | the column is read cell by cell, so an f-string in another column does not drop five literal labels |
 | `test_a_table_that_is_not_literal_contributes_nothing` | a module constant, a comprehension and a computed label are refused rather than guessed, with a control |
 | `test_the_loop_reader_invents_nothing_in_this_corpus` | every name it returns appears verbatim in the file, and it is exactly three files |
+| `test_a_parametrised_family_expands_to_the_names_bash_unrolls` | a `f"{col} range"` over a literal container becomes one concrete name per member, matchable but not counted as an assertion |
+| `test_dropping_a_member_brings_the_divergence_back_named` | the property that makes expansion right and widening wrong: remove a column and the bash name it covered is reported BY NAME |
+| `test_a_templated_pair_is_not_orphaned_by_the_expansion` | the additive constraint, run against `hilbert_locality`, `hilbert_cluster` and `native_ownership` -- no `differential` fixture catches it |
+| `test_the_expansion_refuses_what_it_cannot_spell` | a module constant (`1e-6` renders `1e-06`), two distinct columns, a non-literal container -- with a control |
+| `test_the_expansion_reads_only_the_name_argument` | through `_name_argument` and nothing else; the unrestricted form emits SQL as check names |
 | `test_a_call_whose_name_is_not_a_literal_contributes_nothing` | absent beats wrong: a false green on a parity tool loses a property in both harnesses |
 | `test_an_fstring_name_becomes_a_template` | a runtime-built name is compared by shape |
 | `test_a_conditional_name_carries_both_of_its_arms` | `"a" if c else "b"` states two properties |
