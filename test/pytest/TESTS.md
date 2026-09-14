@@ -89,6 +89,7 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
+- [44. test_parallel_am_scan.py: a table-AM parallel scan must share work](#44-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
 
 ## 1. How to read a test in here
 
@@ -4338,3 +4339,26 @@ Removal proof, run on both harnesses: restore `META.json` as it shipped and the 
 substantive arms redden on each side while every premise stays green. The premises
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
+
+## 44. test_parallel_am_scan.py: a table-AM parallel scan must share work
+
+The port of `test/parallel_am_scan.sh`. With the custom scan off, Parallel Seq
+Scan goes through the table AM. `phs_nallocated` was a first-wins flag: one
+backend claimed the whole scan and every launched worker reported 0 rows.
+The custom-scan path already claims distinct row groups; this pair pins the
+AM path to the same property.
+
+Public seam: `EXPLAIN ANALYZE` worker rows on a Parallel Seq Scan. Leader
+participation is off so the two launched workers are the claimers under
+test. The shell twin uses its own table (`pam`, 50000 rows, groups of 100);
+this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+
+The load-bearing assertion is `workers share the table-AM scan, it is not a
+single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
+reachable only when each worker claims its own row groups.

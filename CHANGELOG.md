@@ -578,6 +578,18 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
+- A table-AM parallel scan was a single claimer.
+
+  `pgcolumnar_read_start` treated `phs_nallocated` as a first-wins flag: the
+  first participant loaded every row group and the others marked themselves
+  exhausted. Workers launched, then sat idle while one backend (usually the
+  leader) read the table. The custom-scan path already claims distinct groups
+  from a shared counter; the AM path now uses `phs_nallocated` the same way,
+  as a group index, not a mutex.
+
+  Measured with the custom scan off, two workers, and leader participation
+  off: both workers produced rows (19000 and 31000 of 50000). Restoring
+  first-wins returns one worker to 0.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
@@ -2301,6 +2313,7 @@ true until the next version shipped.
   rather than measured. It is the gap to close if the default is ever doubted.
 
 ### Fixed
+
 
 - The standing parity arm graded a hand-written list, and nothing enforced it
   (#432, #1046).
