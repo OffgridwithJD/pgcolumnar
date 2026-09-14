@@ -593,8 +593,23 @@ def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     # or truncated COMPLETE would leave every arm below unrun and the verdict comparison
     # trivially equal -- the whole arm passing over nothing. The sweep in
     # `test_loop_coverage_premise.py` caught the omission the moment the list was hoisted.
-    expect.at_least(len(complete), 8,
-                    "premise: there are pairs to grade, so an empty list cannot pass here")
+    #
+    # IT COUNTS THE DECLARED TOTAL AGAINST THE PAIRS THAT EXIST, not `COMPLETE` against a
+    # number. The first version was `at_least(len(complete), 8)` and it broke the escape
+    # hatch this change exists to provide: moving one stem to INCOMPLETE takes
+    # `len(COMPLETE)` to 7 and reddened the suite, so a pair could not be declared
+    # incomplete without going red. @OffgridwithJD caught it; my proof that the hatch
+    # worked had been run BEFORE this premise was added and never re-run against the file
+    # that shipped.
+    #
+    # The floor was also a hard-coded 8 needing an edit the first time a ninth pair lands
+    # -- the budget shape #982 argues against. Derived, it needs none.
+    declared_total = len(complete) + len(INCOMPLETE)
+    pairs_on_disk = {q.name[5:-3] for q in HERE.glob("test_*.py")
+                     if (root / "test" / f"{q.name[5:-3]}.sh").exists()}
+    expect.num(declared_total, len(pairs_on_disk),
+               "premise: every pair on disk is declared somewhere, so this loop and the "
+               "INCOMPLETE list account for all of them")
     verdicts = {}
     for stem in complete:
         sh, py = root / "test" / f"{stem}.sh", HERE / f"test_{stem}.py"

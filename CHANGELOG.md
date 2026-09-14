@@ -1453,6 +1453,24 @@ true until the next version shipped.
   The last is the one that matters: it demonstrates the escape hatch is usable, rather
   than only that the guard fires.
 
+  **AND IT DID NOT, FIRST TIME.** The cardinality premise below was added AFTER that
+  mutation was run and the mutation was never re-run, so "the hatch works" was true of a
+  file that no longer existed. The premise counted `len(COMPLETE)` against a hard-coded
+  8, so moving one stem to INCOMPLETE took it to 7 and reddened the suite: a pair could
+  not be declared incomplete without going red, which is the one thing this change exists
+  to allow. Caught by @OffgridwithJD reviewing, not by the author re-running.
+
+  The premise now counts the DECLARED TOTAL against the pairs that exist on disk, both
+  derived. That keeps the guard -- an emptied `COMPLETE` still reddens, because 0 does
+  not equal 8 -- permits the hatch, and removes a hard-coded number that would have
+  needed an edit the first time a ninth pair landed, which is the budget shape #982
+  argues against.
+
+  All five mutations were then re-run against the file that ships. Three of them redden
+  the accounting premise as well as their named arm, which is correct rather than noise:
+  a dropped stem, a phantom stem and a double-declared stem each genuinely break the
+  accounting, and the named arm fires beside it to say which.
+
   **Hoisting the list made an existing guard fire**, which is the sweep working. The
   standing arm's loop now iterates a module-level name rather than a literal, so
   `test_loop_coverage_premise.py` demanded a cardinality premise -- an empty `COMPLETE`
