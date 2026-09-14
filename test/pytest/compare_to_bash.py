@@ -231,6 +231,130 @@ def _loop_names(tree):
     return out
 
 
+def _literal_members(node, consts):
+    """-> the elements of a literal container, or None when it is not one.
+
+    Accepts the container itself, a module constant naming one, and `sorted(...)` of
+    either -- which is how a port writes a parametrize source it wants ordered. A
+    constant whose VALUE is not a literal container gives None, because
+    `ast.literal_eval` has already refused it.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id == "sorted" and len(node.args) == 1:
+        inner = _literal_members(node.args[0], consts)
+        return None if inner is None else sorted(inner)
+    if isinstance(node, ast.Name):
+        value = consts.get(node.id)
+        return list(value) if isinstance(value, (list, tuple, set, dict)) else None
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        out = []
+        for element in node.elts:
+            try:
+                out.append(ast.literal_eval(element))
+            except (ValueError, TypeError, SyntaxError):
+                return None
+        return out
+    return None
+
+
+def _expanded_names(tree):
+    """-> a CONCRETE name per member for an f-string parametrised over one column.
+
+    #1045 class 3. A bash suite unrolls a family as literals where its port
+    parametrises it, so the two never match:
+
+        bash   diff_query "c_int range" ... "c_text range"        11 literals
+        port   @pytest.mark.parametrize("col", sorted(RANGES))
+               expect.row_set(c, h, f"{col} range")               1 template
+
+    Resolving `RANGES` to its 11 keys emits 11 concrete names, matched LITERALLY on
+    both sides. The alternative -- widening `_template` so a literal matches a
+    template -- resolves the same 17 and gives up the ability to ever detect them
+    going wrong: `c_bytea range` would match `{} range` whether or not the port
+    covers `c_bytea`. Measured: drop `c_bytea` from `RANGES` and expansion reports it
+    by name, where widening cannot.
+
+    THESE NAMES ARE ADDITIVE. `_py_names` appends them BESIDE the template rather
+    than instead of it, and that is a constraint rather than a convenience. Where BOTH
+    sides are templated the template IS the match -- 11 of `hilbert_locality`'s 30
+    bash names and 10 of `hilbert_cluster`'s match that way -- so replacing the port's
+    template orphans them. Measured: replacing breaks three green pairs and takes
+    `differential` to 13 rather than 0. It is also INDEPENDENT of the refusals below:
+    those names are matched against bash names that are themselves templated, so the
+    orphaning happens whether or not anything else is ever expanded.
+
+    WHAT IT REFUSES, each costing a false MISSING at worst:
+
+    - a module constant in the name. `FLOAT_RTOL = 1e-6` renders as `1e-06`, a
+      different spelling from its own source, and the bash side carries no such name.
+      A resolvable value is not one that renders the way the other side spells it.
+    - two or more DISTINCT parametrised columns. Stacked parametrize is a cartesian
+      product, and expanding one while holding the other invents names that exist
+      nowhere. Three sites, all in `hilbert_cluster`, which grades clean today and
+      stays clean because refusing means not ADDING. Build the product when a pair
+      needs it, against a real example.
+    - anything that is not a bare `Name`, and any name that is not a parametrised
+      column.
+
+    AND IT READS ONLY THE NAME ARGUMENT, through `_name_argument` and nothing else.
+    Expanding every f-string in a body instead emits 240 names where this emits 144,
+    96 of them SQL -- `SELECT id, c_int FROM %T` as a check name. That form resolves
+    the 17 too, so it LOOKS like it works and only its own output says otherwise.
+    """
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            try:
+                consts[node.targets[0].id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                pass
+
+    out = []
+    for func in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        columns = {}
+        for dec in func.decorator_list:
+            if not (isinstance(dec, ast.Call)
+                    and getattr(dec.func, "attr", "") == "parametrize"
+                    and len(dec.args) >= 2):
+                continue
+            declared = _as_names(dec.args[0])
+            if not declared:
+                continue
+            names = [c.strip() for c in declared[0].split(",")]
+            members = _literal_members(dec.args[1], consts)
+            # ONE COLUMN ONLY. A multi-column decorator hands each test a ROW, and
+            # reading a row as a column's members is the same defect as reading a
+            # table per row -- it produces values that were never in that position.
+            if members is not None and len(names) == 1:
+                columns[names[0]] = members
+
+        if not columns:
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _name_argument(node)
+            if not isinstance(name, ast.JoinedStr):
+                continue
+            interpolated = [v.value for v in name.values
+                            if isinstance(v, ast.FormattedValue)]
+            if not interpolated:
+                continue
+            if not all(isinstance(e, ast.Name) and e.id in columns
+                       for e in interpolated):
+                continue
+            wanted = {e.id for e in interpolated}
+            if len(wanted) != 1:
+                continue
+            column = wanted.pop()
+            for member in columns[column]:
+                out.append("".join(
+                    piece.value if isinstance(piece, ast.Constant) else str(member)
+                    for piece in name.values))
+    return out
+
+
 def _py_names(src):
     """Every assertion name in the port, by parsing rather than matching.
 
@@ -259,6 +383,22 @@ def _py_names(src):
             continue
         out.extend(_as_names(node.args[idx]))
     return out
+
+
+def _matchable_names(src):
+    """-> what the port's names can be matched AGAINST, which is more than it asserts.
+
+    `_py_names` answers "what does this port assert", and the report prints that
+    number. `_expanded_names` answers a different question: which concrete spellings
+    of those same assertions a bash literal could be compared with. One parametrised
+    arm asserting `f"{col} range"` over 11 columns is ONE assertion and ELEVEN
+    spellings, and conflating them makes the header lie -- measured, `differential`
+    would report 274 named assertions where the port has 99.
+
+    So the expansion feeds the MISSING calculation and nothing else. It is not an
+    assertion, it is not `extra`, and it is not counted.
+    """
+    return _py_names(src) + _expanded_names(ast.parse(src))
 
 
 def _as_names(node):
@@ -650,8 +790,13 @@ def main(bash_file, py_file):
               "name argument in a position the extractor can see, or record directly.")
         return 2
 
+    py_src = open(py_file).read()
     bash_names = _names_in(bash_src)
-    py_names = _py_names(open(py_file).read())
+    py_names = _py_names(py_src)
+    # WHAT THE PORT ASSERTS is `py_names`, and that is what the header reports and
+    # what `extra` lists. What a bash literal may be MATCHED against is wider, because
+    # one parametrised arm stands for several concrete names (#1045 class 3).
+    matchable = set(_matchable_names(py_src))
 
     bset, pset = set(bash_names), set(py_names)
 
@@ -659,11 +804,12 @@ def main(bash_file, py_file):
     print(f"pytest named assertions: {len(py_names)} ({len(pset)} distinct)")
     print()
 
-    literal = bset & pset
+    literal = bset & matchable
     # Only names with no literal partner are considered as templates, so a template
     # match can never hide a literal one or be double-counted.
-    b_left, p_left = bset - literal, pset - literal
-    p_templates = {_template(n) for n in p_left}
+    b_left = bset - literal
+    p_left = pset - literal
+    p_templates = {_template(n) for n in matchable - literal}
     templated = {n for n in b_left if _template(n) in p_templates}
 
     missing = sorted(b_left - templated)

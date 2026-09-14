@@ -82,8 +82,10 @@ behaviour, the source of that number is named.
 - [34. test_docs_stripe_floor.py: the stripe floor is below a vector](#34-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 - [35. test_projection_privilege.py: the projection read helpers are a privilege boundary](#35-test_projection_privilegepy-the-projection-read-helpers-are-a-privilege-boundary)
 - [36. test_compare_to_bash.py: the parity tool reads the NAME](#36-test_compare_to_bashpy-the-parity-tool-reads-the-name)
-- [37. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#37-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
-- [38. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#38-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
+- [37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface](#37-test_iceberg_fdwpy-the-iceberg-fdws-pruning-surface)
+- [38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint](#38-test_objstore_endpoint_userinfopy-userinfo-in-an-object-store-endpoint)
+- [39. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#39-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
+- [40. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#40-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
 
 ## 1. How to read a test in here
 
@@ -1067,6 +1069,7 @@ many times.
 | `test_an_anchor_that_strips_the_underscores_is_caught` | the exact broken link that shipped, with a control |
 | `test_every_in_document_link_in_this_directory_reaches_a_heading` | every contents-list link resolves, with a coverage premise |
 | `test_the_contents_list_is_numbered_in_order` | the contents list and the sections both count 1..N with no gap or inversion — the link arms above ask only whether a link RESOLVES, and a shuffled list resolves perfectly |
+| `test_every_test_file_has_a_NUMBERED_section_of_its_own` | a section written as an unnumbered `###` is invisible to every other arm: not in the numbering, not in the contents, and the file is still NAMED so the coverage arm is satisfied — `test_iceberg_fdw.py` shipped that way in #1057 |
 | `test_a_shuffled_contents_list_is_caught_on_a_fixture` | **removal proof**: the `29, 31, 30` shape that shipped, with a clean control and an omitted entry named apart from an inversion |
 | `test_the_next_steps_list_is_anchored_to_the_inventory` | every section 5 entry names a mode id, so the entry can be checked at all |
 | `test_no_open_next_step_names_work_the_document_calls_done` | an un-struck entry whose id reached section 2 is stale work to do |
@@ -3841,6 +3844,11 @@ the tool grades THIS tree.
 | `test_a_literal_column_survives_an_interpolated_neighbour` | the column is read cell by cell, so an f-string in another column does not drop five literal labels |
 | `test_a_table_that_is_not_literal_contributes_nothing` | a module constant, a comprehension and a computed label are refused rather than guessed, with a control |
 | `test_the_loop_reader_invents_nothing_in_this_corpus` | every name it returns appears verbatim in the file, and it is exactly three files |
+| `test_a_parametrised_family_expands_to_the_names_bash_unrolls` | a `f"{col} range"` over a literal container becomes one concrete name per member, matchable but not counted as an assertion |
+| `test_dropping_a_member_brings_the_divergence_back_named` | the property that makes expansion right and widening wrong: remove a column and the bash name it covered is reported BY NAME |
+| `test_a_templated_pair_is_not_orphaned_by_the_expansion` | the additive constraint, run against `hilbert_locality`, `hilbert_cluster` and `native_ownership` -- no `differential` fixture catches it |
+| `test_the_expansion_refuses_what_it_cannot_spell` | a module constant (`1e-6` renders `1e-06`), two distinct columns, a non-literal container -- with a control |
+| `test_the_expansion_reads_only_the_name_argument` | through `_name_argument` and nothing else; the unrestricted form emits SQL as check names |
 | `test_a_call_whose_name_is_not_a_literal_contributes_nothing` | absent beats wrong: a false green on a parity tool loses a property in both harnesses |
 | `test_an_fstring_name_becomes_a_template` | a runtime-built name is compared by shape |
 | `test_a_conditional_name_carries_both_of_its_arms` | `"a" if c else "b"` states two properties |
@@ -3871,7 +3879,20 @@ the tool grades THIS tree.
 | `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
 
-### `test_iceberg_fdw.py` -- the Iceberg FDW's pruning surface (#388, #432)
+## 37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface
+
+## 38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint
+
+Not a port and not a pair: `objstore_endpoint_userinfo.sh` does not exist. These assert
+the same properties as `test/objstore_userinfo.sh`'s endpoint arms, independently,
+through the python harness.
+
+| test | asserts |
+| --- | --- |
+| `test_a_userinfo_endpoint_is_refused` | both shapes refuse at `22023`, naming userinfo and naming the ENDPOINT rather than the s3:// URL |
+| `test_the_guard_fires_without_a_region_configured` | the placement: with no region set the refusal is userinfo, not the region demand |
+| `test_a_clean_endpoint_is_not_refused_as_userinfo` | the control -- a clean endpoint gets past the guard and fails for another reason |
+| `test_an_at_sign_in_the_object_key_is_not_userinfo` | the other direction: `@` is legal in a key and is untouched |
 
 Ports `test/iceberg_fdw.sh`. 74 of its 76 check names, one for one; the two it cannot
 carry are `pgc_skip`'s refusal names, which are structural and declared in
@@ -3907,7 +3928,7 @@ carry are `pgc_skip`'s refusal names, which are structural and declared in
 | `test_a_plan_with_no_pruning_marker_is_not_read_as_zero` | a plan that never mentions `Files Pruned` is not read as 0; needs no server |
 
 
-## 37. test_hilbert_cluster.py: the Hilbert clustering SQL surface
+## 39. test_hilbert_cluster.py: the Hilbert clustering SQL surface
 
 The port of `test/hilbert_cluster.sh` (#432, #889's SQL half). The bash suite pins the SQL
 surface of `pgcolumnar.cluster_hilbert` and `recluster_hilbert`, the recorded
@@ -4001,7 +4022,7 @@ the surface and the recorded kind and must never be read as evidence of Hilbertn
 | `test_the_install_script_and_the_catalog_agree_on_the_symbol_set` | S8, symbols resolved from the AS clause and never derived |
 | `test_each_new_verb_is_installed_and_its_symbol_declared` | installed once, C, and declared |
 | `test_each_new_verb_has_its_siblings_signature` | args, VARIADIC element and return type, compared against the sibling rather than retyped |
-## 38. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch
+## 40. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch
 
 A column chunk's `page_length` is `uint64` in the catalog. Both decode entry
 points used to cast the value stream to `uint32`. Adding 2^32 leaves the low

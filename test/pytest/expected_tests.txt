@@ -124,7 +124,15 @@
 # reader, the interpolated-neighbour case, the refusal of a non-literal table with its
 # control, and a corpus-wide arm that every name it returns is text the file contains.
 # Re-derived by collection: `335 tests collected`.
-guard_tests 335
+# 335 -> 340 when a parametrised family learned to expand to the names its bash twin
+# unrolls (#1045 class 3): the expansion, the falsifiability property that makes it
+# right, the additive constraint run against three REAL pairs, the three refusals with
+# a control, and the name-argument restriction.
+# Re-derived by collection: `340 tests collected`.
+# 340 -> 341: a test file documented as an unnumbered `###` is invisible to every
+# other arm -- outside the numbering, outside the contents, and still NAMED, so the
+# coverage arm passes (#1024). Re-derived by collection: `341 tests collected`.
+guard_tests 341
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -175,6 +183,15 @@ guard_tests 335
 # right here; two independent 322s merged just as silently earlier today and the
 # merged tree collected 323. Re-derive BOTH after every merge, not the one git
 # complained about.
+# 320 -> 325 when test_objstore_endpoint_userinfo.py landed (#995): the two userinfo
+# endpoint shapes, the placement premise that the guard fires with no region
+# configured, the clean-endpoint control, and the '@'-in-the-key control. NOT a port
+# and not a pair -- `objstore_endpoint_userinfo.sh` does not exist; these assert the
+# same properties through the python harness independently.
+# Re-derived by collection: `325 tests collected`.
 # 320 -> 321: test_native_chunk_length_bound.py, the uint32 page_length fence.
 # Re-derived by collection on this tree: `321 tests collected`.
-cluster_tests 321
+# MERGED with main. Neither side's value survives: 321 and 325 were each
+# derived against a tree that is not this one. Re-derived BY COLLECTION on the
+# merged tree below.
+cluster_tests 326

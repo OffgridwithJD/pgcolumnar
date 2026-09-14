@@ -18,6 +18,94 @@ true until the next version shipped.
 
 ### Added
 
+- Userinfo in an object-store ENDPOINT was accepted, and the diagnostic told the
+  operator to allow-list it (#995).
+
+  #997 closed `s3://u:p@bucket/key` -- userinfo in the URL the caller writes. The
+  endpoint the OPERATOR configures was still unguarded, and the bucket guard cannot see
+  it because it is not in the URL at all.
+
+  TWO SHAPES, AND ONLY ONE WAS EVER CAUGHT. Measured on the authority parse:
+
+      http://u:p@host:30829   -> host "u",          port 0       refused, wrong reason
+      http://user@host:30829  -> host "user@host",  port 30829   port VALID
+
+  The first has a colon inside the userinfo, so the split lands there and the port
+  becomes `atoi("p@host:30829")` = 0. The second has no such colon: the real port
+  survives, the `@` rides along in the host, and the invalid-port refusal never fires.
+  #995 measured the first and concluded "refused as invalid host or port", which is
+  true of that shape rather than of the code.
+
+  The second shape is why this is a guard and not a message change. Its refusal came
+  from the allow-list, naming the host it could not match, and the hint then said:
+
+      ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints = 'user@host'
+
+  A diagnostic that invites widening a security boundary to accommodate a parse bug is
+  worse than a wrong error code. Following it moves the failure from the allow-list to
+  a DNS miss.
+
+  The guard sits BEFORE the scheme and region demands rather than at the authority
+  parse eighty lines later. Placed there it is unreachable whenever no region is
+  configured: measured, every endpoint arm reported `requires a region option` until it
+  moved. That is the same reasoning the bucket guard carries, and the trap #995 named.
+
+  Arms in `test/objstore_userinfo.sh` beside the existing ones, with a clean-endpoint
+  control in the same run, and in `test/pytest/test_objstore_endpoint_userinfo.py`
+  independently.
+- A test file documented as an unnumbered `###` section was invisible to every arm
+  that checks `TESTS.md` (#1024).
+
+  Not in the numbering, so `1..N with no gap` never saw it. Not in the contents, so the
+  link arms never saw it. Still NAMED in the document, so the coverage arm was
+  satisfied. `test_iceberg_fdw.py` shipped that way in #1057 and sat undetected.
+
+  #1024's own report -- two PRs each taking the next section number -- is no longer
+  open: `test_the_contents_list_is_numbered_in_order` landed after #1023 and catches a
+  duplicate and an inversion in one rule. Planted, it reddens. This change keeps that
+  guard and closes the remaining shape, which is cheaper to hit: the collision needs two
+  PRs in flight, a heading at the wrong level needs one person.
+
+- A bash suite that unrolls a family as literals graded MISSING against the port that
+  parametrises it (#1045 class 3).
+
+      bash   diff_query "c_int range" ... "c_text range"        11 literals
+      port   @pytest.mark.parametrize("col", sorted(RANGES))
+             expect.row_set(c, h, f"{col} range")               1 template
+
+  The port asserts every one of the 17 properties -- `RANGES` holds the same 11
+  columns bash unrolls and `EQUALITIES` the same 6 -- but a literal never meets a
+  template, so `differential` was declared INCOMPLETE for a spelling.
+
+  The grader now resolves the container and emits one CONCRETE name per member,
+  matched literally on both sides. The alternative, widening `_template` so a literal
+  matches a template, resolves the same 17 and gives up the ability to ever detect
+  them going wrong: `c_bytea range` would match `{}` range whether or not the port
+  covers `c_bytea`. Measured -- drop `c_bytea` from `RANGES` and the expansion reports
+  it by name, where a widened template cannot.
+
+  THE EXPANSION IS ADDITIVE, and that is a constraint rather than a convenience. Where
+  BOTH sides are templated the template IS the match: 11 of `hilbert_locality`'s 30
+  bash names and 10 of `hilbert_cluster`'s match that way, so replacing the port's
+  template orphans them. Measured, replacing breaks three green pairs and takes
+  `differential` to 13 rather than 0.
+
+  IT IS ALSO NOT AN ASSERTION. One parametrised arm is ONE assertion and ELEVEN
+  spellings; counting the spellings made `differential` report 274 named assertions
+  where the port has 100. The expansion feeds the MISSING calculation and nothing
+  else -- it is not counted and it is not listed as `extra`.
+
+  Refused, each costing a false MISSING at worst: a module constant, because
+  `FLOAT_RTOL = 1e-6` renders as `1e-06` and bash carries neither spelling; two or
+  more distinct parametrised columns, because stacked parametrize is a cartesian
+  product and expanding one while holding the other invents names that exist nowhere;
+  and any container that is not literal. Read through `_name_argument` and nothing
+  else -- expanding every f-string instead emits `SELECT id, c_int FROM %T` as a check
+  name, 96 such in `differential` alone.
+
+  `differential` reaches `missing: 0` and leaves `INCOMPLETE`. Eight of the nine
+  graded pairs are now one-for-one; the ninth is blocked on #1040 phase 0b.
+
 - The grader could not read a port's own name when a `for` loop supplied it
   (#1045 class 2).
 
