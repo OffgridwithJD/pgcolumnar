@@ -18,6 +18,54 @@ true until the next version shipped.
 
 ### Added
 
+- Userinfo in an object-store ENDPOINT was accepted, and the diagnostic told the
+  operator to allow-list it (#995).
+
+  #997 closed `s3://u:p@bucket/key` -- userinfo in the URL the caller writes. The
+  endpoint the OPERATOR configures was still unguarded, and the bucket guard cannot see
+  it because it is not in the URL at all.
+
+  TWO SHAPES, AND ONLY ONE WAS EVER CAUGHT. Measured on the authority parse:
+
+      http://u:p@host:30829   -> host "u",          port 0       refused, wrong reason
+      http://user@host:30829  -> host "user@host",  port 30829   port VALID
+
+  The first has a colon inside the userinfo, so the split lands there and the port
+  becomes `atoi("p@host:30829")` = 0. The second has no such colon: the real port
+  survives, the `@` rides along in the host, and the invalid-port refusal never fires.
+  #995 measured the first and concluded "refused as invalid host or port", which is
+  true of that shape rather than of the code.
+
+  The second shape is why this is a guard and not a message change. Its refusal came
+  from the allow-list, naming the host it could not match, and the hint then said:
+
+      ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints = 'user@host'
+
+  A diagnostic that invites widening a security boundary to accommodate a parse bug is
+  worse than a wrong error code. Following it moves the failure from the allow-list to
+  a DNS miss.
+
+  The guard sits BEFORE the scheme and region demands rather than at the authority
+  parse eighty lines later. Placed there it is unreachable whenever no region is
+  configured: measured, every endpoint arm reported `requires a region option` until it
+  moved. That is the same reasoning the bucket guard carries, and the trap #995 named.
+
+  Arms in `test/objstore_userinfo.sh` beside the existing ones, with a clean-endpoint
+  control in the same run, and in `test/pytest/test_objstore_endpoint_userinfo.py`
+  independently.
+- A test file documented as an unnumbered `###` section was invisible to every arm
+  that checks `TESTS.md` (#1024).
+
+  Not in the numbering, so `1..N with no gap` never saw it. Not in the contents, so the
+  link arms never saw it. Still NAMED in the document, so the coverage arm was
+  satisfied. `test_iceberg_fdw.py` shipped that way in #1057 and sat undetected.
+
+  #1024's own report -- two PRs each taking the next section number -- is no longer
+  open: `test_the_contents_list_is_numbered_in_order` landed after #1023 and catches a
+  duplicate and an inversion in one rule. Planted, it reddens. This change keeps that
+  guard and closes the remaining shape, which is cheaper to hit: the collision needs two
+  PRs in flight, a heading at the wrong level needs one person.
+
 - A bash suite that unrolls a family as literals graded MISSING against the port that
   parametrises it (#1045 class 3).
 
