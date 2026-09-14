@@ -3875,6 +3875,20 @@ the tool grades THIS tree.
 | `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
 
+
+### `test_objstore_endpoint_userinfo.py` -- userinfo in an object-store endpoint (#995)
+
+Not a port and not a pair: `objstore_endpoint_userinfo.sh` does not exist. These assert
+the same properties as `test/objstore_userinfo.sh`'s endpoint arms, independently,
+through the python harness.
+
+| test | asserts |
+| --- | --- |
+| `test_a_userinfo_endpoint_is_refused` | both shapes refuse at `22023`, naming userinfo and naming the ENDPOINT rather than the s3:// URL |
+| `test_the_guard_fires_without_a_region_configured` | the placement: with no region set the refusal is userinfo, not the region demand |
+| `test_a_clean_endpoint_is_not_refused_as_userinfo` | the control -- a clean endpoint gets past the guard and fails for another reason |
+| `test_an_at_sign_in_the_object_key_is_not_userinfo` | the other direction: `@` is legal in a key and is untouched |
+
 ### `test_iceberg_fdw.py` -- the Iceberg FDW's pruning surface (#388, #432)
 
 Ports `test/iceberg_fdw.sh`. 74 of its 76 check names, one for one; the two it cannot
