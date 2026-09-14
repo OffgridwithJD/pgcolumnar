@@ -3829,6 +3829,7 @@ the tool grades THIS tree.
 | `test_the_wrapper_whose_name_is_the_second_argument` | `pgc_skip`'s name is `$2`; reading `$1` extracts the CAPABILITY, which is a wrong name rather than an absent one |
 | `test_the_derivation_finds_a_wrapper_planted_in_a_fixture` | the derivation on a fixture where the answer is known: four forwarding shapes found, and a function owning its own literal name rejected |
 | `test_the_comment_stripper_keeps_a_parameter_expansion` | `${shape#*|}` and `$#` are not comments; `#` opens one only at a word boundary |
+| `test_an_empty_helper_group_fabricates_names_rather_than_reading_none` | an empty alternation matches everywhere, so a position with no helper would invent `$PGC_DB` as a check name rather than read none |
 | `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
 | `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
 | `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |

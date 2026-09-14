@@ -97,6 +97,18 @@ true until the next version shipped.
   where the port parametrises them over `RANGES` and `EQUALITIES`, which hold the same
   11 and the same 6 columns.
 
+  Reading a name from the argument that HOLDS it means one pattern per position, and
+  an empty position is not a no-op: `(?:)` matches everywhere, so the pattern
+  degenerates to "any word, then any quoted string". On `zonemap_boundaries.sh`,
+  which has no position-2 helper, it invented six names including `$PGC_DB` and
+  `$(dirname `, each of which would be reported as a bash property the port is
+  missing for ever, because no port can assert them. The positions are therefore
+  derived from the table's own values, so an empty group cannot be constructed, and
+  building one is refused rather than silently returning junk. Found because a
+  reviewer's stale `.pyc` left the table mid-mutation: python validates a cached
+  `.pyc` on source mtime in whole seconds and size, so a same-size edit applied and
+  restored within one second keeps running while the file's md5 reports clean.
+
 - `skip-loop-arms.py` read a one-line function body as everything below it, so a psql
   wrapper counted as a check recorder (#1042).
 
