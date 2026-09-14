@@ -49,6 +49,48 @@ true until the next version shipped.
 
   `test/pytest/TESTS.md` also described the ledger as FIVE tab-separated columns and
   omitted `majors` from the list, from the day that column landed (#1010) until now.
+- `compare_to_bash.py` read 6 of `differential.sh`'s 86 check names and reported the
+  port one-for-one (#1045).
+
+  The extractor's helper list was every recorder `lib.sh` names `check*`. `diff_query`
+  is a `lib.sh` wrapper that forwards its `$1` into `check`, so the NAME is in the
+  suite and only the RECORDER is in `lib.sh`:
+
+      test/differential.sh:116   diff_query "c_uuid range" "SELECT id FROM %T WHERE ..."
+
+  and the grader read none of them. Corpus-wide, five recorders were unread:
+
+      diff_query          name is $1   150 names   11 suites
+      diff_query_ordered  name is $1     5          3
+      pgc_skip            name is $2    70         47
+      pgc_pass            name is $1     9          2
+      pgc_fail            name is $1    15         11
+                                       249 names   70 of 264 suites
+
+  `pgc_skip` is why the table records a POSITION rather than a membership. Its name is
+  `$2` and `$1` is a capability, written bare at 68 of its 70 call sites and quoted at
+  the other two, so a pattern keyed to the first quoted argument reads the capability
+  at those two. A wrong name is worse than an absent one: no port can assert
+  `test_decoding`, so it would be reported MISSING for ever.
+
+  THE DRIFT GUARD #1040 ADDED WAS GREEN THROUGHOUT, AND WAS NOT BROKEN. It derived its
+  population by SPELLING -- `^(check(?:_[a-z_]+)?)\(\)` -- so `diff_query` was never in
+  the set it ranged over. A guard is worth exactly its population. It now derives the
+  population from what a function DOES, taking the closure from `pgc_record`, and
+  checks each name's argument position as well as its membership. Reverting either
+  half reddens it: the spelling population finds 8 recorders where the closure finds
+  13, and a membership-only guard passes while `pgc_skip` is read at `$1`.
+
+  `differential` moves to `INCOMPLETE` with `missing: 54` in the same change, because
+  the extractor cannot be widened and the pair kept green at once. The port is not
+  missing 54 properties. Two blindnesses were cancelling: the suite records through
+  `diff_query`, which this change reads, and the port binds most of its own names to a
+  `for` loop variable, which the grader still cannot read (#1045 class 2). The pair
+  graded `missing: 0` on 6 of 86 bash names against 62 of 132 port names -- two blind
+  halves cannot disagree. 17 of the 54 are a spelling rather than a gap: bash unrolls
+  `c_int range` through `c_text range` and `c_int eq` through `c_arr eq` as literals
+  where the port parametrises them over `RANGES` and `EQUALITIES`, which hold the same
+  11 and the same 6 columns.
 
 - `skip-loop-arms.py` read a one-line function body as everything below it, so a psql
   wrapper counted as a check recorder (#1042).
