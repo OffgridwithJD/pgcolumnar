@@ -395,11 +395,13 @@ than a wrong algorithm.
   "before" run be the fixed `.so`. A stale `.pyc` will let every run AFTER the
   restore be the mutant: CPython validates its cache on `(source mtime in whole
   seconds, source size)`, so a same-size edit applied and restored inside one
-  second leaves a cache that still validates. Measured on 2026-09-13 against
+  second leaves a cache that still validates. Only IMPORTED modules are cached: a
+  script run directly is compiled fresh every time, which is why the two
+  invocations disagree at all. Measured on 2026-09-13 against
   `compare_to_bash.py`, where `"pgc_skip": 2,` -> `1,` is exactly that shape; the
   source was verified restored by md5 and the runtime kept running the mutation
-  for the rest of the session, producing a confident, reproducible, entirely
-  false defect report against another branch.
+  for the rest of the session. It produced a confident, reproducible and entirely
+  false defect report about another branch, which was caught before it was sent.
 
   So fingerprint the artifact, and assert the RUNTIME rather than the file:
 
@@ -414,8 +416,18 @@ than a wrong algorithm.
   process.
 
   The tell, when it happens, is two ways of invoking the same code disagreeing --
-  the CLI read 9 names and the import read 15 out of one file, which is
-  impossible for one function unless the two are not running the same function.
+  the CLI read 9 names and the import read 15 out of one file, which is impossible
+  for one function unless the two are not running the same function. The direct
+  run is the one to believe, since it was compiled fresh.
+
+  **The same cause also produces the opposite quiet wrong answer, so do not read a
+  clean run as proof there is nothing here.** Mutate and restore inside the
+  ORIGINAL's second and the clean cache never invalidates either, so the mutation
+  appears to do nothing -- and "the mutation changed nothing" is what "this code is
+  not load-bearing" looks like, which is the conclusion the whole removal proof
+  exists to reach. Reproducing the stale cache took @OffgridwithJD three attempts
+  for exactly that reason. One cause, two silent and opposite errors: the proof
+  reads as passing when the change is unnecessary, and as failing when it is not.
 - **A removal proof must fail for the STATED reason.** That a check can fail is
   not evidence that it fails for the reason claimed. Read the failure text.
 - **A suite that sources a helper cannot see whether anything calls it.** Feeding
