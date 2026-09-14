@@ -96,15 +96,31 @@
 # `$(dirname ` as check names out of a suite containing no position-2 helper. Found
 # when a reviewer's stale `.pyc` left the table mid-mutation. Re-derived by
 # collection: `322 tests collected`.
+# MERGED with #1048's one ledger arm, which derived 318 against bf31e2f while
+# this derived 321 against the same commit. Both are right for a tree that is not
+# this one. Re-derived by collection on the merged tree, never by adding deltas.
+# AND BOTH SIDES OF THAT MERGE SAID 322, for different reasons -- #1055 reached it
+# from 321 by one empty-group arm, this branch from 321 by one ledger arm. Agreeing
+# numbers are the case where adding deltas looks safest and is not. Re-derived by
+# collection on the merged tree.
+# 323 -> 324: a SOURCE-TEXT pin that the reconciliation totals what was printed (#1048).
+# No behavioural arm can reach it -- the two sources are equal wherever the display
+# prints every bucket -- so the guarantee rested on a comment until review objected
+# that comments rot where arms do not. Re-derived by collection: `324 tests collected`.
 # 322 -> 329 when the grader learned a suite's OWN recorders (#1053): the forwarding
 # shapes, a composing wrapper left alone, the refusal of a helper whose name position
 # cannot be resolved, the corpus budget pinned at one suite, the bare-{} drop, the
 # grader's refusal exercised through `main`, and a helper reaching only `pgc_record`.
 #
-# #1054 moves this to 324 on ITS tree, from a different arm. Whichever lands second
-# re-derives by collection -- 322 and 322 collected 323 earlier today, and nothing
-# conflicted.
-guard_tests 329
+# MERGED with #1048's source-text pin (324). Both sides moved this key and git
+# conflicted on it, which is the LOUD case. The quiet one is `cluster_tests`, which
+# both sides left at 320 and which merged silently -- and silence is not agreement,
+# it is the absence of a signal. Both keys re-derived by collection below.
+# Re-derived by collection on the MERGED tree: `331 tests collected`. Not 329, not
+# 324, and the fact that 322 + 7 + 2 happens to reach it is a coincidence of this
+# merge rather than a method -- the deltas were measured against different trees and
+# adding them is what produced a number no tree collected earlier today.
+guard_tests 331
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -148,8 +164,11 @@ guard_tests 329
 # COLLECTED, NOT FIFTY-SIX FUNCTIONS -- most families are one function parametrised
 # over their probes. Re-derived by collection on this tree: `320 tests collected`.
 #
-# guard_tests is UNCHANGED at 322 here and #1054 moves it to 323 on its own tree.
-# Whichever of the two lands second re-derives BOTH numbers by collection: the two
-# branches touch different keys in this file, so git merges it without a conflict and
-# there is nothing to notice.
+# THE TWO KEYS FAILED DIFFERENTLY IN THE SAME MERGE, which is the lesson worth
+# keeping. `guard_tests` moved on both sides, so git CONFLICTED and demanded an
+# answer -- the loud case. `cluster_tests` was 320 on both sides and merged silently
+# -- and silence is not agreement, it is the absence of a signal. It happened to be
+# right here; two independent 322s merged just as silently earlier today and the
+# merged tree collected 323. Re-derive BOTH after every merge, not the one git
+# complained about.
 cluster_tests 320
