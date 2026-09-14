@@ -144,6 +144,93 @@ _NAME_ARG = {
 }
 
 
+def _name_argument(node):
+    """-> the AST node holding this `expect.<helper>(...)` call's name, or None.
+
+    Factored out because three places now need the SAME answer -- `_py_names`, the
+    loop reader below, and any future one. Two copies of "which argument is the name"
+    is the defect `_NAME_ARG` exists to prevent, one level up.
+    """
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id == "expect"):
+        return None
+    for kw in node.keywords:
+        if kw.arg == "name":
+            return kw.value
+    if not node.args:
+        return None
+    idx = _NAME_ARG.get(func.attr, -1)
+    if idx is None or (idx != -1 and len(node.args) <= idx):
+        return None
+    return node.args[idx]
+
+
+def _loop_names(tree):
+    """-> every name supplied by a `for` over a LITERAL table (#1045 class 2).
+
+    The loop analogue of `_parametrized_names`, and the same idiom one level down:
+
+        for label, sql in (("allnull column scan",  "SELECT * FROM %T"),
+                           ("allnull column count", "SELECT count(allnull) FROM %T")):
+            c, h = p.both(sql)
+            expect.row_set(c, h, label)
+
+    The name reaching `expect` is a variable, so reading only the call site reports
+    every such property MISSING -- 46 names across 15 sites, 37 of them in
+    `differential`, whose port is behaviourally complete.
+
+    READ PER ELEMENT, NOT PER ROW. `ast.literal_eval` on the whole table fails when
+    any OTHER column holds an f-string, which is exactly `differential`'s
+    mismatched-collation table: five literal labels beside one interpolated query.
+    Reading the label column element by element with `_as_names` keeps them.
+
+    ONLY A COLUMN ACTUALLY USED AS A NAME. A loop variable that is merely mentioned in
+    the body is not a name, and harvesting it would invent properties out of SQL
+    strings -- the failure `_as_names` exists to refuse.
+    """
+    out = []
+    for loop in [n for n in ast.walk(tree) if isinstance(n, ast.For)]:
+        if not isinstance(loop.iter, (ast.Tuple, ast.List)):
+            continue
+        target = loop.target
+        if isinstance(target, ast.Name):
+            columns = {target.id: None}
+        elif isinstance(target, ast.Tuple):
+            columns = {e.id: i for i, e in enumerate(target.elts)
+                       if isinstance(e, ast.Name)}
+        else:
+            continue
+
+        used = set()
+        for stmt in loop.body:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call):
+                    continue
+                arg = _name_argument(node)
+                if isinstance(arg, ast.Name) and arg.id in columns:
+                    used.add(arg.id)
+        for ident in sorted(used):
+            index = columns[ident]
+            values, readable = [], True
+            for row in loop.iter.elts:
+                if index is None:
+                    cell = row
+                elif isinstance(row, (ast.Tuple, ast.List)) and index < len(row.elts):
+                    cell = row.elts[index]
+                else:
+                    readable = False
+                    break
+                got = _as_names(cell)
+                if not got:
+                    readable = False
+                    break
+                values += got
+            if readable:
+                out += values
+    return out
+
+
 def _py_names(src):
     """Every assertion name in the port, by parsing rather than matching.
 
@@ -152,7 +239,7 @@ def _py_names(src):
     its arms. Four helpers put it somewhere else and are read through `_NAME_ARG`.
     """
     tree = ast.parse(src)
-    out = _parametrized_names(tree)
+    out = _parametrized_names(tree) + _loop_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue

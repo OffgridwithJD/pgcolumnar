@@ -18,6 +18,38 @@ true until the next version shipped.
 
 ### Added
 
+- The grader could not read a port's own name when a `for` loop supplied it
+  (#1045 class 2).
+
+      for label, sql in (("allnull column scan",  "SELECT * FROM %T"),
+                         ("allnull column count", "SELECT count(a) FROM %T")):
+          c, h = p.both(sql)
+          expect.row_set(c, h, label)
+
+  `_as_names` reads a variable as nothing, deliberately: reporting a guessed string is
+  worse than reporting none. So the arm RAN AND PASSED while the grader reported its
+  bash counterpart MISSING. 46 names across 15 sites, 37 of them in `differential`,
+  whose port is behaviourally complete.
+
+  This is `_parametrized_names` one level down and gets the same answer: the table is
+  literal, the column is a name, read the column. Read CELL BY CELL rather than row by
+  row, because `ast.literal_eval` on a whole row raises when any other column holds an
+  f-string -- which is `differential`'s mismatched-collation table, five literal labels
+  beside one interpolated query.
+
+  Only a column actually used as a NAME ARGUMENT is read. A loop variable merely
+  mentioned in the body is not a name, and harvesting it invents properties out of SQL
+  strings; measured, that doubles the names this returns. A table that is not literal
+  -- a module constant, a comprehension, a computed label -- contributes nothing
+  rather than a guess.
+
+  `differential` goes from 54 MISSING to 17, and the 17 are a spelling rather than a
+  gap: bash unrolls `c_int range` through `c_text range` and `c_int eq` through
+  `c_arr eq` as literals where the port parametrises them over `RANGES` and
+  `EQUALITIES`, which hold the same 11 and the same 6 columns. That is #1045 class 3,
+  a judgement the tool cannot make, and it stays declared rather than decided by
+  widening `_template`.
+
 - `pgc_ledger.py merge` reported the UNION of majors, which cannot show the defect
   that has occurred twice (#1048).
 

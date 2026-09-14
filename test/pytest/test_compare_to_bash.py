@@ -42,6 +42,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
+                             _loop_names,
                              _derive_recorders, _names_in, _suite_recorders,
                              _parametrized_names, _py_names, _strip_comments,
                              _template, _words)
@@ -102,17 +103,16 @@ INCOMPLETE = {
         "here rather than worked around by naming a passing premise after a missing "
         "dependency, which would read as an assertion that the fixture is absent.",
     "differential":
-        "54 of its 86 bash names have no counterpart the grader can see, and the "
-        "port is not missing 54 properties. Two separate blindnesses were cancelling "
-        "(#1045): the suite records through `diff_query`, which this change now "
-        "reads, and the PORT binds most of its own names to a `for` loop variable, "
-        "which the grader still cannot read. Fixing the bash half alone reveals the "
-        "whole gap at once. 17 of the 54 are class 3 -- bash unrolls `c_int range` "
+        "17 of its 86 bash names have no counterpart the grader can see, and all 17 "
+        "are a SPELLING rather than a gap. The bash suite unrolls `c_int range` "
         "through `c_text range` (11) and `c_int eq` through `c_arr eq` (6) as "
-        "literals where the port parametrises them over RANGES and EQUALITIES, which "
-        "hold the same 11 and the same 6 columns. Those 17 are a spelling, not a "
-        "gap. The remaining 37 are the port's loop-bound names. Declared here rather "
-        "than fixed with the extractor, so this change carries one claim."
+        "literals; the port parametrises them over RANGES and EQUALITIES, which hold "
+        "the same 11 and the same 6 columns -- checked, not assumed. So a literal "
+        "name meets a templated one, and #1045 class 3 resolves that as MISSING. "
+        "It was 54 until the loop reader landed; the other 37 were the port's OWN "
+        "names, bound to a `for` variable (#1045 class 2). Whether a literal family "
+        "and its parametrised twin should match is a judgement the tool cannot make, "
+        "so it stays declared here rather than decided by widening `_template`."
 }
 
 
@@ -142,6 +142,116 @@ def test_the_name_is_the_last_argument_not_the_first_string(expect):
     expect.num(len(got), 3, "three assertions, three names")
     expect.num(sum(1 for n in got if n in ("42501", "none")), 0,
                "and no want is mistaken for a name, which is the defect this closes")
+
+
+def test_a_name_bound_by_a_loop_over_a_literal_table_is_read(expect):
+    """CLASS 2 OF #1045: the port's own names, invisible to the grader.
+
+        for label, sql in (("allnull column scan",  "SELECT * FROM %T"),
+                           ("allnull column count", "SELECT count(allnull) FROM %T")):
+            c, h = p.both(sql)
+            expect.row_set(c, h, label)
+
+    `_as_names` reads a `Name` node as nothing, deliberately -- reporting a guessed
+    string is worse than reporting none -- so the arm RAN AND PASSED while the grader
+    reported its bash counterpart MISSING. 46 names across 15 sites, 37 of them in
+    `differential`, whose port is behaviourally complete.
+
+    This is `_parametrized_names` one level down, and the same answer: the table is
+    literal, the column is a name, read the column.
+    """
+    tree = ast.parse(
+        'for label, sql in (("allnull column scan", "SELECT * FROM %T"),\n'
+        '                   ("allnull column count", "SELECT count(a) FROM %T")):\n'
+        '    c, h = p.both(sql)\n'
+        '    expect.row_set(c, h, label)\n')
+    expect.text(", ".join(_loop_names(tree)),
+                "allnull column scan, allnull column count",
+                "the label column is read, in table order")
+
+    # AND THE OTHER COLUMN IS NOT. A loop variable that is merely mentioned in the
+    # body is not a name; harvesting it would invent properties out of SQL strings.
+    expect.num(sum(1 for n in _loop_names(tree) if "SELECT" in n), 0,
+               "and the column that is NOT a name argument contributes nothing")
+
+    # AND IT IS WIRED IN, which is a separate fact from the reader working. Measured:
+    # disconnecting `_loop_names` from `_py_names` reddened NO arm until this line
+    # existed -- every one of them called the reader directly. A reader nobody consults
+    # is the same defect as a guard nobody exercises, and this file has now shipped
+    # three of those.
+    got = _py_names(
+        'for label, sql in (("allnull column scan", "SELECT * FROM %T"),):\n'
+        '    expect.row_set(c, h, label)\n')
+    expect.text(", ".join(got), "allnull column scan",
+                "and `_py_names` returns it, so the grader actually sees it")
+
+
+def test_a_literal_column_survives_an_interpolated_neighbour(expect):
+    r"""READ PER ELEMENT, NOT PER ROW, and `differential` is why.
+
+        ("textbloom collate-mismatch",
+         f"SELECT count(*) FROM %T WHERE tk = '{present}' COLLATE \"C\"")
+
+    `ast.literal_eval` on the whole table raises on that f-string, so a row-at-a-time
+    reader drops all five labels beside it -- every one of them a plain literal. The
+    column is read cell by cell through `_as_names` for that reason.
+    """
+    tree = ast.parse(
+        'for label, sql in (("textbloom present", "SELECT 1"),\n'
+        '                   ("textbloom collate-mismatch", f"SELECT {x}")):\n'
+        '    expect.row_set(c, h, label)\n')
+    expect.text(", ".join(_loop_names(tree)),
+                "textbloom present, textbloom collate-mismatch",
+                "a literal label survives an interpolated neighbour in the same row")
+
+
+def test_a_table_that_is_not_literal_contributes_nothing(expect):
+    """THE REFUSAL, because the alternative is guessing.
+
+    A loop over a name, a comprehension, or a row whose label is itself computed
+    cannot be read without running the file. `_as_names`' rule holds here too: absent
+    beats wrong, because a wrong name can never be matched by the other harness and is
+    reported MISSING for ever.
+    """
+    for src, why in (
+            ('for label, sql in CASES:\n    expect.num(g, 1, label)\n',
+             "a loop over a module name"),
+            ('for label, sql in [(mk(i), "q") for i in r]:\n'
+             '    expect.num(g, 1, label)\n', "a comprehension"),
+            ('for label, sql in ((LABEL_ONE, "q"),):\n    expect.num(g, 1, label)\n',
+             "a row whose label is itself a name")):
+        expect.num(len(_loop_names(ast.parse(src))), 0,
+                   f"{why} contributes no names rather than guessed ones")
+
+    # THE CONTROL, so the three above are a refusal and not a broken reader.
+    expect.text(", ".join(_loop_names(ast.parse(
+        'for label in ("one", "two"):\n    expect.num(g, 1, label)\n'))),
+        "one, two", "control: a literal table over a single column still reads")
+
+
+def test_the_loop_reader_invents_nothing_in_this_corpus(expect):
+    """EVERY NAME IT RETURNS IS TEXT THE FILE CONTAINS, asserted over the tree rather
+    than over a fixture, because the risk this guards is a reader that CONSTRUCTS a
+    string rather than finding one.
+    """
+    added, absent, files = 0, [], []
+    for py in sorted(HERE.glob("test_*.py")):
+        src = py.read_text()
+        got = _loop_names(ast.parse(src))
+        if got:
+            files.append(py.name[5:-3])
+        added += len(got)
+        absent += [n for n in got if n not in src]
+    expect.at_least(added, 40,
+                    "premise: the reader really does add names in this tree, so the "
+                    "assertion below is not vacuous")
+    expect.text(", ".join(absent) or "none", "none",
+                "every name the loop reader returns appears verbatim in the file it "
+                "came from")
+    expect.text(", ".join(files),
+                "build_refusal, differential, join_runtime_filter",
+                "and it is these files, so a fourth appearing is a diff a reviewer "
+                "sees rather than a number that moved")
 
 
 def test_a_call_whose_name_is_not_a_literal_contributes_nothing(expect):

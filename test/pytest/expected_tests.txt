@@ -120,7 +120,11 @@
 # 324, and the fact that 322 + 7 + 2 happens to reach it is a coincidence of this
 # merge rather than a method -- the deltas were measured against different trees and
 # adding them is what produced a number no tree collected earlier today.
-guard_tests 331
+# 331 -> 335 when the PORT side learned a name bound by a loop (#1045 class 2): the
+# reader, the interpolated-neighbour case, the refusal of a non-literal table with its
+# control, and a corpus-wide arm that every name it returns is text the file contains.
+# Re-derived by collection: `335 tests collected`.
+guard_tests 335
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
