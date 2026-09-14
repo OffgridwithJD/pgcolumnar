@@ -196,35 +196,49 @@ def test_an_order_the_rows_are_not_in_keeps_the_sort(fx, expect, sql, name):
 # names them separately, and because a plan failure and an answer failure want
 # different reading: one is a lost optimisation, the other is a wrong result.
 
+# THE THIRD FIELD SAYS WHETHER THE TEMPLATE CAN CARRY AN ORDERING CLAIM, and it is
+# declared rather than sniffed at runtime. `expect.ordered_rows` refuses a sequence whose
+# elements are all identical, because the reverse reads the same and the claim cannot
+# fail -- and a `LIMIT 1` result is that case by construction. Deciding per call by
+# looking at the data is how an ordering claim silently becomes a value one, which is the
+# failure the two instruments exist to keep apart.
+#
+# This caught a decorative arm of my own: `and the first row matches heap` compared one
+# row to one row through `ordered_rows` and asserted nothing about order. It is a VALUE
+# claim -- the minimum under the ordering -- so it takes `rows`, which still names the
+# position on a mismatch.
 ANSWERS = [
     ("SELECT id, k, j FROM %T ORDER BY k, j, id",
-     "and returns the same rows in the same order as heap"),
+     "and returns the same rows in the same order as heap", True),
     ("SELECT k, j FROM %T ORDER BY k NULLS LAST, j LIMIT 10",
-     "and LIMIT returns the same first rows as heap"),
+     "and LIMIT returns the same first rows as heap", True),
     ("SELECT k, j, id FROM %T ORDER BY k NULLS LAST, j, id LIMIT 500",
-     "and a larger LIMIT does too"),
+     "and a larger LIMIT does too", True),
     ("SELECT k FROM %T WHERE k IS NOT NULL ORDER BY k LIMIT 1",
-     "and the first row matches heap"),
+     "and the first row matches heap", False),
     ("SELECT k, j, id FROM %T ORDER BY k DESC NULLS FIRST, j DESC, id DESC LIMIT 200",
-     "and DESC still answers correctly"),
+     "and DESC still answers correctly", True),
     ("SELECT k, id FROM %T ORDER BY k NULLS FIRST, id LIMIT 300",
-     "and NULLS FIRST still answers correctly"),
+     "and NULLS FIRST still answers correctly", True),
     ("SELECT j, id FROM %T ORDER BY j, id LIMIT 300",
-     "and a non-prefix still answers correctly"),
+     "and a non-prefix still answers correctly", True),
     ("SELECT id FROM %T ORDER BY id LIMIT 300",
-     "and a non-key column still answers correctly"),
+     "and a non-key column still answers correctly", True),
 ]
 
 
-@pytest.mark.parametrize("template,name", ANSWERS)
-def test_the_columnar_answer_matches_heap_in_order(fx, expect, template, name):
+@pytest.mark.parametrize("template,name,ordered", ANSWERS)
+def test_the_columnar_answer_matches_heap_in_order(fx, expect, template, name, ordered):
     with fx.cursor() as cur:
         columnar = _rows(cur, template.replace("%T", "c"))
         heap = _rows(cur, template.replace("%T", "h"))
         expect.at_least(len(heap), 1,
                         f"premise: the heap oracle returns rows for {name!r}, so the "
                         f"comparison is not two empty lists")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same", name)
+        if ordered:
+            expect.ordered_rows(columnar, heap, name)
+        else:
+            expect.rows(columnar, heap, name)
 
 
 def test_a_constant_leading_key_is_skipped(fx, expect):
@@ -247,8 +261,8 @@ def test_a_constant_leading_key_is_skipped(fx, expect):
         columnar = _rows(cur, "SELECT j, id FROM c WHERE k = 5 ORDER BY j, id")
         heap = _rows(cur, "SELECT j, id FROM h WHERE k = 5 ORDER BY j, id")
         expect.at_least(len(heap), 1, "premise: the heap oracle returns those rows too")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same",
-                    "and it answers in j order, matching heap")
+        expect.ordered_rows(columnar, heap,
+                           "and it answers in j order, matching heap")
 
 
 # ================================================== an unsorted tail
@@ -302,7 +316,7 @@ def test_the_tail_answer_matches_heap(tail, expect, template, name):
         columnar = _rows(cur, template.replace("%T", "tailc"))
         heap = _rows(cur, template.replace("%T", "tailh"))
         expect.at_least(len(heap), 1, f"premise: the oracle returns rows for {name!r}")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same", name)
+        expect.ordered_rows(columnar, heap, name)
 
 
 # =================================================== a Z-order run
@@ -337,8 +351,8 @@ def test_a_zorder_run_is_not_a_sort_on_its_lead_column(zorder, expect):
         columnar = _rows(cur, "SELECT k, j, id FROM zc ORDER BY k, j, id LIMIT 300")
         heap = _rows(cur, "SELECT k, j, id FROM zh ORDER BY k, j, id LIMIT 300")
         expect.at_least(len(heap), 1, "premise: the Z-order oracle returns rows")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same",
-                    "and the Z-order run still answers correctly")
+        expect.ordered_rows(columnar, heap,
+                           "and the Z-order run still answers correctly")
 
 
 # ============================== an unsorted relation, and a rewrite that retracts
@@ -547,8 +561,8 @@ def test_a_collatable_sort_column_is_not_claimed(collated, expect):
         columnar = _rows(cur, "SELECT k, id FROM colc ORDER BY k, id")
         heap = _rows(cur, "SELECT k, id FROM colh ORDER BY k, id")
         expect.at_least(len(heap), 1, "premise: the C-collation oracle returns rows")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same",
-                    "and it answers in C order, matching heap")
+        expect.ordered_rows(columnar, heap,
+                           "and it answers in C order, matching heap")
 
 
 def test_a_collation_alter_changes_the_order_without_rewriting(collated, expect):
@@ -600,7 +614,7 @@ def test_a_collation_alter_changes_the_order_without_rewriting(collated, expect)
                  "and the whole ordered result matches heap under the new collation")):
             columnar = _rows(cur, template.replace("%T", "colc"))
             heap = _rows(cur, template.replace("%T", "colh"))
-            expect.text("same" if columnar == heap else "DIFFERENT", "same", name)
+            expect.ordered_rows(columnar, heap, name)
 
 
 # ==================== which types the collation refusal actually covers
@@ -692,8 +706,8 @@ def test_an_enum_add_value_before_does_not_renumber(fx, expect):
         columnar = _rows(cur, "SELECT k, id FROM t_enum ORDER BY k, id")
         heap = _rows(cur, "SELECT k, id FROM t_enum_h ORDER BY k, id")
         expect.at_least(len(heap), 1, "premise: the enum oracle returns rows")
-        expect.text("same" if columnar == heap else "DIFFERENT", "same",
-                    "and the ordered answer still matches heap")
+        expect.ordered_rows(columnar, heap,
+                           "and the ordered answer still matches heap")
 
 
 # ================================= a CACHED ordered plan must be retracted
@@ -1060,7 +1074,7 @@ def test_a_projection_does_not_lend_its_order_to_the_base_relation(fx, expect):
             columnar = _rows(cur, template.replace("%T", "prc"))
             heap = _rows(cur, template.replace("%T", "prc_h"))
             expect.at_least(len(heap), 1, f"premise: the oracle returns rows for {name!r}")
-            expect.text("same" if columnar == heap else "DIFFERENT", "same", name)
+            expect.ordered_rows(columnar, heap, name)
 
 
 # =========== the claim must not survive into a plan that interleaves rows
