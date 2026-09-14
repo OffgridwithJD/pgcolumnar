@@ -280,20 +280,52 @@ def _template(name):
     return re.sub(r"\{[^{}]*\}", "{}", _BASH_INTERP.sub("{}", name))
 
 
-def _at(pos):
-    return tuple(h for h, p in _BASH_NAME_ARG.items() if p == pos)
-
-
 # One shell word: a double-quoted string, or a run of non-space. Used only to STEP
 # OVER the arguments before the name, never to capture one.
 _WORD = r'(?:"[^"]*"|\S+)'
 
-# `\b` before the alternation, so `check` does not match inside `pgc_check_thing`.
-# The alternatives are listed longest-first, which READS as though it matters and
-# does not: python's `re` backtracks across them. The pattern SHAPE is what makes
-# `check_ratio_needs_quiet_machine` readable, and an arm holds that.
-_BASH_PATTERN = r'\b(?:' + "|".join(_at(1)) + r')\s+"([^"]+)"'
-_BASH_PATTERN_2 = r'\b(?:' + "|".join(_at(2)) + r')\s+' + _WORD + r'\s+"([^"]+)"'
+
+def _pattern_for(pos, helpers):
+    """-> the regex reading a name from argument `pos` of any of `helpers`.
+
+    `\b` before the alternation, so `check` does not match inside `pgc_check_thing`.
+    The alternatives read longest-first, which LOOKS decisive and is not: python's
+    `re` backtracks across them. The pattern SHAPE is what makes
+    `check_ratio_needs_quiet_machine` readable, and an arm holds that.
+
+    AN EMPTY `helpers` WOULD BE A DISASTER RATHER THAN A NO-OP. `(?:)` matches the
+    empty string anywhere, so the pattern degenerates to "any word then any quoted
+    string" and the tool FABRICATES names -- measured on `zonemap_boundaries.sh`,
+    which contains no position-2 helper at all: `$PGC_DB`, `$(dirname `, `2`. Those
+    are then reported as bash properties the port is missing, for ever, because no
+    port can assert `$PGC_DB`. Silent junk is the worst of the three outcomes here.
+    """
+    if not helpers:
+        raise ValueError(f"no helper names its check at argument {pos}: an empty "
+                         f"alternation matches everywhere and would fabricate names")
+    # `(_WORD + separator) * (pos - 1)`, NOT `_WORD * (pos - 1) + separator`. The
+    # second form is byte-identical at positions 1 and 2 and wrong from 3 on: it runs
+    # the word matchers together with no whitespace between them, so a position-3
+    # helper reads NOTHING. Latent -- no helper is at 3 -- and it is the same shape as
+    # the defect this function exists to close: a builder that silently mis-builds the
+    # case nobody exercises. The `if not helpers` guard above cannot see it, because
+    # `helpers` is not empty.
+    return (r'\b(?:' + "|".join(helpers) + r')\s+'
+            + (_WORD + r'\s+') * (pos - 1)
+            + r'"([^"]+)"')
+
+
+# Built from the POSITIONS the table actually uses, not from a hard-coded 1 and 2, so
+# an empty group cannot be constructed: a position exists here only because some
+# helper has it.
+_BASH_PATTERNS = tuple(
+    _pattern_for(pos, tuple(h for h, p in _BASH_NAME_ARG.items() if p == pos))
+    for pos in sorted(set(_BASH_NAME_ARG.values())))
+
+# Kept: the position-1 pattern is what the shadowing arm reads. Built by ASKING for
+# position 1 rather than taking `_BASH_PATTERNS[0]`, which is the position-1 pattern
+# only because 1 sorts first -- correct today and correct by accident.
+_BASH_PATTERN = _pattern_for(1, tuple(h for h, p in _BASH_NAME_ARG.items() if p == 1))
 
 
 def _bash_names(text):
@@ -303,7 +335,10 @@ def _bash_names(text):
     count and the difference between them is information: a suite asserting the same
     property twice is a different thing from one asserting it once.
     """
-    return re.findall(_BASH_PATTERN, text) + re.findall(_BASH_PATTERN_2, text)
+    out = []
+    for pat in _BASH_PATTERNS:
+        out.extend(re.findall(pat, text))
+    return out
 
 
 def main(bash_file, py_file):
