@@ -1123,12 +1123,28 @@ def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one
                 "and the reconciliation is printed beside the buckets")
 
     # THE RECONCILIATION IS DERIVED FROM THE PRINTED LINES, NOT FROM THE COUNTER.
-    # `sum(dist.values())` equals `len(rows)` by construction, so a reconciliation built
-    # from it guards the one step that cannot go wrong: truncating the DISPLAY loop drops
-    # a bucket -- the MINORITY one, which is the whole point of the summary -- and such a
-    # reconciliation still balances. Caught by @OffgridwithJD reviewing this branch.
-    # Asserted by re-adding the printed counts here, which is the only way an arm outside
-    # the tool can tell the two sources apart.
+    #
+    # NO STANDING ARM HOLDS THAT, AND THIS ONE DOES NOT EITHER. Said plainly because the
+    # two assertions below LOOK like they do. Where the display prints every bucket the
+    # two sources are equal by construction, so no fixture reachable from outside
+    # `cmd_merge` separates them: a wording-preserving revert to `sum(dist.values())`
+    # passes the whole file, 29 passed, 160 checks. The earlier revert that DID redden
+    # changed the printed words, so what caught it was a text pin, not the mechanism.
+    # Measured by @OffgridwithJD, who reverted it and got green.
+    #
+    # The change is kept anyway because it REMOVES THE SECOND SOURCE rather than guarding
+    # one: `emitted` is appended in the same loop that prints, so the total and the lines
+    # cannot drift without editing two adjacent statements. A by-construction fix is
+    # exactly the kind a standing arm cannot prove, and the alternative -- a
+    # `--limit-buckets` seam existing only so a test can truncate the display -- would add
+    # a production flag to manufacture the input, which is worse than saying this.
+    #
+    # What the two assertions below DO hold: that a truncated display is visible. Under a
+    # truncation they disagree and redden, whichever source the total is built from.
+    # Which matters because `sum(dist.values())` equals `len(rows)` by construction, so a
+    # reconciliation built from it says nothing about the display: truncating the loop
+    # drops a bucket -- the MINORITY one, which is the whole point of the summary -- and
+    # the line still balances. That is the defect the change removes.
     # PARSED PER LINE, not out of the whitespace-joined block. Joined, the bucket LABEL
     # runs into the next line's word: "... 2 rows 18" + "rows 4 = ..." yields a phantom
     # "18 rows" and the sum came to 26 against 4. The line structure is the thing that
