@@ -2283,9 +2283,15 @@ design said may only fall. It shipped at 614 rows, 614 `never`, ceiling 614.
 What the gate refuses is a check the committed ledger has never seen, **in a suite the
 ledger covers**. Regenerating the ledger is the intended fix and a reviewable diff.
 
-The format is five tab-separated columns keyed on the first three:
-`suite`, `part`, `check name`, `last observed red`, `mutations` — the last a `-` or a
-`;`-separated **set**, accumulated rather than overwritten.
+The format is six tab-separated columns keyed on the first three:
+`suite`, `part`, `check name`, `majors`, `last observed red`, `mutations` — the last two
+each a `-` or a `;`-separated **set**, accumulated rather than overwritten.
+
+`majors` is the set of PostgreSQL majors the check has been observed on, added by #1010.
+It is a FIELD and not part of the key: keying on it would store one fact once per major,
+which on a measured full matrix meant 32,360 rows to express 105 keys' worth of
+difference. This paragraph said **five** columns and omitted `majors` from the day that
+column landed until #1048.
 
 `run_all_versions.sh` invokes the gate before it removes the build directory, which is
 the only place a matrix run can reach every suite's log.
@@ -2580,6 +2586,41 @@ check in a suite it has never seen, and a major it holds no rows for is the iden
 problem: adding PG20 would make every check new at once and redden the whole run, which is a
 gate somebody turns off. The control shows a new check IS refused on a covered major, so the
 arm does not merely prove the gate refuses nothing.
+
+### `test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one`
+
+`merge` printed a **union** over rows, and a union cannot represent a minority set. Merge
+rows carrying `{18}` into a ledger whose rows carry `{15,16,17,18,19}` and the union does
+not move, so the line was **byte-identical on a correct merge and an incorrect one**. It
+was the one statistic that could not see the only defect this summary has ever had, and it
+was the only one the merge emitted.
+
+That defect occurred twice in three hours, to the same person, with a written note about it
+in between:
+
+| | rows written | against | caught by |
+| --- | --- | --- | --- |
+| #1041 | 12 at `18` | 934 at `15;16;17;18;19` | CI's `suites (PG 17)` leg |
+| #1042 | 8 at `18` | 1209 at `15;16;17;18;19` | a manual `uniq -c`, locally |
+
+Both times the merge printed `majors ... 15, 16, 17, 18, 19`. **The operator was not
+ignoring the output; the output agreed with them.** A roll-up that cannot represent the
+failure is worse than no summary, because it actively confirms the wrong answer.
+
+It now prints the distribution, says `NOT UNIFORM` when there is more than one set, and
+prints `rows N = sum of buckets N` beside it.
+
+The arm holds the **discrimination**, not the wording: it merges the same two checks two
+ways and requires the two summaries to differ. Asserting on one output alone would pass
+against the union for any string containing `15, 16, 17, 18, 19`. The correct arm uses
+**five logs**, not one log naming five majors — the same name twice in one log is a
+duplicate sharing a row, which is a different thing and would make the control unfaithful.
+
+Removal proof: restoring union semantics while **keeping** the new output shape reddens the
+discrimination assertion, so what is load-bearing is the distribution and not the rewording.
+
+Reporting only. Whether merge should **refuse** a non-uniform result is a live design
+question and is deliberately not settled here (#1048).
 
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 

@@ -18,6 +18,38 @@ true until the next version shipped.
 
 ### Added
 
+- `pgc_ledger.py merge` reported the UNION of majors, which cannot show the defect
+  that has occurred twice (#1048).
+
+  The summary printed a union over rows:
+
+      majors = sorted(set().union(*(v[0] for v in rows.values())) if rows else set())
+
+  A union cannot represent a MINORITY set. Merge rows carrying `{18}` into a ledger whose
+  rows carry `{15,16,17,18,19}` and the union does not move, so the line was
+  byte-identical on a correct merge and an incorrect one -- the one statistic that could
+  not see the only defect this summary has ever had, and the only one it emitted.
+
+  It happened twice in three hours, to the same person, with a written note in between:
+  #1041 wrote 12 rows at `18` against 934 uniform ones, caught only by CI's `suites
+  (PG 17)` leg; #1042 wrote 8 against 1209, caught by a manual `uniq -c`. Both times the
+  merge printed `majors ... 15, 16, 17, 18, 19`. The operator was not ignoring the
+  output; the output agreed with them.
+
+  It now prints the distribution, names it `NOT UNIFORM` when there is more than one set,
+  and prints `rows N = sum of buckets N` beside it:
+
+      majors: NOT UNIFORM -- 2 distinct sets over 5 rows
+             3 rows  15;16;17;18;19
+             2 rows  18
+        rows 5 = sum of buckets 5
+
+  Reporting only. Whether merge should REFUSE a non-uniform result is a live design
+  question and is deliberately not settled by this change.
+
+  `test/pytest/TESTS.md` also described the ledger as FIVE tab-separated columns and
+  omitted `majors` from the list, from the day that column landed (#1010) until now.
+
 - `skip-loop-arms.py` read a one-line function body as everything below it, so a psql
   wrapper counted as a check recorder (#1042).
 
