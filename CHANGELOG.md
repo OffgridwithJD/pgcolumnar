@@ -42,6 +42,45 @@ true until the next version shipped.
   loop` still PASSES -- which is the defect -- while both premises redden.
 
   Closes the third of #1033's three gaps; `ae008c2` closed the other two.
+- A bash suite that unrolls a family as literals graded MISSING against the port that
+  parametrises it (#1045 class 3).
+
+      bash   diff_query "c_int range" ... "c_text range"        11 literals
+      port   @pytest.mark.parametrize("col", sorted(RANGES))
+             expect.row_set(c, h, f"{col} range")               1 template
+
+  The port asserts every one of the 17 properties -- `RANGES` holds the same 11
+  columns bash unrolls and `EQUALITIES` the same 6 -- but a literal never meets a
+  template, so `differential` was declared INCOMPLETE for a spelling.
+
+  The grader now resolves the container and emits one CONCRETE name per member,
+  matched literally on both sides. The alternative, widening `_template` so a literal
+  matches a template, resolves the same 17 and gives up the ability to ever detect
+  them going wrong: `c_bytea range` would match `{}` range whether or not the port
+  covers `c_bytea`. Measured -- drop `c_bytea` from `RANGES` and the expansion reports
+  it by name, where a widened template cannot.
+
+  THE EXPANSION IS ADDITIVE, and that is a constraint rather than a convenience. Where
+  BOTH sides are templated the template IS the match: 11 of `hilbert_locality`'s 30
+  bash names and 10 of `hilbert_cluster`'s match that way, so replacing the port's
+  template orphans them. Measured, replacing breaks three green pairs and takes
+  `differential` to 13 rather than 0.
+
+  IT IS ALSO NOT AN ASSERTION. One parametrised arm is ONE assertion and ELEVEN
+  spellings; counting the spellings made `differential` report 274 named assertions
+  where the port has 100. The expansion feeds the MISSING calculation and nothing
+  else -- it is not counted and it is not listed as `extra`.
+
+  Refused, each costing a false MISSING at worst: a module constant, because
+  `FLOAT_RTOL = 1e-6` renders as `1e-06` and bash carries neither spelling; two or
+  more distinct parametrised columns, because stacked parametrize is a cartesian
+  product and expanding one while holding the other invents names that exist nowhere;
+  and any container that is not literal. Read through `_name_argument` and nothing
+  else -- expanding every f-string instead emits `SELECT id, c_int FROM %T` as a check
+  name, 96 such in `differential` alone.
+
+  `differential` reaches `missing: 0` and leaves `INCOMPLETE`. Eight of the nine
+  graded pairs are now one-for-one; the ninth is blocked on #1040 phase 0b.
 
 - The grader could not read a port's own name when a `for` loop supplied it
   (#1045 class 2).
