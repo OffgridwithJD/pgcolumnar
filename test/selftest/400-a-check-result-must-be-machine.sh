@@ -561,6 +561,32 @@ check "and not a piped loop with no check in it" \
 check "and not a check after a one-line piped loop that already closed" \
 	"$(_pipeloop_sites "$_pl_fx/oneline.sh" | grep -c .)" "0"
 
+# THE POPULATION, because the arm below can report a clean tree having read nothing.
+# The detector is proven to FIRE, at :548 against a fixture. Nothing proved it had
+# EXAMINED anything. Without `nullglob` a wrong `$PGC_TESTDIR` leaves both globs
+# LITERAL, awk opens no file, `grep -c .` over no input prints 0, and the arm compares
+# that 0 against 0 and passes. Measured with the identical expression:
+#
+#     PGC_TESTDIR=<a real dir with one offender>   hits=1   detector fires
+#     PGC_TESTDIR=/nonexistent                     hits=0   ARM PASSES, nothing read
+#
+# Counted by what awk actually OPENED -- `FNR == 1` fires once per file it reads -- and
+# not by `ls`, so a file that exists and cannot be read is a miss here rather than an
+# invisible one. That is also the same mechanism the detector uses, so the premise and
+# the thing it premises cannot drift apart.
+#
+# RECONCILED against what the globs offered rather than floored at a number, so there is
+# no constant to maintain: a literal glob offers 2 words and reads 0, which is a
+# mismatch, while the real corpus offers and reads the same 313.
+_pl_offered="$(set -- "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh; echo $#)"
+_pl_read="$(awk 'FNR == 1 { n++ } END { print n+0 }' \
+	"$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh 2>/dev/null)"
+check_num "premise: the piped-loop sweep read every file it was offered" \
+	"${_pl_read:-0}" "${_pl_offered:-0}"
+# And that the population is the suite corpus rather than a stray directory that
+# happens to reconcile. Only a mass deletion of suites can approach this floor.
+check "premise: and that population is the suite corpus" \
+	"$([ "${_pl_read:-0}" -ge 200 ] && echo yes || echo no)" "yes"
 _pl_hits="$(_pipeloop_sites "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh 2>/dev/null | grep -c . || true)"
 [ "${_pl_hits:-0}" = 0 ] || _pipeloop_sites "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh | sed 's/^/    /'
 check "no suite calls a check inside a piped loop" "${_pl_hits:-0}" "0"
