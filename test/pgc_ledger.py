@@ -97,6 +97,7 @@ rather than the catalogue it exists to become.
 """
 
 import argparse
+import collections
 import os
 import pathlib
 import re
@@ -470,10 +471,42 @@ def cmd_merge(args):
     write_ledger(args.ledger, rows)
     seen_all = {k for _, s in runs for k in s}
     red = sum(1 for v in rows.values() if v[1] != NEVER)
-    majors = sorted(set().union(*(v[0] for v in rows.values())) if rows else set())
+    # THE DISTRIBUTION, NOT THE UNION (#1048). A union over rows cannot represent a
+    # MINORITY set, and that is the only defect this summary has ever had. Merge rows
+    # carrying {18} into a ledger whose rows carry {15,16,17,18,19} and the union is
+    # unchanged, so the line read BYTE-IDENTICALLY on a correct merge and an incorrect
+    # one. It happened twice in three hours to the same person, with a written note in
+    # between: #1041 wrote 12 rows at `18` against 934 uniform ones, caught only by CI's
+    # PG17 leg; #1042 wrote 8 against 1209, caught by a manual `uniq -c`. Both times this
+    # line printed the full set and the operator believed it, because it agreed with them.
+    # A roll-up that cannot represent the failure is worse than no summary.
+    #
+    # Reporting only. Whether merge should REFUSE a non-uniform result is a separate
+    # design question and is deliberately not decided here.
+    dist = collections.Counter(MAJOR_SEP.join(sorted(v[0])) for v in rows.values())
     print(f"  ledger: rows={len(rows)} | runs={len(runs)}, distinct checks this merge={len(seen_all)}, "
           f"observed red ever={red}, never={len(rows) - red}")
-    print(f"    majors the ledger now claims rows for: {', '.join(majors) or 'none'}")
+    #
+    # THE RECONCILIATION COUNTS WHAT WAS PRINTED, not what was counted. `sum(dist.values())`
+    # would equal `len(rows)` BY CONSTRUCTION -- `dist` consumes `rows.values()` exactly
+    # once -- so it could only ever catch a filter on the comprehension two lines up, and
+    # never a bucket lost in the DISPLAY. Measured by @OffgridwithJD on this branch:
+    # truncating the loop below to `[:1]` drops the MINORITY bucket, which is the one this
+    # whole summary exists to show, and the reconciliation still balanced at 5 = 5. A guard
+    # over the step that cannot go wrong is the shape this change is about.
+    emitted = []
+    if not dist:
+        print("    majors: the ledger has no rows")
+    elif len(dist) == 1:
+        only, n = next(iter(dist.items()))
+        print(f"    majors: uniform, all {n} rows carry {only}")
+        emitted.append(n)
+    else:
+        print(f"    majors: NOT UNIFORM -- {len(dist)} distinct sets over {len(rows)} rows")
+        for maj, n in sorted(dist.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"      {n:>6} rows  {maj}")
+            emitted.append(n)
+    print(f"      rows {len(rows)} = sum of buckets printed {sum(emitted)}")
     return 0
 
 

@@ -23,6 +23,7 @@ shell: a Python twin of a Python tool would agree with itself.
 """
 
 import pathlib
+import re
 import subprocess
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -1041,3 +1042,155 @@ def test_the_gate_cannot_refuse_a_check_on_a_major_it_has_never_seen(tmp_path, e
                "a known check on a major its row does not claim is named, because the row "
                "is a claim about where it exists")
     expect.num(rc, 1, "and refused until the ledger is regenerated")
+
+
+def test_the_reconciliation_is_built_from_the_printed_total(expect):
+    """A SOURCE-TEXT PIN, because no behavioural arm can reach this one (#1048).
+
+    The arm below asserts that a truncated display is visible. It CANNOT assert that the
+    reconciliation is computed from what was printed, because where the display prints
+    every bucket `sum(emitted)` and `sum(dist.values())` are equal by construction, and no
+    fixture reachable from outside `cmd_merge` separates them. Measured: a
+    wording-preserving swap to `sum(dist.values())` passes the whole file, 29 passed.
+
+    So the guarantee rested on a comment, and @OffgridwithJD's objection to that is the
+    right one -- comments rot where arms do not. This is the weaker kind of check that
+    CONTEXT.md explicitly keeps for this case: "a grep over source text is the weaker kind
+    of check and is still worth writing; premise it on the call site existing, or it
+    approves a file that no longer has one."
+
+    It proves nothing about behaviour. What it does is refuse to let the source drift back
+    silently, which is the failure the comment alone could not stop.
+    """
+    src = (REPO / "test" / "pgc_ledger.py").read_text(encoding="utf-8")
+    line = [l for l in src.splitlines() if "sum of buckets printed" in l]
+
+    # THE PREMISE, without which a renamed or deleted line makes this arm approve anything.
+    expect.num(len(line), 1, "premise: the reconciliation line exists, exactly once")
+
+    expect.text("sum(emitted)" in line[0], True,
+                "the reconciliation totals what was PRINTED; `sum(dist.values())` is equal "
+                "to len(rows) by construction and would say nothing about the display")
+    expect.text("dist.values()" in line[0], False,
+                "and it is not built from the Counter, which is the drift this pins")
+
+
+def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one(
+        tmp_path, expect):
+    """The merge summary must be able to show the one defect it has ever had (#1048).
+
+    `merge` printed a UNION over rows: `sorted(set().union(*(v[0] for v in rows.values())))`.
+    A union cannot represent a minority set. Merge rows carrying `{18}` into a ledger whose
+    rows carry `{15,16,17,18,19}` and the union is unchanged, so the line is BYTE-IDENTICAL
+    on a correct merge and an incorrect one. It is the one statistic that cannot see the
+    failure, and it was the only one the merge emitted.
+
+    That defect occurred twice in three hours, to the same person, with a written note about
+    it in between: #1041 merged 12 rows at `18` against 934 uniform rows, caught only by CI's
+    `suites (PG 17)` leg; #1042 merged 8 at `18` against 1209, caught by a manual `uniq -c`.
+    Both times the merge printed `majors ... 15, 16, 17, 18, 19` and the operator believed it.
+    A roll-up that cannot represent the failure is worse than no summary, because it actively
+    confirms the wrong answer.
+
+    This arm holds the DISCRIMINATION, not the wording: it merges the same checks two ways
+    and requires the two summaries to differ. An assertion on one output alone would pass
+    against the union for any string containing `15, 16, 17, 18, 19`.
+
+    Reporting only. Whether merge should REFUSE a non-uniform result is a live design
+    question and is deliberately not settled here (#1048).
+    """
+    uniform = ("demo\tpart1\told one\t15;16;17;18;19\tnever\t-\n"
+               "demo\tpart1\told two\t15;16;17;18;19\tnever\t-\n")
+
+    # CORRECT: the new checks observed on all five majors. Five LOGS, not one log naming
+    # five majors -- the same name twice in one log is a duplicate sharing a row, which is
+    # a different thing and would make this control unfaithful.
+    good = _w(tmp_path, "good.tsv", uniform)
+    for maj in ("15", "16", "17", "18", "19"):
+        log = _w(tmp_path, f"g{maj}.log",
+                 f"RESULT\tdemo\tpart1\tnew one\tPASS\t{maj}\t\n"
+                 f"RESULT\tdemo\tpart1\tnew two\tPASS\t{maj}\t\nchecks run: 2\n")
+        _run("merge", "--ledger", good, "--date", "2026-09-13", log)
+    good_out, _ = _run("merge", "--ledger", good, "--date", "2026-09-13",
+                       _w(tmp_path, "noop.log",
+                          "RESULT\tdemo\tpart1\tnew one\tPASS\t15\t\nchecks run: 1\n"))
+
+    # THE DEFECT: the same two checks, one PG18 leg only.
+    bad = _w(tmp_path, "bad.tsv", uniform)
+    bad_out, _ = _run("merge", "--ledger", bad, "--date", "2026-09-13",
+                      _w(tmp_path, "b18.log",
+                         "RESULT\tdemo\tpart1\tnew one\tPASS\t18\t\n"
+                         "RESULT\tdemo\tpart1\tnew two\tPASS\t18\t\nchecks run: 2\n"))
+
+    # The premise: the two merges really did write different ledgers. Without this the
+    # arm could pass while proving nothing about the summary.
+    expect.text({r[2]: r[3] for r in _rows(good)}["new one"], "15;16;17;18;19",
+                "premise: the correct merge wrote the full major set")
+    expect.text({r[2]: r[3] for r in _rows(bad)}["new one"], "18",
+                "premise: the defect merge wrote the minority set")
+
+    def summary(out):
+        """The majors block: from the `majors:` line to its reconciliation.
+
+        NOT `lines containing "major"` -- the per-set bucket lines carry a count and a
+        set and no such word, and they are the substance. That filter was written
+        against the single-line union it is replacing and could not see the fix.
+        """
+        lines = out.splitlines()
+        start = next(i for i, l in enumerate(lines) if "majors:" in l)
+        end = next(i for i, l in enumerate(lines) if "sum of buckets" in l)
+        return " ".join("\n".join(lines[start:end + 1]).split())
+
+    expect.text(summary(good_out) != summary(bad_out), True,
+                "the merge summary DIFFERS between a uniform ledger and one carrying a "
+                "minority major set -- a union is identical on both")
+    expect.text("2 rows 18" in summary(bad_out), True,
+                "and it names the minority set and the row count carrying it, exactly -- "
+                "a bare '2' would also be satisfied by '2 distinct sets'")
+    expect.text("uniform" in summary(good_out) and "NOT UNIFORM" not in summary(good_out),
+                True, "while the correct merge says uniform and does not cry wolf")
+    n_bad = len(_rows(bad))
+    expect.text(f"rows {n_bad} = sum of buckets printed {n_bad}" in summary(bad_out), True,
+                "and the reconciliation is printed beside the buckets")
+
+    # THE RECONCILIATION IS DERIVED FROM THE PRINTED LINES, NOT FROM THE COUNTER.
+    #
+    # NO STANDING ARM HOLDS THAT, AND THIS ONE DOES NOT EITHER. Said plainly because the
+    # two assertions below LOOK like they do. Where the display prints every bucket the
+    # two sources are equal by construction, so no fixture reachable from outside
+    # `cmd_merge` separates them. Measured by @OffgridwithJD on this branch, and the two
+    # mutations are worth keeping apart because only one of them is honest:
+    #
+    #     A  wording kept, source swapped to sum(dist.values())     29 passed
+    #     B  wording reverted as well, to "sum of buckets {n}"       1 failed
+    #
+    # A is the honest mutation and A is what they ran. B reddens on a TEXT PIN -- the arm
+    # notices the word `printed` went missing, not that the number came from elsewhere --
+    # so B would have credited this arm with a guarantee it does not have.
+    #
+    # The change is kept anyway because it REMOVES THE SECOND SOURCE rather than guarding
+    # one: `emitted` is appended in the same loop that prints, so the total and the lines
+    # cannot drift without editing two adjacent statements. A by-construction fix is
+    # exactly the kind a standing arm cannot prove, and the alternative -- a
+    # `--limit-buckets` seam existing only so a test can truncate the display -- would add
+    # a production flag to manufacture the input, which is worse than saying this.
+    #
+    # What the two assertions below DO hold: that a truncated display is visible. Under a
+    # truncation they disagree and redden, whichever source the total is built from.
+    # Which matters because `sum(dist.values())` equals `len(rows)` by construction, so a
+    # reconciliation built from it says nothing about the display: truncating the loop
+    # drops a bucket -- the MINORITY one, which is the whole point of the summary -- and
+    # the line still balances. That is the defect the change removes.
+    # PARSED PER LINE, not out of the whitespace-joined block. Joined, the bucket LABEL
+    # runs into the next line's word: "... 2 rows 18" + "rows 4 = ..." yields a phantom
+    # "18 rows" and the sum came to 26 against 4. The line structure is the thing that
+    # separates a count from a major set, so the parse has to keep it.
+    printed = [int(m.group(1))
+               for l in bad_out.splitlines()
+               for m in [re.match(r"\s+(\d+) rows\s\s+\S", l)] if m]
+    stated = int(re.search(r"sum of buckets printed (\d+)", bad_out).group(1))
+    expect.num(sum(printed), stated,
+               "the reconciliation equals the sum of the bucket counts ACTUALLY PRINTED, "
+               "so a bucket lost in the display cannot leave it balanced")
+    expect.num(stated, n_bad,
+               "and that emitted total still accounts for every row in the ledger")
