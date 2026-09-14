@@ -83,7 +83,14 @@
 # 316 -> 317: the parity declaration is asserted in BOTH directions (#1046), so a pair
 # that exists and is not declared reddens with the stem named. Re-derived by collection
 # against main 20bc290: `317 tests collected`.
-guard_tests 317
+# 317 -> 321 when the bash-side extractor learned the recorders that are not named
+# `check*` (#1045): the drift guard re-derived from BEHAVIOUR rather than spelling and
+# checking argument POSITION as well as membership, an arm for the forwarding wrappers,
+# one for `pgc_skip`'s `$2`, one running the derivation on a fixture with a planted
+# wrapper and a control, and one holding that `#` opens a comment only at a word
+# boundary. Re-derived by collection against main bf31e2f, not by adding four:
+# `321 tests collected`.
+guard_tests 321
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

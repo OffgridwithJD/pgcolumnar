@@ -230,26 +230,45 @@ _BASH_INTERP = re.compile(
 # reads both names identically (measured). An arm pins the BEHAVIOUR rather than the
 # order, because the order is the thing that looks load-bearing and is not.
 #
-# Hand-written so the tool stays standalone, and pinned like `_NAME_ARG`:
-# `test_compare_to_bash.py` reads the DEFINITIONS out of `lib.sh` and fails with the
-# helper named when the two part company.
+# WHICH ARGUMENT CARRIES THE NAME, per helper. This is the bash mirror of
+# `_NAME_ARG` above, and it exists for the same reason: a helper's name is not
+# always its first argument, and a pattern that assumes so reads the wrong string
+# rather than no string.
 #
-# SUITE-LOCAL HELPERS ARE OUT OF SCOPE, deliberately. Four suites define one of their
-# own (`check_structure`, `check_reconstruct`, `check_split_happened` in
-# `parallel_copy.sh`, `check_float` in `parquet_export_stats.sh`) and none of the four
-# has a pytest twin, so none is graded. An arm asserts both halves of that.
-_BASH_HELPERS = (
-    "check_ratio_needs_quiet_machine",
-    "check_unrunnable",
-    "check_timing",
-    "check_ratio",
-    "check_text",
-    "check_skip",
-    "check_num",
-    "check",
-)
+# `pgc_skip <capability> <message>` is the case that forced it (#1045). Its check
+# name is `$2`; `$1` is a capability, written bare at 68 of its 70 call sites and
+# QUOTED at the other two. A single pattern keyed to the first quoted argument
+# therefore reads the name almost everywhere and the CAPABILITY at
+# `pgc_skip "test_decoding" "..."` -- and a wrong name is worse than an absent one,
+# because it can never be matched by a port and is reported MISSING for ever.
+#
+# `diff_query` and `diff_query_ordered` are the other half: `lib.sh` wrappers that
+# forward their `$1` into `check`. The NAME is in the suite, only the RECORDER is
+# in `lib.sh`, and the extractor read neither. 225 names across 59 suites were
+# invisible, 80 of them in `differential`, which graded one-for-one on 6 of its 86.
+#
+# Hand-written so the tool stays standalone, and pinned like `_NAME_ARG`: the drift
+# guard in `test_compare_to_bash.py` DERIVES this table from `lib.sh` -- membership
+# and position both -- and fails with the helper named when the two disagree.
+_BASH_NAME_ARG = {
+    "check_ratio_needs_quiet_machine": 1,
+    "check_unrunnable": 1,
+    "diff_query_ordered": 1,
+    "diff_query": 1,
+    "check_timing": 1,
+    "check_ratio": 1,
+    "check_text": 1,
+    "check_skip": 1,
+    "check_num": 1,
+    "check": 1,
+    "pgc_pass": 1,
+    "pgc_fail": 1,
+    "pgc_skip": 2,
+}
 
-_BASH_PATTERN = (r'\b(?:' + "|".join(_BASH_HELPERS) + r')\s+"([^"]+)"')
+# The membership view of the table, kept because that is what the reader wants when
+# the question is "does the extractor know about X".
+_BASH_HELPERS = tuple(_BASH_NAME_ARG)
 
 
 def _template(name):
@@ -261,9 +280,35 @@ def _template(name):
     return re.sub(r"\{[^{}]*\}", "{}", _BASH_INTERP.sub("{}", name))
 
 
+def _at(pos):
+    return tuple(h for h, p in _BASH_NAME_ARG.items() if p == pos)
+
+
+# One shell word: a double-quoted string, or a run of non-space. Used only to STEP
+# OVER the arguments before the name, never to capture one.
+_WORD = r'(?:"[^"]*"|\S+)'
+
+# `\b` before the alternation, so `check` does not match inside `pgc_check_thing`.
+# The alternatives are listed longest-first, which READS as though it matters and
+# does not: python's `re` backtracks across them. The pattern SHAPE is what makes
+# `check_ratio_needs_quiet_machine` readable, and an arm holds that.
+_BASH_PATTERN = r'\b(?:' + "|".join(_at(1)) + r')\s+"([^"]+)"'
+_BASH_PATTERN_2 = r'\b(?:' + "|".join(_at(2)) + r')\s+' + _WORD + r'\s+"([^"]+)"'
+
+
+def _bash_names(text):
+    """-> every check name the suite states, each read from the argument that holds it.
+
+    A LIST, not a set, because the caller reports both the total and the distinct
+    count and the difference between them is information: a suite asserting the same
+    property twice is a different thing from one asserting it once.
+    """
+    return re.findall(_BASH_PATTERN, text) + re.findall(_BASH_PATTERN_2, text)
+
+
 def main(bash_file, py_file):
     """-> the exit status: 1 when a bash property has no counterpart."""
-    bash_names = re.findall(_BASH_PATTERN, open(bash_file).read())
+    bash_names = _bash_names(open(bash_file).read())
     py_names = _py_names(open(py_file).read())
 
     bset, pset = set(bash_names), set(py_names)
