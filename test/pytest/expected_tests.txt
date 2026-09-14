@@ -103,7 +103,11 @@
 # from 321 by one empty-group arm, this branch from 321 by one ledger arm. Agreeing
 # numbers are the case where adding deltas looks safest and is not. Re-derived by
 # collection on the merged tree.
-guard_tests 323
+# 323 -> 324: a SOURCE-TEXT pin that the reconciliation totals what was printed (#1048).
+# No behavioural arm can reach it -- the two sources are equal wherever the display
+# prints every bucket -- so the guarantee rested on a comment until review objected
+# that comments rot where arms do not. Re-derived by collection: `324 tests collected`.
+guard_tests 324
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

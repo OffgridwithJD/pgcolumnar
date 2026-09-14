@@ -1044,6 +1044,37 @@ def test_the_gate_cannot_refuse_a_check_on_a_major_it_has_never_seen(tmp_path, e
     expect.num(rc, 1, "and refused until the ledger is regenerated")
 
 
+def test_the_reconciliation_is_built_from_the_printed_total(expect):
+    """A SOURCE-TEXT PIN, because no behavioural arm can reach this one (#1048).
+
+    The arm below asserts that a truncated display is visible. It CANNOT assert that the
+    reconciliation is computed from what was printed, because where the display prints
+    every bucket `sum(emitted)` and `sum(dist.values())` are equal by construction, and no
+    fixture reachable from outside `cmd_merge` separates them. Measured: a
+    wording-preserving swap to `sum(dist.values())` passes the whole file, 29 passed.
+
+    So the guarantee rested on a comment, and @OffgridwithJD's objection to that is the
+    right one -- comments rot where arms do not. This is the weaker kind of check that
+    CONTEXT.md explicitly keeps for this case: "a grep over source text is the weaker kind
+    of check and is still worth writing; premise it on the call site existing, or it
+    approves a file that no longer has one."
+
+    It proves nothing about behaviour. What it does is refuse to let the source drift back
+    silently, which is the failure the comment alone could not stop.
+    """
+    src = (REPO / "test" / "pgc_ledger.py").read_text(encoding="utf-8")
+    line = [l for l in src.splitlines() if "sum of buckets printed" in l]
+
+    # THE PREMISE, without which a renamed or deleted line makes this arm approve anything.
+    expect.num(len(line), 1, "premise: the reconciliation line exists, exactly once")
+
+    expect.text("sum(emitted)" in line[0], True,
+                "the reconciliation totals what was PRINTED; `sum(dist.values())` is equal "
+                "to len(rows) by construction and would say nothing about the display")
+    expect.text("dist.values()" in line[0], False,
+                "and it is not built from the Counter, which is the drift this pins")
+
+
 def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one(
         tmp_path, expect):
     """The merge summary must be able to show the one defect it has ever had (#1048).
@@ -1127,10 +1158,15 @@ def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one
     # NO STANDING ARM HOLDS THAT, AND THIS ONE DOES NOT EITHER. Said plainly because the
     # two assertions below LOOK like they do. Where the display prints every bucket the
     # two sources are equal by construction, so no fixture reachable from outside
-    # `cmd_merge` separates them: a wording-preserving revert to `sum(dist.values())`
-    # passes the whole file, 29 passed, 160 checks. The earlier revert that DID redden
-    # changed the printed words, so what caught it was a text pin, not the mechanism.
-    # Measured by @OffgridwithJD, who reverted it and got green.
+    # `cmd_merge` separates them. Measured by @OffgridwithJD on this branch, and the two
+    # mutations are worth keeping apart because only one of them is honest:
+    #
+    #     A  wording kept, source swapped to sum(dist.values())     29 passed
+    #     B  wording reverted as well, to "sum of buckets {n}"       1 failed
+    #
+    # A is the honest mutation and A is what they ran. B reddens on a TEXT PIN -- the arm
+    # notices the word `printed` went missing, not that the number came from elsewhere --
+    # so B would have credited this arm with a guarantee it does not have.
     #
     # The change is kept anyway because it REMOVES THE SECOND SOURCE rather than guarding
     # one: `emitted` is appended in the same loop that prints, so the total and the lines

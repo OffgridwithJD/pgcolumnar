@@ -2587,6 +2587,30 @@ problem: adding PG20 would make every check new at once and redden the whole run
 gate somebody turns off. The control shows a new check IS refused on a covered major, so the
 arm does not merely prove the gate refuses nothing.
 
+### `test_the_reconciliation_is_built_from_the_printed_total`
+
+A **source-text pin**, and the only kind of check that can reach this property.
+
+The arm below asserts that a truncated display is visible. It cannot assert that the
+reconciliation is *computed from what was printed*, because wherever the display prints
+every bucket `sum(emitted)` and `sum(dist.values())` are equal by construction — no
+fixture reachable from outside `cmd_merge` separates them. Measured: a wording-preserving
+swap to `sum(dist.values())` passed the whole file, 29 passed.
+
+So the guarantee rested on a comment. @OffgridwithJD objected that **comments rot where
+arms do not**, which is right, and this is the weaker check CONTEXT.md keeps for exactly
+this case: *"a grep over source text is the weaker kind of check and is still worth
+writing; premise it on the call site existing, or it approves a file that no longer has
+one."*
+
+It proves nothing about behaviour. It refuses to let the source drift back silently.
+
+| | |
+| --- | --- |
+| control | 30 passed |
+| wording-preserving swap to `sum(dist.values())` | **1 failed**, this arm |
+| reconciliation line deleted (the premise) | **1 failed**, this arm |
+
 ### `test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one`
 
 `merge` printed a **union** over rows, and a union cannot represent a minority set. Merge

@@ -44,7 +44,11 @@ true until the next version shipped.
              2 rows  18
         rows 5 = sum of buckets printed 5
 
-  The reconciliation counts what was PRINTED. `sum(dist.values())` would equal
+  The reconciliation counts what was PRINTED, and a SOURCE-TEXT pin holds that,
+  because no behavioural arm can: wherever the display prints every bucket the two
+  sources are equal by construction, so a wording-preserving swap back to
+  `sum(dist.values())` passed the whole file. The guarantee rested on a comment
+  until review pointed out that comments rot where arms do not. `sum(dist.values())` would equal
   `len(rows)` by construction, so it could never catch a bucket lost in the DISPLAY --
   and truncating the loop drops the MINORITY bucket, the one the summary exists to
   show, while the line still balances. Found by @OffgridwithJD in review.
