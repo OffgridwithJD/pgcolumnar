@@ -714,6 +714,42 @@ def _unresolved_links(text):
     return sorted({a for a in _LINK.findall(text) if a not in have})
 
 
+def test_every_test_file_has_a_NUMBERED_section_of_its_own(expect):
+    """A SECTION AT THE WRONG LEVEL IS INVISIBLE TO EVERY OTHER ARM (#1024).
+
+    The arm above catches a section NUMBER taken twice, which is the collision #1024
+    describes, and it does catch it -- planted, two arms redden. What nothing caught is
+    a test file whose section was written as an unnumbered `###` instead of a numbered
+    `##`: it is not in the numbering, so `1..N with no gap` never sees it; it is not in
+    the contents, so the link arms never see it; and the file IS named in the document,
+    so the coverage arm is satisfied.
+
+    That is not hypothetical. `test_iceberg_fdw.py` shipped that way in #1057 and sat
+    undetected until this arm was written -- one person writing a heading at the wrong
+    level, where the collision needs two PRs in flight.
+
+    MEASURED BEFORE WRITING IT: 33 test files, 32 with a numbered section, one without,
+    and that one was the defect. The rule was already true everywhere else, which is
+    why it can be asserted rather than declared as a goal.
+    """
+    text = (HERE / "TESTS.md").read_text(encoding="utf-8")
+    files = sorted(p.name for p in HERE.glob("test_*.py"))
+    numbered = set(re.findall(r"^## \d+\. (test_\w+\.py)", text, re.M))
+
+    expect.at_least(len(files), 20,
+                    "premise: the corpus was found, so the comparison is not vacuous")
+    missing = [f for f in files if f not in numbered]
+    expect.text(", ".join(missing) or "none", "none",
+                "every test file has a NUMBERED top-level section, so none is "
+                "documented outside the numbering the arms above check")
+
+    # AND THE OTHER DIRECTION, so a section cannot outlive the file it documents --
+    # the same both-ways shape the declaration arms use.
+    gone = [n for n in sorted(numbered) if n not in files]
+    expect.text(", ".join(gone) or "none", "none",
+                "and every numbered section names a file that exists")
+
+
 def test_the_anchor_rule_drops_punctuation_and_keeps_underscores(expect):
     """The derivation, on the heading the defect was found in."""
     # Assembled, for the reason given in the arm below: a literal corpus file name

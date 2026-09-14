@@ -18,6 +18,19 @@ true until the next version shipped.
 
 ### Added
 
+- A test file documented as an unnumbered `###` section was invisible to every arm
+  that checks `TESTS.md` (#1024).
+
+  Not in the numbering, so `1..N with no gap` never saw it. Not in the contents, so the
+  link arms never saw it. Still NAMED in the document, so the coverage arm was
+  satisfied. `test_iceberg_fdw.py` shipped that way in #1057 and sat undetected.
+
+  #1024's own report -- two PRs each taking the next section number -- is no longer
+  open: `test_the_contents_list_is_numbered_in_order` landed after #1023 and catches a
+  duplicate and an inversion in one rule. Planted, it reddens. This change keeps that
+  guard and closes the remaining shape, which is cheaper to hit: the collision needs two
+  PRs in flight, a heading at the wrong level needs one person.
+
 - A bash suite that unrolls a family as literals graded MISSING against the port that
   parametrises it (#1045 class 3).
 

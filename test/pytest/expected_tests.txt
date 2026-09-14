@@ -129,7 +129,10 @@
 # right, the additive constraint run against three REAL pairs, the three refusals with
 # a control, and the name-argument restriction.
 # Re-derived by collection: `340 tests collected`.
-guard_tests 340
+# 340 -> 341: a test file documented as an unnumbered `###` is invisible to every
+# other arm -- outside the numbering, outside the contents, and still NAMED, so the
+# coverage arm passes (#1024). Re-derived by collection: `341 tests collected`.
+guard_tests 341
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
