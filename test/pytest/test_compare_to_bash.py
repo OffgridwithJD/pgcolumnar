@@ -80,14 +80,137 @@ from compare_to_bash import _as_names, _parametrized_names, _py_names, _template
 #
 # The shape is `SHELL_REFERENCES`' in `test_harness_deps.py`, asserted in both
 # directions for the same reason: a one-way list rots into a permanent exemption.
-COMPLETE = ["differential", "hilbert_cluster", "hilbert_locality",
+COMPLETE = ["hilbert_cluster", "hilbert_locality",
             "native_ownership", "native_projection", "projection_privilege",
             "stats_privilege", "zonemap_boundaries"]
 
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
-INCOMPLETE = {}
+INCOMPLETE = {
+    "differential":
+        "54 of its 86 bash names have no counterpart the grader can see, and the "
+        "port is not missing 54 properties. Two separate blindnesses were cancelling "
+        "(#1045): the suite records through `diff_query`, which this change now "
+        "reads, and the PORT binds most of its own names to a `for` loop variable, "
+        "which the grader still cannot read. Fixing the bash half alone reveals the "
+        "whole gap at once. 17 of the 54 are class 3 -- bash unrolls `c_int range` "
+        "through `c_text range` (11) and `c_int eq` through `c_arr eq` (6) as "
+        "literals where the port parametrises them over RANGES and EQUALITIES, which "
+        "hold the same 11 and the same 6 columns. Those 17 are a spelling, not a "
+        "gap. The remaining 37 are the port's loop-bound names. Declared here rather "
+        "than fixed with the extractor, so this change carries one claim."
+}
+
+
+def _strip_comments(text):
+    r"""-> the text with shell comments removed, and NOTHING else removed.
+
+    `#` starts a comment only at a word boundary. `${shape#*|}` and `$#` are not
+    comments, and cutting at the first `#` truncates the line to something that
+    parses as a different program. That exact slip has produced two wrong counts in
+    this repo, so the fixtures for it are in the arm below rather than in a comment.
+    """
+    out = []
+    for line in text.splitlines():
+        res, i, quote = [], 0, None
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == quote:
+                    quote = None
+                res.append(ch)
+            elif ch in "\"'":
+                quote = ch
+                res.append(ch)
+            elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()"):
+                break
+            else:
+                res.append(ch)
+            i += 1
+        out.append("".join(res))
+    return "\n".join(out)
+
+
+def _bodies(text):
+    """-> [(function name, body)] with each body ended by ITS OWN closing brace.
+
+    Per-line brace depth, not `find("\n}")`: 199 definitions in this tree are written
+    on one line (`q() { psql ...; }`), and a scan for a brace in the first column
+    swallows every following definition into the first one's body.
+    """
+    out, lines = [], text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{", line)
+        if not m:
+            continue
+        depth = line.count("{") - line.count("}")
+        body, j = [line[m.end():]], i + 1
+        while j < len(lines) and depth > 0:
+            depth += lines[j].count("{") - lines[j].count("}")
+            body.append(lines[j])
+            j += 1
+        out.append((m.group(1), "\n".join(body)))
+    return out
+
+
+def _words(text):
+    """-> the shell words of a call's argument list, quotes kept."""
+    return re.findall(r'"[^"]*"|\S+', text)
+
+
+def _derive_recorders(lib, seed=("pgc_record", 2)):
+    """-> {helper: which argument holds the check name}, derived from what lib.sh DOES.
+
+    THE POPULATION IS THE POINT (#1045). The #1040 guard derived its population by
+    SPELLING -- every `lib.sh` function whose name begins `check`. It was green for
+    weeks while `diff_query` went unread, and correctly so: `diff_query` was never in
+    its population. The guard was not broken; the definition of the thing it guards
+    was. 225 names across 59 suites were outside it.
+
+    So: start from `pgc_record`, the primitive that actually records, and take the
+    closure. A function is a recorder at position N when it passes its own `$N` --
+    directly, or renamed once through a `local` -- into the name slot of a helper
+    already known to be one. `diff_query` calls `check`, which calls `pgc_record`.
+    One level of indirection was the entire gap.
+
+    The seed is not returned. It is `lib.sh`'s own primitive and no suite calls it,
+    which the arm below asserts rather than assumes: the day a suite calls it, the
+    extractor has to learn it and this stops being true quietly.
+    """
+    lib = _strip_comments(lib)
+    defs = _bodies(lib)
+    known = {seed[0]: seed[1]}
+
+    changed = True
+    while changed:
+        changed = False
+        for fn, body in defs:
+            if fn in known:
+                continue
+            aliases = {m.group(1): int(m.group(2)) for m in
+                       re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\{?(\d+)\}?"', body)}
+            for rec, pos in sorted(known.items()):
+                for m in re.finditer(r'\b' + rec + r'([ \t]+.*)$', body, re.M):
+                    args = _words(m.group(1))
+                    if len(args) < pos:
+                        continue
+                    slot = args[pos - 1]
+                    inner = re.fullmatch(r'"\$\{?([A-Za-z_0-9]+)\}?"', slot)
+                    if not inner:
+                        continue          # a literal, or something not a bare $x
+                    tok = inner.group(1)
+                    n = int(tok) if tok.isdigit() else aliases.get(tok)
+                    if n is None:
+                        continue
+                    known[fn] = n
+                    changed = True
+                    break
+                if fn in known:
+                    break
+
+    del known[seed[0]]
+    return known
 
 
 def _names(src):
@@ -412,45 +535,192 @@ def test_no_later_argument_can_overtake_the_name(expect):
                 "no positional argument can be written after the name and be read as it")
 
 
-def test_the_extractor_reads_every_check_helper_lib_sh_defines(expect):
-    """THE BASH-SIDE DRIFT GUARD (#1040), and the mirror of the table guard above.
+def test_the_extractor_reads_every_recorder_lib_sh_defines(expect):
+    r"""THE BASH-SIDE DRIFT GUARD (#1040), WIDENED FROM SPELLING TO BEHAVIOUR (#1045).
 
-    The extractor read five of the eight check helpers `lib.sh` defines. The other
-    three -- `check_unrunnable`, `check_skip`, `check_ratio_needs_quiet_machine` --
-    matched no branch of its pattern, so a bash property asserted through any of
-    them was invisible, was never reported MISSING, and could not move `rc`.
+    The #1040 form derived its population with `^(check(?:_[a-z_]+)?)\(\)` -- every
+    `lib.sh` function whose NAME begins `check`. That found the three helpers #1040
+    was about. It could not find `diff_query`, which forwards its `$1` into `check`
+    and is named nothing like it.
 
-    **A pair could therefore be declared one-for-one on the strength of the grader's
-    blind spot**, which is what `hilbert_locality` was: two of the four properties
-    its unrunnable branch records had no counterpart in the port at all.
+    **The guard was green the whole time, and it was not broken. Its population was.**
+    A guard is worth exactly the set it ranges over, and this one asked what a
+    function is CALLED. Measured on `bf31e2f`, before the widening:
 
-    The helper list is hand-written, for the same reason `_NAME_ARG` is: the tool
-    stays standalone. So it is pinned the same way -- this reads the DEFINITIONS out
-    of `lib.sh` and fails with the helper named when the two part company. Add a
-    `check_whatever()` to `lib.sh` and this goes red before a suite using it is
-    silently ungraded.
+        names the extractor read from differential.sh     6
+        names differential.sh actually states            86
+        corpus-wide, names no graded or future port could match     249 across 70 suites
 
-    Suite-LOCAL helpers are deliberately not in scope here; that is asserted, with
-    its reason, in the arm below.
+    `_derive_recorders` takes the closure from `pgc_record` instead, so membership
+    follows from what a function does. It finds five the spelling did not:
+    `diff_query`, `diff_query_ordered`, `pgc_skip`, `pgc_pass`, `pgc_fail`.
+
+    IT ALSO CHECKS THE POSITION. `pgc_skip`'s name is `$2`, and a membership-only
+    guard would have gone green while the extractor read capabilities as check names
+    -- a name that is WRONG rather than absent, which no port can ever match and
+    which is reported MISSING for ever.
     """
-    from compare_to_bash import _BASH_HELPERS
+    from compare_to_bash import _BASH_NAME_ARG
 
     lib = (HERE.parent / "lib.sh").read_text()
-    # `check` or `check_<something>`. NOT `check[a-z_]*`, which also matches
-    # `checks_in` -- a COUNTING utility in decode_interrupts.sh that returns a
-    # number and records nothing. Define the population before counting it.
-    defined = set(re.findall(r'^(check(?:_[a-z_]+)?)\(\)\s*\{', lib, re.M))
-    expect.at_least(len(defined), 8,
-                    "premise: lib.sh's check helpers were found, not an empty set")
+    derived = _derive_recorders(lib)
+    expect.at_least(len(derived), 13,
+                    "premise: lib.sh's recorders were derived, not an empty set")
 
-    missing = sorted(defined - set(_BASH_HELPERS))
-    extra = sorted(set(_BASH_HELPERS) - defined)
+    missing = sorted(set(derived) - set(_BASH_NAME_ARG))
+    extra = sorted(set(_BASH_NAME_ARG) - set(derived))
     expect.text(", ".join(missing) or "none", "none",
-                "every check helper lib.sh defines is one the extractor reads")
+                "every recorder lib.sh defines is one the extractor reads")
     expect.text(", ".join(extra) or "none", "none",
-                "and the extractor claims no helper lib.sh does not define")
-    expect.num(len(_BASH_HELPERS), len(defined),
-               "inputs == sum(buckets): the two lists are the same size")
+                "and the extractor claims no recorder lib.sh does not define")
+
+    wrong = sorted(f"{h} (table ${_BASH_NAME_ARG[h]}, lib.sh ${derived[h]})"
+                   for h in derived
+                   if h in _BASH_NAME_ARG and derived[h] != _BASH_NAME_ARG[h])
+    expect.text(", ".join(wrong) or "none", "none",
+                "and each name is read from the argument lib.sh actually names it in")
+
+    # THE SEED IS EXCLUDED, and the first version of this arm asserted that no suite
+    # calls `pgc_record` directly. THAT IS FALSE: eleven files do, inside their own
+    # suite-local wrappers (`audit.sh`, `unique_conc.sh`). The arm is kept and the
+    # claim narrowed to the one that holds and that grading actually depends on --
+    # none of those suites has a pytest twin, so none is graded and the seed's
+    # absence from the table costs nothing today.
+    #
+    # Suite-LOCAL recorders are a separate population and out of scope here, as the
+    # arm below says. Two ways of finding them give OVERLAPPING, NOT NESTED, answers,
+    # and neither is a superset of the other:
+    #
+    #   by spelling (`check_*`, what that arm uses)   4 helpers in 2 suites
+    #   by behaviour (forwards a bare positional)    27 helpers in 25 suites
+    #
+    # `check_float` is in both. `parallel_copy.sh`'s three are found ONLY by spelling,
+    # because they compose the name rather than forward it -- `check "$label: offsets
+    # well-formed"` -- so the extractor reads their shape as a template from
+    # `parallel_copy.sh` itself while the 12 labels the suite supplies go unread. The
+    # behaviour list is the one that matters for the queue: `sorted_pathkeys.sh`
+    # defines `ans` and `ansp` and loses 19 of its 113 names, and `phase6.sh` loses 39
+    # of 43. Filed rather than fixed here: this change is about the recorders `lib.sh`
+    # shares, and widening both populations at once would make the removal proof
+    # unreadable.
+    direct = sorted(sh.name[:-3] for sh in HERE.parent.glob("*.sh")
+                    if sh.name != "lib.sh"
+                    and re.search(r'\bpgc_record\s+[A-Z]', _strip_comments(sh.read_text())))
+    expect.at_least(len(direct), 1,
+                    "premise: some suite does call pgc_record directly, so this is "
+                    "not vacuous")
+    twinned = sorted(d for d in direct if (HERE / f"test_{d}.py").exists())
+    expect.text(", ".join(twinned) or "none", "none",
+                "no suite calling pgc_record directly has a twin, so excluding the "
+                "seed costs no grading today")
+
+
+def test_a_lib_sh_wrapper_that_forwards_a_name_is_read(expect):
+    """THE WRAPPER BLIND SPOT (#1045).
+
+        diff_query() {
+            local label="$1" tmpl="$2"
+            ...
+            check "$label" "$hc" "$hq"
+        }
+
+    The NAME is in the suite -- `diff_query "c_uuid range" "SELECT ..."` -- and only
+    the RECORDER is in `lib.sh`. So this is NOT class 4 of #1045, where the name
+    itself lives in `lib.sh` and no suite supplies one. The suite says what the
+    property is called and the extractor was not reading it.
+
+    WHAT MADE IT INVISIBLE FOR SO LONG: `differential`'s port names are separately
+    unreadable, bound by a `for` loop variable (#1045 class 2). So the pair graded
+    `missing: 0` on 6 of 86 bash names against 62 of 132 port names. **Two blind
+    halves cannot disagree**, and the verdict read as the strongest one in the set.
+    """
+    from compare_to_bash import _bash_names
+    src = ('diff_query "c_uuid range" "SELECT id FROM %T WHERE c_uuid > $1"\n'
+           'diff_query_ordered "sorted scan" "SELECT * FROM %T ORDER BY id"\n'
+           'pgc_pass "the rewrite happened"\n'
+           'pgc_fail "the rewrite did not happen" "no new group"\n')
+    expect.text(", ".join(sorted(_bash_names(src))),
+                "c_uuid range, sorted scan, the rewrite did not happen, "
+                "the rewrite happened",
+                "a name passed to a lib.sh wrapper is read from the suite")
+
+
+def test_the_wrapper_whose_name_is_the_second_argument(expect):
+    """`pgc_skip` IS NOT `$1`, AND PUTTING IT IN THE `$1` GROUP IS WORSE THAN BLIND.
+
+        pgc_skip() {  # pgc_skip <capability> <message>
+            ...
+            pgc_record FAIL "$2" "FAIL  $2"
+
+    The capability is `$1`, the NAME is `$2`. 68 of the 70 call sites write the
+    capability bare, so a pattern keyed to the first QUOTED argument reads the name
+    at those 68 and the CAPABILITY at the other two:
+
+        pgc_skip pyarrow "pyarrow not available; ..."     <- quoted arg IS the name
+        pgc_skip "test_decoding" "test_decoding.so ..."   <- quoted arg is NOT
+
+    An absent name is a gap. A WRONG name is a permanent false MISSING: no port can
+    assert `test_decoding`, so no port can ever close it. Hence the position table.
+    """
+    from compare_to_bash import _bash_names
+    expect.text(", ".join(_bash_names(
+        'pgc_skip pyarrow "pyarrow not available; the suite needs it"\n')),
+        "pyarrow not available; the suite needs it",
+        "an unquoted capability does not stop the name being read")
+    expect.text(", ".join(_bash_names(
+        'pgc_skip "test_decoding" "test_decoding.so is not in the pkglibdir"\n')),
+        "test_decoding.so is not in the pkglibdir",
+        "and a QUOTED capability is not mistaken for the name")
+
+
+def test_the_derivation_finds_a_wrapper_planted_in_a_fixture(expect):
+    """THE GUARD IS ONLY WORTH ITS POPULATION, so the derivation is exercised where
+    the answer is known and not only on `lib.sh`, where it is green.
+
+    Four shapes, because the corpus has all four: a direct positional, one renamed
+    through a `local`, a name in the second argument, and a one-line definition. Plus
+    a CONTROL that must not be picked up -- a function supplying its OWN literal
+    name, which is #1045 class 4 proper and no tuple entry can fix.
+    """
+    fixture = (
+        'pgc_record() { PGC_CHECKS=$((PGC_CHECKS + 1)); }\n'
+        'rec() {\n\tpgc_record "$1" "$2" "$3"\n}\n'
+        'wrap_direct() {\n\trec PASS "$1" "PASS $1"\n}\n'
+        'wrap_local() {\n\tlocal label="$1"\n\trec PASS "$label" "x"\n}\n'
+        'wrap_second() {\n\trec SKIP "$2" "SKIP $2"\n}\n'
+        'one_liner() { rec PASS "$1" "PASS $1"; }\n'
+        'owns_its_name() {\n\trec PASS "premise: the oracle is order-sensitive" "x"\n}\n'
+    )
+    got = _derive_recorders(fixture)
+    expect.text(", ".join(f"{k}:${v}" for k, v in sorted(got.items())),
+                "one_liner:$1, rec:$2, wrap_direct:$1, wrap_local:$1, wrap_second:$2",
+                "every forwarding shape is found and each carries its own position")
+    expect.num(1 if "owns_its_name" in got else 0, 0,
+               "control: a function supplying its OWN literal name is not a wrapper")
+
+
+def test_the_comment_stripper_keeps_a_parameter_expansion(expect):
+    r"""`#` STARTS A COMMENT ONLY AT A WORD BOUNDARY.
+
+    `${shape#*|}` and `$#` are not comments. Cutting at the first `#` truncates the
+    line to something that parses as a different program, and it has produced two
+    wrong published counts in this repo -- once against a figure that was right, and
+    once three hours after the first fix, in a function whose body was `local n=$#`.
+
+    So the stripper's fixtures live here, where a regression reddens, rather than in
+    a comment saying to be careful.
+    """
+    for src, want in (
+            (r'x=${shape#*|}', r'x=${shape#*|}'),
+            (r'local n=$#; echo $n', r'local n=$#; echo $n'),
+            (r'foo  # a comment', r'foo  '),
+            (r'echo "a # b"  # tail', r'echo "a # b"  ')):
+        expect.text(_strip_comments(src), want,
+                    f"the stripper leaves {src!r} as the shell reads it")
+    # Separately, because `expect.text` refuses an empty expectation -- rightly, since
+    # anything empty would satisfy it -- and a whole-line comment must strip to empty.
+    expect.num(len(_strip_comments(r'# whole line')), 0,
+               "and a whole-line comment strips to nothing at all")
 
 
 def test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one(expect):
