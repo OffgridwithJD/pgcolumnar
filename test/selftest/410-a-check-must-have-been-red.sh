@@ -557,6 +557,43 @@ check "control: a REAL orphan still returns 1 under --orphans-only" \
 check "control: and a clean run still returns 0 under it" \
 	"$(_led_rc orphan-scan --orphans-only --ledger "$_lw/orph.tsv" "$_lw/o_before.log")" "0"
 
+# ---- the WIRING, not the tool: the runner's reduction over N logs ------------
+#
+# The arms above prove the TOOL. They say nothing about run_all_versions.sh, and
+# the first version of that wiring was wrong in a way none of them could see: it
+# reduced N per-log statuses with `|| _orph_fail=$?`, which OVERWRITES, so the
+# operator was told about whichever log failed LAST. Measured with a stub, both
+# orders: orphan-then-toolfail reported "could not run the orphan scan" and hid a
+# real orphan; the reverse hid the broken tool. The verdict was right both times
+# and the DIAGNOSIS was wrong half the time -- the same defect the gate's own
+# comment says it fixed, which is how I know a comment does not transfer.
+#
+# Caught by @OffgridwithJD, who also measured that the obvious repair is worse:
+# `|| { [ "$?" -gt "$_orph_fail" ] && _orph_fail=$?; }` yields 0 for EVERY input,
+# because `$?` inside the braces is the `[` test, so it reports CLEAN.
+#
+# EVALS THE RUNNER'S OWN TEXT, the way link 5 of part 330 does, because an arm
+# that re-derives the rule tests the world instead of the code.
+_orw="$PGC_TESTDIR/run_all_versions.sh"
+_orw_txt="$(awk '/^\t\t\tcase "\$_orph_rc" in$/{f=1} f{print} f&&/^\t\t\tesac$/{exit}' "$_orw")"
+check "premise: the runner's orphan reduction was extracted, not an empty range" \
+	"$(printf '%s\n' "$_orw_txt" | grep -c '_orph_orphan=1')" "1"
+
+for _ord in "1 2" "2 1"; do
+	_orph_orphan=0; _orph_broken=0
+	for _orph_rc in $_ord; do eval "$_orw_txt"; done
+	check "both conditions survive the reduction whatever order they arrive in ($_ord)" \
+		"$_orph_orphan$_orph_broken" "11"
+done
+# CONTROL: it does not simply set both flags for everything.
+_orph_orphan=0; _orph_broken=0
+for _orph_rc in 0 0 0; do eval "$_orw_txt"; done
+check "control: all-clean logs leave both flags down" "$_orph_orphan$_orph_broken" "00"
+_orph_orphan=0; _orph_broken=0
+for _orph_rc in 0 1 0; do eval "$_orw_txt"; done
+check "control: one orphan among clean logs raises only the orphan flag" \
+	"$_orph_orphan$_orph_broken" "10"
+
 # WHY THIS REPORTS AND DOES NOT GATE -- pinned to the PRECONDITION, not to one
 # instance of it.
 #

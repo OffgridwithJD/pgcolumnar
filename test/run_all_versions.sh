@@ -1470,21 +1470,48 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 	# turns off. The skipped part is still PRINTED by the tool, so narrowing what the
 	# gate refuses on does not hide it.
 	if [ -n "${_led_logs:-}" ] && [ -f "$builddir/test/check_ledger.tsv" ]; then
-		_orph_fail=0
+		# TWO FLAGS, NOT A COMBINED STATUS. The loop runs once per log, so the
+		# statuses have to be reduced, and every single-variable reduction loses
+		# one of the two answers:
+		#
+		#   `|| _orph_fail=$?`   OVERWRITES, so across 246 logs the operator is told
+		#                        about whichever failed LAST. Measured with a stub:
+		#                        orphan-then-toolfail reports "could not run" and
+		#                        hides a real orphan; the reverse hides the broken
+		#                        tool. The verdict is right either way and the
+		#                        DIAGNOSIS is wrong half the time, which is the
+		#                        defect the gate's own comment above says it fixed.
+		#   keeping the MAX      still hides a real orphan behind a tool failure.
+		#   `|| { [ "$?" -gt ... ; }`  is worse again: `$?` inside the braces is the
+		#                        `[` test, so it yields 0 for every input and reports
+		#                        CLEAN. Measured, both orders.
+		#
+		# Reported by @OffgridwithJD, who also measured that third one before
+		# suggesting it. Two independent conditions need two independent flags.
+		_orph_orphan=0
+		_orph_broken=0
 		# shellcheck disable=SC2086
 		for _orph_log in $_led_logs; do
 			python3 "$builddir/test/pgc_ledger.py" orphan-scan --orphans-only \
-				--ledger "$builddir/test/check_ledger.tsv" "$_orph_log" || _orph_fail=$?
+				--ledger "$builddir/test/check_ledger.tsv" "$_orph_log"
+			_orph_rc=$?
+			case "$_orph_rc" in
+				0)	;;
+				1)	_orph_orphan=1 ;;
+				*)	_orph_broken=1 ;;
+			esac
 		done
-		case "$_orph_fail" in
-			0)	;;
-			1)	echo "  PG$major: the ledger names a check that no longer exists, which is"
-				echo "  not a pass. Regenerate the ledger, or rename the row if the check"
-				echo "  moved rather than went."
-				verfail=1 ;;
-			*)	echo "  PG$major could not run the orphan scan at all, which is not a pass."
-				verfail=1 ;;
-		esac
+		if [ "$_orph_orphan" = 1 ]; then
+			echo "  PG$major: the ledger names a check that no longer exists, which is"
+			echo "  not a pass. Regenerate the ledger, or rename the row if the check"
+			echo "  moved rather than went."
+			verfail=1
+		fi
+		if [ "$_orph_broken" = 1 ]; then
+			echo "  PG$major could not run the orphan scan on at least one log, which is"
+			echo "  not a pass. That is separate from the line above, and both can be true."
+			verfail=1
+		fi
 	fi
 
 	# How many of the suites counted as having RUN actually accounted for their
