@@ -527,6 +527,36 @@ check "control: a prune that leaves nothing outstanding returns 0" \
 check "control: and that one did prune, so 0 is not a refusal in disguise" \
 	"$(wc -l < "$_lw/rc.tsv" | tr -d ' ')" "1"
 
+# ---- --orphans-only: a QUESTION, not a change of severity (#983, #1015) ------
+#
+# The default question is "is anything outstanding in the parts this run claimed",
+# and a skipped part IS outstanding: the run held those rows and failed to speak for
+# them. That is why rc=1 covers it and why the three arms above are right on the
+# merits rather than only by precedent -- `not checked` is silence by construction
+# and OUT of scope, `unprunable` is a gap in a part the run claimed and IN it.
+#
+# A GATE NEEDS THE NARROWER QUESTION. `run_all_versions.sh` must refuse a ledger row
+# whose check no longer exists (#983) and must NOT refuse a box where a part skipped,
+# because a skip is box-dependent and not a deletion. Those share rc=1 by design, so
+# the flag changes WHAT IS ASKED rather than what a code means: with it, rc=1 is
+# orphans and nothing else. rc=1 never acquires a second meaning.
+_oo_pre="$(wc -l < "$_lw/rc.tsv" | tr -d ' ')"
+check "premise: the fixture is back to a state with rows to speak about" \
+	"$([ "$_oo_pre" -ge 1 ] && echo yes || echo no)" "yes"
+: > "$_lw/oo.tsv"
+_led_run merge --ledger "$_lw/oo.tsv" --date 2026-09-01 "$_lw/sk_full.log" >/dev/null
+check "premise: the skipped-part fixture still yields a finding by default" \
+	"$(_led_rc orphan-scan --ledger "$_lw/oo.tsv" "$_lw/sk_skipped.log")" "1"
+check "a skipped part is NOT an orphan, so --orphans-only returns 0" \
+	"$(_led_rc orphan-scan --orphans-only --ledger "$_lw/oo.tsv" "$_lw/sk_skipped.log")" "0"
+check "and it still REPORTS the skipped part, so the gate cannot silence it" \
+	"$(_led_run orphan-scan --orphans-only --ledger "$_lw/oo.tsv" "$_lw/sk_skipped.log" \
+	   | grep -c 'unprunable:')" "1"
+check "control: a REAL orphan still returns 1 under --orphans-only" \
+	"$(_led_rc orphan-scan --orphans-only --ledger "$_lw/orph.tsv" "$_lw/o_after.log")" "1"
+check "control: and a clean run still returns 0 under it" \
+	"$(_led_rc orphan-scan --orphans-only --ledger "$_lw/orph.tsv" "$_lw/o_before.log")" "0"
+
 # WHY THIS REPORTS AND DOES NOT GATE -- pinned to the PRECONDITION, not to one
 # instance of it.
 #
