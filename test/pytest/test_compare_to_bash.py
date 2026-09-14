@@ -88,6 +88,16 @@ COMPLETE = ["hilbert_cluster", "hilbert_locality",
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
 INCOMPLETE = {
+    "iceberg_fdw":
+        "74 of its 76 bash names are asserted; the two that are not are `pgc_skip`'s "
+        "refusal names, `python3 is needed` and `iceberg warehouse data files are "
+        "missing`. THIS IS STRUCTURAL, not a gap in the port: `pgc_skip` records "
+        "under the NAME it is given, while `expect.cannot_run` records under the "
+        "REASON CODE, so a port cannot emit those two strings as check names at all. "
+        "The port refuses by name-per-test through `_need`, which is the closest the "
+        "python side can express. #1040's phase 0b is the open question; declared "
+        "here rather than worked around by naming a passing premise after a missing "
+        "dependency, which would read as an assertion that the fixture is absent.",
     "differential":
         "54 of its 86 bash names have no counterpart the grader can see, and the "
         "port is not missing 54 properties. Two separate blindnesses were cancelling "

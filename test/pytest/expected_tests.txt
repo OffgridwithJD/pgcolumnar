@@ -145,4 +145,14 @@ guard_tests 324
 # arms. FORTY-FIVE COLLECTED, NOT FORTY-FIVE FUNCTIONS -- S1's refusal matrix is one
 # function parametrized over four inputs and two verb pairs. Re-derived by collection on
 # the merged tree, per the recipe above: `264 tests collected`.
-cluster_tests 264
+# 264 -> 320 when test_iceberg_fdw.py landed: the port of the Iceberg FDW's pruning
+# surface (#388, #432), 56 collected tests across identity, metrics, bucket[N],
+# truncate[W], day/year/month/hour on date, timestamp and timestamptz. FIFTY-SIX
+# COLLECTED, NOT FIFTY-SIX FUNCTIONS -- most families are one function parametrised
+# over their probes. Re-derived by collection on this tree: `320 tests collected`.
+#
+# guard_tests is UNCHANGED at 322 here and #1054 moves it to 323 on its own tree.
+# Whichever of the two lands second re-derives BOTH numbers by collection: the two
+# branches touch different keys in this file, so git merges it without a conflict and
+# there is nothing to notice.
+cluster_tests 320
