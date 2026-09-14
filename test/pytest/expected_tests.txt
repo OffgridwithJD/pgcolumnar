@@ -51,7 +51,88 @@
 # 290 -> 298 when test_compare_to_bash.py landed: eight arms over the parity tool's own
 # extractors. Re-derived by collection on the merged tree, per the recipe above:
 # `298 tests collected`.
-guard_tests 298
+# 298 -> 304: six arms in test_mutation_ledger.py about one ledger key covering
+# more than one check (#982) -- the refusal, its uncovered-suite control, the two-runs
+# distinction, the false-positive budget, and two for the same class one level down, where a
+# duplicated row in the tracked ledger file collapsed silently and let the last line win.
+# Re-derived by collection on the merged tree, per the recipe above: `304 tests collected`.
+# 304 -> 307: three arms in test_guards_pinned.py pinning that `allow_empty` takes a
+# REASON and not a flag (#1031), with the accepted form as the control and `row_set`
+# asserted to inherit the refusal rather than route around it.
+#
+# RE-DERIVE THIS AFTER EVERY REBASE, not once. Two branches can each derive a number
+# correctly against a tree holding only their own arms and both be wrong for the merge --
+# measured by @jdatcmd on #1022, where two independent derivations of 280 had 283 as the
+# merged truth. Derived here by collection: `307 tests collected`.
+# 298 -> 303 when the same file gained five arms for the helpers whose name is not the
+# last argument (#1036), four of them behavioural and one a drift guard over the table.
+# Re-derived by collection, not by adding five: `303 tests collected`.
+# 303 -> 304 when review found a second coincidence: `-1` is a claim about the CALL SITE
+# and the drift guard reads the SIGNATURE. Re-derived by collection: `304 tests collected`.
+# MERGED with #1035 (#982's six ledger arms), whose arms are disjoint from these.
+# Re-derived by collection on the merged tree, NOT by adding the two deltas.
+# MERGED with #1037 (#1031's three allow_empty arms). Its keyword-only change
+# and this branch's REASON check are complementary, and pgc_vacuity.py kept both.
+# Re-derived by collection on the merged tree: the two 307s and the 310 that
+# preceded this are each right for a DIFFERENT tree and none of them is this one.
+# 313 -> 316 when the bash-side extractor was widened to every check helper lib.sh
+# defines (#1040): a drift guard re-deriving that list from lib.sh's DEFINITIONS, a
+# shadowing arm (check_ratio is a prefix of check_ratio_needs_quiet_machine), and one
+# pinning the four suite-local helpers as knowingly out of scope.
+# Re-derived by collection against main 0d17a87: `316 tests collected`.
+# 316 -> 317: the parity declaration is asserted in BOTH directions (#1046), so a pair
+# that exists and is not declared reddens with the stem named. Re-derived by collection
+# against main 20bc290: `317 tests collected`.
+# 317 -> 321 when the bash-side extractor learned the recorders that are not named
+# `check*` (#1045): the drift guard re-derived from BEHAVIOUR rather than spelling and
+# checking argument POSITION as well as membership, an arm for the forwarding wrappers,
+# one for `pgc_skip`'s `$2`, one running the derivation on a fixture with a planted
+# wrapper and a control, and one holding that `#` opens a comment only at a word
+# boundary. Re-derived by collection against main bf31e2f, not by adding four:
+# `321 tests collected`.
+# 321 -> 322: an empty helper group is refused rather than built. Splitting the
+# extractor into one pattern per ARGUMENT POSITION made an empty group constructible
+# for the first time, and `(?:)` matches everywhere -- it fabricated `$PGC_DB` and
+# `$(dirname ` as check names out of a suite containing no position-2 helper. Found
+# when a reviewer's stale `.pyc` left the table mid-mutation. Re-derived by
+# collection: `322 tests collected`.
+# MERGED with #1048's one ledger arm, which derived 318 against bf31e2f while
+# this derived 321 against the same commit. Both are right for a tree that is not
+# this one. Re-derived by collection on the merged tree, never by adding deltas.
+# AND BOTH SIDES OF THAT MERGE SAID 322, for different reasons -- #1055 reached it
+# from 321 by one empty-group arm, this branch from 321 by one ledger arm. Agreeing
+# numbers are the case where adding deltas looks safest and is not. Re-derived by
+# collection on the merged tree.
+# 323 -> 324: a SOURCE-TEXT pin that the reconciliation totals what was printed (#1048).
+# No behavioural arm can reach it -- the two sources are equal wherever the display
+# prints every bucket -- so the guarantee rested on a comment until review objected
+# that comments rot where arms do not. Re-derived by collection: `324 tests collected`.
+# 322 -> 329 when the grader learned a suite's OWN recorders (#1053): the forwarding
+# shapes, a composing wrapper left alone, the refusal of a helper whose name position
+# cannot be resolved, the corpus budget pinned at one suite, the bare-{} drop, the
+# grader's refusal exercised through `main`, and a helper reaching only `pgc_record`.
+#
+# MERGED with #1048's source-text pin (324). Both sides moved this key and git
+# conflicted on it, which is the LOUD case. The quiet one is `cluster_tests`, which
+# both sides left at 320 and which merged silently -- and silence is not agreement,
+# it is the absence of a signal. Both keys re-derived by collection below.
+# Re-derived by collection on the MERGED tree: `331 tests collected`. Not 329, not
+# 324, and the fact that 322 + 7 + 2 happens to reach it is a coincidence of this
+# merge rather than a method -- the deltas were measured against different trees and
+# adding them is what produced a number no tree collected earlier today.
+# 331 -> 335 when the PORT side learned a name bound by a loop (#1045 class 2): the
+# reader, the interpolated-neighbour case, the refusal of a non-literal table with its
+# control, and a corpus-wide arm that every name it returns is text the file contains.
+# Re-derived by collection: `335 tests collected`.
+# 335 -> 340 when a parametrised family learned to expand to the names its bash twin
+# unrolls (#1045 class 3): the expansion, the falsifiability property that makes it
+# right, the additive constraint run against three REAL pairs, the three refusals with
+# a control, and the name-argument restriction.
+# Re-derived by collection: `340 tests collected`.
+# 340 -> 341: a test file documented as an unnumbered `###` is invisible to every
+# other arm -- outside the numbering, outside the contents, and still NAMED, so the
+# coverage arm passes (#1024). Re-derived by collection: `341 tests collected`.
+guard_tests 341
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -74,6 +155,42 @@ guard_tests 298
 # 205 -> 217 when test_projection_privilege.py landed: twelve arms over the two projection
 # read helpers, parametrised per function so each carries the bash suite's own check name.
 # Re-derived by collection.
+# 217 -> 219: two arms in test_harness_deps.py asserting THIS FILE states
+# each key exactly once (#982). A keep-both merge of three PRs each moving guard_tests produced
+# three of those lines, and the arm that read this file built a dict, so it could not see the
+# duplicate.
+#
+# IN THE CLUSTER HALF, NOT THE GUARD HALF, which I got wrong first and this mechanism caught
+# with `collected 283 test(s) but expected 285`: test_harness_deps.py DEFINES NO_CLUSTER and
+# is not IN it.
+#
+# Re-derived by collection on the merged tree: `219 tests collected`.
+# 219 -> 264 when test_hilbert_cluster.py landed: the port of the Hilbert clustering
+# SQL surface (#432, #889's SQL half), 45 collected tests across the bash suite's eight
+# arms. FORTY-FIVE COLLECTED, NOT FORTY-FIVE FUNCTIONS -- S1's refusal matrix is one
+# function parametrized over four inputs and two verb pairs. Re-derived by collection on
+# the merged tree, per the recipe above: `264 tests collected`.
+# 264 -> 320 when test_iceberg_fdw.py landed: the port of the Iceberg FDW's pruning
+# surface (#388, #432), 56 collected tests across identity, metrics, bucket[N],
+# truncate[W], day/year/month/hour on date, timestamp and timestamptz. FIFTY-SIX
+# COLLECTED, NOT FIFTY-SIX FUNCTIONS -- most families are one function parametrised
+# over their probes. Re-derived by collection on this tree: `320 tests collected`.
+#
+# THE TWO KEYS FAILED DIFFERENTLY IN THE SAME MERGE, which is the lesson worth
+# keeping. `guard_tests` moved on both sides, so git CONFLICTED and demanded an
+# answer -- the loud case. `cluster_tests` was 320 on both sides and merged silently
+# -- and silence is not agreement, it is the absence of a signal. It happened to be
+# right here; two independent 322s merged just as silently earlier today and the
+# merged tree collected 323. Re-derive BOTH after every merge, not the one git
+# complained about.
+# 320 -> 325 when test_objstore_endpoint_userinfo.py landed (#995): the two userinfo
+# endpoint shapes, the placement premise that the guard fires with no region
+# configured, the clean-endpoint control, and the '@'-in-the-key control. NOT a port
+# and not a pair -- `objstore_endpoint_userinfo.sh` does not exist; these assert the
+# same properties through the python harness independently.
+# Re-derived by collection: `325 tests collected`.
 # 217 -> 218: test_index_fetch_penalty_crossover.py, the plan-choice arm for #913.
 # Re-derived by collection on this tree: `218 tests collected`.
-cluster_tests 218
+# MERGED with main. Neither value survives: 218 was derived against this branch's
+# tree 59 commits ago, 219 against main's. Re-derived BY COLLECTION.
+cluster_tests 326

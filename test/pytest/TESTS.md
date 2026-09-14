@@ -82,7 +82,10 @@ behaviour, the source of that number is named.
 - [34. test_docs_stripe_floor.py: the stripe floor is below a vector](#34-test_docs_stripe_floorpy-the-stripe-floor-is-below-a-vector)
 - [35. test_projection_privilege.py: the projection read helpers are a privilege boundary](#35-test_projection_privilegepy-the-projection-read-helpers-are-a-privilege-boundary)
 - [36. test_compare_to_bash.py: the parity tool reads the NAME](#36-test_compare_to_bashpy-the-parity-tool-reads-the-name)
-- [37. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#37-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
+- [37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface](#37-test_iceberg_fdwpy-the-iceberg-fdws-pruning-surface)
+- [38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint](#38-test_objstore_endpoint_userinfopy-userinfo-in-an-object-store-endpoint)
+- [39. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#39-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
+- [40. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#40-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 
 ## 1. How to read a test in here
 
@@ -405,6 +408,9 @@ as the failure.
 | `test_num_accepts_real_numbers` | **control**: a genuine numeric comparison still passes |
 | `test_text_refuses_an_empty_expectation` | an empty expected string, which anything empty satisfies |
 | `test_at_least_refuses_a_non_number` | a bound taken from text |
+| `test_rows_refuses_a_flag_where_it_documents_a_reason` | `allow_empty=True` satisfied a truthiness test and carried nothing, so the escape hatch cost LESS to type than the honest assertion |
+| `test_rows_accepts_a_reason` | **control**: the documented form still works, or the refusal above is a wall |
+| `test_row_set_inherits_the_reason_requirement` | `row_set` delegates to `rows`, so it inherits the refusal rather than routing around it |
 | `test_at_least_refuses_a_floor_of_zero` | a floor every possible value clears |
 | `test_at_least_accepts_a_real_bound` | **control**: `at_least(7, 3, …)` passes |
 | `test_plan_node_refuses_no_criteria` | called with neither `node_type` nor `provider` |
@@ -421,6 +427,22 @@ as the failure.
 | `test_plan_marker_refuses_an_absence_claim_over_an_empty_plan` | the hole under both arms |
 | `test_refusal_itself_refuses_an_empty_pattern_list` | the new helper must not become the defect it removes |
 | `test_the_empty_plan_refusal_precedes_the_arms_it_protects` | the refusal's **position**: no arm may answer ahead of it |
+
+**`allow_empty` documented a rule the code did not enforce (#1031).** `rows` documents the
+argument as taking *"a REASON, not a flag"*. The sentence gives the rationale too: the hatch
+should cost more to type than the honest assertion. One line below sits a truthiness test. So
+`allow_empty=True` passed and carried nothing, and the hatch cost less rather than more.
+
+Measured before the refusal: `allow_empty=True` and `allow_empty=1` both passed, 3 passed.
+`row_set` forwards the argument, so it inherited the hole, which is why it has its own arm.
+
+The check fires whenever the argument is given, not only when both sides turn out empty.
+Otherwise a flag form in a test whose sides happen to be non-empty passes today and refuses on
+the day the data changes. That is the worst moment to learn it.
+
+Two live sites used the flag form and **both were substantively correct**. Each had its
+population premise on the line above, and one stated the argument in a comment. They now carry
+that reason in the argument, where an audit of `allow_empty=` can read it.
 
 ### plan_marker, and the three ways it could not fail
 
@@ -1047,6 +1069,7 @@ many times.
 | `test_an_anchor_that_strips_the_underscores_is_caught` | the exact broken link that shipped, with a control |
 | `test_every_in_document_link_in_this_directory_reaches_a_heading` | every contents-list link resolves, with a coverage premise |
 | `test_the_contents_list_is_numbered_in_order` | the contents list and the sections both count 1..N with no gap or inversion — the link arms above ask only whether a link RESOLVES, and a shuffled list resolves perfectly |
+| `test_every_test_file_has_a_NUMBERED_section_of_its_own` | a section written as an unnumbered `###` is invisible to every other arm: not in the numbering, not in the contents, and the file is still NAMED so the coverage arm is satisfied — `test_iceberg_fdw.py` shipped that way in #1057 |
 | `test_a_shuffled_contents_list_is_caught_on_a_fixture` | **removal proof**: the `29, 31, 30` shape that shipped, with a clean control and an omitted entry named apart from an inversion |
 | `test_the_next_steps_list_is_anchored_to_the_inventory` | every section 5 entry names a mode id, so the entry can be checked at all |
 | `test_no_open_next_step_names_work_the_document_calls_done` | an un-struck entry whose id reached section 2 is stale work to do |
@@ -1600,6 +1623,8 @@ fixtures are read off `conftest.py` rather than named in the classifier.
 | `test_the_job_installs_no_database_driver` | the job asserts psycopg is absent rather than assuming it |
 | `test_the_cluster_job_runs_the_other_half_and_derives_it` | the complement of `NO_CLUSTER` is RUN, derived not listed, and asserts the driver IS present |
 | `test_both_pytest_jobs_assert_how_many_tests_they_collected` | both jobs pass `--pgc-expect-tests` from the tracked file, and each guards the read |
+| `test_each_expected_count_is_stated_exactly_once` | `expected_tests.txt` states each key on one line — a keep-both merge duplicates it, `awk` then hands the flag a multi-line value, and the arm above could not see it because it builds a dict |
+| `test_a_duplicated_count_is_caught_and_the_dict_form_is_not` | **removal proof**: the same fixture read both ways, so the dict form is shown keeping the LAST line while the line form names the duplicate |
 | `test_the_shell_reference_detector_sees_code_and_not_prose` | the premise: a docstring is prose, a string passed to bash is a reference, an f-string counts once |
 | `test_the_harness_independence_inventory_is_exactly_what_the_corpus_does` | CONTEXT.md's inventory, asserted in both directions |
 
@@ -1612,6 +1637,23 @@ section**: it prints how many files it ran and pytest prints how many tests
 passed, so the numbers reach a reader from the run. A written count is a
 hand-maintained derived value, and the one in the job's comment was wrong the day
 it was written (#908).
+
+**A keep-both merge of this file duplicates a key.** CI then says something unrecognisable.
+`ci.yml` reads the value with `awk '$1=="guard_tests"{print $2}'`, which prints one line per
+match. Two matches make `WANT` multi-line, `test -n "$WANT"` still passes, and the flag
+refuses it:
+
+    pytest: error: argument --pgc-expect-tests: invalid int value: '284\n280\n283'
+    exit 4
+
+So it **fails closed**, which is why these arms are about legibility rather than a hole. What
+exit 4 does not say is that a line is duplicated. The reader has to work back from an int
+parse error to a merge resolution.
+
+**Not hypothetical.** Three PRs were open at once, each moving `guard_tests`, and resolving all
+three keep-both produced exactly that. Keep-both is right for a changelog and wrong for a
+key-value file, and nothing in the tree said so. The arm that read this file built
+`nums[f[0]] = int(f[1])`, which is the same shape `read_ledger` had before #982 — one file over.
 
 BUT THE ARMS IN THIS FILE DO NOT RUN IN THE GATE, and that is why
 `test/selftest/350-the-pytest-corpus-must-be.sh` runs the membership decision
@@ -2245,9 +2287,15 @@ design said may only fall. It shipped at 614 rows, 614 `never`, ceiling 614.
 What the gate refuses is a check the committed ledger has never seen, **in a suite the
 ledger covers**. Regenerating the ledger is the intended fix and a reviewable diff.
 
-The format is five tab-separated columns keyed on the first three:
-`suite`, `part`, `check name`, `last observed red`, `mutations` — the last a `-` or a
-`;`-separated **set**, accumulated rather than overwritten.
+The format is six tab-separated columns keyed on the first three:
+`suite`, `part`, `check name`, `majors`, `last observed red`, `mutations` — the last two
+each a `-` or a `;`-separated **set**, accumulated rather than overwritten.
+
+`majors` is the set of PostgreSQL majors the check has been observed on, added by #1010.
+It is a FIELD and not part of the key: keying on it would store one fact once per major,
+which on a measured full matrix meant 32,360 rows to express 105 keys' worth of
+difference. This paragraph said **five** columns and omitted `majors` from the day that
+column landed until #1048.
 
 `run_all_versions.sh` invokes the gate before it removes the build directory, which is
 the only place a matrix run can reach every suite's log.
@@ -2365,6 +2413,88 @@ it the gate refuses every check of every uncovered suite and reddens the whole m
 on its first run. It tightens on its own as suites are seeded, and the deadlock that
 shipped is pinned as its own arm — regenerating the ledger lets a new check through.
 
+### `test_the_ledger_refuses_two_rows_sharing_one_key`
+
+The same class one level down, found while building the arm below. `read_ledger` did
+`rows[(f[0], f[1], f[2])] = [...]`, so a duplicated key in the **tracked file** collapsed
+silently and the **last line won**. Measured on a two-line fixture, both orders:
+
+    never first, then 2026-09-01   survivor last_red='2026-09-01'
+    2026-09-01 first, then never   survivor last_red='never'      <- the red is GONE
+
+So line order decided whether a recorded red observation survived. A merge that keeps both
+sides of a changed row turns `ever red` back into `never`. That is the corruption #918 and
+#925 exist to prevent, arriving from the opposite direction to #982's.
+
+**Nothing else could catch it, and bounding the census cannot.**
+`check_ledger_budget.txt` says `checks_never_observed_red` is a CENSUS and must not become a
+ceiling. Every new check enters as `never`, so bounding it deadlocks. The gate compares the
+budget's number with the ledger's, and both come from the same dict, so they agree either
+way. Measured: with the budget regenerated alongside, an erased red passes the gate at
+**rc=0**.
+
+It is refused as an **integrity failure** (rc=2) rather than a gate verdict, beside the other
+inputs that do not parse. A ledger that cannot be trusted is not a gate result.
+
+### `test_a_ledger_with_no_duplicate_key_still_loads`
+
+The false-positive budget, and the premise the refusal needs. Two rows differing only in the
+NAME are two checks and must load, which is the ordinary case for every part in the tree. The
+arm also asserts `rows=3`, so the refusal cannot pass by eating a row.
+
+### `test_the_gate_refuses_two_checks_sharing_one_ledger_key`
+
+A row is keyed on `(suite, part, name)`, so two checks with the same name in one part
+share a row. Nothing is mis-recorded while both pass. The hazard is exact: when one goes
+red the row records `ever red` and its namesake inherits a red observation nothing
+attacked. `checks_never_observed_red` then falls by one for a check nobody attacked,
+which is the census #918 and #925 exist to make trustworthy.
+
+**`merge` already printed this and returned 0**, which is how three of them sat in one
+part of `selftest/400` for a day (#982). The instance was fixed by `c3b13aed`; this is
+the mechanism.
+
+**The gate could not see it at all, by construction.** `cmd_gate` builds its records as
+`sorted({(s, p, n, m) for ...})`. A set collapses the duplicate before any arm can count
+it. So the same canonicalisation that makes the rest of the gate correct made this one
+class unreachable. The count now comes from the raw records, through `_by_run`.
+
+Measured on main at `03c6c9c8`. A real `harness_selftest` run emits **934 RESULT records
+over 934 distinct keys, 0 collisions**. The gate run against the COMMITTED ledger and
+budget returns 0 with no shared-key line. A full PG 18 matrix says the same for the whole
+corpus: 247 suites, RC=0, zero shared keys.
+
+### `test_a_shared_key_is_refused_in_a_suite_the_ledger_does_not_cover`
+
+**The refusal covers every suite, unlike the new-check refusal.** That one is restricted
+for a reason. It cannot know which of an uncovered suite's checks are new. This one needs
+no history. Two records, one key, one log is decidable from the log alone.
+
+Why that matters rather than being a detail. The ledger covers **four suites of 253**. A
+refusal restricted the same way would close the class in four places only. The next
+collision would then arrive in one of the other 249 and sit there until that suite is
+seeded. This arm is what stops the restriction being copied in by habit.
+
+**Measured before widening it**, because a gate that reddens 250 unmeasured suites is a gate
+somebody turns off. A full PG 18 matrix ran with the refusal armed for every suite:
+
+    247 suites ran, RC=0, ALL VERSIONS PASSED, zero shared keys
+
+Check names are static, so one major's matrix measures this class completely rather than
+sampling it.
+
+### `test_the_same_check_in_two_runs_is_not_a_shared_key`
+
+The distinction the refusal must not lose. One check observed on two days is two records
+for one key and is the normal case. It is how the ledger accumulates evidence at all.
+Only a repeat inside ONE log is a collision, which is why the count goes through
+`_by_run` rather than over the logs together. Written the other way it would reject
+every multi-day merge.
+
+### `test_a_clean_run_is_not_refused_for_a_shared_key`
+
+The false-positive budget: two different names in one part pass, and the gate returns 0.
+
 ### `test_the_ceiling_may_only_fall_and_that_is_enforced`
 
 The tracked file says the ceiling may only fall. Without a mechanism that is prose, and
@@ -2460,6 +2590,73 @@ check in a suite it has never seen, and a major it holds no rows for is the iden
 problem: adding PG20 would make every check new at once and redden the whole run, which is a
 gate somebody turns off. The control shows a new check IS refused on a covered major, so the
 arm does not merely prove the gate refuses nothing.
+
+### `test_the_reconciliation_is_built_from_the_printed_total`
+
+A **source-text pin**, and the only kind of check that can reach this property.
+
+The arm below asserts that a truncated display is visible. It cannot assert that the
+reconciliation is *computed from what was printed*, because wherever the display prints
+every bucket `sum(emitted)` and `sum(dist.values())` are equal by construction — no
+fixture reachable from outside `cmd_merge` separates them. Measured: a wording-preserving
+swap to `sum(dist.values())` passed the whole file, 29 passed.
+
+So the guarantee rested on a comment. @OffgridwithJD objected that **comments rot where
+arms do not**, which is right, and this is the weaker check CONTEXT.md keeps for exactly
+this case: *"a grep over source text is the weaker kind of check and is still worth
+writing; premise it on the call site existing, or it approves a file that no longer has
+one."*
+
+It proves nothing about behaviour. It refuses to let the source drift back silently.
+
+| | |
+| --- | --- |
+| control | 30 passed |
+| wording-preserving swap to `sum(dist.values())` | **1 failed**, this arm |
+| reconciliation line deleted (the premise) | **1 failed**, this arm |
+
+### `test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one`
+
+`merge` printed a **union** over rows, and a union cannot represent a minority set. Merge
+rows carrying `{18}` into a ledger whose rows carry `{15,16,17,18,19}` and the union does
+not move, so the line was **byte-identical on a correct merge and an incorrect one**. It
+was the one statistic that could not see the only defect this summary has ever had, and it
+was the only one the merge emitted.
+
+That defect occurred twice in three hours, to the same person, with a written note about it
+in between:
+
+| | rows written | against | caught by |
+| --- | --- | --- | --- |
+| #1041 | 12 at `18` | 934 at `15;16;17;18;19` | CI's `suites (PG 17)` leg |
+| #1042 | 8 at `18` | 1209 at `15;16;17;18;19` | a manual `uniq -c`, locally |
+
+Both times the merge printed `majors ... 15, 16, 17, 18, 19`. **The operator was not
+ignoring the output; the output agreed with them.** A roll-up that cannot represent the
+failure is worse than no summary, because it actively confirms the wrong answer.
+
+It now prints the distribution, says `NOT UNIFORM` when there is more than one set, and
+prints `rows N = sum of buckets printed N` beside it.
+
+**The reconciliation counts what was PRINTED, not what was counted**, and the difference is
+the whole value of it. `sum(dist.values())` equals `len(rows)` by construction — `dist`
+consumes `rows.values()` exactly once — so a reconciliation built from it guards the one
+step that cannot go wrong. Truncating the display loop drops a bucket, and the **minority**
+one at that, while such a line still balances at `5 = 5`. Found by @OffgridwithJD reviewing
+this change. An arm re-adds the printed counts from the output, which is the only way
+something outside the tool can tell the two sources apart.
+
+The arm holds the **discrimination**, not the wording: it merges the same two checks two
+ways and requires the two summaries to differ. Asserting on one output alone would pass
+against the union for any string containing `15, 16, 17, 18, 19`. The correct arm uses
+**five logs**, not one log naming five majors — the same name twice in one log is a
+duplicate sharing a row, which is a different thing and would make the control unfaithful.
+
+Removal proof: restoring union semantics while **keeping** the new output shape reddens the
+discrimination assertion, so what is load-bearing is the distribution and not the rewording.
+
+Reporting only. Whether merge should **refuse** a non-uniform result is a live design
+question and is deliberately not settled here (#1048).
 
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 
@@ -2763,6 +2960,44 @@ not the first one wearing a Python wrapper.
 | `test_an_armless_branch_is_counted_as_armless_and_not_compared` | a site nobody compared and a site that agreed are not the same number |
 | `test_an_interpolated_sibling_is_reported_rather_than_compared_wrongly` | it declines to compare a site where a literal comparison would be **false in both directions** |
 | `test_every_loop_is_classified_into_exactly_one_category` | `compared + armless + interpolated == loops`, so nothing fell out of the report |
+
+### The standing arm graded a hand-written list, and nothing enforced it (#1046)
+
+The arm below grades the pairs it is GIVEN. A pair that existed and was not given to it
+was not graded, and nothing said so -- the arm passed, grading the ones it knew about,
+and reported a clean verdict for a tree it had not fully looked at. **Absent-from-the-list
+and no-gap-found produced the same green.**
+
+Latent throughout: the declared set happened to equal the tree, so nothing was ever
+silently ungraded. It would have gone live the moment a ninth pair landed undeclared,
+which is what forgetting one line looks like.
+
+`COMPLETE` and `INCOMPLETE` are now declared at module scope and asserted in both
+directions, the shape `SHELL_REFERENCES` uses in `test_harness_deps.py`:
+
+| | |
+| --- | --- |
+| a new COMPLETE pair omitted | reddens, with the stem named |
+| a new INCOMPLETE pair omitted | reddens, with the stem named |
+| a known gap, declared with its reason | does not redden |
+| a declared stem whose pair has been deleted | reddens |
+
+**It forbids one thing, and that was the decision rather than an oversight.** Today an
+incomplete pair may land declaring nothing. Here it must carry a stem and a reason --
+the escape hatch is attached rather than the case forbidden, but a porter who lands a
+pair that does not reach zero now has to say so. The cost today is zero: 8 pairs exist,
+8 are declared, `INCOMPLETE` starts empty, and the first person it costs is the next
+porter, who is the person it is for.
+
+A pair is `test_<stem>.py` beside `test/<stem>.sh`, **derived** rather than listed. The
+24 pytest files with no matching suite are the harness's own guards and are correctly
+not pairs; deriving the population keeps them out without a second exemption list.
+
+**And hoisting the list made an existing guard fire.** The standing arm's loop now
+iterates a module-level name rather than a literal, so
+`test_loop_coverage_premise.py` demanded a cardinality premise -- an empty `COMPLETE`
+would leave every arm unrun and the verdict comparison trivially equal. The premise is
+`at_least(len(complete), 8)`, and the sweep caught its absence the moment the list moved.
 
 ### Removal proofs
 
@@ -3389,7 +3624,8 @@ the tool was reporting the wrong string.
 
 | shape | read as |
 | --- | --- |
-| the last string argument | the name |
+| the last argument | the name, for the 14 helpers that put it there |
+| the last argument of `refusal`, `cannot_run`, `plan_marker`, `plan_node` | NOT the name -- see below |
 | an f-string | a `{}` template, matched against bash interpolations reduced the same way |
 | `"a" if cond else "b"` | both arms |
 | `@pytest.mark.parametrize("func,name", ROWS)` | the `name` column, resolved through module constants |
@@ -3399,6 +3635,186 @@ the tool was reporting the wrong string.
 template reducer missed every one of them, because its pattern required `[A-Za-z_]` after
 the dollar.
 
+### The name is not always the last argument (#1036)
+
+The fix above replaced "the first quoted argument" with "the last argument", and that is
+true of 14 of `Expect`'s 18 helpers. It is not a property of the helpers, only of most of
+them, and the four exceptions were then read wrong in silence -- the last argument is a
+real string in each case, so a wrong name looks exactly like a right one.
+
+| call | what the last argument is | the name it records |
+| --- | --- | --- |
+| `refusal(result, name, *patterns)` | a message PATTERN | `name`, argument 1 |
+| `cannot_run(reason, detail="")` | the DETAIL of one run | `reason`, argument 0 |
+| `plan_marker(plan, key, name=None)` | a plan KEY | the `name=` keyword only |
+| `plan_node(plan, ..., name=None)` | a field of the NODE | the `name=` keyword only |
+
+`refusal` is the worst of the four: the name goes MISSING and a fragment of an error
+message arrives as an EXTRA, so one call produces two false entries -- the same defect the
+section above closes, one helper along.
+
+`plan_marker` and `plan_node` contribute NOTHING when called without `name=`. The key is
+not the name even then, only a fragment of one (`plan_marker` records
+`name or f"plan carries {key!r}"`), and reporting no name states MISSING rather than
+inventing one.
+
+**Measured over the tree** at `73e8e3d`, with the table as the only variable (the count
+is labelled with the tree because it moves as pairs are added):
+
+| pair | extras before | after |
+| --- | --- | --- |
+| hilbert_locality | 3 | 2 |
+| every other pair | unchanged | unchanged |
+| **total** | **68** | **67** |
+
+Two false extras went (`Columnar Projected Columns`, a `plan_marker` key; and `the two
+partitions are not different ({})`, a `cannot_run` detail) and one appeared in their place:
+`UNMET_PRECONDITION`, the reason code `cannot_run` actually records. No pair's verdict
+moved, because `rc` is driven by MISSING and extras never moved it -- which is why nothing
+caught this.
+
+**`UNMET_PRECONDITION` is an extra only because the tool cannot see the bash side of it**,
+and saying otherwise would be the same mistake one level down. `hilbert_locality.sh:574`
+and three lines after it DO check that property:
+
+    check_unrunnable "box $box: groups read, Z-order" UNMET_PRECONDITION ...
+
+The bash extractor reads `check(_num|_ratio|_text|_timing)?`, and `check_unrunnable`
+matches no branch of it. Widening that regex by that one alternative and changing nothing
+else takes `hilbert_locality` from `rc=0 missing=0` to **`rc=1 missing=2`** -- `box $box:
+groups read, Hilbert` and `box $box: groups read, Z-order` -- with every other pair
+unchanged. The port emits ONE record named `UNMET_PRECONDITION` where bash emits four per
+box, and two of them have no counterpart in the port at all.
+
+That gap is NOT caused by the change above; the change is what made it visible, and it is
+filed as #1040 rather than widened here, because widening the regex reddens a pair and is
+a port's worth of work rather than a tool fix.
+
+Derived from `test/lib.sh` rather than swept for, because three different sweeps gave
+three different totals: **`lib.sh` defines 8 check helpers, the tool reads 5, and 3 are
+invisible** -- `check_unrunnable`, `check_skip`, `check_ratio_needs_quiet_machine`.
+Individual suites define four more of their own (`check_structure`,
+`check_reconstruct`, `check_split_happened` in `parallel_copy.sh`, `check_float` in
+`parquet_export_stats.sh`), invisible to the same regex.
+
+**50 invisible invocations over `test/*.sh`**, reconciled between two agents and two
+independent methods, which agree helper for helper: `check_unrunnable` 25, `check_skip` 23,
+`check_ratio_needs_quiet_machine` 2.
+
+**The population is half the number.** `test/*.sh` is the 265 top-level suites, which are
+the only files the tool grades. Globbing `test/**/*.sh` instead adds the harness selftests
+and gives **56**, the extra 6 all in `test/selftest/`, which `compare_to_bash.py` never
+reads. Neither number is wrong; a number without its population is.
+
+`test/selftest/` is out of scope for a second reason as well: it is the SHELL harness's
+own self-test, and the two harnesses stay independent, so counting it into a claim about
+what the pytest parity tool grades would cross that line even if the tool could read it.
+
+**And `git grep` will not give you that population.** Git pathspecs are wildmatch without
+`FNM_PATHNAME`, so `*` crosses `/` and the natural spelling is silently recursive:
+
+    git grep -e check_unrunnable REV -- 'test/*.sh'           9 files, 4 under selftest/
+    git grep -e check_unrunnable REV -- ':(glob)test/*.sh'    5 files, 0 under selftest/
+
+Measuring the number at an older revision means reaching for `git grep`, where the
+top-level spelling LOOKS right and is not. Use `:(glob)`.
+
+Getting there took four sweeps that read 89, 64, 54 and 50, and the three wrong ones were
+not method-sensitivity -- they were two defects, both worth knowing because any later
+re-derivation meets them:
+
+- **A `\bNAME\s` sweep counts each helper's own definition line.** `lib.sh:1231` is
+  `check_unrunnable() {<TAB># check_unrunnable NAME REASON_CODE DETAIL` -- the trailing
+  USAGE COMMENT repeats the name followed by a space, so the definition matches as though
+  it were a call. Same shape at `lib.sh:1407`. Two more matches were ordinary prose. That
+  is 89 (definitions included) and 54 (comments included).
+- **A command-position match misses an invocation after `&&`.** `hilbert_curve.sh:321` is
+  `[ -n "$_a" ] && check_unrunnable "$_a" "$2" "$3"`. Anchoring on `^` alone gives 24 for
+  that helper rather than 25.
+
+Strip trailing comments as well as whole-line ones, exclude definitions, and accept a call
+after `;`, `&&` or `||`, and the number is reproducible.
+
+`refusal` moved no pair either: it is used only by `test_raises_sqlstate.py` and
+`test_guards_pinned.py`, neither of which has a bash twin. Its arm drives the real
+extractor rather than a pair.
+
+### A second coincidence, inside the clause that fixed the first
+
+`-1` is a claim about the CALL SITE. The drift guard reads the SIGNATURE. They agree only
+while no OPTIONAL parameter sits after the name, because an optional one can still be
+passed positionally:
+
+| written | read as |
+| --- | --- |
+| `expect.rows(got, want, "THE NAME", "the reason")` | `the reason` |
+| `expect.plan_marker(plan, "key", "THE NAME")` | nothing at all |
+
+Both were legal, both read wrong, and every guard here stayed green. The second is worse:
+a DROPPED name reports the bash property MISSING, and MISSING is what drives `rc`.
+
+Latent rather than live -- no call site in the tree passes a trailing optional
+positionally -- but #1037 makes `allow_empty` a reason STRING, which is exactly the
+argument somebody writes positionally next to a name.
+
+**Closed in the signatures rather than patched in the reader.** `rows`, `row_set`,
+`plan_marker` and `plan_node` now take everything after the name as keyword-only, so the
+wrong call is a `TypeError` instead of a silently misread name:
+
+    Expect.rows() takes 4 positional arguments but 5 were given
+
+`test_no_later_argument_can_overtake_the_name` holds it, and it is a signature fact, which
+is what this guard is already good at reading. `cannot_run` needs no change: its name is
+argument 0 and nothing after it can overtake it.
+
+**The table is a hand-written derived value, so it is pinned.** The tool is deliberately
+standalone (`ast`, `re`, `sys`) and cannot import `Expect` to ask where each name sits.
+`test_the_tools_table_agrees_with_the_signatures_it_describes` reads the real signatures
+out of `pgc_vacuity.py`, recomputes every entry, and fails with the helper named when the
+two disagree.
+
+### The BASH side had the same blind spot, and it shipped that way (#1040)
+
+Everything above is about the python side. The bash side read five of the eight check
+helpers `lib.sh` defines:
+
+    check  check_num  check_text  check_ratio  check_timing        READ
+    check_unrunnable  check_skip  check_ratio_needs_quiet_machine  INVISIBLE
+
+A property asserted through one of the three was never reported MISSING and could not
+move `rc`, so **a pair could grade one-for-one on the strength of the grader's blind
+spot.** `hilbert_locality` was exactly that: two of the four properties its unrunnable
+branch records had no counterpart in the port, and #1041 closed them.
+
+It never drifted out of date. `0cbf574` introduced the pattern, and `check_unrunnable`
+already had 21 call sites that day.
+
+All eight take the check NAME as `$1`, so one pattern serves them all. That is a
+property of these helpers rather than of bash, which is why the drift guard re-reads it
+from `lib.sh` instead of trusting it.
+
+`check_ratio` is a prefix of `check_ratio_needs_quiet_machine`, and **the old pattern
+shape could not read the longer one at all**: `check(?:_num|_ratio|_text|_timing)?\s+"`
+matches `check_ratio`, wants whitespace, finds `_needs...`, backtracks to the empty
+option, wants whitespace after `check`, and fails. Measured on a fixture holding both,
+the old form reads `['short']` and the current one reads `['short', 'long']`.
+
+**The entries are listed longest-first for readability, and that ordering is NOT what
+makes it work.** Python's `re` backtracks across alternatives, so a pure reorder reads
+both names identically -- measured, and the arm stays green under it. Said explicitly
+because the list LOOKS as though its order is load-bearing, and the arm pins the pattern
+shape rather than the order.
+
+**Suite-local helpers are out of scope, asserted rather than assumed.** Four suites
+define one of their own (`check_structure`, `check_reconstruct`, `check_split_happened`
+in `parallel_copy.sh`, `check_float` in `parquet_export_stats.sh`) and none has a pytest
+twin, so none is graded. An arm holds both halves, so the day one is ported the grader's
+limit is stated rather than discovered.
+
+The population is `check` or `check_<something>`, **not** `check[a-z_]*`: the loose form
+also matches `checks_in` in `decode_interrupts.sh`, a counting utility that returns a
+number and records nothing.
+
 ### Removal proof
 
 | mutation | red |
@@ -3407,6 +3823,13 @@ the dollar.
 | drop the conditional-name case | its own arm, and the whole-tree arm |
 | drop parametrize resolution | its own arm, and the whole-tree arm |
 | read the name column by position instead of by its declared name | its own arm, and the whole-tree arm |
+| delete the `_NAME_ARG` table entirely | all four #1036 arms |
+| drop the `refusal` entry | its own arm, and the drift guard |
+| `plan_marker` `None` -> `-1`, taking the key | its own arm, and the drift guard |
+| `cannot_run` `0` -> `-1`, taking the detail | its own arm |
+| a wrong entry for a helper no BEHAVIOURAL arm covers (`at_least`) | the drift guard, and the whole-tree arm -- the four behavioural arms stay green, which is the point of it |
+| add a helper to `Expect` whose name is not last | the drift guard, naming it |
+| revert any one of the four `*` keyword-only markers | `test_no_later_argument_can_overtake_the_name`, naming the helper |
 
 `test_the_ported_suites_in_this_tree_are_graded_one_for_one` catches all four. It is the
 arm that matters: a guard over invented sources proves the extractor reads python, not that
@@ -3417,15 +3840,189 @@ the tool grades THIS tree.
 | test | what it holds |
 | --- | --- |
 | `test_the_name_is_the_last_argument_not_the_first_string` | the regression, over three helpers, one of which always worked |
+| `test_a_name_bound_by_a_loop_over_a_literal_table_is_read` | a `for` over a literal table has its NAME column read, and `_py_names` returns it |
+| `test_a_literal_column_survives_an_interpolated_neighbour` | the column is read cell by cell, so an f-string in another column does not drop five literal labels |
+| `test_a_table_that_is_not_literal_contributes_nothing` | a module constant, a comprehension and a computed label are refused rather than guessed, with a control |
+| `test_the_loop_reader_invents_nothing_in_this_corpus` | every name it returns appears verbatim in the file, and it is exactly three files |
+| `test_a_parametrised_family_expands_to_the_names_bash_unrolls` | a `f"{col} range"` over a literal container becomes one concrete name per member, matchable but not counted as an assertion |
+| `test_dropping_a_member_brings_the_divergence_back_named` | the property that makes expansion right and widening wrong: remove a column and the bash name it covered is reported BY NAME |
+| `test_a_templated_pair_is_not_orphaned_by_the_expansion` | the additive constraint, run against `hilbert_locality`, `hilbert_cluster` and `native_ownership` -- no `differential` fixture catches it |
+| `test_the_expansion_refuses_what_it_cannot_spell` | a module constant (`1e-6` renders `1e-06`), two distinct columns, a non-literal container -- with a control |
+| `test_the_expansion_reads_only_the_name_argument` | through `_name_argument` and nothing else; the unrestricted form emits SQL as check names |
 | `test_a_call_whose_name_is_not_a_literal_contributes_nothing` | absent beats wrong: a false green on a parity tool loses a property in both harnesses |
 | `test_an_fstring_name_becomes_a_template` | a runtime-built name is compared by shape |
 | `test_a_conditional_name_carries_both_of_its_arms` | `"a" if c else "b"` states two properties |
 | `test_a_parametrized_name_is_resolved_from_the_decorator` | the idiom a repeated bash property should be ported to, with a no-`name` decorator as the control |
 | `test_the_parametrize_reader_takes_the_column_called_name` | the declared column, not position |
 | `test_the_two_harnesses_interpolations_land_on_one_template` | bash and python spell interpolation differently and must meet |
+| `test_refusal_names_its_second_argument_not_its_last_pattern` | the name is in the middle; the last argument is a pattern |
+| `test_refusal_with_no_pattern_is_not_the_arm_that_proves_it` | the control: that shape reads the same under either rule, so it proves nothing alone |
+| `test_cannot_run_names_its_reason_not_its_detail` | the only helper whose name is argument zero |
+| `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
+| `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
+| `test_no_later_argument_can_overtake_the_name` | nothing after the name may be passed positionally, so `-1` is true of every CALL and not just every signature |
+| `test_the_extractor_reads_every_recorder_lib_sh_defines` | the BASH-side drift guard, derived from what a `lib.sh` function DOES rather than what it is named, and checking each name's ARGUMENT POSITION as well as membership |
+| `test_a_lib_sh_wrapper_that_forwards_a_name_is_read` | `diff_query`, `diff_query_ordered`, `pgc_pass` and `pgc_fail` record through `check`/`pgc_record`, and the name they carry is the suite's own |
+| `test_the_wrapper_whose_name_is_the_second_argument` | `pgc_skip`'s name is `$2`; reading `$1` extracts the CAPABILITY, which is a wrong name rather than an absent one |
+| `test_the_derivation_finds_a_wrapper_planted_in_a_fixture` | the derivation on a fixture where the answer is known: four forwarding shapes found, and a function owning its own literal name rejected |
+| `test_the_comment_stripper_keeps_a_parameter_expansion` | `${shape#*|}` and `$#` are not comments; `#` opens one only at a word boundary |
+| `test_an_empty_helper_group_fabricates_names_rather_than_reading_none` | an empty alternation matches everywhere, so a position with no helper would invent `$PGC_DB` as a check name rather than read none |
+| `test_a_suites_own_forwarding_wrapper_is_read` | a suite's own wrapper that forwards a bare positional has its names read from the CALL SITES |
+| `test_a_composing_wrapper_is_left_alone` | a wrapper that COMPOSES its name already states a template; refusing it would break three COMPLETE pairs |
+| `test_a_helper_whose_name_cannot_be_resolved_is_refused` | a helper taking a LIST of names in one argument is refused by name, not skipped |
+| `test_the_refusal_names_exactly_the_suites_it_refuses` | the refused SET is pinned by name, not counted; both directions, so an entry cannot outlive its cause |
+| `test_a_bare_interpolation_is_not_published_as_a_name` | a forwarding wrapper's `{}` is dropped: it names nothing and can match a wholly-interpolated port name |
+| `test_the_grader_itself_refuses_the_suite_it_cannot_read` | `main` exits 2 and prints no verdict, with a readable suite as the control |
+| `test_a_helper_reaching_only_the_primitive_is_found` | the closure is seeded from `pgc_record`, not the `check` family; four suites turn on it |
+| `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
+| `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
+| `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
 
-## 37. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
+## 37. test_iceberg_fdw.py: the Iceberg FDW's pruning surface
+
+## 38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint
+
+Not a port and not a pair: `objstore_endpoint_userinfo.sh` does not exist. These assert
+the same properties as `test/objstore_userinfo.sh`'s endpoint arms, independently,
+through the python harness.
+
+| test | asserts |
+| --- | --- |
+| `test_a_userinfo_endpoint_is_refused` | both shapes refuse at `22023`, naming userinfo and naming the ENDPOINT rather than the s3:// URL |
+| `test_the_guard_fires_without_a_region_configured` | the placement: with no region set the refusal is userinfo, not the region demand |
+| `test_a_clean_endpoint_is_not_refused_as_userinfo` | the control -- a clean endpoint gets past the guard and fails for another reason |
+| `test_an_at_sign_in_the_object_key_is_not_userinfo` | the other direction: `@` is legal in a key and is untouched |
+
+Ports `test/iceberg_fdw.sh`. 74 of its 76 check names, one for one; the two it cannot
+carry are `pgc_skip`'s refusal names, which are structural and declared in
+`INCOMPLETE` with their reason.
+
+| test | asserts |
+| --- | --- |
+| `test_the_fdw_reads_the_whole_table` | the premise: five rows, and no predicate prunes no files |
+| `test_a_partition_predicate_returns_iceberg_scans_rows` | the same-oracle read -- `iceberg_scan` cannot prune, so it cannot over-prune |
+| `test_a_partition_predicate_prunes_the_other_file` | an identity partition drops the file that cannot match |
+| `test_a_value_in_no_partition_prunes_everything` | a value in no partition prunes both files and returns nothing |
+| `test_a_non_partition_column_prunes_by_file_metrics` | a non-partition column prunes on the manifest's min/max |
+| `test_a_metrics_pruned_scan_still_returns_its_rows` | and the rows survive the pruning |
+| `test_a_value_outside_every_files_metrics_prunes_all` | a value outside every file's range, against the oracle |
+| `test_a_date_partition_is_not_over_pruned` | #660: a date cell the FDW cannot convert must be READ, never NULL-filled and pruned |
+| `test_a_bucket_partition_keeps_only_the_matching_bucket` | `bucket[8]`: our murmur3 agrees with the one pyiceberg wrote |
+| `test_a_bucket_pruned_equality_returns_its_row` | and the kept file holds the row |
+| `test_a_range_predicate_cannot_bucket_prune` | the hash destroys order, so a range prunes by metrics only |
+| `test_a_truncate_partition_prunes_by_range` | `truncate[100]` with metrics disabled, so the transform is the only mechanism |
+| `test_a_truncate_pruned_scan_still_returns_its_rows` | and the rows survive |
+| `test_the_bucket_table_reads_whole_and_matches_the_murmur3_oracle` | the bucket table's premise and its same-oracle read |
+| `test_the_truncate_table_reads_whole_and_matches_the_oracle` | the truncate table's premise and its same-oracle read |
+| `test_a_day_pruned_scan_still_returns_its_rows` | and the rows survive a `day()` pruning |
+| `test_a_day_partition_on_a_date_prunes` | `day(dt)`, whose cell is Iceberg days from 1970 against PostgreSQL's from 2000 |
+| `test_the_day_table_reads_whole_and_crosschecks_the_epoch` | the oracle read that catches a wrong epoch offset |
+| `test_a_coarse_temporal_transform_prunes` | year/month/day/hour on timestamp, date and timestamptz |
+| `test_a_coarse_temporal_transform_does_not_over_prune` | the boundary bucket must be READ: a coarse bucket spans a range |
+| `test_the_two_temporal_tables_cover_the_same_cases` | the two literal tables have not drifted apart |
+| `test_the_year_table_reads_whole_and_keeps_the_boundary_file` | the boundary case stated alone |
+| `test_a_year_equality_prunes_to_one_file` | an equality narrows to the constant's own bucket |
+| `test_a_year_on_date_equality_prunes_to_one_file` | the same on a date column |
+| `test_an_unknown_table_option_is_refused` | the validator, by SQLSTATE `HV00D` rather than by message text |
+| `test_a_plan_with_no_pruning_marker_is_not_read_as_zero` | a plan that never mentions `Files Pruned` is not read as 0; needs no server |
+
+
+## 39. test_hilbert_cluster.py: the Hilbert clustering SQL surface
+
+The port of `test/hilbert_cluster.sh` (#432, #889's SQL half). The bash suite pins the SQL
+surface of `pgcolumnar.cluster_hilbert` and `recluster_hilbert`, the recorded
+`sorted_kind`, the self-gate and the daemon. `test/hilbert_curve.sh` pins the CURVE itself
+in C and neither file re-tests the other; this port keeps that division.
+
+**45 collected tests, 184 checks, over the bash suite's eight arms.** Graded one-for-one:
+`compare_to_bash.py` reports **0 MISSING** both as the tool ships (124 bash checks) and
+with #1044's widened extractor (133), the difference being the suite's nine
+`check_unrunnable` sites, all of which are twinned.
+
+### Where the port asserts something the original gets for free
+
+Two of them, and both are the same class: **wherever a port replaces a STRUCTURAL
+guarantee with a PROCEDURAL one, it owes an arm the original does not need** (@jdatcmd).
+
+The bash suite hands the daemon's naptime and thresholds to the server through
+`PGC_EXTRA_CONF`, so they are in `postgresql.conf` before the postmaster starts and the
+suite cannot run without them. `pgc_cluster.py` has no such hook, so the port sets them
+with `ALTER SYSTEM` and a reload -- available because all three are `PGC_SIGHUP`. That can
+silently not take effect, and then every S7 arm still passes: at default naptime the daemon
+still acts and the poll still sees the tail fold. So the three values are read back from
+the server. The arm failed on its first run with `got '2s/0.2/0.05'` -- `SHOW` returns the
+unit -- which is the cheapest demonstration that it reads the server rather than restating
+the `ALTER SYSTEM` above it.
+
+The same for `max_parallel_workers_per_gather = 0`: the fixture SET it and nothing read it
+back until the parity tool reported the bash suite's premise as MISSING.
+
+### A reload is not a read
+
+`ALTER SYSTEM SET pgcolumnar.autovacuum = on`, `pg_reload_conf()`, then `SHOW` on the same
+connection returned **`off`**. A reload signals the postmaster and a backend already open
+absorbs it at its next command boundary; this module runs every statement through ONE
+connection, by design. The bash suite never meets it because every `q` is a fresh `psql`.
+`_show_fresh()` opens a new session for post-reload reads -- the port of what the original
+gets for free, not a workaround, and inherited by any later port that changes
+postmaster-level state.
+
+### Three refusals that the port must express differently
+
+`expect.cannot_run()` records under the REASON code, so two refusals in one test collapse
+onto a single `UNMET_PRECONDITION` record. Every conditional `check_unrunnable` in the bash
+suite is therefore its own test here: S3's two curve comparisons, S4's three
+layout-after-a-gated-call arms, and S7's two daemon-layout arms.
+
+### What buys the curve, and what does not
+
+Four arms refuse a relabelled Z-order implementation, and no others: S3's two
+`three different physical orders` arms, S4(d)'s `is NOT the ZORDER rewrite`, and S7's
+`is NOT the zorder layout`. **S5 is green on a relabelled implementation by construction** --
+over one column the Hilbert index and the Morton index are both the identity -- so it buys
+the surface and the recorded kind and must never be read as evidence of Hilbertness.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_the_two_digests_are_the_instruments_this_file_thinks_they_are` | the ordered oracle is order-sensitive and the set oracle is not; invisible to the parity tool because the bash names live in `lib.sh` |
+| `test_parallelism_is_off_so_a_scan_order_is_a_fact_about_the_layout` | a digest is about the layout and not about scheduling |
+| `test_the_refusal_fixture_and_its_roles_are_this_runs` | the fixture holds rows, the role owns nothing, can open a session, and holds EXECUTE and schema USAGE -- so a 42501 can only be the owner check |
+| `test_each_new_verb_refuses_what_its_sibling_refuses` | four inputs x two verb pairs, each new verb's SQLSTATE compared against the established verb's on the identical input |
+| `test_the_probe_can_report_both_success_and_an_unreachable_session` | the probe can say noerror, and can say it never reached the server |
+| `test_the_reorder_fixture_is_measurable_before_anything_moves` | 20 groups, the set matches the heap mirror, the order digest is stable, the plan is the columnar scan |
+| `test_cluster_hilbert_reorders_without_changing_the_row_set` | same rows, different order -- neither half stands alone |
+| `test_physlayout_is_blind_to_an_eager_rewrite` | the instrument's limit, pinned on plain `cluster()` so it cannot be perturbed by #889 |
+| `test_the_three_fixtures_and_the_owner_role_are_measurable` | three fixtures from one generator, and the catalog really is closed to the owner |
+| `test_each_verb_moved_its_own_table_from_its_own_baseline` | without this, "different from each other" is satisfied by insert order |
+| `test_the_kind_is_recorded_and_the_owner_can_read_it` | both routes: the superuser catalog and the owner's reporter |
+| `test_the_owner_alone_can_tell_the_three_kinds_apart` | asserted as a NAMED SET, so no NULL can stand in for one |
+| `test_the_three_kinds_stand_for_three_physical_orders` | the eager verb's curve defence, UNRUN unless both legs moved |
+| `test_the_gate_is_closed_on_an_already_hilbert_table` | (a) 0 groups, kind untouched |
+| `test_the_gated_call_left_the_layout_byte_identical` | UNRUN unless the return really was 0 |
+| `test_the_same_call_does_work_once_a_tail_is_appended` | the positive control: the fifth direction, and what the daemon depends on |
+| `test_the_gate_closes_again_on_the_refolded_table` | (a3) |
+| `test_the_refolded_layout_is_byte_identical_again` | (a3), gated the same way |
+| `test_the_gate_opens_for_a_zorder_table_over_the_same_columns` | (b), with the label asserted WITH the bytes |
+| `test_plain_recluster_is_a_noop_on_a_hilbert_table` | (c) THE RULING: the curve is sticky |
+| `test_the_noop_recluster_left_the_layout_byte_identical` | (c), gated |
+| `test_a_different_key_rewrites_in_both_directions` | (d) the gate must DISCRIMINATE |
+| `test_the_online_hilbert_rewrite_is_not_the_zorder_rewrite` | the online verb's only curve defence, gated on both rewrites |
+| `test_over_one_column_both_curves_are_the_identity` | S5: surface and identity, never the curve |
+| `test_vacuum_sorted_leaves_a_hilbert_table_alone` | S6, the reading of the ruling this suite pins |
+| `test_vacuum_sorted_still_works_on_a_table_with_no_recorded_kind` | the removal proof: it must not no-op on everything |
+| `test_the_daemon_fixtures_are_built_with_the_daemon_off` | the launcher is up, the daemon is off, and the thresholds took |
+| `test_the_two_hand_driven_references_are_built_and_folded` | both references folded, and av_hi does not yet match |
+| `test_the_two_references_are_two_different_layouts` | UNRUN unless both folded |
+| `test_the_daemon_reclustered_the_decayed_hilbert_table` | THE RULING through the daemon, with its own log line naming the dispatch |
+| `test_the_layout_the_daemon_produced_is_a_hilbert_layout` | gated on av_hi not already matching |
+| `test_the_daemons_layout_is_not_the_zorder_layout` | the daemon's curve defence, gated the same way |
+| `test_the_install_script_and_the_catalog_agree_on_the_symbol_set` | S8, symbols resolved from the AS clause and never derived |
+| `test_each_new_verb_is_installed_and_its_symbol_declared` | installed once, C, and declared |
+| `test_each_new_verb_has_its_siblings_signature` | args, VARIADIC element and return type, compared against the sibling rather than retyped |
+## 40. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
 
 #913. A fetching index scan on a correlated key is priced below the custom scan
 through ~50,000 rows, while it does about 27x the work. The penalty term exists

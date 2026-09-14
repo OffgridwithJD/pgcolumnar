@@ -571,9 +571,9 @@ for pin in $PINS; do
 	IFS=: read -r box want_z want_h floor <<<"$pin"
 
 	if [ "$CURVE_DIFFERS" != different ]; then
-		check_unrunnable "box $box: groups read, Z-order" UNMET_PRECONDITION \
+		check_unrunnable "box $box: groups read over $PLACEMENTS placements, Z-order" UNMET_PRECONDITION \
 			"the two partitions are not different ($CURVE_DIFFERS), so a ratio between them is not about the curve"
-		check_unrunnable "box $box: groups read, Hilbert" UNMET_PRECONDITION \
+		check_unrunnable "box $box: groups read over $PLACEMENTS placements, Hilbert" UNMET_PRECONDITION \
 			"the two partitions are not different ($CURVE_DIFFERS), so a ratio between them is not about the curve"
 		check_unrunnable "box $box: Hilbert reads fewer groups than Z-order" UNMET_PRECONDITION \
 			"the two partitions are not different ($CURVE_DIFFERS)"

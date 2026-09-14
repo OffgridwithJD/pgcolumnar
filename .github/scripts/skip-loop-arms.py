@@ -43,6 +43,13 @@ def blank_heredocs(lines):
     embeds python whose `if phys != {...}:` a naive depth count reads as a shell
     `if`, which unbalanced the walk and made a ten-arm branch report six. The
     tool that finds silently-lost arms was silently losing arms.
+
+    NOT IDEMPOTENT. Blanking twice is not blanking once: the second pass meets an
+    opener whose TERMINATOR the first pass already blanked, finds no terminator,
+    and blanks to end-of-file. Measured on `lib.sh`: 112 lines blanked by one
+    pass, 372 by two. Nothing calls it twice today and every caller here hands it
+    RAW text -- but the composition is silent and plausible, and it cost @jdatcmd
+    four phantom "lost recorders" within a minute of meeting the helper.
     """
     out, term = [], None
     for l in lines:
@@ -58,14 +65,88 @@ def blank_heredocs(lines):
     return out
 
 
+def unclosed_definitions(text):
+    r"""-> the functions whose body never closes, by name.
+
+    THE DEPTH WALK HAS ONE FAILURE MODE AND THIS IS IT. Braces are counted, not
+    parsed, so an unbalanced `{` inside a QUOTED STRING is counted as a real one
+    and the body runs to end-of-file, swallowing every function after it. The
+    corpus has exactly one:
+
+        test/selftest/400-a-check-result-must-be-machine.sh:338  _us_unbound()
+
+    whose body contains `grep -oE '\$\{?[A-Za-z_]...'` and `tr -d '${'` -- two
+    unmatched braces inside quoted regexes. Its "body" is then 229 lines and runs
+    to line 566 of 566.
+
+    NOT FIXED BY PARSING SHELL QUOTING. One pathological definition in 913 does
+    not buy a lexer, and a lexer is a much larger thing to be wrong about. What is
+    fixed is the SILENCE: a body that runs to EOF is a fact this walk already
+    knows and used to discard, so it is printed. A swallow you can see is a
+    different object from one you cannot. (@jdatcmd)
+    """
+    out = []
+    # HEREDOC BODIES ARE BLANKED FIRST, which this file already does for the
+    # structure walk and did not do here. A fixture WRITTEN INTO a heredoc is
+    # text, not shell -- and the guard for this very defect (selftest 490)
+    # embeds `q() { ... }` and an unbalanced-brace fixture as heredoc content,
+    # so without this the tool reports the test's own fixtures as findings in
+    # the real tree. Measured: `unclosed 2`, the second being 490's own
+    # `swallower`.
+    lines = blank_heredocs(text.splitlines())
+    for i, l in enumerate(lines):
+        m = _HELPER_DEF.match(l)
+        if not m:
+            continue
+        depth = l.count("{") - l.count("}")
+        j = i + 1
+        while j < len(lines) and depth > 0:
+            depth += lines[j].count("{") - lines[j].count("}")
+            j += 1
+        if depth > 0:
+            out.append(m.group(1))
+    return out
+
+
 def emitters(text):
+    """-> the function names in TEXT that record a check.
+
+    THE BODY ENDS AT ITS OWN CLOSING BRACE, counted, not searched for. The first
+    version took `text[start:text.find("\n}", start)]` -- everything up to the next
+    brace at column zero -- which is wrong for a definition that closes on its own
+    line:
+
+        test/audit.sh:122   q() { run_pg "$PSQL -c \\"$1\\""; }
+
+    `q`'s brace is not at column zero, so its "body" ran on into the NEXT
+    function's and swallowed every `check` call in between. `q` -- a psql wrapper
+    that records nothing -- then classified as a recorder, and its first argument,
+    SQL text, entered a set of valid check names. The corpus has 199 one-line
+    definitions, so this is the common form and not an edge case (#1042).
+
+    It changed no verdict on the tree as it stood: A/B against this fix on
+    `db74d9e9c` gave `loops 8 / compared 6 / interpolated 1 / armless 1` either
+    way, byte-identical. That is a property of TODAY'S CORPUS and not of the tool
+    -- the day a one-line definition sits above a recorder whose names matter, the
+    arm-name set silently gains whatever that wrapper's first argument is.
+    """
     out = {"check", "check_num", "check_skip", "check_text", "check_timing"}
-    for m in _HELPER_DEF.finditer(text):
-        name, start = m.group(1), m.end()
-        end = text.find("\n}", start)
-        body = text[start:end if end > 0 else len(text)]
-        if re.search(r"\bcheck\w*\b|\bpgc_record\b", body):
-            out.add(name)
+    # Same reason as `unclosed_definitions`: a function DEFINED inside a heredoc
+    # is a fixture being written to a file, not a definition in this one.
+    lines = blank_heredocs(text.splitlines())
+    for i, l in enumerate(lines):
+        m = _HELPER_DEF.match(l)
+        if not m:
+            continue
+        depth = l.count("{") - l.count("}")
+        body = [l[m.end():]]
+        j = i + 1
+        while j < len(lines) and depth > 0:
+            depth += lines[j].count("{") - lines[j].count("}")
+            body.append(lines[j])
+            j += 1
+        if re.search(r"\bcheck\w*\b|\bpgc_record\b", "\n".join(body)):
+            out.add(m.group(1))
     return out
 
 
@@ -183,13 +264,26 @@ def main(testdir):
 
     loops = compared = interpolated = armless = 0
     bad = []
+    # SCANNED OVER THE WHOLE POPULATION, before the check_skip filter below, so
+    # the number describes the files this tool reads rather than the subset it
+    # happens to compare.
+    unclosed = []
+    for f in files:
+        for fn in unclosed_definitions(f.read_text(errors="replace")):
+            unclosed.append(f"{f.name}:{fn}")
     for f in files:
         text = f.read_text(errors="replace")
         if "check_skip \"$" not in text:
             continue
         lines = text.splitlines()
-        # STRUCTURE IS READ FROM A HEREDOC-FREE VIEW; names still come from the
-        # real lines, because a heredoc never contains a check.
+        # STRUCTURE IS READ FROM A HEREDOC-FREE VIEW, and so are DEFINITIONS.
+        # A heredoc body is a file being WRITTEN, not this file:
+        # 080-no-suite-pipes-a-captured-string.sh:26-27 writes `piped()` and
+        # `cased()` into one, and a raw scan counts them as this suite's. The
+        # earlier form of this comment said a heredoc never contains a check,
+        # which was true when it was written and is not now -- the same shape as
+        # #1043's header and #1041's census recipe, prose invalidated by a later
+        # change to the thing it describes.
         struct = blank_heredocs(lines)
         emit = emitters(text) | emitters(lib)
         for var in sorted(set(re.findall(r'check_skip\s+"\$([a-z_][a-z0-9_]*)"', text))):
@@ -211,10 +305,22 @@ def main(testdir):
     print(f"compared {compared}")
     print(f"interpolated {interpolated}")
     print(f"armless {armless}")
+    print(f"unclosed {len(unclosed)}")
+    for u in unclosed:
+        print(f"UNCLOSED {u}")
     for b in bad:
         print(f"MISMATCH {b}")
     return 0
 
 
 if __name__ == "__main__":
+    # `--emitters FILE` prints what `emitters()` makes of one file, so the guard
+    # can drive the real function over a fixture rather than reimplementing it.
+    # Without it the only observable is the mismatch total, and this defect
+    # changes no total on the current corpus -- so nothing could distinguish the
+    # two extractors from the outside.
+    if "--emitters" in sys.argv:
+        target = sys.argv[sys.argv.index("--emitters") + 1]
+        print(" ".join(sorted(emitters(pathlib.Path(target).read_text()))))
+        sys.exit(0)
     sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "test"))
