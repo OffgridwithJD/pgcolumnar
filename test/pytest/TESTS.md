@@ -3854,6 +3854,13 @@ the tool grades THIS tree.
 | `test_the_derivation_finds_a_wrapper_planted_in_a_fixture` | the derivation on a fixture where the answer is known: four forwarding shapes found, and a function owning its own literal name rejected |
 | `test_the_comment_stripper_keeps_a_parameter_expansion` | `${shape#*|}` and `$#` are not comments; `#` opens one only at a word boundary |
 | `test_an_empty_helper_group_fabricates_names_rather_than_reading_none` | an empty alternation matches everywhere, so a position with no helper would invent `$PGC_DB` as a check name rather than read none |
+| `test_a_suites_own_forwarding_wrapper_is_read` | a suite's own wrapper that forwards a bare positional has its names read from the CALL SITES |
+| `test_a_composing_wrapper_is_left_alone` | a wrapper that COMPOSES its name already states a template; refusing it would break three COMPLETE pairs |
+| `test_a_helper_whose_name_cannot_be_resolved_is_refused` | a helper taking a LIST of names in one argument is refused by name, not skipped |
+| `test_the_refusal_names_exactly_the_suites_it_refuses` | the refused SET is pinned by name, not counted; both directions, so an entry cannot outlive its cause |
+| `test_a_bare_interpolation_is_not_published_as_a_name` | a forwarding wrapper's `{}` is dropped: it names nothing and can match a wholly-interpolated port name |
+| `test_the_grader_itself_refuses_the_suite_it_cannot_read` | `main` exits 2 and prints no verdict, with a readable suite as the control |
+| `test_a_helper_reaching_only_the_primitive_is_found` | the closure is seeded from `pgc_record`, not the `check` family; four suites turn on it |
 | `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
 | `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
 | `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |

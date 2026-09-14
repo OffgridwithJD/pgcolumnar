@@ -41,7 +41,10 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from compare_to_bash import _as_names, _parametrized_names, _py_names, _template  # noqa: E402
+from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
+                             _derive_recorders, _names_in, _suite_recorders,
+                             _parametrized_names, _py_names, _strip_comments,
+                             _template, _words)
 
 
 # THE PAIRS THIS TREE HOLDS, DECLARED IN BOTH DIRECTIONS (#1046).
@@ -112,115 +115,6 @@ INCOMPLETE = {
         "than fixed with the extractor, so this change carries one claim."
 }
 
-
-def _strip_comments(text):
-    r"""-> the text with shell comments removed, and NOTHING else removed.
-
-    `#` starts a comment only at a word boundary. `${shape#*|}` and `$#` are not
-    comments, and cutting at the first `#` truncates the line to something that
-    parses as a different program. That exact slip has produced two wrong counts in
-    this repo, so the fixtures for it are in the arm below rather than in a comment.
-    """
-    out = []
-    for line in text.splitlines():
-        res, i, quote = [], 0, None
-        while i < len(line):
-            ch = line[i]
-            if quote:
-                if ch == quote:
-                    quote = None
-                res.append(ch)
-            elif ch in "\"'":
-                quote = ch
-                res.append(ch)
-            elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()"):
-                break
-            else:
-                res.append(ch)
-            i += 1
-        out.append("".join(res))
-    return "\n".join(out)
-
-
-def _bodies(text):
-    """-> [(function name, body)] with each body ended by ITS OWN closing brace.
-
-    Per-line brace depth, not `find("\n}")`: 199 definitions in this tree are written
-    on one line (`q() { psql ...; }`), and a scan for a brace in the first column
-    swallows every following definition into the first one's body.
-    """
-    out, lines = [], text.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{", line)
-        if not m:
-            continue
-        depth = line.count("{") - line.count("}")
-        body, j = [line[m.end():]], i + 1
-        while j < len(lines) and depth > 0:
-            depth += lines[j].count("{") - lines[j].count("}")
-            body.append(lines[j])
-            j += 1
-        out.append((m.group(1), "\n".join(body)))
-    return out
-
-
-def _words(text):
-    """-> the shell words of a call's argument list, quotes kept."""
-    return re.findall(r'"[^"]*"|\S+', text)
-
-
-def _derive_recorders(lib, seed=("pgc_record", 2)):
-    """-> {helper: which argument holds the check name}, derived from what lib.sh DOES.
-
-    THE POPULATION IS THE POINT (#1045). The #1040 guard derived its population by
-    SPELLING -- every `lib.sh` function whose name begins `check`. It was green for
-    weeks while `diff_query` went unread, and correctly so: `diff_query` was never in
-    its population. The guard was not broken; the definition of the thing it guards
-    was. 225 names across 59 suites were outside it.
-
-    So: start from `pgc_record`, the primitive that actually records, and take the
-    closure. A function is a recorder at position N when it passes its own `$N` --
-    directly, or renamed once through a `local` -- into the name slot of a helper
-    already known to be one. `diff_query` calls `check`, which calls `pgc_record`.
-    One level of indirection was the entire gap.
-
-    The seed is not returned. It is `lib.sh`'s own primitive and no suite calls it,
-    which the arm below asserts rather than assumes: the day a suite calls it, the
-    extractor has to learn it and this stops being true quietly.
-    """
-    lib = _strip_comments(lib)
-    defs = _bodies(lib)
-    known = {seed[0]: seed[1]}
-
-    changed = True
-    while changed:
-        changed = False
-        for fn, body in defs:
-            if fn in known:
-                continue
-            aliases = {m.group(1): int(m.group(2)) for m in
-                       re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\{?(\d+)\}?"', body)}
-            for rec, pos in sorted(known.items()):
-                for m in re.finditer(r'\b' + rec + r'([ \t]+.*)$', body, re.M):
-                    args = _words(m.group(1))
-                    if len(args) < pos:
-                        continue
-                    slot = args[pos - 1]
-                    inner = re.fullmatch(r'"\$\{?([A-Za-z_0-9]+)\}?"', slot)
-                    if not inner:
-                        continue          # a literal, or something not a bare $x
-                    tok = inner.group(1)
-                    n = int(tok) if tok.isdigit() else aliases.get(tok)
-                    if n is None:
-                        continue
-                    known[fn] = n
-                    changed = True
-                    break
-                if fn in known:
-                    break
-
-    del known[seed[0]]
-    return known
 
 
 def _names(src):
@@ -861,6 +755,217 @@ def test_the_suite_local_helpers_are_known_and_excluded(expect):
                if (HERE / f"test_{f[:-3]}.py").exists()]
     expect.num(len(twinned), 0,
                "and none of their suites has a pytest twin, so none is graded today")
+
+
+def test_a_suites_own_forwarding_wrapper_is_read(expect):
+    """THE SUITE-LOCAL GAP (#1053). `lib.sh`'s wrappers were #1051; these are the ones
+    a suite defines for itself.
+
+        sorted_pathkeys.sh   ans() { ansp "$1" h c "$2"; }
+                             ansp() { local label="$1"; check_text "$label" ...; }
+
+    19 of that suite's 113 names go through those two, and they are not a random 19:
+    the suite pairs every `check "... plans no Sort"` with an `ans "and ... still
+    answers correctly"`, because losing the Sort is only correct if the rows still
+    come back in that order. So the grader saw every claim about the PLAN and none
+    about the ANSWER, and a port dropping all 18 answer arms would have graded
+    one-for-one.
+    """
+    src = ('check_text() { pgc_record "$1" "$2"; }\n'
+           'ansp() {\n\tlocal label="$1"\n\tcheck_text "$label" "$2" "$3"\n}\n'
+           'ans() { ansp "$1" h c "$2"; }\n'
+           'ans   "and returns the same rows in the same order as heap" \'SELECT 1\'\n'
+           'ansp  "and it answers in j order" h c \'SELECT 2\'\n')
+    forwarding, unreadable = _suite_recorders(src)
+    expect.text(", ".join(f"{k}:${v}" for k, v in sorted(forwarding.items())),
+                "ans:$1, ansp:$1",
+                "both forwarding shapes are found -- one through a local, one a "
+                "one-line body")
+    expect.text(", ".join(unreadable) or "none", "none",
+                "and neither is refused, because both name positions resolve")
+    expect.text(", ".join(sorted(_names_in(src))),
+                "and it answers in j order, and returns the same rows in the same "
+                "order as heap",
+                "the names are read from the CALL SITES, which is where a forwarding "
+                "wrapper's names are")
+
+
+def test_a_composing_wrapper_is_left_alone(expect):
+    """COMPOSE IS NOT A GAP, and treating it as one was the expensive mistake.
+
+        native_ownership.sh   refused() { check "non-owner refused: ${1%%(*}" ...; }
+
+    `_BASH_INTERP` reduces `${1%%(*}` to `{}`, so the definition already states
+    `non-owner refused: {}` -- a real template naming a real property, covering all
+    nine call sites. That is why `native_ownership` grades one-for-one today.
+
+    MEASURED BEFORE THIS ARM EXISTED: refusing on "the name slot is not a bare
+    positional" refuses 32 suites, including `hilbert_cluster`, `hilbert_locality` and
+    `native_ownership` -- three pairs that are COMPLETE -- to fix nothing. The refuse
+    half is right in principle and, aimed at this population, it breaks green pairs.
+    """
+    src = ('check() { pgc_record "$1" "$2"; }\n'
+           'refused() {\n\tcheck "non-owner refused: ${1%%(*}" "$2" "$3"\n}\n'
+           'refused "read_projection(x)" a b\n')
+    forwarding, unreadable = _suite_recorders(src)
+    expect.text(", ".join(forwarding) or "none", "none",
+                "a composing wrapper is not a forwarder, so its call sites are not "
+                "re-read")
+    expect.text(", ".join(unreadable) or "none", "none",
+                "and it is NOT refused: the definition states the property")
+    expect.text(", ".join(_names_in(src)), "non-owner refused: ${1%%(*}",
+                "the template is read from the definition, as it always was")
+
+
+def test_a_helper_whose_name_cannot_be_resolved_is_refused(expect):
+    """THE REFUSE HALF. `hilbert_curve.sh` is the whole population, and it is real:
+
+        arms_failed() {            # arms_failed "LIST" DETAIL
+            while IFS= read -r _a; do
+                [ -n "$_a" ] && pgc_fail "$_a" "$2"
+            done <<< "$1"
+        }
+
+    The names are newline-separated INSIDE `$1` and reach `pgc_fail` through a loop
+    variable, so no rule about argument positions can read them. Silently skipping is
+    how 147 names in 14 suites came to be ungraded, so this names the helper and
+    refuses the suite instead.
+    """
+    src = ('pgc_fail() { pgc_record FAIL "$1" "$1"; }\n'
+           'arms_failed() {\n\tlocal _a\n\twhile IFS= read -r _a; do\n'
+           '\t\t[ -n "$_a" ] && pgc_fail "$_a" "$2"\n\tdone <<< "$1"\n}\n')
+    forwarding, unreadable = _suite_recorders(src)
+    expect.text(", ".join(unreadable), "arms_failed",
+                "a helper that reaches a recorder under an unresolvable name is "
+                "refused by name")
+    expect.text(", ".join(forwarding) or "none", "none",
+                "and is not silently treated as a forwarder")
+
+
+def test_the_refusal_names_exactly_the_suites_it_refuses(expect):
+    """A STATIC GUARD NEEDS A FALSE-POSITIVE BUDGET, measured over the tree before it
+    ships rather than discovered by it. One suite of 264 is refused and it is a true
+    positive; every graded pair is unchanged.
+
+    THE SET IS PINNED, NOT THE COUNT, and that is not a style choice.
+    `checks_never_observed_red` is this repo's worked example of the other shape: a
+    census over the tree that every legitimate addition broke, so the only way to land
+    one was to raise a number the design said may only fall, which retires the guard
+    the first time it is inconvenient. A count tells a reviewer that something moved.
+    A set tells them WHAT, which is the difference between a diff they can judge and a
+    number they can only bump.
+
+    Asserted in both directions, so an entry cannot outlive its cause: a suite that
+    starts being refused reddens with its name, and one that stops reddens too.
+    """
+    refused = sorted(sh.name[:-3] for sh in HERE.parent.glob("*.sh")
+                     if sh.name != "lib.sh" and _suite_recorders(sh.read_text())[1])
+    expect.text(", ".join(refused), "hilbert_curve",
+                "exactly these suites are refused -- `hilbert_curve`, whose helpers "
+                "take a newline-separated LIST of names in one argument")
+    twinned = [r for r in refused if (HERE / f"test_{r}.py").exists()]
+    expect.text(", ".join(twinned) or "none", "none",
+                "and none of them has a pytest twin, so the refusal grades nothing "
+                "today")
+
+
+def test_a_bare_interpolation_is_not_published_as_a_name(expect):
+    """A FORWARDING WRAPPER'S DEFINITION STATES NO PROPERTY, and publishing `{}` for it
+    is worse than publishing nothing.
+
+    `check_text "$label"` reduces to the template `{}`. Published, it sits in MISSING
+    naming nothing a port could assert -- and it MATCHES a port name that is entirely
+    one interpolation, which is a pass for a property neither side named. 17 were
+    being published across the corpus. A wrong name is worse than an absent one, which
+    is the argument #1051 turned on.
+    """
+    src = ('check_text() { pgc_record "$1" "$2"; }\n'
+           'ansp() {\n\tlocal label="$1"\n\tcheck_text "$label" "$2" "$3"\n}\n'
+           'ansp "a real property" a b\n')
+    expect.num(sum(1 for n in _bash_names(src) if _template(n) == "{}"), 1,
+               "premise: the raw extractor does publish a bare {} for this shape")
+    expect.text(", ".join(_names_in(src)), "a real property",
+                "and the reader drops it, keeping only names that state something")
+
+
+def test_the_grader_itself_refuses_the_suite_it_cannot_read(expect, tmp_path):
+    """THE REFUSAL RUNS, not just the classifier that feeds it.
+
+    `_suite_recorders` returning an unreadable helper is asserted above. That is not
+    the same as `main` acting on it, and the difference is the whole value of the
+    refuse half: a classifier nobody consults is a list. MEASURED -- disabling the
+    refusal in `main` reddened no arm at all until this one existed, which is the same
+    defect the refusal exists to prevent, one level up.
+
+    THE PORT SIDE IS A FIXTURE, not one of this tree's real ports. Naming a real
+    `test_*.py` here made `test_harness_deps.py` classify THIS file as cluster-bound,
+    because a file that drives a cluster-bound file needs whatever that file needs --
+    and it was right to. The arm is about the grader's refusal, not about any port, so
+    it supplies its own.
+    """
+    import io, contextlib
+    from compare_to_bash import main
+
+    port = tmp_path / "test_stub.py"
+    port.write_text("def test_x(expect):\n    expect.num(1, 1, 'a name')\n")
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = main(str(HERE.parent / "hilbert_curve.sh"), str(port))
+    text = out.getvalue()
+    expect.num(rc, 2, "the grader exits 2 -- neither a pass nor an ordinary MISSING -- "
+                      "on a suite whose names it cannot fully read")
+    expect.num(1 if "REFUSED" in text else 0, 1, "and says so")
+    expect.num(1 if "arms_failed" in text and "arms_unrunnable" in text else 0, 1,
+               "naming both helpers, so the reader knows what to change")
+    expect.num(1 if "missing:" in text else 0, 0,
+               "and prints NO verdict, because a verdict about a partly-read suite is "
+               "the thing this refuses to produce")
+
+    # THE CONTROL: a suite it CAN read still grades, so the refusal is about the
+    # unreadable helper and not about every foreign suite.
+    readable = tmp_path / "readable.sh"
+    readable.write_text('check "a property the port also asserts" "$a" "$b"\n')
+    port.write_text("def test_x(expect):\n"
+                    "    expect.num(1, 1, 'a property the port also asserts')\n")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = main(str(readable), str(port))
+    expect.num(rc, 0, "control: a readable suite still grades, and grades clean")
+    expect.num(1 if "missing:" in out.getvalue() else 0, 1,
+               "and DOES print a verdict, so the refusal above is the difference")
+
+
+def test_a_helper_reaching_only_the_primitive_is_found(expect):
+    """THE SEED IS `pgc_record`, NOT THE `check` FAMILY, and four suites turn on it.
+
+        phase4.sh::assert_plan   reaches: pgc_record
+        phase5.sh::assert_plan   reaches: pgc_record
+        audit.sh::expect_error   reaches: pgc_record
+
+    None of them ever calls a `check_*` helper. A closure seeded from the check family
+    cannot see them, and seeding from the primitive is the difference between 145
+    names read and 89 -- measured against a second implementation that seeded from
+    `check*` and came up 56 short across exactly these four suites.
+
+    This is the direct-call-versus-closure error one level up: closing over `check*`
+    without closing over the thing `check*` itself closes over.
+    """
+    src = ('pgc_record() { PGC_CHECKS=$((PGC_CHECKS + 1)); }\n'
+           'assert_plan() {\n\tlocal name="$1"\n'
+           '\tpgc_record PASS "$name" "PASS  $name"\n}\n'
+           'assert_plan "the plan has no Sort" "$(plan)"\n')
+    forwarding, unreadable = _suite_recorders(src)
+    expect.text(", ".join(f"{k}:${v}" for k, v in sorted(forwarding.items())),
+                "assert_plan:$1",
+                "a helper that reaches ONLY the primitive is still a recorder")
+    expect.text(", ".join(_names_in(src)), "the plan has no Sort",
+                "and its call sites are read")
+
+    # AND ON THE REAL TREE, because the fixture proves the rule and not the corpus.
+    real = _suite_recorders((HERE.parent / "phase4.sh").read_text())[0]
+    expect.num(1 if "assert_plan" in real else 0, 1,
+               "phase4.sh's assert_plan is found in the tree, not only in a fixture")
 
 
 def test_every_pair_in_the_tree_is_declared(expect):

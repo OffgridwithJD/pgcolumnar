@@ -58,6 +58,42 @@ true until the next version shipped.
 
   `test/pytest/TESTS.md` also described the ledger as FIVE tab-separated columns and
   omitted `majors` from the list, from the day that column landed (#1010) until now.
+- `compare_to_bash.py` could not read a name a suite passed through its OWN wrapper,
+  and published a bare `{}` in its place (#1053).
+
+  #1051 taught the extractor the recorders `lib.sh` shares. A suite may also define
+  its own, and there are two shapes, only one of which is a gap:
+
+      COMPOSE   check "non-owner refused: ${1%%(*}"     the definition states a
+                                                        TEMPLATE naming the property
+      FORWARD   check_text "$label" "$got" "$want"      the definition states nothing
+
+  A composing wrapper is already read correctly -- `non-owner refused: {}` covers all
+  nine of `native_ownership`'s call sites, which is why that pair grades one-for-one.
+  A forwarding wrapper's definition yields the bare template `{}`, and 17 of those
+  were being published: a "property" with no content, sitting in MISSING where no port
+  can ever assert it, and MATCHING a port name that is entirely one interpolation.
+
+  The grader now derives each suite's own recorders by the rule that already works for
+  `lib.sh` -- a function forwarding a bare positional into a known recorder's name
+  slot, transitively, seeded from `pgc_record` -- reads the call sites of the
+  forwarding ones, drops the bare `{}`, and leaves composers alone. 145 names across
+  14 suites become readable. `sorted_pathkeys` alone gains 18, and they are not a
+  random 18: that suite pairs every "plans no Sort" with an "and still answers
+  correctly", so the grader could see every claim about the PLAN and none about the
+  ANSWER.
+
+  AND IT REFUSES what it cannot read. `hilbert_curve.sh` defines two helpers taking a
+  newline-separated LIST of names in one argument, so no rule about argument positions
+  can read them; the grader now exits 2 naming both rather than grading the rest. One
+  suite of 264, a true positive, with no pytest twin.
+
+  MEASURED BEFORE BUILDING, and it changed the design: refusing on "the name position
+  is not a bare positional" also refuses every COMPOSING wrapper -- 32 suites,
+  including `hilbert_cluster`, `hilbert_locality` and `native_ownership`, three pairs
+  that are COMPLETE today -- to fix nothing. Every graded pair is unchanged by what
+  shipped.
+
 - `iceberg_fdw.sh` is ported to pytest: the FDW's partition and metrics pruning
   (#388, #432).
 
