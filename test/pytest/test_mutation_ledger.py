@@ -23,6 +23,7 @@ shell: a Python twin of a Python tool would agree with itself.
 """
 
 import pathlib
+import re
 import subprocess
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -1118,6 +1119,26 @@ def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one
     expect.text("uniform" in summary(good_out) and "NOT UNIFORM" not in summary(good_out),
                 True, "while the correct merge says uniform and does not cry wolf")
     n_bad = len(_rows(bad))
-    expect.text(f"rows {n_bad} = sum of buckets {n_bad}" in summary(bad_out), True,
-                "and the reconciliation is printed beside the buckets, so a set lost to "
-                "the sort would be visible rather than inferred")
+    expect.text(f"rows {n_bad} = sum of buckets printed {n_bad}" in summary(bad_out), True,
+                "and the reconciliation is printed beside the buckets")
+
+    # THE RECONCILIATION IS DERIVED FROM THE PRINTED LINES, NOT FROM THE COUNTER.
+    # `sum(dist.values())` equals `len(rows)` by construction, so a reconciliation built
+    # from it guards the one step that cannot go wrong: truncating the DISPLAY loop drops
+    # a bucket -- the MINORITY one, which is the whole point of the summary -- and such a
+    # reconciliation still balances. Caught by @OffgridwithJD reviewing this branch.
+    # Asserted by re-adding the printed counts here, which is the only way an arm outside
+    # the tool can tell the two sources apart.
+    # PARSED PER LINE, not out of the whitespace-joined block. Joined, the bucket LABEL
+    # runs into the next line's word: "... 2 rows 18" + "rows 4 = ..." yields a phantom
+    # "18 rows" and the sum came to 26 against 4. The line structure is the thing that
+    # separates a count from a major set, so the parse has to keep it.
+    printed = [int(m.group(1))
+               for l in bad_out.splitlines()
+               for m in [re.match(r"\s+(\d+) rows\s\s+\S", l)] if m]
+    stated = int(re.search(r"sum of buckets printed (\d+)", bad_out).group(1))
+    expect.num(sum(printed), stated,
+               "the reconciliation equals the sum of the bucket counts ACTUALLY PRINTED, "
+               "so a bucket lost in the display cannot leave it balanced")
+    expect.num(stated, n_bad,
+               "and that emitted total still accounts for every row in the ledger")

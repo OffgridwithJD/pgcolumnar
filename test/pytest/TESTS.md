@@ -2608,7 +2608,15 @@ ignoring the output; the output agreed with them.** A roll-up that cannot repres
 failure is worse than no summary, because it actively confirms the wrong answer.
 
 It now prints the distribution, says `NOT UNIFORM` when there is more than one set, and
-prints `rows N = sum of buckets N` beside it.
+prints `rows N = sum of buckets printed N` beside it.
+
+**The reconciliation counts what was PRINTED, not what was counted**, and the difference is
+the whole value of it. `sum(dist.values())` equals `len(rows)` by construction — `dist`
+consumes `rows.values()` exactly once — so a reconciliation built from it guards the one
+step that cannot go wrong. Truncating the display loop drops a bucket, and the **minority**
+one at that, while such a line still balances at `5 = 5`. Found by @OffgridwithJD reviewing
+this change. An arm re-adds the printed counts from the output, which is the only way
+something outside the tool can tell the two sources apart.
 
 The arm holds the **discrimination**, not the wording: it merges the same two checks two
 ways and requires the two summaries to differ. Asserting on one output alone would pass

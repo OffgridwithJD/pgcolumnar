@@ -42,7 +42,12 @@ true until the next version shipped.
       majors: NOT UNIFORM -- 2 distinct sets over 5 rows
              3 rows  15;16;17;18;19
              2 rows  18
-        rows 5 = sum of buckets 5
+        rows 5 = sum of buckets printed 5
+
+  The reconciliation counts what was PRINTED. `sum(dist.values())` would equal
+  `len(rows)` by construction, so it could never catch a bucket lost in the DISPLAY --
+  and truncating the loop drops the MINORITY bucket, the one the summary exists to
+  show, while the line still balances. Found by @OffgridwithJD in review.
 
   Reporting only. Whether merge should REFUSE a non-uniform result is a live design
   question and is deliberately not settled by this change.

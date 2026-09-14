@@ -486,18 +486,27 @@ def cmd_merge(args):
     dist = collections.Counter(MAJOR_SEP.join(sorted(v[0])) for v in rows.values())
     print(f"  ledger: rows={len(rows)} | runs={len(runs)}, distinct checks this merge={len(seen_all)}, "
           f"observed red ever={red}, never={len(rows) - red}")
+    #
+    # THE RECONCILIATION COUNTS WHAT WAS PRINTED, not what was counted. `sum(dist.values())`
+    # would equal `len(rows)` BY CONSTRUCTION -- `dist` consumes `rows.values()` exactly
+    # once -- so it could only ever catch a filter on the comprehension two lines up, and
+    # never a bucket lost in the DISPLAY. Measured by @OffgridwithJD on this branch:
+    # truncating the loop below to `[:1]` drops the MINORITY bucket, which is the one this
+    # whole summary exists to show, and the reconciliation still balanced at 5 = 5. A guard
+    # over the step that cannot go wrong is the shape this change is about.
+    emitted = []
     if not dist:
         print("    majors: the ledger has no rows")
     elif len(dist) == 1:
         only, n = next(iter(dist.items()))
         print(f"    majors: uniform, all {n} rows carry {only}")
+        emitted.append(n)
     else:
         print(f"    majors: NOT UNIFORM -- {len(dist)} distinct sets over {len(rows)} rows")
         for maj, n in sorted(dist.items(), key=lambda kv: (-kv[1], kv[0])):
             print(f"      {n:>6} rows  {maj}")
-    # The house rule for any list-derived claim: print the reconciliation beside it, so a
-    # bucket lost to a sort or a filter is visible rather than inferred.
-    print(f"      rows {len(rows)} = sum of buckets {sum(dist.values())}")
+            emitted.append(n)
+    print(f"      rows {len(rows)} = sum of buckets printed {sum(emitted)}")
     return 0
 
 
