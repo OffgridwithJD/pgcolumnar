@@ -224,6 +224,36 @@ INCOMPLETE branch set a variable the verdict never read.
 silently, so the layer refused the cheap dishonest escape and permitted the
 expensive-looking one. An escape hatch that costs nothing is the default.
 
+### Before you write a `cannot_run`: it exits 67, and CI acts on that
+
+A run containing one unrunnable check exits **67** — `EXIT_INCOMPLETE`, deliberately the
+same number as `lib.sh`'s `PGC_EXIT_INCOMPLETE`, so a runner learns the code once. pytest
+itself only uses 0-6, so it collides with nothing.
+
+**The `pytest (cluster tests)` job runs pytest bare under `set -euo pipefail`.** So 67
+fails the step, and the job goes red on a check that did exactly what it was supposed to
+do. Measured on 2026-09-14: that leg exits 0 with **0 unrun**, so nothing in the cluster
+half was producing one and nothing was absorbing it. The next legitimately-unrunnable
+cluster arm is the first, and it turns the job red.
+
+The guard half is not in the same position today, but the reasoning is the same.
+
+So, in order:
+
+1. **Try to remove the precondition.** `sorted_pathkeys`' `parallel_copy` arm needed
+   `max_prepared_transactions` raised before the postmaster starts. That is a line in
+   `pgc_cluster`'s `postgresql.conf`, so the arm runs and the question disappears. Prefer
+   this whenever the precondition is something this harness controls.
+2. **If it is not yours to control, weigh what refusing costs.** `cannot_run` records
+   under the REASON CODE, not under a check name, so a ported arm that refuses emits
+   NONE of the bash names it would have carried and the suite must be declared in
+   `INCOMPLETE` (#1040 phase 0b). Refusing is not free even before CI sees it.
+3. **Only then refuse**, and say in the PR that the cluster job's exit code changes.
+
+The general shape, worth recognising away from here: a truthful "could not evaluate"
+sharing one channel with "something is wrong", and a caller that cannot tell them apart.
+`orphan-scan` has the same problem with its exit 1 (#1015).
+
 The run now ends `EXIT_INCOMPLETE`, which is 67 — deliberately the same number as
 `PGC_EXIT_INCOMPLETE` in `lib.sh:58`, because a runner that learns the code should
 learn it once. pytest itself uses 0–6, so 67 collides with nothing. The reason and
