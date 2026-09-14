@@ -3836,6 +3836,10 @@ the tool grades THIS tree.
 | test | what it holds |
 | --- | --- |
 | `test_the_name_is_the_last_argument_not_the_first_string` | the regression, over three helpers, one of which always worked |
+| `test_a_name_bound_by_a_loop_over_a_literal_table_is_read` | a `for` over a literal table has its NAME column read, and `_py_names` returns it |
+| `test_a_literal_column_survives_an_interpolated_neighbour` | the column is read cell by cell, so an f-string in another column does not drop five literal labels |
+| `test_a_table_that_is_not_literal_contributes_nothing` | a module constant, a comprehension and a computed label are refused rather than guessed, with a control |
+| `test_the_loop_reader_invents_nothing_in_this_corpus` | every name it returns appears verbatim in the file, and it is exactly three files |
 | `test_a_call_whose_name_is_not_a_literal_contributes_nothing` | absent beats wrong: a false green on a parity tool loses a property in both harnesses |
 | `test_an_fstring_name_becomes_a_template` | a runtime-built name is compared by shape |
 | `test_a_conditional_name_carries_both_of_its_arms` | `"a" if c else "b"` states two properties |
