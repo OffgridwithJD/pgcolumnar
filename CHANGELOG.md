@@ -578,6 +578,18 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
+- An index fetch silently returned a row when `page_length` was 2^32 too large.
+
+  `NativeColumnChunkMetadata.pageLength` is `uint64`. Both decode entry points
+  cast `(pageLength - validityBytes)` to `uint32`. Adding 2^32 to the catalog
+  value leaves the low 32 bits unchanged, so a btree fetch reconstructed the
+  original stream and returned the row. A sequential scan already refused: the
+  chunk no longer fitted its row group, so containment raised XX001. The fetch
+  path never had that check.
+
+  The value-stream length is now required to fit in `uint32` before either path
+  decodes. Adding 2^32 is refused with XX001 on the fetch and on the scan. New
+  twins `native_chunk_length_bound` and `test_native_chunk_length_bound.py`.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
