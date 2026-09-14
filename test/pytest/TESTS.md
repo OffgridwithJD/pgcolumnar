@@ -89,6 +89,7 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
+- [44. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#44-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
 
 ## 1. How to read a test in here
 
@@ -4338,3 +4339,27 @@ Removal proof, run on both harnesses: restore `META.json` as it shipped and the 
 substantive arms redden on each side while every premise stays green. The premises
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
+
+## 44. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O
+
+The port of `test/parallel_scan_cost.sh`. The partial path priced itself as
+`serial_startup + (serial_run / workers)`. Core seqscan divides CPU only and
+leaves disk I/O whole. Dividing the whole run quotes an I/O-dominated scan at
+half its serial cost with two workers, so Gather beat honestly costed
+alternatives.
+
+Public seam: `EXPLAIN` of a columnar scan. This file raises `seq_page_cost` so
+I/O dominates the serial run; the shell twin does the same with a different
+page-cost and its own table. CPU terms stay at their defaults so the parallel
+path is still a little cheaper than serial and Gather still appears -- the
+number this suite exists to read. Assertion names match the shell suite.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
+
+The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
+`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
+unreachable by dividing the whole run, and reachable only if I/O remains.

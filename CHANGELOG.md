@@ -578,6 +578,16 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
+- A parallel custom scan divided its whole run cost by the worker count.
+
+  Core seqscan divides CPU across workers and leaves disk I/O whole. The
+  partial columnar path divided `(total - startup)` by `workers`, so an
+  I/O-dominated scan was quoted at half its serial cost with two workers.
+  Measured: serial run 10825, parallel Custom Scan 5412.5 (ratio 2.000).
+  Leaving I/O undivided, the same fixture is 10112.5 (ratio 1.070).
+
+  `get_parallel_divisor` is static in core; the leader-participation heuristic
+  is reproduced so CPU uses the same divisor a parallel seqscan does.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
@@ -2301,6 +2311,7 @@ true until the next version shipped.
   rather than measured. It is the gap to close if the default is ever doubted.
 
 ### Fixed
+
 
 - The standing parity arm graded a hand-written list, and nothing enforced it
   (#432, #1046).
