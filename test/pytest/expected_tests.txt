@@ -80,7 +80,10 @@
 # shadowing arm (check_ratio is a prefix of check_ratio_needs_quiet_machine), and one
 # pinning the four suite-local helpers as knowingly out of scope.
 # Re-derived by collection against main 0d17a87: `316 tests collected`.
-guard_tests 316
+# 316 -> 317: the parity declaration is asserted in BOTH directions (#1046), so a pair
+# that exists and is not declared reddens with the stem named. Re-derived by collection
+# against main 20bc290: `317 tests collected`.
+guard_tests 317
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

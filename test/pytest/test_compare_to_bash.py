@@ -44,6 +44,52 @@ sys.path.insert(0, str(HERE))
 from compare_to_bash import _as_names, _parametrized_names, _py_names, _template  # noqa: E402
 
 
+# THE PAIRS THIS TREE HOLDS, DECLARED IN BOTH DIRECTIONS (#1046).
+#
+# `COMPLETE` is graded by the standing arm below: every one must reach zero MISSING.
+# `INCOMPLETE` is how a pair that does NOT reach zero is declared, with the reason,
+# rather than being absent.
+#
+# WHY A DECLARATION AND NOT JUST A DERIVED LIST. Grading whatever exists would pin a
+# real gap as the expected state, which the standing arm's docstring has always
+# refused. Declaring the gap instead keeps the refusal and removes the silence: the
+# arm asserts that COMPLETE + INCOMPLETE is exactly the set of pairs in the tree, so
+#
+#     a new COMPLETE pair omitted     reddens, with the stem named
+#     a new INCOMPLETE pair omitted   reddens, with the stem named
+#     a known gap                     declared with its reason, does not redden
+#     a declared pair that vanishes   reddens
+#
+# IT DOES FORBID ONE THING, and the issue said this was the decision to make rather than
+# assume: today an INCOMPLETE pair may land declaring NOTHING and nothing reddens. Here
+# it must carry a stem and a reason. That is a new obligation on a real case -- the
+# escape hatch is attached rather than the case forbidden, but a porter who lands a pair
+# that does not reach zero now has to say so. Named by @OffgridwithJD, who pointed out
+# that "forbids nothing that was allowed before" was the comfortable phrasing and the
+# accurate one is "forbids nothing EXCEPT landing an incomplete pair silently", which is
+# the thing this guard exists about.
+#
+# THE COST TODAY IS ZERO, measured on 20bc290: 8 pairs exist, 8 are declared, 0 exist
+# undeclared and 0 are declared without existing. `INCOMPLETE` starts empty and the first
+# person it costs is the next porter, who is the person it is for.
+#
+# Until #1046 the list was hand-written
+# and nothing enforced it: the set happened to equal the tree, so nothing had ever been
+# silently ungraded, and an eighth pair omitted would have left the arm passing while it
+# graded seven -- absent-from-the-list and no-gap-found producing the same green.
+#
+# The shape is `SHELL_REFERENCES`' in `test_harness_deps.py`, asserted in both
+# directions for the same reason: a one-way list rots into a permanent exemption.
+COMPLETE = ["differential", "hilbert_cluster", "hilbert_locality",
+            "native_ownership", "native_projection", "projection_privilege",
+            "stats_privilege", "zonemap_boundaries"]
+
+# stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
+# about the PORT rather than a licence: the standing arm does not grade it, so the
+# reason is the only thing standing between a declared gap and a forgotten one.
+INCOMPLETE = {}
+
+
 def _names(src):
     return _py_names(src)
 
@@ -465,6 +511,53 @@ def test_the_suite_local_helpers_are_known_and_excluded(expect):
                "and none of their suites has a pytest twin, so none is graded today")
 
 
+def test_every_pair_in_the_tree_is_declared(expect):
+    """THE DECLARATION IS ASSERTED IN BOTH DIRECTIONS (#1046).
+
+    The standing arm below grades the pairs it is GIVEN. Until this arm existed, a pair
+    that existed and was not given to it was not graded, and nothing said so: the arm
+    passed, grading the ones it knew about, and reported a clean verdict for a tree it
+    had not fully looked at. **Absent-from-the-list and no-gap-found produced the same
+    green.**
+
+    Latent rather than live throughout: the declared set happened to equal the tree, so
+    nothing had ever been silently ungraded. It would have gone live the moment a ninth
+    pair landed undeclared, which is a thing a porter does by forgetting one line.
+
+    BOTH DIRECTIONS, for the reason `SHELL_REFERENCES` gives in `test_harness_deps.py`:
+    a declaration asserted one way rots into a permanent exemption. A pair that exists
+    and is not declared reddens; a stem declared for a pair that has been deleted
+    reddens too.
+
+    A PAIR IS `test_<stem>.py` BESIDE `test/<stem>.sh`, derived from the tree rather
+    than listed. 24 pytest files have no matching suite -- the harness's own guards --
+    and are correctly not pairs; deriving the population is what keeps them out without
+    a second exemption list to maintain.
+    """
+    root = HERE.parent.parent
+    exist = {p.name[5:-3] for p in HERE.glob("test_*.py")
+             if (root / "test" / f"{p.name[5:-3]}.sh").exists()}
+    expect.at_least(len(exist), 8, "premise: the tree has pairs to find, derived not listed")
+
+    declared = set(COMPLETE) | set(INCOMPLETE)
+    expect.num(len(declared), len(COMPLETE) + len(INCOMPLETE),
+               "premise: no stem is both complete and incomplete")
+
+    undeclared = sorted(exist - declared)
+    phantom = sorted(declared - exist)
+    expect.text(", ".join(undeclared) or "none", "none",
+                "every pair in the tree is declared, so none is silently ungraded")
+    expect.text(", ".join(phantom) or "none", "none",
+                "and every declared stem is a pair that exists, so the list cannot rot")
+
+    # A DECLARED GAP MUST CARRY ITS REASON, or `INCOMPLETE` becomes a way to drop a pair
+    # out of grading by naming it. The standing arm does not grade these, so the reason
+    # is the only thing between a declared gap and a forgotten one.
+    thin = sorted(k for k, v in INCOMPLETE.items() if len(v.strip()) < 20)
+    expect.text(", ".join(thin) or "none", "none",
+                "every incomplete pair says why, at more than a passing word")
+
+
 def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     """THE STANDING ARM, and the reason this file is not only about fixtures.
 
@@ -494,12 +587,29 @@ def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     import io
 
     root = HERE.parent.parent
-    # EVERY pair in the tree. When a new port lands it belongs here, and when one
-    # cannot reach zero the reason belongs in its own file rather than in an omission
-    # from this list.
-    complete = ["differential", "hilbert_cluster", "hilbert_locality",
-                "native_ownership", "native_projection", "projection_privilege",
-                "stats_privilege", "zonemap_boundaries"]
+    complete = COMPLETE
+    # A CARDINALITY PREMISE, required because the list moved to module scope in #1046 and
+    # this loop now iterates a DERIVED name rather than a literal spelled here. An empty
+    # or truncated COMPLETE would leave every arm below unrun and the verdict comparison
+    # trivially equal -- the whole arm passing over nothing. The sweep in
+    # `test_loop_coverage_premise.py` caught the omission the moment the list was hoisted.
+    #
+    # IT COUNTS THE DECLARED TOTAL AGAINST THE PAIRS THAT EXIST, not `COMPLETE` against a
+    # number. The first version was `at_least(len(complete), 8)` and it broke the escape
+    # hatch this change exists to provide: moving one stem to INCOMPLETE takes
+    # `len(COMPLETE)` to 7 and reddened the suite, so a pair could not be declared
+    # incomplete without going red. @OffgridwithJD caught it; my proof that the hatch
+    # worked had been run BEFORE this premise was added and never re-run against the file
+    # that shipped.
+    #
+    # The floor was also a hard-coded 8 needing an edit the first time a ninth pair lands
+    # -- the budget shape #982 argues against. Derived, it needs none.
+    declared_total = len(complete) + len(INCOMPLETE)
+    pairs_on_disk = {q.name[5:-3] for q in HERE.glob("test_*.py")
+                     if (root / "test" / f"{q.name[5:-3]}.sh").exists()}
+    expect.num(declared_total, len(pairs_on_disk),
+               "premise: every pair on disk is declared somewhere, so this loop and the "
+               "INCOMPLETE list account for all of them")
     verdicts = {}
     for stem in complete:
         sh, py = root / "test" / f"{stem}.sh", HERE / f"test_{stem}.py"

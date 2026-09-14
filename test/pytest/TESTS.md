@@ -2884,6 +2884,44 @@ not the first one wearing a Python wrapper.
 | `test_an_interpolated_sibling_is_reported_rather_than_compared_wrongly` | it declines to compare a site where a literal comparison would be **false in both directions** |
 | `test_every_loop_is_classified_into_exactly_one_category` | `compared + armless + interpolated == loops`, so nothing fell out of the report |
 
+### The standing arm graded a hand-written list, and nothing enforced it (#1046)
+
+The arm below grades the pairs it is GIVEN. A pair that existed and was not given to it
+was not graded, and nothing said so -- the arm passed, grading the ones it knew about,
+and reported a clean verdict for a tree it had not fully looked at. **Absent-from-the-list
+and no-gap-found produced the same green.**
+
+Latent throughout: the declared set happened to equal the tree, so nothing was ever
+silently ungraded. It would have gone live the moment a ninth pair landed undeclared,
+which is what forgetting one line looks like.
+
+`COMPLETE` and `INCOMPLETE` are now declared at module scope and asserted in both
+directions, the shape `SHELL_REFERENCES` uses in `test_harness_deps.py`:
+
+| | |
+| --- | --- |
+| a new COMPLETE pair omitted | reddens, with the stem named |
+| a new INCOMPLETE pair omitted | reddens, with the stem named |
+| a known gap, declared with its reason | does not redden |
+| a declared stem whose pair has been deleted | reddens |
+
+**It forbids one thing, and that was the decision rather than an oversight.** Today an
+incomplete pair may land declaring nothing. Here it must carry a stem and a reason --
+the escape hatch is attached rather than the case forbidden, but a porter who lands a
+pair that does not reach zero now has to say so. The cost today is zero: 8 pairs exist,
+8 are declared, `INCOMPLETE` starts empty, and the first person it costs is the next
+porter, who is the person it is for.
+
+A pair is `test_<stem>.py` beside `test/<stem>.sh`, **derived** rather than listed. The
+24 pytest files with no matching suite are the harness's own guards and are correctly
+not pairs; deriving the population keeps them out without a second exemption list.
+
+**And hoisting the list made an existing guard fire.** The standing arm's loop now
+iterates a module-level name rather than a literal, so
+`test_loop_coverage_premise.py` demanded a cardinality premise -- an empty `COMPLETE`
+would leave every arm unrun and the verdict comparison trivially equal. The premise is
+`at_least(len(complete), 8)`, and the sweep caught its absence the moment the list moved.
+
 ### Removal proofs
 
 Each mutation was asserted to apply before the run, because a clean pass reads
@@ -3740,6 +3778,7 @@ the tool grades THIS tree.
 | `test_the_extractor_reads_every_check_helper_lib_sh_defines` | the BASH-side drift guard: the helper list re-derived from `lib.sh`'s definitions |
 | `test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one` | `check_ratio` must not eat `check_ratio_needs_quiet_machine` |
 | `test_the_suite_local_helpers_are_known_and_excluded` | the four suite-local helpers, and that none of their suites is graded |
+| `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
 
 ## 37. test_hilbert_cluster.py: the Hilbert clustering SQL surface

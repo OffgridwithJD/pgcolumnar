@@ -1416,6 +1416,67 @@ true until the next version shipped.
 
 ### Fixed
 
+- The standing parity arm graded a hand-written list, and nothing enforced it
+  (#432, #1046).
+
+  `test_the_ported_suites_in_this_tree_are_graded_one_for_one` grades the pairs it is
+  GIVEN. A pair that existed and was not given to it was not graded, and nothing said
+  so: the arm passed, grading the ones it knew about, and reported a clean verdict for
+  a tree it had not fully looked at. **Absent-from-the-list and no-gap-found produced
+  the same green.**
+
+  Latent throughout -- the declared set happened to equal the tree, so nothing was ever
+  silently ungraded. Found by @OffgridwithJD, whose eighth port would not have been
+  graded by it, and it would have gone live the moment a ninth landed undeclared.
+
+  `COMPLETE` and `INCOMPLETE` are declared at module scope and asserted BOTH ways, the
+  shape `SHELL_REFERENCES` already uses: a pair in the tree that is not declared reddens
+  with the stem named, and a declared stem whose pair has been deleted reddens too. A
+  pair is derived as `test_<stem>.py` beside `test/<stem>.sh`, so the 24 pytest files
+  with no suite stay out without a second exemption list.
+
+  **It forbids one thing, and that was the decision rather than an oversight.** An
+  incomplete pair could previously land declaring nothing; now it must carry a stem and
+  a reason. The escape hatch is attached rather than the case forbidden, and the cost
+  today is zero -- 8 pairs exist, 8 are declared, `INCOMPLETE` starts empty. Named by
+  @OffgridwithJD, who pointed out that "forbids nothing that was allowed before" was the
+  comfortable phrasing.
+
+  Five mutations, each asserted to apply by md5 and the tree restored after:
+
+      drop a stem                            every pair in the tree is declared
+      declare a stem with no files           every declared stem is a pair that exists
+      move a stem to INCOMPLETE, thin reason every incomplete pair says why
+      a stem in both lists                   no stem is both complete and incomplete
+      move a stem to INCOMPLETE, full reason ALL GREEN -- the hatch works
+
+  The last is the one that matters: it demonstrates the escape hatch is usable, rather
+  than only that the guard fires.
+
+  **AND IT DID NOT, FIRST TIME.** The cardinality premise below was added AFTER that
+  mutation was run and the mutation was never re-run, so "the hatch works" was true of a
+  file that no longer existed. The premise counted `len(COMPLETE)` against a hard-coded
+  8, so moving one stem to INCOMPLETE took it to 7 and reddened the suite: a pair could
+  not be declared incomplete without going red, which is the one thing this change exists
+  to allow. Caught by @OffgridwithJD reviewing, not by the author re-running.
+
+  The premise now counts the DECLARED TOTAL against the pairs that exist on disk, both
+  derived. That keeps the guard -- an emptied `COMPLETE` still reddens, because 0 does
+  not equal 8 -- permits the hatch, and removes a hard-coded number that would have
+  needed an edit the first time a ninth pair landed, which is the budget shape #982
+  argues against.
+
+  All five mutations were then re-run against the file that ships. Three of them redden
+  the accounting premise as well as their named arm, which is correct rather than noise:
+  a dropped stem, a phantom stem and a double-declared stem each genuinely break the
+  accounting, and the named arm fires beside it to say which.
+
+  **Hoisting the list made an existing guard fire**, which is the sweep working. The
+  standing arm's loop now iterates a module-level name rather than a literal, so
+  `test_loop_coverage_premise.py` demanded a cardinality premise -- an empty `COMPLETE`
+  would leave every arm unrun and the verdict comparison trivially equal.
+
+
 - `compare_to_bash.py` read five of the eight check helpers `lib.sh` defines
   (#432, #1040).
 
