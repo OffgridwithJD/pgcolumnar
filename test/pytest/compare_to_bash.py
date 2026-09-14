@@ -250,6 +250,12 @@ _BASH_INTERP = re.compile(
 # Hand-written so the tool stays standalone, and pinned like `_NAME_ARG`: the drift
 # guard in `test_compare_to_bash.py` DERIVES this table from `lib.sh` -- membership
 # and position both -- and fails with the helper named when the two disagree.
+# The primitive every recorder reaches, and the argument IT names its check in. The
+# seed of the closure below; named rather than inlined so an arm can assert that no
+# suite calls it directly.
+_RECORD_PRIMITIVE = "pgc_record"
+_RECORD_NAME_ARG = 2
+
 _BASH_NAME_ARG = {
     "check_ratio_needs_quiet_machine": 1,
     "check_unrunnable": 1,
@@ -270,6 +276,115 @@ _BASH_NAME_ARG = {
 # the question is "does the extractor know about X".
 _BASH_HELPERS = tuple(_BASH_NAME_ARG)
 
+
+def _strip_comments(text):
+    r"""-> the text with shell comments removed, and NOTHING else removed.
+
+    `#` starts a comment only at a word boundary. `${shape#*|}` and `$#` are not
+    comments, and cutting at the first `#` truncates the line to something that
+    parses as a different program. That exact slip has produced two wrong counts in
+    this repo, so the fixtures for it are in the arm below rather than in a comment.
+    """
+    out = []
+    for line in text.splitlines():
+        res, i, quote = [], 0, None
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == quote:
+                    quote = None
+                res.append(ch)
+            elif ch in "\"'":
+                quote = ch
+                res.append(ch)
+            elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()"):
+                break
+            else:
+                res.append(ch)
+            i += 1
+        out.append("".join(res))
+    return "\n".join(out)
+
+
+def _bodies(text):
+    """-> [(function name, body)] with each body ended by ITS OWN closing brace.
+
+    Per-line brace depth, not `find("\n}")`: 199 definitions in this tree are written
+    on one line (`q() { psql ...; }`), and a scan for a brace in the first column
+    swallows every following definition into the first one's body.
+    """
+    out, lines = [], text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(\)[ \t]*\{", line)
+        if not m:
+            continue
+        depth = line.count("{") - line.count("}")
+        body, j = [line[m.end():]], i + 1
+        while j < len(lines) and depth > 0:
+            depth += lines[j].count("{") - lines[j].count("}")
+            body.append(lines[j])
+            j += 1
+        out.append((m.group(1), "\n".join(body)))
+    return out
+
+
+def _words(text):
+    """-> the shell words of a call's argument list, quotes kept."""
+    return re.findall(r'"[^"]*"|\S+', text)
+
+
+def _derive_recorders(lib, seed=("pgc_record", 2)):
+    """-> {helper: which argument holds the check name}, derived from what lib.sh DOES.
+
+    THE POPULATION IS THE POINT (#1045). The #1040 guard derived its population by
+    SPELLING -- every `lib.sh` function whose name begins `check`. It was green for
+    weeks while `diff_query` went unread, and correctly so: `diff_query` was never in
+    its population. The guard was not broken; the definition of the thing it guards
+    was. 225 names across 59 suites were outside it.
+
+    So: start from `pgc_record`, the primitive that actually records, and take the
+    closure. A function is a recorder at position N when it passes its own `$N` --
+    directly, or renamed once through a `local` -- into the name slot of a helper
+    already known to be one. `diff_query` calls `check`, which calls `pgc_record`.
+    One level of indirection was the entire gap.
+
+    The seed is not returned. It is `lib.sh`'s own primitive and no suite calls it,
+    which the arm below asserts rather than assumes: the day a suite calls it, the
+    extractor has to learn it and this stops being true quietly.
+    """
+    lib = _strip_comments(lib)
+    defs = _bodies(lib)
+    known = {seed[0]: seed[1]}
+
+    changed = True
+    while changed:
+        changed = False
+        for fn, body in defs:
+            if fn in known:
+                continue
+            aliases = {m.group(1): int(m.group(2)) for m in
+                       re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\{?(\d+)\}?"', body)}
+            for rec, pos in sorted(known.items()):
+                for m in re.finditer(r'\b' + rec + r'([ \t]+.*)$', body, re.M):
+                    args = _words(m.group(1))
+                    if len(args) < pos:
+                        continue
+                    slot = args[pos - 1]
+                    inner = re.fullmatch(r'"\$\{?([A-Za-z_0-9]+)\}?"', slot)
+                    if not inner:
+                        continue          # a literal, or something not a bare $x
+                    tok = inner.group(1)
+                    n = int(tok) if tok.isdigit() else aliases.get(tok)
+                    if n is None:
+                        continue
+                    known[fn] = n
+                    changed = True
+                    break
+                if fn in known:
+                    break
+
+    del known[seed[0]]
+    return known
 
 def _template(name):
     """-> the name with every interpolation reduced to `{}`.
@@ -341,9 +456,114 @@ def _bash_names(text):
     return out
 
 
+def _suite_recorders(text):
+    """-> ({helper: which argument holds the name}, [helpers whose name is unreadable]).
+
+    A SUITE'S OWN RECORDERS, derived from its own definitions by the rule that already
+    works for `lib.sh`: seed from the shared table, and any function forwarding a bare
+    positional into a known recorder's name slot is itself a recorder (#1053).
+
+    TWO SHAPES, AND ONLY ONE IS A GAP. The distinction is the whole of this function:
+
+        COMPOSE   check "non-owner refused: ${1%%(*}"    the definition states a
+                                                        TEMPLATE naming the property,
+                                                        and it covers every call site
+        FORWARD   check_text "$label" ...                the definition states nothing;
+                                                        the NAME is at the call sites
+
+    A composing wrapper is already read, correctly, out of the suite file -- which is
+    why `native_ownership` grades one-for-one today. Treating it as unreadable and
+    refusing it would have broken three COMPLETE pairs to fix nothing; measured, at 32
+    suites refused including `hilbert_cluster`, `hilbert_locality` and
+    `native_ownership`. So only FORWARDING wrappers are returned here, and the call
+    sites are where their names are read.
+
+    The unreadable list is the refuse half: a helper that reaches a recorder with a
+    name slot this cannot resolve at all. Skipping it silently is how 147 names in 14
+    suites came to be ungraded.
+    """
+    body_text = _strip_comments(text)
+    known = dict(_BASH_NAME_ARG)
+    known[_RECORD_PRIMITIVE] = _RECORD_NAME_ARG
+    forwarding, unreadable = {}, []
+
+    changed = True
+    while changed:
+        changed = False
+        for fn, body in _bodies(body_text):
+            if fn in known or fn in unreadable:
+                continue
+            aliases = {m.group(1): int(m.group(2)) for m in
+                       re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\{?(\d+)\}?"', body)}
+            for rec, pos in sorted(known.items()):
+                m = re.search(r"\b" + rec + r"([ \t]+.*)$", body, re.M)
+                if not m:
+                    continue
+                args = _words(m.group(1))
+                if len(args) < pos:
+                    continue
+                slot = args[pos - 1]
+                bare = re.fullmatch(r'"\$\{?([A-Za-z_0-9]+)\}?"', slot)
+                if bare:
+                    token = bare.group(1)
+                    n = int(token) if token.isdigit() else aliases.get(token)
+                    if n is None:
+                        # Reaches a recorder, and which argument carries the name
+                        # cannot be decided. REFUSE rather than skip.
+                        unreadable.append(fn)
+                    else:
+                        known[fn] = n
+                        forwarding[fn] = n
+                    changed = True
+                    break
+                # A literal or a composed name: the definition states the property and
+                # `_bash_names` already reads it. Not a forwarder, not a refusal.
+                break
+    return forwarding, sorted(unreadable)
+
+
+def _names_in(text):
+    """-> every check name the suite states, including through its OWN wrappers.
+
+    A BARE `{}` IS DROPPED. A forwarding wrapper's definition reads as `"$label"`,
+    which reduces to the template `{}` -- a property with no content. Published, it
+    sits in MISSING naming nothing a port could assert, and it MATCHES a port name
+    that is entirely one interpolation, which is a spurious pass. 17 of them were
+    being published. A wrong name is worse than an absent one, which is the argument
+    #1051 turned on.
+    """
+    forwarding, _ = _suite_recorders(text)
+    names = list(_bash_names(text))
+    for helper, pos in sorted(forwarding.items()):
+        names += re.findall(_pattern_for(pos, (helper,)), _strip_comments(text))
+    # THE FILTER IS APPLIED ONCE, AT THE END, AND TO BOTH SOURCES. A forwarder calling
+    # another forwarder -- `ans() { ansp "$1" h c "$2"; }` -- is a call site like any
+    # other to the pattern, and it yields `$1`. Filtering only the definitions left
+    # that one through, which the fixture below caught.
+    return [n for n in names if _template(n) != "{}"]
+
+
 def main(bash_file, py_file):
     """-> the exit status: 1 when a bash property has no counterpart."""
-    bash_names = _bash_names(open(bash_file).read())
+    bash_src = open(bash_file).read()
+
+    # THE REFUSE HALF (#1053). A helper that reaches a recorder whose name argument
+    # cannot be resolved makes every name it carries invisible, and grading the rest
+    # would report a verdict about a suite the tool has only partly read. That is the
+    # shape this whole issue is about, so it is a refusal rather than a silent skip.
+    _forwarding, unreadable = _suite_recorders(bash_src)
+    if unreadable:
+        print(f"REFUSED: {bash_file} defines {len(unreadable)} helper(s) that record a "
+              f"check under a name this cannot resolve:")
+        for helper in unreadable:
+            print(f"  unreadable  {helper}")
+        print()
+        print("Every check they carry is invisible, so any verdict here would be about "
+              "the part of the suite that happens to be readable. Give the helper a "
+              "name argument in a position the extractor can see, or record directly.")
+        return 2
+
+    bash_names = _names_in(bash_src)
     py_names = _py_names(open(py_file).read())
 
     bset, pset = set(bash_names), set(py_names)

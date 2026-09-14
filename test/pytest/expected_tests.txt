@@ -96,7 +96,15 @@
 # `$(dirname ` as check names out of a suite containing no position-2 helper. Found
 # when a reviewer's stale `.pyc` left the table mid-mutation. Re-derived by
 # collection: `322 tests collected`.
-guard_tests 322
+# 322 -> 329 when the grader learned a suite's OWN recorders (#1053): the forwarding
+# shapes, a composing wrapper left alone, the refusal of a helper whose name position
+# cannot be resolved, the corpus budget pinned at one suite, the bare-{} drop, the
+# grader's refusal exercised through `main`, and a helper reaching only `pgc_record`.
+#
+# #1054 moves this to 324 on ITS tree, from a different arm. Whichever lands second
+# re-derives by collection -- 322 and 322 collected 323 earlier today, and nothing
+# conflicted.
+guard_tests 329
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
