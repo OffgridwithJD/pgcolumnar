@@ -140,4 +140,67 @@ check "a clean URL to a non-allowed endpoint is still the allow-list's 42501" \
 
 check "backend alive" "$(q 'SELECT 1;')" "1"
 
+# --- and userinfo in the ENDPOINT, which #997 left (#995) --------------------
+#
+# The bucket guard above cannot see this one: the userinfo is in the endpoint the
+# operator configured, not in the s3:// URL the caller wrote. Reached here through a
+# foreign server's `endpoint` option, which is `cfg->endpoint` in os_resolve_s3 -- the
+# same variable `AWS_ENDPOINT_URL` feeds, so one arm per SHAPE proves the guard and no
+# postmaster restart is needed. That the env source also reaches it is what the
+# AWS_ENDPOINT_URL control above already shows.
+#
+# TWO SHAPES, AND ONLY ONE OF THEM USED TO BE CAUGHT -- measured on the parse itself
+# before writing the guard:
+#
+#   http://u:p@127.0.0.1:1   -> host "u",            port 0       <- port 0, refused
+#   http://user@127.0.0.1:1  -> host "user@127.0.0.1", port 1      <- port VALID
+#
+# The first has a colon INSIDE the userinfo, so the authority split lands there and the
+# port becomes atoi("p@127.0.0.1:1") = 0. The second has no such colon, so the real port
+# survives and the '@' rides along in the host. #995 measured only the first and
+# concluded "refused as invalid host or port" -- true of that shape, not of the code.
+#
+# The second shape is the one that argues for the guard. Its refusal came from the
+# allow-list, naming the host it could not match, and the HINT then told the operator:
+#
+#     ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints = 'user@127.0.0.1'
+#
+# A diagnostic that invites widening a security boundary to accommodate a parse bug is
+# worse than a wrong error code, which is why the arms below pin the message and not
+# only the SQLSTATE.
+q "CREATE SERVER s3ui FOREIGN DATA WRAPPER pgcolumnar_parquet
+   OPTIONS (endpoint 'http://u:p@127.0.0.1:1');" >/dev/null
+q "CREATE FOREIGN TABLE ft_ui (id int) SERVER s3ui
+   OPTIONS (path 's3://mybucket/x.parquet');" >/dev/null
+q "CREATE SERVER s3ui2 FOREIGN DATA WRAPPER pgcolumnar_parquet
+   OPTIONS (endpoint 'http://user@127.0.0.1:1');" >/dev/null
+q "CREATE FOREIGN TABLE ft_ui2 (id int) SERVER s3ui2
+   OPTIONS (path 's3://mybucket/x.parquet');" >/dev/null
+q "CREATE SERVER s3ok FOREIGN DATA WRAPPER pgcolumnar_parquet
+   OPTIONS (endpoint 'http://127.0.0.1:1');" >/dev/null
+q "CREATE FOREIGN TABLE ft_ok (id int) SERVER s3ok
+   OPTIONS (path 's3://mybucket/x.parquet');" >/dev/null
+
+check "a userinfo endpoint is refused by the parse guard (22023)" \
+	"$(sqlstate_of "SELECT * FROM ft_ui")" "22023"
+check "and the message names userinfo" \
+	"$(msg_of "SELECT * FROM ft_ui")" "1"
+check "and it names the ENDPOINT, not the s3:// URL, which carries none" \
+	"$(msg_has "SELECT * FROM ft_ui" 'endpoint')" "1"
+# The shape the port check never caught: no colon before the '@', so the real port
+# survived and only the allow-list refused it -- at 42501, with a hint to allow-list it.
+check "the user@host shape is refused by the same guard (22023, not an allow-list 42501)" \
+	"$(sqlstate_of "SELECT * FROM ft_ui2")" "22023"
+check "and its message names userinfo too" \
+	"$(msg_of "SELECT * FROM ft_ui2")" "1"
+
+# THE CONTROL. Without it these five cannot tell a userinfo refusal from "this foreign
+# server cannot reach anything" -- the same trap the s3 controls above exist for, and
+# the one that wasted a run on #995's first probe. A clean endpoint must get PAST the
+# guard and fail for a connection reason instead.
+check "control: a clean endpoint is not refused as userinfo" \
+	"$(msg_of "SELECT * FROM ft_ok")" "0"
+check "control: and it gets past the parse to a connection failure, not 22023" \
+	"$([ "$(sqlstate_of "SELECT * FROM ft_ok")" = "22023" ] && echo no || echo yes)" "yes"
+
 pgc_summary
