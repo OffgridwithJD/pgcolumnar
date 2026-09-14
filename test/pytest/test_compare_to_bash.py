@@ -723,6 +723,78 @@ def test_the_comment_stripper_keeps_a_parameter_expansion(expect):
                "and a whole-line comment strips to nothing at all")
 
 
+def test_an_empty_helper_group_fabricates_names_rather_than_reading_none(expect):
+    """AN EMPTY ALTERNATION IS NOT A NO-OP, IT IS A NAME GENERATOR.
+
+    The extractor now reads a name from the argument that holds it, so it builds one
+    pattern per POSITION. A position whose helper list is empty gives `(?:)`, which
+    matches the empty string anywhere, and the pattern degenerates to "any word, then
+    any quoted string". Measured on `zonemap_boundaries.sh`, which contains no
+    position-2 helper at all:
+
+        $(dirname
+        premise: the boundary fixture has two row groups
+        2
+        $PGC_PORT
+        $PGC_DB
+
+    Six fabricated names, reported as bash properties the port is missing -- for
+    ever, because no port can assert `$PGC_DB`. That is worse than reading nothing
+    and worse than an error, and it is SILENT.
+
+    THIS IS WHY THE POSITIONS ARE DERIVED FROM THE TABLE'S OWN VALUES. A position
+    exists only because a helper has it, so the empty group cannot be built. The arm
+    holds the refusal anyway, because the next person to touch this will reach for a
+    literal list of positions, which is what the first version of it did.
+
+    Found when a reviewer's stale `.pyc` left `_BASH_NAME_ARG` mid-mutation and the
+    tool started emitting `$PGC_DB` out of a suite that could not produce it.
+    """
+    from compare_to_bash import _pattern_for, _BASH_NAME_ARG, _BASH_PATTERNS
+
+    raised = ""
+    try:
+        _pattern_for(2, ())
+    except ValueError as e:
+        raised = "refused"
+    expect.text(raised, "refused", "an empty helper group is refused, not built")
+
+    # THE CONTROL: the same call with a member returns a pattern that reads that
+    # member, so the refusal is about emptiness and not about the function.
+    got = re.findall(_pattern_for(2, ("pgc_skip",)),
+                     'pgc_skip pyarrow "pyarrow is needed"\n')
+    expect.text(", ".join(got), "pyarrow is needed",
+                "control: a group with a member builds a pattern that reads it")
+
+    # AND THE THING THAT MAKES THE REFUSAL UNREACHABLE: every position comes from a
+    # helper, so no group can be empty by construction.
+    expect.num(len(_BASH_PATTERNS), len(set(_BASH_NAME_ARG.values())),
+               "one pattern per position the table actually uses, so no group is empty")
+
+    # The fabrication itself, on the real suite, with the degenerate pattern built by
+    # hand -- the arm must show the harm and not only assert the refusal.
+    degenerate = r'\b(?:' + "|".join(()) + r')\s+(?:"[^"]*"|\S+)\s+"([^"]+)"'
+    junk = re.findall(degenerate, (HERE.parent / "zonemap_boundaries.sh").read_text())
+    expect.at_least(len(junk), 1,
+                    "premise: the degenerate pattern really does fabricate names from a "
+                    "suite with no position-2 helper")
+    expect.num(1 if "$PGC_DB" in junk else 0, 1,
+               "and one of them is a shell variable, which no port could ever assert")
+
+    # AND THE SEPARATOR, which is the same class one position further out. The
+    # arguments before the name must be separated by whitespace: running the word
+    # matchers together is byte-identical at 1 and 2 and reads NOTHING from 3 on.
+    # Nothing sits at position 3 today, so this is the arm that would notice.
+    expect.text(", ".join(re.findall(_pattern_for(3, ("demo_helper",)),
+                                     'demo_helper arg1 arg2 "the check name"\n')),
+                "the check name",
+                "a helper naming its check at argument 3 is read, not silently missed")
+    expect.text(", ".join(re.findall(_pattern_for(1, ("demo_helper",)),
+                                     'demo_helper "the check name" got want\n')),
+                "the check name",
+                "control: position 1 still reads the argument next to the helper")
+
+
 def test_a_longer_helper_name_is_not_shadowed_by_a_shorter_one(expect):
     r"""`check_ratio` is a PREFIX of `check_ratio_needs_quiet_machine`.
 
