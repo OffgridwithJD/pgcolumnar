@@ -3786,6 +3786,42 @@ the tool grades THIS tree.
 | `test_every_pair_in_the_tree_is_declared` | the declaration is asserted BOTH ways, so a new pair cannot be silently ungraded |
 | `test_the_ported_suites_in_this_tree_are_graded_one_for_one` | the standing arm: every pair in the tree, graded |
 
+### `test_iceberg_fdw.py` -- the Iceberg FDW's pruning surface (#388, #432)
+
+Ports `test/iceberg_fdw.sh`. 74 of its 76 check names, one for one; the two it cannot
+carry are `pgc_skip`'s refusal names, which are structural and declared in
+`INCOMPLETE` with their reason.
+
+| test | asserts |
+| --- | --- |
+| `test_the_fdw_reads_the_whole_table` | the premise: five rows, and no predicate prunes no files |
+| `test_a_partition_predicate_returns_iceberg_scans_rows` | the same-oracle read -- `iceberg_scan` cannot prune, so it cannot over-prune |
+| `test_a_partition_predicate_prunes_the_other_file` | an identity partition drops the file that cannot match |
+| `test_a_value_in_no_partition_prunes_everything` | a value in no partition prunes both files and returns nothing |
+| `test_a_non_partition_column_prunes_by_file_metrics` | a non-partition column prunes on the manifest's min/max |
+| `test_a_metrics_pruned_scan_still_returns_its_rows` | and the rows survive the pruning |
+| `test_a_value_outside_every_files_metrics_prunes_all` | a value outside every file's range, against the oracle |
+| `test_a_date_partition_is_not_over_pruned` | #660: a date cell the FDW cannot convert must be READ, never NULL-filled and pruned |
+| `test_a_bucket_partition_keeps_only_the_matching_bucket` | `bucket[8]`: our murmur3 agrees with the one pyiceberg wrote |
+| `test_a_bucket_pruned_equality_returns_its_row` | and the kept file holds the row |
+| `test_a_range_predicate_cannot_bucket_prune` | the hash destroys order, so a range prunes by metrics only |
+| `test_a_truncate_partition_prunes_by_range` | `truncate[100]` with metrics disabled, so the transform is the only mechanism |
+| `test_a_truncate_pruned_scan_still_returns_its_rows` | and the rows survive |
+| `test_the_bucket_table_reads_whole_and_matches_the_murmur3_oracle` | the bucket table's premise and its same-oracle read |
+| `test_the_truncate_table_reads_whole_and_matches_the_oracle` | the truncate table's premise and its same-oracle read |
+| `test_a_day_pruned_scan_still_returns_its_rows` | and the rows survive a `day()` pruning |
+| `test_a_day_partition_on_a_date_prunes` | `day(dt)`, whose cell is Iceberg days from 1970 against PostgreSQL's from 2000 |
+| `test_the_day_table_reads_whole_and_crosschecks_the_epoch` | the oracle read that catches a wrong epoch offset |
+| `test_a_coarse_temporal_transform_prunes` | year/month/day/hour on timestamp, date and timestamptz |
+| `test_a_coarse_temporal_transform_does_not_over_prune` | the boundary bucket must be READ: a coarse bucket spans a range |
+| `test_the_two_temporal_tables_cover_the_same_cases` | the two literal tables have not drifted apart |
+| `test_the_year_table_reads_whole_and_keeps_the_boundary_file` | the boundary case stated alone |
+| `test_a_year_equality_prunes_to_one_file` | an equality narrows to the constant's own bucket |
+| `test_a_year_on_date_equality_prunes_to_one_file` | the same on a date column |
+| `test_an_unknown_table_option_is_refused` | the validator, by SQLSTATE `HV00D` rather than by message text |
+| `test_a_plan_with_no_pruning_marker_is_not_read_as_zero` | a plan that never mentions `Files Pruned` is not read as 0; needs no server |
+
+
 ## 37. test_hilbert_cluster.py: the Hilbert clustering SQL surface
 
 The port of `test/hilbert_cluster.sh` (#432, #889's SQL half). The bash suite pins the SQL

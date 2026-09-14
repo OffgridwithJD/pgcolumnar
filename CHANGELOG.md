@@ -18,6 +18,43 @@ true until the next version shipped.
 
 ### Added
 
+- `iceberg_fdw.sh` is ported to pytest: the FDW's partition and metrics pruning
+  (#388, #432).
+
+  74 of the suite's 76 check names, one for one under `compare_to_bash.py`, across
+  identity partitions, file metrics, `bucket[8]`, `truncate[100]`, and
+  `day`/`year`/`month`/`hour` on date, timestamp and timestamptz columns.
+
+  EVERY PRUNING ARM IS PAIRED WITH A CORRECTNESS ARM, which is the design of the bash
+  suite and the reason it matters here: pruning is an optimisation, so a bug in it
+  returns FEWER ROWS rather than a slower plan, and a row count cannot tell the two
+  apart because the right answer to most of these predicates is also small. The
+  oracle is `iceberg_scan` of the same table under the same predicate -- it receives
+  no predicate and opens every file, so it cannot over-prune.
+
+  Three things the port asserts that a count alone would not:
+
+  - a coarse transform must READ the boundary bucket. `year(ts)` puts every 2020
+    timestamp in one bucket, so `ts > 2021-01-01` has to keep the 2021 file even
+    though the constant is in it. An exact `[V,V]` rule prunes that file and loses
+    the row.
+  - `bucket[8](id)` and metrics are distinguished rather than conflated. `id = 5`
+    keeps one file under bucket pruning and two under metrics alone, because
+    bucket-3's range `[3,7]` contains 5. The expected count is 4 for that reason.
+  - a date partition the FDW cannot convert must be read in full (#660). The wrong
+    behaviour is to NULL-fill and prune, and its symptom is an empty answer.
+
+  `_pruned` returns a sentinel rather than 0 when EXPLAIN reports no `Files Pruned`
+  marker. "Pruned nothing" and "did not say" are the same number and opposite facts,
+  and returning 0 for the second would make every pruning arm pass vacuously the day
+  the FDW stopped reporting.
+
+  The two names not carried are `pgc_skip`'s refusal names. That is structural:
+  `pgc_skip` records under the NAME it is given and `expect.cannot_run` records under
+  the REASON CODE, so a port cannot emit those strings as check names at all
+  (#1040 phase 0b). Declared in `INCOMPLETE` with that reason rather than worked
+  around by naming a passing premise after a missing dependency.
+
 - `compare_to_bash.py` read 6 of `differential.sh`'s 86 check names and reported the
   port one-for-one (#1045).
 
