@@ -237,4 +237,5 @@ guard_tests 346
 # `guard_tests` was re-derived in the same run and did NOT move -- 342 -- which is
 # the expected answer for a file that needs a cluster, and checking it was the point
 # rather than assuming it.
-cluster_tests 410
+# 410 -> 411 when test_native_fetch_coalesce.py landed on the rebased tree. Re-derived by collection, never by adding one to 410.
+cluster_tests 411

@@ -578,6 +578,20 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
+- An index fetch pinned once per projected column, while a sequential scan
+  already coalesced adjacent chunk ranges into one read.
+
+  `pgcolumnar_fetch_row` issued two `PgColumnarReadLogicalData` calls per
+  column (validity bitmap, then the value stream). The scan path
+  (`pgcolumnar_native_read_projected`) sorts those ranges and merges the ones
+  that touch. Adjacent columns in a row group are laid out back to back, so a
+  wide btree fetch of a small group pinned the same pages once per column.
+
+  Measured on PostgreSQL 18 with `EXPLAIN (ANALYZE, BUFFERS)` executor pins
+  (planning excluded): 16 int columns, one row via the index, 64 pins for one
+  column and 94 for sixteen -- exactly two extra pins per extra column. After
+  the fetch path coalesces the same way the scan does, both counts are 61.
+  New twins `native_fetch_coalesce` and `test_native_fetch_coalesce.py`.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,

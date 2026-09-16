@@ -89,6 +89,7 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
+- [44. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#44-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
 
 ## 1. How to read a test in here
 
@@ -4338,3 +4339,21 @@ Removal proof, run on both harnesses: restore `META.json` as it shipped and the 
 substantive arms redden on each side while every premise stays green. The premises
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
+
+## 44. test_native_fetch_coalesce.py: index fetch I/O is not per-column
+
+Index fetch used to pin once per column: validity bitmap, then the value stream,
+two `PgColumnarReadLogicalData` calls each. Sequential scan already coalesces
+adjacent chunk ranges into one read. Adjacent columns sit back to back, so a
+wide fetch of a small group was many pins of the same pages.
+
+The public seam is executor buffer pins on `EXPLAIN (ANALYZE, BUFFERS)`, not
+wall clock. Planning pins grow with the target list and are excluded. After the
+fix, fetching every projected column must not pin once per extra column.
+
+Independent of `test/native_fetch_coalesce.sh`. Same public seam, own fixture,
+own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_fetch_coalesce` | a point lookup uses the index and returns the projected values; executor pins for one column and for every column are both measurable, and the wide fetch does not pin once per column |

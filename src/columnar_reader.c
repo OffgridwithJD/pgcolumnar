@@ -4054,6 +4054,108 @@ pgcolumnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
  *		back null. wantValues == false stops as soon as liveness is settled,
  *		without touching the group's bytes at all.
  */
+
+/*
+ * pgcolumnar_fetch_coalesce_read
+ *		Read unread projected chunks the way the scan path does: sort ranges
+ *		and merge those that touch, so adjacent columns cost one
+ *		PgColumnarReadLogicalData rather than one per column.
+ *
+ *		Validity bitmaps land on the fetch-cache entry. Value streams stay in
+ *		CurrentMemoryContext (the per-fetch tmp context) for the decode loop
+ *		to copy from. A column nobody projected is never read.
+ */
+static void
+pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
+							   int natts, int validityBytes,
+							   bool allColumns, Bitmapset *needed,
+							   char **valueStream, uint32 *valueLen)
+{
+	PgColumnarByteRange *ranges;
+	int			n = 0;
+	int			c;
+	int			i;
+
+	ranges = (PgColumnarByteRange *) palloc(sizeof(PgColumnarByteRange) * natts);
+
+	for (c = 0; c < natts; c++)
+	{
+		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
+
+		if (!allColumns && !bms_is_member(c, needed))
+			continue;
+		if (cc == NULL || cc->pageLength == 0)
+			continue;
+		if (entry->vbits[c] != NULL && entry->rawBuf[c] != NULL)
+			continue;
+
+		ranges[n].start = cc->pageOffset;
+		ranges[n].end = cc->pageOffset + cc->pageLength;
+		n++;
+	}
+
+	if (n == 0)
+	{
+		pfree(ranges);
+		return;
+	}
+
+	qsort(ranges, n, sizeof(PgColumnarByteRange), pgcolumnar_byte_range_cmp);
+
+	for (i = 0; i < n;)
+	{
+		uint64		start = ranges[i].start;
+		uint64		end = ranges[i].end;
+		int			j = i + 1;
+		char	   *buf;
+		uint64		span;
+
+		while (j < n && ranges[j].start <= end)
+		{
+			if (ranges[j].end > end)
+				end = ranges[j].end;
+			j++;
+		}
+
+		span = end - start;
+		buf = (char *) palloc(span > 0 ? span : 1);
+		if (span > 0)
+			PgColumnarReadLogicalData(rel, start, buf, span);
+
+		for (c = 0; c < natts; c++)
+		{
+			NativeColumnChunkMetadata *cc = entry->ccForCol[c];
+			uint64		off;
+
+			if (cc == NULL || cc->pageLength == 0)
+				continue;
+			if (cc->pageOffset < start || cc->pageOffset + cc->pageLength > end)
+				continue;
+
+			off = cc->pageOffset - start;
+			if (entry->vbits[c] == NULL)
+			{
+				MemoryContext vOld = MemoryContextSwitchTo(entry->cx);
+
+				entry->vbits[c] = palloc(validityBytes > 0 ? validityBytes : 1);
+				MemoryContextSwitchTo(vOld);
+				if (validityBytes > 0)
+					memcpy(entry->vbits[c], buf + off, validityBytes);
+			}
+			if (entry->rawBuf[c] == NULL &&
+				cc->pageLength >= (uint64) validityBytes)
+			{
+				valueStream[c] = buf + off + validityBytes;
+				valueLen[c] = (uint32) (cc->pageLength - validityBytes);
+			}
+		}
+
+		i = j;
+	}
+
+	pfree(ranges);
+}
+
 static bool
 pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 				   Datum *values, bool *nulls, bool allColumns,
@@ -4289,6 +4391,14 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 
 	validityBytes = (int) ((entry->rowCount + 7) / 8);
 
+	{
+		char	  **valueStream = (char **) palloc0(sizeof(char *) * natts);
+		uint32	   *valueLen = (uint32 *) palloc0(sizeof(uint32) * natts);
+
+		pgcolumnar_fetch_coalesce_read(rel, entry, natts, validityBytes,
+									   allColumns, needed, valueStream,
+									   valueLen);
+
 	for (c = 0; c < natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, c);
@@ -4384,8 +4494,14 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			vstream = palloc(vlen > 0 ? vlen : 1);
 			MemoryContextSwitchTo(decOld);
 			if (vlen > 0)
-				PgColumnarReadLogicalData(rel, cc->pageOffset + validityBytes,
-										vstream, vlen);
+			{
+				if (valueStream[c] != NULL)
+					memcpy(vstream, valueStream[c], vlen);
+				else
+					PgColumnarReadLogicalData(rel,
+											cc->pageOffset + validityBytes,
+											vstream, vlen);
+			}
 
 			decOld = MemoryContextSwitchTo(decCx);
 			if (baseline)
@@ -4500,6 +4616,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			entry->rawBuf[c] = NULL;
 			entry->overflow[c] = true;
 		}
+	}
 	}
 
 	/*
