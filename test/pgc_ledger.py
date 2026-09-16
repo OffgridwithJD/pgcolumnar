@@ -567,6 +567,23 @@ def cmd_orphan_scan(args):
     list and ignores the second manufactures the confidence that the thing is
     handled.
 
+    SCANNED AGAINST A LOG OF THE SAME TREE, which this cannot check and the caller
+    must. A row whose check was ADDED after the log was written has no record in it
+    and is reported as an orphan -- the same signal as a check that was DELETED, and
+    nothing in a RESULT record (suite, part, name, verdict, major) dates it against a
+    tree, so the two are indistinguishable here.
+
+    `run_all_versions.sh` satisfies this STRUCTURALLY: it passes the logs from the run
+    it has just finished, so nobody chooses freshness and the shape of the call
+    guarantees it. A caller supplying a log by hand has no such guarantee and must
+    check it themselves. Those are different safety properties and only the first is
+    free.
+
+    Measured: a log from #1070's tree replayed against the ledger one commit later
+    reported `orphans=2`, and both were the part-400 checks that tree had just gained.
+    A stale log produces exactly the signal this subcommand exists to find, which is
+    why it is a precondition and not a caveat.
+
     SCOPED TO THE PARTS THE RUN CONTAINS, and the scope is REPORTED, not assumed.
     A one-suite log has nothing to say about another suite's rows. Counting those
     as present would make a single-suite run certify the whole ledger, so they are
