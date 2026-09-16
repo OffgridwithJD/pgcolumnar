@@ -1169,11 +1169,11 @@ harness_selftest	490-a-one-line-body-ends-at-its-own-brace	control: and the reco
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the skip-loop tool is present	15;16;17;18;19	never	-
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool answers with an emitter set, so 'q is absent' is about q	15;16;17;18;19	never	-
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool reports an unclosed count at all, so a zero below means zero	15;16;17;18;19	never	-
-native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	18	never	-
-native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the index	18	never	-
-native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	18	never	-
-native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected column touched a measurable number of buffers	18	never	-
-native_fetch_coalesce	native_fetch_coalesce	premise: the wide fetch returns the projected values	18	never	-
+native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	15;16;17;18	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the index	15;16;17;18	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	15;16;17;18	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected column touched a measurable number of buffers	15;16;17;18	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: the wide fetch returns the projected values	15;16;17;18	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-
