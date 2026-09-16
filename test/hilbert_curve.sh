@@ -176,11 +176,20 @@
 # or changed the NULL rule stays green. The arm is named for the pack, not for
 # the key.
 #
-# THIS SUITE IS NOT REGISTERED in test/run_all_versions.sh, so no CI run
-# dispatches it. That is deliberate while src/columnar_curve.c does not exist
-# and every battery arm is RED by design; registering it belongs in the commit
-# that adds the encoder, together with the CHANGELOG entry. Until then
-# test/selftest/070 reports it as UNREGISTERED, which is the accurate state.
+# THE PARAGRAPH THAT STOOD HERE WAS CARRIED OUT AND LEFT BEHIND (#1088). It made
+# three claims, each true when written and none true now:
+#
+#     "NOT REGISTERED in test/run_all_versions.sh"   it is registered
+#     "src/columnar_curve.c does not exist"          127 lines, and it links
+#                                                    into pgcolumnar.so
+#     "070 reports it as UNREGISTERED, which is
+#      the accurate state"                           070's arm PASSES: every
+#                                                    suite is registered
+#
+# It also said registering the suite "belongs in the commit that adds the
+# encoder". That commit landed. A stale instruction is worse than a stale fact
+# because it tells the next person to undo what was done, and this one names the
+# undo explicitly.
 #
 # Usage:  test/hilbert_curve.sh [PG_CONFIG]
 # The argument is accepted and ignored; this suite needs no cluster.
