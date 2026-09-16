@@ -108,6 +108,64 @@ true until the next version shipped.
   reached `main` sitting directly above `## 38.`, with the Iceberg body attached to
   the userinfo heading. Fixed here, and the section order now matches the bodies.
 
+### Changed
+
+- `design/ROADMAP.md`'s block-compression entry and alpha4's plan item record the
+  measurement instead of the claim (#890).
+
+  The entry read as an outstanding task sourced to Zeng et al., VLDB 2024. It was
+  measured on this engine and did not reproduce, and left as-is it would have
+  regenerated the same issue against a different corpus in a year.
+
+  The roadmap carries the five-shape table, the narrow reading of it -- the shape
+  the pre-registered rule names as the DECIDER comes out UNDECIDED rather than
+  NET WIN, so "the premise is refuted" is true only of the two most compressible
+  shapes -- and the two reasons it retired: no storage tier exists to key a
+  default off, and no shape fires NET COST.
+
+  THE FIRST VERSION OF THIS ENTRY MIXED TWO RUNS IN ONE COLUMN, found in review
+  by @OffgridwithJD. The summary table it was copied from labelled two of its
+  read costs `0.92 (rep)` and `0.92 (mix)` -- shape names from an EARLIER
+  three-shape run, with a different row count and wall-clock rather than
+  instruction counts. Transcribing it dropped the parentheses, which were the
+  only marker that those two values came from somewhere else. Reconciled against
+  the five-shape run row by row, three of the five read costs were wrong:
+
+      shape            C as written     C in the five-shape run
+      repetitive           0.92                 1.001
+      text_heavy            --                  0.911
+      realistic            0.92                 1.001
+      random_int           1.00                 1.000     matched
+      incompressible       1.01                 1.010     matched
+
+  Every `S` value was correct, and no verdict changes: `repetitive` and
+  `text_heavy` are NET WIN on `S` alone, and the three UNDECIDED rows stay
+  UNDECIDED because their `C` was already below the 1.10 threshold. So the
+  conclusion never depended on the wrong numbers -- which is exactly why nothing
+  would have caught them.
+
+  `text_heavy`'s blank was the costly one. Its real `C` of 0.911 is the most
+  favourable read cost in the set, so omitting it UNDERSTATED the case the table
+  makes.
+
+  The entry now also carries the conditions -- rows, build, counter, and that
+  the codec was asserted from `column_chunk.block_codec` rather than assumed --
+  plus the limit that an instruction count cannot see an I/O saving at ANY
+  working-set size. #890 learned that when a table went out from an assert build
+  without naming it; the roadmap is where someone goes to reopen this, so the
+  header belongs there more than on the issue.
+
+  Two things kept that would otherwise be lost with it. Dictionary encoding on
+  float columns was a SEPARATE clause of the same roadmap entry, nothing above
+  measures it, and it stays open. And the alpha4 item is marked as having cost
+  nothing in written bytes, so it need not have been alpha work at all -- it was
+  scheduled as alpha because the plan assumed it would change the writer, and
+  that assumption was the part that needed checking first.
+
+  Three defects found by the investigation are tracked separately and do not
+  close with it: #1074, #1075, #1076.
+
+
 ### Fixed
 
 - The projection guard fired on a correct caller and stayed green on a wrong one

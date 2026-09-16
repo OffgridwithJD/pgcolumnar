@@ -189,13 +189,84 @@ compression defaults, and the FastLanes on-disk format generation.
   strings while keeping random access. Both are per-column codec upgrades. Low
   effort. Sources: ALP, SIGMOD 2024, https://duckdb.org/science/alp ; FSST is used
   by BtrBlocks and FastLanes (below).
-- Reconsider default block compression. On fast local NVMe, general-purpose block
-  compression (pglz, lz4, zstd) can cost more in CPU than it saves in I/O; make it
-  opt-in per storage tier, and apply dictionary encoding aggressively, including on
-  float columns. This finding is scoped to fast local storage and reverses for
-  high-latency or remote (object-store) storage, so keep block compression the
-  default there. Low effort (defaults and per-table options).
-  Source: Zeng et al., VLDB 2024, https://www.vldb.org/pvldb/vol17/p148-zeng.pdf .
+- ~~Reconsider default block compression.~~ **MEASURED ON THIS ENGINE 2026-09-16
+  (#890) AND NOT REPRODUCED. Do not re-open this without reading that issue
+  first.** The claim was that on fast local NVMe, general-purpose block
+  compression (pglz, lz4, zstd) costs more in CPU than it saves in I/O, so it
+  should be opt-in per storage tier. Source: Zeng et al., VLDB 2024,
+  https://www.vldb.org/pvldb/vol17/p148-zeng.pdf .
+
+  Two reasons it did not carry here, and the second is the interesting one.
+
+  **There is no storage tier to key a default off.** A native columnar table's
+  blocks always live in the PostgreSQL data directory; object storage is an
+  import/export/interop surface, not a location for native table storage. So
+  "per storage tier" has no input available in this extension.
+
+  **And the premise itself does not hold on our writer, because we are not
+  measuring the same thing the paper did.** We run a cascade of lightweight
+  encodings -- FSST for strings, dictionary, RLE -- *before* the block codec, so
+  the bytes reaching zstd are already reduced and the CPU-versus-I/O balance is
+  not the paper's.
+
+  THE CONDITIONS TRAVEL WITH THE NUMBERS, because this issue learned that the
+  hard way: a table went out from an assert build without naming it and had to be
+  re-run. Anyone re-deriving these needs all of it.
+
+      rows          200,000 per shape, each materialised ONCE as a heap source
+                    and written three times, so all three arms see byte-identical
+                    input
+      build         PG 17, NON-assert (`--enable-cassert` absent)
+      codec         asserted from `column_chunk.block_codec`, not assumed from
+                    the GUC; `PgColumnarScan` asserted on EVERY arm
+      counter       backend instruction counts, not wall clock
+      cache         the working set fits in page cache
+
+      AND AN INSTRUCTION COUNT CANNOT SEE AN I/O SAVING AT ALL, at any working
+      set size. `C` below is the CPU of a scan, so it bounds the cost side of
+      compression and says nothing about the device-wait saving on the benefit
+      side. A bigger working set does not fix that; a different counter would.
+      So `C` near 1.0 means "costs nothing to read", never "saves nothing".
+
+  Five corpus shapes against a rule registered before the run, all five values
+  from the SAME run (S = space saved, C = read cost, W = write cost):
+
+      shape            S = 1 - zstd/none      C        W       verdict
+      repetitive             0.750          1.001    0.998     NET WIN
+      text_heavy             0.958          0.911    0.920     NET WIN
+      realistic              0.127          1.001    0.996     UNDECIDED
+      random_int             0.000          1.000    1.012     UNDECIDED
+      incompressible        -0.015          1.010    0.913     UNDECIDED
+
+  **No shape fires NET COST**, which is what settles it. Note the narrow reading:
+  the shape the rule names as the decider is `realistic`, and it comes out
+  UNDECIDED rather than NET WIN. An undecided measurement does not move a
+  default, so the outcome is the same -- but "the premise is refuted" is true
+  only of the two most compressible shapes, and the record should say which ones
+  carried the conclusion.
+
+  Two rows are worth reading on their own. On `incompressible`, `zstd` is
+  measurably CHEAPER to write than `none` (W = 0.913), because the cascade's FSST
+  keep test only runs when a codec is configured and dropping FSST saves more
+  than zstd costs. That is the opposite of the naive expectation and it is a
+  property of our cascade, not of zstd. And `text_heavy` is the only shape where
+  compression measurably pays on the READ side too (C = 0.911), which is the most
+  favourable read cost in the set and the strongest single number against the
+  premise.
+
+  The `lz4` arm is the one that ever costs: W = 1.248 on `incompressible`, for a
+  codec then declined on every chunk. It is not the default, so it does not bear
+  on this entry, and the mechanism is #1075 rather than the codec.
+
+  **Dictionary encoding on float columns is NOT covered by this and remains
+  open.** It was a separate clause of the original entry and nothing above
+  measures it.
+
+  Three defects were found by the investigation and are tracked separately:
+  #1074 (a sub-margin FSST win is discarded and nothing tells the user), #1075
+  (the block codec compresses the whole encoded region per chunk and discards it
+  when it declines), #1076 (`pgcolumnar.compression` is not independent of the
+  cascade).
 - FastLanes-style expression encoding. For a future on-disk format generation,
   cascade lightweight encodings over fixed 1024-value vectors with multi-column
   compression and partial bottom-up decode, so the executor receives compressed
