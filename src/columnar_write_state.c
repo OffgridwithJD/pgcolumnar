@@ -1099,6 +1099,7 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 				 uint64 storageId, uint64 groupNumber, int columnIndex)
 {
 	FlushColumnResult result;
+	char	   *codecBuf;		/* the block codec's buffer, freed below */
 	List	   *zoneRows = NIL;
 	NativeBloomMetadata *bloomRow = NULL;
 	StringInfo	chunk = makeStringInfo();
@@ -1467,10 +1468,10 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	/* optional block codec over the whole encoded region (spec 6) */
 	finalData = encoded->data;
 	finalLen = encoded->len;
+	codecBuf = NULL;
 	if (compressionType != COLUMNAR_COMPRESSION_NONE &&
 		encoded->len > 0)
 	{
-		char	   *compData;
 		uint32		compLen;
 		int			usedType;
 		int			usedLevel;
@@ -1478,11 +1479,11 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 		PgColumnarCompressValueStream(encoded->data, encoded->len,
 									compressionType,
 									compressionLevel,
-									&compData, &compLen,
+									&codecBuf, &compLen,
 									&usedType, &usedLevel);
 		if (usedType != COLUMNAR_COMPRESSION_NONE)
 		{
-			finalData = compData;
+			finalData = codecBuf;
 			finalLen = compLen;
 			blockCodec = usedType;
 		}
@@ -1490,6 +1491,30 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 
 	if (finalLen > 0)
 		appendBinaryStringInfo(chunk, finalData, finalLen);
+
+	/*
+	 * The codec's buffer is dead on BOTH paths, and neither freed it.
+	 *
+	 * When the codec declines, PgColumnarCompressValueStream returns a palloc'd
+	 * COPY of the raw bytes rather than NULL -- its documented contract, so every
+	 * caller owns a buffer with the same ownership semantics. This caller never
+	 * reads that copy: `finalData` still points at `encoded->data`. When the codec
+	 * succeeds, appendBinaryStringInfo above has already copied the bytes into
+	 * `chunk`, so the buffer is dead from that line on.
+	 *
+	 * Either way it is `encoded->len` or fewer bytes -- the whole encoded region of
+	 * one column chunk -- left allocated until the row group's flush context is
+	 * deleted, with every other column flushing in the meantime. It is bounded
+	 * rather than a leak, and it roughly doubles what the flush holds for a column
+	 * whose codec declines. Measured on a 200,000-row incompressible load, where
+	 * lz4 declines on every chunk (#1075).
+	 *
+	 * Freed here rather than in each branch so the success path is covered too: a
+	 * free placed only in the `declined` arm is the version that reads as complete
+	 * and is not.
+	 */
+	if (codecBuf != NULL)
+		pfree(codecBuf);
 
 	result.chunk = chunk;
 	result.descriptor = desc->data;

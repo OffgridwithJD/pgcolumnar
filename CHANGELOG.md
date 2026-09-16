@@ -18,6 +18,45 @@ true until the next version shipped.
 
 ### Added
 
+- Six more guards counted their callers instead of pinning their property (#1078's
+  class). Two were blind to the defect they name.
+
+  #1078 repaired two arms in `native_fetch_projection.sh` that compared a whole-file
+  `grep -c` against a literal. A sweep of `test/` found **twelve** sites of that shape;
+  these are six of the remaining ten, in `native_fetch_cache.sh` and
+  `native_fetch_position.sh`.
+
+  THE REPAIR DIFFERS PER ARM, BECAUSE THE FAILURE DIRECTION DOES. A count over a call
+  site is blind; a count over a guarded FORM is blind and noisy; and a count is CORRECT
+  where the count is the property. Two arms in the sweep were left alone for that reason
+  -- `decode_interrupts.sh`'s `^#define COLUMNAR_DECODE_INTERRUPT(i)` would be a
+  redefinition if it appeared twice, and `native_saop_pushdown.sh`'s premise is
+  load-bearing for an `awk` range that would silently concatenate two expressions.
+
+      the entry key    both directions   -> self-referential, keyed N of N
+      the cid reject   noise only        -> scoped to the function that must contain it
+      the geometry     blind to 3 of 4   -> membership over all four compared fields
+      the discard      proxy for "where" -> the two functions named
+      rank, valOffset  noise only        -> scoped to pgcolumnar_fetch_row
+
+  Measured, every mutation compiling so the suite rebuilds and runs end to end:
+
+      case                        OLD arms            NEW arms
+      unkeyed group lookup        key=1     PASS      RED  keyed 1 of 2
+      second keyed lookup         key=2     RED       24 passed
+      rowCount dropped            geom=1    PASS      RED  rowCount
+      executor-end discard gone   discard=1 RED       RED  names the function
+      third discard call          discard=3 RED       24 passed
+      rank replaced by a walk     rank=0    RED       RED  rank prefix
+
+  **Both blindness rows are the case for this change**: an unkeyed lookup and a dropped
+  geometry field both leave the old arms green. The two noise rows are what fired on
+  #1077 and cost a correct PR a red.
+
+  No ledger change: `native_fetch_cache` and `native_fetch_position` have zero rows, so
+  they are two of the 249 uncovered suites and no check name here is a ledger key.
+  Verified rather than inherited.
+
 - The piped-loop sweep reported a clean tree without reading one (#1033).
 
   `selftest/400` proves its detector FIRES -- a fixture with a check inside a piped
@@ -108,6 +147,64 @@ true until the next version shipped.
   reached `main` sitting directly above `## 38.`, with the Iceberg body attached to
   the userinfo heading. Fixed here, and the section order now matches the bodies.
 
+### Changed
+
+- `design/ROADMAP.md`'s block-compression entry and alpha4's plan item record the
+  measurement instead of the claim (#890).
+
+  The entry read as an outstanding task sourced to Zeng et al., VLDB 2024. It was
+  measured on this engine and did not reproduce, and left as-is it would have
+  regenerated the same issue against a different corpus in a year.
+
+  The roadmap carries the five-shape table, the narrow reading of it -- the shape
+  the pre-registered rule names as the DECIDER comes out UNDECIDED rather than
+  NET WIN, so "the premise is refuted" is true only of the two most compressible
+  shapes -- and the two reasons it retired: no storage tier exists to key a
+  default off, and no shape fires NET COST.
+
+  THE FIRST VERSION OF THIS ENTRY MIXED TWO RUNS IN ONE COLUMN, found in review
+  by @OffgridwithJD. The summary table it was copied from labelled two of its
+  read costs `0.92 (rep)` and `0.92 (mix)` -- shape names from an EARLIER
+  three-shape run, with a different row count and wall-clock rather than
+  instruction counts. Transcribing it dropped the parentheses, which were the
+  only marker that those two values came from somewhere else. Reconciled against
+  the five-shape run row by row, three of the five read costs were wrong:
+
+      shape            C as written     C in the five-shape run
+      repetitive           0.92                 1.001
+      text_heavy            --                  0.911
+      realistic            0.92                 1.001
+      random_int           1.00                 1.000     matched
+      incompressible       1.01                 1.010     matched
+
+  Every `S` value was correct, and no verdict changes: `repetitive` and
+  `text_heavy` are NET WIN on `S` alone, and the three UNDECIDED rows stay
+  UNDECIDED because their `C` was already below the 1.10 threshold. So the
+  conclusion never depended on the wrong numbers -- which is exactly why nothing
+  would have caught them.
+
+  `text_heavy`'s blank was the costly one. Its real `C` of 0.911 is the most
+  favourable read cost in the set, so omitting it UNDERSTATED the case the table
+  makes.
+
+  The entry now also carries the conditions -- rows, build, counter, and that
+  the codec was asserted from `column_chunk.block_codec` rather than assumed --
+  plus the limit that an instruction count cannot see an I/O saving at ANY
+  working-set size. #890 learned that when a table went out from an assert build
+  without naming it; the roadmap is where someone goes to reopen this, so the
+  header belongs there more than on the issue.
+
+  Two things kept that would otherwise be lost with it. Dictionary encoding on
+  float columns was a SEPARATE clause of the same roadmap entry, nothing above
+  measures it, and it stays open. And the alpha4 item is marked as having cost
+  nothing in written bytes, so it need not have been alpha work at all -- it was
+  scheduled as alpha because the plan assumed it would change the writer, and
+  that assumption was the part that needed checking first.
+
+  Three defects found by the investigation are tracked separately and do not
+  close with it: #1074, #1075, #1076.
+
+
 ### Fixed
 
 - The docs said `pgcolumnar.compression` picks a codec. It also picks encodings
@@ -157,6 +254,55 @@ true until the next version shipped.
 
   The mutant still writes correct rows, which is why the content arms hold: this
   is a decision changing, not data corruption.
+- The block codec's buffer was never freed, on either path (#1075).
+
+  `flush_one_column` compresses the whole encoded region of a column chunk and
+  then leaves the codec's buffer allocated:
+
+      PgColumnarCompressValueStream(encoded->data, encoded->len, ..., &compData, ...);
+      if (usedType != COLUMNAR_COMPRESSION_NONE)
+      {
+          finalData = compData; ...
+      }
+      if (finalLen > 0)
+          appendBinaryStringInfo(chunk, finalData, finalLen);
+
+  BOTH paths leave it dead. When the codec declines,
+  `PgColumnarCompressValueStream` returns a palloc'd COPY of the raw bytes rather
+  than NULL, by its documented contract, and this caller never reads it --
+  `finalData` still points at `encoded->data`. When the codec succeeds,
+  `appendBinaryStringInfo` has already copied the bytes into `chunk`.
+
+  It is bounded rather than a leak: `flushContext` is deleted per row group. What
+  it costs is peak allocation, because it roughly doubles what the flush holds for
+  the encoded region while every other column is still flushing.
+
+  Freed after the append rather than inside either branch, so the success path is
+  covered too. A free placed only in the declined arm is the version that reads as
+  complete and is not.
+
+  MEASURED ON TWO FIXTURES, AND THE FIRST ONE FOUND NOTHING. Peak RSS of the
+  loading backend (`VmHWM`), lz4, byte-identical input every run:
+
+      200,000 rows, default stripe    baseline 117,178 kB   patched 118,002 kB
+      600,000 rows, ONE stripe        baseline 326,584 kB   patched 304,979 kB
+
+  The first is +0.70%, the WRONG DIRECTION, and it is recorded because it is the
+  honest half: at that scale the encoded region is a few MB against a 117 MB
+  process and the effect is swamped. The second saves 21.1 MiB, 6.6% of peak,
+  against repetition spreads of 0.14% and 0.27%. The saving is proportional to the
+  row group's encoded size, and on a default stripe of narrow data it is not
+  observable at all.
+
+  Stored bytes do not move, which is the requirement: 32,055,856 bytes and
+  fingerprint `a0959193` identical across every run of both builds.
+
+  NO NEW TEST ARM, deliberately. What changed is peak allocation, and there is no
+  stable way to assert that in CI here -- a probe of
+  `pg_log_backend_memory_contexts` would have to land mid-flush. The correctness
+  requirement is that output does not move, which the existing content suites
+  cover and which was verified by measurement. An arm grepping the source for
+  `pfree(codecBuf)` would be the exact shape repaired in `8e88f42` and `f115d0b`.
 
 - The projection guard fired on a correct caller and stayed green on a wrong one
   (#1077).
