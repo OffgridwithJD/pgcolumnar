@@ -139,7 +139,20 @@
 # documented under the wrong title. `## 37. test_iceberg_fdw.py` sat directly above
 # `## 38.`, with the Iceberg body attached to the userinfo heading, and every arm in
 # this file stayed green. Re-derived by collection: `342 tests collected`.
-guard_tests 342
+# 342 -> 346 when test_pgxn_metadata.py landed: four arms over META.json, the PGXN
+# distribution metadata that NO suite, Makefile rule or CI step had ever read. It
+# named `pgcolumnar--1.0-alpha3.sql`, a file that does not exist -- the cycle-open
+# rename moved it -- so the published metadata pointed at something the
+# distribution does not contain.
+#
+# In the GUARD half, correctly: it reads META.json, VERSION and `git archive`, and
+# needs neither a cluster nor the driver. `NO_CLUSTER` decides that membership and
+# is asserted against the corpus in both directions, so the declaration and the
+# property had to agree before this collected here at all.
+#
+# Re-derived by collection on this tree, never by adding four: `346 tests
+# collected`. `cluster_tests` was re-derived in the same run and did NOT move.
+guard_tests 346
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

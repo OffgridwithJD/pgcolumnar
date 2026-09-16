@@ -236,6 +236,95 @@ done
 check "every document citing VERSION quotes the version VERSION holds" \
 	"$(printf '%s' "$_stale" | sed 's/^ //')" ""
 
+# ---- and META.json, which NOTHING read at all ------------------------------
+#
+# `META.json` is the PGXN distribution metadata. It hardcodes the version TWICE
+# and names the base install script by filename, and no suite, no Makefile rule
+# and no CI step ever read it. It went stale for the whole alpha4 cycle:
+#
+#     version                    1.0.0-alpha.3     while VERSION said 1.0-alpha4
+#     provides.pgcolumnar.file   pgcolumnar--1.0-alpha3.sql
+#
+# THE FILENAME IS THE PART THAT MATTERS. `pgcolumnar--1.0-alpha3.sql` does not
+# exist: it was RENAMED to the alpha4 name when the cycle opened, which is how
+# this repository makes each cycle's base script. So the published metadata named
+# a file the distribution does not contain, and the version strings were only the
+# visible half.
+#
+# The two version forms differ by convention and that is not a bug: PGXN requires
+# three-part semver, so `1.0-alpha4` is published as `1.0.0-alpha.4`. The mapping
+# is derived here rather than hardcoded, so a future `1.0-beta1` is covered too.
+_meta="$SRCDIR/META.json"
+check "premise: META.json is present and parses" \
+	"$(python3 -c "import json,sys;json.load(open(sys.argv[1]));print('yes')" "$_meta" 2>/dev/null || echo no)" "yes"
+
+# VERSION `1.0-alpha4` -> PGXN `1.0.0-alpha.4`: pad the numeric part to three
+# components, and put a dot before the suffix's trailing digits.
+_pgxn_ver="$(printf '%s' "$_ver" | awk -F- '{
+	n = $1; c = split(n, p, "."); while (c < 3) { n = n ".0"; c++ }
+	if (NF > 1) { s = $2; sub(/[0-9]+$/, ".&", s); print n "-" s } else print n
+}')"
+check "premise: the PGXN form was derived from VERSION, not empty" \
+	"$([ -n "$_pgxn_ver" ] && echo yes || echo no)" "yes"
+
+for _mk in version provides.pgcolumnar.version; do
+	check "META.json $_mk is the version VERSION holds, in PGXN form" \
+		"$(python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split('.'): m=m[k]
+print(m)" "$_meta" "$_mk" 2>/dev/null)" "$_pgxn_ver"
+done
+
+# The defect that actually shipped. `git archive` rather than a filesystem test,
+# because what matters is whether the DISTRIBUTION contains it -- an export-ignore
+# rule could drop a file that is present in the tree.
+_meta_file="$(python3 -c "
+import json,sys
+print(json.load(open(sys.argv[1]))['provides']['pgcolumnar']['file'])" "$_meta" 2>/dev/null)"
+check "premise: META.json names a base install script" \
+	"$([ -n "$_meta_file" ] && echo yes || echo no)" "yes"
+check "the script META.json names is in the published distribution" \
+	"$(cd "$SRCDIR" && git archive HEAD 2>/dev/null | tar -t 2>/dev/null | grep -cx "$_meta_file")" "1"
+
+# AND THE SCRIPTS META.json CANNOT NAME. `provides.file` is ONE filename, so the arm
+# above cannot notice an `export-ignore` that drops a DIFFERENT install script -- an
+# upgrade path. That breaks `ALTER EXTENSION ... UPDATE` for anyone who installed
+# from PGXN, and nothing else here would see it.
+#
+# IT IS HERE AND NOT ONLY IN THE PYTEST TWIN FOR A RELEASE REASON. The pytest guards
+# run in CI; the five-major shell matrix is the release gate. An arm protecting the
+# upgrade path for published installs belongs in the gate that runs before a tag.
+# Raised in review of #1086, where it existed only on the python side.
+_meta_ship="$(cd "$SRCDIR" && git archive HEAD 2>/dev/null | tar -t 2>/dev/null)"
+_meta_ondisk="$(cd "$SRCDIR" && ls pgcolumnar--*.sql 2>/dev/null)"
+check "premise: the tree has install scripts to check" \
+	"$([ -n "$_meta_ondisk" ] && echo yes || echo no)" "yes"
+#
+# NO PIPE INTO AN EARLY-EXIT READER (#486). The first version of this loop was
+# `printf '%s\n' "$_meta_ship" | grep -qx "$_ms"`, which is exactly the shape
+# selftest/080 refuses: a builtin writing a captured string into a reader that
+# exits on its first match. `$_meta_ship` is the whole `git archive | tar -t`
+# listing, 4999 bytes on this tree -- right at the pipe-buffer boundary where the
+# shape works almost every time and then does not.
+#
+# The newline sentinels on both sides give the anchored match `grep -x` was
+# providing, without a subprocess. Caught by 080 in review of #1086, which is the
+# rule doing its job on arrival: the arm was fine in the pytest twin and only
+# became subject to 080 when it entered the shell harness.
+_meta_missing=""
+for _ms in $_meta_ondisk; do
+	case $'\n'"$_meta_ship"$'\n' in
+		*$'\n'"$_ms"$'\n'*)	;;
+		*)	_meta_missing="$_meta_missing $_ms" ;;
+	esac
+done
+# A SENTINEL, not an empty expectation: comparing against "" passes on anything
+# empty, including a sweep that produced nothing at all.
+check "every pgcolumnar--*.sql in the tree is in the published distribution" \
+	"$([ -z "$_meta_missing" ] && echo "all shipped" || printf '%s' "${_meta_missing# }")" \
+	"all shipped"
+
 
 echo "checks run: $checks"
 if [ "$fail" = 0 ]; then

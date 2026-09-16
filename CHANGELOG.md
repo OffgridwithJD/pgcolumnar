@@ -18,6 +18,77 @@ true until the next version shipped.
 
 ### Fixed
 
+- `META.json` named an install script the distribution does not contain, and
+  nothing had ever read it.
+
+  It is the PGXN distribution metadata. It hardcodes the version twice and names
+  the base install script by filename, and no suite, no Makefile rule and no CI
+  step consumed it. It went stale for the whole alpha4 cycle:
+
+      version                    1.0.0-alpha.3     while VERSION said 1.0-alpha4
+      provides.pgcolumnar.file   pgcolumnar--1.0-alpha3.sql
+
+  THE FILENAME IS THE HALF THAT MATTERS. `pgcolumnar--1.0-alpha3.sql` does not
+  exist: this repository opens each cycle by RENAMING the base script to the new
+  version. So the published metadata pointed at a file PGXN would not receive, and
+  the two version strings were only the visible symptom. A reader comparing those
+  against `VERSION` would have called it a cosmetic lag.
+
+  Fixed, and now gated in both harnesses. `docs_style.sh` already had a section for
+  exactly this class -- documents that hardcode a version beside a citation of the
+  file holding it -- and `META.json` is the same shape with a filename added.
+  `test/pytest/test_pgxn_metadata.py` asserts the same properties through its own
+  parse and its own `git archive`.
+
+  `git archive` rather than a filesystem test throughout, because the question is
+  what the DISTRIBUTION contains. An `export-ignore` can drop a file that is plainly
+  present on disk, which this repository has been bitten by before.
+
+  A fourth arm covers what the third cannot: `provides.file` is ONE filename, so an
+  `export-ignore` dropping a different install script would leave it green while
+  `ALTER EXTENSION ... UPDATE` broke for anyone who installed from PGXN. It is on
+  BOTH sides rather than in python alone, because the pytest guards run in CI while
+  the five-major shell matrix is the release gate, and an arm protecting the upgrade
+  path for published installs belongs in the gate that runs before a tag.
+
+  ITS FIRST SHELL VERSION TRIPPED `selftest/080`, which is the rule working on
+  arrival: the arm was fine in the pytest twin and only became subject to the
+  no-pipe sweep when it entered the shell harness. The line was
+
+      printf '%s\n' "$_meta_ship" | grep -qx "$_ms"
+
+  a builtin writing a captured string into a reader that exits on its first match,
+  which is #486 exactly. `$_meta_ship` is the whole `git archive | tar -t` listing,
+  4999 bytes on this tree, right at the pipe-buffer boundary where the shape works
+  almost every time. Replaced with a `case` over newline-sentinelled text, which
+  gives the anchored match `grep -x` provided and starts no process. The failure
+  direction was a false RED rather than a false green, so noisy rather than
+  dangerous, but it was red in the gate the arm had just been moved into.
+
+  The PGXN form is DERIVED from `VERSION` rather than hardcoded -- `1.0-alpha4` to
+  `1.0.0-alpha.4`, and a future `1.0-beta1` to `1.0.0-beta.1` -- so the arms do not
+  need editing at the next release. The transform has its own arm, because a
+  derivation is a claim too: were it wrong, every other arm would compare against a
+  wrong expectation.
+
+  Removal proof, both harnesses: restore `META.json` as it shipped and every
+  substantive arm reddens while every premise stays green. The premises hold because
+  the file still parses and still names *a* script; it names the wrong one, which is
+  the distinction the arms draw.
+
+      docs_style.sh   3 arms red, premises green
+      pytest          2 tests red, 9 pass + 2 fail + 0 unrun = 11
+
+  THE TWO COUNTS DIFFER AND THAT IS NOT DRIFT. `docs_style.sh` splits the version
+  property across two arms with its `_mk` loop, one for `version` and one for
+  `provides.pgcolumnar.version`, while the pytest twin asserts both inside a single
+  test. Three and two are the same three assertions counted by their harness's own
+  unit. An earlier revision of this entry said "two on each side", which the table
+  beside it already contradicted (@OffgridwithJD).
+
+  `guard_tests` re-derived by collection 342 -> 346; `cluster_tests` unchanged at
+  410, checked in the same run rather than assumed.
+
 - One geometry arm accepted a comparison the property does not describe (#1081).
 
   #1081 replaced a count of `entry->fileOffset != rg->fileOffset` with a per-field
