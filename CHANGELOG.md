@@ -18,6 +18,45 @@ true until the next version shipped.
 
 ### Added
 
+- Six more guards counted their callers instead of pinning their property (#1078's
+  class). Two were blind to the defect they name.
+
+  #1078 repaired two arms in `native_fetch_projection.sh` that compared a whole-file
+  `grep -c` against a literal. A sweep of `test/` found **twelve** sites of that shape;
+  these are six of the remaining ten, in `native_fetch_cache.sh` and
+  `native_fetch_position.sh`.
+
+  THE REPAIR DIFFERS PER ARM, BECAUSE THE FAILURE DIRECTION DOES. A count over a call
+  site is blind; a count over a guarded FORM is blind and noisy; and a count is CORRECT
+  where the count is the property. Two arms in the sweep were left alone for that reason
+  -- `decode_interrupts.sh`'s `^#define COLUMNAR_DECODE_INTERRUPT(i)` would be a
+  redefinition if it appeared twice, and `native_saop_pushdown.sh`'s premise is
+  load-bearing for an `awk` range that would silently concatenate two expressions.
+
+      the entry key    both directions   -> self-referential, keyed N of N
+      the cid reject   noise only        -> scoped to the function that must contain it
+      the geometry     blind to 3 of 4   -> membership over all four compared fields
+      the discard      proxy for "where" -> the two functions named
+      rank, valOffset  noise only        -> scoped to pgcolumnar_fetch_row
+
+  Measured, every mutation compiling so the suite rebuilds and runs end to end:
+
+      case                        OLD arms            NEW arms
+      unkeyed group lookup        key=1     PASS      RED  keyed 1 of 2
+      second keyed lookup         key=2     RED       24 passed
+      rowCount dropped            geom=1    PASS      RED  rowCount
+      executor-end discard gone   discard=1 RED       RED  names the function
+      third discard call          discard=3 RED       24 passed
+      rank replaced by a walk     rank=0    RED       RED  rank prefix
+
+  **Both blindness rows are the case for this change**: an unkeyed lookup and a dropped
+  geometry field both leave the old arms green. The two noise rows are what fired on
+  #1077 and cost a correct PR a red.
+
+  No ledger change: `native_fetch_cache` and `native_fetch_position` have zero rows, so
+  they are two of the 249 uncovered suites and no check name here is a ledger key.
+  Verified rather than inherited.
+
 - The piped-loop sweep reported a clean tree without reading one (#1033).
 
   `selftest/400` proves its detector FIRES -- a fixture with a check inside a piped

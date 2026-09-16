@@ -227,10 +227,22 @@ check "doubling the row group does not double the cost of the same fetches" \
 # already built from it and make had nothing to do.
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
+# PIN THE PROPERTY, NOT THE CALLER COUNT (#1078's class). Both counted a string
+# across the whole file against a literal 1. These two are EXISTENCE claims, so the
+# direction they failed in is noise: a second honest use of either mechanism
+# elsewhere in the reader would have reddened them while the property held. Scoped
+# to the function the claim is about, which also says WHERE it must be true.
+_nfp_row="$(awk '/^pgcolumnar_fetch_row\(/,/^}/' "$SRC/columnar_reader.c")"
+
+check "premise: pgcolumnar_fetch_row was extracted, not an empty range" \
+	"$([ -n "$_nfp_row" ] && echo yes || echo no)" "yes"
+
 check "the rank comes from a prefix rather than a loop over earlier rows" \
-	"$(grep -c 'present = pgcolumnar_rank_before' "$SRC/columnar_reader.c")" "1"
+	"$(printf '%s\n' "$_nfp_row" \
+		| grep -qF 'present = pgcolumnar_rank_before' && echo yes || echo no)" "yes"
 
 check "a varying-length column reaches its value through an offset table" \
-	"$(grep -c 'entry->valOffset\[c\]\[present\]' "$SRC/columnar_reader.c")" "1"
+	"$(printf '%s\n' "$_nfp_row" \
+		| grep -qF 'entry->valOffset[c][present]' && echo yes || echo no)" "yes"
 
 pgc_summary
