@@ -86,6 +86,7 @@ behaviour, the source of that number is named.
 - [38. test_objstore_endpoint_userinfo.py: userinfo in an object-store endpoint](#38-test_objstore_endpoint_userinfopy-userinfo-in-an-object-store-endpoint)
 - [39. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#39-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
 - [40. test_sorted_pathkeys.py: when a scan may claim its rows are ordered](#40-test_sorted_pathkeyspy-when-a-scan-may-claim-its-rows-are-ordered)
+- [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 
 ## 1. How to read a test in here
 
@@ -4141,3 +4142,102 @@ psql as the same user.
 | `test_a_query_that_cannot_use_the_order_does_not_pay_to_decide` | deciding the claim must not read buffers for a query that cannot use it |
 | `test_a_projection_does_not_lend_its_order_to_the_base_relation` | a sorted projection is a different relation; its order is not the base table's |
 | `test_a_plain_gather_never_sits_above_a_scan_claiming_an_order` | Gather does not preserve order, so the two must never be stacked |
+
+
+## 41. test_projections.py: a second copy of some columns, kept honest
+
+Ports `test/projections.sh` (#432), all 75 of its check names, one for one.
+
+A projection is a second copy of some columns. Every property here is about the copy
+staying honest: it holds the rows the base holds, it loses the rows the base loses, it
+survives a vacuum that renumbers every row underneath it, and the planner reads it only
+when it can answer the whole query from it.
+
+So a wrong projection is a WRONG ANSWER, not a slow one. A scan that reads a stale
+projection returns rows the base no longer has, and nothing downstream re-checks.
+
+The file is organised by what can make the copy diverge, not by feature:
+
+| group | what can go wrong |
+| --- | --- |
+| CATALOG | `add_projection` records the wrong thing, or accepts what it should refuse |
+| FAN-OUT | a write reaches the base and not the copy -- including a DELETE, whose liveness comes from the base's delete vector |
+| RECONSTRUCT | a column the projection does not store is fetched from the base BY ROW NUMBER; if that linkage drifts the rows pair up wrongly |
+| PLANNER | a covering projection is chosen when it can answer, and must not be when it cannot |
+| REBUILD | `pgcolumnar.vacuum` compacts the base into fresh row numbers; a projection left on the old numbering is keyed to rows that mean something else |
+| MVCC | an old snapshot must not see rows committed after it -- through a projection scan as much as through the base |
+| LIFECYCLE | a dropped table's declaration (#304), and a projection added or dropped mid-transaction (#875) |
+
+### Four places the port asserts more than the original
+
+This is the first port where the difference is worth a section, because in one of them
+the port is **strictly stronger** and a reader comparing the two should know which way.
+
+**`expect_fail` becomes `expect.sqlstate`.** The original's own helper runs the
+statement and passes when it errors AT ALL, so a misspelt table name satisfies every one
+of its eight refusal arms. Each code below was MEASURED against this build, and they are
+all distinct, so each arm now names the refusal it is for:
+
+```
+duplicate name          42710      add on heap table       42809
+unknown column          42703      drop base               22023
+empty columns           22023      drop unknown            42704
+duplicate column        42701      read_projection base    42704
+sort key not in columns 22023
+```
+
+The names are the bash suite's; the assertions are not.
+
+**The EXPLAIN grep becomes a typed field.** `grep -c 'Columnar Projection: pc'` is a
+substring test over text. The plan carries `"Columnar Projection": "pc"` as a property,
+so the port reads the value -- and the mutation proof confirms it reads the NAME rather
+than the presence: forcing the planner to refuse gives `got None want 'pc'`. The two
+NEGATIVE arms use `expect.plan_marker(absent=True)`, which refuses an empty plan, because
+a plan that never arrived looks exactly like a plan carrying no projection.
+
+**`pgc_set_hash` becomes `expect.row_set`.** Order-blind by declaration rather than by
+construction. A hash mismatch says two hashes differ; a row-set mismatch says which row.
+
+**The second session is a second connection.** The original drives a background
+`psql -f fifo` and waits by polling its output file for a token, up to 200 times at
+0.1s. A second `psycopg` connection removes the wait rather than shortening it: the
+query returns when it returns. The original's two arms that exist only to NAME that
+polling timeout -- `session A opened snapshot` and `session A responded post-commit` --
+are carried here as the positive facts they are the negative of.
+
+### Arrays are cast in SQL
+
+`psycopg` returns a PostgreSQL array as a Python list, so `{1,2,3}` arrives as
+`[1, 2, 3]`. Casting `::text` in the query keeps both harnesses comparing the string the
+server produced, rather than comparing a Python object against a brace literal and
+failing for a reason that has nothing to do with projections.
+
+| test | asserts |
+| --- | --- |
+| `test_the_catalog_is_empty_until_the_first_projection_is_added` | the base projection is recorded LAZILY, so the catalog holds nothing before the first add |
+| `test_the_first_add_records_the_base_and_the_new_projection` | both rows appear at once, with the base's columns, empty sort key, name and shared storage id |
+| `test_a_second_projection_may_have_no_sort_key` | a projection without a sort key, and three distinct storage ids |
+| `test_a_bad_projection_is_refused_by_its_own_code` | seven refusals, each by its measured SQLSTATE rather than by "it errored" |
+| `test_a_projection_on_a_heap_table_is_refused` | the refusal that is about the ACCESS METHOD, not the arguments |
+| `test_drop_removes_one_projection_and_leaves_the_rest` | drop is surgical, and the table is still readable after the DDL |
+| `test_a_projection_added_late_is_back_filled_from_the_existing_rows` | a projection added after the rows exist is populated from them, not left empty |
+| `test_a_write_fans_out_to_every_projection` | the write path: both projections match the base, by rows and by count |
+| `test_projection_chunks_carry_skip_metadata` | the min/max that makes choosing the projection worth anything |
+| `test_a_delete_reaches_the_projection_through_the_base_delete_vector` | liveness comes from the BASE, so a delete that never touches the copy still removes its rows |
+| `test_fan_out_spans_more_than_one_row_group` | one group is the case where a numbering bug cannot show |
+| `test_the_base_projection_cannot_be_read_by_name` | `base` names a catalog row, not something `read_projection` addresses |
+| `test_columns_the_projection_lacks_are_reconstructed_from_the_base` | the row-number linkage between copy and base |
+| `test_reconstruction_survives_deletes_and_nulls` | where a drifting row number shows first: missing rows and absent values |
+| `test_a_covering_sort_key_query_reads_the_projection` | the projection is chosen, AND the rows match a heap oracle -- a plan check alone cannot say the rows were right |
+| `test_the_guc_is_an_off_switch` | the off switch really switches off |
+| `test_a_query_naming_an_uncovered_column_falls_back_to_the_base` | choosing a projection that lacks `b` would drop the column, not merely cost more |
+| `test_a_projection_scan_reflects_deletes` | the scan path, against the oracle, after a delete and over the full range |
+| `test_vacuum_rebuilds_the_projection_against_the_compacted_base` | survives, is still chosen, and still matches the oracle on fresh row numbers |
+| `test_a_second_vacuum_renumbers_again_and_stays_correct` | ONCE IS NOT THE PROPERTY: a rebuild reading the pre-vacuum numbering is right the first time |
+| `test_an_old_snapshot_never_sees_rows_committed_after_it` | REPEATABLE READ through a projection scan, the case no single-session test can reach |
+| `test_dropping_a_table_removes_only_its_own_declaration` | #304: one orphan used to abort `rebuild_projections()` for every other table |
+| `test_the_rebuild_repairs_an_orphan_rather_than_aborting_on_it` | a database from an older build already holds orphans, so the rebuild must clean rather than abort |
+| `test_a_projection_added_mid_transaction_receives_the_later_writes` | #875: a write before the add latches an EMPTY writer list and every later write skips silently |
+| `test_the_control_a_transaction_with_no_write_before_the_add` | the control -- that path always worked and must stay working |
+| `test_a_projection_dropped_mid_transaction_stops_receiving_writes` | the same latch with the opposite sign, including the orphan storage it would leave |
+| `test_the_control_a_drop_in_its_own_transaction` | pins the arm above to the CACHE rather than to `drop_projection`'s own cleanup |
