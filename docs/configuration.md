@@ -27,7 +27,7 @@ pgColumnar has two kinds of settings:
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `pgcolumnar.compression` | enum | `zstd` | Default codec for new chunks. One of `none`, `pglz`, `lz4`, `zstd`. `lz4` and `zstd` are available only when the extension was built with those libraries. |
+| `pgcolumnar.compression` | enum | `zstd` | Default block codec for new chunks. One of `none`, `pglz`, `lz4`, `zstd`. `lz4` and `zstd` are available only when the extension was built with those libraries. **This setting also participates in the lightweight encoding decisions that run before the codec**, so `none` is not the same cascade with compression removed; see [Compression and the encoding cascade](administration.md#compression-and-the-encoding-cascade). |
 | `pgcolumnar.compression_level` | integer | `3` | Level for the `zstd` codec. Range 1 to 22. Higher levels compress more and write more slowly. |
 | `pgcolumnar.fsst_min_gain_percent` | integer | `5` | Minimum size reduction, in percent, for FSST string encoding to be kept for a column chunk. Range 0 to 99. See below. |
 | `pgcolumnar.fsst_verdict_reuse` | integer | `16` | How many later row groups may reuse a column's FSST keep-or-drop verdict before it is decided again. Range 0 to INT_MAX. |

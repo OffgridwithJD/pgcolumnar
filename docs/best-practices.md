@@ -52,12 +52,22 @@ decompresses fastest for a scan-bound workload where storage is cheap. `none` an
 ranges from 1 to 22, with a default of 3. Raise it for cold, archival data, where a
 slower write buys lasting space. Leave it low for tables you rewrite often.
 
-**Let the encoder choose the encoding.** Before the codec runs, each chunk takes the
-encoding that makes it smallest. The encodings include dictionary, run-length,
-delta, frame-of-reference, delta-of-delta, and FSST for strings. Specialized float
-encodings are available too. You do not select these encodings. You feed the encoder
-data it can exploit. Sorted or low-cardinality columns encode far smaller, which is
-another reason to cluster.
+**Let the encoder choose the encoding.** Before the codec runs, each chunk takes a
+lightweight encoding: dictionary, run-length, delta, frame-of-reference,
+delta-of-delta, or FSST for strings. Specialized float encodings are available too.
+You do not select these encodings. You feed the encoder data it can exploit. Sorted
+or low-cardinality columns encode far smaller, which is another reason to cluster.
+
+Two things about that choice are worth knowing before you tune anything.
+
+It aims at the smallest **stored** result, not the smallest encoded one. That
+means it is made after the configured codec has run, so
+**`pgcolumnar.compression` changes which encodings a chunk gets**. See
+[Compression and the encoding cascade](administration.md#compression-and-the-encoding-cascade).
+
+For FSST it is also not purely a size choice. A win smaller than
+`pgcolumnar.fsst_min_gain_percent` is given up on purpose, because the
+per-vector FSST encode costs more than a marginal win repays.
 
 **Spend encode effort where it pays.** `encode_effort` is `full` or `fast`. Leave it
 at `full` for the best ratio. Switch a column to `fast` when a text-heavy load is
