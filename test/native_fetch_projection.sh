@@ -173,8 +173,21 @@ check "premise: the column-set entry point is called at all" \
 	"$([ "${_np_cols:-0}" -ge 1 ] && echo yes || echo no)" "yes"
 
 # `PgColumnarReadRowByNumberCols(` does not match `PgColumnarReadRowByNumber(`, so
-# the narrow caller is not counted as a full decode. Asserted rather than assumed,
-# because the whole arm rests on it.
+# the narrow caller is not counted as a full decode.
+#
+# THIS PREMISE DOCUMENTS THE INTENT; IT IS NOT WHAT PROVIDES THE GUARANTEE, and
+# the first version of this comment said it was. A broken prefix relationship
+# cannot pass silently, because the other two arms already contradict each other
+# under it: if `Cols(` matched the wide pattern then every narrow call would be
+# counted twice, so `full >= cols`, and `cols >= 1` with `full == 0` is a
+# contradiction. The arm reddens rather than hiding.
+#
+#     cols=1, prefix intact   -> full=0   arm PASS
+#     cols=1, prefix broken   -> full=1   arm RED
+#     cols=3, prefix broken   -> full=3   arm RED
+#
+# Kept because a reader should not have to derive that, and because it names the
+# assumption a future rename would break. Correction from @OffgridwithJD's review.
 check "premise: the column-set caller is not counted as a full decode" \
 	"$(printf 'PgColumnarReadRowByNumberCols(a, b)\n' | grep -c 'PgColumnarReadRowByNumber(')" "0"
 

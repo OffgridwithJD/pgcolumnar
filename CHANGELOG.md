@@ -168,6 +168,54 @@ true until the next version shipped.
 
 ### Fixed
 
+- The arm named "the visibility-only caller decodes nothing" passed on a tree
+  where it decoded (#1077 sweep).
+
+  Two arms in `native_fetch_projection.sh` counted a CALL SITE, with its argument
+  text, pinned at a literal `1`:
+
+      grep -c 'PgColumnarRowIsLive(rel, snap, baseRow)'            "1"
+      grep -c 'PgColumnarReadRowByNumberCols(rel, snap, baseRow'   "1"
+
+  That asserts a particular call is still written the way it was written, which is
+  not the property either name claims. Plant the regression they exist to catch --
+  a full `PgColumnarReadRowByNumber` beside the liveness check in the visibility
+  path -- and both stay green, because the call they count is still there and the
+  decode added next to it is invisible to them:
+
+      state                          live cols full | OLD1  OLD2 | NEW
+      clean                             1    1    0 | PASS  PASS | PASS
+      REGRESSED, full decode added      1    1    1 | PASS  PASS | RED
+      honest 2nd narrow caller          2    1    0 | PASS  PASS | PASS
+      empty file                        0    0    0 | RED   RED  | premises RED
+
+  Unlike the `allColumns` pair repaired in `8e88f42`, these fail in ONE direction
+  only. A realistic second caller uses different variable names, so the exact-text
+  count stays at 1 and the old arm is BLIND rather than falsely alarmed. Row 3 is a
+  pass for the old arms by accident, not by correctness.
+
+  THE PROPERTY IS A ZERO. Three entry points exist and only one decodes every
+  column, so the projection path is asserted never to call it. More correct callers
+  of the two narrow entry points move nothing; any full decode moves it off zero --
+  the opposite failure direction from a count pinned at 1.
+
+  Three premises keep the zero from being vacuous: each narrow entry point is
+  called at all, and that `PgColumnarReadRowByNumberCols(` does not match
+  `PgColumnarReadRowByNumber(`. That third one DOCUMENTS the assumption rather than
+  providing the guarantee, which the first version of its comment got wrong: a
+  broken prefix would make `full >= cols`, and `cols >= 1` with `full == 0` is a
+  contradiction, so the main arm reddens rather than hiding. Corrected in review by
+  @OffgridwithJD.
+
+  Removal proof, against the real suite: md5 `c8324ce4f486` -> `a2c26702a9cc`, full
+  decodes 0 -> 1, `16 passed + 1 failed + 0 unrunnable + 0 skipped = 17`, one red
+  naming `got [1 full decode(s)] want [0 full decode(s)]`, all three premises green,
+  restored with an empty diff.
+
+  The fourth and fifth arm in this file repaired for counting a string across a
+  whole file; `8e88f42` did the second and third and the `deltuples` comment
+  records the first.
+
 - The projection guard fired on a correct caller and stayed green on a wrong one
   (#1077).
 
