@@ -195,17 +195,71 @@ check "the untouched rows are unchanged" \
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
-check "the entry key includes the storage id" \
-	"$(grep -c 'e->storageId == storageId && e->groupNumber == groupNumber' "$SRC/columnar_reader.c")" "1"
+# PIN THE PROPERTY, NOT THE CALLER COUNT (#1078's class). Each of these four
+# counted a string across a whole file and compared it against a literal, which
+# asserts HOW MANY sites exist today rather than that every site is honest. The
+# failure direction differs per arm and so does the repair, which is why they are
+# not all rewritten the same way:
+#
+#   the entry key    both directions -- a second honest lookup reddens it, and a
+#                    lookup that drops the storage id is invisible. Self-referential.
+#   the cid reject   noise only -- it is an EXISTENCE claim, and a second honest
+#                    site reddened it. Scoped to the function that must contain it.
+#   the geometry     the count was a proxy for one of FOUR compared fields, and
+#                    said nothing about the other three. Membership instead.
+#   the discard      the count 2 was a proxy for "from these two places". Name them.
 
+_nfc_slot="$(awk '/^pgcolumnar_fetch_group_slot\(/,/^}/' "$SRC/columnar_reader.c")"
+_nfc_row="$(awk '/^pgcolumnar_fetch_row\(/,/^}/' "$SRC/columnar_reader.c")"
+
+check "premise: the fetch-cache functions were extracted, not empty ranges" \
+	"$([ -n "$_nfc_slot" ] && [ -n "$_nfc_row" ] && echo yes || echo no)" "yes"
+
+# EVERY group-number comparison is keyed by the storage id as well. Honest extra
+# lookups move both counts together; one that forgets the storage id moves only
+# the total. Both numbers are in the compared strings, so the message reconciles.
+_nfc_grp="$(grep -c 'e->groupNumber == groupNumber' "$SRC/columnar_reader.c")"
+_nfc_keyed="$(grep -c 'e->storageId == storageId && e->groupNumber == groupNumber' \
+	"$SRC/columnar_reader.c")"
+
+check "premise: there is a group-number comparison to key" \
+	"$([ "${_nfc_grp:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+check "every group-number comparison is keyed by the storage id too" \
+	"keyed $_nfc_keyed of $_nfc_grp" "keyed $_nfc_grp of $_nfc_grp"
+
+# `case` OVER A CAPTURED STRING, NOT A PIPE INTO grep -q. `grep -q` exits on its
+# first match and closes the pipe, so the writer can take SIGPIPE -- #486, and
+# selftest/080 refuses it. The same file family already has the answer at
+# native_fetch_projection.sh:155: a `case` needs no subprocess and no pipe.
 check "an entry from an earlier command is rejected" \
-	"$(grep -c 'e->cid != cid' "$SRC/columnar_reader.c")" "1"
+	"$(case "$_nfc_slot" in *'e->cid != cid'*) echo yes ;; *) echo no ;; esac)" "yes"
 
-check "a hit re-checks the group geometry it was filled with" \
-	"$(grep -cE 'entry->fileOffset != rg->fileOffset' "$SRC/columnar_reader.c")" "1"
+# The recheck compares four fields. Counting one of them asserted nothing about
+# the other three, and a reflow that dropped one would have passed.
+for _f in firstRowNumber rowCount fileOffset natts; do
+	check "a hit re-checks the group's $_f against the row group" \
+		"$(case "$_nfc_row" in \
+			*"entry->$_f != rg->$_f"*|*"entry->$_f != natts"*) echo yes ;; \
+			*) echo no ;; esac)" "yes"
+done
 
-check "the cache is released at executor end, not only at transaction end" \
-	"$(grep -c 'PgColumnarDiscardFetchCache' "$SRC/columnar_tableam.c")" "2"
+# Named call sites rather than a count of 2: a third honest caller is not a defect,
+# and losing either of these two is.
+#
+# CAPTURED FIRST, WITH ITS OWN PREMISE, so "this function does not discard the
+# cache" and "the awk range matched nothing" are different answers. Without the
+# premise a renamed function reads as a missing call, which is the both-readings
+# problem a literal match always has.
+for _fn in pgcolumnar_executor_end pgcolumnar_xact_callback; do
+	_nfc_fn="$(awk "/^$_fn\\(/,/^}/" "$SRC/columnar_tableam.c")"
+
+	check "premise: $_fn was extracted, not an empty range" \
+		"$([ -n "$_nfc_fn" ] && echo yes || echo no)" "yes"
+
+	check "the fetch cache is discarded from $_fn" \
+		"$(case "$_nfc_fn" in *PgColumnarDiscardFetchCache*) echo yes ;; *) echo no ;; esac)" "yes"
+done
 
 # The SETs every fetch-path guard below runs under, defined once because the
 # premise that asserts the plan and the measurement that depends on it must not
