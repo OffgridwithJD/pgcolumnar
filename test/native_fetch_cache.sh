@@ -237,12 +237,24 @@ check "an entry from an earlier command is rejected" \
 
 # The recheck compares four fields. Counting one of them asserted nothing about
 # the other three, and a reflow that dropped one would have passed.
-for _f in firstRowNumber rowCount fileOffset natts; do
+#
+# THREE COMPARE AGAINST THE ROW GROUP AND ONE DOES NOT. `natts` is compared against
+# the scan's own column count rather than against `rg`, so it needs its own pattern.
+# Reported by @jdatcmd: the first version put `!= natts` in the alternation for ALL
+# four, which is harmless -- `entry->firstRowNumber != natts` appears nowhere -- and
+# is still wrong as a claim, because each arm would then accept a comparison the
+# property does not describe.
+for _f in firstRowNumber rowCount fileOffset; do
 	check "a hit re-checks the group's $_f against the row group" \
 		"$(case "$_nfc_row" in \
-			*"entry->$_f != rg->$_f"*|*"entry->$_f != natts"*) echo yes ;; \
+			*"entry->$_f != rg->$_f"*) echo yes ;; \
 			*) echo no ;; esac)" "yes"
 done
+
+check "a hit re-checks the group's natts against the scan's column count" \
+	"$(case "$_nfc_row" in \
+		*"entry->natts != natts"*) echo yes ;; \
+		*) echo no ;; esac)" "yes"
 
 # Named call sites rather than a count of 2: a third honest caller is not a defect,
 # and losing either of these two is.
