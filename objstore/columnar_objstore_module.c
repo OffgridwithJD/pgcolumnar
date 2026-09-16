@@ -1391,6 +1391,56 @@ os_resolve_s3(PgColumnarObjHandle *h, const char *url,
 				ep = os_require_env("AWS_ENDPOINT_URL", url);
 		}
 	}
+	/*
+	 * Userinfo in the ENDPOINT, which #997 left (#995). The bucket guard above
+	 * cannot see it: the userinfo is in the endpoint the operator configured,
+	 * not in the s3:// URL the caller wrote.
+	 *
+	 * HERE, AND NOT AT THE AUTHORITY PARSE BELOW. Placed there it sits behind the
+	 * region demand, so an endpoint carrying userinfo with no region configured
+	 * reports the region instead -- and an arm for it would need a region set for
+	 * no reason connected to what it tests. MEASURED: all five endpoint arms in
+	 * test/objstore_userinfo.sh returned "requires a region option" until this
+	 * moved. That is the same reasoning the bucket guard carries for sitting
+	 * before the endpoint is resolved at all, and the trap #995 named.
+	 *
+	 * The scheme is not yet checked here, so the scan is the whole endpoint
+	 * rather than its authority. An '@' cannot occur in "http://" or "https://",
+	 * and one in a PATH is still a malformed endpoint, so the wider scan refuses
+	 * the same set and costs nothing.
+	 *
+	 * TWO SHAPES, AND ONLY ONE WAS EVER CAUGHT -- measured on the parse itself:
+	 *
+	 *   http://u:p@host:30829   -> host "u",          port 0       <- refused
+	 *   http://user@host:30829  -> host "user@host",  port 30829   <- port VALID
+	 *
+	 * The first has a colon INSIDE the userinfo, so the authority split lands
+	 * there and the port becomes atoi("p@host:30829") = 0. The second has no such
+	 * colon, the real port survives, and the invalid-port refusal never fires at
+	 * all. #995 measured the first and concluded "refused as invalid host or
+	 * port" -- true of that shape, not of the code.
+	 *
+	 * The second shape is why this is a guard and not a message change. Its
+	 * refusal came from the allow-list, naming the host it could not match, and
+	 * the hint then told the operator:
+	 *
+	 *     ALTER SYSTEM SET pgcolumnar.objstore_allowed_endpoints = 'user@host'
+	 *
+	 * A diagnostic that invites widening a security boundary to accommodate a
+	 * parse bug is worse than a wrong error code.
+	 *
+	 * The message names the ENDPOINT rather than `url`, because that is the
+	 * string carrying the userinfo.
+	 */
+	if (strchr(ep, '@') != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("columnar: userinfo in object-store endpoint \"%s\" is "
+						"not supported", ep),
+				 errhint("Remove the user:password@ from the endpoint and supply "
+						 "credentials through AWS_ACCESS_KEY_ID and "
+						 "AWS_SECRET_ACCESS_KEY.")));
+
 	if (pg_strncasecmp(ep, "https://", 8) == 0)
 	{
 #ifdef HAVE_OBJSTORE_OPENSSL

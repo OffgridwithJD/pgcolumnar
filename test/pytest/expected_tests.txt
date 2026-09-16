@@ -129,7 +129,10 @@
 # right, the additive constraint run against three REAL pairs, the three refusals with
 # a control, and the name-argument restriction.
 # Re-derived by collection: `340 tests collected`.
-guard_tests 340
+# 340 -> 341: a test file documented as an unnumbered `###` is invisible to every
+# other arm -- outside the numbering, outside the contents, and still NAMED, so the
+# coverage arm passes (#1024). Re-derived by collection: `341 tests collected`.
+guard_tests 341
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -180,4 +183,10 @@ guard_tests 340
 # right here; two independent 322s merged just as silently earlier today and the
 # merged tree collected 323. Re-derive BOTH after every merge, not the one git
 # complained about.
-cluster_tests 320
+# 320 -> 325 when test_objstore_endpoint_userinfo.py landed (#995): the two userinfo
+# endpoint shapes, the placement premise that the guard fires with no region
+# configured, the clean-endpoint control, and the '@'-in-the-key control. NOT a port
+# and not a pair -- `objstore_endpoint_userinfo.sh` does not exist; these assert the
+# same properties through the python harness independently.
+# Re-derived by collection: `325 tests collected`.
+cluster_tests 325
