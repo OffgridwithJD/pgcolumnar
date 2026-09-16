@@ -237,12 +237,13 @@ _nfp_row="$(awk '/^pgcolumnar_fetch_row\(/,/^}/' "$SRC/columnar_reader.c")"
 check "premise: pgcolumnar_fetch_row was extracted, not an empty range" \
 	"$([ -n "$_nfp_row" ] && echo yes || echo no)" "yes"
 
+# `case`, not a pipe into `grep -q`: that exits on its first match and closes the
+# pipe under its writer (#486), which selftest/080 refuses. The pattern is quoted so
+# the brackets in valOffset[c][present] are literal rather than glob classes.
 check "the rank comes from a prefix rather than a loop over earlier rows" \
-	"$(printf '%s\n' "$_nfp_row" \
-		| grep -qF 'present = pgcolumnar_rank_before' && echo yes || echo no)" "yes"
+	"$(case "$_nfp_row" in *'present = pgcolumnar_rank_before'*) echo yes ;; *) echo no ;; esac)" "yes"
 
 check "a varying-length column reaches its value through an offset table" \
-	"$(printf '%s\n' "$_nfp_row" \
-		| grep -qF 'entry->valOffset[c][present]' && echo yes || echo no)" "yes"
+	"$(case "$_nfp_row" in *'entry->valOffset[c][present]'*) echo yes ;; *) echo no ;; esac)" "yes"
 
 pgc_summary
