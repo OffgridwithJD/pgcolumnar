@@ -236,6 +236,41 @@ true until the next version shipped.
 
 ### Fixed
 
+- `fsst_margin.sh`'s low-margin arm looks redundant and is not: it falsifies the
+  descriptor reader.
+
+  The three arms across sections 1 and 2b bracket the FSST decision, and the
+  bracket also falsifies `fsst_vectors` itself. Nothing said so, and the
+  low-margin arm reads as a weaker duplicate of the margin-90 one, so it is the
+  obvious thing to delete in a tidy-up.
+
+  Measured by evaluating the arms against a stubbed reader rather than argued:
+
+      reader always returns 0    low-margin RED   margin-90 PASS   codec RED
+      reader always returns >0   low-margin PASS  margin-90 RED    codec PASS
+      the real tree              PASS             PASS             PASS
+
+  `fsst_vectors` parses the encoding descriptor by byte offset,
+  `get_byte(descriptor, 6 + i * 13)`, which is the kind of reader that goes
+  silently wrong on a format change and returns a plausible number. With only the
+  margin-90 arm, a reader stuck at 0 reads as "FSST was dropped" and every arm is
+  green.
+
+  AND THE TWO MARGINS ARE THE GUC'S OWN ENDPOINTS. `columnar_tableam.c:3269`
+  declares it `5, 0, 99`, so the bracket uses the extremes the setting admits
+  rather than an arbitrary low and high. That is what makes each half the
+  strongest form: at margin 0 the keep test is "any compressed win at all keeps
+  FSST", in the GUC's own help text, so `kept == 0` there would mean FSST never
+  helps on this corpus rather than merely not helping enough. Raising it to 5 to
+  simplify the arm would lose that with nothing to show it went.
+
+  Comment only. No check name moves: the sorted name list hashes `62d1b8a49926`
+  before and after.
+
+  Found by @OffgridwithJD reviewing #1082, which had already merged, and the
+  endpoint reading is theirs too. The table is measured rather than argued, and
+  the range was read from the declaration rather than taken on trust.
+
 - The arm named "the visibility-only caller decodes nothing" passed on a tree
   where it decoded (#1077 sweep).
 

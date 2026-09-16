@@ -94,6 +94,37 @@ check "the heap mirror has content to compare against" \
 	"$([ -n "$heap_hash" ] && echo yes || echo no)" "yes"
 
 # --- 1. the margin decides ---------------------------------------------------
+#
+# THE THREE ARMS BELOW AND IN 2b BRACKET THE DECISION, and the bracket also
+# falsifies `fsst_vectors` itself. That second property is accidental and worth
+# writing down, because the low-margin arm looks redundant next to the margin-90
+# one and is not:
+#
+#     reader always returns 0    low-margin RED   margin-90 PASS   codec RED
+#     reader always returns >0   low-margin PASS  margin-90 RED    codec PASS
+#     the real tree              PASS             PASS             PASS
+#
+# `fsst_vectors` parses the encoding descriptor by byte offset --
+# `get_byte(descriptor, 6 + i * 13)` -- which is exactly the kind of reader that
+# goes silently wrong on a format change and reports a plausible number. With only
+# the margin-90 arm, a reader stuck at 0 would read as "FSST was dropped" and every
+# arm would be green. Removing the low-margin arm as redundant takes that with it.
+#
+# AND THE TWO MARGINS ARE THE GUC'S OWN ENDPOINTS, not arbitrary low and high
+# values. `columnar_tableam.c:3269` declares it `5, 0, 99` -- default 5, minimum
+# 0, maximum 99 -- so this arm and 2b's bracket the decision with the extremes the
+# setting admits.
+#
+# That is what makes each half the strongest available statement. At margin 0 the
+# keep test is "any compressed win at all keeps FSST", in the GUC's own words, so
+# `kept == 0` here would mean FSST never helps on this corpus rather than merely
+# not helping enough. Raise this to 5 to "simplify" it and that disappears, with
+# nothing to show it went.
+#
+# Found by @OffgridwithJD reviewing #1082, and the endpoint reading is theirs too.
+# The table above is measured rather than argued, by evaluating the arms against a
+# stubbed reader; the range was read from the declaration rather than taken on
+# trust.
 
 load fm_keep 0 "$decide_corpus"
 kept="$(fsst_vectors fm_keep)"
