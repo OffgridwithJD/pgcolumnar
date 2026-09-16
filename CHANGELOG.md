@@ -16,6 +16,35 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- One geometry arm accepted a comparison the property does not describe (#1081).
+
+  #1081 replaced a count of `entry->fileOffset != rg->fileOffset` with a per-field
+  membership loop, so that dropping any one of the four compared fields reddens by
+  name. The loop matched `entry->$_f != rg->$_f` OR `entry->$_f != natts` for every
+  field, because `natts` is the one field compared against the scan's own column
+  count rather than against the row group.
+
+  Harmless today -- `entry->firstRowNumber != natts` appears nowhere -- and still
+  wrong as a claim: each arm would accept a comparison its own name denies. Three
+  fields now match only the `rg` form, and `natts` has its own arm and its own name.
+
+  Reported by @jdatcmd on #1081's review.
+
+  All four verified by removal on the real suite, each reddening only its own arm:
+
+      firstRowNumber removed   FAIL  a hit re-checks the group's firstRowNumber ...
+      rowCount removed         FAIL  a hit re-checks the group's rowCount ...
+      fileOffset removed       FAIL  a hit re-checks the group's fileOffset ...
+      natts removed            FAIL  a hit re-checks the group's natts against the
+                                     scan's column count
+      restored                 26 passed, source byte-identical
+
+  `firstRowNumber` is the one #1081 shipped unproven. Its mutation did not apply --
+  that line starts `(entry->` rather than `entry->`, so the pattern missed -- and the
+  harness's applied-assertion reported it rather than counting a clean run as a pass.
+
 ### Added
 
 - Six more guards counted their callers instead of pinning their property (#1078's
