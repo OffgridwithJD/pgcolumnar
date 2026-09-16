@@ -88,6 +88,7 @@ behaviour, the source of that number is named.
 - [40. test_sorted_pathkeys.py: when a scan may claim its rows are ordered](#40-test_sorted_pathkeyspy-when-a-scan-may-claim-its-rows-are-ordered)
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
+- [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
 
 ## 1. How to read a test in here
 
@@ -4289,3 +4290,51 @@ Removal proof, run on both harnesses: deleting the early return and rebuilding m
 `.so` from `c8e5c790dbac` to `6455728725e5` and reddens exactly the codec arms, while
 every content invariant stays green. The mutant still writes correct rows, which is the
 point of keeping the invariant in the file: this is a decision changing, not corruption.
+
+## 43. test_pgxn_metadata.py: the published distribution metadata, which nothing read
+
+`META.json` is what PGXN receives. It hardcodes the version twice and names the base
+install script by filename, and **no suite, no Makefile rule and no CI step ever read
+it**. It went stale for the whole alpha4 cycle:
+
+```
+version                    1.0.0-alpha.3     while VERSION said 1.0-alpha4
+provides.pgcolumnar.file   pgcolumnar--1.0-alpha3.sql
+```
+
+**The filename is the half that matters.** `pgcolumnar--1.0-alpha3.sql` does not
+exist. This repository opens each cycle by RENAMING the base script to the new
+version, so the published metadata named a file the distribution does not contain.
+The two version strings were only the visible symptom, and a reader comparing them
+against `VERSION` would have called it a cosmetic lag.
+
+| test | what it establishes |
+| --- | --- |
+| `test_the_version_derivation_maps_the_forms_this_project_uses` | the transform itself, before anything relies on it |
+| `test_meta_json_states_the_version_the_VERSION_file_holds` | both version fields, against the source of truth |
+| `test_the_script_meta_json_names_is_in_the_published_distribution` | the defect that actually shipped |
+| `test_every_sql_file_meta_json_could_name_is_shipped` | the neighbouring failure: an upgrade script dropped from the archive |
+
+**The first exists because a derivation is a claim too.** PGXN requires three-part
+semver, so `1.0-alpha4` publishes as `1.0.0-alpha.4`, and the mapping is computed
+rather than hardcoded so a future `1.0-beta1` is covered. If that transform were
+wrong, every other arm would compare against a wrong expectation and could pass or
+fail for reasons having nothing to do with `META.json`.
+
+**The fourth covers what the third cannot see.** `provides.file` is ONE filename, so
+an `export-ignore` that dropped a different install script -- an upgrade path --
+would leave the third arm green while `ALTER EXTENSION ... UPDATE` broke for anyone
+who installed from PGXN.
+
+`git archive` rather than `os.path.exists` throughout, because the question is what
+the DISTRIBUTION contains and not what the working tree holds. An `export-ignore`
+attribute can drop a file that is plainly present on disk, and this repository has
+been bitten by one before.
+
+**Not a port and not a pair.** `docs_style.sh` asserts the same properties through
+its own parse and its own `git archive`; neither file names the other.
+
+Removal proof, run on both harnesses: restore `META.json` as it shipped and the two
+substantive arms redden on each side while every premise stays green. The premises
+hold because the file still parses and still names *a* script -- it names the wrong
+one, which is exactly the distinction the arms draw.

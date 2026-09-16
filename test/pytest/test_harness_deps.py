@@ -112,6 +112,10 @@ NO_CLUSTER = [
     # The parity tool is python and reads python. No cluster and no driver: its input
     # is a source file and its output is a verdict about two source files.
     "test_compare_to_bash.py",
+    # The PGXN distribution metadata. Reads META.json and VERSION and runs
+    # `git archive`; the public seam is the published distribution, so it needs
+    # neither a cluster nor the driver.
+    "test_pgxn_metadata.py",
 ]
 
 
