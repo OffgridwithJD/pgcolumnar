@@ -100,6 +100,13 @@ A runtime filter then cannot drop groups.
 - `pgcolumnar.cluster(table)` does the eager, one-shot reorg under
   `AccessExclusiveLock`. Use it for a first sort or a full rewrite in a maintenance
   window, not on a live hot table.
+- `pgcolumnar.cluster_hilbert(table)` and `pgcolumnar.recluster_hilbert(table)` are
+  the same two verbs on the Hilbert curve. **Choose the curve by the predicate.**
+  Z-order is fine for point lookups. Hilbert has no jumps at a bit boundary, so it
+  keeps neighbouring keys together and a range filter reads fewer chunk groups.
+  Measured on 200,000 rows over two columns, Hilbert read 1.24x to 2.04x fewer
+  groups. The gap narrows as the query box grows, so measure your own corpus when
+  the two look close.
 - `pgcolumnar.sort_status(table)` reports how much of the table is in order. Measure
   before and after a sort rather than guess.
 
@@ -118,7 +125,8 @@ still reads and filters those rows. Match the verb to the damage:
 | `pgcolumnar.compact_rewrite(table, min_deleted_fraction, max_groups)` | rewrites partially deleted groups to drop dead rows | `ShareUpdateExclusiveLock` |
 | `pgcolumnar.recluster(table)` | restores sort order online | `ShareUpdateExclusiveLock` |
 | `pgcolumnar.truncate(table)` | returns reclaimed end blocks to the OS | `ShareUpdateExclusiveLock` plus a brief conditional `AccessExclusiveLock` |
-| `pgcolumnar.cluster(table)` / `vacuum_sorted(table)` | eager full reorg | `AccessExclusiveLock` |
+| `pgcolumnar.recluster_hilbert(table)` | restores Hilbert order online | `ShareUpdateExclusiveLock` |
+| `pgcolumnar.cluster(table)` / `cluster_hilbert(table)` / `vacuum_sorted(table)` | eager full reorg | `AccessExclusiveLock` |
 
 **Let the daemon carry the routine load.** Set `pgcolumnar.autovacuum = on`; it is
 off by default. A background worker then calls only the two online verbs,

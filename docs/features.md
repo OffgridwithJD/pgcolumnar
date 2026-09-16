@@ -166,6 +166,12 @@ coverage.
   (Morton) curve on several numeric columns at once. Point and range filters on
   more than one clustered column then skip more groups. It holds
   `AccessExclusiveLock`, like core `CLUSTER`, so it is an eager bulk operation.
+- `pgcolumnar.cluster_hilbert(table, col [, col ...])` does the same on the
+  Hilbert curve instead. The Hilbert curve has no jumps at a bit boundary, so keys
+  close in the data stay close in storage. **Prefer it when the clustered columns
+  carry range filters**. Measured on 200,000 rows over two columns, it read 1.24x
+  to 2.04x fewer chunk groups than Z-order. The advantage is largest on the most
+  selective queries. Everything else matches `cluster`.
 
 ### Online reclaim and clustering
 
@@ -179,6 +185,9 @@ and writes continue.
   `max_groups` bounds how many one call rewrites.
 - `pgcolumnar.recluster(table, col [, col ...])` re-establishes the same Z-order
   as `cluster` online. It is a fast no-op when the recorded key is intact.
+- `pgcolumnar.recluster_hilbert(table, col [, col ...])` is the online counterpart
+  to `cluster_hilbert`, and the way to move a Z-ordered table onto the Hilbert
+  curve.
 - `pgcolumnar.expire(table)` drops row groups whose rows have all passed the
   retention declared with `set_options(ttl_column, ttl_interval)`. A group with
   one live row is kept whole, so nothing inside the retention is dropped. It

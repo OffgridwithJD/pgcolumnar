@@ -95,11 +95,39 @@ SELECT pgcolumnar.vacuum_sorted('events');
 
 -- Z-order (Morton) clustering over several columns at once
 SELECT pgcolumnar.cluster('events', 'customer_id', 'amount');
+
+-- the same, on the Hilbert curve
+SELECT pgcolumnar.cluster_hilbert('events', 'customer_id', 'ts');
 ```
 
 `vacuum_sorted` sorts ascending and tightens the first column most. `cluster`
 uses a Z-order curve, so filters on more than one of its columns all skip more
 groups.
+
+**Which curve.** `cluster_hilbert` lays the rows on the Hilbert curve instead.
+That curve has no jumps at a bit boundary, so keys close in the data stay close
+in storage. Range filters on the clustered columns then read fewer chunk groups.
+Measured on 200,000 rows over two columns, Hilbert read 1.24x to 2.04x fewer
+groups than Z-order. The advantage is largest on the most selective queries.
+Take Z-order for point lookups and Hilbert for ranges, and measure your own
+corpus if the two are close.
+
+**The curve is sticky, on the same key.** The table records which curve it was laid
+on, and `pgcolumnar.sort_status` reports it as `sorted_kind`. Once a table is on the
+Hilbert curve, plain `cluster` and `recluster` **over the same key** maintain that
+curve rather than converting it back.
+
+**A different key reverts to Z-order**, and the column order is part of the key:
+
+```sql
+SELECT pgcolumnar.cluster_hilbert('h', 'a', 'b');   -- sorted_kind: hilbert
+SELECT pgcolumnar.recluster('h', 'a', 'b');         -- sorted_kind: hilbert
+SELECT pgcolumnar.recluster('h', 'b', 'a');         -- sorted_kind: zorder
+```
+
+That is what keeps "sticky" from meaning "unescapable". To move a Z-ordered table
+onto Hilbert, or to keep Hilbert while changing the key, name the verb:
+`pgcolumnar.recluster_hilbert`.
 
 `cluster` and `recluster` take at most eight key columns, and each must be a
 boolean, an integer, a floating-point, a `date` or a timestamp. They do not take

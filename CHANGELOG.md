@@ -18,6 +18,60 @@ true until the next version shipped.
 
 ### Fixed
 
+- Hilbert clustering shipped in alpha4 and the pages a user reads never mentioned
+  it (#1043 for the suite header).
+
+  `pgcolumnar.cluster_hilbert` and `pgcolumnar.recluster_hilbert` were documented
+  in `docs/sql-reference.md` and NOWHERE ELSE. `features.md`, `how-to.md` and
+  `best-practices.md` all describe clustering as Z-order and name only `cluster`
+  and `recluster`:
+
+      sql-reference.md   cluster_hilbert 5 hits, recluster_hilbert 2
+      features.md        0
+      how-to.md          0
+      best-practices.md  0
+      user-guide.md      0
+
+  So a reader following the discovery path picked Z-order and never learned the
+  other option existed. It is the headline item of the release whose theme is
+  skipping and layout, with a measured 1.24x to 2.04x advantage on range filters.
+
+  All three pages now carry the verbs, the measured advantage, and the rule for
+  choosing: Z-order for point lookups, Hilbert for ranges, measure when they look
+  close. `how-to.md` also states that the curve is sticky ON THE SAME KEY, because
+  that is the part which surprises people.
+
+  THE QUALIFIER IS THE WHOLE CLAIM AND THE FIRST DRAFT DROPPED IT. `sql-reference.md`
+  already said "plain `cluster` and `recluster` ON THE SAME KEY maintain that curve";
+  the paraphrase written for `how-to.md` said it unconditionally.
+  `cluster_inherited_curve` requires `sort_key_matches`, which compares the recorded
+  key position by position, so the column ORDER is part of it:
+
+      cluster_hilbert('h','a','b')   sorted_kind hilbert
+      recluster('h','a','b')         sorted_kind hilbert
+      recluster('h','b','a')         sorted_kind zorder
+
+  The page now carries that sequence, because a reader copying the paragraph is
+  exactly who needs it. Caught in review by @OffgridwithJD; the function's own
+  header calls the condition the thing that keeps "sticky" from meaning
+  "unescapable".
+
+  AND THE SUITE HEADER TOLD A READER TO UNDO THE FEATURE (#1043).
+  `test/hilbert_cluster.sh` said the suite is red on purpose, that neither verb
+  exists, and that registering it in the matrix is future work. All three were
+  true when written; `4b66555` carried out every instruction in them and left the
+  paragraphs in place. Verified against the tree: both verbs are defined in
+  `pgcolumnar--1.0-alpha4.sql`, the suite is registered, and it is green on all
+  five majors.
+
+  A stale instruction is worse than a stale fact, because it tells the next person
+  to undo what was done. The one sentence that is still true is kept, and it is the
+  trap the paragraphs existed to name: a shim renaming the Z-order verbs passes 162
+  of 181 arms, and S5 is green on it BY CONSTRUCTION because over one column both
+  curves are the identity.
+
+  No check name moves: the sorted name list hashes `72eb1c4e4f42` before and after.
+
 - One geometry arm accepted a comparison the property does not describe (#1081).
 
   #1081 replaced a count of `entry->fileOffset != rg->fileOffset` with a per-field

@@ -129,24 +129,27 @@
 # identity -- so S5 buys the surface and the recorded identity, never the curve,
 # and must not be counted as evidence of Hilbertness.
 #
-# THIS SUITE IS RED ON PURPOSE UNTIL #889's SQL HALF LANDS. Neither
-# cluster_hilbert nor recluster_hilbert exists yet, and the shape of the red is
-# worth stating exactly, because "every arm that names one fails with 42883" is
-# what a reader would otherwise assume and it is not what happens. Measured on
-# PG17.10, 2026-09-09: 98 passed + 74 failed + 9 unrunnable = 181, and 27 of the
-# 74 reds carry 42883. Every one of those 27 names a missing verb. THE OTHER 47
-# ARE DOWNSTREAM, and they accuse code that ships today: a fixture that could
-# not be clustered makes vacuum_sorted, recluster and the daemon print exactly
-# what a real defect in them would print. Read the 42883 arms first, and treat
-# every other red as fixture drift until the SQL half lands.
+# THE THREE PARAGRAPHS THAT STOOD HERE WERE CARRIED OUT AND LEFT BEHIND (#1043).
+# They said this suite was red on purpose, that neither verb existed, and that it
+# was deliberately absent from the matrix. All three were true when written. The
+# commit they named, `4b66555`, did every one of the things they instructed, and
+# the paragraphs stayed:
 #
-# IT IS DELIBERATELY NOT REGISTERED in test/run_all_versions.sh: a red suite must
-# not enter the matrix. THAT HAS A PRICE, and it is stated here so it is not
-# rediscovered: harness_selftest.sh sweeps test/*.sh and asserts every suite is
-# registered, so this file makes harness_selftest fail its registration arm
-# (measured: 260 passed + 1 failed with the file present, 261 + 0 without it).
-# REGISTERING THIS SUITE IN run_all_versions.sh IS PART OF THE PR THAT LANDS
-# #889's SQL HALF, in the same commit that turns the suite green.
+#     cluster_hilbert, recluster_hilbert   defined in pgcolumnar--1.0-alpha4.sql
+#     registered                           test/run_all_versions.sh
+#     green                                in the matrix, on all five majors
+#
+# So a reader was told the suite is red on purpose, and it is green; that the
+# verbs do not exist, and they ship; and that registering it is future work, and
+# it is registered. A stale instruction is worse than a stale fact, because it
+# tells the next person to undo what was done.
+#
+# WHAT SURVIVES IS THE ONE SENTENCE THAT IS STILL TRUE, and it is the trap the
+# original paragraphs existed to name: a shim that renames the Z-order verbs and
+# writes sorted_kind='hilbert' reddens only four arms and passes 162 of 181. S5
+# is green on such a shim BY CONSTRUCTION, because over one column both curves
+# are the identity. S5 therefore buys the surface and the recorded identity, and
+# never the curve. Do not count it as evidence of Hilbertness.
 #
 # Usage:  test/hilbert_cluster.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
