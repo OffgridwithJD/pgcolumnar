@@ -110,6 +110,56 @@ true until the next version shipped.
 
 ### Fixed
 
+- The block codec's buffer was never freed, on either path (#1075).
+
+  `flush_one_column` compresses the whole encoded region of a column chunk and
+  then leaves the codec's buffer allocated:
+
+      PgColumnarCompressValueStream(encoded->data, encoded->len, ..., &compData, ...);
+      if (usedType != COLUMNAR_COMPRESSION_NONE)
+      {
+          finalData = compData; ...
+      }
+      if (finalLen > 0)
+          appendBinaryStringInfo(chunk, finalData, finalLen);
+
+  BOTH paths leave it dead. When the codec declines,
+  `PgColumnarCompressValueStream` returns a palloc'd COPY of the raw bytes rather
+  than NULL, by its documented contract, and this caller never reads it --
+  `finalData` still points at `encoded->data`. When the codec succeeds,
+  `appendBinaryStringInfo` has already copied the bytes into `chunk`.
+
+  It is bounded rather than a leak: `flushContext` is deleted per row group. What
+  it costs is peak allocation, because it roughly doubles what the flush holds for
+  the encoded region while every other column is still flushing.
+
+  Freed after the append rather than inside either branch, so the success path is
+  covered too. A free placed only in the declined arm is the version that reads as
+  complete and is not.
+
+  MEASURED ON TWO FIXTURES, AND THE FIRST ONE FOUND NOTHING. Peak RSS of the
+  loading backend (`VmHWM`), lz4, byte-identical input every run:
+
+      200,000 rows, default stripe    baseline 117,178 kB   patched 118,002 kB
+      600,000 rows, ONE stripe        baseline 326,584 kB   patched 304,979 kB
+
+  The first is +0.70%, the WRONG DIRECTION, and it is recorded because it is the
+  honest half: at that scale the encoded region is a few MB against a 117 MB
+  process and the effect is swamped. The second saves 21.1 MiB, 6.6% of peak,
+  against repetition spreads of 0.14% and 0.27%. The saving is proportional to the
+  row group's encoded size, and on a default stripe of narrow data it is not
+  observable at all.
+
+  Stored bytes do not move, which is the requirement: 32,055,856 bytes and
+  fingerprint `a0959193` identical across every run of both builds.
+
+  NO NEW TEST ARM, deliberately. What changed is peak allocation, and there is no
+  stable way to assert that in CI here -- a probe of
+  `pg_log_backend_memory_contexts` would have to land mid-flush. The correctness
+  requirement is that output does not move, which the existing content suites
+  cover and which was verified by measurement. An arm grepping the source for
+  `pfree(codecBuf)` would be the exact shape repaired in `8e88f42` and `f115d0b`.
+
 - The projection guard fired on a correct caller and stayed green on a wrong one
   (#1077).
 
