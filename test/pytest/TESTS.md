@@ -87,6 +87,7 @@ behaviour, the source of that number is named.
 - [39. test_hilbert_cluster.py: the Hilbert clustering SQL surface](#39-test_hilbert_clusterpy-the-hilbert-clustering-sql-surface)
 - [40. test_sorted_pathkeys.py: when a scan may claim its rows are ordered](#40-test_sorted_pathkeyspy-when-a-scan-may-claim-its-rows-are-ordered)
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
+- [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 
 ## 1. How to read a test in here
 
@@ -4241,3 +4242,50 @@ failing for a reason that has nothing to do with projections.
 | `test_the_control_a_transaction_with_no_write_before_the_add` | the control -- that path always worked and must stay working |
 | `test_a_projection_dropped_mid_transaction_stops_receiving_writes` | the same latch with the opposite sign, including the orphan storage it would leave |
 | `test_the_control_a_drop_in_its_own_transaction` | pins the arm above to the CACHE rather than to `drop_projection`'s own cleanup |
+
+## 42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too
+
+`pgcolumnar.compression` reads as a codec choice, and the documentation said exactly
+that: "default codec for new chunks". It is not only that. It also decides which
+lightweight encodings a chunk gets, and nothing named the coupling until #1076.
+
+`columnar_encoding.c` returns "FSST helps" UNCONDITIONALLY when the codec is `none`,
+before it looks at the corpus or at `fsst_min_gain_percent`:
+
+```c
+if (compressionType == COLUMNAR_COMPRESSION_NONE)
+    return true;
+```
+
+The reasoning is sound. Whether FSST is worth keeping depends on the size AFTER the
+codec, because what lands on disk is the encoded stream compressed, and with no codec
+the encoded length already IS the stored length. The consequence is that `none` is a
+DIFFERENT cascade rather than the same cascade with a step removed.
+
+**Every arm here is a differential, and that is not decoration.** "FSST is kept under
+`none`" on its own is satisfied by any corpus FSST always wins on, which would make the
+file green and empty. So each arm loads the same corpus at the same margin WITH a codec,
+where FSST is dropped, and the only variable between the two loads is the setting under
+test.
+
+| test | what it establishes |
+| --- | --- |
+| `test_the_codec_setting_decides_whether_fsst_is_kept` | margin 90, same corpus: dropped with `zstd`, kept with `none` |
+| `test_the_margin_is_never_consulted_when_there_is_no_codec` | margin 99 is the maximum the GUC accepts, and it still does not drop FSST under `none` |
+| `test_the_corpus_is_marginal_rather_than_one_fsst_always_wins` | the premise the other two rest on: with a codec, margin 0 keeps and margin 90 drops |
+| `test_the_rows_survive_every_combination` | the invariant, against a heap mirror, so a decision arm cannot pass while data changes |
+
+The third is the one that makes the rest mean something. A corpus FSST wins or loses
+outright cannot show the coupling at all, because the margin never gets a say.
+
+**Not a port and not a pair.** `test/fsst_margin.sh` asserts the same property, and the
+two share no corpus, no helper and no byte layout. Each parses
+`pgcolumnar.column_chunk.encoding_descriptor` itself: a 6-byte header, then one 13-byte
+entry per vector whose first byte is the encoding type. Reading past the entry count
+would score the chunk's shared symbol table bytes as encoding types, so both bound the
+scan by the count rather than by the descriptor's length.
+
+Removal proof, run on both harnesses: deleting the early return and rebuilding moves the
+`.so` from `c8e5c790dbac` to `6455728725e5` and reddens exactly the codec arms, while
+every content invariant stays green. The mutant still writes correct rows, which is the
+point of keeping the invariant in the file: this is a decision changing, not corruption.
