@@ -142,10 +142,25 @@ Nothing further should be added. It is 11 days into a 14-day cycle.
   not time; no timing claim is made, and the per-row key build has never been
   measured inside PostgreSQL. Recorded on #889 with the instrument's own defects,
   three of which produced wrong numbers before they were found.
-- **Per-tier block compression defaults.** On fast local storage, block
-  compression can cost more CPU than it saves in I/O. The finding reverses for
-  object storage. Make the default depend on the tier. Low effort, and it changes
-  written bytes, so it is alpha work by the rule above.
+- **Per-tier block compression defaults. MEASURED, NO CHANGE** (#890). The
+  premise did not reproduce on this engine, so nothing about the default moved
+  and this item ships as a measurement rather than as code.
+
+  Two things retired it. There is no storage tier to key a default off: a native
+  table's blocks always live in the data directory, and object storage is an
+  import/export surface rather than a location for native table storage. And
+  across five corpus shapes, against a rule registered before the run, **no shape
+  fires NET COST** -- the shape the rule names as the decider comes out
+  UNDECIDED, and an undecided measurement does not move a default.
+
+  **This item cost nothing in written bytes and therefore did not need to be
+  alpha work at all.** That is worth recording: it was scheduled as alpha because
+  the plan assumed it would change the writer, and the assumption was the part
+  that needed checking first. `design/ROADMAP.md` carries the table and the
+  narrow reading of it.
+
+  Three defects found by the investigation are tracked separately and do NOT
+  close with it: #1074, #1075, #1076.
 
 ### 1.0-alpha5, target 2026-09-29. Theme: join acceleration
 
