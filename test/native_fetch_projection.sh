@@ -159,11 +159,50 @@ check "and does not decode the row to find out" \
 		*) echo yes ;; esac)" "yes"
 
 # and the convention that made an empty set mean its opposite stays gone: the
-# worker takes an explicit flag, so "every column" cannot be spelled as a set
-check "asking for every column is a flag, not an absent set" \
-	"$(grep -c 'bool allColumns' "$SRC/columnar_reader.c")" "1"
+# worker takes an explicit flag, so "every column" cannot be spelled as a set.
+#
+# PIN THE PROPERTY, NOT THE CALLER COUNT. Both arms here counted the guarded
+# form across the file and compared it against a literal 1, which asserts how
+# many honest callers exist rather than that every caller is honest. That is the
+# same defect the `deltuples` comment 15 lines above records, left in place in
+# two arms after being fixed in one, and it fired again the moment a second
+# correct caller arrived (#1077's coalescing read, which takes the flag and
+# tests it exactly as the convention demands, and was failed for it).
+#
+# The property is that EVERY membership test in the needed-set consults the flag
+# first. Honest callers move both counts together; an unguarded test moves only
+# the total. Both numbers are printed in the arm so the comparison is the
+# reconciliation rather than a bare verdict.
+_afc_tests="$(grep -c 'bms_is_member(c, needed)' "$SRC/columnar_reader.c")"
+_afc_guarded="$(grep -c '!allColumns && !bms_is_member(c, needed)' "$SRC/columnar_reader.c")"
+_afc_flags="$(grep -c 'bool allColumns' "$SRC/columnar_reader.c")"
 
-check "the column test consults that flag rather than a null set" \
-	"$(grep -c '!allColumns && !bms_is_member(c, needed)' "$SRC/columnar_reader.c")" "1"
+check "premise: there is a needed-set membership test to guard" \
+	"$([ "${_afc_tests:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+check "premise: the explicit all-columns flag is declared" \
+	"$([ "${_afc_flags:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+# A LITERAL MATCH CANNOT TELL "written differently" FROM "written wrongly", and
+# both readings of a mismatch are live. Reversed operands, a renamed variable, a
+# `pgindent` wrap across two lines, or the positive form all redden this pin while
+# the tree is correct -- and this repository already has a guard that failed for
+# not joining line continuations. Failing closed is the right direction, but the
+# message has to say what the two readings are or the next reader spends the
+# afternoon hunting a caller that does not exist.
+#
+# Emitted only on mismatch, and BEFORE the check, so the check's NAME stays the
+# key the ledger records.
+if [ "$_afc_guarded" != "$_afc_tests" ]; then
+	echo "  note: $_afc_tests needed-set membership test(s) in columnar_reader.c," \
+		"$_afc_guarded of them guarded."
+	echo "  note: either a test was added without the flag, OR a correct test is" \
+		"written in a form this literal match does not recognise -- reversed" \
+		"operands, a wrapped line, a renamed variable, the positive form."
+	echo "  note: read the sites before assuming the first."
+fi
+
+check "every needed-set membership test consults that flag rather than a null set" \
+	"guarded $_afc_guarded of $_afc_tests" "guarded $_afc_tests of $_afc_tests"
 
 pgc_summary

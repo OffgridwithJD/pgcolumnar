@@ -110,6 +110,46 @@ true until the next version shipped.
 
 ### Fixed
 
+- The projection guard fired on a correct caller and stayed green on a wrong one
+  (#1077).
+
+  `native_fetch_projection.sh` protected one convention -- "every column" is an
+  explicit flag, never an absent set -- with two arms that counted a string across
+  `columnar_reader.c` and compared it against a literal `1`. That asserts HOW MANY
+  honest callers exist, which is a fact about today's tree, not the property.
+
+  It errs in BOTH directions, and the second one is why this is a fix rather than
+  a widening. Four source states, the same two arms:
+
+      state        tests guarded flags | OLD arm1  OLD arm2 | NEW
+      main             1       1     1 | PASS      PASS     | PASS
+      honest caller    2       2     2 | RED       RED      | PASS
+      unguarded fn     2       1     2 | RED       PASS     | RED
+      unguarded inline 2       1     1 | PASS      PASS     | RED
+
+  Row 2 is #1077's coalescing read: it takes the flag and tests it exactly as the
+  convention demands, and was failed for existing. Row 4 is the defect the arms
+  exist to catch, added inside the existing worker so no new flag is declared --
+  and BOTH arms pass it. `arm2` counts the GUARDED form, which is still 1, so a
+  bare `bms_is_member(c, needed)` beside it is invisible to the arm named "the
+  column test consults that flag rather than a null set".
+
+  Row 3 shows the one red the old arms do produce is not evidence either: `arm1`
+  reddens there for the same reason it reddens on row 2, the count moved. It
+  cannot distinguish a correct caller from a broken one.
+
+  The arms now pin the property against itself -- every needed-set membership test
+  consults the flag, `guarded N of N` -- so honest callers move both counts
+  together and an unguarded one moves only the total. Both numbers are printed in
+  the compared strings, so the arm's message is the reconciliation.
+
+  Two premises were added beside it, because `guarded 0 of 0` also satisfies
+  equality: that a membership test exists to guard, and that the flag is declared.
+
+  This is the third arm in this file to be repaired for counting a string across a
+  whole file. The `deltuples` comment 15 lines above records the first, fixed by
+  scoping; these two were left as whole-file counts and did the same thing again.
+
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
   so the joined name is text the file contains but not text `in src` can find. The
