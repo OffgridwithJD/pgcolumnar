@@ -139,11 +139,60 @@ check "and its values are right with nothing decoded from the base" \
 # every check above while giving back what the change was for.
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 
-check "the visibility-only caller decodes nothing" \
-	"$(grep -c 'PgColumnarRowIsLive(rel, snap, baseRow)' "$SRC/columnar_projection.c")" "1"
+# THE ARM NAMED "DECODES NOTHING" COULD NOT SEE A DECODE. Both of these counted a
+# CALL SITE, with its argument text, and pinned it at a literal 1 -- so they
+# asserted that a particular call is still written the way it was written, which is
+# not the property either name claims. Measured: plant the regression these arms
+# exist to catch, a full `PgColumnarReadRowByNumber` beside the liveness check in
+# the visibility path, and BOTH arms stay green, because the call they count is
+# still there and the decode added next to it is invisible to them.
+#
+# The property is a ZERO, not a one. There are three entry points and only one of
+# them decodes every column:
+#
+#     PgColumnarRowIsLive            answers visibility, decodes nothing
+#     PgColumnarReadRowByNumberCols  decodes a given set of columns
+#     PgColumnarReadRowByNumber      decodes EVERY column -- the thing to stay out
+#
+# So assert the file never calls the full decode. A want-zero count is also the
+# shape a second honest caller cannot break: more correct callers of the two narrow
+# entry points move nothing, while any full decode moves it off zero. That is the
+# opposite failure direction from a count pinned at 1, which reddens on correct
+# additions and stays green on wrong ones.
+#
+# The two premises keep the zero from being vacuous: a file that called NOTHING
+# would also report zero full decodes.
+_np_live="$(grep -c 'PgColumnarRowIsLive(' "$SRC/columnar_projection.c")"
+_np_cols="$(grep -c 'PgColumnarReadRowByNumberCols(' "$SRC/columnar_projection.c")"
+_np_full="$(grep -c 'PgColumnarReadRowByNumber(' "$SRC/columnar_projection.c")"
 
-check "the reconstruct caller asks only for uncovered columns" \
-	"$(grep -c 'PgColumnarReadRowByNumberCols(rel, snap, baseRow' "$SRC/columnar_projection.c")" "1"
+check "premise: the visibility-only entry point is called at all" \
+	"$([ "${_np_live:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+check "premise: the column-set entry point is called at all" \
+	"$([ "${_np_cols:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+# `PgColumnarReadRowByNumberCols(` does not match `PgColumnarReadRowByNumber(`, so
+# the narrow caller is not counted as a full decode.
+#
+# THIS PREMISE DOCUMENTS THE INTENT; IT IS NOT WHAT PROVIDES THE GUARANTEE, and
+# the first version of this comment said it was. A broken prefix relationship
+# cannot pass silently, because the other two arms already contradict each other
+# under it: if `Cols(` matched the wide pattern then every narrow call would be
+# counted twice, so `full >= cols`, and `cols >= 1` with `full == 0` is a
+# contradiction. The arm reddens rather than hiding.
+#
+#     cols=1, prefix intact   -> full=0   arm PASS
+#     cols=1, prefix broken   -> full=1   arm RED
+#     cols=3, prefix broken   -> full=3   arm RED
+#
+# Kept because a reader should not have to derive that, and because it names the
+# assumption a future rename would break. Correction from @OffgridwithJD's review.
+check "premise: the column-set caller is not counted as a full decode" \
+	"$(printf 'PgColumnarReadRowByNumberCols(a, b)\n' | grep -c 'PgColumnarReadRowByNumber(')" "0"
+
+check "neither caller decodes every column: no full decode in the projection path" \
+	"$_np_full full decode(s)" "0 full decode(s)"
 
 # Scoped to the function rather than counting a string across the file: the
 # string appears legitimately elsewhere now that the index fetch also asks only
