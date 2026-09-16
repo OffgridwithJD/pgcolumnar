@@ -254,6 +254,53 @@ true until the next version shipped.
   The fourth and fifth arm in this file repaired for counting a string across a
   whole file; `8e88f42` did the second and third and the `deltuples` comment
   records the first.
+- The docs said `pgcolumnar.compression` picks a codec. It also picks encodings
+  (#1076), and two things they told users about `none` are measurably wrong
+  (#1074).
+
+  `columnar_encoding.c` returns "FSST helps" UNCONDITIONALLY when the codec is
+  `none`, before it looks at the corpus or the margin:
+
+      if (compressionType == COLUMNAR_COMPRESSION_NONE)
+          return true;
+
+  So `none` is a DIFFERENT cascade, not the same cascade with the codec removed.
+  Nothing in `docs/` said so. `configuration.md` called the setting "default codec
+  for new chunks", which is exactly the narrow reading that makes the coupling
+  invisible.
+
+  Two user-facing claims fell out of it. `administration.md` described `none` as
+  "Lowest write cost, largest size". Measured on 200,000 rows each, backend
+  instruction counts, `zstd` against `none`:
+
+      high-entropy hex text     0.92     zstd CHEAPER to write
+      repetitive text           0.99     zstd CHEAPER to write
+
+  Neither shape made `none` the cheaper one, and on the hex shape `zstd` also
+  produced a table 1.4 percent LARGER. `best-practices.md` said each chunk "takes
+  the encoding that makes it smallest", which is wrong twice: the target is the
+  smallest STORED result, so it depends on the codec, and a FSST win below
+  `fsst_min_gain_percent` is given up on purpose.
+
+  All three pages corrected, with a new `Compression and the encoding cascade`
+  section carrying the mechanism and both measurements.
+
+  ARMS IN BOTH HARNESSES, and each is a DIFFERENTIAL rather than a bare assertion.
+  "FSST is kept under `none`" alone is satisfied by any corpus FSST always wins on,
+  so every arm is paired with the same corpus at the same margin WITH a codec,
+  where it is dropped. `fsst_margin.sh` gains three checks; the independent
+  `test/pytest/test_compression_reaches_the_cascade.py` builds its own corpus and
+  parses the descriptor itself.
+
+  Removal proof: deleting the early return and rebuilding moves the `.so`
+  `c8e5c790dbac` -> `6455728725e5`, and reddens exactly the codec arms on both
+  sides while every content invariant stays green:
+
+      fsst_margin.sh    14 passed + 2 failed + 0 unrunnable + 0 skipped = 16
+      pytest            8 pass + 2 fail + 0 unrun = 10
+
+  The mutant still writes correct rows, which is why the content arms hold: this
+  is a decision changing, not data corruption.
 - The block codec's buffer was never freed, on either path (#1075).
 
   `flush_one_column` compresses the whole encoded region of a column chunk and

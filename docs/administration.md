@@ -32,13 +32,53 @@ The default codec is `zstd` at level 3. Set the default for new data with
 
 | Codec | Notes |
 | --- | --- |
-| `none` | No compression. Lowest write cost, largest size. |
+| `none` | No block codec. Not reliably the cheapest to write or the largest on disk; see below. |
 | `pglz` | Built in, always available. |
 | `lz4` | Available when built with `liblz4`. Fast decompression. |
 | `zstd` | Available when built with `libzstd`. Higher compression at a given speed than `pglz`; the level trades size against write cost. |
 
 A codec change applies to data written after the change. To apply it to existing
 data, rewrite the table with [`pgcolumnar.vacuum`](sql-reference.md#pgcolumnarvacuumtablename-regclass-stripe_count-int-default-0).
+
+### Compression and the encoding cascade
+
+**`pgcolumnar.compression` is not only a codec choice. It also changes which
+lightweight encodings your data gets.**
+
+Before the block codec runs, each column chunk takes a lightweight encoding.
+The choices include dictionary, run-length, delta, frame-of-reference, and FSST
+for strings.
+
+Whether FSST is kept is decided after the configured codec has run. What reaches
+disk is the encoded stream compressed, so that is the size the decision has to
+compare. The decision therefore reads `pgcolumnar.compression`.
+
+With `none` there is no codec to compare through. The chunk-level FSST test is
+skipped, and FSST is kept whenever it was built. **`none` is a different cascade,
+not the same cascade with compression removed.**
+
+Two consequences surprise people.
+
+**`none` is not reliably the cheapest to write.** On a high-entropy text load,
+`zstd` drops FSST for the whole chunk. Skipping the per-vector FSST encode saves
+more than the codec costs. Measured on 200,000 rows per shape, as backend
+instruction counts, `zstd` against `none`:
+
+    high-entropy hex text     0.92
+    repetitive text           0.99
+
+Neither shape made `none` the cheaper one.
+
+**A codec is not guaranteed to make the table smaller than `none`.** On the hex
+load above, `zstd` produced a table 1.4 percent *larger*. Dropping FSST cost more
+than the codec saved. FSST is kept only when it wins by
+[`pgcolumnar.fsst_min_gain_percent`](configuration.md#compression). A smaller win
+is given up on purpose, to avoid paying the per-vector encode for little return.
+
+Neither effect is a reason to avoid compression. On compressible data the codec
+is worth far more than either. On the repetitive text above it produced a table
+12 times smaller. Treat both as reasons to **measure your own corpus**, rather
+than to assume `none` is the cheap end of a single axis.
 
 ## Row-group sizing
 

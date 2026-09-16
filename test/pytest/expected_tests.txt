@@ -209,4 +209,19 @@ guard_tests 342
 # functions. Seven of the 33 are one parametrised refusal family.
 # Re-derived by collection on this tree, never by adding 33 to a number measured on
 # another: `406 tests collected`.
-cluster_tests 406
+# 406 -> 410 when test_compression_reaches_the_cascade.py landed (#1076): four arms
+# holding that `pgcolumnar.compression` decides which lightweight encodings a chunk
+# gets, not only which codec compresses it. NOT a port and not a pair --
+# `fsst_margin.sh` asserts the same property through its own corpus and its own
+# descriptor parse, and neither file names the other.
+#
+# EACH ARM IS A DIFFERENTIAL, which is why there are four and not one. "FSST is kept
+# under none" alone is satisfied by any corpus FSST always wins on, so every arm is
+# paired with the same corpus at the same margin WITH a codec, and one arm exists
+# only to assert the corpus is marginal rather than one-sided.
+#
+# Re-derived by collection on this tree, never by adding four: `410 tests collected`.
+# `guard_tests` was re-derived in the same run and did NOT move -- 342 -- which is
+# the expected answer for a file that needs a cluster, and checking it was the point
+# rather than assuming it.
+cluster_tests 410

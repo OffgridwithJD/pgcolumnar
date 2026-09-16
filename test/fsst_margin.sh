@@ -74,9 +74,11 @@ content_corpus="CASE g % 13
 		END"
 
 # margin "" means: do not SET it at all, i.e. whatever the build ships.
-load() {  # table margin corpus
+# codec "" means the same: leave pgcolumnar.compression at the build default.
+load() {  # table margin corpus [codec]
 	local setguc=""
 	[ -n "$2" ] && setguc="SET pgcolumnar.fsst_min_gain_percent = $2;"
+	[ -n "${4:-}" ] && setguc="$setguc SET pgcolumnar.compression = '$4';"
 	psql_run "DROP TABLE IF EXISTS $1;
 		$setguc
 		CREATE TABLE $1 (id int, v text) USING pgcolumnar;
@@ -117,6 +119,39 @@ default_v="$(fsst_vectors fm_default)"
 check "the shipped default drops FSST on a marginal corpus" "$default_v" "0"
 check "and 0 still keeps it, so the default is a decision and not a rewrite" \
 	"$([ "$kept" -gt 0 ] && echo yes || echo no)" "yes"
+
+# --- 2b. the CODEC decides too, which the docs used to deny (#1076) ----------
+#
+# `pgcolumnar.compression` reads as a codec choice: "default codec for new
+# chunks". It is not only that. `columnar_encoding.c` returns "FSST helps"
+# UNCONDITIONALLY when the codec is `none`, before it looks at the corpus or the
+# margin:
+#
+#     if (compressionType == COLUMNAR_COMPRESSION_NONE)
+#         return true;
+#
+# So `none` is not "the cascade without a block codec", it is a DIFFERENT
+# cascade. Setting it changes which lightweight encodings a chunk gets.
+#
+# This is the same differential as section 1 with the other variable moved: same
+# corpus, same margin 90, and only the codec differs. Section 1 established that
+# margin 90 drops FSST on this corpus, so a keep here can only have come from the
+# codec. Without that pairing this arm would be satisfied by a corpus FSST always
+# wins on.
+load fm_none 90 "$decide_corpus" none
+none_v="$(fsst_vectors fm_none)"
+
+check "premise: the paired arm dropped FSST at this margin with a codec" "$dropped" "0"
+
+check "with no codec the same corpus keeps FSST at the same margin" \
+	"$([ "$none_v" -gt 0 ] && echo yes || echo no)" "yes"
+
+# The margin is not merely outvoted here, it is never consulted: the keep test
+# returns before reading it. 99 is the maximum the GUC accepts, so if any margin
+# could drop FSST under `none` this is the one that would.
+load fm_none99 99 "$decide_corpus" none
+check "and at the maximum margin too, because the test returns before reading it" \
+	"$([ "$(fsst_vectors fm_none99)" -gt 0 ] && echo yes || echo no)" "yes"
 
 # --- 3. the invariant: content never changes ---------------------------------
 
