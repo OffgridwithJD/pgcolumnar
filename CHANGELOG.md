@@ -87,6 +87,54 @@ true until the next version shipped.
   KNOWN LIMIT, stated because it changes what a green CI check means here: at depth
   1 with no tags every section arm is skipped, so CI cannot run any of this. It
   runs locally and in the five-major release gate, which is where a release is cut.
+- Eleven timeout paths printed a FAIL that nothing recorded, and the accounting
+  balanced at the wrong number (#965).
+
+  `concurrency.sh`, `unique_conc.sh` and `update_conc.sh` bound every wait. On a
+  timeout each printed `FAIL  timeout waiting for ...`, set the suite-local `fail`
+  and returned -- touching neither `PGC_CHECKS` nor the record stream. The suite
+  still exited 1, so this was never a false green. What it was is worse than a
+  missing number:
+
+      main, with a timeout induced      rc=1, CONCURRENCY TEST FAILED
+        human FAIL lines          1
+        RESULT records with FAIL  0
+        RESULT records total      7
+        checks run:               7
+
+  Records and total agree, so nothing refuses the log -- on a run that printed a
+  FAIL and exited 1. A missing figure can be noticed; one that reconciles cannot.
+
+  Each path now records through `pgc_record`. The same induced timeout:
+
+      this change                       rc=1, CONCURRENCY TEST FAILED
+        RESULT records with FAIL  2
+        RESULT records total      9
+        checks run:               9
+
+  THE NAME IS FIXED PER WAIT KIND, with the session and sentinel in the REASON
+  field. The ledger is keyed on (suite, part, name), so interpolating
+  `"$name/$label"` would mint rows nobody can enumerate and therefore nobody can
+  seed. Four kinds: a command's sentinel, a standalone sentinel, a session
+  blocking, a session reaching idle-in-transaction.
+
+  It cannot be proved by running the suite green -- not one of these lines
+  executes on a green run, so every count is identical whether the conversion is
+  right, wrong or absent. Proved by lowering all four wait bounds from 1200 to 1
+  in a scratch tree, with the rewritten count asserted before the run, and with
+  unmodified `main` as the control. Green runs are unchanged: 7 records and
+  `checks run: 7` before and after.
+
+- Every record these three suites emitted named `major=unknown` (#965).
+
+  `pgc_record` reads `${PGC_MAJOR:-unknown}`, and `PGC_MAJOR` is set by
+  `pgc_setup`, which these three do not call -- they carry their own harness.
+  Measured on a green run before the fix: 7 of 7 records said `unknown`. A ledger
+  row claiming to hold on `unknown` matches no run, so none of these checks could
+  ever have been seeded, which is part of why `suites_not_covered` has a floor
+  here. One line each, from the `PG_CONFIG` they already resolve. All records now
+  carry the real major: `concurrency` 7, `unique_conc` 31, `update_conc` 25, every
+  one of them `18` on PG18, each reconciling with its own `checks run:`.
 
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).
