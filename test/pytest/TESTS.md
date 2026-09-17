@@ -92,6 +92,7 @@ behaviour, the source of that number is named.
 - [44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#44-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
 - [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
 - [46. test_parallel_am_scan.py: a table-AM parallel scan must share work](#46-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
+- [47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#47-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 
 ## 1. How to read a test in here
 
@@ -4354,11 +4355,6 @@ This file asserts the SQLSTATE, not a cost number. The poison is a catalog
 UPDATE; the property is that a fetch raises XX001 and the backend survives.
 
 Independent of `test/native_chunk_length_bound.sh`. Same public seam, own
-fixture, own observations. Assertion names match the shell suite.
-
-| test | what it asserts |
-| --- | --- |
-| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
 ## 45. test_native_fetch_coalesce.py: index fetch I/O is not per-column
 
 Index fetch used to pin once per column: validity bitmap, then the value stream,
@@ -4400,3 +4396,21 @@ this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
 The load-bearing assertion is `workers share the table-AM scan, it is not a
 single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
 reachable only when each worker claims its own row groups.
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
+## 47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
+
+#913. A fetching index scan on a correlated key is priced below the custom scan
+through ~50,000 rows, while it does about 27x the work. The penalty term exists
+for this; the measurement says it is too small. Split from #766, which closed
+on the opposite question.
+
+This file asserts the PLAN, not a cost number. Costs drift with the constants.
+The chosen node is the property.
+
+Independent of `test/index_fetch_penalty_crossover.sh`. Same public seam, own
+fixture, own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+

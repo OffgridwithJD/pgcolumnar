@@ -89,7 +89,8 @@ COMPLETE = ["differential", "hilbert_cluster", "hilbert_locality",
             "native_chunk_length_bound", "native_fetch_coalesce", "native_ownership", "native_projection", "parallel_am_scan",
             "projection_privilege",
             "projections",
-            "sorted_pathkeys", "stats_privilege", "zonemap_boundaries"]
+            "sorted_pathkeys", "stats_privilege",
+            "index_fetch_penalty_crossover", "zonemap_boundaries"]
 
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the
