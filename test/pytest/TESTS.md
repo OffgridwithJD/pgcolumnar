@@ -4358,6 +4358,7 @@ this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
 | test | what it holds |
 | --- | --- |
 | `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
 
 The load-bearing assertion is `workers share the table-AM scan, it is not a
 single claimer`. It is unreachable while `phs_nallocated` is first-wins, and

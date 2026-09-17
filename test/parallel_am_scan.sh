@@ -105,4 +105,84 @@ check "a parallel table-AM scan returns the same row count as serial" \
 check "workers share the table-AM scan, it is not a single claimer" \
 	"$n_busy" "2"
 
+# ---- a parallel INDEX BUILD is the other consumer of the shared claim --------
+#
+# Everything above drives the shared group claim through a parallel SEQ SCAN.
+# A parallel index build reaches the same pgcolumnar_next_group_index through
+# table_beginscan_parallel, and it is the consumer where a claim bug is silent:
+# a scan that double-claims returns duplicate rows and someone notices, while an
+# index that SKIPS a group is simply missing entries and every query using it
+# quietly returns fewer rows.
+#
+# THE WORKER COUNT IS NOT A pgcolumnar GUC, AND max_parallel_maintenance_workers
+# ALONE WILL NOT PRODUCE ONE. That GUC is a gate -- 0 builds serially -- but core
+# sizes the request in plan_create_index_workers() from relpages, and a columnar
+# table reports very few pages for many rows (measured: 69 pages for 2,000,000),
+# so the size heuristic grants ONE worker however large the table is. The table's
+# `parallel_workers` reloption is the only dial that produces real parallelism
+# here, which is why it is set below and why a bigger fixture would not help.
+psql_run "ALTER TABLE pam SET (parallel_workers = 4);"
+
+# Own reader: `q` runs psql without -q, so a multi-statement call prints a SET
+# line per SET and the value under test would be whatever came last. This takes
+# the final line after dropping those. grep -v and tail both read to EOF, so
+# neither can SIGPIPE the writer (#486).
+_pam_read() {
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "$1" 2>/dev/null | grep -v '^SET$' | tail -1
+}
+
+_pam_mark="pam_build_$$"
+q "DO \$\$ BEGIN RAISE LOG '$_pam_mark'; END \$\$;" >/dev/null
+q "DROP INDEX IF EXISTS pam_idx;" >/dev/null
+q "SET log_min_messages = debug1;
+   SET max_parallel_maintenance_workers = 4;
+   SET min_parallel_table_scan_size = 0;
+   CREATE INDEX pam_idx ON pam (id);" >/dev/null
+
+# Scoped to a marker this run wrote, so a build from an earlier run in the same
+# cluster cannot answer for this one.
+_pam_req="$(awk -v m="$_pam_mark" '
+		p && /with request for/ { print; exit }
+		$0 ~ m                  { p = 1 }
+	' "${PGC_LOGFILE:-/dev/null}")"
+_pam_nreq="$(printf '%s' "$_pam_req" | tr -dc '0-9 ' | awk '{print $1+0}')"
+
+check "premise: the index build requested parallel workers" \
+	"$([ -n "$_pam_req" ] && [ "${_pam_nreq:-0}" -ge 2 ] && echo yes || echo "no (${_pam_nreq:-none})")" "yes"
+
+# The plan is classified from a captured string with `case`, not a pipe into an
+# early-exit reader.
+_pam_planout="$(_pam_read "SET enable_seqscan=off;
+                           SET pgcolumnar.enable_custom_scan=off;
+                           EXPLAIN (COSTS OFF) SELECT count(*) FROM pam WHERE id > 0;")"
+_pam_planall="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq -c "SET enable_seqscan=off;
+		                      SET pgcolumnar.enable_custom_scan=off;
+		                      EXPLAIN (COSTS OFF) SELECT count(*) FROM pam WHERE id > 0;" 2>/dev/null)"
+case "$_pam_planall" in
+	*"Index Only Scan"*)	_pam_node="Index Only Scan" ;;
+	*"Index Scan"*)		_pam_node="Index Scan" ;;
+	*"Seq Scan"*)		_pam_node="Seq Scan" ;;
+	*)			_pam_node="" ;;
+esac
+
+check "premise: the comparison reads the table through the index" \
+	"$_pam_node" "Index Only Scan"
+
+# THE PROPERTY: the index built in parallel describes the whole table. Compared
+# as an aggregate through the index against the same aggregate through a
+# sequential scan -- a count alone would miss a group read twice and a group
+# skipped cancelling out, which the sum does not.
+_pam_idx="$(_pam_read "SET enable_seqscan=off; SET pgcolumnar.enable_custom_scan=off;
+                       SELECT count(*) || '|' || coalesce(sum(id),0) FROM pam WHERE id > 0;")"
+_pam_seq="$(_pam_read "SET enable_indexscan=off; SET enable_bitmapscan=off;
+                       SELECT count(*) || '|' || coalesce(sum(id),0) FROM pam WHERE id > 0;")"
+
+check "premise: both sides of the comparison returned a value" \
+	"$([ -n "$_pam_idx" ] && [ -n "$_pam_seq" ] && echo yes || echo no)" "yes"
+
+check "a parallel index build indexes every row of the table" \
+	"$_pam_idx" "$_pam_seq"
+
 pgc_summary

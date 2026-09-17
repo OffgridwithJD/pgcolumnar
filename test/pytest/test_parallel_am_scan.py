@@ -13,6 +13,11 @@ the claimers under test. Many small row groups keep both workers busy
 before either finishes the table.
 """
 
+import pathlib
+import re
+import uuid
+
+
 
 def _nodes(plan):
     stack = [plan[0]["Plan"]]
@@ -136,4 +141,122 @@ def test_parallel_am_scan(pgc_conn, expect):
         n_busy,
         2,
         "workers share the table-AM scan, it is not a single claimer",
+    )
+
+
+# ---- a parallel INDEX BUILD is the other consumer of the shared claim --------
+#
+# The scan arms above drive pgcolumnar_next_group_index through a parallel seq
+# scan. A parallel index build reaches the same claim through
+# table_beginscan_parallel, and it is the consumer where a claim bug is silent:
+# a scan that double-claims returns duplicate rows and someone notices, while an
+# index that SKIPS a group is simply missing entries.
+#
+# THE WORKER COUNT IS NOT A pgcolumnar GUC, and max_parallel_maintenance_workers
+# alone will not produce one. That GUC is a gate -- 0 builds serially -- but core
+# sizes the request in plan_create_index_workers() from relpages, and a columnar
+# table reports very few pages for many rows (measured: 69 pages for 2,000,000),
+# so the heuristic grants ONE worker however large the fixture. The table's
+# `parallel_workers` reloption is the only dial.
+#
+# Independent of test/parallel_am_scan.sh: that suite reads PGC_LOGFILE with awk
+# and compares a concatenated string; this one reads the cluster's own
+# server.log through the pgc_cluster fixture and compares a tuple. Same seam,
+# separate observers, neither invoking the other.
+def _requested_workers(cluster, marker):
+    """Workers the build asked for, from the first request line after MARKER.
+
+    Scoped to a marker this test wrote, so a build from an earlier test in the
+    same session cluster cannot answer for this one.
+    """
+    log = pathlib.Path(cluster.datadir) / "server.log"
+    if not log.is_file():
+        return None
+    seen = False
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not seen:
+            if marker in line:
+                seen = True
+            continue
+        m = re.search(r"with request for (\d+) parallel worker", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _scan_node_of(plan):
+    stack = [plan[0]["Plan"]]
+    while stack:
+        node = stack.pop(0)
+        t = node.get("Node Type", "")
+        if t in ("Index Only Scan", "Index Scan", "Seq Scan", "Custom Scan"):
+            return t
+        stack.extend(node.get("Plans") or ())
+    return ""
+
+
+def test_a_parallel_index_build_covers_the_whole_table(pgc_cluster, pgc_conn, expect):
+    """The index built in parallel must describe every row."""
+    marker = "pamidx_" + uuid.uuid4().hex[:12]
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE pamidx (id int, v int) USING pgcolumnar")
+        cur.execute(
+            "INSERT INTO pamidx SELECT g, g % 1000 FROM generate_series(1, 300000) g"
+            # single %, not %%: psycopg only un-doubles when it is
+            # interpolating, and this call passes no parameters.
+        )
+        cur.execute("ALTER TABLE pamidx SET (parallel_workers = 4)")
+        cur.execute("ANALYZE pamidx")
+        # The marker is interpolated, not bound: a placeholder inside a DO
+        # body cannot be typed ("could not determine data type of parameter
+        # $1"), because the body is a string literal to the server. Safe to
+        # interpolate and asserted so -- it is uuid4 hex generated here.
+        assert marker.replace("_", "").isalnum(), marker
+        cur.execute("DO $pgcmark$ BEGIN RAISE LOG '%s'; END $pgcmark$" % marker)
+        cur.execute("SET log_min_messages = debug1")
+        cur.execute("SET max_parallel_maintenance_workers = 4")
+        cur.execute("SET min_parallel_table_scan_size = 0")
+        cur.execute("CREATE INDEX pamidx_id ON pamidx (id)")
+        cur.execute("RESET log_min_messages")
+
+    req = _requested_workers(pgc_cluster, marker)
+    expect.num(
+        1 if (req is not None and req >= 2) else 0,
+        1,
+        "premise: the index build requested parallel workers",
+    )
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("SET enable_seqscan = off")
+        cur.execute("SET pgcolumnar.enable_custom_scan = off")
+        cur.execute(
+            "EXPLAIN (FORMAT JSON, COSTS OFF) "
+            "SELECT count(*) FROM pamidx WHERE id > 0"
+        )
+        plan = cur.fetchone()[0]
+        cur.execute("SELECT count(*), coalesce(sum(id), 0) FROM pamidx WHERE id > 0")
+        via_index = cur.fetchone()
+    expect.text(
+        _scan_node_of(plan),
+        "Index Only Scan",
+        "premise: the comparison reads the table through the index",
+    )
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("SET enable_indexscan = off")
+        cur.execute("SET enable_bitmapscan = off")
+        cur.execute("SELECT count(*), coalesce(sum(id), 0) FROM pamidx WHERE id > 0")
+        via_seq = cur.fetchone()
+
+    expect.num(
+        1 if (via_index is not None and via_seq is not None) else 0,
+        1,
+        "premise: both sides of the comparison returned a value",
+    )
+    # The SUM, not just the count: a group read twice cancelling a group skipped
+    # leaves the count right and the sum wrong.
+    expect.rows(
+        [via_index],
+        [via_seq],
+        "a parallel index build indexes every row of the table",
     )
