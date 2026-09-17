@@ -237,10 +237,5 @@ guard_tests 346
 # `guard_tests` was re-derived in the same run and did NOT move -- 342 -- which is
 # the expected answer for a file that needs a cluster, and checking it was the point
 # rather than assuming it.
-# 410 -> 411 when test_native_fetch_coalesce.py landed on the rebased tree. Re-derived by collection, never by adding one to 410.
-# 411 -> 412 when the coalescing suite gained an ordering arm for the validity
-# copy. Re-derived by collecting the complement of NO_CLUSTER, the way the job
-# builds FILES, never by adding one to 411: `412 tests collected`. guard_tests
-# was re-derived in the same run and did NOT move -- 346 -- which is the expected
-# answer for a file the cluster leg owns, and checking it was the point.
-cluster_tests 413
+# cluster_tests re-derived by collection on the rebased tree, never by adding a delta measured on another tree.
+cluster_tests 415

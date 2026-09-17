@@ -91,6 +91,7 @@ behaviour, the source of that number is named.
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
 - [44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#44-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
 - [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
+- [46. test_parallel_am_scan.py: a table-AM parallel scan must share work](#46-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
 
 ## 1. How to read a test in here
 
@@ -4376,3 +4377,26 @@ own observations. Assertion names match the shell suite.
 | --- | --- |
 | `test_native_fetch_coalesce` | a point lookup uses the index and returns the projected values; executor pins for one column and for every column are both measurable, and the wide fetch does not pin once per column |
 | `test_the_validity_copy_is_bounded_before_the_chunk_is_read` | the bound on the validity copy precedes the copy, read as positions in the coalescing helper rather than as the presence of both statements -- the overread it guards had both |
+## 46. test_parallel_am_scan.py: a table-AM parallel scan must share work
+
+The port of `test/parallel_am_scan.sh`. With the custom scan off, Parallel Seq
+Scan goes through the table AM. `phs_nallocated` was a first-wins flag: one
+backend claimed the whole scan and every launched worker reported 0 rows.
+The custom-scan path already claims distinct row groups; this pair pins the
+AM path to the same property.
+
+Public seam: `EXPLAIN ANALYZE` worker rows on a Parallel Seq Scan. Leader
+participation is off so the two launched workers are the claimers under
+test. The shell twin uses its own table (`pam`, 50000 rows, groups of 100);
+this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
+
+The load-bearing assertion is `workers share the table-AM scan, it is not a
+single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
+reachable only when each worker claims its own row groups.
