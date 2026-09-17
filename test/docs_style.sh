@@ -236,6 +236,34 @@ done
 check "every document citing VERSION quotes the version VERSION holds" \
 	"$(printf '%s' "$_stale" | sed 's/^ //')" ""
 
+# ---- and the VERSION BADGE, which is a third place the version is written ----
+#
+# `badges/version.svg` renders the version as an image, and README.md repeats it
+# in that image's alt text. Neither is prose, so neither the VERSION check above
+# nor the published-release check below can see them, and the badge sat at
+# `1.0-alpha3` for the whole alpha4 cycle. It is the first thing on the GitHub
+# page, so it is the version most readers see and the last one anything checked.
+#
+# THE SVG CARRIES THE STRING THREE TIMES -- aria-label, title, and the rendered
+# text node -- and a fix that updates one of them looks right in a browser while
+# leaving the accessible name stale. All three are compared.
+_badge="$SRCDIR/badges/version.svg"
+check "premise: the version badge is present" \
+	"$([ -f "$_badge" ] && echo yes || echo no)" "yes"
+
+_badgehits="$(grep -c -- "$_ver" "$_badge" 2>/dev/null || echo 0)"
+_badgeold="$(grep -oE '1\.0-[a-z]+[0-9]*' "$_badge" 2>/dev/null | sort -u | grep -vxF "$_ver" | tr '\n' ' ' | sed 's/ $//')"
+check "the version badge names no version other than VERSION's" \
+	"$_badgeold" ""
+check "premise: and it names VERSION's version at all" \
+	"$([ "${_badgehits:-0}" -ge 1 ] && echo yes || echo no)" "yes"
+
+# README's alt text is the badge's accessible name and drifts separately from the
+# image it describes.
+check "README's badge alt text names the version VERSION holds" \
+	"$(grep -oE 'alt="Version [^"]*"' "$SRCDIR/README.md" | sed 's/.*alt="Version //; s/"$//')" \
+	"$_ver"
+
 # ---- the OTHER version claim, which the check above cannot see --------------
 #
 # A second version sentence sits beside the first: "the latest published
