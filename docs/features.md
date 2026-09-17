@@ -30,11 +30,33 @@ settings see the [configuration reference](configuration.md); for constraints se
   run-length (RLE), frame-of-reference with bit-packing (FOR), delta,
   delta-of-delta, and Gorilla XOR for floats. A dictionary encoding also covers
   low-cardinality columns, including text, and FSST covers longer text values.
-  Each chunk takes the encoding that makes it smallest. The block codec then runs
-  on the encoded stream.
+  Each chunk takes the smallest encoding the writer compares. The block codec then
+  runs on the encoded stream.
 - Block compression with four codecs: `none`, `pglz`, `lz4`, and `zstd` with a
   level. The writer compresses each column chunk separately. It stores a chunk
   without compression if the compression makes it no smaller.
+
+**A codec can make a table larger on high-entropy text** (#1074).
+
+The writer keeps FSST only when it beats the alternative by
+`fsst_min_gain_percent`. It measures both sides after the block codec has run.
+Storing the FSST codes uncompressed is not one of the options it compares.
+
+A codec that shrinks the plain text past that margin drops FSST. The result can be
+bigger than the same rows written with `compression = none`.
+
+Measured on 200,000 rows of random hex text, with the codec read back from
+`pgcolumnar.column_chunk.block_codec` rather than assumed:
+
+| `pgcolumnar.compression` | bytes | against `none` |
+| --- | --- | --- |
+| `lz4` | 10,663,464 | 99.997% |
+| `none` | 10,663,789 | 100% |
+| `zstd` | 10,853,334 | 101.777% |
+
+`lz4` is unaffected because it declined on half the chunks and FSST stayed. If a
+table stores long high-entropy text, measure both settings. Do not assume a
+stronger codec writes less.
 
 ## Scan and execution
 

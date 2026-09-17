@@ -18,6 +18,31 @@ true until the next version shipped.
 
 ### Fixed
 
+- `docs/features.md` promised an encoding choice the writer does not make (#1074).
+
+  The section said "Each chunk takes the encoding that makes it smallest". It does
+  not. FSST is kept only when it beats the alternative by `fsst_min_gain_percent`.
+  Both sides are measured after the block codec has run. Storing the FSST codes
+  uncompressed is never one of the options compared. A codec strong enough to shrink
+  the plain text past that margin drops FSST and can write more than `none` does.
+
+  Reproduced on 200,000 rows of random hex text. Three arms write from one
+  materialised corpus, so every arm sees identical input. The codec is read back
+  from `pgcolumnar.column_chunk.block_codec` rather than assumed from the GUC:
+
+      arm    page bytes    vs none    block_codec
+      lz4    10,663,464    99.997%    none x4, lz4 x4
+      none   10,663,789    100%       none x8
+      zstd   10,853,334    101.777%   zstd x8
+
+  The descriptor length is what names the mechanism. On the two text columns it is
+  1870 and 1897 bytes under `none`. That is the FSST symbol table. Under `zstd` it
+  is 280, which is FSST gone. `lz4` is unaffected because it declined on half the
+  chunks and FSST stayed.
+
+  Only the documentation changes here. The encoding cascade is untouched, and the
+  fix #1074 proposes belongs with its own margin tests rather than beside a release.
+
 - Two more suite headers told a reader to undo what had already been done (#1088).
 
   `fcfd3e6` fixed this class in `hilbert_cluster.sh`. Two files still carried it,
