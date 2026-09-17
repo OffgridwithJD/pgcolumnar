@@ -9,7 +9,7 @@
 
 <a href="docs/installation.md"><img src="badges/postgresql.svg" alt="PostgreSQL 15-18 (+19 beta)"></a>
 <a href="LICENSE"><img src="badges/license.svg" alt="License: MIT"></a>
-<a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-alpha3"></a>
+<a href="VERSION"><img src="badges/version.svg" alt="Version 1.0-alpha4"></a>
 <a href="docs/limitations.md#release-status"><img src="badges/status.svg" alt="Status: pre-release"></a>
 
 <p><strong><a href="https://commandprompt.github.io/pgcolumnar/">Read the documentation at commandprompt.github.io/pgcolumnar</a></strong></p>
