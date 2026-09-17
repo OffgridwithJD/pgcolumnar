@@ -243,4 +243,4 @@ guard_tests 346
 # builds FILES, never by adding one to 411: `412 tests collected`. guard_tests
 # was re-derived in the same run and did NOT move -- 346 -- which is the expected
 # answer for a file the cluster leg owns, and checking it was the point.
-cluster_tests 412
+cluster_tests 413

@@ -89,7 +89,8 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
-- [44. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#44-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
+- [44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#44-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
+- [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
 
 ## 1. How to read a test in here
 
@@ -4340,7 +4341,24 @@ substantive arms redden on each side while every premise stays green. The premis
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
 
-## 44. test_native_fetch_coalesce.py: index fetch I/O is not per-column
+## 44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch
+
+A column chunk's `page_length` is `uint64` in the catalog. Both decode entry
+points used to cast the value stream to `uint32`. Adding 2^32 leaves the low
+32 bits unchanged, so an index fetch silently read the original stream and
+returned the row. A sequential scan already refused, because the chunk no
+longer fitted its row group.
+
+This file asserts the SQLSTATE, not a cost number. The poison is a catalog
+UPDATE; the property is that a fetch raises XX001 and the backend survives.
+
+Independent of `test/native_chunk_length_bound.sh`. Same public seam, own
+fixture, own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+## 45. test_native_fetch_coalesce.py: index fetch I/O is not per-column
 
 Index fetch used to pin once per column: validity bitmap, then the value stream,
 two `PgColumnarReadLogicalData` calls each. Sequential scan already coalesces
