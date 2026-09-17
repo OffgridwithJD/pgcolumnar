@@ -964,6 +964,7 @@ harness_selftest	410-a-check-must-have-been-red	and the history it is about to l
 harness_selftest	410-a-check-must-have-been-red	and the history it would lose is printed with it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the ledger is one row shorter afterwards	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the message says how to fix it, because regenerating is the intended action	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and the prior policy is chosen from a closed set, not taken as a ref	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names both values	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names how many failed, so the author can narrow the run	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the check that reddened	15;16;17;18;19	never	-
@@ -1169,6 +1170,14 @@ harness_selftest	490-a-one-line-body-ends-at-its-own-brace	control: and the reco
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the skip-loop tool is present	15;16;17;18;19	never	-
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool answers with an emitter set, so 'q is absent' is about q	15;16;17;18;19	never	-
 harness_selftest	490-a-one-line-body-ends-at-its-own-brace	premise: the tool reports an unclosed count at all, so a zero below means zero	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	and it still defaults to auto when the caller names nothing	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	and the suites job fetches the history that ref needs	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	premise: the nightly workflow is present	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	premise: the runner invokes the ledger gate	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	premise: the suites job is findable and runs the matrix	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the prior is chosen from a closed set of policies	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the runner takes its prior ceiling policy from PGC_LEDGER_AGAINST	15;16;17;18;19	never	-
+harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the suites job names a prior ceiling for the gate	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-
