@@ -1439,11 +1439,27 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 			echo "  PG$major: the prior-ceiling policy is unusable, which is not a pass"
 			verfail=1
 		fi
-		# WHY THIS EXISTS (#1104). A nightly runs on `schedule`, so GITHUB_BASE_REF is
-		# unset and the checkout configures no upstream. `auto` then has no prior and
-		# fails closed, correctly, on every major while no suite failed. The control was
-		# in the same run: `upgrade-guard` runs this same script with `fetch-depth: 0`
-		# and passed, while all five `suites` jobs failed.
+		# WHY THIS EXISTS (#1104), and the first telling of it named the wrong trigger.
+		# It is a TAG PUSH, not a schedule. Six scheduled runs on main are green and the
+		# only red in the workflow's history is `push ref=v1.0-alpha4`. A branch checkout
+		# configures an upstream and `auto` resolves; a tag checkout is DETACHED, has no
+		# local branch, and so has no upstream to resolve. That state never had an answer.
+		#
+		# AND `auto` IS A TAUTOLOGY ON THE SCHEDULED RUNS THAT PASS, which is the better
+		# reason for this change. `actions/checkout` fetches refs/heads/main into
+		# refs/remotes/origin/main and checks out main at that same sha, so `auto`
+		# resolves to origin/main and origin/main IS HEAD. Measured by @OffgridwithJD:
+		# a24155b3 against a24155b3. The ceiling was compared against the commit it was
+		# read from, every night, and could not have caught a raise. That is exactly the
+		# "compared a committed file against itself" failure the --against design refuses
+		# one level up.
+		#
+		# So `parent` does not only give the tag run a prior it lacked. It replaces a
+		# comparison that could never fail with one that can.
+		#
+		# The control for the tag run was in that same run: `upgrade-guard` runs this
+		# same script with `fetch-depth: 0` and passed, while all five `suites` jobs
+		# failed.
 		#
 		# WHATEVER SELECTS `parent` MUST ALSO FETCH IT. `HEAD~1` does not exist in a
 		# depth-1 checkout, measured, so choosing that policy without `fetch-depth`

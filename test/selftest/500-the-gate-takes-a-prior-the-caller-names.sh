@@ -1,7 +1,13 @@
 # ---- the ledger gate must take a prior ceiling the caller can name ----------
 #
-# #1104. The nightly went red on every major and no suite failed. The roster held
-# 258 entries with zero `=FAIL`, and the verdict came from the ledger gate:
+# #1104. THE NIGHTLY WENT RED ON A TAG PUSH, not a schedule, and the first telling
+# of this named the wrong trigger. Six scheduled runs on main are green; the only
+# red in the workflow's history is `push ref=v1.0-alpha4`. A branch checkout
+# configures an upstream and `auto` resolves. A tag checkout is DETACHED, has no
+# local branch, and so has none.
+#
+# Every major went red and no suite failed. The roster held 258 entries with zero
+# `=FAIL`, and the verdict came from the ledger gate:
 #
 #     ledger integrity failure: no trustworthy prior ceiling: GITHUB_BASE_REF is
 #     unset and the local main has no configured upstream.
@@ -16,6 +22,14 @@
 #
 # `run_all_versions.sh` hardcoded `--against auto`, so a caller that knows its own
 # prior could not pass one. `PGC_LEDGER_AGAINST` is that way in.
+#
+# AND `auto` IS A TAUTOLOGY ON THE RUNS THAT PASS. `actions/checkout` fetches
+# refs/heads/main into refs/remotes/origin/main and checks out main at that sha, so
+# `auto` resolves to origin/main and origin/main IS HEAD. Measured: a24155b3
+# against a24155b3. The ceiling was compared against the commit it was read from,
+# every night, and could not have caught a raise. `parent` replaces a comparison
+# that cannot fail with one that can, which is a better reason for this arm than
+# the tag run that exposed it.
 #
 # MEASURED BEFORE THE FIX, on this tree:
 #
