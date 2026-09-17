@@ -652,6 +652,21 @@ true until the next version shipped.
   Removal proof: restoring the conditional while keeping the arms gives
   `every staged install script is the committed fixture, not a leftover:
   got [1.0-alpha2] want []`, naming the script that was wrong.
+- A covering projection scan was priced at half the base scan for every
+  restriction.
+
+  `PgColumnarSetRelPathlist` offers a covering-projection path when a
+  projection stores every referenced column and its leading sort key appears
+  in a restriction. That path took the base custom-scan run cost and
+  multiplied by 0.5. The constant does not depend on selectivity, so a 5
+  percent range on the sort key was quoted the same as a 50 percent range.
+  Measured on a 20,000-row table with scrambled insert order: both plans
+  reported run-cost ratio 0.500 against the base scan.
+
+  The projection is stored sorted on that key. The run cost now follows the
+  restriction's selectivity, floored at one written stripe, and is not
+  discounted twice when the heap layout already prunes as tightly. After the
+  change the same fixture reports 0.050 against 0.500.
 
 ## [1.0-alpha4] - 2026-09-17
 

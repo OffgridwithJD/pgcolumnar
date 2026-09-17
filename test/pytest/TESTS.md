@@ -96,6 +96,7 @@ behaviour, the source of that number is named.
 - [48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#48-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
 - [49. test_residual_is_counted.py: a residual must be counted, not subtracted](#49-test_residual_is_countedpy-a-residual-must-be-counted-not-subtracted)
 - [50. test_collation_pinned.py: comm's inputs must be sorted the same way](#50-test_collation_pinnedpy-comms-inputs-must-be-sorted-the-same-way)
+- [51. test_projection_scan_cost.py: a covering projection is not priced at half](#51-test_projection_scan_costpy-a-covering-projection-is-not-priced-at-half)
 
 ## 1. How to read a test in here
 
@@ -4576,3 +4577,19 @@ Both corpus arms report zero on this tree, measured before the file was written,
 the detector is proved by planting rather than by the corpus. The load-bearing arm
 is the process-substituted form: unreachable by a pipe pattern, and reachable only
 once the detector reads substitutions too.
+
+## 51. test_projection_scan_cost.py: a covering projection is not priced at half
+
+The covering-projection path took the base custom-scan run cost and multiplied
+by 0.5. That constant does not depend on the restriction, so a tight range on
+the sort key was quoted the same as a loose one. The projection is stored
+sorted on that key; the planner number has to move with selectivity.
+
+This file asserts the PLANNER ratio, not a runtime. Public seam: `EXPLAIN` of
+a columnar scan with `pgcolumnar.enable_projection_scan` on and off. The
+shell twin uses its own table (`prsc`, 20000 rows, 5 percent vs 50 percent);
+this file uses `pscost`, 24000 rows, 1800 vs 12000. Assertion names match.
+
+| test | what it asserts |
+| --- | --- |
+| `test_projection_scan_cost` | the table and covering projection exist; the tight and loose plans use that projection; without the GUC they are base columnar scans; every compared scan has a positive run cost; a tight covering projection is cheaper relative to the base than a loose one; the two ratios are not both 0.5 |

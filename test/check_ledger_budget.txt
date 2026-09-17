@@ -89,4 +89,9 @@ suites_not_covered 249
 # RESEATED onto main carrying #1114 and #1120. Re-derived by the command above on
 # the merged tree; the ledger auto-merged silently again and was checked by KEY:
 # 0 main keys lost, 9 added, all in part 070.
-checks_never_observed_red 1368
+# 1368 -> 1375 after rebasing projection_scan_cost onto current main:
+# nine new ledger rows, of which seven last-red stay never (the two
+# load-bearing arms were observed red under the 0.5 causation mutation).
+# Re-derived by COUNTING, not by adding seven to a number from another tree:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+checks_never_observed_red 1375
