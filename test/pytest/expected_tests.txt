@@ -237,4 +237,5 @@ guard_tests 346
 # `guard_tests` was re-derived in the same run and did NOT move -- 342 -- which is
 # the expected answer for a file that needs a cluster, and checking it was the point
 # rather than assuming it.
-cluster_tests 410
+# cluster_tests re-derived by collection on the rebased tree, never by adding a delta measured on another tree.
+cluster_tests 411
