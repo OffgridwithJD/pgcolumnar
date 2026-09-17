@@ -236,6 +236,43 @@ done
 check "every document citing VERSION quotes the version VERSION holds" \
 	"$(printf '%s' "$_stale" | sed 's/^ //')" ""
 
+# ---- the OTHER version claim, which the check above cannot see --------------
+#
+# A second version sentence sits beside the first: "the latest published
+# pre-release is `vX`". It drifted for a whole cycle in THREE documents while the
+# check above stayed green, because that check only looks at files carrying the
+# phrase "recorded in `VERSION`", and this is a different sentence:
+#
+#     README.md             v1.0-alpha2    while v1.0-alpha3 was tagged
+#     docs/roadmap.md       v1.0-alpha2
+#     docs/installation.md  v1.0-alpha2    and it named the tree's version wrong too
+#     CHANGELOG.md          v1.0-alpha3    the only one right
+#
+# `docs/installation.md` is the one that shows why the scope mattered. It never
+# writes the phrase "recorded in `VERSION`", so it was outside the other check
+# entirely, and it also carried a stale heading and a stale upgrade chain.
+#
+# THIS IS AN AGREEMENT CHECK, NOT A COMPARISON, and that is a real limit. No
+# tracked file holds "the newest tag" the way VERSION holds the version, and
+# reading `git tag` fails in a tree copied without `.git`, which this harness is
+# run from. So it catches one document drifting away from the others, which is
+# what happened. It CANNOT catch every document being stale together, and the
+# release procedure carries that step instead.
+_pubdocs="$(grep -rln 'latest published pre-release' \
+	"$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+check "premise: at least one document names the latest published pre-release" \
+	"$([ -n "$_pubdocs" ] && echo yes || echo no)" "yes"
+
+# shellcheck disable=SC2086
+_pubvers="$(grep -rhoE 'latest published pre-release is `v[^`]*`' $_pubdocs 2>/dev/null \
+	| grep -oE '`v[^`]*`' | tr -d '`' | sort -u)"
+check "premise: the claim was parsed, not merely present" \
+	"$([ -n "$_pubvers" ] && echo yes || echo no)" "yes"
+
+check "every document names the same latest published pre-release" \
+	"$([ "$(printf '%s\n' "$_pubvers" | grep -c .)" = 1 ] && echo "" \
+	   || printf '%s' "$_pubvers" | tr '\n' ' ' | sed 's/ $//')" ""
+
 # ---- and META.json, which NOTHING read at all ------------------------------
 #
 # `META.json` is the PGXN distribution metadata. It hardcodes the version TWICE

@@ -14,7 +14,7 @@ installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
 notes in this file describe `default_version` as pinned at an earlier version, each
 true until the next version shipped.
 
-## [Unreleased]
+## [1.0-alpha4] - 2026-09-17
 
 ### Fixed
 
@@ -232,6 +232,41 @@ true until the next version shipped.
   harness's applied-assertion reported it rather than counting a clean run as a pass.
 
 ### Added
+
+- Hilbert clustering: `pgcolumnar.cluster_hilbert` and
+  `pgcolumnar.recluster_hilbert` (#889).
+
+  **Two verbs rather than a parameter on the existing two.** PostgreSQL refuses
+  to extend `cluster(regclass, VARIADIC name[])` in either direction: a defaulted
+  parameter cannot precede a `VARIADIC` one, and an array-plus-kind overload
+  makes the documented `cluster('t','a','b')` call ambiguous. Both were measured
+  on 18.4. The new verbs match their siblings element for element in argument
+  types, variadic element type, return type and volatility, so a caller switches
+  between them by name alone.
+
+  **What the curve buys.** Z-order jumps a long way in key space at a bit
+  boundary; a Hilbert curve does not. Keys that are close in the data therefore
+  stay closer in storage, the min/max zone maps over the clustered columns are
+  tighter, and a range filter reads fewer chunk groups. The key is the same width
+  and sorts through the same `bytea` comparator, so nothing downstream of the
+  sort knows which curve produced it.
+
+  **The curve is sticky.** `sorted_kind` is the table's declared intent, not a
+  property of each call:
+
+  - plain `recluster` on a Hilbert table over the same key is a no-op returning
+    0, not a silent conversion back to Z-order;
+  - `recluster_hilbert` on a Z-ordered table over the same columns rewrites it;
+  - `vacuum_sorted` leaves a Hilbert table alone rather than sorting it
+    lexicographically and relabelling it;
+  - the maintenance daemon dispatches on the recorded kind, so a Hilbert table
+    is re-clustered with Hilbert instead of being converted on a timer;
+  - naming the other verb, or reclustering on a different key, is how a table
+    changes curve.
+
+  Held by `test/hilbert_cluster.sh` (181 arms) over the SQL surface, the recorded
+  kind, both self-gates and the daemon, and by `test/hilbert_curve.sh` (184 arms)
+  over the encoder itself.
 
 - Six more guards counted their callers instead of pinning their property (#1078's
   class). Two were blind to the defect they name.
@@ -2300,41 +2335,6 @@ true until the next version shipped.
   Per-element evaluation is capped at 128 non-NULL entries. Larger lists retain
   the bounded two-key hull because exact vector refinement otherwise costs
   elements times rows.
-- Hilbert clustering: `pgcolumnar.cluster_hilbert` and
-  `pgcolumnar.recluster_hilbert` (#889).
-
-  **Two verbs rather than a parameter on the existing two.** PostgreSQL refuses
-  to extend `cluster(regclass, VARIADIC name[])` in either direction: a defaulted
-  parameter cannot precede a `VARIADIC` one, and an array-plus-kind overload
-  makes the documented `cluster('t','a','b')` call ambiguous. Both were measured
-  on 18.4. The new verbs match their siblings element for element in argument
-  types, variadic element type, return type and volatility, so a caller switches
-  between them by name alone.
-
-  **What the curve buys.** Z-order jumps a long way in key space at a bit
-  boundary; a Hilbert curve does not. Keys that are close in the data therefore
-  stay closer in storage, the min/max zone maps over the clustered columns are
-  tighter, and a range filter reads fewer chunk groups. The key is the same width
-  and sorts through the same `bytea` comparator, so nothing downstream of the
-  sort knows which curve produced it.
-
-  **The curve is sticky.** `sorted_kind` is the table's declared intent, not a
-  property of each call:
-
-  - plain `recluster` on a Hilbert table over the same key is a no-op returning
-    0, not a silent conversion back to Z-order;
-  - `recluster_hilbert` on a Z-ordered table over the same columns rewrites it;
-  - `vacuum_sorted` leaves a Hilbert table alone rather than sorting it
-    lexicographically and relabelling it;
-  - the maintenance daemon dispatches on the recorded kind, so a Hilbert table
-    is re-clustered with Hilbert instead of being converted on a timer;
-  - naming the other verb, or reclustering on a different key, is how a table
-    changes curve.
-
-  Held by `test/hilbert_cluster.sh` (181 arms) over the SQL surface, the recorded
-  kind, both self-gates and the daemon, and by `test/hilbert_curve.sh` (184 arms)
-  over the encoder itself.
-
 - `test/projection_rewrite.sh`, 84 checks. Nothing in the tree asserted that a
   projection answers after a rewrite, which is why this was silent.
 

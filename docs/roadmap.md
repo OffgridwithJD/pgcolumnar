@@ -13,7 +13,7 @@ Issues are the authority on anything being worked now.
 
 pgColumnar is [pre-release](limitations.md#release-status). The version marker is
 `1.0-alpha4`, recorded in `VERSION`. That version is in development and not tagged; the
-latest published pre-release is `v1.0-alpha2`. A table `USING pgcolumnar` is stored in the
+latest published pre-release is `v1.0-alpha3`. A table `USING pgcolumnar` is stored in the
 native on-disk format, PGCN v1.
 
 ## Releases to 1.0
@@ -26,11 +26,17 @@ documentation, and tests. A feature deferred past beta 1 waits for 2.0.
 
 | release | target | theme |
 | --- | --- | --- |
-| `1.0-alpha3` | 2026-09-01 | feature complete: retention, load deduplication, sort reporting, more skipping |
-| `1.0-alpha4` | 2026-09-15 | skipping and layout |
-| `1.0-alpha5` | 2026-09-29 | join acceleration |
-| `1.0-alpha6` | 2026-10-13 | encoding and Parquet partition inference |
+| `1.0-alpha3` | 2026-09-02 | feature complete: retention, load deduplication, sort reporting, more skipping |
+| `1.0-alpha4` | 2026-09-17 | layout, skipping, and join acceleration |
+| `1.0-alpha5` | 2026-09-29 | encoding: adaptive cascade selection |
+| `1.0-alpha6` | 2026-10-13 | Parquet partition inference |
 | `1.0-beta1` | 2026-10-27 | feature freeze |
+
+Alpha4 carries join acceleration because that work finished inside its cycle
+rather than waiting for the alpha5 it was planned for. The serial join runtime
+filter ships on by default, and per-element pruning of a set predicate ships with
+it. The two items alpha6 held are therefore split across alpha5 and alpha6, and no
+date moves.
 
 Dates are a cadence, not a commitment. They follow the 14 days observed between
 `v1.0-alpha` and `v1.0-alpha2`, and each is the date a tag is cut.
