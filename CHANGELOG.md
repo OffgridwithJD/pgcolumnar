@@ -18,6 +18,43 @@ true until the next version shipped.
 
 ### Fixed
 
+- Two more suite headers told a reader to undo what had already been done (#1088).
+
+  `fcfd3e6` fixed this class in `hilbert_cluster.sh`. Two files still carried it,
+  and every claim in them is false against the tree:
+
+      hilbert_locality.sh   "DELIBERATELY NOT REGISTERED ... makes that arm red
+                            until then"          registered; 070's arm PASSES;
+                                                 harness_selftest 967 + 0
+      hilbert_curve.sh      "NOT REGISTERED"     registered
+                            "src/columnar_curve.c does not exist"
+                                                 127 lines, links into the .so
+                            "070 reports it UNREGISTERED, which is the accurate
+                             state"              070 reports the opposite
+
+  `hilbert_curve.sh` also said registering the suite "belongs in the commit that
+  adds the encoder". That commit landed.
+
+  `hilbert_locality.sh` IS THE FILE THE PUBLISHED ADVICE CITES. `features.md`,
+  `how-to.md` and `best-practices.md` quote 1.24x to 2.04x against Z-order, and
+  that range comes from this suite's pins -- 2.0424, 1.6794, 1.4627 at
+  ROWS=200000. A reader arriving from the docs to check the number was told the
+  file is not in the matrix and is expected to redden the selftest.
+
+  THE SWEEP THAT FOUND THEM NEEDED ITS CONTINUATIONS JOINED, which is why the
+  class survived the first pass. `hilbert_locality.sh` wraps the phrase as
+  `makes that arm` / `# red until then` across two comment lines, invisible to a
+  line-oriented grep, and the search reported nothing. Reported by
+  @OffgridwithJD, who checked before concluding the file was clean.
+
+  So the rule for guarding this class is to match on REGISTRATION STATUS, which
+  is structural, and never on the prose, which wraps. The sweep now used joins
+  comment continuations first and compares each claim against the `SUITES` array.
+
+  Comment only. No check name moves: `3cfc50038951` and `bf6154cc7070` before and
+  after. Both suites green on PG17 non-assert, 65 and 184 checks, and
+  `harness_selftest` unchanged.
+
 - Hilbert clustering shipped in alpha4 and the pages a user reads never mentioned
   it (#1043 for the suite header).
 
