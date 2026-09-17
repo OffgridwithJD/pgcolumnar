@@ -90,6 +90,7 @@ behaviour, the source of that number is named.
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
 - [44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#44-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
+- [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
 
 ## 1. How to read a test in here
 
@@ -4357,3 +4358,21 @@ fixture, own observations. Assertion names match the shell suite.
 | test | what it asserts |
 | --- | --- |
 | `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+## 45. test_native_fetch_coalesce.py: index fetch I/O is not per-column
+
+Index fetch used to pin once per column: validity bitmap, then the value stream,
+two `PgColumnarReadLogicalData` calls each. Sequential scan already coalesces
+adjacent chunk ranges into one read. Adjacent columns sit back to back, so a
+wide fetch of a small group was many pins of the same pages.
+
+The public seam is executor buffer pins on `EXPLAIN (ANALYZE, BUFFERS)`, not
+wall clock. Planning pins grow with the target list and are excluded. After the
+fix, fetching every projected column must not pin once per extra column.
+
+Independent of `test/native_fetch_coalesce.sh`. Same public seam, own fixture,
+own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_fetch_coalesce` | a point lookup uses the index and returns the projected values; executor pins for one column and for every column are both measurable, and the wide fetch does not pin once per column |
+| `test_the_validity_copy_is_bounded_before_the_chunk_is_read` | the bound on the validity copy precedes the copy, read as positions in the coalescing helper rather than as the presence of both statements -- the overread it guards had both |

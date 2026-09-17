@@ -1175,6 +1175,13 @@ native_chunk_length_bound	native_chunk_length_bound	backend survived the sequent
 native_chunk_length_bound	native_chunk_length_bound	backend survived the truncated-length fetch	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: a point lookup uses the index, not a sequential columnar scan	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: that fetch returns the row	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the index	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected column touched a measurable number of buffers	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: the coalescing helper holds both the bound and the validity copy	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	premise: the wide fetch returns the projected values	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	the validity copy is bounded by the chunk length before it runs	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-

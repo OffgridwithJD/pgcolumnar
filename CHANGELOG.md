@@ -615,18 +615,87 @@ true until the next version shipped.
   This is the third arm in this file to be repaired for counting a string across a
   whole file. The `deltuples` comment 15 lines above records the first, fixed by
   scoping; these two were left as whole-file counts and did the same thing again.
-- An index fetch silently returned a row when `page_length` was 2^32 too large.
+- An index fetch pinned once per projected column, while a sequential scan
+  already coalesced adjacent chunk ranges into one read.
 
-  `NativeColumnChunkMetadata.pageLength` is `uint64`. Both decode entry points
-  cast `(pageLength - validityBytes)` to `uint32`. Adding 2^32 to the catalog
-  value leaves the low 32 bits unchanged, so a btree fetch reconstructed the
-  original stream and returned the row. A sequential scan already refused: the
-  chunk no longer fitted its row group, so containment raised XX001. The fetch
-  path never had that check.
+  `pgcolumnar_fetch_row` issued two `PgColumnarReadLogicalData` calls per
+  column (validity bitmap, then the value stream). The scan path
+  (`pgcolumnar_native_read_projected`) sorts those ranges and merges the ones
+  that touch. Adjacent columns in a row group are laid out back to back, so a
+  wide btree fetch of a small group pinned the same pages once per column.
 
-  The value-stream length is now required to fit in `uint32` before either path
-  decodes. Adding 2^32 is refused with XX001 on the fetch and on the scan. New
-  twins `native_chunk_length_bound` and `test_native_chunk_length_bound.py`.
+  Measured on PostgreSQL 18 with `EXPLAIN (ANALYZE, BUFFERS)` executor pins
+  (planning excluded): 16 int columns, one row via the index, 64 pins for one
+  column and 94 for sixteen -- exactly two extra pins per extra column. After
+  the fetch path coalesces the same way the scan does, both counts are 61.
+  New twins `native_fetch_coalesce` and `test_native_fetch_coalesce.py`.
+
+  THE VALIDITY COPY IS BOUNDED BY THE CHUNK BEFORE IT RUNS. The coalesced path
+  copies `validityBytes` out of a span buffer that is only guaranteed to hold
+  `page_length` bytes for the chunk being served, and the test reconciling the
+  two ran three lines AFTER the copy. A chunk whose catalog `page_length` was
+  smaller than its validity bitmap therefore read past the allocation.
+
+  Reproduced against a build with `-fsanitize=address`, by poisoning
+  `pgcolumnar.column_chunk.page_length` on the last chunk by `page_offset` and
+  issuing a plain index-scan `SELECT`:
+
+      AddressSanitizer: heap-buffer-overflow
+      READ of size 625, 0 bytes after a 2640-byte region
+        pgcolumnar_fetch_coalesce_read   (the memcpy)
+        pgcolumnar_fetch_row
+        printtup
+
+  The backend died and the cluster entered recovery. Main cannot have this
+  shape: its non-coalesced fill reads straight from storage into an
+  exactly-sized destination, so no in-memory extent exists to exceed. The span
+  buffer and the copy out of it are both new here.
+
+  Hoisting the `page_length >= validityBytes` test above the copy closes it. An
+  inconsistent chunk is left for the non-coalesced path, which refuses it.
+
+  The regression arm is an ORDERING pin, not a behavioural one, and that is
+  deliberate: reading ~117 bytes past a palloc'd span reads adjacent heap and
+  returns quietly without a sanitizer, so a behavioural arm would report PASS
+  on the broken code. Both harnesses assert the order, each reading the source
+  its own way -- awk over line numbers in the shell suite, a regex over
+  character offsets in the pytest twin. Proved by MOVING the guard below the
+  copy rather than deleting it, which leaves both statements present and
+  reddens only the ordering arm.
+
+  AND A CHUNK THE CHECKED DECODE PATH WOULD REFUSE IS LEFT FOR IT, so the refusal
+  keeps its SQLSTATE. The range-building loop now defers any chunk whose
+  page_length is under the validity bitmap or whose value stream would not fit a
+  uint32.
+
+  Without that, this change SHADOWS #1063's typed refusal. `pgcolumnar_fetch_row`
+  calls the coalescing helper before the per-column loop reaches
+  `pgcolumnar_chunk_value_bytes`, and the helper builds its ranges straight from
+  `page_length`, so a poisoned length spans ~4GB and palloc raises first.
+  Measured on the two composed:
+
+      without the defer   native_chunk_length_bound   5 passed + 1 failed
+                          ERROR: invalid memory alloc request size 4294971754
+      with the defer      native_chunk_length_bound   6 passed + 0 failed  (XX001)
+      with the defer      native_fetch_coalesce       7 passed + 0 failed
+
+  The last line matters: the wide-fetch pin still passes, so deferring the
+  inconsistent chunk is not disabling coalescing to make a test green.
+
+  Reported by @jdatcmd, who composed the two branches rather than reading them.
+
+  THE ORDERING ARM IS ANCHORED ON THE CONTAINMENT TEST, because the function now
+  holds two guards with the same text -- the deferral above and the bound on the
+  copy. An unanchored search finds the first, which is in the wrong loop, and the
+  arm would then pass with the bound deleted. The containment test belongs only
+  to the distribution loop. Proved by deleting ONLY that guard and leaving the
+  deferral: both arms redden.
+
+  The two source patterns use bracket expressions rather than backslash-escaped
+  parens. `awk -v` processes escapes in the value and `\(` is undefined, so mawk
+  keeps the backslash and matches while gawk strips it -- silently not matching
+  for one pattern, and exiting fatally on `Unmatched (` for the other. CI runners
+  carry gawk. Verified identical under both.
 
 - `compare_to_bash.py`'s corpus arm called a WRAPPED name fabricated. A name too long
   for one line is written as adjacent literals, and Python joins them at parse time,
