@@ -255,8 +255,11 @@ def test_a_parallel_index_build_covers_the_whole_table(pgc_cluster, pgc_conn, ex
     )
     # The SUM, not just the count: a group read twice cancelling a group skipped
     # leaves the count right and the sum wrong.
+    # FAIL CLOSED, same reason as the shell twin: if the build errored both
+    # fetches return None and [None] == [None] would report PASS on a broken
+    # tree. Distinct sentinels cannot collide.
     expect.rows(
-        [via_index],
-        [via_seq],
+        [via_index if via_index is not None else ("the index read returned nothing",)],
+        [via_seq if via_seq is not None else ("the sequential read returned nothing",)],
         "a parallel index build indexes every row of the table",
     )

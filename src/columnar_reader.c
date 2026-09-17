@@ -1020,6 +1020,40 @@ pgcolumnar_read_start(PgColumnarReadState *readState)
 	}
 }
 
+
+/*
+ * pgcolumnar_chunk_value_bytes
+ *		The value stream that follows a chunk's validity bitmap, as a uint32.
+ *
+ *		page_length is uint64 in the catalog. Both decode entry points used to
+ *		cast (page_length - validityBytes) to uint32. Adding 2^32 to page_length
+ *		leaves the low 32 bits unchanged, so an index fetch silently read the
+ *		original stream and returned the row. A sequential scan already refused
+ *		(the chunk no longer fitted its row group). Refuse here so a fetch cannot
+ *		truncate.
+ */
+static uint32
+pgcolumnar_chunk_value_bytes(uint64 pageLength, int validityBytes, int attnum)
+{
+	uint64		vbytes;
+
+	if (validityBytes < 0)
+		validityBytes = 0;
+	if ((uint64) validityBytes > pageLength)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("columnar chunk for column %d has a validity bitmap longer than the chunk",
+						attnum)));
+	vbytes = pageLength - (uint64) validityBytes;
+	if (vbytes > (uint64) PG_UINT32_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("columnar chunk for column %d is too large to decode",
+						attnum),
+				 errdetail("Value stream is " UINT64_FORMAT " bytes.", vbytes)));
+	return (uint32) vbytes;
+}
+
 /*
  * pgcolumnar_native_decode_chunk
  *		Reconstruct a native column chunk's raw present-value stream (D4) from its
@@ -2711,7 +2745,9 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			/* D4: reconstruct the raw present-value stream from the descriptor */
 			rs->nativeValueCursor[cc->columnIndex] =
 				pgcolumnar_native_decode_chunk(rs->groupContext, att, base + validityBytes,
-											 (uint32) (cc->pageLength - validityBytes),
+											 pgcolumnar_chunk_value_bytes(cc->pageLength,
+																		   validityBytes,
+																		   cc->columnIndex + 1),
 											 cc->encodingDescriptor,
 											 cc->encodingDescriptorLen,
 											 cc->blockCodec, &vraw, &vcount,
@@ -4055,6 +4091,146 @@ pgcolumnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
  *		back null. wantValues == false stops as soon as liveness is settled,
  *		without touching the group's bytes at all.
  */
+
+/*
+ * pgcolumnar_fetch_coalesce_read
+ *		Read unread projected chunks the way the scan path does: sort ranges
+ *		and merge those that touch, so adjacent columns cost one
+ *		PgColumnarReadLogicalData rather than one per column.
+ *
+ *		Validity bitmaps land on the fetch-cache entry. Value streams stay in
+ *		CurrentMemoryContext (the per-fetch tmp context) for the decode loop
+ *		to copy from. A column nobody projected is never read.
+ */
+static void
+pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
+							   int natts, int validityBytes,
+							   bool allColumns, Bitmapset *needed,
+							   char **valueStream, uint32 *valueLen)
+{
+	PgColumnarByteRange *ranges;
+	int			n = 0;
+	int			c;
+	int			i;
+
+	ranges = (PgColumnarByteRange *) palloc(sizeof(PgColumnarByteRange) * natts);
+
+	for (c = 0; c < natts; c++)
+	{
+		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
+
+		if (!allColumns && !bms_is_member(c, needed))
+			continue;
+		if (cc == NULL || cc->pageLength == 0)
+			continue;
+		if (entry->vbits[c] != NULL && entry->rawBuf[c] != NULL)
+			continue;
+
+		/*
+		 * A CHUNK THE CHECKED DECODE PATH WOULD REFUSE IS LEFT FOR IT, so
+		 * the refusal keeps its SQLSTATE. Coalescing first would span
+		 * page_length bytes, and palloc raises XX000 ("invalid memory alloc
+		 * request size") above 1GB -- before pgcolumnar_chunk_value_bytes
+		 * could raise the typed XX001 that names the column and the reason.
+		 *
+		 * Measured on the composed tree without this: a poisoned
+		 * page_length of 2^32 + 4458 gives
+		 *     ERROR: invalid memory alloc request size 4294971754
+		 * and native_chunk_length_bound's XX001 arm fails. The refusal is
+		 * not lost, only shadowed: this range never reaches the coalesced
+		 * read, and the per-column loop refuses it as it always did.
+		 *
+		 * Reported by @jdatcmd against #1092 + #1093 composed.
+		 */
+		if (cc->pageLength < (uint64) validityBytes ||
+			cc->pageLength - (uint64) validityBytes > (uint64) PG_UINT32_MAX)
+			continue;
+
+		ranges[n].start = cc->pageOffset;
+		ranges[n].end = cc->pageOffset + cc->pageLength;
+		n++;
+	}
+
+	if (n == 0)
+	{
+		pfree(ranges);
+		return;
+	}
+
+	qsort(ranges, n, sizeof(PgColumnarByteRange), pgcolumnar_byte_range_cmp);
+
+	for (i = 0; i < n;)
+	{
+		uint64		start = ranges[i].start;
+		uint64		end = ranges[i].end;
+		int			j = i + 1;
+		char	   *buf;
+		uint64		span;
+
+		while (j < n && ranges[j].start <= end)
+		{
+			if (ranges[j].end > end)
+				end = ranges[j].end;
+			j++;
+		}
+
+		span = end - start;
+		buf = (char *) palloc(span > 0 ? span : 1);
+		if (span > 0)
+			PgColumnarReadLogicalData(rel, start, buf, span);
+
+		for (c = 0; c < natts; c++)
+		{
+			NativeColumnChunkMetadata *cc = entry->ccForCol[c];
+			uint64		off;
+
+			if (cc == NULL || cc->pageLength == 0)
+				continue;
+			if (cc->pageOffset < start || cc->pageOffset + cc->pageLength > end)
+				continue;
+
+			/*
+			 * THE BOUND FOR THE vbits COPY BELOW, and it belongs here rather
+			 * than beside the value stream. The containment check above
+			 * guarantees [off, off+pageLength) lies inside buf; the copy reads
+			 * validityBytes. Those coincide only under this condition, which
+			 * used to be tested three lines later -- so a chunk whose catalog
+			 * page_length was smaller than its validity bitmap read past the
+			 * span allocation. Measured under ASAN before this guard:
+			 * heap-buffer-overflow, READ of size 625 starting 0 bytes after a
+			 * 2640-byte region, backend killed, on a plain index-scan SELECT.
+			 *
+			 * An inconsistent chunk is left for the non-coalesced path, which
+			 * reads it straight from storage into an exactly-sized buffer and
+			 * refuses it there.
+			 */
+			if (cc->pageLength < (uint64) validityBytes)
+				continue;
+
+			off = cc->pageOffset - start;
+			if (entry->vbits[c] == NULL)
+			{
+				MemoryContext vOld = MemoryContextSwitchTo(entry->cx);
+
+				entry->vbits[c] = palloc(validityBytes > 0 ? validityBytes : 1);
+				MemoryContextSwitchTo(vOld);
+				if (validityBytes > 0)
+					memcpy(entry->vbits[c], buf + off, validityBytes);
+			}
+			if (entry->rawBuf[c] == NULL &&
+				cc->pageLength >= (uint64) validityBytes)
+			{
+				valueStream[c] = buf + off + validityBytes;
+				valueLen[c] = (uint32) (cc->pageLength - validityBytes);
+			}
+		}
+
+		i = j;
+	}
+
+	pfree(ranges);
+}
+
 static bool
 pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 				   Datum *values, bool *nulls, bool allColumns,
@@ -4290,6 +4466,14 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 
 	validityBytes = (int) ((entry->rowCount + 7) / 8);
 
+	{
+		char	  **valueStream = (char **) palloc0(sizeof(char *) * natts);
+		uint32	   *valueLen = (uint32 *) palloc0(sizeof(uint32) * natts);
+
+		pgcolumnar_fetch_coalesce_read(rel, entry, natts, validityBytes,
+									   allColumns, needed, valueStream,
+									   valueLen);
+
 	for (c = 0; c < natts; c++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, c);
@@ -4367,7 +4551,9 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 									COLUMNAR_NATIVE_ENCDESC_BASELINE);
 			MemoryContext decCx;
 			MemoryContext decOld;
-			uint32		vlen = (uint32) (cc->pageLength - validityBytes);
+			uint32		vlen = pgcolumnar_chunk_value_bytes(cc->pageLength,
+												   validityBytes,
+												   c + 1);
 			char	   *vstream;
 
 			if (entry->overflow[c])
@@ -4385,8 +4571,14 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			vstream = palloc(vlen > 0 ? vlen : 1);
 			MemoryContextSwitchTo(decOld);
 			if (vlen > 0)
-				PgColumnarReadLogicalData(rel, cc->pageOffset + validityBytes,
-										vstream, vlen);
+			{
+				if (valueStream[c] != NULL)
+					memcpy(vstream, valueStream[c], vlen);
+				else
+					PgColumnarReadLogicalData(rel,
+											cc->pageOffset + validityBytes,
+											vstream, vlen);
+			}
 
 			decOld = MemoryContextSwitchTo(decCx);
 			if (baseline)
@@ -4501,6 +4693,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			entry->rawBuf[c] = NULL;
 			entry->overflow[c] = true;
 		}
+	}
 	}
 
 	/*

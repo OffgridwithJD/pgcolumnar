@@ -182,7 +182,14 @@ _pam_seq="$(_pam_read "SET enable_indexscan=off; SET enable_bitmapscan=off;
 check "premise: both sides of the comparison returned a value" \
 	"$([ -n "$_pam_idx" ] && [ -n "$_pam_seq" ] && echo yes || echo no)" "yes"
 
+# FAIL CLOSED. If the build errored, BOTH reads come back empty and comparing
+# "" against "" reports PASS -- measured: mutating the shared claim so every
+# participant walks its own index made the build fail, both reads returned
+# nothing, and this check passed on a tree where the property was broken. The
+# premise above caught it, but a headline check that says PASS when it measured
+# nothing is worse than no check. Distinct sentinels cannot collide.
 check "a parallel index build indexes every row of the table" \
-	"$_pam_idx" "$_pam_seq"
+	"${_pam_idx:-<the index read returned nothing>}" \
+	"${_pam_seq:-<the sequential read returned nothing>}"
 
 pgc_summary
