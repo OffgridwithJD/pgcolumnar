@@ -162,12 +162,12 @@ Nothing further should be added. It is 11 days into a 14-day cycle.
   Three defects found by the investigation are tracked separately and do NOT
   close with it: #1074, #1075, #1076.
 
-### 1.0-alpha5, target 2026-09-29. Theme: join acceleration
+### 1.0-alpha5, target 2026-09-29. Theme: encoding (adaptive cascade selection)
 
-**BOTH ITEMS SHIPPED EARLY, IN ALPHA4. This alpha has no scope as written, and
-the owner has to give it some or fold it into alpha6.** Recorded 2026-09-17 while
-auditing the documentation for the alpha4 tag. Verified rather than assumed: each
-commit below is absent from `v1.0-alpha3` and present in `main`.
+**BOTH OF THIS ALPHA'S PLANNED ITEMS SHIPPED EARLY, IN ALPHA4**, so the encoding
+item has been moved up from alpha6 to fill it. Recorded 2026-09-17 while auditing
+the documentation for the alpha4 tag. Verified rather than assumed: each commit
+below is absent from `v1.0-alpha3` and present in `main`.
 
     9f7dcd8  perf: prune scattered IN lists by element (#752)
     ae623cb  feat: add serial join runtime range filter (#752)
@@ -188,19 +188,23 @@ The two items as they were planned:
   `docs/how-to.md` and `docs/features.md`.
 
 This is a scheduling fact rather than a problem. The series compressed on
-2026-08-29 to reach beta sooner, and work moving forward is that decision
-working. But `docs/roadmap.md` still publishes "join acceleration" as alpha5's
-theme, and that is now a promise about work already delivered.
+2026-08-29 to reach beta sooner, and work moving forward is that decision working.
 
-### 1.0-alpha6, target 2026-10-13. Theme: encoding and interoperability
+**What this alpha now carries**, moved up from alpha6:
 
 - **Adaptive cascade encoding selection.** The primitives exist; the missing piece
   is a sampling selector that chooses per block. High value at low to medium
   effort, and it changes what the writer emits.
+
+No date moves. alpha6 keeps Parquet partition inference and stays the last alpha.
+
+### 1.0-alpha6, target 2026-10-13. Theme: Parquet partition inference
+
 - **Parquet partition inference**, the one remaining item inside Parquet.
 
-Two items rather than three, deliberately. The Arrow C Data Interface export was
-cut from this alpha on 2026-08-29. alpha6 is now the last one, and the series
+One item. The Arrow C Data Interface export was cut from this alpha on 2026-08-29,
+and adaptive cascade encoding selection moved up to alpha5 on 2026-09-17 when
+alpha4 absorbed alpha5's join work. alpha6 is still the last one, and the series
 should not lose an item it needs to a slip in October.
 
 ## What compressing the series costs
