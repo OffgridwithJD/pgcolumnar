@@ -77,6 +77,62 @@ done
 cleanup() { for f in "${STAGED[@]:-}"; do [ -n "$f" ] && rm -f "$f"; done; }
 trap cleanup EXIT
 
+# ---- each fixture must be what its tag actually shipped (#901) --------------
+#
+# THE FIXTURES ARE THE PREMISE OF EVERY ARM BELOW. This suite claims that each
+# released starting point upgrades to the current catalog, and it can only claim
+# that if the fixture IS the released starting point.
+#
+# They were made by renaming the root base script when the next cycle opened. A
+# rename at cycle-open equals the release only if nothing touched the file between
+# the tag and the rename, and for `1.0-alpha2` something did: two post-release
+# `set_options` fixes. The fixture was the released script plus those, so this
+# suite spent two cycles upgrading from a state no user ever had.
+#
+# Comparing BLOB IDS rather than diffing, because a blob id is a lookup. No
+# similarity heuristic and no pathspec can distort it, and a rename-detection
+# argument once turned a content-preserving move into a fabricated `R098` here.
+#
+# `1.0-alpha` IS DELIBERATELY ABSENT FROM THIS LIST, and that is the finding this
+# check exists to stop being invisible. `v1.0-alpha` shipped
+# `pgcolumnar--1.0-dev.sql` with `default_version = 1.0-dev`; there is no
+# `pgcolumnar--1.0-alpha.sql` at that tag or any other. Its fixture is constructed
+# rather than released, and it cannot be replaced by the real `1.0-dev` script:
+# that script names the pre-rename C symbol and the current library does not
+# export it.
+#
+#     ERROR:  could not find function "columnar_handler" in file "pgcolumnar.so"
+#
+# So no single-library test can start from a genuine `1.0-dev` or `1.0-alpha`
+# install. The arm is kept because it is the only cover for the
+# `1.0-dev--1.0-alpha` and `1.0-alpha--1.0-alpha2` upgrade scripts, which ship.
+# What it tests is catalog shape, not a released artifact, and it is named that
+# way rather than counted with the others.
+_FX_TAGGED="1.0-alpha2 1.0-alpha3 1.0-alpha4"
+
+_fx_git() { git -C "$HERE/.." "$@" 2>/dev/null; }
+if ! _fx_git rev-parse --git-dir >/dev/null; then
+	_fx_why="no git repository in the tree under test"
+elif [ -z "$(_fx_git tag -l 'v1.0-alpha*')" ]; then
+	# CI checks out at depth 1 with no tags, so this cannot run there. It runs
+	# locally and in the five-major release gate, which is where a fixture is
+	# captured and therefore where it can be captured wrongly.
+	_fx_why="no release tags in this checkout"
+else
+	_fx_why=""
+fi
+
+for v in $_FX_TAGGED; do
+	_fx_name="the $v fixture is byte-identical to what v$v shipped"
+	if [ -n "$_fx_why" ]; then
+		check_skip "$_fx_name" "SKIP  $_fx_name ($_fx_why)" "$_fx_why"
+		continue
+	fi
+	_fx_tag="$(_fx_git rev-parse "v$v:pgcolumnar--$v.sql" || echo "no such path at v$v")"
+	_fx_fix="$(_fx_git hash-object "$HERE/fixtures/pgcolumnar--$v.sql" || echo "fixture missing")"
+	check "$_fx_name" "$_fx_fix" "$_fx_tag"
+done
+
 P() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -tAq "$@"; }
 
 # Comprehensive catalog snapshot of the pgcolumnar schema, one line per object.
