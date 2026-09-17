@@ -926,8 +926,21 @@ check "the runner passes --against to the gate" \
 # ERROR, because a fallback that enforces less while saying so is still a gate
 # enforcing less.
 
+# THE INVARIANT IS UNCHANGED AND THE LITERAL MOVED (#1104). The runner now passes
+# `$_led_against`, which a `case` immediately above restricts to `auto` or
+# `parent`. Both are POLICIES the tool resolves; neither is a ref the caller
+# names, so the staleness this section refuses is still refused. The old form
+# pinned the literal string `--against auto`, which could not express "a policy
+# chosen from a closed set" and so failed a runner that still honours the rule.
+#
+# What must stay true is that no REF reaches that call site. The arm below checks
+# the closed set, and the `origin/main` arm after it is unchanged and still the
+# one that catches a remote name.
 check "the runner asks the tool to resolve the prior rather than naming one" \
-	"$(grep -A5 'pgc_ledger.py" gate' "$_rv" | grep -c -- '--against auto')" "1"
+	"$(grep -A5 'pgc_ledger.py" gate' "$_rv" | grep -c -- '--against "\$_led_against"')" "1"
+
+check "and the prior policy is chosen from a closed set, not taken as a ref" \
+	"$(grep -cE '^[[:space:]]+auto\|parent\)' "$_rv")" "1"
 check "and the runner names no remote at that call site" \
 	"$(grep -A6 'pgc_ledger.py" gate' "$_rv" | grep -c 'origin/main')" "0"
 

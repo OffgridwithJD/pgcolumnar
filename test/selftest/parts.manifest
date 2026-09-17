@@ -46,3 +46,4 @@
 470-a-skipped-arm-records-under-its-own-name.sh
 480-an-unrunnable-record-names-its-check.sh
 490-a-one-line-body-ends-at-its-own-brace.sh
+500-the-gate-takes-a-prior-the-caller-names.sh

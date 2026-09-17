@@ -1419,6 +1419,35 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		echo "  the ledger is missing from the tree under test, which is not a pass"
 		verfail=1
 	else
+		# A CALLER MAY SELECT A POLICY, never a ref (#1104). `PGC_LEDGER_AGAINST`
+		# accepts `auto` or `parent` and nothing else, and the validation below is the
+		# point rather than tidiness: part 410 refuses a runner that NAMES a prior,
+		# because `origin` is per-clone and a stale main makes this gate enforce LESS
+		# while printing that it compared. An arbitrary ref through an environment
+		# variable is that same hole with a longer fuse.
+		#
+		# Both values are resolved by the tool. `auto` reads GITHUB_BASE_REF or
+		# main@{upstream}; `parent` resolves HEAD~1, which is derived from the commit
+		# under test rather than from a remote name and so cannot be stale. Neither can
+		# fall back: both raise when they cannot resolve.
+		case "${PGC_LEDGER_AGAINST:-auto}" in
+			auto|parent)	_led_against="${PGC_LEDGER_AGAINST:-auto}" ;;
+			*)	echo "  PGC_LEDGER_AGAINST must be 'auto' or 'parent', not '${PGC_LEDGER_AGAINST}'" >&2
+				_led_against="" ;;
+		esac
+		if [ -z "$_led_against" ]; then
+			echo "  PG$major: the prior-ceiling policy is unusable, which is not a pass"
+			verfail=1
+		fi
+		# WHY THIS EXISTS (#1104). A nightly runs on `schedule`, so GITHUB_BASE_REF is
+		# unset and the checkout configures no upstream. `auto` then has no prior and
+		# fails closed, correctly, on every major while no suite failed. The control was
+		# in the same run: `upgrade-guard` runs this same script with `fetch-depth: 0`
+		# and passed, while all five `suites` jobs failed.
+		#
+		# WHATEVER SELECTS `parent` MUST ALSO FETCH IT. `HEAD~1` does not exist in a
+		# depth-1 checkout, measured, so choosing that policy without `fetch-depth`
+		# trades one failure for another. The tool raises rather than falling back.
 		# WHICH REF CARRIES THE PRIOR CEILING is resolved by the tool, from
 		# GITHUB_BASE_REF in CI or the local main's configured upstream outside
 		# it, and it FAILS CLOSED when neither gives a trustworthy answer.
@@ -1436,7 +1465,7 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 			--ledger "$builddir/test/check_ledger.tsv" \
 			--budget "$builddir/test/check_ledger_budget.txt" \
 			--registered "$_acc_registered" \
-			--against auto \
+			--against "$_led_against" \
 			$_led_logs
 		_led_rc=$?
 		# BRANCH ON THE STATUS THE TOOL WENT TO THE TROUBLE OF DISTINGUISHING.

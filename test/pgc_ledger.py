@@ -820,9 +820,33 @@ def _resolve_against(path, spec):
     the thing this whole change exists to refuse, and a fallback that says so is
     still a gate enforcing less.
     """
+    repo = pathlib.Path(path).resolve().parent
+
+    # `parent` is a POLICY the tool resolves, not a ref the caller names, and that
+    # distinction is the whole point of this function. A scheduled run has no
+    # GITHUB_BASE_REF and the checkout configures no upstream, so `auto` fails
+    # closed and the nightly could never pass (#1104). The prior that means
+    # something there is the commit this one landed on top of.
+    #
+    # It carries none of the staleness this function refuses. `HEAD~1` is derived
+    # from the commit under test rather than from a remote name, so it cannot be a
+    # fork's main 446 commits behind. It also cannot silently enforce less: if the
+    # checkout is shallow the parent does not exist and this raises rather than
+    # falling back.
+    if spec == "parent":
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD~1"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+        raise LedgerError(
+            "--against parent was given but HEAD~1 does not resolve, so there is no "
+            "prior ceiling to compare against. A shallow checkout is the usual cause: "
+            "fetch at least depth 2."
+        )
+
     if spec != "auto":
         return spec
-    repo = pathlib.Path(path).resolve().parent
+
 
     def _rev(ref):
         r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", ref],
