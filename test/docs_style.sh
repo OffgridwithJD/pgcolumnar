@@ -263,15 +263,36 @@ _pubdocs="$(grep -rln 'latest published pre-release' \
 check "premise: at least one document names the latest published pre-release" \
 	"$([ -n "$_pubdocs" ] && echo yes || echo no)" "yes"
 
+# BOTH WORD ORDERS, because the four documents do not agree on one. Three write
+# "latest published pre-release is `vX`" and CHANGELOG.md writes "`vX` is the
+# latest published pre-release". A pattern for one order silently parses three
+# files and skips the fourth, which is the REFERENCE document, so the check would
+# have compared the copies to each other and exempted the original.
+#
+# The per-file count is what makes that visible: a file that mentions the claim
+# and yields no version is a file this rule cannot see, and it is named rather
+# than skipped.
 # shellcheck disable=SC2086
-_pubvers="$(grep -rhoE 'latest published pre-release is `v[^`]*`' $_pubdocs 2>/dev/null \
-	| grep -oE '`v[^`]*`' | tr -d '`' | sort -u)"
-check "premise: the claim was parsed, not merely present" \
-	"$([ -n "$_pubvers" ] && echo yes || echo no)" "yes"
+_pubvers="$( { grep -rhoE 'latest published pre-release is `v[^`]*`' $_pubdocs 2>/dev/null
+               grep -rhoE '`v[^`]*` is the latest published pre-release' $_pubdocs 2>/dev/null
+             } | grep -oE '`v[^`]*`' | tr -d '`' | sort -u)"
 
+_pubunparsed=""
+for _d in $_pubdocs; do
+	grep -qE 'latest published pre-release is `v[^`]*`|`v[^`]*` is the latest published pre-release' \
+		"$_d" || _pubunparsed="$_pubunparsed $(basename "$_d")"
+done
+check "every document making the claim states it in a form this rule can read" \
+	"$(printf '%s' "$_pubunparsed" | sed 's/^ //')" ""
+
+# A DISTINCT SENTINEL, not "". An empty extraction would otherwise compare "" to
+# "" and report PASS having read nothing, which is #1096's defect exactly: the
+# premise caught it there and the headline still said PASS.
 check "every document names the same latest published pre-release" \
-	"$([ "$(printf '%s\n' "$_pubvers" | grep -c .)" = 1 ] && echo "" \
-	   || printf '%s' "$_pubvers" | tr '\n' ' ' | sed 's/ $//')" ""
+	"$([ "$(printf '%s\n' "$_pubvers" | grep -c .)" = 1 ] \
+	   && printf '%s' "$_pubvers" \
+	   || printf 'DISAGREE:%s' "$(printf '%s' "$_pubvers" | tr '\n' ',' | sed 's/,$//')")" \
+	"$(printf '%s\n' "$_pubvers" | head -1)"
 
 # ---- and META.json, which NOTHING read at all ------------------------------
 #

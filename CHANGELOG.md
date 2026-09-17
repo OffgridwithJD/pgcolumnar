@@ -6,8 +6,8 @@ pre-release; the version marker is `1.0-alpha4`, recorded in `VERSION`. New tabl
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's `default_version` is `1.0-alpha4`, which is in development and not
-yet tagged; `v1.0-alpha3` is the latest published pre-release. Upgrade scripts from
+The extension's `default_version` is `1.0-alpha4`.
+`v1.0-alpha4` is the latest published pre-release. Upgrade scripts from
 every previously shipped version ship with it (`1.0-dev`, which the v1.0-alpha tag
 installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
 `ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha4` from any of them. Older
