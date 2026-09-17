@@ -14,7 +14,7 @@ installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
 notes in this file describe `default_version` as pinned at an earlier version, each
 true until the next version shipped.
 
-## [Unreleased]
+## [1.0-alpha4] - 2026-09-17
 
 ### Fixed
 
