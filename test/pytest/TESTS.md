@@ -4357,3 +4357,4 @@ own observations. Assertion names match the shell suite.
 | test | what it asserts |
 | --- | --- |
 | `test_native_fetch_coalesce` | a point lookup uses the index and returns the projected values; executor pins for one column and for every column are both measurable, and the wide fetch does not pin once per column |
+| `test_the_validity_copy_is_bounded_before_the_chunk_is_read` | the bound on the validity copy precedes the copy, read as positions in the coalescing helper rather than as the presence of both statements -- the overread it guards had both |

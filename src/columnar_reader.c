@@ -4089,6 +4089,26 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 		if (entry->vbits[c] != NULL && entry->rawBuf[c] != NULL)
 			continue;
 
+		/*
+		 * A CHUNK THE CHECKED DECODE PATH WOULD REFUSE IS LEFT FOR IT, so
+		 * the refusal keeps its SQLSTATE. Coalescing first would span
+		 * page_length bytes, and palloc raises XX000 ("invalid memory alloc
+		 * request size") above 1GB -- before pgcolumnar_chunk_value_bytes
+		 * could raise the typed XX001 that names the column and the reason.
+		 *
+		 * Measured on the composed tree without this: a poisoned
+		 * page_length of 2^32 + 4458 gives
+		 *     ERROR: invalid memory alloc request size 4294971754
+		 * and native_chunk_length_bound's XX001 arm fails. The refusal is
+		 * not lost, only shadowed: this range never reaches the coalesced
+		 * read, and the per-column loop refuses it as it always did.
+		 *
+		 * Reported by @jdatcmd against #1092 + #1093 composed.
+		 */
+		if (cc->pageLength < (uint64) validityBytes ||
+			cc->pageLength - (uint64) validityBytes > (uint64) PG_UINT32_MAX)
+			continue;
+
 		ranges[n].start = cc->pageOffset;
 		ranges[n].end = cc->pageOffset + cc->pageLength;
 		n++;
@@ -4130,6 +4150,24 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 			if (cc == NULL || cc->pageLength == 0)
 				continue;
 			if (cc->pageOffset < start || cc->pageOffset + cc->pageLength > end)
+				continue;
+
+			/*
+			 * THE BOUND FOR THE vbits COPY BELOW, and it belongs here rather
+			 * than beside the value stream. The containment check above
+			 * guarantees [off, off+pageLength) lies inside buf; the copy reads
+			 * validityBytes. Those coincide only under this condition, which
+			 * used to be tested three lines later -- so a chunk whose catalog
+			 * page_length was smaller than its validity bitmap read past the
+			 * span allocation. Measured under ASAN before this guard:
+			 * heap-buffer-overflow, READ of size 625 starting 0 bytes after a
+			 * 2640-byte region, backend killed, on a plain index-scan SELECT.
+			 *
+			 * An inconsistent chunk is left for the non-coalesced path, which
+			 * reads it straight from storage into an exactly-sized buffer and
+			 * refuses it there.
+			 */
+			if (cc->pageLength < (uint64) validityBytes)
 				continue;
 
 			off = cc->pageOffset - start;

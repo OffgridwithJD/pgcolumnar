@@ -117,4 +117,76 @@ done
 check "premise: the wide fetch returns the projected values" \
 	"$(fetch_val "${FORCE} SELECT ${sel_wide} FROM nfc WHERE id = 1;")" "$expect_wide"
 
+# ---- the validity copy must be bounded by the chunk, not by the row count -----
+#
+# THIS IS AN ORDERING PIN AND IT IS DELIBERATELY NOT BEHAVIOURAL. The defect it
+# guards was a heap overread: the coalesced path copies validityBytes out of a
+# span buffer that is only guaranteed to hold page_length bytes for this chunk,
+# and the test reconciling the two used to run three lines AFTER the copy.
+#
+# Reproduced before the fix, on a build with -fsanitize=address, by poisoning
+# pgcolumnar.column_chunk.page_length below the validity bitmap on the last
+# chunk by page_offset and issuing a plain index-scan SELECT:
+#
+#     AddressSanitizer: heap-buffer-overflow
+#     READ of size 625, 0 bytes after a 2640-byte region
+#       pgcolumnar_fetch_coalesce_read  columnar_reader.c   (the memcpy)
+#       pgcolumnar_fetch_row
+#       printtup
+#
+# A behavioural arm here would be VACUOUS on this build. Reading ~117 bytes past
+# a palloc'd span reads adjacent heap and returns quietly without a sanitizer, so
+# the suite would report PASS on the broken code. The sanitizer run is the
+# behavioural proof and it belongs to the nightly ASAN job; what this suite can
+# assert deterministically is the property that was wrong -- the order.
+#
+# Line numbers are read from the source rather than counted, because a count
+# would pass on a file where the two statements had swapped.
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
+
+# awk reads the file directly: piping a captured string into a reader that exits
+# early is what selftest/080 refuses (#486).
+# $2 is an OPTIONAL anchor: the search starts only after a line matching it.
+# THE FUNCTION HAS TWO GUARDS WITH THE SAME TEXT. The range-building loop defers
+# a chunk the checked decode path would refuse, and the distribution loop bounds
+# the validity copy; both read `pageLength < (uint64) validityBytes`. Without an
+# anchor this finds the FIRST, which is in the wrong loop -- the ordering check
+# would then still pass with the distribution guard deleted, which is the guard
+# it exists to pin. Anchoring on the containment test, which only the
+# distribution loop has, pins the right one. Reported by @jdatcmd.
+_nfc_line() {
+	awk -v pat="$1" -v after="$2" '
+		/^pgcolumnar_fetch_coalesce_read[(]/       { f = 1 }
+		f && after != "" && $0 ~ after             { g = 1; next }
+		f && (after == "" || g) && $0 ~ pat        { print NR; exit }
+		f && /^}/                                  { exit }
+	' "$SRC/columnar_reader.c"
+}
+
+# BRACKETS, NOT BACKSLASHES, and this is not style. `awk -v` processes escape
+# sequences in the VALUE, and `\(` is not a defined escape, so the result is
+# implementation-defined: mawk keeps the backslash and the pattern matches, gawk
+# strips it with a warning and the pattern becomes a regex GROUP that never
+# matches the literal text. `memcpy\(entry->vbits` is worse under gawk -- it
+# becomes an unmatched `(` and awk exits fatally. Either way both variables come
+# back empty and both checks below report "no", so the arm fails on a tree where
+# the property holds.
+#
+# Measured on one machine, same file, same commit:
+#     mawk   guard=4150 copy=4161
+#     gawk   warning, then nothing
+# CI runners carry gawk; this container carried mawk, which is why it passed
+# here and failed there. A bracket expression cannot be mangled by -v escape
+# processing and means a literal paren in both. Verified identical under mawk
+# and gawk. Reported by @jdatcmd.
+_nfc_guard="$(_nfc_line 'pageLength < [(]uint64[)] validityBytes' 'cc->pageOffset < start')"
+_nfc_copy="$(_nfc_line 'memcpy[(]entry->vbits' '')"
+
+check "premise: the coalescing helper holds both the bound and the validity copy" \
+	"$([ -n "$_nfc_guard" ] && [ -n "$_nfc_copy" ] && echo yes || echo no)" "yes"
+
+check "the validity copy is bounded by the chunk length before it runs" \
+	"$([ -n "$_nfc_guard" ] && [ -n "$_nfc_copy" ] && \
+	   [ "$_nfc_guard" -lt "$_nfc_copy" ] && echo yes || echo no)" "yes"
+
 pgc_summary

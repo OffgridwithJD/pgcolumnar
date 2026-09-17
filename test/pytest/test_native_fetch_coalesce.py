@@ -3,6 +3,9 @@ chunk ranges. Independent of test/native_fetch_coalesce.sh: same public seam,
 own fixture, own observations. Assertion names match the shell suite.
 """
 
+import pathlib
+import re
+
 
 NCOLS = 12
 ROWS = 4500
@@ -137,4 +140,54 @@ def test_native_fetch_coalesce(pgc_conn, expect):
         1 if wide <= narrow + extra_cols else 0,
         1,
         "a wide index fetch does not pin once per column",
+    )
+# ---- the validity copy must be bounded by the chunk, not by the row count ----
+#
+# The coalesced fetch path copies validityBytes out of a span buffer that is only
+# guaranteed to hold page_length bytes for the chunk being served. The test that
+# reconciles the two once ran AFTER the copy, which made a chunk whose catalog
+# page_length was under its validity bitmap read past the allocation -- measured
+# under -fsanitize=address as a heap-buffer-overflow that killed the backend on a
+# plain index-scan SELECT.
+#
+# ORDERING, not presence: a check that both statements exist would pass on the
+# broken code, because the broken code had both. This reads their positions.
+#
+# Independent of test/native_fetch_coalesce.sh by construction: that suite walks
+# the function with awk and compares line numbers; this one slices the function
+# out with a regex and compares character offsets. Same property, no shared
+# observer, and neither invokes the other.
+_FN = re.compile(
+    r"^pgcolumnar_fetch_coalesce_read\(.*?^\}", re.S | re.M
+)
+
+
+def _coalesce_body():
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "columnar_reader.c"
+    m = _FN.search(src.read_text(encoding="utf-8"))
+    return m.group(0) if m else ""
+
+
+def test_the_validity_copy_is_bounded_before_the_chunk_is_read(expect):
+    """The bound on the vbits copy must precede the copy itself."""
+    body = _coalesce_body()
+    # THE FUNCTION HAS TWO GUARDS WITH THE SAME TEXT: the range-building loop
+    # defers a chunk the checked decode path would refuse, and the distribution
+    # loop bounds the validity copy. A plain find() returns the first, which is
+    # in the wrong loop -- this check would then still pass with the
+    # distribution guard deleted. The containment test belongs only to the
+    # distribution loop, so searching after it pins the right guard.
+    anchor = body.find("cc->pageOffset < start")
+    guard = body.find("pageLength < (uint64) validityBytes", anchor + 1) if anchor >= 0 else -1
+    copy = body.find("memcpy(entry->vbits")
+
+    expect.num(
+        1 if (anchor >= 0 and guard >= 0 and copy >= 0) else 0,
+        1,
+        "premise: the coalescing helper holds both the bound and the validity copy",
+    )
+    expect.num(
+        1 if (guard >= 0 and copy >= 0 and guard < copy) else 0,
+        1,
+        "the validity copy is bounded by the chunk length before it runs",
     )
