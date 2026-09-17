@@ -108,7 +108,35 @@ trap cleanup EXIT
 # `1.0-dev--1.0-alpha` and `1.0-alpha--1.0-alpha2` upgrade scripts, which ship.
 # What it tests is catalog shape, not a released artifact, and it is named that
 # way rather than counted with the others.
-_FX_TAGGED="1.0-alpha2 1.0-alpha3 1.0-alpha4"
+# DERIVED FROM THE FIXTURES ON DISK rather than listed, so a fixture added at the
+# next cycle-open is checked without anyone remembering to add it here. A list
+# that has to be edited alongside the thing it describes goes stale, and this
+# suite already carries three copies of its version list for exactly that reason.
+# A hardcoded list here could not see its own incompleteness: the one case it
+# must catch is a NEW fixture, and a new fixture is precisely what it would omit.
+#
+# THE LOCAL TAG IS TRUSTED, AND THAT IS A REAL LIMIT. `git fetch` never moves an
+# existing local tag, so a stale one compares the fixture against the wrong blob
+# and this arm reports a drift that is not there, or misses one that is. A false
+# release-integrity issue has already been filed off a stale local ref in this
+# repository. If this arm fails and the fixture looks right, check the tag against
+# the server before believing it:
+#
+#     git ls-remote origin refs/tags/v<version>
+_FX_TAGGED=""
+for _fx_f in "$HERE"/fixtures/pgcolumnar--*.sql; do
+	[ -f "$_fx_f" ] || continue
+	_fx_v="${_fx_f##*/pgcolumnar--}"; _fx_v="${_fx_v%.sql}"
+	# 1.0-alpha is synthetic and has no tag artifact: see above.
+	[ "$_fx_v" = "1.0-alpha" ] && continue
+	_FX_TAGGED="$_FX_TAGGED $_fx_v"
+done
+_FX_TAGGED="${_FX_TAGGED# }"
+
+# The sweep is a claim too. An empty one would make every arm below vanish and the
+# suite would report clean having compared nothing.
+check "premise: the fixture sweep found fixtures to compare against their tags" \
+	"$([ -n "$_FX_TAGGED" ] && echo yes || echo no)" "yes"
 
 _fx_git() { git -C "$HERE/.." "$@" 2>/dev/null; }
 if ! _fx_git rev-parse --git-dir >/dev/null; then
