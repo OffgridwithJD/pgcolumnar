@@ -93,6 +93,7 @@ behaviour, the source of that number is named.
 - [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
 - [46. test_parallel_am_scan.py: a table-AM parallel scan must share work](#46-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
 - [47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#47-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
+- [48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#48-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
 
 ## 1. How to read a test in here
 
@@ -4385,18 +4386,6 @@ Public seam: `EXPLAIN ANALYZE` worker rows on a Parallel Seq Scan. Leader
 participation is off so the two launched workers are the claimers under
 test. The shell twin uses its own table (`pam`, 50000 rows, groups of 100);
 this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
-
-### Every arm
-
-| test | what it holds |
-| --- | --- |
-| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
-| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
-
-The load-bearing assertion is `workers share the table-AM scan, it is not a
-single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
-reachable only when each worker claims its own row groups.
-| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
 ## 47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
 
 #913. A fetching index scan on a correlated key is priced below the custom scan
@@ -4413,4 +4402,34 @@ fixture, own observations. Assertion names match the shell suite.
 | test | what it asserts |
 | --- | --- |
 | `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
+
+The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
+`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
+unreachable by dividing the whole run, and reachable only if I/O remains.
+## 48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O
+
+The port of `test/parallel_scan_cost.sh`. The partial path priced itself as
+`serial_startup + (serial_run / workers)`. Core seqscan divides CPU only and
+leaves disk I/O whole. Dividing the whole run quotes an I/O-dominated scan at
+half its serial cost with two workers, so Gather beat honestly costed
+alternatives.
+
+Public seam: `EXPLAIN` of a columnar scan. This file raises `seq_page_cost` so
+I/O dominates the serial run; the shell twin does the same with a different
+page-cost and its own table. CPU terms stay at their defaults so the parallel
+path is still a little cheaper than serial and Gather still appears -- the
+number this suite exists to read. Assertion names match the shell suite.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
+
+The load-bearing assertion is `workers share the table-AM scan, it is not a
+single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
+reachable only when each worker claims its own row groups.
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
 

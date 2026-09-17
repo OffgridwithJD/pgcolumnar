@@ -1261,3 +1261,16 @@ parallel_am_scan	parallel_am_scan	premise: the serial plan is not a columnar cus
 parallel_am_scan	parallel_am_scan	premise: the table holds every inserted row	15;16;17;18;19	never	-
 parallel_am_scan	parallel_am_scan	premise: with the custom scan off the serial plan is a Seq Scan	15;16;17;18;19	never	-
 parallel_am_scan	parallel_am_scan	workers share the table-AM scan, it is not a single claimer	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers with the leader participating	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: both leader settings produced a row estimate to compare	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: both scans have a positive run cost	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the leader-on parallel scan has a positive run cost	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the leader-on plan is still a parallel columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan has Gather	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan is a columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan uses two workers	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	the leader-participation branch changes the divisor	15;16;17;18;19	never	-
