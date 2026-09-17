@@ -164,15 +164,33 @@ Nothing further should be added. It is 11 days into a 14-day cycle.
 
 ### 1.0-alpha5, target 2026-09-29. Theme: join acceleration
 
+**BOTH ITEMS SHIPPED EARLY, IN ALPHA4. This alpha has no scope as written, and
+the owner has to give it some or fold it into alpha6.** Recorded 2026-09-17 while
+auditing the documentation for the alpha4 tag. Verified rather than assumed: each
+commit below is absent from `v1.0-alpha3` and present in `main`.
+
+    9f7dcd8  perf: prune scattered IN lists by element (#752)
+    ae623cb  feat: add serial join runtime range filter (#752)
+    cbd0c2e  feat: add serial join runtime Bloom filter (#752)
+    60ddc10  feat: turn join runtime filter on by default (#752)
+
+The two items as they were planned:
+
 - **Per-element evaluation of a set predicate** (#752). Already specified, with a
   measured ceiling. On a clustered fact table it reaches 9 to 12 chunk groups of
   27, against 25 today. On an unclustered one the ceiling is provably zero. The
   design, the cost bound, the buffer constraint and the negative control are all
-  recorded on the issue.
+  recorded on the issue. **Shipped in alpha4 as `9f7dcd8`.**
 - **Runtime filters from a join's build side**, with clustering on the join key as
   a stated precondition rather than an assumption. The ceiling is zero without it,
   which is measured, so the documentation half of this item is as important as the
-  code.
+  code. **Shipped in alpha4, and on by default.** The precondition is documented in
+  `docs/how-to.md` and `docs/features.md`.
+
+This is a scheduling fact rather than a problem. The series compressed on
+2026-08-29 to reach beta sooner, and work moving forward is that decision
+working. But `docs/roadmap.md` still publishes "join acceleration" as alpha5's
+theme, and that is now a promise about work already delivered.
 
 ### 1.0-alpha6, target 2026-10-13. Theme: encoding and interoperability
 
@@ -264,3 +282,46 @@ It does not claim the dates will hold. It claims three things. The cadence is
 observed rather than invented. Every item named is traceable to an issue or to
 `design/ROADMAP.md`. And the beta 1 test can be failed, which matters, because a
 plan whose entry criteria cannot be failed is a wish.
+
+## Cutting a release
+
+**This section exists because it did not, and alpha4 reached tag day with no
+release notes**. Every previous release has a `RELEASE_NOTES_*.md`, so the step
+was known and simply never written down. A step that lives only in someone's
+memory is a step that gets skipped under time pressure.
+
+Documentation, in this order, before the tag:
+
+1. **Write `RELEASE_NOTES_<version>.md`.** Model it on the previous one. Build the
+   highlights from what a USER can see, which means the upgrade script, the GUC
+   defaults, and the `feat`/`fix` commits touching `src/`. Do not build them from
+   the changelog's headline count: alpha4's `[Unreleased]` ran to 4,229 lines and
+   almost all of it was test-harness work.
+2. **Check the changelog's categories.** Alpha4's headline feature sat under
+   `### Fixed`. Keep a Changelog wants Added for new surface, and a reader looking
+   for what is new will not find it under Fixed.
+3. **Update the two version claims.** They are different sentences in different
+   places and only one of them is gated:
+
+       "<version>, recorded in `VERSION`"        gated by docs_style.sh
+       "the latest published pre-release is"     agreement-checked only
+
+   The second drifted a whole cycle across README.md, docs/roadmap.md and
+   docs/installation.md while the first stayed green. `docs_style.sh` now checks
+   that every document making the claim makes the SAME claim, which catches one
+   file drifting. It cannot catch all of them being stale together, because no
+   tracked file records the newest tag. That is this step's job.
+4. **Re-theme the next alpha if its scope shipped early.** Alpha5's two items both
+   landed in alpha4, so the published roadmap promised work already delivered.
+5. **Run the gates.** `test/docs_style.sh` and `python3
+   test/plain_language_check.py docs/*.md README.md`. Release notes are outside
+   `docs_style.sh`'s scope by design, so run the language check on the new file by
+   hand.
+
+Then the tag itself:
+
+6. `## [Unreleased]` becomes `## [<version>] - <date>`.
+7. Tag, then capture the fixture FROM THE TAG (#901):
+   `git show v<version>:pgcolumnar--<version>.sql > test/fixtures/pgcolumnar--<version>.sql`.
+   Capturing it from the working tree at the next cycle-open is how the alpha2
+   fixture came to differ from what alpha2 actually shipped.
