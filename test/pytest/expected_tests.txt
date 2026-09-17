@@ -238,4 +238,4 @@ guard_tests 346
 # the expected answer for a file that needs a cluster, and checking it was the point
 # rather than assuming it.
 # cluster_tests re-derived by collection on the rebased tree, never by adding a delta measured on another tree.
-cluster_tests 411
+cluster_tests 417

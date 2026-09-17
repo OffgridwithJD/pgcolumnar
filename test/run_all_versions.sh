@@ -115,6 +115,7 @@ SUITES=(
 	import_exclusion
 	import_export_privilege
 	index_delete_liveness
+	index_fetch_penalty_crossover
 	index_fetch_penalty_width
 	index_only
 	inheritance
@@ -132,6 +133,7 @@ SUITES=(
 	native_batch_fold_projection
 	native_bloom
 	native_cancel
+	native_chunk_length_bound
 	native_cluster
 	native_compact
 	native_ctas
@@ -147,6 +149,7 @@ SUITES=(
 	native_fastdecode
 	native_fetch_bigcap
 	native_fetch_cache
+	native_fetch_coalesce
 	native_fetch_group_memo
 	native_fetch_interrupt
 	native_fetch_position
@@ -223,6 +226,7 @@ SUITES=(
 	objstore_tls_read
 	objstore_userinfo
 	parallel
+	parallel_am_scan
 	parallel_copy
 	parallel_copy_dedup
 	parallel_degree

@@ -58,4 +58,4 @@ suites_not_covered 249
 # that is not this one. Neither survives. Re-derived by COUNTING on the merged tree,
 # which is the only resolution this number has:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1235
+checks_never_observed_red 1268

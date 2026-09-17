@@ -89,7 +89,11 @@ behaviour, the source of that number is named.
 - [41. test_projections.py: a second copy of some columns, kept honest](#41-test_projectionspy-a-second-copy-of-some-columns-kept-honest)
 - [42. test_compression_reaches_the_cascade.py: the codec setting decides encodings too](#42-test_compression_reaches_the_cascadepy-the-codec-setting-decides-encodings-too)
 - [43. test_pgxn_metadata.py: the published distribution metadata, which nothing read](#43-test_pgxn_metadatapy-the-published-distribution-metadata-which-nothing-read)
-- [44. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#44-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
+- [44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch](#44-test_native_chunk_length_boundpy-a-truncated-chunk-length-cannot-fetch)
+- [45. test_native_fetch_coalesce.py: index fetch I/O is not per-column](#45-test_native_fetch_coalescepy-index-fetch-io-is-not-per-column)
+- [46. test_parallel_am_scan.py: a table-AM parallel scan must share work](#46-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
+- [47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#47-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
+- [48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#48-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
 
 ## 1. How to read a test in here
 
@@ -4340,7 +4344,70 @@ substantive arms redden on each side while every premise stays green. The premis
 hold because the file still parses and still names *a* script -- it names the wrong
 one, which is exactly the distinction the arms draw.
 
-## 44. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O
+## 44. test_native_chunk_length_bound.py: a truncated chunk length cannot fetch
+
+A column chunk's `page_length` is `uint64` in the catalog. Both decode entry
+points used to cast the value stream to `uint32`. Adding 2^32 leaves the low
+32 bits unchanged, so an index fetch silently read the original stream and
+returned the row. A sequential scan already refused, because the chunk no
+longer fitted its row group.
+
+This file asserts the SQLSTATE, not a cost number. The poison is a catalog
+UPDATE; the property is that a fetch raises XX001 and the backend survives.
+
+Independent of `test/native_chunk_length_bound.sh`. Same public seam, own
+## 45. test_native_fetch_coalesce.py: index fetch I/O is not per-column
+
+Index fetch used to pin once per column: validity bitmap, then the value stream,
+two `PgColumnarReadLogicalData` calls each. Sequential scan already coalesces
+adjacent chunk ranges into one read. Adjacent columns sit back to back, so a
+wide fetch of a small group was many pins of the same pages.
+
+The public seam is executor buffer pins on `EXPLAIN (ANALYZE, BUFFERS)`, not
+wall clock. Planning pins grow with the target list and are excluded. After the
+fix, fetching every projected column must not pin once per extra column.
+
+Independent of `test/native_fetch_coalesce.sh`. Same public seam, own fixture,
+own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_fetch_coalesce` | a point lookup uses the index and returns the projected values; executor pins for one column and for every column are both measurable, and the wide fetch does not pin once per column |
+| `test_the_validity_copy_is_bounded_before_the_chunk_is_read` | the bound on the validity copy precedes the copy, read as positions in the coalescing helper rather than as the presence of both statements -- the overread it guards had both |
+## 46. test_parallel_am_scan.py: a table-AM parallel scan must share work
+
+The port of `test/parallel_am_scan.sh`. With the custom scan off, Parallel Seq
+Scan goes through the table AM. `phs_nallocated` was a first-wins flag: one
+backend claimed the whole scan and every launched worker reported 0 rows.
+The custom-scan path already claims distinct row groups; this pair pins the
+AM path to the same property.
+
+Public seam: `EXPLAIN ANALYZE` worker rows on a Parallel Seq Scan. Leader
+participation is off so the two launched workers are the claimers under
+test. The shell twin uses its own table (`pam`, 50000 rows, groups of 100);
+this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
+## 47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
+
+#913. A fetching index scan on a correlated key is priced below the custom scan
+through ~50,000 rows, while it does about 27x the work. The penalty term exists
+for this; the measurement says it is too small. Split from #766, which closed
+on the opposite question.
+
+This file asserts the PLAN, not a cost number. Costs drift with the constants.
+The chosen node is the property.
+
+Independent of `test/index_fetch_penalty_crossover.sh`. Same public seam, own
+fixture, own observations. Assertion names match the shell suite.
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
+
+The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
+`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
+unreachable by dividing the whole run, and reachable only if I/O remains.
+## 48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O
 
 The port of `test/parallel_scan_cost.sh`. The partial path priced itself as
 `serial_startup + (serial_run / workers)`. Core seqscan divides CPU only and
@@ -4358,8 +4425,11 @@ number this suite exists to read. Assertion names match the shell suite.
 
 | test | what it holds |
 | --- | --- |
-| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
+| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
 
-The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
-`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
-unreachable by dividing the whole run, and reachable only if I/O remains.
+The load-bearing assertion is `workers share the table-AM scan, it is not a
+single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
+reachable only when each worker claims its own row groups.
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
+
