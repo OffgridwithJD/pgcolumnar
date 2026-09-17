@@ -100,4 +100,66 @@ check "premise: both scans have a positive run cost" \
 check "an I/O-dominated parallel scan is not priced at serial/workers" \
 	"$(awk -v r="$ratio" "BEGIN{ print (r < 1.35) ? \"io-kept\" : \"halved\" }")" "io-kept"
 
+# ---- the same property with the leader participating, which is the default ----
+#
+# EVERYTHING ABOVE RUNS WITH parallel_leader_participation OFF. That makes the
+# divisor exactly the worker count and leaves the
+# `if (parallel_leader_participation)` arm of pgcolumnar_parallel_divisor
+# unexecuted -- so the copied heuristic was covered only in the configuration
+# nobody runs. The GUC defaults ON.
+#
+# Reported in review of #1065.
+setg parallel_leader_participation on
+par_plan_on="$(explain_scan 2)"
+
+# The row estimate is the observable that proves the branch ran: the partial path
+# divides rel->rows by the SAME divisor, so leader-on and leader-off cannot agree.
+# With two workers the divisor is 2 against 2 + (1 - 0.3*2) = 2.4, which is a
+# visible difference in the plan rather than an inference about the code.
+scan_rows() {
+	awk '/Custom Scan \(PgColumnarScan\)/ {
+		if (match($0, /rows=[0-9]+/)) {
+			print substr($0, RSTART + 5, RLENGTH - 5)
+			exit
+		}
+	}' <<-EOF
+	$1
+	EOF
+}
+
+rows_off="$(scan_rows "$par_plan")"
+rows_on="$(scan_rows "$par_plan_on")"
+
+check "premise: the leader-on plan is still a parallel columnar scan" \
+	"$(printf '%s' "$par_plan_on" | grep -c 'Custom Scan (PgColumnarScan)')" "1"
+
+check "premise: both leader settings produced a row estimate to compare" \
+	"$([ -n "$rows_off" ] && [ -n "$rows_on" ] && echo yes || echo no)" "yes"
+
+# If this ever reports "same", the leader-participation branch did not run and
+# every assertion below it is about the wrong divisor.
+check "the leader-participation branch changes the divisor" \
+	"$([ "$rows_off" != "$rows_on" ] && echo differs || echo same)" "differs"
+
+p_pair_on="$(scan_cost_pair "$par_plan_on")"
+p_start_on="${p_pair_on%% *}"
+p_total_on="${p_pair_on##* }"
+p_run_on="$(awk -v t="$p_total_on" -v s="$p_start_on" "BEGIN{ print t-s }")"
+ratio_on="$(awk -v s="$s_run" -v p="$p_run_on" \
+	"BEGIN{ if (p<=0) print 0; else printf \"%.3f\", s/p }")"
+
+echo "-- leader on: parallel Custom Scan cost=$p_start_on..$p_total_on run=$p_run_on ratio=$ratio_on"
+echo "-- rows: leader off=$rows_off leader on=$rows_on"
+
+check "premise: the leader-on parallel scan has a positive run cost" \
+	"$(awk -v p="$p_run_on" "BEGIN{ print (p>0) ? \"yes\" : \"no\" }")" "yes"
+
+# The bound is the same as the leader-off arm: dividing the WHOLE run would put
+# the ratio at the divisor, and the divisor is larger here, so a regression is if
+# anything easier to see in this configuration.
+check "an I/O-dominated parallel scan is not priced at serial/workers with the leader participating" \
+	"$(awk -v r="$ratio_on" "BEGIN{ print (r < 1.35) ? \"io-kept\" : \"halved\" }")" "io-kept"
+
+setg parallel_leader_participation off
+
 pgc_summary

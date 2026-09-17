@@ -1228,11 +1228,16 @@ native_join_vector_agg	native_join_vector_agg	unique join fold answer equals GUC
 native_join_vector_agg	native_join_vector_agg	unique join fold answer equals heap	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses core Agg when GUC off	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	unique join uses vectorized agg when GUC on	15;16;17;18;19	2026-09-12	drop JOINREL fold
-parallel_scan_cost	parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: both scans have a positive run cost	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the parallel plan has Gather	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the parallel plan is a columnar scan	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the parallel plan uses two workers	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18	never	-
-parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18	never	-
+parallel_scan_cost	parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers with the leader participating	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: both leader settings produced a row estimate to compare	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: both scans have a positive run cost	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the leader-on parallel scan has a positive run cost	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the leader-on plan is still a parallel columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan has Gather	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan is a columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the parallel plan uses two workers	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
+parallel_scan_cost	parallel_scan_cost	the leader-participation branch changes the divisor	15;16;17;18;19	never	-

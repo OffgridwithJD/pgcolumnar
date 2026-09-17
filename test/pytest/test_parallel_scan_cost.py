@@ -108,3 +108,55 @@ def test_parallel_scan_cost(pgc_conn, expect):
         "io-kept",
         "an I/O-dominated parallel scan is not priced at serial/workers",
     )
+
+    # ---- the same property with the leader participating, the default --------
+    #
+    # Everything above runs with parallel_leader_participation OFF, which makes
+    # the divisor exactly the worker count and leaves the
+    # `if (parallel_leader_participation)` arm of pgcolumnar_parallel_divisor
+    # unexecuted. That GUC defaults ON, so without this the copied heuristic is
+    # covered only in the configuration nobody runs.
+    #
+    # The row estimate is what proves the branch ran: the partial path divides
+    # rel->rows by the same divisor, so leader-on and leader-off cannot agree.
+    # Two workers give 2 against 2 + (1 - 0.3*2) = 2.4.
+    with pgc_conn.cursor() as cur:
+        cur.execute("SET parallel_leader_participation = on")
+    parallel_on = _plan(pgc_conn, 2)
+    pnode_on = _custom_scan(parallel_on)
+
+    expect.text(
+        "Custom Scan" if pnode_on else "none",
+        "Custom Scan",
+        "premise: the leader-on plan is still a parallel columnar scan",
+    )
+
+    rows_off = pnode.get("Plan Rows") if pnode else None
+    rows_on = pnode_on.get("Plan Rows") if pnode_on else None
+    expect.text(
+        "yes" if rows_off is not None and rows_on is not None else "no",
+        "yes",
+        "premise: both leader settings produced a row estimate to compare",
+    )
+    expect.text(
+        "differs" if rows_off != rows_on else "same",
+        "differs",
+        "the leader-participation branch changes the divisor",
+    )
+
+    p_run_on = pnode_on["Total Cost"] - pnode_on["Startup Cost"]
+    expect.text(
+        "yes" if p_run_on > 0 else "no",
+        "yes",
+        "premise: the leader-on parallel scan has a positive run cost",
+    )
+
+    ratio_on = s_run / p_run_on
+    print(f"-- leader on: parallel run={p_run_on} ratio={ratio_on:.3f}")
+    print(f"-- rows: leader off={rows_off} leader on={rows_on}")
+    expect.text(
+        "io-kept" if ratio_on < 1.35 else "halved",
+        "io-kept",
+        "an I/O-dominated parallel scan is not priced at serial/workers "
+        "with the leader participating",
+    )
