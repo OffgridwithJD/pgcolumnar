@@ -84,6 +84,28 @@ SETS_ORD="SET max_parallel_workers_per_gather=0; SET random_page_cost=1.0;"
 PLAN_ORD="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
 	-c "$SETS_ORD EXPLAIN (COSTS OFF) SELECT * FROM ifc_cl ORDER BY id" 2>&1)"
 echo "-- clustered ORDER BY: $(printf '%s\n' "$PLAN_ORD" | grep -m1 -E 'Scan|Sort')"
+# THIS ARM IS THE CAP'S REMOVAL PROOF, and nothing else in the suite is.
+#
+# The per-row term is capped at half a group. Nothing here NAMES the cap, so a
+# reader asking "is that cap load-bearing, or can it be simplified away?" finds
+# no arm mentioning it and concludes nothing protects it. That conclusion is
+# wrong, and it was reached in writing during review of this PR before anyone
+# mutated the code.
+#
+# Measured, deleting the cap and leaving everything else:
+#
+#     as written   6 passed + 0 failed
+#     uncapped     FAIL  the fetch penalty leaves a clustered ORDER BY on its
+#                        index: got [no (Sort)] want [yes]
+#
+# per_row = cpu_tuple_cost * rows * decodeUnits grows with the whole table on an
+# ordered scan, so this IS the saturation case: uncapped it costs the ordered
+# scan off its index, which is the #355 regression the cap exists to prevent.
+#
+# The arm above it is the other side. Together they bound the cap in both
+# directions -- too small and the 50,000-row range stays on the index, too large
+# and the ordered scan leaves it. Removing either leaves the cap pinned on one
+# side only, which is the easy miss.
 check "the fetch penalty leaves a clustered ORDER BY on its index" \
 	"$(grep -q 'Index Scan using ifc_cl_id' <<<"$PLAN_ORD" && echo yes \
 		|| echo "no ($(printf '%s' "$PLAN_ORD" | grep -m1 -E 'Scan|Sort'))")" \
