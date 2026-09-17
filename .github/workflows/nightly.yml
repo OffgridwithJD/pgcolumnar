@@ -81,7 +81,14 @@ jobs:
           - { pg: '18', runner: ubuntu-latest }
           - { pg: '18', runner: ubuntu-24.04-arm }
     steps:
+      # fetch-depth: 2, not the default 1, because the ledger gate needs a prior
+      # ceiling and `HEAD~1` does not exist in a shallow checkout (#1104).
+      # Measured: at depth 1 `git rev-parse HEAD~1` fails, at depth 2 it resolves.
+      # `upgrade-guard` already takes 0 for its tags, and it was the only job
+      # running this matrix that passed the night this broke.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # The packages are ~102 MB, of which ~91 MB is the LLVM toolchain that
       # postgresql-server-dev-N depends on. That download is what stalls: every
@@ -194,7 +201,7 @@ jobs:
           # PGC_REQUIRE_ISOLATION makes a missing pg_isolation_regress fail rather
           # than skip (#247); timing suites are dropped on shared runners.
           sudo -E env "PATH=$PATH" PGC_SKIP_TIMING=1 PGC_JOBS=4 \
-            PGC_REQUIRE_ISOLATION=1 \
+            PGC_REQUIRE_ISOLATION=1 PGC_LEDGER_AGAINST=parent \
             bash test/run_all_versions.sh /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Collect logs on failure
