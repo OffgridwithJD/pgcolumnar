@@ -148,10 +148,24 @@
 # Usage:  test/hilbert_locality.sh [PG_CONFIG]
 # Written fresh for pgColumnar.
 #
-# DELIBERATELY NOT REGISTERED in test/run_all_versions.sh yet. Registering it is
-# part of the PR that lands it in the matrix; harness_selftest.sh sweeps
-# test/*.sh and asserts every suite is registered, so this file makes that arm
-# red until then.
+# THE PARAGRAPH THAT STOOD HERE WAS CARRIED OUT AND LEFT BEHIND (#1088). It said
+# this suite is deliberately unregistered and makes harness_selftest's
+# registration arm red until someone lands it in the matrix. Both halves were true
+# when written and neither is now:
+#
+#     registered in test/run_all_versions.sh   yes
+#     harness_selftest                         967 passed + 0 failed
+#     070's registration arm                   PASS, every suite is registered
+#
+# The same shape as #1043 in hilbert_cluster.sh, and it matters more here: this is
+# the suite the published clustering advice cites. `docs/features.md`,
+# `docs/how-to.md` and `docs/best-practices.md` quote the 1.24x to 2.04x range
+# against Z-order, and the pins below are where that range comes from. A reader
+# arriving from the docs to check the number was told the file is not in the
+# matrix and is expected to redden the selftest.
+#
+# A stale instruction is worse than a stale fact: it tells the next person to undo
+# what was done.
 
 set -uo pipefail
 
