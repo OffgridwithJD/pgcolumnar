@@ -18,6 +18,76 @@ true until the next version shipped.
 
 ### Fixed
 
+- Every PR with a changelog entry conflicted with every other one (#996).
+
+  Entries insert as the first child of a single heading, so two PRs that share no
+  file but `CHANGELOG.md` still collide. Nine of 27 merges in one day touched it,
+  and three merge commits that day exist only to resolve it.
+
+  `.gitattributes` now gives `CHANGELOG.md` a union merge driver. Measured on the
+  real pair, #1098 and #1106, which both open a new `## [Unreleased]`:
+
+      default 3-way   rc=1, 2 conflict markers
+      merge=union     rc=0, 0 markers, ONE [Unreleased], both entries intact
+
+  The headings are not doubled because union emits identical lines once:
+  7640 + 57 + 52 = 7749 against an actual 7744, the 5 being the shared
+  `## [Unreleased]` / blank / `### Fixed` / blank prefix.
+
+  UNION'S HAZARD IS REAL FOR THIS FILE, so the driver does not ship alone. Union
+  keeps both sides of a divergent hunk with no marker, and a release cut EDITS the
+  line a pending PR appends beneath. Reproduced: a PR merged into a release cut
+  files its entry INSIDE the section that just shipped, rc=0, no marker. Today that
+  case conflicts and a human sees it, so union alone would trade a loud daily cost
+  for a silent one at every release.
+
+  `test/docs_style.sh` therefore gains the check that catches it: each dated
+  section must hold the entries its own tag shipped, and nothing else. THE KEY IS
+  THE ENTRY, not a count -- counting would let one post-tag entry be swapped for
+  another with the arm still green.
+
+  IT FOUND ONE ALREADY ON MAIN. `## [1.0-alpha3]` carries an entry that
+  `v1.0-alpha3` never shipped:
+
+      - A pytest harness beside the bash suites, with a layer that refuses tests which
+
+  added by `d978e7f` (#432) on 2026-09-09, seven days after the 2026-09-02 tag.
+  Found by @jdatcmd in review.
+
+  That entry cannot be corrected without making a second section wrong: the work
+  shipped in the 1.0-alpha4 cycle, and the `v1.0-alpha4` tag does not carry it
+  either. So a released section CAN diverge from its tag, but only by being
+  recorded in `test/changelog_post_tag.txt` with a reason a reviewer sees in the
+  diff. Two further arms guard that file: every row needs a reason, and no row may
+  be stale.
+
+  Seven mutations, each restored byte-exact: an entry added to closed alpha4, an
+  entry removed from alpha2, the allowance row deleted, the allowance naming a
+  different entry, the reason blanked, a stale allowance row, and the driver line
+  removed. Each reddens its own arm; the clean tree is 42 checks, rc=0.
+
+  THE FIRST VERSION OF THIS CHECK WAS MEASURED AGAINST A STALE TAG and reported the
+  opposite. This tree's local `v1.0-alpha3` was `d9df031d` against the server's
+  `cec9e9b5`, and `git fetch` never moves a tag that already exists. That produced
+  a claim that `v1.0-alpha3` shipped with its section still named `## [Unreleased]`,
+  a skip for it, and a "false-positive budget of 1 of 4" -- all three false, and
+  the arm green where the tree was actually in violation. @jdatcmd caught it by
+  checking their own refs against `git ls-remote` before contradicting the result.
+  The suite now says how to check a tag before believing a red arm.
+
+  Reaching for a skip there was also the wrong instrument, and two guards said so.
+  This suite keeps its OWN tally and emits none of the machine RESULT vocabulary,
+  so `lib.sh`'s `check_skip` is `command not found` inside it -- printing nothing,
+  counting nothing, failing nothing, while the suite reports PASSED. A local one
+  then tripped `selftest 400`, which refuses `echo "SKIP` in any file that calls
+  `check`, because a SKIP is an outcome a count and a record must see. A property
+  this suite cannot compare is now a `note()`: printed, counted as nothing,
+  claiming no outcome.
+
+  KNOWN LIMIT, stated because it changes what a green CI check means here: at depth
+  1 with no tags every section arm is skipped, so CI cannot run any of this. It
+  runs locally and in the five-major release gate, which is where a release is cut.
+
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).
 

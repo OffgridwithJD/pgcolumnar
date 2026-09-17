@@ -68,6 +68,23 @@ check() {
 	fi
 }
 
+# THIS SUITE KEEPS ITS OWN TALLY, not lib.sh's, and emits none of the machine
+# RESULT vocabulary. So it cannot report a `SKIP` OUTCOME: selftest 400 refuses
+# `echo "SKIP` in any file that calls `check`, because a skip there is a check
+# result a count and a record must see, and this suite has neither to put it in.
+#
+# A property this suite cannot compare is therefore a NOTE: printed for a reader,
+# counted as nothing, claiming no outcome. Where the reason is itself a fact about
+# the tree it is asserted with `check` instead -- see the no-baseline arm below --
+# so "this cannot be checked" is itself checked rather than asserted.
+#
+# Reaching for lib.sh's helper of that name here is `command not found`: it prints
+# nothing, counts nothing and fails nothing while the suite reports PASSED.
+# Measured, and the reason this is a note rather than a second check helper.
+note() {	# note TEXT
+	echo "--  $1"
+}
+
 command -v python3 >/dev/null || { echo "FAIL  python3 not found"; exit 1; }
 
 echo "== pgColumnar test: docs_style.sh =="
@@ -225,7 +242,7 @@ check "premise: the VERSION file has a version to compare against" \
 # README.md is in this list because it was NOT, and drifted two versions as a
 # result: it said `1.0-alpha` while VERSION said `1.0-alpha3`. The check that
 # would have caught it excluded the only file that was wrong.
-_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+_verdocs="$(grep -rln 'recorded in `VERSION`' "$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | LC_ALL=C sort)"
 check "premise: at least one document cites the VERSION file" \
 	"$([ -n "$_verdocs" ] && echo yes || echo no)" "yes"
 
@@ -252,7 +269,7 @@ check "premise: the version badge is present" \
 	"$([ -f "$_badge" ] && echo yes || echo no)" "yes"
 
 _badgehits="$(grep -c -- "$_ver" "$_badge" 2>/dev/null || echo 0)"
-_badgeold="$(grep -oE '1\.0-[a-z]+[0-9]*' "$_badge" 2>/dev/null | sort -u | grep -vxF "$_ver" | tr '\n' ' ' | sed 's/ $//')"
+_badgeold="$(grep -oE '1\.0-[a-z]+[0-9]*' "$_badge" 2>/dev/null | LC_ALL=C sort -u | grep -vxF "$_ver" | tr '\n' ' ' | sed 's/ $//')"
 check "the version badge names no version other than VERSION's" \
 	"$_badgeold" ""
 check "premise: and it names VERSION's version at all" \
@@ -287,7 +304,7 @@ check "README's badge alt text names the version VERSION holds" \
 # what happened. It CANNOT catch every document being stale together, and the
 # release procedure carries that step instead.
 _pubdocs="$(grep -rln 'latest published pre-release' \
-	"$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | sort)"
+	"$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | LC_ALL=C sort)"
 check "premise: at least one document names the latest published pre-release" \
 	"$([ -n "$_pubdocs" ] && echo yes || echo no)" "yes"
 
@@ -303,7 +320,7 @@ check "premise: at least one document names the latest published pre-release" \
 # shellcheck disable=SC2086
 _pubvers="$( { grep -rhoE 'latest published pre-release is `v[^`]*`' $_pubdocs 2>/dev/null
                grep -rhoE '`v[^`]*` is the latest published pre-release' $_pubdocs 2>/dev/null
-             } | grep -oE '`v[^`]*`' | tr -d '`' | sort -u)"
+             } | grep -oE '`v[^`]*`' | tr -d '`' | LC_ALL=C sort -u)"
 
 _pubunparsed=""
 for _d in $_pubdocs; do
@@ -410,6 +427,150 @@ done
 check "every pgcolumnar--*.sql in the tree is in the published distribution" \
 	"$([ -z "$_meta_missing" ] && echo "all shipped" || printf '%s' "${_meta_missing# }")" \
 	"all shipped"
+
+
+# ---- the changelog's shared anchor, and the guard the fix needs (#996) -------
+#
+# Every PR that adds an entry inserts as the first child of one heading, so any
+# two conflict for a reason unrelated to either change. Nine of 27 merges in one
+# day touched this file, and three merge commits that day exist only to resolve
+# it. `.gitattributes` now gives CHANGELOG.md a UNION merge driver, which takes
+# both sides with no marker.
+#
+# MEASURED ON THE REAL PAIR, #1098 and #1106, both of which add a new
+# `## [Unreleased]` section:
+#
+#     default 3-way   rc=1, 2 conflict markers
+#     merge=union     rc=0, 0 markers, ONE `## [Unreleased]`, both entries intact
+#
+# The section headers are not doubled because union emits identical lines once:
+# 7640 + 57 + 52 = 7749 against an actual 7744, and the 5 are the shared
+# `## [Unreleased]` / blank / `### Fixed` / blank prefix.
+#
+# UNION'S HAZARD IS REAL AND THIS FILE MEETS IT AT EVERY RELEASE. Union keeps
+# both sides of a divergent hunk silently, so where one branch EDITS a line that
+# another appends beneath, the append survives under the edit. A release cut
+# edits exactly that line -- `## [Unreleased]` becomes `## [1.0-alphaN] - date`.
+# Reproduced: a PR appending an entry, merged into a release cut, lands that
+# entry INSIDE the section that just shipped, with rc=0 and no marker. Today the
+# same case conflicts and a human sees it.
+#
+# So the driver ships with the check below, which is what makes it safe: an entry
+# cannot appear in a released section after that release's tag without this
+# saying so.
+check "CHANGELOG.md has a union merge driver, so two entries do not conflict" \
+	"$(grep -c '^CHANGELOG\.md[[:space:]]\+merge=union$' "$SRCDIR/.gitattributes")" "1"
+
+# Portable awk: no gawk-only three-argument match(). Identical output under mawk,
+# gawk and this box's default awk, checked rather than assumed.
+_cl_versions() {	# stdin: a CHANGELOG -> one DATED section version per line
+	awk '
+		/^## \[[^]]+\] - / {
+			line = $0; sub(/^## \[/, "", line); sub(/\].*$/, "", line); print line
+		}
+	'
+}
+
+# THE KEY IS THE ENTRY, NOT A COUNT. Counting would let one post-tag entry be
+# swapped for another with the arm still green -- the same "an aggregate that
+# balances" failure this repository has been finding all week, one level up.
+_cl_entries() {	# _cl_entries VERSION; stdin: a CHANGELOG -> that section's entry first lines
+	awk -v want="$1" '
+		/^## \[/ {
+			insec = 0; line = $0
+			if (line ~ /^## \[[^]]+\] - /) {
+				sub(/^## \[/, "", line); sub(/\].*$/, "", line)
+				if (line == want) insec = 1
+			}
+			next
+		}
+		insec && /^- / { print }
+	'
+}
+
+_cl_git() { git -C "$SRCDIR" "$@" 2>/dev/null; }
+_cl_allowfile="$SRCDIR/test/changelog_post_tag.txt"
+
+# STALE LOCAL TAGS ARE THE FAILURE MODE HERE, and it is not hypothetical: the
+# first version of this check reported `v1.0-alpha3` as shipping no dated section
+# at all, because this tree's local tag was 5 commits behind the server and
+# `git fetch` NEVER moves a tag that already exists. That produced a wrong
+# narrative, a wrong false-positive budget, and a green arm where the tree is
+# actually in violation. Caught by jdatcmd, who checked their own refs against
+# `git ls-remote` before saying so.
+#
+# If an arm below fails and the section looks right, check the tag before
+# believing it:
+#
+#     git ls-remote --tags origin 'refs/tags/v1.0-alpha*'
+#     git fetch --tags --force origin
+if ! _cl_git rev-parse --git-dir >/dev/null; then
+	_cl_why="no git repository in the tree under test"
+elif [ -z "$(_cl_git tag -l 'v1.0-alpha*')" ]; then
+	# CI checks out at depth 1 with no tags, so NONE of this runs there and a
+	# green check on this job says nothing about it. It runs locally and in the
+	# five-major release gate, which is where a release is cut and therefore
+	# where an entry can be filed into a closed section.
+	_cl_why="no release tags in this checkout"
+else
+	_cl_why=""
+fi
+
+_cl_seen=0
+_cl_usedrows=""
+while read -r _cl_v; do
+	[ -n "$_cl_v" ] || continue
+	_cl_seen=$((_cl_seen + 1))
+	_cl_name="the $_cl_v section holds what v$_cl_v shipped, plus only what is recorded"
+	if [ -n "$_cl_why" ]; then
+		note "$_cl_name: not compared ($_cl_why)"
+		continue
+	fi
+	_cl_tagged="$(_cl_git show "v$_cl_v:CHANGELOG.md" | _cl_entries "$_cl_v" | LC_ALL=C sort)"
+	if [ -z "$_cl_tagged" ]; then
+		check "v$_cl_v carries a dated section of its own to compare against" \
+			"no section for $_cl_v at v$_cl_v" "a section for $_cl_v at v$_cl_v"
+		continue
+	fi
+	_cl_nowents="$(_cl_entries "$_cl_v" < "$SRCDIR/CHANGELOG.md" | LC_ALL=C sort)"
+	# LC_ALL=C on BOTH the sorts and the comm. `comm` compares byte-wise and does
+	# not check that its inputs agree; fed two collations it returns wrong lines
+	# rather than an error. Selftest 070 enforces this over the whole file, which is
+	# why the sorts above that predate this block are pinned too.
+	_cl_extra="$(LC_ALL=C comm -13 <(printf '%s\n' "$_cl_tagged") <(printf '%s\n' "$_cl_nowents"))"
+	_cl_gone="$(LC_ALL=C comm -23 <(printf '%s\n' "$_cl_tagged") <(printf '%s\n' "$_cl_nowents"))"
+	_cl_allowed="$(awk -F'\t' -v v="$_cl_v" '$1==v && $2 != "" {print $2}' "$_cl_allowfile" 2>/dev/null | LC_ALL=C sort)"
+	[ -n "$_cl_allowed" ] && _cl_usedrows="$_cl_usedrows$_cl_allowed
+"
+	check "$_cl_name" "$_cl_extra" "$_cl_allowed"
+	check "the $_cl_v section still holds every entry v$_cl_v shipped" "$_cl_gone" ""
+done <<CLEOF
+$(_cl_versions < "$SRCDIR/CHANGELOG.md")
+CLEOF
+
+# The sweep is a claim. An empty one would make every arm above vanish and this
+# suite would report clean having compared no section at all.
+check "premise: the changelog sweep found dated release sections" \
+	"$([ "$_cl_seen" -ge 3 ] && echo yes || echo no)" "yes"
+
+# ---- and the recorded exceptions are themselves checked ---------------------
+#
+# A file of allowances is a second place to be wrong. Two arms: every row must
+# carry a reason, and no row may be stale -- an allowance for an entry that is no
+# longer extra would silently widen what the arms above accept.
+_cl_rows="$(grep -cE '^[^#]' "$_cl_allowfile" 2>/dev/null || true)"
+check "premise: the post-tag allowance file is present and readable" \
+	"$([ -f "$_cl_allowfile" ] && echo yes || echo no)" "yes"
+_cl_noreason="$(awk -F'\t' '/^[^#]/ && NF > 0 && $3 == "" {print $1 " " $2}' "$_cl_allowfile" 2>/dev/null)"
+check "every recorded post-tag entry carries a reason" "$_cl_noreason" ""
+if [ -z "$_cl_why" ]; then
+	_cl_declared="$(awk -F'\t' '/^[^#]/ && $2 != "" {print $2}' "$_cl_allowfile" 2>/dev/null | LC_ALL=C sort)"
+	_cl_stale="$(LC_ALL=C comm -23 <(printf '%s\n' "$_cl_declared") <(printf '%s\n' "$_cl_usedrows" | LC_ALL=C sort -u))"
+	check "no recorded post-tag entry is stale, so the allowance cannot widen silently" \
+		"$_cl_stale" ""
+else
+	note "no recorded post-tag entry is stale: not compared ($_cl_why)"
+fi
 
 
 echo "checks run: $checks"
