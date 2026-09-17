@@ -65,16 +65,88 @@ TARGET="$(sed -n "s/^default_version *= *'\\(.*\\)'.*/\\1/p" "$HERE/../pgcolumna
 check "control default_version is 1.0-alpha4" "$TARGET" "1.0-alpha4"
 
 # Stage the frozen old base install scripts so an old-version extension can be
-# created. These are fixtures, not shipped; remove them at the end.
+# created. These are fixtures, not shipped; whatever was there is put back at the
+# end.
+#
+# STAGED UNCONDITIONALLY (#1090). The old form staged only `if [ ! -f "$dst" ]`,
+# so an install script left in the extension directory by an older `make install`
+# WON over the committed fixture. This repository shipped
+# pgcolumnar--1.0-alpha2.sql and pgcolumnar--1.0-alpha3.sql from the tree until
+# the cycle-open rename moved them under test/fixtures, so any prefix installed
+# before that still carries them and nothing prunes them. And because the leftover
+# was not staged, the EXIT trap did not remove it either: it persisted and won
+# again on every later run.
+#
+# IT FAILS IN BOTH DIRECTIONS, and the quiet one is the dangerous one. Measured on
+# this tree, same commit, two prefixes on one machine:
+#
+#   leftover DIFFERS from the fixture   PG15's alpha2 is the v1.0-alpha2 TAG
+#                                       content (fead351f84ca) against the
+#                                       fixture's cbb4f36e4308. The suite reported
+#                                       11 passed + 0 failed -- CONVERGED, having
+#                                       tested a file nobody committed, with
+#                                       nothing in the output naming which file it
+#                                       read.
+#   leftover is BROKEN                  planting a one-line invalid file gave
+#                                       8 passed + 3 failed, a red for a defect
+#                                       that is not in the tree at all.
+#
+# The second is how this was noticed; the first is what it costs.
+#
+# A pre-existing file is preserved and restored rather than deleted: this suite
+# did not create it and removing it would change the state of a prefix it does not
+# own. Its CONTENT is restored, not its every attribute -- `cp -p` cannot give back
+# an owner the suite does not have, and these leftovers are root-owned on a
+# developer's box while the suite runs as `postgres`. Content is what the next run
+# reads, which is what this is protecting.
+#
+# ONE LIST. The versions were written out FOUR times -- here, in the staging arm,
+# as a literal `3` in its count, and again in the convergence loop that upgrades
+# from each of them -- so adding a fixture meant editing four places, and editing
+# three of them left an arm passing while testing less than its name claims.
+# Reported by jdatcmd, who counted three; the convergence loop is the fourth.
+_NUC_FIXTURES=(1.0-alpha 1.0-alpha2 1.0-alpha3)
+
+# A `.pgcbak` ALREADY HERE MEANS AN EARLIER RUN DIED before its EXIT trap, so the
+# original is in the backup and the install script holds the fixture. Taking the
+# backup again would overwrite the original WITH the fixture and lose it for good:
+#
+#     start:          ext=[ORIGINAL]          bak=-
+#     run 1 crashes:  ext=[FIXTURE]           bak=[ORIGINAL]
+#     run 2 unguarded:ext=[FIXTURE]           bak=[FIXTURE]    <- original gone
+#
+# That is the outcome the preserve-rather-than-delete design exists to avoid,
+# reached by another route, and those leftovers are the evidence for #901. So the
+# backup is taken only when there is not one already, and the state is NAMED rather
+# than silently worked around: the prefix is mid-surgery and a reader should know.
+# To clear it, restore by hand from the `.pgcbak` and remove it. Reported by
+# jdatcmd, who reproduced the loss.
+_nuc_mid=""
+for v in "${_NUC_FIXTURES[@]}"; do
+	[ -f "$EXTDIR/pgcolumnar--$v.sql.pgcbak" ] && _nuc_mid="$_nuc_mid $v"
+done
+check "premise: no earlier run of this suite died with a backup still staged" \
+	"${_nuc_mid# }" ""
+
 STAGED=()
-for v in 1.0-alpha 1.0-alpha2 1.0-alpha3; do
+for v in "${_NUC_FIXTURES[@]}"; do
 	src="$HERE/fixtures/pgcolumnar--$v.sql"
 	dst="$EXTDIR/pgcolumnar--$v.sql"
-	if [ -f "$src" ] && [ ! -f "$dst" ]; then
-		cp "$src" "$dst"; STAGED+=("$dst")
-	fi
+	[ -f "$src" ] || continue
+	[ -f "$dst" ] && [ ! -f "$dst.pgcbak" ] && cp -p "$dst" "$dst.pgcbak"
+	cp "$src" "$dst"
+	STAGED+=("$dst")
 done
-cleanup() { for f in "${STAGED[@]:-}"; do [ -n "$f" ] && rm -f "$f"; done; }
+cleanup() {
+	for f in "${STAGED[@]:-}"; do
+		[ -n "$f" ] || continue
+		if [ -f "$f.pgcbak" ]; then
+			mv -f "$f.pgcbak" "$f"
+		else
+			rm -f "$f"
+		fi
+	done
+}
 trap cleanup EXIT
 
 # ---- each fixture must be what its tag actually shipped (#901) --------------
@@ -161,6 +233,29 @@ for v in $_FX_TAGGED; do
 	check "$_fx_name" "$_fx_fix" "$_fx_tag"
 done
 
+# THE ARM THAT CATCHES THE QUIET HALF. Staging unconditionally fixes it; this
+# says so out loud, so a future change that reintroduces a conditional cannot
+# pass silently. Comparing the installed file against the fixture is the only
+# thing that separates "tested the committed fixture" from "tested whatever was
+# lying in the extension directory".
+_nuc_staged=0
+_nuc_wrong=""
+for v in "${_NUC_FIXTURES[@]}"; do
+	src="$HERE/fixtures/pgcolumnar--$v.sql"
+	dst="$EXTDIR/pgcolumnar--$v.sql"
+	[ -f "$src" ] || continue
+	_nuc_staged=$((_nuc_staged + 1))
+	cmp -s "$src" "$dst" || _nuc_wrong="$_nuc_wrong $v"
+done
+
+# The count is pinned separately: without it a fixture that vanished would leave
+# the content arm comparing nothing and reporting "none".
+check "premise: every fixture named for staging was staged" \
+	"$_nuc_staged" "${#_NUC_FIXTURES[@]}"
+
+check "every staged install script is the committed fixture, not a leftover" \
+	"${_nuc_wrong# }" ""
+
 P() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -tAq "$@"; }
 
 # Comprehensive catalog snapshot of the pgcolumnar schema, one line per object.
@@ -190,7 +285,7 @@ check "fresh $TARGET install has objects to compare" \
 	"$([ "$(wc -l <"$REF")" -gt 100 ] && echo yes || echo no)" "yes"
 
 # Each released starting point must upgrade to an identical catalog.
-for from in 1.0-alpha 1.0-alpha2 1.0-alpha3; do
+for from in "${_NUC_FIXTURES[@]}"; do
 	[ -f "$EXTDIR/pgcolumnar--$from.sql" ] || { check "fixture for $from present" "missing" "present"; continue; }
 	db="conv_from_$(echo "$from" | tr '.-' '__')"
 	P -d postgres -c "DROP DATABASE IF EXISTS $db;" >/dev/null

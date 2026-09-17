@@ -14,6 +14,63 @@ installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
 notes in this file describe `default_version` as pinned at an earlier version, each
 true until the next version shipped.
 
+## [Unreleased]
+
+### Fixed
+
+- `native_upgrade_converge` staged its fixtures only when nothing was already
+  installed, so a leftover install script won over the committed fixture (#1090).
+
+  The suite creates an old-version extension to upgrade from, which needs the old
+  base install script present in the extension directory. It staged each fixture
+  `if [ -f "$src" ] && [ ! -f "$dst" ]`. This repository shipped
+  `pgcolumnar--1.0-alpha2.sql` and `pgcolumnar--1.0-alpha3.sql` from the tree
+  until the cycle-open rename moved them under `test/fixtures`, so every prefix
+  installed before that still carries them and nothing prunes them. And because
+  the leftover was not staged, the EXIT trap did not remove it either: it
+  persisted and won again on every later run.
+
+  IT FAILED IN BOTH DIRECTIONS, and the quiet one is the one that matters.
+  Measured on one machine, same commit, two prefixes:
+
+      leftover DIFFERS    PG15 holds the v1.0-alpha2 TAG content (fead351f84ca)
+                          against the fixture's cbb4f36e4308. The suite reported
+                          11 passed + 0 failed -- CONVERGED, having tested a file
+                          nobody committed, with nothing in the output naming
+                          which file it read.
+      leftover BROKEN     a one-line invalid file gave 8 passed + 3 failed: a red
+                          for a defect that is not in the tree at all.
+
+  That the suite reads the leftover rather than the fixture was established with
+  a discriminator that cannot be ambiguous -- a syntactically invalid leftover
+  must fail if it is read and pass if it is not.
+
+  Staging is now unconditional, and a pre-existing file is preserved and restored
+  rather than deleted: the suite did not create it and must not change the state of
+  a prefix it does not own. Its CONTENT is restored, not its every attribute --
+  `cp -p` cannot give back an owner the suite does not have, and the leftovers on a
+  developer's box are root-owned while the suite runs as `postgres`.
+
+  The backup is taken only when there is not one already. `cp -p "$dst"
+  "$dst.pgcbak"` run unconditionally destroys the original across a crashed run:
+  the first run leaves the fixture installed and the original in `.pgcbak`, and the
+  second overwrites the backup with the fixture. The pre-existing file is then gone
+  for good, silently, by the route the preserve-rather-than-delete design exists to
+  avoid. Those leftovers are the evidence for #901, so this is not hypothetical.
+  A pre-existing `.pgcbak` also now fails a named check rather than passing
+  unremarked, because it means an earlier run died mid-staging. Reported by
+  jdatcmd.
+
+  Two arms say so out loud, so a future change that reintroduces a conditional
+  cannot pass silently: one pins that all three fixtures were staged, the other
+  that each installed script IS the committed fixture. The count is pinned
+  separately because without it a fixture that vanished would leave the content
+  arm comparing nothing and reporting clean.
+
+  Removal proof: restoring the conditional while keeping the arms gives
+  `every staged install script is the committed fixture, not a leftover:
+  got [1.0-alpha2] want []`, naming the script that was wrong.
+
 ## [1.0-alpha4] - 2026-09-17
 
 ### Fixed
