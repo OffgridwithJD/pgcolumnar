@@ -98,6 +98,9 @@ behaviour, the source of that number is named.
 - [50. test_collation_pinned.py: comm's inputs must be sorted the same way](#50-test_collation_pinnedpy-comms-inputs-must-be-sorted-the-same-way)
 - [51. test_projection_scan_cost.py: a covering projection is not priced at half](#51-test_projection_scan_costpy-a-covering-projection-is-not-priced-at-half)
 - [52. test_record_names_its_major.py: a record must name its major](#52-test_record_names_its_majorpy-a-record-must-name-its-major)
+- [53. test_analyze_reltuples.py: ANALYZE must estimate the row count, not zero](#53-test_analyze_reltuplespy-analyze-must-estimate-the-row-count-not-zero)
+- [54. test_projection_update.py: UPDATE must fan the new row number out to projections](#54-test_projection_updatepy-update-must-fan-the-new-row-number-out-to-projections)
+- [55. test_projection_drop_column.py: DROP COLUMN must not invalidate a projection](#55-test_projection_drop_columnpy-drop-column-must-not-invalidate-a-projection)
 
 ## 1. How to read a test in here
 
@@ -4639,3 +4642,70 @@ The load-bearing assertion is the last one's bound. The runner has many later
 `verfail=1` lines, so an unbounded search finds one whatever the guard does --
 which is exactly how the shell twin's first version of that arm stayed green
 against the line removed. Mutation testing caught it.
+
+## 53. test_analyze_reltuples.py: ANALYZE must estimate the row count, not zero
+
+Port of `analyze_reltuples.sh` (#432). A block was mapped to its row group by comparing
+offsets that had `COLUMNAR_FIRST_LOGICAL_OFFSET` subtracted from one side and not the
+other, so `reltuples` came back 0 for a 10,000-row table and the planner believed every
+columnar table smaller than one stripe was empty.
+
+heap is the oracle: ANALYZE samples, so the columnar estimate is not required to be exact,
+only as close as heap's on the same data.
+
+Two assertions the bash suite does not make. Its helper builds the columnar and heap
+tables with separate inserts and compares their estimates without checking they hold the
+same rows, so this port asserts both counts. And the arm named `20 stripes: within 5% of
+actual` sets `pgcolumnar.stripe_row_limit` but checks only the estimate, which a
+single-group table also passes; this port reads `pgcolumnar.row_group` and fails first if
+the fixture is not the shape the name claims.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_analyze_estimates_the_row_count` | every arm, from the four paired columnar/heap sizes through the multi-stripe geometry, the delete, and the clustered `n_distinct` |
+
+## 54. test_projection_update.py: UPDATE must fan the new row number out to projections
+
+Port of `projection_update.sh` (#432). UPDATE is delete-old plus insert-new, and the
+insert half used to skip fan-out, so `read_projection` returned no rows and a covering
+projection scan answered as if the updated rows had been deleted.
+
+Row sets are compared as sorted tuples in Python rather than through `pgc_set_hash`. That
+keeps the two harnesses independent by construction, and a failure prints the rows that
+differ instead of two unequal hashes.
+
+The port also pins the affected row counts. An UPDATE whose WHERE matched nothing leaves
+both sides identical and every arm below it green, having exercised no fan-out at all.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_update_fans_the_new_row_number_out_to_projections` | every arm: the covering scan before and after updating a projected column, then a non-projected one, with `read_projection` and `reconstruct_via_projection` |
+
+## 55. test_projection_drop_column.py: DROP COLUMN must not invalidate a projection
+
+Port of `projection_drop_column.sh` (#432). Projections are extension metadata rather
+than `pg_depend` objects, so PostgreSQL accepted `DROP COLUMN` on a projected column and
+the next INSERT failed in `lookup_type_cache`.
+
+SQLSTATE rather than message text: `2BP01` for the dependency refusal and `42501` for the
+non-owner. The bash suite gets there by running `psql` with `VERBOSITY verbose` and
+extracting the code with `sed`; the port reads `exc.sqlstate`.
+
+`SET ROLE` rather than a login role, which is the opposite of
+`test_projection_privilege.py` and for the reason that file gives: real logins are needed
+when the ACL layers are the subject, and only add ways to fail when ownership is.
+
+The two non-owner arms exist to show a stranger cannot tell a projected column from an
+unprojected one. The bash suite asserts each against the literal `42501`; the port also
+compares them to each other, so indistinguishability is asserted rather than implied.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_drop_column_is_refused_while_a_projection_depends_on_it` | every arm: the two non-owner refusals, the dependency refusal, writability afterwards, the unrelated column, and the partitioned parent |
+
