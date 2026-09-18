@@ -115,6 +115,82 @@ true until the next version shipped.
   reader ignore the flag reddens ten, and using the group-wide size in the fetch
   path reddens exactly the three fetch arms. Ledger rows seeded from five real
   runs merged in one call, so each carries 15;16;17;18;19.
+- Three cost-model suites ported to pytest (#432).
+
+  `native_index_fetch_stripe_cost`, `scan_decode_cost` and
+  `index_fetch_penalty_width`, 18 names, each graded `missing: 0` by
+  `compare_to_bash.py`. Ports take 22 to 25 of the corpus. Every cost quoted here and
+  in the files came from ONE run, PG18 assert build, 2026-09-18. One subject: what the
+  planner charges for the decode a scan or a fetch really performs.
+
+  EACH PORT ASSERTS SOMETHING ITS BASH ORIGINAL DOES NOT.
+
+      native_index_fetch_stripe_cost   the original moves the per-table
+                                       stripe_row_limit and asserts two costs
+                                       differ. Measured, the two arms are not the
+                                       same plan: at its 100,000 rows the second
+                                       is a Custom Scan, so the check compares the
+                                       prices of two different nodes and cannot
+                                       separate a re-priced fetch from a plan
+                                       flip. The port matches at 1,000 rows, where
+                                       both arms stay on the index, and asserts
+                                       the shape before comparing the prices. It
+                                       also adds the attribution cell: with
+                                       enable_index_fetch_penalty off the same two
+                                       arms price identically, 35.20 and 35.20
+                                       against 51.70 and 808.98.
+
+      scan_decode_cost                 the fixtures are smaller and the ratios
+                                       were measured before they were shrunk. The
+                                       column-count ratio is flat at 4.209 from
+                                       100,000 rows to 2,000,000, so the original's
+                                       2,000,000 buys the assertion nothing;
+                                       200,000 is kept because it still spans more
+                                       than one row group. The point-lookup arm is
+                                       the one size decides, and its boundary was
+                                       measured: a Custom Scan at 50,000 rows, the
+                                       index from 100,000.
+
+      index_fetch_penalty_width        plan shape is read from FORMAT JSON by
+                                       exact Node Type equality rather than by
+                                       grepping plan text, and the row-group
+                                       geometry is read back from
+                                       pgcolumnar.row_group (20 groups per arm)
+                                       rather than assumed from the option that
+                                       set it.
+
+  THE ROW-GROUP LIMIT IS A PER-TABLE OPTION IN THE PORT, NOT A CLUSTER SETTING.
+  The bash suite pins `pgcolumnar.stripe_row_limit=20000` in the cluster config so
+  the writing and planning sessions cannot disagree (#806). A pytest cluster is
+  shared by every test in the session, so that is not available -- and is not
+  needed: `set_options` before the write is durable and is what both the writer
+  and the planner read.
+
+  REVIEW FIXES (@jdatcmd). The ordering arm's `FW <= FN` was satisfied by `FW = 0`,
+  which is also what an over-charged width weight produces; the ladder now reaches
+  below the shell suite's first rung, where the wide table does still fetch by index,
+  so `FW` is a measured 5 and `FW > 0` is asserted beside it. And the `#171`
+  point-lookup arm is labelled for what it actually guards: inflating the scan decode
+  charge a millionfold leaves it passing (`Index Scan`, #503 ratio 4.209 -> 16.999),
+  while inflating the index-fetch penalty reddens it (`got 'Custom Scan'`). It bounds
+  a neighbouring subsystem, not this change, and nothing in either harness bounds
+  this change from that side today.
+
+  Every load-bearing arm carries a removal proof against the C, each mutation
+  asserted to have applied and restored byte-identical:
+
+      decode charge deleted (#503)        column-count ratio 4.209 -> 1.014
+      width weight dropped (#768)         width ratio 7.303 -> 0.966, and the
+                                          column-count arm stays green at 2.610
+      prefix charged per column (#803)    the ordering inverts: the wide table
+                                          fetches to 120 rows against the narrow
+                                          table's 40
+      per-table option branch removed     both stripe_row_limit arms collapse
+                                          onto 810.46
+
+  No bash suite changes, so no ledger row moves and the census does not.
+  `cluster_tests` 427 -> 430, re-derived by collection on the reseated tree.
+
 - Three suites ported to pytest, and the queue re-derived (#432).
 
   `analyze_reltuples`, `projection_update` and `projection_drop_column`, 21 names,

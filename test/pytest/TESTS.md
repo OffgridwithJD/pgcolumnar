@@ -103,6 +103,9 @@ behaviour, the source of that number is named.
 - [55. test_projection_drop_column.py: DROP COLUMN must not invalidate a projection](#55-test_projection_drop_columnpy-drop-column-must-not-invalidate-a-projection)
 - [56. test_encode_post_codec.py: an encoding must be smaller after the codec](#56-test_encode_post_codecpy-an-encoding-must-be-smaller-after-the-codec)
 - [57. test_validity_elision.py: a column with no nulls must store no validity bitmap](#57-test_validity_elisionpy-a-column-with-no-nulls-must-store-no-validity-bitmap)
+- [58. test_native_index_fetch_stripe_cost.py: the fetch penalty reads the table's own row-group limit](#58-test_native_index_fetch_stripe_costpy-the-fetch-penalty-reads-the-tables-own-row-group-limit)
+- [59. test_scan_decode_cost.py: a scan is priced for the columns it decodes and their width](#59-test_scan_decode_costpy-a-scan-is-priced-for-the-columns-it-decodes-and-their-width)
+- [60. test_index_fetch_penalty_width.py: a wider prefix must give up on per-row fetches sooner](#60-test_index_fetch_penalty_widthpy-a-wider-prefix-must-give-up-on-per-row-fetches-sooner)
 
 ## 1. How to read a test in here
 
@@ -4851,3 +4854,134 @@ null in the table, so the column that still needs its bitmap is asserted beside
 the one that does not -- and the null count is asserted separately, because both
 `EXCEPT ALL` arms are satisfied by a table that agrees on values and not on
 nulls.
+
+## 58. test_native_index_fetch_stripe_cost.py: the fetch penalty reads the table's own row-group limit
+
+Port of `native_index_fetch_stripe_cost.sh` (#432). The index-fetch penalty prices one
+row-group decode, so its size is the limit in force for that table -- the per-table
+`stripe_row_limit` option when the owner set one, not only the session GUC (#806).
+
+The property is a response rather than a number: move the option, and the estimate must
+move. A cost value would pin this box's cost constants instead.
+
+**The port asserts the plan SHAPE before it compares the two prices, and the shell suite
+does not.** Measured on this fixture, PG18 assert build:
+
+| rows matched | limit 2,000 | limit 150,000 |
+| --- | --- | --- |
+| 1,000 | Index Scan 51.70 | Index Scan 808.98 |
+| 20,000 | Index Scan 735.26 | Index Scan 1752.26 |
+| 50,000 | Index Scan 1827.50 | Custom Scan 2004.50 |
+| 100,000 | Index Scan 3657.00 | Custom Scan 2004.50 |
+
+At the shell suite's 100,000 rows the second arm is no longer an index scan, so the two
+numbers it compares are the prices of two different plans. They differ and the check
+passes, but a plan flip is one of the things a changed penalty causes, so that comparison
+cannot separate "the penalty re-priced this fetch" from "the penalty moved the planner
+onto another node". The port matches at 1,000 rows, where both arms stay on the index.
+
+It also carries the attribution cell the original leaves out. With
+`enable_index_fetch_penalty = off` the same two arms price identically (35.20 and 35.20
+against 51.70 and 808.98), which names the penalty as the term carrying the option rather
+than leaving any cost term that reads it equally satisfying.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_index_fetch_stripe_cost` | every arm: the cost is a real estimate, both arms are the same plan shape and that shape is the index fetch, the estimate moves with the per-table option, and with the penalty off it does not |
+
+## 59. test_scan_decode_cost.py: a scan is priced for the columns it decodes and their width
+
+Port of `scan_decode_cost.sh` (#432). Two defects in one cost term. The custom scan
+inherited the heap seqscan cost, whose CPU term is per row, so decoding nine columns was
+priced what decoding one was (#503); the fix that followed charged per decoded value,
+which left a 324-byte text column charged what a 4-byte int4 column is (#768). #171 bounds
+the correction from the other side: raising the full-scan cost must not push a point
+lookup off its index.
+
+**The fixtures are smaller than the shell suite's, and the ratios were measured before
+they were shrunk.** The shell suite writes 2,000,000 rows twice.
+
+| rows | narrow (1 col) | wide (9 cols) | ratio | insert |
+| --- | --- | --- | --- | --- |
+| 100,000 | 1250.9 | 5266.0 | 4.210 | 0.08s |
+| 200,000 | 2501.8 | 10530.0 | 4.209 | 0.15s |
+| 500,000 | 6254.2 | 26322.0 | 4.209 | 0.35s |
+| 1,000,000 | 12508.5 | 52645.0 | 4.209 | 0.70s |
+| 2,000,000 | 25016.9 | 105288.0 | 4.209 | 1.42s |
+
+The ratio the arm bounds at 1.5 is flat to three decimals across a 20x range, so the extra
+rows buy the assertion nothing. 200,000 is kept rather than the cheapest cell because at
+the default 150,000-row group limit it spans more than one row group.
+
+The point lookup is the one arm size actually decides, and its boundary was measured
+rather than guessed: at 50,000 rows the plan is a Custom Scan and the arm would fail; from
+100,000 it is an Index Scan. 200,000 is one doubling of margin.
+
+**What the `#171` arm can and cannot catch**, measured after review. Two mutations, each
+x1,000,000:
+
+| mutation | the `#171` arm |
+| --- | --- |
+| the scan decode charge — this file's own subject | **passes** (`Index Scan`); the #503 ratio moves 4.209 to 16.999 |
+| the index-fetch penalty — a neighbouring subsystem | **reddens**: `got 'Custom Scan' want 'index'` |
+
+A dearer scan makes the index more attractive, so no over-charge of the term this file is
+about can take a point lookup off its index. The arm is a real guard, but on
+`pgcolumnar_index_fetch_penalty`. It is not evidence that the decode charge is bounded
+from the other side, and nothing in either harness bounds that today.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_scan_decode_cost` | every arm: both scans priced, nine decoded columns cost materially more than one, the widths are in the statistics, four wide text columns cost more than eight narrow int ones, and a point lookup still takes its index |
+
+## 60. test_index_fetch_penalty_width.py: a wider prefix must give up on per-row fetches sooner
+
+Port of `index_fetch_penalty_width.sh` (#432). The penalty's CPU term counted the decoded
+prefix's columns, so a 68-byte text column was charged what a 4-byte int4 column was. The
+consequence is an inverted ordering, not merely an under-charge: the model let the wide
+table fetch about 3x more rows than the narrow one before switching to a scan, when the
+wide table can afford about 3x fewer (#803).
+
+`nproj` is the decoded PREFIX length, so width cannot be varied at a fixed prefix inside
+one table. Hence two tables of identical shape whose columns differ only in type at each
+position.
+
+**The ladder reaches below the shell suite's first rung, and that is a fix rather than a
+preference.** `FW <= FN` is satisfied by `FW = 0`, and 0 is what an over-charged width
+weight produces as well as what "gives up immediately" produces. The shell ladder starts
+at 20 and the wide table's flip point is between 5 and 7 rows, so every rung it tries is
+already past it. Measured, penalty on:
+
+| k | rows | `ifw_n` | `ifw_w` |
+| --- | --- | --- | --- |
+| 1 | 0 | Index Scan | Index Scan |
+| 5 | 2 | Index Scan | Index Scan |
+| 10 | 5 | Index Scan | Index Scan |
+| 20 | 7 | Index Scan | **Custom Scan** |
+
+With four rungs below 20, `FW` is a measured 5 rather than a floor, and the arm gained
+`premise: and the wide table fetches by index somewhere on it too`. The shell suite has
+the same one-sidedness; it is reported rather than changed here, because this pull
+request adds no bash check and so moves no ledger row.
+
+**The row-group limit is a per-table option here, not a cluster setting.** The shell suite
+pins `pgcolumnar.stripe_row_limit=20000` in the cluster config, because the writing and
+the planning session must not disagree about it (#806). A pytest cluster is shared by
+every test in the session, so a cluster-wide setting for one file is not available -- and
+is not needed: `set_options(stripe_row_limit => ...)` before the write is durable, belongs
+to the table rather than to a session, and is what both the writer and the planner read.
+The geometry is then read back from `pgcolumnar.row_group` as a premise (20 groups on each
+arm) rather than assumed from the option.
+
+Plan shape is read from `FORMAT JSON` by exact `Node Type` equality rather than by
+grepping the plan text, which a property line carrying the same words can satisfy.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_index_fetch_penalty_width` | every arm: both fixtures complete, equal row-group counts above the fetch cache, the wide prefix really wider, both prefixes under the cache cap, the penalty is what moves the plan, the narrow table fetches somewhere on the ladder, and the wide table gives up no later |
