@@ -500,6 +500,22 @@ Measured, on four branches rebased onto the driver after it landed: zero CHANGEL
 conflicts, one `## [Unreleased]`, every entry present, `docs_style.sh` green. The
 same merges showed `CONFLICTING` on GitHub throughout.
 
+### And why rebasing works where merging does not
+
+The advice above is not a preference. Git reads `.gitattributes` from the tree it is
+merging **into**, so a branch that predates the driver cannot use it:
+
+    merge main INTO the branch   conflicts: CHANGELOG.md  <derived files>
+    rebase the branch ONTO main  conflicts:               <derived files>
+
+Measured on #1107, whose head predates #1108 (`grep -c 'CHANGELOG.md.*merge=union'`
+gives 0 on that head and 1 on main). Merging brings main's commits into a tree whose
+attributes have no driver; rebasing replays the branch onto main, where the driver is
+already in force.
+
+So for any branch opened before the driver landed, *Update branch* cannot work even
+in principle — and that is most branches that have been open more than a day.
+
 ### What the driver does not excuse
 
 A **release cut** edits `## [Unreleased]` into `## [1.0-alphaN] - date`, which is the
