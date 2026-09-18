@@ -220,4 +220,34 @@ check "and the two suites are named, not left as a number" \
 check "and a real debt is still not a major failure, which is the old behaviour" \
 	"$(printf '%s\n' "$_out510b" | grep -c '^verfail=0$')" "1"
 
+# ---- collation, which selftest 070's regex cannot reach ---------------------
+#
+# Found by @OffgridwithJD reviewing this change. `comm` requires both inputs sorted
+# in ITS collation, and `sort` orders by locale. Real suite names reorder: measured
+# on this box, `pgc_setup`/`pg_dump_roundtrip` and `projections`/`projection_update`
+# both swap between `C` and `en_US.UTF-8`, and `comm` then prints `file 1 is not in
+# sorted order` and yields a wrong set.
+#
+# SELFTEST 070 CANNOT SEE IT. That guard (#552) requires every `| sort` in a file
+# using `comm` to carry `LC_ALL=C`, and its pattern is a PIPE. These three readers
+# use process substitution, so the file matched zero times and read as compliant
+# while using `comm` three times.
+#
+# AND THE PREFIX DOES NOT REACH THE SUBSTITUTIONS. `LC_ALL=C comm <(sort ...)` pins
+# only comm's own comparison: the substitutions run in subshells of the PARENT and
+# inherit the parent's locale. Both halves are pinned, and both are asserted.
+#
+# Not live on the gate -- the container is C.UTF-8, which orders these as C does --
+# so this is latent, and latent is exactly what a guard is for.
+_comm510() { grep -vE '^[[:space:]]*#' "$_rv510"; }
+
+check "premise: the runner really does use comm, so this arm has a subject" \
+	"$([ "$(_comm510 | grep -cE '(^|[^_[:alnum:]])comm ')" -ge 3 ] && echo yes || echo no)" "yes"
+
+check "every comm in the runner pins its collation" \
+	"$(_comm510 | grep -E '(^|[^_[:alnum:]])comm ' | grep -cv 'LC_ALL=C comm ' || true)" "0"
+
+check "and no sort feeding one is left on the caller's locale" \
+	"$(_comm510 | grep -c '<(sort ' || true)" "0"
+
 rm -rf "$_d510"

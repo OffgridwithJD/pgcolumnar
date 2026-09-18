@@ -1051,7 +1051,7 @@ pgc_reconcile_records() {	# pgc_reconcile_records LOGFILE -> 0 ok, 1 mismatch
 # a different mechanism, not a debt, and the thing that made one report give two answers
 # to the same question (#928).
 pgc_own_mechanism_suites() {	# pgc_own_mechanism_suites NARROWFILE WIDEFILE -> names
-	comm -13 <(sort "$1") <(sort "$2")
+	LC_ALL=C comm -13 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
 
 # THE RESIDUAL IS A SET, NOT A SUBTRACTION (#999, #1006, filed independently by
@@ -1071,10 +1071,23 @@ pgc_own_mechanism_suites() {	# pgc_own_mechanism_suites NARROWFILE WIDEFILE -> n
 # committed it one level up. Counting the difference instead makes a negative
 # unrepresentable rather than merely detected.
 #
-# Both readers sort, because the caller appends in roster order and `comm` on
-# unsorted input yields a wrong set silently rather than an error.
+# Both readers sort, because the caller appends in roster order, and they pin the
+# COLLATION on both the sort and the comm. `sort` orders by locale: measured on real
+# suite names, `pgc_setup`/`pg_dump_roundtrip` and `projections`/`projection_update`
+# both swap between `C` and `en_US.UTF-8`. Fed a mismatch, `comm` writes `input is not
+# in sorted order` to STDERR and prints a result anyway -- so in a harness whose stderr
+# lands in a log nobody reads, a wrong set arrives looking like an answer.
+#
+# THE PREFIX ON `comm` IS NOT ENOUGH. Process substitutions run in subshells of the
+# PARENT and inherit its locale, not comm's, so `LC_ALL=C comm <(sort ...)` still sorts
+# on the caller's locale. Found by @OffgridwithJD in review; the guard that should have
+# caught it reads only the piped form and cannot see process substitution (#1112).
+#
+# The wording above is deliberate. An earlier draft spelled the piped form literally and
+# selftest 070 flagged THIS FILE for its own comment -- the guard scans every line,
+# prose included, so a note explaining the rule violates it. Recorded in #1112.
 pgc_ran_without_accounting() {	# pgc_ran_without_accounting RANFILE WIDEFILE -> names
-	comm -23 <(sort "$1") <(sort "$2")
+	LC_ALL=C comm -23 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
 
 # The other bucket, counted rather than left over. Called twice: once over the
@@ -1082,7 +1095,7 @@ pgc_ran_without_accounting() {	# pgc_ran_without_accounting RANFILE WIDEFILE -> 
 # suites that SKIPPED, which gives the category that was being folded into a number
 # phrased as a problem. One reader for both, because the question is the same one.
 pgc_accounted_among() {	# pgc_accounted_among NAMEFILE WIDEFILE -> names
-	comm -12 <(sort "$1") <(sort "$2")
+	LC_ALL=C comm -12 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
 
 pgc_log_shows_any_accounting() {	# pgc_log_shows_any_accounting LOGFILE -> yes|no

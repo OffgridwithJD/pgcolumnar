@@ -62,4 +62,7 @@ suites_not_covered 249
 # 330 for the names the tally now records and two in part 390 following the reworded
 # headline. Derived by the command above on this tree, and by the gate's own census
 # in the same run, which printed `never observed red=1306` independently.
-checks_never_observed_red 1306
+# 1306 -> 1309: three arms pinning the collation of the runner's `comm` readers, added
+# after @OffgridwithJD found the three helpers unpinned in review. Re-derived by the
+# command above and by the gate's census in the same run.
+checks_never_observed_red 1309

@@ -1187,15 +1187,18 @@ harness_selftest	510-a-residual-must-be-counted	a suite that ran and did not acc
 harness_selftest	510-a-residual-must-be-counted	and a real debt is still not a major failure, which is the old behaviour	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and it records the name of every suite that skipped	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and no line in it carries a negative suite count at all	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and no sort feeding one is left on the caller's locale	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and the block leaves the major verdict alone when the sums agree	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and the skipped-but-accounted suites are named as their own category	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and the summary calls the residual reader on the suites that ran	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and the two suites are named, not left as a number	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	every comm in the runner pins its collation	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: and it ends at its own closing brace, not mid-statement	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the intersection reader is callable	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the residual reader is callable	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the runner defines the intersection reader	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the runner defines the residual reader this part evals	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the runner really does use comm, so this arm has a subject	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the subtraction the runner used goes negative on the live shape	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the summary block was extracted, not an empty range	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	premise: the tally function is findable	15;16;17;18;19	never	-
