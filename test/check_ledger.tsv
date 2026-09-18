@@ -230,6 +230,7 @@ harness_selftest	070-and-comm-s-two-inputs-must	premise: some suite still uses c
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment ending in a pipe is not a producer	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment naming a TERMINATED tag still opens no heredoc, so the lines below it are seen	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment naming a heredoc exempts nothing, so the line below it is still seen	15;16;17;18;19	never	-
+harness_selftest	080-no-suite-pipes-a-captured-string	a generator read through a subshell loses the seed	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	an opener on a line of CODE with no terminator exempts nothing either	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	an opener with no terminator exempts nothing	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and a pipeline split BEFORE the pipe, with the operator at column 1	15;16;17;18;19	never	-
@@ -237,6 +238,8 @@ harness_selftest	080-no-suite-pipes-a-captured-string	and an indented split is r
 harness_selftest	080-no-suite-pipes-a-captured-string	and bench/ was in the scan, which is the hole this rule had	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and does not cover the live one above it	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and it follows the pipe across blank and comment lines	15;16;17;18;19	never	-
+harness_selftest	080-no-suite-pipes-a-captured-string	and no call site reads one through a command substitution	15;16;17;18;19	never	-
+harness_selftest	080-no-suite-pipes-a-captured-string	and one that ASSIGNS keeps it, which is the form fuzz.sh uses	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and reports it at the PRODUCER's line, which is the line that has to change	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and selftest/ was in the scan, which is the hole that reddened #923	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	and the heredoc exemption covers the one inside the heredoc, not the other	15;16;17;18;19	never	-
@@ -245,6 +248,7 @@ harness_selftest	080-no-suite-pipes-a-captured-string	and the scan examined the 
 harness_selftest	080-no-suite-pipes-a-captured-string	and the sweep counts it once, because a hit is keyed on file:line	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	control: a real heredoc, opened in code and terminated, still exempts its body	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	control: piping a large string into grep -q reports a match as absent	15;16;17;18;19	never	-
+harness_selftest	080-no-suite-pipes-a-captured-string	neither generator prints its value, which is what put it in a subshell	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	no suite pipes a captured string into an early-exit reader	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: and bash agrees -- with no command to continue, the reader alone will not parse	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: and bash runs that file as one assignment -- no reader, no output, rc 0	15;16;17;18;19	never	-
@@ -258,6 +262,7 @@ harness_selftest	080-no-suite-pipes-a-captured-string	premise: and the physical-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: and the violation between that comment and its tag is what the pattern would flag	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: and without -H it reports a line number where the key wants a path	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: bash joins a pipeline across blank and comment lines, which is why the joiner must	15;16;17;18;19	never	-
+harness_selftest	080-no-suite-pipes-a-captured-string	premise: fuzz.sh still defines the two generators this arm is about	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: indent that same reader by a tab and the physical-line pattern sees it unaided	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: no backslash continuation is followed by a blank or a comment	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	premise: no line opens a heredoc AND continues, which is what lets the joiner ignore bodies	15;16;17;18;19	never	-

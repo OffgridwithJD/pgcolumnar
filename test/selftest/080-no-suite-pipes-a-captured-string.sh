@@ -770,3 +770,42 @@ check "the join CREATES a hit on a two-line quoted string, the sweep's one false
 	"$(_epipe_joined_lines "$_epipe_str" | grep -cE "$_epipe_pat" || true)" "1"
 check "premise: and bash runs that file as one assignment -- no reader, no output, rc 0" \
 	"$(bash "$_epipe_str" </dev/null 2>&1; echo "rc=$?")" "rc=0"
+
+# ---- a seeded generator must not be read through a subshell (#1011) ----------
+#
+# `RANDOM=$SEED` seeds the sequence in THIS shell. `$( )` is a subshell, and bash
+# re-seeds RANDOM in one -- deliberately, since 5.1, so that two subshells do not
+# yield the same value. So `N=$(( 1 + $(rnd 5000) ))` drew from a fresh sequence on
+# every call, PGC_SEED controlled nothing, and `fuzz.sh` printed
+# `reproduce a failure with PGC_SEED=<n>` on every run while two runs at one seed
+# shared ZERO fixtures. Measured before and after: 0 of 5, then 5 of 5.
+#
+# THE MECHANISM IS EXERCISED, NOT GREPPED. A static pattern would say fuzz.sh uses
+# the right spelling today; these two say WHY it is the right one, on this bash,
+# and would notice if the subshell behaviour ever changed under us.
+_seed_probe() {	# _seed_probe echo|assign -> five values drawn from one fixed seed
+	bash -c '
+		RANDOM=4242
+		if [ "$1" = echo ]; then
+			g() { echo $(( RANDOM % 1000 )); }
+			for _ in 1 2 3 4 5; do printf "%s " "$(g)"; done
+		else
+			g() { _v=$(( RANDOM % 1000 )); }
+			for _ in 1 2 3 4 5; do g; printf "%s " "$_v"; done
+		fi' _ "$1"
+}
+check "a generator read through a subshell loses the seed" \
+	"$([ "$(_seed_probe echo)" = "$(_seed_probe echo)" ] && echo same || echo differs)" "differs"
+check "and one that ASSIGNS keeps it, which is the form fuzz.sh uses" \
+	"$([ "$(_seed_probe assign)" = "$(_seed_probe assign)" ] && echo same || echo differs)" "same"
+
+# And the file itself, so a rewrite back to the printing form is caught. Premised
+# on the generators still existing, or a rename makes this arm approve a file that
+# no longer has them.
+_seed_f="$PGC_TESTDIR/fuzz.sh"
+check "premise: fuzz.sh still defines the two generators this arm is about" \
+	"$(grep -cE '^(rnd|pick)\(\)' "$_seed_f")" "2"
+check "neither generator prints its value, which is what put it in a subshell" \
+	"$(grep -cE '^(rnd|pick)\(\).*echo ' "$_seed_f")" "0"
+check "and no call site reads one through a command substitution" \
+	"$(grep -cE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*\$\((rnd|pick) ' "$_seed_f")" "0"

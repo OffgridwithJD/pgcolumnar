@@ -27,9 +27,25 @@ RANDOM=$SEED
 echo "-- fuzz seed=$SEED iters=$ITERS  (reproduce a failure with PGC_SEED=$SEED)"
 
 # Uniform integer in [0, n).
-rnd() { echo $(( RANDOM % $1 )); }
+# THE GENERATORS SET A VARIABLE; THEY DO NOT PRINT (#1011).
+#
+# `RANDOM=$SEED` above does seed the sequence. Every call site read it through a
+# COMMAND SUBSTITUTION -- `N=$(( 1 + $(rnd 5000) ))` -- and `$( )` is a subshell.
+# Bash re-seeds RANDOM in a subshell (5.1+, deliberately, so two subshells do not
+# yield the same value), so each call drew from a fresh sequence and the seeded one
+# in this shell was never read. PGC_SEED controlled nothing, while the suite printed
+# `reproduce a failure with PGC_SEED=<n>` on every run.
+#
+# Measured on this box, bash 5.3.9, the two forms over one seed:
+#
+#     subshell    run A: 739 227 141 262 904     run B: 798 969 493 460 795
+#     arithmetic  run A: 202 552 638 271 721     run B: 202 552 638 271 721
+#
+# `$(( ))` is ARITHMETIC EXPANSION and runs in this shell, so the results below are
+# assigned rather than echoed and no subshell is entered at any call site.
+rnd() { _RND=$(( RANDOM % $1 )); }
+pick() { local n=$#; local i=$(( RANDOM % n )); shift "$i"; _PICK="$1"; }
 # Pick one element of the argument list.
-pick() { local n=$#; local i=$(( RANDOM % n )); shift "$i"; echo "$1"; }
 
 CODECS="none pglz lz4 zstd"
 
@@ -39,18 +55,19 @@ FUZZ_DEFS="id int, c_int int, c_num numeric(20,4), c_f8 double precision,
 	c_bool boolean, c_date date, c_ts timestamp, c_vc varchar(40), c_text text"
 
 for it in $(seq 1 "$ITERS"); do
-	N=$(( 1 + $(rnd 5000) ))
+	rnd 5000; N=$(( 1 + _RND ))
 	# Occasionally snap N to a boundary of the chosen chunk-group limit.
-	NULLMOD=$(( 2 + $(rnd 18) ))
-	CG=$(pick 100 250 500 1000)
-	SR=$(pick 1000 2000 5000)
-	CODEC=$(pick $CODECS)
-	LVL=$(( 1 + $(rnd 19) ))
+	rnd 18; NULLMOD=$(( 2 + _RND ))
+	pick 100 250 500 1000; CG="$_PICK"
+	pick 1000 2000 5000; SR="$_PICK"
+	# shellcheck disable=SC2086
+	pick $CODECS; CODEC="$_PICK"
+	rnd 19; LVL=$(( 1 + _RND ))
 	# Filter bounds within the generated ranges.
 	span=$(( N > 1 ? N : 2 ))
-	LO=$(rnd "$span")
-	HI=$(( LO + 1 + $(rnd 500) ))
-	EQ=$(( 1 + $(rnd "$span") ))
+	rnd "$span"; LO=$_RND
+	rnd 500; HI=$(( LO + 1 + _RND ))
+	rnd "$span"; EQ=$(( 1 + _RND ))
 
 	tag="it=$it N=$N nullmod=$NULLMOD cg=$CG sr=$SR codec=$CODEC lvl=$LVL"
 	echo "-- $tag"

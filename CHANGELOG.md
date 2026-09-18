@@ -18,6 +18,37 @@ true until the next version shipped.
 
 ### Fixed
 
+- `PGC_SEED` seeded nothing: two fuzzer runs at one seed shared no fixture at all
+  (#1011).
+
+  `fuzz.sh` printed `reproduce a failure with PGC_SEED=<n>` on every run. Following
+  that instruction did not reproduce anything.
+
+  `RANDOM=$SEED` does seed the sequence in the shell that sets it. Every generator
+  was read through a COMMAND SUBSTITUTION -- `N=$(( 1 + $(rnd 5000) ))` -- and
+  `$( )` is a subshell. Bash re-seeds `RANDOM` in a subshell, deliberately, since
+  5.1, so that two subshells do not yield the same value. Each call therefore drew
+  from a fresh sequence and the seeded one was never read.
+
+  Measured on this box, bash 5.3.9, five draws from one seed:
+
+      subshell    run A: 739 227 141 262 904     run B: 798 969 493 460 795
+      arithmetic  run A: 202 552 638 271 721     run B: 202 552 638 271 721
+
+  `$(( ))` is arithmetic expansion and runs in the current shell, so the generators
+  now ASSIGN rather than print, and no call site enters a subshell.
+
+  End to end, `PGC_SEED=12345`, two runs each:
+
+      main        first fixture differs; shared fixtures 0 of 5
+      this change first fixture identical; shared fixtures 5 of 5
+      seed 99999  different fixtures again, so it is seeded and not constant
+
+  THE GUARD EXERCISES THE MECHANISM rather than grepping for the spelling: one arm
+  shows a generator read through a subshell losing the seed on this bash, another
+  shows the assigning form keeping it. Three static arms pin `fuzz.sh`'s own form,
+  and putting the printing generator back reddens two of them.
+
 - Every PR with a changelog entry conflicted with every other one (#996).
 
   Entries insert as the first child of a single heading, so two PRs that share no
