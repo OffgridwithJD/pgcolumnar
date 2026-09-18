@@ -2359,6 +2359,18 @@ Last-write-wins records the most recent attack rather than the catalogue the col
 exists to become. One `--mutation` copied across several logs attributes a deliberate
 change to failures it had nothing to do with, and is refused.
 
+### `test_a_mutation_with_two_targets_can_be_recorded_when_both_are_named`
+
+A mutation with two GENUINE targets is ordinary: reverting the
+`enable_join_runtime_filter` boot value reddens two checks, and neither is collateral
+because both read the default directly. The tool could not tell that from "one target
+and one bystander" and resolved the ambiguity by recording NOTHING, so the column
+could never hold the entry it most exists for -- the one saying which checks share a
+cause. `--target` makes the caller assert the attribution, as `--reds-are-real` makes
+them assert that a red is real. Six arms: both named permits it and records both; one
+named of two is still refused and names the unclaimed check; a target that did not
+fail is refused and names it; and `--target` without `--mutation` is refused.
+
 ### `test_a_log_that_does_not_parse_is_not_evidence`
 
 `read_records` accepted `len(f) >= 5`, so a record missing its reason, a verdict

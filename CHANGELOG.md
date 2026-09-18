@@ -297,6 +297,69 @@ true until the next version shipped.
 
   Guard half 347 passed, 913 checks; the two cluster-side files touched, 22 passed,
   79 checks. `guard_tests` re-derived by collection, 346 -> 347.
+- A mutation with two genuine targets could not be recorded at all (#1014).
+
+  `merge --mutation NAME` refused any run in which more than one check failed. The
+  guard is right about the hazard -- attributing a mutation to a bystander records
+  collateral damage as evidence -- and wrong about the remedy. A mutation with TWO
+  GENUINE targets is ordinary, and for it the only permitted merge was
+  `--reds-are-real`, which writes `-` in the mutation column.
+
+  So the catalogue that column exists to become could never hold the entry it most
+  exists for: the one that says WHICH CHECKS SHARE A CAUSE.
+
+  `--target CHECK`, repeatable, makes the caller assert the attribution, exactly as
+  `--reds-are-real` makes them assert that a red is real. The guard keeps its teeth
+  in both directions:
+
+      a red not named as a target   refused, and the refusal names it
+      a target that did not fail    refused, because the claim is wrong
+      --target without --mutation   refused, because it attributes nothing
+      one red and no --target       merges, as every existing caller does
+
+  THE TWO ROWS ARE BACK-FILLED, and the mutation was re-run rather than recalled.
+  `native_join_runtime_filter`'s two ever-red rows now name
+  `pgcolumnar.enable_join_runtime_filter boot value true -> false` instead of `-`.
+
+  Getting there cost two wrong attempts, and the reason is a PostgreSQL fact worth
+  writing down because it is not the obvious one.
+
+  Mutating only the C initializer is INERT: 46 checks, 0 failed.
+  `DefineCustomBoolVariable` assigns the boot value to the variable at registration,
+  so for a bool GUC the initializer decides nothing at run time.
+
+  Mutating only the `DefineCustomBoolVariable` boot value will not start at all:
+
+      LOG:  GUC (PGC_BOOL) pgcolumnar.enable_join_runtime_filter, boot_val=0, C-var=1
+      TRAP: failed Assert("check_GUC_init(variable)"), File: "guc.c", Line: 4944
+
+  `check_GUC_init` does NOT require the two to agree. Read at the source rather
+  than inferred from the trap, `src/backend/utils/misc/guc.c`:
+
+      case PGC_BOOL:
+          if (*conf->variable && !conf->boot_val)   /* traps: C-var true, boot false */
+
+  It is ASYMMETRIC: a C variable left `true` against a `false` boot value traps, and
+  a `false` initializer against a `true` boot value is accepted silently. `PGC_INT`
+  and `PGC_REAL` apply the same asymmetry against zero; `PGC_ENUM` requires equality
+  unconditionally.
+
+  So this mutation is two lines, but not because the two must match -- because one
+  line alone does nothing and the other alone will not boot. The third attempt
+  changed both, fingerprinted the `.so` before and after to prove the build took
+  (`53c3f626889c` -> `7f67e077f26c`), reddened exactly the two checks, and restored
+  byte-exact with the `.so` back to `53c3f626889c`.
+
+  The census does not move: both rows were already ever-red, so
+  `checks_never_observed_red` stays at 1277 and the ledger stays 1285 rows, all
+  carrying `15;16;17;18;19`.
+
+  Both harnesses, independently: nine arms in `selftest/410` and six in
+  `test_mutation_ledger.py`, each with its own fixture and its own names. Every
+  refusal arm greps its MESSAGE rather than only its status -- `--target` did not
+  exist before this change, so argparse exited 2 for an unknown flag, and three arms
+  written against the status alone passed against the absent feature. Measured
+  before the implementation, which is why they are written the other way.
 
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).

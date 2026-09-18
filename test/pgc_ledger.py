@@ -459,17 +459,65 @@ def cmd_merge(args):
     # kills that check, which is the opposite of what this column is for.
     # Measured on #918: a two-FAIL log merged with --mutation MUTATION_A recorded
     # it against both. Reported by @linuxhikerpm.
+    # --target NAMES WHAT THE MUTATION KILLED, and means nothing on its own (#1014).
+    if getattr(args, "target", None) and not args.mutation:
+        raise LedgerError(
+            "--target names what a mutation killed, so it needs --mutation to say "
+            "which mutation. On its own it attributes nothing.")
+
     if args.mutation:
         failed = sorted({key for _p, seen in runs for key, vs in seen.items()
                          if any(v == "FAIL" for v, _m in vs)})
-        if len(failed) > 1:
+        named = list(dict.fromkeys(getattr(args, "target", None) or []))
+        if named:
+            # A MUTATION WITH TWO GENUINE TARGETS IS ORDINARY, not exotic (#1014).
+            # Reverting the `enable_join_runtime_filter` boot value reddens both
+            # `join runtime filter defaults on` and `default plan has runtime
+            # coordinator`; neither is collateral, because both read the default
+            # directly, which is why one change kills both.
+            #
+            # The tool cannot tell that from "one target and one bystander", and it
+            # used to resolve the ambiguity by recording NOTHING: the only permitted
+            # merge was --reds-are-real, which writes `-` in the mutation column. So
+            # the catalogue this column exists to become could never hold the entry
+            # it most exists for -- the one that says WHICH CHECKS SHARE A CAUSE.
+            #
+            # The caller ASSERTS the attribution instead, exactly as --reds-are-real
+            # makes them assert that a red is real. The guard keeps its teeth in the
+            # case it was written for: a red not named is still collateral.
+            #
+            # Matched on the check NAME, which is what an author knows and what the
+            # PR body will say. The ledger key carries suite and part as well, so a
+            # name shared by two parts names both -- deliberately: they are the same
+            # assertion made twice, and a mutation that kills one kills the other.
+            failed_names = {n for _s, _p, n in failed}
+            unhit = [t for t in named if t not in failed_names]
+            if unhit:
+                listed = "\n".join(f"      {t}" for t in unhit[:6])
+                more = "" if len(unhit) <= 6 else f"\n      ... and {len(unhit) - 6} more"
+                raise LedgerError(
+                    f"{len(unhit)} check(s) were named as a target but did not fail in "
+                    f"this run:\n{listed}{more}\n    A mutation that does not redden "
+                    f"what you aimed at is a finding about the mutation, not a row to "
+                    f"write down. Re-run, or drop the target you did not hit.")
+            unnamed = [k for k in failed if k[2] not in set(named)]
+            if unnamed:
+                listed = "\n".join(f"      {s}\t{p}\t{n}" for s, p, n in unnamed[:6])
+                more = "" if len(unnamed) <= 6 else f"\n      ... and {len(unnamed) - 6} more"
+                raise LedgerError(
+                    f"{len(unnamed)} check(s) failed but was not named as a target:\n"
+                    f"{listed}{more}\n    An unnamed red is collateral damage, and "
+                    f"recording the mutation against it would be evidence that the "
+                    f"mutation kills that check. Name it with --target if it is a real "
+                    f"target, or narrow the run.")
+        elif len(failed) > 1:
             listed = "\n".join(f"      {s}\t{p}\t{n}" for s, p, n in failed[:6])
             more = "" if len(failed) <= 6 else f"\n      ... and {len(failed) - 6} more"
             raise LedgerError(
                 f"--mutation names one check, but {len(failed)} checks failed in this "
                 f"run:\n{listed}{more}\n    Attributing it to all of them would record "
-                f"collateral damage as evidence. Merge without --mutation, or narrow the "
-                f"run to the check the mutation targets.")
+                f"collateral damage as evidence. Name every one you meant to hit with "
+                f"--target, merge without --mutation, or narrow the run.")
 
     # A RED NEEDS A REASON (#946). `merge` already refuses a log that does not
     # RECONCILE, and reconciliation is not the property that matters: both logs that
@@ -1252,6 +1300,10 @@ def main(argv=None):
     m.add_argument("--ledger", required=True)
     m.add_argument("--date", default="unknown")
     m.add_argument("--mutation", default="")
+    m.add_argument("--target", action="append", default=[], metavar="CHECK",
+                   help="a check name this mutation was aimed at; repeatable. "
+                        "Required when a mutation reddens more than one check, so "
+                        "the attribution is asserted rather than inferred (#1014)")
     m.add_argument("--reds-are-real", action="store_true",
                    help="the FAIL records in these logs are a genuine observation "
                         "of the code under test, not an artifact of the environment")

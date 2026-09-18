@@ -121,6 +121,67 @@ check "and the refusal names how many failed, so the author can narrow the run" 
 check "control: the same log merges with a different reason, so the refusal above is --mutation-across-two-checks and not the log" \
 	"$(_led_rc merge --reds-are-real --ledger "$_lw/m2.tsv" --date 2026-09-10 "$_lw/twofail.log")" "0"
 
+# ---- ...unless the caller NAMES them (#1014) --------------------------------
+#
+# A MUTATION WITH TWO GENUINE TARGETS IS ORDINARY. #1008 is the live case:
+# reverting the `enable_join_runtime_filter` boot value reddens both `join runtime
+# filter defaults on` and `default plan has runtime coordinator`. Neither is
+# collateral -- both read the default directly, which is why one change kills both.
+#
+# The tool could not tell that from "one target and one bystander", and resolved
+# the ambiguity by recording NOTHING: the only permitted merge was
+# `--reds-are-real`, which writes `-` in the mutation column. So the catalogue this
+# column exists to become could never hold the entry it most exists for -- the
+# mutation that tells a reader WHICH CHECKS SHARE A CAUSE.
+#
+# The caller asserts the attribution, exactly as `--reds-are-real` makes them
+# assert that a red is real. A red not named is still collateral and still refused.
+#
+# EVERY REFUSAL ARM BELOW GREPS ITS MESSAGE, not just the status. `--target` did
+# not exist before this change, so argparse exited 2 for an unknown flag -- and an
+# arm asserting only `rc=2` would have passed against the absent feature, which is
+# the shape this repository keeps finding.
+check "naming both failing checks as targets permits the merge" \
+	"$(_led_rc merge --ledger "$_lw/m3.tsv" --date 2026-09-10 --mutation M \
+		--target 'the target' --target 'collateral' "$_lw/twofail.log")" "0"
+check "and the mutation is recorded against both of them" \
+	"$(awk -F'\t' '$6=="M"' "$_lw/m3.tsv" | grep -c .)" "2"
+
+check "naming only one of two failing checks is still refused" \
+	"$(_led_rc merge --ledger "$_lw/m4.tsv" --date 2026-09-10 --mutation M \
+		--target 'the target' "$_lw/twofail.log")" "2"
+check "and the refusal names the check that was not claimed as a target" \
+	"$(_led_run merge --ledger "$_lw/m4.tsv" --date 2026-09-10 --mutation M \
+		--target 'the target' "$_lw/twofail.log" \
+		| grep -c 'failed but was not named as a target')" "1"
+
+# THE OTHER DIRECTION. A target that did not redden means the author believes the
+# mutation kills a check and it does not. That is a finding about the mutation,
+# not a row to write down.
+check "a target that did not fail is refused, because the claim is wrong" \
+	"$(_led_rc merge --ledger "$_lw/m5.tsv" --date 2026-09-10 --mutation M \
+		--target 'the target' --target 'collateral' --target 'never ran' \
+		"$_lw/twofail.log")" "2"
+check "and that refusal names the target that stayed green" \
+	"$(_led_run merge --ledger "$_lw/m5.tsv" --date 2026-09-10 --mutation M \
+		--target 'the target' --target 'collateral' --target 'never ran' \
+		"$_lw/twofail.log" | grep -c 'named as a target but did not fail')" "1"
+
+check "--target without --mutation is refused, because it attributes nothing" \
+	"$(_led_rc merge --ledger "$_lw/m6.tsv" --date 2026-09-10 \
+		--target 'the target' "$_lw/twofail.log")" "2"
+check "and that refusal says --target needs --mutation" \
+	"$(_led_run merge --ledger "$_lw/m6.tsv" --date 2026-09-10 \
+		--target 'the target' "$_lw/twofail.log" \
+		| grep -c 'target names what a mutation killed')" "1"
+
+# EVERY EXISTING CALLER. One red and no --target is the shape every merge in this
+# tree uses today, and it must not have moved.
+check "control: one red and no --target still merges" \
+	"$(_led_rc merge --ledger "$_lw/m7.tsv" --date 2026-09-10 --mutation M "$_lw/red.log")" "0"
+check "control: and still records the mutation against the check that reddened" \
+	"$(awk -F'\t' '$3=="first check"{print $6}' "$_lw/m7.tsv")" "M"
+
 # The three must be distinguishable from a REAL refusal, or fail-closed just
 # renames every outcome.
 check "a real refusal is a different status from an integrity failure" \

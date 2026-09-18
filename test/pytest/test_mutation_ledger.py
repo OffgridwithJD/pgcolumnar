@@ -125,6 +125,67 @@ def test_the_mutation_column_accumulates_rather_than_overwriting(tmp_path, expec
                "one mutation cannot be attributed across several runs at once")
 
 
+def test_a_mutation_with_two_targets_can_be_recorded_when_both_are_named(tmp_path, expect):
+    """#1014. A mutation with TWO GENUINE TARGETS is ordinary, not exotic.
+
+    Reverting the `enable_join_runtime_filter` boot value reddens both `join runtime
+    filter defaults on` and `default plan has runtime coordinator`. Neither is
+    collateral -- both read the default directly, which is why one change kills both.
+
+    The tool could not tell that from "one target and one bystander" and resolved the
+    ambiguity by recording NOTHING: the only permitted merge was `--reds-are-real`,
+    which writes `-` in the mutation column. So the catalogue this column exists to
+    become could never hold the entry it most exists for, the one saying WHICH CHECKS
+    SHARE A CAUSE.
+
+    Its own fixture and its own names, sharing nothing with the shell part.
+    """
+    two = _w(tmp_path, "two.log",
+             "RESULT\tdemo\tpart1\taimed at\tFAIL\t18\t\n"
+             "RESULT\tdemo\tpart1\talso aimed at\tFAIL\t18\t\n"
+             "checks run: 2\n")
+
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "a.tsv", ""), "--date", "2026-09-12",
+                   "--mutation", "M", two)
+    expect.num(rc, 2, "two reds and no targets is still refused")
+    expect.text("--target" if "--target" in out else f"absent; got {out[:200]!r}",
+                "--target", "and the refusal offers --target as the way through")
+
+    led = _w(tmp_path, "b.tsv", "")
+    out, rc = _run("merge", "--ledger", led, "--date", "2026-09-12", "--mutation", "M",
+                   "--target", "aimed at", "--target", "also aimed at", two)
+    expect.num(rc, 0, "naming both permits the merge")
+    expect.text(",".join(sorted(r[5] for r in _rows(led))), "M,M",
+                "and the mutation is recorded against both of them")
+
+    # THE GUARD KEEPS ITS TEETH. A red nobody claimed is collateral, and recording
+    # the mutation against it would be evidence that the mutation kills that check.
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "c.tsv", ""), "--date", "2026-09-12",
+                   "--mutation", "M", "--target", "aimed at", two)
+    expect.num(rc, 2, "naming only one of the two is still refused")
+    expect.text("failed but was not named as a target" if "failed but was not named as a target" in out else f"absent; got {out[:200]!r}",
+                "failed but was not named as a target", "and the refusal says which kind of mistake this is")
+    expect.text("also aimed at" if "also aimed at" in out else f"absent; got {out[:200]!r}",
+                "also aimed at", "naming the check nobody claimed")
+
+    # THE OTHER DIRECTION: a target that did not redden means the mutation did not do
+    # what the author believes, which is a finding rather than a row.
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "d.tsv", ""), "--date", "2026-09-12",
+                   "--mutation", "M", "--target", "aimed at", "--target", "also aimed at",
+                   "--target", "never ran", two)
+    expect.num(rc, 2, "a target that did not fail is refused")
+    expect.text("named as a target but did not fail" if "named as a target but did not fail" in out else f"absent; got {out[:200]!r}",
+                "named as a target but did not fail", "and the refusal says so in those terms")
+    expect.text("never ran" if "never ran" in out else f"absent; got {out[:200]!r}",
+                "never ran", "naming the target that stayed green")
+
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "e.tsv", ""), "--date", "2026-09-12",
+                   "--target", "aimed at", two)
+    expect.num(rc, 2, "--target without --mutation is refused")
+    expect.text("needs --mutation" if "needs --mutation" in out else f"absent; got {out[:200]!r}",
+                "needs --mutation", "because on its own it attributes nothing")
+
+
 def test_two_runs_of_a_check_are_not_a_duplicate_of_it(tmp_path, expect):
     """Merging the logs first cannot tell "the same check in two runs" from "the same
     name twice in one run", and reported the first as the second."""
