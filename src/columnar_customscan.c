@@ -1622,29 +1622,82 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
  *		reference disqualifies a projection scan.
  */
 static Selectivity
-pgcolumnar_sortkey_selectivity(PlannerInfo *root, RelOptInfo *rel,
+pgcolumnar_sortkey_selectivity(PlannerInfo *root, RelOptInfo *rel, Oid relid,
 							   AttrNumber sortAttno)
 {
 	List	   *clauses = NIL;
 	ListCell   *lc;
+	Relation	r;
+	TupleDesc	tupdesc;
 
 	/*
 	 * Eligibility tests sortKey[0] against restrictCols. Pricing has to use
 	 * the same clauses: rel->rows is the estimate after EVERY restriction,
 	 * including columns the projection cannot prune on.
+	 *
+	 * MENTIONING THE SORT KEY IS NOT PRUNING ON IT (#1126). A single
+	 * RestrictInfo that ORs a sort-key range with a predicate on another column
+	 * references the key, so a membership test counts it whole and credits the
+	 * projection with a selectivity the sort order cannot deliver. Measured
+	 * before this changed: `sk BETWEEN 1 AND 2000 OR kind = 'odd'` priced at
+	 * 0.101 of the base while pruning nothing -- no pushed-down filter, no
+	 * usable skip predicate, every chunk group read, 50% more vector decodes and
+	 * 33% slower than the base scan it undercut tenfold.
+	 *
+	 * SO ASK THE FUNCTION THAT DECIDES SKIPPING, rather than restating its rule
+	 * here. `pgcolumnar_clause_to_scankey` returns 0 for a clause it cannot use
+	 * -- a BoolExpr is not an OpExpr and never becomes a key -- and records the
+	 * column each key prunes on. That keeps one definition of "can skip" for the
+	 * price and the executor, which is selftest 320's rule: a check that
+	 * recomputes a rule tests the world instead of the code.
+	 *
+	 * NOT `exact`. The fold needs exactness because scan keys are its whole row
+	 * filter (#715); pruning does not. An anchored LIKE (#426) and an IN-list
+	 * range (#704) are conservative keys that prune honestly, and gating on
+	 * exactness would decline a projection that genuinely wins -- the silent
+	 * direction, since a plan not taken reddens nothing.
 	 */
 	if (sortAttno <= 0)
 		return (Selectivity) 1.0;
 
+	r = table_open(relid, AccessShareLock);
+	tupdesc = RelationGetDescr(r);
+
 	foreach(lc, rel->baserestrictinfo)
 	{
 		RestrictInfo *ri = lfirst_node(RestrictInfo, lc);
-		Bitmapset  *cols = NULL;
+		ScanKeyData scratch[2];	/* an anchored LIKE writes two keys */
+		bool		exact = false;
+		int			n;
+		int			i;
+		bool		allOnSortKey;
 
-		pull_varattnos((Node *) ri->clause, rel->relid, &cols);
-		if (bms_is_member(sortAttno - FirstLowInvalidHeapAttributeNumber, cols))
+		n = pgcolumnar_clause_to_scankey((Node *) ri->clause, rel->relid,
+										 tupdesc, &scratch[0], &exact);
+		if (n < 1)
+			continue;
+
+		/*
+		 * EVERY key, not the first. One clause writing keys on two different
+		 * columns would otherwise be credited entirely to the sort key on the
+		 * strength of whichever came first. No current shape does that, which
+		 * is a reason to be cheap about it rather than a reason to assume it.
+		 */
+		allOnSortKey = true;
+		for (i = 0; i < n; i++)
+		{
+			if (scratch[i].sk_attno != sortAttno)
+			{
+				allOnSortKey = false;
+				break;
+			}
+		}
+		if (allOnSortKey)
 			clauses = lappend(clauses, ri);
 	}
+
+	table_close(r, AccessShareLock);
+
 	if (clauses == NIL)
 		return (Selectivity) 1.0;
 	return clauselist_selectivity(root, clauses, rel->relid, JOIN_INNER, NULL);
@@ -2949,7 +3002,8 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			 * and a 50% range the same price.
 			 */
 			serialRun = serialTotalCost - serialStartupCost;
-			sel = (double) pgcolumnar_sortkey_selectivity(root, rel, sortAttno);
+			sel = (double) pgcolumnar_sortkey_selectivity(root, rel, rte->relid,
+														  sortAttno);
 			if (sel < 0.0)
 				sel = 0.0;
 			if (sel > 1.0)
