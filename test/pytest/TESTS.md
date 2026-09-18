@@ -95,6 +95,7 @@ behaviour, the source of that number is named.
 - [47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#47-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 - [48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#48-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
 - [49. test_residual_is_counted.py: a residual must be counted, not subtracted](#49-test_residual_is_countedpy-a-residual-must-be-counted-not-subtracted)
+- [50. test_collation_pinned.py: comm's inputs must be sorted the same way](#50-test_collation_pinnedpy-comms-inputs-must-be-sorted-the-same-way)
 
 ## 1. How to read a test in here
 
@@ -4524,3 +4525,42 @@ and neither file names the other.
 The load-bearing assertion is that the printed breakdown takes a count a count
 can take. It is unreachable while the residual is a subtraction across two
 populations, and reachable only once it is a set difference over the names.
+## 50. test_collation_pinned.py: comm's inputs must be sorted the same way
+
+#552 established the rule and #1112 found the hole. `comm` requires both inputs
+sorted in ITS collation and does not check: fed a mismatch it writes `input is not
+in sorted order` to stderr and prints a result anyway, so where stderr lands in a
+log nobody reads, a wrong set arrives looking like an answer.
+
+The inputs are not collation-insensitive. On real suite names,
+`pgc_setup`/`pg_dump_roundtrip` and `projections`/`projection_update` both swap
+between `C` and `en_US.UTF-8`.
+
+**Two halves, and the second is the one that was missed.** `LC_ALL=C comm <(sort a)
+<(sort b)` pins only comm's own comparison: the substitutions run in subshells of
+the **parent** and inherit its locale. A guard accepting `LC_ALL=C` anywhere on the
+line would bless exactly the form a reader writes after reading the guard's name.
+
+Public seam: the shell corpus under `test/*.sh`. Read independently of
+`test/selftest/070-and-comm-s-two-inputs-must.sh` -- same corpus, own
+implementation, own planted probes, and neither file names the other.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_the_corpus_has_files_using_comm_so_the_sweep_is_not_vacuous` | the sweep spans more than one file, printed from the data |
+| `test_every_sort_feeding_a_comm_pins_its_collation` | no suite using `comm` leaves a sort on the caller's locale |
+| `test_every_comm_pins_its_own_comparison` | and the `comm` itself is pinned, which is a separate claim |
+| `test_the_detector_catches_the_process_substituted_form` | the hole #1112 names: not a pipeline, so a pipe pattern cannot see it |
+| `test_the_detector_still_catches_the_piped_form` | widening did not trade #552's case away |
+| `test_a_line_with_one_of_two_sorts_pinned_is_caught` | the half-pinned form, which is what a partial fix produces |
+| `test_pinning_only_the_comm_does_not_pin_its_substitutions` | a pinned `comm` over unpinned sorts is still a breach, while its comm half is satisfied |
+| `test_a_fully_pinned_line_is_not_flagged` | without which the detector could be "flag everything" and every arm above still passes |
+| `test_prose_describing_the_rule_does_not_violate_it` | a comment containing the forbidden form is not a breach -- it flagged `run_all_versions.sh` for its own text before the guard skipped comments |
+| `test_an_unpinned_comm_is_caught_and_a_word_containing_comm_is_not` | `command` and an identifier containing `comm` are not comms |
+
+Both corpus arms report zero on this tree, measured before the file was written, so
+the detector is proved by planting rather than by the corpus. The load-bearing arm
+is the process-substituted form: unreachable by a pipe pattern, and reachable only
+once the detector reads substitutions too.

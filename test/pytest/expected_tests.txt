@@ -173,7 +173,27 @@
 # 361 here, which is a coincidence of this merge rather than a method: the deltas were
 # measured against different trees. Re-derived by collection on the merged tree, which
 # is the only resolution this number has.
-guard_tests 363
+# 355 -> 365 when test_collation_pinned.py landed (#1112): ten arms over the comm
+# collation rule -- the corpus sweep in both halves, plus seven planted probes, because
+# both corpus arms report ZERO on this tree and an arm that can only report "none" is a
+# check that cannot fail.
+#
+# NOTE FOR WHOEVER MERGES SECOND. #1115 moves this same key to 361 from 355 for six arms
+# of its own. Neither number survives and the deltas were measured against different
+# trees. Re-derive by collection on the merged tree.
+# MERGED with #1115's six arms. This branch derived 365 from a base of 355, and #1115
+# derived 361 from that same 355; neither is the merged truth. Both deltas happen to
+# land on 371 from the other's base, which is exactly the coincidence this file warns
+# about three times over -- they were measured against different trees and agreeing is
+# not evidence. Re-derived by collection on the merged tree: `371 tests collected`.
+# RESEATED onto main carrying #1113 and #1119. This branch derived 371 from a base of
+# 361 and main now states 362; neither is the merged truth. Re-derived by collection on
+# this tree: `372 tests collected`.
+# RESEATED again, onto main carrying #1114 and #1120. Main states 363, this branch had
+# 372; re-derived by collection on this tree: `373 tests collected`. This key has now
+# been re-derived four times on one branch, each time against a different base, and the
+# arithmetic would have been right by luck twice and wrong twice.
+guard_tests 373
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
