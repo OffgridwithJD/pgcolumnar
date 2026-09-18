@@ -73,3 +73,21 @@ mkdocs.yml        export-ignore
 .gitignore        export-ignore
 .mailmap          export-ignore
 .gitattributes    export-ignore
+
+# ---- merge behaviour -------------------------------------------------------
+#
+# CHANGELOG.md takes a UNION merge. Every PR adds its entry as the first child of
+# one heading, so any two of them conflict over an anchor rather than over
+# content: nine of 27 merges in one day touched this file, and three merge
+# commits that day exist only to resolve it.
+#
+# Union takes both sides of a divergent hunk with no marker. Identical lines are
+# emitted once, so two branches that each open a `## [Unreleased]` section
+# produce one heading and both entries -- measured on #1098 and #1106.
+#
+# ITS HAZARD IS REAL HERE: a release cut EDITS `## [Unreleased]` into
+# `## [1.0-alphaN] - date`, and a PR appending beneath that line then lands its
+# entry inside the section that just shipped, silently. `test/docs_style.sh`
+# carries the check that catches it, by comparing each released section against
+# what its own tag shipped. The driver and that check belong together.
+CHANGELOG.md      merge=union

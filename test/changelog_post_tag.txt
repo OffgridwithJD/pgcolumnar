@@ -1,0 +1,25 @@
+# POST-TAG ENTRIES IN RELEASED SECTIONS, each recorded with the reason it stays.
+#
+# `test/docs_style.sh` pins every dated section to the entries its own tag shipped.
+# Without this file that pin would forbid a released section from ever changing,
+# which is not quite the rule anyone wants: it would mean a mistake made before a
+# tag can never be described afterwards. So a divergence is allowed, and allowed
+# ONLY by being written down here with a reason a reviewer sees in the diff.
+#
+# THE KEY IS THE ENTRY'S FIRST LINE, NOT A COUNT. An allowance of "+1" would let
+# one post-tag entry be swapped for another with the check still green, which is
+# the same shape as an accounting line that balances while saying nothing.
+#
+# Format, TAB-separated, three fields, all required:
+#
+#     <version>	<the entry's first line, verbatim>	<why it stays>
+#
+# Two arms in docs_style.sh guard this file itself: every row must carry a reason,
+# and no row may be stale -- an allowance for an entry that is no longer extra
+# would silently widen what the section arms accept.
+#
+# Adding a row is not the normal response to a red arm. The normal response is that
+# an entry was filed into a closed section by mistake and belongs in [Unreleased].
+# A row here says the mistake is already tagged and cannot be corrected without
+# making some other section wrong.
+1.0-alpha3	- A pytest harness beside the bash suites, with a layer that refuses tests which	d978e7f, docs: record the pytest harness in the changelog (#432), added it on 2026-09-09 -- seven days after the v1.0-alpha3 tag. It STAYS where it is. The work shipped in the 1.0-alpha4 cycle, but the v1.0-alpha4 tag does not carry the entry either, so moving it would make a second section disagree with its own tag and deleting it would lose a true record. A changelog records what happened, and what happened is this.
