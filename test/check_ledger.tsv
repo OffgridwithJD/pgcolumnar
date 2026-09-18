@@ -221,12 +221,21 @@ harness_selftest	050-the-list-must-be-read-the	premise: the fixture really does 
 harness_selftest	060-the-list-stays-sorted-which-is	premise: C collation puts sort_status before sorted_projection	15;16;17;18;19	never	-
 harness_selftest	060-the-list-stays-sorted-which-is	the suite list is sorted in C order, so two new suites land in different places	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	a file that uses comm pins the collation of every sort feeding it	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	a line with ONE of two sorts pinned is still caught	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	a process-substituted sort with no pin is caught, which the old pattern missed	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	an unpinned comm is caught by its own reader	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	and a fully pinned line is not flagged, so the reader can report none	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	and a pinned comm is not	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	and a prefix of a registered name is not treated as registered	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	and pins the comm itself, whose prefix does not reach its substitutions	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	and the piped form the old pattern did catch is still caught	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	every registered suite has a file	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	every suite is registered in run_all_versions.sh	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	negative control: and does not find one that is not	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	pinning only the comm does not pin its substitutions	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	positive control: the membership test finds a name that is registered	15;16;17;18;19	never	-
 harness_selftest	070-and-comm-s-two-inputs-must	premise: some suite still uses comm, or the check below is vacuous	15;16;17;18;19	never	-
+harness_selftest	070-and-comm-s-two-inputs-must	prose describing the rule does not violate it	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment ending in a pipe is not a producer	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment naming a TERMINATED tag still opens no heredoc, so the lines below it are seen	15;16;17;18;19	never	-
 harness_selftest	080-no-suite-pipes-a-captured-string	a comment naming a heredoc exempts nothing, so the line below it is still seen	15;16;17;18;19	never	-

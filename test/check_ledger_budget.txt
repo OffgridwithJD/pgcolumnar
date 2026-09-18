@@ -78,4 +78,15 @@ suites_not_covered 249
 # clean union and only the COUNT had to be re-derived. Both files conflicted loudly
 # here, which is the safe half: the ledger is always right and only sometimes speaks.
 # Re-derived by the command above on the merged tree, never by adding the deltas:
-checks_never_observed_red 1340
+# 1325 -> 1334: nine arms in selftest part 070, which learned to see a
+# process-substituted sort and to read code rather than prose (#1112). Derived by the
+# command above on this tree, and by the gate's census in the same run.
+# RESEATED onto main carrying #1113 and #1119. Main states 1330, this branch stated
+# 1334, and the merged tree is neither. The ledger auto-merged SILENTLY here while the
+# budget conflicted loudly, which is the usual pairing and the reason the union was
+# checked by KEY rather than trusted: 0 main keys lost, 9 added, all in part 070.
+# Re-derived by the command above on the merged tree.
+# RESEATED onto main carrying #1114 and #1120. Re-derived by the command above on
+# the merged tree; the ledger auto-merged silently again and was checked by KEY:
+# 0 main keys lost, 9 added, all in part 070.
+checks_never_observed_red 1349
