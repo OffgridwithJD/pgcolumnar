@@ -477,6 +477,23 @@ pgcolumnar_row_read_column(PgColumnarReadState *rs, int c, Datum *values, bool *
 		{
 			char	   *p = rs->nativeValueCursor[c];
 
+			/*
+			 * BOUNDED, which the inlined copy of this decode was not. The
+			 * general path below has always refused a value running past the
+			 * stream end; this one trusted the bitmap to stop first. #1130
+			 * gives a corrupt catalog a new way to say "every row is present"
+			 * -- the NO_VALIDITY flag on a chunk whose values are short --
+			 * and a synthesized all-ones bitmap then walks this cursor off the
+			 * end of the stream. The guard in pgcolumnar_native_load_group
+			 * checks the descriptor's value COUNTS against the row count; it
+			 * cannot check bytes, because the encoded bytes are what the
+			 * decoder is about to produce.
+			 */
+			if (p + att->attlen > rs->nativeValueEnd[c])
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
+
 			values[c] = fetch_att(p, true, att->attlen);
 			rs->nativeValueCursor[c] = p + att->attlen;
 		}
@@ -1022,6 +1039,29 @@ pgcolumnar_read_start(PgColumnarReadState *readState)
 
 
 /*
+ * pgcolumnar_chunk_validity_bytes
+ *		How many bytes of validity bitmap THIS chunk stored: 0 when it held no
+ *		null and therefore wrote none (#1130), and the row group's
+ *		ceil(rowCount / 8) otherwise.
+ *
+ *		A PROPERTY OF ONE CHUNK, not of the row group. One column can hold nulls
+ *		while its neighbour does not, so every reader that used to derive the
+ *		size once per group asks this once per chunk instead. Three of them read
+ *		the same chunk -- the group scan, the coalesced fetch read, and the
+ *		per-column fetch path -- and they MUST agree, because the coalesced read
+ *		hands the per-column loop a pointer and a length it computed itself.
+ *		They agree by calling this rather than by each repeating the condition.
+ */
+static inline int
+pgcolumnar_chunk_validity_bytes(const NativeColumnChunkMetadata *cc,
+								int validityBytes)
+{
+	return PgColumnarEncdescOmitsValidity(cc->encodingDescriptor,
+										  cc->encodingDescriptorLen)
+		? 0 : validityBytes;
+}
+
+/*
  * pgcolumnar_chunk_value_bytes
  *		The value stream that follows a chunk's validity bitmap, as a uint32.
  *
@@ -1090,7 +1130,7 @@ pgcolumnar_native_decode_chunk(MemoryContext cx, Form_pg_attribute att,
 	MemoryContext decodeScratch;
 
 	if (descLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN ||
-		(uint8) desc[0] != COLUMNAR_NATIVE_ENCDESC_VERSION)
+		!PgColumnarEncdescVersionSupported(desc))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgcolumnar: unrecognized native encoding descriptor")));
@@ -2446,6 +2486,8 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 	List	   *chunks;
 	ListCell   *lc;
 	int			validityBytes;
+	int			chunkValidityBytes;	/* #1130: per chunk, not per row group */
+	char	   *allPresentBits = NULL;	/* shared synthesized all-ones bitmap */
 	int			maxVecCount;
 	int			groupVecDecoded;	/* measured in the decode loop, never derived */
 	int			pass;
@@ -2625,7 +2667,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			 * answer instead of a loud one.
 			 */
 			if (cc->encodingDescriptorLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN ||
-				(uint8) cc->encodingDescriptor[0] != COLUMNAR_NATIVE_ENCDESC_VERSION)
+				!PgColumnarEncdescVersionSupported(cc->encodingDescriptor))
 			{
 				allDescriptor = false;
 				continue;
@@ -2722,7 +2764,98 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 							   rg->fileOffset, rg->fileOffset + rg->byteLength)));
 
 		base = rs->nativeBuffer + (cc->pageOffset - rg->fileOffset);
-		rs->nativeValidity[cc->columnIndex] = base;
+
+		/*
+		 * #1130: the bitmap's size is a property of THIS CHUNK, not of the row
+		 * group. A chunk that held no null did not store one, and its neighbour
+		 * in the same group may still have. `validityBytes` above remains the
+		 * group-wide ceil(rowCount / 8), which is the length of a bitmap that
+		 * WAS stored and of the synthesized one below.
+		 */
+		chunkValidityBytes = pgcolumnar_chunk_validity_bytes(cc, validityBytes);
+
+		/*
+		 * A chunk with no stored bitmap still has to answer "is row r present?",
+		 * and all fourteen readers of nativeValidity read it as bits. Point them
+		 * at one all-ones buffer rather than teaching each of them a second
+		 * shape: the answer is identical for every such chunk in the group, so
+		 * it is built once, shared, and the readers stay unchanged.
+		 */
+		if (chunkValidityBytes > 0)
+			rs->nativeValidity[cc->columnIndex] = base;
+		else
+		{
+			/*
+			 * A CHUNK THAT STORED NO BITMAP IS ASSERTING THAT EVERY ROW OF THE
+			 * GROUP IS PRESENT IN IT, so that assertion is checked against the
+			 * descriptor's own per-vector value counts before it is believed.
+			 *
+			 * Without this the synthesized all-ones bitmap below reports
+			 * "present" for rows the chunk does not hold, and the scan reads
+			 * past the value stream. Measured with corruption.sh's
+			 * `row_count = row_count + 100000`: SIGSEGV. A stored bitmap needs
+			 * no equivalent because its own bits say which rows are absent.
+			 */
+			int64		accounted =
+				PgColumnarEncdescTotalValueCount(cc->encodingDescriptor,
+												 cc->encodingDescriptorLen);
+
+			if (accounted < 0 || (uint64) accounted != rg->rowCount)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("columnar chunk for column %d claims no nulls but does not account for every row of row group " UINT64_FORMAT,
+								cc->columnIndex + 1, rg->groupNumber),
+						 errdetail("The descriptor accounts for " INT64_FORMAT " values where the row group declares " UINT64_FORMAT ".",
+								   accounted, rg->rowCount)));
+
+			if (allPresentBits == NULL)
+			{
+				/*
+				 * SIZED FROM rowCount IN 64-BIT, because that is what its
+				 * readers index it by, and `validityBytes` above is an int that
+				 * a corrupt row_count overflows. Sizing from that int gave a
+				 * one-byte buffer for a row count of 2^60 and the readers walked
+				 * off it: SIGSEGV, caught by corruption.sh's "alive after
+				 * row_count" arm.
+				 *
+				 * A stored bitmap needs no such check because pageLength bounds
+				 * it -- pgcolumnar_chunk_value_bytes refuses a validity span
+				 * longer than the chunk. An OMITTED one has no such relation to
+				 * anything on disk, so the bound has to be asserted here.
+				 */
+				uint64		need = (rg->rowCount + 7) / 8;
+
+				/*
+				 * MaxAllocSize AND NOTHING TIGHTER, which is not for want of
+				 * looking. The obvious bound is the row group's own byteLength
+				 * -- a stored bitmap cannot be longer than the bytes the group
+				 * occupies -- and it is WRONG here, which this change is itself
+				 * the proof of: an elided group of two well-encoded bigint
+				 * columns measured 360 bytes on disk against a 12,500-byte
+				 * bitmap it no longer stores. Bounding by byteLength refused
+				 * every table the feature helps most; measured, not reasoned
+				 * about, when that bound made a plain SELECT raise
+				 * "implausible row count" on a correct table.
+				 *
+				 * The real guard is the value-count check above, which runs
+				 * FIRST and refuses a corrupt row_count before a byte is
+				 * allocated. This one is the backstop for a descriptor that
+				 * claims billions of values to match.
+				 */
+				if (need > (uint64) MaxAllocSize)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("columnar row group " UINT64_FORMAT " declares an implausible row count",
+									rg->groupNumber),
+							 errdetail("Row count " UINT64_FORMAT " would need " UINT64_FORMAT " bytes of validity bits.",
+									   rg->rowCount, need)));
+
+				allPresentBits = (char *) MemoryContextAlloc(rs->groupContext,
+															 need > 0 ? (Size) need : 1);
+				memset(allPresentBits, 0xFF, need > 0 ? (Size) need : 1);
+			}
+			rs->nativeValidity[cc->columnIndex] = allPresentBits;
+		}
 
 		if (cc->encodingDescriptorLen == 1 &&
 			(uint8) cc->encodingDescriptor[0] == COLUMNAR_NATIVE_ENCDESC_BASELINE)
@@ -2730,7 +2863,7 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 			/* D2b baseline: raw present values follow the validity bitmap; no
 			 * per-vector structure, so per-vector skipping is disabled below. The
 			 * value region runs from the bitmap end to the chunk end. */
-			rs->nativeValueCursor[cc->columnIndex] = base + validityBytes;
+			rs->nativeValueCursor[cc->columnIndex] = base + chunkValidityBytes;
 			rs->nativeValueEnd[cc->columnIndex] = base + cc->pageLength;
 			allDescriptor = false;
 		}
@@ -2744,9 +2877,9 @@ pgcolumnar_native_load_group(PgColumnarReadState *rs)
 
 			/* D4: reconstruct the raw present-value stream from the descriptor */
 			rs->nativeValueCursor[cc->columnIndex] =
-				pgcolumnar_native_decode_chunk(rs->groupContext, att, base + validityBytes,
+				pgcolumnar_native_decode_chunk(rs->groupContext, att, base + chunkValidityBytes,
 											 pgcolumnar_chunk_value_bytes(cc->pageLength,
-																		   validityBytes,
+																		   chunkValidityBytes,
 																		   cc->columnIndex + 1),
 											 cc->encodingDescriptor,
 											 cc->encodingDescriptorLen,
@@ -4101,6 +4234,10 @@ pgcolumnar_fetch_group_slot(uint64 storageId, uint64 groupNumber, bool *hit)
  *		Validity bitmaps land on the fetch-cache entry. Value streams stay in
  *		CurrentMemoryContext (the per-fetch tmp context) for the decode loop
  *		to copy from. A column nobody projected is never read.
+ *
+ *		validityBytes arrives non-negative: the caller refuses a row count whose
+ *		bitmap would exceed MaxAllocSize, which is also what stops the int it is
+ *		cast to from overflowing.
  */
 static void
 pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
@@ -4118,6 +4255,7 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 	for (c = 0; c < natts; c++)
 	{
 		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
+		int			cvb;			/* #1130: this chunk's validity bytes */
 
 		if (!allColumns && !bms_is_member(c, needed))
 			continue;
@@ -4125,6 +4263,16 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 			continue;
 		if (entry->vbits[c] != NULL && entry->rawBuf[c] != NULL)
 			continue;
+
+		/*
+		 * #1130: the skip below is THIS CHUNK'S bitmap against THIS CHUNK'S
+		 * page, and eliding the bitmap is exactly what takes a well-encoded
+		 * chunk under the group-wide size -- a sorted bigint measured 135 bytes
+		 * of values against a 25,000-byte bitmap. Comparing against the
+		 * group-wide size would therefore send every chunk this change helps
+		 * most to the per-column path, which reads it a column at a time.
+		 */
+		cvb = pgcolumnar_chunk_validity_bytes(cc, validityBytes);
 
 		/*
 		 * A CHUNK THE CHECKED DECODE PATH WOULD REFUSE IS LEFT FOR IT, so
@@ -4142,8 +4290,8 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 		 *
 		 * Reported by @jdatcmd against #1092 + #1093 composed.
 		 */
-		if (cc->pageLength < (uint64) validityBytes ||
-			cc->pageLength - (uint64) validityBytes > (uint64) PG_UINT32_MAX)
+		if (cc->pageLength < (uint64) cvb ||
+			cc->pageLength - (uint64) cvb > (uint64) PG_UINT32_MAX)
 			continue;
 
 		ranges[n].start = cc->pageOffset;
@@ -4183,6 +4331,7 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 		{
 			NativeColumnChunkMetadata *cc = entry->ccForCol[c];
 			uint64		off;
+			int			cvb;	/* #1130: this chunk's validity bytes */
 
 			if (cc == NULL || cc->pageLength == 0)
 				continue;
@@ -4204,24 +4353,39 @@ pgcolumnar_fetch_coalesce_read(Relation rel, PgColumnarFetchGroup *entry,
 			 * reads it straight from storage into an exactly-sized buffer and
 			 * refuses it there.
 			 */
-			if (cc->pageLength < (uint64) validityBytes)
+			/*
+			 * #1130: per chunk, because a chunk that held no null stored no
+			 * bitmap while its neighbour in the same group may have stored one.
+			 */
+			cvb = pgcolumnar_chunk_validity_bytes(cc, validityBytes);
+
+			if (cc->pageLength < (uint64) cvb)
 				continue;
 
 			off = cc->pageOffset - start;
 			if (entry->vbits[c] == NULL)
 			{
 				MemoryContext vOld = MemoryContextSwitchTo(entry->cx);
+				int			vbytes = validityBytes > 0 ? validityBytes : 1;
 
-				entry->vbits[c] = palloc(validityBytes > 0 ? validityBytes : 1);
+				entry->vbits[c] = palloc(vbytes);
 				MemoryContextSwitchTo(vOld);
-				if (validityBytes > 0)
-					memcpy(entry->vbits[c], buf + off, validityBytes);
+
+				/*
+				 * A chunk with no stored bitmap answers "present" for every
+				 * row, and every reader of vbits reads it as bits, so it is
+				 * synthesized rather than special-cased at each of them.
+				 */
+				if (cvb > 0)
+					memcpy(entry->vbits[c], buf + off, cvb);
+				else
+					memset(entry->vbits[c], 0xFF, vbytes);
 			}
 			if (entry->rawBuf[c] == NULL &&
-				cc->pageLength >= (uint64) validityBytes)
+				cc->pageLength >= (uint64) cvb)
 			{
-				valueStream[c] = buf + off + validityBytes;
-				valueLen[c] = (uint32) (cc->pageLength - validityBytes);
+				valueStream[c] = buf + off + cvb;
+				valueLen[c] = (uint32) (cc->pageLength - cvb);
 			}
 		}
 
@@ -4464,7 +4628,28 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		MemoryContextSwitchTo(entryOld);
 	}
 
-	validityBytes = (int) ((entry->rowCount + 7) / 8);
+	/*
+	 * SIZED IN 64-BIT AND REFUSED BEFORE THE CAST. A corrupt row_count large
+	 * enough to overflow this int produced a NEGATIVE validityBytes, and every
+	 * consumer below then either skipped its read and left the bits
+	 * uninitialised or indexed past a one-byte buffer -- a hazard that predates
+	 * #1130 and that #1130's own comments could not honestly describe, because
+	 * they claimed a refusal further down that does not exist. Refused here
+	 * instead, once, in the same shape as the scan path's guard, which is what
+	 * lets every consumer below treat validityBytes as non-negative.
+	 */
+	{
+		uint64		need = (entry->rowCount + 7) / 8;
+
+		if (need > (uint64) MaxAllocSize)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("columnar row group " UINT64_FORMAT " declares an implausible row count",
+							entry->groupNumber),
+					 errdetail("Row count " UINT64_FORMAT " would need " UINT64_FORMAT " bytes of validity bits.",
+							   entry->rowCount, need)));
+		validityBytes = (int) need;
+	}
 
 	{
 		char	  **valueStream = (char **) palloc0(sizeof(char *) * natts);
@@ -4479,6 +4664,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		Form_pg_attribute att = TupleDescAttr(tupdesc, c);
 		NativeColumnChunkMetadata *cc = entry->ccForCol[c];
 		char	   *vbits;
+		int			cvb;			/* #1130: this chunk's validity bytes */
 		char	   *rawBuf;
 		uint32		rawBufLen = 0;	/* byte length of rawBuf, for bounds checks */
 		char	   *cursor;
@@ -4505,19 +4691,37 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		}
 
 		/*
+		 * #1130: PER CHUNK. This path is where an elided bitmap lands most
+		 * often, because the coalesced read above skips a chunk smaller than
+		 * the group's bitmap and eliding it is what makes a well-encoded chunk
+		 * that small. Reading the group-wide size here took the chunk's first
+		 * encoded bytes for a bitmap: measured on this tree before the fix,
+		 * native_index's point lookup returned NO ROW for a row that is there.
+		 */
+		cvb = pgcolumnar_chunk_validity_bytes(cc, validityBytes);
+
+		/*
 		 * The validity bitmap, read once for this column and then kept (#433).
 		 * It is small and it is consulted on every fetch, so an overflowed
 		 * column still answers "is this row null" without touching the group.
+		 *
+		 * A chunk that stored none answers "present" for every row, and the
+		 * bits are read by the rank prefix and by the null test below, so it is
+		 * synthesized once into the same shape rather than special-cased at
+		 * each reader.
 		 */
 		if (entry->vbits[c] == NULL)
 		{
 			MemoryContext vOld = MemoryContextSwitchTo(entry->cx);
+			int			vbytes = validityBytes > 0 ? validityBytes : 1;
 
-			entry->vbits[c] = palloc(validityBytes > 0 ? validityBytes : 1);
+			entry->vbits[c] = palloc(vbytes);
 			MemoryContextSwitchTo(vOld);
-			if (validityBytes > 0)
+			if (cvb > 0)
 				PgColumnarReadLogicalData(rel, cc->pageOffset, entry->vbits[c],
-										validityBytes);
+										cvb);
+			else
+				memset(entry->vbits[c], 0xFF, vbytes);
 		}
 		vbits = entry->vbits[c];
 		if (((vbits[rowInGrp >> 3] >> (rowInGrp & 7)) & 1) == 0)
@@ -4552,7 +4756,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 			MemoryContext decCx;
 			MemoryContext decOld;
 			uint32		vlen = pgcolumnar_chunk_value_bytes(cc->pageLength,
-												   validityBytes,
+												   cvb,
 												   c + 1);
 			char	   *vstream;
 
@@ -4576,7 +4780,7 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 					memcpy(vstream, valueStream[c], vlen);
 				else
 					PgColumnarReadLogicalData(rel,
-											cc->pageOffset + validityBytes,
+											cc->pageOffset + cvb,
 											vstream, vlen);
 			}
 

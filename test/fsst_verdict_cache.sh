@@ -76,7 +76,8 @@ fingerprint() {  # fingerprint <table>
 
 # How many vectors chose FSST. Lifted from test/write_fsst_compressed.sh, whose
 # comment carries the trap: the descriptor is a 6-byte header (version, a
-# reserved byte, then the vector count as uint32) followed by that many 13-byte
+# flags byte -- a reserved zero before #1130 -- then the vector count as uint32)
+# followed by that many 13-byte
 # entries and then the chunk-shared symbol table, so entry i's type byte is at
 # 6 + i*13 and the count must come from the header rather than from the length.
 # Reading past the entries scores the symbol table's own bytes as encoding types.

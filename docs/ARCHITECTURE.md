@@ -15,8 +15,10 @@ A columnar relation stores its data in its own main fork using standard
 PostgreSQL pages, so the buffer manager, WAL, and page checksums apply. Block 0
 is a metapage, block 1 is reserved, and block 2 onward is a logical byte area.
 Rows are grouped into row groups (a run of up to `stripe_row_limit` rows, the
-write unit). Within a row group one column's data is a chunk, holding a validity
-bitmap and a value stream encoded in fixed-size vectors. The metadata catalog is a separate set of ordinary heap tables in the
+write unit). Within a row group one column's data is a chunk. A chunk holds a
+value stream encoded in fixed-size vectors. A validity bitmap precedes that
+stream when the chunk holds a null. A chunk with no nulls stores no bitmap, and
+records that in its encoding descriptor. The metadata catalog is a separate set of ordinary heap tables in the
 `pgcolumnar` schema:
 
 - `storage`, `row_group` and `column_chunk` record the layout.

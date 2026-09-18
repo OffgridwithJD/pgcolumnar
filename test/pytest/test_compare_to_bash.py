@@ -95,7 +95,7 @@ COMPLETE = ["analyze_reltuples",
             "projections",
             "sorted_pathkeys", "stats_privilege",
             "index_fetch_penalty_crossover",
-            "parallel_scan_cost", "zonemap_boundaries"]
+            "parallel_scan_cost", "validity_elision", "zonemap_boundaries"]
 
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the

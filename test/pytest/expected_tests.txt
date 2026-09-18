@@ -310,4 +310,12 @@ guard_tests 380
 # `guard_tests` was re-derived in the same run and did NOT move: 380. That is the
 # expected answer for a file that needs a cluster, and checking it rather than
 # assuming it is what this file asks for.
-cluster_tests 423
+# 423 -> 427 when test_validity_elision.py landed (#1130): four cluster arms over
+# the elided validity bitmap -- the size arms with their premises, the read-back
+# invariant they exist to prove is not vacuous, the FETCH path, which is a second
+# reader with its own copy of the layout, and the two corruption guards the
+# elision added, each poisoned into firing and asserted by SQLSTATE.
+#
+# DERIVED BY COLLECTION on this tree: `427 tests collected`. `guard_tests` was
+# re-derived in the same run and did NOT move: 380.
+cluster_tests 427

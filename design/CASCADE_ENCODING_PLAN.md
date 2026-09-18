@@ -162,7 +162,7 @@ of incompressible columns would spend less time in candidates that bail early.
 Cascading (step 2) is unaffected by this result. It remains the size lever, and
 it remains a format change, though a smaller one than the plan assumed: the
 encoding descriptor is already versioned (`COLUMNAR_NATIVE_ENCDESC_VERSION`, now
-2) with a fixed-size entry per vector, and `columnar_reader.c` rejects an
+3, since #1130 spent the header's reserved byte on flags) with a fixed-size entry per vector, and `columnar_reader.c` rejects an
 unrecognized version with a clean error. A version 3 entry carrying a chain can
 therefore coexist with 2, and an older build meets a clear error rather than a
 wrong value. The open decision is still whether new tables write version 3 by

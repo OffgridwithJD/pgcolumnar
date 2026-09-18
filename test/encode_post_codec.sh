@@ -72,8 +72,18 @@ encoded_vectors() {	# table -> count of non-NONE vectors
 # bitmap, which is one bit per row and is written raw ahead of the codec
 # (columnar_write_state.c:1079). Subtracted so the number moves only with the
 # encoding decision, which is what this suite is about.
+#
+# SUBTRACTED ONLY WHERE THERE IS ONE (#1130). A chunk that holds no null stores
+# no bitmap and sets bit 0 of the descriptor's flags byte, so the old
+# unconditional subtraction now removes bytes that were never written and
+# understates the value stream. These fixtures hold no nulls at all, so every
+# chunk takes the zero branch today; the condition is here because a fixture
+# that gains a null must not silently change what this measures.
 value_bytes() {	# table -> bytes
-	q "SELECT coalesce(sum(c.page_length) - sum((c.value_count + 7) / 8), 0)
+	q "SELECT coalesce(sum(c.page_length) - sum(
+			CASE WHEN octet_length(c.encoding_descriptor) >= 6
+			      AND (get_byte(c.encoding_descriptor, 1) & 1) = 1
+			     THEN 0 ELSE (c.value_count + 7) / 8 END), 0)
 		FROM pgcolumnar.column_chunk c
 		JOIN pgcolumnar.storage s ON s.storage_id = c.storage_id
 		WHERE s.relation_oid = '$1'::regclass

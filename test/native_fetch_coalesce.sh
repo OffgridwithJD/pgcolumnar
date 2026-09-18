@@ -120,7 +120,7 @@ check "premise: the wide fetch returns the projected values" \
 # ---- the validity copy must be bounded by the chunk, not by the row count -----
 #
 # THIS IS AN ORDERING PIN AND IT IS DELIBERATELY NOT BEHAVIOURAL. The defect it
-# guards was a heap overread: the coalesced path copies validityBytes out of a
+# guards was a heap overread: the coalesced path copies the validity bytes out of a
 # span buffer that is only guaranteed to hold page_length bytes for this chunk,
 # and the test reconciling the two used to run three lines AFTER the copy.
 #
@@ -149,11 +149,18 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src"
 # $2 is an OPTIONAL anchor: the search starts only after a line matching it.
 # THE FUNCTION HAS TWO GUARDS WITH THE SAME TEXT. The range-building loop defers
 # a chunk the checked decode path would refuse, and the distribution loop bounds
-# the validity copy; both read `pageLength < (uint64) validityBytes`. Without an
-# anchor this finds the FIRST, which is in the wrong loop -- the ordering check
-# would then still pass with the distribution guard deleted, which is the guard
-# it exists to pin. Anchoring on the containment test, which only the
-# distribution loop has, pins the right one. Reported by @jdatcmd.
+# the validity copy; both read `pageLength < (uint64) cvb`. Without an anchor
+# this finds the FIRST, which is in the wrong loop -- the ordering check would
+# then still pass with the distribution guard deleted, which is the guard it
+# exists to pin. Anchoring on the containment test, which only the distribution
+# loop has, pins the right one. Reported by @jdatcmd.
+#
+# THE TEXT MOVED WITH #1130 and the pattern moved with it: both guards compared
+# against `validityBytes`, the row group's ceil(rowCount / 8), until the bitmap
+# became a property of the CHUNK. `cvb` is that chunk's own size, 0 where the
+# bitmap was elided. The property this suite pins -- the bound precedes the copy
+# -- is unchanged; only the name it is spelled with moved, which is the standing
+# cost of pinning source text and the reason the pattern is stated once here.
 _nfc_line() {
 	awk -v pat="$1" -v after="$2" '
 		/^pgcolumnar_fetch_coalesce_read[(]/       { f = 1 }
@@ -179,7 +186,7 @@ _nfc_line() {
 # here and failed there. A bracket expression cannot be mangled by -v escape
 # processing and means a literal paren in both. Verified identical under mawk
 # and gawk. Reported by @jdatcmd.
-_nfc_guard="$(_nfc_line 'pageLength < [(]uint64[)] validityBytes' 'cc->pageOffset < start')"
+_nfc_guard="$(_nfc_line 'pageLength < [(]uint64[)] cvb' 'cc->pageOffset < start')"
 _nfc_copy="$(_nfc_line 'memcpy[(]entry->vbits' '')"
 
 check "premise: the coalescing helper holds both the bound and the validity copy" \

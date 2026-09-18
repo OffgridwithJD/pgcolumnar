@@ -18,6 +18,103 @@ true until the next version shipped.
 
 ### Fixed
 
+- The validity bitmap was stored uncompressed and never elided, so a column with
+  no nulls paid `ceil(rows / 8)` bytes for ever (#1130).
+
+  A column chunk's page was always `[validity bitmap][encoded values]`. The
+  bitmap is one bit per row and is written RAW, ahead of the block codec, which
+  therefore never saw it. A `NOT NULL` column, or one that simply holds no nulls,
+  still stored `ceil(rows / 8)` bytes of `0xFF`.
+
+  The writer now omits the bitmap for a chunk that holds no null, and says so in
+  the encoding descriptor's new flags byte. Measured on ClickBench
+  `hits_0.parquet` (1,000,000 rows, 105 columns, no null in any of them),
+  imported through `pgcolumnar.import_parquet` on PG17, both arms loaded into the
+  same cluster on the same day:
+
+      stored chunk bytes   78,109,810 -> 64,984,810   -16.80%
+      validity bytes       13,125,000 ->          0
+      relation size        78,381,056 -> 65,216,512
+      chunks without a bitmap    0 of 735 -> 735 of 735
+
+  The saving is exactly the bitmap: -13,125,000 bytes, which is
+  105 columns x 125,000 bytes. Nothing else moved.
+
+  **DECIDED FROM THE ROWS WRITTEN, not from the column's `NOT NULL` flag.** A
+  nullable column whose rows happen to be complete gets the saving too, and a
+  constraint added later cannot make an already-written chunk lie.
+
+  **THE FORMAT MOVES: encoding descriptor version 2 -> 3.** Version 3 spends the
+  byte version 2 wrote as a zero reserved byte, so every field keeps its offset
+  and a version-2 descriptor is a version-3 one whose flags are clear. Readers
+  accept 2 and 3; writers emit 3. Tables written by an older build keep reading
+  with no conversion.
+
+  **DOWNGRADING A BINARY BELOW THE ONE THAT WROTE THE TABLE IS NOT SUPPORTED**,
+  and the shape of that failure is measured rather than asserted. An alpha4
+  binary reading a table this build wrote: a sequential scan always raises
+  `unrecognized native encoding descriptor`; an index fetch of a chunk narrower
+  than the bitmap raises `validity bitmap longer than the chunk`; and an index
+  fetch of a WIDER chunk returned NULL for a row that holds a value in 16 of 40
+  single-row fetches, because the old reader tests a bit in bytes that are not a
+  bitmap before it reaches any version check. #1137 tracks the versioning gap
+  that makes the silent case possible.
+
+  **THE BITMAP'S SIZE IS NOW A PROPERTY OF THE CHUNK, NOT THE ROW GROUP**, and
+  three readers had to learn that, not one. The first implementation taught only
+  the sequential scan, and the PG17 matrix went red in 33 suites --
+  `native_index`'s point lookup returned NO ROW for a row that is there. The two
+  are correlated rather than independent: `pgcolumnar_fetch_coalesce_read` skips
+  any chunk whose `page_length` is below the group's bitmap size, and eliding the
+  bitmap is exactly what takes a well-encoded chunk below it, so the chunks this
+  change helps most are the ones that fall to the per-column fetch path.
+
+  **A HARDENING GAP THE CHANGE'S OWN COMMENTS FORCED INTO THE OPEN.** The scan's
+  fast path for fixed-width by-value types read a value without checking it
+  against the end of the stream, trusting the validity bitmap to stop first.
+  A synthesized all-ones bitmap is a new way to reach past it, so the fast path
+  now carries the bound the general path has always had. Two more guards refuse
+  a descriptor that claims no bitmap while accounting for fewer values than the
+  group has rows, and a row count whose bitmap would not fit in memory. Both are
+  asserted by SQLSTATE `XX001` against a poisoned catalog.
+
+  THE BOUND ON THE FAST PATH COSTS NOTHING MEASURABLE. Backend instructions for
+  `sum` over a 1,000,000-row bigint column, `cpu_core/instructions/` pinned to
+  the P-cores, three repetitions per backend and two backends per arm:
+
+      with the bound      6,819,185,307   6,811,086,223
+      without it          7,408,953,743   7,394,084,968
+
+  The bounded build is 7.9% LOWER, reproduced in a second build directory with
+  the arms interleaved (6,818,778,149 / 6,801,164,841 against the same .so).
+  WHAT THIS SUPPORTS IS THAT THE CHECK IS NOT A COST. It is not claimed as a
+  saving, and the direction is unexplained: the compiled function is LARGER with
+  the bound (97 instructions against 88, plus 69 bytes of cold block) and nothing
+  else in the object moved, so a local codegen effect cannot produce a gap of
+  197 instructions per row.
+
+  THE PLAN AND THE WORK ARE THE SAME ON BOTH ARMS, which was the first thing to
+  suspect and is now excluded. Captured per arm: the same plan node
+  (`Custom Scan (PgColumnarScan)`), the same `actual rows=1000000`, the same
+  7 chunk groups and 100 vectors decoded, and the same checksum over the column.
+  So neither the plan nor the fixture explains it.
+
+  WHAT DOES NARROW IT IS THE BRANCH COUNT. Measured beside the instructions:
+
+      branches         1,679,418,138   against   1,675,963,100      +0.2%
+      instructions     6,817,514,459   against   7,409,086,680      +8.7%
+
+  Equal control flow, 590 million more instructions retired. So the difference
+  is the instruction MIX in straight-line code and not more iterations of
+  anything. The mechanism is still unidentified, and the number is recorded as
+  what it is: the check is not a cost, and nothing further is claimed.
+
+  `test/validity_elision.sh` and `test/pytest/test_validity_elision.py`, 25
+  checks each, green on PG15 through PG19. Three mutations were run against
+  them: forcing the writer's elision decision false reddens one arm, making the
+  reader ignore the flag reddens ten, and using the group-wide size in the fetch
+  path reddens exactly the three fetch arms. Ledger rows seeded from five real
+  runs merged in one call, so each carries 15;16;17;18;19.
 - Three suites ported to pytest, and the queue re-derived (#432).
 
   `analyze_reltuples`, `projection_update` and `projection_drop_column`, 21 names,

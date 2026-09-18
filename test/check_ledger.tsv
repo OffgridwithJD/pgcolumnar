@@ -1416,3 +1416,28 @@ projection_scan_cost	projection_scan_cost	premise: without the projection scan, 
 projection_scan_cost	projection_scan_cost	premise: without the projection scan, the tight plan is a base columnar scan	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	tight and loose covering scans are not both priced at half the base	15;16;17;18;19	2026-09-17	-
 projection_scan_cost	projection_scan_cost	while a plain range on the sort key still earns its discount	15;16;17;18;19	never	-
+validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
+validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
+validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-
+validity_elision	validity_elision	an implausible row count on an elided chunk is refused before anything is allocated	15;16;17;18;19	never	-
+validity_elision	validity_elision	and the backend survives that refusal	15;16;17;18;19	never	-
+validity_elision	validity_elision	and the backend survives that refusal too	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: each fixture is a single row group, which is what the expected size assumes	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the arms below reach the row through an index scan	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	premise: the block codec is off, so the residual is the bitmap and nothing else	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the first fixture holds no nulls at all	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	premise: the join arms below reach the columnar side by index too	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the per-chunk arm's residual was summed over chunks that exist	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the residual was summed over chunks that exist	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	never	-
+validity_elision	validity_elision	single-row fetches of the null-bearing column return its nulls as nulls	15;16;17;18;19	never	-
+validity_elision	validity_elision	single-row fetches through the elided path return the row asked for	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
+validity_elision	validity_elision	the full column fetched by index matches the heap, row for row	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
+validity_elision	validity_elision	the full column holds no row the heap does not	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the full column preserves its null count	15;16;17;18;19	never	-
+validity_elision	validity_elision	the full column reads back exactly what the heap holds	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the nulls column fetched by index matches the heap, row for row	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
+validity_elision	validity_elision	the nulls column holds no row the heap does not	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the nulls column preserves its null count	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the nulls column reads back exactly what the heap holds	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	while a column with nulls still stores one, sized one bit per row	15;16;17;18;19	never	-
