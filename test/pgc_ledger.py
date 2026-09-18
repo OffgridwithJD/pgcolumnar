@@ -375,6 +375,69 @@ def cmd_census(args):
     return 0
 
 
+def _warn_subset_majors(rows, touched):
+    """Say so when this merge wrote a row covering fewer majors than the ledger does.
+
+    #1071. A contributor adds checks, runs the suite on ONE major, and merges that
+    log. The row lands with `majors = 18`. The gate considers a row only where its
+    majors intersect the run's, so `suites (PG 18)` matches it and is green while
+    `suites (PG 17)` reads it as a check the ledger has never seen and reddens --
+    naming the contributor's own checks `(on major 17)`, which reads as though their
+    suite is broken on 17 when it passes there.
+
+    FIVE AUTHORS IN A ROW, including the person who wrote this tool, on a PR that was
+    itself about ledger hygiene (#1039, #1063, #1065, #1068, #1070). When everyone
+    makes the same mistake it is the tool's shape rather than five lapses, and the
+    tool already had what it needed: the distribution below is computed for the
+    summary line, so `merge` knew the new row was anomalous and said nothing.
+
+    THE PREDICATE IS STRICT SUBSET, not inequality. A row naming a major the ledger
+    has never carried is how a new major legitimately enters, and warning about that
+    would make this wrong in the case the project wants to encourage.
+
+    ONLY ROWS THIS MERGE TOUCHED. Every untouched row in a partly-seeded ledger is a
+    subset of the prevailing set, so a sweep over the whole file would reprint the
+    ledger's history on every merge and bury the one row that matters.
+
+    REPORTING, NOT A REFUSAL, deliberately. Seeding a major at a time is legitimate --
+    it is how a contributor without five installed majors makes progress -- so a hard
+    refusal would block the honest case to catch the careless one. The gate still
+    refuses later; this only makes that refusal predictable at the moment it is caused.
+    """
+    untouched = [v[0] for k, v in rows.items() if k not in touched and v[0]]
+    if not untouched:
+        # Nothing to be a subset OF. Seeding a fresh ledger must not warn, or the
+        # warning fires when nothing is wrong and stops being read.
+        return
+    # The PLURALITY set, matching the distribution the summary prints. A union would
+    # be wrong for the same reason it was wrong in the summary (#1048): it cannot
+    # represent what most rows actually carry.
+    prevailing = collections.Counter(frozenset(m) for m in untouched).most_common(1)[0][0]
+
+    offenders = {}
+    for key in sorted(touched):
+        got = frozenset(rows[key][0])
+        if got and got < prevailing:
+            offenders.setdefault(MAJOR_SEP.join(sorted(got)), []).append(key)
+    if not offenders:
+        return
+
+    have = MAJOR_SEP.join(sorted(prevailing))
+    n_prev = sum(1 for m in untouched if frozenset(m) == prevailing)
+    for got, keys in sorted(offenders.items()):
+        missing = MAJOR_SEP.join(sorted(prevailing - set(got.split(MAJOR_SEP))))
+        print(f"    WARNING: {len(keys)} row(s) written carrying majors={got}, while "
+              f"{n_prev} other row(s) carry {have}.")
+        print(f"             The gate will refuse these on every major they do not "
+              f"name, so this reddens on {missing}.")
+        print(f"             Merge a log from each major -- `merge` takes several at "
+              f"once -- or seed the rest before this lands.")
+        for suite, part, name in keys[:6]:
+            print(f"               {suite}\t{part}\t{name}")
+        if len(keys) > 6:
+            print(f"               ... and {len(keys) - 6} more")
+
+
 def cmd_merge(args):
     rows = read_ledger(args.ledger)
     runs = _by_run(args.logs)
@@ -441,9 +504,11 @@ def cmd_merge(args):
                 f"--mutation NAME if you broke it deliberately, or --reds-are-real if "
                 f"this is a genuine observation of the code under test.")
 
+    touched = set()
     for path, seen in runs:
         for key, pairs in sorted(seen.items()):
             verdicts = [v for v, _m in pairs]
+            touched.add(key)
             if key not in rows:
                 # A check this ledger has never seen enters as DEBT. A green run
                 # has observed nothing go red, so merging one must never record a
@@ -467,6 +532,8 @@ def cmd_merge(args):
             if len(verdicts) > 1:
                 print(f"    duplicate check name in one run, so one ledger row covers "
                       f"{len(verdicts)}: {key[0]}\t{key[1]}\t{key[2]}")
+
+    _warn_subset_majors(rows, touched)
 
     write_ledger(args.ledger, rows)
     seen_all = {k for _, s in runs for k in s}
@@ -1062,7 +1129,13 @@ def cmd_gate(args):
         print(f"    not in the ledger: {suite}\t{part}\t{name}\t(on major {major})")
     if unknown:
         print(f"    {len(unknown)} check(s) the ledger has never seen. Regenerate it with:")
-        print(f"      python3 test/pgc_ledger.py merge --ledger {args.ledger} --date <today> <log>")
+        # PLURAL, and it is the reason this defect kept recurring (#1071). The recipe
+        # said `<log>`, and following it exactly writes a row covering one major --
+        # which reddens on every other leg and names the contributor's own checks.
+        print(f"      python3 test/pgc_ledger.py merge --ledger {args.ledger} --date <today> \\")
+        print(f"          <log-pg15> <log-pg16> <log-pg17> <log-pg18> <log-pg19>")
+        print(f"      One log per gated major. A row covers only the majors it was "
+              f"merged from, so a single log reddens the other legs.")
         rc = 1
 
     # A CENSUS, not a ceiling. Bounding it deadlocks: every new check enters as

@@ -1210,6 +1210,22 @@ harness_selftest	510-a-residual-must-be-counted	the residual count agrees with t
 harness_selftest	510-a-residual-must-be-counted	the skipped-but-accounted suites are named, not folded into the residual	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	the summary prints the residual from the reader, not by subtraction	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	the tally function records the name of every suite that ran	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	a pre-existing minority row is not re-reported on an unrelated merge	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	a row covering fewer majors than the ledger is warned about	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	a row naming a major the ledger has never seen is not a subset	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and a correct merge does not warn at all	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and it names exactly the majors the gate will redden on	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and names the checks whose rows are short	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and names the set that was merged, so both sides are visible	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and seeding still succeeds	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and the old singular recipe is gone from the tool	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	and the row is written anyway, so the warning is advice not a veto	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	premise: the five-log merge wrote the full major set	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	premise: the ledger tool this part drives is present	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	premise: the single-major merge really did write the minority set	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	seeding a ledger with no prevailing set is not warned	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	the gate's printed recipe names one log per gated major	15;16;17;18;19	never	-
+harness_selftest	520-a-merged-row-must-cover-the-majors	the warning does not fail the merge	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-

@@ -2698,6 +2698,39 @@ discrimination assertion, so what is load-bearing is the distribution and not th
 Reporting only. Whether merge should **refuse** a non-uniform result is a live design
 question and is deliberately not settled here (#1048).
 
+### A merged row that covers fewer majors than the ledger (#1071)
+
+That design question is now settled the other way round, and the answer is a WARNING
+rather than a refusal.
+
+`merge` writes a row covering only the majors it was handed. A contributor runs the
+suite on ONE major, merges that log, and the row lands with `majors = 18`. The gate
+considers a row only where its majors intersect the run's, so `suites (PG 18)` matches
+it and is green while `suites (PG 17)` reads it as a check never seen and reddens —
+naming the contributor's own checks `(on major 17)`, which reads as though their suite
+is broken on 17 when it passes there.
+
+Five authors in a row hit it, including the person who wrote the tool, on a PR that was
+itself about ledger hygiene: #1039, #1063, #1065, #1068, #1070. The tool already had
+what it needed — the distribution it prints for its summary is computed from the same
+rows — so it could see the new row was anomalous and said nothing.
+
+| test | what it holds |
+| --- | --- |
+| `test_merge_warns_when_it_writes_a_strict_subset_of_the_ledgers_majors` | a single-major merge into a five-major ledger warns exactly once, and the same checks merged from five logs do not warn at all |
+| `test_the_warning_names_the_majors_the_gate_will_redden_on` | the warning names the missing majors, read out of the text rather than searched for loosely — `"15" in output` is also satisfied by the prevailing set printed beside it |
+| `test_seeding_a_ledger_with_no_prevailing_set_is_not_warned` | an empty ledger has nothing to be a subset of, and a warning that fires when nothing is wrong stops being read |
+| `test_a_row_carrying_a_major_the_ledger_has_never_seen_is_not_a_subset` | the predicate is strict subset, not inequality, so adding a new major is not warned about |
+| `test_the_warning_is_not_a_refusal` | the merge still succeeds and the row is still written — seeding one major at a time is legitimate |
+| `test_an_existing_rows_widening_is_not_reported_as_a_subset` | only rows the merge touched are candidates, or a partly-seeded ledger reprints its own history every time |
+
+Held as a **discrimination**, like the arm above it: the same checks merged correctly
+must not warn. An assertion on the bad output alone would pass against a tool that
+warned unconditionally, which would train the warning out of being read.
+
+The shell twin is `test/selftest/520-a-merged-row-must-cover-the-majors.sh`. Same
+properties, own fixtures, and neither file names the other.
+
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 
 **Why this file exists.** `assert-inside-a-loop-over-zero-rows` in VACUITY_MODES.md 3.5
