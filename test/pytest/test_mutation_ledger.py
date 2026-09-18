@@ -185,6 +185,63 @@ def test_a_mutation_with_two_targets_can_be_recorded_when_both_are_named(tmp_pat
     expect.text("needs --mutation" if "needs --mutation" in out else f"absent; got {out[:200]!r}",
                 "needs --mutation", "because on its own it attributes nothing")
 
+def test_a_log_must_be_able_to_say_which_tree_it_came_from(tmp_path, expect):
+    """#1073. `orphan-scan` reports a ledger row no record in its part matches, and a
+    row whose check was ADDED after the log was written produces exactly that signal.
+
+    Nothing in a RESULT record dates it against a tree, so a stale log and a genuinely
+    deleted check are indistinguishable. Measured when filed: replaying a log from one
+    tree against the ledger one commit later reported two orphans, and both were
+    checks that tree had just gained.
+
+    `test/lib.sh` already writes `-- source: <fingerprint>`. The tool reads it and the
+    caller says what it expects. Opt-in, because a hand caller may not know its build.
+
+    Own fixture and own names, sharing nothing with the shell part.
+    """
+    old, new = "aaaa1111bbbb", "c9e65b1b35ba"
+    rec = "RESULT\tdemo\tpart1\tone the log has\tPASS\t18\t\nchecks run: 1\n"
+    from_old = _w(tmp_path, "old.log", f"-- source: {old} matches the binary under test\n" + rec)
+    from_new = _w(tmp_path, "cur.log", f"-- source: {new} matches the binary under test\n" + rec)
+    nameless = _w(tmp_path, "none.log", rec)
+    # the ledger one commit later: the part has GAINED a check
+    led = _w(tmp_path, "l.tsv",
+             "demo\tpart1\tone the log has\t18\tnever\t-\n"
+             "demo\tpart1\tone added since\t18\tnever\t-\n")
+
+    out, rc = _run("orphan-scan", "--ledger", led, from_old)
+    expect.num(rc, 1, "without the flag the added check is reported as an orphan")
+    expect.text("named" if "one added since" in out else f"absent; got {out[:200]!r}",
+                "named", "and that is the false signal: it was ADDED, not deleted")
+
+    out, rc = _run("orphan-scan", "--ledger", led, "--expect-source", new, from_old)
+    expect.num(rc, 2, "naming the tree refuses a log from another one")
+    expect.text(old if old in out else f"absent; got {out[:200]!r}", old,
+                "and the refusal names the fingerprint the log carries")
+
+    # THE CONTROL, without which the arm above proves only that the flag refuses
+    # everything: a log FROM the named tree is read, and its orphan still stands.
+    out, rc = _run("orphan-scan", "--ledger", led, "--expect-source", new, from_new)
+    expect.num(rc, 1, "a log from the named tree is read, orphan and all")
+    expect.text("named" if "one added since" in out else f"absent; got {out[:200]!r}",
+                "named", "so with the tree confirmed the orphan is a real finding")
+
+    # A log naming none satisfies "does not disagree", which is how an opt-in check
+    # reports success having asked nothing.
+    out, rc = _run("orphan-scan", "--ledger", led, "--expect-source", new, nameless)
+    expect.num(rc, 2, "a log naming no fingerprint cannot satisfy the flag")
+    expect.text("said" if "names no source fingerprint" in out else f"absent; got {out[:200]!r}",
+                "said", "and says the log names none, rather than that it disagrees")
+
+    # MERGE TOO, where it matters more: a misread orphan is recoverable, a stale log
+    # stamped into the ledger persists.
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "m.tsv", ""), "--date", "2026-09-18",
+                   "--expect-source", new, from_old)
+    expect.num(rc, 2, "merge refuses a log from another tree the same way")
+    out, rc = _run("merge", "--ledger", _w(tmp_path, "m2.tsv", ""), "--date", "2026-09-18",
+                   "--expect-source", new, from_new)
+    expect.num(rc, 0, "control: and merges one from the tree it was told to expect")
+
 
 def test_two_runs_of_a_check_are_not_a_duplicate_of_it(tmp_path, expect):
     """Merging the logs first cannot tell "the same check in two runs" from "the same

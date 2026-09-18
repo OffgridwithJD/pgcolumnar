@@ -347,8 +347,13 @@ check "the record cannot introduce a suite the source never declared" \
 # thing that records it. Pin the write to that branch, beside the forged log it
 # sits next to.
 
+# ANCHORED ON THE echo, NOT ON ITS REDIRECTION (#1073). This read `>"..."` and the
+# runner now appends, because the batch fingerprint is written to the log first and
+# a truncating redirect would erase it. The arm's subject -- that the branch which
+# decides not to dispatch is the thing that records it -- did not change; only the
+# operator did, and the arm went red for a reason unrelated to what it asserts.
 check "the skip branch records the suite it did not dispatch" \
-	"$(grep -A8 'echo "\$s.sh: SKIPPED (ran no checks)" >"\$builddir/\${s}.log"' "$_rv" \
+	"$(grep -A8 'echo "\$s.sh: SKIPPED (ran no checks)" >>*"\$builddir/\${s}.log"' "$_rv" \
 		| grep -c 'accounting.notdispatched')" "1"
 check "and the reconciliation is given that record" \
 	"$(grep -c 'pgc_reconcile_accounting "\$_acc_declared" "\$_acc_observed" "\$_acc_notdisp"' "$_rv")" "1"

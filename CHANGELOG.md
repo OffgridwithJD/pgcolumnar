@@ -105,6 +105,116 @@ true until the next version shipped.
   was dead and is gone: both patterns require `sort` immediately after the `|` or
   the `<(`, which makes a mixed line fail without the substitution step the draft
   performed.
+- A stale log and a deleted check were indistinguishable, so `orphan-scan` could
+  report one as the other (#1073).
+
+  `orphan-scan` refuses a ledger row that no record in its own part matches. A row
+  whose check was ADDED after the log was written produces exactly that signal, and
+  nothing in a RESULT record dates it against a tree.
+
+  Measured when it was filed: replaying a log from one tree against the ledger one
+  commit later reported two orphans, and both were checks that tree had just GAINED
+  -- one step from a defect report against a tool merged an hour earlier.
+
+  Nothing needed inventing. `test/lib.sh` already writes `-- source: <fingerprint>`
+  into every log, from the one implementation in `test/pgc_fingerprint.py`. It needed
+  READING. `--expect-source FINGERPRINT` refuses a log that does not carry the one
+  the caller names, on `orphan-scan` and on `merge` -- and on merge it matters more,
+  because a misread orphan is recoverable by looking again and a stale log stamped
+  into the ledger persists.
+
+  Reproduced end to end, with the control that makes the refusal mean something:
+
+      without the flag          orphan: demo part1 one added since   rc=1
+                                (reported DELETED; it was ADDED)
+      --expect-source <new>     refused: "came from a different tree: it names
+                                source aaaa1111bbbb, and you expected c9e65b1b35ba"
+      a log FROM that tree      read, and the orphan STILL REPORTED  rc=1
+                                (tree confirmed, so the orphan is a real finding)
+      a log naming none         refused, because "does not disagree" is how an
+                                opt-in check reports success having asked nothing
+
+  OPT-IN, deliberately. A hand caller may not know the build its log came from, and a
+  flag that refused every hand invocation is a flag nobody passes. Today's runner is
+  safe by CONSTRUCTION -- it passes the logs from the run it has just finished -- and
+  that is an argument for stating the guarantee, not for assuming the next caller
+  inherits it. The runner now passes `--expect-source` from the same stamp it wrote,
+  so the flag is exercised in production rather than only in its own arms: `lib.sh`
+  and `pgc_fingerprint.py` both give `c9e65b1b35ba` on this tree.
+
+  AN EMPTY EXPECTATION EXPECTS NOTHING, and the runner could pass one.
+  `pgc_source_fingerprint` returns EMPTY with status 0 on both its failure paths --
+  no `python3`, or the module erroring -- so on a box where the freshness machinery
+  is broken the runner would pass `--expect-source ""`, and the tool's own opt-in
+  rule would then skip the check entirely. That is "does not disagree" satisfying a
+  guard, moved from the log to the expectation: precisely what this flag exists to
+  refuse, one level out. Reported by jdatcmd.
+
+      pgc_source_fingerprint /nonexistent/tree   -> value=[] rc=0
+      PATH=/nonexistent pgc_source_fingerprint   -> value=[] rc=0
+
+  The runner now refuses rather than scanning: an empty fingerprint sets the broken
+  flag and the scan does not run at all, so it cannot report clean. The two halves
+  do degrade together -- `lib.sh` cannot stamp the log either, so a log written then
+  would be refused if the check ran -- but "it happens to be covered elsewhere" is
+  how a guard stops being one.
+
+  THE RUNNER STAMPS, NOT THE SUITES, and the first version had that wrong. The
+  `-- source:` line is written by `pgc_setup`, and TWENTY-EIGHT files in `test/`
+  never call it: they carry their own harness, deliberately, which is the population
+  #1109 exists for. Fourteen REGISTERED suites among them produced logs that could
+  not satisfy the flag, and CI refused every major:
+
+      audit  concurrency  decode_interrupts  hilbert_curve  objstore_stash_recovery
+      phase2  phase3  phase4  phase5  phase6  smoke  unique_conc  update_conc
+      wal_envelope
+
+  "Safe by construction" was true of PROVENANCE and not of STAMPING, and those are
+  different properties. Reported by jdatcmd off CI.
+
+  The runner owns every log, so it stamps every log: one helper, three sites,
+  nothing asked of any suite. The stamp is written FIRST and the suite APPENDS --
+  `_log_source_fingerprint` returns the first match, so a suite that also stamps
+  gets one answer rather than two, and a `>` where a `>>` belongs would erase the
+  line just written.
+
+  COUNTED ON CALLS, NOT MENTIONS. A plain `grep -l pgc_setup` says twenty, because
+  six of those fourteen name it only in a comment saying they skip it deliberately.
+  Counting the mention would have put six suites on the wrong side of the claim.
+
+  Verified end to end on a full one-major matrix, run alone:
+
+      suite FAILs                               0
+      command not found                         0
+      names no source fingerprint               0
+      came from a different tree                0
+      source fingerprint could not be computed  0
+      suites that ran: 256 of 258
+
+  The third line is the claim: `orphan-scan` ran with a real expectation against
+  every log in the batch and refused none. The fifth says the expectation was not
+  empty, so the flag did work rather than being skipped.
+
+  AND A DEFINITION-ORDER DEFECT FOUND BY RUNNING IT. The helper was first defined
+  below its call sites; bash reads top to bottom, so the matrix printed
+  `pgc_stamp_log: command not found` once per suite AND THE SUITE LOOP RAN ANYWAY.
+  Every log would have arrived unstamped while the run looked normal -- the failure
+  this change exists to prevent, reintroduced by ordering. No behavioural arm over
+  the helper can see it, since the helper is correct and the file is not, so an arm
+  compares the definition's line number against the first call's.
+
+  `selftest/390` was re-anchored rather than changed in substance: it pinned the
+  skip branch on the literal `>"$builddir/${s}.log"`, and that redirection had to
+  become `>>`. The arm's subject -- that the branch which declines to dispatch is
+  the thing that records it -- is unchanged.
+
+  Both harnesses independently: twenty-three arms in `selftest/410`, nine in
+  `test_mutation_ledger.py`, own fixtures and own names.
+
+  A fixture error on the way, worth recording because it looked like a code defect:
+  the first end-to-end run used `0ld7reefaaaa` as a fingerprint, which is not
+  hexadecimal, so the tool reported "names no source fingerprint" where a mismatch
+  was expected. The format check was right and the fixture was wrong.
 
 - Every PR with a changelog entry conflicted with every other one (#996).
 
