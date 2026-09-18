@@ -301,15 +301,21 @@ _epipe_scanned="$(printf '%s' "$_epipe_files" | grep -c . || true)"
 # '"'"'/harness_selftest.sh:'"'"'` entered with the rule itself (23c96c7, 2026-08-07), when
 # harness_selftest.sh was the monolith and held 25 occurrences of `grep` inside its
 # own explanation of the forbidden shape. #554 split that file into the parts in
-# this directory three days later, and it has held none since: 60 lines, zero.
+# this directory three days later, and it has held none since: 90 lines, zero.
+# (60 when that sentence was written; the file has grown and the count with it,
+# which is why the arm below now reads code rather than the whole file.)
 #
 # What remains is the DERIVED exemption -- a line inside a quoted heredoc is text,
 # whatever file it sits in -- which is the form the comment above already argues
 # for. The arm below keeps the removal honest. Put a reader back into
 # harness_selftest.sh and the sweep will flag it, which it should: that file runs
 # its pipelines like any other.
+# CODE ONLY (#1123). The pattern here is the bare word `grep`, which is the single
+# most likely word to appear in a comment in a file about readers, and that file
+# carries 61 comment lines. Counting the prose would redden this arm for a sentence.
+_hs_code="$(grep -vE '^[[:space:]]*#' "$TESTDIR/harness_selftest.sh")"
 check "premise: the file the old filename exclusion named holds no reader to exclude" \
-	"$(grep -c 'grep' "$TESTDIR/harness_selftest.sh" || true)" "0"
+	"$(grep -c 'grep' <<<"$_hs_code" || true)" "0"
 
 check "and the scan examined the suites rather than finding nothing to read" \
 	"$([ "${_epipe_scanned:-0}" -ge 20 ] && echo yes || echo "no (scanned $_epipe_scanned)")" "yes"
