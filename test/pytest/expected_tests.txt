@@ -193,7 +193,13 @@
 # 372; re-derived by collection on this tree: `373 tests collected`. This key has now
 # been re-derived four times on one branch, each time against a different base, and the
 # arithmetic would have been right by luck twice and wrong twice.
-guard_tests 374
+# 373 -> 379 when test_record_names_its_major.py landed (#1121): six arms over the
+# RESULT record's major field and the runner's guard, parsed in Python rather than by
+# evalling the shell reader, so the two harnesses fail differently.
+# Re-derived by collection, never by adding six.
+# RESEATED onto main carrying #1117. Main states 374, this branch stated 379; neither
+# is the merged truth. Re-derived by collection: `380 tests collected`.
+guard_tests 380
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

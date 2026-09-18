@@ -125,6 +125,9 @@ NO_CLUSTER = [
     # cluster, no driver -- reading the same corpus the shell part reads, with its
     # own implementation.
     "test_collation_pinned.py",
+    # #1121's file. Parses the RESULT record format in Python and reads the runner's
+    # text -- no connection, no cluster, no driver.
+    "test_record_names_its_major.py",
 ]
 
 

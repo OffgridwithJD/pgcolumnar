@@ -97,6 +97,7 @@ behaviour, the source of that number is named.
 - [49. test_residual_is_counted.py: a residual must be counted, not subtracted](#49-test_residual_is_countedpy-a-residual-must-be-counted-not-subtracted)
 - [50. test_collation_pinned.py: comm's inputs must be sorted the same way](#50-test_collation_pinnedpy-comms-inputs-must-be-sorted-the-same-way)
 - [51. test_projection_scan_cost.py: a covering projection is not priced at half](#51-test_projection_scan_costpy-a-covering-projection-is-not-priced-at-half)
+- [52. test_record_names_its_major.py: a record must name its major](#52-test_record_names_its_majorpy-a-record-must-name-its-major)
 
 ## 1. How to read a test in here
 
@@ -4595,3 +4596,46 @@ names match.
 | test | what it asserts |
 | --- | --- |
 | `test_projection_scan_cost` | the table and covering projection exist; the tight and loose plans use that projection; without the GUC they are base columnar scans; every compared scan has a positive run cost; a tight covering projection is cheaper relative to the base than a loose one; the two ratios are not both 0.5; a non-sort-key restriction does not cheapen a covering projection |
+## 52. test_record_names_its_major.py: a record must name its major
+
+#1121. `pgc_record` writes `${PGC_MAJOR:-unknown}` and `PGC_MAJOR` is set inside
+`pgc_setup`, so a suite that records but never calls `pgc_setup` writes every
+check against the literal string `unknown`.
+
+The gate matches a ledger row only where its majors intersect the majors the run
+observed, and **no run ever observes `unknown`**. Such a check cannot be seeded,
+and a row for it could never be matched again. Measured on PG 17 before the fix:
+
+```
+smoke 9/9   audit 31/31   objstore_stash_recovery 17/17   phase2 42/42
+phase3 32/32   phase4 38/38   phase5 36/36   phase6 43/43
+---- 248 of 248 records named no major ----
+```
+
+**A static rule cannot do this job, and two attempts failed in different
+directions.** "Defines no `check()` of its own" finds 5 and misses `audit`, whose
+own `check()` body calls `pgc_record`. "The file contains the string
+`pgc_record`" finds 7 and misses `objstore_stash_recovery`, which uses `lib.sh`'s
+`check()` so the string never appears in it. The truth was 8 both times. Whether
+a suite records is a runtime property, so the guard reads the records.
+
+Public seam: the RESULT record format and the runner's text. Read independently
+of `test/selftest/530-a-record-must-name-its-major.sh`, which evals the shell
+reader out of the runner while this parses the format directly. Neither file
+names the other.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_a_clean_log_counts_none_while_a_mixed_one_counts_its_own` | asserted as a pair, because zero is also what a wrong field number and a broken parser produce |
+| `test_every_offending_record_is_counted_not_just_the_first` | a suite can record some checks before `pgc_setup` and some after |
+| `test_a_log_with_no_records_is_not_an_offender` | carrying no records is not naming a bad major |
+| `test_the_word_in_a_reason_field_is_not_an_offending_record` | field six, not the line -- with the control that the same word in field six IS caught |
+| `test_a_short_record_does_not_crash_or_count` | a truncated line has no field six |
+| `test_the_runner_reads_every_suites_log_and_fails_the_major` | the wiring, bounded to the guard's own block |
+
+The load-bearing assertion is the last one's bound. The runner has many later
+`verfail=1` lines, so an unbounded search finds one whatever the guard does --
+which is exactly how the shell twin's first version of that arm stayed green
+against the line removed. Mutation testing caught it.

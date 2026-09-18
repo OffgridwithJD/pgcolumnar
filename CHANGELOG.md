@@ -62,6 +62,49 @@ true until the next version shipped.
   layout already prunes as tightly. The same misattributed query reports
   1.000; a 5 percent range on the sort key still reports 0.050 against a
   50 percent range at 0.500.
+- Eleven suites recorded every check against a major that is not a major (#1121).
+
+  `pgc_record` writes `${PGC_MAJOR:-unknown}` and PGC_MAJOR is set inside
+  `pgc_setup`. A suite that records but never calls `pgc_setup` wrote every check
+  against the literal string `unknown`.
+
+  THE GATE MATCHES A LEDGER ROW ONLY WHERE ITS MAJORS INTERSECT THE RUN'S, and no
+  run ever observes `unknown`. So none of those checks could be seeded, and a row
+  for one could never be matched again. Measured on PG17 before the fix:
+
+      smoke 9   audit 31   objstore_stash_recovery 17   phase2 42   phase3 32
+      phase4 38   phase5 36   phase6 43   decode_interrupts 29
+      hilbert_curve 184   wal_envelope 20
+      ---- 481 of 481 records named no major ----
+
+  Same defect and same one-line fix as #1109, which reached `concurrency`,
+  `unique_conc` and `update_conc`. After the fix all eleven record their real major
+  and every record count is unchanged.
+
+  THE THREE THAT TAKE NO PG_CONFIG read it from `$1`. The runner passes the
+  pg_config to every suite, including those needing no cluster, and `pgc_major_of`
+  yields empty on a path it cannot run -- so a bad path degrades to today's
+  `unknown` rather than to a WRONG major. A guessed major would seed a row claiming
+  a major the check was never observed on, which is worse than saying nothing.
+
+  TWO GUARDS, BECAUSE NEITHER SUBSUMES THE OTHER. `run_all_versions.sh` refuses a
+  major whose logs carry such a record, naming the suites: that reads what was
+  actually written, but is silent about a suite nothing dispatched. Selftest 400
+  sweeps the registered suites statically: that is decidable without running
+  anything, but models how a suite gets its major rather than observing it.
+
+  THE POPULATION WAS WRONG TWICE AND BOTH ERRORS WERE STATIC ONES. A sweep keyed on
+  "defines no `check()` of its own" misses `audit`, whose own `check()` body calls
+  `pgc_record`. One keyed on "the file contains `pgc_record`" misses
+  `objstore_stash_recovery`, which uses lib.sh's `check()`. And excluding files that
+  match `pgc_setup` dropped `decode_interrupts`, `hilbert_curve` and `wal_envelope`
+  -- the three whose comments say pgc_setup is SKIPPED deliberately, matching the
+  same grep a call would. The text explaining the behaviour was read as the
+  behaviour. Selftest 400 carries both wrong regex spellings as fixtures.
+
+  `pg_upgrade` meets several of those static tests and is NOT affected: it carries
+  its own `check()` that never calls `pgc_record`, so it emits no records at all.
+  Checked by running it.
 
 - A `CONFLICTING` badge on a changelog entry is GitHub, not git (#1116).
 
