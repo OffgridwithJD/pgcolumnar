@@ -1194,3 +1194,152 @@ def test_the_merge_summary_distinguishes_a_minority_major_set_from_a_uniform_one
                "so a bucket lost in the display cannot leave it balanced")
     expect.num(stated, n_bad,
                "and that emitted total still accounts for every row in the ledger")
+
+
+# ---- a row that is a strict subset of the ledger's majors (#1071) ------------
+
+
+def _uniform5(tmp_path, name):
+    return _w(tmp_path, name,
+              "demo\tpart1\told one\t15;16;17;18;19\tnever\t-\n"
+              "demo\tpart1\told two\t15;16;17;18;19\tnever\t-\n")
+
+
+def _one_major_log(tmp_path, name, major, *checks):
+    body = "".join(f"RESULT\tdemo\tpart1\t{c}\tPASS\t{major}\t\n" for c in checks)
+    return _w(tmp_path, name, body + f"checks run: {len(checks)}\n")
+
+
+def test_merge_warns_when_it_writes_a_strict_subset_of_the_ledgers_majors(
+        tmp_path, expect):
+    """Five authors made this mistake, including the person who wrote the tool (#1071).
+
+    A contributor adds checks, runs the suite on ONE major, merges that log. The row
+    lands with `majors = 18`. `suites (PG 18)` then matches it and is green, while
+    `suites (PG 17)` cannot match it and reddens naming the contributor's own checks
+    `(on major 17)` -- so it reads as though their suite is broken on 17 when it
+    passes there.
+
+    The tool already computes the distribution this needs for its summary line, so it
+    knows the new row is anomalous and says nothing. When five people make the same
+    mistake it is the tool's shape, not five lapses.
+
+    HELD AS A DISCRIMINATION, not as a wording: the same checks merged correctly must
+    NOT warn. An assertion on the bad output alone would pass against a tool that
+    warns unconditionally, which would train the warning out of being read.
+    """
+    bad = _uniform5(tmp_path, "bad.tsv")
+    bad_out, bad_rc = _run("merge", "--ledger", bad, "--date", "2026-09-13",
+                           _one_major_log(tmp_path, "b18.log", "18", "new one", "new two"))
+
+    good = _uniform5(tmp_path, "good.tsv")
+    for maj in ("15", "16", "17", "18", "19"):
+        _run("merge", "--ledger", good, "--date", "2026-09-13",
+             _one_major_log(tmp_path, f"g{maj}.log", maj, "new one", "new two"))
+    good_out, good_rc = _run("merge", "--ledger", good, "--date", "2026-09-13",
+                             _one_major_log(tmp_path, "gnoop.log", "15", "new one"))
+
+    expect.text({r[2]: r[3] for r in _rows(bad)}["new one"], "18",
+                "premise: the single-major merge really did write the minority set")
+    expect.text({r[2]: r[3] for r in _rows(good)}["new one"], "15;16;17;18;19",
+                "premise: and the five-log merge wrote the full set")
+
+    expect.num(bad_out.count("WARNING"), 1,
+               "the single-major merge warns exactly once")
+    expect.num(good_out.count("WARNING"), 0,
+               "and the correct merge does not warn at all")
+
+
+def test_the_warning_names_the_majors_the_gate_will_redden_on(tmp_path, expect):
+    """A warning that says only "not uniform" leaves the reader to work out the fix.
+
+    The whole cost of #1071 was that the failure surfaced later, on another major,
+    phrased as the contributor's suite being broken. The warning has to name which
+    majors are missing, because that is exactly the list of legs that will redden.
+
+    Asserted over the WARNING BLOCK, not the whole output. The merged major appears
+    in the summary line regardless, so a search over everything would pass for a
+    warning that named nothing.
+    """
+    led = _uniform5(tmp_path, "l.tsv")
+    out, _ = _run("merge", "--ledger", led, "--date", "2026-09-13",
+                  _one_major_log(tmp_path, "b18.log", "18", "new one"))
+
+    warn = [l for l in out.splitlines() if "WARNING" in l]
+    expect.num(len(warn), 1, "premise: there is exactly one warning line to read")
+
+    # THE MAJORS ARE READ OUT OF THE TEXT, not searched for loosely. `"15" in block`
+    # is also satisfied by the prevailing set `15;16;17;18;19` printed beside it, so
+    # a substring sweep would pass for a warning that named no missing major at all.
+    reddens = re.search(r"reddens on ([0-9;]+)", out)
+    expect.text("found" if reddens else "absent", "found",
+                "premise: the warning states which majors this reddens on")
+    expect.text(reddens.group(1).split(";"), ["15", "16", "17", "19"],
+                "every major the gate will redden on is named, and only those")
+
+    expect.text("named" if "majors=18" in warn[0] else "absent", "named",
+                "and the set that WAS merged is named, so the reader sees both sides")
+
+
+def test_seeding_a_ledger_with_no_prevailing_set_is_not_warned(tmp_path, expect):
+    """An empty ledger has nothing to be a subset OF.
+
+    A warning here would fire on every first merge, and a warning that fires when
+    nothing is wrong is one nobody reads by the third time.
+    """
+    empty = _w(tmp_path, "empty.tsv", "")
+    out, rc = _run("merge", "--ledger", empty, "--date", "2026-09-13",
+                   _one_major_log(tmp_path, "s18.log", "18", "new one"))
+    expect.num(out.count("WARNING"), 0, "seeding an empty ledger does not warn")
+    expect.num(rc, 0, "and it still succeeds")
+
+
+def test_a_row_carrying_a_major_the_ledger_has_never_seen_is_not_a_subset(
+        tmp_path, expect):
+    """Adding a NEW major is not the defect, and must not be trained out.
+
+    The predicate is STRICT SUBSET, not inequality. A run on a major the ledger has
+    never carried is how a new major legitimately enters, and warning about it would
+    make the warning wrong in exactly the case the project wants to encourage.
+    """
+    led = _uniform5(tmp_path, "l.tsv")
+    out, rc = _run("merge", "--ledger", led, "--date", "2026-09-13",
+                   _one_major_log(tmp_path, "n20.log", "20", "new one"))
+    expect.num(out.count("WARNING"), 0,
+               "a row naming an unseen major is not warned about")
+    expect.num(rc, 0, "and the merge succeeds")
+
+
+def test_the_warning_is_not_a_refusal(tmp_path, expect):
+    """Reporting, deliberately, not a gate.
+
+    Seeding one major at a time is legitimate -- it is how a contributor without five
+    installed majors makes progress -- so a hard refusal would block the honest case
+    to catch the careless one. The gate already refuses later; this only makes the
+    refusal predictable at the moment it is caused.
+    """
+    led = _uniform5(tmp_path, "l.tsv")
+    out, rc = _run("merge", "--ledger", led, "--date", "2026-09-13",
+                   _one_major_log(tmp_path, "b18.log", "18", "new one"))
+    expect.num(rc, 0, "the warning does not fail the merge")
+    expect.text({r[2]: r[3] for r in _rows(led)}["new one"], "18",
+                "and the row is written, so the warning is advice rather than a veto")
+
+
+def test_an_existing_rows_widening_is_not_reported_as_a_subset(tmp_path, expect):
+    """Only rows this merge actually TOUCHED are candidates.
+
+    Every untouched row in a partially-seeded ledger is a subset of the prevailing
+    set, so a warning computed over the whole file would report the ledger's history
+    on every merge and drown the one row that matters.
+    """
+    led = _w(tmp_path, "l.tsv",
+             "demo\tpart1\told one\t15;16;17;18;19\tnever\t-\n"
+             "demo\tpart1\told two\t15;16;17;18;19\tnever\t-\n"
+             "demo\tpart1\thistoric\t18\tnever\t-\n")
+    # Touches only `old one`, which already carries the full set.
+    out, rc = _run("merge", "--ledger", led, "--date", "2026-09-13",
+                   _one_major_log(tmp_path, "t.log", "15", "old one"))
+    expect.num(out.count("WARNING"), 0,
+               "the pre-existing minority row is not re-reported on an unrelated merge")
+    expect.num(rc, 0, "and the merge succeeds")

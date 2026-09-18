@@ -171,6 +171,38 @@ true until the next version shipped.
   with it. Removal proof, four mutations, each reddening named checks and each
   mutant asserted to still parse -- reversing the difference, dropping the sort,
   restoring the subtraction, and dropping one recorded name.
+- `pgc_ledger merge` wrote a row covering one major and never said so (#1071).
+
+  A contributor adds checks, runs the suite on ONE major, merges that log. The row
+  lands with `majors = 18`. The gate considers a row only where its majors intersect
+  the run's, so `suites (PG 18)` matches it and is green while `suites (PG 17)` reads
+  it as a check the ledger has never seen and reddens -- naming the contributor's own
+  checks `(on major 17)`, which reads as though their suite is broken on 17 when it
+  passes there.
+
+  FIVE AUTHORS IN A ROW hit it, including the person who wrote the tool, on a PR that
+  was itself about ledger hygiene: #1039, #1063, #1065, #1068 and #1070 each wrote 6
+  to 10 rows at `18` against a ledger where every other row carried `15;16;17;18;19`.
+  When everyone makes the same mistake it is the tool's shape rather than five lapses.
+
+  THE TOOL ALREADY KNEW. The distribution it prints for its summary line is computed
+  from the same rows, so `merge` could see the new row was a strict subset of what the
+  rest of the ledger carries, and said nothing.
+
+  `merge` now warns, naming the rows, the set they carry, the set the rest of the
+  ledger carries, and the majors the gate will redden on. The predicate is STRICT
+  SUBSET rather than inequality, so a row naming a major the ledger has never carried
+  -- how a new major legitimately enters -- is not warned about. Only rows the merge
+  touched are candidates, or a partly-seeded ledger would reprint its own history on
+  every merge.
+
+  REPORTING, NOT A REFUSAL, deliberately. Seeding one major at a time is how a
+  contributor without five installed majors makes progress, so refusing would block
+  the honest case to catch the careless one. The gate still refuses later; this makes
+  that refusal predictable at the moment it is caused.
+
+  The gate's printed recipe said `<log>`, singular, so following it exactly produced
+  the broken row. It now names one log per gated major and says why.
 
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).

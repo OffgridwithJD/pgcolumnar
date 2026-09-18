@@ -159,7 +159,21 @@
 # NO_CLUSTER is asserted against the corpus in both directions, so the declaration
 # and the property had to agree before this collected here at all.
 # Re-derived by collection on this tree, never by adding nine: `355 tests collected`.
-guard_tests 355
+# 346 -> 352 when #1071's six arms landed in test_mutation_ledger.py: the warning,
+# the correct-merge control that keeps it a discrimination rather than a wording, the
+# majors it must name, the empty-ledger case, the new-major case, and the two that hold
+# it to reporting rather than refusing.
+#
+# NOTE FOR WHOEVER MERGES SECOND. #1110 moves this same key to 355 from the same 346,
+# for six arms of its own in a different file. Neither number survives the merge and
+# adding the deltas lands on a value no tree collects -- the file says this three times
+# already and it is about to be true again. Re-derive by collection on the merged tree.
+# MERGED with #1110's nine arms. Both sides moved this key from 346 -- this branch to
+# 352, #1110 to 355 -- and neither survives. 352 + 9 and 355 + 6 both happen to reach
+# 361 here, which is a coincidence of this merge rather than a method: the deltas were
+# measured against different trees. Re-derived by collection on the merged tree, which
+# is the only resolution this number has.
+guard_tests 361
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
