@@ -1165,6 +1165,11 @@ SHELL_REFERENCES = {
     "test_mutation_ledger.py":
         "executes the matrix runner with its list flag to get the registered suite "
         "list, which is the same mechanism the entry above uses",
+    "test_residual_is_counted.py":
+        "reads the matrix runner's text to take out its two set readers and the "
+        "summary block that prints the suite breakdown, then executes them -- so the "
+        "residual the summary prints is tested rather than a Python restatement of "
+        "it, which would agree with itself",
     "test_compare_to_bash.py":
         "reads the shell harness's helper library to re-derive the parity tool's "
         "check-helper list from the definitions themselves, so the list the grader "
