@@ -52,10 +52,39 @@
 # assignments and function definitions only, so sourcing it starts nothing.
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# A TIMEOUT IS A CHECK RESULT (#965). These paths printed `FAIL  timeout waiting
+# for ...`, set the suite-local `fail` and returned -- touching neither PGC_CHECKS
+# nor the record stream. A failing run then reconciled as `N passed + 0 failed =
+# N`: an aggregate that BALANCES while asserting zero failures on a run that
+# failed. That is worse than invisibility, because a missing number can be noticed
+# and a balancing one cannot. Induced and measured rather than argued.
+#
+# THE NAME IS FIXED PER WAIT KIND, with the session and sentinel in pgc_record's
+# REASON field. The ledger is keyed on (suite, part, name), so interpolating
+# "$name/$label" into the name would mint rows nobody can enumerate and therefore
+# nobody can seed.
+#
+# NO GREEN RUN EXECUTES THIS. It records only on the timeout path, so a passing
+# suite emits nothing here and the record stream is unchanged.
+wait_timeout() {	# wait_timeout FIXED-NAME DETAIL
+	pgc_record FAIL "$1" "FAIL  $1 (timed out waiting for $2)" "$2"
+	fail=1
+}
+
+
 set -uo pipefail
 
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 BINDIR="$("$PG_CONFIG" --bindir)"
+
+# EVERY RECORD THIS SUITE EMITS CARRIED `major=unknown` (#965). `pgc_record` reads
+# `${PGC_MAJOR:-unknown}`, and PGC_MAJOR is set by `pgc_setup` -- which this suite
+# does not call, because it carries its own harness. So all of its rows named a
+# major that is not a major, and a ledger keyed on (suite, part, name, majors)
+# cannot seed them: the row would claim to hold on "unknown" and match no run.
+# Measured before the fix, on a green run: 7 of 7 records said `unknown`.
+PGC_MAJOR="$(pgc_major_of "$PG_CONFIG")"
+
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WORKDIR="$(mktemp -d /tmp/pgcolumnar-conc.XXXXXX)"
@@ -239,8 +268,7 @@ send_wait() {  # name label sql...
 	while ! grep -q "<<$label>>" "$outfile" 2>/dev/null; do
 		sleep 0.05; i=$((i + 1))
 		if [ "$i" -ge 1200 ]; then
-			echo "FAIL  timeout waiting for $name/$label"
-			fail=1
+			wait_timeout "a bounded wait for a command's sentinel completed" "$name/$label"
 			return 1
 		fi
 	done
@@ -254,8 +282,7 @@ wait_sentinel() {  # name label
 	while ! grep -q "<<$label>>" "$outfile" 2>/dev/null; do
 		sleep 0.05; i=$((i + 1))
 		if [ "$i" -ge 1200 ]; then
-			echo "FAIL  timeout waiting for $name/$label sentinel"
-			fail=1
+			wait_timeout "a bounded wait for a standalone sentinel completed" "$name/$label"
 			return 1
 		fi
 	done
@@ -270,8 +297,7 @@ wait_blocked() {  # application_name
 		[ "$n" = "1" ] && return 0
 		sleep 0.05; i=$((i + 1))
 		if [ "$i" -ge 1200 ]; then
-			echo "FAIL  timeout waiting for $app to block"
-			fail=1
+			wait_timeout "a bounded wait for a session to block completed" "$app"
 			return 1
 		fi
 	done
@@ -285,8 +311,7 @@ wait_idle_intx() {  # application_name
 		[ "$st" = "idle in transaction" ] && return 0
 		sleep 0.05; i=$((i + 1))
 		if [ "$i" -ge 1200 ]; then
-			echo "FAIL  timeout waiting for $app to go idle-in-transaction"
-			fail=1
+			wait_timeout "a bounded wait for a session to reach idle-in-transaction completed" "$app"
 			return 1
 		fi
 	done
