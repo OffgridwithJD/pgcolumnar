@@ -65,4 +65,17 @@ suites_not_covered 249
 # 1306 -> 1309: three arms pinning the collation of the runner's `comm` readers, added
 # after @OffgridwithJD found the three helpers unpinned in review. Re-derived by the
 # command above and by the gate's census in the same run.
-checks_never_observed_red 1309
+# 1277 -> 1293 when #1071's sixteen checks merged: selftest part 520, over the warning
+# `merge` now prints when it writes a row covering fewer majors than the ledger carries.
+# Derived by the command above on this tree, and by the gate's own census in the same
+# run, which printed `never observed red=1293` independently.
+#
+# THE MERGE THAT WROTE THESE ROWS EXERCISED THE NEW WARNING AND IT STAYED SILENT, which
+# is the control: five logs, all sixteen rows uniform at 15;16;17;18;19, no WARNING line.
+# MERGED with #1110. Both sides moved this key from 1277 -- that branch to 1309 over
+# three merges, this one to 1293 -- and neither is the merged truth. The two ledgers
+# had NO key in common (28 rows against 16, union 44, zero shared), so the rows are a
+# clean union and only the COUNT had to be re-derived. Both files conflicted loudly
+# here, which is the safe half: the ledger is always right and only sometimes speaks.
+# Re-derived by the command above on the merged tree, never by adding the deltas:
+checks_never_observed_red 1325
