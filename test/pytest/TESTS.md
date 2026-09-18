@@ -2413,6 +2413,18 @@ was rejected — a real CI red is the most valuable row the ledger holds and has
 mutation to name. An all-`PASS` log still merges with no flag, which is the control.
 See #946.
 
+### `test_a_log_must_be_able_to_say_which_tree_it_came_from`
+
+`orphan-scan` reports a ledger row no record in its part matches, and a row whose
+check was ADDED after the log was written produces exactly that signal. Nothing in a
+RESULT record dates it against a tree, so a stale log and a genuinely deleted check
+are indistinguishable. `test/lib.sh` already writes `-- source: <fingerprint>`;
+`--expect-source` reads it and refuses a log from another tree. Opt-in, because a
+hand caller may not know its own build. Nine arms, including the control that a log
+FROM the named tree is still read with its orphan intact -- without which the refusal
+arms prove only that the flag refuses everything -- and the case of a log naming no
+fingerprint at all, which would otherwise satisfy "does not disagree".
+
 ### `test_two_runs_of_a_check_are_not_a_duplicate_of_it`
 
 Merging logs first cannot tell *the same check in two runs* from *the same name twice in

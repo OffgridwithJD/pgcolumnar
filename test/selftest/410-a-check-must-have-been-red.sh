@@ -319,6 +319,133 @@ checks run: 1
 ' > "$_lw/s15b.log"
 check "control: a check the ledger claims for 15 that a PG15 run did not emit IS an orphan" 	"$(_led_run orphan-scan --ledger "$_lw/scope.tsv" "$_lw/s15b.log" | grep -c 'orphan: demo	part1	pg15 only' || true)" "1"
 
+# ---- a log must be able to say WHICH TREE it came from (#1073) ---------------
+#
+# `orphan-scan` reports a ledger row that no record in its own part matches. A row
+# whose check was ADDED AFTER the log was written produces exactly that signal, and
+# nothing in a RESULT record dates it against a tree. So a stale log and a genuinely
+# deleted check are indistinguishable, and the tool cannot close the gap from inside.
+#
+# Measured when it was filed: replaying a log from one tree against the ledger one
+# commit later reported 2 orphans, and both were checks that tree had just GAINED.
+# One step from filing a defect in a tool merged an hour earlier.
+#
+# The harness ALREADY writes `-- source: <fingerprint>` into every log, from the one
+# implementation in test/pgc_fingerprint.py. The tool now reads it and the caller
+# says what it expects.
+#
+# OPT-IN, deliberately. A hand caller may not know the build its log came from, and a
+# flag that refused every hand invocation is a flag nobody passes. Today's runner is
+# safe by CONSTRUCTION -- it passes the logs from the run it just finished -- and
+# that is an argument for making the guarantee explicit, not for assuming the next
+# caller inherits it.
+printf -- '-- source: aaaaaaaaaaaa matches the binary under test\nRESULT\tdemo\tpart1\tc\tPASS\t18\t\nchecks run: 1\n' > "$_lw/fp_a.log"
+printf -- '-- source: bbbbbbbbbbbb matches the binary under test\nRESULT\tdemo\tpart1\tc\tPASS\t18\t\nchecks run: 1\n' > "$_lw/fp_b.log"
+printf 'RESULT\tdemo\tpart1\tc\tPASS\t18\t\nchecks run: 1\n' > "$_lw/fp_none.log"
+printf 'demo\tpart1\tc\t18\tnever\t-\n' > "$_lw/fp.tsv"
+
+check "control: without --expect-source a log from any tree is read, so this is opt-in" \
+	"$(_led_rc orphan-scan --ledger "$_lw/fp.tsv" "$_lw/fp_b.log")" "0"
+check "a log whose source fingerprint is the expected one is read" \
+	"$(_led_rc orphan-scan --ledger "$_lw/fp.tsv" --expect-source aaaaaaaaaaaa "$_lw/fp_a.log")" "0"
+check "a log from ANOTHER tree is refused rather than read as evidence" \
+	"$(_led_rc orphan-scan --ledger "$_lw/fp.tsv" --expect-source aaaaaaaaaaaa "$_lw/fp_b.log")" "2"
+check "and the refusal names the fingerprint the log carries, so a reader can tell which tree" \
+	"$(_led_run orphan-scan --ledger "$_lw/fp.tsv" --expect-source aaaaaaaaaaaa "$_lw/fp_b.log" \
+		| grep -c 'bbbbbbbbbbbb')" "1"
+
+# THE FLAG MUST NOT PASS VACUOUSLY. A log naming no fingerprint at all satisfies
+# "does not disagree", which is how an opt-in check reports success having asked
+# nothing -- the shape #1032 and #965 both turned out to be.
+check "a log naming NO source fingerprint is refused when one is expected" \
+	"$(_led_rc orphan-scan --ledger "$_lw/fp.tsv" --expect-source aaaaaaaaaaaa "$_lw/fp_none.log")" "2"
+check "and that refusal says the log names none, rather than that it disagrees" \
+	"$(_led_run orphan-scan --ledger "$_lw/fp.tsv" --expect-source aaaaaaaaaaaa "$_lw/fp_none.log" \
+		| grep -c 'names no source fingerprint')" "1"
+
+# MERGE TOO, and it matters MORE there. orphan-scan misreporting a stale log is
+# recoverable by looking again; a stale log stamped into the ledger persists.
+check "merge refuses a log from another tree the same way" \
+	"$(_led_rc merge --ledger "$_lw/fpm.tsv" --date 2026-09-18 --reds-are-real \
+		--expect-source aaaaaaaaaaaa "$_lw/fp_b.log")" "2"
+check "control: and merges it when the fingerprint is the expected one" \
+	"$(_led_rc merge --ledger "$_lw/fpm.tsv" --date 2026-09-18 --reds-are-real \
+		--expect-source aaaaaaaaaaaa "$_lw/fp_a.log")" "0"
+
+# AND THE RUNNER PASSES IT, or the flag exists and nothing uses it -- which is the
+# state orphan-scan itself was in until #983: written, tested, and unable to fire on
+# anybody's change.
+check "the runner tells orphan-scan which tree the logs came from" \
+	"$(grep -A8 'pgc_ledger.py" orphan-scan' "$_rv" | grep -c -- '--expect-source')" "1"
+
+# AND AN EMPTY EXPECTATION MUST NOT PASS FOR ONE (#1073, reported by jdatcmd).
+#
+# `pgc_source_fingerprint` returns EMPTY with status 0 on both its failure paths, so
+# a box without python3 would have the runner pass `--expect-source ""` -- and the
+# tool's opt-in rule then skips the check. "Does not disagree" satisfying a guard,
+# moved from the log to the expectation, which is the thing the flag exists to
+# refuse one level out.
+check "the runner refuses the scan when it cannot name the tree" \
+	"$(grep -A14 '_orph_fp=' "$_rv" | grep -c 'could not be computed')" "1"
+check "and the scan does not run at all without an expectation, so it cannot report clean" \
+	"$(grep -c 'for _orph_log in \${_orph_fp:+\$_led_logs}' "$_rv")" "1"
+# THE PREMISE FOR BOTH: the empty return is real, not imagined.
+check "premise: pgc_source_fingerprint really does return empty with status 0" \
+	"$( . "$PGC_TESTDIR/lib.sh" 2>/dev/null
+	   v="$(pgc_source_fingerprint /nonexistent/tree 2>/dev/null)"; rc=$?
+	   printf 'value=[%s] rc=%s' "$v" "$rc" )" "value=[] rc=0"
+
+# ---- and the RUNNER stamps every log, not the suites (#1073) -----------------
+#
+# The first version of this leaned on `pgc_setup` to write `-- source:`, and TWENTY
+# suites in this tree never call it -- they carry their own harness, deliberately,
+# which is the population #1109 exists for. Fourteen registered suites therefore
+# produced logs that could not say which tree they came from, and CI refused the
+# whole major:
+#
+#     audit  concurrency  decode_interrupts  hilbert_curve  objstore_stash_recovery
+#     phase2  phase3  phase4  phase5  phase6  smoke  unique_conc  update_conc
+#     wal_envelope
+#
+# "Safe by construction" was true of PROVENANCE and not of STAMPING, and those are
+# different properties. Caught by @jdatcmd off CI, not by me.
+#
+# The runner owns every log, so it stamps every log: one site, 258 suites, nothing
+# asked of any suite. THE ORDER IS LOAD-BEARING -- a suite that also stamps writes a
+# second line, and the tool reads the FIRST, so the runner's is the one answer.
+check "the runner defines one stamping helper rather than repeating the line" \
+	"$(grep -c '^pgc_stamp_log()' "$_rv")" "1"
+# AND DEFINES IT BEFORE IT CALLS IT. bash reads top to bottom, so a helper defined
+# below its call site is `command not found` at run time -- and the suite loop still
+# runs, so every log in the batch arrives unstamped while the run looks normal.
+# Measured: the first version put the definition at line 1128 and called it at 762,
+# and the matrix printed `pgc_stamp_log: command not found` once per suite.
+check "and defines it BEFORE the first call, since bash reads top to bottom" \
+	"$([ "$(grep -n '^pgc_stamp_log()' "$_rv" | cut -d: -f1)" \
+	     -lt "$(grep -n 'pgc_stamp_log "' "$_rv" | sed -n 2p | cut -d: -f1)" ] \
+	   && echo before || echo after)" "before"
+check "and stamps at every site that writes a suite log" \
+	"$(grep -c 'pgc_stamp_log "\$builddir/\${s}\.log"' "$_rv")" "3"
+# THE APPEND IS THE OTHER HALF. A suite redirected with > would truncate the stamp
+# the line above just wrote, and the log would arrive unstamped with nothing saying
+# so -- the failure this replaces, reintroduced by a redirection operator.
+check "and every suite log is APPENDED to, so the stamp survives the run" \
+	"$(grep -c 'bash "\$builddir/test/\${s}\.sh" "\$pgc" >"\$builddir/\${s}\.log"' "$_rv")" "0"
+check "premise: and those writes exist at all, in the appending form" \
+	"$(grep -c 'bash "\$builddir/test/\${s}\.sh" "\$pgc" >>"\$builddir/\${s}\.log"' "$_rv")" "2"
+
+# THE HELPER'S OWN BEHAVIOUR, exercised rather than read: it must write the line a
+# log carries, and must write NOTHING when it has no fingerprint -- a stamp saying
+# `-- source: ` would satisfy the format and name no tree.
+_st_d="$PGC_WORKDIR/stamp"; rm -rf "$_st_d"; mkdir -p "$_st_d"
+( eval "$(sed -n '/^pgc_stamp_log()/,/^}/p' "$_rv")"
+  pgc_stamp_log "$_st_d/a.log" c9e65b1b35ba
+  pgc_stamp_log "$_st_d/b.log" "" )
+check "the helper writes a source line a reader can parse" \
+	"$(grep -cE '^-- source: [0-9a-f]{6,64}\b' "$_st_d/a.log" 2>/dev/null || true)" "1"
+check "and writes nothing at all when it has no fingerprint to write" \
+	"$([ -e "$_st_d/b.log" ] && echo "a file was created" || echo none)" "none"
+
 # A row claiming BOTH majors is checked on BOTH: a stronger claim held to both tests,
 # which is the point of storing a set rather than one major per row.
 printf 'RESULT	demo	part1	pg18 only	PASS	18	

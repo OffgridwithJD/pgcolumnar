@@ -913,6 +913,9 @@ harness_selftest	410-a-check-must-have-been-red	a later green run does not erase
 harness_selftest	410-a-check-must-have-been-red	a ledger row naming a major that is not a major is an integrity failure	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a ledger row no record in its own part matches is named an orphan	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a log carrying a FAIL is refused when no reason is given	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	a log from ANOTHER tree is refused rather than read as evidence	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	a log naming NO source fingerprint is refused when one is expected	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	a log whose source fingerprint is the expected one is read	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a major the ledger holds no row for refuses nothing, as an uncovered suite does	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a name that appeared while another disappeared is reported as a rename	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a named mutation is recorded against the check that reddened	15;16;17;18;19	never	-
@@ -952,6 +955,8 @@ harness_selftest	410-a-check-must-have-been-red	and a record missing its verdict
 harness_selftest	410-a-check-must-have-been-red	and a row naming NO major says nothing about where its check exists	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and an empty mutation is a placeholder, not an empty last field	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and an undated merge does not erase a known date	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and defines it BEFORE the first call, since bash reads top to bottom	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and every suite log is APPENDED to, so the stamp survives the run	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it copies them BEFORE removing the build directory, which is the only order that works	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it entered as debt, not as an observation nothing made	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it is REFUSED, not merely printed	15;16;17;18;19	never	-
@@ -973,9 +978,11 @@ harness_selftest	410-a-check-must-have-been-red	and nothing is written, so a ref
 harness_selftest	410-a-check-must-have-been-red	and one that stayed green keeps its debt	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and only when there is a base, so a push build does not fail on it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and records neither as ever having been red	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and stamps at every site that writes a suite log	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and that is not a failure, because a run sees ONE major	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and that refusal names the target that stayed green	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and that refusal says --target needs --mutation	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and that refusal says the log names none, rather than that it disagrees	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the PG18-only row is one it cannot speak about, not one that vanished	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the addition in the other part is not called a rename	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the census line it always printed is still there	15;16;17;18;19	never	-
@@ -992,11 +999,14 @@ harness_selftest	410-a-check-must-have-been-red	and the refusal names both value
 harness_selftest	410-a-check-must-have-been-red	and the refusal names how many failed, so the author can narrow the run	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the check that reddened	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the check that was not claimed as a target	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and the refusal names the fingerprint the log carries, so a reader can tell which tree	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the raise	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal quotes the claim beside the measurement	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the runner names no remote at that call site	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and the scan does not run at all without an expectation, so it cannot report clean	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the scan states how many rows it could not speak about	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the summary keeps the two apart, so a zero orphan count is not a clean bill	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and writes nothing at all when it has no fingerprint to write	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	auto refuses when GITHUB_BASE_REF names a ref that is not here	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	auto uses the base ref when it resolves, and names it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	auto with no base ref and no upstream is an integrity failure	15;16;17;18;19	never	-
@@ -1012,6 +1022,7 @@ harness_selftest	410-a-check-must-have-been-red	control: a well-formed log still
 harness_selftest	410-a-check-must-have-been-red	control: all-clean logs leave both flags down	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: an all-PASS log still merges with no flag at all	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and a clean run still returns 0 under it	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	control: and merges it when the fingerprint is the expected one	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and still records the mutation against the check that reddened	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and that one did prune, so 0 is not a refusal in disguise	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and the ledger really is shorter afterwards	15;16;17;18;19	never	-
@@ -1022,11 +1033,13 @@ harness_selftest	410-a-check-must-have-been-red	control: the row in the part the
 harness_selftest	410-a-check-must-have-been-red	control: the same log merges with a different reason, so the refusal above is --mutation-across-two-checks and not the log	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: the same row with a real major is read without complaint	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: the same two rows ARE pruned when that part's record is a PASS	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	control: without --expect-source a log from any tree is read, so this is opt-in	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	each says what was wrong with the input	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	every committed row has six fields	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	every row has six fields and no trailing tab	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	it is still a finding, so the scan does not return success	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	lowering it is allowed, which is the direction the burn-down goes	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	merge refuses a log from another tree the same way	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	merging a green run records both checks	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	naming both failing checks as targets permits the merge	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	naming only one of two failing checks is still refused	15;16;17;18;19	never	-
@@ -1041,7 +1054,9 @@ harness_selftest	410-a-check-must-have-been-red	premise: and the refusal removed
 harness_selftest	410-a-check-must-have-been-red	premise: and the run the scan is given holds only one of them	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: and the skipped run emits exactly one of them, as a SKIP	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: and the two arms it stands in for are still named in the ledger	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	premise: and those writes exist at all, in the appending form	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: both are never, so this ledger's census is two	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	premise: pgc_source_fingerprint really does return empty with status 0	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: that part has rows the skipped run cannot speak for	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: the budget is a tracked file too	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	premise: the budget was restored byte-exact	15;16;17;18;19	never	-
@@ -1078,14 +1093,18 @@ harness_selftest	410-a-check-must-have-been-red	the committed census matches the
 harness_selftest	410-a-check-must-have-been-red	the distance travels with a refusal too, not only with a pass	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the four categories account for every ledger row	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the gate refuses to run without the registered suite list	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	the helper writes a source line a reader can parse	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the ledger partitions into observed and never	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the orphan scan stays a REPORT while any skip loop cannot be compared to its arms	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the refusal says why, rather than only that it refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the runner asks the tool to resolve the prior rather than naming one	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the runner captures the gate's status rather than only its success	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	the runner defines one stamping helper rather than repeating the line	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the runner invokes the ledger gate	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the runner keeps the logs somewhere that outlives the build directory	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the runner passes --against to the gate	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	the runner refuses the scan when it cannot name the tree	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	the runner tells orphan-scan which tree the logs came from	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the same check in two logs is two runs, not a duplicate	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the same name twice in ONE log is a duplicate, and is named	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the scan reports a finding on a skipped part	15;16;17;18;19	never	-

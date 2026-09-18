@@ -732,6 +732,41 @@ for pgc in "${CONFIGS[@]}"; do
 	# reports "freshness UNVERIFIED" and the controller arm silently stops being a
 	# controller arm -- the whole batch degrades to the state this exists to
 	# prevent, and nothing says so. Say so.
+# THE RUNNER STAMPS EVERY LOG, not the suites (#1073).
+#
+# `-- source: <fingerprint>` is written by `pgc_setup`, and TWENTY-EIGHT files in
+# `test/` never call it -- they carry their own harness, deliberately, which is the
+# same population #1109 exists for. So a log's provenance depended on which harness
+# the suite chose, and fourteen REGISTERED suites among them produced logs that
+# could not say which tree they came from:
+#
+# COUNTED ON CODE, NOT ON MENTIONS. A plain `grep -l pgc_setup` says 20, because six
+# of these fourteen name it in a COMMENT saying they skip it deliberately --
+# `concurrency`, `decode_interrupts`, `hilbert_curve`, `unique_conc`, `update_conc`
+# and `wal_envelope`. Counting the mention rather than the call would have put six
+# suites on the wrong side of the very claim this comment makes.
+#
+#     audit  concurrency  decode_interrupts  hilbert_curve  objstore_stash_recovery
+#     phase2  phase3  phase4  phase5  phase6  smoke  unique_conc  update_conc
+#     wal_envelope
+#
+# This runner already owns every log -- it redirects each suite into
+# `$builddir/<suite>.log` -- so stamping here covers all 258 at one site and needs
+# nothing from any suite. "Safe by construction" then describes STAMPING and not
+# only provenance, which is the distinction that made the first version wrong.
+# Reported by @jdatcmd, off CI.
+#
+# WRITTEN FIRST, and that is load-bearing: a suite that DOES call `pgc_setup` stamps
+# again below, and `_log_source_fingerprint` returns the FIRST match. The runner's
+# line is the one read, so one answer per log whichever harness the suite uses.
+pgc_stamp_log() {	# pgc_stamp_log LOGFILE FINGERPRINT
+	[ -n "${2:-}" ] || return 0
+	printf -- '-- source: %s (stamped by the runner for this batch)\n' "$2" >"$1"
+}
+
+	# The value every log in this batch is stamped with, from the one implementation.
+	_batch_fp="$( . "$builddir/test/lib.sh"; pgc_source_fingerprint "$builddir" )"
+
 	if (
 		. "$builddir/test/lib.sh"
 		pgc_write_source_stamp \
@@ -756,8 +791,9 @@ for pgc in "${CONFIGS[@]}"; do
 		while [ "$(jobs -rp | wc -l)" -ge "$maxjobs" ]; do wait -n; done
 		port=$((BASE_PORT++))
 		(
+			pgc_stamp_log "$builddir/${s}.log" "$_batch_fp"
 			PGC_SKIP_BUILD=1 PGC_PORT="$port" \
-				bash "$builddir/test/${s}.sh" "$pgc" >"$builddir/${s}.log" 2>&1
+				bash "$builddir/test/${s}.sh" "$pgc" >>"$builddir/${s}.log" 2>&1
 			echo $? >"$builddir/${s}.rc"
 		) &
 	done
@@ -789,7 +825,8 @@ for pgc in "${CONFIGS[@]}"; do
 			# well as the status: this branch never executes the suite, so nothing
 			# else would produce one and the run would be classified a failure.
 			echo 66 >"$builddir/${s}.rc"
-			echo "$s.sh: SKIPPED (ran no checks)" >"$builddir/${s}.log"
+			pgc_stamp_log "$builddir/${s}.log" "$_batch_fp"
+			echo "$s.sh: SKIPPED (ran no checks)" >>"$builddir/${s}.log"
 			# Record the decision where it is made (#916). This suite calls
 			# pgc_summary and will produce no accounting line, because it was
 			# never run; the reconciliation needs that said by the driver rather
@@ -798,8 +835,9 @@ for pgc in "${CONFIGS[@]}"; do
 			continue
 		fi
 		port=$((BASE_PORT++))
+		pgc_stamp_log "$builddir/${s}.log" "$_batch_fp"
 		PGC_SKIP_BUILD=1 PGC_PORT="$port" \
-			bash "$builddir/test/${s}.sh" "$pgc" >"$builddir/${s}.log" 2>&1
+			bash "$builddir/test/${s}.sh" "$pgc" >>"$builddir/${s}.log" 2>&1
 		echo $? >"$builddir/${s}.rc"
 	done
 
@@ -1097,6 +1135,7 @@ pgc_ran_without_accounting() {	# pgc_ran_without_accounting RANFILE WIDEFILE -> 
 pgc_accounted_among() {	# pgc_accounted_among NAMEFILE WIDEFILE -> names
 	LC_ALL=C comm -12 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
+
 
 pgc_log_shows_any_accounting() {	# pgc_log_shows_any_accounting LOGFILE -> yes|no
 	# Did this suite count its checks AT RUNTIME, by any mechanism the log shows?
@@ -1598,9 +1637,40 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		# suggesting it. Two independent conditions need two independent flags.
 		_orph_orphan=0
 		_orph_broken=0
+		# The same value every log in this batch was stamped with, above.
+		_orph_fp="$_batch_fp"
+		# AN EMPTY EXPECTATION EXPECTS NOTHING. `pgc_source_fingerprint` returns
+		# EMPTY with status 0 on both its failure paths -- no python3, or the module
+		# erroring -- so a box where the freshness machinery is broken would pass
+		# `--expect-source ""`, and the tool's own opt-in rule would then skip the
+		# check entirely. That is "does not disagree" satisfying a guard, moved from
+		# the log to the expectation: exactly what the flag below exists to refuse,
+		# one level out. Reported by @jdatcmd.
+		#
+		# The two halves do degrade together -- lib.sh cannot stamp the log either,
+		# so a log written now would be refused if the check ran -- but "it happens
+		# to be covered elsewhere" is how a guard stops being one. Refused here.
+		if [ -z "$_orph_fp" ]; then
+			echo "  PG$major: the source fingerprint could not be computed, so the"
+			echo "  orphan scan cannot be told which tree these logs came from. That"
+			echo "  is the freshness machinery being unavailable, not a clean scan."
+			_orph_broken=1
+		fi
 		# shellcheck disable=SC2086
-		for _orph_log in $_led_logs; do
+		for _orph_log in ${_orph_fp:+$_led_logs}; do
+			# WHICH TREE THESE LOGS CAME FROM (#1073). A ledger row whose check
+			# was ADDED after the log was written looks exactly like a row whose
+			# check was DELETED, and nothing in a RESULT record dates one against
+			# the other. This caller is safe by construction -- these are the logs
+			# from the run it has just finished -- and that guarantee is now stated
+			# rather than assumed, so a future caller that is NOT safe is refused
+			# instead of quietly misreported.
+			#
+			# Read from the stamp this runner wrote above, not recomputed: two
+			# implementations of one fingerprint drift, which is the defect
+			# test/pgc_fingerprint.py exists to have ended.
 			python3 "$builddir/test/pgc_ledger.py" orphan-scan --orphans-only \
+				--expect-source "$_orph_fp" \
 				--ledger "$builddir/test/check_ledger.tsv" "$_orph_log"
 			_orph_rc=$?
 			case "$_orph_rc" in

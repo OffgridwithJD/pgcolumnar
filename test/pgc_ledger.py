@@ -437,8 +437,73 @@ def _warn_subset_majors(rows, touched):
         if len(keys) > 6:
             print(f"               ... and {len(keys) - 6} more")
 
+# ---- which TREE a log came from (#1073) -------------------------------------
+#
+# `orphan-scan` reports a ledger row that no record in its own part matches. A row
+# whose check was ADDED AFTER the log was written produces exactly that signal, and
+# nothing in a RESULT record dates it against a tree. A stale log and a genuinely
+# deleted check are indistinguishable, and the tool cannot close that from inside.
+#
+# Measured when it was filed: replaying a log from one tree against the ledger one
+# commit later reported 2 orphans, both of which were checks that tree had just
+# GAINED -- one step from a defect report against a tool merged an hour earlier.
+#
+# `test/lib.sh` already writes `-- source: <fingerprint>` into every log, from the
+# one implementation in `test/pgc_fingerprint.py`. Nothing needed inventing; it
+# needed reading.
+_SOURCE_LINE = re.compile(r"^--\s+source:\s+([0-9a-f]{6,64})\b")
+
+
+def _log_source_fingerprint(path):
+    """-> the source fingerprint a log names, or None if it names none.
+
+    Three spellings reach the log -- verified, source-only, and UNVERIFIED -- and
+    all three put the fingerprint in the same place, so the prefix is matched and
+    the prose after it is not.
+    """
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                m = _SOURCE_LINE.match(line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        return None
+    return None
+
+
+def _refuse_foreign_logs(args):
+    """Refuse a log that did not come from the tree the caller names.
+
+    OPT-IN. A hand caller may not know the build its log came from, and a flag that
+    refused every hand invocation is a flag nobody passes. Today's runner is safe by
+    CONSTRUCTION -- it passes the logs from the run it has just finished -- which is
+    an argument for making that guarantee explicit rather than for assuming the next
+    caller inherits it.
+    """
+    want = (getattr(args, "expect_source", None) or "").strip()
+    if not want:
+        return
+    for path in args.logs:
+        got = _log_source_fingerprint(path)
+        # A LOG NAMING NONE SATISFIES "does not disagree", which is how an opt-in
+        # check reports success having asked nothing. Refused rather than skipped.
+        if got is None:
+            raise LedgerError(
+                f"{path} names no source fingerprint, so it cannot be shown to come "
+                f"from the tree you named ({want}). A log written by test/lib.sh "
+                f"carries `-- source: <fingerprint>`; one that does not was produced "
+                f"another way, and --expect-source cannot vouch for it.")
+        if got != want:
+            raise LedgerError(
+                f"{path} came from a different tree: it names source {got}, and you "
+                f"expected {want}. A check ADDED since that log was written looks "
+                f"exactly like a check DELETED since the ledger was, so reading it "
+                f"here would report the one as the other.")
+
 
 def cmd_merge(args):
+    _refuse_foreign_logs(args)
     rows = read_ledger(args.ledger)
     runs = _by_run(args.logs)
 
@@ -768,6 +833,7 @@ def cmd_orphan_scan(args):
     could be. Prose covers a human; a script sees only the code. So 0 now means the
     ledger and the run agree, and anything outstanding keeps the 1 the scan gave.
     """
+    _refuse_foreign_logs(args)
     runs = _by_run(args.logs)
     if len(runs) > 1:
         raise LedgerError(
@@ -1307,6 +1373,10 @@ def main(argv=None):
     m.add_argument("--reds-are-real", action="store_true",
                    help="the FAIL records in these logs are a genuine observation "
                         "of the code under test, not an artifact of the environment")
+    m.add_argument("--expect-source", default="", metavar="FINGERPRINT",
+                   help="refuse a log whose `-- source:` fingerprint is not this "
+                        "one, so a stale log cannot be read as evidence about "
+                        "this tree (#1073). Opt-in")
     m.add_argument("logs", nargs="+")
     m.set_defaults(fn=cmd_merge)
 
@@ -1325,6 +1395,10 @@ def main(argv=None):
     o.add_argument("--prune", action="store_true",
                    help="remove orphan rows that carry no history; refuse the whole "
                         "prune if any of them does")
+    o.add_argument("--expect-source", default="", metavar="FINGERPRINT",
+                   help="refuse a log whose `-- source:` fingerprint is not this "
+                        "one, so a stale log cannot be read as evidence about "
+                        "this tree (#1073). Opt-in")
     o.add_argument("logs", nargs="+")
     o.set_defaults(fn=cmd_orphan_scan)
 
