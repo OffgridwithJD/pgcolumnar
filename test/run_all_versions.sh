@@ -254,6 +254,7 @@ SUITES=(
 	projection_privilege
 	projection_rename_restore
 	projection_rewrite
+	projection_scan_cost
 	projection_update
 	projections
 	pushdown_report

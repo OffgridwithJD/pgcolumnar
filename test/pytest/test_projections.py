@@ -435,10 +435,13 @@ def test_reconstruction_survives_deletes_and_nulls(recon, expect):
 def planner(pgc_conn):
     with pgc_conn.cursor() as cur:
         cur.execute("CREATE TABLE ps (a int, b text, c int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('ps', stripe_row_limit => 2500, "
+                    "chunk_group_row_limit => 1000)")
         cur.execute("SELECT pgcolumnar.add_projection('ps','pc',"
                     "ARRAY['a','c'],ARRAY['c'])")
         cur.execute("INSERT INTO ps SELECT g, 'r'||g, (g*7)%%1000 "
                     "FROM generate_series(1,%s) g", (PLANNER_ROWS,))
+        cur.execute("ANALYZE ps")
         cur.execute("CREATE TABLE ps_h (a int, b text, c int) USING heap")
         cur.execute("INSERT INTO ps_h SELECT g, 'r'||g, (g*7)%%1000 "
                     "FROM generate_series(1,%s) g", (PLANNER_ROWS,))
@@ -507,11 +510,14 @@ def test_a_projection_scan_reflects_deletes(planner, expect):
 def vac(pgc_conn):
     with pgc_conn.cursor() as cur:
         cur.execute("CREATE TABLE pv (a int, b text, c int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('pv', stripe_row_limit => 2500, "
+                    "chunk_group_row_limit => 1000)")
         cur.execute("SELECT pgcolumnar.add_projection('pv','pvp',"
                     "ARRAY['a','c'],ARRAY['c'])")
         cur.execute("INSERT INTO pv SELECT g, 'r'||g, (g*7)%%1000 "
                     "FROM generate_series(1,%s) g", (PLANNER_ROWS,))
         cur.execute("DELETE FROM pv WHERE a BETWEEN 5000 AND 8000")
+        cur.execute("ANALYZE pv")
         cur.execute("CREATE TABLE pv_h (a int, b text, c int) USING heap")
         cur.execute("INSERT INTO pv_h SELECT g, 'r'||g, (g*7)%%1000 "
                     "FROM generate_series(1,%s) g WHERE g NOT BETWEEN 5000 AND 8000",

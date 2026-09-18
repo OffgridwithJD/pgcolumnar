@@ -245,7 +245,7 @@ CREATE TABLE dim_pj(k int);
 INSERT INTO dim_pj SELECT g FROM generate_series(1,200) g;
 CREATE TABLE fact_pj(k int, payload text) USING pgcolumnar;
 SELECT pgcolumnar.set_options($t$fact_pj$t$, stripe_row_limit => 1000);
-INSERT INTO fact_pj SELECT g, repeat(md5(g::text), 4) FROM generate_series(1,4000) g;
+INSERT INTO fact_pj SELECT g, repeat(md5(g::text), 4) FROM generate_series(1,4000) g ORDER BY md5(g::text);
 SELECT pgcolumnar.add_projection($t$fact_pj$t$, $n$byk$n$, ARRAY['k','payload'], ARRAY['k']);
 CREATE TABLE heap_pj AS SELECT * FROM fact_pj;
 ANALYZE dim_pj;

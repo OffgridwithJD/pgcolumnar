@@ -88,6 +88,7 @@ from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
 COMPLETE = ["differential", "hilbert_cluster", "hilbert_locality",
             "native_chunk_length_bound", "native_fetch_coalesce", "native_ownership", "native_projection", "parallel_am_scan",
             "projection_privilege",
+            "projection_scan_cost",
             "projections",
             "sorted_pathkeys", "stats_privilege",
             "index_fetch_penalty_crossover",

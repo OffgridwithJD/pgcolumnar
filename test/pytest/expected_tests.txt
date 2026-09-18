@@ -279,4 +279,12 @@ guard_tests 374
 # the expected answer for a file that needs a cluster, and checking it was the point
 # rather than assuming it.
 # cluster_tests re-derived by collection on the rebased tree, never by adding a delta measured on another tree.
-cluster_tests 417
+# 417 -> 418 when test_projection_scan_cost.py landed: one cluster arm that
+# a covering projection scan is not priced at half the base for every
+# restriction. Re-derived by collection on this tree, never by adding one
+# to a number measured on another: `418 tests collected`. `guard_tests`
+# was re-derived in the same run and did NOT move -- 346.
+# After rebase onto origin/main (ab8feef), re-derived by collection on this
+# tree, not by keeping the auto-merged 418: guard_tests 374 tests collected;
+# cluster_tests 418 tests collected. guard_tests did not move.
+cluster_tests 418

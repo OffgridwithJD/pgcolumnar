@@ -41,6 +41,27 @@ true until the next version shipped.
   0 on a correct document. The mutation then reddened it as well, which looks like a
   working removal proof and is two failures agreeing. Re-anchored on a phrase that
   fits one line; the control is green and the mutation still reddens.
+- A covering projection scan was priced at half the base scan for every
+  restriction, then from every restriction's selectivity.
+
+  `PgColumnarSetRelPathlist` offers a covering-projection path when a
+  projection stores every referenced column and its leading sort key appears
+  in a restriction. That path took the base custom-scan run cost and
+  multiplied by 0.5. The constant does not depend on selectivity, so a 5
+  percent range on the sort key was quoted the same as a 50 percent range.
+  Measured on a 20,000-row table with scrambled insert order: both plans
+  reported run-cost ratio 0.500 against the base scan.
+
+  Replacing the constant with `rel->rows / rel->tuples` moved with
+  selectivity, but `rel->rows` is the estimate after every restriction.
+  The projection prunes only on `sortKey[0]`. A full-range sort key plus a
+  rare non-sort-key column was then quoted at 0.077 of the base for work
+  the sort order cannot reduce. The run cost now follows
+  `clauselist_selectivity` over the clauses that reference that sort key,
+  floored at one written stripe, and is not discounted twice when the heap
+  layout already prunes as tightly. The same misattributed query reports
+  1.000; a 5 percent range on the sort key still reports 0.050 against a
+  50 percent range at 0.500.
 
 - A `CONFLICTING` badge on a changelog entry is GitHub, not git (#1116).
 
