@@ -93,6 +93,23 @@ q "SELECT pg_reload_conf()" >/dev/null
 q "SELECT pgcolumnar.iceberg_rest_table_location('$CAT','db','events')" >/dev/null
 q "ALTER SYSTEM SET log_statement='none'" >/dev/null
 q "SELECT pg_reload_conf()" >/dev/null
+# PREMISE FOR THE CLAIM BELOW, which can pass having read nothing (#1032).
+# `grep -c` prints `0` for a file that EXISTS AND IS EMPTY. A missing or unreadable
+# file prints NOTHING, so `"" != "0"` already fails the claim -- empty is the only
+# hole, and it is the one a rotation, a `log_destination` change or a truncating
+# reuse path would open. Measured, all four states:
+#
+#     real log   got=[0] passes     empty log  got=[0] PASSES having read nothing
+#     missing    got=[]  fails      leaking    got=[1] fails
+#
+# NOT `grep -c . ... || echo 0`: `grep -c` prints `0` AND exits 1 on an empty file,
+# so that form yields TWO lines and turns the comparison into a shell error. The
+# assignment form below carries one value.
+#
+# The request logs in this suite already have positive controls; the PG log did not.
+_ir_loglines="$(grep -c . "$PGC_LOGFILE" 2>/dev/null)" || _ir_loglines=0
+check "premise: the PG server log holds lines to search" \
+	"$([ "${_ir_loglines:-0}" -gt 0 ] && echo yes || echo no)" "yes"
 check "the token never appears in the server (PG) log" \
 	"$(grep -c "$TOKEN" "$PGC_LOGFILE" 2>/dev/null)" "0"
 check "the token value never appears in the catalog request log" \

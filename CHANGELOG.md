@@ -18,6 +18,54 @@ true until the next version shipped.
 
 ### Fixed
 
+- Four secret-leak claims over the PG server log could pass having read nothing
+  (#1032).
+
+  `iceberg_rest.sh`, `iceberg_rest_server.sh` (twice) and `iceberg_rest_vended.sh`
+  each assert that a token or secret never reaches `$PGC_LOGFILE`, with
+  `grep -c "$SECRET" "$PGC_LOGFILE"` compared against `0`. Nothing in the tree made
+  any positive claim about that file: no suite asserted it exists, is readable, or
+  holds a single line.
+
+  THE HOLE IS EXACTLY ONE STATE, and the other three are already safe. Measured:
+
+      a real server log   got=[0]  passes
+      an EMPTY log        got=[0]  PASSES, having read nothing
+      a missing log       got=[]   fails
+      a log that LEAKS    got=[1]  fails
+
+  `grep -c` prints nothing for a file it cannot open, so a missing path, an unset
+  variable and an unreadable file all fail closed. A file that EXISTS AND IS EMPTY
+  prints `0`, which is the value the claim wants. Anything leaving the log present
+  and empty -- a rotation, a `log_destination` change, a truncating reuse path --
+  turns all four green and says nothing.
+
+  Each claim now carries its own premise immediately above it, so the two cannot
+  drift apart:
+
+      _ir_loglines="$(grep -c . "$PGC_LOGFILE" 2>/dev/null)" || _ir_loglines=0
+      check "premise: the PG server log holds lines to search" \
+      	"$([ "${_ir_loglines:-0}" -gt 0 ] && echo yes || echo no)" "yes"
+
+  NOT the `grep -c . ... || echo 0` form: `grep -c` prints `0` AND exits 1 on an
+  empty file, so that yields two lines and turns the comparison into a shell error
+  rather than a comparison. The assignment form carries one value. Measured.
+
+  Removal proof, at suite level: pointing both reads at a present-and-empty file
+  gives `FAIL premise: the PG server log holds lines to search` while
+  `PASS the token never appears in the server (PG) log` still stands -- the premise
+  catching precisely what the claim cannot see.
+
+  A first attempt at that proof truncated `$PGC_LOGFILE` in place and did NOT
+  reproduce: the running postmaster wrote a line back within the same instant
+  (`lines immediately after truncation: 1`), so the mutation never created the
+  state it claimed to. Recorded because the invalid version looked like a passing
+  control.
+
+  The three suites already applied this discipline to their own request logs --
+  every absence claim over `$REST_LOG` and `$OLOG` sits beside a positive grep
+  returning `1`. The PG log was the one file they skipped.
+
 - `native_upgrade_converge` staged its fixtures only when nothing was already
   installed, so a leftover install script won over the committed fixture (#1090).
 
