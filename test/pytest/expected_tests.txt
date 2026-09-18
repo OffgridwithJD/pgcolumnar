@@ -293,4 +293,8 @@ guard_tests 380
 # After rebase onto origin/main (ab8feef), re-derived by collection on this
 # tree, not by keeping the auto-merged 418: guard_tests 374 tests collected;
 # cluster_tests 418 tests collected. guard_tests did not move.
-cluster_tests 418
+# 418 -> 421 with the three ports in #432's analyze/projection batch:
+# test_analyze_reltuples.py, test_projection_update.py and
+# test_projection_drop_column.py, one collected test each. Re-derived BY COLLECTION on
+# this tree, never by adding three.
+cluster_tests 421

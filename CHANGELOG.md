@@ -18,6 +18,49 @@ true until the next version shipped.
 
 ### Fixed
 
+- Three suites ported to pytest, and the queue re-derived (#432).
+
+  `analyze_reltuples`, `projection_update` and `projection_drop_column`, 21 names,
+  each graded `missing: 0` by `compare_to_bash.py`. Ports take 17 to 20 of the
+  corpus, and the batch is one pull request rather than three because the
+  per-PR cost -- the census, the counts, TESTS.md and its anchor -- is paid once
+  per review and not once per suite.
+
+  EACH PORT ASSERTS SOMETHING ITS BASH ORIGINAL DOES NOT, which is the point of
+  porting rather than translating:
+
+      analyze_reltuples        the helper builds a columnar and a heap table from
+                               two separate inserts and compares their row
+                               estimates without checking they hold the same rows.
+                               Both counts are asserted now. And the arm named
+                               `20 stripes: within 5% of actual` never read the
+                               geometry -- a single-group table passes that 5%
+                               check too -- so the port reads pgcolumnar.row_group.
+
+      projection_update        an UPDATE whose WHERE matched nothing leaves both
+                               sides identical and every arm below it green,
+                               having exercised no fan-out at all. The affected
+                               row counts are pinned.
+
+      projection_drop_column   the two non-owner arms exist to show a stranger
+                               cannot tell a projected column from an unprojected
+                               one. The bash suite asserts each against the
+                               literal 42501 and leaves the reader to notice they
+                               match; the port compares them to each other.
+
+  THE SECOND ONE CAUGHT MY OWN PREMISE. I first asserted the non-owner could read
+  the table, and the run returned 42501: USAGE on the schema resolves the NAME,
+  while SELECT is a separate grant. The property the arms below it need is only
+  that the name is not invisible, because 42P01 would mean they were asserting
+  ownership against a table the role cannot see. Corrected to test for that.
+
+  Row sets are compared as sorted tuples in Python rather than through
+  `pgc_set_hash`, so the two harnesses stay independent by construction and a
+  failure prints the rows that differ instead of two unequal hashes.
+
+  No bash suite changes, so no ledger row moves and the census does not.
+  `cluster_tests` 418 -> 421, re-derived by collection.
+
 - A covering projection was priced by clauses that merely mention its sort key,
   rather than by clauses it can prune on (#1126, the remainder of #1107).
 
