@@ -391,8 +391,16 @@ check "and a skip does not, which is the one that must stay true" \
 check "the runner's INCOMPLETE branch calls the mapping rather than a local flag" \
 	"$(grep -c 'pgc_verdict_fails_major "\$_verdict"' "$_rv")" "1"
 
+# CODE ONLY, NOT THE PROSE THAT DESCRIBES IT (#1123). `$_rv` carries 874 comment
+# lines, and one of them writing `MAJOR_FAIL=` -- a historical note about the very
+# name this arm exists to keep retired -- reddens it against a correct runner.
+# MEASURED, not supposed: adding that one comment line and changing nothing else
+# took harness_selftest to `1080 passed + 1 failed`.
+#
+# A herestring, not a pipe, because this file forbids the pipe (#486, part 080).
+_rv_code="$(grep -vE '^[[:space:]]*#' "$_rv")"
 check "and no write-only failure flag survives in the runner" \
-	"$(grep -c 'MAJOR_FAIL=' "$_rv")" "0"
+	"$(grep -c 'MAJOR_FAIL=' <<<"$_rv_code" || true)" "0"
 
 unset -f pgc_verdict_fails_major
 unset _rv _rvlog _rvrc

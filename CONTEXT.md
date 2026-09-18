@@ -261,6 +261,55 @@ Python that reaches into shell:
   reported "one ledger row covers 2" -- and the right response to a name that already
   exists is to ask why, not to rename it. Anchor a check sweep at `^[[:space:]]*`.
 
+- **A sweep over shell source cannot tell code from the prose describing it.**
+  Anchoring is only half the decision. Four guards got this wrong in one week, in
+  both directions, and every one was silent (#1123).
+
+  ```
+  selftest/070 flagged its own subject's comment, which quoted the pattern it greps for
+  grep -l pgc_setup counted six comments saying "skipped deliberately" as CALLS
+  the same trap as an EXCLUSION dropped those six, and with them 233 records
+  a record-pattern matched the word `check` inside run_all_versions.sh's echo strings
+  ```
+
+  Over-inclusion reads as a strict guard; under-inclusion reads as a clean tree.
+  Neither announces itself.
+
+  **Three decisions, and the third removes the question where it applies:**
+
+  1. **Strip comments.** `grep -vE '^[[:space:]]*#'` into a variable, then read the
+     variable. A herestring, not a pipe -- part 080 forbids the pipe (#486).
+  2. **Decide whether string literals count, and say which.** A pattern that
+     matches inside an `echo` is a different sweep from one that does not, and
+     stripping comments does not settle it.
+  3. **Prefer a population that cannot contain prose about itself.** Sweeping the
+     REGISTERED SUITES rather than `test/*.sh` dropped `run_all_versions.sh` out of
+     scope, because the runner is not a suite. That fixed one of the four with no
+     pattern work at all.
+
+  **Measured over this tree**, with each grep's own pattern extracted by `shlex`
+  from the `$(...)` body rather than by a regex over the line -- which is the part
+  that was wrong the first time and produced a number too bad to publish:
+
+  ```
+  126 sweeps over shell source
+   34 anchored at ^, so a comment line cannot match
+   92 unanchored
+    2 unanchored AND over a commented file AND the pattern is a bare identifier
+  ```
+
+  That last class is the one that bites, and both instances were real. In
+  `selftest/320` the pattern was `MAJOR_FAIL=` over a runner carrying 874 comment
+  lines: adding one comment saying the old name was `MAJOR_FAIL=`, changing no
+  code, took `harness_selftest` to `1080 passed + 1 failed`. In `selftest/080` the
+  pattern was the bare word `grep` over a file of 61 comment lines about readers.
+  Both now read code only.
+
+  **The wider count is a measurement, not a budget.** "Unanchored" is not
+  "exposed": a pattern like `/pbt/run\.sh$` cannot plausibly appear in prose, and
+  whether one can is a judgment a guard should not pretend to make. The narrow
+  class above is the part worth checking by hand when a sweep is written.
+
 - **The one permitted cross-reference, named as the rule asks.**
   `test_the_two_fingerprint_implementations_cover_the_same_inputs` asserts that the
   shell path and the Python path give the same value, which is to say that neither

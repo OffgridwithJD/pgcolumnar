@@ -143,6 +143,51 @@ true until the next version shipped.
 
   NOT A REGRESSION FROM #1107: the old constant `0.5` also beat the base for this
   query and the planner also chose the projection. What changed is how confidently.
+- Two guards read the prose describing their subject as if it were the subject
+  (#1123). One of them reddened on a comment.
+
+  `selftest/320` counted `MAJOR_FAIL=` over `run_all_versions.sh`, which carries 874
+  comment lines, and expected zero. MEASURED: adding one comment saying the old
+  spelling was `MAJOR_FAIL=` before #967 renamed it, and changing no code, took
+  `harness_selftest` to `1080 passed + 1 failed`. The arm exists to keep that name
+  retired, so the sentence that records the retirement is exactly what breaks it.
+
+  `selftest/080` counted the bare word `grep` over `harness_selftest.sh`, a file of
+  61 comment lines about readers. It passes today only because that file happens to
+  contain the word zero times.
+
+  Both now strip comments into a variable and read the variable, with a herestring
+  rather than a pipe, which is the form part 080 itself requires (#486).
+
+  PROVED IN FOUR ARMS, because a guard that stops flagging prose looks identical to
+  one that stopped working:
+
+      clean tree                              1081 passed + 0 failed
+      the comment that reddened 320           1081 passed + 0 failed   (was 1080 + 1)
+      a comment mentioning `grep`             1081 passed + 0 failed
+      a REAL reader put back in the subject   1080 passed + 1 failed   <- still caught
+
+  THE COUNT I COULD NOT PRODUCE WHEN I FILED #1123, produced. The first attempt
+  extracted the surrounding `"$(grep ...` rather than the grep's own pattern and
+  reported 54 "exposed" including obviously immune cases, so nothing was published.
+  Parsing each `$(...)` body with `shlex` instead of regexing the line fixes it:
+
+      126 sweeps over shell source
+       34 anchored at ^, so a comment line cannot match
+       92 unanchored
+        2 unanchored AND over a commented file AND the pattern is a bare identifier
+
+  Both of those two were real and both are fixed here. The wider 92 is a
+  MEASUREMENT AND NOT A BUDGET: `/pbt/run\.sh$` is unanchored and cannot appear in
+  prose, and deciding which patterns plausibly can is a judgment a guard should not
+  pretend to make. `CONTEXT.md` carries the rule and the numbers; no gate is added
+  on the 92.
+
+  The justification in 080 also carried a stale count -- "60 lines, zero" for a file
+  that is now 90 lines. Corrected, with the growth noted, because the exposure
+  surface grew with it.
+
+  No check names change, so no ledger row moves and the census stays at 1391.
 
 - The union-merge page did not say why rebasing works where merging does not
   (#1116 follow-up).
