@@ -509,7 +509,9 @@ harness_selftest	330-the-incomplete-path-must-run-whole	and counts both suites a
 harness_selftest	330-the-incomplete-path-must-run-whole	and exactly one of them as incomplete	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and is counted as having run	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and is not counted as skipped, nor is the skip count disturbed	15;16;17;18;19	never	-
+harness_selftest	330-the-incomplete-path-must-run-whole	and is recorded in neither the skipped names nor twice in its own	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and its log carries the INCOMPLETE line the classifier needs	15;16;17;18;19	never	-
+harness_selftest	330-the-incomplete-path-must-run-whole	and its name is recorded among the suites that ran	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and neither as skipped	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and no longer counts incompletes inline beside it	15;16;17;18;19	never	-
 harness_selftest	330-the-incomplete-path-must-run-whole	and records each suite's own verdict in the results string	15;16;17;18;19	never	-
@@ -720,6 +722,8 @@ harness_selftest	390-a-registered-suite-must-account	and prose containing the wo
 harness_selftest	390-a-registered-suite-must-account	and so does a failing one, which is the point	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and sorts its inputs, because the runner appends them in SUITES order	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the excused one is not named as a failure	15;16;17;18;19	never	-
+harness_selftest	390-a-registered-suite-must-account	and the headline a reader sees is that number	15;16;17;18;19	never	-
+harness_selftest	390-a-registered-suite-must-account	and the narrow file is still not what the headline counts	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the population reconciliation counts that same file	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the reader answers no on it, which is the wrong answer the arm catches	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	and the real function reconciles the same input, so the arm is not noise	15;16;17;18;19	never	-
@@ -1178,6 +1182,34 @@ harness_selftest	500-the-gate-takes-a-prior-the-caller-names	premise: the suites
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the prior is chosen from a closed set of policies	15;16;17;18;19	never	-
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the runner takes its prior ceiling policy from PGC_LEDGER_AGAINST	15;16;17;18;19	never	-
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the suites job names a prior ceiling for the gate	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	a real debt is counted and named by the same block	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	a suite that ran and did not account is named by the residual	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and a real debt is still not a major failure, which is the old behaviour	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and it records the name of every suite that skipped	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and no line in it carries a negative suite count at all	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and no sort feeding one is left on the caller's locale	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and the block leaves the major verdict alone when the sums agree	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and the skipped-but-accounted suites are named as their own category	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and the summary calls the residual reader on the suites that ran	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and the two suites are named, not left as a number	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	every comm in the runner pins its collation	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: and it ends at its own closing brace, not mid-statement	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the intersection reader is callable	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the residual reader is callable	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the runner defines the intersection reader	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the runner defines the residual reader this part evals	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the runner really does use comm, so this arm has a subject	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the subtraction the runner used goes negative on the live shape	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the summary block was extracted, not an empty range	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the tally function is findable	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	premise: the two buckets partition the suites that ran	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the live shape yields an empty residual while the same reader still finds a real one	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the printed breakdown no longer goes negative on the live shape	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the reader sorts its own inputs rather than trusting the caller	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the residual count agrees with the names the residual printed	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the skipped-but-accounted suites are named, not folded into the residual	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the summary prints the residual from the reader, not by subtraction	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	the tally function records the name of every suite that ran	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-

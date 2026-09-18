@@ -806,6 +806,16 @@ for pgc in "${CONFIGS[@]}"; do
 	# collect results in suite order for a stable, readable summary
 	suites_ran=0
 	suites_skipped=0
+	# THE NAMES BEHIND THOSE TWO COUNTS (#999, #1006). Truncated per major rather
+	# than appended, for the reason the `suites_incomplete=0` reset below carries:
+	# a per-major file that survives the previous major makes PG16 report PG15's
+	# suites and still print PASS, because verfail is per major and the file was
+	# not. Written beside every increment of the counter they belong to, so the
+	# names and the count cannot drift apart.
+	_acc_ranfile="$builddir/accounting.ran"
+	_acc_skipfile="$builddir/accounting.skipped"
+	: >"$_acc_ranfile"
+	: >"$_acc_skipfile"
 # Classify one suite's exit status. A function, not four inline branches,
 # because the selftest evals THIS TEXT rather than re-deriving the condition: a
 # check that recomputes a rule tests the world instead of the code.
@@ -1041,7 +1051,51 @@ pgc_reconcile_records() {	# pgc_reconcile_records LOGFILE -> 0 ok, 1 mismatch
 # a different mechanism, not a debt, and the thing that made one report give two answers
 # to the same question (#928).
 pgc_own_mechanism_suites() {	# pgc_own_mechanism_suites NARROWFILE WIDEFILE -> names
-	comm -13 <(sort "$1") <(sort "$2")
+	LC_ALL=C comm -13 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
+}
+
+# THE RESIDUAL IS A SET, NOT A SUBTRACTION (#999, #1006, filed independently by
+# both sessions off the same runs). The breakdown below used to print
+# `$((suites_ran - _acc_any))`, and every PG 17 matrix on main printed
+#
+#     of those, 248 accounted for their checks and -5 did not
+#
+# Minus five suites. The two terms count different populations: `suites_ran`
+# excludes a skipped suite, while `_acc_any` counts every registered suite whose
+# log shows an accounting line -- and a skipped suite still prints one, because
+# `pgc_summary` emits it on every exit path before it decides the status.
+#
+# A DERIVED RESIDUAL CLOSES THE PARTITION WHATEVER THE INPUTS ARE: 248 + (-5) =
+# 243, so an `inputs == sum(buckets)` arm passes on any two numbers. That is the
+# error `pgc_summary` warns about eight lines below its own counter, and this line
+# committed it one level up. Counting the difference instead makes a negative
+# unrepresentable rather than merely detected.
+#
+# Both readers sort, because the caller appends in roster order, and they pin the
+# COLLATION on both the sort and the comm. `sort` orders by locale: measured on real
+# suite names, `pgc_setup`/`pg_dump_roundtrip` and `projections`/`projection_update`
+# both swap between `C` and `en_US.UTF-8`. Fed a mismatch, `comm` writes `input is not
+# in sorted order` to STDERR and prints a result anyway -- so in a harness whose stderr
+# lands in a log nobody reads, a wrong set arrives looking like an answer.
+#
+# THE PREFIX ON `comm` IS NOT ENOUGH. Process substitutions run in subshells of the
+# PARENT and inherit its locale, not comm's, so `LC_ALL=C comm <(sort ...)` still sorts
+# on the caller's locale. Found by @OffgridwithJD in review; the guard that should have
+# caught it reads only the piped form and cannot see process substitution (#1112).
+#
+# The wording above is deliberate. An earlier draft spelled the piped form literally and
+# selftest 070 flagged THIS FILE for its own comment -- the guard scans every line,
+# prose included, so a note explaining the rule violates it. Recorded in #1112.
+pgc_ran_without_accounting() {	# pgc_ran_without_accounting RANFILE WIDEFILE -> names
+	LC_ALL=C comm -23 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
+}
+
+# The other bucket, counted rather than left over. Called twice: once over the
+# suites that RAN, which gives the figure the breakdown reports, and once over the
+# suites that SKIPPED, which gives the category that was being folded into a number
+# phrased as a problem. One reader for both, because the question is the same one.
+pgc_accounted_among() {	# pgc_accounted_among NAMEFILE WIDEFILE -> names
+	LC_ALL=C comm -12 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
 
 pgc_log_shows_any_accounting() {	# pgc_log_shows_any_accounting LOGFILE -> yes|no
@@ -1254,11 +1308,13 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		echo "  PASS  $_name"
 		results+="$_name=PASS "
 		suites_ran=$((suites_ran + 1))
+		printf '%s\n' "$_name" >>"$_acc_ranfile"
 	elif [ "$_verdict" = INCOMPLETE ]; then
 		echo "  INCOMPLETE  $_name (a check could not be evaluated)"
 		grep -E '^UNRUN' "$_log" | sed 's/^/      >> /'
 		results+="$_name=INCOMPLETE "
 		suites_ran=$((suites_ran + 1))
+		printf '%s\n' "$_name" >>"$_acc_ranfile"
 		suites_incomplete=$((suites_incomplete + 1))
 		[ "$(pgc_verdict_fails_major "$_verdict")" = yes ] && verfail=1
 	elif [ "$_verdict" = SKIP ]; then
@@ -1270,6 +1326,7 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		results+="$_name=SKIP "
 		suites_skipped=$((suites_skipped + 1))
 		skipped_names="$skipped_names $_name"
+		printf '%s\n' "$_name" >>"$_acc_skipfile"
 	else
 		echo "  FAIL  $_name"
 		# The failing check first, then the tail. A suite that prints a
@@ -1296,6 +1353,7 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		# majors hid it, because a tally only disagrees with itself once
 		# something actually fails.
 		suites_ran=$((suites_ran + 1))
+		printf '%s\n' "$_name" >>"$_acc_ranfile"
 		verfail=1
 	fi
 }
@@ -1592,8 +1650,42 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 	_acc_ran="$(grep -c . "$_acc_observed" 2>/dev/null || true)"
 	_acc_any="$(grep -c . "$_acc_accounted" 2>/dev/null || true)"
 	_acc_own="$(pgc_own_mechanism_suites "$_acc_observed" "$_acc_accounted" | tr '\n' ' ')"
+	# THE RESIDUAL IS COUNTED FROM THE NAMES, not left over from a subtraction
+	# (#999, #1006). `_acc_any` stays in the line because it is the population
+	# figure a reader wants, but it is no longer one side of the residual: the
+	# suites that ran and did not account are a set difference over the names, and
+	# the suites that accounted among those that ran are the intersection. Both
+	# come from the run, so `inputs == sum(buckets)` below is a measurement rather
+	# than an identity that holds for any two numbers.
+	_acc_debt="$(pgc_ran_without_accounting "$_acc_ranfile" "$_acc_accounted" | tr '\n' ' ')"
+	_acc_ndebt="$(pgc_ran_without_accounting "$_acc_ranfile" "$_acc_accounted" | grep -c . || true)"
+	_acc_ranacc="$(pgc_accounted_among "$_acc_ranfile" "$_acc_accounted" | grep -c . || true)"
+	_acc_skipacc="$(pgc_accounted_among "$_acc_skipfile" "$_acc_accounted" | tr '\n' ' ')"
+	_acc_nskipacc="$(pgc_accounted_among "$_acc_skipfile" "$_acc_accounted" | grep -c . || true)"
 	echo "  suites that ran: $suites_ran of ${#SUITES[@]} (skipped: $suites_skipped, incomplete: $suites_incomplete)"
-	echo "  of those, $_acc_any accounted for their checks and $((suites_ran - _acc_any)) did not"
+	echo "  of those, $_acc_ranacc accounted for their checks and $_acc_ndebt did not"
+	if [ -n "${_acc_debt// /}" ]; then
+		echo "    ran without accounting: ${_acc_debt% }"
+	fi
+	# THE NAMES BEHIND THE OLD NEGATIVE. These suites skipped, so they are not in
+	# the ran population, and they accounted, so they were being subtracted from
+	# it. Printed as their own category because they are not a debt.
+	if [ "$_acc_nskipacc" != 0 ]; then
+		echo "  $_acc_nskipacc of the $suites_skipped skipped suites accounted for themselves anyway: ${_acc_skipacc% }"
+	fi
+	# INPUTS == SUM(BUCKETS), printed from the data on every path, green included.
+	# It means something here only because neither bucket is the other's leftover.
+	if [ "$((_acc_ranacc + _acc_ndebt))" != "$suites_ran" ]; then
+		echo "    the ran breakdown does not add up: $suites_ran ran, $_acc_ranacc accounted + $_acc_ndebt did not"
+		verfail=1
+	fi
+	# A count of suites cannot be negative. The set difference makes that
+	# unrepresentable, so this arm can only fire if the shape changes again -- which
+	# is the case it exists for, since the last one shipped for at least three runs.
+	if [ "$_acc_ndebt" -lt 0 ] || [ "$_acc_ranacc" -lt 0 ]; then
+		echo "    a suite count went negative: accounted=$_acc_ranacc did-not=$_acc_ndebt, which cannot happen"
+		verfail=1
+	fi
 	if [ -n "${_acc_own// /}" ]; then
 		# SAY WHICH LINE, because "by their own mechanism" was read twice in one night
 		# as "emits no RESULT records" and produced a wrong planning number from it.

@@ -144,6 +144,14 @@ check "the runner classifies the file that suite actually produced" \
 
 verfail=0; suites_ran=0; suites_skipped=5; suites_incomplete=0
 results=""; skipped_names=""
+# THE TALLY ALSO RECORDS NAMES NOW (#999, #1006). The residual in the matrix
+# summary is a set difference over these two files rather than a subtraction, so
+# `pgc_tally_suite` writes the name of every suite it counts. The files are part of
+# the function's contract exactly as `suites_ran` is, and this fixture supplies
+# them the same way -- under `set -u` an unset one aborts the part, which is how
+# this coupling announced itself rather than passing quietly.
+_acc_ranfile="$_e2e_dir/tally_ran.txt"; _acc_skipfile="$_e2e_dir/tally_skipped.txt"
+: >"$_acc_ranfile"; : >"$_acc_skipfile"
 pgc_tally_suite e2e_incomplete \
 	"$(pgc_classify_suite_rc "$(cat "$_e2e_dir/e2e_incomplete.rc")" "$_e2e_dir/e2e_incomplete.log")" \
 	"$_e2e_dir/e2e_incomplete.log" >"$_e2e_dir/tally_incomplete.out"
@@ -157,6 +165,17 @@ check "and counted as incomplete, so the tally can say so" "$suites_incomplete" 
 
 check "and is not counted as skipped, nor is the skip count disturbed" \
 	"$suites_skipped" "5"
+
+# THE NAME LANDS BESIDE THE COUNT (#999, #1006). The matrix residual is a set
+# difference over these files, so a suite counted in `suites_ran` and missing from
+# the ran file would be reported as having failed to account for itself -- named,
+# in the summary, wrongly. An INCOMPLETE suite RAN, so it belongs in the ran file
+# and in neither the skip file nor the residual.
+check "and its name is recorded among the suites that ran" \
+	"$(cat "$_acc_ranfile")" "e2e_incomplete"
+
+check "and is recorded in neither the skipped names nor twice in its own" \
+	"$(grep -c . "$_acc_ranfile")/$(grep -c . "$_acc_skipfile" || true)" "1/0"
 
 check "and appears in the results string as INCOMPLETE" \
 	"$(printf '%s' "$results" | grep -c 'e2e_incomplete=INCOMPLETE ')" "1"
@@ -211,6 +230,14 @@ SUITES=(e2e_incomplete e2e_pass)
 builddir="$_e2e_dir"
 verfail=0; suites_ran=0; suites_skipped=0
 results=""; skipped_names=""
+# THE TALLY ALSO RECORDS NAMES NOW (#999, #1006). The residual in the matrix
+# summary is a set difference over these two files rather than a subtraction, so
+# `pgc_tally_suite` writes the name of every suite it counts. The files are part of
+# the function's contract exactly as `suites_ran` is, and this fixture supplies
+# them the same way -- under `set -u` an unset one aborts the part, which is how
+# this coupling announced itself rather than passing quietly.
+_acc_ranfile="$_e2e_dir/tally_ran.txt"; _acc_skipfile="$_e2e_dir/tally_skipped.txt"
+: >"$_acc_ranfile"; : >"$_acc_skipfile"
 # 99, not 0: the loop must zero this itself. suites_ran and suites_skipped are
 # reset per major by lines above the extracted chunk, so this test sets them;
 # suites_incomplete is reset INSIDE the chunk, so seeding it with a value no
@@ -264,6 +291,14 @@ check "and the summary line carries the incomplete count a reader needs" \
 SUITES=(e2e_pass)
 verfail=0; suites_ran=0; suites_skipped=0; suites_incomplete=0
 results=""; skipped_names=""
+# THE TALLY ALSO RECORDS NAMES NOW (#999, #1006). The residual in the matrix
+# summary is a set difference over these two files rather than a subtraction, so
+# `pgc_tally_suite` writes the name of every suite it counts. The files are part of
+# the function's contract exactly as `suites_ran` is, and this fixture supplies
+# them the same way -- under `set -u` an unset one aborts the part, which is how
+# this coupling announced itself rather than passing quietly.
+_acc_ranfile="$_e2e_dir/tally_ran.txt"; _acc_skipfile="$_e2e_dir/tally_skipped.txt"
+: >"$_acc_ranfile"; : >"$_acc_skipfile"
 eval "$_e2e_txt_loop" >"$_e2e_dir/loop_pass.out"
 
 check "control: the same loop leaves a passing suite passing" \

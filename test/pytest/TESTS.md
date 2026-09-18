@@ -94,6 +94,7 @@ behaviour, the source of that number is named.
 - [46. test_parallel_am_scan.py: a table-AM parallel scan must share work](#46-test_parallel_am_scanpy-a-table-am-parallel-scan-must-share-work)
 - [47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch](#47-test_index_fetch_penalty_crossoverpy-the-correlated-range-must-not-fetch)
 - [48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O](#48-test_parallel_scan_costpy-a-parallel-custom-scan-must-not-divide-io)
+- [49. test_residual_is_counted.py: a residual must be counted, not subtracted](#49-test_residual_is_countedpy-a-residual-must-be-counted-not-subtracted)
 
 ## 1. How to read a test in here
 
@@ -4433,3 +4434,47 @@ single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
 reachable only when each worker claims its own row groups.
 | `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
 
+## 49. test_residual_is_counted.py: a residual must be counted, not subtracted
+
+#999 and #1006, filed independently by both sessions off the same runs. Every
+PG 17 matrix report on `main` printed a count that cannot exist:
+
+```
+suites that ran: 243 of 252 (skipped: 9, incomplete: 0)
+of those, 248 accounted for their checks and -5 did not
+```
+
+PG 18 printed `-2` the same day. The two terms count different populations:
+`suites_ran` excludes a skipped suite, while `_acc_any` counts every registered
+suite whose log shows an accounting line -- and a skipped suite still prints one,
+because `pgc_summary` emits it on every exit path before it decides the status.
+
+Nothing caught it because the residual was DERIVED. `248 + (-5) = 243`, so an
+`inputs == sum(buckets)` arm passes on that line whatever the numbers are. It is
+the error `pgc_summary` warns about eight lines below its own counter, committed
+one level up.
+
+Public seam: the two readers and the summary block, taken out of
+`run_all_versions.sh` and run against files in `tmp_path`. The block is extracted
+rather than retyped, because a retyped block is a second implementation and
+agrees with itself. Independent of
+`test/selftest/510-a-residual-must-be-counted.sh`: same properties, own fixtures,
+and neither file names the other.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_the_residual_names_the_suites_that_ran_and_did_not_account` | the debt is a set of names, and the reader exits clean |
+| `test_a_skipped_suite_that_accounted_does_not_become_a_debt` | on the live shape the residual is empty while the same reader still finds a real debt, and the skipped-but-accounted suites are their own named category |
+| `test_the_old_subtraction_goes_negative_on_that_same_input` | the control: three ran minus five accounted is the `-2` the runner printed |
+| `test_the_readers_sort_their_own_inputs` | `comm` on unsorted input yields a wrong set silently, so the sort lives inside the reader |
+| `test_the_two_buckets_partition_the_suites_that_ran` | `inputs == sum(buckets)`, and neither bucket is the other's leftover |
+| `test_the_summary_block_was_extracted_rather_than_an_empty_range` | an empty extraction runs nothing and reports clean, so the block is asserted before it is used |
+| `test_the_printed_breakdown_takes_a_count_a_count_can_take` | the line a reader sees carries no negative, and names the skipped-but-accounted category |
+| `test_the_same_block_counts_and_names_a_real_debt` | the same block still counts and names a genuine debt, so it is not printing `0 did not` unconditionally |
+| `test_no_code_path_subtracts_the_wide_population_from_the_ran_count` | the defect's shape is refused at the source, over CODE lines only -- the comment explaining it quotes it verbatim |
+
+The load-bearing assertion is that the printed breakdown takes a count a count
+can take. It is unreachable while the residual is a subtraction across two
+populations, and reachable only once it is a set difference over the names.

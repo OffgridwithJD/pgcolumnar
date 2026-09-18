@@ -116,6 +116,11 @@ NO_CLUSTER = [
     # `git archive`; the public seam is the published distribution, so it needs
     # neither a cluster nor the driver.
     "test_pgxn_metadata.py",
+    # #999/#1006's file. It drives two shell readers and the summary block out of
+    # `run_all_versions.sh` with `bash`, over files in tmp_path -- no connection, no
+    # cluster, no driver. The classifier agrees, and this declaration has to say so
+    # before the guard job will collect it.
+    "test_residual_is_counted.py",
 ]
 
 
@@ -1160,6 +1165,11 @@ SHELL_REFERENCES = {
     "test_mutation_ledger.py":
         "executes the matrix runner with its list flag to get the registered suite "
         "list, which is the same mechanism the entry above uses",
+    "test_residual_is_counted.py":
+        "reads the matrix runner's text to take out its two set readers and the "
+        "summary block that prints the suite breakdown, then executes them -- so the "
+        "residual the summary prints is tested rather than a Python restatement of "
+        "it, which would agree with itself",
     "test_compare_to_bash.py":
         "reads the shell harness's helper library to re-derive the parity tool's "
         "check-helper list from the definitions themselves, so the list the grader "
