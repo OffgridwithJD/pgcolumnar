@@ -18,6 +18,30 @@ true until the next version shipped.
 
 ### Fixed
 
+- The union-merge page did not say why rebasing works where merging does not
+  (#1116 follow-up).
+
+  `CONTEXT.md` told a contributor to rebase rather than click *Update branch*, and
+  gave the commands, but not the reason. The reason is the part that makes the advice
+  transferable: **git reads `.gitattributes` from the tree it is merging INTO**, so a
+  branch opened before the driver landed cannot use it.
+
+  Measured on #1107, whose head predates #1108:
+
+      merge main INTO the branch   conflicts: CHANGELOG.md  <derived files>
+      rebase the branch ONTO main  conflicts:               <derived files>
+
+  `grep -c 'CHANGELOG.md.*merge=union'` gives 0 on that head and 1 on main. Merging
+  brings main's commits into a tree whose attributes have no driver; rebasing replays
+  the branch onto main, where the driver is already in force. So for any branch older
+  than the driver, *Update branch* cannot work even in principle.
+
+  THE ARM FOR THIS WAS RED ON THE UNMUTATED TREE FIRST. Its grep spanned the prose's
+  line break -- "the tree it is / merging **into**" -- so a line-based pattern found
+  0 on a correct document. The mutation then reddened it as well, which looks like a
+  working removal proof and is two failures agreeing. Re-anchored on a phrase that
+  fits one line; the control is green and the mutation still reddens.
+
 - A `CONFLICTING` badge on a changelog entry is GitHub, not git (#1116).
 
   #996 gave `CHANGELOG.md` a union merge driver, and it does what it was argued to

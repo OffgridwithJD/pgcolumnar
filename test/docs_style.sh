@@ -590,6 +590,13 @@ check "and names the command rather than only the problem" \
 	"$(grep -c 'git rebase origin/main' "$SRCDIR/CONTEXT.md")" "1"
 check "and warns against the button that reintroduces the conflict" \
 	"$(grep -ci 'do not click' "$SRCDIR/CONTEXT.md")" "1"
+# ANCHORED ON ONE LINE. The first spelling of this arm spanned the prose's line
+# break -- "the tree it is / merging into" -- so a line-based grep found 0 on the
+# unmutated tree and the arm was red for the sentence it was asserting. The mutation
+# then reddened it too, which looked like a working proof and was two failures
+# agreeing. Same class as a drift-guard that does not join line continuations.
+check "and says WHY rebasing works where merging does not" \
+	"$(grep -c 'merging \*\*into\*\*' "$SRCDIR/CONTEXT.md")" "1"
 
 
 echo "checks run: $checks"
