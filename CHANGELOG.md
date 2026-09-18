@@ -18,6 +18,56 @@ true until the next version shipped.
 
 ### Fixed
 
+- A covering projection was priced by clauses that merely mention its sort key,
+  rather than by clauses it can prune on (#1126, the remainder of #1107).
+
+  #1107 replaced a constant `0.5` with the selectivity of the clauses referencing
+  `sortKey[0]`, which fixed the case where the selectivity came from a different
+  column entirely. It left a narrower one: **a single `RestrictInfo` that ORs a
+  sort-key range with a predicate on another column references the sort key**, so
+  the membership test counted it whole and credited the projection with a
+  selectivity its sort order cannot deliver.
+
+      WHERE sk BETWEEN 1 AND 2000                  priced 0.100   earns it
+      WHERE sk BETWEEN 1 AND 2000 OR kind = 'odd'  priced 0.101   earns nothing
+
+  Measured on 20,000 rows, `stripe_row_limit => 1000`, scrambled physical order,
+  projection sorted on `sk`, with `kind = 'odd'` where `sk % 1000 = 0` so its rows
+  are spread across the whole `sk` domain. The second query prunes NOTHING and is
+  slower than the base scan it undercuts tenfold:
+
+      Columnar Usable Skip Predicates   0 with the projection, 0 without
+      Columnar Vectors Skipped          0 with the projection, 0 without
+      Columnar Chunk Groups Read       20 of 20, both ways
+      Columnar Vector Decodes         120 with the projection, 80 without
+      Execution Time                2.653 ms with, 1.996 ms without
+
+  ASK THE FUNCTION THAT DECIDES SKIPPING. `pgcolumnar_clause_to_scankey` already
+  answers "can this clause prune, and on which column" -- it returns 0 for a
+  `BoolExpr`, because a BoolExpr is not an `OpExpr` and never becomes a scan key --
+  and it records `sk_attno` per key. Pricing now keeps a clause only when it yields
+  at least one key and every key it yields is on the sort key. One definition of
+  "can skip", shared by the price and the executor, rather than a second one
+  restated in the cost path.
+
+  NOT GATED ON `exact`. The batch fold needs exactness because scan keys are its
+  whole row filter (#715); pruning does not. An anchored `LIKE` (#426) and an
+  IN-list range (#704) are conservative keys that prune honestly, and gating on
+  exactness would decline a projection that genuinely wins. That is the silent
+  direction -- a plan not taken reddens nothing -- so the arm for it ships beside
+  the arm for the defect, and mutation-testing the gate onto `exact` reddens the
+  IN-list arm exactly as intended.
+
+  THE FIXTURE HAD TO CLEAR THE ONE-STRIPE FLOOR. The first version of this arm used
+  a 100-row range; at 20 stripes the floor is 0.05 and both the fabricated discount
+  and the honest one price there, so a broken guard and a working one were
+  indistinguishable and the arm passed against the defect. The range is 10% now,
+  and a premise check asserts it is above the floor so the arm cannot quietly
+  return to being vacuous.
+
+  NOT A REGRESSION FROM #1107: the old constant `0.5` also beat the base for this
+  query and the planner also chose the projection. What changed is how confidently.
+
 - The union-merge page did not say why rebasing works where merging does not
   (#1116 follow-up).
 

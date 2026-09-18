@@ -463,7 +463,11 @@ live in `columnar_write_state.c` (each projection stores the base row number as 
 leading column); the planner selection and executor projection scan live in
 `columnar_customscan.c` (a covering projection with a restricted sort key is
 scanned instead of the base, pruning chunk groups by the projection's min/max,
-with deletes/visibility taken from the base). `pgcolumnar.vacuum` rebuilds
+with deletes/visibility taken from the base). "Restricted" means the query carries a
+clause that can prune on the sort key. A clause prunes when it becomes a scan
+key. A clause that only names the column does not prune. For example, an `OR` of
+a sort-key range with a condition on another column names the sort key and prunes
+nothing, so it earns no discount (#1126). `pgcolumnar.vacuum` rebuilds
 projections aligned to the compacted base.
 
 ## Data flow summaries

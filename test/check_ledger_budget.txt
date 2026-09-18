@@ -110,4 +110,22 @@ suites_not_covered 249
 # and TESTS.md conflicted loudly -- the usual pairing -- so the union was checked
 # by KEY: 0 keys lost from either side, 14 added, 0 duplicates. Re-derived by the
 # command above.
-checks_never_observed_red 1391
+# 1391 -> 1396: five arms in projection_scan_cost over the sort-key price (#1126) --
+# the arm for a clause that mentions the sort key it cannot prune on, two controls
+# for the silent direction (a plain range and an IN-list must KEEP their discount),
+# and two premises, one of which asserts the fixture clears the one-stripe floor.
+# Seeded from one run per major, all five merged in a SINGLE call, so every row
+# carries 15;16;17;18;19 and the short-major warning (#1071) stayed silent.
+# RESEATED onto main carrying #1124. Main states 1391, this branch stated 1382, and
+# the merged tree is neither. The ledger auto-merged SILENTLY while this file
+# conflicted loudly -- the usual pairing -- so the union was checked by KEY:
+# 0 keys lost from either side, 0 duplicates, 1407 rows. Re-derived by COUNTING on
+# the merged tree, never by adding five:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+#
+# COUNT THE WHOLE FILE. check_ledger.tsv has NO header row -- line 1 is a data row
+# (differential/differential/agg avg) -- so a `tail -n +2` habit drops it and reports
+# one short. The census command above was never affected because it skips nothing,
+# but a row count taken the other way disagrees with the tool's own `ledger: rows=`
+# and reads as an off-by-one in the merge rather than in the command.
+checks_never_observed_red 1396

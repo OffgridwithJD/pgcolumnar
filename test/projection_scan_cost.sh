@@ -148,4 +148,64 @@ check "a non-sort-key restriction does not cheapen a covering projection" \
 	"$(awk -v r="$m_ratio" "BEGIN{ print (r+0 >= 0.8) ? \"not-cheap\" : \"cheap\" }")" \
 	"not-cheap"
 
+# ---- a clause that MENTIONS the sort key but cannot prune on it (#1126) -------
+#
+# Eligibility and pricing both ask "does this clause reference sortKey[0]".
+# Mentioning is not prunability. A single RestrictInfo that ORs a sort-key range
+# with a predicate on another column mentions the key, is counted whole, and
+# contributes a selectivity the sort order cannot deliver.
+#
+# THE SAME prsk FIXTURE, because the question is about the clause and not the
+# data: `kind = 'odd'` holds where sk % 1000 = 0, so its rows are spread across
+# the whole sk domain and no sort order on sk brings them together.
+#
+# THE RANGE MUST CLEAR THE ONE-STRIPE FLOOR or the arm is vacuous. At
+# stripe_row_limit => 1000 over 20000 rows there are 20 stripes, so the floor is
+# 0.05; a range of 100 rows prices at the floor whether the arithmetic is right
+# or wrong, and a broken guard and a working one are indistinguishable. 2000 rows
+# is 10%, well clear of it. The first version of this arm used 100 and passed
+# against the defect.
+OR_HI=2000
+SQL_ORQ="SELECT sk FROM prsk WHERE sk BETWEEN 1 AND $OR_HI OR kind = 'odd'"
+SQL_PRUNE="SELECT sk FROM prsk WHERE sk BETWEEN 1 AND $OR_HI"
+SQL_SAOP="SELECT sk FROM prsk WHERE sk = ANY (ARRAY[1,2,3,4,5,6,7,8,9,10])"
+
+or_run="$(run_of "$(explain_scan on "$SQL_ORQ")")"
+or_base="$(run_of "$(explain_scan off "$SQL_ORQ")")"
+pr_run="$(run_of "$(explain_scan on "$SQL_PRUNE")")"
+pr_base="$(run_of "$(explain_scan off "$SQL_PRUNE")")"
+sa_run="$(run_of "$(explain_scan on "$SQL_SAOP")")"
+sa_base="$(run_of "$(explain_scan off "$SQL_SAOP")")"
+or_ratio="$(awk -v p="$or_run" -v b="$or_base" "BEGIN{ if (b<=0) print 0; else printf \"%.3f\", p/b }")"
+pr_ratio="$(awk -v p="$pr_run" -v b="$pr_base" "BEGIN{ if (b<=0) print 0; else printf \"%.3f\", p/b }")"
+sa_ratio="$(awk -v p="$sa_run" -v b="$sa_base" "BEGIN{ if (b<=0) print 0; else printf \"%.3f\", p/b }")"
+echo "-- unprunable OR ratio=$or_ratio   prunable range ratio=$pr_ratio   IN-list ratio=$sa_ratio"
+
+check "premise: every unprunable-clause scan has a positive run cost" \
+	"$(awk -v a="$or_run" -v b="$or_base" "BEGIN{ print (a>0 && b>0) ? \"yes\" : \"no\" }")" "yes"
+
+# PREMISE THAT THE FIXTURE CLEARS THE FLOOR. Without it a pass says nothing:
+# at the floor every arm below reads 0.05 and agrees for the wrong reason.
+check "premise: the prunable range is priced above the one-stripe floor, so the arms differ" \
+	"$(awk -v r="$pr_ratio" "BEGIN{ print (r+0 > 0.051) ? \"above\" : \"at-floor\" }")" "above"
+
+# THE ARM. The OR rules out nothing by sort order, so it must not be discounted.
+check "a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection" \
+	"$(awk -v r="$or_ratio" "BEGIN{ print (r+0 >= 0.8) ? \"not-cheap\" : \"cheap\" }")" \
+	"not-cheap"
+
+# THE OTHER DIRECTION, which is the silent one. Declining a projection that would
+# have won costs a query plan and reddens nothing, so both controls ship with the
+# arm rather than after it.
+check "while a plain range on the sort key still earns its discount" \
+	"$(awk -v r="$pr_ratio" "BEGIN{ print (r+0 < 0.8) ? \"cheap\" : \"not-cheap\" }")" \
+	"cheap"
+
+# AN IN-LIST PRUNES HONESTLY and must keep its discount. `exact` is false for a
+# ScalarArrayOpExpr range key, so a fix that gated on exactness rather than on
+# producing a key at all would decline this one.
+check "and an IN-list on the sort key keeps its discount, which gating on exactness would lose" \
+	"$(awk -v r="$sa_ratio" "BEGIN{ print (r+0 < 0.8) ? \"cheap\" : \"not-cheap\" }")" \
+	"cheap"
+
 pgc_summary

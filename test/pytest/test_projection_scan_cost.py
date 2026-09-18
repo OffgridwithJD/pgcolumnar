@@ -189,3 +189,77 @@ def test_projection_scan_cost(pgc_conn, expect):
         "not-cheap",
         "a non-sort-key restriction does not cheapen a covering projection",
     )
+
+    # ---- mentioning the sort key is not pruning on it (#1126) ----------------
+    #
+    # The arm above covers a clause on ANOTHER column. This one covers a clause
+    # that references the sort key and still cannot prune on it: one RestrictInfo
+    # ORing a sort-key range with a predicate on another column. A membership test
+    # counts it whole; a scan-key test does not, because a BoolExpr never becomes
+    # a key.
+    #
+    # THE RANGE MUST CLEAR THE ONE-STRIPE FLOOR. 30000 rows at stripe_row_limit
+    # 1500 is 20 stripes, so the floor is 0.05 and a small range prices there
+    # whether the arithmetic is right or wrong. 3000 rows is 10%. The shell twin's
+    # first version of this arm used a range below the floor and passed against the
+    # defect; the premise below is what stops that recurring here.
+    #
+    # Same psmis fixture, because the question is about the CLAUSE and not the
+    # data: flag = 'x' holds where ikey % 1500 = 0, so its rows sit in every stripe
+    # and no sort order on ikey gathers them.
+    or_hi = 3000
+    sql_or = f"SELECT ikey FROM psmis WHERE ikey BETWEEN 1 AND {or_hi} OR flag = 'x'"
+    sql_prune = f"SELECT ikey FROM psmis WHERE ikey BETWEEN 1 AND {or_hi}"
+    sql_saop = "SELECT ikey FROM psmis WHERE ikey = ANY (ARRAY[1,2,3,4,5,6,7,8,9,10])"
+
+    def _run_ratio(sql):
+        pj = _custom_scan(_plan(pgc_conn, sql, True))
+        bs = _custom_scan(_plan(pgc_conn, sql, False))
+        pr = pj["Total Cost"] - pj["Startup Cost"]
+        br = bs["Total Cost"] - bs["Startup Cost"]
+        return pr, br, (pr / br if br > 0 else 0.0)
+
+    or_run, or_base, or_ratio = _run_ratio(sql_or)
+    pr_run, pr_base, pr_ratio = _run_ratio(sql_prune)
+    sa_run, sa_base, sa_ratio = _run_ratio(sql_saop)
+    print(f"-- unprunable OR ratio={or_ratio:.3f} "
+          f"prunable range ratio={pr_ratio:.3f} IN-list ratio={sa_ratio:.3f}")
+
+    expect.text(
+        "yes" if min(or_run, or_base, pr_run, pr_base, sa_run, sa_base) > 0 else "no",
+        "yes",
+        "premise: every unprunable-clause scan has a positive run cost",
+    )
+
+    # Without this the three arms below can all agree at the floor, which is
+    # agreement for a reason unrelated to what they assert.
+    expect.text(
+        "above" if pr_ratio > 0.051 else "at-floor",
+        "above",
+        "premise: the prunable range is priced above the one-stripe floor, "
+        "so the arms differ",
+    )
+
+    expect.text(
+        "not-cheap" if or_ratio >= 0.8 else "cheap",
+        "not-cheap",
+        "a clause that mentions the sort key but cannot prune on it does not "
+        "cheapen a covering projection",
+    )
+
+    # The silent direction. Declining a projection that would have won costs a
+    # plan and reddens nothing, so both controls ship with the arm.
+    expect.text(
+        "cheap" if pr_ratio < 0.8 else "not-cheap",
+        "cheap",
+        "while a plain range on the sort key still earns its discount",
+    )
+
+    # An IN-list range key is conservative, so `exact` is false for it. A fix
+    # gating on exactness rather than on producing a key would decline this.
+    expect.text(
+        "cheap" if sa_ratio < 0.8 else "not-cheap",
+        "cheap",
+        "and an IN-list on the sort key keeps its discount, which gating on "
+        "exactness would lose",
+    )
