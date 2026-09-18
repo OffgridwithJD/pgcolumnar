@@ -17,8 +17,10 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 psql_run "CREATE TABLE pu (a int, b text, c int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('pu', stripe_row_limit => 2000, chunk_group_row_limit => 1000);"
 psql_run "SELECT pgcolumnar.add_projection('pu', 'pc', ARRAY['a','c'], ARRAY['c']);"
 psql_run "INSERT INTO pu SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
+psql_run "ANALYZE pu;"
 psql_run "CREATE TABLE pu_h (a int, b text, c int) USING heap;"
 psql_run "INSERT INTO pu_h SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
 

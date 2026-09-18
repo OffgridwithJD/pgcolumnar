@@ -136,3 +136,56 @@ def test_projection_scan_cost(pgc_conn, expect):
         "scaled",
         "tight and loose covering scans are not both priced at half the base",
     )
+
+    # Independent of the shell twin: different table, N, stripe, column names,
+    # and rare-value density. Same public EXPLAIN seam.
+    n_attr = 30000
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE psmis (ikey int, flag text) USING pgcolumnar")
+        cur.execute(
+            "SELECT pgcolumnar.set_options('psmis', stripe_row_limit => 1500, "
+            "chunk_group_row_limit => 500)"
+        )
+        cur.execute(
+            f"INSERT INTO psmis SELECT ikey, "
+            f"CASE WHEN ikey % 1500 = 0 THEN 'x' ELSE 'y' END "
+            f"FROM generate_series(1, {n_attr}) ikey "
+            "ORDER BY md5((ikey + 41)::text)"
+        )
+        cur.execute(
+            "SELECT pgcolumnar.add_projection('psmis', 'onikey', "
+            "ARRAY['ikey','flag'], ARRAY['ikey'])"
+        )
+        cur.execute("ANALYZE psmis")
+        cur.execute(
+            "SELECT count(*) FROM pgcolumnar.projection_declaration "
+            "WHERE rel = 'psmis'::regclass AND name = 'onikey'"
+        )
+        expect.num(
+            cur.fetchone()[0],
+            1,
+            "premise: the misattributed query has a covering projection",
+        )
+
+    sql_mis = (
+        f"SELECT ikey FROM psmis WHERE ikey BETWEEN 1 AND {n_attr} "
+        "AND flag = 'x'"
+    )
+    mis_proj = _plan(pgc_conn, sql_mis, True)
+    mis_base = _plan(pgc_conn, sql_mis, False)
+    mp = _custom_scan(mis_proj)
+    mb = _custom_scan(mis_base)
+    m_proj_run = mp["Total Cost"] - mp["Startup Cost"]
+    m_base_run = mb["Total Cost"] - mb["Startup Cost"]
+    expect.text(
+        "yes" if min(m_proj_run, m_base_run) > 0 else "no",
+        "yes",
+        "premise: every misattributed scan has a positive run cost",
+    )
+    m_ratio = m_proj_run / m_base_run
+    print(f"-- misattr proj_run={m_proj_run} base_run={m_base_run} ratio={m_ratio:.3f}")
+    expect.text(
+        "not-cheap" if m_ratio >= 0.8 else "cheap",
+        "not-cheap",
+        "a non-sort-key restriction does not cheapen a covering projection",
+    )

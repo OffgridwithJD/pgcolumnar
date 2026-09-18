@@ -1621,8 +1621,38 @@ pgcolumnar_sorted_pathkeys(PlannerInfo *root, RelOptInfo *rel, Oid relid)
  *		projection name (palloc'd) or NULL. A system-column or whole-row
  *		reference disqualifies a projection scan.
  */
+static Selectivity
+pgcolumnar_sortkey_selectivity(PlannerInfo *root, RelOptInfo *rel,
+							   AttrNumber sortAttno)
+{
+	List	   *clauses = NIL;
+	ListCell   *lc;
+
+	/*
+	 * Eligibility tests sortKey[0] against restrictCols. Pricing has to use
+	 * the same clauses: rel->rows is the estimate after EVERY restriction,
+	 * including columns the projection cannot prune on.
+	 */
+	if (sortAttno <= 0)
+		return (Selectivity) 1.0;
+
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *ri = lfirst_node(RestrictInfo, lc);
+		Bitmapset  *cols = NULL;
+
+		pull_varattnos((Node *) ri->clause, rel->relid, &cols);
+		if (bms_is_member(sortAttno - FirstLowInvalidHeapAttributeNumber, cols))
+			clauses = lappend(clauses, ri);
+	}
+	if (clauses == NIL)
+		return (Selectivity) 1.0;
+	return clauselist_selectivity(root, clauses, rel->relid, JOIN_INNER, NULL);
+}
+
 static char *
-pgcolumnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
+pgcolumnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid,
+							 AttrNumber *sortAttnoOut)
 {
 	uint64		storageId;
 	Relation	r;
@@ -1634,6 +1664,9 @@ pgcolumnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 	int			bestNcols = PG_INT32_MAX;
 	int			x;
 	bool		haveAdditional = false;
+
+	if (sortAttnoOut != NULL)
+		*sortAttnoOut = 0;
 
 	if (!pgcolumnar_enable_projection_scan)
 		return NULL;
@@ -1705,6 +1738,8 @@ pgcolumnar_choose_projection(PlannerInfo *root, RelOptInfo *rel, Oid relid)
 		{
 			best = pstrdup(p->name);
 			bestNcols = p->columnsLen;
+			if (sortAttnoOut != NULL)
+				*sortAttnoOut = p->sortKey[0];
 		}
 	}
 
@@ -2870,12 +2905,14 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	/*
 	 * Offer a projection scan (gap 26) as a competing path when a covering
 	 * projection with a restricted sort key exists. The projection is stored
-	 * sorted on that key, so its run cost follows the restriction's
+	 * sorted on that key, so its run cost follows the sort-key clauses'
 	 * selectivity (one-stripe floor), not a constant 0.5 of the base scan.
 	 * The planner picks by cost; the executor re-applies the qual either way.
 	 */
 	{
-		char	   *projName = pgcolumnar_choose_projection(root, rel, rte->relid);
+		AttrNumber	sortAttno = 0;
+		char	   *projName = pgcolumnar_choose_projection(root, rel, rte->relid,
+															&sortAttno);
 
 		if (projName != NULL)
 		{
@@ -2905,13 +2942,14 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			 *
 			 * The base run already includes zonemap survival on the HEAP layout.
 			 * A covering projection is clustered on the restrict key, so replace
-			 * that survival with the restriction's selectivity. Dividing by the
+			 * that survival with the selectivity of clauses that reference that
+			 * key -- not rel->rows after every restriction. Dividing by the
 			 * base survival avoids a second discount when the heap is already
 			 * as clustered as the projection. A constant 0.5 made a 5% range
 			 * and a 50% range the same price.
 			 */
 			serialRun = serialTotalCost - serialStartupCost;
-			sel = (rel->tuples > 0.0) ? (rel->rows / rel->tuples) : 1.0;
+			sel = (double) pgcolumnar_sortkey_selectivity(root, rel, sortAttno);
 			if (sel < 0.0)
 				sel = 0.0;
 			if (sel > 1.0)

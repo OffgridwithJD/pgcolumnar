@@ -552,7 +552,7 @@ def test_projection_outer_is_not_wrapped(pgc_conn, expect):
             CREATE TABLE factp(k int, payload text) USING pgcolumnar;
             SELECT pgcolumnar.set_options($t$factp$t$, stripe_row_limit => 1000);
             INSERT INTO factp SELECT g, repeat(md5(g::text), 4)
-            FROM generate_series(1, 6000) g;
+            FROM generate_series(1, 6000) g ORDER BY md5((g + 9)::text);
             SELECT pgcolumnar.add_projection(
                 $t$factp$t$, $n$pk$n$, ARRAY['k','payload'], ARRAY['k']);
             CREATE TABLE heapp AS SELECT * FROM factp;

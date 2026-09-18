@@ -177,8 +177,10 @@ check "reconstruct row count matches base" \
 # ---------------------------------------------------------------------------
 echo "-- phase 4b: planner selects a covering projection for a sort-key predicate"
 psql_run "CREATE TABLE ps (a int, b text, c int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('ps', stripe_row_limit => 1000, chunk_group_row_limit => 500);"
 psql_run "SELECT pgcolumnar.add_projection('ps', 'pc', ARRAY['a','c'], ARRAY['c']);"
 psql_run "INSERT INTO ps SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
+psql_run "ANALYZE ps;"
 psql_run "CREATE TABLE ps_h (a int, b text, c int) USING heap;"
 psql_run "INSERT INTO ps_h SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
 
@@ -214,8 +216,10 @@ check "full-range projection scan matches oracle" \
 # ---------------------------------------------------------------------------
 echo "-- phase 5: pgcolumnar.vacuum rebuilds projections aligned to the compacted base"
 psql_run "CREATE TABLE pv (a int, b text, c int) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('pv', stripe_row_limit => 1000, chunk_group_row_limit => 500);"
 psql_run "SELECT pgcolumnar.add_projection('pv', 'pvp', ARRAY['a','c'], ARRAY['c']);"
 psql_run "INSERT INTO pv SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g;"
+psql_run "ANALYZE pv;"
 psql_run "DELETE FROM pv WHERE a BETWEEN 5000 AND 8000;"
 psql_run "CREATE TABLE pv_h (a int, b text, c int) USING heap;"
 psql_run "INSERT INTO pv_h SELECT g, 'r'||g, (g*7)%1000 FROM generate_series(1,20000) g WHERE g NOT BETWEEN 5000 AND 8000;"

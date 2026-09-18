@@ -115,4 +115,37 @@ check "tight and loose covering scans are not both priced at half the base" \
 		print both ? \"both-halved\" : \"scaled\"
 	}")" "scaled"
 
+
+# The projection prunes only on its sort key. A query whose selectivity comes
+# from a different column must not be priced as if the sort order produced
+# that selectivity. Own table, own N, own column names; not derived from the
+# pytest twin.
+N_ATTR=20000
+psql_run "CREATE TABLE prsk (sk int, kind text) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('prsk', stripe_row_limit => 1000, chunk_group_row_limit => 500);"
+psql_run "INSERT INTO prsk SELECT sk, CASE WHEN sk % 1000 = 0 THEN 'odd' ELSE 'usual' END FROM generate_series(1, $N_ATTR) sk ORDER BY md5(sk::text);"
+psql_run "SELECT pgcolumnar.add_projection('prsk', 'onsk', ARRAY['sk','kind'], ARRAY['sk']);"
+psql_run "ANALYZE prsk;"
+
+SQL_MIS="SELECT sk FROM prsk WHERE sk BETWEEN 1 AND $N_ATTR AND kind = 'odd'"
+mis_proj="$(explain_scan on "$SQL_MIS")"
+mis_base="$(explain_scan off "$SQL_MIS")"
+m_proj_run="$(run_of "$mis_proj")"
+m_base_run="$(run_of "$mis_base")"
+m_ratio="$(awk -v p="$m_proj_run" -v b="$m_base_run" "BEGIN{ if (b<=0) print 0; else printf \"%.3f\", p/b }")"
+echo "-- misattr proj_run=$m_proj_run base_run=$m_base_run ratio=$m_ratio"
+
+check "premise: the misattributed query has a covering projection" \
+	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration WHERE rel = 'prsk'::regclass AND name = 'onsk'")" "1"
+
+check "premise: every misattributed scan has a positive run cost" \
+	"$(awk -v a="$m_proj_run" -v b="$m_base_run" "BEGIN{ print (a>0 && b>0) ? \"yes\" : \"no\" }")" "yes"
+
+# rel->rows after every restriction makes this cheap (one-stripe floor over
+# heap survival on kind). The sort key is the whole table, so the ratio
+# has to sit with the base.
+check "a non-sort-key restriction does not cheapen a covering projection" \
+	"$(awk -v r="$m_ratio" "BEGIN{ print (r+0 >= 0.8) ? \"not-cheap\" : \"cheap\" }")" \
+	"not-cheap"
+
 pgc_summary

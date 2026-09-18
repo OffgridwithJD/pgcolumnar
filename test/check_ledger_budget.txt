@@ -94,4 +94,9 @@ suites_not_covered 249
 # load-bearing arms were observed red under the 0.5 causation mutation).
 # Re-derived by COUNTING, not by adding seven to a number from another tree:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1375
+# 1375 -> 1377 after the misattributed-selectivity arm: twelve rows, of which
+# nine last-red stay never (the three load-bearing arms were observed red:
+# two under the 0.5 causation mutation, one under rel->rows / rel->tuples).
+# Re-derived by COUNTING, not by adding two to a number from another tree:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+checks_never_observed_red 1377

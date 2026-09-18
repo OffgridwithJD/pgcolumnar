@@ -4588,8 +4588,10 @@ sorted on that key; the planner number has to move with selectivity.
 This file asserts the PLANNER ratio, not a runtime. Public seam: `EXPLAIN` of
 a columnar scan with `pgcolumnar.enable_projection_scan` on and off. The
 shell twin uses its own table (`prsc`, 20000 rows, 5 percent vs 50 percent);
-this file uses `pscost`, 24000 rows, 1800 vs 12000. Assertion names match.
+this file uses `pscost`, 24000 rows, 1800 vs 12000. The misattributed-selectivity
+arm uses `prsk`/`kind` on the shell side and `psmis`/`flag` here. Assertion
+names match.
 
 | test | what it asserts |
 | --- | --- |
-| `test_projection_scan_cost` | the table and covering projection exist; the tight and loose plans use that projection; without the GUC they are base columnar scans; every compared scan has a positive run cost; a tight covering projection is cheaper relative to the base than a loose one; the two ratios are not both 0.5 |
+| `test_projection_scan_cost` | the table and covering projection exist; the tight and loose plans use that projection; without the GUC they are base columnar scans; every compared scan has a positive run cost; a tight covering projection is cheaper relative to the base than a loose one; the two ratios are not both 0.5; a non-sort-key restriction does not cheapen a covering projection |

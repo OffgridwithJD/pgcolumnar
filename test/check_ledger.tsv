@@ -1374,10 +1374,13 @@ parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;
 parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	the leader-participation branch changes the divisor	15;16;17;18;19	never	-
+projection_scan_cost	projection_scan_cost	a non-sort-key restriction does not cheapen a covering projection	15;16;17;18	2026-09-18	-
 projection_scan_cost	projection_scan_cost	a tight covering projection is cheaper relative to the base than a loose one	15;16;17;18	2026-09-17	-
 projection_scan_cost	projection_scan_cost	premise: a covering projection exists	15;16;17;18	never	-
 projection_scan_cost	projection_scan_cost	premise: every compared scan has a positive run cost	15;16;17;18	never	-
+projection_scan_cost	projection_scan_cost	premise: every misattributed scan has a positive run cost	15;16;17;18	never	-
 projection_scan_cost	projection_scan_cost	premise: the loose plan uses the covering projection	15;16;17;18	never	-
+projection_scan_cost	projection_scan_cost	premise: the misattributed query has a covering projection	15;16;17;18	never	-
 projection_scan_cost	projection_scan_cost	premise: the table holds every inserted row	15;16;17;18	never	-
 projection_scan_cost	projection_scan_cost	premise: the tight plan uses the covering projection	15;16;17;18	never	-
 projection_scan_cost	projection_scan_cost	premise: without the projection scan, the loose plan is a base columnar scan	15;16;17;18	never	-
