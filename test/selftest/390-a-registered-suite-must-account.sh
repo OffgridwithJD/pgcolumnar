@@ -691,8 +691,19 @@ check "and sorts its inputs, because the runner appends them in SUITES order" \
 	"$(pgc_own_mechanism_suites "$_o28/narrow_unsorted" "$_o28/wide_unsorted" | tr '\n' ' ')" "beta "
 
 # And the headline must come from the SAME file the population line counts.
+#
+# THE LINE WAS REWORDED BY #999 AND THIS ARM FOLLOWS THE PROPERTY, NOT THE TEXT.
+# The headline used to BE `$_acc_any`, the count of the wide file. It is now the
+# intersection of the suites that RAN with that same wide file, because
+# `suites_ran - _acc_any` subtracts two different populations and printed `-5` on
+# every PG 17 matrix. What #928 established is unchanged and is what is asserted
+# here: the headline derives from `_acc_accounted`, never from `_acc_observed`.
 check "the breakdown headline counts the wide set, not the narrow one" \
-	"$(grep -c 'of those, \$_acc_any accounted for their checks' "$_rv")" "1"
+	"$(grep -c '_acc_ranacc="\$(pgc_accounted_among "\$_acc_ranfile" "\$_acc_accounted"' "$_rv")" "1"
+check "and the headline a reader sees is that number" \
+	"$(grep -c 'of those, \$_acc_ranacc accounted for their checks' "$_rv")" "1"
+check "and the narrow file is still not what the headline counts" \
+	"$(grep -c 'of those, \$_acc_ran accounted' "$_rv")" "0"
 check "and the population reconciliation counts that same file" \
 	"$(grep -c '_acc_any="\$(grep -c \. "\$_acc_accounted"' "$_rv")" "1"
 # THE LABEL WAS REWORDED AND THIS ARM FOLLOWS IT. It used to grep "by their own

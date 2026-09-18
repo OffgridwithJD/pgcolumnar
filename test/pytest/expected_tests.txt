@@ -152,7 +152,14 @@
 #
 # Re-derived by collection on this tree, never by adding four: `346 tests
 # collected`. `cluster_tests` was re-derived in the same run and did NOT move.
-guard_tests 346
+# 346 -> 355 when test_residual_is_counted.py landed (#999, #1006): nine arms over
+# the two set readers and the summary block that prints the breakdown, which had
+# printed a negative suite count on every PG 17 matrix. In the GUARD half: it runs
+# `bash` over files in tmp_path and needs neither a cluster nor the driver, and
+# NO_CLUSTER is asserted against the corpus in both directions, so the declaration
+# and the property had to agree before this collected here at all.
+# Re-derived by collection on this tree, never by adding nine: `355 tests collected`.
+guard_tests 355
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

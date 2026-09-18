@@ -135,6 +135,42 @@ true until the next version shipped.
   here. One line each, from the `PG_CONFIG` they already resolve. All records now
   carry the real major: `concurrency` 7, `unique_conc` 31, `update_conc` 25, every
   one of them `18` on PG18, each reconciling with its own `checks run:`.
+- The matrix summary printed a negative count of suites (#999, #1006).
+
+  Every PG 17 matrix report on `main` printed a number that cannot exist:
+
+      suites that ran: 243 of 252 (skipped: 9, incomplete: 0)
+      of those, 248 accounted for their checks and -5 did not
+
+  PG 18 printed `-2` the same day, from 246 ran. Both sessions filed it
+  independently off the same runs.
+
+  THE TWO TERMS COUNTED DIFFERENT POPULATIONS. `suites_ran` excludes a skipped
+  suite. `_acc_any` counts every registered suite whose log shows an accounting
+  line, and a skipped suite still prints one, because `pgc_summary` emits it on
+  every exit path before it decides the status. Subtracting one from the other
+  goes negative as soon as any suite skips and accounts.
+
+  NOTHING CAUGHT IT BECAUSE THE RESIDUAL WAS DERIVED. `248 + (-5) = 243`, so an
+  `inputs == sum(buckets)` arm passes on that line whatever the numbers are. It is
+  the error `pgc_summary` warns about eight lines below its own counter, committed
+  one level up.
+
+  The residual is now a SET DIFFERENCE over the names the run recorded, and the
+  other bucket is the intersection, so neither is the other's leftover and a
+  negative is unrepresentable rather than merely detected. `pgc_tally_suite`
+  records the name of every suite beside the counter it increments. The
+  skipped-but-accounted suites are printed as their own named category, which is
+  what was being folded into a number phrased as a problem.
+
+  Guarded by `test/selftest/510-a-residual-must-be-counted.sh` and
+  `test/pytest/test_residual_is_counted.py`, which assert the same properties
+  through their own harnesses and name each other nowhere. Both drive the readers
+  AND the summary block extracted from `run_all_versions.sh`, rather than grepping
+  its text: proving the reader correct says nothing about what the summary prints
+  with it. Removal proof, four mutations, each reddening named checks and each
+  mutant asserted to still parse -- reversing the difference, dropping the sort,
+  restoring the subtraction, and dropping one recorded name.
 
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).

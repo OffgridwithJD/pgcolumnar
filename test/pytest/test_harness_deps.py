@@ -116,6 +116,11 @@ NO_CLUSTER = [
     # `git archive`; the public seam is the published distribution, so it needs
     # neither a cluster nor the driver.
     "test_pgxn_metadata.py",
+    # #999/#1006's file. It drives two shell readers and the summary block out of
+    # `run_all_versions.sh` with `bash`, over files in tmp_path -- no connection, no
+    # cluster, no driver. The classifier agrees, and this declaration has to say so
+    # before the guard job will collect it.
+    "test_residual_is_counted.py",
 ]
 
 

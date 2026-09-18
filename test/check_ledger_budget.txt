@@ -58,4 +58,8 @@ suites_not_covered 249
 # that is not this one. Neither survives. Re-derived by COUNTING on the merged tree,
 # which is the only resolution this number has:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1277
+# 1277 -> 1306 when #999/#1006's 29 checks merged: part 510, plus two arms in part
+# 330 for the names the tally now records and two in part 390 following the reworded
+# headline. Derived by the command above on this tree, and by the gate's own census
+# in the same run, which printed `never observed red=1306` independently.
+checks_never_observed_red 1306
