@@ -1173,6 +1173,11 @@ SHELL_REFERENCES = {
     "test_mutation_ledger.py":
         "executes the matrix runner with its list flag to get the registered suite "
         "list, which is the same mechanism the entry above uses",
+    "test_record_names_its_major.py":
+        "reads the matrix runner's text to assert that the guard it defines is "
+        "actually called and actually fails the major -- the reader can be correct "
+        "while nothing acts on its answer, which is the half a removal proof over "
+        "the reader alone cannot see",
     "test_residual_is_counted.py":
         "reads the matrix runner's text to take out its two set readers and the "
         "summary block that prints the suite breakdown, then executes them -- so the "
