@@ -106,6 +106,9 @@ behaviour, the source of that number is named.
 - [58. test_native_index_fetch_stripe_cost.py: the fetch penalty reads the table's own row-group limit](#58-test_native_index_fetch_stripe_costpy-the-fetch-penalty-reads-the-tables-own-row-group-limit)
 - [59. test_scan_decode_cost.py: a scan is priced for the columns it decodes and their width](#59-test_scan_decode_costpy-a-scan-is-priced-for-the-columns-it-decodes-and-their-width)
 - [60. test_index_fetch_penalty_width.py: a wider prefix must give up on per-row fetches sooner](#60-test_index_fetch_penalty_widthpy-a-wider-prefix-must-give-up-on-per-row-fetches-sooner)
+- [61. test_native_reclaim_cycles.py: repeated compaction must not fight its own free list](#61-test_native_reclaim_cyclespy-repeated-compaction-must-not-fight-its-own-free-list)
+- [62. test_native_reclaim_frag.py: coalescing must merge, stay correct, and cost nothing](#62-test_native_reclaim_fragpy-coalescing-must-merge-stay-correct-and-cost-nothing)
+- [63. test_native_vacuum_race.py: compaction must not drop a concurrent commit](#63-test_native_vacuum_racepy-compaction-must-not-drop-a-concurrent-commit)
 
 ## 1. How to read a test in here
 
@@ -4985,3 +4988,86 @@ grepping the plan text, which a property line carrying the same words can satisf
 | test | what it holds |
 | --- | --- |
 | `test_index_fetch_penalty_width` | every arm: both fixtures complete, equal row-group counts above the fetch cache, the wide prefix really wider, both prefixes under the cache cap, the penalty is what moves the plan, the narrow table fetches somewhere on the ladder, and the wide table gives up no later |
+
+## 61. test_native_reclaim_cycles.py: repeated compaction must not fight its own free list
+
+Port of `native_reclaim_cycles.sh` (#432). `PgColumnarAllocateFreeSpace` consumed a
+`free_space` row without a `CommandCounterIncrement`, so a `compact_rewrite` that
+allocated more than once in one command re-selected the row it had just consumed and
+died with "tuple already updated by self" (#84).
+
+**The port catches that defect and the shell suite does not** (#1138). Delete the fix and
+the shell suite still reports 12 passed / 0 failed. The cause is
+`pgcolumnar.reclaim_coalesce`, which defaults ON: compaction merges adjacent freed
+ranges, so the free list holds one or two rows however much is freed, and one command
+never allocates from it twice. Measured on the shell suite's fixture, `free_space` rows
+before each cycle: 0, 1, 2, 2, 2.
+
+This file runs its cycles with coalescing off, which keeps the ranges separate, and
+asserts the free list is fragmented before relying on it. Two cells, each built from its
+own source and printing its own `.so` hash:
+
+| build | result |
+| --- | --- |
+| fix present (`.so e95880e45673`) | 30 groups, free list steady at 18, clean cycles |
+| fix removed (`.so 42bb17933a55`) | `compact_rewrite cycle 1 returns a count (no self-conflict): got 'bad:tuple already updated by self'` |
+
+Row sets are compared as sorted tuples in Python rather than through `pgc_set_hash`, so
+the two harnesses stay independent by construction.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_reclaim_cycles` | every arm: the fixture's groups and its fragmented free list, initial parity, then per cycle that `compact_rewrite` returned a count and parity held, and that the file reaches a steady state |
+
+## 62. test_native_reclaim_frag.py: coalescing must merge, stay correct, and cost nothing
+
+Port of `native_reclaim_frag.sh` (#432). The same retire+recluster workload runs with
+`pgcolumnar.reclaim_coalesce` on and off. Both modes must agree on the data while
+disagreeing on the free list: fewer `free_space` rows with coalescing on is the direct,
+deterministic evidence that the coalesce path ran. Measured: 1 row on, 18 off.
+
+The original wraps its whole build-and-compact sequence in `{ ... } >/dev/null 2>&1`, so
+a failed `INSERT`, a refused `set_options` or an errored `compact` leaves exactly the
+state a successful one does, and the arms below would compare two empty tables and
+report parity. The port asserts the row count per mode before anything is compared, so
+"both modes agree" cannot be satisfied by both modes having done nothing.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_reclaim_frag` | every arm: the row counts per mode before and after the block delete, parity with the heap mirror in both modes, that coalescing leaves fewer free_space rows, and that it never costs file size |
+
+## 63. test_native_vacuum_race.py: compaction must not drop a concurrent commit
+
+Port of `native_vacuum_race.sh` (#432). `pgcolumnar_compact_relation` used the caller's
+pre-lock statement snapshot, so a row group committed after that snapshot was invisible
+to the rewrite and was destroyed by the relfilenode swap (#295). Covered for `vacuum()`,
+`vacuum_sorted()` and `cluster()`.
+
+**The shell suite races on the clock; this one does not.** The original backgrounds a
+`psql` running `SELECT pg_sleep(5)` inside its transaction, sleeps 2 in the shell, and
+inserts during the gap — and redirects to `/dev/null` the one observation that would
+prove the race happened. If session B's snapshot were taken after A's commit, B would
+simply see all 150 rows, the maintenance call would keep them, and every check would
+pass having tested nothing.
+
+The port uses two connections and no sleeps, and asserts the interleaving: B sees 50
+before A commits, and **still** sees 50 after. The second premise is the load-bearing
+one — it says A's rows are genuinely outside B's snapshot, which is the precondition for
+the defect and exactly what a timing slip destroys.
+
+Removal proof: take the caller's transaction snapshot instead of a fresh post-lock one,
+and `vacuum()` destroys 100 of 150 rows — the arm reports `got 50 want 150`.
+
+The three maintenance calls are driven from an inline literal loop table, because an
+f-string name would reach `compare_to_bash` as one template and could not match the
+three literal names the shell suite states.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_vacuum_race` | every arm: per maintenance call, that B pinned a snapshot of 50 and that A's commit stayed outside it, then that all 150 rows survive; and that `vacuum()` preserves the exact row set rather than only the count |

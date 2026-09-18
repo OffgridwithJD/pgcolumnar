@@ -115,6 +115,46 @@ true until the next version shipped.
   reader ignore the flag reddens ten, and using the group-wide size in the fetch
   path reddens exactly the three fetch arms. Ledger rows seeded from five real
   runs merged in one call, so each carries 15;16;17;18;19.
+- Three reclaim and maintenance suites ported to pytest, and a guard that could not
+  see its own defect (#432, #1138).
+
+  `native_reclaim_cycles`, `native_reclaim_frag` and `native_vacuum_race`, 12 names,
+  each graded `missing: 0`. Ports take 25 to 28 of the corpus.
+
+  THE FIRST PORT CATCHES A DEFECT ITS ORIGINAL CANNOT. `native_reclaim_cycles.sh` is
+  the declared regression guard for #84, and deleting the #84 fix leaves it reporting
+  12 passed / 0 failed. `pgcolumnar.reclaim_coalesce` defaults ON, so compaction
+  merges adjacent freed ranges and the free list holds one or two rows however much
+  is freed -- and #84 needs one command to allocate from that list twice. Measured on
+  the shell fixture, free_space rows per cycle: 0, 1, 2, 2, 2.
+
+  The port runs its cycles with coalescing off, which keeps 18 separate ranges, and
+  asserts that fragmentation as a premise so the suite cannot go quietly vacuous
+  again. Two cells, each built from its own source:
+
+      fix present (.so e95880e45673)   clean cycles, free list steady at 18
+      fix removed (.so 42bb17933a55)   compact_rewrite cycle 1 returns a count
+                                       (no self-conflict): got 'bad:tuple already
+                                       updated by self'
+
+  The shell suite is left alone; the fixture change is filed as #1138 rather than
+  made in a pull request whose subject is the port.
+
+  THE THIRD PORT REPLACES A CLOCK WITH AN ORDERING. `native_vacuum_race.sh`
+  backgrounds a psql running pg_sleep(5), sleeps 2 in the shell, and inserts during
+  the gap -- then redirects to /dev/null the one observation that would show the race
+  happened. The port uses two connections and no sleeps, and asserts the
+  interleaving: session B sees 50 rows before A commits and still sees 50 after, so
+  A's rows are provably outside B's snapshot. Removal proof: take the caller's
+  snapshot instead of a fresh post-lock one and vacuum() destroys 100 of 150 rows.
+
+  The second port asserts the row count per coalesce mode before comparing them,
+  because the original wraps its whole build in `>/dev/null 2>&1` and would report
+  parity between two empty tables.
+
+  No bash suite changes, so no ledger row moves and the census does not.
+  `cluster_tests` 430 -> 433, re-derived by collection after the reseat.
+
 - Three cost-model suites ported to pytest (#432).
 
   `native_index_fetch_stripe_cost`, `scan_decode_cost` and

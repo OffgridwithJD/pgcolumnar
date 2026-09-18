@@ -97,6 +97,9 @@ COMPLETE = ["analyze_reltuples",
             "native_index_fetch_stripe_cost",
             "native_ownership",
             "native_projection",
+            "native_reclaim_cycles",
+            "native_reclaim_frag",
+            "native_vacuum_race",
             "parallel_am_scan",
             "parallel_scan_cost",
             "projection_drop_column",
@@ -278,8 +281,9 @@ def test_the_loop_reader_invents_nothing_in_this_corpus(expect):
                 "every name the loop reader returns appears verbatim in the file it "
                 "came from")
     expect.text(", ".join(files),
-                "build_refusal, differential, join_runtime_filter, sorted_pathkeys",
-                "and it is these files, so a fifth appearing is a diff a reviewer "
+                "build_refusal, differential, join_runtime_filter, "
+                "native_vacuum_race, sorted_pathkeys",
+                "and it is these files, so another appearing is a diff a reviewer "
                 "sees rather than a number that moved")
 
     # CONTROL, because the assertion above was RELAXED to let a wrapped name through and a
