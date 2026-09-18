@@ -78,4 +78,4 @@ suites_not_covered 249
 # clean union and only the COUNT had to be re-derived. Both files conflicted loudly
 # here, which is the safe half: the ledger is always right and only sometimes speaks.
 # Re-derived by the command above on the merged tree, never by adding the deltas:
-checks_never_observed_red 1330
+checks_never_observed_red 1340

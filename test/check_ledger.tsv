@@ -880,6 +880,7 @@ harness_selftest	410-a-check-must-have-been-red	--mutation across two failing ch
 harness_selftest	410-a-check-must-have-been-red	--prune REFUSES the whole prune when any orphan carries history	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--prune removes NOTHING from a part that skipped	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--prune removes a historyless orphan and says which	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	--target without --mutation is refused, because it attributes nothing	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a PG15 run names no orphan, having seen every check the ledger claims for 15	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a before-log and an after-log together are refused, as rename-scan refuses them	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a before-log and an after-log together are refused, not silently empty	15;16;17;18;19	never	-
@@ -921,6 +922,7 @@ harness_selftest	410-a-check-must-have-been-red	a second major is ADDED to the s
 harness_selftest	410-a-check-must-have-been-red	a second mutation ACCUMULATES rather than replacing the first	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a skipped part is NOT an orphan, so --orphans-only returns 0	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a stale prior is named WITH its distance from HEAD	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	a target that did not fail is refused, because the claim is wrong	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a verdict pgc_record cannot emit is an integrity failure	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	an absolute budget path resolves against git rather than shrugging	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	an empty check name is one too, because it names no check	15;16;17;18;19	never	-
@@ -963,6 +965,8 @@ harness_selftest	410-a-check-must-have-been-red	and one that stayed green keeps 
 harness_selftest	410-a-check-must-have-been-red	and only when there is a base, so a push build does not fail on it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and records neither as ever having been red	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and that is not a failure, because a run sees ONE major	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and that refusal names the target that stayed green	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and that refusal says --target needs --mutation	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the PG18-only row is one it cannot speak about, not one that vanished	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the addition in the other part is not called a rename	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the census line it always printed is still there	15;16;17;18;19	never	-
@@ -973,10 +977,12 @@ harness_selftest	410-a-check-must-have-been-red	and the history it is about to l
 harness_selftest	410-a-check-must-have-been-red	and the history it would lose is printed with it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the ledger is one row shorter afterwards	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the message says how to fix it, because regenerating is the intended action	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and the mutation is recorded against both of them	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the prior policy is chosen from a closed set, not taken as a ref	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names both values	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names how many failed, so the author can narrow the run	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the check that reddened	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and the refusal names the check that was not claimed as a target	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal names the raise	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the refusal quotes the claim beside the measurement	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and the runner names no remote at that call site	15;16;17;18;19	never	-
@@ -997,10 +1003,12 @@ harness_selftest	410-a-check-must-have-been-red	control: a well-formed log still
 harness_selftest	410-a-check-must-have-been-red	control: all-clean logs leave both flags down	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: an all-PASS log still merges with no flag at all	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and a clean run still returns 0 under it	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	control: and still records the mutation against the check that reddened	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and that one did prune, so 0 is not a refusal in disguise	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and the ledger really is shorter afterwards	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: on a covered major a new check is named and refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: one orphan among clean logs raises only the orphan flag	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	control: one red and no --target still merges	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: the row in the part the run never mentioned SURVIVES the prune	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: the same log merges with a different reason, so the refusal above is --mutation-across-two-checks and not the log	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: the same row with a real major is read without complaint	15;16;17;18;19	never	-
@@ -1011,6 +1019,8 @@ harness_selftest	410-a-check-must-have-been-red	every row has six fields and no 
 harness_selftest	410-a-check-must-have-been-red	it is still a finding, so the scan does not return success	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	lowering it is allowed, which is the direction the burn-down goes	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	merging a green run records both checks	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	naming both failing checks as targets permits the merge	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	naming only one of two failing checks is still refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	nor is one merely removed	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	once the suite is covered, a new check in it IS refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	one --mutation cannot be attributed across several runs at once	15;16;17;18;19	never	-
@@ -1266,7 +1276,7 @@ native_join_runtime_filter	native_join_runtime_filter	collation-mismatch answer 
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch plan has coordinator	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	default plan has runtime coordinator	15;16;17;18;19	2026-09-12	-
+native_join_runtime_filter	native_join_runtime_filter	default plan has runtime coordinator	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
 native_join_runtime_filter	native_join_runtime_filter	early limit equals heap	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	early limit has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	empty-build answer equals heap	15;16;17;18;19	never	-
@@ -1278,7 +1288,7 @@ native_join_runtime_filter	native_join_runtime_filter	int4/int8 answer equals he
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 bloom rejects most non-matches	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 plan has coordinator	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	join runtime filter defaults on	15;16;17;18;19	2026-09-12	-
+native_join_runtime_filter	native_join_runtime_filter	join runtime filter defaults on	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
 native_join_runtime_filter	native_join_runtime_filter	plan has build tap	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	plan has runtime coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	plan retains core Hash Join	15;16;17;18;19	never	-
