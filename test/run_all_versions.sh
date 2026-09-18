@@ -1137,6 +1137,22 @@ pgc_accounted_among() {	# pgc_accounted_among NAMEFILE WIDEFILE -> names
 	LC_ALL=C comm -12 <(LC_ALL=C sort "$1") <(LC_ALL=C sort "$2")
 }
 
+# How many of a log's records name no major (#1121).
+#
+# A STATIC RULE CANNOT DO THIS JOB, and two attempts got it wrong in different
+# directions before this reader existed. "Does this suite record?" is a RUNTIME
+# property: `audit.sh` defines its own `check()` whose body calls `pgc_record`, so a
+# rule keyed on defining a local check() misses it; `objstore_stash_recovery.sh`
+# uses lib.sh's check() directly, so the string `pgc_record` never appears in the
+# file at all and a rule keyed on that misses it too. And a third, excluding files
+# that match `pgc_setup`, dropped the three suites whose COMMENTS say they skip it
+# deliberately -- one of them the largest in the set at 184 records.
+#
+# The three predicates found 5, 7 and 8 suites. The truth was ELEVEN. Read the
+# records: this reader does not care which pattern finds which file.
+pgc_unknown_major_records() {	# pgc_unknown_major_records LOGFILE -> count
+	awk -F'\t' '$1 == "RESULT" && $6 == "unknown"' "$1" 2>/dev/null | grep -c . || true
+}
 
 pgc_log_shows_any_accounting() {	# pgc_log_shows_any_accounting LOGFILE -> yes|no
 	# Did this suite count its checks AT RUNTIME, by any mechanism the log shows?
@@ -1510,6 +1526,41 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		[ "$(grep -c '^RESULT	' "$builddir/${s}.log" || true)" -ne 0 ] \
 			&& _led_logs="$_led_logs $builddir/${s}.log"
 	done
+	# A RECORD THAT NAMES NO MAJOR IS A ROW NOTHING CAN SEED (#1121).
+	#
+	# `pgc_record` writes `${PGC_MAJOR:-unknown}`, and PGC_MAJOR is set inside
+	# `pgc_setup`. A suite that sources lib.sh -- so pgc_record exists and runs --
+	# but never calls pgc_setup records every check against the literal `unknown`.
+	#
+	# THE GATE CONSIDERS A ROW ONLY WHERE ITS MAJORS INTERSECT THE RUN'S, and no run
+	# ever observes `unknown`, so such a check cannot be seeded and a row for it could
+	# never be matched again. Eight suites were in that state, 248 of 248 records,
+	# until #1121; #1109 had already fixed three more the same way.
+	#
+	# CHECKED HERE because this is the only place that holds every log of a real run.
+	# The static version -- "a suite sourcing lib.sh must set PGC_MAJOR" -- is in the
+	# selftest and catches it earlier; this one catches it for the records that were
+	# actually written, which is the claim that matters.
+	_unk_suites=""
+	_unk_total=0
+	for s in "${SUITES[@]}"; do
+		[ -s "$builddir/${s}.log" ] || continue
+		_unk_n="$(pgc_unknown_major_records "$builddir/${s}.log")"
+		if [ "$_unk_n" -ne 0 ]; then
+			_unk_suites="$_unk_suites $s($_unk_n)"
+			_unk_total=$((_unk_total + _unk_n))
+		fi
+	done
+	if [ "$_unk_total" != 0 ]; then
+		# NAMED, NOT COUNTED. The count says something is wrong; the names say which
+		# suite to add the one line to.
+		echo "  PG$major: $_unk_total record(s) name no major, so no ledger row for them"
+		echo "  could ever be seeded -- the gate matches a row only where its majors"
+		echo "  intersect the run's, and no run observes 'unknown':${_unk_suites}"
+		echo "  Set PGC_MAJOR in each, as #1109 did. That is not a pass."
+		verfail=1
+	fi
+
 	if [ -z "$_led_logs" ]; then
 		echo "  no suite emitted a check record on PG$major, so the ledger has nothing to gate"
 		verfail=1

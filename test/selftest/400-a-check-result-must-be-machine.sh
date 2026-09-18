@@ -608,3 +608,83 @@ check "premise: and that population is the suite corpus" \
 _pl_hits="$(_pipeloop_sites "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh 2>/dev/null | grep -c . || true)"
 [ "${_pl_hits:-0}" = 0 ] || _pipeloop_sites "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh | sed 's/^/    /'
 check "no suite calls a check inside a piped loop" "${_pl_hits:-0}" "0"
+
+# ---- a suite that records must know its major (#1121, #1109) -----------------
+#
+# `pgc_record` writes `${PGC_MAJOR:-unknown}`, and PGC_MAJOR is set inside
+# `pgc_setup`. A suite that sources lib.sh -- so `check` exists and records -- but
+# never calls `pgc_setup` writes every record against the literal string `unknown`.
+#
+# A LEDGER ROW CLAIMING `unknown` MATCHES NO RUN. The gate considers a row only
+# where its majors intersect the majors the run observed, and no run ever observes
+# `unknown`, so those checks are structurally unseedable: they cannot be recorded
+# and could never be matched again if they were.
+#
+# #1109 fixed three of these -- concurrency, unique_conc, update_conc -- found by
+# reading a failure. Eight more were found the same way by @jdatcmd (#1121), and
+# this sweep found the remaining three. ELEVEN, and the population is why this is a
+# sweep rather than three more one-line fixes: a run-based check ("no record says
+# unknown") is silent about a suite that did not run, and every one of these was
+# found only when something else happened to fail.
+#
+# STATIC, SO IT COVERS A SUITE NOBODY DISPATCHED. Decidable without running
+# anything, which is the property that makes it a guard rather than an observation.
+#
+# THE PATTERN COST THREE ITERATIONS and each earlier one was wrong differently:
+#
+#     .*lib\.sh          matches portlib.sh -- six files, all false positives
+#     .*/lib\.sh"?$      misses `. ".../lib.sh" || {` -- hilbert_curve, a false
+#                        negative, and it is the largest suite in the set at 184
+#                        records
+#     .*/lib\.sh"        correct: a literal slash excludes portlib, no end-anchor
+#                        admits a trailing `|| { ... }`
+#
+# Both failures were silent in the direction that matters: the first inflated the
+# set with files that were fine, the second dropped a file that was not.
+# THE POPULATION IS THE REGISTERED SUITES, not every file in test/. Only a
+# registered suite produces a log the ledger reads, and sweeping the directory
+# instead put `run_all_versions.sh` in the offender list -- whose only matches are
+# the word "check" inside its own echo strings.
+_maj_s="$(grep -n '^SUITES=(' "$_rv" | cut -d: -f1)"
+_maj_e="$(awk -v s="$_maj_s" 'NR>s && /^\)/{print NR; exit}' "$_rv")"
+_maj_reg="$PGC_WORKDIR/registered.txt"
+sed -n "$((_maj_s + 1)),$((_maj_e - 1))p" "$_rv" | sed 's/#.*//' | tr -s ' \t' '\n' \
+	| grep -E '^[a-z][a-z0-9_]*$' | LC_ALL=C sort -u > "$_maj_reg"
+
+_maj_src='^[[:space:]]*\.[[:space:]].*/lib\.sh"'
+_maj_bad=""
+_maj_seen=0
+while read -r _maj_n; do
+	_maj_f="$PGC_TESTDIR/$_maj_n.sh"
+	[ -f "$_maj_f" ] || continue
+	grep -qE "$_maj_src" "$_maj_f" || continue
+	_maj_seen=$((_maj_seen + 1))
+	# HERESTRINGS, NOT `printf | grep -q` (#486, selftest part 080). The piped form
+	# lets the reader exit early, printf takes EPIPE, and pipefail calls the whole
+	# pipeline failed -- so `&& continue` never fired for a suite that DOES call
+	# pgc_setup and `|| continue` fired for one that records. Measured: the piped
+	# draft of this very sweep both added three files that were fine and dropped
+	# phase3, which is not. The guard one part over exists for this and caught it.
+	_maj_body="$(grep -vE '^[[:space:]]*#' "$_maj_f")"
+	grep -qE '(^|[[:space:];&|])pgc_setup[[:space:]]' <<<"$_maj_body" && continue
+	grep -qE '^[[:space:]]*PGC_MAJOR=' <<<"$_maj_body" && continue
+	# A file that records nothing has no record to mis-label.
+	grep -qE '(^|[[:space:];&|])(check|check_num|check_text|check_skip|pgc_record)[[:space:]]' \
+		<<<"$_maj_body" || continue
+	_maj_bad="$_maj_bad $_maj_n"
+done < "$_maj_reg"
+check "premise: the sweep read the suites, so an empty result means something" \
+	"$([ "$_maj_seen" -ge 200 ] && echo yes || echo no)" "yes"
+check "every suite that records also learns which major it ran on" \
+	"${_maj_bad# }" ""
+
+# AND THE PATTERN ITSELF, since it is the part that was wrong twice. Two fixtures
+# in the workdir rather than a claim about the tree: one that sources portlib and
+# must NOT match, one that sources lib.sh with a trailing `|| {` and must.
+_maj_d="$PGC_WORKDIR/major"; rm -rf "$_maj_d"; mkdir -p "$_maj_d"
+printf '. "$(dirname "${BASH_SOURCE[0]}")/portlib.sh"\n' > "$_maj_d/port.sh"
+printf '. "$(dirname "${BASH_SOURCE[0]}")/lib.sh" || {\n\techo no\n}\n' > "$_maj_d/trail.sh"
+check "the source pattern does not mistake portlib.sh for lib.sh" \
+	"$(grep -cE "$_maj_src" "$_maj_d/port.sh")" "0"
+check "and does match a lib.sh source with a trailing brace" \
+	"$(grep -cE "$_maj_src" "$_maj_d/trail.sh")" "1"

@@ -813,6 +813,7 @@ harness_selftest	400-a-check-result-must-be-machine	an unrunnable check emits ex
 harness_selftest	400-a-check-result-must-be-machine	an unrunnable check still prints its old line	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and a different major reaches the same field, so it is read not hardcoded	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and a harness that set no major says unknown rather than an empty field	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	and does match a lib.sh source with a trailing brace	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and it is counted	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and it is counted, so checks run: reports it	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and its major field carries the server major it ran under	15;16;17;18;19	never	-
@@ -850,6 +851,7 @@ harness_selftest	400-a-check-result-must-be-machine	check_text on an empty side 
 harness_selftest	400-a-check-result-must-be-machine	check_text's empty-side line is unchanged	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	control: a well-formed record still reconciles	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	control: unknown IS a major the reconciler accepts, or the four above prove nothing	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	every suite that records also learns which major it ran on	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	fewer records than counted checks is not described as a subshell	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	lib.sh bumps PGC_CHECKS in exactly one place	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	more records than counted checks names the cause, not just the arithmetic	15;16;17;18;19	never	-
@@ -868,6 +870,7 @@ harness_selftest	400-a-check-result-must-be-machine	premise: the fixtures carry 
 harness_selftest	400-a-check-result-must-be-machine	premise: the piped-loop sweep read every file it was offered	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: the probe ran every helper shape once	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: the sweep classified a corpus of check-calling files	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	premise: the sweep read the suites, so an empty result means something	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: while a file that calls no check is not its business	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the accounting line reconciles four outcomes against the count	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the major [18.2] is not a major, so that record does not reconcile	15;16;17;18;19	never	-
@@ -884,6 +887,7 @@ harness_selftest	400-a-check-result-must-be-machine	the runner calls the record 
 harness_selftest	400-a-check-result-must-be-machine	the runner defines the record reconciliation	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the same ratio check, ENABLED, emits one record and passes	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the same timing check, ENABLED, emits one record and passes	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	the source pattern does not mistake portlib.sh for lib.sh	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the sweep finds a check inside a PIPED loop	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--mutation across two failing checks in one run is refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--prune REFUSES the whole prune when any orphan carries history	15;16;17;18;19	never	-
@@ -1269,6 +1273,16 @@ harness_selftest	520-a-merged-row-must-cover-the-majors	premise: the single-majo
 harness_selftest	520-a-merged-row-must-cover-the-majors	seeding a ledger with no prevailing set is not warned	15;16;17;18;19	never	-
 harness_selftest	520-a-merged-row-must-cover-the-majors	the gate's printed recipe names one log per gated major	15;16;17;18;19	never	-
 harness_selftest	520-a-merged-row-must-cover-the-majors	the warning does not fail the merge	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	a log whose records all name a major counts none, while a mixed one counts its own	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	a log with no records at all is not an offender	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	and a suite that names no major fails the major, rather than only printing	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	and it counts every offending record, not just the first	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	and the message names the offending suites	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	premise: an unreadable log is indistinguishable from a clean one, so the caller must guard it	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	premise: it is callable	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	premise: the runner defines the reader this part evals	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	the runner calls the reader over every suite's log	15;16;17;18;19	never	-
+harness_selftest	530-a-record-must-name-its-major	the word in a REASON is not a record that names no major	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-

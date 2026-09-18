@@ -49,3 +49,4 @@
 500-the-gate-takes-a-prior-the-caller-names.sh
 510-a-residual-must-be-counted.sh
 520-a-merged-row-must-cover-the-majors.sh
+530-a-record-must-name-its-major.sh

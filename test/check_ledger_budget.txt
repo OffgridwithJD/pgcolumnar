@@ -99,4 +99,15 @@ suites_not_covered 249
 # two under the 0.5 causation mutation, one under rel->rows / rel->tuples).
 # Re-derived by COUNTING, not by adding two to a number from another tree:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1377
+# 1349 -> 1363: fourteen arms across two guards for #1121 -- ten in selftest part 530
+# over the runner's record reader, four in part 400 over the static sweep. Derived by
+# the command above on this tree, and by the gate's census in the same run.
+# RESEATED onto main carrying #1117. Main states 1368, this branch stated 1363, and
+# the merged tree is neither. The ledger auto-merged silently and was checked by KEY:
+# 0 main keys lost, 14 added. Re-derived by the command above.
+# RESEATED onto main carrying #1107. Main states 1377, this branch stated 1382,
+# and the merged tree is neither. The ledger auto-merged SILENTLY while this file
+# and TESTS.md conflicted loudly -- the usual pairing -- so the union was checked
+# by KEY: 0 keys lost from either side, 14 added, 0 duplicates. Re-derived by the
+# command above.
+checks_never_observed_red 1391
