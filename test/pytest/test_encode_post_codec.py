@@ -39,10 +39,11 @@ NONE_ENCODING_TYPE = 0
 def _descriptor_encodings(cur, table):
     """Encoding type of every vector of column 0, read from the descriptor.
 
-    6-byte header -- version, a reserved byte, then the vector count as uint32
-    little-endian -- followed by that many 13-byte entries whose first byte is
-    the encoding type. The count bounds the scan: reading to the descriptor's
-    length would score the trailing shared-table region as encoding types.
+    6-byte header -- version, a flags byte (a reserved zero before #1130), then
+    the vector count as uint32 little-endian -- followed by that many 13-byte
+    entries whose first byte is the encoding type. The count bounds the scan:
+    reading to the descriptor's length would score the trailing shared-table
+    region as encoding types.
     """
     cur.execute(
         """
@@ -72,10 +73,19 @@ def _value_bytes(cur, table):
 
     The bitmap is one bit per row and is written raw ahead of the codec, so it
     is subtracted to leave a number that moves only with the encoding decision.
+
+    SUBTRACTED ONLY WHERE THERE IS ONE (#1130). A chunk holding no null stores no
+    bitmap and sets bit 0 of the descriptor's flags byte; subtracting
+    unconditionally would remove bytes that were never written. These fixtures
+    hold no nulls, so every chunk takes the zero branch today -- the condition is
+    here so a fixture that gains one cannot silently change what is measured.
     """
     cur.execute(
         """
-        SELECT coalesce(sum(c.page_length) - sum((c.value_count + 7) / 8), 0)
+        SELECT coalesce(sum(c.page_length) - sum(
+                 CASE WHEN octet_length(c.encoding_descriptor) >= 6
+                       AND (get_byte(c.encoding_descriptor, 1) & 1) = 1
+                      THEN 0 ELSE (c.value_count + 7) / 8 END), 0)
           FROM pgcolumnar.column_chunk c
           JOIN pgcolumnar.storage s ON s.storage_id = c.storage_id
          WHERE s.relation_oid = %s::regclass

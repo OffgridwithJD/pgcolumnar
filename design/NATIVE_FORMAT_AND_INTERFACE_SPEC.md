@@ -84,6 +84,14 @@ page checksums apply, as in the 1.0-dev line.
   vector granularity).
 - Null values are recorded per column chunk as a validity bitmap, one bit per row,
   laid out so a vector's validity slice is a contiguous run.
+- **A column chunk that holds no null stores no bitmap at all**, and says so in its
+  encoding descriptor's flags byte (`NO_VALIDITY`, descriptor version 3). The
+  bitmap is written ahead of the block codec and is never compressed, so on a
+  column with no nulls it was a constant cost that grew with the row count and
+  shrank with nothing: measured at 16.8% of a 1,000,000-row ClickBench table, and
+  99.5% of the page on a well-encoded column. Elision is decided per CHUNK from
+  the rows actually written, not from the column's `NOT NULL` constraint, so a
+  nullable column whose rows happen to be complete gets it too.
 
 ## 5. Encodings
 

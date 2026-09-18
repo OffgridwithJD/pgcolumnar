@@ -67,7 +67,26 @@ columnar format version` for the metapage, or `unsupported columnar native forma
 version` for the data format. The read then fails. It does not read bytes that a
 different layout wrote. The check runs on each decode path. These paths include
 the sequential scan, the vectorized aggregate, and the index-scan fetch. Thus the
-build refuses a version that it cannot read, whichever path the query uses. Both guards are pinned by
+build refuses a version that it cannot read, whichever path the query uses.
+
+**A third version is not covered by either guard.** Each column chunk carries an
+encoding descriptor with its own version. The two stamps above do not move when
+it does. A build reads descriptor versions 2 and 3. It refuses a higher one with
+`unrecognized native encoding descriptor`.
+
+That refusal is late rather than early. It fires when a chunk is decoded, not
+when the relation is opened. The index-scan fetch path consults a chunk for
+null-ness before it decodes it. A descriptor from a future build can therefore
+produce a NULL where a value exists. Measured on an alpha4 build reading alpha5
+chunks: 16 of 40 single-row fetches returned NULL. The other 24 raised the
+error.
+
+**Do not downgrade the extension below the version that wrote a table.** It is
+not merely inadvisable. One path can return a wrong answer rather than fail.
+Upgrading is safe and needs no conversion. A newer build reads every descriptor
+version it has ever written. [Issue
+#1137](https://github.com/commandprompt/pgcolumnar/issues/1137) tracks closing
+the gap, so that a future version is refused early on every path. Both guards are pinned by
 `test/native_format.sh`.
 
 A projection stores its own copy of the data and carries its own format version.

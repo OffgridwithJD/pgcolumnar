@@ -65,7 +65,8 @@ build() {  # table, expression, compression
 
 # How many vectors of the text column chose FSST.
 #
-# The descriptor is a 6-byte header -- version, a reserved byte, then the vector
+# The descriptor is a 6-byte header -- version, a flags byte (#1130; a reserved
+# zero before it), then the vector
 # count as uint32 -- followed by that many 13-byte entries, followed by the
 # chunk-shared symbol table. So entry i's type byte is at 6 + i*13, and the
 # count comes from the header rather than from the length: the trailing table's

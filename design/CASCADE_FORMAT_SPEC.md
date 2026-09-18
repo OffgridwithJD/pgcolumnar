@@ -22,21 +22,38 @@ of them names a *component* of a scheme's output, not the whole of it.
 The per-chunk `encoding_descriptor` in `pgcolumnar.column_chunk` is:
 
 ```
-[uint8  version]        COLUMNAR_NATIVE_ENCDESC_VERSION = 2
-[uint8  reserved]
+[uint8  version]        COLUMNAR_NATIVE_ENCDESC_VERSION = 3
+[uint8  flags]          bit 0 NO_VALIDITY: this chunk stored no validity bitmap
 [uint32 vectorCount]
 [vectorCount entries of 13 bytes]
     [uint8  encodingType]
+    [uint32 valueCount]
     [uint32 rawLen]
     [uint32 encLen]
-    [uint32 valueCount]
 [uint32 sharedTableLen]     optional, FSST's chunk-shared symbol table
 [sharedTableLen bytes]
 ```
 
-Verified: the descriptor is versioned, and `columnar_reader.c` rejects an
-unrecognized version with `ERRCODE_DATA_CORRUPTED` before reading anything else,
-so version 3 chunks can coexist with version 2 in one table.
+The entry's field ORDER above is `valueCount, rawLen, encLen`, which is what
+`columnar_encdesc.h` writes and reads (offsets 1, 5, 9 within the entry). This
+block previously named them in the wrong order; no code ever followed it.
+
+Version 3 (#1130) spends the byte version 2 wrote as a zero reserved byte. A
+version-2 descriptor is therefore a version-3 one whose flags are all clear:
+every field keeps its offset, and a reader needs no second parse. Writers emit
+`COLUMNAR_NATIVE_ENCDESC_VERSION`; readers accept anything from
+`COLUMNAR_NATIVE_ENCDESC_MIN_READABLE` (2) upward, because tables written by an
+older build must keep reading.
+
+`NO_VALIDITY` says the chunk held no null and its validity bitmap was therefore
+not written: the page is `[encoded]` rather than `[validity][encoded]`. It is a
+property of ONE CHUNK -- one column can hold nulls while its neighbour does not
+-- so every reader decides the bitmap's size per chunk rather than once per row
+group from `ceil(rowCount / 8)`.
+
+Verified: the descriptor is versioned, and `columnar_reader.c` rejects a version
+it does not recognize with `ERRCODE_DATA_CORRUPTED` before reading anything
+else, so version 2 and version 3 chunks coexist in one table.
 
 ## Decision 1: which feature is being built
 
@@ -64,7 +81,23 @@ If the answer is whole-output chaining after all, this spec's descriptor is clos
 to right and the candidate list needs rewriting. If it is component cascading, the
 descriptor below is the one to implement.
 
-## Decision 2: when a table starts writing version 3
+## THE VERSION NUMBER THIS DOCUMENT PROPOSES IS TAKEN (2026-09-18)
+
+This spec was written when the next descriptor version was free. It is not:
+**#1130 spent version 3** on the header's flags byte, so that a chunk holding no
+null can say it stored no validity bitmap -- 16.8% of a real ClickBench table.
+That change keeps every existing field at its offset and adds no per-vector
+bytes, so it is compatible in shape with everything below; only the number
+moves.
+
+**Read every "version 3" below as "the next version", which is now 4.** The two
+decisions the sections below record -- when a table starts writing it, and what
+the entry looks like -- are unaffected. Decision 2's recommendation is now
+partly settled by precedent rather than by argument: #1130 took the
+unconditional break, so a second one costs an operator nothing new if it ships
+in the same release, and rather more if it ships later.
+
+## Decision 2: when a table starts writing the new version
 
 - **Unconditionally, once the feature ships.** The break is deterministic and tied
   to the upgrade, so it is one CHANGELOG line: chunks written after this version
@@ -85,7 +118,7 @@ An earlier draft of this spec recommended the data-triggered variant. That was
 wrong for the reason above: it trades a predictable break for an unpredictable
 one, which is worse to operate even though it breaks fewer tables.
 
-## Proposed version 3 entry (component cascading, one component per stage)
+## Proposed entry for the NEXT version, 4 (component cascading, one component per stage)
 
 ```
 [uint8  chainLen]          1..PGCN_MAX_CHAIN (proposed 3)
@@ -110,8 +143,9 @@ Without them the reader is guessing. The alternative, making every encoding's
 output self-describing, changes every encoder's on-disk bytes and is a much larger
 change than this one.
 
-`chainLen == 1` expresses exactly what version 2 expresses, so version 3 is a
-superset.
+`chainLen == 1` expresses exactly what version 2 expresses, so the new version is
+a superset -- of version 3 as well, whose flags byte sits in the header and is
+untouched by anything here.
 
 ## Guards, each needing a test that fails without it
 

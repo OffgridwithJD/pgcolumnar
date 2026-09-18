@@ -143,7 +143,7 @@ def test_native_fetch_coalesce(pgc_conn, expect):
     )
 # ---- the validity copy must be bounded by the chunk, not by the row count ----
 #
-# The coalesced fetch path copies validityBytes out of a span buffer that is only
+# The coalesced fetch path copies the validity bytes out of a span buffer that is only
 # guaranteed to hold page_length bytes for the chunk being served. The test that
 # reconciles the two once ran AFTER the copy, which made a chunk whose catalog
 # page_length was under its validity bitmap read past the allocation -- measured
@@ -177,8 +177,13 @@ def test_the_validity_copy_is_bounded_before_the_chunk_is_read(expect):
     # in the wrong loop -- this check would then still pass with the
     # distribution guard deleted. The containment test belongs only to the
     # distribution loop, so searching after it pins the right guard.
+    #
+    # THE TEXT MOVED WITH #1130: both guards compared against `validityBytes`,
+    # the row group's ceil(rowCount / 8), until the bitmap became a property of
+    # the CHUNK. `cvb` is that chunk's own size, 0 where it was elided. The
+    # property pinned here is unchanged; only its spelling moved.
     anchor = body.find("cc->pageOffset < start")
-    guard = body.find("pageLength < (uint64) validityBytes", anchor + 1) if anchor >= 0 else -1
+    guard = body.find("pageLength < (uint64) cvb", anchor + 1) if anchor >= 0 else -1
     copy = body.find("memcpy(entry->vbits")
 
     expect.num(

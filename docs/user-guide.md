@@ -326,7 +326,7 @@ bookkeeping and none of the data:
 
 ```
 table pgcolumnar.row_group:    INSERT: storage_id[bigint]:10000000000 group_number[bigint]:1 ...
-table pgcolumnar.column_chunk: INSERT: ... encoding_descriptor[bytea]:'\x020001...'
+table pgcolumnar.column_chunk: INSERT: ... encoding_descriptor[bytea]:'\x030100...'
 table pgcolumnar.zone_map:     INSERT: ... minimum[bytea]:'\x0100000000000000' ...
 table pgcolumnar.delete_vector: UPDATE: ... bitmap[bytea]:'\x03' deleted_count[integer]:2
 ```

@@ -52,9 +52,10 @@
  * single 0 byte: raw present values, no per-vector encoding, block_codec 0) or a
  * D4 descriptor with this leading version byte, recording the lightweight
  * encoding chosen per 1024-value vector so the reader reconstructs the exact raw
- * value stream. The layout is: uint8 version, uint8 reserved, uint32 vectorCount,
+ * value stream. The layout is: uint8 version, uint8 flags, uint32 vectorCount,
  * then per vector { uint8 encodingType, uint32 valueCount, uint32 rawLen,
  * uint32 encLen }. Integers are host-endian (little-endian hosts assumed, spec 3).
+ * Byte 1 was a reserved zero until version 3 spent it on flags.
  *
  * Version 2 (E3b) appends one trailing region after the per-vector entries:
  * { uint32 sharedTableLen, sharedTableLen bytes }. It holds a chunk-shared FSST
@@ -63,9 +64,60 @@
  * their own, so the costly table build is paid once per chunk, not per vector.
  * It is appended (not inserted after the header) so every per-vector entry offset
  * is unchanged from version 1.
+ *
+ * Version 3 (#1130) spends the header's reserved byte on flags, whose only bit
+ * today says the chunk stored no validity bitmap because it holds no null. No
+ * field moves, nothing is added per vector, and a version-2 descriptor is a
+ * version-3 one whose flags are clear.
  */
 #define COLUMNAR_NATIVE_ENCDESC_BASELINE 0
-#define COLUMNAR_NATIVE_ENCDESC_VERSION 2
+#define COLUMNAR_NATIVE_ENCDESC_VERSION 3
+
+/*
+ * The oldest descriptor a reader accepts. Version 3 (#1130) spends the header's
+ * previously-reserved byte on flags, so a version-2 descriptor is a version-3
+ * one whose flags are all clear -- every field keeps its offset and the reader
+ * needs no second parse. Writers emit VERSION; readers accept anything from
+ * MIN_READABLE to VERSION, because tables written by an older build must keep
+ * reading.
+ *
+ * AN OLD BINARY READING A VERSION-3 TABLE IS MOSTLY LOUD AND NOT ALWAYS, and the
+ * difference is measured rather than argued. Run on 2026-09-18 against an alpha4
+ * build (descriptor v2) reading tables this code wrote:
+ *
+ *   sequential scan      ERROR "unrecognized native encoding descriptor", every
+ *                        time, from the guard in pgcolumnar_native_decode_chunk.
+ *   index fetch, narrow  ERROR "columnar chunk for column N has a validity bitmap
+ *     chunk              longer than the chunk" -- the elided chunk is smaller
+ *                        than the bitmap the old reader expects, so its own
+ *                        bound refuses it.
+ *   index fetch, wide    40 single-row fetches: 24 raised "unrecognized native
+ *     chunk              encoding descriptor" and 16 RETURNED NULL for a row that
+ *                        holds a value. The old reader takes the chunk's first
+ *                        ceil(rowCount / 8) encoded bytes for a bitmap and tests
+ *                        one bit; a zero bit answers "null" before any version
+ *                        check is reached.
+ *
+ * So downgrading a binary below the one that wrote the table is NOT supported,
+ * and this is the shape of the failure rather than a guarantee about it.
+ * pgcolumnar.storage.format_version is the stamp that could refuse such a table
+ * early on both paths, and it cannot express this change today: it is checked
+ * `!= COLUMNAR_NATIVE_VERSION_MAJOR`, so bumping it would also make THIS build
+ * refuse every table alpha4 wrote. Tracked separately; see the issue linked from
+ * the #1130 changelog entry.
+ */
+#define COLUMNAR_NATIVE_ENCDESC_MIN_READABLE 2
+
+/*
+ * Header flags, at byte 1, which version 2 wrote as a zero reserved byte.
+ *
+ * NO_VALIDITY says the column chunk holds no nulls and its validity bitmap was
+ * therefore NOT written: the page is [encoded] rather than [validity][encoded].
+ * The bitmap is one bit per row, written raw ahead of the block codec, which
+ * never sees it -- measured at 16.80% of a 1,000,000-row ClickBench table where
+ * no column has a null, and 99.5% of the page on a column that encodes well.
+ */
+#define COLUMNAR_ENCDESC_FLAG_NO_VALIDITY 0x01
 #define COLUMNAR_NATIVE_ENCDESC_HEADER_LEN 6	/* version + reserved + vectorCount */
 #define COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN 13	/* encodingType + 3 * uint32 */
 #define COLUMNAR_NATIVE_ENCDESC_SHARED_LEN_BYTES 4	/* trailing uint32 sharedTableLen */

@@ -18,8 +18,14 @@
 # production. It does NOT pin which encoding was chosen, so encoder tuning does
 # not spuriously break it.
 #
-# Layout (descriptor version 2):
-#   header:  version u8 @0, reserved u8 @1, vectorCount u32 @2   (HEADER_LEN 6)
+# Layout (descriptor version 3):
+#   header:  version u8 @0, flags u8 @1, vectorCount u32 @2   (HEADER_LEN 6)
+#
+# VERSION 3 SPENDS THE RESERVED BYTE ON FLAGS (#1130). Bit 0, NO_VALIDITY, says
+# the chunk held no nulls and therefore did NOT store its validity bitmap, so
+# the page is [encoded] rather than [validity][encoded]. Every other field keeps
+# its offset, which is why a version-2 descriptor is readable as a version-3 one
+# whose flags are clear -- and why this suite's offsets below did not move.
 #   entry:   type u8 @0, valueCount u32 @1, rawLen u32 @5, encLen u32 @9  (ENTRY_LEN 13)
 #   trailer: sharedTableLen u32, then that many bytes
 #
@@ -50,9 +56,19 @@ le32() { q "SELECT get_byte(d,$2)+get_byte(d,$2+1)*256+get_byte(d,$2+2)*65536
 olen() { q "SELECT octet_length(encoding_descriptor) FROM pgcolumnar.column_chunk
             WHERE storage_id=$SID AND column_index=$1;"; }
 
-# version byte is 2 on every column's descriptor
+# version byte is 3 on every column's descriptor
 for col in 0 1 2; do
-	check "column $col descriptor version byte is 2" "$(b $col 0)" "2"
+	check "column $col descriptor version byte is 3" "$(b $col 0)" "3"
+done
+
+# FLAGS (u8 @1), which version 2 wrote as a zero reserved byte. This fixture
+# inserts no NULL, so every column asserts NO_VALIDITY and stores no bitmap.
+# Pinned per column rather than once, because the flag is a property of the
+# CHUNK: one column may hold a null while its neighbour does not, and a reader
+# that decided this per row group would be wrong for exactly that table.
+for col in 0 1 2; do
+	check "column $col descriptor flags byte says the bitmap was omitted" \
+		"$(b $col 1)" "1"
 done
 
 # vectorCount (u32 @2) is 1 (one chunk group, one vector)

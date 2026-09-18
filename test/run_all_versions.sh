@@ -289,6 +289,7 @@ SUITES=(
 	vacuum_lock_privilege
 	vacuum_sorted_gate
 	vacuum_stripe_count
+	validity_elision
 	vector_agg_rescan_memory
 	vector_agg_tlist_shape
 	vm_clear_on_renumber

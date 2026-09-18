@@ -34,7 +34,8 @@ ROWS="${PGC_FSST_MARGIN_ROWS:-20000}"
 
 # How many vectors of the text column chose FSST (encoding type 8).
 #
-# The descriptor is a 6-byte header -- version, a reserved byte, then the vector
+# The descriptor is a 6-byte header -- version, a flags byte (#1130; a reserved
+# zero before it), then the vector
 # count as uint32 -- followed by that many 13-byte entries. Same decode as
 # write_fsst_compressed.sh, and for the same reason: reading past the entries
 # would score the chunk's symbol table as encoding types.

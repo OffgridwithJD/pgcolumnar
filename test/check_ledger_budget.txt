@@ -128,4 +128,27 @@ suites_not_covered 249
 # one short. The census command above was never affected because it skips nothing,
 # but a row count taken the other way disagrees with the tool's own `ledger: rows=`
 # and reads as an off-by-one in the merge rather than in the command.
-checks_never_observed_red 1407
+# 1407 -> 1421 when validity_elision's twenty-five checks landed (#1130).
+# Twenty-five rows, of which ELEVEN carry an observed red: the three mutations
+# that ran were the writer's elision decision, the reader's flag read, and the
+# fetch path's per-chunk size, and between them they reddened eleven. The
+# fourteen left never are the premises, the per-chunk arm, the null-column probe
+# and the two corruption guards -- those landed after the mutations ran, and the
+# guards are exercised by a poisoned catalog rather than by a mutation of the
+# code. The twenty-fifth is the premise @OffgridwithJD's review added: it is
+# observed red by pointing the per-chunk residual at a column that does not
+# exist, which is a mutation of the SUITE rather than of the product, so it is
+# recorded here in prose rather than as a last-red date.
+# Seeded from one run per major, all five merged in a SINGLE call, so every row
+# carries 15;16;17;18;19 and the short-major warning (#1071) stayed silent.
+#
+# `suites_not_covered` does NOT move: registering validity_elision takes the
+# registered count 260 -> 261 and seeding it takes the covered count 11 -> 12, so
+# the difference is 249 either way. That is the whole reason the rows are seeded
+# in this change rather than after it -- registering a suite without seeding it
+# raises a number the gate may only see fall.
+#
+# Re-derived by COUNTING on this tree, never by adding fourteen to a number from
+# another:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+checks_never_observed_red 1421

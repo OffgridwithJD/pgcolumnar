@@ -102,6 +102,7 @@ behaviour, the source of that number is named.
 - [54. test_projection_update.py: UPDATE must fan the new row number out to projections](#54-test_projection_updatepy-update-must-fan-the-new-row-number-out-to-projections)
 - [55. test_projection_drop_column.py: DROP COLUMN must not invalidate a projection](#55-test_projection_drop_columnpy-drop-column-must-not-invalidate-a-projection)
 - [56. test_encode_post_codec.py: an encoding must be smaller after the codec](#56-test_encode_post_codecpy-an-encoding-must-be-smaller-after-the-codec)
+- [57. test_validity_elision.py: a column with no nulls must store no validity bitmap](#57-test_validity_elisionpy-a-column-with-no-nulls-must-store-no-validity-bitmap)
 
 ## 1. How to read a test in here
 
@@ -4754,3 +4755,99 @@ The controls are the load-bearing half. Declining every encoding would satisfy
 "never larger than unencoded" and redden nothing, so the repeating column ships
 beside the tail one and asserts that encoding is still chosen where it wins.
 
+## 57. test_validity_elision.py: a column with no nulls must store no validity bitmap
+
+#1130. A column chunk's page was always `[validity bitmap][encoded values]`. The
+bitmap is one bit per row, written RAW ahead of the block codec, which therefore
+never saw it -- so a column holding no null still stored `ceil(rows / 8)` bytes
+of `0xFF` for ever. Measured on ClickBench `hits_0.parquet` (1,000,000 rows, 105
+columns, no null in any of them): **16.80% of everything stored**, and 99.5% of
+the page on a well-encoded column whose values came to 135 bytes.
+
+The writer now omits the bitmap for a chunk that holds no null and says so in the
+descriptor's new flags byte (`NO_VALIDITY`, descriptor version 3).
+
+**THE MEASUREMENT IS EXACT, not a ratio.** With the block codec off the page is
+exactly `[validity][encoded]`, so `page_length - sum(encLen)` IS the bitmap, with
+nothing else in it. The arms assert `0` and `ceil(rows / 8)` rather than a
+threshold, so a wrong answer cannot hide inside a tolerance. The suite turns the
+codec off for that reason; with one, the same subtraction reads a compression
+ratio and calls it a bitmap.
+
+**THE FETCH PATH IS A SECOND READER, and it is the reason this file has a third
+test.** A scan reaches a chunk through `pgcolumnar_native_load_group`; an index
+scan reaches a row through `pgcolumnar_fetch_get_row`, which reads the chunk's
+bytes itself. The first implementation fixed the scan and not the fetch, and the
+PG17 matrix went red in 33 suites -- `native_index`'s point lookup returned NO
+ROW for a row that is there. Worse, the two are CORRELATED: the coalesced read
+skips a chunk whose `page_length` is below the group's bitmap size, and eliding
+the bitmap is exactly what takes a well-encoded chunk below it. A fixture built
+to exercise the elision is therefore systematically the fixture that lands on
+the reader most likely to have been left behind.
+
+**TWO ARRANGEMENTS MAKE THE FETCH ARMS REAL, and both were found by an arm that
+failed rather than by reasoning.** The table carries a KEY column beside the
+measured one, because an index on the only column is answered by an Index Only
+Scan that never calls the table AM at all -- the first version of these arms
+passed against a build whose fetch path was provably broken. And
+`pgcolumnar.enable_custom_scan` is off, because `enable_seqscan` does not govern
+the columnar custom scan: without it the plan was
+`Custom Scan (PgColumnarScan)`, a scan wearing a fetch's name. The premise arm
+asserts the PLAN NODE rather than the row, because a row that comes back is no
+evidence about which reader produced it.
+
+Public seam: `pgcolumnar.column_chunk` and the encoding descriptor. Independent
+of `test/validity_elision.sh`, which reads the descriptor through `get_byte()`
+in SQL and turns the codec off with `ALTER DATABASE`, while this decodes the
+descriptor in Python bytes and uses a session `SET` -- which it can, because one
+connection serves the whole test and the shell twin's `psql_run` opens a new
+session per statement. Neither file names the other.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_a_column_with_no_nulls_stores_no_validity_bitmap` | the size arms and the five premises they rest on |
+| `test_the_layout_change_returns_the_same_rows` | the invariant the size arms exist to prove is not vacuous |
+| `test_the_guards_the_elision_added_refuse_a_lying_catalog` | both new guards, poisoned into firing, asserted by SQLSTATE |
+| `test_the_fetch_path_reads_an_elided_chunk_correctly` | the second reader, with the plan asserted rather than assumed |
+
+**FIVE PREMISES, AND EACH ANSWERS A WAY THE HEADLINE ARM READS 0 WITHOUT
+MEASURING ANYTHING.** The residual arm expects `0`, which is also what
+`coalesce(sum(...), 0)` returns over an empty set, so the chunk count is
+asserted beside it. The exact size assumes one row group, so the group count is
+asserted. And the subtraction is the bitmap only while the block codec is off,
+so the setting is read back rather than assumed — `SET` and `ALTER DATABASE`
+are statements that have to have taken effect.
+
+**THE PER-CHUNK ARM IS THE ONE THAT CANNOT BE PASSED BY A PER-GROUP DECISION.**
+Both size arms are satisfied by a writer that decides elision once per row
+group: one fixture's group holds no null anywhere and the other's holds some.
+The null-bearing fixture carries a null-free KEY column in the same row group,
+so only a per-chunk decision elides one and keeps the other.
+
+**AND IT CARRIES ITS OWN PREMISE, BESIDE IT RATHER THAN WITH THE OTHERS.** It
+expects `0`, and `0` is also what the residual returns when it summed nothing:
+a column index off the end of the table answers exactly as a correctly elided
+bitmap does. @OffgridwithJD measured that against the first version of this
+pair -- pointing that one residual at `column_index 99` left all 24 checks green
+in BOTH harnesses, because `_residual` returns the chunk count and two of its
+three call sites discarded it. The two residuals that keep discarding it are the
+ones a bug makes LARGE, which is the distinction worth carrying: a premise is
+owed wherever the failure mode and the pass look the same.
+
+**THE GUARD ARMS ASSERT SQLSTATE `XX001`**, not message text: that is
+`ERRCODE_DATA_CORRUPTED` and comes only from a guard that ran. One poisons the
+`NO_VALIDITY` flag onto a chunk that holds nulls; the other poisons the row
+count. Both also assert the backend survived. The second arm records a refuted
+idea as well: bounding the synthesized bitmap by the row group's byte length
+looks right and is wrong, because an elided group of 360 bytes legitimately
+needs 12,500 bytes of bits — which is the saving, not a defect. It was measured
+when that bound made a plain `SELECT` raise on a correct table.
+
+The second fixture is the load-bearing control. Deleting the bitmap
+unconditionally satisfies "a column with no nulls stores none" and loses every
+null in the table, so the column that still needs its bitmap is asserted beside
+the one that does not -- and the null count is asserted separately, because both
+`EXCEPT ALL` arms are satisfied by a table that agrees on values and not on
+nulls.

@@ -36,7 +36,8 @@ FSST_ENCODING_TYPE = 8
 def _fsst_vectors(cur, table):
     """How many vectors of column 1 chose FSST, read from the descriptor.
 
-    The descriptor is a 6-byte header -- version, a reserved byte, then the vector
+    The descriptor is a 6-byte header -- version, a flags byte (#1130; a
+    reserved zero before it), then the vector
     count as uint32 little-endian -- followed by that many 13-byte entries whose
     first byte is the encoding type. Reading past the entries would score the
     chunk's shared symbol table bytes as encoding types, so the count bounds the

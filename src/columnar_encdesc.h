@@ -30,7 +30,9 @@
 
 #include "columnar.h"			/* COLUMNAR_NATIVE_ENCDESC_* constants */
 
-/* header: version u8, reserved u8, vectorCount u32 (COLUMNAR_NATIVE_ENCDESC_HEADER_LEN) */
+/* header: version u8, flags u8, vectorCount u32 (COLUMNAR_NATIVE_ENCDESC_HEADER_LEN) */
+#define COLUMNAR_ENCDESC_HDR_OFF_VERSION 0
+#define COLUMNAR_ENCDESC_HDR_OFF_FLAGS 1
 #define COLUMNAR_ENCDESC_HDR_OFF_VECCOUNT 2
 
 /* per-vector entry: type u8, valueCount u32, rawLen u32, encLen u32 (…ENTRY_LEN) */
@@ -47,16 +49,61 @@ typedef struct PgColumnarEncdescEntry
 	uint32		encLen;
 } PgColumnarEncdescEntry;
 
-/* append the descriptor header (version + reserved + vectorCount) */
+/*
+ * Append the descriptor header: version + flags + vectorCount.
+ *
+ * FLAGS IS AN ARGUMENT WITH NO DEFAULT, deliberately. The convenience wrapper
+ * that passed 0 was left behind by #1130 with no callers, and a zero flags byte
+ * is no longer a neutral value: it asserts that this chunk DID store a validity
+ * bitmap. A writer that wants that has to say so.
+ */
 static inline void
-PgColumnarEncdescPutHeader(StringInfo desc, uint32 vectorCount)
+PgColumnarEncdescPutHeaderFlags(StringInfo desc, uint32 vectorCount, uint8 flags)
 {
 	uint8		version = COLUMNAR_NATIVE_ENCDESC_VERSION;
-	uint8		reserved = 0;
 
 	appendBinaryStringInfo(desc, (char *) &version, 1);
-	appendBinaryStringInfo(desc, (char *) &reserved, 1);
+	appendBinaryStringInfo(desc, (char *) &flags, 1);
 	appendBinaryStringInfo(desc, (char *) &vectorCount, sizeof(uint32));
+}
+
+/*
+ * Whether a reader understands this descriptor's version. Callers that have
+ * already checked descLen may pass the header directly.
+ */
+static inline bool
+PgColumnarEncdescVersionSupported(const char *desc)
+{
+	uint8		v = (uint8) desc[COLUMNAR_ENCDESC_HDR_OFF_VERSION];
+
+	return v >= COLUMNAR_NATIVE_ENCDESC_MIN_READABLE &&
+		v <= COLUMNAR_NATIVE_ENCDESC_VERSION;
+}
+
+/*
+ * Whether this column chunk OMITTED its validity bitmap because it held no
+ * nulls (#1130).
+ *
+ * A PROPERTY OF ONE CHUNK, not of the row group: one column can hold nulls
+ * while its neighbour does not, so this cannot be decided once per group the
+ * way ceil(rowCount / 8) was before v3. Callers already hold that group-wide
+ * size and use it unchanged when this returns false, which is why this answers
+ * the question rather than recomputing the length.
+ *
+ * A version-2 descriptor has a zero byte where the flags now are, so it answers
+ * false without a version test of its own, and the D2b baseline descriptor is
+ * one byte long and answers false on the length check.
+ */
+static inline bool
+PgColumnarEncdescOmitsValidity(const char *desc, uint32 descLen)
+{
+	if (desc == NULL || descLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN)
+		return false;
+	if ((uint8) desc[COLUMNAR_ENCDESC_HDR_OFF_VERSION] ==
+		COLUMNAR_NATIVE_ENCDESC_BASELINE)
+		return false;
+	return ((uint8) desc[COLUMNAR_ENCDESC_HDR_OFF_FLAGS] &
+			COLUMNAR_ENCDESC_FLAG_NO_VALIDITY) != 0;
 }
 
 /* append one per-vector entry */
@@ -78,6 +125,41 @@ PgColumnarEncdescReadVectorCount(const char *desc)
 
 	memcpy(&vectorCount, desc + COLUMNAR_ENCDESC_HDR_OFF_VECCOUNT, sizeof(uint32));
 	return vectorCount;
+}
+
+/*
+ * Total values the per-vector entries account for, or -1 if the descriptor is
+ * too short to walk. Used to check a NO_VALIDITY claim against the row count:
+ * a chunk that stored no bitmap is asserting that every row of the group is
+ * present in it, and that assertion has to be checked against something the
+ * writer also recorded, or a corrupt row_count turns into phantom rows the
+ * reader believes are there.
+ */
+static inline int64
+PgColumnarEncdescTotalValueCount(const char *desc, uint32 descLen)
+{
+	uint32		vectorCount;
+	uint64		total = 0;
+	uint64		entriesEnd;
+	uint32		i;
+
+	if (desc == NULL || descLen < COLUMNAR_NATIVE_ENCDESC_HEADER_LEN)
+		return -1;
+	vectorCount = PgColumnarEncdescReadVectorCount(desc);
+	entriesEnd = (uint64) COLUMNAR_NATIVE_ENCDESC_HEADER_LEN +
+		(uint64) vectorCount * COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN;
+	if (entriesEnd > (uint64) descLen)
+		return -1;
+	for (i = 0; i < vectorCount; i++)
+	{
+		uint32		vc;
+
+		memcpy(&vc, desc + COLUMNAR_NATIVE_ENCDESC_HEADER_LEN +
+			   (Size) i * COLUMNAR_NATIVE_ENCDESC_ENTRY_LEN +
+			   COLUMNAR_ENCDESC_OFF_VALUECOUNT, sizeof(uint32));
+		total += vc;
+	}
+	return (int64) total;
 }
 
 /* read one per-vector entry at dp into *e; returns the cursor past it */
