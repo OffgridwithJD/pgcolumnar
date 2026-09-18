@@ -101,6 +101,7 @@ behaviour, the source of that number is named.
 - [53. test_analyze_reltuples.py: ANALYZE must estimate the row count, not zero](#53-test_analyze_reltuplespy-analyze-must-estimate-the-row-count-not-zero)
 - [54. test_projection_update.py: UPDATE must fan the new row number out to projections](#54-test_projection_updatepy-update-must-fan-the-new-row-number-out-to-projections)
 - [55. test_projection_drop_column.py: DROP COLUMN must not invalidate a projection](#55-test_projection_drop_columnpy-drop-column-must-not-invalidate-a-projection)
+- [56. test_encode_post_codec.py: an encoding must be smaller after the codec](#56-test_encode_post_codecpy-an-encoding-must-be-smaller-after-the-codec)
 
 ## 1. How to read a test in here
 
@@ -4708,4 +4709,48 @@ compares them to each other, so indistinguishability is asserted rather than imp
 | test | what it holds |
 | --- | --- |
 | `test_drop_column_is_refused_while_a_projection_depends_on_it` | every arm: the two non-owner refusals, the dependency refusal, writability afterwards, the unrelated column, and the partitioned parent |
+
+## 56. test_encode_post_codec.py: an encoding must be smaller after the codec
+
+#1132. `PgColumnarEncodeChunk` compares every candidate against `bestLen`,
+which starts at `rawLen`, and every comparison is on UNCOMPRESSED bytes. The
+block codec runs afterwards, once, over the whole encoded region, defaulting to
+zstd level 3. Bit-packing whitens a stream the codec was exploiting, so an
+encoding that shrank the bytes can **enlarge** the stored chunk.
+
+FSST already decided post-codec through `PgColumnarFsstHelpsCompressed`. This
+file asks the same question of the encoders that had no such gate. Measured on
+ClickBench `hits_0.parquet`, 16 of 77 fixed-width columns were stored larger
+encoded than raw, costing 7.17% of their stored bytes.
+
+**THE FIXTURE IS THE ARGUMENT, and five synthetic shapes failed to reproduce the
+defect before the sixth did.** The worst real column, `ClientEventTime`, is a
+HEAVY TAIL: rare outliers stretch the range while the typical value stays in a
+narrow band. That splits the two cost models exactly -- frame-of-reference
+prices by RANGE and must size every value for the outliers, while zstd prices by
+BYTE REDUNDANCY and the typical value's high bytes are constant. Repetition
+alone does not reproduce it (measured 0.71x, encoding winning), so the tail is
+load-bearing and the first premise asserts it.
+
+**That premise was a coin flip in its first version.** It read the 0.1st-to-99.9th
+percentile spread, which with one outlier in a thousand lands exactly ON the
+boundary: from one seed it measured 4,994 on one run and 53,786,536 on another,
+green then red with no code change between. It reads the 1st-to-99th percentile
+now, measured at 4905 / 4905 / 4904 across three runs.
+
+Public seam: the encoding descriptor and `column_chunk.page_length`. Independent
+of `test/encode_post_codec.sh`, which reads the descriptor through `get_byte()`
+in SQL while this decodes it in Python, over its own cluster, its own table
+names and its own corpus constants. Neither file names the other.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_a_chunk_is_never_stored_larger_than_unencoded` | the arm, its two premises, and both controls |
+| `test_the_decision_never_changes_what_comes_back_out` | the invariant the size arms exist to prove is not vacuous |
+
+The controls are the load-bearing half. Declining every encoding would satisfy
+"never larger than unencoded" and redden nothing, so the repeating column ships
+beside the tail one and asserts that encoding is still chosen where it wins.
 

@@ -77,6 +77,7 @@ SUITES=(
 	eager_ordering_record
 	encode_effort
 	encode_invariants
+	encode_post_codec
 	entry_point_privilege
 	estimate_deleted
 	export_sink

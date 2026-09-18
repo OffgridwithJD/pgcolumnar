@@ -36,6 +36,15 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
+# #1132: the writer now keeps an encoding only when it is smaller AFTER block
+# compression, and this suite's subject is the ENCODERS rather than that choice.
+# Its fixtures are chosen to exercise a particular encoder, which is not the same
+# as being fixtures where that encoder beats zstd -- two of its controls assert
+# the encoder actually ran, and those went red when the choice landed. Pinning the
+# pre-#1132 behaviour here keeps this suite testing what it is named for; the
+# selection policy has its own suite, encode_post_codec.sh.
+psql_run "ALTER DATABASE $PGC_DB SET pgcolumnar.enable_post_codec_encoding_choice = off;" >/dev/null 2>&1
+
 ROWS="${PGC_ENCINV_ROWS:-4096}"
 
 # The C-level half. Bound here rather than shipped, like the other debug hooks.

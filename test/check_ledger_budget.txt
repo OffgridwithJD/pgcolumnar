@@ -128,4 +128,4 @@ suites_not_covered 249
 # one short. The census command above was never affected because it skips nothing,
 # but a row count taken the other way disagrees with the tool's own `ledger: rows=`
 # and reads as an off-by-one in the merge rather than in the command.
-checks_never_observed_red 1396
+checks_never_observed_red 1407

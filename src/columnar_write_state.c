@@ -1108,6 +1108,8 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	uint64		rowIdx = 0;
 	StringInfo	encoded = makeStringInfo();
 	StringInfo	desc = makeStringInfo();
+	StringInfo	rawRegion = makeStringInfo();	/* #1132: the unencoded alternative */
+	StringInfo	rawDesc = makeStringInfo();
 	uint32		vectorCount = (uint32) list_length(chunkGroups);
 	char	   *fsstTable = NULL;	/* chunk-shared FSST table (E3b), or NULL */
 	uint32		fsstTableLen = 0;
@@ -1157,6 +1159,7 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 
 	/* descriptor header (columnar_encdesc.h owns the wire layout) */
 	PgColumnarEncdescPutHeader(desc, vectorCount);
+	PgColumnarEncdescPutHeader(rawDesc, vectorCount);
 
 	/*
 	 * E3b: build one FSST symbol table for the whole column chunk from a
@@ -1324,6 +1327,28 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 		PgColumnarEncdescPutEntry(desc, entryType, entryValueCount,
 								  entryRawLen, encLen);
 
+		/*
+		 * #1132: carry the unencoded alternative alongside. Encoding is chosen
+		 * per vector on PRE-codec bytes, but the chunk is stored POST-codec, and
+		 * bit-packing whitens a stream the codec was exploiting -- so a vector
+		 * that shrank can still enlarge the stored chunk. Building both here
+		 * lets the decision be made once, below, at the granularity the codec
+		 * actually runs at.
+		 *
+		 * BUILT ONLY WHEN THE DECISION WILL BE TAKEN. This is a full copy of the
+		 * column chunk's value stream, and what a flush holds is already a
+		 * sensitivity here -- see the codec-buffer note below, measured on a
+		 * 200,000-row load in #1075. With the choice off the copy is not made
+		 * and the GUC costs nothing rather than costing memory silently.
+		 */
+		if (pgcolumnar_enable_post_codec_encoding_choice)
+		{
+			appendBinaryStringInfo(rawRegion, col->valueStream.data,
+								   col->valueStream.len);
+			PgColumnarEncdescPutEntry(rawDesc, COLUMNAR_ENCODING_NONE,
+									  entryValueCount, entryRawLen, entryRawLen);
+		}
+
 		/* per-vector zone map (native spec 7.1, D5) */
 		{
 			NativeZoneMapMetadata *z = palloc0(sizeof(NativeZoneMapMetadata));
@@ -1394,6 +1419,18 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	appendBinaryStringInfo(desc, (char *) &fsstTableLen, sizeof(uint32));
 	if (fsstTableLen > 0)
 		appendBinaryStringInfo(desc, fsstTable, fsstTableLen);
+
+	/*
+	 * The unencoded alternative needs the same trailing region, but never a
+	 * table: its entries are all COLUMNAR_ENCODING_NONE, so nothing can
+	 * reference one. Writing the length unconditionally keeps the exact-length
+	 * check in columnar_reader.c:1111-1115 satisfied either way.
+	 */
+	{
+		uint32		noSharedTable = 0;
+
+		appendBinaryStringInfo(rawDesc, (char *) &noSharedTable, sizeof(uint32));
+	}
 
 	/* whole-chunk zone map (vector_index -1) */
 	{
@@ -1486,6 +1523,62 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 			finalData = codecBuf;
 			finalLen = compLen;
 			blockCodec = usedType;
+		}
+
+		/*
+		 * #1132: THE ENCODING IS CHOSEN PRE-CODEC AND THE CHUNK IS STORED
+		 * POST-CODEC, so ask the only question that decides the stored size --
+		 * is the encoded region, once compressed, actually smaller than the raw
+		 * one compressed? Measured on ClickBench hits_0.parquet, the answer was
+		 * no on 16 of 77 fixed-width columns, costing 7.17% of their stored
+		 * bytes, and ClientEventTime alone was stored 2.06x larger than raw.
+		 *
+		 * FSST already decides this way, through PgColumnarFsstHelpsCompressed.
+		 * This is the same question asked for the rest.
+		 *
+		 * ONLY WHEN ENCODING CLAIMED A WIN. `rawRegion->len > encoded->len` is
+		 * the cheap precondition: when the encoders all declined, the two
+		 * regions are the same bytes and compressing twice would buy nothing.
+		 * It also bounds the added cost to chunks where there is a decision to
+		 * make.
+		 */
+		if (pgcolumnar_enable_post_codec_encoding_choice &&
+			rawRegion->len > encoded->len)
+		{
+			char	   *rawCodecBuf = NULL;
+			uint32		rawCompLen;
+			int			rawUsedType;
+			int			rawUsedLevel;
+			uint32		rawFinalLen;
+
+			PgColumnarCompressValueStream(rawRegion->data, rawRegion->len,
+										compressionType,
+										compressionLevel,
+										&rawCodecBuf, &rawCompLen,
+										&rawUsedType, &rawUsedLevel);
+			rawFinalLen = (rawUsedType != COLUMNAR_COMPRESSION_NONE)
+				? rawCompLen : rawRegion->len;
+
+			if (rawFinalLen < finalLen)
+			{
+				/*
+				 * Storing it unencoded wins. The descriptor must describe the
+				 * bytes actually written, so swap it for the all-NONE one built
+				 * alongside; a descriptor that disagrees with its chunk is a
+				 * decode error, not a size regression.
+				 */
+				if (codecBuf != NULL)
+					pfree(codecBuf);
+				codecBuf = rawCodecBuf;
+				finalData = (rawUsedType != COLUMNAR_COMPRESSION_NONE)
+					? rawCodecBuf : rawRegion->data;
+				finalLen = rawFinalLen;
+				blockCodec = (rawUsedType != COLUMNAR_COMPRESSION_NONE)
+					? rawUsedType : COLUMNAR_COMPRESSION_NONE;
+				desc = rawDesc;
+			}
+			else
+				pfree(rawCodecBuf);
 		}
 	}
 
