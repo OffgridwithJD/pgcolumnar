@@ -371,5 +371,11 @@ def test_the_empty_plan_refusal_precedes_the_arms_it_protects(expect):
     expect.text(f"{i_refusal is not None} {i_absent is not None} {i_present is not None}",
                 "True True True",
                 "premise: all three were found, so the ordering can mean something")
-    expect.num(int(i_refusal < i_absent and i_refusal < i_present), 1,
-               "the empty-plan refusal precedes both arms it protects")
+    # TWO ARMS, NOT ONE FLAG (#1030). `int(a < b and a < c)` collapses two
+    # comparisons into 0 or 1, so a failure says `got 0 want 1` and cannot name
+    # WHICH ordering broke -- with all three indices in scope one line above. Two
+    # at_least arms each report a real distance and each name their own half.
+    expect.at_least(i_absent - i_refusal, 1,
+                    "the empty-plan refusal precedes the absent arm it protects")
+    expect.at_least(i_present - i_refusal, 1,
+                    "the empty-plan refusal precedes the present arm it protects")

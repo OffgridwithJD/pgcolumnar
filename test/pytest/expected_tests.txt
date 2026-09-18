@@ -173,7 +173,7 @@
 # 361 here, which is a coincidence of this merge rather than a method: the deltas were
 # measured against different trees. Re-derived by collection on the merged tree, which
 # is the only resolution this number has.
-guard_tests 361
+guard_tests 362
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

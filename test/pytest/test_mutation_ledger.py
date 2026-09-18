@@ -474,9 +474,10 @@ def test_the_ledger_refuses_two_rows_sharing_one_key(tmp_path, expect):
     log = _w(tmp_path, "r.log",
              "RESULT\tdemo\tpart1\ta check\tPASS\t18\t\nchecks run: 1\n")
     out, rc = _run("gate", "--ledger", dup, "--budget", budget, "--registered", reg, log)
-    expect.num(int("a ledger row repeats a key" in out), 1,
-               "a duplicated ledger key is refused by name")
-    expect.num(int("a check" in out), 1, "and the row is named")
+    expect.contains(
+        out, "a ledger row repeats a key",
+        "a duplicated ledger key is refused by name")
+    expect.contains(out, "a check", "and the row is named")
     expect.num(rc, 2, "as an integrity failure, not a gate verdict")
 
 
@@ -495,10 +496,12 @@ def test_a_ledger_with_no_duplicate_key_still_loads(tmp_path, expect):
     log = _w(tmp_path, "r.log",
              "RESULT\tdemo\tpart1\tfirst check\tPASS\t18\t\nchecks run: 1\n")
     out, rc = _run("gate", "--ledger", ok, "--budget", budget, "--registered", reg, log)
-    expect.num(int("a ledger row repeats a key" in out), 0,
-               "three distinct keys are not a duplicate")
-    expect.num(int("ledger census: rows=3" in out), 1,
-               "and all three rows loaded, so the refusal did not eat one")
+    expect.contains(
+        out, "a ledger row repeats a key",
+        "three distinct keys are not a duplicate", absent=True)
+    expect.contains(
+        out, "ledger census: rows=3",
+        "and all three rows loaded, so the refusal did not eat one")
 
 
 def test_the_gate_refuses_two_checks_sharing_one_ledger_key(tmp_path, expect):
@@ -558,10 +561,11 @@ def test_the_gate_refuses_two_checks_sharing_one_ledger_key(tmp_path, expect):
     expect.at_least(len(out), 20, "premise: the gate produced output to read")
     expect.num(out.count("one ledger key covers 2 checks"), 1,
                "a key covering two checks in one run is refused, and named")
-    expect.num(int("part1" in out), 1, "with the part, since the part is half the key")
+    expect.contains(out, "part1", "with the part, since the part is half the key")
     expect.num(rc, 1, "and the gate fails rather than noting it")
-    expect.num(int("Traceback" in out), 0,
-               "premise: rc came from the refusal, not from a crash")
+    expect.contains(
+        out, "Traceback",
+        "premise: rc came from the refusal, not from a crash", absent=True)
 
 
 def test_a_shared_key_is_refused_in_a_suite_the_ledger_does_not_cover(expect, tmp_path):
@@ -593,8 +597,9 @@ def test_a_shared_key_is_refused_in_a_suite_the_ledger_does_not_cover(expect, tm
     expect.num(out.count("one ledger key covers 2 checks"), 1,
                "a shared key in an uncovered suite is named")
     expect.num(rc, 1, "and refused, with no row in the ledger for that suite")
-    expect.num(int("Traceback" in out), 0,
-               "premise: rc came from the refusal, not from a crash")
+    expect.contains(
+        out, "Traceback",
+        "premise: rc came from the refusal, not from a crash", absent=True)
     expect.num(out.count("not in the ledger:"), 0,
                "premise: and not from the new-check refusal, which this suite escapes")
 

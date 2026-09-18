@@ -274,22 +274,25 @@ def test_the_loop_reader_invents_nothing_in_this_corpus(expect):
     expect.text(", ".join(_loop_names(ast.parse(split))), "one two three",
                 "premise: the reader joins a wrapped name, which is why the relaxation "
                 "is needed at all")
-    expect.num(int("one two three" in split), 0,
-               "and the raw source does NOT contain it, so the old predicate called a "
-               "wrapped name fabricated")
-    expect.num(int("one two three" in _joined(split)), 1,
-               "collapsing the file's own concatenation finds it")
+    expect.contains(
+        split, "one two three",
+        "and the raw source does NOT contain it, so the old predicate called a "
+        "wrapped name fabricated", absent=True)
+    expect.contains(
+        _joined(split), "one two three",
+        "collapsing the file's own concatenation finds it")
 
     built = ('P = "two"\n'
              'for label, sql in ((f"one {P} three", "q"),):\n'
              '    expect.num(g, 1, label)\n')
     expect.text(", ".join(_loop_names(ast.parse(built))), "one {} three",
                 "premise: an f-string name is read as a TEMPLATE, not refused")
-    expect.num(int("one {} three" in _joined(built)), 0,
-               "and collapsing the concatenation does NOT rescue it -- a template is "
-               "constructed, not found, so the relaxation keeps the guarantee it was "
-               "relaxed from. A port that writes an f-string loop name reddens this arm "
-               "by name, which is the designed outcome and not a new one")
+    expect.contains(
+        _joined(built), "one {} three",
+        "and collapsing the concatenation does NOT rescue it -- a template is "
+        "constructed, not found, so the relaxation keeps the guarantee it was "
+        "relaxed from. A port that writes an f-string loop name reddens this arm "
+        "by name, which is the designed outcome and not a new one", absent=True)
 
 
 # A port that parametrises a family its bash twin unrolls, which is the whole of
@@ -503,13 +506,16 @@ def test_a_parametrized_name_is_resolved_from_the_decorator(expect):
         '    expect.num(got, 1, "an unrelated property")\n'
     )
     got = _names(src)
-    expect.num(int("a role with only schema USAGE is refused" in got), 1,
-               "a parametrized name is resolved through the module-level constant")
-    expect.num(int("and is refused reconstruct" in got), 1, "for every row of it")
-    expect.num(int("read_projection" in got), 0,
-               "while the OTHER column of the same decorator is not a name")
-    expect.num(int("reconstruct" in got), 0,
-               "and a parametrize with no name column contributes nothing")
+    expect.contains(
+        got, "a role with only schema USAGE is refused",
+        "a parametrized name is resolved through the module-level constant")
+    expect.contains(got, "and is refused reconstruct", "for every row of it")
+    expect.contains(
+        got, "read_projection",
+        "while the OTHER column of the same decorator is not a name", absent=True)
+    expect.contains(
+        got, "reconstruct",
+        "and a parametrize with no name column contributes nothing", absent=True)
 
 
 def test_the_parametrize_reader_takes_the_column_called_name(expect):
@@ -1373,7 +1379,11 @@ def test_the_ported_suites_in_this_tree_are_graded_one_for_one(expect):
     verdicts = {}
     for stem in complete:
         sh, py = root / "test" / f"{stem}.sh", HERE / f"test_{stem}.py"
-        expect.num(int(sh.exists() and py.exists()), 1, f"premise: both halves of {stem} exist")
+        # TWO ARMS, NOT ONE FLAG (#1030). This is a premise about a PAIR, so
+        # "which half is missing" is exactly the question it should answer, and
+        # `int(a and b)` is the one shape that cannot.
+        expect.num(int(sh.exists()), 1, f"premise: the bash half of {stem} exists")
+        expect.num(int(py.exists()), 1, f"premise: the pytest half of {stem} exists")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = main(str(sh), str(py))

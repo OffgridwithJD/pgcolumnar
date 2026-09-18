@@ -203,6 +203,69 @@ true until the next version shipped.
 
   The gate's printed recipe said `<log>`, singular, so following it exactly produced
   the broken row. It now names one log per gated major and says why.
+- The hand-rolled-inequality scan covered two operators of ten, so its scanned
+  class was empty while 27 live sites sat outside it (#1030).
+
+  `test_layer.py`'s `_hand_rolled_inequalities` refuses `int(<Compare>)` passed to
+  an `expect` call -- the idiom that throws both values away. Its docstring said
+  exactly that. The code required an `Eq` or a `NotEq`:
+
+      and any(isinstance(op, (ast.NotEq, ast.Eq)) for op in arg.args[0].ops)
+
+  So `int(a != b)` was refused and `int("x" in got)` was not. A name that outran
+  its content, and the corpus reported clean because the shapes it actually used
+  were the ones the scan could not see.
+
+  Widened to any comparison, and to ANY boolean combination, which is the worse
+  case: `int(a and b)` cannot say which half was false. The operator list is NAMED
+  and pinned against `ast` itself, so a future operator reddens an arm rather than
+  silently narrowing the rule.
+
+  THE FIRST ATTEMPT AT THE BOOLEAN HALF INHERITED THE BUG IT WAS FIXING. It
+  required a comparison inside the BoolOp, which left
+  `int(p.exists() and q.exists())` live -- a PREMISE arm about a pair, whose whole
+  job is to say which half is missing, reporting `got 0 want 1`. The operator
+  widening fixed the comparison half completely and the boolean half kept the
+  original narrowing. Reported by @jdatcmd, who probed the boundary rather than
+  reading the branch. A single truthiness is still honest: `int(p.exists())` has
+  one value and nothing to disambiguate; it is the COMBINING that loses the answer.
+
+  THE POPULATION WAS 28, NOT THE 7 THE ISSUE MEASURED -- main moved between the
+  measurement and the fix. Twenty-one `in`, five `> 0`, two boolean pairs, across
+  eight files.
+
+  `Expect.contains(got, want, name, absent=False)` is new, because 21 sites of one
+  shape is a missing word in the vocabulary rather than 21 local mistakes. It
+  reports what was actually there:
+
+      collapsed : how-to names clustering: got 0 want 1
+      contains  : how-to names clustering: 'cluster' is absent from 'this document
+                  talks about join keys and nothing else at all'
+
+  Its parameters are `got` and `want` deliberately: `test_failed_query_sentinel.py`
+  partitions the layer's assertions by their first two parameter names, so any
+  other spelling would have put it in neither bucket and opened the silent hole
+  that file exists to refuse. It is registered in that file's shape table, so the
+  failed-query sentinel sweep covers it like every other comparison.
+
+  The five `int(len(x) > 0)` sites became `at_least`, which reports the number. The
+  boolean pair became two `at_least` arms, each naming its own half.
+
+  Removal proof, both directions:
+
+      control                                        44 passed
+      one collapsed `in` site put back               the sweep FAILS
+      the same site, with the OLD Eq/NotEq scanner   the sweep PASSES
+
+  The third line is the finding: the old scan reports a clean corpus with the
+  collapsed site still in it.
+
+  Eleven false-positive arms, five of them real `int()` calls from this corpus --
+  a parsed regex group, a driver flag, a path premise, a value `num()` would refuse
+  as a string, and a single call, which has one value and nothing to disambiguate.
+
+  Guard half 347 passed, 913 checks; the two cluster-side files touched, 22 passed,
+  79 checks. `guard_tests` re-derived by collection, 346 -> 347.
 
 - Four secret-leak claims over the PG server log could pass having read nothing
   (#1032).
