@@ -86,16 +86,29 @@ from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
 # The shape is `SHELL_REFERENCES`' in `test_harness_deps.py`, asserted in both
 # directions for the same reason: a one-way list rots into a permanent exemption.
 COMPLETE = ["analyze_reltuples",
-            "differential", "encode_post_codec", "hilbert_cluster", "hilbert_locality",
-            "native_chunk_length_bound", "native_fetch_coalesce", "native_ownership", "native_projection", "parallel_am_scan",
+            "differential",
+            "encode_post_codec",
+            "hilbert_cluster",
+            "hilbert_locality",
+            "index_fetch_penalty_crossover",
+            "index_fetch_penalty_width",
+            "native_chunk_length_bound",
+            "native_fetch_coalesce",
+            "native_index_fetch_stripe_cost",
+            "native_ownership",
+            "native_projection",
+            "parallel_am_scan",
+            "parallel_scan_cost",
             "projection_drop_column",
             "projection_privilege",
-            "projection_update",
             "projection_scan_cost",
+            "projection_update",
             "projections",
-            "sorted_pathkeys", "stats_privilege",
-            "index_fetch_penalty_crossover",
-            "parallel_scan_cost", "validity_elision", "zonemap_boundaries"]
+            "scan_decode_cost",
+            "sorted_pathkeys",
+            "stats_privilege",
+            "validity_elision",
+            "zonemap_boundaries"]
 
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the

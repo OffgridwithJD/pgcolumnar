@@ -318,4 +318,13 @@ guard_tests 380
 #
 # DERIVED BY COLLECTION on this tree: `427 tests collected`. `guard_tests` was
 # re-derived in the same run and did NOT move: 380.
-cluster_tests 427
+# 427 -> 430 when the three cost-model ports landed (#432):
+# test_native_index_fetch_stripe_cost.py, test_scan_decode_cost.py and
+# test_index_fetch_penalty_width.py, one test each.
+#
+# DERIVED BY COLLECTION AFTER EVERY RESEAT, never carried. This branch has stated 424
+# (base 421), then 426 (base 423), and now 430 (base 427) -- three different right
+# answers to the same question, because main moved three times underneath it. A number
+# that is carried across a reseat is a number that agrees with the tree it was taken
+# from and not with this one.
+cluster_tests 430
