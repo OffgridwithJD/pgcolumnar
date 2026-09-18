@@ -185,6 +185,7 @@ extern int	pgcolumnar_fsst_verdict_reuse;
 #define COLUMNAR_FSST_HELPS		1
 #define COLUMNAR_FSST_HURTS		2
 extern bool pgcolumnar_enable_qual_pushdown;
+extern bool pgcolumnar_enable_post_codec_encoding_choice;
 extern int	pgcolumnar_qual_skipvec_min_payload_cols;	/* #595 width gate */
 extern bool pgcolumnar_enable_late_materialization;
 extern bool pgcolumnar_enable_column_projection;

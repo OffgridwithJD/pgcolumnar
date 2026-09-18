@@ -60,6 +60,39 @@ true until the next version shipped.
 
   No bash suite changes, so no ledger row moves and the census does not.
   `cluster_tests` 418 -> 421, re-derived by collection.
+- An encoding was chosen on pre-codec bytes but the chunk is stored post-codec,
+  so an encoding that shrank the bytes could enlarge the stored chunk (#1132).
+
+  `PgColumnarEncodeChunk` picks the smallest candidate against `bestLen`, which
+  starts at `rawLen`, and every comparison is on UNCOMPRESSED bytes. The block
+  codec runs afterwards, once, over the whole encoded region, defaulting to zstd
+  level 3. Bit-packing whitens a stream the codec was exploiting, so the two
+  disagree -- and only the codec's answer is what gets written.
+
+  FSST already decided this way, through `PgColumnarFsstHelpsCompressed`. The
+  writer now asks the same question for the rest: it compresses the encoded
+  region and the raw one and keeps whichever is smaller, per column chunk, which
+  is the granularity the codec actually runs at.
+
+  Measured on ClickBench `hits_0.parquet`, 1,000,000 rows and 105 columns,
+  imported with `pgcolumnar.import_parquet` on PG17:
+
+      stored total    81,869,112  ->  78,109,810      -4.59%
+      NONE vectors           101  ->       1,621
+      RLE / DICT / FOR      5372 / 3782 / 934  ->  4558 / 3390 / 621
+      FSST                   310  ->         310      unchanged
+
+  FSST is unchanged because it already had this gate; the encoders that did not
+  are exactly the ones that moved. The worst single column, `ClientEventTime`,
+  was stored 49.7% smaller. Its shape is why: rare outliers stretch the range
+  frame-of-reference must size every value for, while the typical value's high
+  bytes stay constant for the codec to compress. Row counts, two column sums and
+  an md5 over `URL` are identical across the two loads.
+
+  `pgcolumnar.enable_post_codec_encoding_choice` (default `on`) restores the old
+  behaviour. It exists because the suites that test the ENCODERS need them to
+  actually run: a fixture chosen to exercise frame-of-reference packing is not
+  necessarily one where packing beats the codec.
 
 - A covering projection was priced by clauses that merely mention its sort key,
   rather than by clauses it can prune on (#1126, the remainder of #1107).

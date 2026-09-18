@@ -77,6 +77,7 @@ int			pgcolumnar_compression_level = 3;
 int			pgcolumnar_fsst_min_gain_percent = 5;
 int			pgcolumnar_qual_skipvec_min_payload_cols = 20;	/* #595 width gate */
 bool		pgcolumnar_enable_qual_pushdown = true;
+bool		pgcolumnar_enable_post_codec_encoding_choice = true;
 bool		pgcolumnar_enable_late_materialization = true;
 bool		pgcolumnar_enable_column_projection = true;
 bool		pgcolumnar_enable_bloom_filter = true;
@@ -3296,6 +3297,28 @@ _PG_init(void)
 							 "Push scan qualifiers down for chunk-group skipping.",
 							 NULL,
 							 &pgcolumnar_enable_qual_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	/*
+	 * #1132. An encoding is chosen on pre-codec bytes but the chunk is stored
+	 * post-codec, so the writer compares the encoded region against the raw one,
+	 * both compressed, and keeps the smaller. Off restores the pre-#1132
+	 * behaviour of trusting the pre-codec choice.
+	 *
+	 * It exists because the suites that test the ENCODERS need them to actually
+	 * run: a fixture chosen to exercise frame-of-reference packing is not
+	 * necessarily one where packing beats the codec, and those suites assert
+	 * that the packer ran (encode_invariants.sh:139). Separating the two lets
+	 * each be tested for what it is -- the encoders here, the selection policy
+	 * in encode_post_codec.sh.
+	 */
+	DefineCustomBoolVariable("pgcolumnar.enable_post_codec_encoding_choice",
+							 "Keep an encoding only when it is smaller after block compression.",
+							 NULL,
+							 &pgcolumnar_enable_post_codec_encoding_choice,
 							 true,
 							 PGC_USERSET,
 							 0,

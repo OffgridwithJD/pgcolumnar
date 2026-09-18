@@ -297,4 +297,17 @@ guard_tests 380
 # test_analyze_reltuples.py, test_projection_update.py and
 # test_projection_drop_column.py, one collected test each. Re-derived BY COLLECTION on
 # this tree, never by adding three.
-cluster_tests 421
+# 421 -> 423 when test_encode_post_codec.py landed (#1132): two arms over the
+# post-codec encoding choice -- the size arm with its two premises and both
+# controls, and the read-back invariant those exist to prove is not vacuous.
+#
+# DERIVED BY COLLECTION AFTER THE REBASE, which is the only reason it is right.
+# This branch first stated 421 against a base of 418 and the rebase onto main
+# carrying #1133 moved the base to 421 underneath it, so the committed number
+# described a tree that no longer existed. CI named it -- `collected 423 test(s)
+# but expected 421` -- rather than running a different corpus than the one
+# declared, which is the whole point of the key.
+# `guard_tests` was re-derived in the same run and did NOT move: 380. That is the
+# expected answer for a file that needs a cluster, and checking it rather than
+# assuming it is what this file asks for.
+cluster_tests 423

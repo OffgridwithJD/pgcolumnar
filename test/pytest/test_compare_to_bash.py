@@ -86,7 +86,7 @@ from compare_to_bash import (_as_names, _bash_names, _bodies,  # noqa: E402
 # The shape is `SHELL_REFERENCES`' in `test_harness_deps.py`, asserted in both
 # directions for the same reason: a one-way list rots into a permanent exemption.
 COMPLETE = ["analyze_reltuples",
-            "differential", "hilbert_cluster", "hilbert_locality",
+            "differential", "encode_post_codec", "hilbert_cluster", "hilbert_locality",
             "native_chunk_length_bound", "native_fetch_coalesce", "native_ownership", "native_projection", "parallel_am_scan",
             "projection_drop_column",
             "projection_privilege",
