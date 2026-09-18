@@ -69,6 +69,42 @@ true until the next version shipped.
   shows a generator read through a subshell losing the seed on this bash, another
   shows the assigning form keeping it. Three static arms pin `fuzz.sh`'s own form,
   and putting the printing generator back reddens two of them.
+- The collation guard could not see a process-substituted sort (#1112).
+
+  `comm` requires both inputs sorted in ITS collation and does not check. Fed a
+  mismatch it writes `input is not in sorted order` to stderr and prints a result
+  anyway, so where stderr lands in a log nobody reads, a wrong set arrives looking
+  like an answer. The inputs are not collation-insensitive: on real suite names
+  `pgc_setup`/`pg_dump_roundtrip` and `projections`/`projection_update` both swap
+  between `C` and `en_US.UTF-8`.
+
+  `test/selftest/070` required every `sort` feeding a `comm` to carry `LC_ALL=C`,
+  and matched only the PIPED form. A process-substituted sort is not a pipeline, so
+  `run_all_versions.sh` used `comm` three times through substitutions, matched the
+  pattern zero times, and read as compliant. One of the three had been there since
+  #928. Found by OffgridwithJD reviewing #1110.
+
+  PINNING THE COMM IS NOT ENOUGH, and that is the half that changes the fix rather
+  than its description. `LC_ALL=C comm <(sort a) <(sort b)` pins only comm's own
+  comparison: the substitutions run in subshells of the PARENT and inherit its
+  locale. A guard accepting `LC_ALL=C` anywhere on the line would bless exactly the
+  form a reader writes after reading the guard's name. The two halves are now
+  separate checks.
+
+  AND IT READS CODE ONLY. The guard scanned every line, prose included, so a comment
+  explaining the rule violated it: a note reading "reads only the piped form"
+  contained the literal string it grepped for and flagged its own file. A rule that
+  cannot be written down is a rule people stop writing down.
+
+  Both corpus arms report zero on this tree, measured before the change, so the
+  detector is proved by PLANTING rather than by the corpus: the substituted form,
+  the piped form, a half-pinned line, a pinned comm over unpinned sorts, and the two
+  forms that must not be flagged.
+
+  Mutation testing deleted a line from the first draft and NOTHING changed, so it
+  was dead and is gone: both patterns require `sort` immediately after the `|` or
+  the `<(`, which makes a mixed line fail without the substitution step the draft
+  performed.
 
 - Every PR with a changelog entry conflicted with every other one (#996).
 

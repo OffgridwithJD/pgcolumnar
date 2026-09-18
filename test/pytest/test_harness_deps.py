@@ -121,6 +121,10 @@ NO_CLUSTER = [
     # cluster, no driver. The classifier agrees, and this declaration has to say so
     # before the guard job will collect it.
     "test_residual_is_counted.py",
+    # #1112's file. An AST-free text sweep over `test/*.sh` -- no connection, no
+    # cluster, no driver -- reading the same corpus the shell part reads, with its
+    # own implementation.
+    "test_collation_pinned.py",
 ]
 
 
