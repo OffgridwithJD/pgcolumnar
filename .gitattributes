@@ -90,4 +90,11 @@ mkdocs.yml        export-ignore
 # entry inside the section that just shipped, silently. `test/docs_style.sh`
 # carries the check that catches it, by comparing each released section against
 # what its own tag shipped. The driver and that check belong together.
+#
+# GITHUB DOES NOT HONOUR THIS (#1116). Its mergeability calculation and its merge
+# button do not read .gitattributes, so a pull request still shows CONFLICTING the
+# moment another changelog entry lands -- while the same merge is clean locally.
+# The instruction for a contributor is in CONTEXT.md: rebase and push, do not click
+# "Update branch". The driver still buys what it was for, which is the nine local
+# merges and rebases a day that #996 measured.
 CHANGELOG.md      merge=union

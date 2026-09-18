@@ -18,6 +18,27 @@ true until the next version shipped.
 
 ### Fixed
 
+- A `CONFLICTING` badge on a changelog entry is GitHub, not git (#1116).
+
+  #996 gave `CHANGELOG.md` a union merge driver, and it does what it was argued to
+  do: four branches have rebased onto it with zero conflicts, one `## [Unreleased]`,
+  every entry present, `docs_style.sh` green.
+
+  GITHUB DOES NOT HONOUR IT. Its mergeability calculation and its merge button do not
+  read `.gitattributes`, so a pull request shows the red *This branch has conflicts*
+  badge the moment another changelog entry lands -- while the same merge is clean on
+  the contributor's machine. #1108's body asked this question explicitly and said it
+  was untested; @jdatcmd tested it.
+
+  Documented rather than worked around, which is what the measurement supports: the
+  badge is wrong rather than harmful, and the cost #996 measured was nine local
+  merges and rebases a day, which is gone. `CONTEXT.md` now says what the badge means
+  and gives the three commands; `.gitattributes` records it beside the driver.
+
+  Four arms in `docs_style.sh` hold the driver and the instruction TOGETHER, because
+  the driver without the instruction is worse than either alone -- it makes the badge
+  lie and gives nobody the reason. Removing the section reddens three of them.
+
 - `PGC_SEED` seeded nothing: two fuzzer runs at one seed shared no fixture at all
   (#1011).
 
