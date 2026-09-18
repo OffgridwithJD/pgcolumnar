@@ -211,6 +211,19 @@ set -uo pipefail
 	exit 1
 }
 
+# WHICH MAJOR THIS SUITE RAN ON (#1121, the wider half of #1109). `pgc_record`
+# writes `${PGC_MAJOR:-unknown}`, and PGC_MAJOR is set inside `pgc_setup` -- which
+# this suite does not call, deliberately. Without this line every record it emits
+# says `unknown`, and a ledger row claiming `unknown` matches no run, so none of
+# these checks could ever be seeded or matched again.
+#
+# The runner passes the pg_config as $1 to EVERY suite, including those that need
+# no cluster, so it is available here. `pgc_major_of` returns empty on a path it
+# cannot run, which degrades to exactly today's `unknown` rather than to a WRONG
+# major -- a guessed major would seed a row claiming a major the check was never
+# observed on, which is worse than saying nothing.
+PGC_MAJOR="$(pgc_major_of "${1:-}")"
+
 # No cluster, so pgc_setup is skipped deliberately -- the shape wal_envelope.sh
 # uses. lib.sh already zeroes the counters; they are restated so a reader can see
 # this suite keeps them itself and so pgc_summary's reconciliation is meaningful.

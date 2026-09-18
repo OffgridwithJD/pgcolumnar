@@ -33,6 +33,19 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
+
+# WHICH MAJOR THIS SUITE RAN ON (#1121, the wider half of #1109). `pgc_record`
+# writes `${PGC_MAJOR:-unknown}`, and PGC_MAJOR is set inside `pgc_setup` -- which
+# this suite does not call, deliberately. Without this line every record it emits
+# says `unknown`, and a ledger row claiming `unknown` matches no run, so none of
+# these checks could ever be seeded or matched again.
+#
+# The runner passes the pg_config as $1 to EVERY suite, including those that need
+# no cluster, so it is available here. `pgc_major_of` returns empty on a path it
+# cannot run, which degrades to exactly today's `unknown` rather than to a WRONG
+# major -- a guessed major would seed a row claiming a major the check was never
+# observed on, which is worse than saying nothing.
+PGC_MAJOR="$(pgc_major_of "$PG_CONFIG")"
 BINDIR="$("$PG_CONFIG" --bindir)"
 PORT="${PGC_PORT:-$(pgc_pick_port)}"
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
