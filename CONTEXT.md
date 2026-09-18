@@ -473,6 +473,41 @@ than a wrong algorithm.
   (#486). Under `pipefail` it reports "not found" whenever the writer fails.
   Use `case` for a fixed string, or `grep -q PATTERN <<<"$var"`.
 
+## A CONFLICTING badge on CHANGELOG.md means rebase locally (#1116)
+
+`CHANGELOG.md` carries a **union** merge driver, set in `.gitattributes` by #996.
+Two pull requests that each add an entry no longer conflict: git takes both sides,
+emits the shared `## [Unreleased]` / `### Fixed` lines once, and the result needs no
+hand editing.
+
+**GitHub does not honour it.** Its mergeability calculation and its merge button do
+not read `.gitattributes`, so a pull request still shows the red *This branch has
+conflicts that must be resolved* badge the moment another changelog entry lands.
+
+This is confusing in the specific way that costs time: **the merge is clean on your
+machine and the web UI says it is not.**
+
+### What to do
+
+Rebase locally and push. Do not click *Update branch*, and do not wait for the
+button — both give you the conflict the driver exists to remove.
+
+    git fetch origin
+    git rebase origin/main
+    git push --force-with-lease
+
+Measured, on four branches rebased onto the driver after it landed: zero CHANGELOG
+conflicts, one `## [Unreleased]`, every entry present, `docs_style.sh` green. The
+same merges showed `CONFLICTING` on GitHub throughout.
+
+### What the driver does not excuse
+
+A **release cut** edits `## [Unreleased]` into `## [1.0-alphaN] - date`, which is the
+one case union resolves silently and wrongly: a pending entry lands inside the
+section that just shipped. `test/docs_style.sh` compares each dated section against
+what its own tag shipped, so that is caught rather than trusted. If you are cutting a
+release, land the pending changelog entries first or expect that arm to tell you.
+
 ## Building and running
 
 An ordinary PGXS extension: `make PG_CONFIG=/path/to/pg_config` then

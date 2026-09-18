@@ -573,6 +573,25 @@ else
 fi
 
 
+# ---- the union driver's instruction is written down (#1116) ------------------
+#
+# GitHub does not read `.gitattributes`, so a PR shows CONFLICTING even where the
+# driver resolves the merge cleanly. A contributor who clicks "Update branch" gets
+# the conflict the driver exists to remove. Measured on four branches: clean
+# locally, CONFLICTING on the web, throughout.
+#
+# The driver without the instruction is worse than either alone -- it makes the
+# badge lie and gives nobody the reason -- so the two are asserted together.
+check "premise: CHANGELOG.md still has the union merge driver" \
+	"$(grep -c '^CHANGELOG\.md[[:space:]]\+merge=union$' "$SRCDIR/.gitattributes")" "1"
+check "and CONTEXT.md tells a contributor what a CONFLICTING badge means" \
+	"$(grep -c 'CONFLICTING badge on CHANGELOG.md means rebase locally' "$SRCDIR/CONTEXT.md")" "1"
+check "and names the command rather than only the problem" \
+	"$(grep -c 'git rebase origin/main' "$SRCDIR/CONTEXT.md")" "1"
+check "and warns against the button that reintroduces the conflict" \
+	"$(grep -ci 'do not click' "$SRCDIR/CONTEXT.md")" "1"
+
+
 echo "checks run: $checks"
 if [ "$fail" = 0 ]; then
 	echo "docs_style.sh: PASSED"
