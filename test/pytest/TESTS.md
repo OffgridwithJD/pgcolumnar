@@ -122,6 +122,7 @@ behaviour, the source of that number is named.
 - [74. test_base_scan_io.py: a base scan is not priced from sibling projection pages](#74-test_base_scan_iopy-a-base-scan-is-not-priced-from-sibling-projection-pages)
 - [75. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation](#75-test_range_pruningpy-a-range-prunes-on-overlap-containment-and-under-its-own-collation)
 - [76. test_docs_upgrade_chain.py: the documented upgrade chain must be the one that ships](#76-test_docs_upgrade_chainpy-the-documented-upgrade-chain-must-be-the-one-that-ships)
+- [77. test_projection_parallel.py: a covering projection can be a parallel scan](#77-test_projection_parallelpy-a-covering-projection-can-be-a-parallel-scan)
 
 ## 1. How to read a test in here
 
@@ -5993,3 +5994,25 @@ pytest twin is refused before it can report a vacuous pass.
 The shell twin is six arms in `test/docs_style.sh`. It folds the file with `tr` and
 cuts sentences with `sed`; this half splits on a lookbehind and collects with `re`.
 The two halves share no code.
+
+## 77. test_projection_parallel.py: a covering projection can be a parallel scan
+
+The covering-projection path was a serial CustomPath (`parallel_aware = false`,
+`parallel_safe = false`) while the parallel base scan was a partial path with
+no projection name. Those cannot both be true of one plan: either Gather wins
+and the projection is dropped, or the serial projection wins and the workers
+are dropped.
+
+The executor already partitions whatever storage `BeginCustomScan` opened (the
+DSM stripe counter is attached to `readState`), so a covering scan can be
+parallel. A partial covering-projection path is now offered.
+
+This file asserts the PLANNER shape and the query's count. Public seam:
+`EXPLAIN` of a covering projection query, plus `count(*)`. The shell twin uses
+`cvppar` / `byik` / 32000 rows / `ik BETWEEN 40 AND 220`; this file uses
+`pcvgath` / `onskey` / 50000 rows / `skey BETWEEN 200 AND 599`. Assertion
+names match.
+
+| test | what it asserts |
+| --- | --- |
+| `test_projection_parallel` | the table and covering projection exist; a serial covering query uses the projection; a parallel base scan is available when the projection is off; a covering projection can be a parallel scan; a parallel covering projection returns the covering rows once |
