@@ -141,6 +141,9 @@ VALID = {
     # refusal this assertion reports two blown-up statements as an observable
     # difference. The fix for one direction opened the other.
     "differ":        ("abc", "xyz"),
+    # The haystack must actually CONTAIN the needle, or the assertion fails for a
+    # reason that is not the sentinel and the arm proves nothing.
+    "contains":      ("abcdef", "cde"),
 }
 
 # NOT EVERY ASSERTION IS IN THIS SWEEP. `wrote` is outside it because its left

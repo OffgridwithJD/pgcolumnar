@@ -654,8 +654,9 @@ def _run_without_psycopg(args, expect, pg_config=None):
         [sys.executable, "-c", "import psycopg"],
         cwd=str(HERE), env=env, capture_output=True, text=True,
     )
-    expect.at_least(int("ImportError" in probe.stderr), 1,
-                    "premise: the shim really does make `import psycopg` fail")
+    expect.contains(
+        probe.stderr, "ImportError",
+        "premise: the shim really does make `import psycopg` fail")
     return proc
 
 
@@ -690,8 +691,8 @@ def test_a_cluster_test_still_needs_the_driver(expect, pytestconfig):
                                 pg_config=pytestconfig.getoption("--pg-config"))
     expect.at_least(proc.returncode, 1,
                     "a cluster test cannot pass without the driver")
-    expect.at_least(
-        int("psycopg is shimmed out" in (proc.stdout + proc.stderr)), 1,
+    expect.contains(
+        proc.stdout + proc.stderr, "psycopg is shimmed out",
         "and it fails BECAUSE the driver is gone, naming the shim")
 
 

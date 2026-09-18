@@ -35,13 +35,10 @@ def test_how_to_names_join_key_clustering_for_the_runtime_filter(expect):
     """
     expect.num(int(HOWTO.is_file()), 1, "premise: how-to.md is in the tree")
     section = _section_after(HOWTO, "## Skip fact-table work under a star-schema join")
-    expect.num(int(len(section) > 0), 1,
-               "premise: the star-schema join heading is present")
+    expect.at_least(len(section), 1, "premise: the star-schema join heading is present")
     low = section.lower()
-    expect.num(int("cluster" in low), 1,
-               "the runtime-filter how-to names clustering")
-    expect.num(int("join key" in low), 1,
-               "and it names the join key as the clustering column")
+    expect.contains(low, "cluster", "the runtime-filter how-to names clustering")
+    expect.contains(low, "join key", "and it names the join key as the clustering column")
 
 
 def test_best_practices_names_join_key_clustering_for_a_fact_table(expect):
@@ -52,5 +49,4 @@ def test_best_practices_names_join_key_clustering_for_a_fact_table(expect):
     """
     expect.num(int(PRACTICES.is_file()), 1, "premise: best-practices.md is in the tree")
     text = PRACTICES.read_text(encoding="utf-8").lower()
-    expect.num(int("join key" in text), 1,
-               "best-practices names clustering on the join key")
+    expect.contains(text, "join key", "best-practices names clustering on the join key")

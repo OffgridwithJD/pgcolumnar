@@ -361,7 +361,8 @@ the general case was hand-rolled.
 | `test_differ_refuses_a_failed_query_on_either_side` | a failed arm is refused, left and right |
 | `test_differ_refuses_two_failed_queries` | **the inverse of #930's trap**; see below |
 | `test_the_inequality_scan_finds_a_planted_offence` | the AST scan fires on both spellings |
-| `test_the_inequality_scan_does_not_flag_honest_code` | five shapes it must not flag |
+| `test_the_inequality_scan_does_not_flag_honest_code` | eleven shapes it must not flag, five of them real int() calls from this corpus |
+| `test_the_operator_list_is_what_ast_offers` | #1030, `_COMPARE_OPS` pinned against `ast`, so a new operator cannot narrow the rule |
 | `test_no_test_in_this_corpus_hand_rolls_an_inequality` | the population is zero, across 17 files |
 | `test_a_conftest_cannot_switch_off_the_order_collapse_scan` | #924, the route still open after #958 |
 | `test_a_conftest_cannot_switch_off_the_broad_except_scan` | the same hatch, a second scan |

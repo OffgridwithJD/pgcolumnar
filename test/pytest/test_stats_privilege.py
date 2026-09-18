@@ -153,5 +153,6 @@ def test_a_role_with_no_privilege_is_refused(pgc_cluster, pgc_conn, expect):
     _, err = _as(pgc_cluster, NONE,
                  "SELECT count(*) FROM pgcolumnar.stats('st_t')", schema)
     expect.sqlstate(err, "42501", "a role with no privilege on the table is refused")
-    expect.num(int("st_t" in str(err)), 1,
-               "and the refusal names the TABLE, not a catalog table it never asked about")
+    expect.contains(
+        str(err), "st_t",
+        "and the refusal names the TABLE, not a catalog table it never asked about")

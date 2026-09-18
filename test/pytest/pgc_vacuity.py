@@ -716,6 +716,49 @@ class Expect:
         if got != want:
             raise AssertionError(f"{name}: got {got!r} want {want!r}")
 
+    # -- containment -------------------------------------------------------
+    #
+    # A MISSING WORD IN THE VOCABULARY, not 21 local mistakes (#1030). Every site
+    # that wanted this wrote `expect.num(int(needle in hay), 1, name)`, which throws
+    # BOTH values away: the failure reads `got 0 want 1`, and a reader cannot tell a
+    # haystack that was EMPTY from one that was WRONG. That is the reason `differ`
+    # exists, applied to containment.
+    @_resolving
+    def contains(self, got, want, name, *, absent=False):
+        """Assert `want in got`, SHOWING `got` when it is not there.
+
+        `got` is the haystack and `want` the text sought in it. The names are the
+        layer's own, deliberately: `test_failed_query_sentinel.py` partitions the
+        assertions by their FIRST TWO PARAMETER NAMES, so calling these anything
+        else would put this method in neither bucket and open the silent hole that
+        file exists to refuse. It is a caller-supplied value on the left, so a
+        failed-query sentinel can arrive in it and must be refused like any other.
+
+        `absent=True` asserts the opposite and reports WHERE it was found, because
+        "it is present" is not useful without "here".
+        """
+        self._refuse_failed_query(name, got, want)
+        if _empty(want):
+            raise VacuityError(
+                f"{name}: the text sought is empty, so every value contains it."
+            )
+        # An empty haystack satisfies an absence claim without testing anything,
+        # which is the same vacuity `row_set` refuses without an explicit flag.
+        if absent and _empty(got):
+            raise VacuityError(
+                f"{name}: the value searched is empty, so nothing could have been "
+                f"found in it and this could not have failed."
+            )
+        self._record(name)
+        shown = got if len(got) <= 300 else got[:300] + "...[clipped]"
+        if absent and want in got:
+            raise AssertionError(
+                f"{name}: {want!r} is present at offset {got.index(want)} and "
+                f"should not be, in {shown!r}"
+            )
+        if not absent and want not in got:
+            raise AssertionError(f"{name}: {want!r} is absent from {shown!r}")
+
     # -- SQLSTATE ----------------------------------------------------------
     @_resolving
     def sqlstate(self, exc, want, name):

@@ -65,8 +65,9 @@ def _sections_containing(path, needle):
 
 def test_configuration_states_the_floor_where_it_documents_the_setting(expect):
     expect.num(int(CONFIG.is_file()), 1, "premise: configuration.md is in the tree")
-    expect.num(int(len(_floor_line_sections(CONFIG)) > 0), 1,
-               "configuration.md states the 1024 floor on the setting's own line")
+    expect.at_least(
+        len(_floor_line_sections(CONFIG)), 1,
+        "configuration.md states the 1024 floor on the setting's own line")
 
 
 def test_administration_states_it_in_the_section_that_says_to_lower_it(expect):
@@ -78,16 +79,19 @@ def test_administration_states_it_in_the_section_that_says_to_lower_it(expect):
     """
     expect.num(int(ADMIN.is_file()), 1, "premise: administration.md is in the tree")
     advice = _sections_containing(ADMIN, "lower this setting")
-    expect.num(int(len(advice) > 0), 1,
-               "premise: administration.md still tells a reader to lower the setting")
+    expect.at_least(
+        len(advice), 1,
+        "premise: administration.md still tells a reader to lower the setting")
     floor = _floor_line_sections(ADMIN)
-    expect.num(int(len(advice & floor) > 0), 1,
-               "and the 1024 floor is stated in that same section")
+    expect.at_least(
+        len(advice & floor), 1,
+        "and the 1024 floor is stated in that same section")
     low = ADMIN.read_text(encoding="utf-8").lower()
-    expect.num(int("fsst" in low), 1, "and names what lowering past it costs")
+    expect.contains(low, "fsst", "and names what lowering past it costs")
 
 
 def test_best_practices_carries_the_floor_with_the_load_sizing_advice(expect):
     expect.num(int(PRACTICES.is_file()), 1, "premise: best-practices.md is in the tree")
-    expect.num(int(len(_floor_line_sections(PRACTICES)) > 0), 1,
-               "the load-sizing advice states the floor on the same line")
+    expect.at_least(
+        len(_floor_line_sections(PRACTICES)), 1,
+        "the load-sizing advice states the floor on the same line")

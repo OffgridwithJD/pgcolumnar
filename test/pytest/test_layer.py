@@ -610,13 +610,55 @@ def test_differ_refuses_two_failed_queries(pytester, expect):
 _INEQ_MSG = "int() of a comparison, passed to an expect call"
 
 
+# EVERY COMPARISON OPERATOR, LOOKED UP BY NAME (#1030). The first version of this
+# scan required an `Eq` or a `NotEq`:
+#
+#     and any(isinstance(op, (ast.NotEq, ast.Eq)) for op in arg.args[0].ops)
+#
+# so `int(a != b)` was refused and `int(x in y)` was not. The docstring said
+# `int(<Compare>)` and the code delivered `int(<Compare with Eq or NotEq>)`, and by
+# the time anyone read it the scanned class was EMPTY while seven live sites sat
+# outside it. A name that outran its content, which is the shape this corpus keeps
+# finding in other people's documents.
+#
+# Named rather than enumerated as classes, so a future operator cannot silently
+# narrow the rule by not being in a tuple. The list is asserted against `ast`
+# itself below: if Python grows an operator, that arm reddens rather than this scan
+# quietly skipping it.
+_COMPARE_OPS = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn")
+
+
+def _collapses_to_a_flag(node, ast=None):
+    """Does this expression throw BOTH of its values away, leaving 0 or 1?
+
+    A comparison does. So does ANY boolean combination -- and that one is worse,
+    because `int(a and b)` cannot say WHICH half was false.
+
+    THE OPERANDS DO NOT MATTER, and the first version of this got that wrong by
+    requiring a Compare inside. It left `int(p.exists() and q.exists())` live in
+    `test_compare_to_bash.py`, a PREMISE arm whose whole job is to say which half
+    of a pair is missing, reporting `got 0 want 1` instead. Reported by @jdatcmd,
+    who probed the boundary rather than reading the branch:
+
+        int(a == b and c == d)          BoolOp of Compare -> flagged
+        int(p.exists() and q.exists())  BoolOp of Call    -> was NOT flagged
+
+    A single truthiness is still fine: `int(x)` and `int(p.exists())` have one
+    value and nothing to disambiguate. It is the COMBINING that loses the answer.
+    """
+    import ast as _a
+    ast = ast or _a
+    return isinstance(node, (ast.Compare, ast.BoolOp))
+
+
 def _hand_rolled_inequalities(source, filename="<probe>"):
     """-> ["file:line", ...] for `expect.X(int(a != b), ...)` and friends.
 
-    The shape is `int(<Compare>)` appearing as an ARGUMENT to a call on `expect`. A
-    bare `int(a != b)` assigned to a name is not flagged: it asserts nothing by
-    itself, and flagging it would be a claim about arithmetic rather than about an
-    assertion.
+    The shape is `int(<Compare>)`, for ANY comparison operator, appearing as an
+    ARGUMENT to a call on `expect` -- plus `int(<Compare> and <Compare>)`, which
+    collapses two of them at once. A bare `int(a != b)` assigned to a name is not
+    flagged: it asserts nothing by itself, and flagging it would be a claim about
+    arithmetic rather than about an assertion.
     """
     import ast
 
@@ -634,9 +676,7 @@ def _hand_rolled_inequalities(source, filename="<probe>"):
                             and isinstance(arg.func, ast.Name)
                             and arg.func.id == "int"
                             and len(arg.args) == 1
-                            and isinstance(arg.args[0], ast.Compare)
-                            and any(isinstance(op, (ast.NotEq, ast.Eq))
-                                    for op in arg.args[0].ops)):
+                            and _collapses_to_a_flag(arg.args[0], ast)):
                         found.append(f"{filename}:{arg.lineno}")
             self.generic_visit(node)
 
@@ -666,6 +706,44 @@ def test_the_inequality_scan_finds_a_planted_offence(expect):
         "def test_z(expect):\n"
         "    expect.num(int(stated == disk), 0, 'disagrees')\n")), 1,
         "and finds the int(a == b) spelling, not only int(a != b)")
+    # EVERY OPERATOR, not just equality (#1030). The scan required an Eq or a NotEq
+    # while its docstring said `int(<Compare>)`, so the scanned class was EMPTY and
+    # 27 live sites sat outside it. One arm per operator family, because "any
+    # Compare" is the claim and a single `in` case would not show it.
+    for label, op in (("in", "'x' in got"), ("not in", "'x' not in got"),
+                      ("<", "a < b"), (">", "a > b"), ("<=", "a <= b"),
+                      (">=", "a >= b"), ("is", "a is b"), ("is not", "a is not b")):
+        expect.num(len(_hand_rolled_inequalities(
+            f"def t(expect):\n    expect.num(int({op}), 1, 'n')\n")), 1,
+            f"the scan finds int(a {label} b)")
+    # AND THE BOOLEAN COMBINATION, which is the worst of them: it collapses two
+    # comparisons, so a failure cannot say which half broke.
+    expect.num(len(_hand_rolled_inequalities(
+        "def t(expect):\n    expect.num(int(a < b and a < c), 1, 'n')\n")), 1,
+        "the scan finds int(<Compare> and <Compare>)")
+    # THE OPERANDS DO NOT MATTER. Requiring a Compare inside the BoolOp left
+    # `int(p.exists() and q.exists())` live -- a premise arm that exists to say
+    # WHICH half is missing, reporting `got 0 want 1`. Reported by @jdatcmd.
+    for label, src in (("calls", "int(p.exists() and q.exists())"),
+                       ("plain names", "int(a and b)"),
+                       ("or, not and", "int(a or b)"),
+                       ("three operands", "int(a and b and c)")):
+        expect.num(len(_hand_rolled_inequalities(
+            f"def t(expect):\n    expect.num({src}, 1, 'n')\n")), 1,
+            f"the scan finds a boolean pair of {label}, not only of comparisons")
+
+
+def test_the_operator_list_is_what_ast_offers(expect):
+    """The list is named rather than enumerated as classes, so this arm is what stops
+    a future operator from silently narrowing the rule by not being in a tuple."""
+    import ast
+
+    offered = sorted(n for n in dir(ast)
+                     if isinstance(getattr(ast, n), type)
+                     and issubclass(getattr(ast, n), ast.cmpop)
+                     and n != "cmpop")
+    expect.text(" ".join(offered), " ".join(sorted(_COMPARE_OPS)),
+                "the declared comparison operators are exactly what ast offers")
 
 
 def test_the_inequality_scan_does_not_flag_honest_code(expect):
@@ -689,6 +767,21 @@ def test_the_inequality_scan_does_not_flag_honest_code(expect):
         ("the idiom inside a string",
          "def t(expect):\n    s = \"expect.num(int(a != b), 1, 'x')\"\n"
          "    expect.text(s, s, 'n')\n"),
+        # THE HONEST int() CALLS THIS CORPUS ACTUALLY MAKES (#1030). Widening the
+        # scan from Eq/NotEq to every comparison is only safe if these stay out, so
+        # the cost is measured here rather than assumed. Each is a real shape from
+        # the tree, not an invented one.
+        ("int() of a regex group, parsing a number",
+         "def t(expect):\n    expect.num(int(m.group(1)), 3, 'n')\n"),
+        ("int() of a driver flag with nothing richer to show",
+         "def t(expect):\n    expect.num(int(writes[0].acknowledged), 1, 'n')\n"),
+        ("int() of a path premise",
+         "def t(expect):\n    expect.num(int(HOWTO.is_file()), 1, 'n')\n"),
+        ("int() of a value num() would refuse as a string",
+         "def t(expect):\n    expect.num(int(level), 2, 'n')\n"),
+        # A SINGLE truthiness is honest: one value, nothing to disambiguate.
+        ("int() of a single call",
+         "def t(expect):\n    expect.num(int(p.exists()), 1, 'n')\n"),
     ):
         expect.num(len(_hand_rolled_inequalities(src)), 0,
                    f"not flagged: {label}")
