@@ -18,6 +18,36 @@ true until the next version shipped.
 
 ### Fixed
 
+- `analyze_differential` ported to pytest (#432).
+
+  20 names, `missing: 0`, and no extras. `pgcolumnar.analyze()` writes through
+  `pg_restore_attribute_stats`, which takes `VARIADIC "any"` and validates each
+  argument's type at run time. A mistyped argument is not an error: the function
+  warns, sets the argument to NULL and returns cleanly having stored nothing. A
+  value-level suite cannot see that, because the function leaves kinds it was not
+  given in place -- so a statistic we failed to write is still there wearing core's
+  shape. Core ANALYZE is therefore the oracle and the comparison is over SHAPE.
+
+  The refusal carries the shell suite's name, which #1131 made possible: on 15, 16
+  and 17 `analyze_differential.sh` declines through `check_skip`, which RECORDS the
+  refusal as "the differential analyze path". The port declines under the same name
+  and the run exits 67.
+
+  ONE ARM STRONGER THAN THE ORIGINAL. The shell suite names "could not read the
+  server major, so the gate below cannot be trusted" inside a `pgc_fail` that fires
+  only when the version is unreadable. The port asserts it on every run, so the
+  version gate is known to have been decided on a real number.
+
+  Proved by removal against `pgcolumnar--1.0-alpha4.sql`, each mutation asserted to
+  have matched its anchor once and to have been restored byte-identical; control 27
+  checks passed:
+
+      mcvfreqs::real[] -> ::float8[]      and without a WARNING ...   got 10 want 0
+      frequency / non-null count          every most-common value of i ...  got 2 want 0
+      histogram_bounds -> typed NULL      and a histogram for exactly ...  got 0 want 4
+
+  `cluster_tests` 441 -> 442, derived by collection.
+
 - `advisory_lock_class` ported to pytest, asserting a stronger property than the
   original because the original's cannot fail when it matters (#432, #1154).
 
