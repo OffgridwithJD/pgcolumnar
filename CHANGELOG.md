@@ -115,6 +115,40 @@ true until the next version shipped.
   reader ignore the flag reddens ten, and using the group-wide size in the fetch
   path reddens exactly the three fetch arms. Ledger rows seeded from five real
   runs merged in one call, so each carries 15;16;17;18;19.
+- Two delete-visibility suites ported to pytest, and a suite that names four access
+  paths and takes two (#432, #1146).
+
+  `native_delete_vector_index` and `native_delete_visibility_paths`, 11 names, each
+  graded `missing: 0`.
+
+  THE SHELL SUITE NAMES FOUR PATHS AND TAKES TWO. None of the `enable_*` scan GUCs
+  governs `Custom Scan (PgColumnarScan)`, so its sequential, index/bitmap and
+  index-only arms all plan the same node. The property is true -- each returns 4286 --
+  but three arms are one piece of evidence counted three times.
+  `pgcolumnar.enable_custom_scan = off` moves it, and each named path is then
+  reachable and still correct: Seq Scan, Index Scan and Index Only Scan all return
+  4286. The port forces the path each arm is named for and asserts the node before
+  reading the count.
+
+  AND THE INDEXED DELETE-VECTOR READ IS ONLY MEASURED ON A FRESH SESSION (#1146). The
+  shell harness sends every statement through its own psql, so the scan it measures is
+  always made by a session that did no writing. Measured on the same fixture:
+
+      the scan runs in...                  idx_scan   seq_scan
+      the session that wrote and deleted         62         20
+      a fresh session                            21          0
+
+  Twenty sequential catalog scans, one per row group, survive in the writing session.
+  The port asserts the property the suite states, on a second connection, and asserts
+  nothing about the writing session; the observation is filed rather than pinned.
+
+  The delete_vector count is scoped by storage_id, because that catalog is
+  database-wide and a pytest worker shares one cluster across the corpus -- unscoped,
+  the arm would pass or fail on test order.
+
+  No bash suite changes, so no ledger row moves and the census does not.
+  `cluster_tests` 433 -> 435, re-derived by collection.
+
 - Three reclaim and maintenance suites ported to pytest, and a guard that could not
   see its own defect (#432, #1138).
 

@@ -109,6 +109,8 @@ behaviour, the source of that number is named.
 - [61. test_native_reclaim_cycles.py: repeated compaction must not fight its own free list](#61-test_native_reclaim_cyclespy-repeated-compaction-must-not-fight-its-own-free-list)
 - [62. test_native_reclaim_frag.py: coalescing must merge, stay correct, and cost nothing](#62-test_native_reclaim_fragpy-coalescing-must-merge-stay-correct-and-cost-nothing)
 - [63. test_native_vacuum_race.py: compaction must not drop a concurrent commit](#63-test_native_vacuum_racepy-compaction-must-not-drop-a-concurrent-commit)
+- [64. test_native_delete_vector_index.py: reading the delete vector uses its index](#64-test_native_delete_vector_indexpy-reading-the-delete-vector-uses-its-index)
+- [65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path](#65-test_native_delete_visibility_pathspy-a-deleted-row-is-invisible-on-every-path)
 
 ## 1. How to read a test in here
 
@@ -5071,3 +5073,67 @@ three literal names the shell suite states.
 | test | what it holds |
 | --- | --- |
 | `test_native_vacuum_race` | every arm: per maintenance call, that B pinned a snapshot of 50 and that A's commit stayed outside it, then that all 150 rows survive; and that `vacuum()` preserves the exact row set rather than only the count |
+
+## 64. test_native_delete_vector_index.py: reading the delete vector uses its index
+
+Port of `native_delete_vector_index.sh` (#432). `PgColumnarReadDeleteVectorList` and its
+siblings passed `InvalidOid` / `indexOK=false` to `systable_beginscan`, so every call
+sequentially scanned `pgcolumnar.delete_vector` filtered by scan key — once per row group
+while a scan builds its liveness cache.
+
+**The count is scoped to this table's storage, which is not a style choice.** The shell
+suite counts `pgcolumnar.delete_vector` whole, against a cluster it created moments
+earlier. A pytest worker shares one cluster across the corpus and that catalog is
+database-wide, so unscoped the arm would pass or fail on test ORDER — reproducible only in
+a suite run.
+
+**The measured scan runs on a second connection, and that is load-bearing (#1146).** The
+shell suite sends every statement through its own `psql`, so the scan it measures is
+always made by a session that did not write. Measured on this fixture:
+
+| the scan runs in… | `idx_scan` | `seq_scan` |
+| --- | --- | --- |
+| the session that wrote | 62 | **20** |
+| a fresh session | 21 | 0 |
+
+Twenty sequential catalog scans, one per row group, survive in the writing session. This
+file asserts the property the suite states, on a fresh connection, and asserts nothing
+about the writing session either way; the observation is filed as #1146.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_delete_vector_index` | every arm: the fixture's rows and row groups, one delete_vector row per group scoped to this storage, that the cache-building scan ran and was correct, that it used the index and did not sequentially scan, and that the deletes are still applied |
+
+## 65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path
+
+Port of `native_delete_visibility_paths.sh` (#432). The delete-vector fold and the per-row
+bit test are single-sourced in `pgcolumnar_merge_delete_vectors` and `dv_row_deleted`, and
+several independent paths consult them.
+
+**The shell suite names four paths and takes two.** None of the `enable_*` scan GUCs
+governs `Custom Scan (PgColumnarScan)`, so three of its arms plan the same node:
+
+| arm, as the shell suite runs it | plan actually taken |
+| --- | --- |
+| sequential scan (row-emitting path) | Custom Scan |
+| index / bitmap scan | Custom Scan |
+| index-only scan | Custom Scan |
+| aggregate over the whole table | Custom Scan (vectorized aggregate) |
+
+The property is true — each returns 4286 — but three arms are one piece of evidence
+counted three times. `pgcolumnar.enable_custom_scan = off` is the switch that moves it,
+and with it each named path is reachable and still correct: Seq Scan, Index Scan and Index
+Only Scan all return 4286. This port forces the path each arm is named for and **asserts
+the node before reading the count**.
+
+It also asserts what the shell suite assumes in a comment: that the deletes span more than
+one row group, since each group builds its own mask; and that the rolled-back delete left
+its row in place, so the in-transaction arm cannot be satisfied by a delete that persisted.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_delete_visibility_paths` | every arm: the row count and group span, then the live set through a Seq Scan, an Index Scan, an Index Only Scan and the columnar aggregate — each with its plan asserted — then one deleted and one live row through the index, and a delete read back inside its own transaction |
