@@ -75,9 +75,42 @@ def _advisory_tags(conn):
         the lock it took: classid=2 objid=1410065408 field4=102
 
     The maximum is now 102, the STORAGE_ROW lock, which is still unreachable -- so the
-    suite reports the property holding while the lock under test sits in the SQL space.
+    shell suite reports the property holding while the lock under test sits in the SQL
+    space. Measured under that mutation, with the object forced to rebuild:
+
+        advisory_lock_class.sh    7 passed + 0 failed        PASSED
+        this file                 TWO arms red, .so 0ab2accb47ef -> 29a7f55eeb71
+
+    TWO, NOT ONE, AND I ORIGINALLY CLAIMED ONE (#1157). I wrote that the contention arm
+    "inherits the error" -- reasoned, not run. @jdatcmd ran it. Both
+    `the lock an insert takes is not in a SQL-reachable class` and
+    `a user advisory lock on that tag does not block a columnar insert` go red, because
+    the discovery FEEDS the contention arm: one wrong premise disables both, and both
+    come back when the premise is fixed. Two arms moving together with the defect is
+    worse than one vacuous arm, since both keep looking like evidence.
+
     Asserting over the whole set has no such blind spot, and is the stronger claim
     anyway: NO lock an insert takes may be SQL-reachable.
+
+    REPRODUCING THAT MUTATION NEEDS A CLEAN BUILD (#1158). Changing this `#define`
+    rebuilds nothing on its own: PGXS emits no header dependencies unless PostgreSQL
+    was configured with `--enable-depend`, and it was not here. The run then measures a
+    stale object and reports a clean pass that reads exactly like "not load-bearing",
+    and the `.so` hash not moving is the only tell.
+
+    `rm -f src/columnar_unique.o` IS NOT ENOUGH, AND THIS COMMENT SAID IT WAS. Measured
+    on PG17 from a clean tree, mutating the header each time:
+
+        rm -f obj; make                 0 files compiled, object still MISSING,
+                                        .so f7eac4d19c7f4762 -- UNCHANGED
+        rm -f obj; touch the .c; make   2 files compiled, .so 812d9b3c5c9ddd4c
+        make clean; make                .so 812d9b3c5c9ddd4c
+
+    `make` does not rebuild a deleted object listed in OBJS, so the first line leaves
+    exactly the stale library the caveat is warning about. The last two agree on the
+    byte, so touching the source is a measured-equivalent shortcut to a full clean --
+    but `make clean` is the one to reach for, because it does not depend on knowing
+    which object the header reached.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT classid, objid, objsubid FROM pg_locks "
