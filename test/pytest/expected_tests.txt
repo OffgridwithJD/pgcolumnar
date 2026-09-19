@@ -330,4 +330,7 @@ guard_tests 380
 # 430 -> 433 when the three reclaim ports landed (#432):
 # test_native_reclaim_cycles.py, test_native_reclaim_frag.py and
 # test_native_vacuum_race.py, one test each. Derived by collection after the reseat.
-cluster_tests 433
+# 433 -> 435 when the two delete-visibility ports landed (#432):
+# test_native_delete_vector_index.py and test_native_delete_visibility_paths.py,
+# one test each. Derived by collection.
+cluster_tests 435
