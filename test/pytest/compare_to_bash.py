@@ -124,7 +124,7 @@ def _parametrized_names(tree):
 # case, so a wrong name looked exactly like a right one.
 #
 #   refusal(result, name, *patterns)      the last argument is a PATTERN
-#   cannot_run(reason, detail="")         records `name=reason`, the FIRST argument
+#   cannot_run(reason, detail="", *, name=)  the name is the KEYWORD or nothing (#1131)
 #   plan_marker(plan, key, name=None)     the last argument is a plan KEY
 #   plan_node(plan, ..., name=None)       the last argument describes the NODE
 #
@@ -138,7 +138,14 @@ def _parametrized_names(tree):
 # whose name is not last and that arm goes red before this table is wrong in the field.
 _NAME_ARG = {
     "refusal": 1,
-    "cannot_run": 0,
+    # #1131: `cannot_run` states a property only when it is GIVEN a check name. Before
+    # that it recorded under its reason CODE and this table said 0, which harvested the
+    # code as though it were a check name -- a name no bash suite has, reported as an
+    # extra on every pair that declined to run. `None` means only a `name=` keyword
+    # carries it, so a declaration with no name now states nothing, which is the same
+    # rule `_names_in` applies when it drops a bare `{}`: a wrong name is worse than an
+    # absent one.
+    "cannot_run": None,
     "plan_marker": None,
     "plan_node": None,
 }

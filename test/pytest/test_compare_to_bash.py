@@ -120,15 +120,17 @@ COMPLETE = ["analyze_reltuples",
 # reason is the only thing standing between a declared gap and a forgotten one.
 INCOMPLETE = {
     "iceberg_fdw":
-        "74 of its 76 bash names are asserted; the two that are not are `pgc_skip`'s "
-        "refusal names, `python3 is needed` and `iceberg warehouse data files are "
-        "missing`. THIS IS STRUCTURAL, not a gap in the port: `pgc_skip` records "
-        "under the NAME it is given, while `expect.cannot_run` records under the "
-        "REASON CODE, so a port cannot emit those two strings as check names at all. "
-        "The port refuses by name-per-test through `_need`, which is the closest the "
-        "python side can express. #1040's phase 0b is the open question; declared "
-        "here rather than worked around by naming a passing premise after a missing "
-        "dependency, which would read as an assertion that the fixture is absent.",
+        "75 of its 76 bash names are asserted. The one that is not is `python3 is "
+        "needed`, and since #1131 the reason is no longer the harness contract -- "
+        "`cannot_run` now carries a check name, which is how `iceberg warehouse data "
+        "files are missing` moved from MISSING to matched. What remains is that the "
+        "bash gate guards a dependency THIS PORT DOES NOT HAVE: the shell suite runs "
+        "`python3 -c 'import json'` and then never uses python3 again (one occurrence "
+        "in the file, the gate itself), while the port reads the committed warehouses "
+        "directly. Naming a refusal after a dependency the port does not need would "
+        "assert a precondition that is always met, which is the same dishonesty this "
+        "entry was created to avoid. Filed separately as a vestigial gate in the shell "
+        "suite; if it is removed there, this pair reaches zero and moves to COMPLETE.",
 }
 
 
@@ -595,20 +597,59 @@ def test_refusal_with_no_pattern_is_not_the_arm_that_proves_it(expect):
                 "the no-pattern shape reads the same either way, so it proves nothing alone")
 
 
-def test_cannot_run_names_its_reason_not_its_detail(expect):
-    """`cannot_run(reason, detail="")` records `name=reason`: the FIRST argument.
+def test_cannot_run_without_a_name_states_no_property(expect):
+    """REPLACES `test_cannot_run_names_its_reason_not_its_detail`, which pinned the
+    contract #1131 changed.
 
-    It is the only helper whose name is argument zero, and the detail beside it is prose
-    about one run -- "the two partitions are not different ({})" -- which can never match
-    a bash check name. Reading it produced an extra that no bash suite could ever satisfy.
+    That test asserted the reason CODE is harvested as the check name, and it was the
+    right answer while there was no name to harvest: the detail beside it is prose
+    about one run -- "the two partitions are not different ({})" -- which can never
+    match a bash check name, so the code was the least-bad of two wrong options.
+
+    It is not the right answer now. A reason code is not a check name; no bash suite
+    has one, so harvesting it reported an extra on every pair that declined to run.
+    With a real name available (#1131) the honest reading of an unnamed declaration is
+    that it states no property at all -- the same rule `_names_in` applies when it
+    drops a bare `{}` template rather than publish a name with no content.
+
+    The detail still contributes nothing, which is the half of the old test that was
+    always right and is asserted here.
     """
-    src = ('def t(expect):\n'
-           '    expect.cannot_run("MISSING_DEPENDENCY",\n'
-           '                      "the two partitions are not different")\n')
-    got = _names(src)
-    expect.text(", ".join(got), "MISSING_DEPENDENCY",
-                "the reason CODE is the name, and the detail is not a name at all")
-    expect.num(len(got), 1, "the detail contributes nothing")
+    got = _names('def t(expect):\n'
+                 '    expect.cannot_run("MISSING_DEPENDENCY",\n'
+                 '                      "the two partitions are not different")\n')
+    expect.text(", ".join(got) or "none", "none",
+                "an unnamed declaration states no property, so neither argument is a name")
+
+
+def test_cannot_run_carries_a_check_name_when_it_is_given_one(expect):
+    """#1131: `cannot_run` may carry the NAME a bash gate records, beside its reason.
+
+    `check_skip`, `pgc_skip` and `pgc_fail` record under the NAME they are given.
+    `cannot_run` recorded under its REASON CODE, so a port could not emit the string
+    and `compare_to_bash` reported it MISSING -- 66 suites and 1,281 names that could
+    not reach `missing: 0` however faithfully they were ported. jd chose resolution 1
+    on #1131: the name rides alongside, the closed reason list is unchanged, and the
+    outcome stays UNRUN.
+
+    THE NAME IS KEYWORD-ONLY, and that is not a style choice. `cannot_run(reason,
+    detail)` is called positionally across the corpus; a `name` parameter in second
+    position would silently reinterpret every one of those details as a check name.
+    """
+    named = _names('def t(expect):\n'
+                   '    expect.cannot_run("MISSING_DEPENDENCY",\n'
+                   '                      "python3 is absent on this box",\n'
+                   '                      name="python3 is needed")\n')
+    expect.text(", ".join(named), "python3 is needed",
+                "the check NAME is what the grader harvests when one is given")
+
+    # THE POSITIONAL SHAPE IS UNTOUCHED, which is what `name` being keyword-only buys:
+    # the detail is still the detail. What an unnamed call yields is
+    # `test_cannot_run_without_a_name_states_no_property`'s subject, not this one's.
+    bare = _names('def t(expect):\n'
+                  '    expect.cannot_run("MISSING_DEPENDENCY", "prose about one run")\n')
+    expect.text(", ".join(bare) or "none", "none",
+                "and the detail is not harvested as a name by either shape")
 
 
 def test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword(expect):
@@ -656,9 +697,11 @@ def test_the_tools_table_agrees_with_the_signatures_it_describes(expect):
     from compare_to_bash import _NAME_ARG
 
     # The ONE thing a signature cannot state: which parameter becomes the record's name.
-    # `cannot_run` records `name=reason`; every other helper calls its parameter `name`.
-    # Pinned below against the body, so this line cannot quietly become wrong either.
-    records_name_as = {"cannot_run": "reason"}
+    # Every helper calls its parameter `name`, `cannot_run` included since #1131 -- where
+    # it is KEYWORD-ONLY, so it is absent from the required list and the derived answer is
+    # None, "no positional carries it". Pinned below against the body, so this line cannot
+    # quietly become wrong either.
+    records_name_as = {}
 
     src = (HERE / "pgc_vacuity.py").read_text()
     tree = ast.parse(src)
@@ -698,18 +741,32 @@ def test_the_tools_table_agrees_with_the_signatures_it_describes(expect):
     expect.text("; ".join(disagree) or "none", "none",
                 "every entry in the table matches the signature it describes")
 
-    # The one hand-written semantic claim above, pinned against the body it describes:
-    # read cannot_run's own `_record(...)` call and check which parameter it names.
+    # The hand-written semantic claim above, pinned against the body it describes: read
+    # cannot_run's own `_record(...)` call and check which parameter it names.
     #
+    # Since #1131 the body is `name=name or reason`, so the pin reads the BoolOp rather
+    # than a bare Name, and asserts BOTH operands AND their order. Order is the whole
+    # claim: `reason or name` would compile, pass any test that only checked which
+    # identifiers appear, and record the reason code for every named declaration --
+    # putting back exactly the 1,281-name blind spot this change removes.
     fn = [f for f in helpers if f.name == "cannot_run"]
     expect.num(len(fn), 1, "premise: cannot_run is among the helpers read")
-    recorded = [kw.value.id for call in ast.walk(fn[0])
-                if isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute) and call.func.attr == "_record"
-                for kw in call.keywords
-                if kw.arg == "name" and isinstance(kw.value, ast.Name)]
-    expect.text(", ".join(recorded), "reason",
-                "cannot_run really does record its reason as the name")
+    recorded = []
+    for call in ast.walk(fn[0]):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "_record"):
+            continue
+        for kw in call.keywords:
+            if kw.arg != "name":
+                continue
+            v = kw.value
+            if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or):
+                recorded.append(" or ".join(o.id for o in v.values
+                                            if isinstance(o, ast.Name)))
+            elif isinstance(v, ast.Name):
+                recorded.append(v.id)
+    expect.text(", ".join(recorded), "name or reason",
+                "cannot_run records the given name, falling back to the reason code")
 
 def test_no_later_argument_can_overtake_the_name(expect):
     """`-1` is a claim about the CALL SITE, and the arm above only reads the SIGNATURE.

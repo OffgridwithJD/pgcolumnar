@@ -199,7 +199,11 @@
 # Re-derived by collection, never by adding six.
 # RESEATED onto main carrying #1117. Main states 374, this branch stated 379; neither
 # is the merged truth. Re-derived by collection: `380 tests collected`.
-guard_tests 380
+# 380 -> 382 with #1131: three arms added for `cannot_run`'s check name (two in
+# test_compare_to_bash.py, one in test_check_records.py) and one retired --
+# test_cannot_run_names_its_reason_not_its_detail, which pinned the contract #1131
+# changed. Net +2, derived by collection rather than by counting the diff.
+guard_tests 382
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
