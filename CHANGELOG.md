@@ -18,6 +18,33 @@ true until the next version shipped.
 
 ### Fixed
 
+- `advisory_lock_class` ported to pytest, asserting a stronger property than the
+  original because the original's cannot fail when it matters (#432, #1154).
+
+  8 names, `missing: 0`, and no extras: a one-to-one port. The shell suite discovers
+  "the lock the insert took" as `ORDER BY objsubid DESC LIMIT 1`, but an insert takes
+  more than one advisory lock, and the maximum is the unique-key lock only while the
+  unique-key lock is the highest-numbered one. Regress `PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY`
+  to 2 -- the #430 defect -- and the maximum becomes 102, STORAGE_ROW, still
+  unreachable: the suite reports the property holding while the lock under test sits in
+  the SQL-addressable space, and the contention arm takes the wrong tag and passes too.
+
+  The port collects EVERY advisory lock the insert holds, asserts none is in a
+  SQL-reachable class, and contends for every addressable tag. Under the same mutation
+  it reddens naming the offender:
+
+      the lock an insert takes is not in a SQL-reachable class:
+          got 'reachable [(16572, 77, 2)]' want 'unreachable'
+
+  NO SLEEPS AND NO POLLING. The shell suite backgrounds a psql running pg_sleep(30),
+  polls pg_locks up to sixty times each way, and must pg_terminate_backend rather than
+  kill the client -- its own comment records that killing the client left the server
+  holding the transaction and reported the same result with and without the fix. With
+  real connections there is no window to wait on.
+
+  `cluster_tests` 437 -> 440: three tests rather than one, because `cannot_run`
+  declares a whole test unrunnable while `check_skip` skips a single check.
+
 - `native_parquet_dict_oob` ported to pytest (#432).
 
   5 names, `missing: 0`. A Parquet dictionary index with the high bit set must not

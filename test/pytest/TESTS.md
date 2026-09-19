@@ -113,6 +113,7 @@ behaviour, the source of that number is named.
 - [65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path](#65-test_native_delete_visibility_pathspy-a-deleted-row-is-invisible-on-every-path)
 - [66. test_temporal.py: a columnar table enforces temporal constraints like a heap](#66-test_temporalpy-a-columnar-table-enforces-temporal-constraints-like-a-heap)
 - [67. test_native_parquet_dict_oob.py: a crafted dictionary index must not read out of bounds](#67-test_native_parquet_dict_oobpy-a-crafted-dictionary-index-must-not-read-out-of-bounds)
+- [68. test_advisory_lock_class.py: no lock an insert takes may be reachable from SQL](#68-test_advisory_lock_classpy-no-lock-an-insert-takes-may-be-reachable-from-sql)
 
 ## 1. How to read a test in here
 
@@ -5210,3 +5211,53 @@ three is what tells the two worlds apart in the report.
 | test | what it holds |
 | --- | --- |
 | `test_native_parquet_dict_oob` | every arm: the benign file still reads its four rows, the crafted index is refused with an error, the backend is still alive afterwards, the server log exists, and it records no segfault |
+
+## 68. test_advisory_lock_class.py: no lock an insert takes may be reachable from SQL
+
+Port of `advisory_lock_class.sh` (#432). `locktag_field4` says which advisory space a tag
+belongs to, and PostgreSQL's own functions own exactly two values: 1 for the int8 key form
+and 2 for the two-int4 form. A lock the extension takes in either shares a space with
+anything a user can take from SQL, and a user lock on the same tag then blocks a columnar
+insert forever — which was #430.
+
+**The port asserts a stronger property than the original, because the original's is
+unfalsifiable at the moment it matters (#1154).** The shell suite discovers "the lock the
+insert took" as `ORDER BY objsubid DESC LIMIT 1`. An insert takes more than one:
+
+| build | locks held by the inserting session |
+| --- | --- |
+| fixed | `[(16572, 77, 103), (2, 1410065408, 102)]` |
+| unique-key class regressed to 2 | `[(2, 1410065408, 102), (16572, 77, 2)]` |
+
+The maximum is the unique-key lock only while the unique-key lock is the highest-numbered
+one. Regress it and the maximum becomes 102, STORAGE_ROW, which is still unreachable — so
+the suite reports the property holding while the lock under test sits in the SQL space,
+and the later arm contends for the wrong tag and passes too.
+
+This file collects **every** advisory lock the insert holds and asserts none is in a
+SQL-reachable class, and contends for every addressable tag rather than one. Under the
+same mutation it reddens naming the offender:
+
+```
+the lock an insert takes is not in a SQL-reachable class:
+    got 'reachable [(16572, 77, 2)]' want 'unreachable'
+```
+
+**No sleeps and no polling.** The shell suite backgrounds a `psql` running `pg_sleep(30)`,
+polls `pg_locks` up to sixty times for the lock to appear and again for it to go, and must
+`pg_terminate_backend` rather than kill the client — its own comment records that killing
+the client left the server holding the transaction and "reported the same result with and
+without the fix". With real connections a second session's `INSERT` returns when the lock
+is held and closing the connection ends the transaction, so there is no window to wait on.
+
+**The skip is per test.** `cannot_run` declares a whole test unrunnable while `check_skip`
+skips one check, so the SQL-form arm is its own test and the duplicate-key arm runs
+regardless.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_the_lock_an_insert_takes_is_not_in_a_sql_reachable_class` | the lock is enabled, the insert's locks are visible, none is SQL-reachable, and the discovering session leaves nothing held |
+| `test_a_user_advisory_lock_on_that_tag_does_not_block_an_insert` | a user session holding every addressable tag in class 2 does not block a columnar insert |
+| `test_a_duplicate_key_is_still_rejected` | the lock still does its job, so removing the collision by removing the lock does not pass |
