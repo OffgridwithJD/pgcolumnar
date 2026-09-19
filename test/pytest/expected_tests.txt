@@ -342,4 +342,43 @@ guard_tests 382
 # 437 -> 440 with the advisory-lock port (#432): THREE tests, not one, because
 # cannot_run declares a whole test unrunnable while check_skip skips one check --
 # so the SQL-form arm has to be its own test for the skip's scope to be honest.
-cluster_tests 440
+# 433 -> 434 when test_index_am_support.py landed: one cluster test that reads the
+# index access methods out of docs/features.md and exercises every one the page
+# names. The count moves by one because the per-method arms are a loop inside a
+# single test rather than a parametrization.
+#
+# RE-DERIVED BY COLLECTION AFTER THE REBASE, not carried. This branch first stated
+# 431 against a base of 430, and #1142 moved the base to 433 underneath it, so the
+# committed number described a tree that no longer existed.
+# Re-derived on the rebased tree: `434 tests collected`. `guard_tests` was
+# re-derived in the same run and did NOT move: 380.
+# RE-DERIVED AGAIN after the reseat onto main carrying #1148: `436 tests
+# collected`. And once more after main took #1151, where this file AUTO-MERGED
+# SILENTLY: main stated 435, this branch stated 436, git took 436 without a
+# conflict. That happened to be right -- #1151 moves `guard_tests` 380 -> 382 and
+# leaves `cluster_tests` alone -- and it was confirmed by collection rather than
+# by the arithmetic, because a side that wins silently is right only until it is
+# not. This branch has now stated 431, 434 and 436, each correct for the
+# base it was taken on, which is the whole reason this file says re-derive rather
+# than carry. `guard_tests` was re-derived in the same run and did NOT move: 380.
+#
+# RESEATED ONTO MAIN CARRYING #1152, AND THIS IS THE CASE THE FILE KEEPS WARNING
+# ABOUT, caught live. Main stated 436 for the temporal port; this branch stated 436
+# for `test_index_am_support.py`. The two are different arms in different files, so
+# neither number describes a tree holding both -- and because the VALUE was the same
+# on both sides, git resolved the value silently and conflicted only on the comment
+# above it. A reader who trusted the resolution would have shipped 436.
+#
+# Re-derived by collection on the merged tree: `437 tests collected`. `guard_tests`
+# was re-derived in the same run and did NOT move: 382.
+#
+# RESEATED ONCE MORE, onto main carrying #1156, and this time git CONFLICTED rather
+# than resolving in silence -- the values differed (440 against 437) where the #1152
+# reseat above had them equal. The loud case is the lucky one.
+#
+# Re-derived by collection on the merged tree: `441 tests collected`. Neither side's
+# number survives, and the fact that 437 + 4 and 440 + 1 both reach it is a property
+# of this particular merge rather than a method. `guard_tests` was re-derived in the
+# same run and did NOT move: 382. The ledger census was re-counted in the same run
+# and did NOT move: 1439.
+cluster_tests 441
