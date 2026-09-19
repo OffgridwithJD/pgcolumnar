@@ -115,6 +115,7 @@ behaviour, the source of that number is named.
 - [67. test_native_parquet_dict_oob.py: a crafted dictionary index must not read out of bounds](#67-test_native_parquet_dict_oobpy-a-crafted-dictionary-index-must-not-read-out-of-bounds)
 - [68. test_advisory_lock_class.py: no lock an insert takes may be reachable from SQL](#68-test_advisory_lock_classpy-no-lock-an-insert-takes-may-be-reachable-from-sql)
 - [69. test_index_am_support.py: the index methods the page claims must work](#69-test_index_am_supportpy-the-index-methods-the-page-claims-must-work)
+- [70. test_analyze_differential.py: our statistics must have the shape core writes](#70-test_analyze_differentialpy-our-statistics-must-have-the-shape-core-writes)
 
 ## 1. How to read a test in here
 
@@ -5403,3 +5404,74 @@ reasons. The shell twin already counts, with `wc -l`, so the counted form is the
 faithful one. And `test_loop_coverage_premise.py` recognises a cardinality premise
 only as `len(...)` inside a counted assertion outside the loop, so the string
 form left the loop below reading as unpremised.
+
+## 70. test_analyze_differential.py: our statistics must have the shape core writes
+
+Port of `analyze_differential.sh` (#432). `pgcolumnar.analyze()` writes through
+`pg_restore_attribute_stats`, which takes `VARIADIC "any"` and validates each
+argument's type at run time. **A mistyped argument is not an error.** The function
+emits a WARNING, sets that argument to NULL, and returns cleanly having stored
+nothing.
+
+**Values cannot be the oracle here, and that is why the pair exists.**
+`pg_restore_attribute_stats` leaves kinds it was not given in place, which is
+correct and fatal to attribution: a statistic we failed to write is still in the
+catalog wearing core's shape, so every value assertion reads core's work and
+reports it as ours. So core ANALYZE is the oracle and the comparison is over
+SHAPE — for each statistic kind written for a column, the operator and the
+collation stored beside it must match what core stored for the same kind of the
+same column. A dropped argument leaves the slot absent, which a shape comparison
+sees at once.
+
+**The refusal is named, and that is #1131.** On 15, 16 and 17 the shell suite
+declines through `check_skip`, which RECORDS the refusal under the name "the
+differential analyze path". Until `expect.cannot_run` could carry a name no port
+could emit that string, and `compare_to_bash` reported it MISSING however faithful
+the rest was. The precondition — the server major — exists on both sides, which is
+the case resolution 1 unblocks. On 15 and 17 the pair runs one check and declines,
+and the run exits 67.
+
+**One arm the shell reaches only on failure.** `analyze_differential.sh` names
+"could not read the server major, so the gate below cannot be trusted" inside a
+`pgc_fail` that fires only when the version is unreadable. The port asserts the
+same property on every run, under the same name, so the gate below it is known to
+have been decided on a real number rather than on an empty string that compared
+less-than 18.
+
+**Independent of the shell suite at every seam.** The shell materialises an
+`ad_shape` table, because each `q()` opens its own connection, and pairs
+kind/operator/collation with `unnest ... WITH ORDINALITY` joined three ways; this
+file holds one connection, reads the five slots as three arrays, and zips them in
+Python. The shell greps psql's output for `WARNING`; this file registers a psycopg
+notice handler, so the fact the suite is named for is observed through two
+unrelated channels. Frequencies are checked one most-common value at a time
+through a parameterised count, so a failure names the value that disagreed rather
+than counting disagreements.
+
+**The element type of the stored array is deliberately not compared**, on both
+sides. `pg_statistic.stavalues1` is declared `anyarray`, so `pg_typeof` returns the
+constant string `anyarray` for every row ever stored. A probe built on it reports
+every slot as mismatched — core's own included — so it tests the expectation rather
+than the code.
+
+### Removal proof
+
+Three mutations of `pgcolumnar--1.0-alpha4.sql`, each asserted to have matched its
+anchor exactly once and to have been restored byte-identical. The control is 27
+checks passed.
+
+| cell | mutation | what reddens |
+| --- | --- | --- |
+| B | `mcvfreqs::real[]` → `mcvfreqs::float8[]` | `and without a WARNING, which is how pg_restore_attribute_stats drops an argument`, got 10 want 0 — five columns, each warning twice, because the pair rule drops `most_common_vals` with it |
+| C | frequency divided by the non-null count instead of the row count | `every most-common value of i exists with exactly its stored frequency`, got 2 want 0 |
+| D | `'histogram_bounds', hist::text` → a typed NULL | `and a histogram for exactly the four core gave one`, got 0 want 4 |
+
+Cell B is the failure mode the suite is named for: the call succeeds, nothing is
+raised, and the statistic is simply missing. It is caught by the notice handler
+before any later arm runs, which is why only one arm appears in that row.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_analyze_differential` | the whole pair in one function, because the shell suite gates the whole of itself on the major: the fixture loaded and is genuinely nullable, both awkward text values are present, core wrote a most-common list for all five columns and a histogram for the four with a tail, every statistic was cleared before we wrote, `pgcolumnar.analyze()` raised nothing and warned about nothing, we wrote the same kinds for the same columns carrying the same operator and collation, every most-common value exists with the frequency stored for it, the comma and the quote survived the round trip, and boolean got no histogram |

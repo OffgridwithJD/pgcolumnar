@@ -381,4 +381,11 @@ guard_tests 382
 # of this particular merge rather than a method. `guard_tests` was re-derived in the
 # same run and did NOT move: 382. The ledger census was re-counted in the same run
 # and did NOT move: 1439.
-cluster_tests 441
+# 441 -> 442 with the analyze_differential port (#432): one cluster test, because the
+# shell suite gates the whole of itself on the server major and the port mirrors that
+# scope -- one `cannot_run` declares one test unrunnable, so splitting the arms would
+# have made the refusal narrower than the suite's own.
+#
+# Derived by collection on this tree, not by adding one: `442 tests collected`.
+# `guard_tests` was re-derived in the same run and did NOT move: 382.
+cluster_tests 442
