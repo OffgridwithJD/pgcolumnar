@@ -327,4 +327,7 @@ guard_tests 380
 # answers to the same question, because main moved three times underneath it. A number
 # that is carried across a reseat is a number that agrees with the tree it was taken
 # from and not with this one.
-cluster_tests 430
+# 430 -> 433 when the three reclaim ports landed (#432):
+# test_native_reclaim_cycles.py, test_native_reclaim_frag.py and
+# test_native_vacuum_race.py, one test each. Derived by collection after the reseat.
+cluster_tests 433
