@@ -698,3 +698,27 @@ def test_the_recorder_is_only_observed_once_and_both_sides_of_that_are_blind(
     expect.outcomes(early, "an EARLY removal does not refuse it either",
                     passed=1, failed=0)
     early.stdout.fnmatch_lines(["*checks run: 2*"])
+
+
+def test_cannot_run_records_under_its_name_and_still_counts_as_unrun(expect):
+    """#1131 resolution 1, from the record's side rather than the grader's.
+
+    Two things have to hold together, and asserting either alone would miss the point:
+    the record must be findable by the bash suite's NAME, and the outcome must stay
+    UNRUN. A name that arrived by turning the declaration into a PASS would satisfy the
+    grader and assert that a missing dependency is present, which is exactly what the
+    `iceberg_fdw` INCOMPLETE entry refused to do.
+    """
+    rec = pgc_vacuity.Expect("nodeid::test_probe")
+    rec.cannot_run("MISSING_DEPENDENCY", "python3 is absent",
+                   name="python3 is needed")
+
+    names = [r.name for r in rec.records]
+    verdicts = [r.verdict for r in rec.records]
+    expect.text(", ".join(names), "python3 is needed",
+                "the record is named for the bash check, not the reason code")
+    expect.text(", ".join(verdicts), "UNRUN",
+                "and declaring it unrunnable is still not a pass")
+    expect.text(str(rec.unrunnable[0]), "MISSING_DEPENDENCY",
+                "the closed reason code is unchanged, so the stream stays keyable")
+

@@ -1022,7 +1022,7 @@ class Expect:
 
     # -- the third state ---------------------------------------------------
     @_resolving
-    def cannot_run(self, reason, detail=""):
+    def cannot_run(self, reason, detail="", *, name=None):
         """Declare this test unrunnable. Not a pass, and not a silent skip.
 
         THE STATE HAS TO COST SOMETHING OR IT IS A SKIP WITH BETTER MANNERS. It
@@ -1035,6 +1035,11 @@ class Expect:
 
         The run now ends `EXIT_INCOMPLETE` unless something failed outright, and
         the reason and detail are printed. See `_UnrunnableCollector` below.
+
+        `name` IS KEYWORD-ONLY, and that is not a style choice. `cannot_run(reason,
+        detail)` is called positionally across this corpus; a `name` parameter in
+        second position would silently reinterpret every one of those details as a
+        check name, which is the failure the `_NAME_ARG` table exists to prevent.
         """
         if reason not in UNRUNNABLE_REASONS:
             raise VacuityError(
@@ -1043,10 +1048,25 @@ class Expect:
         self.unrunnable = (reason, detail)
         # UNRUN, NOT PASS. An assertion that declined to run is an outcome like any
         # other -- #937 property 4 -- and the shell's verdict vocabulary has the same
-        # four values for the same reason. The record is named by the reason CODE,
-        # which is from a closed list, so the stream stays keyable when the detail is
-        # free text.
-        self._record(name=reason, verdict="UNRUN", reason=detail)
+        # four values for the same reason.
+        #
+        # THE NAME IS THE BASH CHECK'S NAME WHEN ONE IS GIVEN (#1131). `check_skip`,
+        # `pgc_skip` and `pgc_fail` record under the NAME they are given; this
+        # recorded under its REASON CODE, so a port could not emit the string and
+        # `compare_to_bash` reported it MISSING -- 66 suites and 1,281 names that
+        # could not reach `missing: 0` however faithfully they were ported. jd chose
+        # this resolution on #1131.
+        #
+        # The reason code is unchanged and still validated against the closed list,
+        # and it still rides in `self.unrunnable`, so the UNRUN line and anything
+        # keying on the code are untouched. Without a name the code remains the
+        # record's name, as before.
+        #
+        # AND THE OUTCOME STAYS UNRUN. A name that arrived by turning the declaration
+        # into a PASS would satisfy the grader while asserting that a missing
+        # dependency is present -- which is precisely what `iceberg_fdw`'s INCOMPLETE
+        # entry refused to do.
+        self._record(name=name or reason, verdict="UNRUN", reason=detail)
 
 
 @pytest.fixture

@@ -18,6 +18,45 @@ true until the next version shipped.
 
 ### Fixed
 
+- A named skip could not be ported: `cannot_run` recorded under its reason code, so
+  66 suites and 1,281 names could not reach `missing: 0` (#1131, #1150).
+
+  `check_skip`, `pgc_skip` and `pgc_fail` record under the NAME they are given.
+  `expect.cannot_run` recorded under its REASON CODE, from a closed list, so a port
+  could not emit the string its bash suite states and `compare_to_bash` reported it
+  MISSING however faithfully the suite was ported. jd chose resolution 1 on #1131:
+  the name rides alongside the code.
+
+      cannot_run(reason, detail="", *, name=None)
+
+  `name` IS KEYWORD-ONLY. `cannot_run(reason, detail)` is called positionally across
+  the corpus, and a `name` parameter in second position would silently reinterpret
+  every existing detail as a check name with nothing red to say so. The reason list
+  is unchanged and still validated, the code still rides in `self.unrunnable` so the
+  UNRUN line is untouched, and the outcome is still UNRUN rather than PASS -- a name
+  that arrived by turning the declaration into a pass would satisfy the grader while
+  asserting the missing dependency is present.
+
+  `_NAME_ARG["cannot_run"]` becomes `None`, so an unnamed declaration states no
+  property rather than publishing its reason code as a check name -- the rule
+  `_names_in` already applies when it drops a bare `{}` template.
+
+  ONE TEST RETIRED, NOT WEAKENED. `test_cannot_run_names_its_reason_not_its_detail`
+  pinned "the reason CODE is the name", the least-bad answer while there was no name
+  to harvest. `test_cannot_run_without_a_name_states_no_property` replaces it and the
+  reasoning is in the file.
+
+  THE LIMIT OF THE DECISION, found by hitting it: this unblocks a bash gate name
+  whose PRECONDITION EXISTS on the pytest side. A gate on a dependency the port does
+  not have stays unportable, and that is correct. `iceberg_fdw` goes from
+  `missing: 2` to `missing: 1` -- `iceberg warehouse data files are missing` is now
+  carried and matched; `python3 is needed` is not, because the port reads the
+  committed warehouses and needs no python3. Nor does the shell suite: that gate is
+  its only mention of python3 and nothing after it parses JSON, so it is filed as
+  vestigial (#1150). Remove it and the pair reaches zero.
+
+  `guard_tests` 380 -> 382, re-derived by collection.
+
 - The validity bitmap was stored uncompressed and never elided, so a column with
   no nulls paid `ceil(rows / 8)` bytes for ever (#1130).
 

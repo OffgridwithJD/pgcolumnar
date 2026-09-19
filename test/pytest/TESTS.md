@@ -2911,6 +2911,7 @@ incremented by one line and read by one, and **zero** per-assertion records.
 | test | what it pins |
 |---|---|
 | `test_each_counted_assertion_appends_exactly_one_record` | three assertions leave three records, from a premise of zero |
+| `test_cannot_run_records_under_its_name_and_still_counts_as_unrun` | the record carries the bash check's name while the outcome stays UNRUN (#1131) |
 | `test_the_count_is_the_record_stream` | the count tracks the records at every step, not only at the end |
 | `test_the_count_cannot_be_moved_without_a_record` | **the construction proof**: the count has no setter |
 | `test_a_record_names_the_assertion_that_made_it` | the names, in order |
@@ -3971,7 +3972,8 @@ the tool grades THIS tree.
 | `test_the_two_harnesses_interpolations_land_on_one_template` | bash and python spell interpolation differently and must meet |
 | `test_refusal_names_its_second_argument_not_its_last_pattern` | the name is in the middle; the last argument is a pattern |
 | `test_refusal_with_no_pattern_is_not_the_arm_that_proves_it` | the control: that shape reads the same under either rule, so it proves nothing alone |
-| `test_cannot_run_names_its_reason_not_its_detail` | the only helper whose name is argument zero |
+| `test_cannot_run_without_a_name_states_no_property` | a declaration with no name is not a property; the reason CODE is not a check name (#1131) |
+| `test_cannot_run_carries_a_check_name_when_it_is_given_one` | and with `name=` it is harvested under the bash gate's name, the old positional shape untouched |
 | `test_a_helper_whose_name_is_optional_takes_it_only_from_the_keyword` | `plan_marker` and `plan_node` carry no name positionally; absent beats a key |
 | `test_the_tools_table_agrees_with_the_signatures_it_describes` | the drift guard: every entry re-derived from the real signatures |
 | `test_no_later_argument_can_overtake_the_name` | nothing after the name may be passed positionally, so `-1` is true of every CALL and not just every signature |

@@ -179,18 +179,32 @@ def test_a_plan_with_no_pruning_marker_is_not_read_as_zero(expect):
                 "but a plan with no marker at all is NOT read as zero, because "
                 "'pruned nothing' and 'did not say' are opposite facts")
 
+# The name the bash suite's gate records when the committed warehouse is absent:
+#
+#     iceberg_fdw.sh:26   || pgc_skip fixture "iceberg warehouse data files are missing"
+#
+# Carried verbatim so the two harnesses state the same property. Before #1131
+# `cannot_run` recorded under its reason CODE and this name could not be emitted at
+# all, which is why this pair was the tree's only declared-INCOMPLETE one.
+# It is written at the call site rather than held in a constant: `compare_to_bash`
+# reads the port's SOURCE and resolves string LITERALS, so a name behind a module
+# constant is a name the grader cannot see. Measured -- with the constant, this pair
+# still reported `missing: 2`.
+
+
 def _need(expect, meta, *aliases):
     """-> True when every warehouse is staged; otherwise records ONE refusal.
 
-    Per test, because `expect.cannot_run` records under its REASON CODE rather than
-    per check: two refusals inside one test would collapse onto a single record and
-    the second property would leave no trace at all.
+    Per test, because a refusal is recorded per TEST rather than per check: two
+    refusals inside one test would collapse onto a single record and the second
+    property would leave no trace at all.
     """
     missing = [a for a in aliases if a not in meta]
     if missing:
         expect.cannot_run("UNMET_PRECONDITION",
                           f"the {', '.join(missing)} warehouse fixture is not in this "
-                          f"tree, so the transform it covers cannot be exercised")
+                          f"tree, so the transform it covers cannot be exercised",
+                          name="iceberg warehouse data files are missing")
         return False
     return True
 
