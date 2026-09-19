@@ -196,6 +196,54 @@ This is a scheduling fact rather than a problem. The series compressed on
   is a sampling selector that chooses per block. High value at low to medium
   effort, and it changes what the writer emits.
 
+**THE PLAN'S OWN GATE HAS NOT BEEN MET, AND THE DECISION IS OPEN (#1139).**
+Step 1, the sampling selector, shipped on 2026-07-25. Step 2, cascading itself,
+is what this theme now means. `design/CASCADE_ENCODING_PLAN.md` requires a
+measured size win per candidate chain before any of it ships. Measured on
+2026-09-18 against ClickBench:
+
+- **The headroom splits by column type.** Text columns sit at 1.40x to 1.63x
+  against a much more expensive general codec. Fixed-width columns sit at 0.87x
+  to 1.24x, and half are within 6% of it.
+- **Two of the four candidate chains are fixed-width only.** RLE run-lengths
+  then bitpack, and delta then RLE, apply where there is little left to find.
+- **The other two reach text, through their dictionary stage.** Dictionary then
+  FOR and dictionary then bitpack apply to any column DICT wins on, text
+  included. The tree's own `native_dict_underfill` asserts a DICT-encoded text
+  column, so this is not hypothetical.
+- **But the dictionary path carries 3.3% of the bytes.** Across the five text
+  columns holding the headroom, the encoded bytes divide as:
+
+        FSST    310 vectors   162,164,181 bytes   91.2%
+        NONE      7 vectors     9,864,728 bytes    5.6%
+        DICT    183 vectors     5,811,383 bytes    3.3%
+
+  DICT wins where cardinality is low, and those vectors are small: a mean of
+  31,756 bytes against 523,110 for FSST. The seven unencoded vectors are the
+  largest of all, at 1,409,247 each. **No candidate chain follows FSST, and none
+  applies to a vector no first stage won**, so 96.7% of these bytes is out of
+  reach of all four. (Pre-codec share: `encLen` is per vector while
+  `page_length` is post-codec and cannot be split. DICT output compresses well,
+  so its post-codec share is if anything smaller.)
+- **The text headroom survives FSST**, which already buys 9% to 20% on the four
+  large text columns.
+- **At equal codec level our encoding already wins** on every text column, by 6%
+  to 25%. What is left is buyable with codec LEVEL rather than with chains.
+
+So the gate is not simply unmet: the measurement it asks for is now narrow and
+specified. Run dictionary-then-FOR and dictionary-then-bitpack over the DICT
+vectors, knowing the ceiling is 3.3% of the bytes where the headroom is. The
+other 96.7% is out of reach of every chain on the list.
+
+The numbers and their method are on #1139. **What is not decided here is whether
+to re-theme this alpha**, which is the owner's call; this is recorded so a reader
+does not take the theme above as settled work. Two items reached this alpha from
+its own measurements rather than from the plan:
+
+    #1132  encoding kept only when smaller after the codec   81,869,112 -> 78,109,810   -4.59%
+    #1130  no validity bitmap for a chunk with no nulls      78,109,810 -> 64,984,810  -16.80%
+                                                             total                     -20.6%
+
 No date moves. alpha6 keeps Parquet partition inference and stays the last alpha.
 
 ### 1.0-alpha6, target 2026-10-13. Theme: Parquet partition inference
