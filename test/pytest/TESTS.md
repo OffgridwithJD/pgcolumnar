@@ -112,6 +112,7 @@ behaviour, the source of that number is named.
 - [64. test_native_delete_vector_index.py: reading the delete vector uses its index](#64-test_native_delete_vector_indexpy-reading-the-delete-vector-uses-its-index)
 - [65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path](#65-test_native_delete_visibility_pathspy-a-deleted-row-is-invisible-on-every-path)
 - [66. test_temporal.py: a columnar table enforces temporal constraints like a heap](#66-test_temporalpy-a-columnar-table-enforces-temporal-constraints-like-a-heap)
+- [67. test_native_parquet_dict_oob.py: a crafted dictionary index must not read out of bounds](#67-test_native_parquet_dict_oobpy-a-crafted-dictionary-index-must-not-read-out-of-bounds)
 
 ## 1. How to read a test in here
 
@@ -5173,3 +5174,39 @@ table alone, and `overlapping insert rejected (columnar)` reddens with `got 'ok'
 | test | what it holds |
 | --- | --- |
 | `test_temporal` | every arm: heap and columnar agree on accepting non-overlapping rows and rejecting an overlapping one, the accepted rows are really there, the PK contents match, and on 19 the FOR PORTION OF update and its result set match |
+
+## 67. test_native_parquet_dict_oob.py: a crafted dictionary index must not read out of bounds
+
+Port of `native_parquet_dict_oob.sh` (#432). The RLE_DICTIONARY path bounds-checked a
+file-controlled index with a SIGNED comparison, so an index with the high bit set
+sign-extends to a negative int, slips past the check, and reads about 16 GB past the
+dictionary. One crafted file, readable by anyone who may call `read_parquet`, took the
+cluster down with SIGSEGV.
+
+**The gate carries the shell suite's name**, which #1131 made possible: `pgc_skip fixture
+"dictionary-index OOB fixtures are missing"` records under that name, and before #1131 a
+port could emit only the reason code.
+
+**The fixtures are copied, not read in place.** The server runs as the `postgres` OS user
+while the checkout belongs to whoever cloned it, and `read_parquet` opens the file as the
+server — so a fixture left in the source tree is a path the backend may not be able to
+read, and that failure would look exactly like the rejection this suite exists to prove.
+
+Removal proof — restore the signed comparison:
+
+```
+the crafted file answered: consuming input failed: server closed the connection unexpectedly
+attack: the out-of-range dictionary index is rejected with an error: got 'no (...)' want 'yes'
+```
+
+On a real crash it is the rejection arm that reddens and the two arms after it never run,
+because the connection they would use is gone. They are not redundant: an out-of-bounds
+read that lands on mapped memory returns garbage without raising and without dying, and
+then the rejection arm fails while those two pass — a quieter defect, and asserting all
+three is what tells the two worlds apart in the report.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_native_parquet_dict_oob` | every arm: the benign file still reads its four rows, the crafted index is refused with an error, the backend is still alive afterwards, the server log exists, and it records no segfault |

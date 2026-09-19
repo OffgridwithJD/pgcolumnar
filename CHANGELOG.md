@@ -18,6 +18,27 @@ true until the next version shipped.
 
 ### Fixed
 
+- `native_parquet_dict_oob` ported to pytest (#432).
+
+  5 names, `missing: 0`. A Parquet dictionary index with the high bit set must not
+  read out of bounds: the RLE_DICTIONARY path bounds-checked a file-controlled index
+  with a SIGNED comparison, so an index of 0x80000000 sign-extends to a negative int,
+  slips past the check, and reads about 16 GB past the dictionary.
+
+  The gate carries the shell suite's name, which #1131 made possible. The fixtures are
+  COPIED rather than read in place: the server runs as the postgres OS user while the
+  checkout does not belong to it, and `read_parquet` opens the file as the server -- a
+  permission failure there would look exactly like the rejection the suite exists to
+  prove.
+
+  Removal proof, restoring the signed comparison: the crafted file answers "server
+  closed the connection unexpectedly" and the rejection arm reddens. On a real crash
+  the arms after it never run, because the connection is gone; they cover the quieter
+  world where the out-of-bounds read lands on mapped memory, returns garbage, and
+  neither raises nor dies.
+
+  `cluster_tests` 436 -> 437, re-derived by collection.
+
 - `temporal` ported to pytest, the first pair #1131 unblocked (#432).
 
   5 names, `missing: 0`. PostgreSQL 18's `WITHOUT OVERLAPS` primary keys and 19's
