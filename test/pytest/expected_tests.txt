@@ -337,4 +337,5 @@ guard_tests 382
 # 433 -> 435 when the two delete-visibility ports landed (#432):
 # test_native_delete_vector_index.py and test_native_delete_visibility_paths.py,
 # one test each. Derived by collection.
-cluster_tests 435
+# 435 -> 436 with the temporal port (#432), the first pair #1131 unblocked.
+cluster_tests 436

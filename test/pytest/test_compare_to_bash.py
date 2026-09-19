@@ -112,6 +112,7 @@ COMPLETE = ["analyze_reltuples",
             "scan_decode_cost",
             "sorted_pathkeys",
             "stats_privilege",
+            "temporal",
             "validity_elision",
             "zonemap_boundaries"]
 
