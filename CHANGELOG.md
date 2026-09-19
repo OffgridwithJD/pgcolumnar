@@ -18,6 +18,23 @@ true until the next version shipped.
 
 ### Fixed
 
+- `temporal` ported to pytest, the first pair #1131 unblocked (#432).
+
+  5 names, `missing: 0`. PostgreSQL 18's `WITHOUT OVERLAPS` primary keys and 19's
+  `UPDATE ... FOR PORTION OF` run through the constraint machinery pgColumnar
+  integrates with, so a columnar table must behave exactly as a heap one does.
+
+  `temporal.sh` gates on `btree_gist` and records that refusal under a NAME, which a
+  port could not emit until #1131. Two refusals here and only one is a property: the
+  version refusal is deliberately UNNAMED, because on 15/16/17 the shell suite exits
+  without recording anything and there is no name to match.
+
+  ONE ARM THE ORIGINAL DOES NOT HAVE. Both PK arms are satisfied by a table that
+  rejected everything, and two empty tables compare equal -- so the hash comparison
+  after them has the same hole. The port asserts the accepted rows are present first.
+
+  `cluster_tests` 435 -> 436, re-derived by collection.
+
 - A named skip could not be ported: `cannot_run` recorded under its reason code, so
   66 suites and 1,281 names could not reach `missing: 0` (#1131, #1150).
 

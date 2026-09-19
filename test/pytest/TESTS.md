@@ -111,6 +111,7 @@ behaviour, the source of that number is named.
 - [63. test_native_vacuum_race.py: compaction must not drop a concurrent commit](#63-test_native_vacuum_racepy-compaction-must-not-drop-a-concurrent-commit)
 - [64. test_native_delete_vector_index.py: reading the delete vector uses its index](#64-test_native_delete_vector_indexpy-reading-the-delete-vector-uses-its-index)
 - [65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path](#65-test_native_delete_visibility_pathspy-a-deleted-row-is-invisible-on-every-path)
+- [66. test_temporal.py: a columnar table enforces temporal constraints like a heap](#66-test_temporalpy-a-columnar-table-enforces-temporal-constraints-like-a-heap)
 
 ## 1. How to read a test in here
 
@@ -5139,3 +5140,36 @@ its row in place, so the in-transaction arm cannot be satisfied by a delete that
 | test | what it holds |
 | --- | --- |
 | `test_native_delete_visibility_paths` | every arm: the row count and group span, then the live set through a Seq Scan, an Index Scan, an Index Only Scan and the columnar aggregate — each with its plan asserted — then one deleted and one live row through the index, and a delete read back inside its own transaction |
+
+## 66. test_temporal.py: a columnar table enforces temporal constraints like a heap
+
+Port of `temporal.sh` (#432). PostgreSQL 18 adds `WITHOUT OVERLAPS` primary keys, 19 adds
+`UPDATE ... FOR PORTION OF`, and both run through the index and constraint machinery
+pgColumnar integrates with. The suite builds a heap/columnar pair and asserts they agree.
+
+**This is the first pair unblocked by #1131.** `temporal.sh` gates on `btree_gist` — a
+`WITHOUT OVERLAPS` key needs a GiST index over the scalar part — and records that refusal
+under a NAME. Until `expect.cannot_run` could carry a name the string was inexpressible
+and the pair reported `missing: 1` however faithful the rest was.
+
+**Two refusals, and only one of them is a property.** The version refusal is deliberately
+UNNAMED: on 15, 16 and 17 the shell suite prints a note, calls `pgc_summary` and exits
+without recording anything, so there is no name to match and an unnamed `cannot_run`
+states none. The `btree_gist` refusal is named, because the shell suite names it.
+
+**One arm the original does not have.** Both PK arms are satisfied by a table that
+rejected everything, including the rows that should have gone in — and two empty tables
+compare equal, so the hash comparison that follows has the same hole. The port asserts the
+accepted rows are present before comparing.
+
+Removal proof: there is no pgcolumnar-specific temporal code to delete, since the suite
+guards an integration with core's constraint machinery. The mutation is at the only seam
+that expresses "columnar stopped enforcing it" — drop the constraint from the columnar
+table alone, and `overlapping insert rejected (columnar)` reddens with `got 'ok' want
+'err'` while the heap arm stays green.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_temporal` | every arm: heap and columnar agree on accepting non-overlapping rows and rejecting an overlapping one, the accepted rows are really there, the PK contents match, and on 19 the FOR PORTION OF update and its result set match |
