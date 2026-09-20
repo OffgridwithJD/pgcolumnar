@@ -150,6 +150,17 @@ def _pair_is_lossy(lhs, op, rhs):
     #   r > 1    fails at 0 AND 1 -- a set, so it hides r
     #   r >= 0   cannot fail at all for a count -- a vacuous arm, not a premise
     #
+    #
+    # AND `r >= 0` IS CAUGHT FOR A REASON THAT DEPENDS ON THE OPERAND. Over a
+    # COUNT it cannot fail at all -- a vacuous arm wearing a premise's name, which
+    # is a different defect from hiding an operand. Over a SIGNED value it is an
+    # ordinary test that fails for every negative r, which is a set, so it hides r
+    # in the usual way. An AST sweep cannot tell the two apart, so it is refused
+    # either way and the message names the second reading. For the count case that
+    # diagnosis is imprecise: a reader following it would add the value to the
+    # branch and still have an arm that cannot fail. Recorded rather than fixed --
+    # distinguishing them needs type information this has no access to, and an arm
+    # that guessed would be worse than a message that is occasionally imprecise.
     # Neither was in the corpus and neither was reported; they were found by
     # driving the boundary after @OffgridwithJD's mirror finding sent me back to
     # it. A carve-out is a claim like any other and this one was not measured.
