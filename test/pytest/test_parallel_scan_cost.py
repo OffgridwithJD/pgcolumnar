@@ -96,15 +96,17 @@ def test_parallel_scan_cost(pgc_conn, expect):
     s_run = snode["Total Cost"] - snode["Startup Cost"]
     p_run = pnode["Total Cost"] - pnode["Startup Cost"]
     expect.text(
-        "yes" if s_run > 0 and p_run > 0 else "no",
-        "yes",
+        "both positive" if s_run > 0 and p_run > 0
+        else f"serial {s_run}, parallel {p_run}",
+        "both positive",
         "premise: both scans have a positive run cost",
     )
 
     ratio = s_run / p_run
     print(f"-- serial run={s_run} parallel run={p_run} ratio={ratio:.3f}")
     expect.text(
-        "io-kept" if ratio < 1.35 else "halved",
+        "io-kept" if ratio < 1.35
+        else f"ratio {ratio:.3f} at or above 1.35 (serial {s_run}, parallel {p_run})",
         "io-kept",
         "an I/O-dominated parallel scan is not priced at serial/workers",
     )
@@ -155,7 +157,9 @@ def test_parallel_scan_cost(pgc_conn, expect):
     print(f"-- leader on: parallel run={p_run_on} ratio={ratio_on:.3f}")
     print(f"-- rows: leader off={rows_off} leader on={rows_on}")
     expect.text(
-        "io-kept" if ratio_on < 1.35 else "halved",
+        "io-kept" if ratio_on < 1.35
+        else f"ratio {ratio_on:.3f} at or above 1.35 "
+             f"(serial {s_run}, parallel {p_run_on})",
         "io-kept",
         "an I/O-dominated parallel scan is not priced at serial/workers "
         "with the leader participating",

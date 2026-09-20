@@ -100,8 +100,13 @@ check_num "premise: fetching every projected column touched a measurable number 
 # count may not exceed the one-column count by more than one pin per extra
 # column.
 EXTRA_COLS=$((NCOLS - 1))
-check_num "a wide index fetch does not pin once per column" \
-	"$([ "${WIDE:-0}" -le $((NARROW + EXTRA_COLS)) ] && echo 1 || echo 0)" "1"
+# `check`, not `check_num`, because the value now carries the measurement rather
+# than a 1 or a 0. Collapsed to a number this failed as `got [0] want [1]` and said
+# nothing about how far over the bound the wide fetch went (#1164).
+check "a wide index fetch does not pin once per column" \
+	"$([ "${WIDE:-0}" -le $((NARROW + EXTRA_COLS)) ] && echo coalesced \
+		|| echo "wide ${WIDE:-0} over the bound $((NARROW + EXTRA_COLS)) (narrow $NARROW + $EXTRA_COLS)")" \
+	"coalesced"
 
 expect_wide=""
 i=0

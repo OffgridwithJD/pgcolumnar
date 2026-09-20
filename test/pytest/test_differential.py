@@ -290,16 +290,28 @@ def test_sum_and_avg_agree_for_every_numeric_type(matrix, col, expect):
     cs, hs = c[0], h[0]
     expect.num(len(cs), len(hs), f"{col} sum/avg returns the same shape")
     for got, want, what in zip(cs, hs, ("sum", "avg")):
-        # A relative difference, asserted as a number so the failure prints it.
+        # THE MEASUREMENT BELONGS IN THE COMPARED VALUE, NOT IN THE NAME. This put
+        # `got`, `want` and `rel` into the check NAME, which does carry them to the
+        # reader but makes the name a different string on every run: the name is what
+        # the parity grader matches, what the accounting counts, and what a ledger row
+        # is keyed on, and none of those want a float in them. The name now states the
+        # property and the value carries the numbers.
         rel = abs(got - want) / max(abs(want), 1e-300)
-        expect.num(1 if rel <= FLOAT_RTOL else 0, 1,
-                   f"{col} sum/avg agrees on {what} within {FLOAT_RTOL} relative "
-                   f"(got {got!r} want {want!r}, relative {rel:.3e})")
+        expect.text("within tolerance" if rel <= FLOAT_RTOL
+                    else f"relative {rel:.3e} (got {got!r} want {want!r})",
+                    "within tolerance",
+                    f"{col} sum/avg agrees on {what} within {FLOAT_RTOL} relative")
     # AND THE CONTROL: the tolerance must not be so loose that it accepts anything. A
     # decode error large enough to matter is orders of magnitude outside it, so the arm
     # asserts the bound is tight enough to have a direction.
-    expect.num(1 if FLOAT_RTOL < 1e-3 else 0, 1,
-               f"{col} sum/avg tolerance is tight enough to fail on a real decode error")
+    #
+    # This compares two module constants, so it cannot move at run time -- it is a
+    # drift guard against somebody loosening FLOAT_RTOL, and it fails only when the
+    # source changes. Which is exactly why its failure has to say what the constant
+    # became.
+    expect.text("tight" if FLOAT_RTOL < 1e-3 else f"FLOAT_RTOL is {FLOAT_RTOL}",
+                "tight",
+                f"{col} sum/avg tolerance is tight enough to fail on a real decode error")
 
 
 @pytest.mark.parametrize("col", sorted(RANGES))

@@ -141,7 +141,8 @@ def test_a_chunk_is_never_stored_larger_than_unencoded(pgc_conn, expect):
         spread = int(c.fetchone()[0])
 
         expect.text(
-            "tail-shaped" if rng > 1000000000 and spread < 100000 else "not-tail-shaped",
+            "tail-shaped" if rng > 1000000000 and spread < 100000
+            else f"range {rng} (needs > 1e9), spread {spread} (needs < 1e5)",
             "tail-shaped",
             "premise: the tail fixture's range is set by outliers, not by its typical value",
         )
@@ -158,7 +159,8 @@ def test_a_chunk_is_never_stored_larger_than_unencoded(pgc_conn, expect):
         rep_bytes = _value_bytes(c, "pc_rep")
 
         expect.text(
-            "not-inflated" if tail_bytes <= raw * 0.35 else "inflated",
+            "not-inflated" if tail_bytes <= raw * 0.35
+            else f"{tail_bytes} bytes over the {raw * 0.35:.0f} ceiling (raw {raw})",
             "not-inflated",
             "a chunk is not stored larger than it would be with no encoding at all",
         )
@@ -170,7 +172,8 @@ def test_a_chunk_is_never_stored_larger_than_unencoded(pgc_conn, expect):
             "while a column where encoding genuinely wins still encodes",
         )
         expect.text(
-            "small" if rep_bytes <= raw * 0.10 else "large",
+            "small" if rep_bytes <= raw * 0.10
+            else f"{rep_bytes} bytes over the {raw * 0.10:.0f} ceiling (raw {raw})",
             "small",
             "and that column stays far below the no-encoding size, so the win is real",
         )

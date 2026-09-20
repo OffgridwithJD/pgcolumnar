@@ -136,9 +136,13 @@ def test_native_fetch_coalesce(pgc_conn, expect):
         "premise: fetching every projected column touched a measurable number of buffers",
     )
     extra_cols = NCOLS - 1
-    expect.num(
-        1 if wide <= narrow + extra_cols else 0,
-        1,
+    print(f"-- index fetch buffers: narrow={narrow} wide={wide} "
+          f"(bound narrow + {extra_cols})")
+    expect.text(
+        "coalesced" if wide <= narrow + extra_cols
+        else f"wide {wide} over the bound {narrow + extra_cols} "
+             f"(narrow {narrow} + {extra_cols})",
+        "coalesced",
         "a wide index fetch does not pin once per column",
     )
 # ---- the validity copy must be bounded by the chunk, not by the row count ----
@@ -186,13 +190,20 @@ def test_the_validity_copy_is_bounded_before_the_chunk_is_read(expect):
     guard = body.find("pageLength < (uint64) cvb", anchor + 1) if anchor >= 0 else -1
     copy = body.find("memcpy(entry->vbits")
 
-    expect.num(
-        1 if (anchor >= 0 and guard >= 0 and copy >= 0) else 0,
-        1,
+    # NAMES THE MISSING ONE. Collapsed to a boolean this failed as `got 0 want 1`
+    # for any of three different reasons -- a renamed anchor, a moved bound, a
+    # rewritten copy -- and sent the reader to read the whole helper.
+    absent = [what for what, at in (("the chunk-offset anchor", anchor),
+                                    ("the pageLength bound", guard),
+                                    ("the validity memcpy", copy)) if at < 0]
+    expect.text(
+        "all three present" if not absent else "not found: " + ", ".join(absent),
+        "all three present",
         "premise: the coalescing helper holds both the bound and the validity copy",
     )
-    expect.num(
-        1 if (guard >= 0 and copy >= 0 and guard < copy) else 0,
-        1,
+    expect.text(
+        "bound first" if (guard >= 0 and copy >= 0 and guard < copy)
+        else f"bound at {guard}, copy at {copy}",
+        "bound first",
         "the validity copy is bounded by the chunk length before it runs",
     )

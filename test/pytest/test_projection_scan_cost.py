@@ -108,9 +108,13 @@ def test_projection_scan_cost(pgc_conn, expect):
     l_proj_run = lp["Total Cost"] - lp["Startup Cost"]
     t_base_run = tb["Total Cost"] - tb["Startup Cost"]
     l_base_run = lb["Total Cost"] - lb["Startup Cost"]
+    zero = [what for what, run in (("tight projection", t_proj_run),
+                                   ("loose projection", l_proj_run),
+                                   ("tight base", t_base_run),
+                                   ("loose base", l_base_run)) if run <= 0]
     expect.text(
-        "yes" if min(t_proj_run, l_proj_run, t_base_run, l_base_run) > 0 else "no",
-        "yes",
+        "all positive" if not zero else "no run cost: " + ", ".join(zero),
+        "all positive",
         "premise: every compared scan has a positive run cost",
     )
 
@@ -124,7 +128,8 @@ def test_projection_scan_cost(pgc_conn, expect):
     )
 
     expect.text(
-        "tighter" if t_ratio < l_ratio else "not",
+        "tighter" if t_ratio < l_ratio
+        else f"tight {t_ratio:.3f} not below loose {l_ratio:.3f}",
         "tighter",
         "a tight covering projection is cheaper relative to the base than a loose one",
     )
@@ -177,15 +182,17 @@ def test_projection_scan_cost(pgc_conn, expect):
     mb = _custom_scan(mis_base)
     m_proj_run = mp["Total Cost"] - mp["Startup Cost"]
     m_base_run = mb["Total Cost"] - mb["Startup Cost"]
+    zero = [what for what, run in (("projection", m_proj_run),
+                                   ("base", m_base_run)) if run <= 0]
     expect.text(
-        "yes" if min(m_proj_run, m_base_run) > 0 else "no",
-        "yes",
+        "all positive" if not zero else "no run cost: " + ", ".join(zero),
+        "all positive",
         "premise: every misattributed scan has a positive run cost",
     )
     m_ratio = m_proj_run / m_base_run
     print(f"-- misattr proj_run={m_proj_run} base_run={m_base_run} ratio={m_ratio:.3f}")
     expect.text(
-        "not-cheap" if m_ratio >= 0.8 else "cheap",
+        "not-cheap" if m_ratio >= 0.8 else f"ratio {m_ratio:.3f} below 0.8",
         "not-cheap",
         "a non-sort-key restriction does not cheapen a covering projection",
     )
@@ -225,23 +232,28 @@ def test_projection_scan_cost(pgc_conn, expect):
     print(f"-- unprunable OR ratio={or_ratio:.3f} "
           f"prunable range ratio={pr_ratio:.3f} IN-list ratio={sa_ratio:.3f}")
 
+    zero = [what for what, run in (("OR projection", or_run), ("OR base", or_base),
+                                   ("range projection", pr_run), ("range base", pr_base),
+                                   ("IN-list projection", sa_run),
+                                   ("IN-list base", sa_base)) if run <= 0]
     expect.text(
-        "yes" if min(or_run, or_base, pr_run, pr_base, sa_run, sa_base) > 0 else "no",
-        "yes",
+        "all positive" if not zero else "no run cost: " + ", ".join(zero),
+        "all positive",
         "premise: every unprunable-clause scan has a positive run cost",
     )
 
     # Without this the three arms below can all agree at the floor, which is
     # agreement for a reason unrelated to what they assert.
     expect.text(
-        "above" if pr_ratio > 0.051 else "at-floor",
+        "above" if pr_ratio > 0.051
+        else f"ratio {pr_ratio:.3f} at or below the 0.051 one-stripe floor",
         "above",
         "premise: the prunable range is priced above the one-stripe floor, "
         "so the arms differ",
     )
 
     expect.text(
-        "not-cheap" if or_ratio >= 0.8 else "cheap",
+        "not-cheap" if or_ratio >= 0.8 else f"ratio {or_ratio:.3f} below 0.8",
         "not-cheap",
         "a clause that mentions the sort key but cannot prune on it does not "
         "cheapen a covering projection",
@@ -250,7 +262,7 @@ def test_projection_scan_cost(pgc_conn, expect):
     # The silent direction. Declining a projection that would have won costs a
     # plan and reddens nothing, so both controls ship with the arm.
     expect.text(
-        "cheap" if pr_ratio < 0.8 else "not-cheap",
+        "cheap" if pr_ratio < 0.8 else f"ratio {pr_ratio:.3f} at or above 0.8",
         "cheap",
         "while a plain range on the sort key still earns its discount",
     )
@@ -258,7 +270,7 @@ def test_projection_scan_cost(pgc_conn, expect):
     # An IN-list range key is conservative, so `exact` is false for it. A fix
     # gating on exactness rather than on producing a key would decline this.
     expect.text(
-        "cheap" if sa_ratio < 0.8 else "not-cheap",
+        "cheap" if sa_ratio < 0.8 else f"ratio {sa_ratio:.3f} at or above 0.8",
         "cheap",
         "and an IN-list on the sort key keeps its discount, which gating on "
         "exactness would lose",
