@@ -183,4 +183,17 @@ suites_not_covered 249
 # Re-derived by COUNTING on this tree, never by adding nineteen to a number from
 # another:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1439
+#
+# 1439 -> 1444 when 540's five arms landed. They enter as `never`, which is what
+# every new check does, and `suites_not_covered` does NOT move: `harness_selftest`
+# was already a covered suite, which is exactly why the gate refused these five
+# and why they needed seeding at all.
+#
+# THE MAJOR SET WAS DERIVED FROM FIVE RUNS, never copied from the neighbouring
+# rows. harness_selftest was built and run against 15.18, 16.14, 17.10, 18.4 and
+# 19beta2 -- 1086 passed + 0 failed on every one -- and the five logs merged
+# together, so `15;16;17;18;19` is a measurement rather than an assumption.
+#
+# Re-counted on this tree, never by adding five:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1444
+checks_never_observed_red 1444
