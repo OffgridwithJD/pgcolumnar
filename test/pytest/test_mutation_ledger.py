@@ -512,7 +512,8 @@ def test_the_runner_invokes_the_gate_before_it_removes_the_logs(expect):
     teardown = [i for i, l in enumerate(text) if 'rm -rf "$builddir"' in l]
     expect.num(len(call), 1, "the runner invokes the ledger gate exactly once")
     expect.at_least(len(teardown), 1, "premise: the runner removes the build directory")
-    expect.text("before" if call[0] < teardown[-1] else "after", "before",
+    expect.text("before" if call[0] < teardown[-1]
+                else f"call at line {call[0]}, teardown at {teardown[-1]}", "before",
                 "and it runs before the logs are removed, the only place it can")
     # The block is extracted, not a fixed-size window: a window's size is a fact
     # about formatting, and the first version measured 8 lines and broke the moment

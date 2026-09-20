@@ -18,6 +18,71 @@ true until the next version shipped.
 
 ### Fixed
 
+- A tolerance arm that collapses to a boolean cannot say which assertion failed,
+  or by how much. 26 sites now carry their measurement into the failure message
+  (#1164).
+
+  `expect.num(1 if abs(on - off) <= 5 else 0, 1, name)` discards four measured
+  buffer counts BEFORE asserting, so the failure can only ever read `got 0 want 1`.
+  Two arms in `test_sorted_pathkeys.py` were the motivating pair: one is a 6-buffer
+  spurious gap and the other a 14-buffer collapse, they are different findings with
+  different owners, and a red said neither. They now read:
+
+      got 'differs by 9 (on=227 off=218 over 1000 groups)'  want 'within 5'
+      got 'margin 3 (on=45 off=42)'                         want 'reads more'
+
+  THE PORT LOST A DIAGNOSTIC THE ORIGINAL HAD, which is the sharper half of this.
+  `sorted_pathkeys.sh` already printed `on=`, `off=` and the group count on BOTH
+  arms, and `parallel_am_scan.sh` already printed `no (${_pam_nreq:-none})`. Their
+  ports dropped it. `compare_to_bash` grades the NAME, so two arms grade
+  `missing: 0` while one prints the measurement and the other prints `got 0 want 1`
+  -- name parity does not preserve diagnostics, and nothing in the harness can see
+  the difference. `native_fetch_coalesce.sh` and `projection_scan_cost.sh` were
+  defective on both sides and are fixed on both.
+
+  THE POPULATION WAS MEASURED, NOT ESTIMATED, and the first two answers were wrong
+  for reasons worth keeping. Over `test/pytest/*.py` by `ast` rather than by regex,
+  because the shape appears inside docstrings in this tree and a text sweep flags
+  its own documentation:
+
+      190  expect.*(<conditional>, ...)
+      148  ...both branches constant        -- 'Gather'/'none' fails informatively
+       26  ...AND the failing set has more than one member
+           AND neither branch carries the value
+
+  Both halves of that last rule are load-bearing. `x > 0` and `n >= 1` over a count
+  fail at exactly one value, so the boolean is a LOSSLESS encoding and `got 'no'
+  want 'yes'` already determines the state: 9 such sites are deliberately unchanged.
+  And a branch that merely NAMES the outcome is not carrying it -- `got 'halved'
+  want 'io-kept'` tells the reader the verdict they already had and not the ratio
+  that produced it. Excluding those cost 14 sites on the first pass.
+
+  Each rewritten arm was proved to carry its measurement by mutating the threshold
+  until it fails, restoring by inverse edit and re-hashing byte-identical:
+
+      got 'wide 14 over the bound 25 (narrow 14 + 11)'      want 'coalesced'
+      got 'no run cost: tight base'                         want 'all positive'
+      got 'ratio 1.008 at or above 1.35 (serial 208206.25, parallel 206603.12)'
+      got '259338 bytes over the 336000 ceiling (raw 960000)'
+      got 'requested 1, needs 2'                            want 'requested'
+
+  `test_differential.py` also put `got`, `want` and the relative difference into the
+  check NAME. That does reach the reader, and it makes the name a different string
+  on every run -- the name is what the parity grader matches, what the accounting
+  counts and what a ledger row is keyed on. Moved to the compared value; the name
+  now states the property and is stable.
+
+  Left alone deliberately, with the reason recorded at the site: `check_num "$X"
+  "$X"` in `sorted_pathkeys.sh` compares a value against itself, which the pytest
+  layer refuses outright as a vacuity mode. `check_num` validates that BOTH sides
+  are numbers before comparing, so through that helper a self-comparison IS a
+  numeric-ness test -- an idiom, not a defect, and the reason the port had to
+  express that premise a different way.
+
+  No test is added or removed, so `cluster_tests` and `guard_tests` do not move;
+  both re-derived by collection rather than assumed. All nine affected pairs still
+  grade `missing: 0`.
+
 - `analyze_differential` ported to pytest (#432).
 
   20 names, `missing: 0`, and no extras. `pgcolumnar.analyze()` writes through

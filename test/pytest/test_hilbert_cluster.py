@@ -844,7 +844,9 @@ def test_the_same_call_does_work_once_a_tail_is_appended(s4a, expect):
     conn, st = s4a
     expect.text("decayed" if (st["appended_tail"] or 0) > 0 else "clean", "decayed",
                 "premise: s4a now carries an appended tail for the gate to let through")
-    expect.text("yes" if (st["ret2"] or 0) > 0 else "no", "yes",
+    # `(x or 0) > 0` maps BOTH None and 0 to "no": a verb that returned no count and
+    # a verb that returned zero are different failures and this said neither.
+    expect.text("yes" if (st["ret2"] or 0) > 0 else f"no (returned {st['ret2']!r})", "yes",
                 "(a2) THE SAME CALL ON THE SAME TABLE does work once a tail is "
                 "appended, so the 0 above was a gate and not a dead verb (>0)")
     expect.text(_changed(st["phys2"], st["phys2_after"]), "moved",
@@ -905,7 +907,7 @@ def test_the_gate_opens_for_a_zorder_table_over_the_same_columns(s4b, expect):
     expect.text(st["ran"], NOERROR, "premise: cluster('s4b','a','b') ran without raising")
     expect.text(st["kind_before"], "zorder/{a,b}",
                 "premise: s4b is a zorder table over exactly (a,b)")
-    expect.text("yes" if (st["ret"] or 0) > 0 else "no", "yes",
+    expect.text("yes" if (st["ret"] or 0) > 0 else f"no (returned {st['ret']!r})", "yes",
                 "(b) recluster_hilbert on a zorder table over the same columns does "
                 "real work (>0)")
     expect.text(_changed(st["phys"], st["phys_after"]), "moved",
@@ -999,7 +1001,8 @@ def test_a_different_key_rewrites_in_both_directions(s4d, expect):
                 "premise: the two (d) twins are byte-identical before either is "
                 "reclustered on the new key")
 
-    expect.text("yes" if (st["s4d1"]["ret"] or 0) > 0 else "no", "yes",
+    expect.text("yes" if (st["s4d1"]["ret"] or 0) > 0
+                else f"no (returned {st['s4d1']['ret']!r})", "yes",
                 "(d) recluster_hilbert over DIFFERENT columns still rewrites (>0)")
     expect.text(_changed(st["s4d1"]["phys"], st["s4d1"]["phys_after"]), "moved",
                 "(d) and that rewrite moved s4d1's layout")
@@ -1008,7 +1011,8 @@ def test_a_different_key_rewrites_in_both_directions(s4d, expect):
     expect.num(_scalar(conn, "SELECT count(*) FROM s4d1"), S4_ROWS,
                "(d) and no row was lost from s4d1")
 
-    expect.text("yes" if (st["s4d2"]["ret"] or 0) > 0 else "no", "yes",
+    expect.text("yes" if (st["s4d2"]["ret"] or 0) > 0
+                else f"no (returned {st['s4d2']['ret']!r})", "yes",
                 "(d) plain recluster over DIFFERENT columns rewrites a hilbert table (>0)")
     expect.text(_changed(st["s4d2"]["phys"], st["s4d2"]["phys_after"]), "moved",
                 "(d) and that rewrite moved s4d2's layout")
@@ -1637,7 +1641,8 @@ def test_the_install_script_and_the_catalog_agree_on_the_symbol_set(s8, expect):
     conn, st = s8
     expect.text("yes" if st["exists"] else f"missing: {st['sqlfile']}", "yes",
                 "premise: the install script derived from default_version exists")
-    expect.text("yes" if len(st["src"]) >= 20 else "no", "yes",
+    expect.text("yes" if len(st["src"]) >= 20
+                else f"no ({len(st['src'])} symbols declared)", "yes",
                 "premise: the install script declares MODULE_PATHNAME symbols at all")
     expect.text("same" if st["src"] == st["cat"] else "differs", "same",
                 "the catalog and the install script still agree on the symbol set")

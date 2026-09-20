@@ -1032,15 +1032,37 @@ def test_a_query_that_cannot_use_the_order_does_not_pay_to_decide(planbuf_fx, ex
     # A TOLERANCE, not equality: two backends differ by a couple of buffers whatever
     # this code does. Set far below the effect it must detect -- without the guard this
     # read +44 on this fixture, and it grows with the group count.
-    expect.num(1 if abs(on - off) <= 5 else 0, 1,
-               "a query with no ORDER BY does not read the group list to decide")
+    #
+    # PRINTED ON EVERY RUN, pass or fail. A tolerance is a claim about a distribution
+    # and the distance from the bound is the only evidence for it, so a green run is a
+    # data point about headroom rather than a boolean.
+    #
+    # THE GROUP COUNT IS IN THE FAILURE MESSAGE, and it is the third value the shell
+    # twin prints. It is load-bearing rather than context: the delta GROWS with the
+    # group count, and at a hundred groups the unguarded read was +6 -- close enough to
+    # the noise floor that the arm could not discriminate. A reader looking at a future
+    # red needs to know the fixture had its thousand groups before believing the delta.
+    # It is recoverable from the `premise: the fixture has many groups` arm above, but
+    # that is the reader doing a join, and not needing one is the whole point.
+    gap = abs(on - off)
+    print(f"-- planning buffers, no ORDER BY: on={on} off={off} "
+          f"|on-off|={gap} (tolerance 5) over {groups} groups")
+    expect.text("within 5" if gap <= 5
+                else f"differs by {gap} (on={on} off={off} over {groups} groups)",
+                "within 5",
+                "a query with no ORDER BY does not read the group list to decide")
 
     # THE CONTROL that stops the arm above from being satisfied by a function that never
     # reads anything: the query that CAN use the ordering must still pay.
     order_on = _planning_buffers(conn, "on", "SELECT k FROM pb ORDER BY k LIMIT 10")
     order_off = _planning_buffers(conn, "off", "SELECT k FROM pb ORDER BY k LIMIT 10")
-    expect.num(1 if order_on > order_off + 5 else 0, 1,
-               "control: a query that CAN use the ordering does read to decide")
+    margin = order_on - order_off
+    print(f"-- planning buffers, ORDER BY: on={order_on} off={order_off} "
+          f"margin={margin} (needs > 5)")
+    expect.text("reads more" if margin > 5
+                else f"margin {margin} (on={order_on} off={order_off})",
+                "reads more",
+                "control: a query that CAN use the ordering does read to decide")
 
 
 # ======================= a projection sorted on a DIFFERENT key must not lend its order

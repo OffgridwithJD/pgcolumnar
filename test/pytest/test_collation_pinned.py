@@ -69,7 +69,12 @@ def test_the_corpus_has_files_using_comm_so_the_sweep_is_not_vacuous(expect):
     names = [p.name for p in _files_using_comm()]
     expect.at_least(len(names), 1, "at least one suite still uses comm")
     # Printed from the data rather than retyped, so this cannot go stale.
-    expect.text("many" if len(names) >= 2 else "one", "many",
+    # FLAGGED BY THE SIGNATURE AND NOT A DEFECT, fixed anyway because it is one
+    # word: `at_least(len(names), 1)` above already guarantees >= 1, so this fails
+    # only at exactly 1 and the boolean is lossless. A static rule cannot see that a
+    # PRECEDING assertion narrowed the failing set -- which is the interesting false
+    # positive in this class.
+    expect.text("many" if len(names) >= 2 else f"only {len(names)}", "many",
                 f"and more than one does, so the sweep spans files: {names}")
 
 

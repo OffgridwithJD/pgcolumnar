@@ -99,7 +99,8 @@ def test_the_codec_setting_decides_whether_fsst_is_kept(pgc_conn, expect):
             "with no codec the same corpus keeps FSST at the same margin",
         )
         expect.text(
-            "codec decided" if without > with_codec else "no difference",
+            "codec decided" if without > with_codec
+            else f"without={without} with_codec={with_codec}",
             "codec decided",
             "so the codec is what changed the decision, not the corpus",
         )

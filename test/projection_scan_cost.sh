@@ -98,9 +98,17 @@ check "premise: without the projection scan, the tight plan is a base columnar s
 check "premise: without the projection scan, the loose plan is a base columnar scan" \
 	"$(echo "$loose_base" | grep -c 'Columnar Projection')" "0"
 
+# NAMES WHICH SCAN. Collapsed to yes/no this said one of four was not positive and
+# nothing about which one, and the reader had to re-derive all four (#1164). Single
+# quotes round the awk program so the strings need no escaping.
 check "premise: every compared scan has a positive run cost" \
 	"$(awk -v a="$t_proj_run" -v b="$t_base_run" -v c="$l_proj_run" -v d="$l_base_run" \
-		"BEGIN{ print (a>0 && b>0 && c>0 && d>0) ? \"yes\" : \"no\" }")" "yes"
+		'BEGIN{ z = ""
+			if (a <= 0) z = z " tight projection"
+			if (b <= 0) z = z " tight base"
+			if (c <= 0) z = z " loose projection"
+			if (d <= 0) z = z " loose base"
+			print (z == "") ? "yes" : "no run cost:" z }')" "yes"
 
 # The unfixed path multiplies the whole run by 0.5, so both ratios are 0.500.
 # A constant other than 0.5 can dodge the "both halved" pin; it cannot make
@@ -139,7 +147,11 @@ check "premise: the misattributed query has a covering projection" \
 	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration WHERE rel = 'prsk'::regclass AND name = 'onsk'")" "1"
 
 check "premise: every misattributed scan has a positive run cost" \
-	"$(awk -v a="$m_proj_run" -v b="$m_base_run" "BEGIN{ print (a>0 && b>0) ? \"yes\" : \"no\" }")" "yes"
+	"$(awk -v a="$m_proj_run" -v b="$m_base_run" \
+		'BEGIN{ z = ""
+			if (a <= 0) z = z " projection"
+			if (b <= 0) z = z " base"
+			print (z == "") ? "yes" : "no run cost:" z }')" "yes"
 
 # rel->rows after every restriction makes this cheap (one-stripe floor over
 # heap survival on kind). The sort key is the whole table, so the ratio
@@ -182,7 +194,11 @@ sa_ratio="$(awk -v p="$sa_run" -v b="$sa_base" "BEGIN{ if (b<=0) print 0; else p
 echo "-- unprunable OR ratio=$or_ratio   prunable range ratio=$pr_ratio   IN-list ratio=$sa_ratio"
 
 check "premise: every unprunable-clause scan has a positive run cost" \
-	"$(awk -v a="$or_run" -v b="$or_base" "BEGIN{ print (a>0 && b>0) ? \"yes\" : \"no\" }")" "yes"
+	"$(awk -v a="$or_run" -v b="$or_base" \
+		'BEGIN{ z = ""
+			if (a <= 0) z = z " OR projection"
+			if (b <= 0) z = z " OR base"
+			print (z == "") ? "yes" : "no run cost:" z }')" "yes"
 
 # PREMISE THAT THE FIXTURE CLEARS THE FLOOR. Without it a pass says nothing:
 # at the floor every arm below reads 0.05 and agrees for the wrong reason.

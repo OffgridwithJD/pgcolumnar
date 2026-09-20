@@ -220,9 +220,13 @@ def test_a_parallel_index_build_covers_the_whole_table(pgc_cluster, pgc_conn, ex
         cur.execute("RESET log_min_messages")
 
     req = _requested_workers(pgc_cluster, marker)
-    expect.num(
-        1 if (req is not None and req >= 2) else 0,
-        1,
+    # THREE FAILING STATES, not one: no line in the log at all, a request of zero,
+    # or a request below what this premise needs. `got 0 want 1` named none of them.
+    expect.text(
+        "requested" if (req is not None and req >= 2)
+        else ("no worker request found in the log" if req is None
+              else f"requested {req}, needs 2"),
+        "requested",
         "premise: the index build requested parallel workers",
     )
 

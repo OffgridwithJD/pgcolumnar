@@ -370,7 +370,9 @@ def test_fan_out_spans_more_than_one_row_group(pgc_conn, expect):
                       "(SELECT proj_storage_id FROM pgcolumnar.projection "
                       " WHERE storage_id = pgcolumnar.get_storage_id('fo2') "
                       " AND name='fp2')")
-        expect.text("yes" if groups >= 2 else "no", "yes",
+        # 0 and 1 are different failures: no projection storage at all, against a
+        # projection that exists and did not span. `no` said neither.
+        expect.text("yes" if groups >= 2 else f"no ({groups} row group(s))", "yes",
                     "fp2 spans multiple projection row groups")
 
 
