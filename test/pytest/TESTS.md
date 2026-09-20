@@ -5564,90 +5564,6 @@ collation. Measured rather than assumed:
 The second is the `pg_config` the `pytest (cluster tests)` job is given, so **CI
 runs these arms rather than declining them.** The five-major local gate exits 67 on
 every major for this pair, which is the designed third state and not a failure.
-## 72. test_assertion_carries_its_measurement.py: a failure must say what it measured
-
-    expect.num(1 if abs(on - off) <= 5 else 0, 1, "...")   ->   got 0 want 1
-
-Four measured buffer counts, reduced to a boolean before the assert. The failure
-message carries none of them, so the red says only that the arm failed — which the
-word FAILED already said.
-
-**WHAT IT COST, MEASURED (#1164).** A PG 15 leg reddened one arm of
-`sorted_pathkeys`, and two sessions spent an afternoon unable to say whether the
-ORACLE (`|on - off| <= 5`, a six-buffer spurious gap) or the CONTROL
-(`order_on > order_off + 5`, a fourteen-buffer collapse) had failed. Those are
-different defects with different owners. Four further experiments were aimed at a
-target whose identity was unknown, and it is still unknown.
-
-**TWO BUGS, ONE SYMPTOM.** The runner also captured each leg into a shell variable
-and grepped it for summary lines, so the full output never reached disk. That was
-repaired separately. **Repairing it alone would still have left `got 0 want 1`**,
-because the measurement was discarded before the message was built.
-
-### The rule
-
-An `IfExp` first argument is refused when BOTH hold: the failing set has more than
-one member, AND neither branch carries the value. `is None`, `in`, `==` and
-nothing-versus-something (`x > 0`, `n >= 1`) are determinate — the boolean already
-names the failing state.
-
-**Nothing-versus-something is determinate whatever the left side LOOKS like.** An
-earlier draft keyed on the operand being a bare `Name` and so flagged
-`(st['ret'] or 0) > 0`; the `or 0` is a None-guard, not a measurement, and refusing
-it was syntax standing in for semantics.
-
-**The one exception**, and it is why the carve-out cannot be "the comparator is 0":
-
-    'yes' if min(t_proj_run, l_proj_run, t_base_run, l_base_run) > 0 else 'no'
-
-The comparator IS 0 and the boolean still hides which of four measurements went
-non-positive.
-
-### Why this and not a parity check
-
-`compare_to_bash` grades the check NAME. Two arms grade `missing: 0` while one
-prints its measurement and the other prints `got 0 want 1` — which is how two of
-the four pairs repaired under #1164 turned out to be **port regressions**, where
-the shell original had carried its numbers all along. Name parity does not preserve
-diagnostics, and no comparison of two independent implementations ever will.
-
-### The population, measured before this was written
-
-    expect.*(<IfExp>, ...)              190
-      + both branches constant          148
-        + a LOSSY test                   26   <- repaired under #1164
-
-### The shell twin is shaped differently, on purpose
-
-`test/selftest/540-an-arm-must-carry-its-measurement.sh` asserts a tracked list
-(`test/lossy_arms.tsv`, 77 rows across 52 suites) rather than zero, because that
-corpus is not at zero. The gate refuses both directions: an unlisted offender fails
-by name, and a repaired arm fails until its row is removed, so the list may only
-shrink. **The asymmetry is the honest answer**: the two corpora are in different
-states, and a guard asserting zero over both would claim a property this tree does
-not have.
-
-### Every test
-
-| test | what it holds |
-| --- | --- |
-| `test_the_grouped_node_is_chosen_for_the_shapes_it_supports` | a text key, an hour expression and the q4 shape all plan as the grouped node, and the GUC off plans an ordinary Agg |
-| `test_the_grouped_path_agrees_with_a_heap_mirror` | eight exact-aggregate shapes, each with the node asserted first, against the same rows in a heap table |
-| `test_the_mirror_still_agrees_after_deletes_and_an_added_column` | the mirror and the toggle both survive a delete and an `ADD COLUMN ... DEFAULT` |
-| `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
-| `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
-| `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
-| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
-| `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
-| `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
-| `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
-| `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
-| `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
-| `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
-| `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
-| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
-| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |
-
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 
 Port of `analyze_function.sh` (#414, #432). Core ANALYZE samples 30,000 rows, and on a
@@ -5740,4 +5656,90 @@ assumed: `542af67fbc25` unmutated, `1cd8f666717b` mutated, `542af67fbc25` restor
 | `test_a_determinate_arm_is_not_caught` | six shapes whose failing set is a single value, driven rather than described |
 | `test_an_aggregate_over_several_operands_stays_in_scope` | `min(a,b,c,d) > 0` is lossy, `min(a) > 0` is not |
 | `test_a_chained_comparison_is_examined_pair_by_pair` | `0 < sel < 20000` hides its middle operand; an earlier draft scored every chain determinate |
+| `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
 | `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
+
+
+## 73. test_assertion_carries_its_measurement.py: a failure must say what it measured
+
+    expect.num(1 if abs(on - off) <= 5 else 0, 1, "...")   ->   got 0 want 1
+
+Four measured buffer counts, reduced to a boolean before the assert. The failure
+message carries none of them, so the red says only that the arm failed — which the
+word FAILED already said.
+
+**WHAT IT COST, MEASURED (#1164).** A PG 15 leg reddened one arm of
+`sorted_pathkeys`, and two sessions spent an afternoon unable to say whether the
+ORACLE (`|on - off| <= 5`, a six-buffer spurious gap) or the CONTROL
+(`order_on > order_off + 5`, a fourteen-buffer collapse) had failed. Those are
+different defects with different owners. Four further experiments were aimed at a
+target whose identity was unknown, and it is still unknown.
+
+**TWO BUGS, ONE SYMPTOM.** The runner also captured each leg into a shell variable
+and grepped it for summary lines, so the full output never reached disk. That was
+repaired separately. **Repairing it alone would still have left `got 0 want 1`**,
+because the measurement was discarded before the message was built.
+
+### The rule
+
+An `IfExp` first argument is refused when BOTH hold: the failing set has more than
+one member, AND neither branch carries the value. `is None`, `in`, `==` and
+nothing-versus-something (`x > 0`, `n >= 1`) are determinate — the boolean already
+names the failing state.
+
+**Nothing-versus-something is determinate whatever the left side LOOKS like.** An
+earlier draft keyed on the operand being a bare `Name` and so flagged
+`(st['ret'] or 0) > 0`; the `or 0` is a None-guard, not a measurement, and refusing
+it was syntax standing in for semantics.
+
+**The one exception**, and it is why the carve-out cannot be "the comparator is 0":
+
+    'yes' if min(t_proj_run, l_proj_run, t_base_run, l_base_run) > 0 else 'no'
+
+The comparator IS 0 and the boolean still hides which of four measurements went
+non-positive.
+
+### Why this and not a parity check
+
+`compare_to_bash` grades the check NAME. Two arms grade `missing: 0` while one
+prints its measurement and the other prints `got 0 want 1` — which is how two of
+the four pairs repaired under #1164 turned out to be **port regressions**, where
+the shell original had carried its numbers all along. Name parity does not preserve
+diagnostics, and no comparison of two independent implementations ever will.
+
+### The population, measured before this was written
+
+    expect.*(<IfExp>, ...)              190
+      + both branches constant          148
+        + a LOSSY test                   26   <- repaired under #1164
+
+### The shell twin is shaped differently, on purpose
+
+`test/selftest/540-an-arm-must-carry-its-measurement.sh` asserts a tracked list
+(`test/lossy_arms.tsv`, 77 rows across 52 suites) rather than zero, because that
+corpus is not at zero. The gate refuses both directions: an unlisted offender fails
+by name, and a repaired arm fails until its row is removed, so the list may only
+shrink. **The asymmetry is the honest answer**: the two corpora are in different
+states, and a guard asserting zero over both would claim a property this tree does
+not have.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_grouped_node_is_chosen_for_the_shapes_it_supports` | a text key, an hour expression and the q4 shape all plan as the grouped node, and the GUC off plans an ordinary Agg |
+| `test_the_grouped_path_agrees_with_a_heap_mirror` | eight exact-aggregate shapes, each with the node asserted first, against the same rows in a heap table |
+| `test_the_mirror_still_agrees_after_deletes_and_an_added_column` | the mirror and the toggle both survive a delete and an `ADD COLUMN ... DEFAULT` |
+| `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
+| `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
+| `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
+| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
+| `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
+| `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
+| `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
+| `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
+| `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
+| `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
+| `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
+| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
+| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |

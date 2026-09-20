@@ -221,7 +221,13 @@
 # `cluster_tests` was re-derived in the same run and did NOT move -- 442 -- which
 # is the expected answer for a file that needs no cluster, and checking it rather
 # than assuming it is what this file asks for.
-guard_tests 389
+# 389 -> 390 in a second review round, when an eighth arm landed for a comparison
+# wrapped in anything at all. `_is_lossy` handled BoolOp and Compare and returned
+# False for every other node type -- a fail-open default that scored
+# `any(r <= 0 for r in runs)` determinate, which is the natural rewrite of the
+# `min(runs) > 0` the previous round taught it to refuse.
+# Re-derived by collection, not by adding one: `390 tests collected`.
+guard_tests 390
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

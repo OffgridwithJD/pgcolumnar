@@ -122,9 +122,17 @@ def _pair_is_lossy(lhs, op, rhs):
         return False
     if not isinstance(op, ORDERING_OPS):
         return False
-    # Nothing versus something: exactly one value fails, so the boolean fixes it.
-    # Keyed on the COMPARATOR, never on the shape of the left side.
-    if isinstance(rhs, ast.Constant) and rhs.value in (0, 1):
+    # Nothing versus something -- `x > 0`, `n >= 1` -- where exactly one value
+    # fails, so the boolean already fixes it. Keyed on the COMPARATOR, never on
+    # the shape of the left side.
+    #
+    # THE DIRECTION IS PART OF THE CARVE-OUT and a refactor dropped it once. Only
+    # `>` and `>=` are nothing-versus-something. `r <= 0` against the same literal
+    # fails for EVERY POSITIVE r, which is a set rather than a value, so it hides
+    # `r` and stays in scope. Caught by `any(r <= 0 for r in runs)` reading as
+    # determinate -- a false negative introduced while fixing a different one.
+    if (isinstance(op, (ast.Gt, ast.GtE))
+            and isinstance(rhs, ast.Constant) and rhs.value in (0, 1)):
         return _aggregates(lhs)
     return True
 
@@ -150,11 +158,31 @@ def _comparison_is_lossy(test):
 
 
 def _is_lossy(test):
-    """A test is lossy if it is a lossy comparison, or a boolean combination
-    holding one. Every operand is examined; one is enough."""
-    if isinstance(test, ast.BoolOp):
-        return any(_is_lossy(v) for v in test.values)
-    return _comparison_is_lossy(test)
+    """Lossy if ANY comparison anywhere inside the test is lossy.
+
+    EVERY COMPARISON, WHEREVER IT SITS, and this is a walk rather than a list of
+    node types on purpose. An earlier draft handled `BoolOp` and `Compare` and
+    returned False for everything else -- a FAIL-OPEN default, which scored a
+    comparison wrapped in anything at all as determinate:
+
+        'yes' if any(r <= 0 for r in runs) else 'no'      MISSED
+        'yes' if all(r > t for r in runs) else 'no'       MISSED
+        1 if not abs(on - off) > 5 else 0                 MISSED
+
+    **`any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`.** So
+    the shape the aggregate rule refuses had an escape hatch one keystroke away,
+    and an author told "your `min` arm is refused" is likely to reach for exactly
+    it. @OffgridwithJD found all three by planting them, and made that argument:
+    close it for the evasion path, not because any site is live. None was --
+    three `any`/`all` sites and eight negations in the corpus, every one either
+    determinate or already carrying.
+
+    The justification for walking is that **the boolean collapses the WHOLE
+    expression**, however deeply a comparison is nested inside it, so nesting
+    cannot make a hidden operand recoverable.
+    """
+    return any(_comparison_is_lossy(n) for n in ast.walk(test)
+               if isinstance(n, ast.Compare))
 
 
 def _branch_carries(node):
@@ -298,6 +326,31 @@ def test_a_chained_comparison_is_examined_pair_by_pair(tmp_path, expect):
                              "    expect.num(1 if a is not None is not b else 0, 1, 'n')\n")
     expect.num(len(collapsing_arms(det)), 0,
                "control: a chain of determinate operators stays determinate")
+
+
+def test_a_comparison_wrapped_in_anything_is_still_examined(tmp_path, expect):
+    """The fail-open default, closed.
+
+    An earlier draft handled `BoolOp` and `Compare` and returned False for every
+    other node type, so a comparison inside a generator or behind a `not` was
+    scored determinate. `any(r <= 0 for r in runs)` is the natural rewrite of
+    `min(runs) > 0`, so refusing the aggregate while passing this one leaves the
+    escape hatch next to the door.
+    """
+    for src, why in (
+        ("'yes' if any(r <= 0 for r in runs) else 'no'", "a generator inside any()"),
+        ("'yes' if all(r > t for r in runs) else 'no'", "a generator inside all()"),
+        ("1 if not abs(on - off) > 5 else 0", "a negated comparison"),
+    ):
+        d = _fixture(tmp_path, f"def test_x(expect):\n    expect.text({src}, 'yes', 'n')\n")
+        expect.num(len(collapsing_arms(d)), 1, f"lossy however it is wrapped: {why}")
+
+    # THE CONTROL, so the walk is not simply flagging everything it can reach: a
+    # determinate comparison stays determinate at any depth.
+    ok = _fixture(tmp_path, "def test_x(expect):\n"
+                            "    expect.text('yes' if any(r is None for r in runs) else 'no', 'no', 'n')\n")
+    expect.num(len(collapsing_arms(ok)), 0,
+               "control: a determinate comparison is determinate however it is wrapped")
 
 
 def test_a_boolean_combination_is_examined_operand_by_operand(tmp_path, expect):
