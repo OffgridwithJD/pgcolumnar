@@ -116,12 +116,24 @@ def _aggregates(node):
             and node.func.id in {"min", "max", "sum"} and len(node.args) >= 1)
 
 
+# Mirroring an ordering operator, so `0 < r` and `r > 0` are one rule rather
+# than two special cases.
+_MIRROR = {ast.Lt: ast.Gt, ast.Gt: ast.Lt, ast.LtE: ast.GtE, ast.GtE: ast.LtE}
+
+
 def _pair_is_lossy(lhs, op, rhs):
     """One (left, operator, right) triple of a comparison."""
     if isinstance(op, DETERMINATE_OPS):
         return False
     if not isinstance(op, ORDERING_OPS):
         return False
+    # WRITTEN EITHER WAY ROUND. `0 < r` is `r > 0` with the operands swapped, and
+    # keying the carve-out on the right-hand side alone refused it -- a FALSE
+    # POSITIVE ON CORRECT CODE, which is the failure that gets a guard switched
+    # off and takes its rule with it. Mirror once, then apply one rule; a second
+    # special case would have to be kept in step with the direction logic below.
+    if isinstance(lhs, ast.Constant) and not isinstance(rhs, ast.Constant):
+        lhs, op, rhs = rhs, _MIRROR[type(op)](), lhs
     # Nothing versus something -- `x > 0`, `n >= 1` -- where exactly one value
     # fails, so the boolean already fixes it. Keyed on the COMPARATOR, never on
     # the shape of the left side.
@@ -131,8 +143,19 @@ def _pair_is_lossy(lhs, op, rhs):
     # fails for EVERY POSITIVE r, which is a set rather than a value, so it hides
     # `r` and stays in scope. Caught by `any(r <= 0 for r in runs)` reading as
     # determinate -- a false negative introduced while fixing a different one.
-    if (isinstance(op, (ast.Gt, ast.GtE))
-            and isinstance(rhs, ast.Constant) and rhs.value in (0, 1)):
+    # EXACTLY `> 0` AND `>= 1`, not "an ordering operator against 0 or 1". Both
+    # spellings fail at exactly one value, which is what makes the boolean
+    # sufficient. Nothing else does, and the looser form let two shapes through:
+    #
+    #   r > 1    fails at 0 AND 1 -- a set, so it hides r
+    #   r >= 0   cannot fail at all for a count -- a vacuous arm, not a premise
+    #
+    # Neither was in the corpus and neither was reported; they were found by
+    # driving the boundary after @OffgridwithJD's mirror finding sent me back to
+    # it. A carve-out is a claim like any other and this one was not measured.
+    if ((isinstance(op, ast.Gt) and isinstance(rhs, ast.Constant) and rhs.value == 0)
+            or (isinstance(op, ast.GtE) and isinstance(rhs, ast.Constant)
+                and rhs.value == 1)):
         return _aggregates(lhs)
     return True
 
@@ -326,6 +349,32 @@ def test_a_chained_comparison_is_examined_pair_by_pair(tmp_path, expect):
                              "    expect.num(1 if a is not None is not b else 0, 1, 'n')\n")
     expect.num(len(collapsing_arms(det)), 0,
                "control: a chain of determinate operators stays determinate")
+
+
+def test_the_carve_out_is_driven_at_its_boundary(tmp_path, expect):
+    """`> 0` and `>= 1` exactly, written either way round.
+
+    The carve-out is a claim like any other and an earlier draft had not measured
+    it: `rhs.value in (0, 1)` for either operator let `r > 1` through (it fails at
+    0 AND 1, a set) and `r >= 0` too (it cannot fail at all). Both are driven here
+    so the next person changing this rule finds out immediately.
+
+    The mirrored spellings are the other half. `0 < r` is `r > 0` with the operands
+    swapped, and refusing it was a FALSE POSITIVE ON CORRECT CODE -- the failure
+    that gets a guard switched off and takes its rule with it.
+    """
+    cases = (
+        ("1 if r > 0 else 0", 0, "nothing versus something"),
+        ("1 if r >= 1 else 0", 0, "the same, spelled with a floor"),
+        ("1 if 0 < r else 0", 0, "mirrored: 0 < r is r > 0"),
+        ("1 if 1 <= r else 0", 0, "mirrored: 1 <= r is r >= 1"),
+        ("1 if r > 1 else 0", 1, "fails at 0 AND 1, so it hides r"),
+        ("1 if r >= 0 else 0", 1, "cannot fail at all, so it is not a premise"),
+        ("1 if 1 < r else 0", 1, "mirrored: 1 < r is r > 1, still lossy"),
+    )
+    for src, want, why in cases:
+        d = _fixture(tmp_path, f"def test_x(expect):\n    expect.num({src}, 1, 'n')\n")
+        expect.num(len(collapsing_arms(d)), want, f"boundary: {why}")
 
 
 def test_a_comparison_wrapped_in_anything_is_still_examined(tmp_path, expect):

@@ -227,7 +227,14 @@
 # `any(r <= 0 for r in runs)` determinate, which is the natural rewrite of the
 # `min(runs) > 0` the previous round taught it to refuse.
 # Re-derived by collection, not by adding one: `390 tests collected`.
-guard_tests 390
+# 390 -> 391 in review round 3: a ninth arm driving the carve-out at its
+# boundary. `0 < r` is `r > 0` with the operands swapped and was refused -- a
+# false positive on correct code -- so comparisons are mirrored once rather
+# than special-cased twice. Driving it then showed the carve-out itself was
+# never measured: `rhs.value in (0, 1)` for either operator excused `r > 1`
+# (fails at 0 AND 1) and `r >= 0` (cannot fail at all). Exactly `> 0` and
+# `>= 1` now. Re-derived by collection: `391 tests collected`.
+guard_tests 391
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
