@@ -5739,4 +5739,5 @@ assumed: `542af67fbc25` unmutated, `1cd8f666717b` mutated, `542af67fbc25` restor
 | `test_a_lossy_arm_is_caught` | the removal proof, with a carrying arm as its control |
 | `test_a_determinate_arm_is_not_caught` | six shapes whose failing set is a single value, driven rather than described |
 | `test_an_aggregate_over_several_operands_stays_in_scope` | `min(a,b,c,d) > 0` is lossy, `min(a) > 0` is not |
+| `test_a_chained_comparison_is_examined_pair_by_pair` | `0 < sel < 20000` hides its middle operand; an earlier draft scored every chain determinate |
 | `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
