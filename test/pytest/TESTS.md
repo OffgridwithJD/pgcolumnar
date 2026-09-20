@@ -116,6 +116,7 @@ behaviour, the source of that number is named.
 - [68. test_advisory_lock_class.py: no lock an insert takes may be reachable from SQL](#68-test_advisory_lock_classpy-no-lock-an-insert-takes-may-be-reachable-from-sql)
 - [69. test_index_am_support.py: the index methods the page claims must work](#69-test_index_am_supportpy-the-index-methods-the-page-claims-must-work)
 - [70. test_analyze_differential.py: our statistics must have the shape core writes](#70-test_analyze_differentialpy-our-statistics-must-have-the-shape-core-writes)
+- [71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers](#71-test_native_groupaggpy-the-grouped-vectorized-aggregate-must-answer-what-core-answers)
 
 ## 1. How to read a test in here
 
@@ -5475,3 +5476,110 @@ before any later arm runs, which is why only one arm appears in that row.
 | test | what it holds |
 | --- | --- |
 | `test_analyze_differential` | the whole pair in one function, because the shell suite gates the whole of itself on the major: the fixture loaded and is genuinely nullable, both awkward text values are present, core wrote a most-common list for all five columns and a histogram for the four with a tail, every statistic was cleared before we wrote, `pgcolumnar.analyze()` raised nothing and warned about nothing, we wrote the same kinds for the same columns carrying the same operator and collation, every most-common value exists with the frequency stored for it, the comma and the quote survived the round trip, and boolean got no histogram |
+
+## 71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers
+
+Port of `native_groupagg.sh` (#289, #432). The grouped path fires for
+`SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys>` over one columnar
+relation, and scatters each surviving row into an open-addressing hash table whose
+per-group accumulators fold in scan order.
+
+**Two oracles, and neither is the other's substitute.** A heap mirror holds the
+same rows, so exact aggregates must agree byte for byte — but it cannot judge float
+summation order, because the two storage types do not scan in the same order and
+float addition is not associative. A toggle differential runs the same query over
+the SAME columnar rows with the path off and on; both arms read in the same order,
+so even float sums must be identical. That is what validates the order-preserving
+accumulators.
+
+**Every comparison carries a node premise**, and that is the whole reason the file
+is shaped this way. A query the node quietly rejects runs the scalar Agg in BOTH
+arms, so the comparison is two identical runs agreeing with each other. That is how
+`sum(real)` returning 0 got through an earlier version of the shell suite.
+
+**The collation arms are their own test.** `check_skip` skips one check;
+`cannot_run` declares a whole TEST unrunnable. Putting the ICU-gated pair in a
+function with anything else would make the refusal wider than the shell suite's.
+
+### The one arm that differs from the shell suite, and why (#1162)
+
+`native_groupagg.sh` asks ten aggregates over ten DIFFERENT columns to cost more
+than one over one. A scan projecting ten columns costs more than one projecting one
+whatever the folding charge is, so **the arm passes against the exact defect #349
+fixed.** Measured, with the folding charge stripped of its `naggs` factor:
+
+| shape | control | mutant |
+| --- | --- | --- |
+| 1 aggregate over 1 column | 350.50 | 350.50 |
+| 10 aggregates over 10 columns (what the shell suite asks) | 1253.01 | **803.01** |
+| 10 aggregates over 1 column, path forced | 800.50 | **350.50** |
+
+This file holds the projection fixed — ten `avg(a)` over one column — and forces
+the path, so both arms really are the grouped node. The difference is then exactly
+the term under test: 450.00 = `cpu_operator_cost` × 20,000 rows × 9 extra
+aggregates, and 0.00 under the mutation. Forcing matters: with the charge applied
+the planner prices that shape OUT of the grouped path, so without
+`enable_hashagg=off; enable_sort=off` the comparison silently changes which node it
+reads.
+
+Two premises come with it, which the shell suite does not have: both costed plans
+are asserted to BE the grouped node, so a planner change that stopped choosing it
+cannot leave the arm comparing core's Agg with itself.
+
+### Independent of the shell suite at every seam
+
+| | shell | port |
+| --- | --- | --- |
+| the node premise | `grep` `EXPLAIN` text for the marker line | `EXPLAIN (FORMAT JSON)`, asking whether a node carries the PROPERTY, through `plan_marker`, which refuses an empty plan |
+| the oracle | `md5(string_agg(...))` computed by the server | sorted row tuples compared in Python, so a disagreement prints rows |
+| the GUC | set on the DATABASE, because each `q()` opens a connection | set on the SESSION, which holds one |
+
+### Removal proof
+
+Four mutations of `src/columnar_vector.c`, each asserted to have matched its anchor
+exactly once and to have been restored byte-identical, on the Debian PostgreSQL 18
+the CI cluster job uses. The `.so` hash is recorded per cell, because a mutation
+that never reached the binary is the failure a red arm cannot show.
+
+| cell | mutation | `.so` | what reddens |
+| --- | --- | --- | --- |
+| A | control | `37d535c9dd69` | 85 pass |
+| B | the deterministic-collation gate on a group key | `77a1d36c89a0` | `plan: non-deterministic collation key falls back` — the key is present and should not be |
+| C | the folding charge stops scaling with the aggregate count | `f9dc2a9d5faa` | `ten aggregates cost more than one (#349)` — `1=350.5 10=350.5` |
+| D | the group-estimate bound is never applied | `7d25ab46e1d9` | `the bound is accurate for a truncating time key, not just smaller` (got 299940 want 12) **and** `while a matching-type predicate still gets one` |
+| E | the pseudoconstant (one-time) qual rejection | `f0ef8381416d` | `regress B2: gating WHERE falls back (not the node)` |
+
+### The ICU refusal, and where it does and does not fire
+
+`test_a_non_deterministic_collation_key_falls_back` needs a non-deterministic ICU
+collation. Measured rather than assumed:
+
+```
+/usr/local/pg{15,16,17,18,19}a   --without-icu   the test declines, run exits 67
+/usr/lib/postgresql/18           --with-icu      the test runs, 85 checks, rc 0
+```
+
+The second is the `pg_config` the `pytest (cluster tests)` job is given, so **CI
+runs these arms rather than declining them.** The five-major local gate exits 67 on
+every major for this pair, which is the designed third state and not a failure.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_grouped_node_is_chosen_for_the_shapes_it_supports` | a text key, an hour expression and the q4 shape all plan as the grouped node, and the GUC off plans an ordinary Agg |
+| `test_the_grouped_path_agrees_with_a_heap_mirror` | eight exact-aggregate shapes, each with the node asserted first, against the same rows in a heap table |
+| `test_the_mirror_still_agrees_after_deletes_and_an_added_column` | the mirror and the toggle both survive a delete and an `ADD COLUMN ... DEFAULT` |
+| `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
+| `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
+| `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
+| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
+| `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
+| `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
+| `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
+| `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
+| `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
+| `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
+| `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
+| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
+| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |

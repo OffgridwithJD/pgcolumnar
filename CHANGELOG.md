@@ -18,6 +18,53 @@ true until the next version shipped.
 
 ### Fixed
 
+- `native_groupagg` ported to pytest, with one arm stronger than the original
+  because the original's cannot fail against the defect it names (#289, #432, #1162).
+
+  33 names plus one template, `missing: 0`. The grouped vectorized aggregate is held
+  to two oracles that are not substitutes for each other: a heap mirror, which cannot
+  judge float summation order because the two storage types do not scan in the same
+  order, and a toggle differential over the SAME columnar rows, which can. Every
+  comparison carries a node premise -- a query the node quietly rejects runs the
+  scalar Agg in BOTH arms, which is how `sum(real)` returning 0 once passed.
+
+  THE #349 COST ARM. `native_groupagg.sh` asks ten aggregates over ten DIFFERENT
+  columns to cost more than one over one, and a scan projecting ten columns costs
+  more whatever the folding charge is. Measured with the charge stripped of its
+  aggregate-count factor -- the exact defect #349 fixed:
+
+      10 aggregates over 10 columns   control 1253.01   mutant 803.01   still green
+      10 aggregates over 1 column     control  800.50   mutant 350.50   reddens
+
+  The port holds the projection fixed and forces the path, so the difference is
+  exactly the term under test: 450.00 = cpu_operator_cost x 20,000 rows x 9 extra
+  aggregates. Forcing matters -- with the charge applied the planner prices that
+  shape out of the grouped path, so an unforced comparison changes which node it
+  reads. Two premises assert both costed plans ARE the grouped node. #1162 tracks
+  the shell suite, which still has the hole.
+
+  Proved by removal against `src/columnar_vector.c` on the Debian PostgreSQL 18 the
+  CI cluster job uses. Control 85 checks passed; each mutation asserted to have
+  matched its anchor exactly once and been restored byte-identical; `.so` hash per
+  cell, because a mutation that never reached the binary is the failure a red arm
+  cannot show:
+
+      A control                          37d535c9dd69   85 pass
+      B deterministic-collation gate     77a1d36c89a0   plan: non-deterministic collation key falls back
+      C folding charge's naggs factor    f9dc2a9d5faa   ten aggregates cost more than one (#349)
+      D group-estimate bound             7d25ab46e1d9   the bound is accurate ... (299940 want 12), +1
+      E pseudoconstant qual rejection    f0ef8381416d   regress B2: gating WHERE falls back
+
+  The ICU-gated collation pair is its own test, because `cannot_run` declares a whole
+  TEST unrunnable while `check_skip` declines one check. Measured rather than assumed:
+  the five local source builds are `--without-icu` and it declines there (run exits
+  67); the `pg_config` the cluster job is given is `--with-icu`, so CI runs those
+  arms. `pg_config --configure | grep -c icu` returns 1 for `--without-icu`, which is
+  how the first reading of that was wrong.
+
+  `cluster_tests` 442 -> 458, derived by collection. The branch stated 457 before the
+  rebase, correctly, against a main that has since moved.
+
 - A tolerance arm that collapses to a boolean cannot say which assertion failed,
   or by how much. 26 sites now carry their measurement into the failure message
   (#1164).

@@ -388,4 +388,19 @@ guard_tests 382
 #
 # Derived by collection on this tree, not by adding one: `442 tests collected`.
 # `guard_tests` was re-derived in the same run and did NOT move: 382.
-cluster_tests 442
+# 442 -> 458 with the native_groupagg port (#289, #432): SIXTEEN cluster tests, not
+# one. The shell suite is a single linear script and the port is not, for two reasons
+# that are both about scope. `cannot_run` declares a whole TEST unrunnable while
+# `check_skip` declines one check, so the ICU-gated collation pair has to stand alone
+# or the refusal takes unrelated arms with it. And a 450-line suite reported as one
+# failure names the file rather than the property.
+#
+# THIS BRANCH HAS NOW STATED 457 AND 458, and only the second is right. It was cut
+# when main was at c050f84 and derived 441 -> 457; #1161 then took 441 -> 442
+# underneath it, and the rebase conflicted on this key because both sides had moved
+# from 441. Neither number survives a merge and adding the deltas reaches a value no
+# tree collects -- which this file says in six places and which was true again.
+#
+# Re-derived by collection on the rebuilt branch: `458 tests collected`. `guard_tests`
+# was re-derived in the same run and did NOT move: 382.
+cluster_tests 458
