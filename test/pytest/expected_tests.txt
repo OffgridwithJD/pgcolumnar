@@ -403,4 +403,23 @@ guard_tests 382
 #
 # Re-derived by collection on the rebuilt branch: `458 tests collected`. `guard_tests`
 # was re-derived in the same run and did NOT move: 382.
-cluster_tests 458
+# 458 -> 462 with the analyze_function port (#414, #432): FOUR cluster tests, split
+# by FIXTURE rather than by property. Only the first pays the 500,000-row build; the
+# stride fixture is 11 rows, the delete fixture 1,200 and the doc fixture 20,000, so
+# paying the big one four times to keep a single function would have been the wrong
+# trade.
+#
+# The split has a consequence for the REFUSAL, recorded here and not only in
+# TESTS.md: the shell suite prints one `check_skip` and exits, so exactly one of these
+# four names it and the other three decline UNNAMED. Naming all four would publish
+# three checks the original does not have.
+#
+# THIS BRANCH HAS STATED 446 AND 462, and only the second is right. It was cut when
+# main was at e0e9517 and derived 442 -> 446; #1167 then took 442 -> 458 underneath
+# it. Neither number survives and adding the deltas reaches a value no tree collects,
+# which this file says in six places and which has now been true on two consecutive
+# branches in one afternoon.
+#
+# Re-derived by collection on the rebuilt branch: `462 tests collected`. `guard_tests`
+# was re-derived in the same run and did NOT move: 382.
+cluster_tests 462

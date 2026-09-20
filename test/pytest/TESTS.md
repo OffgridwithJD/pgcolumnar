@@ -117,6 +117,7 @@ behaviour, the source of that number is named.
 - [69. test_index_am_support.py: the index methods the page claims must work](#69-test_index_am_supportpy-the-index-methods-the-page-claims-must-work)
 - [70. test_analyze_differential.py: our statistics must have the shape core writes](#70-test_analyze_differentialpy-our-statistics-must-have-the-shape-core-writes)
 - [71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers](#71-test_native_groupaggpy-the-grouped-vectorized-aggregate-must-answer-what-core-answers)
+- [72. test_analyze_function.py: statistics collected by reading, not by sampling](#72-test_analyze_functionpy-statistics-collected-by-reading-not-by-sampling)
 
 ## 1. How to read a test in here
 
@@ -5583,3 +5584,90 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
 | `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
 | `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |
+
+## 72. test_analyze_function.py: statistics collected by reading, not by sampling
+
+Port of `analyze_function.sh` (#414, #432). Core ANALYZE samples 30,000 rows, and on a
+table of any size those rows are spread across every row group, so every group is
+decoded for every column. `pgcolumnar.analyze()` reads ONE column instead, and the
+statistics that come out of a full read are EXACT where core's are estimates.
+**Exactness is the observable a sampled implementation cannot fake**, which is why it
+is what gets asserted.
+
+### The refusal carries the shell suite's name, and only once (#1131)
+
+On 15, 16 and 17 `analyze_function.sh` declines through `check_skip`, which RECORDS
+the refusal under the name `pgcolumnar.analyze()` — the statistics are written through
+`pg_restore_attribute_stats`, which core added in 18.
+
+This file is FOUR tests, split by fixture so only the first pays the 500,000-row
+build. That has a consequence for the refusal: the shell prints ONE `check_skip` and
+exits, so **exactly one test names it and the other three decline UNNAMED**. An
+unnamed `cannot_run` states no property, which is right — naming all four would
+publish three checks the original does not have.
+
+Verified at RUNTIME, not just in source, by spying on `Expect._record` — because
+`compare_to_bash` grades the NAME and proves the string is PRESENT, never that
+anything emits it:
+
+```
+PG18   56 bash names, 55 emitted   (the refusal does not fire above 17)
+PG17   verdict UNRUN: 'pgcolumnar.analyze()'
+```
+
+### Every fixture is built to defeat a specific false pass
+
+* `k` is one row in ten NULL. **0.1 is a number a sampler reaches whenever it is
+  lucky**, so `k` alone cannot discriminate.
+* `k7` is one row in SEVEN NULL, so the truth is 71428/500000 = 0.142856. Core's
+  estimate is always a whole number of sampled rows over 30,000, and there is no whole
+  `k` with `k/30000 = 0.142856` — it would need 4285.68. **Core cannot report this
+  fraction whatever it draws**, so the discrimination does not depend on luck.
+* `skew` holds 1,000,000 in exactly one row of 500,000 and under 100 elsewhere.
+* `cat` has three repeated values, a unique tail and one row in ten NULL, so dividing
+  frequencies by the non-null count instead of the row count gives 0.2/0.12/0.06 —
+  three individually plausible numbers that are all wrong.
+
+### What is printed rather than asserted
+
+Whether core's sampled number happens to land on the truth is a fact about a random
+draw, not about this extension. The shell suite retracted two such gates (#475, #487)
+after one failed a correct suite about one run in 130. This file prints the same
+figures and asserts only against independently counted truth.
+
+### Independent of the shell suite
+
+The shell greps psql's output for ERROR and WARNING; this registers a psycopg notice
+handler and catches `psycopg.Error`. The shell parses the documentation table with
+`awk` bounded at the next `###`; this parses the same section with a regex bounded the
+same way, and for the same recorded reason — a `sed` range ending at `/^## /` once ran
+past and compared against seventeen names from three sections.
+
+### Removal proof
+
+Three mutations of `pgcolumnar--1.0-alpha4.sql`, on the Debian PostgreSQL 18 the CI
+cluster job is given. Each asserted its anchor matched exactly once and that the file
+changed; each restored byte-identical. Control: 55 checks passed.
+
+| cell | mutation | what reddens |
+| --- | --- | --- |
+| B | the per-column target replaced by the global default | `the histogram honours the column's statistics target, not the global default` (got 101 want 11) **and** `histogram_bounds are core's positional stride` (got `{1,2,...,11}` want `{1,4,7,11}`) |
+| C | the `SET STATISTICS 0` skip disabled | `pgcolumnar.analyze() ran for the zero-target column without raising` — got `22012: division by zero` |
+| D | the null fraction divided by the non-null count | `reports null_frac exactly` (got 0.11111111 want 0.1) **and** `null_frac counts live rows, not rows a DELETE left behind` (got 0.153846 want 0.133333) |
+
+**THE `.so` HASH IS NOT THE INSTRUMENT HERE, and printing it would be worse than
+omitting it.** These mutations are in the extension SQL, so the C is unchanged and the
+library hashes identically in all four cells — four identical hashes would look like
+evidence and be none. What establishes that the mutant reached the server is the
+`.sql` md5 moving per cell, and that `.sql` is in `pgc_fingerprint`'s `ROOT_SUFFIXES`,
+so the build fingerprint moves and `build_once` reinstalls. Verified rather than
+assumed: `542af67fbc25` unmutated, `1cd8f666717b` mutated, `542af67fbc25` restored.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_analyze_function` | the 500,000-row fixture: null_frac exact on a fraction core's sample cannot express, n_distinct exact from one column, the statistics it does not compute left in place, the histogram's true maximum and its smallest non-most-common bound, no most-common value inside the histogram, every bound a value the column holds, the three MCV frequencies over total rows rather than non-null rows, the per-column statistics target honoured, and a column at `SET STATISTICS 0` left alone |
+| `test_histogram_bounds_are_a_positional_stride` | eleven distinct rows at target 3, where core's `values[floor(i*(nv-1)/(nhist-1))]` and `percentile_disc`'s `ceil(p*nv)-1` land on different values; the expectation comes from an independent oracle AND a hand-worked figure that must agree first |
+| `test_null_frac_counts_live_rows_not_ones_a_delete_left` | #485: null_frac came from the zone maps, which count what was WRITTEN, so one pg_stats row carried two statistics normalised against different populations; both must imply the same table |
+| `test_the_documented_statistics_are_the_ones_written` | the list in `docs/sql-reference.md` parsed and compared against what the function populates, plus the two negatives the doc states in prose |

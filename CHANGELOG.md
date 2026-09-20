@@ -18,6 +18,54 @@ true until the next version shipped.
 
 ### Fixed
 
+- `analyze_function` ported to pytest (#414, #432).
+
+  56 names, `missing: 0`, no extras. Core ANALYZE samples 30,000 rows and those rows
+  are spread across every row group, so every group is decoded for every column.
+  `pgcolumnar.analyze()` reads ONE column, and the statistics that come out of a full
+  read are EXACT where core's are estimates. Exactness is the observable a sampled
+  implementation cannot fake, which is what gets asserted.
+
+  THE DISCRIMINATION DOES NOT DEPEND ON LUCK. `k` is one row in ten NULL, and 0.1 is
+  a number a sampler reaches whenever it is lucky. `k7` is one row in SEVEN, so the
+  truth is 0.142856 and core's estimate is always a whole number of sampled rows over
+  30,000 -- there is no whole k with k/30000 = 0.142856. Core cannot report that
+  fraction whatever it draws. An earlier version of the shell suite gated on core
+  being WRONG and failed a correct suite about one run in 130 (#487); this file
+  prints those figures and asserts only against independently counted truth.
+
+  ONE NAMED REFUSAL, THREE UNNAMED. Four tests, split by fixture so only the first
+  pays the 500,000-row build. The shell suite prints ONE `check_skip` and exits, so
+  exactly one test carries `name="pgcolumnar.analyze()"` and the other three decline
+  unnamed -- naming all four would publish three checks the original does not have.
+
+  VERIFIED AT RUNTIME, not only in source. `compare_to_bash` grades the NAME and
+  proves the string is PRESENT, never that anything emits it. Spying on
+  `Expect._record`: PG18 emits 55 of the 56 (the refusal does not fire above 17), and
+  PG17 emits `pgcolumnar.analyze()` with verdict UNRUN rather than laundered into a
+  pass.
+
+  Proved by removal against `pgcolumnar--1.0-alpha4.sql`; control 55 checks passed,
+  each mutation asserted to have matched its anchor once and restored byte-identical:
+
+      per-column target -> global default   the histogram honours the column's target
+                                            (101 want 11), and the positional stride
+      SET STATISTICS 0 skip disabled        ran for the zero-target column without
+                                            raising (22012: division by zero)
+      null_frac / non-null count            reports null_frac exactly (0.11111111 want
+                                            0.1), and the DELETE arm (0.153846 want
+                                            0.133333)
+
+  THE `.so` HASH IS NOT THE INSTRUMENT FOR A SQL MUTATION and is deliberately not
+  quoted: the C is unchanged, so the library hashes identically in all four cells and
+  four identical hashes would look like evidence and be none. What establishes the
+  mutant reached the server is the `.sql` md5 moving per cell, and `.sql` being in
+  `pgc_fingerprint`'s ROOT_SUFFIXES so the build fingerprint moves and `build_once`
+  reinstalls -- measured: 542af67fbc25 unmutated, 1cd8f666717b mutated, restored.
+
+  `cluster_tests` 458 -> 462, derived by collection. The branch stated 446 before the
+  rebase, correctly, against a main that #1167 has since moved.
+
 - `native_groupagg` ported to pytest, with one arm stronger than the original
   because the original's cannot fail against the defect it names (#289, #432, #1162).
 
