@@ -104,16 +104,20 @@ def _aggregates(node):
 
     The boolean hides WHICH operand failed, so these stay in scope even when the
     comparator is 0 -- which is the case a comparator-only carve-out gets wrong.
+
+    ARGUMENT COUNT IS NOT OPERAND COUNT, and an earlier draft keyed on the wrong
+    one (`len(node.args) > 1`). `min(runs)` takes ONE argument and aggregates a
+    whole sequence -- `min` of a scalar is a TypeError, so a one-argument call is
+    iterable by construction and hides exactly as much as the spelled-out form.
+    Caught by @OffgridwithJD, who also noticed the control below had been passing
+    for a reason the code did not give.
     """
     return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id in {"min", "max", "sum"} and len(node.args) > 1)
+            and node.func.id in {"min", "max", "sum"} and len(node.args) >= 1)
 
 
-def _comparison_is_lossy(test):
-    """True when the boolean discards an operand the reader would need."""
-    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
-        return False
-    op, lhs, rhs = test.ops[0], test.left, test.comparators[0]
+def _pair_is_lossy(lhs, op, rhs):
+    """One (left, operator, right) triple of a comparison."""
     if isinstance(op, DETERMINATE_OPS):
         return False
     if not isinstance(op, ORDERING_OPS):
@@ -123,6 +127,26 @@ def _comparison_is_lossy(test):
     if isinstance(rhs, ast.Constant) and rhs.value in (0, 1):
         return _aggregates(lhs)
     return True
+
+
+def _comparison_is_lossy(test):
+    """True when the boolean discards an operand the reader would need.
+
+    EVERY PAIR OF A CHAINED COMPARISON IS EXAMINED. An earlier draft opened with
+    `len(test.ops) == 1` and scored `0 < sel < 20000` as determinate -- a shape
+    that hides `sel` and has many failing states. Two live chained comparisons
+    exist in this corpus and both are saved by an f-string on the other branch,
+    so neither was a live miss; but the guard was not what protected them, and
+    deleting either f-string would have made the arm undiagnosable in silence.
+    """
+    if not isinstance(test, ast.Compare):
+        return False
+    left = test.left
+    for op, right in zip(test.ops, test.comparators):
+        if _pair_is_lossy(left, op, right):
+            return True
+        left = right
+    return False
 
 
 def _is_lossy(test):
@@ -243,10 +267,37 @@ def test_an_aggregate_over_several_operands_stays_in_scope(tmp_path, expect):
     expect.num(len(collapsing_arms(d)), 1,
                "an aggregate over several operands is lossy even against 0")
 
-    single = _fixture(tmp_path, "def test_x(expect):\n"
-                                "    expect.text('yes' if min(a) > 0 else 'no', 'yes', 'n')\n")
-    expect.num(len(collapsing_arms(single)), 0,
-               "control: a one-operand min hides nothing, so it is determinate")
+    # ARGUMENT COUNT IS NOT OPERAND COUNT. `min(runs)` takes one argument and
+    # aggregates a sequence -- `min` of a scalar raises -- so it hides exactly as
+    # much as the spelled-out form and must be caught too.
+    one_arg = _fixture(tmp_path, "def test_x(expect):\n"
+                                 "    expect.text('yes' if min(runs) > 0 else 'no', 'yes', 'n')\n")
+    expect.num(len(collapsing_arms(one_arg)), 1,
+               "a single-argument min aggregates a sequence, so it is lossy too")
+
+    plain = _fixture(tmp_path, "def test_x(expect):\n"
+                               "    expect.text('yes' if rows > 0 else 'no', 'yes', 'n')\n")
+    expect.num(len(collapsing_arms(plain)), 0,
+               "control: a bare name against 0 is nothing-versus-something, not an aggregate")
+
+
+def test_a_chained_comparison_is_examined_pair_by_pair(tmp_path, expect):
+    """`0 < sel < 20000` hides `sel` and has many failing states.
+
+    An earlier draft opened with `len(test.ops) == 1` and scored every chained
+    comparison determinate. Two exist in this corpus; both are saved by an f-string
+    on the other branch, so neither was a live miss -- but the guard was not what
+    protected them.
+    """
+    chained = _fixture(tmp_path, "def test_x(expect):\n"
+                                 "    expect.num(1 if 0 < sel < 20000 else 0, 1, 'n')\n")
+    expect.num(len(collapsing_arms(chained)), 1,
+               "a chained comparison is examined pair by pair")
+
+    det = _fixture(tmp_path, "def test_x(expect):\n"
+                             "    expect.num(1 if a is not None is not b else 0, 1, 'n')\n")
+    expect.num(len(collapsing_arms(det)), 0,
+               "control: a chain of determinate operators stays determinate")
 
 
 def test_a_boolean_combination_is_examined_operand_by_operand(tmp_path, expect):

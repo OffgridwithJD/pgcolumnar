@@ -31,7 +31,32 @@
 # 61 -> 60 when #1165 repaired `native_fetch_coalesce: a wide index fetch does
 # not pin once per column`. The row was removed because the sweep stopped finding
 # it, not because anyone edited this file: that is the "repaired arm" direction
-# doing its job, and it is why the list is regenerated rather than hand-edited.
+# doing its job, and it is why the list is regenerated rather than hand-edited.#
+# 60 -> 77 when the scope was narrowed from the DIRECTORY test/selftest/ to the
+# single file that enforces the rule. The first draft excluded the whole
+# directory on a justification that is true of 540 and of no other part; 17 real
+# offenders were sitting in parts the sweep never looked at, including
+# 410's two computed line numbers compared with `-lt` and both discarded.
+# Reported by @OffgridwithJD, who planted five shapes against the controls and
+# found this one by asking what the sweep was never SHOWN rather than what it
+# got wrong on what it was.
+050-the-list-must-be-read-the	positive control: and it is a whole list, not one lucky line
+180-the-port-walk-must-wrap-not	premise: the auxiliary band has a width to wrap within
+210-no-suite-assigns-a-bash-special	control: the sweep catches an assignment to a bash special
+220-an-opt-in-upgrade-guard-must	premise: the population is the real test directory, not an empty glob
+240-the-nightly-enumeration-must-not	premise: at least three nightly jobs were parsed, so the list is real
+240-the-nightly-enumeration-must-not	premise: the nightly paragraph was located and is not empty
+300-a-test-script-must-be-runnable	premise: the documents name a population of commands, not none
+330-the-incomplete-path-must-run-whole	premise: the sweep found the loop's callers to check
+390-a-registered-suite-must-account	premise: the fixture is long enough to lose the race
+400-a-check-result-must-be-machine	premise: and that population is the suite corpus
+400-a-check-result-must-be-machine	premise: the sweep read the suites, so an empty result means something
+410-a-check-must-have-been-red	and defines it BEFORE the first call, since bash reads top to bottom
+410-a-check-must-have-been-red	and it copies them BEFORE removing the build directory, which is the only order that works
+410-a-check-must-have-been-red	and it runs before the build directory is removed, which is the only place it can
+420-a-deleted-part-must-be-visible	premise: the manifest names something, so the comparison has two sides
+430-the-self-test-must-not-report	premise: the sweep reads every selftest part
+450-a-red-nightly-must-be-findable	premise: the other nightly jobs were parsed, so the comparison is real
 autovacuum	premise: av_off starts with dead rows above the threshold
 autovacuum	premise: av_on starts with dead rows above the threshold
 bloom_lazy	a scan that keeps every group reads more

@@ -5620,7 +5620,7 @@ diagnostics, and no comparison of two independent implementations ever will.
 ### The shell twin is shaped differently, on purpose
 
 `test/selftest/540-an-arm-must-carry-its-measurement.sh` asserts a tracked list
-(`test/lossy_arms.tsv`, 60 rows across 35 suites) rather than zero, because that
+(`test/lossy_arms.tsv`, 77 rows across 52 suites) rather than zero, because that
 corpus is not at zero. The gate refuses both directions: an unlisted offender fails
 by name, and a repaired arm fails until its row is removed, so the list may only
 shrink. **The asymmetry is the honest answer**: the two corpora are in different

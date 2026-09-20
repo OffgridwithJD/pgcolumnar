@@ -23,8 +23,8 @@
 # the other printed `got 0 want 1`. Name parity does not preserve diagnostics.
 #
 # WHY THIS IS A LIST AND NOT A ZERO. The pytest corpus reaches zero and its twin
-# asserts zero. This corpus holds 55 such arms across 36 suites, and a rule that
-# went red on arrival with 55 offenders would be switched off within a week. So
+# asserts zero. This corpus holds 77 such arms across 52 suites, and a rule that
+# went red on arrival with 77 offenders would be switched off within a week. So
 # the debt is TRACKED, in `test/lossy_arms.tsv`, and the gate refuses BOTH
 # directions: an unlisted offender fails by name, and a listed arm that has since
 # been repaired fails until its row goes. The list may only shrink, and it does so
@@ -56,11 +56,22 @@
 # direction that gets published**, so the carve-outs are driven below rather than
 # described.
 #
-# SCOPED TO test/*.sh, one glob, non-recursive. `test/selftest/` is NOT swept, and
-# that is a decision rather than an accident: this file's own explanation of the
-# rule, and the control fixture below, both contain the shape they exist to
-# describe. Sweeping the file that enforces a rule for instances of that rule is
-# selftest 260's mistake.
+# SCOPED TO test/*.sh AND test/selftest/*.sh, EXCEPT THIS FILE. The first draft
+# excluded the whole `selftest/` directory on the grounds that "this file's own
+# explanation of the rule, and the control fixture below, both contain the shape
+# they exist to describe". That is exactly right for 540 and **it is not a
+# property of the directory** -- @OffgridwithJD pointed at
+# `410-a-check-must-have-been-red.sh`, an ordinary part carrying a genuinely lossy
+# arm by this rule: two computed line numbers compared with `-lt`, both discarded,
+# where the comment above it records that the real failure was "definition at line
+# 1128, called at 762" -- precisely the two numbers `got [after] want [before]`
+# throws away.
+#
+# Selftest 260's mistake was sweeping the ENFORCER for instances of the rule. The
+# enforcer is one file, so one file is what the exclusion covers. 080 records the
+# same correction twice, in the other direction: its directory scoping "fell out
+# of writing a glob" rather than being decided, and bench/ then held six instances
+# it never looked at.
 
 _lam_list="$PGC_TESTDIR/lossy_arms.tsv"
 
@@ -139,7 +150,9 @@ check_text "control: a determinate or carrying arm is not swept up" \
 # The corpus, against the tracked debt. Both directions, in one pass.
 _lam_found="$PGC_WORKDIR/lam_found.tsv"
 : > "$_lam_found"
-for _lam_f in "$PGC_TESTDIR"/*.sh; do
+for _lam_f in "$PGC_TESTDIR"/*.sh "$PGC_TESTDIR"/selftest/*.sh; do
+	# This file only: it describes the shape and plants one in its probe.
+	case "$_lam_f" in *540-an-arm-must-carry-its-measurement.sh) continue ;; esac
 	_lam_sweep "$_lam_f" >> "$_lam_found"
 done
 sort -u -o "$_lam_found" "$_lam_found"
