@@ -50,3 +50,4 @@
 510-a-residual-must-be-counted.sh
 520-a-merged-row-must-cover-the-majors.sh
 530-a-record-must-name-its-major.sh
+540-an-arm-must-carry-its-measurement.sh
