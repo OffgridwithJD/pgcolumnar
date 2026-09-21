@@ -18,6 +18,59 @@ true until the next version shipped.
 
 ### Fixed
 
+- Five premise arms carried a verdict about a number they never printed (#1164).
+
+  #1164's rule excuses a nothing-versus-something comparison -- `x > 0`, `n >= 1` --
+  because exactly one value fails, so the boolean is a lossless encoding. **That is a
+  property of a non-negative integer, not of the operator.** Over a signed operand the
+  failing set has more than one member and the arm hides which one was reached, which
+  is the defect the rule exists to refuse.
+
+  THE POPULATION WAS COUNTED, not asserted. Twenty arms in the pytest corpus are
+  excused by that carve-out. The operand of all twenty was read: eighteen are counts
+  (`count(*)`, `cur.rowcount`, log-line tallies, buffer counts). Two are not, and both
+  appear on the shell side as well.
+
+  `reltuples` IS SIGNED. Core writes `-1` for "no statistics" (PG 14+), so the failing
+  set is `{-1, 0}` and the branch named the member it had not read:
+
+      before   got [ZERO] want [nonzero]              -- reltuples may be -1
+      after    got [reltuples 10000] want [nonzero]
+
+  Those are different defects. `0` is the #414 shift, where ANALYZE ran and mapped no
+  block to its row group. `-1` is an ANALYZE that never reached the table at all. A
+  reader following `ZERO` would look for the first and not find it.
+
+  A DIFFERENCE OF TWO COSTS IS SIGNED BY CONSTRUCTION. `Total Cost - Startup Cost`
+  collapsed to `yes`/`no` covered a degenerate plan (`total == startup`) and a
+  cost-model inversion (`total < startup`) with one word:
+
+      before   got [no] want [yes]
+      after    got [run cost 9793.75 (total 9793.75, startup 0.00)] want [yes]
+      after    got [serial 10625, parallel 9912.5] want [yes]
+
+  **The corpus already disagreed with itself about this one.** In
+  `test_parallel_scan_cost.py` the same premise appears twice, twelve lines apart;
+  #1165 repaired the leader-off arm to carry both costs and walked past the leader-on
+  arm below it. The carve-out is what made them look alike. Both shell arms were
+  unrepaired.
+
+  FIXED IN BOTH HARNESSES, each in its own. `test/analyze_reltuples.sh`,
+  `test/parallel_scan_cost.sh` (two arms), `test/pytest/test_analyze_reltuples.py` and
+  `test/pytest/test_parallel_scan_cost.py`. No check NAME changed, so assertion parity
+  and the ledger keys are untouched.
+
+  Every arm proved by mutating its threshold until it failed, asserting the mutation
+  matched once, reading the message, and restoring byte-identical. Green either side:
+
+      test/analyze_reltuples.sh       11 passed + 0 failed
+      test/parallel_scan_cost.sh      13 passed + 0 failed
+      the two pytest files            33 pass + 0 fail + 0 unrun
+
+  Measured consequence, through #1166's sweep: carve-out beneficiaries 20 -> 18, live
+  offenders none either way. The remaining eighteen are counts, and the gap is recorded
+  rather than closed -- no AST sweep can tell a count from a signed value.
+
 - `analyze_function` ported to pytest (#414, #432).
 
   56 names, `missing: 0`, no extras. Core ANALYZE samples 30,000 rows and those rows

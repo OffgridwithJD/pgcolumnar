@@ -77,7 +77,12 @@ def _both(cur, expect, lab, n, ddl, ex):
     c = _reltuples(cur, "ar_c")
     h = _reltuples(cur, "ar_h")
 
-    expect.text("nonzero" if c > 0 else "ZERO", "nonzero",
+    # `reltuples` IS SIGNED: core writes -1 for "no statistics" (PG 14+), so the
+    # failing set is {-1, 0} and not the single value a `> 0` test usually has.
+    # "ZERO" named the one it had not read -- a reader following it would go
+    # looking for an ANALYZE that produced nothing, when the hook may never have
+    # run at all.
+    expect.text("nonzero" if c > 0 else f"reltuples {c}", "nonzero",
                 f"{lab}: estimate is not zero")
     expect.text(_closeness(c, n, n * 0.05), "close",
                 f"{lab}: within 5% of actual (heap says {h})")

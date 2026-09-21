@@ -147,9 +147,14 @@ def test_parallel_scan_cost(pgc_conn, expect):
     )
 
     p_run_on = pnode_on["Total Cost"] - pnode_on["Startup Cost"]
+    # CARRIED, like the leader-off premise twelve lines above. A difference of two
+    # costs is signed, so "no" covered both a degenerate plan (total == startup)
+    # and a cost-model inversion (total < startup), which are different defects.
     expect.text(
-        "yes" if p_run_on > 0 else "no",
-        "yes",
+        "positive" if p_run_on > 0
+        else f"run cost {p_run_on} (total {pnode_on['Total Cost']}, "
+             f"startup {pnode_on['Startup Cost']})",
+        "positive",
         "premise: the leader-on parallel scan has a positive run cost",
     )
 
