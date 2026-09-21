@@ -18,6 +18,63 @@ true until the next version shipped.
 
 ### Fixed
 
+- `advisory_lock_class` discovered a maximum, so it went green exactly when the
+  unique-key class regressed (#1154).
+
+  The suite guards #430 -- no advisory lock pgColumnar takes may sit in a
+  SQL-reachable class -- and found the lock it would assert about with
+  `ORDER BY objsubid DESC LIMIT 1`. An insert takes more than one:
+  `PGCOLUMNAR_LOCKCLASS_STORAGE_ROW` (102) as well as
+  `PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY` (103). **The maximum is the unique-key lock
+  only while the unique-key lock is the highest-numbered one**, which stops being
+  true in exactly the case the suite exists to catch.
+
+  MEASURED, four cells on PG 18, the mutation being the #430 defect itself
+  (`PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY` back to `2`):
+
+      suite      build      result
+      current    clean      7 passed + 0 failed          <- control
+      current    MUTATED    7 passed + 0 failed  PASSED  <- the defect, reported green
+      repaired   MUTATED    5 passed + 2 FAILED  FAILED
+      repaired   clean      7 passed + 0 failed
+
+  Under the mutation the old suite discovered `classid=2 objid=1410065408
+  field4=102` -- the storage-row lock, still unreachable -- and reported the
+  property holding while the unique-key lock sat in the two-int4 space any
+  application can address. The repaired suite names the tag instead:
+
+      got [reachable: (16572,77,field4=2)] want [unreachable]
+
+  ONE WRONG PREMISE DISABLED TWO ARMS. The discovery fed the contention arm, which
+  contended for the tag it had discovered -- by then the wrong tag -- so nothing
+  blocked and that arm passed too. Both come back together when the premise is
+  fixed, which is why the fix is to assert over the SET: no lock an insert takes
+  may be SQL-reachable, and every addressable tag is contended for rather than one.
+
+  THREE SMALLER REPAIRS CAME OUT OF THE PROOF, each of which was hiding behind the
+  first:
+
+  - **The duplicate-key arm depended on an earlier arm having passed.** It
+    re-inserted the key the contention arm had inserted, so the mutation reddened
+    it as well -- three reds, of which the third was a cascade and had nothing to
+    do with duplicate keys. It plants its own key now, which is what the pytest
+    twin already did.
+  - **The discovery raced the insert.** It polled `pg_locks` until a row appeared,
+    which can be observed part-way through an insert that takes two locks. The
+    probe now waits for the session to reach its `pg_sleep`, which is only true
+    once the insert has returned.
+  - **`psql -c` could not express that wait.** A multi-statement `-c` is ONE
+    simple-query message, so `pg_stat_activity` carries the whole string from the
+    first instant. The background sessions take their statements on stdin, one
+    round trip each, so the view moves with them.
+
+  NO CHECK NAME CHANGED, so assertion parity with `test/pytest/test_advisory_lock_class.py`
+  holds and no ledger row moves. That port already asserted over the set (#1157);
+  the shell suite is what was left.
+
+  Gated: 7 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean over the
+  whole harness; the selftest corpus and the pytest guard leg green.
+
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
   #1164's rule excuses a nothing-versus-something comparison -- `x > 0`, `n >= 1` --

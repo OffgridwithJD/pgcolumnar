@@ -103,6 +103,53 @@ When a fix lands, sweep the docs in the same change. `ANALYZE` collecting no
 statistics sat in `limitations.md` as a limitation after the implementation had
 already merged, which is worse than either state alone.
 
+## Discover a set, never a maximum
+
+A test that DISCOVERS what it will assert about must discover all of it. A proxy
+that names the right object today names a different one the moment the property
+regresses -- and it goes green in exactly that case.
+
+`test/advisory_lock_class.sh` guards #430: no advisory lock pgColumnar takes may
+sit in a SQL-reachable class. It discovered the lock with
+
+    ORDER BY objsubid DESC LIMIT 1
+
+An insert takes more than one: `PGCOLUMNAR_LOCKCLASS_STORAGE_ROW` (102) as well as
+`PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY` (103). The maximum is the unique-key lock only
+while the unique-key lock is the highest-numbered one. Put the unique-key class
+back to 2 -- the #430 defect itself -- and the maximum becomes 102, the
+storage-row lock, which is still unreachable. Measured on PG 18, with the object
+forced to rebuild:
+
+    the suite discovered   classid=2 objid=1410065408 field4=102
+    the suite reported     7 passed + 0 failed        PASSED
+
+while the unique-key lock sat in the two-int4 space any application can address.
+
+**One wrong premise disabled two arms**, because the discovery fed the contention
+arm below it: that arm contended for the tag it had discovered, which was now the
+wrong tag, so nothing blocked and it passed too. Two arms moving together with the
+defect is worse than one vacuous arm, since both keep looking like evidence.
+
+Asserting over the whole set has no such blind spot and is the stronger claim
+anyway: NO lock an insert takes may be SQL-reachable. Under the same mutation the
+set form reddens both arms and names the tag (#1154):
+
+    got [reachable: (16572,77,field4=2)] want [unreachable]
+
+The rule generalises past locks. Wherever a suite reads "the" thing it is about --
+the newest file, the largest group, the last log line, the highest-numbered
+anything -- ask what the population is and assert over it. A representative is an
+assumption about the failure you have not seen yet.
+
+**Two neighbours of this rule, both learned here.** An arm that depends on an
+earlier arm having PASSED reports on the earlier arm: the duplicate-key check at
+the end of that suite re-used a row the contention arm had inserted, so the
+mutation reddened it too, for a reason that has nothing to do with duplicate keys.
+It plants its own key now. And a mutation is evidence only once you have shown it
+applied and the runtime moved: a header edit rebuilds nothing here (#1158), so
+every cell above prints the `.so` md5 and the numbers move with it.
+
 ## Differential oracle
 
 `test/differential.sh`, `recovery`, `fuzz`, `hardening`, and `concurrent_diff`
