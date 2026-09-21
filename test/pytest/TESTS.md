@@ -5737,6 +5737,17 @@ shrink. **The asymmetry is the honest answer**: the two corpora are in different
 states, and a guard asserting zero over both would claim a property this tree does
 not have.
 
+### What it does not catch, and why each is left open
+
+Three shapes are missed. Each was planted against the real sweep and then counted in
+the corpus; none is live, and the file's header carries the measurement behind each.
+
+| shape | why it is left open |
+| --- | --- |
+| an aggregate not spelled `min`, `max` or `sum` — `sorted(runs)[0] > 0` | closing it needs a longer list of names, which the next spelling escapes, or type information this has none of. The two subscript-of-a-call conditionals in the corpus are `str.split(...)[0]` under `==` or `not in`, so both are determinate |
+| a branch that is a named constant — `KEPT if ratio < 1.35 else HALVED` | all four `Name`/`Attribute` branches today sit on determinate tests, so tightening flags none of them; what it would flag is `test_parallel_am_scan.py:225`, which does carry its number |
+| a conditional in a later argument position | all three build a check NAME rather than a measured value, so scanning `args[1:]` refuses correct sites to catch a shape that does not occur |
+
 ### Every test
 
 | test | what it holds |

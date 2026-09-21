@@ -72,12 +72,56 @@ The 26 were repaired under #1164, so this arm reaches zero on arrival. That is t
 point rather than a weakness: the property is true today and nothing was holding it
 there. `test_a_lossy_arm_is_caught` is what says the sweep can still see one.
 
-THE SHELL CORPUS IS A DIFFERENT NUMBER AND ITS GUARD IS SHAPED DIFFERENTLY. It holds
-55 such sites across 36 files, so its twin --
-`test/selftest/540-an-arm-must-carry-its-measurement.sh` -- asserts a tracked list that
-may only shrink, not zero. The asymmetry is deliberate: the two corpora are in
-different states, and a guard that asserted zero over both would be claiming a property
-this tree does not have.
+THE SHELL CORPUS IS A DIFFERENT NUMBER AND ITS GUARD IS SHAPED DIFFERENTLY. Its twin
+-- `test/selftest/540-an-arm-must-carry-its-measurement.sh` -- asserts a tracked list,
+`test/lossy_arms.tsv`, that may only shrink, not zero. The asymmetry is deliberate: the
+two corpora are in different states, and a guard that asserted zero over both would be
+claiming a property this tree does not have.
+
+NO COUNT OF THAT LIST IS REPEATED HERE. This paragraph carried one -- "55 such sites
+across 36 files" -- which was three drafts out of date by the time the branch was
+pushed, while the two places that state the figure (the shell header and TESTS.md) had
+been updated to 77 rows across 52 suites. A number in a third file is a number nobody
+updates. The list is the count.
+
+WHAT THIS DOES NOT CATCH, MEASURED RATHER THAN ASSUMED. Each was planted against the
+real sweep and then counted in the corpus; none is live, and each is left open for a
+reason rather than by oversight.
+
+  AN AGGREGATE THAT IS NOT SPELLED `min`, `max` OR `sum`:
+
+      'yes' if sorted(runs)[0] > 0 else 'no'      MISSED
+      'yes' if min(runs) > 0 else 'no'            caught
+
+  `sorted(runs)[0]` is `min(runs)` written differently, so the aggregate rule is
+  spelling-sensitive. It is the same shape as `any(r <= 0 for r in runs)` from the round
+  the walk closed, and the argument that closed that one does not carry here: an author
+  told "your `min` arm is refused" reaches for `any()`, not for a subscript of a sort.
+  Closing it needs either a longer list of names -- which the next spelling escapes
+  again -- or reasoning about what indexing a sorted sequence means, which is type
+  information this has no access to. TWO subscript-of-a-call conditionals exist in the
+  corpus, `test_failed_query_sentinel.py:322` and `test_raises_sqlstate.py:869`, and
+  both are `str.split(...)[0]` under `==` or `not in`, so both are determinate and
+  correctly unflagged. Found by @OffgridwithJD.
+
+  A BRANCH THAT IS A NAMED CONSTANT reads as carrying, because `_branch_carries` asks
+  only whether the branch is a bare `Constant`:
+
+      KEPT, HALVED = 'io-kept', 'halved'
+      expect.text(KEPT if ratio < 1.35 else HALVED, KEPT, 'n')      MISSED
+
+  Four `Name`/`Attribute` branches sit in `args[0]` conditionals today -- `bounds`,
+  `wrote`, `old` and `proj_err.sqlstate` -- and every one of them is on a determinate
+  test (`is not None`, `in`, a truthiness check), so tightening would not flag any of
+  them. What it would flag is `test_parallel_am_scan.py:225`, whose `else` branch is a
+  nested conditional ending in an f-string that does carry the number. So the rule "a
+  branch that is not a bare constant carries" is right for this tree, and the shape that
+  defeats it is one nobody writes.
+
+  ONLY `args[0]` IS EXAMINED. Three conditionals sit in a later argument position --
+  `test_projection_drop_column.py:119` and `test_projection_privilege.py:185` and `:191`
+  -- and all three build a check NAME rather than a measured value. Scanning `args[1:]`
+  would refuse three correct sites to catch a shape that does not occur.
 """
 
 import ast
