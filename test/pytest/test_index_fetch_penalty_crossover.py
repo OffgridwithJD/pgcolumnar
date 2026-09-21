@@ -29,7 +29,24 @@ def _scan_node(plan):
     return ""
 
 
-def _plan(conn, sql):
+def _scan_rows(plan):
+    """The row estimate on the first scan node, which is what the prices use."""
+    stack = [plan[0]["Plan"]]
+    while stack:
+        node = stack.pop(0)
+        if node["Node Type"] in (
+            "Index Scan",
+            "Index Only Scan",
+            "Bitmap Heap Scan",
+            "Custom Scan",
+            "Seq Scan",
+        ):
+            return node["Plan Rows"]
+        stack.extend(node.get("Plans", ()))
+    return -1
+
+
+def _plan(conn, sql, costs=False):
     with conn.cursor() as cur:
         cur.execute("SET enable_seqscan=off")
         cur.execute("SET enable_bitmapscan=off")
@@ -39,7 +56,8 @@ def _plan(conn, sql):
         cur.execute("SET pgcolumnar.enable_vectorization=off")
         cur.execute("SET pgcolumnar.enable_ungrouped_vector_agg=off")
         cur.execute("SET pgcolumnar.enable_group_vectorization=off")
-        cur.execute(f"EXPLAIN (FORMAT JSON, COSTS OFF) {sql}")
+        off = "OFF" if not costs else "ON"
+        cur.execute(f"EXPLAIN (FORMAT JSON, COSTS {off}) {sql}")
         return cur.fetchone()[0]
 
 
@@ -52,6 +70,14 @@ def test_index_fetch_penalty_crossover(pgc_conn, expect):
             f"INSERT INTO ifc SELECT g, g % 10, g % 100 FROM generate_series(1, {n}) g"
         )
         cur.execute("CREATE INDEX ifc_id ON ifc(id)")
+        # THE ESTIMATE MUST NOT BE A SAMPLE DRAW (#1168). ANALYZE samples 300 x
+        # the statistics target rows; at the default 100 that is 30,000 of these
+        # 1,000,000 and the estimate for `id <= 50000` moves every run. The arm
+        # below asserts a chosen NODE where the two prices are close, so the node
+        # flips when the estimate does -- it flaked twice in two days in the
+        # gate, once on main. 300 x 3500 >= the table, so ANALYZE reads all of it
+        # and there is no draw left to come out differently.
+        cur.execute("ALTER TABLE ifc ALTER COLUMN id SET STATISTICS 3500")
         cur.execute("ANALYZE ifc")
         cur.execute("SELECT count(*) FROM ifc")
         expect.num(cur.fetchone()[0], n, f"premise: the table holds all {n} rows")
@@ -66,6 +92,17 @@ def test_index_fetch_penalty_crossover(pgc_conn, expect):
         _scan_node(point),
         "Index Scan",
         "a selective point lookup still uses the index",
+    )
+
+    # ASSERTED, NOT ASSUMED. The shell twin gets its determinism from the same
+    # ALTER, but a premise that only one half checks is a premise neither half
+    # checks after the next edit.
+    priced = _plan(pgc_conn, f"SELECT sum(a) FROM ifc WHERE id <= {k_range}", costs=True)
+    expect.num(
+        _scan_rows(priced),
+        k_range,
+        f"premise: the {k_range}-row estimate is exact, "
+        "so no arm here rests on a sample draw",
     )
 
     ranged = _plan(pgc_conn, f"SELECT sum(a) FROM ifc WHERE id <= {k_range}")
