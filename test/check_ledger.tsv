@@ -1,3 +1,12 @@
+base_scan_io	base_scan_io	a base scan is not priced from sibling projection pages	15;16;17;18;19	2026-09-21	projPages = 0 (keep whole-file pages)
+base_scan_io	base_scan_io	premise: a covering projection exists	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: adding the projection enlarged the relation file	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the base scan does not name a covering projection	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the base scan has a positive run cost	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the later plan is still a base columnar scan	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the later plan still does not name a covering projection	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the plan is a base columnar scan	15;16;17;18;19	never	-
+base_scan_io	base_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
 differential	differential	agg avg	15;16;17;18;19	never	-
 differential	differential	agg count	15;16;17;18;19	never	-
 differential	differential	agg minmax	15;16;17;18;19	never	-

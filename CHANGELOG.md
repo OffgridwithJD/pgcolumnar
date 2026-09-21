@@ -474,6 +474,19 @@ Measured by the identity of the postmaster each
   edit could move the test and leave the message quoting the old threshold. That is
   the same defect one level along: a number the reader is told and nothing checks.
   `IO_BOUND` now feeds both.
+- A base columnar scan was priced from the whole relation file, so adding a
+  covering projection made the base scan look more expensive even though it
+  still reads only the base storage.
+
+  `pgcolumnar_relation_estimate_size` reported `smgrnblocks` of the main
+  fork. That file holds the base plus every projection. The planner's
+  `rel->pages` now subtracts the page-rounded footprints of sibling
+  projections. Tables with no extra projection keep the same page count.
+
+  Measured on PG18 with `seq_page_cost = 1000` and CPU terms zeroed, 20000
+  rows: the base-scan run stayed 22000 after a covering projection grew the
+  file from 180224 to 344064 bytes (ratio 1.000). Unfixed, the same scan
+  jumped to 42000 (ratio 1.909).
 
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
