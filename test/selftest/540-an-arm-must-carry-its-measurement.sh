@@ -103,6 +103,52 @@
 #   told "your min arm is refused" reaches for it, and nobody rewrites a ternary
 #   as if/else to dodge a guard.
 #
+#   A VERDICT RENDERED BY AN AWK AT THE END OF A PIPE --
+#   `$(cmd | awk '{print ($1 <= $2 * 2) ? "yes" : "no"}')` -- which is
+#   both-constant, throws its operands away, and which the matcher does not
+#   read, because the matcher requires `$(awk` and a pipe puts something else
+#   in that position. Reported by @OffgridwithJD; the numbers here are a second
+#   sweep, run against a lift of `_lam_sweep` that was validated FIRST by
+#   reproducing the shipped list exactly -- 103 found, 103 tracked, both `comm`
+#   directions empty -- so what follows is about the matcher and not about a
+#   copy of it.
+#
+#   SEVEN arms render a verdict this way. FIVE are invisible to the sweep, and
+#   are outside the 136 above because that population requires `$(awk` too:
+#
+#       cost_written_geometry.sh            ($1 >= 1)
+#       logical_decoding_cdc_recipe.sh      ($1 > 0)
+#       native_fetch_interrupt.sh   (x2)    ($1 >= 1)
+#       pg_dump_roundtrip.sh                ($1 > 0)
+#
+#   THE OTHER TWO ARE EXAMINED BY ACCIDENT, and that is the part worth knowing.
+#   Both are in `decode_interrupts.sh`, and their FIRST pipe stage is itself a
+#   `$(awk ...`, which satisfies the matcher's test; the greedy strip to the
+#   last `print` then reads the second stage's condition, correctly. Rewrite
+#   that first stage as `grep` and the arm leaves the sweep without its verdict
+#   changing at all. Membership, so the two claims can be checked separately:
+#   7 piped arms == 2 inside the 136 + 5 outside it.
+#
+#   ZERO ARE LOSSY TODAY: all seven conditions are `> 0` or `>= 1`, which the
+#   carve-out excuses. Proven rather than eyeballed, by putting four arms
+#   through the lifted sweep --
+#
+#       a  piped awk,       excused condition    not flagged   right either way
+#       b  substituted awk, same condition       not flagged   carve-out works
+#       c  piped awk,       LOSSY condition      NOT FLAGGED   <- the gap
+#       d  substituted awk, same LOSSY condition flagged       <- the control
+#
+#   -- where c and d carry the same condition and the same two constant
+#   branches, so the pipe is the whole difference, and d flagging is what says
+#   the probe can speak at all. A fifth arm in the `decode_interrupts` shape,
+#   with a lossy second stage, IS flagged: that is what "by accident" was
+#   measured with rather than asserted.
+#
+#   RECORDED, NOT CLOSED, for the reason given just above: widening `\$\(awk`
+#   to "an awk that is the last stage of the substitution" would cover both
+#   spellings and would add zero rows today, and nobody rewrites a substitution
+#   as a pipe to dodge a guard.
+#
 # SCOPED TO test/*.sh AND test/selftest/*.sh, EXCEPT THIS FILE. The first draft
 # excluded the whole `selftest/` directory on the grounds that "this file's own
 # explanation of the rule, and the control fixture below, both contain the shape
