@@ -234,7 +234,24 @@
 # never measured: `rhs.value in (0, 1)` for either operator excused `r > 1`
 # (fails at 0 AND 1) and `r >= 0` (cannot fail at all). Exactly `> 0` and
 # `>= 1` now. Re-derived by collection: `391 tests collected`.
-guard_tests 391
+#
+# 391 -> 393: two arms in test_docs_cover_the_corpus.py for a property nothing
+# checked -- a section's table row must name a test that section's own file
+# defines. The coverage arm beside them matches with `t not in text` over the
+# WHOLE document, so it accepts any permutation of every table in it, and three
+# sections on main were describing other files' tests.
+#
+# IN THE GUARD HALF, correctly: both read TESTS.md and the corpus source off
+# disk and need neither a cluster nor the driver.
+#
+# Derived by collection on the MERGED tree, never by adding two to either branch's
+# total: `393 tests collected`. #1166 and this branch both moved this line from 382,
+# to 391 and to 384; neither number is the answer and the sum of the deltas is only
+# the answer if nothing else changed, which is a claim rather than a measurement.
+# `cluster_tests` was re-derived in the same run and did NOT move -- 462 -- which
+# is the expected answer for a file that needs no cluster, and checking it rather
+# than assuming it is what this file asks for.
+guard_tests 393
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
