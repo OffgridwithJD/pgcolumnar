@@ -1134,6 +1134,8 @@ many times.
 | `test_every_in_document_link_in_this_directory_reaches_a_heading` | every contents-list link resolves, with a coverage premise |
 | `test_the_contents_list_is_numbered_in_order` | the contents list and the sections both count 1..N with no gap or inversion — the link arms above ask only whether a link RESOLVES, and a shuffled list resolves perfectly |
 | `test_every_test_file_has_a_NUMBERED_section_of_its_own` | a section written as an unnumbered `###` is invisible to every other arm: not in the numbering, not in the contents, and the file is still NAMED so the coverage arm is satisfied — `test_iceberg_fdw.py` shipped that way in #1057 |
+| `test_a_section_table_names_only_the_tests_its_own_file_defines` | presence is not placement: the coverage arm matches with `t not in text` over the whole document, so it accepts any permutation of every table in it — measured on `main`, three sections were describing other files' tests, and two more arrived in #1164's review |
+| `test_a_row_under_the_wrong_heading_is_named` | the removal proof and its control, plus the case that decides the rule's shape: a table carried by no heading at all, which is how a quarter of this document is written |
 | `test_a_numbered_section_has_a_body_of_its_own` | the next one down: a heading with no body still NAMES its file, so a section inserted into the gap between another heading and its body leaves every existing arm green — `## 37. test_iceberg_fdw.py` sat directly above `## 38.` with the Iceberg body under the userinfo title |
 | `test_a_shuffled_contents_list_is_caught_on_a_fixture` | **removal proof**: the `29, 31, 30` shape that shipped, with a clean control and an omitted entry named apart from an inversion |
 | `test_the_next_steps_list_is_anchored_to_the_inventory` | every section 5 entry names a mode id, so the entry can be checked at all |
@@ -1672,14 +1674,6 @@ fixtures are read off `conftest.py` rather than named in the classifier.
 | `test_the_declaration_names_each_file_once` | the list's cardinality, which `membership_report`'s set comparison cannot see. Measured: pytest deduplicates the paths, so the cost is the job's own printed file count, not a double run |
 | `test_the_partition_accounts_for_every_file_in_the_corpus` | **premise**: every file lands in exactly one bucket, and neither bucket is the whole corpus |
 | `test_the_cluster_fixtures_are_read_off_conftest_rather_than_named_here` | the roots of the property are derived from `conftest.py`, not typed |
-| `test_the_classifier_tells_a_plain_file_from_one_that_requests_a_cluster` | the base case and its control, over a fixture corpus |
-| `test_the_classifier_follows_a_cluster_fixture_through_a_local_wrapper` | a module-local fixture wrapping `pgc_cluster` is followed |
-| `test_the_classifier_catches_a_module_scope_driver_import` | an eager import kills collection, so the file cannot run in the job |
-| `test_the_classifier_is_not_fooled_by_prose_that_names_the_driver` | a docstring, a block-comment string, a generated test, and a file merely discussed |
-| `test_the_classifier_takes_a_fixture_that_provisions_without_connecting` | the second signal, isolated: a fixture that starts a cluster and imports no driver |
-| `test_the_classifier_follows_a_conftest_fixture_that_connects_indirectly` | a conftest fixture reaching a cluster through a sibling, importing nothing itself |
-| `test_the_classifier_does_not_read_a_helpers_parameter_as_a_fixture` | pytest resolves names for tests and fixtures, not for helpers |
-| `test_the_classifier_follows_a_file_that_drives_a_cluster_bound_file` | this file's own shape: driving a cluster-bound file inherits what it needs |
 | `test_the_membership_report_names_a_database_free_file_left_undeclared` | the hole itself, on a fixture, with the control beside it |
 | `test_the_membership_report_names_a_declared_file_that_needs_a_cluster` | the other direction: a listed file that starts using a cluster fixture |
 | `test_the_membership_report_names_a_declared_file_that_is_gone` | a rename is still caught, and as its own kind rather than as a cluster need |
@@ -4441,6 +4435,13 @@ This file asserts the SQLSTATE, not a cost number. The poison is a catalog
 UPDATE; the property is that a fetch raises XX001 and the backend survives.
 
 Independent of `test/native_chunk_length_bound.sh`. Same public seam, own
+
+### Every arm
+
+| test | what it asserts |
+| --- | --- |
+| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
+
 ## 45. test_native_fetch_coalesce.py: index fetch I/O is not per-column
 
 Index fetch used to pin once per column: validity bitmap, then the value stream,
@@ -4471,6 +4472,18 @@ Public seam: `EXPLAIN ANALYZE` worker rows on a Parallel Seq Scan. Leader
 participation is off so the two launched workers are the claimers under
 test. The shell twin uses its own table (`pam`, 50000 rows, groups of 100);
 this file uses `ampar`, 80000 rows, groups of 200. Assertion names match.
+
+### Every arm
+
+| test | what it holds |
+| --- | --- |
+| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
+| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
+
+The load-bearing assertion is `workers share the table-AM scan, it is not a
+single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
+reachable only when each worker claims its own row groups.
+
 ## 47. test_index_fetch_penalty_crossover.py: the correlated range must not fetch
 
 #913. A fetching index scan on a correlated key is priced below the custom scan
@@ -4484,14 +4497,12 @@ The chosen node is the property.
 Independent of `test/index_fetch_penalty_crossover.sh`. Same public seam, own
 fixture, own observations. Assertion names match the shell suite.
 
+### Every arm
+
 | test | what it asserts |
 | --- | --- |
-| `test_native_chunk_length_bound` | a point lookup uses the index and returns the row; after `page_length` grows by 2^32, both the fetch and a sequential scan raise XX001 and the backend survives each |
-| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
+| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
 
-The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
-`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
-unreachable by dividing the whole run, and reachable only if I/O remains.
 ## 48. test_parallel_scan_cost.py: a parallel custom scan must not divide I/O
 
 The port of `test/parallel_scan_cost.sh`. The partial path priced itself as
@@ -4506,17 +4517,16 @@ page-cost and its own table. CPU terms stay at their defaults so the parallel
 path is still a little cheaper than serial and Gather still appears -- the
 number this suite exists to read. Assertion names match the shell suite.
 
+
 ### Every arm
 
 | test | what it holds |
 | --- | --- |
-| `test_parallel_am_scan` | the serial plan is a Seq Scan, not a custom scan; the parallel plan is a Seq Scan under Gather with two workers launched; a parallel AM scan returns the same count as serial; both launched workers produced rows |
-| `test_a_parallel_index_build_covers_the_whole_table` | a parallel index build requests workers and indexes every row -- compared as count and SUM through the index against a sequential scan, because a group read twice cancelling a group skipped leaves the count right |
+| `test_parallel_scan_cost` | the serial plan is a columnar scan with no Gather; the parallel plan is a columnar scan under Gather with two workers; both have a positive run cost; an I/O-dominated parallel scan is not priced at serial/workers |
 
-The load-bearing assertion is `workers share the table-AM scan, it is not a
-single claimer`. It is unreachable while `phs_nallocated` is first-wins, and
-reachable only when each worker claims its own row groups.
-| `test_index_fetch_penalty_crossover` | a 50,000-row correlated range uses the custom scan; a point lookup still uses the index; both paths agree on the aggregate; a clustered ORDER BY stays on the index |
+The load-bearing assertion classifies the ratio `serial_run / parallel_run` as
+`io-kept` (below 1.35) rather than `halved` (2.000 on the unfixed path). It is
+unreachable by dividing the whole run, and reachable only if I/O remains.
 
 ## 49. test_residual_is_counted.py: a residual must be counted, not subtracted
 

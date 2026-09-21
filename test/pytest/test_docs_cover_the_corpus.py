@@ -750,6 +750,162 @@ def test_every_test_file_has_a_NUMBERED_section_of_its_own(expect):
                 "and every numbered section names a file that exists")
 
 
+_SECTION = re.compile(r"^## \d+\. (test_\w+\.py):", re.M)
+_TABLE_ROW = re.compile(r"^\| `(test_\w+)` *\|")
+
+
+def _rows_by_section(text):
+    """-> {filename: [test name named by a table row in that section, ...]}.
+
+    Keyed on the ROW, never on the heading that introduces the table. This
+    document spells that heading at least four ways -- `### Every test`,
+    `### Every arm`, `### The arms`, and ninety-odd sections headed with a
+    backticked test name -- and a sweep keyed on one of them measures a
+    fraction of the population while reporting a whole one.
+    """
+    out, current = {}, None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            # ANY `## ` ENDS THE SECTION, not only the next file section.
+            # Leaving `current` in place charged rows under a prose heading to
+            # the previous FILE section -- a false positive on correct writing,
+            # and one that names a section the row is not even in. Five non-file
+            # `## ` headings sit after a file section today, two of them ("What
+            # this corpus does NOT yet refuse", "Traps this corpus records")
+            # exactly where somebody would write a table of test names.
+            # @jdatcmd planted it.
+            m = _SECTION.match(line)
+            current = m.group(1) if m else None
+            if current:
+                out.setdefault(current, [])
+            continue
+        r = _TABLE_ROW.match(line)
+        if r and current:
+            out[current].append(r.group(1))
+    return {f: rows for f, rows in out.items() if rows}
+
+
+def _home_of_every_test(directory):
+    """-> {test name: the file that defines it}."""
+    home = {}
+    for f in sorted(pathlib.Path(directory).glob("test_*.py")):
+        for name in re.findall(r"^def (test_\w+)", f.read_text(encoding="utf-8"), re.M):
+            home[name] = f.name
+    return home
+
+
+def misplaced_rows(text, home):
+    """-> sorted ["<section file>: <row> belongs to <other file>", ...]."""
+    out = []
+    for fname, rows in _rows_by_section(text).items():
+        for r in rows:
+            if home.get(r) != fname:
+                out.append(f"{fname}: {r} belongs to {home.get(r, 'no such test')}")
+    return sorted(out)
+
+
+def test_a_section_table_names_only_the_tests_its_own_file_defines(expect):
+    """PRESENCE IS NOT PLACEMENT, and the coverage arm above can only see presence.
+
+    `test_every_file_and_test_is_named_in_the_document` matches with `t not in
+    text` over the WHOLE document, so a row that names a real test satisfies it
+    wherever that row happens to sit. The reverse arm passes for the same reason:
+    a misplaced row names a test that exists, somewhere. Between them they accept
+    any permutation of every table in this file.
+
+    THAT IS NOT HYPOTHETICAL AND IT IS NOT RARE. The row rule was run over all 237
+    commits that touch this file. NINE occurrences, and six of the ten commits that
+    introduced one are two-parent MERGES:
+
+        e62dd8d0  09-09  s3          repaired
+        b10e3f8a  09-10  s15         repaired
+        6cdea5bd  09-10  s15         repaired
+        ad168007  09-10  s15    MERGE, NEVER REPAIRED -- still wrong 179 commits later
+        22ecc34e  09-14  s36         repaired
+        d1ff6e4c  09-13  s36    MERGE  "Merge main (#1057) into #1048"
+        5933b21f  09-14  s38    MERGE  "Merge main (#1064) into #1024"
+        ce090c63  09-17  s46,47 MERGE  'author/main' into review/103...
+        f74958ed  09-17  s47,48 MERGE  'author/main' into review/106...
+        7217cfc4  09-19  s72,72 (#1164's rebase)
+
+    THE MERGE IS THE MECHANISM. This document is append-heavy: two branches each
+    add a section, git merges the text with no conflict, and a table lands under
+    the wrong heading.
+
+    WHAT THE EXISTING ARMS DO AND DO NOT CATCH, measured by running them at each
+    commit rather than by reasoning about them. A permutation that SPLITS a section
+    duplicates a number, and `test_the_contents_list_is_numbered_in_order` and the
+    link arm reject that at once -- they did, on 4c7ae02 and 0eb1f53. A permutation
+    with the numbering intact is invisible to them: at ce090c63 AND f74958ed, the
+    two merges that produced the 44-48 rotation, both arms were fully green.
+
+    AND THE OBVIOUS HAND REPAIR OF THE FIRST PRODUCES THE SECOND. On ee117726 the
+    split section was renumbered and moved to the end, which satisfied both arms
+    and CARRIED THE PREVIOUS SECTION'S TABLE WITH IT. Red became green and the
+    transposition survived to the merge. @jdatcmd found that and it is the sharper
+    half: a green numbering arm after a conflict repair is not evidence the
+    document is right.
+
+    ONE DIRECTION ONLY. A row may not name a foreign test; a test having no row is
+    a different property and a larger change, and `test_harness_deps_classifier.py`
+    is short one row today. Recorded rather than smuggled in here.
+    """
+    text = (HERE / "TESTS.md").read_text(encoding="utf-8")
+    sections = _rows_by_section(text)
+    expect.at_least(len(sections), 40,
+                    "premise: sections carrying a table were found, so a clean "
+                    "answer is not the answer an empty sweep gives")
+    bad = misplaced_rows(text, _home_of_every_test(HERE))
+    expect.text("; ".join(bad) or "none", "none",
+                "every table row names a test the section's own file defines")
+
+
+def test_a_row_under_the_wrong_heading_is_named(expect):
+    """The removal proof, with the control beside it.
+
+    The fixture is the real shape with one property removed rather than an empty
+    document: an empty document has no misplaced row either, and so reports the
+    same clean answer a correct one does.
+    """
+    # THE FILE NAMES ARE ASSEMBLED, for the reason the two arms above give: a
+    # literal corpus file name in a string here makes `_mentioned_files` read this
+    # file as driving that one, and the membership classifier then calls this file
+    # cluster-bound. CONTEXT.md rule 3.
+    a, b = "test" + "_alpha" + ".py", "test" + "_beta" + ".py"
+    home = {"test_one": a, "test_two": b}
+
+    right = (f"## 1. {a}: the first\n\n### Every arm\n\n"
+             "| test | what it holds |\n| --- | --- |\n| `test_one` | it holds |\n"
+             f"\n## 2. {b}: the second\n\n| `test_two` | it holds |\n")
+    expect.text("; ".join(misplaced_rows(right, home)) or "none", "none",
+                "control: a table whose rows name its own file's tests is not caught")
+
+    wrong = right.replace("| `test_one` | it holds |", "| `test_two` | it holds |")
+    expect.text("; ".join(misplaced_rows(wrong, home)),
+                f"{a}: test_two belongs to {b}",
+                "a row naming another file's test is named, with the file it "
+                "belongs to, rather than counted")
+
+    # A `##` HEADING THAT IS NOT A FILE SECTION ENDS THE SECTION TOO. Without
+    # that, a row under ordinary prose is charged to the file section above it,
+    # which is a false positive on correct writing AND names a section the row is
+    # not in. The control below reports clean either way, so the plant is what
+    # carries this.
+    prose = (f"## 1. {a}: the first\n\n| `test_one` | ok |\n"
+             "\n## 2. How to read a test in here\n\n| `test_two` | ok |\n")
+    expect.text("; ".join(misplaced_rows(prose, home)) or "none", "none",
+                "a row under a heading that is not a file section is charged to "
+                "no file, rather than to the file section above it")
+
+    # AND THE HEADING SPELLING MUST NOT DECIDE IT. Section 2's table above carries
+    # no `### Every arm` heading at all, which is how a quarter of this document is
+    # written; a sweep keyed on the heading would have scored it clean either way.
+    headless = f"## 1. {a}: the first\n\n| `test_two` | it holds |\n"
+    expect.text("; ".join(misplaced_rows(headless, home)),
+                f"{a}: test_two belongs to {b}",
+                "a table with no heading above it is examined like any other")
+
+
 def test_the_anchor_rule_drops_punctuation_and_keeps_underscores(expect):
     """The derivation, on the heading the defect was found in."""
     # Assembled, for the reason given in the arm below: a literal corpus file name

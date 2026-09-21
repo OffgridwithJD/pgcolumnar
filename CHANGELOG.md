@@ -70,6 +70,84 @@ true until the next version shipped.
   Measured consequence, through #1166's sweep: carve-out beneficiaries 20 -> 18, live
   offenders none either way. The remaining eighteen are counts, and the gap is recorded
   rather than closed -- no AST sweep can tell a count from a signed value.
+- Three TESTS.md sections documented other files' tests, and nothing could see it.
+
+  `test_every_file_and_test_is_named_in_the_document` matches with `t not in text`
+  over the WHOLE document, so a row naming a real test satisfies it wherever that row
+  sits. The reverse arm passes for the same reason: a misplaced row names a test that
+  exists, somewhere. **Between them they accept any permutation of every table in the
+  file.** Presence is not placement.
+
+  NINE OCCURRENCES OVER 237 COMMITS, and the mechanism is the MERGE. The rule was run
+  over every commit that touches this file; six of the ten that introduced an
+  occurrence are two-parent merges. The document is append-heavy, so two branches each
+  add a section, git merges the text with no conflict, and a table lands under the
+  wrong heading. Section 15 has been wrong since 2026-09-10 and 179 commits.
+
+  WHAT THE EXISTING ARMS CATCH, measured by running them at each commit rather than by
+  reasoning about them. A permutation that SPLITS a section duplicates a number, and
+  `test_the_contents_list_is_numbered_in_order` and the link arm reject it at once --
+  they did, on two commits of #1164. A permutation with the numbering intact is
+  invisible: at both merges that produced the 44-48 rotation the arms were fully green.
+  **And the obvious hand repair of the first produces the second** -- renumbering the
+  split section and moving it to the end satisfied both arms and carried the previous
+  section's table along, so red became green and the transposition survived. A green
+  numbering arm after a conflict repair is not evidence the document is right.
+
+  WHAT WAS ACTUALLY WRONG, measured before the guard was written:
+
+      ## 15  eight rows the classifier file defines, left behind when ## 16 was split
+             out of it -- interleaved among section 15's own rows, not appended, so
+             no reader spots them
+      ## 44  no table; its row sat in ## 47
+      ## 46  no table; its two rows AND its `phs_nallocated` paragraph sat in ## 48
+      ## 47  its row sat in ## 48
+      ## 48  its row and its `serial_run / parallel_run` paragraph sat in ## 47
+
+  44 through 48 are one four-section shift: each section's table and its load-bearing
+  paragraph had come to rest under the NEXT heading. **Nothing here is a judgement
+  about anyone's prose** -- each paragraph names its own subject, so its home is
+  determined. Section 15's eight are removed rather than merged, because section 16
+  already carries all eight with the descriptions its author wrote for that file.
+
+  THE RULE IS KEYED ON THE ROW, NEVER ON THE HEADING, and that was learned the
+  expensive way. A first draft matched `### Every test` and reported "4 tables, 0
+  failing on main". This document spells that heading at least four ways -- `### Every
+  test` (4), `### Every arm` (24), `### The arms`, and ninety-odd sections headed with
+  a backticked test name -- so the draft measured 4 of 58 sections and called it the
+  population. Row-keyed, main was never at zero:
+
+      heading-keyed draft      4 sections     0 failing     (wrong population)
+      row-keyed                58             3 failing
+
+  Corrected in public before it was built on. A count is a claim about its glob.
+
+  A `##` HEADING THAT IS NOT A FILE SECTION ENDS THE SECTION TOO. Without that, a row
+  under ordinary prose is charged to the file section above it -- a false positive on
+  correct writing, and one that names a section the row is not even in. Not live (five
+  non-file `##` headings sit after a file section, no table rows under any of them) and
+  reachable: two of the five are "What this corpus does NOT yet refuse" and "Traps this
+  corpus records", exactly where somebody writes a table of test names.
+
+  ONE DIRECTION ONLY. A row may not name a foreign test. A test having no row is a
+  different property and a larger change; `test_harness_deps_classifier.py` is short
+  one row today (`test_a_file_that_only_PARSES_a_driver_import_is_job_runnable`) and
+  that is recorded rather than smuggled in.
+
+  Proved by removal against the repaired document, not only on a fixture: one row
+  moved into the previous section, restored byte-identical (`7f720954f8c6` both ways).
+
+      got 'test_index_fetch_penalty_crossover.py: test_parallel_scan_cost belongs to
+           test_parallel_scan_cost.py'   want 'none'
+
+  The fixture arms carry the control beside the offender and the case that decided the
+  rule's shape -- a table carried by no heading at all, which is how a quarter of this
+  document is written and what a heading-keyed sweep would score clean.
+
+      guard leg   393 passed, want 393 (391 on main after #1166, +2), DERIVED BY
+                  COLLECTION on the merged tree rather than by adding this branch's
+                  +2 to #1166's total -- both branches moved this line from 382
+      cluster leg 462, re-derived in the same run and unmoved, as expected
 
 - `analyze_function` ported to pytest (#414, #432).
 
