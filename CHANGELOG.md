@@ -74,6 +74,7 @@ true until the next version shipped.
 
   Gated: 7 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean over the
   whole harness; the selftest corpus and the pytest guard leg green.
+
 - `native_batch_fold_projection`'s "actually ran" arm read the plan's prediction
   (#1149).
 
