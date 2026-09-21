@@ -14,6 +14,19 @@
 # therefore a claim that the SWEEP changed, and a reviewer should refuse any
 # addition that does not come with one.
 #
+# AND THAT CLAIM IS CHECKABLE RATHER THAN TRUSTED. "Not one of those 26 arms
+# changed" is readable straight off the diff, because the widening touches this
+# list and the sweep and nothing else:
+#
+#     git diff --name-only origin/main...HEAD
+#
+# THREE DOTS, against the merge base. Two dots compares the working tree with
+# whatever main has moved on to, so a branch that is merely BEHIND main lists
+# every file the other lane touched -- four of them, in the run that caught this
+# wording. A suite appearing in the three-dot list beside a growth of this file
+# is the shape to refuse: the rows would then be describing arms the same commit
+# edited, and "only what was examined changed" would no longer be true.
+#
 # KEYED BY (SUITE, NAME), never by name alone: `premise: the install script
 # declares MODULE_PATHNAME symbols at all` is carried by two suites, and one key
 # for both would let a repair in one be satisfied by the other. Never by

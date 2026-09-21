@@ -63,16 +63,45 @@
 #   $( awk ... print (COND) ? A : B ... )    a verdict computed by awk
 #
 # The second was invisible until #1174, so `lossy_arms.tsv` read as the debt of
-# the shell corpus when it was the debt of one spelling. 136 recorder arms render
-# through awk; 57 use awk as an extractor and conclude nothing, 33 carry a value
-# into a branch, and 26 discarded both operands and were never examined.
+# the shell corpus when it was the debt of one spelling.
 #
-# STILL OUT OF SCOPE, and named rather than left to be rediscovered: a verdict
-# computed into a VARIABLE and checked on a later line -- `hit="$(awk ... ? 1 :
-# 0)"` then `check "..." "$hit" "1"` -- which is the same defect with the arm two
-# statements from its name. Naming it needs dataflow this sweep does not do, and
-# guessing from the nearest preceding name charges it to the wrong check: that is
-# measured, not feared, in the matcher below.
+# THE POPULATION, WITH ITS BUCKETS SUMMING TO IT. Measured over test/*.sh and
+# test/selftest/*.sh at f1c3b7a:
+#
+#     awk-valued recorder arms           136
+#       awk as an extractor               57   concludes nothing
+#       a branch carries a value          33   correct by the rule
+#       both branches constant            46
+#         excused by the carve-out        20   nothing-versus-something, equality
+#         LOSSY                           26   never examined before #1174
+#       inputs 136 == sum of buckets 136
+#
+# THE FOURTH BUCKET IS THE ONE THAT MATTERS AND I PUBLISHED THIS WITHOUT IT.
+# The first version of this note read "57, 33 and 26", which sums to 116 against
+# a stated 136: the 20 the carve-out EXCUSES had been dropped and the 26 was
+# labelled "both branches constant" when it means "both constant AND lossy".
+# A reader given three buckets cannot tell whether an arm left the population
+# because the rule excused it or because the sweep never saw it -- which is the
+# distinction this whole file is about. Caught by @OffgridwithJD, against the
+# repository rule that a list-derived claim prints `inputs == sum(buckets)`
+# beside it. That identity is now printed above, where it can be checked.
+#
+# STILL OUT OF SCOPE, and named rather than left to be rediscovered:
+#
+#   A VERDICT COMPUTED INTO A VARIABLE and checked on a later line --
+#   `hit="$(awk ... ? 1 : 0)"` then `check "..." "$hit" "1"` -- the same defect
+#   with the arm two statements from its name. Naming it needs dataflow this
+#   sweep does not do, and guessing from the nearest preceding name charges it to
+#   the wrong check: that is measured, not feared, in the matcher below.
+#
+#   A VERDICT RENDERED BY if/else RATHER THAN A TERNARY --
+#   `BEGIN { if (a <= b*2) print "yes"; else print "no" }` -- which is
+#   both-constant and throws its operands away, and which the matcher does not
+#   read. Zero live sites, swept with continuations folded; the two non-ternary
+#   near-misses are printf extractors. Reported by @OffgridwithJD and left open
+#   deliberately: the argument that closed `any()` on #1166 was that an author
+#   told "your min arm is refused" reaches for it, and nobody rewrites a ternary
+#   as if/else to dodge a guard.
 #
 # SCOPED TO test/*.sh AND test/selftest/*.sh, EXCEPT THIS FILE. The first draft
 # excluded the whole `selftest/` directory on the grounds that "this file's own
