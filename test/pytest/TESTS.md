@@ -5564,6 +5564,28 @@ collation. Measured rather than assumed:
 The second is the `pg_config` the `pytest (cluster tests)` job is given, so **CI
 runs these arms rather than declining them.** The five-major local gate exits 67 on
 every major for this pair, which is the designed third state and not a failure.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_grouped_node_is_chosen_for_the_shapes_it_supports` | a text key, an hour expression and the q4 shape all plan as the grouped node, and the GUC off plans an ordinary Agg |
+| `test_the_grouped_path_agrees_with_a_heap_mirror` | eight exact-aggregate shapes, each with the node asserted first, against the same rows in a heap table |
+| `test_the_mirror_still_agrees_after_deletes_and_an_added_column` | the mirror and the toggle both survive a delete and an `ADD COLUMN ... DEFAULT` |
+| `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
+| `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
+| `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
+| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
+| `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
+| `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
+| `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
+| `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
+| `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
+| `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
+| `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
+| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
+| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |
+
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 
 Port of `analyze_function.sh` (#414, #432). Core ANALYZE samples 30,000 rows, and on a
@@ -5650,15 +5672,6 @@ assumed: `542af67fbc25` unmutated, `1cd8f666717b` mutated, `542af67fbc25` restor
 | `test_histogram_bounds_are_a_positional_stride` | eleven distinct rows at target 3, where core's `values[floor(i*(nv-1)/(nhist-1))]` and `percentile_disc`'s `ceil(p*nv)-1` land on different values; the expectation comes from an independent oracle AND a hand-worked figure that must agree first |
 | `test_null_frac_counts_live_rows_not_ones_a_delete_left` | #485: null_frac came from the zone maps, which count what was WRITTEN, so one pg_stats row carried two statistics normalised against different populations; both must imply the same table |
 | `test_the_documented_statistics_are_the_ones_written` | the list in `docs/sql-reference.md` parsed and compared against what the function populates, plus the two negatives the doc states in prose |
-| `test_no_arm_collapses_its_measurement_to_a_constant` | the corpus itself; green on arrival, which is the point |
-| `test_the_sweep_finds_the_arms_it_is_meant_to_classify` | the coverage premise: a sweep that parsed nothing reports the same clean result |
-| `test_a_lossy_arm_is_caught` | the removal proof, with a carrying arm as its control |
-| `test_a_determinate_arm_is_not_caught` | six shapes whose failing set is a single value, driven rather than described |
-| `test_an_aggregate_over_several_operands_stays_in_scope` | `min(a,b,c,d) > 0` is lossy, `min(a) > 0` is not |
-| `test_a_chained_comparison_is_examined_pair_by_pair` | `0 < sel < 20000` hides its middle operand; an earlier draft scored every chain determinate |
-| `test_the_carve_out_is_driven_at_its_boundary` | `> 0` and `>= 1` exactly, written either way round; `r > 1` and `r >= 0` are not the same shape and were being excused |
-| `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
-| `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
 
 
 ## 73. test_assertion_carries_its_measurement.py: a failure must say what it measured
@@ -5728,19 +5741,12 @@ not have.
 
 | test | what it holds |
 | --- | --- |
-| `test_the_grouped_node_is_chosen_for_the_shapes_it_supports` | a text key, an hour expression and the q4 shape all plan as the grouped node, and the GUC off plans an ordinary Agg |
-| `test_the_grouped_path_agrees_with_a_heap_mirror` | eight exact-aggregate shapes, each with the node asserted first, against the same rows in a heap table |
-| `test_the_mirror_still_agrees_after_deletes_and_an_added_column` | the mirror and the toggle both survive a delete and an `ADD COLUMN ... DEFAULT` |
-| `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
-| `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
-| `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
-| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
-| `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
-| `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
-| `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
-| `test_a_gating_where_is_honoured_rather_than_dropped` | blocker 2: a one-time filter makes the node decline, and both the false and true gates answer as heap does |
-| `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
-| `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
-| `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
-| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
-| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |
+| `test_no_arm_collapses_its_measurement_to_a_constant` | the corpus itself; green on arrival, which is the point |
+| `test_the_sweep_finds_the_arms_it_is_meant_to_classify` | the coverage premise: a sweep that parsed nothing reports the same clean result |
+| `test_a_lossy_arm_is_caught` | the removal proof, with a carrying arm as its control |
+| `test_a_determinate_arm_is_not_caught` | six shapes whose failing set is a single value, driven rather than described |
+| `test_an_aggregate_over_several_operands_stays_in_scope` | `min(a,b,c,d) > 0` is lossy, `min(a) > 0` is not |
+| `test_a_chained_comparison_is_examined_pair_by_pair` | `0 < sel < 20000` hides its middle operand; an earlier draft scored every chain determinate |
+| `test_the_carve_out_is_driven_at_its_boundary` | `> 0` and `>= 1` exactly, written either way round; `r > 1` and `r >= 0` are not the same shape and were being excused |
+| `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
+| `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
