@@ -70,11 +70,21 @@
 #
 #     awk-valued recorder arms           136
 #       awk as an extractor               57   concludes nothing
-#       a branch carries a value          33   correct by the rule
-#       both branches constant            46
+#       a branch carries a value          35   correct by the rule
+#       both branches constant            44
 #         excused by the carve-out        20   nothing-versus-something, equality
-#         LOSSY                           26   never examined before #1174
+#         LOSSY                           24   still unrepaired
 #       inputs 136 == sum of buckets 136
+#
+# THE PARTITION MOVED WITH A REPAIR, AND NOTHING WOULD HAVE NOTICED. It read
+# 57/33/46 (20 excused, 26 lossy) until parallel_scan_cost's two "io-kept"
+# arms were repaired: each moved from "both constant and lossy" into "a branch
+# carries a value", so carries went 33 -> 35, both-constant 46 -> 44 and LOSSY
+# 26 -> 24. The TOTAL does not move, because a repaired arm is still an
+# awk-valued recorder arm. The tsv count is derived from the rows and follows a
+# repair on its own; THESE NUMBERS ARE TYPED PROSE and no check reads them, so
+# a repair that leaves them alone leaves the file describing a tree that no
+# longer exists. Re-derive them in the commit that repairs an arm.
 #
 # THE FOURTH BUCKET IS THE ONE THAT MATTERS AND I PUBLISHED THIS WITHOUT IT.
 # The first version of this note read "57, 33 and 26", which sums to 116 against

@@ -135,8 +135,6 @@ native_zonemap_narrow	zone_map reads scale with predicates, not table width (wid
 objstore_listing	the prefix listing paged (more than one list-type=2 request)
 objstore_module	premise: the real module was restored afterwards
 objstore_sink_write	parallel: every worker PUT went to the prefix
-parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers
-parallel_scan_cost	an I/O-dominated parallel scan is not priced at serial/workers with the leader participating
 projection_scan_cost	a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection
 projection_scan_cost	and an IN-list on the sort key keeps its discount, which gating on exactness would lose
 projection_scan_cost	a non-sort-key restriction does not cheapen a covering projection

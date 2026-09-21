@@ -98,11 +98,24 @@ check "premise: both scans have a positive run cost" \
 	"$(awk -v s="$s_run" -v p="$p_run" \
 		'BEGIN{ print (s>0 && p>0) ? "yes" : "serial " s ", parallel " p }')" "yes"
 
+# ONE DEFINITION OF THE BOUND. Writing 1.35 in the condition and again in the
+# message lets a future edit move the test and leave the message describing the
+# old threshold, which is the same class of defect as an arm that does not carry
+# its measurement: the reader is told a number that nothing checks.
+IO_BOUND=1.35
+
 # On the unfixed path the ratio is 2.000 (whole run / 2 workers). Core leaves
 # I/O whole, so with CPU terms zeroed the ratio stays near 1. 1.35 is
 # unreachable by dividing the whole run, and reachable only if I/O remains.
+# CARRIES THE RATIO. "halved" named the verdict and threw away every operand
+# that produced it, so a red said the bound was crossed and not by how much or
+# from what (#1164). Single quotes round the awk program so the strings need no
+# escaping, as in the premise above.
 check "an I/O-dominated parallel scan is not priced at serial/workers" \
-	"$(awk -v r="$ratio" "BEGIN{ print (r < 1.35) ? \"io-kept\" : \"halved\" }")" "io-kept"
+	"$(awk -v r="$ratio" -v s="$s_run" -v p="$p_run" -v b="$IO_BOUND" \
+		'BEGIN{ print (r < b) ? "io-kept" : \
+		       sprintf("ratio %.3f at or above %s (serial %s, parallel %s)", r, b, s, p) }')" \
+	"io-kept"
 
 # ---- the same property with the leader participating, which is the default ----
 #
@@ -166,7 +179,10 @@ check "premise: the leader-on parallel scan has a positive run cost" \
 # the ratio at the divisor, and the divisor is larger here, so a regression is if
 # anything easier to see in this configuration.
 check "an I/O-dominated parallel scan is not priced at serial/workers with the leader participating" \
-	"$(awk -v r="$ratio_on" "BEGIN{ print (r < 1.35) ? \"io-kept\" : \"halved\" }")" "io-kept"
+	"$(awk -v r="$ratio_on" -v s="$s_run" -v p="$p_run_on" -v b="$IO_BOUND" \
+		'BEGIN{ print (r < b) ? "io-kept" : \
+		       sprintf("ratio %.3f at or above %s (serial %s, parallel %s)", r, b, s, p) }')" \
+	"io-kept"
 
 setg parallel_leader_participation off
 
