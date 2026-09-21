@@ -56,6 +56,53 @@
 # direction that gets published**, so the carve-outs are driven below rather than
 # described.
 #
+# THE SCOPE IS A SHAPE, NOT A DIRECTORY, and saying only the directory once cost
+# 26 arms (#1174). The selector below reads two spellings of a verdict:
+#
+#   $( [ TEST ] && echo A || echo B )        a test built into the shell
+#   $( awk ... print (COND) ? A : B ... )    a verdict computed by awk
+#
+# The second was invisible until #1174, so `lossy_arms.tsv` read as the debt of
+# the shell corpus when it was the debt of one spelling.
+#
+# THE POPULATION, WITH ITS BUCKETS SUMMING TO IT. Measured over test/*.sh and
+# test/selftest/*.sh at f1c3b7a:
+#
+#     awk-valued recorder arms           136
+#       awk as an extractor               57   concludes nothing
+#       a branch carries a value          33   correct by the rule
+#       both branches constant            46
+#         excused by the carve-out        20   nothing-versus-something, equality
+#         LOSSY                           26   never examined before #1174
+#       inputs 136 == sum of buckets 136
+#
+# THE FOURTH BUCKET IS THE ONE THAT MATTERS AND I PUBLISHED THIS WITHOUT IT.
+# The first version of this note read "57, 33 and 26", which sums to 116 against
+# a stated 136: the 20 the carve-out EXCUSES had been dropped and the 26 was
+# labelled "both branches constant" when it means "both constant AND lossy".
+# A reader given three buckets cannot tell whether an arm left the population
+# because the rule excused it or because the sweep never saw it -- which is the
+# distinction this whole file is about. Caught by @OffgridwithJD, against the
+# repository rule that a list-derived claim prints `inputs == sum(buckets)`
+# beside it. That identity is now printed above, where it can be checked.
+#
+# STILL OUT OF SCOPE, and named rather than left to be rediscovered:
+#
+#   A VERDICT COMPUTED INTO A VARIABLE and checked on a later line --
+#   `hit="$(awk ... ? 1 : 0)"` then `check "..." "$hit" "1"` -- the same defect
+#   with the arm two statements from its name. Naming it needs dataflow this
+#   sweep does not do, and guessing from the nearest preceding name charges it to
+#   the wrong check: that is measured, not feared, in the matcher below.
+#
+#   A VERDICT RENDERED BY if/else RATHER THAN A TERNARY --
+#   `BEGIN { if (a <= b*2) print "yes"; else print "no" }` -- which is
+#   both-constant and throws its operands away, and which the matcher does not
+#   read. Zero live sites, swept with continuations folded; the two non-ternary
+#   near-misses are printf extractors. Reported by @OffgridwithJD and left open
+#   deliberately: the argument that closed `any()` on #1166 was that an author
+#   told "your min arm is refused" reaches for it, and nobody rewrites a ternary
+#   as if/else to dodge a guard.
+#
 # SCOPED TO test/*.sh AND test/selftest/*.sh, EXCEPT THIS FILE. The first draft
 # excluded the whole `selftest/` directory on the grounds that "this file's own
 # explanation of the rule, and the control fixture below, both contain the shape
@@ -106,6 +153,21 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 			if (t ~ /-(gt|ge)[[:space:]]+"?[01]"?[[:space:]]*$/) return 1
 			return 0
 		}
+		# The same carve-outs the `[` rule uses, written in awk syntax.
+		#
+		# EXACTLY ONE COMPARISON. `(s>0 && p>0)` ends in `p>0` and would read as
+		# nothing-versus-something, while hiding WHICH of two costs went
+		# non-positive -- the arm #1172 repaired by hand. A condition carrying
+		# more than one comparison is a compound and stays in scope.
+		function awk_determinate(c,   n, i) {
+			sub(/[[:space:]]*\)*[[:space:]]*$/, "", c)
+			n = gsub(/<=|>=|==|!=|<|>/, "&", c)
+			if (n != 1) return 0
+			if (c ~ /(==|!=)/) return 1
+			if (c ~ />[[:space:]]*0$/) return 1
+			if (c ~ />=[[:space:]]*1$/) return 1
+			return 0
+		}
 		# CONTINUATIONS ARE FOLDED FIRST. The corpus wraps these arms across
 		# lines, and a line-by-line reader sees `&& echo "smaller"` without the
 		# `|| echo "UNCHANGED ($ROWS_AFTER of $ROWS_BEFORE)"` that follows it --
@@ -124,6 +186,40 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 			sub(/^[^"]*"/, "", nm); sub(/".*$/, "", nm)
 			name = nm
 		}
+		# AN AWK-RENDERED VERDICT, same rule and a different spelling (#1174).
+		#
+		# THE BRANCHES DECIDE, NOT THE PROGRAM. The `[` arm below excuses any arm
+		# whose branches contain `$`, because a branch that interpolates carries
+		# its value. That test cannot be reused here: an awk program written in
+		# DOUBLE quotes interpolates in its CONDITION -- `print ($LO * 8 <= $HI)
+		# ? 1 : 0` -- and still throws both operands away. So the two branches are
+		# matched as literals, and anything concatenated onto one fails the match
+		# and is treated as carrying.
+		#
+		# A BARE NUMBER IS A CONSTANT TOO. `? 1 : 0` renders `got 0 want 1`, which
+		# is the exact symptom #1164 is named for, and a first pass over this
+		# corpus keyed on quoted branches alone and reported zero of them.
+		# THE RECORDER MUST BE ON THIS LINE. `name` holds the LAST name seen, so
+		# a rule that fires on any line would charge an arm to whatever check
+		# preceded it. Measured: without this, `test/lib.sh:1347` -- an `if` in a
+		# helper -- was reported as `lib: $name`, and three `bloom_hit="$(awk
+		# ... ? 1 : 0)"` ASSIGNMENTS in native_join_runtime_filter were charged to
+		# unrelated checks. 4 of 32 findings were manufactured that way.
+		#
+		# A BOOLEAN ASSIGNED TO A VARIABLE AND CHECKED LATER IS THE SAME DEFECT
+		# and is deliberately OUT OF SCOPE here: the arm is two statements apart
+		# from its name, so naming it needs dataflow this sweep does not do.
+		# Recorded rather than mis-attributed.
+		line ~ /(^|[[:space:]])(check|check_num|check_text|check_ratio|pgc_fail|check_skip)[[:space:]]+"/ &&
+		line ~ /\$\(awk/ {
+			t = line
+			gsub(/\\"/, "\"", t)   # an awk program in double quotes escapes its own
+			if (match(t, /\?[[:space:]]*("[^"]*"|[0-9]+(\.[0-9]+)?)[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+(\.[0-9]+)?)[[:space:]]*[})]/)) {
+				cond = substr(t, 1, RSTART - 1)
+				sub(/^.*print[[:space:]]*/, "", cond)
+				if (!awk_determinate(cond) && name != "") print suite "\t" name
+			}
+		}
 		line ~ /\$\([[:space:]]*\[[^]]*\][[:space:]]*&&[[:space:]]*echo/ {
 			body = line
 			sub(/^.*\$\([[:space:]]*\[/, "", body)
@@ -137,6 +233,26 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 	' suite="$(basename "${1%.sh}")" "$1"
 }
 
+# AND THE SAME RULE OVER AN AWK-RENDERED VERDICT (#1174). A separate fixture, so
+# the two controls above keep their numbers and this family is counted on its own.
+#
+# THE INTERPOLATION RULE CANNOT BE REUSED WHOLESALE. The `[` matcher excuses an
+# arm whose branches contain `$`, because a branch that interpolates carries its
+# value. An awk program written in DOUBLE quotes carries `$LO` in its CONDITION
+# and constants in its branches -- `print ($LO * 8 <= $HI) ? 1 : 0` -- so a test
+# for `$` anywhere excuses the whole family. The branches are what must be read.
+_lam_probe_awk="$PGC_WORKDIR/lam_probe_awk.sh"
+cat > "$_lam_probe_awk" <<'PROBE'
+check "an awk verdict whose operands vanish" \
+	"$(awk -v a="$WF" -v b="$NF" 'BEGIN{ print (a <= b * 2) ? "yes" : "no" }')" "yes"
+check "an awk verdict rendered as a number" \
+	"$(awk "BEGIN{print ($LO * 8 <= $HI) ? 1 : 0}")" "1"
+check "determinate: an awk count against nothing" \
+	"$(awk -v n="$SEEN" 'BEGIN{ print (n > 0) ? "some" : "none" }')" "some"
+check "carried: the awk branch names the number" \
+	"$(awk -v n="$n" 'BEGIN{ print (n >= 5) ? "yes" : "no (found " n ")" }')" "yes"
+PROBE
+
 _lam_probe_hits="$(_lam_sweep "$_lam_probe" | wc -l | tr -d ' ')"
 check "control: the sweep sees a threshold arm and a floor arm" \
 	"$_lam_probe_hits" "2"
@@ -146,6 +262,14 @@ check "control: the sweep sees a threshold arm and a floor arm" \
 _lam_probe_names="$(_lam_sweep "$_lam_probe" | cut -f2 | sort | tr '\n' ';')"
 check_text "control: a determinate or carrying arm is not swept up" \
 	"$_lam_probe_names" "a count against a floor;a threshold whose operands vanish;"
+
+_lam_awk_hits="$(_lam_sweep "$_lam_probe_awk" | wc -l | tr -d ' ')"
+check "control: the sweep sees an awk verdict that discards its operands" \
+	"$_lam_awk_hits" "2"
+
+_lam_awk_names="$(_lam_sweep "$_lam_probe_awk" | cut -f2 | sort | tr '\n' ';')"
+check_text "control: a determinate or carrying awk arm is not swept up" \
+	"$_lam_awk_names" "an awk verdict rendered as a number;an awk verdict whose operands vanish;"
 
 # The corpus, against the tracked debt. Both directions, in one pass.
 _lam_found="$PGC_WORKDIR/lam_found.tsv"
