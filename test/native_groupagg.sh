@@ -360,21 +360,59 @@ psql_run "DROP TABLE IF EXISTS t_cost;
           FROM generate_series(1, 20000) n;
           ANALYZE t_cost;" >/dev/null
 
-# cost of the Custom Scan top node, with the grouped path forced on
-gcost() {  # gcost <select-list>
+# THE TWO COSTS MUST BE COSTS OF THE SAME PLAN SHAPE, and of the node under test.
+# Ten aggregates over ten DIFFERENT columns are not that: a scan projecting ten
+# columns costs more than one projecting one whatever the folding charge is, and
+# that difference alone kept this arm green against a build charging nothing per
+# aggregate -- the exact defect #349 fixed. Measured on PG 18, 20,000 rows:
+#
+#     distinct columns, 1 agg     350.50   350.50    (control, mutant)
+#     distinct columns, 10 aggs  1253.01   803.01    <- 803.01 > 350.50, arm green
+#     one column,       1 agg     350.50   350.50
+#     one column,       10 aggs   800.50   350.50    <- the whole difference is folding
+#
+# 450.00 is cpu_operator_cost (0.0025) x 20000 rows x 9 extra aggregates, and under
+# the mutation it is 0.00. Ten aggregates over the SAME column hold the projection
+# fixed; the path is forced so both arms really are the grouped node rather than
+# whatever the planner prefers once the charge is applied -- with the charge on, ten
+# avg(a) is priced OUT of the grouped path and core's Agg wins it, which would
+# silently change which node is being read (#1162).
+gplan() {  # gplan <select-list> -> the plan text, grouped path forced
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 		-d "$PGC_DB" -Atq \
 		-c "SET pgcolumnar.enable_group_vectorization=on" \
-		-c "EXPLAIN (COSTS ON) SELECT host, $1 FROM t_cost GROUP BY host" 2>&1 |
-		head -1 | grep -oE '\.\.[0-9]+\.[0-9]+' | tr -d '.' | head -1
+		-c "SET enable_hashagg=off" \
+		-c "SET enable_sort=off" \
+		-c "EXPLAIN (COSTS ON) SELECT host, $1 FROM t_cost GROUP BY host" 2>&1
 }
-C1="$(gcost 'avg(a)')"
-C10="$(gcost 'avg(a),avg(b),avg(c),avg(d),avg(e),avg(f),avg(g2),avg(h),avg(i),avg(j)')"
-echo "      grouped path cost: 1 aggregate $C1, 10 aggregates $C10"
+# ONE implementation of the plan, so the premise and the cost cannot drift onto
+# different queries.
+gtopcost() { printf '%s\n' "$1" | head -1 | grep -oE '\.\.[0-9]+\.[0-9]+' | tr -d '.' | head -1; }
+gmarker() {  # gmarker <plan> -> yes, or the top line, so a red says what it got
+	[ "$(grep -c 'Columnar Vectorized Group Keys' <<<"$1" || true)" -ne 0 ] &&
+		echo yes || echo "no ($(head -1 <<<"$1" | tr -s ' ' | cut -c1-60))"
+}
+
+TEN_SAME="avg(a),avg(a),avg(a),avg(a),avg(a),avg(a),avg(a),avg(a),avg(a),avg(a)"
+P1="$(gplan 'avg(a)')"
+P10="$(gplan "$TEN_SAME")"
+C1="$(gtopcost "$P1")"
+C10="$(gtopcost "$P10")"
+echo "      grouped path cost (digits, decimal point removed): 1 aggregate $C1, 10 aggregates $C10"
+
+# Asserted, because a short load would leave the whole explanation above describing
+# another table.
+check_num "premise: the cost fixture holds the rows the 450.00 is computed from" \
+	"$(q 'SELECT count(*) FROM t_cost')" "20000"
+# The premise the two costs are costs OF. Without it a planner that stopped choosing
+# the node would leave the arms comparing core's Agg with itself, which is monotone
+# in the aggregate count for reasons of its own.
+check "premise: one aggregate is costed as the grouped node" "$(gmarker "$P1")" "yes"
+check "premise: and so is ten, so the two costs are comparable" "$(gmarker "$P10")" "yes"
 check "premise: the grouped path is costed at all (non-empty estimate)" \
-	"$( [ -n "$C1" ] && [ -n "$C10" ] && echo yes || echo no )" yes
+	"$([ -n "$C1" ] && [ -n "$C10" ] && echo yes || echo "no [1=$C1 10=$C10]")" "yes"
 check "ten aggregates cost more than one (#349)" \
-	"$( [ "$C10" -gt "$C1" ] 2>/dev/null && echo yes || echo no )" yes
+	"$([ "${C10:-0}" -gt "${C1:-0}" ] 2>/dev/null && echo yes || echo "no [1=$C1 10=$C10]")" "yes"
 
 # ---- the group-estimate bound (#369) ---------------------------------------
 #

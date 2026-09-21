@@ -158,6 +158,43 @@ so it plants its own key now. Second, a mutation is evidence only once two thing
 are shown: that it applied, and that the runtime moved. A header edit rebuilds
 nothing here (#1158), so every cell above prints the `.so` md5.
 
+## A cost comparison must vary one term
+
+Two estimates are evidence about a cost term only when everything else is held
+fixed. If a second thing moves with the term, the arm stays green while the term
+goes to zero.
+
+`test/native_groupagg.sh` asserts that the grouped path prices the folding it
+does (#349). It compared one aggregate against ten, and the ten read ten
+different columns. A scan projecting ten columns costs more than one projecting
+one column, whatever the folding charge is. Measured on PG 18 over 20,000 rows,
+against a build whose folding charge no longer scales with the aggregate count:
+
+```
+                            control   mutant
+distinct columns, 1 agg      350.50   350.50
+distinct columns, 10 aggs   1253.01   803.01     803.01 > 350.50, arm green
+one column,       1 agg      350.50   350.50
+one column,       10 aggs    800.50   350.50     the whole difference is folding
+```
+
+The 452.51 that survives the mutation is the scan's projection cost. The 450.00
+that does not is `cpu_operator_cost` times 20,000 rows times nine extra
+aggregates, which is the term under test.
+
+The path has to be forced, and the reason is worth keeping. With the folding
+charge applied, ten `avg(a)` over one column is priced out of the grouped path,
+so the planner picks core's own aggregate node. Removing the charge makes the
+grouped path win it. Without `enable_hashagg = off` and `enable_sort = off` the
+comparison silently changes which node it is reading, which is the same defect
+one level up.
+
+That argues for a premise the arm did not have: assert that the plan being costed
+is the node under test, on both sides. `Columnar Vectorized Group Keys` appears in
+no other node. A positive grep for it therefore proves the node, rather than
+testing an absence that any other plan would also satisfy.
+
+
 ## Differential oracle
 
 `test/differential.sh`, `recovery`, `fuzz`, `hardening`, and `concurrent_diff`

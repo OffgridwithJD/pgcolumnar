@@ -112,6 +112,46 @@ true until the next version shipped.
   Gated: 4 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean; the selftest
   corpus and the pytest guard leg green.
 
+- `native_groupagg`'s #349 cost arm passed against the defect it names (#1162).
+
+  The arm asserts that the grouped path prices the folding it does. It compared
+  one aggregate against ten, and the ten read ten DIFFERENT columns, so the two
+  plans do not project the same data. A scan projecting ten columns costs more
+  than one projecting one column whatever the folding charge is, and that
+  difference alone kept the arm green.
+
+  MEASURED on PG 18, 20,000 rows, mutation = the folding charge stops scaling with
+  the aggregate count, which is the exact defect #349 fixed:
+
+      shape                        control   mutant
+      distinct columns, 1 agg       350.50   350.50
+      distinct columns, 10 aggs    1253.01   803.01    <- 803.01 > 350.50: PASS
+      one column,       1 agg       350.50   350.50
+      one column,       10 aggs     800.50   350.50    <- the arm now reddens
+
+  The 452.51 that survives the mutation is the scan's projection cost. The 450.00
+  that does not is `cpu_operator_cost` x 20,000 rows x 9 extra aggregates, which is
+  the term under test.
+
+      before   PASS  ten aggregates cost more than one (#349)
+      after    FAIL  ten aggregates cost more than one (#349):
+                     got [no [1=35050 10=35050]] want [yes]
+
+  THE PATH IS FORCED, and the reason is the same defect one level up. With the
+  folding charge applied, ten `avg(a)` over one column is priced OUT of the grouped
+  path and the planner picks core's aggregate node; removing the charge makes the
+  grouped path win it. Without `enable_hashagg = off` and `enable_sort = off` the
+  comparison silently changes which node it reads.
+
+  So the arm gains the premises it never had: the fixture holds the rows the 450.00
+  is computed from, and BOTH plans are the grouped node, asserted by the presence of
+  `Columnar Vectorized Group Keys`, which no other node emits. The three names match
+  `test/pytest/test_native_groupagg.py`, which already held the projection fixed and
+  already carried those premises; the shell suite is what was left.
+
+  Gated: 75 passed + 1 skipped on 18; `docs_style` PASSED; the selftest corpus and
+  the pytest guard leg green.
+
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
   #1164's rule excuses a nothing-versus-something comparison -- `x > 0`, `n >= 1` --
