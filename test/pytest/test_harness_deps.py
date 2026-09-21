@@ -77,6 +77,7 @@ NO_CLUSTER = [
     "test_harness_deps_classifier.py",
     "test_writes_wrote_rows.py",
     # An AST sweep plus `inspect`, so it needs neither a cluster nor the driver.
+    "test_assertion_carries_its_measurement.py",
     "test_loop_coverage_premise.py",
     # Landed on main in #930 while this branch was in review, and the arm below named
     # it: cluster-free, not driver-dependent, so the job can run it and the

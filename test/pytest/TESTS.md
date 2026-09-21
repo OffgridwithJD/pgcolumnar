@@ -118,6 +118,7 @@ behaviour, the source of that number is named.
 - [70. test_analyze_differential.py: our statistics must have the shape core writes](#70-test_analyze_differentialpy-our-statistics-must-have-the-shape-core-writes)
 - [71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers](#71-test_native_groupaggpy-the-grouped-vectorized-aggregate-must-answer-what-core-answers)
 - [72. test_analyze_function.py: statistics collected by reading, not by sampling](#72-test_analyze_functionpy-statistics-collected-by-reading-not-by-sampling)
+- [73. test_assertion_carries_its_measurement.py: a failure must say what it measured](#73-test_assertion_carries_its_measurementpy-a-failure-must-say-what-it-measured)
 
 ## 1. How to read a test in here
 
@@ -5671,3 +5672,92 @@ assumed: `542af67fbc25` unmutated, `1cd8f666717b` mutated, `542af67fbc25` restor
 | `test_histogram_bounds_are_a_positional_stride` | eleven distinct rows at target 3, where core's `values[floor(i*(nv-1)/(nhist-1))]` and `percentile_disc`'s `ceil(p*nv)-1` land on different values; the expectation comes from an independent oracle AND a hand-worked figure that must agree first |
 | `test_null_frac_counts_live_rows_not_ones_a_delete_left` | #485: null_frac came from the zone maps, which count what was WRITTEN, so one pg_stats row carried two statistics normalised against different populations; both must imply the same table |
 | `test_the_documented_statistics_are_the_ones_written` | the list in `docs/sql-reference.md` parsed and compared against what the function populates, plus the two negatives the doc states in prose |
+
+
+## 73. test_assertion_carries_its_measurement.py: a failure must say what it measured
+
+    expect.num(1 if abs(on - off) <= 5 else 0, 1, "...")   ->   got 0 want 1
+
+Four measured buffer counts, reduced to a boolean before the assert. The failure
+message carries none of them, so the red says only that the arm failed — which the
+word FAILED already said.
+
+**WHAT IT COST, MEASURED (#1164).** A PG 15 leg reddened one arm of
+`sorted_pathkeys`, and two sessions spent an afternoon unable to say whether the
+ORACLE (`|on - off| <= 5`, a six-buffer spurious gap) or the CONTROL
+(`order_on > order_off + 5`, a fourteen-buffer collapse) had failed. Those are
+different defects with different owners. Four further experiments were aimed at a
+target whose identity was unknown, and it is still unknown.
+
+**TWO BUGS, ONE SYMPTOM.** The runner also captured each leg into a shell variable
+and grepped it for summary lines, so the full output never reached disk. That was
+repaired separately. **Repairing it alone would still have left `got 0 want 1`**,
+because the measurement was discarded before the message was built.
+
+### The rule
+
+An `IfExp` first argument is refused when BOTH hold: the failing set has more than
+one member, AND neither branch carries the value. `is None`, `in`, `==` and
+nothing-versus-something (`x > 0`, `n >= 1`) are determinate — the boolean already
+names the failing state.
+
+**Nothing-versus-something is determinate whatever the left side LOOKS like.** An
+earlier draft keyed on the operand being a bare `Name` and so flagged
+`(st['ret'] or 0) > 0`; the `or 0` is a None-guard, not a measurement, and refusing
+it was syntax standing in for semantics.
+
+**The one exception**, and it is why the carve-out cannot be "the comparator is 0":
+
+    'yes' if min(t_proj_run, l_proj_run, t_base_run, l_base_run) > 0 else 'no'
+
+The comparator IS 0 and the boolean still hides which of four measurements went
+non-positive.
+
+### Why this and not a parity check
+
+`compare_to_bash` grades the check NAME. Two arms grade `missing: 0` while one
+prints its measurement and the other prints `got 0 want 1` — which is how two of
+the four pairs repaired under #1164 turned out to be **port regressions**, where
+the shell original had carried its numbers all along. Name parity does not preserve
+diagnostics, and no comparison of two independent implementations ever will.
+
+### The population, measured before this was written
+
+    expect.*(<IfExp>, ...)              190
+      + both branches constant          148
+        + a LOSSY test                   26   <- repaired under #1164
+
+### The shell twin is shaped differently, on purpose
+
+`test/selftest/540-an-arm-must-carry-its-measurement.sh` asserts a tracked list
+(`test/lossy_arms.tsv`, 77 rows across 52 suites) rather than zero, because that
+corpus is not at zero. The gate refuses both directions: an unlisted offender fails
+by name, and a repaired arm fails until its row is removed, so the list may only
+shrink. **The asymmetry is the honest answer**: the two corpora are in different
+states, and a guard asserting zero over both would claim a property this tree does
+not have.
+
+### What it does not catch, and why each is left open
+
+Three shapes are missed. Each was planted against the real sweep and then counted in
+the corpus; none is live, and the file's header carries the measurement behind each.
+
+| shape | why it is left open |
+| --- | --- |
+| an aggregate not spelled `min`, `max` or `sum` — `sorted(runs)[0] > 0` | closing it needs a longer list of names, which the next spelling escapes, or type information this has none of. The two subscript-of-a-call conditionals in the corpus are `str.split(...)[0]` under `==` or `not in`, so both are determinate |
+| a branch that is a named constant — `KEPT if ratio < 1.35 else HALVED` | all four `Name`/`Attribute` branches today sit on determinate tests, so tightening flags none of them; what it would flag is `test_parallel_am_scan.py:225`, which does carry its number |
+| a conditional in a later argument position | all three build a check NAME rather than a measured value, so scanning `args[1:]` refuses correct sites to catch a shape that does not occur |
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_no_arm_collapses_its_measurement_to_a_constant` | the corpus itself; green on arrival, which is the point |
+| `test_the_sweep_finds_the_arms_it_is_meant_to_classify` | the coverage premise: a sweep that parsed nothing reports the same clean result |
+| `test_a_lossy_arm_is_caught` | the removal proof, with a carrying arm as its control |
+| `test_a_determinate_arm_is_not_caught` | six shapes whose failing set is a single value, driven rather than described |
+| `test_an_aggregate_over_several_operands_stays_in_scope` | `min(a,b,c,d) > 0` is lossy, `min(a) > 0` is not |
+| `test_a_chained_comparison_is_examined_pair_by_pair` | `0 < sel < 20000` hides its middle operand; an earlier draft scored every chain determinate |
+| `test_the_carve_out_is_driven_at_its_boundary` | `> 0` and `>= 1` exactly, written either way round; `r > 1` and `r >= 0` are not the same shape and were being excused |
+| `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
+| `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
