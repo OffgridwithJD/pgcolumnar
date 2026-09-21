@@ -196,6 +196,45 @@ value-stream codecs (round-trip over randomized and boundary inputs):
 test/pbt/run.sh [seed] [iterations]
 ```
 
+## A plan assertion must read what ran
+
+`EXPLAIN` without `ANALYZE` has no execution to report, so a node prints what it
+INTENDS. An arm named for something having happened cannot be satisfied by that.
+
+`columnar_vector.c` prints the batch-fold marker two ways, and says why:
+
+    ExplainPropertyText("Columnar Batch Fold",
+                        (state->haveStats ? state->batchFolded
+                                          : state->batchEligible) ...
+
+`batchEligible` is decided at Begin from the query shape alone; `batchFolded`
+records that the fold ran. `haveStats` is true only under `EXPLAIN (ANALYZE)`. So
+a shape that is predicted eligible and falls back to the row path at execution --
+the fallback the same comment names, a column added after some row groups -- reads
+`yes` under a plain `EXPLAIN`.
+
+Measured on PG 18, by making the fold return early while leaving the Begin-time
+prediction untouched (#1149):
+
+    suite                       build     the "actually ran" arm
+    plain EXPLAIN (before)      MUTATED   PASS       <- cannot fail for its own reason
+    EXPLAIN ANALYZE (after)     MUTATED   FAIL       got [no ... Columnar Batch Fold: no]
+    either                      clean     PASS
+
+The other arms of that suite stayed green in both mutated cells, including the one
+comparing the folded aggregate with the unfolded one: the fallback returns the
+right answer, which is precisely why nothing else could notice.
+
+Two spellings this needs. `TIMING OFF` keeps the arm out of `PGC_SKIP_TIMING`'s
+territory -- it is a plan-shape assertion, not a measurement. And keep stderr: an
+`EXPLAIN (ANALYZE)` that errors otherwise leaves an empty plan and a red arm with
+nothing in it to read.
+
+**The general form.** When an arm says a thing HAPPENED, find the field that
+records happening, and check the observation reaches it. A marker that means two
+different things under two invocations is not a marker until the invocation is
+pinned.
+
 ## Before merging: build every major
 
 ```sh

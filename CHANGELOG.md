@@ -74,6 +74,42 @@ true until the next version shipped.
 
   Gated: 7 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean over the
   whole harness; the selftest corpus and the pytest guard leg green.
+- `native_batch_fold_projection`'s "actually ran" arm read the plan's prediction
+  (#1149).
+
+  The arm is named `the ungrouped batch fold actually ran (Batch Fold: yes)` and
+  asked a plain `EXPLAIN`. `columnar_vector.c` prints
+  `haveStats ? batchFolded : batchEligible`, and `haveStats` is true only under
+  `EXPLAIN (ANALYZE)` -- so the arm read the Begin-time shape prediction, and a fold
+  that was predicted eligible and fell back at execution reported PASS.
+
+  MEASURED, four cells on PG 18. The mutation returns early from
+  `pgcolumnar_native_batch_fold` after the shape check, so the prediction is
+  untouched and the fold does not run:
+
+      suite                    build     the arm      .so
+      plain EXPLAIN (before)   clean     PASS         19baa7b64232
+      plain EXPLAIN (before)   MUTATED   PASS         efcf4b8bc011   <- the defect
+      EXPLAIN ANALYZE (after)  MUTATED   FAIL         efcf4b8bc011
+      EXPLAIN ANALYZE (after)  clean     PASS         19baa7b64232
+
+      FAIL  the ungrouped batch fold actually ran (Batch Fold: yes):
+            got [no (1 Batch Fold lines:  Columnar Batch Fold: no;)] want [yes]
+
+  **Every other arm stayed green in both mutated cells**, including the one comparing
+  the folded aggregate against the unfolded one: the fallback returns the right
+  answer, which is exactly why nothing else could notice.
+
+  The arm now carries its measurement when it fails -- the count of `Batch Fold`
+  lines and the line itself, or the error -- rather than the empty string the old
+  `[ ... ] && echo yes` produced. `TIMING OFF` keeps it a plan-shape assertion rather
+  than a measurement, and stderr is kept so an erroring `ANALYZE` has something to
+  show.
+
+  No check name changed and the suite carries no ledger rows.
+
+  Gated: 4 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean; the selftest
+  corpus and the pytest guard leg green.
 
 - Five premise arms carried a verdict about a number they never printed (#1164).
 

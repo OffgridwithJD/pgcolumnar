@@ -35,12 +35,25 @@ got="$(q "$FOLDON $INNER" | tail -1)"
 echo "-- ref=[$ref]"
 echo "-- got=[$got]"
 
+# ANALYZE, BECAUSE PLAIN EXPLAIN PRINTS THE PREDICTION (#1149). columnar_vector.c
+# reports `haveStats ? batchFolded : batchEligible`, and batchEligible is decided at
+# Begin from the query shape alone. So under a plain EXPLAIN this arm reads what the
+# node INTENDED, and a shape that is predicted eligible and falls back to the row path
+# at execution -- the fallback the source comment names, a column added after some row
+# groups -- reads `yes` and the arm reports PASS. Its name says "actually ran"; only
+# batchFolded can say that, and only ANALYZE reaches it.
+#
+# TIMING OFF keeps this out of PGC_SKIP_TIMING's territory: it is still a plan-shape
+# assertion, not a measurement. stderr is KEPT, because an ANALYZE that errors would
+# otherwise leave an empty plan and a red arm with nothing to read.
 plan="$(env PATH="$PGC_BINDIR:$PATH" psql -h "127.0.0.1" -p "$PGC_PORT" -U postgres -d "$PGC_DB" -qtA \
-	-c "$FOLDON" -c "EXPLAIN (COSTS OFF, VERBOSE) $INNER" 2>/dev/null)"
+	-c "$FOLDON" -c "EXPLAIN (ANALYZE, COSTS OFF, VERBOSE, TIMING OFF) $INNER" 2>&1)"
 foldcnt="$(printf '%s' "$plan" | grep -ciE 'Batch Fold: yes')"
 
 check "the ungrouped batch fold actually ran (Batch Fold: yes)" \
-	"$([ "$foldcnt" -gt 0 ] && echo yes)" "yes"
+	"$([ "$foldcnt" -gt 0 ] && echo yes ||
+	   echo "no ($(printf '%s' "$plan" | grep -icE 'batch fold') Batch Fold lines: $(printf '%s' "$plan" | grep -iE 'batch fold' | tr -s ' ' | tr '\n' ';')$(printf '%s' "$plan" | grep -iE '^ERROR' | head -1))")" \
+	"yes"
 check "ref is a non-empty result (not a vacuous empty compare)" \
 	"$(case "$ref" in ''|'<none>') echo no ;; *) echo yes ;; esac)" "yes"
 check "the folded aggregate equals the non-fold aggregate (payload columns correct)" "$got" "$ref"
