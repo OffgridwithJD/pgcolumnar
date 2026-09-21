@@ -53,8 +53,12 @@ both() {  # label, rows, column ddl, value expression
 	h="$(reltuples ar_h)"
 
 	# not zero, and within 5% of the truth -- the same bar heap clears
+	# `reltuples` IS SIGNED: core writes -1 for "no statistics" (PG 14+), so the
+	# failing set is {-1, 0}. "ZERO" named the one it had not read, sending a
+	# reader after an ANALYZE that produced nothing when the hook may never have
+	# run at all (#1164).
 	check "$lab: estimate is not zero" \
-		"$(awk -v v="$c" 'BEGIN { print (v > 0) ? "nonzero" : "ZERO" }')" "nonzero"
+		"$(awk -v v="$c" 'BEGIN { print (v > 0) ? "nonzero" : "reltuples " v }')" "nonzero"
 	check "$lab: within 5% of actual (heap says $h)" \
 		"$(awk -v v="$c" -v n="$n" 'BEGIN { d = (v > n ? v - n : n - v); print (d <= n * 0.05) ? "close" : "off by " d }')" \
 		"close"

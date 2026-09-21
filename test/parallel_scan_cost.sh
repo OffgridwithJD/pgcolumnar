@@ -91,8 +91,12 @@ check "premise: the parallel plan uses two workers" \
 check "premise: the parallel plan is a columnar scan" \
 	"$(echo "$par_plan" | grep -c "Custom Scan (PgColumnarScan)")" "1"
 
+# CARRIES BOTH. Collapsed to yes/no this said one of two was not positive and
+# nothing about which, or by how much (#1164). Single quotes round the awk program
+# so the strings need no escaping.
 check "premise: both scans have a positive run cost" \
-	"$(awk -v s="$s_run" -v p="$p_run" "BEGIN{ print (s>0 && p>0) ? \"yes\" : \"no\" }")" "yes"
+	"$(awk -v s="$s_run" -v p="$p_run" \
+		'BEGIN{ print (s>0 && p>0) ? "yes" : "serial " s ", parallel " p }')" "yes"
 
 # On the unfixed path the ratio is 2.000 (whole run / 2 workers). Core leaves
 # I/O whole, so with CPU terms zeroed the ratio stays near 1. 1.35 is
@@ -151,8 +155,12 @@ ratio_on="$(awk -v s="$s_run" -v p="$p_run_on" \
 echo "-- leader on: parallel Custom Scan cost=$p_start_on..$p_total_on run=$p_run_on ratio=$ratio_on"
 echo "-- rows: leader off=$rows_off leader on=$rows_on"
 
+# A DIFFERENCE OF TWO COSTS IS SIGNED, so "no" covered both a degenerate plan
+# (total == startup) and a cost-model inversion (total < startup) -- different
+# defects (#1164).
 check "premise: the leader-on parallel scan has a positive run cost" \
-	"$(awk -v p="$p_run_on" "BEGIN{ print (p>0) ? \"yes\" : \"no\" }")" "yes"
+	"$(awk -v p="$p_run_on" -v t="$p_total_on" -v s="$p_start_on" \
+		'BEGIN{ print (p>0) ? "yes" : "run cost " p " (total " t ", startup " s ")" }')" "yes"
 
 # The bound is the same as the leader-off arm: dividing the WHOLE run would put
 # the ratio at the divisor, and the divisor is larger here, so a regression is if
