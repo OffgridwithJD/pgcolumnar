@@ -89,7 +89,7 @@ check "premise: a covering projection exists" \
 # Without this, a pass could mean the projection wrote nothing and both
 # formulae agree because the file did not grow.
 check "premise: adding the projection enlarged the relation file" \
-	"$(awk -v a="$after_bytes" -v b="$before_bytes" "BEGIN{ print (b>0 && a > b*1.3) ? \"grew\" : \"stayed\" }")" \
+	"$(awk -v a="$after_bytes" -v b="$before_bytes" "BEGIN{ print (b>0 && a > b*1.3) ? \"grew\" : \"stayed before=\" b \" after=\" a }")" \
 	"grew"
 
 check "premise: the later plan is still a base columnar scan" \
@@ -101,7 +101,7 @@ check "premise: the later plan still does not name a covering projection" \
 # Unfixed: after_run tracks the whole file, so ratio is about the size jump.
 # Fixed: the base scan still charges the base storage, so ratio stays near 1.
 check "a base scan is not priced from sibling projection pages" \
-	"$(awk -v r="$ratio" "BEGIN{ print (r+0 > 1.25) ? \"inflated\" : \"stable\" }")" \
+	"$(awk -v r="$ratio" "BEGIN{ print (r+0 > 1.25) ? \"inflated ratio=\" r : \"stable\" }")" \
 	"stable"
 
 pgc_summary
