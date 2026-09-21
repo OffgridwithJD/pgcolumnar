@@ -34,17 +34,21 @@ psql_run "CREATE INDEX ifc_id ON ifc(id);"
 #
 # 300 x 3500 = 1,050,000 >= the table, so ANALYZE reads ALL of it and the
 # statistics stop being a draw. That is a STRUCTURAL fix, not a wider margin:
-# there is no sample left to come out differently. Measured on PG17, 30 ANALYZE
-# cycles each, bisecting K* = the smallest range at which the custom scan wins:
+# there is no sample left to come out differently. Measured on PG17, bisecting
+# K* = the smallest range at which the custom scan wins. EVERY ROW CARRIES ITS
+# OWN n, because the first version of this table put one sample size in a header
+# over rows collected under different ones:
 #
-#     target   K* mean   K* sd   K* min..max   estimate at 50,000
-#      100      46847     1067   44706..49276  47,965..52,164   <- flaked here
-#     1000      47163      336   46406..47812  49,412..50,448
-#     3500      47109        0   47109..47109  50,000 exactly, 10/10 draws
+#      target    n    K* mean   K* sd   K* min..max   estimate at 50,000
+#       100     30     46847     1067   44706..49276  47859..52486  <- flaked
+#      1000     30     47163      336   46406..47812  49303..50707
+#      3500     30     47109        0   47109..47109  50000 in 30 of 30
+#      3000     30     47072       64   46933..47167  49906..50189  <- control
 #
-# 3000 is the control: 300 x 3000 = 900,000 < the table, and the wobble is back
-# (K* 46,992..47,167, estimate 49,881..50,093). So the determinism comes from
-# covering the table, which is the thing to keep if this fixture ever grows --
+# 3000 IS THE CONTROL AND IT IS THE INTERESTING ROW: 300 x 3000 = 900,000 is
+# just under the table, and the wobble is back at sd 64 with the estimate exact
+# in 0 of 30 draws. So the determinism comes from COVERING THE TABLE and not
+# from a large target, which is the thing to keep if this fixture ever grows --
 # RAISE THE TARGET WITH N, or the flake returns silently.
 #
 # Cost of the whole fix, PG17: ANALYZE 0.07s -> 0.41s, histogram 101 -> 3501

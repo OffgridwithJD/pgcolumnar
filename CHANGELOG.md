@@ -84,18 +84,21 @@ true until the next version shipped.
   feeding both prices moves every run. Bisecting K*, the smallest range at
   which the custom scan wins, over 30 `ANALYZE` cycles on PG17:
 
-  | statistics target | K* mean | K* sd | K* min..max | estimate at 50,000 |
-  | --- | ---: | ---: | --- | --- |
-  | 100 (default) | 46,847 | 1,067 | 44,706..49,276 | 47,965..52,164 |
-  | 1000 | 47,163 | 336 | 46,406..47,812 | 49,412..50,448 |
-  | 3500 | 47,109 | 0 | 47,109..47,109 | 50,000 exactly |
+  | statistics target | n | K* mean | K* sd | K* min..max | estimate at 50,000 |
+  | --- | ---: | ---: | ---: | --- | --- |
+  | 100 (default) | 30 | 46,847 | 1,067 | 44,706..49,276 | 47,859..52,486 |
+  | 1000 | 30 | 47,163 | 336 | 46,406..47,812 | 49,303..50,707 |
+  | 3500 | 30 | 47,109 | 0 | 47,109..47,109 | 50,000 in 30 of 30 |
+  | 3000 (control) | 30 | 47,072 | 64 | 46,933..47,167 | 49,906..50,189 |
 
   The fixture now sets `STATISTICS 3500` on the key column. 300 x 3500 exceeds the
   table, so `ANALYZE` reads all of it and the statistics stop being a draw. That is a
   structural fix, not a wider margin. K is unchanged, so the arm keeps every bit of the
   sensitivity it had. The premise is asserted rather than assumed, in both
-  harnesses, by a new arm that fails with the estimate it saw. 3000 is the control:
-  300 x 3000 is under the table and the wobble returns.
+  harnesses, by a new arm that fails with the estimate it saw. 3000 is the control. 300 x 3000
+  is just under the table, and the wobble returns at sd 64, with the estimate exact in
+  0 of 30 draws. The determinism comes from covering the table, not from a large
+  target.
 
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
