@@ -177,6 +177,33 @@ true until the next version shipped.
   Gated: 75 passed + 1 skipped on 18; `docs_style` PASSED; the selftest corpus and
   the pytest guard leg green.
 
+- `iceberg_fdw.sh` refused to run without python3 and never used it (#1150).
+
+  The gate was the only occurrence of `python3` in the file:
+
+      iceberg_fdw.sh:22   python3 -c 'import json' 2>/dev/null \
+                              || pgc_skip python "python3 is needed"
+
+  Everything after it reads the committed warehouse under `test/fixtures/iceberg/`
+  with `cp`, `psql` and the FDW. The Iceberg metadata is parsed by the extension,
+  not by a helper script, and nothing in the suite parses JSON in the shell.
+
+  IT COST SOMETHING REAL. `iceberg_fdw` was the tree's only declared-INCOMPLETE
+  pytest pair, and this gate was the whole of the remaining gap: a refusal named
+  after a dependency the port does not have would assert a precondition that is
+  always met. With the gate gone the pair reaches zero and is declared COMPLETE,
+  which leaves no declared-incomplete pair in the tree:
+
+      before   literal 75 | template 0 | missing: 1   PORT IS INCOMPLETE
+      after    literal 75 | template 0 | missing: 0   every bash property is covered
+
+  THE SUITE HAS NO PYTHON3 DEPENDENCY; THE HARNESS STILL DOES. `lib.sh` shells to
+  python3 for the source fingerprint and reports rather than swallows a miss. This
+  removes one suite's vestigial gate, not the tree's use of python3.
+
+  No ledger row moves: `grep -c '^iceberg_fdw' test/check_ledger.tsv` is 0, and the
+  gate only ever recorded when python3 was ABSENT, so no clean run has emitted it.
+
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
   #1164's rule excuses a nothing-versus-something comparison -- `x > 0`, `n >= 1` --
