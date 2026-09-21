@@ -1297,7 +1297,9 @@ harness_selftest	530-a-record-must-name-its-major	the word in a REASON is not a 
 harness_selftest	540-an-arm-must-carry-its-measurement	a new arm that cannot say what it measured is refused by name	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	a repaired arm must have its row removed, so the list only shrinks	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: a determinate or carrying arm is not swept up	15;16;17;18;19	never	-
+harness_selftest	540-an-arm-must-carry-its-measurement	control: a determinate or carrying awk arm is not swept up	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees a threshold arm and a floor arm	15;16;17;18;19	never	-
+harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees an awk verdict that discards its operands	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	premise: the sweep read the corpus and classified arms in it	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
