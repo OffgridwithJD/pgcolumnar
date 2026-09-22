@@ -182,9 +182,15 @@ true until the next version shipped.
   The sentence splitter masks markdown list markers per line, before the lines are
   joined, because a list marker begins a line and nothing else does. Masking any
   number followed by period-space also protects a sentence ENDING in a number and
-  merged 9, 2 and 66 sentence boundaries in `docs/limitations.md`,
+  merged 9, 2 and 69 sentence boundaries in `docs/limitations.md`,
   `docs/installation.md` and `CHANGELOG.md`. No verdict moved, which is a property
   of today's prose rather than of the rule.
+
+  The mask is anchored at column 0. Allowing an indented marker read 3939
+  sentences in `CHANGELOG.md` against @OffgridwithJD's 3942, and all three lines
+  that differ are wrapped prose rather than list items, which is the same
+  over-match one indent to the right. Every ordered-list marker in these documents
+  is at column 0.
 
   Eight arms in `test/docs_style.sh` and four tests in
   `test/pytest/test_docs_upgrade_chain.py`. The shell half folds the file with `tr`

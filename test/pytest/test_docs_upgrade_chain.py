@@ -87,7 +87,7 @@ def _default_version():
     return ""
 
 
-_MARKER = re.compile(r"^(\s*)(\d+)\. ")
+_MARKER = re.compile(r"^(\d+)\. ")
 _MASK = "@LM@"
 
 
@@ -107,15 +107,22 @@ def _flatten(text):
 
     THE OVER-MATCH WAS LIVE, THOUGH. Sentences found on the unmodified documents:
 
-        docs/limitations.md    688 line-initial    679 any-number   9 lost
-        docs/installation.md    74                  72              2 lost
-        CHANGELOG.md          3922                3856             66 lost
+        docs/limitations.md    688 column-0    679 any-number    9 lost
+        docs/installation.md    74               72               2 lost
+        CHANGELOG.md          3942             3873              69 lost
 
     None of those merged pairs put a stray version token into the claim sentence,
     so no verdict changed. That is a property of today's prose rather than of the
     rule.
+
+    COLUMN 0, NOT "LINE-INITIAL AFTER INDENT". Allowing an indented marker read
+    3939 on CHANGELOG.md against @OffgridwithJD's 3942, and the three lines that
+    differ are wrapped prose rather than list items -- a sentence ending in a
+    number, wrapped so the number starts an indented line, which is the same
+    over-match one indent to the right. Every real ordered-list marker in these
+    documents is at column 0.
     """
-    masked = [_MARKER.sub(lambda m: m.group(1) + m.group(2) + "." + _MASK, line, count=1)
+    masked = [_MARKER.sub(lambda m: m.group(1) + "." + _MASK, line, count=1)
               for line in text.splitlines()]
     return " ".join(" ".join(masked).split())
 
