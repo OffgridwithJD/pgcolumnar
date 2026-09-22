@@ -5937,11 +5937,16 @@ any number followed by period-space, which also protects a sentence ENDING in a
 number and merges it with the next one. Sentences found on the unmodified
 documents:
 
+**Measured at `acc4116d`, and the revision is the load-bearing part.** These
+documents grow, so the counts drift with them and the rule does not: `CHANGELOG.md`
+read 66 boundaries lost at `5649eba`, 69 at `197602f` and 71 here. A frozen number
+in a note about a growing file goes stale by construction.
+
 | document | column 0 only | any number | boundaries lost |
 | --- | ---: | ---: | ---: |
-| `docs/limitations.md` | 688 | 679 | 9 |
+| `docs/limitations.md` | 699 | 690 | 9 |
 | `docs/installation.md` | 74 | 72 | 2 |
-| `CHANGELOG.md` | 3942 | 3873 | 69 |
+| `CHANGELOG.md` | 3957 | 3886 | 71 |
 
 No verdict moved, because none of those merged pairs put a stray version token
 into the claim sentence. **That is a property of today's prose, not of the rule**,

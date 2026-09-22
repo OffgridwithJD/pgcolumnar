@@ -438,9 +438,18 @@ check "premise: some shipped version reaches default_version, so the walk found 
 # ENDING in a number and merges it with the next one. On the unmodified
 # documents, sentences found by each rule:
 #
-#     docs/limitations.md    688 column-0    679 any-number    9 lost
-#     docs/installation.md    74               72               2 lost
-#     CHANGELOG.md          3942             3873              69 lost
+# MEASURED AT acc4116d, AND THE SHA IS THE LOAD-BEARING PART. These documents
+# grow, so the counts drift with them: CHANGELOG.md read 66 lost at 5649eba, 69 at
+# 197602f and 71 here, with nothing about the rule changing. A frozen number in a
+# comment about a growing file goes stale by construction, which is the lesson
+# test/check_ledger_budget.txt already carries about its own example.
+#
+#     docs/limitations.md    699 column-0    690 any-number    9 lost
+#     docs/installation.md    74              72               2 lost
+#     CHANGELOG.md          3957            3886              71 lost
+#
+# THE NAMED LINES BELOW ARE THE DURABLE HALF. They do not drift, and they are what
+# the rule was decided on.
 #
 # No verdict moved, because none of those merged pairs put a stray version token
 # into the claim sentence. That is a property of today's prose, not of the rule,

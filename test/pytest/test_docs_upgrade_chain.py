@@ -107,9 +107,13 @@ def _flatten(text):
 
     THE OVER-MATCH WAS LIVE, THOUGH. Sentences found on the unmodified documents:
 
-        docs/limitations.md    688 column-0    679 any-number    9 lost
-        docs/installation.md    74               72               2 lost
-        CHANGELOG.md          3942             3873              69 lost
+    Measured at acc4116d, and the revision is the load-bearing part: these
+    documents grow, so CHANGELOG.md read 66 lost at 5649eba, 69 at 197602f and 71
+    here, with nothing about the rule changing.
+
+        docs/limitations.md    699 column-0    690 any-number    9 lost
+        docs/installation.md    74              72               2 lost
+        CHANGELOG.md          3957            3886              71 lost
 
     None of those merged pairs put a stray version token into the claim sentence,
     so no verdict changed. That is a property of today's prose rather than of the

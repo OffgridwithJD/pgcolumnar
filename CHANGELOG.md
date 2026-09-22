@@ -182,8 +182,10 @@ true until the next version shipped.
   The sentence splitter masks markdown list markers per line, before the lines are
   joined, because a list marker begins a line and nothing else does. Masking any
   number followed by period-space also protects a sentence ENDING in a number and
-  merged 9, 2 and 69 sentence boundaries in `docs/limitations.md`,
-  `docs/installation.md` and `CHANGELOG.md`. No verdict moved, which is a property
+  merged 9, 2 and 71 sentence boundaries in `docs/limitations.md`,
+  `docs/installation.md` and `CHANGELOG.md`, measured at `acc4116d`. The counts
+  drift as those files grow, so the revision is quoted with them; the three named
+  lines below do not drift and are what decided the rule. No verdict moved, which is a property
   of today's prose rather than of the rule.
 
   The mask is anchored at column 0. Allowing an indented marker read 3939
