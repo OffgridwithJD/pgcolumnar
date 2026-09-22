@@ -220,9 +220,15 @@ cutoff is kept, and its expired rows stay until every row in that group has
 expired. Retention is therefore approximate at the group boundary, and it errs
 toward keeping data. A smaller `stripe_row_limit` narrows the boundary.
 
-The retention column must be `timestamp` or `timestamptz`. The table must have
-both `ttl_column` and `ttl_interval` declared, or the function raises an error
-rather than reporting that it did nothing.
+The retention column must be `date`, `timestamp` or `timestamptz`. The table
+must have both `ttl_column` and `ttl_interval` declared, or the function raises
+an error rather than reporting that it did nothing.
+
+On a `date` column the cutoff is the day containing `now() - ttl_interval`. A row
+dated exactly on that day is kept, so a `date` retention keeps a row up to a day
+longer than the interval asks. That is the same direction the group boundary errs
+in, and for the same reason. It applies to a whole-day interval too, because the
+cutoff is measured from the current instant rather than from midnight.
 
 `expire` works on whole row groups and never rewrites them, so it drops a group
 only when every row in it is past the retention. A group that straddles the

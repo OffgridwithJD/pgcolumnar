@@ -326,4 +326,81 @@ check "control: a group whose NULLs are still live is NOT retired" "$DL_RETIRED"
 check "control: and those NULL rows survive" \
 	"$(q 'SELECT count(*) FROM ttl_dl WHERE ts IS NULL')" "90"
 
+# ---- a date retention column (#1135) ---------------------------------------
+#
+# A date partition key is an ordinary shape for the retention case this feature
+# exists to serve, and `date` is not an unsupported type in this file: the same
+# source handles DATEOID in its zone-map key and sortability paths. Only the
+# retention cutoff refused it.
+#
+# THE CUTOFF MUST BE A DATE, and `date - interval` yields a TIMESTAMP in
+# PostgreSQL, so it has to be truncated. Truncation KEEPS a row that is slightly
+# older than the retention window rather than dropping one that is slightly
+# younger, and for a function whose failure mode is deleting data that is the
+# direction to err in. It is asserted below rather than left to the reader.
+D_DAYS=5
+psql_run "CREATE TABLE ttl_date (id int, d date, v text) USING pgcolumnar;"
+psql_run "INSERT INTO ttl_date
+          SELECT g,
+                 (CURRENT_DATE - $D_DAYS) + ((g - 1) / 1000),
+                 'v'||g
+          FROM generate_series(1,5000) g;"
+psql_run "ANALYZE ttl_date;"
+psql_run "SELECT pgcolumnar.set_options('ttl_date', ttl_column => 'd',
+                                        ttl_interval => '3 days');"
+
+D_GROUPS_BEFORE="$(q "SELECT count(*) FROM pgcolumnar.storage s
+                      JOIN pgcolumnar.row_group rg USING (storage_id)
+                      WHERE s.relation_oid = 'ttl_date'::regclass")"
+D_ROWS_BEFORE="$(q "SELECT count(*) FROM ttl_date")"
+D_CUTOFF="SELECT (CURRENT_DATE - 3)"
+D_EXPIRED="$(q "SELECT count(*) FROM ttl_date WHERE d < ($D_CUTOFF)")"
+D_LIVE="$(q "SELECT count(*) FROM ttl_date WHERE d >= ($D_CUTOFF)")"
+D_ONCUTOFF="$(q "SELECT count(*) FROM ttl_date WHERE d = ($D_CUTOFF)")"
+
+check "premise: the date fixture is laid out in several row groups" \
+	"$([ "${D_GROUPS_BEFORE:-0}" -ge 4 ] && echo "many ($D_GROUPS_BEFORE)" \
+	   || echo "TOO FEW ($D_GROUPS_BEFORE)")" \
+	"many ($D_GROUPS_BEFORE)"
+check "premise: the date fixture has rows on both sides of the cutoff" \
+	"$([ "${D_EXPIRED:-0}" -gt 0 ] && [ "${D_LIVE:-0}" -gt 0 ] && echo "both" \
+	   || echo "expired $D_EXPIRED, live $D_LIVE")" \
+	"both"
+check "premise: and rows dated exactly ON the cutoff, which decide the rounding" \
+	"$([ "${D_ONCUTOFF:-0}" -gt 0 ] && echo "some ($D_ONCUTOFF)" || echo "NONE")" \
+	"some ($D_ONCUTOFF)"
+
+D_RETIRED="$(q "SELECT pgcolumnar.expire('ttl_date')")"
+echo "-- date: $D_ROWS_BEFORE rows in $D_GROUPS_BEFORE groups, $D_EXPIRED past retention, $D_ONCUTOFF on the cutoff"
+echo "-- date: expire returned [$D_RETIRED]"
+
+check "a date retention column is accepted, not refused (#1135)" \
+	"$(case "$D_RETIRED" in ''|*ERROR*|*error*) echo "refused ($D_RETIRED)" ;; \
+	                        *) echo accepted ;; esac)" \
+	"accepted"
+
+D_ROWS_AFTER="$(q "SELECT count(*) FROM ttl_date")"
+D_LIVE_AFTER="$(q "SELECT count(*) FROM ttl_date WHERE d >= ($D_CUTOFF)")"
+
+check "expire on a date column retires at least one group" \
+	"$([ "${D_RETIRED:-0}" -gt 0 ] 2>/dev/null && echo retired \
+	   || echo "RETIRED NOTHING ($D_RETIRED)")" \
+	"retired"
+check "NO row still inside the retention was dropped, on a date column" \
+	"$D_LIVE_AFTER" "$D_LIVE"
+check "and the date table really is smaller than it was" \
+	"$([ "${D_ROWS_AFTER:-0}" -lt "${D_ROWS_BEFORE:-0}" ] && echo smaller \
+	   || echo "UNCHANGED ($D_ROWS_AFTER of $D_ROWS_BEFORE)")" \
+	"smaller"
+
+# THE ROUNDING, PINNED. A row dated exactly on the cutoff day is inside the
+# window by the `<` rule the timestamp arms use, and truncation must not move it
+# outside. If the cutoff were rounded the other way this arm is the only one that
+# would notice: every other arm above passes either way.
+check "a row dated exactly on the cutoff is kept, so truncation errs toward keeping" \
+	"$(q "SELECT count(*) FROM ttl_date WHERE d = ($D_CUTOFF)")" "$D_ONCUTOFF"
+
+check "every remaining date row reads back its own value" \
+	"$(q "SELECT count(*) FROM ttl_date WHERE v <> 'v'||id")" "0"
+
 pgc_summary
