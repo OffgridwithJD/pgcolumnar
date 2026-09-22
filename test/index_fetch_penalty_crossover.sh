@@ -25,6 +25,36 @@ K_RANGE=50000
 psql_run "CREATE TABLE ifc (id int, a int, b int) USING pgcolumnar;"
 psql_run "INSERT INTO ifc SELECT g, g % 10, g % 100 FROM generate_series(1,$N) g;"
 psql_run "CREATE INDEX ifc_id ON ifc(id);"
+
+# THE ESTIMATE MUST NOT BE A SAMPLE DRAW (#1168). `ANALYZE` samples 300 x the
+# statistics target rows; at the default 100 that is 30,000 of these 1,000,000,
+# so the estimate for `id <= 50000` moves every run. This suite asserts a CHOSEN
+# NODE where the two prices are close, and the node flips when the estimate does.
+# It flaked twice in two days in the gate, once on `main` itself.
+#
+# 300 x 3500 = 1,050,000 >= the table, so ANALYZE reads ALL of it and the
+# statistics stop being a draw. That is a STRUCTURAL fix, not a wider margin:
+# there is no sample left to come out differently. Measured on PG17, bisecting
+# K* = the smallest range at which the custom scan wins. EVERY ROW CARRIES ITS
+# OWN n, because the first version of this table put one sample size in a header
+# over rows collected under different ones:
+#
+#      target    n    K* mean   K* sd   K* min..max   estimate at 50,000
+#       100     30     46847     1067   44706..49276  47859..52486  <- flaked
+#      1000     30     47163      336   46406..47812  49303..50707
+#      3500     30     47109        0   47109..47109  50000 in 30 of 30
+#      3000     30     47072       64   46933..47167  49906..50189  <- control
+#
+# 3000 IS THE CONTROL AND IT IS THE INTERESTING ROW: 300 x 3000 = 900,000 is
+# just under the table, and the wobble is back at sd 64 with the estimate exact
+# in 0 of 30 draws. So the determinism comes from COVERING THE TABLE and not
+# from a large target, which is the thing to keep if this fixture ever grows --
+# RAISE THE TARGET WITH N, or the flake returns silently.
+#
+# Cost of the whole fix, PG17: ANALYZE 0.07s -> 0.41s, histogram 101 -> 3501
+# bounds. K* is 47,109, so the 50,000 this suite asserts at sits 2,891 rows
+# above the crossover with no variance under it.
+psql_run "ALTER TABLE ifc ALTER COLUMN id SET STATISTICS 3500;"
 psql_run "ANALYZE ifc;"
 
 q1() {
@@ -60,6 +90,16 @@ PLAN_PT="$(plan_of "EXPLAIN (COSTS OFF) SELECT sum(a) FROM ifc WHERE id = 1")"
 echo "-- point lookup: $(printf '%s\n' "$PLAN_PT" | grep -m1 -E 'Scan')"
 check "a selective point lookup still uses the index" \
 	"$(top_node "$PLAN_PT")" "Index Scan"
+
+# PREMISE, AND IT IS THE WHOLE OF #1168: the arm below asserts a CHOSEN NODE at
+# a range where the two prices are close, so it is only evidence if the row
+# estimate feeding those prices is the same number every run. Asserted rather
+# than assumed -- a sampled estimate and an exact one look identical here until
+# the day the node flips.
+EST_AT_K="$(plan_of "EXPLAIN SELECT sum(a) FROM ifc WHERE id <= $K_RANGE" \
+	| grep -m1 -E 'Index Scan|Custom Scan|Seq Scan' | grep -oE 'rows=[0-9]+' | cut -d= -f2)"
+check "premise: the ${K_RANGE}-row estimate is exact, so no arm here rests on a sample draw" \
+	"${EST_AT_K:-none}" "$K_RANGE"
 
 PLAN_50="$(plan_of "EXPLAIN (COSTS OFF) SELECT sum(a) FROM ifc WHERE id <= $K_RANGE")"
 echo "-- ${K_RANGE}-row range: $(printf '%s\n' "$PLAN_50" | grep -m1 -E 'Scan')"

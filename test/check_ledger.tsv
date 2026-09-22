@@ -1324,6 +1324,7 @@ index_am_support	index_am_support	spgist builds an index over a columnar table	1
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-
+index_fetch_penalty_crossover	index_fetch_penalty_crossover	premise: the 50000-row estimate is exact, so no arm here rests on a sample draw	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	premise: the btree on id exists	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	premise: the table holds all 1000000 rows	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	the fetch penalty leaves a clustered ORDER BY on its index	15;16;17;18;19	never	-

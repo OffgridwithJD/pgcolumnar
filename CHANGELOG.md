@@ -74,6 +74,31 @@ true until the next version shipped.
 
   Gated: 7 passed on 15, 16, 17, 18 and 19; `shellcheck -S error` clean over the
   whole harness; the selftest corpus and the pytest guard leg green.
+- `index_fetch_penalty_crossover` asserted a chosen plan node on a sampled estimate,
+  and flaked twice in two days in the gate, once on `main` itself (#1168).
+
+  The suite asserts that a 50,000-row correlated range uses the custom scan rather than
+  a fetching index. That is the right property, and 50,000 is the worst place to ask
+  it: the crossover sits just below. `ANALYZE` samples 300 x the statistics target
+  rows. At the default 100 that is 30,000 of the fixture's 1,000,000, so the estimate
+  feeding both prices moves every run. Bisecting K*, the smallest range at
+  which the custom scan wins, over 30 `ANALYZE` cycles on PG17:
+
+  | statistics target | n | K* mean | K* sd | K* min..max | estimate at 50,000 |
+  | --- | ---: | ---: | ---: | --- | --- |
+  | 100 (default) | 30 | 46,847 | 1,067 | 44,706..49,276 | 47,859..52,486 |
+  | 1000 | 30 | 47,163 | 336 | 46,406..47,812 | 49,303..50,707 |
+  | 3500 | 30 | 47,109 | 0 | 47,109..47,109 | 50,000 in 30 of 30 |
+  | 3000 (control) | 30 | 47,072 | 64 | 46,933..47,167 | 49,906..50,189 |
+
+  The fixture now sets `STATISTICS 3500` on the key column. 300 x 3500 exceeds the
+  table, so `ANALYZE` reads all of it and the statistics stop being a draw. That is a
+  structural fix, not a wider margin. K is unchanged, so the arm keeps every bit of the
+  sensitivity it had. The premise is asserted rather than assumed, in both
+  harnesses, by a new arm that fails with the estimate it saw. 3000 is the control. 300 x 3000
+  is just under the table, and the wobble returns at sd 64, with the estimate exact in
+  0 of 30 draws. The determinism comes from covering the table, not from a large
+  target.
 
 - `native_batch_fold_projection`'s "actually ran" arm read the plan's prediction
   (#1149).
