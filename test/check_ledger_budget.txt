@@ -195,5 +195,11 @@ suites_not_covered 249
 # together, so `15;16;17;18;19` is a measurement rather than an assumption.
 #
 # Re-counted on this tree, never by adding five:
-#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1444
-checks_never_observed_red 1451
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+#
+# NO NUMBER IN THE EXAMPLE, DELIBERATELY. It carried `-> 1444`, written at
+# 7397731, and the tree answered 1452 two merges later: a frozen number in a
+# comment about a moving census goes stale by construction, and this comment sits
+# directly above the value it contradicts. The command is the durable half.
+# Reported by @OffgridwithJD.
+checks_never_observed_red 1453

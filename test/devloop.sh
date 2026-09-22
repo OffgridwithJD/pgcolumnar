@@ -48,11 +48,16 @@ mkdir -p "$BUILD"
 
 # .git is excluded above because it is large -- 32 MB in the audit container --
 # and this loop is meant to be cheap enough to run constantly. But excluding it
-# leaves a tree that is not a checkout, and harness_selftest asks git two
+# leaves a tree that is not a checkout, and harness_selftest asks git several
 # questions about the tree it is running in: whether a compiled Python artifact
-# is tracked, and whether `.gitignore` covers one. Outside a repository both are
-# unanswerable, and the suite reported five failures on a tree with nothing wrong
+# is tracked, whether `.gitignore` covers one, and whether the dependency files
+# a build generates are ignored. Outside a repository none of them is
+# answerable, and the suite reported five failures on a tree with nothing wrong
 # with it (#854).
+#
+# NOT A COUNT. It said "two questions" and the count went stale the moment a
+# third arm was added, without that arm touching this file. @OffgridwithJD
+# caught it on exactly that change.
 #
 # A gitfile is the whole fix: one line, no bytes copied. git resolves it and
 # answers about the recorded tree, which is what the rule is about.
