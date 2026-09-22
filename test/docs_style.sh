@@ -360,6 +360,20 @@ check "every document names the same latest published pre-release" \
 # SCOPED TO THE SENTENCE, not the paragraph. The surrounding paragraph in
 # docs/installation.md also names the destination twice in prose that is correct,
 # so a paragraph-wide reading counts the destination as a starting version.
+#
+# AND THE CLAIM IS REACHABILITY, NOT MEMBERSHIP. "a SINGLE update reaches X from
+# ANY of them" says the scripts form an unbroken chain, and reading only the `A`
+# side of each filename cannot see that. Reported by @OffgridwithJD, who broke the
+# chain without editing a document:
+#
+#     pgcolumnar--1.0-alpha2--1.0-alpha3.sql -> pgcolumnar--1.0-alpha2--1.0-alphaX.sql
+#
+# `1.0-alpha2` still starts a script, so the set of starting versions does not
+# move and all four arms passed, on a tree where three of the five named versions
+# cannot reach `default_version` in one command. So the population below is
+# WALKED: from each starting version, follow `A--B` to the script starting at `B`,
+# and keep it only if the walk ends at `default_version`. That subsumes the
+# membership test, because a version whose target starts nothing drops out.
 _upgsrc="$(ls "$SRCDIR"/pgcolumnar--*--*.sql 2>/dev/null \
 	| sed 's|.*/pgcolumnar--||; s|\.sql$||; s|--.*||' \
 	| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
@@ -371,16 +385,72 @@ _defver="$(sed -n "s/^[[:space:]]*default_version[[:space:]]*=[[:space:]]*'\([^'
 check "premise: the control file names a default_version to arrive at" \
 	"$([ -n "$_defver" ] && echo yes || echo no)" "yes"
 
+# NO VERSION MAY START TWO SCRIPTS, or the walk below would pick one of them and
+# report on a chain the reader does not have. Checked rather than assumed,
+# because picking silently is how a walk becomes an opinion.
+_upgbranch=""
+for _s in $_upgsrc; do
+	_n="$(ls "$SRCDIR"/pgcolumnar--"$_s"--*.sql 2>/dev/null | wc -l)"
+	[ "$_n" = 1 ] || _upgbranch="$_upgbranch $_s=$_n"
+done
+check "each shipped version starts exactly one upgrade script, so the chain is a walk" \
+	"$(printf '%s' "$_upgbranch" | sed 's/^ //')" ""
+
+# THE WALK. From each starting version, follow `A--B` to the script starting at
+# `B` until nothing starts there. Keep the version only if it arrived at
+# `default_version`. The step count is bounded because a mis-generated pair of
+# scripts can form a cycle, and a guard that hangs is a guard that gets removed.
+_upg_step() {	# _upg_step FROM -> the version its script targets, or empty
+	ls "$SRCDIR"/pgcolumnar--"$1"--*.sql 2>/dev/null | head -1 \
+		| sed "s|.*/pgcolumnar--$1--||; s|\.sql$||"
+}
+_upgreach=""
+for _s in $_upgsrc; do
+	_cur="$_s"
+	_steps=0
+	while [ "$_cur" != "$_defver" ] && [ "$_steps" -lt 50 ]; do
+		_nxt="$(_upg_step "$_cur")"
+		[ -n "$_nxt" ] || break
+		_cur="$_nxt"
+		_steps=$((_steps + 1))
+	done
+	[ "$_cur" = "$_defver" ] && _upgreach="$_upgreach $_s"
+done
+_upgreach="$(printf '%s' "$_upgreach" | sed 's/^ //')"
+check "premise: some shipped version reaches default_version, so the walk found a chain" \
+	"$([ -n "$_upgreach" ] && echo yes || echo no)" "yes"
+
 # ONE SENTENCE PER FILE, and the count is checked rather than assumed: `grep -m1`
 # reads the first and a second would go unread, which is the silent half of the
 # same shape the published-release arm above was bitten by.
+# A PERIOD AFTER A BARE NUMBER IS A MARKDOWN LIST MARKER, not a full stop.
+# `docs/installation.md` already yields two fragments that are nothing but "2."
+# and "3.". Raised by @OffgridwithJD, who expected it to sever the claim if the
+# sentence were moved into numbered step 3, which is the `ALTER EXTENSION` step.
+#
+# NO VERDICT CHANGES TODAY, AND THAT IS STATED RATHER THAN IMPLIED. The claim was
+# moved into step 3 and both halves still read the whole sentence, with and
+# without this mask, because the marker always PRECEDES the sentence: splitting
+# there drops the marker and leaves the claim intact. No arrangement was found in
+# which a marker falls inside the claim, so this mask has no removal proof.
+#
+# It is kept anyway, and the reason is not "it might help". The rule this file
+# enforces is that a fragment either carries the claim or is ignored, and a
+# fragment that is nothing but "3." is neither -- it is a sentence the splitter
+# invented. One `sed` removes a class of input the rest of the block was never
+# designed to receive, and the cost of being wrong about it is zero because a
+# masked marker cannot match the marker phrase either way.
+_upg_sentences() {	# _upg_sentences FILE -> one sentence per line
+	tr '\n' ' ' < "$1" \
+		| sed -E 's/(^|[[:space:]])([0-9]+)\. /\1\2.@LM@/g' \
+		| sed 's/\. /.\n/g' \
+		| sed 's/@LM@/ /g'
+}
 _upg_claim() {	# _upg_claim FILE -> the sentence making the upgrade-chain claim
-	tr '\n' ' ' < "$1" | sed 's/\. /.\n/g' \
-		| grep -m1 -E 'previously (shipped|published) version'
+	_upg_sentences "$1" | grep -m1 -E 'previously (shipped|published) version'
 }
 _upg_claims() {	# _upg_claims FILE -> how many sentences make it
-	tr '\n' ' ' < "$1" | sed 's/\. /.\n/g' \
-		| grep -cE 'previously (shipped|published) version'
+	_upg_sentences "$1" | grep -cE 'previously (shipped|published) version'
 }
 # The destination is removed before the starting versions are collected, because
 # the two claims share one sentence and each has its own arm below.
@@ -419,9 +489,9 @@ _upggot=""
 _upgwant=""
 for _d in $_upgdocs; do
 	_upggot="$_upggot $(basename "$_d")=[$(_upg_sources "$_d")]"
-	_upgwant="$_upgwant $(basename "$_d")=[$_upgsrc]"
+	_upgwant="$_upgwant $(basename "$_d")=[$_upgreach]"
 done
-check "every such document names the versions the shipped upgrade scripts start from" \
+check "every such document names the versions that reach default_version in one update" \
 	"${_upggot# }" "${_upgwant# }"
 
 _upggot=""

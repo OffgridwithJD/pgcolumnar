@@ -160,9 +160,18 @@ true until the next version shipped.
   | `docs/installation.md` | all 5 | none a machine can find: "reaches **it** from" |
   | `docs/limitations.md` | 3 of 5, under a hand-typed "Three such scripts" | `1.0-alpha3` |
 
-  Both facts are knowable from the tree. The `pgcolumnar--A--B.sql` filenames give
-  the starting versions and `pgcolumnar.control` gives the destination, so the three
+  Both facts are knowable from the tree. `pgcolumnar.control` gives the destination,
+  and the `pgcolumnar--A--B.sql` filenames give the starting versions, so the three
   documents are now compared against them rather than edited by hand.
+
+  **The filenames are walked, not counted.** "a single update reaches `1.0-alpha5`
+  from any of them" says the scripts form an unbroken chain, which the set of `A`
+  sides cannot see: renaming `pgcolumnar--1.0-alpha2--1.0-alpha3.sql` to
+  `--1.0-alphaX.sql` leaves `1.0-alpha2` starting a script while three of the five
+  named versions can no longer arrive, and every arm passed on that tree. Reported
+  by @OffgridwithJD. Each version is now followed `A--B` to the script starting at
+  `B` and kept only if the walk ends at `default_version`, and a second premise
+  refuses any version that starts two scripts rather than picking one silently.
 
   **The two errors in `CHANGELOG.md` cancel if you count.** It named `1.0-alpha4`
   once too few as a starting version and once too many as the destination, so the set
@@ -170,7 +179,7 @@ true until the next version shipped.
   the tree would have passed a sentence in which both halves were wrong. The two
   claims are therefore read separately, each against its own source on disk.
 
-  Six arms in `test/docs_style.sh` and four tests in
+  Eight arms in `test/docs_style.sh` and four tests in
   `test/pytest/test_docs_upgrade_chain.py`. The shell half folds the file with `tr`
   and cuts sentences with `sed`; the pytest half splits on a lookbehind and collects
   with `re`, so a parsing mistake in one is not a parsing mistake in the other.
