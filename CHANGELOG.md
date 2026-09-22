@@ -16,6 +16,49 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- `pgcolumnar.expire` accepts a `date` retention column (#1135).
+
+  `ttl_column` took `timestamp` or `timestamptz` only. `date` is not an unsupported
+  type in that file: the same source handles `DATEOID` in its zone-map key and
+  sortability paths. Only the retention cutoff refused it, and a date
+  partition key is an ordinary shape for the retention case the feature exists to
+  serve.
+
+  The cutoff is computed in the column's own type, as the two existing arms are. For
+  `date` that means truncating. No date-minus-interval yields a date, because
+  PostgreSQL's `date_mi_interval` returns a timestamp. **Truncation is load-bearing
+  even for a whole-day interval**, because the cutoff is measured from the current
+  instant rather than from midnight:
+
+  | | value |
+  | --- | --- |
+  | `now() - interval '3 days'` | `2026-09-19 00:47:25` |
+  | truncated to a date | `2026-09-19` |
+  | `CURRENT_DATE - interval '3 days'` | `2026-09-19 00:00:00` |
+
+  A row dated `2026-09-19` is midnight, so it falls before the untruncated cutoff and
+  survives the truncated one. Truncation therefore moves the cutoff earlier by the
+  current time of day. It keeps a row up to a day older than the retention window
+  rather than dropping one younger. That is the direction to err in for a function
+  whose failure mode is deleting data.
+
+  `test/ttl_expire.sh` pins the rounding with an arm that reddens when the cutoff
+  moves a day. Its fixture puts 1,000 rows exactly on the cutoff.
+
+  **The cutoff is the calling session's date, not the server's.** `expire` converts
+  the current instant through the session's `TimeZone`. Two sessions can therefore
+  retire different groups. Take a three-day retention with the server at
+  `2026-09-22 03:21+00`. A `UTC` session cuts at `2026-09-19` and retires three
+  groups of the six. A `Pacific/Midway` session cuts at `2026-09-18` and retires
+  two. The
+  behaviour is inherited rather than introduced: `timestamptz` is zone-independent,
+  and the `timestamp` arm already converts through the session zone. What changes
+  is the granularity, from hours to a whole day of rows. Found by @OffgridwithJD
+  reviewing this change, documented in `docs/sql-reference.md`, and pinned by an
+  arm that runs `expire` under two zones.
+
 ### Fixed
 
 - A header edit did not rebuild, so every header mutation proof ran against a stale

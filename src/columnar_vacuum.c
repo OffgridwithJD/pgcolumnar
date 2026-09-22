@@ -49,6 +49,7 @@
 #include "utils/array.h"
 #include "utils/inval.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
 #include "utils/timestamp.h"
@@ -2423,11 +2424,53 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 															 TimestampTzGetDatum(GetCurrentTimestamp())),
 										 IntervalPGetDatum(ttlInterval));
 			break;
+		case DATEOID:
+
+			/*
+			 * A date partition key is an ordinary shape for retention, and this
+			 * file already handles DATEOID in its zone-map key and sortability
+			 * paths; only the cutoff refused it (#1135).
+			 *
+			 * THE CUTOFF IS TRUNCATED, AND THE DIRECTION IS THE POINT. There is
+			 * no date-minus-interval that yields a date: PostgreSQL's
+			 * date_mi_interval returns a timestamp, so the instant has to be
+			 * reduced to the day that contains it.
+			 *
+			 * AND IT IS LOAD-BEARING EVEN FOR A WHOLE-DAY INTERVAL, which is the
+			 * part that looks wrong at a glance. The cutoff starts from
+			 * GetCurrentTimestamp(), not from CURRENT_DATE, so it carries a time
+			 * of day. Measured on 2026-09-22:
+			 *
+			 *     now() - interval '3 days'      2026-09-19 00:47:25
+			 *     truncated                      2026-09-19
+			 *     CURRENT_DATE - interval '3 days'   2026-09-19 00:00:00
+			 *
+			 * A row dated 2026-09-19 is midnight, so against the UNTRUNCATED
+			 * cutoff it compares `<` and is expired; against the truncated one it
+			 * is kept. The `CURRENT_DATE - interval` form would already be
+			 * midnight and need no truncation, but that is not the value this
+			 * computes.
+			 *
+			 * So truncation moves the cutoff EARLIER by the current time of day,
+			 * which KEEPS a row up to a day older than the retention window
+			 * rather than dropping one younger than it. That is the direction to
+			 * err in for a function whose failure mode is deleting data. A row
+			 * dated exactly on the cutoff is inside the window under the `<`
+			 * comparison below, the same rule the two arms above use, and
+			 * test/ttl_expire.sh pins it with an arm that reddens when the cutoff
+			 * moves a day either way.
+			 */
+			cutoff = DirectFunctionCall1(timestamp_date,
+										 DirectFunctionCall2(timestamp_mi_interval,
+															 DirectFunctionCall1(timestamptz_timestamp,
+																				 TimestampTzGetDatum(GetCurrentTimestamp())),
+															 IntervalPGetDatum(ttlInterval)));
+			break;
 		default:
 			table_close(rel, ShareUpdateExclusiveLock);
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("retention column \"%s\" must be timestamp or timestamptz",
+					 errmsg("retention column \"%s\" must be date, timestamp or timestamptz",
 							ttlColumn)));
 			cutoff = (Datum) 0;	/* keep the compiler quiet */
 			break;
