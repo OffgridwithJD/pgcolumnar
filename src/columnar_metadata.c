@@ -788,6 +788,27 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 	}
 
 	insert_free_space_row(rel, td, storageId, off, len, freedXid);
+
+	/*
+	 * LOAD-BEARING FOR #84 IN THE DEFAULT CONFIGURATION, not an optimisation
+	 * detail (#1194). It makes the new free_space row visible to the next scan
+	 * within the same command, which is the same visibility the #84 fix provides
+	 * in PgColumnarAllocateFreeSpace -- so with coalescing on, this increment
+	 * masks #84 entirely.
+	 *
+	 * Measured on PG17. Remove BOTH increments and the SHIPPED configuration
+	 * breaks; the regression guard reaches the defect only because it sets
+	 * reclaim_coalesce off:
+	 *
+	 *     #84 fix removed, this one kept      12 passed + 0 failed  (masked)
+	 *     both removed, coalescing default     8 passed + 4 failed
+	 *       ERROR: tuple already updated by self
+	 *
+	 * So deleting this line is safe only while the #84 fix is present, and
+	 * nothing in the tree would catch it being deleted together with that fix.
+	 * test/native_reclaim_cycles.sh guards #84 with coalescing OFF, which is a
+	 * configuration no production cluster uses.
+	 */
 	if (pgcolumnar_reclaim_coalesce)
 		CommandCounterIncrement();
 	table_close(rel, RowExclusiveLock);
