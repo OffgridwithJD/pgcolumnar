@@ -835,10 +835,25 @@ typedef struct PgColumnarVector
 } PgColumnarVector;
 
 /* value stream encode/decode shared by writer and reader */
+/*
+ * A range predicate's shape (#1144), and the private ScanKey flag that carries
+ * it from PgColumnarBuildScanKeys to here. These ScanKeys never reach an index
+ * AM -- they are built by this extension and consumed by this file -- so a
+ * private high bit is safe, and it is what keeps a range key from being read as
+ * a btree strategy number: RTOverlapStrategyNumber is 3, which is also
+ * BTEqualStrategyNumber.
+ */
+#define PGC_SK_RANGE		0x8000
+#define PGC_RANGE_OVERLAP		1
+#define PGC_RANGE_CONTAINS_ELEM	2
+
 extern void PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
 								Datum value);
 extern void PgColumnarEncodeValueByLen(StringInfo buf, bool byval, int16 len,
 									   Datum value);
+extern Datum PgColumnarDecodeValueByLen(bool byval, int16 len, char **cursor,
+										const char *end,
+										MemoryContext targetContext);
 extern Datum PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 								 const char *end, MemoryContext targetContext);
 

@@ -69,6 +69,9 @@
 #include "utils/fmgroids.h"
 #include "utils/timestamp.h"
 #include "utils/datum.h"
+#include "commands/defrem.h"
+#include "catalog/pg_am_d.h"
+#include "utils/rangetypes.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/rel.h"
@@ -1048,6 +1051,65 @@ pgcolumnar_clause_to_scankey(Node *clause, Index scanrelid, TupleDesc tupdesc,
 	 */
 	if (op->opno == OID_TEXT_LIKE_OP && varOnLeft)
 		return pgcolumnar_like_prefix_scankey(op, var, con, tupdesc, key);
+
+	/*
+	 * RANGE OVERLAP AND CONTAINMENT (#1144), before the btree lookup, because
+	 * those operators are GiST: `get_op_opfamily_strategy` against the btree
+	 * family returns InvalidStrategy for them and the qual was dropped here.
+	 * Measured on 200,000 rows with one tstzrange column: `span && ...` and
+	 * `span @> ...` each pushed down 0 filters, probed 0 zone maps, and removed
+	 * 199,881 and 199,940 rows AFTER decoding them.
+	 *
+	 * The operator is identified by OPFAMILY MEMBERSHIP rather than by name: the
+	 * range type's default GiST opclass names the family, and the strategy
+	 * number inside it says which operator this is. A user-defined `&&` that is
+	 * not in that family is not this operator and is left alone.
+	 *
+	 * `&&` is symmetric, so either operand order is usable. `range @> elem` is
+	 * not, and a constant on the left is a different operator (`elem <@ range`),
+	 * so that case is left for the btree path to reject.
+	 */
+	if (type_is_range(var->vartype))
+	{
+		Oid			gistClass = GetDefaultOpClass(var->vartype, GIST_AM_OID);
+		Oid			gistFamily = OidIsValid(gistClass)
+			? get_opclass_family(gistClass) : InvalidOid;
+		StrategyNumber rstrat = OidIsValid(gistFamily)
+			? get_op_opfamily_strategy(op->opno, gistFamily) : InvalidStrategy;
+
+		if (rstrat == RTOverlapStrategyNumber &&
+			con->consttype == var->vartype)
+		{
+			MemSet(key, 0, sizeof(ScanKeyData));
+			key->sk_flags = PGC_SK_RANGE;
+			key->sk_attno = var->varattno;
+			key->sk_strategy = PGC_RANGE_OVERLAP;
+			key->sk_subtype = con->consttype;
+			key->sk_collation = con->constcollid;
+			key->sk_argument = con->constvalue;
+			*exact = false;		/* the executor still applies the qual */
+			return 1;
+		}
+		if (rstrat == RTContainsElemStrategyNumber && varOnLeft)
+		{
+			TypeCacheEntry *rtce = lookup_type_cache(var->vartype,
+													 TYPECACHE_RANGE_INFO);
+
+			if (rtce->rngelemtype != NULL &&
+				con->consttype == rtce->rngelemtype->type_id)
+			{
+				MemSet(key, 0, sizeof(ScanKeyData));
+				key->sk_flags = PGC_SK_RANGE;
+				key->sk_attno = var->varattno;
+				key->sk_strategy = PGC_RANGE_CONTAINS_ELEM;
+				key->sk_subtype = con->consttype;
+				key->sk_collation = con->constcollid;
+				key->sk_argument = con->constvalue;
+				*exact = false;
+				return 1;
+			}
+		}
+	}
 
 	tce = lookup_type_cache(var->vartype, TYPECACHE_BTREE_OPFAMILY);
 	if (!OidIsValid(tce->btree_opf))
