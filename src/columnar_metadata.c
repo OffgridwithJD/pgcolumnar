@@ -1670,7 +1670,25 @@ PgColumnarUpsertDeleteVector(uint64 storageId, DeleteVectorMetadata *rm)
 	ScanKeyInit(&key[1], Anum_delete_vector_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) rm->groupNumber));
 
-	scan = systable_beginscan(rel, InvalidOid, false, SnapshotSelf, 2, key);
+	/*
+	 * THE INDEX, like every sibling catalog read. This ran once per row
+	 * group with InvalidOid, so a DELETE touching twenty groups took twenty
+	 * sequential scans of delete_vector -- the cost the index switch existed
+	 * to remove, still being paid by the session that did the writing.
+	 *
+	 * Attributed with an elog probe at every delete_vector scan site (#1146):
+	 * 20 here, 40 at ReadDeleteVectorList, 1 at ReadDeleteVectorsForStorage,
+	 * against seq_scan=20 idx_scan=41. Afterwards seq_scan=0 idx_scan=61.
+	 *
+	 * SnapshotSelf is unchanged: the upsert has to see its own uncommitted
+	 * row, and systable_beginscan applies the same snapshot to an index scan.
+	 */
+	{
+		Oid			dvIdx = pgcolumnar_index_oid("delete_vector_pkey");
+
+		scan = systable_beginscan(rel, dvIdx, OidIsValid(dvIdx),
+								  SnapshotSelf, 2, key);
+	}
 	if (HeapTupleIsValid(existing = systable_getnext(scan)))
 	{
 		bool		isnull;

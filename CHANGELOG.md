@@ -18,6 +18,41 @@ true until the next version shipped.
 
 ### Fixed
 
+- The session that deleted rows still scanned `delete_vector` sequentially, once per row
+  group (#1146).
+
+  `delete_vector` gained a `_pkey` and its readers were switched to it, but
+  `PgColumnarUpsertDeleteVector` kept passing `InvalidOid`. It runs once per row group, so
+  a DELETE touching twenty groups took twenty sequential scans of the catalog -- the cost
+  the index switch existed to remove, still paid by the writer.
+
+  Attributed with an elog probe at every `delete_vector` scan site rather than inferred
+  from the totals:
+
+  | site | calls during the DELETE |
+  | --- | ---: |
+  | `PgColumnarUpsertDeleteVector` | 20 |
+  | `PgColumnarReadDeleteVectorList` | 40 |
+  | `PgColumnarReadDeleteVectorsForStorage` | 1 |
+
+  against `seq_scan=20 idx_scan=41` for the catalog, so 40 + 1 are the indexed reads and
+  the twenty are that one site. Afterwards:
+
+  | | seq_scan | idx_scan |
+  | --- | ---: | ---: |
+  | before | 20 | 41 |
+  | after | 0 | 61 |
+
+  41 + 20 = 61, so every scan that was sequential is now indexed and none was lost.
+
+  **The regression arm has to be in the pytest harness.** Every `q` in the shell harness
+  is its own `psql`, so the scan it measures is always made by a session that did no
+  writing, and the writing-session path is unobservable there whatever the arm asserts.
+  The new test holds one connection across the DELETE and reads the counters as a delta
+  over it.
+
+### Fixed
+
 - `docs/limitations.md` told a user that a range column has a collation, and it does
   not (#1144 review).
 
