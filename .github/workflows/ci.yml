@@ -136,18 +136,39 @@ jobs:
   # job PRINTS what it ran, and the measured figures live in the CHANGELOG entry, which
   # is dated. This comment was caught by that arm before the job ever ran.
   #
-  # ONE MAJOR, not the matrix. conftest.py's default is an assert build that exists on
-  # the audit container and not here, so the pg_config is passed explicitly. Widening to
-  # a matrix is a separate decision: this job's purpose is that these tests RUN at all,
-  # and a matrix would multiply a cost nobody has measured yet before the first green.
+  # TWO MAJORS HERE, FIVE NIGHTLY (#1163). This job ran on PG 18 alone while the shell
+  # corpus ran on five, so half of a pair meant to assert the same properties had a
+  # fifth of the major coverage. The deferral that shipped it said a matrix "would
+  # multiply a cost nobody has measured yet"; the cost is measured now, and so is the
+  # gap: a five-major gate on a port branch reddened
+  # `test_a_query_that_cannot_use_the_order_does_not_pay_to_decide` on PG 15, an arm
+  # that had never run on 15 anywhere -- not here, not nightly, not in
+  # run_all_versions.sh -- so attributing it meant building a baseline from scratch.
+  #
+  # THE SHELL TWIN'S CLEAN NIGHTS DO NOT TRANSFER. The two halves differ structurally
+  # in the relevant place: the shell suite runs each measurement in a FRESH psql
+  # backend, the port runs both on ONE persistent connection, and that first-touch
+  # catalog-cache cost is what the arm measures. Thirty clean PG 15 nights are evidence
+  # about the shell instrument.
+  #
+  # The majors here match `suites` above, which already installs them in this workflow's
+  # neighbours. The ends of the range -- 15, 16 and 19, which is where the gap was --
+  # are covered by the nightly matrix rather than on every PR.
+  #
+  # conftest.py's default is an assert build that exists on the audit container and not
+  # here, so the pg_config is passed explicitly.
   pytest-cluster:
-    name: pytest (cluster tests, with the driver)
+    name: pytest (cluster tests, PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['17', '18']
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add the PGDG repository and install PostgreSQL 18 with its headers
+      - name: Add the PGDG repository and install PostgreSQL ${{ matrix.pg }} with its headers
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -163,7 +184,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo timeout 300 apt-get -o Acquire::Retries=5 update
           sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-            postgresql-18 postgresql-server-dev-18 \
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} \
             liblz4-dev libzstd-dev zlib1g-dev
           # NOT cached, deliberately. The suites job caches because it runs a matrix for
           # an hour; a second copy of that cache-key derivation is a thing that goes
@@ -174,7 +195,7 @@ jobs:
       - name: check the pg_config the tests will be given
         run: |
           set -euo pipefail
-          PGC="/usr/lib/postgresql/18/bin/pg_config"
+          PGC="/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config"
           test -x "$PGC"
           echo "pg_config: $PGC"
           "$PGC" --version
@@ -202,7 +223,7 @@ jobs:
       - name: make the extension's install targets writable by this user
         run: |
           set -euo pipefail
-          PGC="/usr/lib/postgresql/18/bin/pg_config"
+          PGC="/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config"
           LIB="$("$PGC" --pkglibdir)"
           SHARE="$("$PGC" --sharedir)"
           sudo chown -R "$(id -un)" "$LIB" "$SHARE"
@@ -239,7 +260,7 @@ jobs:
           echo "running $(set -- $FILES; echo $#) cluster file(s): $FILES"
           echo "expecting $WANT collected test(s)"
           PYTHONPATH=. /tmp/pgcvenv/bin/pytest -q \
-            --pg-config /usr/lib/postgresql/18/bin/pg_config \
+            --pg-config /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
             --pgc-expect-tests "$WANT" \
             $FILES
 

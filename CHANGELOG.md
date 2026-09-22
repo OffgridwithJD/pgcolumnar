@@ -58,6 +58,29 @@ true until the next version shipped.
   is the granularity, from hours to a whole day of rows. Found by @OffgridwithJD
   reviewing this change, documented in `docs/sql-reference.md`, and pinned by an
   arm that runs `expire` under two zones.
+### Changed
+
+- The pytest corpus runs on more than one major (#1163).
+
+  The two harnesses assert the same properties, and the pytest half ran on PG 18
+  alone while the shell half ran the matrix. A five-major gate on a port branch then
+  reddened one arm on PG 15, an arm that had never run on 15 anywhere: not in CI, not
+  nightly, not in `run_all_versions.sh`. Attributing it meant building a baseline from
+  scratch.
+
+  | | before | after |
+  | --- | --- | --- |
+  | per-PR CI | PG 18 | PG 17 and 18 |
+  | nightly | not run | PG 15, 16, 17 and 18 |
+
+  The nightly majors match the shell suites beside them. PG 19 is in neither half of
+  that workflow, only as a from-source build in CI, so matching the list keeps the two
+  halves aligned rather than inventing a gap the other way.
+
+  The shell twin's clean nights do not transfer, which is why this needed the majors
+  rather than an argument. The two halves differ structurally in the relevant
+  place. The shell suite runs each measurement in a fresh `psql` backend. The port
+  runs both on one persistent connection.
 
 ### Fixed
 

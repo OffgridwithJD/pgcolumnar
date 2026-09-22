@@ -482,7 +482,11 @@ suite matrix across 15 to 18 on x86_64, and the current major on aarch64. The
 nightly run also includes the ASAN and UBSAN sanitizer gate, against an
 instrumented PostgreSQL, and the coverage report. It also runs the
 extension-upgrade guard. That guard builds the previous release on PostgreSQL
-18, loads data into it, and upgrades it in place. The sanitizer build stays in a cache, because it takes longer to build
+18, loads data into it, and upgrades it in place. A pytest-cluster job runs the
+pytest corpus on 15 through 18, the same majors as the suites above it. Per-PR
+CI runs that job on 17 and 18. The ends of the range are what the nightly adds,
+and the ends are where the gap was. An arm reddened on 15 that had never run on
+15 anywhere. Nothing could say whether it had flaked before. The sanitizer build stays in a cache, because it takes longer to build
 than to run the suites against it.
 A final job, red-nightly, opens an issue when any of those fail. The next green
 run closes it. A scheduled run has no pull request to be red on, so nothing else
