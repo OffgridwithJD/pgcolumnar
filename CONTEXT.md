@@ -477,6 +477,26 @@ than a wrong algorithm.
   exists to reach. Reproducing the stale cache took @OffgridwithJD three attempts
   for exactly that reason. One cause, two silent and opposite errors: the proof
   reads as passing when the change is unnecessary, and as failing when it is not.
+- **A C HEADER EDIT DID NOT REBUILD (#1158).** Every header mutation proof
+  written before 2026-09-21 ran against a stale object. PGXS generates header
+  dependencies only when the SERVER was configured with `--enable-depend`, and
+  `autodepend` is empty in the `Makefile.global` of every server here. `make`
+  therefore saw `src/*.o` as newer than `src/*.c` and rebuilt nothing, however
+  the headers changed. Measured on PG16: edit a constant in `src/columnar.h`,
+  run `make`, and the build succeeds with `pgcolumnar.so` byte-identical.
+
+  The top-level `Makefile` now passes `-MMD -MP` and includes the generated
+  `.d` files. An edit to any header now rebuilds what included it.
+  `harness_selftest` part 550 asserts the dependency files exist in the tree it
+  just built. `objstore/Makefile` does the same for its own object.
+
+  **This retires neither the `make clean` habit nor the md5.** A tree built
+  before the fix carries objects with no `.d` beside them. Nothing generates one
+  until that object is recompiled. Print the `.so` md5 on both sides of every
+  mutation. It is the only instrument that catches a build reporting success
+  over an unchanged object. The md5 is a function of the BUILD DIRECTORY, so
+  only a before/after pair taken in ONE directory is a comparison.
+
 - **A removal proof must fail for the STATED reason.** That a check can fail is
   not evidence that it fails for the reason claimed. Read the failure text.
 - **A suite that sources a helper cannot see whether anything calls it.** Feeding

@@ -98,6 +98,26 @@ PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed -E 's/^[^0-9]*([0-9]+).*
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
+# HEADER DEPENDENCIES, BECAUSE PGXS DOES NOT EMIT THEM HERE (#1158). PostgreSQL
+# generates .deps only when the SERVER was configured with --enable-depend, and
+# `autodepend` is empty in the Makefile.global of every server this project is
+# built against. Without it `make` sees src/*.o as newer than src/*.c and
+# rebuilds NOTHING however the headers changed.
+#
+# That is not a slow build, it is a WRONG one, and it is silent. Measured on
+# PG16 before this line existed: edit PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY in
+# src/columnar.h, run `make`, and the build succeeds with pgcolumnar.so
+# byte-identical at 2b8bfc2a6d75. Every removal proof that mutates a constant,
+# macro, struct or inline function in a header ran against a stale object and
+# reported a clean pass -- which reads as "the code is not load-bearing", the
+# most expensive wrong answer a proof can give.
+#
+# -MMD writes a .d beside each .o listing the headers it included; -MP adds a
+# phony target for each header so a DELETED header does not break the build with
+# "No rule to make target". The `-include` below is after the PGXS include,
+# because OBJS must be expanded by then.
+PG_CFLAGS += -MMD -MP
+
 # The compiler PGXS will use, for the probe below. CC has to be settled before
 # the include, because PG_CFLAGS is only honored if it is set before it, so the
 # value is read out of the server's Makefile.global unless the caller named one
@@ -125,6 +145,10 @@ endif
 
 include $(PGXS)
 
+# The generated dependency files. A leading `-` so the first build, which has
+# none, is not an error.
+-include $(OBJS:.o=.d)
+
 # The object-store module is a SEPARATE shared library, built and installed
 # alongside this one but never linked into it. See src/columnar_objstore.h: this
 # extension is preloaded, so anything it links reaches the postmaster.
@@ -140,8 +164,13 @@ install: objstore-install
 objstore-install:
 	$(MAKE) -C $(OBJSTORE_DIR) PG_CONFIG=$(PG_CONFIG) install
 
-clean: objstore-clean
+# PGXS's own clean removes OBJS and knows nothing about the .d files beside
+# them, so a stale .d would survive `make clean` and name headers that have
+# moved.
+clean: objstore-clean depclean
+depclean:
+	rm -f $(OBJS:.o=.d)
 objstore-clean:
 	$(MAKE) -C $(OBJSTORE_DIR) PG_CONFIG=$(PG_CONFIG) clean
 
-.PHONY: objstore-all objstore-install objstore-clean
+.PHONY: objstore-all objstore-install objstore-clean depclean

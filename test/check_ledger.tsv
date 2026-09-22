@@ -1301,6 +1301,10 @@ harness_selftest	540-an-arm-must-carry-its-measurement	control: a determinate or
 harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees a threshold arm and a floor arm	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees an awk verdict that discards its operands	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	premise: the sweep read the corpus and classified arms in it	15;16;17;18;19	never	-
+harness_selftest	550-a-header-edit-must-rebuild	and the dependency files name the project headers, not just the .c	15;16;17;18;19	never	-
+harness_selftest	550-a-header-edit-must-rebuild	every object carries a dependency file beside it	15;16;17;18;19	never	-
+harness_selftest	550-a-header-edit-must-rebuild	premise: the selftest knows where the tree it builds is	15;16;17;18;19	never	-
+harness_selftest	550-a-header-edit-must-rebuild	premise: this tree was compiled here, so there are objects to depend on	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-

@@ -30,6 +30,12 @@ endif
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
+# Header dependencies, for the reason in the top-level Makefile (#1158): PGXS
+# emits none unless the server was configured with --enable-depend, and none of
+# the servers here was. This module is one object, and it includes a header from
+# src/, so the same silent staleness applies.
+PG_CFLAGS += -MMD -MP
+
 # Match the language standard the main library uses, for the same reason: PG19's
 # headers are C23 and GCC 13 spells it gnu2x while GCC 14 spells it gnu23.
 PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
@@ -42,3 +48,10 @@ PG_CFLAGS += -std=gnu17
 endif
 
 include $(PGXS)
+
+-include $(OBJS:.o=.d)
+
+clean: depclean
+depclean:
+	rm -f $(OBJS:.o=.d)
+.PHONY: depclean
