@@ -252,16 +252,30 @@ def test_an_index_only_scan_does_not_return_retired_rows(pgc_conn, expect):
         # VACUUM UNTIL THE BITS ARE SET, OR SAY WHY THEY ARE NOT.
         #
         # A page is marked all-visible only when every tuple on it is visible to
-        # ALL transactions, so a neighbour holding an older snapshot suppresses it
-        # entirely. The shell twin never meets that: it gets a cluster to itself.
-        # This corpus SHARES one across xdist workers, so the condition the shell
+        # ALL transactions, so ANY concurrent snapshot older than these rows
+        # suppresses the bits entirely. The shell twin never meets that: it gets a
+        # cluster to itself. This corpus shares one, so the condition the shell
         # suite has structurally is one the port has to establish.
         #
-        # It failed exactly this way in CI on PG 18 -- `relallvisible = 0`, the
-        # premise red, the section's own fixture untouched -- and passed on 15, 16,
-        # 17 and 18 locally and under -n4. A retry is the honest remedy for a
-        # transient horizon and not for a broken VACUUM, which is why the premise
-        # below still refuses if the bits never arrive.
+        # MEASURED by @OffgridwithJD, directly on this arm's SQL:
+        #
+        #     quiet cluster                         allvisible = 2 of 3, 6 of 6
+        #     a snapshot opened before the INSERT   allvisible = 0,      3 of 3
+        #     the holder commits, VACUUM again      allvisible = 2,      3 of 3
+        #
+        # and with ordinary one-statement churn rather than a held snapshot,
+        # 7 of 20 runs read 0 without a retry and 0 of 20 with one, every recovery
+        # taking exactly two attempts. Eight attempts is about four times the worst
+        # case observed.
+        #
+        # NOT XDIST, which is what an earlier version of this comment said. The
+        # ci.yml cluster job runs serial -- no `-n` anywhere in it -- and pgc_conn
+        # is autocommit and function-scoped, so the corpus holds no second
+        # snapshot of its own. The actor is other activity on the shared cluster.
+        #
+        # A retry is the honest remedy for a transient horizon and not for a broken
+        # VACUUM, which is why the premise below still refuses if the bits never
+        # arrive: under a SUSTAINED holder the loop correctly fails to save it.
         for _attempt in range(8):
             cur.execute("VACUUM ttl_ios")
             cur.execute("SELECT relallvisible FROM pg_class"
