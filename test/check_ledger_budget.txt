@@ -196,4 +196,4 @@ suites_not_covered 249
 #
 # Re-counted on this tree, never by adding five:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1444
-checks_never_observed_red 1451
+checks_never_observed_red 1452

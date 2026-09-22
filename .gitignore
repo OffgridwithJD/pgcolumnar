@@ -15,3 +15,17 @@ __pycache__/
 # a container to a clone, they are named after whatever branch was in flight, and
 # nothing ever reads them again. Nine of them rode into c697c8cd under `git add -A`.
 *.bundle
+
+# The header-dependency files PGXS does not generate and our Makefiles do
+# (#1158). One per object, 36 of them after a build, directly beside the sources
+# somebody types `git add -A` next to -- which is the position the nine bundles
+# above were in. They are generated, so they are ignored rather than tracked.
+#
+# Measured on a pristine clone at 7397731: `git status --porcelain` is empty
+# before a build and 36 entries after it, all `.d`, and `git check-ignore` said
+# no. That makes an empty `git status` unusable as a premise, and both harness
+# gates assert exactly that before they run.
+#
+# SAFE BECAUSE NOTHING TRACKED MATCHES: `git ls-files '*.d'` is empty. A pattern
+# this broad would otherwise hide a real file the next time someone adds one.
+*.d

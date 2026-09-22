@@ -145,6 +145,26 @@ Measured by the identity of the postmaster each
   The shell harness already handles this and is unchanged. `lib.sh`'s
   `trap pgc_teardown EXIT` runs on TERM, INT and HUP already. Naming the signals
   explicitly would make the handler fire twice.
+- The dependency files #1158 generates were not ignored, so every built tree reported
+  dirt.
+
+  `-MMD -MP` writes one `.d` beside each object. Measured on a pristine clone at
+  `7397731`, with nothing touched but a build:
+
+  | | `git status --porcelain` |
+  | --- | ---: |
+  | before the build | 0 entries |
+  | after the build | 36 entries, all `.d` |
+
+  `git status` being empty is a premise both harness gates assert before they run, so
+  this made it unusable. The files also sat directly beside the sources, in the
+  position `git add -A` sweeps. `.gitignore`'s own last entry records nine git bundles that rode
+  into a commit exactly that way.
+
+  `*.d` is safe because nothing tracked matches it: `git ls-files '*.d'` is empty.
+  `harness_selftest` part 550 gains the sibling of the arm it already had. The old arm
+  asserts the dependency files exist; the new one asserts they are ignored, which is
+  the half that was missing. Reported by @OffgridwithJD.
 
 - A header edit did not rebuild, so every header mutation proof ran against a stale
   object and reported a clean pass (#1158).

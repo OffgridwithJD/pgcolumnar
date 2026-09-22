@@ -48,6 +48,18 @@ check "and the dependency files name the project headers, not just the .c" \
 	"yes"
 echo "      $_hd_withhdr of $_hd_d dependency files name columnar.h"
 
+# AND THEY MUST BE IGNORED, or every built tree reports dirt. The arms above
+# assert the .d files EXIST, which is the right property and is exactly half of
+# it: #1158 generated 36 new untracked files beside the sources and did not
+# ignore them, so `git status --porcelain` -- which both harness gates assert is
+# empty before they run -- stopped being usable as a premise, and the files sat
+# in the position `git add -A` sweeps. Measured on a pristine clone: 0 entries
+# before a build, 36 after, all `.d`. Reported by @OffgridwithJD.
+_hd_unignored="$(cd "$_hd_src" && git status --porcelain --ignored=no 2>/dev/null \
+	| awk '$1 == "??" {print $2}' | grep -E '\.d$' | head -3 | tr '\n' ' ')"
+check "and the dependency files are ignored, so a built tree is still clean" \
+	"${_hd_unignored:-none}" "none"
+
 # The server's own setting, printed rather than asserted. A server configured
 # with --enable-depend would make this redundant rather than wrong, and an arm
 # that went red there would be refusing a correct configuration.
