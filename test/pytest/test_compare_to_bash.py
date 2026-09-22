@@ -127,7 +127,16 @@ COMPLETE = ["advisory_lock_class",
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
-INCOMPLETE = {}
+INCOMPLETE = {
+    # The port asserts the engine counters, the heap oracle, the scattered zero
+    # and the declared-collation property. The shell suite additionally pins the
+    # three states of max_upper and its own fixture geometry by name, and those
+    # arms are not ported, so the pair does not grade to zero and is declared
+    # here rather than listed as complete.
+    "range_pruning": "counters, heap oracle, scattered zero and the declared "
+                     "collation are ported; the three-state and fixture-geometry "
+                     "premises of the shell suite are not",
+}
 
 
 def _names(src):

@@ -237,8 +237,11 @@ else
 	psql_run "CREATE TYPE tr_coll AS RANGE (SUBTYPE = text, COLLATION = $_rc_coll);"
 	psql_run "CREATE TABLE rc_heap (id int, span tr_coll);"
 	psql_run "CREATE TABLE rc_col  (id int, span tr_coll) USING pgcolumnar;"
-	psql_run "SELECT pgcolumnar.set_options('rc_col', stripe_row_limit => 200, chunk_group_row_limit => 200);"
-	RC_GEN="SELECT g, tr_coll(v, v || 'zz') FROM (SELECT g, (ARRAY['A','a','B','b','C','c','M','m','Y','y'])[1 + (g / 200) % 10] AS v FROM generate_series(1, 2000) g) s"
+	# 1000 is the floor set_options enforces; a smaller value is REFUSED and
+	# psql_run does not abort the suite, so the fixture would quietly keep the
+	# default geometry while this line claimed otherwise.
+	psql_run "SELECT pgcolumnar.set_options('rc_col', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+	RC_GEN="SELECT g, tr_coll(v, v || 'zz') FROM (SELECT g, (ARRAY['A','a','B','b','C','c','M','m','Y','y'])[1 + (g / 1000) % 10] AS v FROM generate_series(1, 10000) g) s"
 	psql_run "INSERT INTO rc_heap $RC_GEN;"
 	psql_run "INSERT INTO rc_col  $RC_GEN;"
 	psql_run "ANALYZE rc_heap;"
@@ -250,7 +253,7 @@ else
 		"t"
 	check "premise: both tables hold the same rows before any predicate" \
 		"$(q "SELECT count(*) FROM rc_heap") $(q "SELECT count(*) FROM rc_col")" \
-		"2000 2000"
+		"10000 10000"
 	check "premise: the collated range column is summarised, so pruning can engage" \
 		"$(RC_Z="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
 		              JOIN pgcolumnar.storage s USING (storage_id)

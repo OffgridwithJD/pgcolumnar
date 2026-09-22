@@ -470,8 +470,12 @@ guard_tests 398
 #
 # Re-derived by collection on the rebuilt branch: `462 tests collected`. `guard_tests`
 # was re-derived in the same run and did NOT move: 382.
+<<<<<<< HEAD
 # 463 -> 464 when test_base_scan_io.py landed (main already at 463 from
 # #1189). Re-derived by collection on this tree, never by adding one:
 # `464 tests collected`. `guard_tests` was re-derived in the same run and
 # did NOT move: 393.
 cluster_tests 464
+=======
+cluster_tests 465
+>>>>>>> 1a90f0e (test: a pytest twin for range pruning, and the ledger rows the new arms owe (#1144))
