@@ -713,6 +713,20 @@ used a node it had been told not to use, because the alternative did not exist.
 Queries still answer correctly, through a sequential scan or the custom scan. A
 `gin` or `brin` index on a columnar table is simply never read.
 
+It is still maintained on every insert, and that cost is not small in proportion.
+A columnar insert touches very few buffers, so any index maintenance is a large
+multiple of it. Measured on 100,000 rows, shared buffer hits on the `INSERT`
+itself:
+
+| table | no index | with BRIN |
+| --- | ---: | ---: |
+| columnar | 202 | 37,484 |
+| heap | 101,468 | 118,923 |
+
+The index is also the same size on both storages, at 24,576 bytes for BRIN and
+5,726,208 for GIN. The work is real and the bytes are real. On a columnar table
+they buy an index that cannot be chosen.
+
 **Use a GiST or an SP-GiST index for a selective overlap or containment query.**
 Both build on a columnar table and both answer the query. A columnar index scan
 is charged for the row-group decode its per-row fetches force. A broad query may

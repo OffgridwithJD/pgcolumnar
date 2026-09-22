@@ -35,6 +35,13 @@ true until the next version shipped.
   | heap | Bitmap Heap Scan | Bitmap Heap Scan |
   | columnar | Seq Scan | Seq Scan |
 
+  The page now also states the maintenance cost, because "never used" understates
+  it. A columnar insert touches very few buffers, so any index maintenance is a large
+  multiple of it: on 100,000 rows an `INSERT` takes 202 shared hits with no index and
+  37,484 with a BRIN index, against 101,468 and 118,923 on heap. The index is the same
+  size on both storages. The work is real and buys an index that cannot be chosen.
+  Measured by @jdatcmd and reproduced here, whose columnar delta agreed within 0.8%.
+
   On PostgreSQL 18 the columnar plan carries `Disabled: true`, which is the planner
   reporting that it used a node it had been told not to use because no alternative
   path existed. A row count cannot change that. BRIN is settled by the same
