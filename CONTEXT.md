@@ -490,6 +490,15 @@ than a wrong algorithm.
   `harness_selftest` part 550 asserts the dependency files exist in the tree it
   just built. `objstore/Makefile` does the same for its own object.
 
+  **A `PG_CFLAGS` on the make COMMAND LINE defeats it**, because a command-line
+  variable beats the `+=` in the Makefile. `make PG_CFLAGS=-O0 -n | grep -c MMD`
+  is 0, against 38 with no override on a full `make -n` here. The two of us
+  measured 38 and 26 over different build scopes; what matters is the 0. Nothing in the tree does this. The cost lands on
+  a developer who sets it to chase a compiler bug, whose next header mutation is
+  then vacuous again. Part 550 catches
+  it by name, because it compares the `.d` count with the `.o` count in the tree
+  it just built. Found by @OffgridwithJD reviewing #1186.
+
   **This retires neither the `make clean` habit nor the md5.** A tree built
   before the fix carries objects with no `.d` beside them. Nothing generates one
   until that object is recompiled. Print the `.so` md5 on both sides of every
