@@ -38,8 +38,10 @@ true until the next version shipped.
   The page now also states the maintenance cost, because "never used" understates
   it. A columnar insert touches very few buffers, so any index maintenance is a large
   multiple of it: on 100,000 rows an `INSERT` takes 202 shared hits with no index and
-  37,484 with a BRIN index, against 101,468 and 118,923 on heap. The index is the same
-  size on both storages. The work is real and buys an index that cannot be chosen.
+  37,484 with a BRIN index, against 101,468 and 118,923 on heap. The index is essentially
+  the same size on both storages -- equal on this fixture, and about 0.5% apart on a
+  second run at a different row count. The work is real and buys an index that cannot
+  be chosen.
   Measured by @jdatcmd and reproduced here, whose columnar delta agreed within 0.8%.
 
   A BRIN index on a columnar table also never summarizes. `brin_summarize_new_values`

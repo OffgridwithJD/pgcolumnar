@@ -723,9 +723,12 @@ itself:
 | columnar | 202 | 37,484 |
 | heap | 101,468 | 118,923 |
 
-The index is also the same size on both storages, at 24,576 bytes for BRIN and
-5,726,208 for GIN. The work is real and the bytes are real. On a columnar table
-they buy an index that cannot be chosen.
+The index is also essentially the same size on both storages: on this fixture,
+24,576 bytes for BRIN and 5,726,208 for GIN on each. Read that as "the storage
+does not change what the index costs", not as a byte-for-byte identity. A second
+run at a different row count put the two GIN indexes about 0.5% apart rather than
+exactly equal. The work is real and the bytes are real. On a columnar table they
+buy an index that cannot be chosen.
 
 A BRIN index also never summarizes. `brin_summarize_new_values` returns 0 on a
 columnar table where it returns a count on heap, because it finds no range to
