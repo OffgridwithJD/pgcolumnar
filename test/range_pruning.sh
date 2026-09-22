@@ -188,11 +188,11 @@ check "an empty range contributes no bound, so its units record NULL" \
 	     WHERE s.relation_oid = 'e_col'::regclass AND z.column_index = 1
 	       AND z.max_upper IS NULL")" "$E_TOTAL"
 check "and an unbounded range records a bound that is present but empty" \
-	"$([ "$(q "SELECT count(*) FROM pgcolumnar.zone_map z
-	           JOIN pgcolumnar.storage s USING (storage_id)
-	          WHERE s.relation_oid = 'u_col'::regclass AND z.column_index = 1
-	            AND z.max_upper IS NOT NULL AND octet_length(z.max_upper) = 0")" -ge 1 ]
-	   && echo "present and empty" || echo "NOT RECORDED")" \
+	"$(U_EMPTY="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+	                 JOIN pgcolumnar.storage s USING (storage_id)
+	                WHERE s.relation_oid = 'u_col'::regclass AND z.column_index = 1
+	                  AND z.max_upper IS NOT NULL AND octet_length(z.max_upper) = 0")";
+	   [ "${U_EMPTY:-0}" -ge 1 ] && echo "present and empty" || echo "NOT RECORDED ($U_EMPTY)")" \
 	"present and empty"
 
 pgc_summary
