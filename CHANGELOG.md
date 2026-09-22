@@ -145,6 +145,26 @@ true until the next version shipped.
   Found by @OffgridwithJD, whose pytest twin already had the fixture and who then
   separated the two factors.
 
+- The coalescing increment is documented as load-bearing for #84 (#1194).
+
+  `test/native_reclaim_cycles.sh` reaches #84 only because it sets
+  `pgcolumnar.reclaim_coalesce` off, which is a configuration no production cluster
+  uses. Under the shipped default the #84 fix can be deleted and nothing notices.
+  `reclaim_coalesce` carries its own `CommandCounterIncrement` on the free path, and
+  that increment provides the same visibility.
+
+  Nothing marked that line as load-bearing, so it reads as an optimisation detail
+  beside the merge it belongs to. Measured on PG17:
+
+  | build | configuration | result |
+  | --- | --- | --- |
+  | #84 fix removed, this increment kept | default | 12 passed + 0 failed |
+  | both removed | default | 8 passed + 4 failed, `tuple already updated by self` |
+
+  So deleting it is safe only while the #84 fix is present, and nothing in the tree
+  would catch the two being deleted together. The comment says that, with the
+  measurement, where the next person editing the line will read it.
+
 - A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
 
   Python does not run `finally` blocks when the default `SIGTERM` disposition
