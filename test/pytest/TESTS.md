@@ -5125,15 +5125,22 @@ always made by a session that did not write. Measured on this fixture:
 | the session that wrote | 62 | **20** |
 | a fresh session | 21 | 0 |
 
-Twenty sequential catalog scans, one per row group, survive in the writing session. This
-file asserts the property the suite states, on a fresh connection, and asserts nothing
-about the writing session either way; the observation is filed as #1146.
+Twenty sequential catalog scans, one per row group, survived in the writing session, and
+#1146 fixed that. `PgColumnarUpsertDeleteVector` ran once per row group passing
+`InvalidOid`; attributed with an elog probe at every `delete_vector` scan site, 20 were
+that call site against `seq_scan=20 idx_scan=41`, and afterwards `seq_scan=0 idx_scan=61`.
+
+This file now asserts BOTH sessions. The second test holds the connection across the
+DELETE and reads the counters as a delta over it, which is the only way the writing-session
+path is observable at all: every `q` in the shell harness is its own psql, so the scan it
+measures is always made by a session that did no writing.
 
 ### Every arm
 
 | test | what it holds |
 | --- | --- |
 | `test_native_delete_vector_index` | every arm: the fixture's rows and row groups, one delete_vector row per group scoped to this storage, that the cache-building scan ran and was correct, that it used the index and did not sequentially scan, and that the deletes are still applied |
+| `test_the_writing_session_does_not_sequentially_scan_the_delete_vector` | the session that DID the deleting: the fixture's row groups, that the DELETE wrote one delete_vector row per group so the zero is not vacuous, that it reached the catalog at all, and that it took no sequential scan |
 
 ## 65. test_native_delete_visibility_paths.py: a deleted row is invisible on every path
 

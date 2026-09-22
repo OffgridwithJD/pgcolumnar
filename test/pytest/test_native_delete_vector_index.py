@@ -115,3 +115,61 @@ def test_native_delete_vector_index(pgc_cluster, pgc_conn, expect):
 
     expect.num(_one(pgc_conn, "SELECT sum(v) FROM t"), LIVE_SUM,
                "the deletes are still applied (visibility unchanged by the index switch)")
+
+
+def test_the_writing_session_does_not_sequentially_scan_the_delete_vector(
+        pgc_cluster, pgc_conn, expect):
+    """The session that DID the deleting must not sequentially scan either (#1146).
+
+    The arm above resets the counters after the write and then reads, so the scan it
+    measures is always made by a session that did no writing. That is not a flaw in its
+    logic; it is the only thing the shell harness can observe, because every `q` there is
+    its own psql. Holding one connection across the DELETE and the read is what makes the
+    writing-session path visible at all.
+
+    `PgColumnarUpsertDeleteVector` ran once per row group with `InvalidOid`, so a DELETE
+    touching twenty groups took twenty sequential scans of the catalog. Attributed with an
+    elog probe at every `delete_vector` scan site: 20 at that call site, 40 at
+    `ReadDeleteVectorList` and 1 at `ReadDeleteVectorsForStorage`, against
+    `seq_scan=20 idx_scan=41` -- so the twenty were that site and nothing else.
+
+    RESET BEFORE THE DELETE, NOT AFTER. The counters are read as a delta across the
+    DELETE alone; resetting afterwards is what attributed these scans to the following
+    SELECT the first time they were measured.
+    """
+    n, groups = 40000, 20
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE dvw (id int, v int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('dvw', stripe_row_limit => 2000,"
+                    " chunk_group_row_limit => 2000)")
+        cur.execute(f"INSERT INTO dvw SELECT g, g FROM generate_series(1, {n}) g")
+        cur.execute("SELECT count(*) FROM pgcolumnar.storage s"
+                    " JOIN pgcolumnar.row_group rg USING (storage_id)"
+                    " WHERE s.relation_oid = 'dvw'::regclass")
+        expect.num(cur.fetchone()[0], groups,
+                   "premise: the fixture is laid out in the expected row groups")
+
+        # The delta is across the DELETE and nothing else.
+        cur.execute("SELECT pg_stat_reset()")
+        cur.execute("DELETE FROM dvw WHERE id % 500 = 0")
+        cur.execute("SELECT pg_stat_force_next_flush()")
+
+        # WITHOUT THIS THE ZERO IS VACUOUS. A DELETE that wrote no delete_vector row
+        # scans nothing, and seq_scan = 0 would report success for a fixture that never
+        # reached the path.
+        cur.execute("SELECT count(*) FROM pgcolumnar.delete_vector dv"
+                    " JOIN pgcolumnar.storage s USING (storage_id)"
+                    " WHERE s.relation_oid = 'dvw'::regclass")
+        expect.num(cur.fetchone()[0], groups,
+                   "premise: the delete wrote one delete_vector row per group")
+
+        cur.execute("SELECT coalesce(seq_scan, 0), coalesce(idx_scan, 0)"
+                    " FROM pg_stat_all_tables WHERE relname = 'delete_vector'"
+                    " AND schemaname = 'pgcolumnar'")
+        seq, idx = cur.fetchone()
+    print(f"-- delete_vector across the DELETE: seq_scan={seq} idx_scan={idx}")
+
+    expect.at_least(idx, 1,
+                    "premise: the writing session did reach the catalog at all")
+    expect.num(seq, 0,
+               "the writing session did NOT sequentially scan the catalog (seq_scan = 0)")
