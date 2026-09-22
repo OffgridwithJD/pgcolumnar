@@ -119,6 +119,40 @@ true until the next version shipped.
 
 ### Added
 
+- `ttl_expire` ships in both harnesses (#1188).
+
+  `pgcolumnar.expire` is the one function in the tree that DELETES ROWS, so a wrong
+  answer there loses data rather than reporting a wrong number. It had a shell suite
+  and no pytest twin, which is the worst place in the corpus for single-harness
+  coverage.
+
+  `test/pytest/test_ttl_expire.py` asserts all 51 of the shell suite's properties:
+  the straddling group that constrains the feature, a live NULL the zone map's
+  maximum cannot speak for, a deleted NULL that must stop pinning its group forever,
+  the index-only scan over a group `expire` removed without touching the delete
+  vector, the `date` rounding, and the session-zone cutoff.
+
+  **Two substitutions, both asserted rather than assumed.** The shell suite bakes
+  `pgcolumnar.stripe_row_limit=1000` into the cluster config before the postmaster
+  starts; this corpus has one connection, so it uses per-table
+  `set_options(..., stripe_row_limit => 1000)` and pins the resulting group count on
+  every fixture. `ALTER DATABASE ... SET` becomes a session `SET`, and the plan it is
+  meant to produce is asserted. A procedural substitute for a structural guarantee
+  can fail silently where the original cannot.
+
+  **Measured, not argued.** Changing the retire decision to read a group's `minimum`
+  instead of its `maximum` is the data-loss implementation, and it reddens the
+  straddle arm in both halves: `NO row still inside the retention was dropped: got
+  [3000] want [3560]`. Removing the live-NULL guard reddens two tests; neutering the
+  deleted-NULL arm reddens one. Each mutation was asserted to match its anchor
+  exactly once and to compile, the `.so` moved and returned, and the source was
+  restored byte-identical.
+
+  The issue asked for 43 checks. The suite runs 51: a `^check "` sweep anchored at
+  column 0 misses four call sites indented inside the timezone loop, and those four
+  interpolate the zone into the check name, so 47 call sites yield 51 runtime names.
+  The suite's own `checks run:` line is what settles it.
+
 - Range columns prune on overlap and containment (#1144).
 
   A zone map recorded `minimum` and `maximum` only. Those are the range type's own
