@@ -137,6 +137,11 @@ true until the next version shipped.
   issue is about. With the #84 fix removed it reddens five
   arms with `ERROR: tuple already updated by self`.
 
+  The pytest twin says the same thing under the same name. It asserts the option read
+  back from the server, rather than assumed from the `SET` that asked for it. The parity
+  grader is what caught the divergence. It graded the pair `1` while every other pair
+  was `0`, on a difference of meaning rather than of counts.
+
   Found by @OffgridwithJD, whose pytest twin already had the fixture and who then
   separated the two factors.
 
