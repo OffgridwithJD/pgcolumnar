@@ -154,7 +154,7 @@ columnar table with it.
 
 `1.0-alpha5`, recorded in `VERSION`, is what this source tree installs. The
 latest published pre-release is `v1.0-alpha4`.
-`ALTER EXTENSION pgcolumnar UPDATE` (step 3 above) reaches it from every
+`ALTER EXTENSION pgcolumnar UPDATE` (step 3 above) reaches `1.0-alpha5` from every
 previously published version: `1.0-dev`, which the `v1.0-alpha` tag installed,
 `1.0-alpha`, `1.0-alpha2`, `1.0-alpha3`, and `1.0-alpha4`. PostgreSQL applies
 the shipped upgrade scripts in sequence. One command therefore carries a

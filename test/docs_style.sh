@@ -339,6 +339,202 @@ check "every document names the same latest published pre-release" \
 	   || printf 'DISAGREE:%s' "$(printf '%s' "$_pubvers" | tr '\n' ',' | sed 's/,$//')")" \
 	"$(printf '%s\n' "$_pubvers" | head -1)"
 
+# ---- and the UPGRADE CHAIN, which is a fourth place a version is written ----
+#
+# Two documents tell a reader which installed versions one `ALTER EXTENSION
+# pgcolumnar UPDATE` can start from, and which version it arrives at. Both facts
+# are knowable from the tree: the shipped `pgcolumnar--A--B.sql` files give the
+# set of starting versions, and `pgcolumnar.control` gives the arrival.
+#
+# Neither was compared against anything. Opening the `1.0-alpha5` cycle bumped
+# VERSION, the control file, the badge and META.json, and every check above went
+# green, while CHANGELOG.md kept saying that the chain starts at four versions
+# and arrives at `1.0-alpha4`. Five ship and it arrives at `1.0-alpha5`.
+#
+# THE TWO ERRORS CANCEL IF YOU COUNT, which is why this reads the two claims
+# separately. CHANGELOG.md named `1.0-alpha4` once too few as a source and once
+# too many as the destination, so the set of versions in the sentence was exactly
+# right. A rule comparing that set against the tree would have passed on a
+# sentence in which both halves were wrong.
+#
+# SCOPED TO THE SENTENCE, not the paragraph. The surrounding paragraph in
+# docs/installation.md also names the destination twice in prose that is correct,
+# so a paragraph-wide reading counts the destination as a starting version.
+#
+# AND THE CLAIM IS REACHABILITY, NOT MEMBERSHIP. "a SINGLE update reaches X from
+# ANY of them" says the scripts form an unbroken chain, and reading only the `A`
+# side of each filename cannot see that. Reported by @OffgridwithJD, who broke the
+# chain without editing a document:
+#
+#     pgcolumnar--1.0-alpha2--1.0-alpha3.sql -> pgcolumnar--1.0-alpha2--1.0-alphaX.sql
+#
+# `1.0-alpha2` still starts a script, so the set of starting versions does not
+# move and all four arms passed, on a tree where three of the five named versions
+# cannot reach `default_version` in one command. So the population below is
+# WALKED: from each starting version, follow `A--B` to the script starting at `B`,
+# and keep it only if the walk ends at `default_version`. That subsumes the
+# membership test, because a version whose target starts nothing drops out.
+_upgsrc="$(ls "$SRCDIR"/pgcolumnar--*--*.sql 2>/dev/null \
+	| sed 's|.*/pgcolumnar--||; s|\.sql$||; s|--.*||' \
+	| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+check "premise: the tree ships upgrade scripts to derive the chain from" \
+	"$([ -n "$_upgsrc" ] && echo yes || echo no)" "yes"
+
+_defver="$(sed -n "s/^[[:space:]]*default_version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+	"$SRCDIR/pgcolumnar.control")"
+check "premise: the control file names a default_version to arrive at" \
+	"$([ -n "$_defver" ] && echo yes || echo no)" "yes"
+
+# NO VERSION MAY START TWO SCRIPTS, or the walk below would pick one of them and
+# report on a chain the reader does not have. Checked rather than assumed,
+# because picking silently is how a walk becomes an opinion.
+_upgbranch=""
+for _s in $_upgsrc; do
+	_n="$(ls "$SRCDIR"/pgcolumnar--"$_s"--*.sql 2>/dev/null | wc -l)"
+	[ "$_n" = 1 ] || _upgbranch="$_upgbranch $_s=$_n"
+done
+check "each shipped version starts exactly one upgrade script, so the chain is a walk" \
+	"$(printf '%s' "$_upgbranch" | sed 's/^ //')" ""
+
+# THE WALK. From each starting version, follow `A--B` to the script starting at
+# `B` until nothing starts there. Keep the version only if it arrived at
+# `default_version`. The step count is bounded because a mis-generated pair of
+# scripts can form a cycle, and a guard that hangs is a guard that gets removed.
+_upg_step() {	# _upg_step FROM -> the version its script targets, or empty
+	ls "$SRCDIR"/pgcolumnar--"$1"--*.sql 2>/dev/null | head -1 \
+		| sed "s|.*/pgcolumnar--$1--||; s|\.sql$||"
+}
+_upgreach=""
+for _s in $_upgsrc; do
+	_cur="$_s"
+	_steps=0
+	while [ "$_cur" != "$_defver" ] && [ "$_steps" -lt 50 ]; do
+		_nxt="$(_upg_step "$_cur")"
+		[ -n "$_nxt" ] || break
+		_cur="$_nxt"
+		_steps=$((_steps + 1))
+	done
+	[ "$_cur" = "$_defver" ] && _upgreach="$_upgreach $_s"
+done
+_upgreach="$(printf '%s' "$_upgreach" | sed 's/^ //')"
+check "premise: some shipped version reaches default_version, so the walk found a chain" \
+	"$([ -n "$_upgreach" ] && echo yes || echo no)" "yes"
+
+# ONE SENTENCE PER FILE, and the count is checked rather than assumed: `grep -m1`
+# reads the first and a second would go unread, which is the silent half of the
+# same shape the published-release arm above was bitten by.
+# A LIST MARKER BEGINS A LINE, and nothing else does. `docs/installation.md`
+# yields two fragments that are nothing but "2." and "3." without this, which
+# @OffgridwithJD raised expecting it to SEVER the claim if the sentence were
+# moved into numbered step 3.
+#
+# IT DOES NOT SEVER ANYTHING, AND THAT IS STATED RATHER THAN IMPLIED. The claim
+# was moved into step 3 and both halves read the whole sentence with and without
+# any masking, because a marker PRECEDES a sentence rather than sitting inside
+# it. No arrangement was found in which one falls inside the claim.
+#
+# WHAT IS MEASURED IS THE OVER-MATCH, AND IT WAS LIVE. The first version of this
+# masked ANY number followed by period-space, which also protects a sentence
+# ENDING in a number and merges it with the next one. On the unmodified
+# documents, sentences found by each rule:
+#
+# MEASURED AT acc4116d, AND THE SHA IS THE LOAD-BEARING PART. These documents
+# grow, so the counts drift with them: CHANGELOG.md read 66 lost at 5649eba, 69 at
+# 197602f and 71 here, with nothing about the rule changing. A frozen number in a
+# comment about a growing file goes stale by construction, which is the lesson
+# test/check_ledger_budget.txt already carries about its own example.
+#
+#     docs/limitations.md    699 column-0    690 any-number    9 lost
+#     docs/installation.md    74              72               2 lost
+#     CHANGELOG.md          3957            3886              71 lost
+#
+# THE NAMED LINES BELOW ARE THE DURABLE HALF. They do not drift, and they are what
+# the rule was decided on.
+#
+# No verdict moved, because none of those merged pairs put a stray version token
+# into the claim sentence. That is a property of today's prose, not of the rule,
+# which is why the tight form is the one that ships.
+#
+# COLUMN 0, NOT "LINE-INITIAL AFTER INDENT", and that distinction was measured
+# rather than chosen. Allowing an indented marker read 3939 on CHANGELOG.md
+# against @OffgridwithJD's 3942, and reconciling the three rather than splitting
+# the difference found them all to be WRAPPED PROSE, not list items:
+#
+#       4286. The port forces the path each arm is named for and a...
+#       1000. Every narrowing floors, so an instant before the epo...
+#       1000. The constant mis-sized every scan and corrupted join...
+#
+# A sentence ending in a number, wrapped so the number starts an indented line,
+# is the same over-match one indent to the right. Every real ordered-list marker
+# in these documents sits at column 0: three in docs/installation.md, one in
+# docs/limitations.md, none in CHANGELOG.md.
+_upg_sentences() {	# _upg_sentences FILE -> one sentence per line
+	# MASKED PER LINE, BEFORE `tr` JOINS THEM, because a list marker BEGINS a
+	# line and nothing else does. The first version masked any number followed
+	# by period-space, which also protects a sentence ENDING in a number and
+	# merges it with the next one -- demonstrated by @OffgridwithJD with
+	# `The corpus held 1444. ` injected ahead of the claim.
+	sed -E 's/^([0-9]+)\. /\1.@LM@/' "$1" \
+		| tr '\n' ' ' \
+		| sed 's/\. /.\n/g' \
+		| sed 's/@LM@/ /g'
+}
+_upg_claim() {	# _upg_claim FILE -> the sentence making the upgrade-chain claim
+	_upg_sentences "$1" | grep -m1 -E 'previously (shipped|published) version'
+}
+_upg_claims() {	# _upg_claims FILE -> how many sentences make it
+	_upg_sentences "$1" | grep -cE 'previously (shipped|published) version'
+}
+# The destination is removed before the starting versions are collected, because
+# the two claims share one sentence and each has its own arm below.
+_upg_sources() {
+	_upg_claim "$1" | sed 's/reaches `[^`]*`//g' \
+		| grep -oE '`1\.0-[a-z0-9]+`' | tr -d '`' \
+		| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+_upg_target() {
+	_upg_claim "$1" | grep -oE 'reaches `[^`]*`' | sed 's/reaches `//; s/`$//' \
+		| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+_upgdocs="$(grep -rlE 'previously (shipped|published) version' \
+	"$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | LC_ALL=C sort)"
+check "premise: at least one document states the upgrade chain" \
+	"$([ -n "$_upgdocs" ] && echo yes || echo no)" "yes"
+
+# NAMED WITH ITS REASON, not just named. A file this rule cannot read is the way
+# the rule goes quiet, so the arm says which half was missing rather than leaving
+# a reader to rediscover it.
+_upgunread=""
+for _d in $_upgdocs; do
+	_b="$(basename "$_d")"
+	[ "$(_upg_claims "$_d")" = 1 ] || _upgunread="$_upgunread $_b:claims=$(_upg_claims "$_d")"
+	[ -n "$(_upg_sources "$_d")" ] || _upgunread="$_upgunread $_b:no-starting-versions"
+	[ -n "$(_upg_target "$_d")" ] || _upgunread="$_upgunread $_b:no-destination"
+done
+check "every document stating the upgrade chain states it in a form this rule can read" \
+	"$(printf '%s' "$_upgunread" | sed 's/^ //')" ""
+
+# BOTH SIDES CARRY THE VERSIONS (#1164). An arm that names only the offending
+# file reports which document is wrong and not what is wrong with it, and the
+# reader then has to re-derive the tree's own answer to find out.
+_upggot=""
+_upgwant=""
+for _d in $_upgdocs; do
+	_upggot="$_upggot $(basename "$_d")=[$(_upg_sources "$_d")]"
+	_upgwant="$_upgwant $(basename "$_d")=[$_upgreach]"
+done
+check "every such document names the versions that reach default_version in one update" \
+	"${_upggot# }" "${_upgwant# }"
+
+_upggot=""
+_upgwant=""
+for _d in $_upgdocs; do
+	_upggot="$_upggot $(basename "$_d")=[$(_upg_target "$_d")]"
+	_upgwant="$_upgwant $(basename "$_d")=[$_defver]"
+done
+check "every such document names default_version as the version one UPDATE reaches" \
+	"${_upggot# }" "${_upgwant# }"
 # ---- and META.json, which NOTHING read at all ------------------------------
 #
 # `META.json` is the PGXN distribution metadata. It hardcodes the version TWICE

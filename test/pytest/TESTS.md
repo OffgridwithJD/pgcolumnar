@@ -121,6 +121,7 @@ behaviour, the source of that number is named.
 - [73. test_assertion_carries_its_measurement.py: a failure must say what it measured](#73-test_assertion_carries_its_measurementpy-a-failure-must-say-what-it-measured)
 - [74. test_base_scan_io.py: a base scan is not priced from sibling projection pages](#74-test_base_scan_iopy-a-base-scan-is-not-priced-from-sibling-projection-pages)
 - [75. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation](#75-test_range_pruningpy-a-range-prunes-on-overlap-containment-and-under-its-own-collation)
+- [76. test_docs_upgrade_chain.py: the documented upgrade chain must be the one that ships](#76-test_docs_upgrade_chainpy-the-documented-upgrade-chain-must-be-the-one-that-ships)
 
 ## 1. How to read a test in here
 
@@ -5830,3 +5831,157 @@ on a user-defined range type it creates for the purpose.
 
 Independent of `test/range_pruning.sh`: same public seam, own fixture, own row
 counts, own observations. Neither file reads or runs the other.
+
+## 76. test_docs_upgrade_chain.py: the documented upgrade chain must be the one that ships
+
+Two claims travel in one sentence. It names the installed versions a single
+`ALTER EXTENSION pgcolumnar UPDATE` can start from, and the version it arrives at.
+Both are knowable from the tree:
+
+| claim | where the tree answers it |
+| --- | --- |
+| the starting versions | the `pgcolumnar--A--B.sql` files, WALKED, not read as the set of `A` |
+| the destination | `default_version` in `pgcolumnar.control` |
+
+Nothing compared them. Opening the `1.0-alpha5` cycle bumped `VERSION`, the control
+file, the version badge and `META.json`, and every version arm in `docs_style.sh`
+stayed green over three documents that were wrong:
+
+| document | starting versions it named | destination it named |
+| --- | --- | --- |
+| `CHANGELOG.md` | 4 of 5, `1.0-alpha4` missing | `1.0-alpha4` |
+| `docs/installation.md` | all 5 | none a machine can find: "reaches **it** from" |
+| `docs/limitations.md` | 3 of 5, and a hand-typed "Three such scripts" | `1.0-alpha3`, two cycles stale |
+
+### The two errors cancel if you count
+
+`CHANGELOG.md` named `1.0-alpha4` once too few as a starting version and once too
+many as the destination. **The set of versions in the sentence was therefore exactly
+right**, and a rule comparing that set against the tree would have passed a sentence
+in which both halves were wrong. So the two claims are read separately, each against
+its own source on disk.
+
+### Scoped to the sentence, not the paragraph
+
+The paragraph around the claim in `docs/installation.md` names the destination twice
+more, in prose that is correct. A paragraph-wide reading counts those as starting
+versions and reports a document that is right as wrong.
+
+### A document this rule cannot read is named, with its reason
+
+`reaches it from every previously published version` is correct English carrying no
+destination a machine can find. An arm that skipped such a file would go quiet
+exactly where the prose drifted, so the readable-form arm reports
+`installation.md=no-destination` rather than passing over it. It also counts the
+claim sentences and refuses a file that makes the claim twice, because reading only
+the first leaves the second unchecked.
+
+### The claim is reachability, not membership
+
+"a **single** `ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha5` from **any**
+of them" says the shipped scripts form an unbroken chain. Reading the `A` side of
+each filename cannot see that. @OffgridwithJD broke the chain without editing a
+document:
+
+    pgcolumnar--1.0-alpha2--1.0-alpha3.sql -> pgcolumnar--1.0-alpha2--1.0-alphaX.sql
+
+`1.0-alpha2` still starts a script, so the set of starting versions does not move,
+and every arm passed on a tree where three of the five named versions cannot
+arrive in one command. So the versions are **walked**: follow `A--B` to the script
+starting at `B`, and keep the version only if the walk ends at `default_version`.
+That subsumes the membership test, because a version whose target starts nothing
+drops out of the expectation.
+
+A walk needs the chain to be a walk, so a second premise refuses any version that
+starts more than one script rather than picking one of them silently.
+
+| test | what it pins |
+| --- | --- |
+| `test_the_tree_states_a_chain_to_compare_against` | the scripts, the control file and the population are non-empty, no version starts two scripts, and the walk reaches `default_version` from somewhere |
+| `test_every_document_states_the_chain_in_a_readable_form` | one claim sentence per file, carrying both halves |
+| `test_every_document_names_the_versions_that_reach_default_version` | the starting versions equal the versions the walk reaches from |
+| `test_every_document_names_default_version_as_the_destination` | the destination equals `default_version` |
+
+### Removal proof, nine ways
+
+Each mutation was applied to a copy of the tree, run, and reverted; all four files
+were confirmed byte-identical to the source afterwards.
+
+| mutation | what went red |
+| --- | --- |
+| `CHANGELOG.md` loses `1.0-alpha4` from its list | the starting-versions arm |
+| `CHANGELOG.md` destination back to `1.0-alpha4` | the destination arm |
+| `docs/installation.md` destination back to "reaches it" | the readable-form arm, and the destination arm |
+| a second claim sentence in `docs/limitations.md` | the readable-form arm, `limitations.md=claims=2` |
+| `pgcolumnar--1.0-alpha4--1.0-alpha5.sql` moved aside | the starting-versions arm, with the **want** side moving |
+| `default_version` blanked | the control-file premise |
+| the marker phrase erased in all three documents | the population premise |
+| `1.0-alpha2--1.0-alpha3.sql` renamed to `--1.0-alphaX.sql` | the reachability arm, with the **want** side falling to two versions |
+| a second script copied to `1.0-alpha3--1.0-alpha9.sql` | the one-script-per-version premise, `1.0-alpha3=2` |
+
+The fifth row is the one that shows the arm reads the disk rather than agreeing with
+itself: the documents did not change and the expectation did. The eighth is the one
+a set comparison cannot produce at all.
+
+### The splitter: what was claimed, what was measured
+
+@OffgridwithJD expected a markdown list marker to SEVER the claim if the sentence
+were moved into numbered step 3 of `docs/installation.md`. It does not. The claim
+was moved there and **both halves read the whole sentence with and without any
+masking**, because a marker precedes a sentence rather than sitting inside it. No
+arrangement was found in which one falls inside the claim, and that half of the
+finding was withdrawn.
+
+**The over-match was live, and that half is measured.** The first version masked
+any number followed by period-space, which also protects a sentence ENDING in a
+number and merges it with the next one. Sentences found on the unmodified
+documents:
+
+**Measured at `acc4116d`, and the revision is the load-bearing part.** These
+documents grow, so the counts drift with them and the rule does not: `CHANGELOG.md`
+read 66 boundaries lost at `5649eba`, 69 at `197602f` and 71 here. A frozen number
+in a note about a growing file goes stale by construction.
+
+| document | column 0 only | any number | boundaries lost |
+| --- | ---: | ---: | ---: |
+| `docs/limitations.md` | 699 | 690 | 9 |
+| `docs/installation.md` | 74 | 72 | 2 |
+| `CHANGELOG.md` | 3957 | 3886 | 71 |
+
+No verdict moved, because none of those merged pairs put a stray version token
+into the claim sentence. **That is a property of today's prose, not of the rule**,
+which is why the tight form ships.
+
+### Column 0, and why that is measured rather than chosen
+
+The first tight version allowed an indented marker and read **3939** on
+`CHANGELOG.md` where @OffgridwithJD read **3942**. Reconciling the three rather
+than splitting the difference found all three to be wrapped prose:
+
+```
+  4286. The port forces the path each arm is named for and a...
+  1000. Every narrowing floors, so an instant before the epo...
+  1000. The constant mis-sized every scan and corrupted join...
+```
+
+A sentence ending in a number, wrapped so the number starts an indented line, is
+the same over-match one indent to the right. Every real ordered-list marker in
+these documents sits at column 0: three in `docs/installation.md`, one in
+`docs/limitations.md`, none in `CHANGELOG.md`.
+
+### The twins fail differently, and this is where it shows
+
+The shell half keeps its own tally and compares strings, so an empty population
+leaves its three comparison arms passing on nothing and only the premise red. The
+pytest half runs under the vacuity layer, and `expect.text` refuses an empty
+expectation outright:
+
+    VacuityError: ... the expected text is empty, so anything empty satisfies it.
+
+So the same mutation produces one red arm in one harness and four in the other. That
+is the reason to keep both: the shell twin needs its premise to stay honest, and the
+pytest twin is refused before it can report a vacuous pass.
+
+The shell twin is six arms in `test/docs_style.sh`. It folds the file with `tr` and
+cuts sentences with `sed`; this half splits on a lookbehind and collects with `re`.
+The two halves share no code.

@@ -129,6 +129,9 @@ NO_CLUSTER = [
     # #1121's file. Parses the RESULT record format in Python and reads the runner's
     # text -- no connection, no cluster, no driver.
     "test_record_names_its_major.py",
+    # This branch's file. It reads three published pages, the control file and the
+    # upgrade-script filenames -- no connection, no cluster, no driver.
+    "test_docs_upgrade_chain.py",
 ]
 
 

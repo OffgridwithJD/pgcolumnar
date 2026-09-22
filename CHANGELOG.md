@@ -9,8 +9,8 @@ are written in the native on-disk format, PGCN v1. For the forward-looking plan 
 The extension's `default_version` is `1.0-alpha5`.
 `v1.0-alpha4` is the latest published pre-release. Upgrade scripts from
 every previously shipped version ship with it (`1.0-dev`, which the v1.0-alpha tag
-installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
-`ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha4` from any of them. Older
+installed, `1.0-alpha`, `1.0-alpha2`, `1.0-alpha3`, and `1.0-alpha4`), so a single
+`ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha5` from any of them. Older
 notes in this file describe `default_version` as pinned at an earlier version, each
 true until the next version shipped.
 
@@ -178,12 +178,64 @@ true until the next version shipped.
 
 ### Fixed
 
+- Three documents named an upgrade chain the tree does not ship (#1197).
+
+  A sentence in each names the installed versions one `ALTER EXTENSION pgcolumnar
+  UPDATE` can start from, and the version it arrives at. Opening the `1.0-alpha5`
+  cycle left all three wrong, and every version check in `docs_style.sh` stayed
+  green:
+
+  | document | starting versions it named | destination it named |
+  | --- | --- | --- |
+  | `CHANGELOG.md` | 4 of 5, `1.0-alpha4` missing | `1.0-alpha4` |
+  | `docs/installation.md` | all 5 | none a machine can find: "reaches **it** from" |
+  | `docs/limitations.md` | 3 of 5, under a hand-typed "Three such scripts" | `1.0-alpha3` |
+
+  Both facts are knowable from the tree. `pgcolumnar.control` gives the destination,
+  and the `pgcolumnar--A--B.sql` filenames give the starting versions, so the three
+  documents are now compared against them rather than edited by hand.
+
+  **The filenames are walked, not counted.** "a single update reaches `1.0-alpha5`
+  from any of them" says the scripts form an unbroken chain, which the set of `A`
+  sides cannot see: renaming `pgcolumnar--1.0-alpha2--1.0-alpha3.sql` to
+  `--1.0-alphaX.sql` leaves `1.0-alpha2` starting a script while three of the five
+  named versions can no longer arrive, and every arm passed on that tree. Reported
+  by @OffgridwithJD. Each version is now followed `A--B` to the script starting at
+  `B` and kept only if the walk ends at `default_version`, and a second premise
+  refuses any version that starts two scripts rather than picking one silently.
+
+  **The two errors in `CHANGELOG.md` cancel if you count.** It named `1.0-alpha4`
+  once too few as a starting version and once too many as the destination, so the set
+  of versions in the sentence was exactly right. A rule comparing that set against
+  the tree would have passed a sentence in which both halves were wrong. The two
+  claims are therefore read separately, each against its own source on disk.
+
+  The sentence splitter masks markdown list markers per line, before the lines are
+  joined, because a list marker begins a line and nothing else does. Masking any
+  number followed by period-space also protects a sentence ENDING in a number and
+  merged 9, 2 and 71 sentence boundaries in `docs/limitations.md`,
+  `docs/installation.md` and `CHANGELOG.md`, measured at `acc4116d`. The counts
+  drift as those files grow, so the revision is quoted with them; the three named
+  lines below do not drift and are what decided the rule. No verdict moved, which is a property
+  of today's prose rather than of the rule.
+
+  The mask is anchored at column 0. Allowing an indented marker read 3939
+  sentences in `CHANGELOG.md` against @OffgridwithJD's 3942, and all three lines
+  that differ are wrapped prose rather than list items, which is the same
+  over-match one indent to the right. Every ordered-list marker in these documents
+  is at column 0.
+
+  Eight arms in `test/docs_style.sh` and four tests in
+  `test/pytest/test_docs_upgrade_chain.py`. The shell half folds the file with `tr`
+  and cuts sentences with `sed`; the pytest half splits on a lookbehind and collects
+  with `re`, so a parsing mistake in one is not a parsing mistake in the other.
+
 - `native_reclaim_cycles` could not reach the defect it guards (#1138).
 
   It is the declared regression guard for #84. Deleting the #84 fix left it reporting
   `12 passed + 0 failed`, arm for arm, including the arm named after the defect.
 
-`pgcolumnar.reclaim_coalesce` defaults on, and it does two things: it merges
+  `pgcolumnar.reclaim_coalesce` defaults on, and it does two things: it merges
   adjacent freed ranges, and it carries its own `CommandCounterIncrement` on the free
   path. That second one does the visibility work the #84 fix would otherwise do, so
   with coalescing on the defect is masked.
