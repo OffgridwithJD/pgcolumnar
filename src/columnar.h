@@ -355,6 +355,36 @@ typedef struct NativeZoneMapMetadata
 	Datum		sum;				/* numeric Datum when hasSum */
 	uint64		valueCount;
 	uint64		nullCount;
+
+	/*
+	 * The greatest upper bound of a RANGE column's values in this unit (#1144),
+	 * which is the statistic overlap and containment need. minimum/maximum are
+	 * recorded under the range type's own btree ordering, which sorts by lower
+	 * bound and then upper bound -- an ordering that does not bound overlap,
+	 * because the lexicographically largest range is not the one reaching
+	 * furthest right.
+	 *
+	 * THREE STATES, NOT TWO, and the third is the one a first implementation
+	 * gets wrong. `max(upper(x))` in SQL SKIPS NULLs, and upper() is NULL for an
+	 * unbounded-above range, so a unit holding [2020-01-03,) beside
+	 * [2020-01-01,2020-01-02) would record 2020-01-02 and prune away a row that
+	 * matches 2099. upper() is also NULL for an EMPTY range, which needs the
+	 * opposite treatment: it must not raise the bound. The writer therefore asks
+	 * upper_inf() and isempty() and never tests the bound for NULL.
+	 *
+	 *     hasMaxUpper = false                    no summary: never prune above
+	 *     hasMaxUpper && upperUnbounded          some value has no upper bound:
+	 *                                            never prune above
+	 *     hasMaxUpper && !upperUnbounded         maxUpper is the bound
+	 *
+	 * maxUpper is a value of the range's SUBTYPE (a timestamptz for a tstzrange
+	 * column), not of the column type, so it is encoded and decoded with the
+	 * element type's byval/len rather than the attribute's.
+	 */
+	bool		hasMaxUpper;
+	bool		upperUnbounded;
+	const char *maxUpper;		/* PgColumnarEncodeValueByLen bytes of the subtype */
+	uint32		maxUpperLen;
 } NativeZoneMapMetadata;
 
 /*
@@ -807,6 +837,8 @@ typedef struct PgColumnarVector
 /* value stream encode/decode shared by writer and reader */
 extern void PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
 								Datum value);
+extern void PgColumnarEncodeValueByLen(StringInfo buf, bool byval, int16 len,
+									   Datum value);
 extern Datum PgColumnarDecodeValue(Form_pg_attribute att, char **cursor,
 								 const char *end, MemoryContext targetContext);
 

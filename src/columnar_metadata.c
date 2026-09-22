@@ -108,7 +108,14 @@
 #define Anum_zone_map_sum 7
 #define Anum_zone_map_value_count 8
 #define Anum_zone_map_null_count 9
-#define Natts_zone_map 9
+/*
+ * #1144. A NULLABLE column added by the alpha5 upgrade, so a catalog that has
+ * not been upgraded has NINE attributes and this attnum does not exist in it.
+ * Every read of it is guarded by tupdesc->natts, because heap_getattr past natts
+ * CRASHES rather than returning NULL -- this repository has paid for that once.
+ */
+#define Anum_zone_map_max_upper 10
+#define Natts_zone_map 10
 
 #define Anum_bloom_storage_id 1
 #define Anum_bloom_group_number 2
@@ -2442,6 +2449,35 @@ PgColumnarInsertZoneMapRow(const NativeZoneMapMetadata *z)
 	values[Anum_zone_map_value_count - 1] = Int64GetDatum((int64) z->valueCount);
 	values[Anum_zone_map_null_count - 1] = Int64GetDatum((int64) z->nullCount);
 
+	/*
+	 * The range upper-bound summary (#1144), in its three states. NULL means no
+	 * summary and the reader must never prune above; a zero-length value means
+	 * the unit holds a range that is unbounded above, which also means never
+	 * prune -- but it is a DIFFERENT fact, and the reader is entitled to say
+	 * which. Absent-versus-unbounded matters because the field is PRESENT and
+	 * understated in the unbounded case, which is exactly what a two-state
+	 * design cannot express.
+	 *
+	 * Guarded by natts: on a catalog that predates the alpha5 upgrade this
+	 * attribute does not exist, and writing past the descriptor is a corruption
+	 * rather than an error.
+	 */
+	if (tupdesc->natts >= Anum_zone_map_max_upper)
+	{
+		if (!z->hasMaxUpper)
+			nulls[Anum_zone_map_max_upper - 1] = true;
+		else
+		{
+			uint32		len = z->upperUnbounded ? 0 : z->maxUpperLen;
+			bytea	   *up = (bytea *) palloc(VARHDRSZ + len);
+
+			SET_VARSIZE(up, VARHDRSZ + len);
+			if (len > 0)
+				memcpy(VARDATA(up), z->maxUpper, len);
+			values[Anum_zone_map_max_upper - 1] = PointerGetDatum(up);
+		}
+	}
+
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 	metadata_flush_insert(rel, tuple);
 	heap_freetuple(tuple);
@@ -2889,6 +2925,39 @@ zonemap_from_tuple(HeapTuple tuple, TupleDesc tupdesc,
 	{
 		z->sum = datumCopy(d, false, -1);	/* numeric is varlena */
 		z->hasSum = true;
+	}
+
+	/*
+	 * The range upper-bound summary (#1144), read ONLY when the catalog has the
+	 * column. A pgcolumnar installed before the alpha5 upgrade has nine
+	 * attributes here, and heap_getattr past natts CRASHES rather than returning
+	 * NULL, so the guard is the difference between "this table predates the
+	 * feature" and a backend that dies reading an old table.
+	 *
+	 * NULL and zero-length are different answers and both mean "do not prune
+	 * above": NULL is no summary at all, zero length is a unit that holds a
+	 * range with no upper bound. Keeping them apart is what lets a reader say
+	 * WHY it could not prune.
+	 */
+	if (tupdesc->natts >= Anum_zone_map_max_upper)
+	{
+		d = heap_getattr(tuple, Anum_zone_map_max_upper, tupdesc, &isnull);
+		if (!isnull)
+		{
+			bytea	   *bup = DatumGetByteaPP(d);
+
+			z->hasMaxUpper = true;
+			z->maxUpperLen = VARSIZE_ANY_EXHDR(bup);
+			if (z->maxUpperLen > 0)
+				z->maxUpper = (const char *) memcpy(palloc(z->maxUpperLen + 1),
+													VARDATA_ANY(bup),
+													z->maxUpperLen);
+			else
+			{
+				z->maxUpper = NULL;
+				z->upperUnbounded = true;
+			}
+		}
 	}
 
 	z->valueCount = (uint64) DatumGetInt64(
