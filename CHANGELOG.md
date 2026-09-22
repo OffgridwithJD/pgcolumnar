@@ -40,7 +40,7 @@ true until the next version shipped.
   multiple of it: on 100,000 rows an `INSERT` takes 202 shared hits with no index and
   37,484 with a BRIN index, against 101,468 and 118,923 on heap. The index is essentially
   the same size on both storages -- equal on this fixture, and about 0.5% apart on a
-  second run at a different row count. The work is real and buys an index that cannot
+  second run on a different fixture. The work is real and buys an index that cannot
   be chosen.
   Measured by @jdatcmd and reproduced here, whose columnar delta agreed within 0.8%.
 
