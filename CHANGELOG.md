@@ -28,15 +28,25 @@ true until the next version shipped.
   oldest 33 hours. One container lost background tasks to low memory as a result. A leaked cluster holding a port is also a false-red source. A later run then
   fails for a reason that has nothing to do with the code.
 
-  | run killed with | postmasters left | datadir |
-  | --- | ---: | --- |
-  | `SIGTERM`, before | 1 | still on disk |
-  | `SIGTERM`, after | 0 | removed |
-  | `SIGKILL`, after | 1 | still on disk |
+Measured by the identity of the postmaster each
+  run started, killing at a delay counted from the moment it first appears:
 
-  The fixture now installs a `SIGTERM` handler that raises `SystemExit(143)`, so the
-  teardown that already existed becomes reachable. `SIGKILL` is uncatchable and still
-  leaks, which is recorded rather than fixed.
+  | kill delay | before | after |
+  | --- | --- | --- |
+  | `SIGTERM` at 0s | survived, datadir present | gone, datadir removed |
+  | `SIGTERM` at 0.5s | survived, datadir present | gone, datadir removed |
+  | `SIGTERM` at 2s | survived, datadir present | gone, datadir removed |
+  | `SIGKILL` | survived, datadir present | survived, datadir present |
+
+  The fixture installs a `SIGTERM` handler that raises `SystemExit(143)`, before
+  anything is built or started, so the teardown that already existed becomes
+  reachable. `SIGKILL` is uncatchable and still leaks, which is recorded rather than
+  fixed.
+
+  The 0s case needed a second change. `Cluster.stop()` returns at once when the
+  interruption arrives during `start()`. An intermediate version therefore removed the
+  tree under a live server, which is a leak with no name tag on the filesystem.
+  `make_cluster` now refuses to remove a directory a postmaster still holds.
 
   The shell harness already handles this and is unchanged. `lib.sh`'s
   `trap pgc_teardown EXIT` runs on TERM, INT and HUP already. Naming the signals

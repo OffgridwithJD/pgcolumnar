@@ -95,19 +95,18 @@ def pgc_cluster(request, worker_id):
     # the moment the postmaster first appears, and reading the identity of THAT
     # postmaster rather than a count:
     #
-    #     kill delay   main                        handler installed first
-    #     0s           survived, datadir present   survived, datadir REMOVED
+    #     kill delay   main                        this change
+    #     0s           survived, datadir present   gone, datadir removed
     #     0.5s         survived, datadir present   gone, datadir removed
     #     2s           survived, datadir present   gone, datadir removed
     #
-    # SO THE 0s WINDOW IS NARROWED AND NOT CLOSED, and saying which half is the
-    # honest version. At 0s the signal lands while `pg_ctl start` is still
-    # coming up: `make_cluster`'s cleanup calls `stop()`, which cannot read a
-    # pidfile that does not exist yet, swallows the failure, and removes the
-    # directory -- so the disk leak goes and the process leak does not. Closing
-    # it needs the cleanup to wait for readiness or to read the pid itself,
-    # which is a change to the startup path rather than to the signal
-    # disposition, and it is filed rather than smuggled in here.
+    # THE 0s CASE NEEDED MORE THAN THE HANDLER. `Cluster.stop()` returns at once
+    # when `self._started` is False, which it is when the interruption arrives
+    # DURING `start()`, so an intermediate version removed the tree under a live
+    # server -- a leak with no name tag anywhere on the filesystem, which is
+    # worse than the one it replaced. @OffgridwithJD measured that and it is why
+    # `make_cluster` now refuses to remove a directory a postmaster still holds;
+    # see `_stop_abandoned` there.
     previous = None
     try:
         previous = signal.signal(signal.SIGTERM, _raise_system_exit)
