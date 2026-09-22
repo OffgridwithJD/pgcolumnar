@@ -18,6 +18,41 @@ true until the next version shipped.
 
 ### Fixed
 
+- A subset pytest run failed on PG 15-17, and the message told you to break the
+  check (#1204).
+
+  Running one file on a major with rows in `expected_unrunnable.txt` exited 67
+  while reporting its own file passed, naming six tests it never collected as
+  proof that a tracked list was stale:
+
+  ```
+  $ pytest test_native_reclaim_cycles.py --pg-config .../pg17
+    1 passed, 15 checks, 0 fail        exit 67
+  ```
+
+  **The check had an unstated premise.** `allowed - actual` reads as "listed as
+  declining, did not decline", which is only answerable for a test the run
+  COLLECTED. A subset collects none of the others, so the question was not stale,
+  it was unasked.
+
+  **And the instruction was worse than the noise.** Running exactly one of the six
+  listed decliners failed too, because the other five were still uncollected; and
+  doing what the message said, deleting the rows, moved the red to the opposite
+  direction, where a full run would have fired against rows that were correct. A
+  guard that refuses correct work gets switched off and takes its rule with it.
+
+  The premise is now stated per ROW rather than per run: the expected-but-ran
+  direction is intersected with what the session collected. A full run is
+  unchanged, because every listed row is collected there. A listed decliner that
+  WAS collected and did not decline still reddens a one-file run, and an
+  unexpected decline still reddens one, so both halves of #1192 keep their teeth
+  on a subset.
+
+  Reported by @OffgridwithJD, who also tried to break the fix and could not:
+  applied to main with a deliberately stale row planted, it refuses under both a
+  serial run and `-n2`, where the concern was that the controller collects nothing
+  under xdist.
+
 - The session that deleted rows still scanned `delete_vector` sequentially, once per row
   group (#1146).
 

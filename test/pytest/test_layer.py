@@ -322,6 +322,42 @@ def test_a_listed_test_that_runs_makes_the_list_stale(pytester, expect):
     result.stderr.fnmatch_lines(["*RAN, so the list is stale*"])
 
 
+def test_a_listed_test_the_run_never_collected_is_not_a_stale_row(pytester, expect):
+    """`allowed - actual` is only answerable for a test the run COLLECTED (#1204).
+
+    A one-file run collects none of the other listed decliners, so every one of
+    them reads as "expected to decline and RAN". That is not a stale list, it is a
+    question nobody asked, and the run exited 67 while reporting its file passed.
+
+    MEASURED ON PG 17 BEFORE THE FIX. `pytest test_native_reclaim_cycles.py`
+    passed 15 checks, failed nothing, and exited 67 naming six tests it never
+    collected. Running exactly one of those six failed too, because the other five
+    were still uncollected. And the message says to edit the list, which would
+    delete correct rows and redden the next full run from the other direction.
+
+    THE PREMISE IS STATED PER ROW, NOT PER RUN. Gating the whole direction on a
+    full run would switch it off for subsets; intersecting with what was collected
+    keeps whatever the subset can answer. The arm above is the control: a listed
+    test that WAS collected and did run is still a stale row.
+    """
+    pytester.makeconftest(_INNER_CONFTEST)
+    pytester.makepyfile(
+        """
+        def test_runs_fine(expect):
+            expect.num(1, 1, "it runs")
+        """
+    )
+    listing = pytester.path / "expected_unrunnable.txt"
+    # A nodeid in a file this run does not contain at all.
+    listing.write_text("17 test_some_other_file.py::test_elsewhere\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", _stub_pg_config(pytester, "PostgreSQL 17.10"),
+        "--pgc-expected-unrunnable", str(listing))
+    expect.num(result.ret, 0,
+               "a listed test the run never collected is not judged")
+
+
 def test_the_list_is_read_for_the_running_major_only(pytester, expect):
     """A row for another major must not excuse this one.
 
