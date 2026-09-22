@@ -122,6 +122,7 @@ COMPLETE = ["advisory_lock_class",
             "sorted_pathkeys",
             "stats_privilege",
             "temporal",
+            "ttl_expire",
             "validity_elision",
             "zonemap_boundaries"]
 

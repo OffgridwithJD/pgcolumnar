@@ -489,4 +489,11 @@ guard_tests 403
 # against a main that said 463, and #1196 and #1202 moved main to 467 in
 # between. Neither side's number is the composed one and their difference is
 # not the delta.
-cluster_tests 468
+# 468 -> 475: seven tests in test_ttl_expire.py, the pytest half of ttl_expire
+# (#1188). RE-DERIVED ON THE COMPOSED TREE after each rebase, never carried
+# across one: this branch has read 473, then 474, and now 475 as main moved
+# from 466 to 467 to 468 under it. Every one of those was correct for the main
+# of its hour and wrong for the next. `475 tests collected` over 49 cluster
+# files. `guard_tests` was re-derived in the same run and did NOT move, which
+# is the expected answer for a file that needs a database.
+cluster_tests 475

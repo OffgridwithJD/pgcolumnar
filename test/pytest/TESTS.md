@@ -123,6 +123,7 @@ behaviour, the source of that number is named.
 - [75. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation](#75-test_range_pruningpy-a-range-prunes-on-overlap-containment-and-under-its-own-collation)
 - [76. test_docs_upgrade_chain.py: the documented upgrade chain must be the one that ships](#76-test_docs_upgrade_chainpy-the-documented-upgrade-chain-must-be-the-one-that-ships)
 - [77. test_projection_parallel.py: a covering projection can be a parallel scan](#77-test_projection_parallelpy-a-covering-projection-can-be-a-parallel-scan)
+- [78. test_ttl_expire.py: the one function that deletes rows, tested twice](#78-test_ttl_expirepy-the-one-function-that-deletes-rows-tested-twice)
 
 ## 1. How to read a test in here
 
@@ -6018,3 +6019,110 @@ this file uses `pcvgath` / `onskey` / 50000 rows / `skey BETWEEN 200 AND
 | test | what it asserts |
 | --- | --- |
 | `test_projection_parallel` | the table and covering projection exist; a serial covering query uses the projection; a parallel base scan is available when the projection is off; a covering projection can be a parallel scan; a parallel covering projection returns the covering rows once; EXPLAIN ANALYZE launched two workers and printed a rows= line for each; both launched workers produced rows |
+
+## 78. test_ttl_expire.py: the one function that deletes rows, tested twice
+
+`pgcolumnar.expire` retires a row group whose every row is past a declared
+retention, from the zone map alone: no decode, no rewrite, no scan of the data. It
+is the only function in the tree whose failure mode is **losing data** rather than
+reporting a wrong number, which is why it is a poor candidate for one harness
+(#1188).
+
+### The arm that constrains the feature
+
+Retiring a group whose rows are all expired is the feature. Retiring one that still
+holds live rows is data loss. Those two are the same operation on a fixture where
+no group spans the cutoff, so every fixture that can straddle is built to straddle:
+
+```
+5,000 rows three minutes apart span about ten days, 1,000 to a group,
+retention four days  ->  the cutoff falls INSIDE a group
+```
+
+**Measured.** Change the retire decision to read the group's `minimum` instead of
+its `maximum` -- which is "drop every group holding an expired row", the data-loss
+implementation -- and the shell twin says:
+
+```
+FAIL  NO row still inside the retention was dropped (#403 item 5a): got [3000] want [3560]
+```
+
+560 live rows. The pytest half reddens the same property in the same mutation.
+
+### Two more ways a maximum is not every row
+
+| case | why the maximum lies | the arm |
+| --- | --- | --- |
+| a NULL in the retention column | the zone map's maximum covers non-NULL values only, so old timestamps plus NULLs look fully expired | `expire does not retire a group that still holds NULL retention rows` |
+| a NULL that was later DELETED | `null_count` is recorded at write time and never revised, so reading it as the live count keeps the group **forever** | `a group whose only NULLs have been deleted is retired` |
+
+The second trades data loss for permanent over-retention, which is quieter and not
+better. Its control -- a group whose NULLs are still live -- is what stops the fix
+being "retire everything" wearing a delete.
+
+### The index-only scan
+
+`expire` retires live groups without going through the delete vector, so the
+visibility-map bits `VACUUM` set stay on and an index-only scan can answer from the
+index alone about a group that is no longer there.
+
+**The plan-shape premise cannot fail for the thing under test.** The shape is
+decided by `relallvisible` and by `enable_seqscan`/`enable_bitmapscan` being off,
+not by the bit the fix clears: stop writing bits and the plan is unchanged. So the
+bits are asserted directly, beside the plan.
+
+### What the port substitutes, and what it therefore asserts
+
+| the shell gets | structurally | the port uses | and asserts |
+| --- | --- | --- | --- |
+| `pgcolumnar.stripe_row_limit=1000` | baked into the cluster config before the postmaster starts (#806) | `set_options(..., stripe_row_limit => 1000)`, catalog state that travels with the table | the resulting group count, per fixture |
+| `ALTER DATABASE ... SET` for the index-only settings | every fresh backend inherits them | `SET` on the one connection | the plan they are meant to produce |
+
+**A procedural substitute for a structural guarantee has to be asserted**, because
+it can fail silently where the original cannot. 1000 is exactly `set_options`'
+floor, and a refusal there prints and does not abort, so a future change to that
+floor would leave one large row group where nothing straddles and several arms
+would stop asserting anything.
+
+### The timezone arms, and the trap in porting them
+
+`timestamptz_timestamp` converts through the session's `TimeZone`, so the cutoff a
+`date` column is compared against is the calling session's own date. The arm pins
+the **rule**, not a difference: asserting that two zones disagree would be a coin
+toss on the time of day. Each zone asserts the identity that holds in every zone at
+every instant, and both cutoffs are printed.
+
+**The zone list must match the shell twin's**, because the zone is interpolated
+into the check name. `compare_to_bash.py` reads `premise: in $_tz ...` and matches
+it against `f"premise: in {tz} ..."` by template, so a port over different zones
+asserts every property correctly and still cannot be graded against the suite it
+mirrors. That trap is invisible from the source: 47 call sites yield 51 runtime
+names, and the issue that asked for this port said 43.
+
+### Removal proof
+
+| mutation | pytest | shell |
+| --- | --- | --- |
+| `maximum` -> `minimum` in the retire decision | the straddle test red | `NO row still inside the retention was dropped` red |
+| the live-NULL guard removed | two tests red | -- |
+| the deleted-NULL arm neutered | one test red | -- |
+| restored | 51 pass + 0 fail | 51 checks, PASSED |
+
+Each mutation was asserted to have matched its anchor exactly once and to compile;
+the `.so` moved `fe47f5f61e27` -> `7cc3b854ddaf` and back, and the source was
+restored byte-identical.
+
+| test | what it pins |
+| --- | --- |
+| `test_expire_retires_expired_groups_and_keeps_the_straddling_one` | the feature, and the straddling group that constrains it |
+| `test_a_null_retention_value_keeps_its_group` | a live NULL the maximum cannot speak for |
+| `test_an_index_only_scan_does_not_return_retired_rows` | the visibility-map bits over a group `expire` removed |
+| `test_a_non_positive_retention_is_refused` | a cutoff in the future would retire live groups: `22023`, with a positive control |
+| `test_a_deleted_null_stops_pinning_its_group` | `null_count` is a write-time record, not a live count |
+| `test_a_date_retention_column_truncates_toward_keeping` | the rounding, which only this arm notices |
+| `test_the_cutoff_is_the_sessions_own_date` | the cutoff is the session's, asserted as an identity rather than as a difference |
+
+The shell twin is `test/ttl_expire.sh`, 51 checks. The two halves share no code:
+different tables, different row counts, different retention windows, and the
+refusals asserted by SQLSTATE here (`55000` for no declared retention, `22023` for
+a non-positive interval) where the shell greps its message.
