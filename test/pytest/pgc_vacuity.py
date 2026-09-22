@@ -1503,6 +1503,23 @@ def pytest_sessionfinish(session, exitstatus):
     allowed = expected_unrunnable(
         major, session.config.getoption("--pgc-expected-unrunnable",
                                         default=str(EXPECTED_UNRUNNABLE)))
+    # ONLY THE ROWS THIS RUN COULD ANSWER (#1204). `allowed - actual` reads as
+    # "listed as declining, did not decline", which is only a statement about a
+    # test the run COLLECTED. A one-file run collects none of the others, so every
+    # one of them read as a stale row: `pytest test_native_reclaim_cycles.py` on
+    # PG 17 passed its 15 checks, failed nothing, and exited 67 naming six tests it
+    # never collected -- and the message told the reader to edit the list, which
+    # would have deleted correct rows and reddened the next full run from the other
+    # direction.
+    #
+    # PER ROW, NOT PER RUN. Gating the whole direction on a full run switches it off
+    # for every subset; intersecting with what was collected keeps whatever the
+    # subset CAN answer. A listed test that was collected and did not decline is
+    # still a stale row and still reddens a one-file run.
+    #
+    # The other direction is untouched: `actual - allowed` is answerable from any
+    # run, because a test that declined, declined, whoever else was collected.
+    allowed &= {item.nodeid for item in session.items}
     unexpected, ran_anyway = unrunnable_offences(actual, allowed)
     if not unexpected and not ran_anyway:
         return

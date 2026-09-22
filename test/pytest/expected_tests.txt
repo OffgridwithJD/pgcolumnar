@@ -256,7 +256,12 @@
 # `402 tests collected`. `cluster_tests` was re-derived in the same run and did NOT
 # move -- 463 -- which is the expected answer for a file declared in NO_CLUSTER, and
 # measuring it is what tells the declaration and the split still agree.
-guard_tests 402
+# 402 -> 403: one arm in test_layer.py for #1204, that a listed decliner the run
+# never COLLECTED is not judged as a stale row. Derived by collection, not by
+# adding one: `403 tests collected` over the 24 NO_CLUSTER files. `cluster_tests`
+# was re-derived in the same run and did NOT move -- 467 -- which is the expected
+# answer for a change that touches only the layer and its own guard.
+guard_tests 403
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
