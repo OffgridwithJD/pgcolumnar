@@ -179,6 +179,13 @@ true until the next version shipped.
   the tree would have passed a sentence in which both halves were wrong. The two
   claims are therefore read separately, each against its own source on disk.
 
+  The sentence splitter masks markdown list markers per line, before the lines are
+  joined, because a list marker begins a line and nothing else does. Masking any
+  number followed by period-space also protects a sentence ENDING in a number and
+  merged 9, 2 and 66 sentence boundaries in `docs/limitations.md`,
+  `docs/installation.md` and `CHANGELOG.md`. No verdict moved, which is a property
+  of today's prose rather than of the rule.
+
   Eight arms in `test/docs_style.sh` and four tests in
   `test/pytest/test_docs_upgrade_chain.py`. The shell half folds the file with `tr`
   and cuts sentences with `sed`; the pytest half splits on a lookbehind and collects

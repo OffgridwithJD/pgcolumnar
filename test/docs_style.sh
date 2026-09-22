@@ -423,26 +423,38 @@ check "premise: some shipped version reaches default_version, so the walk found 
 # ONE SENTENCE PER FILE, and the count is checked rather than assumed: `grep -m1`
 # reads the first and a second would go unread, which is the silent half of the
 # same shape the published-release arm above was bitten by.
-# A PERIOD AFTER A BARE NUMBER IS A MARKDOWN LIST MARKER, not a full stop.
-# `docs/installation.md` already yields two fragments that are nothing but "2."
-# and "3.". Raised by @OffgridwithJD, who expected it to sever the claim if the
-# sentence were moved into numbered step 3, which is the `ALTER EXTENSION` step.
+# A LIST MARKER BEGINS A LINE, and nothing else does. `docs/installation.md`
+# yields two fragments that are nothing but "2." and "3." without this, which
+# @OffgridwithJD raised expecting it to SEVER the claim if the sentence were
+# moved into numbered step 3.
 #
-# NO VERDICT CHANGES TODAY, AND THAT IS STATED RATHER THAN IMPLIED. The claim was
-# moved into step 3 and both halves still read the whole sentence, with and
-# without this mask, because the marker always PRECEDES the sentence: splitting
-# there drops the marker and leaves the claim intact. No arrangement was found in
-# which a marker falls inside the claim, so this mask has no removal proof.
+# IT DOES NOT SEVER ANYTHING, AND THAT IS STATED RATHER THAN IMPLIED. The claim
+# was moved into step 3 and both halves read the whole sentence with and without
+# any masking, because a marker PRECEDES a sentence rather than sitting inside
+# it. No arrangement was found in which one falls inside the claim.
 #
-# It is kept anyway, and the reason is not "it might help". The rule this file
-# enforces is that a fragment either carries the claim or is ignored, and a
-# fragment that is nothing but "3." is neither -- it is a sentence the splitter
-# invented. One `sed` removes a class of input the rest of the block was never
-# designed to receive, and the cost of being wrong about it is zero because a
-# masked marker cannot match the marker phrase either way.
+# WHAT IS MEASURED IS THE OVER-MATCH, AND IT WAS LIVE. The first version of this
+# masked ANY number followed by period-space, which also protects a sentence
+# ENDING in a number and merges it with the next one. On the unmodified
+# documents, sentences found by each rule:
+#
+#     docs/limitations.md    688 line-initial    679 any-number   9 lost
+#     docs/installation.md    74                  72              2 lost
+#     CHANGELOG.md          3922                3856             66 lost
+#
+# No verdict moved, because none of those merged pairs put a stray version token
+# into the claim sentence. That is a property of today's prose, not of the rule,
+# which is why the tight form is the one that ships: masking per line, before
+# `tr` joins them, is the marker's own definition rather than a pattern that
+# resembles it.
 _upg_sentences() {	# _upg_sentences FILE -> one sentence per line
-	tr '\n' ' ' < "$1" \
-		| sed -E 's/(^|[[:space:]])([0-9]+)\. /\1\2.@LM@/g' \
+	# MASKED PER LINE, BEFORE `tr` JOINS THEM, because a list marker BEGINS a
+	# line and nothing else does. The first version masked any number followed
+	# by period-space, which also protects a sentence ENDING in a number and
+	# merges it with the next one -- demonstrated by @OffgridwithJD with
+	# `The corpus held 1444. ` injected ahead of the claim.
+	sed -E 's/^([[:space:]]*)([0-9]+)\. /\1\2.@LM@/' "$1" \
+		| tr '\n' ' ' \
 		| sed 's/\. /.\n/g' \
 		| sed 's/@LM@/ /g'
 }

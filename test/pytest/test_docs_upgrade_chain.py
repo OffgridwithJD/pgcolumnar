@@ -87,32 +87,52 @@ def _default_version():
     return ""
 
 
+_MARKER = re.compile(r"^(\s*)(\d+)\. ")
+_MASK = "@LM@"
+
+
+def _flatten(text):
+    """One line, with markdown list markers masked so they are not full stops.
+
+    A LIST MARKER BEGINS A LINE, and nothing else does. The first version of this
+    masked any number followed by period-space, which also protects a sentence
+    ENDING in a number and merges it with the next one. @OffgridwithJD
+    demonstrated it by injecting `The corpus held 1444. ` ahead of the claim, so
+    the masking happens per line, before the lines are joined.
+
+    NO VERDICT MOVES EITHER WAY TODAY, and that is stated rather than implied. The
+    claim was moved into numbered step 3 and both halves read the whole sentence
+    with and without any masking, because a marker PRECEDES a sentence rather than
+    sitting inside it.
+
+    THE OVER-MATCH WAS LIVE, THOUGH. Sentences found on the unmodified documents:
+
+        docs/limitations.md    688 line-initial    679 any-number   9 lost
+        docs/installation.md    74                  72              2 lost
+        CHANGELOG.md          3922                3856             66 lost
+
+    None of those merged pairs put a stray version token into the claim sentence,
+    so no verdict changed. That is a property of today's prose rather than of the
+    rule.
+    """
+    masked = [_MARKER.sub(lambda m: m.group(1) + m.group(2) + "." + _MASK, line, count=1)
+              for line in text.splitlines()]
+    return " ".join(" ".join(masked).split())
+
+
 def _sentences(flat):
-    """Split on a full stop, and NOT on a markdown list marker.
+    """Split on a full stop.
 
-    A period after a bare number ends a list marker, not a sentence, and
-    `docs/installation.md` already yields two fragments that are nothing but "2."
-    and "3.". Raised by @OffgridwithJD.
-
-    NO VERDICT CHANGES TODAY. The claim was moved into numbered step 3 and both
-    halves still read the whole sentence, with and without this guard, because the
-    marker PRECEDES the sentence rather than sitting inside it. This refuses a
-    boundary the rest of the file was never designed to receive; it is not carrying
-    a proof.
-
-    A SCANNER, not a masking pass. The shell twin masks the markers, splits and
-    restores; this walks the candidate boundaries and refuses the ones whose left
-    side ends in a bare number. Same rule, and a mistake in one is not a mistake
-    in the other.
+    A SCANNER, not a split. The shell twin runs `sed` over the file and cuts with
+    a second `sed`; this walks the candidate boundaries and keeps each sentence
+    with its own period, so a mistake in one is not a mistake in the other.
     """
     out, start = [], 0
     for m in re.finditer(r"\.\s+", flat):
-        if re.search(r"(?:^|\s)\d+$", flat[start:m.start()]):
-            continue
         out.append(flat[start:m.end()].strip())
         start = m.end()
     out.append(flat[start:].strip())
-    return [s for s in out if s]
+    return [s.replace(_MASK, " ").strip() for s in out if s.strip()]
 
 
 def _claim_sentences(path):
@@ -122,7 +142,7 @@ def _claim_sentences(path):
     unchecked, and a document that states the chain twice is the way this rule
     goes quiet without anything turning red.
     """
-    flat = " ".join(path.read_text(encoding="utf-8").split())
+    flat = _flatten(path.read_text(encoding="utf-8"))
     return [s for s in _sentences(flat) if _CLAIM.search(s)]
 
 
