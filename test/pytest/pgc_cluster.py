@@ -25,8 +25,10 @@ import re
 import pathlib
 import shutil
 import socket
+import signal
 import subprocess
 import tempfile
+import time
 
 # THE OLD CONSTANT HERE WAS 54600, AND BOTH HALVES OF ITS COMMENT WERE FALSE
 # (@jdatcmd, #897 review). It claimed to sit below the ephemeral floor and to
@@ -689,6 +691,64 @@ def _asroot(argv, bindir, datadir, check=True):
     return _run(cmd, check=check)
 
 
+def _abandoned_postmaster(datadir):
+    """-> the pid of a postmaster still holding `datadir`, or None (#1170).
+
+    `Cluster.stop()` returns immediately when `self._started` is False, which it
+    is if the interruption arrived DURING `start()`. The postmaster is then up
+    and nothing stops it, so removing the tree leaves a live server whose
+    datadir is gone -- a leak with no name tag anywhere on the filesystem, which
+    is worse than the one it replaces. @OffgridwithJD measured exactly that:
+    `/proc/<pid>/cwd -> /tmp/pgc-pytest-0-oxj_b1xd/data (deleted)`.
+
+    LINE 1 OF postmaster.pid IS NEGATIVE WHEN THE WRITER IS NOT A POSTMASTER --
+    initdb's standalone backend writes one too -- so a negative pid is not a
+    server and must not be signalled. Their detector found that one the hard way.
+
+    AND THE PID IS CHECKED AGAINST ITS OWN COMMAND LINE, because a pid can be
+    recycled between the write and the read. A process is only ours if it is a
+    postgres binary whose arguments name this datadir.
+    """
+    try:
+        first = (pathlib.Path(datadir) / "postmaster.pid").read_text().split("\n")[0]
+    except OSError:
+        return None
+    try:
+        pid = int(first.strip())
+    except ValueError:
+        return None
+    if pid <= 0:
+        return None
+    try:
+        cmdline = pathlib.Path("/proc", str(pid), "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    if not cmdline or not cmdline[0].endswith(b"postgres"):
+        return None
+    return pid if str(datadir).encode() in b" ".join(cmdline) else None
+
+
+def _stop_abandoned(datadir):
+    """SIGQUIT a postmaster the teardown could not stop, and wait for it.
+
+    SIGQUIT is what `pg_ctl -m immediate` sends, which is the right mode for a
+    server nobody is going to talk to again. Returns True when nothing is left
+    holding the directory, so the caller can refuse to remove it otherwise.
+    """
+    pid = _abandoned_postmaster(datadir)
+    if pid is None:
+        return True
+    try:
+        os.kill(pid, signal.SIGQUIT)
+    except OSError:
+        return _abandoned_postmaster(datadir) is None
+    for _ in range(100):
+        if _abandoned_postmaster(datadir) is None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def make_cluster(pg_config, worker_id):
     """Create and start a cluster for one worker. The caller stops it.
 
@@ -737,5 +797,9 @@ def make_cluster(pg_config, worker_id):
                 cluster.stop()
             except Exception:
                 pass
-        shutil.rmtree(root, ignore_errors=True)
+        # NEVER REMOVE A DIRECTORY A POSTMASTER STILL HOLDS. `stop()` is a no-op
+        # when the interruption arrived during `start()`, and removing the tree
+        # then leaves a live server with no datadir to find it by (#1170).
+        if _stop_abandoned(root / "data"):
+            shutil.rmtree(root, ignore_errors=True)
         raise

@@ -27,6 +27,7 @@ import os
 import re
 import pathlib
 import shutil
+import signal
 
 import pytest
 
@@ -58,10 +59,61 @@ def major_of(version_text):
     return m.group(1) if m else ""
 
 
+def _raise_system_exit(signum, *_frame):
+    """Turn SIGTERM into SystemExit so `finally` blocks run (#1170).
+
+    128 + signum is the exit status a shell reports for a signalled process, so a
+    caller reading `$?` sees 143 either way and nothing downstream has to learn a
+    new number.
+
+    THE FRAME IS TAKEN AS A VARARG BECAUSE IT IS GENUINELY UNREAD. Python calls a
+    signal handler with two positional arguments, and naming the second one would
+    be a parameter this function ignores -- which
+    `test_no_helper_in_this_corpus_takes_a_parameter_it_never_reads` refuses,
+    corpus-wide and correctly. It caught this on the first run.
+    """
+    raise SystemExit(128 + signum)
+
+
 @pytest.fixture(scope="session")
 def pgc_cluster(request, worker_id):
     """One cluster per xdist worker, built once and torn down at session end."""
     pg_config = request.config.getoption("--pg-config")
+
+    # THE HANDLER GOES FIRST, BEFORE ANYTHING IS BUILT OR STARTED (#1170).
+    # An earlier draft installed it after `make_cluster` returned, and
+    # @OffgridwithJD's probe killed the run at 0s after the postmaster first
+    # appeared and leaked it anyway: between the postmaster accepting
+    # connections and the handler existing there is a window where the default
+    # disposition still applies. That window contains the initdb and the start,
+    # which is the slowest part of the fixture and exactly when somebody
+    # realises they ran the wrong command.
+    #
+    # `make_cluster` already unwinds on BaseException -- SystemExit included --
+    # so installing it here makes a cleanup that already existed reachable
+    # rather than adding a second one. Measured, killing at a delay counted from
+    # the moment the postmaster first appears, and reading the identity of THAT
+    # postmaster rather than a count:
+    #
+    #     kill delay   main                        this change
+    #     0s           survived, datadir present   gone, datadir removed
+    #     0.5s         survived, datadir present   gone, datadir removed
+    #     2s           survived, datadir present   gone, datadir removed
+    #
+    # THE 0s CASE NEEDED MORE THAN THE HANDLER. `Cluster.stop()` returns at once
+    # when `self._started` is False, which it is when the interruption arrives
+    # DURING `start()`, so an intermediate version removed the tree under a live
+    # server -- a leak with no name tag anywhere on the filesystem, which is
+    # worse than the one it replaced. @OffgridwithJD measured that and it is why
+    # `make_cluster` now refuses to remove a directory a postmaster still holds;
+    # see `_stop_abandoned` there.
+    previous = None
+    try:
+        previous = signal.signal(signal.SIGTERM, _raise_system_exit)
+    except ValueError:
+        # Not the main thread of the main interpreter. Nothing to install, and
+        # the run is no worse off than it was.
+        previous = None
 
     # BUILD BEFORE THE SERVER STARTS. This ran the other way round first, and the
     # ordering was not a detail: shared_preload_libraries maps the library at
@@ -77,6 +129,21 @@ def pgc_cluster(request, worker_id):
     verdict = build_once(str(SRCDIR), pg_config, major)
 
     cluster, root = make_cluster(pg_config, worker_id)
+    try:
+        yield from _serve_cluster(cluster, root, verdict, worker_id)
+    finally:
+        if previous is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous)
+            except ValueError:
+                pass
+
+
+def _serve_cluster(cluster, root, verdict, worker_id):
+    """Print the provenance, install the extension, serve the cluster, tear it
+    down. Split out so the teardown covers `require_server_loaded_this_binary`
+    too: a refusal there used to leave the cluster running, because the old
+    `finally` began after it."""
     print(f"\n-- build: {verdict} from {SRCDIR}")
     # Printed for the same reason lib.sh prints it: so a reader can tell which
     # binary produced the results below.
@@ -90,6 +157,28 @@ def pgc_cluster(request, worker_id):
     # this refuses.
     cluster.require_server_loaded_this_binary()
     import psycopg          # deferred: see the module docstring
+
+    # A KILLED RUN MUST NOT LEAK ITS CLUSTER (#1170). Python does not run
+    # `finally` blocks when the DEFAULT SIGTERM disposition terminates the
+    # process, so the teardown below was unreachable for every interrupted run --
+    # and interrupting a run is normal and correct, not an error. The postmaster
+    # then survives holding its port, its shared memory and its datadir.
+    #
+    # Measured before this handler existed: 21 orphaned postmasters and ~2.5 GB
+    # of datadirs across the two development containers, the oldest 33 hours, and
+    # one container had background tasks killed for low memory as a result. A
+    # leaked cluster holding a port is also the documented false-red source: a
+    # later run fails for a reason that has nothing to do with the code.
+    #
+    #     plain try/finally, kill -TERM                 0 finally blocks ran
+    #     SIGTERM handler raising SystemExit, same kill 1 finally block ran
+    #
+    # SIGKILL IS UNCATCHABLE and no handler will ever cover it. The stale
+    # clusters that predate this were `pkill -9` and the OOM killer.
+    #
+    # THE SHELL HALF ALREADY HANDLES THIS AND MUST NOT BE "FIXED": lib.sh's
+    # `trap pgc_teardown EXIT` already runs on TERM, INT and HUP, and naming the
+    # signals explicitly makes the handler fire twice.
     try:
         with psycopg.connect(cluster.dsn(), autocommit=True) as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS pgcolumnar")

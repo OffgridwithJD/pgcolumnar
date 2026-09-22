@@ -61,6 +61,40 @@ true until the next version shipped.
 
 ### Fixed
 
+- A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
+
+  Python does not run `finally` blocks when the default `SIGTERM` disposition
+  terminates the process, so the `pgc_cluster` fixture's teardown was unreachable for
+  every interrupted run. Interrupting a run is normal and correct. The postmaster then
+  survived holding its port, its shared memory and its datadir. Measured across the two
+  development containers: 21 orphaned postmasters and about 2.5 GB of datadirs, the
+  oldest 33 hours. One container lost background tasks to low memory as a result. A leaked cluster holding a port is also a false-red source. A later run then
+  fails for a reason that has nothing to do with the code.
+
+Measured by the identity of the postmaster each
+  run started, killing at a delay counted from the moment it first appears:
+
+  | kill delay | before | after |
+  | --- | --- | --- |
+  | `SIGTERM` at 0s | survived, datadir present | gone, datadir removed |
+  | `SIGTERM` at 0.5s | survived, datadir present | gone, datadir removed |
+  | `SIGTERM` at 2s | survived, datadir present | gone, datadir removed |
+  | `SIGKILL` | survived, datadir present | survived, datadir present |
+
+  The fixture installs a `SIGTERM` handler that raises `SystemExit(143)`, before
+  anything is built or started, so the teardown that already existed becomes
+  reachable. `SIGKILL` is uncatchable and still leaks, which is recorded rather than
+  fixed.
+
+  The 0s case needed a second change. `Cluster.stop()` returns at once when the
+  interruption arrives during `start()`. An intermediate version therefore removed the
+  tree under a live server, which is a leak with no name tag on the filesystem.
+  `make_cluster` now refuses to remove a directory a postmaster still holds.
+
+  The shell harness already handles this and is unchanged. `lib.sh`'s
+  `trap pgc_teardown EXIT` runs on TERM, INT and HUP already. Naming the signals
+  explicitly would make the handler fire twice.
+
 - A header edit did not rebuild, so every header mutation proof ran against a stale
   object and reported a clean pass (#1158).
 

@@ -7,6 +7,7 @@ the string "100" and leaves every conversion to the reader.
 
 import decimal
 import pathlib
+import signal
 
 import pgc_vacuity
 
@@ -128,6 +129,46 @@ def test_each_test_gets_its_own_schema(pgc_conn, expect):
     expect.text(path.split(",")[0].strip().startswith("pgc_test_"), True,
                 "and it is first on the search path")
 
+
+
+def test_a_killed_run_can_still_reach_its_teardown(pgc_cluster, expect):
+    """SIGTERM must reach the fixture's `finally`, or a killed run leaks its
+    cluster (#1170).
+
+    Python does not run `finally` blocks when the DEFAULT SIGTERM disposition
+    terminates the process, so the teardown was unreachable for every interrupted
+    run -- and interrupting a run is normal. Measured before the handler existed:
+    21 orphaned postmasters and ~2.5 GB of datadirs across two containers, the
+    oldest 33 hours.
+
+    THIS ASSERTS THE WIRING, NOT THE HELPER. Calling `_raise_system_exit`
+    directly proves only that a two-line function raises; what was broken is that
+    nothing installed it. So the arm reads the disposition that is actually in
+    effect while a cluster is alive, which is the state a TERM would arrive in.
+
+    It cannot deliver a real SIGTERM to its own process without ending the run,
+    so the end-to-end proof lives in the commit: a run killed with TERM leaves 0
+    postmasters and no datadir with the handler, and 1 postmaster with the
+    datadir still on disk without it. SIGKILL is uncatchable and still leaks,
+    which is recorded rather than fixed.
+    """
+    import conftest
+
+    handler = signal.getsignal(signal.SIGTERM)
+    expect.text(getattr(handler, "__name__", repr(handler)), "_raise_system_exit",
+                "a SIGTERM arriving during a run reaches a handler, not the default")
+    expect.text(repr(handler is conftest._raise_system_exit), "True",
+                "and it is the conftest handler, not some other module's")
+
+    # The exit status a shell reports for a signalled process, so `$?` reads 143
+    # whichever way the run ended and nothing downstream learns a new number.
+    raised = None
+    try:
+        handler(signal.SIGTERM, None)
+    except SystemExit as exc:
+        raised = exc.code
+    expect.num(raised if raised is not None else -1, 143,
+               "and it raises SystemExit(143), which is what runs the finally")
 
 def test_the_worker_owns_its_own_cluster(pgc_cluster, expect):
     """Under xdist each worker must own a cluster, not share one.

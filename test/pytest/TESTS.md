@@ -1213,6 +1213,7 @@ written.
 | `test_the_plan_shows_a_columnar_scan` | the plan arrives as parsed Python, and the scan ran |
 | `test_the_provider_name_does_not_identify_a_scan` | **pins a trap**; see below |
 | `test_each_test_gets_its_own_schema` | the schema is test-private and first on `search_path` |
+| `test_a_killed_run_can_still_reach_its_teardown` | #1170. SIGTERM must reach the fixture's `finally` or a killed run leaks its cluster. Asserts the disposition in effect while a cluster is alive, which is the wiring; calling the helper directly would prove only that a two-line function raises |
 | `test_the_worker_owns_its_own_cluster` | the port is the one derived from THIS worker's id |
 | `test_the_cluster_refuses_a_foreign_server` | the identity check can return False |
 | `test_the_connection_the_tests_use_is_watched` | writes through `pgc_conn` reach the zero-row guard, on both the connection and a handed-out cursor |
