@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+#
+# Overlap and containment prune chunk groups and vectors (#1144).
+#
+# A zone map records a range column's minimum and maximum under the range type's
+# own btree ordering, which sorts by lower bound and then upper bound. That
+# ordering does not bound overlap: the lexicographically largest range is not the
+# one reaching furthest right, so a chunk holding [1,2) and [3,100) has the same
+# maximum as one holding [1,2) and [3,4). Before this, `span && ...` and
+# `span @> ...` resolved through the btree family, found no strategy, and fell
+# through to a post-decode filter -- measured on 200,000 rows: 0 pushed-down
+# filters, 0 zone map probes, 199,881 rows removed AFTER decoding them.
+#
+# What this suite pins is BOTH halves, because a pruning change can be wrong in
+# two directions and only one of them is visible in a counter:
+#
+#   CORRECTNESS   a heap mirror answers the same queries. A prune that removes a
+#                 unit it should have kept LOSES ROWS, and only the oracle sees it.
+#   EFFECT        the counters move. A prune that removes nothing is correct and
+#                 worthless, and only the counters see that.
+#
+# THE SCATTERED CORPUS IS NOT A CONTROL FOR CORRECTNESS, it is the documented
+# zero: this is worth nothing on an unclustered column, exactly as a min/max zone
+# map is, and docs/limitations.md says so. It is asserted here so the claim in the
+# documentation has something behind it.
+#
+# Usage:  test/range_pruning.sh [PG_CONFIG]
+# Written fresh for pgColumnar.
+set -uo pipefail
+# Pinned in the cluster config rather than by SET, so the writing session and any
+# later session agree about the geometry (#806), and so a unit is one hour of
+# spans rather than whatever the default makes it.
+PGC_EXTRA_CONF="${PGC_EXTRA_CONF:-}
+pgcolumnar.stripe_row_limit=10000"
+export PGC_EXTRA_CONF
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
+
+N=50000
+
+# THE SUMMARY IS A CATALOG COLUMN, AND AN OLD CATALOG DOES NOT HAVE IT. Without
+# it the writer records nothing and every arm below would pass for the wrong
+# reason -- a green suite proving only that pruning nothing returns the right
+# rows. Refused by name rather than skipped silently.
+HAS_COL="$(q "SELECT count(*) FROM pg_attribute
+               WHERE attrelid = 'pgcolumnar.zone_map'::regclass
+                 AND attname = 'max_upper' AND NOT attisdropped")"
+if [ "${HAS_COL:-0}" != "1" ]; then
+	pgc_skip zone_map_max_upper \
+		"pgcolumnar.zone_map has no max_upper column; ALTER EXTENSION pgcolumnar UPDATE"
+fi
+
+mk() {  # mk NAME AM clustered|scattered
+	local off
+	[ "$3" = clustered ] && off="g" || off="(g * 7919 % $N)"
+	psql_run "DROP TABLE IF EXISTS $1;
+	          CREATE TABLE $1 (id bigint, span tstzrange, payload int)$2;
+	          INSERT INTO $1 SELECT g,
+	            tstzrange('2020-01-01'::timestamptz + ($off||' minutes')::interval,
+	                      '2020-01-01'::timestamptz + ($off||' minutes')::interval
+	                        + interval '1 hour'),
+	            g % 97 FROM generate_series(1,$N) g;
+	          ANALYZE $1;" >/dev/null
+}
+mk r_col " USING pgcolumnar" clustered
+mk r_heap "" clustered
+mk s_col " USING pgcolumnar" scattered
+
+# The oracle compares a count AND two sums: a count alone agrees whenever two
+# wrong answers are the same size.
+fingerprint() {  # fingerprint TABLE PREDICATE
+	q "SELECT count(*) || '/' || coalesce(sum(payload),0) || '/' || coalesce(sum(id),0)
+	     FROM $1 WHERE $2"
+}
+counter() {  # counter TABLE PREDICATE NAME
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq \
+		-c "EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) SELECT count(*) FROM $1 WHERE $2" 2>&1 |
+		grep -oE "$3: [0-9]+" | head -1 | grep -oE '[0-9]+$'
+}
+
+WINDOW="tstzrange('2020-01-02 00:00+00','2020-01-02 01:00+00')"
+WEEK="tstzrange('2020-01-05 00:00+00','2020-01-12 00:00+00')"
+POINT="'2020-01-02 00:30+00'::timestamptz"
+FUTURE="tstzrange('2099-01-01 00:00+00','2099-01-02 00:00+00')"
+
+# ---- premises -------------------------------------------------------------
+check "premise: the clustered fixture holds the rows the numbers below count" \
+	"$(q "SELECT count(*) FROM r_col")" "$N"
+check "premise: the heap mirror holds the same rows" \
+	"$(q "SELECT count(*) FROM r_heap")" "$N"
+UNITS="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+            JOIN pgcolumnar.storage s USING (storage_id)
+           WHERE s.relation_oid = 'r_col'::regclass AND z.column_index = 1
+             AND z.vector_index >= 0")"
+check "premise: the range column is summarised in several units, or nothing can be skipped" \
+	"$([ "${UNITS:-0}" -ge 4 ] && echo "many ($UNITS)" || echo "TOO FEW ($UNITS)")" \
+	"many ($UNITS)"
+WITHBOUND="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+                JOIN pgcolumnar.storage s USING (storage_id)
+               WHERE s.relation_oid = 'r_col'::regclass AND z.column_index = 1
+                 AND z.max_upper IS NOT NULL")"
+check "premise: every one of those units carries an upper bound" \
+	"$WITHBOUND" "$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+	                   JOIN pgcolumnar.storage s USING (storage_id)
+	                  WHERE s.relation_oid = 'r_col'::regclass AND z.column_index = 1")"
+check "premise: a non-range column carries none" \
+	"$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+	      JOIN pgcolumnar.storage s USING (storage_id)
+	     WHERE s.relation_oid = 'r_col'::regclass AND z.column_index <> 1
+	       AND z.max_upper IS NOT NULL")" "0"
+
+# ---- correctness: the heap answers the same questions ---------------------
+check_text "overlap with a one-hour window returns the heap's rows" \
+	"$(fingerprint r_col "span && $WINDOW")" "$(fingerprint r_heap "span && $WINDOW")"
+check_text "overlap with a week-long window returns the heap's rows" \
+	"$(fingerprint r_col "span && $WEEK")" "$(fingerprint r_heap "span && $WEEK")"
+check_text "containment of a point returns the heap's rows" \
+	"$(fingerprint r_col "span @> $POINT")" "$(fingerprint r_heap "span @> $POINT")"
+check_text "a window no row can meet returns nothing, from both" \
+	"$(fingerprint r_col "span && $FUTURE")" "$(fingerprint r_heap "span && $FUTURE")"
+check "premise: the first three of those are not vacuously empty" \
+	"$([ "$(q "SELECT count(*) FROM r_heap WHERE span && $WINDOW")" -gt 0 ] &&
+	   [ "$(q "SELECT count(*) FROM r_heap WHERE span && $WEEK")" -gt 0 ] &&
+	   [ "$(q "SELECT count(*) FROM r_heap WHERE span @> $POINT")" -gt 0 ] &&
+	   echo "all three match rows" || echo "AT LEAST ONE IS EMPTY")" \
+	"all three match rows"
+
+# ---- effect: the counters move --------------------------------------------
+check "the overlap qual is pushed down, where it used to be dropped" \
+	"$(counter r_col "span && $WINDOW" 'Pushed-Down Filters')" "1"
+check "and the zone map is probed for it" \
+	"$(counter r_col "span && $WINDOW" 'Zone Map Probes')" "1"
+SKIPPED="$(counter r_col "span && $WINDOW" 'Vectors Skipped')"
+check "a clustered overlap skips vectors instead of decoding them" \
+	"$([ "${SKIPPED:-0}" -gt 0 ] && echo "skipped ($SKIPPED)" || echo "SKIPPED NOTHING")" \
+	"skipped ($SKIPPED)"
+SKIPPED_PT="$(counter r_col "span @> $POINT" 'Vectors Skipped')"
+check "so does a containment probe" \
+	"$([ "${SKIPPED_PT:-0}" -gt 0 ] && echo "skipped ($SKIPPED_PT)" || echo "SKIPPED NOTHING")" \
+	"skipped ($SKIPPED_PT)"
+check "a window no row can meet reads no chunk group at all" \
+	"$(counter r_col "span && $FUTURE" 'Chunk Groups Read')" "0"
+
+# ---- the documented zero ---------------------------------------------------
+check "a scattered column skips nothing, which is what the documentation says" \
+	"$(counter s_col "span && $WINDOW" 'Vectors Skipped')" "0"
+check_text "and still returns the right rows" \
+	"$(fingerprint s_col "span && $WINDOW")" "$(fingerprint r_heap "span && $WINDOW")"
+
+# ---- the two values upper() cannot tell apart ------------------------------
+psql_run "DROP TABLE IF EXISTS u_col; DROP TABLE IF EXISTS u_heap;
+          CREATE TABLE u_col (id bigint, span tstzrange) USING pgcolumnar;
+          CREATE TABLE u_heap (id bigint, span tstzrange);
+          INSERT INTO u_col SELECT g,
+            tstzrange('2020-01-01'::timestamptz + (g||' minutes')::interval,
+                      '2020-01-01'::timestamptz + (g||' minutes')::interval + interval '1 hour')
+            FROM generate_series(1,20000) g;
+          INSERT INTO u_col VALUES (20001, tstzrange('2020-01-03'::timestamptz, NULL));
+          INSERT INTO u_col VALUES (20002, 'empty'::tstzrange);
+          INSERT INTO u_heap SELECT * FROM u_col;
+          ANALYZE u_col;" >/dev/null
+check "a unit holding an unbounded range is never pruned from above" \
+	"$(fingerprint u_col "span && $FUTURE")" "$(fingerprint u_heap "span && $FUTURE")"
+check "the same for a containment probe far to its right" \
+	"$(fingerprint u_col "span @> '2099-06-06 00:00+00'::timestamptz")" \
+	"$(fingerprint u_heap "span @> '2099-06-06 00:00+00'::timestamptz")"
+check "premise: that unbounded row really is matched, so the arm is not vacuous" \
+	"$(q "SELECT count(*) FROM u_heap WHERE span && $FUTURE")" "1"
+# AN EMPTY RANGE NEEDS ITS OWN TABLE. In u_col it shares a unit with the
+# unbounded row, and unbounded is absorbing, so that unit says nothing about
+# empty. `upper()` is NULL for both and they need opposite treatment: an empty
+# range must not raise the bound, an unbounded one must stop the unit being
+# pruned. This is the arm that tells them apart.
+psql_run "DROP TABLE IF EXISTS e_col;
+          CREATE TABLE e_col (id bigint, span tstzrange) USING pgcolumnar;
+          INSERT INTO e_col SELECT g, 'empty'::tstzrange FROM generate_series(1,2000) g;
+          ANALYZE e_col;" >/dev/null
+E_TOTAL="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+              JOIN pgcolumnar.storage s USING (storage_id)
+             WHERE s.relation_oid = 'e_col'::regclass AND z.column_index = 1")"
+check "premise: the all-empty table is summarised at all" \
+	"$([ "${E_TOTAL:-0}" -ge 1 ] && echo "summarised ($E_TOTAL)" || echo "NO ZONE MAP")" \
+	"summarised ($E_TOTAL)"
+check "an empty range contributes no bound, so its units record NULL" \
+	"$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+	      JOIN pgcolumnar.storage s USING (storage_id)
+	     WHERE s.relation_oid = 'e_col'::regclass AND z.column_index = 1
+	       AND z.max_upper IS NULL")" "$E_TOTAL"
+check "and an unbounded range records a bound that is present but empty" \
+	"$([ "$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+	           JOIN pgcolumnar.storage s USING (storage_id)
+	          WHERE s.relation_oid = 'u_col'::regclass AND z.column_index = 1
+	            AND z.max_upper IS NOT NULL AND octet_length(z.max_upper) = 0")" -ge 1 ]
+	   && echo "present and empty" || echo "NOT RECORDED")" \
+	"present and empty"
+
+pgc_summary

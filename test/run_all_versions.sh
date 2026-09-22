@@ -261,6 +261,7 @@ SUITES=(
 	projections
 	pushdown_report
 	qual_order_selectivity
+	range_pruning
 	read_stream
 	reader_buffer_reuse
 	recluster_extent
