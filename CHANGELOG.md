@@ -50,6 +50,14 @@ true until the next version shipped.
   `index_build_range_scan`; the condition that reaches it is reproduced here by naming
   a range that has work.
 
+  **The refusal is consumable, which is worse than the refusal.** The same range
+  returns 0 on the next call and the index never grows, so a reader who checks twice
+  is told the maintenance function worked. Sweeping ranges 0 to 6 three times gives
+  `0 0 E 0 0 0 0`, then all zeros, then all zeros, with the index at 24,576 bytes
+  throughout. That is also why neither session could reproduce the other's result by
+  re-running the same call: each of us was at a different point in the same
+  consumption sequence.
+
   On PostgreSQL 18 the columnar plan carries `Disabled: true`, which is the planner
   reporting that it used a node it had been told not to use because no alternative
   path existed. A row count cannot change that. BRIN is settled by the same

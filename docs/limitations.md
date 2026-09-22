@@ -736,8 +736,17 @@ SELECT brin_summarize_range('cr_brin', 2);
 ERROR:  columnar: partial-range index build is not supported
 ```
 
-Ranges with nothing to summarize still return 0, so the error appears only for a
-range that has work. The index therefore stays at its initial size.
+Ranges with nothing to summarize return 0, so the error appears only for a range
+that has work. **It also appears only once.** Sweeping the same ranges three times:
+
+| pass | ranges 0 to 6 | index size |
+| --- | --- | ---: |
+| 1 | 0 0 E 0 0 0 0 | 24,576 |
+| 2 | 0 0 0 0 0 0 0 | 24,576 |
+| 3 | 0 0 0 0 0 0 0 | 24,576 |
+
+So a second call reports 0 over an index that is still empty. Do not read that 0 as
+a repair. The index never grew, and nothing was ever summarized into it.
 
 **Use a GiST or an SP-GiST index for a selective overlap or containment query.**
 Both build on a columnar table and both answer the query. A columnar index scan
