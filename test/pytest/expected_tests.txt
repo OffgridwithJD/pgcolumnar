@@ -251,7 +251,7 @@
 # `cluster_tests` was re-derived in the same run and did NOT move -- 462 -- which
 # is the expected answer for a file that needs no cluster, and checking it rather
 # than assuming it is what this file asks for.
-guard_tests 393
+guard_tests 398
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

@@ -22,6 +22,8 @@ were added for issue #418 after "empty compared with empty" printed PASS, and
 import ast
 import numbers
 import pathlib
+import re
+import subprocess
 import sys
 
 import functools
@@ -1387,6 +1389,63 @@ def pytest_terminal_summary(terminalreporter):
     )
 
 
+# The expected-unrunnable list, and the major it is read for (#1163).
+EXPECTED_UNRUNNABLE = pathlib.Path(__file__).resolve().parent / "expected_unrunnable.txt"
+
+
+def _server_major(config):
+    """-> the major of the server under test as a string, or None.
+
+    Read from `--pg-config`, which is the only thing a finished session still
+    has: the cluster fixture has torn down by the time sessionfinish runs.
+    Returning None means the comparison below cannot be made, and the caller
+    FAILS CLOSED to the old behaviour rather than passing a run it cannot judge.
+    """
+    pg_config = config.getoption("--pg-config", default=None)
+    if not pg_config:
+        return None
+    try:
+        out = subprocess.run([pg_config, "--version"], capture_output=True,
+                             text=True, timeout=30, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"(\d+)", out or "")
+    return m.group(1) if m else None
+
+
+def expected_unrunnable(major, path=EXPECTED_UNRUNNABLE):
+    """-> the set of nodeids allowed to decline on `major`.
+
+    A major with no rows expects NOTHING to decline, which is a claim and not an
+    absence: 18 and 19 are in that position and a test declining there is a
+    finding.
+    """
+    found = set()
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return found
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == str(major):
+            found.add(parts[1].strip())
+    return found
+
+
+def unrunnable_offences(actual, expected):
+    """-> (unexpected, expected_but_ran), both sorted.
+
+    BOTH DIRECTIONS, because each is a different defect. An unexpected decline is
+    a test that stopped running and nobody said so. An expected one that RAN
+    means the feature arrived and this file still claims it did not, which is how
+    a list like this rots into a permanent exemption.
+    """
+    return sorted(set(actual) - set(expected)), sorted(set(expected) - set(actual))
+
+
 def pytest_sessionfinish(session, exitstatus):
     """An unrunnable test must not leave the run green, and neither must a
     record stream that does not reconcile.
@@ -1419,8 +1478,49 @@ def pytest_sessionfinish(session, exitstatus):
             session.exitstatus = EXIT_INCOMPLETE
 
     collector = getattr(session.config, "pgc_unrunnable", None)
-    if collector is None or not collector.items:
+    if collector is None:
         return
+
+    # AN UNEXPECTEDLY UNRUNNABLE TEST MUST NOT LEAVE THE RUN GREEN (#1163). The
+    # rule used to be "any unrunnable test", which is right about the danger and
+    # wrong about the population: six tests decline on 15, 16 and 17 because
+    # `pg_restore_attribute_stats` and `WITHOUT OVERLAPS` arrived in PostgreSQL
+    # 18, so a corpus with nothing wrong with it exited 67 on three majors. That
+    # is how a nightly stops being read, and this repository has already paid for
+    # a scheduled red nobody looked at for 25 nights.
+    #
+    # `test/pytest/expected_unrunnable.txt` names what may decline on which
+    # major, and BOTH directions are offences: an unexpected decline is a test
+    # that stopped running with nobody saying so, and an expected one that RAN
+    # means the feature arrived while the file still claims it did not.
+    #
+    # FAILS CLOSED. Without a readable `--pg-config` the major is unknown, the
+    # expected set is empty, and every decline is unexpected -- which is exactly
+    # the old behaviour, reached by the path that cannot judge rather than by one
+    # that decided to allow it.
+    actual = {nodeid for nodeid, _, _ in collector.items}
+    major = _server_major(session.config)
+    allowed = expected_unrunnable(
+        major, session.config.getoption("--pgc-expected-unrunnable",
+                                        default=str(EXPECTED_UNRUNNABLE)))
+    unexpected, ran_anyway = unrunnable_offences(actual, allowed)
+    if not unexpected and not ran_anyway:
+        return
+    if unexpected:
+        sys.stderr.write(
+            f"unrunnable on PG{major}, and not expected to be:\n")
+        for nodeid in unexpected:
+            detail = next((d for n, _, d in collector.items if n == nodeid), "")
+            sys.stderr.write(f"  {nodeid}  {detail}\n")
+    if ran_anyway:
+        sys.stderr.write(
+            f"expected to be unrunnable on PG{major} and RAN, so the list is "
+            f"stale:\n")
+        for nodeid in ran_anyway:
+            sys.stderr.write(f"  {nodeid}\n")
+    sys.stderr.write(
+        "  -- edit test/pytest/expected_unrunnable.txt, with the reason.\n")
+    sys.stderr.flush()
     # Both, not just the argument: _RunShape may already have escalated this run
     # to 1 for a lost test, and `exitstatus` is the value from before that.
     if exitstatus == 0 and session.exitstatus == 0:
@@ -1562,6 +1662,18 @@ def pytest_addoption(parser):
         type=int,
         default=None,
         help="how many tests this run must collect; a mismatch fails the run",
+    )
+    # THE PATH IS AN OPTION SO THE RULE CAN BE DRIVEN (#1163). Without it the
+    # expected set is a module constant, and the only way to exercise the
+    # comparison is to edit the shipped file -- which tests the tool and not the
+    # wiring that reads it. The default is the shipped file, so nothing has to
+    # pass it.
+    parser.addoption(
+        "--pgc-expected-unrunnable",
+        action="store",
+        default=str(EXPECTED_UNRUNNABLE),
+        help="path to the major/nodeid list of tests allowed to declare "
+             "themselves unrunnable; the default is the shipped one",
     )
 
 

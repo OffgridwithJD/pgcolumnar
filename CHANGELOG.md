@@ -58,6 +58,41 @@ true until the next version shipped.
   is the granularity, from hours to a whole day of rows. Found by @OffgridwithJD
   reviewing this change, documented in `docs/sql-reference.md`, and pinned by an
   arm that runs `expire` under two zones.
+### Changed
+
+- The pytest corpus runs on more than one major (#1163).
+
+  The two harnesses assert the same properties, and the pytest half ran on PG 18
+  alone while the shell half ran the matrix. A five-major gate on a port branch then
+  reddened one arm on PG 15, an arm that had never run on 15 anywhere: not in CI, not
+  nightly, not in `run_all_versions.sh`. Attributing it meant building a baseline from
+  scratch.
+
+  | | before | after |
+  | --- | --- | --- |
+  | per-PR CI | PG 18 | PG 17 and 18 |
+  | nightly | not run | PG 15, 16, 17 and 18 |
+
+  The nightly majors match the shell suites beside them. PG 19 is in neither half of
+  that workflow, only as a from-source build in CI, so matching the list keeps the two
+  halves aligned rather than inventing a gap the other way.
+
+  **The matrix could not land on its own.** The vacuity layer exited
+  `EXIT_INCOMPLETE` whenever anything in a run declared itself unrunnable. Six tests
+  decline on 15, 16 and 17 for a correct reason: `pg_restore_attribute_stats` and
+  `WITHOUT OVERLAPS` both arrived in PostgreSQL 18. So a healthy corpus exited
+  non-zero on three majors, and CI proved it by failing this change's own PG 17 leg.
+
+  The rule is sharpened rather than masked. `test/pytest/expected_unrunnable.txt`
+  names what may decline on which major, and the layer refuses a run whose unrunnable
+  set differs from it **in either direction**. An unexpected decline is a test that
+  stopped running with nobody saying so. An expected one that ran means the feature
+  arrived while the file still claims it did not. Proposed by @OffgridwithJD.
+
+  The shell twin's clean nights do not transfer, which is why this needed the majors
+  rather than an argument. The two halves differ structurally in the relevant
+  place. The shell suite runs each measurement in a fresh `psql` backend. The port
+  runs both on one persistent connection.
 
 ### Fixed
 
