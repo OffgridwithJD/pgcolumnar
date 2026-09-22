@@ -219,6 +219,14 @@ check "and an unbounded range records a bound that is present but empty" \
 # range over a collatable subtype with an explicit non-default COLLATION, which
 # is why every arm above passes with the defect present.
 #
+# WHAT THIS ARM NEEDS FROM THE DATABASE, stated because a quiet box looks like a
+# clean one. It needs a collation whose ordering DIFFERS from the database default.
+# On a cluster whose default is C.UTF-8 that is any locale collation; on a cluster
+# whose default is already a locale collation it is "C". Declaring COLLATION "C"
+# against a C default changes no ordering, so a fixture written that way is green
+# on a correct tree AND on a broken one -- which is how the defect this arm exists
+# for survived every other arm in this suite.
+#
 # THE COLLATION IS DISCOVERED, NOT ASSUMED. A box with no locale whose ordering
 # differs from the database default cannot pose the question, and an arm that
 # cannot discriminate must say so rather than pass.

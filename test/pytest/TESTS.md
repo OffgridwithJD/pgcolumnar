@@ -119,11 +119,8 @@ behaviour, the source of that number is named.
 - [71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers](#71-test_native_groupaggpy-the-grouped-vectorized-aggregate-must-answer-what-core-answers)
 - [72. test_analyze_function.py: statistics collected by reading, not by sampling](#72-test_analyze_functionpy-statistics-collected-by-reading-not-by-sampling)
 - [73. test_assertion_carries_its_measurement.py: a failure must say what it measured](#73-test_assertion_carries_its_measurementpy-a-failure-must-say-what-it-measured)
-<<<<<<< HEAD
 - [74. test_base_scan_io.py: a base scan is not priced from sibling projection pages](#74-test_base_scan_iopy-a-base-scan-is-not-priced-from-sibling-projection-pages)
-=======
-- [74. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation](#74-test_range_pruningpy-a-range-prunes-on-overlap-containment-and-under-its-own-collation)
->>>>>>> 1a90f0e (test: a pytest twin for range pruning, and the ledger rows the new arms owe (#1144))
+- [75. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation](#75-test_range_pruningpy-a-range-prunes-on-overlap-containment-and-under-its-own-collation)
 
 ## 1. How to read a test in here
 
@@ -5783,7 +5780,6 @@ the corpus; none is live, and the file's header carries the measurement behind e
 | `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
 | `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
 
-<<<<<<< HEAD
 ## 74. test_base_scan_io.py: a base scan is not priced from sibling projection pages
 
 Port of `base_scan_io.sh`. A base columnar scan inherited `rel->pages` from
@@ -5800,8 +5796,8 @@ Assertion names match.
 | test | what it holds |
 | --- | --- |
 | `test_base_scan_io` | the table exists; the plan is a base columnar scan with no covering projection name and a positive run cost; a covering projection then exists and enlarged the file; the later plan is still a base scan; the run cost is not priced from sibling projection pages |
-=======
-## 74. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation
+
+## 75. test_range_pruning.py: a range prunes on overlap, containment, and under its own collation
 
     SELECT id FROM rp_col WHERE span && tstzrange('2024-03-01', '2024-03-01 06:00')
 
@@ -5815,31 +5811,22 @@ cannot match.
 
 **THE HEAP IS THE ORACLE.** A pruning defect returns FEWER rows rather than an
 error, so every predicate is answered by a heap table built from the same generator
-and the row IDENTIFIERS are compared, not the counts. A unit wrongly skipped and
-another wrongly read would leave a count unchanged.
+and the row IDENTIFIERS are compared, not the counts.
 
-**THE SCATTERED ZERO IS AN ASSERTION, NOT AN OMISSION.** On a column whose spans
-are not clustered, every group holds a bound near the maximum and no summary can
-exclude any of them, so `Columnar Chunk Groups Read` equals
-`Columnar Chunk Groups Total`. That is the documented outcome; asserting it stops a
-future change from quietly claiming a win there.
+**THE SCATTERED ZERO IS AN ASSERTION, NOT AN OMISSION.** On a column whose spans are
+not clustered, every group holds a bound near the maximum and no summary can exclude
+any of them, so `Columnar Chunk Groups Read` equals `Columnar Chunk Groups Total`.
 
 **AND A RANGE COMPARES UNDER THE COLLATION IT WAS DECLARED WITH**, which the type
 cache carries as `rng_collation`. Reading the ELEMENT type's `typcollation` instead
 made the writer summarise under one ordering and the reader prune under another, and
-the scan MISSED ROWS. Not reachable with a built-in range type -- `tstzrange`,
-`daterange`, `int4range`, `int8range` and `numrange` are all over non-collatable
-subtypes -- so it needs a user-defined range over a collatable subtype with an
-explicit non-default `COLLATION`. Found by @jdatcmd reviewing #1144. The collation
-is DISCOVERED from `pg_collation` rather than assumed: a build without ICU lists ICU
-collations but refuses to use them, and a box with no locale ordering differently
-from the database default records the arm as unrunnable rather than passing over a
-question it cannot pose.
+the scan MISSED ROWS. Not reachable with a built-in range type, so it needs a
+user-defined range over a collatable subtype with an explicit non-default
+`COLLATION`. Found by @jdatcmd reviewing #1144.
 
-`test_range_pruning` asserts the counters, the heap oracle and the scattered
-zero. `test_a_range_prunes_under_its_declared_collation` asserts the collation
-property, on a user-defined range type it creates for the purpose.
+`test_range_pruning` asserts the counters, the heap oracle and the scattered zero.
+`test_a_range_prunes_under_its_declared_collation` asserts the collation property,
+on a user-defined range type it creates for the purpose.
 
 Independent of `test/range_pruning.sh`: same public seam, own fixture, own row
 counts, own observations. Neither file reads or runs the other.
->>>>>>> 1a90f0e (test: a pytest twin for range pruning, and the ledger rows the new arms owe (#1144))
