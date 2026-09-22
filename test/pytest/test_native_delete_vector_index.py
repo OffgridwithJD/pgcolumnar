@@ -154,19 +154,34 @@ def test_the_writing_session_does_not_sequentially_scan_the_delete_vector(
         cur.execute("DELETE FROM dvw WHERE id % 500 = 0")
         cur.execute("SELECT pg_stat_force_next_flush()")
 
+        # THE COUNTERS FIRST, BEFORE ANYTHING ELSE READS THE CATALOG. The zero-guard
+        # below counts delete_vector rows, and ANY read of delete_vector scans it --
+        # the plan is Aggregate -> Hash Join -> Seq Scan on delete_vector. Asking it
+        # between the flush and this read leaves its own sequential scan pending, so
+        # the arm passes on an accounting delay rather than on a property of the code.
+        # Found by @jdatcmd: forcing a second flush after the premise gives
+        # seq_scan=1 idx_scan=61, with idx_scan unchanged, so the 1 is the premise's
+        # own scan and nothing about the fix moved.
+        #
+        # NOT A FLAKE, WHICH IS WHY ORDERING IS THE FIX RATHER THAN A RETRY. A
+        # time.sleep(2) between the premise and this read still passed, and so did an
+        # intervening SELECT 1; only an explicit flush makes the pending scan visible.
+        # The premise cannot be rewritten out of the problem -- any read of
+        # delete_vector scans it -- so it moves out of the window instead.
+        cur.execute("SELECT coalesce(seq_scan, 0), coalesce(idx_scan, 0)"
+                    " FROM pg_stat_all_tables WHERE relname = 'delete_vector'"
+                    " AND schemaname = 'pgcolumnar'")
+        seq, idx = cur.fetchone()
+
         # WITHOUT THIS THE ZERO IS VACUOUS. A DELETE that wrote no delete_vector row
         # scans nothing, and seq_scan = 0 would report success for a fixture that never
-        # reached the path.
+        # reached the path. Asserted AFTER the counters are read: it is a statement
+        # about the DELETE's effect on the catalog, which does not expire.
         cur.execute("SELECT count(*) FROM pgcolumnar.delete_vector dv"
                     " JOIN pgcolumnar.storage s USING (storage_id)"
                     " WHERE s.relation_oid = 'dvw'::regclass")
         expect.num(cur.fetchone()[0], groups,
                    "premise: the delete wrote one delete_vector row per group")
-
-        cur.execute("SELECT coalesce(seq_scan, 0), coalesce(idx_scan, 0)"
-                    " FROM pg_stat_all_tables WHERE relname = 'delete_vector'"
-                    " AND schemaname = 'pgcolumnar'")
-        seq, idx = cur.fetchone()
     print(f"-- delete_vector across the DELETE: seq_scan={seq} idx_scan={idx}")
 
     expect.at_least(idx, 1,
