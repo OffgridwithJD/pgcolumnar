@@ -32,9 +32,27 @@ set -uo pipefail
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 PSQL_BG() {  # run SQL in a background session that stays open
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-		-d "$PGC_DB" -At -c "$1" >"$2" 2>&1 &
+	# STATEMENTS ARE FED ON STDIN, not through -c. With -c psql sends the whole
+	# string as ONE simple-query message, so pg_stat_activity carries the entire
+	# text from the first instant and cannot say which statement is running. The
+	# set of locks an insert takes is complete only once the insert has RETURNED,
+	# and "the session has reached its pg_sleep" is the signal that says so. On
+	# stdin each statement is its own round trip, so the view moves with it.
+	printf '%s\n' "$1" | env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 \
+		-p "$PGC_PORT" -U postgres -d "$PGC_DB" -At >"$2" 2>&1 &
 	echo $!
+}
+
+wait_for_sleeper() {  # -> yes once a background session has reached its pg_sleep
+	for _i in $(seq 1 100); do
+		if [ "$(q "SELECT count(*) FROM pg_stat_activity
+		            WHERE pid <> pg_backend_pid() AND backend_type = 'client backend'
+		              AND state = 'active' AND query LIKE 'SELECT pg_sleep%'")" != "0" ]; then
+			echo yes; return
+		fi
+		sleep 0.2
+	done
+	echo "no (no session reached pg_sleep within 20s)"
 }
 
 psql_run "CREATE TABLE u (k int, v text) USING pgcolumnar;
@@ -50,27 +68,39 @@ check "premise: the lock is enabled, or nothing below proves anything" \
 HOLD1="$PGC_WORKDIR/discover.out"
 PID1=$(PSQL_BG "BEGIN; INSERT INTO u VALUES (900001, 'probe'); SELECT pg_sleep(30);" "$HOLD1")
 
-lockrow=""
-for _i in $(seq 1 60); do
-	lockrow=$(q "SELECT classid || ' ' || objid || ' ' || objsubid
-	               FROM pg_locks
-	              WHERE locktype = 'advisory' AND granted
-	                AND pid <> pg_backend_pid()
-	              ORDER BY objsubid DESC LIMIT 1")
-	[ -n "$lockrow" ] && break
-	sleep 0.2
-done
-set -- $lockrow
-LK_CLASSID="${1:-}"; LK_OBJID="${2:-}"; LK_SUBID="${3:-}"
+# EVERY advisory lock the session holds, and only once the insert has RETURNED.
+# An insert takes more than one -- PGCOLUMNAR_LOCKCLASS_STORAGE_ROW (102) as
+# well as PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY (103) -- so `ORDER BY objsubid DESC
+# LIMIT 1` names the unique-key lock only while the unique-key lock is the
+# highest-numbered one. That stops being true in exactly the case this suite
+# exists to catch: put the unique-key class back to 2 and the maximum becomes
+# 102, the STORAGE_ROW lock, which is still unreachable -- so the suite reported
+# the property holding while the lock under test sat in the SQL space (#1154).
+sleeper="$(wait_for_sleeper)"
+LOCKS="$(q "SELECT classid || ' ' || objid || ' ' || objsubid
+	              FROM pg_locks
+	             WHERE locktype = 'advisory' AND granted
+	               AND pid <> pg_backend_pid()
+	             ORDER BY objsubid DESC")"
+NLOCKS="$(printf '%s\n' "$LOCKS" | grep -c '[0-9]')"
 
 check "premise: the insert took an advisory lock we can see" \
-	"$([ -n "$LK_SUBID" ] && echo yes || echo "no (pg_locks showed nothing)")" "yes"
-echo "      the lock it took: classid=$LK_CLASSID objid=$LK_OBJID field4=$LK_SUBID"
+	"$([ "$NLOCKS" -ge 1 ] && echo yes || echo "no (pg_locks showed nothing; sleeper=$sleeper)")" "yes"
+echo "      the locks it took: $(printf '%s' "$LOCKS" | tr '\n' ';')"
 
-# The assertion, read straight off the tag. 1 and 2 are the only values an
-# application can produce, so anything else is unreachable from SQL.
+# The assertion, read straight off the tags and over the WHOLE set: NO lock an
+# insert takes may be in a SQL-reachable class. 1 and 2 are the only values an
+# application can produce (lockfuncs.c), so anything else is unreachable. The
+# failing value names the offending tags, so a red says which lock moved.
+sql_reachable=""
+while read -r _c _o _f; do
+	[ -z "${_f:-}" ] && continue
+	case "$_f" in 1|2) sql_reachable="$sql_reachable ($_c,$_o,field4=$_f)" ;; esac
+done <<<"$LOCKS"
 check "the lock an insert takes is not in a SQL-reachable class" \
-	"$(case "$LK_SUBID" in 1|2) echo "reachable (field4=$LK_SUBID)" ;; "") echo unknown ;; *) echo unreachable ;; esac)" \
+	"$(if [ "$NLOCKS" -eq 0 ]; then echo unknown
+	   elif [ -n "$sql_reachable" ]; then echo "reachable:$sql_reachable"
+	   else echo unreachable; fi)" \
 	"unreachable"
 
 # Terminate the BACKEND, not just psql. Killing the client leaves the server
@@ -95,19 +125,44 @@ check "premise: the discovering session is gone and holds nothing" "$gone" "yes"
 # ---------------------------------------------------------------------------
 # pg_advisory_xact_lock(int4,int4) produces field4 = 2. Before the fix our lock
 # was also field4 = 2, so this took the same tag and the insert waited forever.
-if [ -n "$LK_CLASSID" ] && [ "$LK_CLASSID" -le 2147483647 ] && [ "$LK_OBJID" -le 2147483647 ]; then
+#
+# EVERY addressable tag is held, not the highest-numbered one, for the reason in
+# section 1: the discovery FEEDS this arm, so contending for the wrong tag
+# disables this check as well -- two arms moving together with the defect, both
+# still looking like evidence (#1154).
+ADDR=""
+NADDR=0
+while read -r _c _o _f; do
+	[ -z "${_f:-}" ] && continue
+	if [ "$_c" -ge -2147483648 ] && [ "$_c" -le 2147483647 ] &&
+	   [ "$_o" -ge -2147483648 ] && [ "$_o" -le 2147483647 ]; then
+		ADDR="$ADDR$_c $_o
+"
+		NADDR=$((NADDR + 1))
+	fi
+done <<<"$LOCKS"
+
+if [ "$NADDR" -gt 0 ]; then
+	grab="BEGIN;"
+	cond=""
+	while read -r _c _o; do
+		[ -z "${_o:-}" ] && continue
+		grab="$grab
+SELECT pg_advisory_xact_lock($_c::int, $_o::int);"
+		cond="$cond OR (classid = $_c AND objid = $_o)"
+	done <<<"$ADDR"
+	grab="$grab
+SELECT pg_sleep(30);"
+	cond="${cond# OR }"
+
 	HOLD2="$PGC_WORKDIR/holder.out"
-	PID2=$(PSQL_BG "BEGIN;
-	                SELECT pg_advisory_xact_lock($LK_CLASSID::int, $LK_OBJID::int);
-	                SELECT pg_sleep(30);" "$HOLD2")
-	held=no
-	for _i in $(seq 1 60); do
-		n=$(q "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted
-		         AND objsubid = 2 AND classid = $LK_CLASSID AND objid = $LK_OBJID")
-		[ "${n:-0}" -ge 1 ] && { held=yes; break; }
-		sleep 0.2
-	done
-	check "premise: the other session really holds that exact tag in class 2" "$held" "yes"
+	PID2=$(PSQL_BG "$grab" "$HOLD2")
+	sleeper2="$(wait_for_sleeper)"
+	held=$(q "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND granted
+	            AND objsubid = 2 AND ($cond)")
+	check "premise: the other session really holds that exact tag in class 2" \
+		"$([ "${held:-0}" -ge "$NADDR" ] && echo yes || echo "no (holds ${held:-0} of $NADDR; sleeper=$sleeper2)")" \
+		"yes"
 
 	ins=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
 		-c "SET statement_timeout = '10s';" -c "INSERT INTO u VALUES (900001, 'new');" 2>&1)
@@ -127,7 +182,7 @@ if [ -n "$LK_CLASSID" ] && [ "$LK_CLASSID" -le 2147483647 ] && [ "$LK_OBJID" -le
 		sleep 0.2
 	done
 else
-	check_skip "the SQL form of the advisory lock" "SKIP  classid $LK_CLASSID or objid $LK_OBJID exceeds int4, so the SQL form cannot address it" "classid or objid exceeds int4"
+	check_skip "the SQL form of the advisory lock" "SKIP  none of $(printf '%s' "$LOCKS" | tr '\n' ';') fits in two int4s, so the SQL form cannot address it" "classid or objid exceeds int4"
 fi
 
 # ---------------------------------------------------------------------------
@@ -135,7 +190,16 @@ fi
 # ---------------------------------------------------------------------------
 # Removing the collision by removing the lock would satisfy everything above and
 # silently give back issue #5.
-dup=$(psql_run "INSERT INTO u VALUES (900001, 'dup');" 2>&1)
+#
+# IT PLANTS ITS OWN KEY. This arm used to re-insert 900001 and rely on the
+# contention arm above having inserted it successfully -- so under a mutation
+# that BLOCKS that insert, the key was never there and "a duplicate key is still
+# rejected" went red for a reason that has nothing to do with duplicate keys.
+# Measured: the #1154 mutation reddened three arms, of which the third was this
+# cascade. An arm that depends on an earlier arm having passed reports on the
+# earlier arm.
+psql_run "INSERT INTO u VALUES (900002, 'first');" >/dev/null 2>&1
+dup=$(psql_run "INSERT INTO u VALUES (900002, 'dup');" 2>&1)
 check "a duplicate key is still rejected" \
 	"$(grep -qiE 'duplicate key|unique constraint' <<<"$dup" && echo rejected || echo "NOT rejected: $(head -1 <<<"$dup")")" \
 	"rejected"
