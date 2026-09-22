@@ -796,6 +796,21 @@ the collation that put the stored minimum and maximum in order. A comparison wit
 a different collation still operates as a filter, but it does not drive skipping.
 The results therefore never depend on the pushdown.
 
+A range column follows a different rule, because a range column has no collation
+of its own. PostgreSQL records `attcollation` as 0 for it. The ordering comes from
+the collation the range TYPE was declared with, which PostgreSQL records in
+`pg_range.rngcollation`:
+
+```sql
+CREATE TYPE textrange_en AS RANGE (SUBTYPE = text, COLLATION = "en_US.utf8");
+```
+
+That declared collation orders the summary the writer stores. The scan compares
+under the same one when it decides whether to skip a unit. So the rule above holds
+in substance rather than in wording. The comparison and the summary still agree.
+They agree on the range type's collation rather than on the column's. The results
+never depend on the pushdown either way.
+
 ## Replication and backup
 
 - Physical replication and physical backups (`pg_basebackup`, snapshots) include
