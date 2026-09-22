@@ -42,6 +42,14 @@ true until the next version shipped.
   size on both storages. The work is real and buys an index that cannot be chosen.
   Measured by @jdatcmd and reproduced here, whose columnar delta agreed within 0.8%.
 
+  A BRIN index on a columnar table also never summarizes. `brin_summarize_new_values`
+  returns 0 where heap returns a count, and `brin_summarize_range` on a range that has
+  work raises "columnar: partial-range index build is not supported". The two readings
+  look contradictory and are not: a 0 means BRIN found no range and never called into
+  the access method, so it is silence rather than success. @jdatcmd found the guard in
+  `index_build_range_scan`; the condition that reaches it is reproduced here by naming
+  a range that has work.
+
   On PostgreSQL 18 the columnar plan carries `Disabled: true`, which is the planner
   reporting that it used a node it had been told not to use because no alternative
   path existed. A row count cannot change that. BRIN is settled by the same

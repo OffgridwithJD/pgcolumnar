@@ -727,6 +727,18 @@ The index is also the same size on both storages, at 24,576 bytes for BRIN and
 5,726,208 for GIN. The work is real and the bytes are real. On a columnar table
 they buy an index that cannot be chosen.
 
+A BRIN index also never summarizes. `brin_summarize_new_values` returns 0 on a
+columnar table where it returns a count on heap, because it finds no range to
+summarize. Asking it to summarize one range directly reaches a path that refuses:
+
+```
+SELECT brin_summarize_range('cr_brin', 2);
+ERROR:  columnar: partial-range index build is not supported
+```
+
+Ranges with nothing to summarize still return 0, so the error appears only for a
+range that has work. The index therefore stays at its initial size.
+
 **Use a GiST or an SP-GiST index for a selective overlap or containment query.**
 Both build on a columnar table and both answer the query. A columnar index scan
 is charged for the row-group decode its per-row fetches force. A broad query may
