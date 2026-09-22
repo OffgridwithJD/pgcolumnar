@@ -484,4 +484,9 @@ guard_tests 403
 # #1189). Re-derived by collection on this tree, never by adding one:
 # `464 tests collected`. `guard_tests` was re-derived in the same run and
 # did NOT move: 393.
-cluster_tests 467
+# 467 -> 468: one test in test_projection_parallel.py (#1127). RE-DERIVED ON THE
+# COMPOSED TREE after a rebase, not carried across it: this branch read 464
+# against a main that said 463, and #1196 and #1202 moved main to 467 in
+# between. Neither side's number is the composed one and their difference is
+# not the delta.
+cluster_tests 468

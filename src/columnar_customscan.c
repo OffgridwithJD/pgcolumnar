@@ -3281,6 +3281,17 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				prpath->path.parallel_aware = true;
 				prpath->path.parallel_safe = true;
 				prpath->path.parallel_workers = workers;
+				/*
+				 * Clamp ioRunProj to projRun. With projRun = serialRun *
+				 * projScale this is unreachable: ioRun was already clamped
+				 * to serialRun one level up, and multiplying both sides by
+				 * the same non-negative projScale preserves the order. It
+				 * becomes live if projRun is ever computed independently
+				 * (for example from the projection's own pages). When the
+				 * clamp binds fully, cpuRunProj is zero and the partial
+				 * covering path totals exactly like the serial covering
+				 * path, so Gather loses.
+				 */
 				ioRunProj = ioRun * projScale;
 				if (ioRunProj > projRun)
 					ioRunProj = projRun;
