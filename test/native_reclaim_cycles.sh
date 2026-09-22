@@ -21,21 +21,74 @@
 # Written fresh for pgColumnar.
 
 set -uo pipefail
+
+# COALESCING OFF, OR THIS SUITE CANNOT REACH THE DEFECT IT GUARDS (#1138). #84
+# needs ONE COMMAND to allocate from the free list MORE THAN ONCE.
+# `pgcolumnar.reclaim_coalesce` defaults ON, and compaction then merges adjacent
+# freed ranges, so the free list holds one or two rows however much is freed.
+# Measured on the old fixture, free_space rows before each compact_rewrite:
+#
+#     cycle        1    2    3    4    5
+#     free rows    0    1    2    2    2
+#
+# One row is not two allocations, so the just-consumed row was never re-selected
+# and the missing CommandCounterIncrement cost nothing observable. Delete the #84
+# fix, rebuild, and the old suite reported 12 passed + 0 failed, arm for arm --
+# including `compact_rewrite cycle N returns a count (no self-conflict)`, the arm
+# named after the defect. Found by @OffgridwithJD.
+#
+# IN THE CLUSTER CONFIG, NOT A `SET`. Every psql_run here is its own session, so a
+# SET would last exactly one statement and the writing session would not have it.
+PGC_EXTRA_CONF="${PGC_EXTRA_CONF:-}
+pgcolumnar.reclaim_coalesce=off"
+export PGC_EXTRA_CONF
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-# 8000 rows in 8 groups of 1000, so each compaction rewrites several groups and
-# each command performs several free-space allocations.
-GEN="SELECT g AS id, (g % 100) AS v, md5(g::text) AS payload FROM generate_series(1, 8000) g"
+# 30,000 rows in groups of 1,000, then a CONTIGUOUS block of whole groups freed
+# at once. That is what puts many separate reusable ranges on the free list; a
+# rotating slice frees a little from every group and coalesces back to one range.
+ROWS=30000
+GROUP=1000
+DEL_LO=6001
+DEL_HI=24000
+GEN="SELECT g AS id, (g % 100) AS v, md5(g::text) AS payload FROM generate_series(1, $ROWS) g"
 psql_run "CREATE TABLE h (id int, v int, payload text);"
 psql_run "CREATE TABLE n (id int, v int, payload text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => $GROUP, chunk_group_row_limit => $GROUP);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
 
 fsize() { q "SELECT pg_relation_size('n');"; }
 hash_n() { pgc_set_hash 'SELECT id, v, payload FROM n'; }
 hash_h() { pgc_set_hash 'SELECT id, v, payload FROM h'; }
+
+free_rows() { q "SELECT count(*) FROM pgcolumnar.free_space
+                 WHERE storage_id = pgcolumnar.get_storage_id('n');"; }
+
+# SEVERAL GROUPS, OR ONE COMMAND CANNOT ALLOCATE TWICE. Read back from the
+# catalog rather than assumed from the option that asked for it.
+_groups="$(q "SELECT count(*) FROM pgcolumnar.storage s
+              JOIN pgcolumnar.row_group rg USING (storage_id)
+              WHERE s.relation_oid = 'n'::regclass;")"
+check "premise: the table has several row groups to rewrite" \
+	"$([ "${_groups:-0}" -ge 2 ] && echo "many ($_groups)" || echo "TOO FEW ($_groups)")" \
+	"many ($_groups)"
+
+# Free a large CONTIGUOUS block of whole groups and compact, which is what puts
+# many separate reusable ranges on the free list.
+psql_run "DELETE FROM h WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
+psql_run "DELETE FROM n WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
+psql_run "SELECT pgcolumnar.compact('n');"
+_free="$(free_rows)"
+echo "  (free_space rows after the block delete: $_free)"
+
+# THE PRECONDITION FOR #84, ASSERTED RATHER THAN HOPED FOR. With a free list of
+# one row -- which is what coalescing produces -- no command allocates from it
+# twice, and every arm below passes on a build with the fix removed.
+check "premise: the free list is fragmented, so one command allocates from it more than once" \
+	"$([ "${_free:-0}" -ge 5 ] && echo "fragmented ($_free)" || echo "TOO FEW ($_free)")" \
+	"fragmented ($_free)"
 
 check "initial parity" "$(hash_n)" "$(hash_h)"
 

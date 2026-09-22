@@ -112,6 +112,29 @@ true until the next version shipped.
 
 ### Fixed
 
+- `native_reclaim_cycles` could not reach the defect it guards (#1138).
+
+  It is the declared regression guard for #84. Deleting the #84 fix left it reporting
+  `12 passed + 0 failed`, arm for arm, including the arm named after the defect.
+
+  #84 needs one command to allocate from the free list more than once.
+  `pgcolumnar.reclaim_coalesce` defaults on, so compaction merges adjacent freed
+  ranges and the free list holds one or two rows however much is freed. Measured on
+  the old fixture, `free_space` rows before each `compact_rewrite`:
+
+  | cycle | 1 | 2 | 3 | 4 | 5 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | free rows | 0 | 1 | 2 | 2 | 2 |
+
+  One row is not two allocations, so the just-consumed row was never re-selected and
+  the missing `CommandCounterIncrement` cost nothing observable.
+
+  The suite now runs with coalescing off and frees a contiguous block of whole groups.
+  It **asserts the free list is fragmented before relying on it**: 18 rows, against a
+  floor of 5. With the #84 fix removed it now reddens five arms with
+  `ERROR: tuple already updated by self`, on the same binary the old fixture passed
+  on. Found by @OffgridwithJD, whose pytest twin already had the fixture.
+
 - A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
 
   Python does not run `finally` blocks when the default `SIGTERM` disposition
