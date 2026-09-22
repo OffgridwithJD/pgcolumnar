@@ -201,6 +201,29 @@ true until the next version shipped.
 
   Gated: 75 passed + 1 skipped on 18; `docs_style` PASSED; the selftest corpus and
   the pytest guard leg green.
+- `arrow_import.sh` ran 16 of its 72 checks without pyarrow and reported `PASSED`
+  (#1159).
+
+  The three blocks that need a file a foreign producer wrote recorded nothing when
+  they did not run. The accounting reconciles what ran against what was
+  recorded, so it was satisfied by construction. A suite that runs fewer checks read
+  exactly like a suite that has fewer. Two blocks printed an unrecorded line; the third, which
+  carries 44 of the 56 lost checks, printed nothing at all.
+
+  | | checks run | accounting | verdict |
+  | --- | ---: | --- | --- |
+  | before, with pyarrow | 72 | 72 passed, 0 skipped | PASSED |
+  | before, without | 16 | 16 passed, 0 skipped | PASSED |
+  | after, with pyarrow | 72 | 72 passed, 0 skipped | PASSED |
+  | after, without | 72 | 16 passed, 56 skipped | PASSED |
+
+  Each lost arm now records a skip under its own name, which is the pattern #994
+  settled on in `native_parquet_flba.sh`. The run no longer shrinks: both
+  configurations record the same 72 names, 0 in either direction of the difference.
+  The three lists are measured rather than read off the source. The suite was run both ways and the lost
+  records compared in execution order. They fall into exactly three contiguous runs
+  of 2, 10 and 44, which is the three blocks. 51 guarded call sites produce 56 records, because some sit
+  in loops. A list copied from the `check` lines would have been short by five.
 
 - `iceberg_fdw.sh` refused to run without python3 and never used it (#1150).
 

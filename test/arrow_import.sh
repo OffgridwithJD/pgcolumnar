@@ -42,6 +42,39 @@ SQLEOF
 }
 fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
 
+# WITHOUT pyarrow THIS SUITE SHRANK IN SILENCE (#1159). The three blocks below
+# need a file a foreign producer wrote, so they cannot run without pyarrow. They
+# recorded NOTHING when they did not run, and the accounting -- which reconciles
+# what ran against what was recorded -- was satisfied by construction. Measured
+# on PG17, same tree and build, with a python3 that fails only `import pyarrow`:
+#
+#     with pyarrow     72 passed + 0 failed + 0 unrunnable + 0 skipped   PASSED
+#     without          16 passed + 0 failed + 0 unrunnable + 0 skipped   PASSED
+#     identity         16 kept + 56 lost == 72
+#
+# A SUITE THAT RUNS FEWER CHECKS READ EXACTLY LIKE A SUITE THAT HAS FEWER. Two of
+# the three blocks did print an unrecorded `-- pyarrow not available` line; the
+# third, which carries 44 of the 56, printed nothing at all. An unrecorded line
+# is not evidence: it is not in the accounting, not in the verdict, and not in
+# the RESULT records a driver reads.
+#
+# ONE SKIP PER ARM, UNDER THE ARM'S OWN NAME, which is the pattern #994 settled
+# on in native_parquet_flba.sh. A single skip named for none of the 56 would
+# leave all 56 with no record of their own, and a name-keyed reader could not
+# tell a skipped arm from an absent one. The three lists are MEASURED, not read
+# off the source: the suite was run with and without pyarrow, the records were
+# compared in execution order, and the lost ones fall into exactly three
+# contiguous runs of 2, 10 and 44, which is the three blocks. 51 guarded call
+# sites produce 56 records because some sit in loops, so a list copied from the
+# `check` lines would have been short by five.
+#
+# WHY NOT `pgc_skip`, WHICH THE OTHER 29 pyarrow SUITES USE. It is terminal: it
+# ends the run with a named FAIL, or a named SKIP when the dependency is waived.
+# That is right for a suite with nothing else to do and wrong here, because 16 of
+# these checks need no pyarrow at all -- the round trip through our own writer,
+# the FIFO refusal, the index behaviour after an import, the unique violation,
+# and the column-count and non-columnar rejections. Ending the suite would trade
+# one silence for a different loss.
 have_pyarrow=1
 python3 -c 'import pyarrow' 2>/dev/null || have_pyarrow=0
 
@@ -110,7 +143,13 @@ PY
 	vals="$(q "SELECT string_agg(coalesce(a::text,'-')||'/'||coalesce(b::text,'-')||'/'||coalesce(c,'-'), ',' ORDER BY a NULLS LAST) FROM ri_for;")"
 	check "pyarrow values" "$vals" "1/1.5/x,2/-/y,4/4.5/-,-/3.5/z"
 else
-	echo "-- pyarrow not available; skipping foreign-file import"
+	for _ai_foreign in \
+			"pyarrow import rows" \
+			"pyarrow values"; do
+		check_skip "$_ai_foreign" \
+			"SKIP  $_ai_foreign (pyarrow not available)" \
+			"pyarrow not available"
+	done
 fi
 
 # --- 3. documented lossy mapping: non-finite -> null ------------------------
@@ -238,7 +277,21 @@ PY
 		"$(q "SELECT string_agg(ts::text, ',' ORDER BY ts) FROM ri_nsl;")" \
 		"2000-01-01 00:00:00,2000-01-01 00:00:01,2000-01-01 00:00:02,2000-01-01 00:00:03"
 else
-	echo "-- pyarrow not available; skipping nanosecond narrowing checks"
+	for _ai_narrow in \
+			"a lossy nanosecond file imports every row" \
+			"so does a microsecond-exact nanosecond file" \
+			"and a microsecond file" \
+			"the narrowing reports the number of VALUES that lost digits, not rows" \
+			"and does not report the row count instead" \
+			"a time64 column and a nested list are counted too, not just a top-level timestamp" \
+			"and that file imports every row as well" \
+			"control: an ns file on microsecond boundaries reports nothing" \
+			"control: a microsecond file reports nothing" \
+			"the narrowed values are floored to the microsecond"; do
+		check_skip "$_ai_narrow" \
+			"SKIP  $_ai_narrow (pyarrow not available)" \
+			"pyarrow not available"
+	done
 fi
 
 # --- 4. error cases ---------------------------------------------------------
@@ -539,6 +592,56 @@ PY
 		>/dev/null 2>&1
 	check "a struct field's nanosecond unit is honoured at child index 1" \
 		"$(tu_value tu_struct_ns tu_st)" "(7,\"2000-01-01 00:00:00\")"
+else
+	for _ai_types in \
+			"reject dictionary-encoded file" \
+			"premise: the exporter's own timestamp unit still imports correctly" \
+			"premise: and its own time unit does too" \
+			"premise: and a date32 carrier, which shares Arrow's tag 8 with date64" \
+			"a date64 carrier decodes to the date it holds (#864)" \
+			"a timestamp in seconds decodes to the instant it holds (#865)" \
+			"a timestamp in milliseconds decodes to the instant it holds (#865)" \
+			"a timestamp in nanoseconds decodes to the instant it holds (#865)" \
+			"a time64 in nanoseconds decodes to the time it holds (#865)" \
+			"a time32 in seconds decodes to the time it holds (#865)" \
+			"a time32 in milliseconds decodes to the time it holds (#865)" \
+			"premise: a well-formed import reports 00000, so the probe reads success" \
+			"a second count that overflows on scaling is refused, not wrapped" \
+			"a timestamp before PostgreSQL's range is refused" \
+			"a time past midnight is refused" \
+			"a date64 instant mid-day reports the day it falls in" \
+			"a date64 instant before the epoch floors rather than truncating" \
+			"a nanosecond timestamp truncates to microseconds" \
+			"a nanosecond timestamp before the epoch floors rather than truncating" \
+			"a negative nanosecond time is refused, not narrowed into midnight" \
+			"a date32 file is refused for a bigint column, not read past its buffer" \
+			"a date32 file is refused for a uuid column, not read past its buffer" \
+			"a date32 file is refused for a time column, not read past its buffer" \
+			"a date32 file is refused for a numeric(20,4) column, not read past its buffer" \
+			"a date32 file is refused for a timestamp column, not read past its buffer" \
+			"a time64 file is refused for a date column, not stored as year 687342" \
+			"a timestamp file is refused for a date column" \
+			"a date64 file is refused for a timestamp column" \
+			"a uint64 file is refused for bigint (#881)" \
+			"an int64 file is refused for a 4-byte int (#881)" \
+			"an int32 file is refused for bigint (#881)" \
+			"a float32 file is refused for float8 (#881)" \
+			"control: a matching int64 file imports into bigint" \
+			"control: a matching int32 file imports into int" \
+			"control: a matching float64 file imports into float8" \
+			"control: a matching float32 file imports into float4" \
+			"a wider fixed-size binary is refused for uuid (#881)" \
+			"control: a 16-byte fixed-size binary imports into uuid" \
+			"a decimal at another scale is refused (#881)" \
+			"control: a matching decimal imports" \
+			"and a refused import leaves the target empty" \
+			"control: a non-temporal tag is not caught by the temporal refusal" \
+			"a list element's nanosecond unit is honoured, not just the top level" \
+			"a struct field's nanosecond unit is honoured at child index 1"; do
+		check_skip "$_ai_types" \
+			"SKIP  $_ai_types (pyarrow not available)" \
+			"pyarrow not available"
+	done
 fi
 
 IXFILE="$PGC_WORKDIR/ix_roundtrip.arrows"
