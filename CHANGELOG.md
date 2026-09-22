@@ -117,23 +117,28 @@ true until the next version shipped.
   It is the declared regression guard for #84. Deleting the #84 fix left it reporting
   `12 passed + 0 failed`, arm for arm, including the arm named after the defect.
 
-  #84 needs one command to allocate from the free list more than once.
-  `pgcolumnar.reclaim_coalesce` defaults on, so compaction merges adjacent freed
-  ranges and the free list holds one or two rows however much is freed. Measured on
-  the old fixture, `free_space` rows before each `compact_rewrite`:
+`pgcolumnar.reclaim_coalesce` defaults on, and it does two things: it merges
+  adjacent freed ranges, and it carries its own `CommandCounterIncrement` on the free
+  path. That second one does the visibility work the #84 fix would otherwise do, so
+  with coalescing on the defect is masked.
 
-  | cycle | 1 | 2 | 3 | 4 | 5 |
-  | --- | ---: | ---: | ---: | ---: | ---: |
-  | free rows | 0 | 1 | 2 | 2 | 2 |
+  Isolated by freeing alternate whole groups, which fragments by non-adjacency and
+  leaves the option at its default. On the same mutated build:
 
-  One row is not two allocations, so the just-consumed row was never re-selected and
-  the missing `CommandCounterIncrement` cost nothing observable.
+  | fixture | coalesce | free list | rewrote | result |
+  | --- | --- | ---: | ---: | --- |
+  | alternate groups | on | 15 | 15 | clean |
+  | contiguous block | off | 18 | 12 | `tuple already updated by self` |
 
-  The suite now runs with coalescing off and frees a contiguous block of whole groups.
-  It **asserts the free list is fragmented before relying on it**: 18 rows, against a
-  floor of 5. With the #84 fix removed it now reddens five arms with
-  `ERROR: tuple already updated by self`, on the same binary the old fixture passed
-  on. Found by @OffgridwithJD, whose pytest twin already had the fixture.
+  Fifteen fragments with coalescing on does not reach it. The option is necessary and
+  sufficient, and the free-list count is a property of the fixture. The suite runs with coalescing
+  off and **asserts that, read back from the server**. The value is set in the cluster
+  config. A conf line that stops taking effect returns the suite to the state this
+  issue is about. With the #84 fix removed it reddens five
+  arms with `ERROR: tuple already updated by self`.
+
+  Found by @OffgridwithJD, whose pytest twin already had the fixture and who then
+  separated the two factors.
 
 - A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
 

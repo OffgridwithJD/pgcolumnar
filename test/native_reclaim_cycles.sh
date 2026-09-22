@@ -22,20 +22,30 @@
 
 set -uo pipefail
 
-# COALESCING OFF, OR THIS SUITE CANNOT REACH THE DEFECT IT GUARDS (#1138). #84
-# needs ONE COMMAND to allocate from the free list MORE THAN ONCE.
-# `pgcolumnar.reclaim_coalesce` defaults ON, and compaction then merges adjacent
-# freed ranges, so the free list holds one or two rows however much is freed.
-# Measured on the old fixture, free_space rows before each compact_rewrite:
+# COALESCING OFF, OR THIS SUITE CANNOT REACH THE DEFECT IT GUARDS (#1138).
+# Delete the #84 fix, rebuild, and the old fixture reported 12 passed + 0 failed,
+# arm for arm -- including `compact_rewrite cycle N returns a count (no
+# self-conflict)`, the arm named after the defect. Found by @OffgridwithJD.
 #
-#     cycle        1    2    3    4    5
-#     free rows    0    1    2    2    2
+# THE OPERATIVE PROPERTY IS THE GUC, NOT A FRAGMENTED FREE LIST, and the first
+# version of this comment said the opposite. `reclaim_coalesce` does two things:
+# it merges adjacent freed ranges, AND it carries its own CommandCounterIncrement
+# on the free path (columnar_metadata.c:792, `if (pgcolumnar_reclaim_coalesce)`).
+# That second one does the visibility work the #84 fix would otherwise do, so
+# with coalescing on the defect is masked however fragmented the list is.
 #
-# One row is not two allocations, so the just-consumed row was never re-selected
-# and the missing CommandCounterIncrement cost nothing observable. Delete the #84
-# fix, rebuild, and the old suite reported 12 passed + 0 failed, arm for arm --
-# including `compact_rewrite cycle N returns a count (no self-conflict)`, the arm
-# named after the defect. Found by @OffgridwithJD.
+# Isolated by freeing ALTERNATE whole groups, which fragments by non-adjacency
+# and leaves the GUC at its default. On the same mutated .so:
+#
+#     alternate groups, coalesce=on    free list 15, rewrote 15    CLEAN
+#     contiguous block, coalesce=off   free list 18, rewrote 12    tuple already
+#                                                                  updated by self
+#
+# Fifteen fragments with coalescing on does not reach it. So coalesce=off is
+# necessary and sufficient, and the free-list count is a property of the fixture
+# rather than the thing that arms the suite. @OffgridwithJD separated the two
+# factors; the first version of this comment would have told the next maintainer
+# to preserve the wrong one.
 #
 # IN THE CLUSTER CONFIG, NOT A `SET`. Every psql_run here is its own session, so a
 # SET would last exactly one statement and the writing session would not have it.
@@ -81,14 +91,18 @@ psql_run "DELETE FROM h WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
 psql_run "DELETE FROM n WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
 psql_run "SELECT pgcolumnar.compact('n');"
 _free="$(free_rows)"
-echo "  (free_space rows after the block delete: $_free)"
 
-# THE PRECONDITION FOR #84, ASSERTED RATHER THAN HOPED FOR. With a free list of
-# one row -- which is what coalescing produces -- no command allocates from it
-# twice, and every arm below passes on a build with the fix removed.
-check "premise: the free list is fragmented, so one command allocates from it more than once" \
-	"$([ "${_free:-0}" -ge 5 ] && echo "fragmented ($_free)" || echo "TOO FEW ($_free)")" \
-	"fragmented ($_free)"
+# THE PRECONDITION FOR #84, ASSERTED RATHER THAN HOPED FOR, AND IT IS THE GUC.
+# Read back from the SERVER, because the value is set in the cluster config: a
+# conf line that stops taking effect leaves every arm below passing on a build
+# with the fix removed, which is the state this suite was in before #1138.
+check "premise: coalescing is off, which is what lets this suite reach #84" \
+	"$(q "SHOW pgcolumnar.reclaim_coalesce;")" "off"
+
+# The free list's shape, PRINTED rather than asserted. It is a property of the
+# fixture and not what arms the suite: 15 fragments with coalescing ON do not
+# reach the defect.
+echo "  (free_space rows after the block delete: $_free)"
 
 check "initial parity" "$(hash_n)" "$(hash_h)"
 
