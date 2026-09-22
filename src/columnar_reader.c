@@ -328,19 +328,37 @@ pgcolumnar_group_is_restricted_in(PgColumnarReadState *rs, uint64 groupNumber)
 void
 PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 {
-	if (att->attbyval)
+	PgColumnarEncodeValueByLen(buf, att->attbyval, att->attlen, value);
+}
+
+
+/*
+ * PgColumnarEncodeValueByLen
+ *		The same encoding, for a value with no Form_pg_attribute of its own.
+ *
+ * A range column's zone map records the greatest upper bound among its values
+ * (#1144), and that bound is a value of the range's SUBTYPE: a timestamptz for
+ * a tstzrange column. There is no attribute to describe it, only the element
+ * type's byval and len out of the type cache. Splitting the body rather than
+ * copying it keeps ONE encoding: a second copy is a second thing to keep in step
+ * with the reader.
+ */
+void
+PgColumnarEncodeValueByLen(StringInfo buf, bool byval, int16 len, Datum value)
+{
+	if (byval)
 	{
 		char		tmp[8];
 
-		Assert(att->attlen >= 1 && att->attlen <= 8);
-		store_att_byval(tmp, value, att->attlen);
-		appendBinaryStringInfo(buf, tmp, att->attlen);
+		Assert(len >= 1 && len <= 8);
+		store_att_byval(tmp, value, len);
+		appendBinaryStringInfo(buf, tmp, len);
 	}
-	else if (att->attlen > 0)
+	else if (len > 0)
 	{
-		appendBinaryStringInfo(buf, DatumGetPointer(value), att->attlen);
+		appendBinaryStringInfo(buf, DatumGetPointer(value), len);
 	}
-	else if (att->attlen == -1)
+	else if (len == -1)
 	{
 		struct varlena *detoasted =
 			pg_detoast_datum((struct varlena *) DatumGetPointer(value));
@@ -354,7 +372,7 @@ PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("columnar phase 1 does not support column type with attlen %d",
-						att->attlen)));
+						len)));
 	}
 }
 
