@@ -150,15 +150,16 @@ while columnar tables exist, because they depend on the access method. The
 form that succeeds is `DROP EXTENSION pgcolumnar CASCADE`, and it drops every
 columnar table with it.
 
-### Upgrading to 1.0-alpha4
+### Upgrading to 1.0-alpha5
 
-`1.0-alpha4`, recorded in `VERSION`, is what this source tree installs. The
+`1.0-alpha5`, recorded in `VERSION`, is what this source tree installs. The
 latest published pre-release is `v1.0-alpha4`.
 `ALTER EXTENSION pgcolumnar UPDATE` (step 3 above) reaches it from every
 previously published version: `1.0-dev`, which the `v1.0-alpha` tag installed,
-`1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`. PostgreSQL applies the shipped
-upgrade scripts in sequence. One command therefore carries a `1.0-dev` install
-through `1.0-alpha`, `1.0-alpha2` and `1.0-alpha3` to `1.0-alpha4`.
+`1.0-alpha`, `1.0-alpha2`, `1.0-alpha3`, and `1.0-alpha4`. PostgreSQL applies
+the shipped upgrade scripts in sequence. One command therefore carries a
+`1.0-dev` install through `1.0-alpha`, `1.0-alpha2`, `1.0-alpha3` and
+`1.0-alpha4` to `1.0-alpha5`.
 
 The `1.0-alpha` cycle renamed the extension's C symbols into the `pgcolumnar`
 namespace, so that two extensions named `columnar` can be loaded without

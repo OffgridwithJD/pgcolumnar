@@ -2,11 +2,11 @@
 
 All notable changes to pgColumnar are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). pgColumnar is
-pre-release; the version marker is `1.0-alpha4`, recorded in `VERSION`. New tables
+pre-release; the version marker is `1.0-alpha5`, recorded in `VERSION`. New tables
 are written in the native on-disk format, PGCN v1. For the forward-looking plan see
 [design/ROADMAP.md](design/ROADMAP.md); for full history see the git log.
 
-The extension's `default_version` is `1.0-alpha4`.
+The extension's `default_version` is `1.0-alpha5`.
 `v1.0-alpha4` is the latest published pre-release. Upgrade scripts from
 every previously shipped version ship with it (`1.0-dev`, which the v1.0-alpha tag
 installed, `1.0-alpha`, `1.0-alpha2`, and `1.0-alpha3`), so a single
@@ -93,6 +93,22 @@ true until the next version shipped.
   rather than an argument. The two halves differ structurally in the relevant
   place. The shell suite runs each measurement in a fresh `psql` backend. The port
   runs both on one persistent connection.
+- The `1.0-alpha5` cycle is open (#1144, #1139).
+
+  `pgcolumnar.zone_map` has to gain a nullable column for the summary that overlap
+  and containment pruning needs, and `1.0-alpha4` is published. Adding the column to a shipped
+  script would leave an existing alpha4 install without it. A fresh install would
+  then have a different catalog from an upgraded one. So the column needs an
+  upgrade script, and the upgrade script needs a version.
+
+  This change opens the version and nothing else. `pgcolumnar--1.0-alpha4--1.0-alpha5.sql`
+  is **empty on purpose**. The work already pointed at alpha5 appends to a file that
+  exists rather than racing to create it. The version bump is then reviewable on its
+  own rather than inside a feature diff.
+
+  The install script is renamed rather than duplicated, which is what opening
+  `1.0-alpha4` did in `4b66555`. One full install script covers the current version,
+  and the older versions are reached through the upgrade chain.
 
 ### Fixed
 

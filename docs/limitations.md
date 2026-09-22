@@ -2,7 +2,7 @@
 
 ## Release status
 
-pgColumnar is pre-release. The version marker is `1.0-alpha4`, recorded in `VERSION`,
+pgColumnar is pre-release. The version marker is `1.0-alpha5`, recorded in `VERSION`,
 and it is tagged `v1.0-alpha3`.
 
 On PGXN the same release is `1.0.0-alpha.3`. The two differ because PGXN requires a

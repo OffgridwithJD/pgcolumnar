@@ -62,7 +62,7 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 EXTDIR="$("$PGC_PG_CONFIG" --sharedir)/extension"
 TARGET="$(sed -n "s/^default_version *= *'\\(.*\\)'.*/\\1/p" "$HERE/../pgcolumnar.control")"
-check "control default_version is 1.0-alpha4" "$TARGET" "1.0-alpha4"
+check "control default_version is 1.0-alpha5" "$TARGET" "1.0-alpha5"
 
 # Stage the frozen old base install scripts so an old-version extension can be
 # created. These are fixtures, not shipped; whatever was there is put back at the
@@ -105,7 +105,7 @@ check "control default_version is 1.0-alpha4" "$TARGET" "1.0-alpha4"
 # from each of them -- so adding a fixture meant editing four places, and editing
 # three of them left an arm passing while testing less than its name claims.
 # Reported by jdatcmd, who counted three; the convergence loop is the fourth.
-_NUC_FIXTURES=(1.0-alpha 1.0-alpha2 1.0-alpha3)
+_NUC_FIXTURES=(1.0-alpha 1.0-alpha2 1.0-alpha3 1.0-alpha4)
 
 # A `.pgcbak` ALREADY HERE MEANS AN EARLIER RUN DIED before its EXIT trap, so the
 # original is in the backup and the install script holds the fixture. Taking the
