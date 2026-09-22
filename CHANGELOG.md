@@ -18,6 +18,31 @@ true until the next version shipped.
 
 ### Fixed
 
+- A header edit did not rebuild, so every header mutation proof ran against a stale
+  object and reported a clean pass (#1158).
+
+  PGXS generates header dependencies only when the server was configured with
+  `--enable-depend`. `autodepend` is empty in the `Makefile.global` of every server
+  this project builds against. `make` therefore saw `src/*.o` as newer than
+  `src/*.c` and rebuilt nothing, however the headers changed. Measured on PG16, in
+  one build directory so the two fingerprints are comparable:
+
+  | | `pgcolumnar.so` after `make`, no `make clean` |
+  | --- | --- |
+  | before, header edited | `2b8bfc2a6d75`, byte-identical to the clean build |
+  | after, header edited | `7cfcb28e9fe3`, moved from `74840637f16c` |
+
+  A vacuous mutation reads as "the code is not load-bearing", which is the most
+  expensive wrong answer a removal proof can give. CI was never affected, because
+  every job builds from a fresh checkout. Local verification is where removal proofs
+  are run.
+
+  The top-level `Makefile` now passes `-MMD -MP` and includes the generated `.d`
+  files, and `make clean` removes them. `objstore/Makefile` does the same for its own
+  object, which includes a header from `src/`. `harness_selftest` part 550 asserts the
+  outcome rather than the Makefile text. The tree it just built has one dependency
+  file per object, 35 of 35, and 25 of them name `columnar.h`.
+
 - `advisory_lock_class` discovered a maximum, so it went green exactly when the
   unique-key class regressed (#1154).
 
