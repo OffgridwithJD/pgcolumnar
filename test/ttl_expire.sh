@@ -473,7 +473,12 @@ for _tz in UTC Pacific/Midway; do
 	          WHERE s.relation_oid = '$_t'::regclass")"
 	_days="$(q "SELECT count(DISTINCT d) FROM $_t")"
 	_perday="$(q "SELECT DISTINCT count(*) FROM $_t GROUP BY d")"
-	check "premise: one date per row group, so no group straddles the cutoff" \
+	# NAMED FOR THE ZONE, like the two arms below it. Without the zone this arm
+	# records two checks under one ledger key, one per loop iteration, and the
+	# gate refuses that for exactly the reason the arm exists: a red in one zone
+	# would be recorded against the other. The gate caught it on the first push,
+	# on both majors, while all 256 suites reported PASS.
+	check "premise: one date per row group in $_tz, so no group straddles the cutoff" \
 		"$([ "${_gr:-0}" = "${_days:-x}" ] && [ "${_perday:-0}" = "1000" ] && echo "one per group" \
 		   || echo "$_gr groups, $_days dates, rows per date [$_perday]")" \
 		"one per group"
