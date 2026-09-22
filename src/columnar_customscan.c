@@ -2720,6 +2720,72 @@ pgcolumnar_parallel_divisor(Path *path)
 }
 
 /*
+ * pgcolumnar_projection_pages
+ *		Physical pages occupied by one named covering projection's row groups.
+ *		rel->pages is the whole relation file (base plus every projection);
+ *		a covering scan reads only this subset.
+ *
+ * The row-group walk is the I/O estimate itself, not a refinement of an
+ * approximate term, so it earns the plan-time scan that
+ * pgcolumnar_written_stripe_row_limit declines: without it the covering path
+ * inherits the whole-file page count and cannot compete honestly.
+ *
+ * fallbackPages is rel->pages. A lookup failure must not make the path look
+ * cheaper than the base scan; returning 1 would.
+ */
+static BlockNumber
+pgcolumnar_projection_pages(Oid relid, const char *projName,
+							BlockNumber fallbackPages)
+{
+	Relation	r;
+	uint64		storageId;
+	uint64		projSid = 0;
+	List	   *projs;
+	ListCell   *lc;
+	List	   *rgs;
+	uint64		bytes = 0;
+	BlockNumber pages;
+	Snapshot	snap;
+
+	r = table_open(relid, AccessShareLock);
+	storageId = PgColumnarStorageId(r);
+	table_close(r, AccessShareLock);
+
+	projs = PgColumnarListProjections(storageId);
+	foreach(lc, projs)
+	{
+		PgColumnarProjection *pr = (PgColumnarProjection *) lfirst(lc);
+
+		if (pr->projectionId > 0 && strcmp(pr->name, projName) == 0)
+		{
+			projSid = pr->projStorageId;
+			break;
+		}
+	}
+	if (projSid == 0)
+		return fallbackPages;	/* lookup failed: do not undercut the base file */
+
+	snap = GetActiveSnapshot();
+	if (snap == NULL)
+		snap = GetTransactionSnapshot();
+	rgs = PgColumnarReadRowGroupList(projSid, PgColumnarCatalogSnapshot(snap));
+	foreach(lc, rgs)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+
+		bytes += COLUMNAR_PAGE_ROUND_UP(rg->byteLength);
+	}
+	pages = (BlockNumber) (bytes / COLUMNAR_BYTES_PER_PAGE);
+	/*
+	 * A real projection occupying less than a page is genuinely near free.
+	 * This 1 is arithmetic, not the lookup-failure path above.
+	 */
+	if (pages < 1)
+		pages = 1;
+	return pages;
+}
+
+/*
  * pgcolumnar_scan_io_run_cost
  *		The page-read portion of a columnar scan, after projected-width
  *		scaling (#171) and zone-map survival (#434). This is the term core
@@ -3090,7 +3156,20 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				projScale = 1.0;
 			if (projScale < 0.0)
 				projScale = 0.0;
-			projRun = serialRun * projScale;
+			{
+				BlockNumber projPages;
+				Cost		ioBase;
+				Cost		ioProj;
+				Cost		cpuRun;
+
+				projPages = pgcolumnar_projection_pages(rte->relid, projName, rel->pages);
+				ioBase = pgcolumnar_scan_io_run_cost(rel, rte->relid);
+				cpuRun = serialRun - ioBase;
+				if (cpuRun < 0.0)
+					cpuRun = 0.0;
+				ioProj = seq_page_cost * (double) projPages * sel;
+				projRun = cpuRun * projScale + ioProj;
+			}
 			ppath->path.startup_cost = serialStartupCost;
 			ppath->path.total_cost = serialStartupCost + projRun;
 			ppath->path.pathkeys = NIL;
@@ -3282,15 +3361,33 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				prpath->path.parallel_safe = true;
 				prpath->path.parallel_workers = workers;
 				/*
-				 * Clamp ioRunProj to projRun. With projRun = serialRun *
-				 * projScale this is unreachable: ioRun was already clamped
-				 * to serialRun one level up, and multiplying both sides by
-				 * the same non-negative projScale preserves the order. It
-				 * becomes live if projRun is ever computed independently
-				 * (for example from the projection's own pages). When the
-				 * clamp binds fully, cpuRunProj is zero and the partial
-				 * covering path totals exactly like the serial covering
-				 * path, so Gather loses.
+				 * Clamp ioRunProj to projRun. #1127 wrote that this was
+				 * unreachable "with projRun = serialRun * projScale", and
+				 * named "computed independently (for example from the
+				 * projection's own pages)" as what would make it live.
+				 * THIS CHANGE IS THAT, so the premise no longer holds and
+				 * the sentence is corrected rather than carried.
+				 *
+				 * IT IS NOT KNOWN TO BE REACHABLE EITHER, and that is a
+				 * measurement rather than an argument. @OffgridwithJD probed
+				 * it: reached three times in projection_parallel.sh and bound
+				 * zero, with margins 24.4794 against 2122.2110 and 0.2473
+				 * against 163.8619; a fixture built to bind it reached once
+				 * and still did not, 0.2504 against 148.2537. Binding needs
+				 *
+				 *     2*ioBase - serialRun > baseSurvival * seq_page_cost * projPages
+				 *
+				 * in which sel cancels, and both attempts moved the margin the
+				 * wrong way, by 87x and then 592x, because
+				 * pgcolumnar_scan_io_run_cost prices only the columns read.
+				 *
+				 * So: the old premise is FALSE, and reachability is UNPROVEN.
+				 * The clamp stays because it is cheap and its absence would be
+				 * a silently negative cpuRunProj.
+				 *
+				 * When the clamp binds fully, cpuRunProj is zero and the
+				 * partial covering path totals exactly like the serial
+				 * covering path, so Gather loses.
 				 */
 				ioRunProj = ioRun * projScale;
 				if (ioRunProj > projRun)
