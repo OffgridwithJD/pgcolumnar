@@ -135,7 +135,7 @@
 # commit they named, `4b66555`, did every one of the things they instructed, and
 # the paragraphs stayed:
 #
-#     cluster_hilbert, recluster_hilbert   defined in pgcolumnar--1.0-alpha4.sql
+#     cluster_hilbert, recluster_hilbert   defined in the install script
 #     registered                           test/run_all_versions.sh
 #     green                                in the matrix, on all five majors
 #

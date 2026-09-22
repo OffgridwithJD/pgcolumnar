@@ -41,7 +41,7 @@ OBJS = \
 	src/columnar_autovacuum.o
 
 EXTENSION = pgcolumnar
-DATA = pgcolumnar--1.0-alpha4.sql pgcolumnar--1.0-dev--1.0-alpha.sql pgcolumnar--1.0-alpha--1.0-alpha2.sql pgcolumnar--1.0-alpha2--1.0-alpha3.sql pgcolumnar--1.0-alpha3--1.0-alpha4.sql
+DATA = pgcolumnar--1.0-alpha5.sql pgcolumnar--1.0-dev--1.0-alpha.sql pgcolumnar--1.0-alpha--1.0-alpha2.sql pgcolumnar--1.0-alpha2--1.0-alpha3.sql pgcolumnar--1.0-alpha3--1.0-alpha4.sql pgcolumnar--1.0-alpha4--1.0-alpha5.sql
 PGFILEDESC = "pgColumnar - column-oriented table access method"
 
 # make installcheck. Not the project's gate -- that is test/run_all_versions.sh,

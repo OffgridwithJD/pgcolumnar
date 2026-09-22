@@ -12,7 +12,7 @@ Issues are the authority on anything being worked now.
 ## Status
 
 pgColumnar is [pre-release](limitations.md#release-status). The version marker is
-`1.0-alpha4`, recorded in `VERSION`. The
+`1.0-alpha5`, recorded in `VERSION`. The
 latest published pre-release is `v1.0-alpha4`. A table `USING pgcolumnar` is stored in the
 native on-disk format, PGCN v1.
 

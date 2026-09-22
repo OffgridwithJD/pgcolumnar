@@ -2,7 +2,7 @@
    "name": "pgcolumnar",
    "abstract": "Analytic column storage for PostgreSQL, built as a native table access method",
    "description": "pgColumnar is a columnar storage table access method for PostgreSQL, written as a clean-room, MIT-licensed implementation. It reads and writes its own native format, PGCN v1, and supports chunk-group skipping from zone maps, bloom filters and star-schema join runtime filters, vectorized aggregation, projections, Z-order and Hilbert clustering, retention, online compaction and reclustering, parallel bulk ingest and export, Apache Arrow and Parquet import and export, Apache Iceberg, and object storage.",
-   "version": "1.0.0-alpha.4",
+   "version": "1.0.0-alpha.5",
    "maintainer": [
       "Joshua D. Drake <jd@commandprompt.com>"
    ],
@@ -10,9 +10,9 @@
    "release_status": "unstable",
    "provides": {
       "pgcolumnar": {
-         "file": "pgcolumnar--1.0-alpha4.sql",
+         "file": "pgcolumnar--1.0-alpha5.sql",
          "docfile": "docs/index.md",
-         "version": "1.0.0-alpha.4",
+         "version": "1.0.0-alpha.5",
          "abstract": "Analytic column storage for PostgreSQL, built as a native table access method"
       }
    },
