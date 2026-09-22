@@ -455,6 +455,28 @@ for _tz in UTC Pacific/Midway; do
 		"$([ "${_want:-0}" -gt 0 ] && [ "${_want:-0}" -lt "${_before:-0}" ] && echo straddles \
 		   || echo "want $_want of $_before")" \
 		"straddles"
+
+	# AND NO GROUP STRADDLES IT, which is what makes the identity below legal.
+	# `expire` keeps a straddling group WHOLE -- the timestamp block above pins
+	# exactly that -- so "survivors == rows at or after the cutoff" is STRONGER
+	# than the contract and holds only on a geometry where every group sits
+	# entirely on one side. That geometry comes from the stripe_row_limit=1000
+	# baked into the cluster config at the top of this file, not from anything
+	# here, so a change to that line must fail as a FIXTURE problem rather than
+	# as a date defect. Asserted from counts, because the zone map stores its
+	# bounds encoded: 6,000 rows inserted in date order, one date per 1,000, land
+	# one date to a group exactly when the group count equals the date count and
+	# every date holds the same 1,000 rows. Raised by @OffgridwithJD, who
+	# measured a straddling group at the default 150,000 and a red arm with it.
+	_gr="$(q "SELECT count(*) FROM pgcolumnar.storage s
+	          JOIN pgcolumnar.row_group rg USING (storage_id)
+	          WHERE s.relation_oid = '$_t'::regclass")"
+	_days="$(q "SELECT count(DISTINCT d) FROM $_t")"
+	_perday="$(q "SELECT DISTINCT count(*) FROM $_t GROUP BY d")"
+	check "premise: one date per row group, so no group straddles the cutoff" \
+		"$([ "${_gr:-0}" = "${_days:-x}" ] && [ "${_perday:-0}" = "1000" ] && echo "one per group" \
+		   || echo "$_gr groups, $_days dates, rows per date [$_perday]")" \
+		"one per group"
 	check "expire in $_tz keeps exactly the rows at or after that session's cutoff" \
 		"$_after" "$_want"
 	check "and no row older than $_tz's own cutoff survives" "$_below" "0"
