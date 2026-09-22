@@ -16,27 +16,31 @@ Row sets are compared as sorted tuples in Python rather than through `pgc_set_ha
 That keeps the two harnesses independent by construction, and a failure prints the
 rows that differ instead of two unequal hashes.
 
-THE FIXTURE IS FRAGMENTED ON PURPOSE, AND THAT IS THE WHOLE DIFFERENCE. The shell
-suite's fixture cannot reach the defect it is the regression guard for. Measured:
-delete the #84 fix, and the shell suite reports 12 passed / 0 failed, unchanged.
+COALESCING OFF IS THE WHOLE DIFFERENCE, AND IT IS NOT THE FRAGMENTATION. Delete the
+#84 fix and the old shell fixture reported 12 passed / 0 failed, unchanged. An earlier
+version of this docstring said a one-row free list was the reason, and that account is
+wrong.
 
-The reason is `pgcolumnar.reclaim_coalesce`, which defaults ON. Compaction then merges
-adjacent freed ranges, so the free list holds one or two rows however much is freed,
-one command allocates from it at most once, and the just-consumed row is never
-re-selected. Measured on the shell suite's own fixture, per cycle:
+`pgcolumnar.reclaim_coalesce` does TWO things. It merges adjacent freed ranges, and it
+carries its own `CommandCounterIncrement` on the free path -- `columnar_metadata.c:792`,
+guarded by `if (pgcolumnar_reclaim_coalesce)`. That second one does the visibility work
+the #84 fix would otherwise do, so with coalescing on the defect is masked however
+fragmented the list is.
 
-        free_space rows before compact_rewrite:  0, 1, 2, 2, 2
+Isolated by freeing ALTERNATE whole groups, which fragments by non-adjacency and leaves
+the option at its default. On the same mutated build:
 
-With coalescing OFF the same workload keeps the ranges separate and the precondition
-holds. Two cells, each built from its own source and printing its own `.so` hash:
+        alternate groups, coalesce=on    free list 15, rewrote 15    CLEAN
+        contiguous block, coalesce=off   free list 18, rewrote 12    tuple already
+                                                                     updated by self
 
-        fix present (.so e95880e45673)   3 cycles, no error, free list steady at 18
-        fix removed (.so 42bb17933a55)   first compact_rewrite raises
-                                         "tuple already updated by self"
+Fifteen fragments with coalescing on does not reach it. So the option is necessary and
+sufficient, and the free-list count is a property of the fixture rather than the thing
+that arms the suite.
 
-So this file runs its cycles with coalescing off, and asserts the free list is
-actually fragmented before relying on it. That premise is what keeps the suite from
-going quietly vacuous again if the allocator's shape changes.
+So this file runs its cycles with coalescing off and asserts THAT, read back from the
+server rather than assumed from the `SET` that asked for it. The free-list count is
+printed. The shell twin asserts the same property under the same name.
 """
 import psycopg
 
@@ -106,10 +110,14 @@ def test_native_reclaim_cycles(pgc_conn, expect):
     # THE PRECONDITION FOR #84, ASSERTED RATHER THAN HOPED FOR. With a free list of
     # one row -- which is what coalescing produces -- no command allocates from it
     # twice and every arm below passes on a build with the fix removed.
-    expect.at_least(
-        free, 5,
-        "premise: the free list is fragmented, so one command allocates from it "
-        "more than once",
+    # THE PRECONDITION FOR #84, AND IT IS THE OPTION. Read back from the server,
+    # because a `SET` that silently stopped applying leaves every arm below passing
+    # on a build with the fix removed -- which is the state this suite was in before
+    # #1138. The free-list count above is printed rather than asserted: 15 fragments
+    # with coalescing ON do not reach the defect.
+    expect.text(
+        _one(pgc_conn, "SHOW pgcolumnar.reclaim_coalesce"), "off",
+        "premise: coalescing is off, which is what lets this suite reach #84",
     )
 
     expect.rows(_rows(pgc_conn, "n"), _rows(pgc_conn, "h"), "initial parity")

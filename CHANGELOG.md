@@ -112,6 +112,39 @@ true until the next version shipped.
 
 ### Fixed
 
+- `native_reclaim_cycles` could not reach the defect it guards (#1138).
+
+  It is the declared regression guard for #84. Deleting the #84 fix left it reporting
+  `12 passed + 0 failed`, arm for arm, including the arm named after the defect.
+
+`pgcolumnar.reclaim_coalesce` defaults on, and it does two things: it merges
+  adjacent freed ranges, and it carries its own `CommandCounterIncrement` on the free
+  path. That second one does the visibility work the #84 fix would otherwise do, so
+  with coalescing on the defect is masked.
+
+  Isolated by freeing alternate whole groups, which fragments by non-adjacency and
+  leaves the option at its default. On the same mutated build:
+
+  | fixture | coalesce | free list | rewrote | result |
+  | --- | --- | ---: | ---: | --- |
+  | alternate groups | on | 15 | 15 | clean |
+  | contiguous block | off | 18 | 12 | `tuple already updated by self` |
+
+  Fifteen fragments with coalescing on does not reach it. The option is necessary and
+  sufficient, and the free-list count is a property of the fixture. The suite runs with coalescing
+  off and **asserts that, read back from the server**. The value is set in the cluster
+  config. A conf line that stops taking effect returns the suite to the state this
+  issue is about. With the #84 fix removed it reddens five
+  arms with `ERROR: tuple already updated by self`.
+
+  The pytest twin says the same thing under the same name. It asserts the option read
+  back from the server, rather than assumed from the `SET` that asked for it. The parity
+  grader is what caught the divergence. It graded the pair `1` while every other pair
+  was `0`, on a difference of meaning rather than of counts.
+
+  Found by @OffgridwithJD, whose pytest twin already had the fixture and who then
+  separated the two factors.
+
 - A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
 
   Python does not run `finally` blocks when the default `SIGTERM` disposition

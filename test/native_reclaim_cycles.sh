@@ -21,21 +21,88 @@
 # Written fresh for pgColumnar.
 
 set -uo pipefail
+
+# COALESCING OFF, OR THIS SUITE CANNOT REACH THE DEFECT IT GUARDS (#1138).
+# Delete the #84 fix, rebuild, and the old fixture reported 12 passed + 0 failed,
+# arm for arm -- including `compact_rewrite cycle N returns a count (no
+# self-conflict)`, the arm named after the defect. Found by @OffgridwithJD.
+#
+# THE OPERATIVE PROPERTY IS THE GUC, NOT A FRAGMENTED FREE LIST, and the first
+# version of this comment said the opposite. `reclaim_coalesce` does two things:
+# it merges adjacent freed ranges, AND it carries its own CommandCounterIncrement
+# on the free path (columnar_metadata.c:792, `if (pgcolumnar_reclaim_coalesce)`).
+# That second one does the visibility work the #84 fix would otherwise do, so
+# with coalescing on the defect is masked however fragmented the list is.
+#
+# Isolated by freeing ALTERNATE whole groups, which fragments by non-adjacency
+# and leaves the GUC at its default. On the same mutated .so:
+#
+#     alternate groups, coalesce=on    free list 15, rewrote 15    CLEAN
+#     contiguous block, coalesce=off   free list 18, rewrote 12    tuple already
+#                                                                  updated by self
+#
+# Fifteen fragments with coalescing on does not reach it. So coalesce=off is
+# necessary and sufficient, and the free-list count is a property of the fixture
+# rather than the thing that arms the suite. @OffgridwithJD separated the two
+# factors; the first version of this comment would have told the next maintainer
+# to preserve the wrong one.
+#
+# IN THE CLUSTER CONFIG, NOT A `SET`. Every psql_run here is its own session, so a
+# SET would last exactly one statement and the writing session would not have it.
+PGC_EXTRA_CONF="${PGC_EXTRA_CONF:-}
+pgcolumnar.reclaim_coalesce=off"
+export PGC_EXTRA_CONF
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-# 8000 rows in 8 groups of 1000, so each compaction rewrites several groups and
-# each command performs several free-space allocations.
-GEN="SELECT g AS id, (g % 100) AS v, md5(g::text) AS payload FROM generate_series(1, 8000) g"
+# 30,000 rows in groups of 1,000, then a CONTIGUOUS block of whole groups freed
+# at once. That is what puts many separate reusable ranges on the free list; a
+# rotating slice frees a little from every group and coalesces back to one range.
+ROWS=30000
+GROUP=1000
+DEL_LO=6001
+DEL_HI=24000
+GEN="SELECT g AS id, (g % 100) AS v, md5(g::text) AS payload FROM generate_series(1, $ROWS) g"
 psql_run "CREATE TABLE h (id int, v int, payload text);"
 psql_run "CREATE TABLE n (id int, v int, payload text) USING pgcolumnar;"
-psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => 1000, chunk_group_row_limit => 1000);"
+psql_run "SELECT pgcolumnar.set_options('n', stripe_row_limit => $GROUP, chunk_group_row_limit => $GROUP);"
 psql_run "INSERT INTO h $GEN;"
 psql_run "INSERT INTO n $GEN;"
 
 fsize() { q "SELECT pg_relation_size('n');"; }
 hash_n() { pgc_set_hash 'SELECT id, v, payload FROM n'; }
 hash_h() { pgc_set_hash 'SELECT id, v, payload FROM h'; }
+
+free_rows() { q "SELECT count(*) FROM pgcolumnar.free_space
+                 WHERE storage_id = pgcolumnar.get_storage_id('n');"; }
+
+# SEVERAL GROUPS, OR ONE COMMAND CANNOT ALLOCATE TWICE. Read back from the
+# catalog rather than assumed from the option that asked for it.
+_groups="$(q "SELECT count(*) FROM pgcolumnar.storage s
+              JOIN pgcolumnar.row_group rg USING (storage_id)
+              WHERE s.relation_oid = 'n'::regclass;")"
+check "premise: the table has several row groups to rewrite" \
+	"$([ "${_groups:-0}" -ge 2 ] && echo "many ($_groups)" || echo "TOO FEW ($_groups)")" \
+	"many ($_groups)"
+
+# Free a large CONTIGUOUS block of whole groups and compact, which is what puts
+# many separate reusable ranges on the free list.
+psql_run "DELETE FROM h WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
+psql_run "DELETE FROM n WHERE id BETWEEN $DEL_LO AND $DEL_HI;"
+psql_run "SELECT pgcolumnar.compact('n');"
+_free="$(free_rows)"
+
+# THE PRECONDITION FOR #84, ASSERTED RATHER THAN HOPED FOR, AND IT IS THE GUC.
+# Read back from the SERVER, because the value is set in the cluster config: a
+# conf line that stops taking effect leaves every arm below passing on a build
+# with the fix removed, which is the state this suite was in before #1138.
+check "premise: coalescing is off, which is what lets this suite reach #84" \
+	"$(q "SHOW pgcolumnar.reclaim_coalesce;")" "off"
+
+# The free list's shape, PRINTED rather than asserted. It is a property of the
+# fixture and not what arms the suite: 15 fragments with coalescing ON do not
+# reach the defect.
+echo "  (free_space rows after the block delete: $_free)"
 
 check "initial parity" "$(hash_n)" "$(hash_h)"
 
