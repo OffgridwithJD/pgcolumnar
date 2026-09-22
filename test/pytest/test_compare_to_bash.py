@@ -93,6 +93,7 @@ COMPLETE = ["advisory_lock_class",
             "encode_post_codec",
             "hilbert_cluster",
             "hilbert_locality",
+            "iceberg_fdw",
             "index_am_support",
             "index_fetch_penalty_crossover",
             "index_fetch_penalty_width",
@@ -125,21 +126,7 @@ COMPLETE = ["advisory_lock_class",
 # stem -> why it does not yet reach zero. Empty today, and an entry here is a claim
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
-INCOMPLETE = {
-    "iceberg_fdw":
-        "75 of its 76 bash names are asserted. The one that is not is `python3 is "
-        "needed`, and since #1131 the reason is no longer the harness contract -- "
-        "`cannot_run` now carries a check name, which is how `iceberg warehouse data "
-        "files are missing` moved from MISSING to matched. What remains is that the "
-        "bash gate guards a dependency THIS PORT DOES NOT HAVE: the shell suite runs "
-        "`python3 -c 'import json'` and then never uses python3 again (one occurrence "
-        "in the file, the gate itself), while the port reads the committed warehouses "
-        "directly. Naming a refusal after a dependency the port does not need would "
-        "assert a precondition that is always met, which is the same dishonesty this "
-        "entry was created to avoid. Filed separately as a vestigial gate in the shell "
-        "suite; if it is removed there, this pair reaches zero and moves to COMPLETE.",
-}
-
+INCOMPLETE = {}
 
 
 def _names(src):

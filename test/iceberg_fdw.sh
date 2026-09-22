@@ -19,7 +19,6 @@ set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
-python3 -c 'import json' 2>/dev/null || pgc_skip python "python3 is needed"
 FX="$(dirname "${BASH_SOURCE[0]}")/fixtures/iceberg"
 WH="$FX/warehouse"
 [ -f "$(ls "$WH"/db/events/data/*/*.parquet 2>/dev/null | head -1)" ] \
