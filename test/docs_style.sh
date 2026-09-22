@@ -339,6 +339,99 @@ check "every document names the same latest published pre-release" \
 	   || printf 'DISAGREE:%s' "$(printf '%s' "$_pubvers" | tr '\n' ',' | sed 's/,$//')")" \
 	"$(printf '%s\n' "$_pubvers" | head -1)"
 
+# ---- and the UPGRADE CHAIN, which is a fourth place a version is written ----
+#
+# Two documents tell a reader which installed versions one `ALTER EXTENSION
+# pgcolumnar UPDATE` can start from, and which version it arrives at. Both facts
+# are knowable from the tree: the shipped `pgcolumnar--A--B.sql` files give the
+# set of starting versions, and `pgcolumnar.control` gives the arrival.
+#
+# Neither was compared against anything. Opening the `1.0-alpha5` cycle bumped
+# VERSION, the control file, the badge and META.json, and every check above went
+# green, while CHANGELOG.md kept saying that the chain starts at four versions
+# and arrives at `1.0-alpha4`. Five ship and it arrives at `1.0-alpha5`.
+#
+# THE TWO ERRORS CANCEL IF YOU COUNT, which is why this reads the two claims
+# separately. CHANGELOG.md named `1.0-alpha4` once too few as a source and once
+# too many as the destination, so the set of versions in the sentence was exactly
+# right. A rule comparing that set against the tree would have passed on a
+# sentence in which both halves were wrong.
+#
+# SCOPED TO THE SENTENCE, not the paragraph. The surrounding paragraph in
+# docs/installation.md also names the destination twice in prose that is correct,
+# so a paragraph-wide reading counts the destination as a starting version.
+_upgsrc="$(ls "$SRCDIR"/pgcolumnar--*--*.sql 2>/dev/null \
+	| sed 's|.*/pgcolumnar--||; s|\.sql$||; s|--.*||' \
+	| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+check "premise: the tree ships upgrade scripts to derive the chain from" \
+	"$([ -n "$_upgsrc" ] && echo yes || echo no)" "yes"
+
+_defver="$(sed -n "s/^[[:space:]]*default_version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+	"$SRCDIR/pgcolumnar.control")"
+check "premise: the control file names a default_version to arrive at" \
+	"$([ -n "$_defver" ] && echo yes || echo no)" "yes"
+
+# ONE SENTENCE PER FILE, and the count is checked rather than assumed: `grep -m1`
+# reads the first and a second would go unread, which is the silent half of the
+# same shape the published-release arm above was bitten by.
+_upg_claim() {	# _upg_claim FILE -> the sentence making the upgrade-chain claim
+	tr '\n' ' ' < "$1" | sed 's/\. /.\n/g' \
+		| grep -m1 -E 'previously (shipped|published) version'
+}
+_upg_claims() {	# _upg_claims FILE -> how many sentences make it
+	tr '\n' ' ' < "$1" | sed 's/\. /.\n/g' \
+		| grep -cE 'previously (shipped|published) version'
+}
+# The destination is removed before the starting versions are collected, because
+# the two claims share one sentence and each has its own arm below.
+_upg_sources() {
+	_upg_claim "$1" | sed 's/reaches `[^`]*`//g' \
+		| grep -oE '`1\.0-[a-z0-9]+`' | tr -d '`' \
+		| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+_upg_target() {
+	_upg_claim "$1" | grep -oE 'reaches `[^`]*`' | sed 's/reaches `//; s/`$//' \
+		| LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+_upgdocs="$(grep -rlE 'previously (shipped|published) version' \
+	"$SRCDIR/CHANGELOG.md" "$SRCDIR/README.md" "$SRCDIR/docs" 2>/dev/null | LC_ALL=C sort)"
+check "premise: at least one document states the upgrade chain" \
+	"$([ -n "$_upgdocs" ] && echo yes || echo no)" "yes"
+
+# NAMED WITH ITS REASON, not just named. A file this rule cannot read is the way
+# the rule goes quiet, so the arm says which half was missing rather than leaving
+# a reader to rediscover it.
+_upgunread=""
+for _d in $_upgdocs; do
+	_b="$(basename "$_d")"
+	[ "$(_upg_claims "$_d")" = 1 ] || _upgunread="$_upgunread $_b:claims=$(_upg_claims "$_d")"
+	[ -n "$(_upg_sources "$_d")" ] || _upgunread="$_upgunread $_b:no-starting-versions"
+	[ -n "$(_upg_target "$_d")" ] || _upgunread="$_upgunread $_b:no-destination"
+done
+check "every document stating the upgrade chain states it in a form this rule can read" \
+	"$(printf '%s' "$_upgunread" | sed 's/^ //')" ""
+
+# BOTH SIDES CARRY THE VERSIONS (#1164). An arm that names only the offending
+# file reports which document is wrong and not what is wrong with it, and the
+# reader then has to re-derive the tree's own answer to find out.
+_upggot=""
+_upgwant=""
+for _d in $_upgdocs; do
+	_upggot="$_upggot $(basename "$_d")=[$(_upg_sources "$_d")]"
+	_upgwant="$_upgwant $(basename "$_d")=[$_upgsrc]"
+done
+check "every such document names the versions the shipped upgrade scripts start from" \
+	"${_upggot# }" "${_upgwant# }"
+
+_upggot=""
+_upgwant=""
+for _d in $_upgdocs; do
+	_upggot="$_upggot $(basename "$_d")=[$(_upg_target "$_d")]"
+	_upgwant="$_upgwant $(basename "$_d")=[$_defver]"
+done
+check "every such document names default_version as the version one UPDATE reaches" \
+	"${_upggot# }" "${_upgwant# }"
 # ---- and META.json, which NOTHING read at all ------------------------------
 #
 # `META.json` is the PGXN distribution metadata. It hardcodes the version TWICE

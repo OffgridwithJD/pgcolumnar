@@ -115,9 +115,9 @@ A physical copy does not replace the source across a version change.
 The same posture covers the extension's own catalog, not only the on-disk data
 format. The install script of a build defines the `pgcolumnar` catalog tables for a fresh
 `CREATE EXTENSION`. An `ALTER EXTENSION UPDATE` script ships when a build needs one.
-Three such scripts ship today: 1.0-dev to 1.0-alpha, 1.0-alpha to 1.0-alpha2, and
-1.0-alpha2 to 1.0-alpha3. A single `ALTER EXTENSION pgcolumnar UPDATE` walks the
-chain from any of them.
+One `ALTER EXTENSION pgcolumnar UPDATE` reaches `1.0-alpha5` from every
+previously shipped version: `1.0-dev`, `1.0-alpha`, `1.0-alpha2`, `1.0-alpha3`
+and `1.0-alpha4`. PostgreSQL applies the shipped scripts in sequence.
 
 **Replacing the shared library is not sufficient on its own.** After installing a new
 build, run `ALTER EXTENSION pgcolumnar UPDATE;` in every database that has the extension.
