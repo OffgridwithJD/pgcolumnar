@@ -18,6 +18,41 @@ true until the next version shipped.
 
 ### Added
 
+- Range columns prune on overlap and containment (#1144).
+
+  A zone map recorded `minimum` and `maximum` only. Those are the range type's own
+  btree ordering, which sorts by lower bound and then upper bound, so the largest
+  range is not the one reaching furthest right. A chunk holding `[1,2)` and
+  `[3,100)` has the same `maximum` as one holding `[1,2)` and `[3,4)`. Neither
+  `&&` nor `@>` could be answered from that, so both read every chunk group.
+
+  `zone_map` gains `max_upper`, the greatest upper bound in the unit. It is a
+  `bytea` with three states, because two cannot express what a reader needs:
+
+  | value | meaning | pruning |
+  | --- | --- | --- |
+  | NULL | no summary was recorded | do not prune |
+  | zero length | the unit holds a range unbounded above | do not prune |
+  | any other length | the bound, in the element type's encoding | may prune |
+
+  Every row written before this column existed reads as NULL, so an upgraded
+  install prunes nothing until its data is rewritten, and never prunes wrongly.
+
+  Measured on 200,000 rows in 20 chunk groups, `tstzrange` over three months:
+
+  | fixture | groups read, before | groups read, after |
+  | --- | ---: | ---: |
+  | clustered on the range | 20 | 1 |
+  | scattered | 20 | 20 |
+
+  The scattered result is the documented one, not a shortfall. Every group holds
+  a bound near the maximum, so no summary can exclude any of them.
+  `docs/limitations.md` states which predicates prune and which do not.
+
+  The column is added in `pgcolumnar--1.0-alpha4--1.0-alpha5.sql` and in
+  `pgcolumnar--1.0-alpha5.sql`, so a fresh install and an upgraded one converge.
+  `test/native_upgrade_converge.sh` is what asserts that.
+
 - `pgcolumnar.expire` accepts a `date` retention column (#1135).
 
   `ttl_column` took `timestamp` or `timestamptz` only. `date` is not an unsupported

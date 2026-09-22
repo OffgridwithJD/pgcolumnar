@@ -30,6 +30,7 @@
 #include "commands/defrem.h"
 #include "miscadmin.h"
 #include "utils/lsyscache.h"
+#include "utils/rangetypes.h"
 #include "port/atomics.h"
 #include "port/pg_bitutils.h"
 #include "utils/memutils.h"
@@ -69,6 +70,37 @@ typedef struct SkipPredicate
 	 */
 	uint64		excludes;
 	bool		runtimeFilter;	/* owned by the join runtime filter */
+
+	/*
+	 * Range overlap and containment (#1144). These operators live in a GiST
+	 * opfamily, so get_op_opfamily_strategy against the btree family returns
+	 * InvalidStrategy and the qual never became a key at all -- measured: 0
+	 * pushed-down filters, 0 zone map probes, 199,881 rows removed after
+	 * decoding. The zone map's min/max cannot answer them either, because the
+	 * range btree ordering sorts by lower bound and does not bound overlap.
+	 *
+	 * What answers them is the least lower bound and the greatest upper bound of
+	 * the unit. The first comes from the stored `minimum`, which is a whole
+	 * RANGE value and therefore carries its own inclusivity; the second is the
+	 * max_upper column P1 added, which stores the VALUE only.
+	 *
+	 * BECAUSE max_upper CARRIES NO INCLUSIVITY, the upper-side test is
+	 * deliberately conservative: it prunes on a strict inequality, and on
+	 * equality only when the probe's own bound makes it safe. The case it gives
+	 * up is a unit ending exactly where the probe begins, which is a
+	 * measure-zero coincidence on the corpora this was measured against.
+	 */
+	bool		rangePred;
+	int			rangeKind;		/* PGC_RANGE_OVERLAP or PGC_RANGE_CONTAINS_ELEM */
+	RangeBound	probeLower;		/* the probe's bounds, for OVERLAP */
+	RangeBound	probeUpper;
+	bool		probeEmpty;
+	Datum		probeElem;		/* the probed point, for CONTAINS_ELEM */
+	FmgrInfo	elemCmpFn;		/* the range's ELEMENT comparison */
+	Oid			elemCollation;
+	bool		elemByVal;
+	int16		elemLen;
+	TypeCacheEntry *rangeTce;	/* to deserialize the stored minimum */
 } SkipPredicate;
 
 struct PgColumnarReadState
@@ -328,19 +360,37 @@ pgcolumnar_group_is_restricted_in(PgColumnarReadState *rs, uint64 groupNumber)
 void
 PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 {
-	if (att->attbyval)
+	PgColumnarEncodeValueByLen(buf, att->attbyval, att->attlen, value);
+}
+
+
+/*
+ * PgColumnarEncodeValueByLen
+ *		The same encoding, for a value with no Form_pg_attribute of its own.
+ *
+ * A range column's zone map records the greatest upper bound among its values
+ * (#1144), and that bound is a value of the range's SUBTYPE: a timestamptz for
+ * a tstzrange column. There is no attribute to describe it, only the element
+ * type's byval and len out of the type cache. Splitting the body rather than
+ * copying it keeps ONE encoding: a second copy is a second thing to keep in step
+ * with the reader.
+ */
+void
+PgColumnarEncodeValueByLen(StringInfo buf, bool byval, int16 len, Datum value)
+{
+	if (byval)
 	{
 		char		tmp[8];
 
-		Assert(att->attlen >= 1 && att->attlen <= 8);
-		store_att_byval(tmp, value, att->attlen);
-		appendBinaryStringInfo(buf, tmp, att->attlen);
+		Assert(len >= 1 && len <= 8);
+		store_att_byval(tmp, value, len);
+		appendBinaryStringInfo(buf, tmp, len);
 	}
-	else if (att->attlen > 0)
+	else if (len > 0)
 	{
-		appendBinaryStringInfo(buf, DatumGetPointer(value), att->attlen);
+		appendBinaryStringInfo(buf, DatumGetPointer(value), len);
 	}
-	else if (att->attlen == -1)
+	else if (len == -1)
 	{
 		struct varlena *detoasted =
 			pg_detoast_datum((struct varlena *) DatumGetPointer(value));
@@ -354,7 +404,7 @@ PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att, Datum value)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("columnar phase 1 does not support column type with attlen %d",
-						att->attlen)));
+						len)));
 	}
 }
 
@@ -368,30 +418,47 @@ Datum
 PgColumnarDecodeValue(Form_pg_attribute att, char **cursor, const char *end,
 					MemoryContext targetContext)
 {
+	return PgColumnarDecodeValueByLen(att->attbyval, att->attlen, cursor, end,
+									  targetContext);
+}
+
+
+/*
+ * PgColumnarDecodeValueByLen
+ *		The same decoding, for a value with no Form_pg_attribute of its own.
+ *
+ * The zone map's range upper bound (#1144) is a value of the range's ELEMENT
+ * type, described only by the type cache's byval and len. Splitting the body
+ * rather than copying it keeps ONE decoding beside the one encoding.
+ */
+Datum
+PgColumnarDecodeValueByLen(bool byval, int16 len, char **cursor, const char *end,
+						   MemoryContext targetContext)
+{
 	char	   *p = *cursor;
 	Datum		result;
 
-	if (att->attbyval)
+	if (byval)
 	{
-		if (p + att->attlen > end)
+		if (p + len > end)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
-		result = fetch_att(p, true, att->attlen);
-		*cursor = p + att->attlen;
+		result = fetch_att(p, true, len);
+		*cursor = p + len;
 	}
-	else if (att->attlen > 0)
+	else if (len > 0)
 	{
 		char	   *copy;
 
-		if (p + att->attlen > end)
+		if (p + len > end)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("pgcolumnar: fixed-length value runs past the value stream end")));
-		copy = MemoryContextAlloc(targetContext, att->attlen);
-		memcpy(copy, p, att->attlen);
+		copy = MemoryContextAlloc(targetContext, len);
+		memcpy(copy, p, len);
 		result = PointerGetDatum(copy);
-		*cursor = p + att->attlen;
+		*cursor = p + len;
 	}
 	else
 	{
@@ -690,6 +757,77 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 			continue;
 		if (key->sk_attno < 1 || key->sk_attno > natts)
 			continue;
+		/*
+		 * A range overlap or containment key (#1144). It carries no btree
+		 * strategy -- those operators are GiST -- so it is recognised by the
+		 * private flag and built here rather than falling through the
+		 * strategy check below, which would drop it.
+		 */
+		if (key->sk_flags & PGC_SK_RANGE)
+		{
+			SkipPredicate *p = &out[n];
+			Form_pg_attribute rangeAtt;
+			TypeCacheEntry *rtce;
+			TypeCacheEntry *etce;
+
+			if (key->sk_attno < 1 || key->sk_attno > natts)
+				continue;
+			rangeAtt = TupleDescAttr(tupdesc, key->sk_attno - 1);
+			if (!type_is_range(rangeAtt->atttypid))
+				continue;
+
+			rtce = lookup_type_cache(rangeAtt->atttypid, TYPECACHE_RANGE_INFO);
+			if (rtce->rngelemtype == NULL)
+				continue;
+			etce = lookup_type_cache(rtce->rngelemtype->type_id,
+									 TYPECACHE_CMP_PROC_FINFO);
+			if (!OidIsValid(etce->cmp_proc_finfo.fn_oid))
+				continue;
+
+			memset(p, 0, sizeof(SkipPredicate));
+			p->attidx = key->sk_attno - 1;
+			p->rangePred = true;
+			p->rangeKind = key->sk_strategy;
+			p->rangeTce = rtce;
+			/*
+			 * THE RANGE'S OWN COLLATION, not the element type's. A range
+			 * compares under the collation it was DECLARED with, which the
+			 * type cache carries as rng_collation; the element type's
+			 * typcollation is a different value. Taking the element's made
+			 * the writer summarise under one ordering and the reader prune
+			 * under another, and the scan MISSED ROWS -- a wrong answer
+			 * rather than an error. Unreachable with a built-in range type,
+			 * whose subtypes are all non-collatable. Found by @jdatcmd.
+			 */
+			p->elemCollation = rtce->rng_collation;
+			p->elemByVal = etce->typbyval;
+			p->elemLen = etce->typlen;
+			fmgr_info_copy(&p->elemCmpFn, &etce->cmp_proc_finfo, cx);
+
+			if (key->sk_strategy == PGC_RANGE_OVERLAP)
+			{
+				RangeType  *probe = DatumGetRangeTypeP(key->sk_argument);
+
+				range_deserialize(rtce, probe, &p->probeLower, &p->probeUpper,
+								  &p->probeEmpty);
+				/*
+				 * An EMPTY probe overlaps nothing at all, so every unit could be
+				 * skipped -- but the executor's own qual will return no rows
+				 * anyway and a predicate that excludes everything is exactly the
+				 * shape a mistake hides in. It is left unbuilt.
+				 */
+				if (p->probeEmpty)
+					continue;
+			}
+			else if (key->sk_strategy == PGC_RANGE_CONTAINS_ELEM)
+				p->probeElem = key->sk_argument;
+			else
+				continue;
+
+			n++;
+			continue;
+		}
+
 		if (key->sk_strategy < BTLessStrategyNumber ||
 			key->sk_strategy > BTGreaterStrategyNumber)
 			continue;
@@ -1352,6 +1490,20 @@ native_value_satisfies(SkipPredicate *pred, Datum val)
 {
 	int32		c;
 
+	/*
+	 * A RANGE predicate is not a value comparison (#1144) and has no cmpFn: its
+	 * comparison is between the range's ELEMENT bounds, which this function has
+	 * no access to. Calling through the zeroed FmgrInfo segfaulted the backend,
+	 * measured on `span && tstzrange(...)` before this line existed.
+	 *
+	 * "Cannot rule this out" is the safe answer and the one this function's own
+	 * contract gives for anything it does not recognise, because the caller
+	 * turns a false into a SKIPPED VECTOR. Overlap is decided by the zone map
+	 * path, which has the bounds.
+	 */
+	if (pred->rangePred)
+		return true;
+
 	if (pred->searchArray)
 	{
 		int			i;
@@ -1525,6 +1677,121 @@ pgcolumnar_native_refine_skipvec(PgColumnarReadState *rs, int vecCount)
  *		whole-chunk (group) and per-vector skipping (native spec 7.1). Decodes the
  *		stored min/max in cx.
  */
+/*
+ * native_range_excludes
+ *		The overlap and containment half of native_zone_excludes (#1144).
+ *
+ * Two facts decide it, and neither is the btree maximum:
+ *
+ *     the unit's LEAST LOWER BOUND   from the stored `minimum`, which is a whole
+ *                                    RANGE value and carries its inclusivity
+ *     the unit's GREATEST UPPER      the max_upper column, which stores the
+ *                                    VALUE only
+ *
+ * `span && [lo,hi)` cannot match this unit when every value ends at or before
+ * lo, or when every value starts at or after hi. `span @> point` cannot match
+ * when the point is at or after every upper bound, or strictly before every
+ * lower bound.
+ *
+ * CONSERVATIVE ON THE UPPER SIDE, deliberately. max_upper carries no
+ * inclusivity, so a unit whose greatest upper bound EQUALS the probe's lower
+ * bound is not pruned unless the probe's own bound settles it: an inclusive
+ * upper at x does overlap a probe starting inclusively at x, and the stored
+ * value cannot tell the two apart. Strict inequality is always safe, and the
+ * case given up is a unit ending exactly where the probe begins.
+ *
+ * NEVER PRUNES WITHOUT A SUMMARY: no zone map, no min/max, no max_upper, or a
+ * max_upper recording an unbounded range all return false. An unbounded value
+ * reaches every probe to its right, which is exactly why it is recorded as its
+ * own state rather than as an absent bound.
+ */
+static bool
+native_range_excludes(SkipPredicate *pred, Form_pg_attribute att,
+					  NativeZoneMapMetadata *z, MemoryContext cx)
+{
+	char	   *cur;
+	Datum		minv;
+	RangeBound	unitLower;
+	RangeBound	unitUpper;
+	bool		unitEmpty;
+	Datum		maxUpper = (Datum) 0;
+	bool		haveUpper;
+	int32		c;
+
+	if (z == NULL || !z->hasMinMax)
+		return false;
+
+	haveUpper = (z->hasMaxUpper && !z->upperUnbounded &&
+				 z->maxUpper != NULL && z->maxUpperLen > 0);
+
+	cur = (char *) z->minimum;
+	minv = PgColumnarDecodeValue(att, &cur, z->minimum + z->minimumLen, cx);
+	range_deserialize(pred->rangeTce, DatumGetRangeTypeP(minv),
+					  &unitLower, &unitUpper, &unitEmpty);
+	if (unitEmpty)
+		return false;			/* the smallest value says nothing about the rest */
+
+	if (haveUpper)
+	{
+		char	   *ucur = (char *) z->maxUpper;
+
+		maxUpper = PgColumnarDecodeValueByLen(pred->elemByVal, pred->elemLen,
+											  &ucur,
+											  z->maxUpper + z->maxUpperLen, cx);
+	}
+
+	if (pred->rangeKind == PGC_RANGE_OVERLAP)
+	{
+		/* every value ends before the probe starts */
+		if (haveUpper && !pred->probeLower.infinite)
+		{
+			c = DatumGetInt32(FunctionCall2Coll(&pred->elemCmpFn,
+												pred->elemCollation,
+												maxUpper,
+												pred->probeLower.val));
+			if (c < 0 || (c == 0 && !pred->probeLower.inclusive))
+				return true;
+		}
+
+		/* every value starts at or after the probe ends */
+		if (!unitLower.infinite && !pred->probeUpper.infinite)
+		{
+			c = DatumGetInt32(FunctionCall2Coll(&pred->elemCmpFn,
+												pred->elemCollation,
+												unitLower.val,
+												pred->probeUpper.val));
+			if (c > 0 ||
+				(c == 0 && !(unitLower.inclusive && pred->probeUpper.inclusive)))
+				return true;
+		}
+		return false;
+	}
+
+	if (pred->rangeKind == PGC_RANGE_CONTAINS_ELEM)
+	{
+		if (haveUpper)
+		{
+			c = DatumGetInt32(FunctionCall2Coll(&pred->elemCmpFn,
+												pred->elemCollation,
+												maxUpper, pred->probeElem));
+			if (c < 0)
+				return true;	/* the point is past every upper bound */
+		}
+		if (!unitLower.infinite)
+		{
+			c = DatumGetInt32(FunctionCall2Coll(&pred->elemCmpFn,
+												pred->elemCollation,
+												unitLower.val, pred->probeElem));
+			if (c > 0)
+				return true;	/* the point is before every lower bound */
+		}
+		return false;
+	}
+
+	return false;
+}
+
+
 static bool
 native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 					 NativeZoneMapMetadata *z, MemoryContext cx)
@@ -1534,6 +1801,9 @@ native_zone_excludes(SkipPredicate *pred, Form_pg_attribute att,
 	Datum		maxv;
 	int32		c1;
 	int32		c2;
+
+	if (pred->rangePred)
+		return native_range_excludes(pred, att, z, cx);
 
 	if (z == NULL || !z->hasMinMax)
 		return false;

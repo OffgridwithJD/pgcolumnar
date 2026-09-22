@@ -1459,6 +1459,37 @@ projection_scan_cost	projection_scan_cost	premise: without the projection scan, 
 projection_scan_cost	projection_scan_cost	premise: without the projection scan, the tight plan is a base columnar scan	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	tight and loose covering scans are not both priced at half the base	15;16;17;18;19	2026-09-17	-
 projection_scan_cost	projection_scan_cost	while a plain range on the sort key still earns its discount	15;16;17;18;19	never	-
+range_pruning	range_pruning	a clustered overlap skips vectors instead of decoding them	15;16;17;18;19	never	-
+range_pruning	range_pruning	a scattered column skips nothing, which is what the documentation says	15;16;17;18;19	never	-
+range_pruning	range_pruning	a unit holding an unbounded range is never pruned from above	15;16;17;18;19	never	-
+range_pruning	range_pruning	a window no row can meet reads no chunk group at all	15;16;17;18;19	never	-
+range_pruning	range_pruning	a window no row can meet returns nothing, from both	15;16;17;18;19	never	-
+range_pruning	range_pruning	an empty range contributes no bound, so its units record NULL	15;16;17;18;19	never	-
+range_pruning	range_pruning	and an unbounded range records a bound that is present but empty	15;16;17;18;19	never	-
+range_pruning	range_pruning	and still returns the right rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	and the rows themselves match, not only the count	15;16;17;18;19	never	-
+range_pruning	range_pruning	and the zone map is probed for it	15;16;17;18;19	never	-
+range_pruning	range_pruning	containment of a point returns the heap's rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap ["A","C"] returns the heap's rows under a declared collation	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap ["B","M"] returns the heap's rows under a declared collation	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap ["a","b"] returns the heap's rows under a declared collation	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap ["m","z"] returns the heap's rows under a declared collation	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap with a one-hour window returns the heap's rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	overlap with a week-long window returns the heap's rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: a non-range column carries none	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: both tables hold the same rows before any predicate	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: every one of those units carries an upper bound	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: that unbounded row really is matched, so the arm is not vacuous	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the all-empty table is summarised at all	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the clustered fixture holds the rows the numbers below count	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the collated range column is summarised, so pruning can engage	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the first three of those are not vacuously empty	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the heap mirror holds the same rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the range column is summarised in several units, or nothing can be skipped	15;16;17;18;19	never	-
+range_pruning	range_pruning	premise: the range type collates differently from its element type	15;16;17;18;19	never	-
+range_pruning	range_pruning	so does a containment probe	15;16;17;18;19	never	-
+range_pruning	range_pruning	the overlap qual is pushed down, where it used to be dropped	15;16;17;18;19	never	-
+range_pruning	range_pruning	the same for a containment probe far to its right	15;16;17;18;19	never	-
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-

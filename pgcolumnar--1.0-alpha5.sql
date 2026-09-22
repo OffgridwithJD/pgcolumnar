@@ -256,7 +256,8 @@ CREATE TABLE pgcolumnar.zone_map (
 	maximum bytea,
 	sum numeric,                      -- NULL when the type has no sum
 	value_count bigint NOT NULL,
-	null_count bigint NOT NULL
+	null_count bigint NOT NULL,
+	max_upper bytea                   -- range columns only (#1144)
 );
 CREATE UNIQUE INDEX zone_map_pkey
 	ON pgcolumnar.zone_map USING btree (storage_id, group_number, column_index, vector_index);

@@ -40,6 +40,7 @@
 #include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/rangetypes.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -190,6 +191,24 @@ typedef struct PgColumnarColumnDef
 	PgColumnarFastCmp fastCmp;	/* direct comparison, when the type allows */
 
 	/*
+	 * Range column (#1144): the zone map also records the greatest UPPER bound,
+	 * which is the statistic overlap and containment need and which the btree
+	 * min/max cannot supply. A range type is already `orderable` -- its cmp proc
+	 * exists, which is why a range column already carries min/max -- so this is a
+	 * second accumulator on a path that already runs, not a new path.
+	 *
+	 * rangeTce is the RANGE type's cache entry, needed by range_deserialize.
+	 * The bound itself is a value of the ELEMENT type, so it is compared with the
+	 * element's cmp proc and encoded with the element's byval/len.
+	 */
+	bool		isRange;
+	TypeCacheEntry *rangeTce;
+	FmgrInfo	elemCmpFn;
+	Oid			elemCollation;
+	bool		elemByVal;
+	int16		elemLen;
+
+	/*
 	 * int2/int4 column: its exact sum fits an int64 accumulator, so the zone map
 	 * carries a per-vector and per-chunk sum for the zone-map-only aggregate (D5).
 	 * Other summable types (int8, numeric, float) are left with a null zone sum.
@@ -227,6 +246,19 @@ typedef struct ColumnChunkBuffer
 	bool		hasMinMax;
 	Datum		minValue;		/* held in the stripe context */
 	Datum		maxValue;
+
+	/*
+	 * Running greatest upper bound of a range column's values (#1144), with the
+	 * three states the format carries: nothing seen, a bound, or "some value is
+	 * unbounded above, so this unit can never be pruned on its upper side".
+	 * An EMPTY range contributes neither -- it overlaps nothing and must not
+	 * raise the bound -- which is why upper_inf() and isempty() are asked
+	 * explicitly rather than testing the bound for NULL, since upper() is NULL
+	 * for both and they need opposite treatment.
+	 */
+	bool		hasMaxUpper;
+	bool		upperUnbounded;
+	Datum		maxUpper;		/* element-type value, held in the stripe context */
 
 	/* running exact sum of non-null int2/int4 values (zone map, D5) */
 	int64		sum;
@@ -419,6 +451,49 @@ build_column_def(Form_pg_attribute att, bool bloomEnabled, MemoryContext cxt,
 	tce = lookup_type_cache(att->atttypid,
 							TYPECACHE_CMP_PROC_FINFO |
 							TYPECACHE_HASH_PROC_FINFO);
+
+	/*
+	 * A range column also summarises its greatest UPPER bound (#1144). The
+	 * element type's comparison and storage facts come from the range type's own
+	 * cache entry; TYPECACHE_RANGE_INFO is what populates rngelemtype, and asking
+	 * for the element's cmp proc separately is what makes rngelemtype->cmp_proc_finfo
+	 * valid to copy. Multiranges are NOT handled here: they are a different
+	 * deserialisation and the measurement that justifies this one did not cover
+	 * them, so they keep today's behaviour rather than an untested new one.
+	 */
+	if (type_is_range(att->atttypid))
+	{
+		TypeCacheEntry *rtce = lookup_type_cache(att->atttypid,
+												 TYPECACHE_RANGE_INFO);
+
+		if (rtce->rngelemtype != NULL)
+		{
+			TypeCacheEntry *etce =
+				lookup_type_cache(rtce->rngelemtype->type_id,
+								  TYPECACHE_CMP_PROC_FINFO);
+
+			if (OidIsValid(etce->cmp_proc_finfo.fn_oid))
+			{
+				def->isRange = true;
+				def->rangeTce = rtce;
+				fmgr_info_copy(&def->elemCmpFn, &etce->cmp_proc_finfo, cxt);
+				/*
+				 * THE RANGE'S OWN COLLATION, not the element type's. A range
+				 * compares under the collation it was DECLARED with, which the
+				 * type cache carries as rng_collation; the element type's
+				 * typcollation is a different value. Taking the element's made
+				 * the writer summarise under one ordering and the reader prune
+				 * under another, and the scan MISSED ROWS -- a wrong answer
+				 * rather than an error. Unreachable with a built-in range type,
+				 * whose subtypes are all non-collatable. Found by @jdatcmd.
+				 */
+				def->elemCollation = rtce->rng_collation;
+				def->elemByVal = etce->typbyval;
+				def->elemLen = etce->typlen;
+			}
+		}
+	}
+
 	if (OidIsValid(tce->cmp_proc_finfo.fn_oid))
 	{
 		def->orderable = true;
@@ -954,6 +1029,63 @@ PgColumnarWriteRow(PgColumnarWriteState *writeState, Relation rel,
 			}
 
 			/*
+			 * Maintain the per-chunk greatest UPPER bound for a range column
+			 * (#1144). This runs BEFORE the flattened copy is freed below,
+			 * because the bound points into the range value and is copied into
+			 * the stripe context here.
+			 *
+			 * The three cases are asked explicitly rather than derived from a
+			 * NULL bound, because upper() is NULL for BOTH an empty range and an
+			 * unbounded one and they need opposite treatment: an empty range
+			 * overlaps nothing and must not raise the bound, while an unbounded
+			 * one must stop this unit ever being pruned on its upper side.
+			 */
+			if (writeState->colDefs[c].isRange)
+			{
+				PgColumnarColumnDef *def = &writeState->colDefs[c];
+				RangeType  *r = DatumGetRangeTypeP(v);
+				RangeBound	rlower;
+				RangeBound	rupper;
+				bool		rempty;
+
+				range_deserialize(def->rangeTce, r, &rlower, &rupper, &rempty);
+
+				if (rempty)
+				{
+					/* contributes no bound in either direction */
+				}
+				else if (rupper.infinite)
+				{
+					col->hasMaxUpper = true;
+					col->upperUnbounded = true;
+				}
+				else if (!col->upperUnbounded)
+				{
+					MemoryContext upperContext =
+						MemoryContextSwitchTo(writeState->stripeContext);
+
+					if (!col->hasMaxUpper)
+					{
+						col->maxUpper = datumCopy(rupper.val, def->elemByVal,
+												  def->elemLen);
+						col->hasMaxUpper = true;
+					}
+					else if (DatumGetInt32(FunctionCall2Coll(&def->elemCmpFn,
+															def->elemCollation,
+															rupper.val,
+															col->maxUpper)) > 0)
+					{
+						if (!def->elemByVal)
+							pfree(DatumGetPointer(col->maxUpper));
+						col->maxUpper = datumCopy(rupper.val, def->elemByVal,
+												  def->elemLen);
+					}
+
+					MemoryContextSwitchTo(upperContext);
+				}
+			}
+
+			/*
 			 * Free the flattened copy if detoasting made one. Everything above
 			 * has consumed it: the encoder and bloom copied the bytes out, and
 			 * min/max datumCopy'd into the stripe context. Nothing was allocated
@@ -1120,6 +1252,9 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 	int			blockCodec = COLUMNAR_COMPRESSION_NONE;
 	int			vec = 0;
 	bool		chunkHasMinMax = false;
+	bool		chunkHasMaxUpper = false;	/* #1144: folded across this chunk's vectors */
+	bool		chunkUpperUnbounded = false;
+	Datum		chunkMaxUpper = (Datum) 0;
 	Datum		chunkMin = (Datum) 0;
 	Datum		chunkMax = (Datum) 0;
 	uint64		chunkValueCount = 0;
@@ -1429,6 +1564,49 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 				}
 			}
 
+			/*
+			 * The greatest upper bound of this VECTOR, and its fold into the
+			 * chunk (#1144). Unbounded is absorbing in both directions: one
+			 * unbounded value makes the vector unbounded, and one unbounded
+			 * vector makes the chunk unbounded, because a unit that contains a
+			 * range reaching to infinity can never be ruled out from above.
+			 */
+			if (col->hasMaxUpper)
+			{
+				z->hasMaxUpper = true;
+				z->upperUnbounded = col->upperUnbounded;
+
+				if (!col->upperUnbounded)
+				{
+					StringInfoData mu;
+
+					initStringInfo(&mu);
+					PgColumnarEncodeValueByLen(&mu, def->elemByVal, def->elemLen,
+											   col->maxUpper);
+					z->maxUpper = mu.data;
+					z->maxUpperLen = (uint32) mu.len;
+				}
+
+				if (!chunkHasMaxUpper)
+				{
+					chunkHasMaxUpper = true;
+					chunkUpperUnbounded = col->upperUnbounded;
+					chunkMaxUpper = col->maxUpper;
+				}
+				else if (col->upperUnbounded)
+				{
+					chunkUpperUnbounded = true;
+				}
+				else if (!chunkUpperUnbounded &&
+						 DatumGetInt32(FunctionCall2Coll(&def->elemCmpFn,
+														 def->elemCollation,
+														 col->maxUpper,
+														 chunkMaxUpper)) > 0)
+				{
+					chunkMaxUpper = col->maxUpper;
+				}
+			}
+
 			chunkValueCount += col->valueCount;
 			chunkSum += col->sum;
 			zoneRows = lappend(zoneRows, z);
@@ -1490,6 +1668,24 @@ flush_one_column(Form_pg_attribute att, List *chunkGroups,
 			z->minimumLen = (uint32) mn.len;
 			z->maximum = mx.data;
 			z->maximumLen = (uint32) mx.len;
+		}
+
+		/* the chunk's greatest upper bound, folded from its vectors (#1144) */
+		if (chunkHasMaxUpper)
+		{
+			z->hasMaxUpper = true;
+			z->upperUnbounded = chunkUpperUnbounded;
+
+			if (!chunkUpperUnbounded)
+			{
+				StringInfoData mu;
+
+				initStringInfo(&mu);
+				PgColumnarEncodeValueByLen(&mu, def->elemByVal, def->elemLen,
+										   chunkMaxUpper);
+				z->maxUpper = mu.data;
+				z->maxUpperLen = (uint32) mu.len;
+			}
 		}
 
 		zoneRows = lappend(zoneRows, z);
@@ -1894,6 +2090,30 @@ serialize_column_result(StringInfo out, FlushColumnResult *res)
 			if (maxLen > 0)
 				appendBinaryStringInfo(out, z->maximum, maxLen);
 		}
+
+		/*
+		 * The range upper-bound summary (#1144). This stream is the parallel
+		 * flush worker's handoff to the backend over DSM, not the on-disk
+		 * format: both ends are the same binary, so a field may be added as long
+		 * as BOTH SIDES MOVE TOGETHER. deserialize_column_result reads these in
+		 * the same order.
+		 */
+		{
+			uint8		zHasMaxUpper = (uint8) (z->hasMaxUpper ? 1 : 0);
+			uint8		zUpperUnbounded = (uint8) (z->upperUnbounded ? 1 : 0);
+
+			appendBinaryStringInfo(out, (char *) &zHasMaxUpper, sizeof(uint8));
+			if (z->hasMaxUpper)
+			{
+				uint32		upLen = z->upperUnbounded ? 0 : z->maxUpperLen;
+
+				appendBinaryStringInfo(out, (char *) &zUpperUnbounded,
+									   sizeof(uint8));
+				appendBinaryStringInfo(out, (char *) &upLen, sizeof(uint32));
+				if (upLen > 0)
+					appendBinaryStringInfo(out, z->maxUpper, upLen);
+			}
+		}
 	}
 
 	appendBinaryStringInfo(out, (char *) &hasBloom, sizeof(uint8));
@@ -2070,6 +2290,38 @@ deserialize_column_result(void *dsmaddr)
 			else
 				zm->maximum = palloc(0);
 			zm->maximumLen = maxLen;
+		}
+
+		/* the range upper-bound summary, in the order serialize wrote it (#1144) */
+		{
+			uint8		zHasMaxUpper;
+
+			memcpy(&zHasMaxUpper, cursor, sizeof(uint8));
+			cursor += sizeof(uint8);
+			if (zHasMaxUpper)
+			{
+				uint8		zUpperUnbounded;
+				uint32		upLen;
+
+				zm->hasMaxUpper = true;
+				memcpy(&zUpperUnbounded, cursor, sizeof(uint8));
+				cursor += sizeof(uint8);
+				zm->upperUnbounded = (zUpperUnbounded != 0);
+
+				memcpy(&upLen, cursor, sizeof(uint32));
+				cursor += sizeof(uint32);
+				if (upLen > 0)
+				{
+					char	   *mu = palloc(upLen);
+
+					memcpy(mu, cursor, upLen);
+					cursor += upLen;
+					zm->maxUpper = mu;
+				}
+				else
+					zm->maxUpper = palloc(0);
+				zm->maxUpperLen = upLen;
+			}
 		}
 
 		zoneRows = lappend(zoneRows, zm);

@@ -652,21 +652,37 @@ btree strategies: `<`, `<=`, `=`, `>=` and `>`.
 Everything else is filtered after the values are decoded. The rows returned are
 correct either way. What differs is how much the scan reads to find them.
 
-The operators this most often surprises people with are the range ones. Overlap
-(`&&`) and containment (`@>`) belong to GiST operator families, not to btree.
-Measured on a 200,000-row table with one `tstzrange` column:
+Range overlap (`&&`) and containment (`@>`) are the exception. They prune through
+a second path. Those operators belong to GiST operator families rather than
+btree. The scan resolves them through the range type's default GiST opclass, and
+answers them from a statistic the btree minimum and maximum cannot supply.
 
-| predicate | pushed-down filters | zone map probes |
-| --- | ---: | ---: |
-| `span && tstzrange(...)` | 0 | 0 |
-| `span @> timestamptz` | 0 | 0 |
-| `span > tstzrange(...)` | 1 | 2 |
+The minimum and maximum of a range column are taken in that type's own btree
+order. That order sorts by lower bound and then upper bound. The largest range in it is
+not the range reaching furthest right, so it cannot bound overlap. A
+zone map therefore also records the **greatest upper bound** in each unit. A unit
+is skipped when every value ends before the probe starts, or every value starts
+after the probe ends.
 
-Zone maps are written for range and multirange columns. They cannot answer an
-overlap question. The minimum and maximum are taken in the range type's own
-btree order, which sorts by lower bound and then upper bound. The largest range
-in that order is not the range with the greatest upper bound. Overlap pruning
-would need that second statistic, and nothing records it today.
+**It is worth nothing at all on a column whose ranges are scattered.** A minimum
+and maximum are worth nothing on an unsorted column. This is the same. Measured on
+200,000 rows with one `tstzrange` column, one row per minute with hour-long spans,
+against the same table shuffled:
+
+| corpus | predicate | units skipped | rows skipped |
+| --- | --- | ---: | ---: |
+| clustered by time | `span && ` a one-hour window | 19 of 20 | 190,000 of 200,000 |
+| clustered by time | `span @> ` a timestamptz | 19 of 20 | 190,000 of 200,000 |
+| scattered | either | 0 of 20 | 0 |
+
+The number on an unclustered column is zero, not merely smaller. Cluster the table
+on the range column if you want overlap queries to skip anything.
+
+**A range with no upper bound is never pruned from above.** One such value makes
+every probe to its right read that unit. The value reaches them all. An
+empty range contributes no bound in either direction. Both are recorded
+distinctly from "no summary at all". A table written before this existed keeps
+today's behaviour, rather than being pruned on a statistic nobody wrote.
 
 ### GIN and BRIN build, and nothing has been seen to use them
 
