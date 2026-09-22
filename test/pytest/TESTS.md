@@ -119,6 +119,7 @@ behaviour, the source of that number is named.
 - [71. test_native_groupagg.py: the grouped vectorized aggregate must answer what core answers](#71-test_native_groupaggpy-the-grouped-vectorized-aggregate-must-answer-what-core-answers)
 - [72. test_analyze_function.py: statistics collected by reading, not by sampling](#72-test_analyze_functionpy-statistics-collected-by-reading-not-by-sampling)
 - [73. test_assertion_carries_its_measurement.py: a failure must say what it measured](#73-test_assertion_carries_its_measurementpy-a-failure-must-say-what-it-measured)
+- [74. test_base_scan_io.py: a base scan is not priced from sibling projection pages](#74-test_base_scan_iopy-a-base-scan-is-not-priced-from-sibling-projection-pages)
 
 ## 1. How to read a test in here
 
@@ -5777,3 +5778,20 @@ the corpus; none is live, and the file's header carries the measurement behind e
 | `test_the_carve_out_is_driven_at_its_boundary` | `> 0` and `>= 1` exactly, written either way round; `r > 1` and `r >= 0` are not the same shape and were being excused |
 | `test_a_comparison_wrapped_in_anything_is_still_examined` | `any(r <= 0 for r in runs)` is the natural rewrite of `min(runs) > 0`, so the escape hatch is closed rather than left beside the door |
 | `test_a_boolean_combination_is_examined_operand_by_operand` | one lossy operand is enough; a determinate one beside it is no excuse |
+
+## 74. test_base_scan_io.py: a base scan is not priced from sibling projection pages
+
+Port of `base_scan_io.sh`. A base columnar scan inherited `rel->pages` from
+`smgrnblocks` of the relation file. That file holds the base plus every
+projection stored beside it. Adding a covering projection does not make the
+base scan read more bytes; the planner must not quote it as if it did.
+
+Public seam: `EXPLAIN` cost of a base scan (`pgcolumnar.enable_projection_scan
+= off`) before and after a sibling projection lands, with `seq_page_cost`
+raised and CPU terms zeroed so the run is pages. The shell twin uses `bsio` /
+`bynid` / 20000 rows; this file uses `bpages` / `onrid` / 30000 rows.
+Assertion names match.
+
+| test | what it holds |
+| --- | --- |
+| `test_base_scan_io` | the table exists; the plan is a base columnar scan with no covering projection name and a positive run cost; a covering projection then exists and enlarged the file; the later plan is still a base scan; the run cost is not priced from sibling projection pages |

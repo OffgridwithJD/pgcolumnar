@@ -1030,6 +1030,50 @@ pgcolumnar_relation_needs_toast_table(Relation rel)
 	return false;
 }
 
+/*
+ * pgcolumnar_sibling_projection_pages
+ *		Pages occupied by every non-base projection stored in this
+ *		relation's file.
+ *
+ *		The main fork holds the base plus every projection. The planner's
+ *		rel->pages is smgrnblocks of that file, so a BASE scan is charged
+ *		for pages it will not read. Subtracting this count is a no-op
+ *		when the table has no extra projection.
+ *
+ *		When projections DO exist this walks every projection's row-group
+ *		list on every estimate_size call (every plan of the table). That is
+ *		planning-time catalog work proportional to projections times groups;
+ *		the no-projection case remains free.
+ */
+static BlockNumber
+pgcolumnar_sibling_projection_pages(uint64 baseStorageId, Snapshot snapshot)
+{
+	List	   *projs;
+	ListCell   *lc;
+	uint64		bytes = 0;
+
+	projs = PgColumnarListProjections(baseStorageId);
+	foreach(lc, projs)
+	{
+		PgColumnarProjection *pr = (PgColumnarProjection *) lfirst(lc);
+		List	   *rgs;
+		ListCell   *rgc;
+
+		if (pr->projectionId == 0)
+			continue;
+		if (pr->projStorageId == 0 || pr->projStorageId == baseStorageId)
+			continue;
+		rgs = PgColumnarReadRowGroupList(pr->projStorageId, snapshot);
+		foreach(rgc, rgs)
+		{
+			NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(rgc);
+
+			bytes += COLUMNAR_PAGE_ROUND_UP(rg->byteLength);
+		}
+	}
+	return (BlockNumber) (bytes / COLUMNAR_BYTES_PER_PAGE);
+}
+
 static void
 pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 								BlockNumber *pages, double *tuples,
@@ -1095,6 +1139,35 @@ pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 		if (deleted > physicalRows)
 			deleted = physicalRows;
 		liveRows = (double) (physicalRows - deleted);
+	}
+
+	/*
+	 * rel->pages is smgrnblocks of the one shared file: base row groups
+	 * plus every projection stored beside them. A base scan reads only
+	 * the base storage. Subtract the sibling projection footprints so
+	 * the planner does not charge that scan for pages it will not visit.
+	 *
+	 * Without a projection this is a no-op, so tables that never grew a
+	 * second copy keep the same page count they had.
+	 */
+	{
+		BlockNumber projPages;
+
+		projPages = pgcolumnar_sibling_projection_pages(storageId, snapshot);
+		if (nblocks > projPages)
+			nblocks -= projPages;
+		else
+		{
+			/*
+			 * Sibling footprints meeting or exceeding the file should not
+			 * happen (they live in the same file), but stale or orphaned
+			 * projection row groups, a rewrite, or PAGE_ROUND_UP can reach
+			 * it. Floor at one page rather than underflow; a one-page
+			 * estimate for a large table is the wrong answer that would
+			 * otherwise look like a planner bug somewhere else.
+			 */
+			nblocks = 1;
+		}
 	}
 
 	*pages = Max(nblocks, 1);

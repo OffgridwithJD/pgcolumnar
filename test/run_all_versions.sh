@@ -54,6 +54,7 @@ SUITES=(
 	autovacuum
 	autovacuum_yield
 	avro_manifest
+	base_scan_io
 	batch_fold_explain
 	bench_guards
 	bloom_lazy
