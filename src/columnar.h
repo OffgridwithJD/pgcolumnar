@@ -844,8 +844,14 @@ typedef struct PgColumnarVector
  * BTEqualStrategyNumber.
  */
 #define PGC_SK_RANGE		0x8000
-#define PGC_RANGE_OVERLAP		1
-#define PGC_RANGE_CONTAINS_ELEM	2
+/*
+ * Numbered ABOVE the btree strategies on purpose. 1 and 2 are BTLess and
+ * BTLessEqual, and a range predicate travels through code that switches on
+ * `strategy`; two meanings sharing a number is how one of them gets read as the
+ * other. Nothing here is a btree strategy, so nothing may collide with one.
+ */
+#define PGC_RANGE_OVERLAP		101
+#define PGC_RANGE_CONTAINS_ELEM	102
 
 extern void PgColumnarEncodeValue(StringInfo buf, Form_pg_attribute att,
 								Datum value);
