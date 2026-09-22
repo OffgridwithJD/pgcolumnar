@@ -225,6 +225,133 @@ def test_an_unrunnable_test_names_its_reason_and_its_detail(pytester, expect):
     expect.num(result.ret, 67, "and it is still not a pass")
 
 
+
+# ---------------------------------------------------------------------------
+# AN UNEXPECTEDLY UNRUNNABLE TEST, which is a narrower claim than the three arms
+# above make and the one #1163 needed. Six tests decline on PG 15, 16 and 17
+# because `pg_restore_attribute_stats` and `WITHOUT OVERLAPS` arrived in 18, so
+# "any unrunnable test exits 67" made a healthy corpus red on three majors.
+#
+# THE MAJOR COMES FROM `--pg-config`, so these drive a STUB that prints a version
+# rather than mocking the lookup. That is the wiring: the list, the major and the
+# comparison, in the order a real run reads them.
+# ---------------------------------------------------------------------------
+
+def _stub_pg_config(pytester, version_text):
+    """A pg_config that answers --version and nothing else."""
+    path = pytester.path / "stub_pg_config"
+    path.write_text(f"#!/bin/sh\necho '{version_text}'\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+# THE INNER RUN NEEDS `--pg-config` DEFINED. The real one lives in conftest.py's
+# `pytest_addoption`, which an inner session does not get, so a run that passed it
+# exited USAGE_ERROR rather than exercising anything. Measured on the first
+# attempt: ExitCode.USAGE_ERROR against an expected 0.
+_INNER_CONFTEST = """
+pytest_plugins = ['pgc_vacuity']
+
+
+def pytest_addoption(parser):
+    parser.addoption("--pg-config", action="store", default=None)
+"""
+
+
+def _unrunnable_fixture(pytester, expected_rows):
+    pytester.makeconftest(_INNER_CONFTEST)
+    pytester.makepyfile(
+        """
+        def test_cannot(expect):
+            expect.cannot_run("UNSUPPORTED_MAJOR", "the feature arrived in 18")
+        """
+    )
+    listing = pytester.path / "expected_unrunnable.txt"
+    listing.write_text(expected_rows)
+    return str(listing)
+
+
+def test_an_expected_unrunnable_test_leaves_the_run_green(pytester, expect):
+    """The property the matrix could not land without.
+
+    The same declaration the arms above exit 67 for, listed for this major,
+    exits 0 -- so the difference is the list and not the declaration.
+    """
+    listing = _unrunnable_fixture(
+        pytester, "17 test_an_expected_unrunnable_test_leaves_the_run_green.py::test_cannot\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", _stub_pg_config(pytester, "PostgreSQL 17.10"),
+        "--pgc-expected-unrunnable", listing)
+    expect.num(result.ret, 0, "a decline the list names is not a red")
+
+
+def test_an_unlisted_unrunnable_test_is_named_and_refused(pytester, expect):
+    """The control beside it: the same run with an EMPTY list is refused, and the
+    refusal names the test rather than counting it."""
+    listing = _unrunnable_fixture(pytester, "# nothing expected on any major\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", _stub_pg_config(pytester, "PostgreSQL 17.10"),
+        "--pgc-expected-unrunnable", listing)
+    expect.num(result.ret, 67, "an unlisted decline is still INCOMPLETE")
+    result.stderr.fnmatch_lines(["*not expected to be*", "*test_cannot*"])
+
+
+def test_a_listed_test_that_runs_makes_the_list_stale(pytester, expect):
+    """The other direction, which is the half a one-way check would miss.
+
+    A feature arriving is a fact the list should stop claiming, and nothing else
+    in the corpus would notice: the test simply starts passing.
+    """
+    pytester.makeconftest(_INNER_CONFTEST)
+    pytester.makepyfile(
+        """
+        def test_runs_fine(expect):
+            expect.num(1, 1, "it runs")
+        """
+    )
+    listing = pytester.path / "expected_unrunnable.txt"
+    listing.write_text(
+        "17 test_a_listed_test_that_runs_makes_the_list_stale.py::test_runs_fine\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", _stub_pg_config(pytester, "PostgreSQL 17.10"),
+        "--pgc-expected-unrunnable", str(listing))
+    expect.num(result.ret, 67, "a list that claims a test declines, when it runs, is refused")
+    result.stderr.fnmatch_lines(["*RAN, so the list is stale*"])
+
+
+def test_the_list_is_read_for_the_running_major_only(pytester, expect):
+    """A row for another major must not excuse this one.
+
+    Without this the file would behave as one flat set, and the six rows that
+    belong to 15, 16 and 17 would silently excuse the same decline on 18.
+    """
+    listing = _unrunnable_fixture(
+        pytester, "15 test_the_list_is_read_for_the_running_major_only.py::test_cannot\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", _stub_pg_config(pytester, "PostgreSQL 18.4"),
+        "--pgc-expected-unrunnable", listing)
+    expect.num(result.ret, 67, "a row for 15 does not excuse a decline on 18")
+
+
+def test_an_unreadable_pg_config_fails_closed(pytester, expect):
+    """No major means no judgement, and no judgement means the OLD behaviour.
+
+    The dangerous failure here is the other one: an unknown major treated as
+    "expect anything" would turn every decline green on any box where
+    `pg_config` is missing.
+    """
+    listing = _unrunnable_fixture(
+        pytester, "17 test_an_unreadable_pg_config_fails_closed.py::test_cannot\n")
+    result = pytester.runpytest(
+        "-p", "pgc_vacuity",
+        "--pg-config", str(pytester.path / "no-such-pg-config"),
+        "--pgc-expected-unrunnable", listing)
+    expect.num(result.ret, 67, "an unknown major refuses rather than excuses")
+
 def test_a_real_failure_outranks_an_unrunnable_test(pytester, expect):
     """Which state dominates, asserted rather than left to fall out.
 
