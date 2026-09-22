@@ -27,6 +27,7 @@ import os
 import re
 import pathlib
 import shutil
+import signal
 
 import pytest
 
@@ -56,6 +57,22 @@ def major_of(version_text):
     from another major link and then fail to load (#536)."""
     m = re.search(r"(\d+)", version_text or "")
     return m.group(1) if m else ""
+
+
+def _raise_system_exit(signum, *_frame):
+    """Turn SIGTERM into SystemExit so `finally` blocks run (#1170).
+
+    128 + signum is the exit status a shell reports for a signalled process, so a
+    caller reading `$?` sees 143 either way and nothing downstream has to learn a
+    new number.
+
+    THE FRAME IS TAKEN AS A VARARG BECAUSE IT IS GENUINELY UNREAD. Python calls a
+    signal handler with two positional arguments, and naming the second one would
+    be a parameter this function ignores -- which
+    `test_no_helper_in_this_corpus_takes_a_parameter_it_never_reads` refuses,
+    corpus-wide and correctly. It caught this on the first run.
+    """
+    raise SystemExit(128 + signum)
 
 
 @pytest.fixture(scope="session")
@@ -90,11 +107,46 @@ def pgc_cluster(request, worker_id):
     # this refuses.
     cluster.require_server_loaded_this_binary()
     import psycopg          # deferred: see the module docstring
+
+    # A KILLED RUN MUST NOT LEAK ITS CLUSTER (#1170). Python does not run
+    # `finally` blocks when the DEFAULT SIGTERM disposition terminates the
+    # process, so the teardown below was unreachable for every interrupted run --
+    # and interrupting a run is normal and correct, not an error. The postmaster
+    # then survives holding its port, its shared memory and its datadir.
+    #
+    # Measured before this handler existed: 21 orphaned postmasters and ~2.5 GB
+    # of datadirs across the two development containers, the oldest 33 hours, and
+    # one container had background tasks killed for low memory as a result. A
+    # leaked cluster holding a port is also the documented false-red source: a
+    # later run fails for a reason that has nothing to do with the code.
+    #
+    #     plain try/finally, kill -TERM                 0 finally blocks ran
+    #     SIGTERM handler raising SystemExit, same kill 1 finally block ran
+    #
+    # SIGKILL IS UNCATCHABLE and no handler will ever cover it. The stale
+    # clusters that predate this were `pkill -9` and the OOM killer.
+    #
+    # THE SHELL HALF ALREADY HANDLES THIS AND MUST NOT BE "FIXED": lib.sh's
+    # `trap pgc_teardown EXIT` already runs on TERM, INT and HUP, and naming the
+    # signals explicitly makes the handler fire twice.
+    previous = None
+    try:
+        previous = signal.signal(signal.SIGTERM, _raise_system_exit)
+    except ValueError:
+        # Not the main thread of the main interpreter. Nothing to install, and
+        # the run is not worse off than it was.
+        previous = None
+
     try:
         with psycopg.connect(cluster.dsn(), autocommit=True) as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS pgcolumnar")
         yield cluster
     finally:
+        if previous is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous)
+            except ValueError:
+                pass
         cluster.stop()
         shutil.rmtree(root, ignore_errors=True)
 

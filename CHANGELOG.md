@@ -18,6 +18,30 @@ true until the next version shipped.
 
 ### Fixed
 
+- A pytest run killed with `SIGTERM` leaked its throwaway cluster (#1170).
+
+  Python does not run `finally` blocks when the default `SIGTERM` disposition
+  terminates the process, so the `pgc_cluster` fixture's teardown was unreachable for
+  every interrupted run. Interrupting a run is normal and correct. The postmaster then
+  survived holding its port, its shared memory and its datadir. Measured across the two
+  development containers: 21 orphaned postmasters and about 2.5 GB of datadirs, the
+  oldest 33 hours. One container lost background tasks to low memory as a result. A leaked cluster holding a port is also a false-red source. A later run then
+  fails for a reason that has nothing to do with the code.
+
+  | run killed with | postmasters left | datadir |
+  | --- | ---: | --- |
+  | `SIGTERM`, before | 1 | still on disk |
+  | `SIGTERM`, after | 0 | removed |
+  | `SIGKILL`, after | 1 | still on disk |
+
+  The fixture now installs a `SIGTERM` handler that raises `SystemExit(143)`, so the
+  teardown that already existed becomes reachable. `SIGKILL` is uncatchable and still
+  leaks, which is recorded rather than fixed.
+
+  The shell harness already handles this and is unchanged. `lib.sh`'s
+  `trap pgc_teardown EXIT` runs on TERM, INT and HUP already. Naming the signals
+  explicitly would make the handler fire twice.
+
 - A header edit did not rebuild, so every header mutation proof ran against a stale
   object and reported a clean pass (#1158).
 
