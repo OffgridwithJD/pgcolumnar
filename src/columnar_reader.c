@@ -789,7 +789,17 @@ pgcolumnar_make_predicates(SkipPredicate *out, int nkeys, ScanKey keys,
 			p->rangePred = true;
 			p->rangeKind = key->sk_strategy;
 			p->rangeTce = rtce;
-			p->elemCollation = etce->typcollation;
+			/*
+			 * THE RANGE'S OWN COLLATION, not the element type's. A range
+			 * compares under the collation it was DECLARED with, which the
+			 * type cache carries as rng_collation; the element type's
+			 * typcollation is a different value. Taking the element's made
+			 * the writer summarise under one ordering and the reader prune
+			 * under another, and the scan MISSED ROWS -- a wrong answer
+			 * rather than an error. Unreachable with a built-in range type,
+			 * whose subtypes are all non-collatable. Found by @jdatcmd.
+			 */
+			p->elemCollation = rtce->rng_collation;
 			p->elemByVal = etce->typbyval;
 			p->elemLen = etce->typlen;
 			fmgr_info_copy(&p->elemCmpFn, &etce->cmp_proc_finfo, cx);

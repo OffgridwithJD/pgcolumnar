@@ -477,7 +477,17 @@ build_column_def(Form_pg_attribute att, bool bloomEnabled, MemoryContext cxt,
 				def->isRange = true;
 				def->rangeTce = rtce;
 				fmgr_info_copy(&def->elemCmpFn, &etce->cmp_proc_finfo, cxt);
-				def->elemCollation = etce->typcollation;
+				/*
+				 * THE RANGE'S OWN COLLATION, not the element type's. A range
+				 * compares under the collation it was DECLARED with, which the
+				 * type cache carries as rng_collation; the element type's
+				 * typcollation is a different value. Taking the element's made
+				 * the writer summarise under one ordering and the reader prune
+				 * under another, and the scan MISSED ROWS -- a wrong answer
+				 * rather than an error. Unreachable with a built-in range type,
+				 * whose subtypes are all non-collatable. Found by @jdatcmd.
+				 */
+				def->elemCollation = rtce->rng_collation;
 				def->elemByVal = etce->typbyval;
 				def->elemLen = etce->typlen;
 			}

@@ -204,4 +204,70 @@ check "and an unbounded range records a bound that is present but empty" \
 	   [ "${U_EMPTY:-0}" -ge 1 ] && echo "present and empty" || echo "NOT RECORDED ($U_EMPTY)")" \
 	"present and empty"
 
+# ---- a range compares under ITS OWN collation, not its element type's ---------
+#
+# A range type is DECLARED with a collation, which the type cache carries as
+# rng_collation. The element type's typcollation is a different value: for
+# `CREATE TYPE tr AS RANGE (SUBTYPE = text, COLLATION = "en_US.utf8")` the range
+# collates en_US.utf8 while text's typcollation is `default`. Summarising under
+# one ordering and pruning under another makes the scan MISS ROWS -- a wrong
+# answer, not an error. Found by @jdatcmd reviewing #1144.
+#
+# NOT REACHABLE WITH A BUILT-IN RANGE TYPE. tstzrange, daterange, int4range,
+# int8range and numrange are all over non-collatable subtypes, so both
+# expressions are 0 and agree however this is computed. It needs a user-defined
+# range over a collatable subtype with an explicit non-default COLLATION, which
+# is why every arm above passes with the defect present.
+#
+# THE COLLATION IS DISCOVERED, NOT ASSUMED. A box with no locale whose ordering
+# differs from the database default cannot pose the question, and an arm that
+# cannot discriminate must say so rather than pass.
+_rc_coll=""
+for _c in '"en_US.utf8"' '"en_GB.utf8"' '"unicode"' '"ucs_basic"' '"C"'; do
+	if [ "$(q "SELECT ('B' < 'a' COLLATE $_c) <> ('B' < 'a')" 2>/dev/null)" = "t" ]; then
+		_rc_coll="$_c"; break
+	fi
+done
+
+if [ -z "$_rc_coll" ]; then
+	check_skip "a range type's declared collation is the one it prunes under" \
+		"SKIP  no available collation orders differently from this database's default, so the arm cannot discriminate" \
+		"no discriminating collation on this box"
+else
+	psql_run "CREATE TYPE tr_coll AS RANGE (SUBTYPE = text, COLLATION = $_rc_coll);"
+	psql_run "CREATE TABLE rc_heap (id int, span tr_coll);"
+	psql_run "CREATE TABLE rc_col  (id int, span tr_coll) USING pgcolumnar;"
+	psql_run "SELECT pgcolumnar.set_options('rc_col', stripe_row_limit => 200, chunk_group_row_limit => 200);"
+	RC_GEN="SELECT g, tr_coll(v, v || 'zz') FROM (SELECT g, (ARRAY['A','a','B','b','C','c','M','m','Y','y'])[1 + (g / 200) % 10] AS v FROM generate_series(1, 2000) g) s"
+	psql_run "INSERT INTO rc_heap $RC_GEN;"
+	psql_run "INSERT INTO rc_col  $RC_GEN;"
+	psql_run "ANALYZE rc_heap;"
+	psql_run "ANALYZE rc_col;"
+
+	check "premise: the range type collates differently from its element type" \
+		"$(q "SELECT (SELECT rngcollation FROM pg_range WHERE rngtypid = 'tr_coll'::regtype)
+		             <> (SELECT typcollation FROM pg_type WHERE oid = 'text'::regtype)")" \
+		"t"
+	check "premise: both tables hold the same rows before any predicate" \
+		"$(q "SELECT count(*) FROM rc_heap") $(q "SELECT count(*) FROM rc_col")" \
+		"2000 2000"
+	check "premise: the collated range column is summarised, so pruning can engage" \
+		"$(RC_Z="$(q "SELECT count(*) FROM pgcolumnar.zone_map z
+		              JOIN pgcolumnar.storage s USING (storage_id)
+		             WHERE s.relation_oid = 'rc_col'::regclass AND z.max_upper IS NOT NULL")";
+		   [ "${RC_Z:-0}" -ge 1 ] && echo "summarised ($RC_Z)" || echo "NOT SUMMARISED ($RC_Z)")" \
+		"summarised ($(q "SELECT count(*) FROM pgcolumnar.zone_map z JOIN pgcolumnar.storage s USING (storage_id) WHERE s.relation_oid = 'rc_col'::regclass AND z.max_upper IS NOT NULL"))"
+
+	# THE ORACLE. Every probe is answered by the heap as well, and the two must
+	# agree; a pruning bug shows up as the columnar side returning FEWER rows.
+	for _q in '["A","C"]' '["a","b"]' '["B","M"]' '["m","z"]'; do
+		check "overlap $_q returns the heap's rows under a declared collation" \
+			"$(q "SELECT count(*) FROM rc_col WHERE span && '$_q'::tr_coll")" \
+			"$(q "SELECT count(*) FROM rc_heap WHERE span && '$_q'::tr_coll")"
+	done
+	check "and the rows themselves match, not only the count" \
+		"$(pgc_set_hash "SELECT id FROM rc_col WHERE span && '[\"A\",\"C\"]'::tr_coll")" \
+		"$(pgc_set_hash "SELECT id FROM rc_heap WHERE span && '[\"A\",\"C\"]'::tr_coll")"
+fi
+
 pgc_summary
