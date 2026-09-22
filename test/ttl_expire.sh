@@ -403,4 +403,61 @@ check "a row dated exactly on the cutoff is kept, so truncation errs toward keep
 check "every remaining date row reads back its own value" \
 	"$(q "SELECT count(*) FROM ttl_date WHERE v <> 'v'||id")" "0"
 
+# ---- the cutoff is the SESSION's date, not the server's (#1135 review) -------
+#
+# `timestamptz_timestamp` converts through the session's TimeZone, so the cutoff
+# a date column is compared against is the calling session's own date. Two
+# sessions can therefore expire different sets. Measured, server now() at
+# 2026-09-22 03:21+00:
+#
+#     session zone         local now              cutoff at '3 days'
+#     UTC                  2026-09-22 03:21       2026-09-19
+#     Pacific/Midway       2026-09-21 16:21       2026-09-18   <- a day earlier
+#     Pacific/Kiritimati   2026-09-22 17:21       2026-09-19
+#
+# IT IS INHERITED, NOT INTRODUCED. timestamptz is zone-independent; the
+# timestamp arm already converts through the session zone, because a zone-naive
+# column forces a choice; date follows its sibling. What changes is the
+# GRANULARITY -- hours for a timestamp, a whole day of rows for a date. Reported
+# by @OffgridwithJD reviewing #1135.
+#
+# THE ARM PINS THE RULE, NOT A DIFFERENCE. Asserting that two zones disagree
+# would be a coin toss on the time of day: at 23:00 UTC, Midway is 12:00 the SAME
+# date and there is nothing to see. So each zone asserts the identity that holds
+# in every zone at every instant -- the rows that survive are exactly the rows at
+# or after THAT SESSION's own cutoff -- and the two cutoffs are printed so a
+# reader can see they are free to differ.
+qz() {  # qz ZONE SQL
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
+		-c "SET TimeZone = '$1'; $2" 2>&1 | tail -1
+}
+
+for _tz in UTC Pacific/Midway; do
+	_t="ttl_tz_$(printf '%s' "$_tz" | tr -c 'A-Za-z0-9' '_')"
+	psql_run "DROP TABLE IF EXISTS $_t;
+	          CREATE TABLE $_t (id int, d date, v text) USING pgcolumnar;"
+	psql_run "INSERT INTO $_t
+	          SELECT g, (CURRENT_DATE - 6) + ((g - 1) / 1000), 'v'||g
+	          FROM generate_series(1,6000) g;"
+	psql_run "SELECT pgcolumnar.set_options('$_t', ttl_column => 'd',
+	                                        ttl_interval => '3 days');"
+
+	# The cutoff THIS session computes, read in the same zone the expire runs in.
+	_cut="$(qz "$_tz" "SELECT ((now() AT TIME ZONE '$_tz') - interval '3 days')::date")"
+	_want="$(qz "$_tz" "SELECT count(*) FROM $_t WHERE d >= DATE '$_cut'")"
+	_before="$(qz "$_tz" "SELECT count(*) FROM $_t")"
+	_ret="$(qz "$_tz" "SELECT pgcolumnar.expire('$_t')")"
+	_after="$(qz "$_tz" "SELECT count(*) FROM $_t")"
+	_below="$(qz "$_tz" "SELECT count(*) FROM $_t WHERE d < DATE '$_cut'")"
+	echo "-- tz $_tz: cutoff $_cut, $_before rows -> $_after, retired $_ret group(s)"
+
+	check "premise: in $_tz the fixture straddles that session's cutoff" \
+		"$([ "${_want:-0}" -gt 0 ] && [ "${_want:-0}" -lt "${_before:-0}" ] && echo straddles \
+		   || echo "want $_want of $_before")" \
+		"straddles"
+	check "expire in $_tz keeps exactly the rows at or after that session's cutoff" \
+		"$_after" "$_want"
+	check "and no row older than $_tz's own cutoff survives" "$_below" "0"
+done
+
 pgc_summary

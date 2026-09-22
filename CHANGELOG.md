@@ -47,6 +47,18 @@ true until the next version shipped.
   `test/ttl_expire.sh` pins the rounding with an arm that reddens when the cutoff
   moves a day. Its fixture puts 1,000 rows exactly on the cutoff.
 
+  **The cutoff is the calling session's date, not the server's.** `expire` converts
+  the current instant through the session's `TimeZone`. Two sessions can therefore
+  retire different groups. Take a three-day retention with the server at
+  `2026-09-22 03:21+00`. A `UTC` session cuts at `2026-09-19` and retires three
+  groups of the six. A `Pacific/Midway` session cuts at `2026-09-18` and retires
+  two. The
+  behaviour is inherited rather than introduced: `timestamptz` is zone-independent,
+  and the `timestamp` arm already converts through the session zone. What changes
+  is the granularity, from hours to a whole day of rows. Found by @OffgridwithJD
+  reviewing this change, documented in `docs/sql-reference.md`, and pinned by an
+  arm that runs `expire` under two zones.
+
 ### Fixed
 
 - A header edit did not rebuild, so every header mutation proof ran against a stale

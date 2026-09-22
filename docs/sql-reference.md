@@ -230,6 +230,14 @@ longer than the interval asks. That is the same direction the group boundary err
 in, and for the same reason. It applies to a whole-day interval too, because the
 cutoff is measured from the current instant rather than from midnight.
 
+**The cutoff is the calling session's date, not the server's.** `expire` converts
+the current instant through the session's `TimeZone`. Two sessions can therefore
+retire different groups. Take a three-day retention, with the server at
+`2026-09-22 03:21+00`. A session in `UTC` cuts at `2026-09-19`. One in
+`Pacific/Midway` cuts at `2026-09-18`, a day earlier. A `timestamptz` column does not have this behaviour,
+because it carries its own zone. Set `TimeZone` explicitly in the session that
+calls `expire` if you need the boundary to be the same every time.
+
 `expire` works on whole row groups and never rewrites them, so it drops a group
 only when every row in it is past the retention. A group that straddles the
 cutoff stays whole, and rows older than the retention survive in it.
