@@ -55,6 +55,15 @@ echo "      $_hd_withhdr of $_hd_d dependency files name columnar.h"
 # empty before they run -- stopped being usable as a premise, and the files sat
 # in the position `git add -A` sweeps. Measured on a pristine clone: 0 entries
 # before a build, 36 after, all `.d`. Reported by @OffgridwithJD.
+# A PREMISE, LIKE ITS SIBLINGS. The arm below asserts `none`, and outside a
+# repository `git status` prints nothing and `none` is what it reports -- silence,
+# which is the failure mode #854 already cost this project once. Asked for by
+# @OffgridwithJD, whose point is that every other arm in this part states what
+# must be true before it can mean anything.
+check "premise: this tree is a checkout, so git can answer" \
+	"$(cd "$_hd_src" && git rev-parse --is-inside-work-tree 2>/dev/null || echo no)" \
+	"true"
+
 _hd_unignored="$(cd "$_hd_src" && git status --porcelain --ignored=no 2>/dev/null \
 	| awk '$1 == "??" {print $2}' | grep -E '\.d$' | head -3 | tr '\n' ' ')"
 check "and the dependency files are ignored, so a built tree is still clean" \

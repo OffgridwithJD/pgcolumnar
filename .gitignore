@@ -28,4 +28,12 @@ __pycache__/
 #
 # SAFE BECAUSE NOTHING TRACKED MATCHES: `git ls-files '*.d'` is empty. A pattern
 # this broad would otherwise hide a real file the next time someone adds one.
+#
+# IT MATCHES DIRECTORIES TOO, since there is no trailing slash, so a future
+# `packaging/pgcolumnar.d/` would be ignored whole. Nothing like that exists.
+# `src/*.d` and `objstore/*.d` would be exact and were the alternative; the broad
+# form is kept because its failure is LOUD -- someone asks why their directory is
+# untracked -- while the narrow form's is the silent one this entry exists to
+# stop: a third directory starts compiling objects and the dirt comes back with
+# nobody told. Raised by @OffgridwithJD.
 *.d

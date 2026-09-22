@@ -164,7 +164,9 @@ Measured by the identity of the postmaster each
   `*.d` is safe because nothing tracked matches it: `git ls-files '*.d'` is empty.
   `harness_selftest` part 550 gains the sibling of the arm it already had. The old arm
   asserts the dependency files exist; the new one asserts they are ignored, which is
-  the half that was missing. Reported by @OffgridwithJD.
+  the half that was missing. Both rest on a premise that `git` can answer at all.
+  Outside a repository `git status` prints nothing, and "nothing untracked" is what
+  silence looks like. Reported by @OffgridwithJD.
 
 - A header edit did not rebuild, so every header mutation proof ran against a stale
   object and reported a clean pass (#1158).
