@@ -1480,6 +1480,20 @@ native_value_satisfies(SkipPredicate *pred, Datum val)
 {
 	int32		c;
 
+	/*
+	 * A RANGE predicate is not a value comparison (#1144) and has no cmpFn: its
+	 * comparison is between the range's ELEMENT bounds, which this function has
+	 * no access to. Calling through the zeroed FmgrInfo segfaulted the backend,
+	 * measured on `span && tstzrange(...)` before this line existed.
+	 *
+	 * "Cannot rule this out" is the safe answer and the one this function's own
+	 * contract gives for anything it does not recognise, because the caller
+	 * turns a false into a SKIPPED VECTOR. Overlap is decided by the zone map
+	 * path, which has the bounds.
+	 */
+	if (pred->rangePred)
+		return true;
+
 	if (pred->searchArray)
 	{
 		int			i;
