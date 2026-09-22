@@ -206,4 +206,7 @@ suites_not_covered 249
 # branch previously stated 1459 against a5c7d5d. Re-counted on THIS tree,
 # never by adding:
 #     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
-checks_never_observed_red 1492
+# RE-DERIVED ON THE COMPOSED TREE after a rebase (#1127), by counting rather
+# than by adding this branch's nine rows to either side: main moved while this
+# sat, so neither the branch's previous value nor main's is the composed one.
+checks_never_observed_red PENDING
