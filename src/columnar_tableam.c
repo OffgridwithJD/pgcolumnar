@@ -1039,6 +1039,11 @@ pgcolumnar_relation_needs_toast_table(Relation rel)
  *		rel->pages is smgrnblocks of that file, so a BASE scan is charged
  *		for pages it will not read. Subtracting this count is a no-op
  *		when the table has no extra projection.
+ *
+ *		When projections DO exist this walks every projection's row-group
+ *		list on every estimate_size call (every plan of the table). That is
+ *		planning-time catalog work proportional to projections times groups;
+ *		the no-projection case remains free.
  */
 static BlockNumber
 pgcolumnar_sibling_projection_pages(uint64 baseStorageId, Snapshot snapshot)
@@ -1152,7 +1157,17 @@ pgcolumnar_relation_estimate_size(Relation rel, int32 *attr_widths,
 		if (nblocks > projPages)
 			nblocks -= projPages;
 		else
+		{
+			/*
+			 * Sibling footprints meeting or exceeding the file should not
+			 * happen (they live in the same file), but stale or orphaned
+			 * projection row groups, a rewrite, or PAGE_ROUND_UP can reach
+			 * it. Floor at one page rather than underflow; a one-page
+			 * estimate for a large table is the wrong answer that would
+			 * otherwise look like a planner bug somewhere else.
+			 */
 			nblocks = 1;
+		}
 	}
 
 	*pages = Max(nblocks, 1);

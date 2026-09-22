@@ -100,8 +100,10 @@ check "premise: the later plan still does not name a covering projection" \
 
 # Unfixed: after_run tracks the whole file, so ratio is about the size jump.
 # Fixed: the base scan still charges the base storage, so ratio stays near 1.
+# Band, not a ceiling: over-subtraction (ratio too small) is the failure mode
+# this code newly makes reachable, and a one-sided bound would green it.
 check "a base scan is not priced from sibling projection pages" \
-	"$(awk -v r="$ratio" "BEGIN{ print (r+0 > 1.25) ? \"inflated ratio=\" r : \"stable\" }")" \
+	"$(awk -v r="$ratio" "BEGIN{ print (r+0 > 1.25 || r+0 < 0.8) ? \"moved ratio=\" r : \"stable\" }")" \
 	"stable"
 
 pgc_summary

@@ -472,6 +472,6 @@ guard_tests 398
 # was re-derived in the same run and did NOT move: 382.
 # 463 -> 464 when test_base_scan_io.py landed (main already at 463 from
 # #1189). Re-derived by collection on this tree, never by adding one:
-# PLACEHOLDER until collection after rebase completes.
-# `guard_tests` was re-derived in the same run and did NOT move: 393.
+# `464 tests collected`. `guard_tests` was re-derived in the same run and
+# did NOT move: 393.
 cluster_tests 464

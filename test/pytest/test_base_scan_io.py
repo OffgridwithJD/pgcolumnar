@@ -126,9 +126,12 @@ def test_base_scan_io(pgc_conn, expect):
         f"-- before_run={before_run} after_run={after_run} ratio={ratio:.3f}"
     )
     print(f"-- before_bytes={before_bytes} after_bytes={after_bytes}")
+    # Band, not a ceiling: over-subtraction (ratio too small) is newly
+    # reachable once sibling pages are subtracted, and a one-sided bound
+    # would green it.
     expect.text(
-        f"inflated ratio={ratio:.3f} (after_run={after_run}, before_run={before_run})"
-        if ratio > 1.25 else "stable",
+        f"moved ratio={ratio:.3f} (after_run={after_run}, before_run={before_run})"
+        if ratio > 1.25 or ratio < 0.8 else "stable",
         "stable",
         "a base scan is not priced from sibling projection pages",
     )
