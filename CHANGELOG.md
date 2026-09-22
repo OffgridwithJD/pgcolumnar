@@ -252,6 +252,46 @@ true until the next version shipped.
   No ledger row moves: `grep -c '^iceberg_fdw' test/check_ledger.tsv` is 0, and the
   gate only ever recorded when python3 was ABSENT, so no clean run has emitted it.
 
+- `parallel_scan_cost`'s two ratio arms rendered `halved` and threw the ratio away
+  (#1164, found by #1174's widening).
+
+  Both arms are `(r < 1.35) ? "io-kept" : "halved"`. The verdict named the bound
+  being crossed and nothing about by how much, or from which two costs. They are
+  two of the twenty-six arms #1174 uncovered when awk-rendered verdicts came into
+  the sweep's scope. The failing branch now carries what it measured, in the same
+  words the pytest twin already used:
+
+      before   got [halved] want [io-kept]
+      after    got [ratio 2.000 at or above 1.35 (serial 10625, parallel 5312.5)]
+               want [io-kept]
+
+  THE LIST SHRANK, WHICH IS THE ONLY DIRECTION IT MOVES: `test/lossy_arms.tsv`
+  goes 103 rows to 101. The guard refuses both directions, so repairing an arm and
+  leaving its row is a red by name -- measured here before the rows came out:
+
+      stale: parallel_scan_cost: an I/O-dominated parallel scan is not priced
+             at serial/workers (and the leader-participating arm)
+
+  AND THE PUBLISHED PARTITION MOVED WITH IT. 540's header states the population in
+  typed prose, which no check reads:
+
+      carries        33 -> 35
+      both constant  46 -> 44
+      LOSSY          26 -> 24
+      total         136 -> 136   (a repaired arm is still an awk-valued arm)
+
+  Re-derived with an independent classifier rather than adjusted: it reproduces the
+  committed 57/33/46 (20 excused, 26 lossy) on the unrepaired tree, and 57/35/44 (20
+  excused, 24 lossy) on this one, with `inputs == sum(buckets)` true on both. The
+  header now says why that block has to be re-derived by hand in the commit that
+  repairs an arm.
+
+  ONE DEFINITION OF THE BOUND, which the forced-failure run is what exposed. The
+  first repair wrote `1.35` in the condition and again in the message, so a later
+  edit could move the test and leave the message quoting the old threshold. That is
+  the same defect one level along: a number the reader is told and nothing checks.
+  `IO_BOUND` now feeds both.
+
 - Five premise arms carried a verdict about a number they never printed (#1164).
 
   #1164's rule excuses a nothing-versus-something comparison -- `x > 0`, `n >= 1` --
