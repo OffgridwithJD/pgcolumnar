@@ -16,6 +16,37 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/limitations.md` told a user that a range column has a collation, and it does
+  not (#1144 review).
+
+  The "Skipping and collation" section says a pushed-down filter drives skipping only
+  when the comparison collation matches the COLUMN's collation, and that this is the
+  collation that ordered the stored minimum and maximum. Range pruning landed in
+  #1196 and made that wrong for a range column, in a section that change did not
+  touch.
+
+  Measured rather than reasoned:
+
+  | | value |
+  | --- | ---: |
+  | `attcollation` of a text column declared `COLLATE "en_US.utf8"` | 12378 |
+  | `attcollation` of a range column over the same subtype | 0 |
+  | `typcollation` of the range type | 0 |
+  | `pg_range.rngcollation` | `"en_US.utf8"` |
+
+  So a range column has no collation for a comparison to match. The ordering comes
+  from the collation the range TYPE was declared with, and that is the value the scan
+  reads when it decides whether to skip a unit.
+
+  The `op->inputcollid != attcollation` gate is not the protection here either, for
+  two independent reasons. The range path in `PgColumnarSetRelPathlist` sets
+  `PGC_SK_RANGE` and returns before reaching it. And both sides are 0 for a range
+  predicate, so the comparison would pass the clause through even if it ran.
+
+  Reported by @jdatcmd.
+
 ### Added
 
 - Range columns prune on overlap and containment (#1144).
