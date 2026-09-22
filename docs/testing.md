@@ -196,6 +196,50 @@ value-stream codecs (round-trip over randomized and boundary inputs):
 test/pbt/run.sh [seed] [iterations]
 ```
 
+## A plan assertion must read what ran
+
+`EXPLAIN` without `ANALYZE` has no execution to report, so a node prints what it
+intends to do. An arm named for something having happened cannot be satisfied by
+that.
+
+`columnar_vector.c` prints the batch-fold marker two ways, and says why:
+
+```
+ExplainPropertyText("Columnar Batch Fold",
+                    (state->haveStats ? state->batchFolded
+                                      : state->batchEligible) ...
+```
+
+`batchEligible` is decided at Begin from the query shape alone. `batchFolded`
+records that the fold ran, and `haveStats` is true only under
+`EXPLAIN (ANALYZE)`. A shape can be predicted eligible and still take the row
+path at execution. The same source comment names that case: a column added after
+some row groups. Under a plain `EXPLAIN` it reads `yes`.
+
+Measured on PG 18, by making the fold return early while the Begin-time
+prediction stays untouched (#1149):
+
+```
+suite                     build     the "actually ran" arm
+plain EXPLAIN (before)    MUTATED   PASS    cannot fail for its own reason
+EXPLAIN ANALYZE (after)   MUTATED   FAIL    got [no ... Columnar Batch Fold: no]
+either form               clean     PASS
+```
+
+The other arms of that suite stayed green in both mutated cells. That includes
+the arm comparing the folded aggregate with the unfolded one, because the row
+path returns the right answer. Nothing else could notice, which is the point.
+
+Two spellings this needs. `TIMING OFF` keeps the arm out of `PGC_SKIP_TIMING`'s
+territory, because it is a plan-shape assertion rather than a measurement. Keep
+stderr as well: an `EXPLAIN (ANALYZE)` that errors otherwise leaves an empty plan
+and a red arm with nothing in it to read.
+
+The general form is short. When an arm says a thing happened, find the field that
+records happening, and check the observation reaches it. A marker that means two
+different things under two invocations is not a marker until the invocation is
+pinned.
+
 ## Before merging: build every major
 
 ```sh
