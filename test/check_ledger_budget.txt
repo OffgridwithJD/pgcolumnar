@@ -202,4 +202,8 @@ suites_not_covered 249
 # comment about a moving census goes stale by construction, and this comment sits
 # directly above the value it contradicts. The command is the durable half.
 # Reported by @OffgridwithJD.
-checks_never_observed_red 1453
+# RESEATED onto origin/main 133c3fbd (post-#1193). Main stated 1453; this
+# branch previously stated 1459 against a5c7d5d. Re-counted on THIS tree,
+# never by adding:
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l
+checks_never_observed_red 1461
