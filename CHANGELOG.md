@@ -16,6 +16,37 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/limitations.md` now says GIN and BRIN can never be chosen, rather than that
+  nothing has been seen to choose them (#1143).
+
+  The old wording left GIN as an open question and suggested the fixture might have
+  been too small. It is not a cost problem. Both are bitmap-only access methods, and
+  the columnar table access method implements no bitmap-scan callback, so the planner
+  generates no path either index could serve.
+
+  Measured on 200,000 rows, same data and same two indexes on both storages, with
+  `enable_seqscan`, `enable_indexscan` and `enable_indexonlyscan` off. The only
+  difference between the rows is the table access method:
+
+  | storage | GIN plan | BRIN plan |
+  | --- | --- | --- |
+  | heap | Bitmap Heap Scan | Bitmap Heap Scan |
+  | columnar | Seq Scan | Seq Scan |
+
+  On PostgreSQL 18 the columnar plan carries `Disabled: true`, which is the planner
+  reporting that it used a node it had been told not to use because no alternative
+  path existed. A row count cannot change that. BRIN is settled by the same
+  measurement, which #1143 records as never having been probed past the build.
+
+  `src/columnar_tableam.c` gains a comment at the access-method routine, because the
+  callback set is not the same on every major and a half-implementation fails badly:
+  15 to 17 declare `scan_bitmap_next_block` and `scan_bitmap_next_tuple`, 18 removed
+  the former, and `table_scan_bitmap_*` calls through the pointer after guarding only
+  against logical decoding, so a NULL member is a null function-pointer call rather
+  than an error. Reported by @jdatcmd.
+
 ### Fixed
 
 - The session that deleted rows still scanned `delete_vector` sequentially, once per row
