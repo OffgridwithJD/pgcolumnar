@@ -30,8 +30,14 @@ set -uo pipefail
 # Pinned in the cluster config rather than by SET, so the writing session and any
 # later session agree about the geometry (#806), and so a unit is one hour of
 # spans rather than whatever the default makes it.
+# THE GEOMETRY IS THE MEASUREMENT. At stripe_row_limit=10000 a row group holds
+# exactly ONE vector, because chunk_group_row_limit is 10000 too -- so pruning
+# happens entirely at the group level and "vectors skipped" is 0 however well it
+# works. The first version of this suite asserted the vector counter under that
+# geometry and failed for a reason that had nothing to do with the code. One
+# group of five vectors puts both levels in one fixture.
 PGC_EXTRA_CONF="${PGC_EXTRA_CONF:-}
-pgcolumnar.stripe_row_limit=10000"
+pgcolumnar.stripe_row_limit=50000"
 export PGC_EXTRA_CONF
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
@@ -65,6 +71,7 @@ mk() {  # mk NAME AM clustered|scattered
 mk r_col " USING pgcolumnar" clustered
 mk r_heap "" clustered
 mk s_col " USING pgcolumnar" scattered
+mk s_heap "" scattered
 
 # The oracle compares a count AND two sums: a count alone agrees whenever two
 # wrong answers are the same size.
@@ -129,8 +136,10 @@ check "premise: the first three of those are not vacuously empty" \
 # ---- effect: the counters move --------------------------------------------
 check "the overlap qual is pushed down, where it used to be dropped" \
 	"$(counter r_col "span && $WINDOW" 'Pushed-Down Filters')" "1"
+PROBES="$(counter r_col "span && $WINDOW" 'Zone Map Probes')"
 check "and the zone map is probed for it" \
-	"$(counter r_col "span && $WINDOW" 'Zone Map Probes')" "1"
+	"$([ "${PROBES:-0}" -ge 1 ] && echo "probed ($PROBES)" || echo "NOT PROBED")" \
+	"probed ($PROBES)"
 SKIPPED="$(counter r_col "span && $WINDOW" 'Vectors Skipped')"
 check "a clustered overlap skips vectors instead of decoding them" \
 	"$([ "${SKIPPED:-0}" -gt 0 ] && echo "skipped ($SKIPPED)" || echo "SKIPPED NOTHING")" \
@@ -146,7 +155,7 @@ check "a window no row can meet reads no chunk group at all" \
 check "a scattered column skips nothing, which is what the documentation says" \
 	"$(counter s_col "span && $WINDOW" 'Vectors Skipped')" "0"
 check_text "and still returns the right rows" \
-	"$(fingerprint s_col "span && $WINDOW")" "$(fingerprint r_heap "span && $WINDOW")"
+	"$(fingerprint s_col "span && $WINDOW")" "$(fingerprint s_heap "span && $WINDOW")"
 
 # ---- the two values upper() cannot tell apart ------------------------------
 psql_run "DROP TABLE IF EXISTS u_col; DROP TABLE IF EXISTS u_heap;
