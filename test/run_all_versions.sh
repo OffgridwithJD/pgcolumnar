@@ -61,8 +61,8 @@ SUITES=(
 	bloom_setting
 	bloom_sizing
 	cancel_decode
-	catalog_natts
 	catalog_delete_index
+	catalog_natts
 	catalog_plan_index
 	column_projection
 	concurrency

@@ -515,4 +515,7 @@ guard_tests 403
 # against earlier mains and neither survives, because each described a tree that
 # no longer exists.
 #
-cluster_tests PLACEHOLDER
+#     main 54acb19b    guard=403 cluster=478  (51 cluster files)
+#     this tree         guard=403 cluster=480  (52 cluster files)
+#
+cluster_tests 480
