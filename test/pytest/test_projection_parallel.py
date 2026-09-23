@@ -92,6 +92,22 @@ def _plan(conn, sql, workers, projection_scan, analyze=False):
         return cur.fetchone()[0]
 
 
+def _plan_at_page_cost(conn, sql, spc):
+    """The same plan with seq_page_cost raised until the base I/O dominates.
+
+    Its own cursor and its own SETs. Nothing here reads the shell suite: the
+    assertion NAMES match so the two can be compared by name, which is the only
+    thing the two harnesses share.
+    """
+    with conn.cursor() as cur:
+        _apply_parallel(cur)
+        cur.execute("SET max_parallel_workers_per_gather = 2")
+        cur.execute("SET pgcolumnar.enable_projection_scan = on")
+        cur.execute(f"SET seq_page_cost = {spc}")
+        cur.execute("EXPLAIN (FORMAT JSON, COSTS OFF) " + sql)
+        return cur.fetchone()[0]
+
+
 def _count(conn, sql, workers, projection_scan):
     with conn.cursor() as cur:
         _apply_parallel(cur)
@@ -205,4 +221,43 @@ def test_projection_parallel(pgc_conn, expect):
         n_busy,
         2,
         "workers share the covering projection scan, it is not a single claimer",
+    )
+
+    # ---- the page-cost ladder (#1209) ------------------------------------
+    #
+    # Core leaves disk I/O whole and amortises only CPU, so raising
+    # seq_page_cost until the base relation's I/O dominates its decode CPU must
+    # cost the PARALLEL covering path. If the partial covering total divided
+    # both, an I/O-bound scan would be quoted at 1/N and Gather would keep
+    # winning however expensive the pages became.
+    #
+    # NOT A GUARD ON THE CLAMP, and the sign says why:
+    #
+    #     unclamped - clamped = (pre - projRun) * (1 - 1/divisor)
+    #
+    # pre > projRun IS the binding condition and divisor > 1 always, so removing
+    # the clamp makes the partial path DEARER and no plan moves. Measured on the
+    # shell side too: the clamp-removal mutation reddens nothing.
+    #
+    # THE TWO ARMS ARE A PAIR AND NEITHER HALF IS SOUND ALONE (@jdatcmd,
+    # review). The second cannot separate "I/O is left whole" from "there is no
+    # parallel covering path at all": both read projection-only. The premise at
+    # seq_page_cost = 1 is what excludes the second reading, so deleting it as
+    # redundant leaves a passing arm that proves nothing.
+    #
+    # The threshold is scale-invariant -- both C and (A - B) are proportional to
+    # the row count -- so this fixture's different N needs no different number.
+    ladder = {spc: _shape(_plan_at_page_cost(pgc_conn, sql, spc))
+              for spc in (1, 1024, 4096, 1000000)}
+    print("-- page-cost ladder:", ", ".join(f"{k}={v}" for k, v in ladder.items()))
+
+    expect.text(
+        ladder[1],
+        "gather+projection",
+        "premise: the covering plan is parallel at the default page cost",
+    )
+    expect.text(
+        ladder[1000000],
+        "projection-only",
+        "a page cost that makes I/O dominate costs the parallel covering path",
     )

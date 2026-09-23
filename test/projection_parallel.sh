@@ -207,6 +207,12 @@ explain_cov_spc() {	# $1 = seq_page_cost
 		-c "EXPLAIN (COSTS OFF) $Q;" 2>/dev/null || true
 }
 
+# THE TWO ARMS ARE A PAIR AND NEITHER HALF IS SOUND ALONE (@jdatcmd, review).
+# The second cannot separate "I/O is left whole" from "there is no parallel
+# covering path at all": both read projection-only. The premise at
+# seq_page_cost=1 is what excludes the second reading, so deleting it as
+# redundant leaves a passing arm that proves nothing.
+#
 # The ladder is printed rather than summarised: a failure of the second arm has
 # two possible causes -- the partial total amortising I/O, or a host where the
 # covering projection is not smaller than the base's read columns so no page
