@@ -36,6 +36,21 @@ true until the next version shipped.
   chosen, and mutating the line to `pages = 997` drops it from the plan. Proven by
   removal in both harnesses -- 10 passed + 1 failed, the new arm alone, restored to
   11 and 11. Green on PG 15, 16, 17, 18 and 19.
+- Three suites now record a skip under each arm's own name when pyarrow is absent,
+  so the set of recorded check names no longer depends on the environment (#1185).
+  Measured by running every pyarrow-dependent suite twice, with the capability
+  present and absent, and comparing the recorded `RESULT` names:
+
+      parquet_export_stats.sh    162 -> 160 passed + 2 skipped = 162
+      native_parquet_schema.sh    35 ->  29 passed + 6 skipped =  35
+      parquet_nested_import.sh     7 ->   5 passed + 2 skipped =   7
+
+  `parquet_export_stats.sh` recorded nothing at all -- a bare `echo` in the `else`
+  -- so it reported `160 passed + 0 failed + 0 unrunnable + 0 skipped` and PASSED
+  while both of its `control:` arms had vanished. The other two recorded a single
+  summary skip while six and two named arms disappeared, which reconciles the
+  accounting and hides the shortfall. Check counts with pyarrow present are
+  unchanged at 162, 35 and 7, so no ledger or census movement.
 
 - The sorted-pathkeys planning-buffer arm now takes each reading in a fresh backend,
   so a reading cannot carry catalog-cache state accumulated by earlier tests (#1203).

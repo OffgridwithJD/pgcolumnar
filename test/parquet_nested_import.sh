@@ -86,7 +86,14 @@ then
 else
 	rc=$?
 	if [ "$rc" = 3 ]; then
-		check_skip "the reference-writer case" "SKIP: pyarrow not available for the reference-writer case" "pyarrow not available"
+		# ONE SKIP PER ARM, UNDER THE ARM'S OWN NAME (#1185); a single
+		# summary name leaves both of these out of the recorded set.
+		for _pni_arm in "pyarrow import rows" "pyarrow nested file matches oracle"
+		do
+			check_skip "$_pni_arm" \
+				"SKIP: $_pni_arm (pyarrow not available for the reference writer)" \
+				"pyarrow not available"
+		done
 	else
 		echo "FAIL: pyarrow nested file generation errored (rc=$rc)"
 		PGC_FAIL=1
