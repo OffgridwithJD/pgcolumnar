@@ -120,7 +120,7 @@ coverage.
 - **The suite checks only the methods that bullet names.** An exclusion written
   anywhere else on this page is checked against nothing. So do not write one here.
   A method that does not work belongs in
-  [limitations](limitations.md#gin-and-brin-build-and-nothing-has-been-seen-to-use-them),
+  [limitations](limitations.md#gin-and-brin-build-and-no-plan-can-use-them),
   with its own evidence.
 - Every row is assigned a stable row number and synthetic item pointer at insert
   time, so ordinary index scans fetch rows by item pointer.

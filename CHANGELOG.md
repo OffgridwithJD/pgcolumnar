@@ -16,6 +16,62 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/limitations.md` now says GIN and BRIN can never be chosen, rather than that
+  nothing has been seen to choose them (#1143).
+
+  The old wording left GIN as an open question and suggested the fixture might have
+  been too small. It is not a cost problem. Both are bitmap-only access methods, and
+  the columnar table access method implements no bitmap-scan callback, so the planner
+  generates no path either index could serve.
+
+  Measured on 200,000 rows, same data and same two indexes on both storages, with
+  `enable_seqscan`, `enable_indexscan` and `enable_indexonlyscan` off. The only
+  difference between the rows is the table access method:
+
+  | storage | GIN plan | BRIN plan |
+  | --- | --- | --- |
+  | heap | Bitmap Heap Scan | Bitmap Heap Scan |
+  | columnar | Seq Scan | Seq Scan |
+
+  The page now also states the maintenance cost, because "never used" understates
+  it. A columnar insert touches very few buffers, so any index maintenance is a large
+  multiple of it: on 100,000 rows an `INSERT` takes 202 shared hits with no index and
+  37,484 with a BRIN index, against 101,468 and 118,923 on heap. The index is essentially
+  the same size on both storages -- equal on this fixture, and about 0.5% apart on a
+  second run on a different fixture. The work is real and buys an index that cannot
+  be chosen.
+  Measured by @jdatcmd and reproduced here, whose columnar delta agreed within 0.8%.
+
+  A BRIN index on a columnar table also never summarizes. `brin_summarize_new_values`
+  returns 0 where heap returns a count, and `brin_summarize_range` on a range that has
+  work raises "columnar: partial-range index build is not supported". The two readings
+  look contradictory and are not: a 0 means BRIN found no range and never called into
+  the access method, so it is silence rather than success. @jdatcmd found the guard in
+  `index_build_range_scan`; the condition that reaches it is reproduced here by naming
+  a range that has work.
+
+  **The refusal is consumable, which is worse than the refusal.** The same range
+  returns 0 on the next call and the index never grows, so a reader who checks twice
+  is told the maintenance function worked. Sweeping ranges 0 to 6 three times gives
+  `0 0 E 0 0 0 0`, then all zeros, then all zeros, with the index at 24,576 bytes
+  throughout. That is also why neither session could reproduce the other's result by
+  re-running the same call: each of us was at a different point in the same
+  consumption sequence.
+
+  On PostgreSQL 18 the columnar plan carries `Disabled: true`, which is the planner
+  reporting that it used a node it had been told not to use because no alternative
+  path existed. A row count cannot change that. BRIN is settled by the same
+  measurement, which #1143 records as never having been probed past the build.
+
+  `src/columnar_tableam.c` gains a comment at the access-method routine, because the
+  callback set is not the same on every major and a half-implementation fails badly:
+  15 to 17 declare `scan_bitmap_next_block` and `scan_bitmap_next_tuple`, 18 removed
+  the former, and `table_scan_bitmap_*` calls through the pointer after guarding only
+  against logical decoding, so a NULL member is a null function-pointer call rather
+  than an error. Reported by @jdatcmd.
+
 ### Fixed
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the

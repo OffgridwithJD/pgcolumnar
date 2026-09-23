@@ -2297,6 +2297,23 @@ static const TableAmRoutine pgcolumnar_am_methods = {
 
 	.relation_estimate_size = pgcolumnar_relation_estimate_size,
 
+	/*
+	 * NO BITMAP-SCAN CALLBACK IS SET, AND THE PLANNER IS WHAT MAKES THAT SAFE.
+	 * GIN and BRIN are bitmap-only, so with no callback here no bitmap path is
+	 * generated and neither index can be chosen (#1143). Measured: with
+	 * enable_seqscan off on 200,000 rows the plan is a Seq Scan reported
+	 * "Disabled: true", while the same data on heap gives a Bitmap Heap Scan.
+	 *
+	 * ANYONE IMPLEMENTING THIS MUST SET EVERY CALLBACK THE MAJOR DEFINES, and
+	 * the set is not the same on all of them: 15 to 17 declare
+	 * scan_bitmap_next_block and scan_bitmap_next_tuple, 18 removed the former
+	 * in the read-stream rework and declares only the latter.
+	 *
+	 * A HALF-IMPLEMENTATION CRASHES RATHER THAN ERRORS. table_scan_bitmap_*
+	 * guards only against logical decoding and then calls through the pointer,
+	 * so a NULL member is a null function-pointer call in the executor.
+	 * Reported by @jdatcmd.
+	 */
 	.scan_sample_next_block = pgcolumnar_scan_sample_next_block,
 	.scan_sample_next_tuple = pgcolumnar_scan_sample_next_tuple,
 };

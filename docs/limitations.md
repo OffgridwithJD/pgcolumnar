@@ -684,25 +684,72 @@ empty range contributes no bound in either direction. Both are recorded
 distinctly from "no summary at all". A table written before this existed keeps
 today's behaviour, rather than being pruned on a statistic nobody wrote.
 
-### GIN and BRIN build, and nothing has been seen to use them
+### GIN and BRIN build, and no plan can use them
 
 `CREATE INDEX` accepts `gin` and `brin` on a columnar table and the build
-succeeds. That is all that is established. No plan has been observed choosing
-either one.
+succeeds. Neither index can ever be chosen.
 
-For GIN the question is open. A `jsonb` containment query on a 20,000-row table
-still planned a sequential scan with four scan settings turned off. GIN supports
-only bitmap scans, and those settings are cost penalties rather than
-prohibitions.
+Both are bitmap-only access methods. A GIN index has no `amgettuple` at all. So
+the only path either one can produce is a bitmap index scan feeding a bitmap heap
+scan. The columnar table access method implements no bitmap-scan callback. The
+planner therefore generates no such path, and this is not a cost the row count can
+change.
 
-For BRIN the question is deeper. BRIN summarises ranges of physical blocks, and a
-columnar table's block layout is not a heap's. Whether such a summary means
-anything here is a design question, not a tuning one. It may be that the build
-should be refused instead of accepted.
+Measured on 200,000 rows, with the same data and the same two indexes on both
+storages, and with `enable_seqscan`, `enable_indexscan` and `enable_indexonlyscan`
+turned off:
 
-[Issue #1143](https://github.com/commandprompt/pgcolumnar/issues/1143) tracks
-both. Until it is settled, treat a successful `CREATE INDEX` with either method
-as a build, not as a plan.
+| storage | GIN plan | BRIN plan |
+| --- | --- | --- |
+| heap | Bitmap Heap Scan | Bitmap Heap Scan |
+| columnar | Seq Scan | Seq Scan |
+
+The only difference between the two rows is the table access method. Both return
+the same rows.
+
+On PostgreSQL 18 the columnar plan is reported with `Disabled: true`. The planner
+used a node it had been told not to use, because the alternative did not exist.
+
+Queries still answer correctly, through a sequential scan or the custom scan. A
+`gin` or `brin` index on a columnar table is simply never read.
+
+It is still maintained on every insert, and that cost is not small in proportion.
+A columnar insert touches very few buffers, so any index maintenance is a large
+multiple of it. Measured on 100,000 rows, shared buffer hits on the `INSERT`
+itself:
+
+| table | no index | with BRIN |
+| --- | ---: | ---: |
+| columnar | 202 | 37,484 |
+| heap | 101,468 | 118,923 |
+
+The index is also essentially the same size on both storages: on this fixture,
+24,576 bytes for BRIN and 5,726,208 for GIN on each. Read that as "the storage
+does not change what the index costs", not as a byte-for-byte identity. A second
+run on a different fixture put the two GIN indexes about 0.5% apart rather than
+exactly equal. The work is real and the bytes are real. On a columnar table they
+buy an index that cannot be chosen.
+
+A BRIN index also never summarizes. `brin_summarize_new_values` returns 0 on a
+columnar table where it returns a count on heap, because it finds no range to
+summarize. Asking it to summarize one range directly reaches a path that refuses:
+
+```
+SELECT brin_summarize_range('cr_brin', 2);
+ERROR:  columnar: partial-range index build is not supported
+```
+
+Ranges with nothing to summarize return 0, so the error appears only for a range
+that has work. **It also appears only once.** Sweeping the same ranges three times:
+
+| pass | ranges 0 to 6 | index size |
+| --- | --- | ---: |
+| 1 | 0 0 E 0 0 0 0 | 24,576 |
+| 2 | 0 0 0 0 0 0 0 | 24,576 |
+| 3 | 0 0 0 0 0 0 0 | 24,576 |
+
+So a second call reports 0 over an index that is still empty. Do not read that 0 as
+a repair. The index never grew, and nothing was ever summarized into it.
 
 **Use a GiST or an SP-GiST index for a selective overlap or containment query.**
 Both build on a columnar table and both answer the query. A columnar index scan
