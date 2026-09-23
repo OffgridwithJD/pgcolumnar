@@ -133,7 +133,21 @@ PY
 		"$(q "SELECT count(*) FILTER (WHERE field_id IS NULL) || '/' || count(*) FROM pgcolumnar.parquet_schema('$REQ');")" \
 		"2/2"
 else
-	check_skip "the REQUIRED-column and field-id checks" "SKIP  pyarrow not available; REQUIRED-column and field-id checks skipped" "pyarrow not available"
+	# ONE SKIP PER ARM, UNDER THE ARM'S OWN NAME (#1185). A single summary skip
+	# reconciles the accounting while six named checks disappear from the
+	# recorded set, which is the shortfall that cannot be seen from the totals.
+	for _nps_arm in \
+		"premise: pyarrow wrote the field-id file" \
+		"REQUIRED column reports nullable=f" \
+		"OPTIONAL column reports nullable=t" \
+		"REQUIRED int32 maps to integer" \
+		"field ids report as written, in schema order" \
+		"a file without field ids reports NULL, not zero"
+	do
+		check_skip "$_nps_arm" \
+			"SKIP  $_nps_arm (pyarrow not available to write the fixture)" \
+			"pyarrow not available"
+	done
 fi
 
 pgc_summary
