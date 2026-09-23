@@ -18,6 +18,52 @@ true until the next version shipped.
 
 ### Changed
 
+- `build_all_versions.sh` reads the matrix's major list from `run_all_versions.sh`
+  instead of carrying its own copy (#1219). The two copies were identical, so the
+  rot was latent rather than live -- but a major moving in one and not the other
+  means the build check compiles against a set the gate does not use, and
+  reporting "builds on every major" about the wrong majors is the failure that
+  script exists to prevent, one level up.
+
+  Not hypothetical as a shape: the runner's PG18 is `/usr/local/pgsql`, which is
+  not the path a reader guesses, and picking `pg18_nc` by hand instead of reading
+  the array cost @jdatcmd four probes on a phantom regression. A person choosing
+  majors by hand makes the same mistake a stale copy does.
+
+  A list that could not be READ is now distinguished from a list of zero majors,
+  and a malformed array from an absent one. Without the first, a renamed array
+  gives `built 0 of 0`, which reads exactly like a host with none of the majors
+  installed and sends the reader to their PATH rather than to the array.
+
+  THE CAPTURED BLOCK IS VALIDATED BEFORE IT IS EVALLED (@jdatcmd, review).
+  `/^)/` does not match an indented terminator, and the runner's own `SUITES=(`
+  closes with a tab, so matching that style is a natural edit rather than a
+  hypothetical. With a tabbed `)` the range ran to end of file and `eval`
+  executed about 1500 lines of the runner, clobbering this script's variables
+  and stopping only when `set -u` hit an unbound name: bounded by accident
+  rather than by design. The reader now accepts either terminator and refuses
+  any block whose lines are not the opener, a path, or the closer.
+
+  Driven, four ways:
+
+      paren at column 0             built 1 of 1, PASSED
+      terminator indented           7 lines captured, built 1 of 1, PASSED
+      an assignment smuggled in     refused, 1 line was something else
+      array deleted                 refused, no DEFAULT_CONFIGS array found
+      array present but empty       refused, no default majors could be read
+
+  and on a host lacking the default paths, `built 0 of 5` with exit 1.
+
+  THE DEFAULT LIST IS ONLY READ WHEN IT IS GOING TO BE USED (@jdatcmd, review).
+  Each refusal tells the reader that naming `pg_config` paths as arguments
+  bypasses it. That promise was false while the block was read before `$#` was
+  examined: a reader with a malformed array who did exactly what the message
+  said got the same refusal. A message that sends the reader where the code
+  will not take them is this change's own subject, one level in. The read now
+  happens only in the branch that uses it, and all three refusals were driven
+  again with an explicit `pg_config` argument: smuggled assignment, deleted
+  array and empty array each build and report PASSED.
+
 - The arm asserting the build path calls `pgc_build_needs_clean` now strips comments
   before counting, so a comment naming the call cannot satisfy it (#1222). The arm
   has always been named "rather than merely naming it" and relied on a trailing
