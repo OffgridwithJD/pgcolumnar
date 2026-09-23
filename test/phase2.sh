@@ -50,10 +50,13 @@ echo "workdir=$WORKDIR"
 # PGC_SKIP_BUILD; skip the redundant per-suite build+install then, which also
 # avoids racing a concurrent suite's install into the same lib dir.
 if [ -z "${PGC_SKIP_BUILD:-}" ]; then
-	echo "-- building"
-	make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" >/dev/null
-	echo "-- installing"
-	make -C "$SRCDIR" install PG_CONFIG="$PG_CONFIG" >/dev/null
+	# THE HARNESS BUILDER, NOT A HAND-ROLLED make (#1220). Three guarantees come
+	# with it and none of them were here: it asks the OBJECTS which major built
+	# them (#1219), it keeps the build stamp (#536), and it refuses to run when
+	# the build or the install failed instead of reporting checks against the
+	# previously installed .so -- which the two discarded exit statuses below it
+	# used to do silently.
+	pgc_build_and_install "$SRCDIR" "$PG_CONFIG" "$PGC_MAJOR" || exit 1
 fi
 
 if [ "$(id -u)" = "0" ]; then

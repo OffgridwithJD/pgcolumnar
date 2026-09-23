@@ -187,6 +187,48 @@ true until the next version shipped.
 
 ### Fixed
 
+- Eleven suites built with their own `make`, so neither the build stamp (#536)
+  nor the cross-major object check (#1219) protected them (#1220). They now route
+  through `pgc_build_and_install`.
+
+  One major's objects were installed into another major's prefix, silently. The
+  demonstration is the issue's own fixture and it is the same command twice, PG19
+  objects in the tree and a build stamp made to AGREE with the major being run:
+
+  ```
+    before   smoke.sh <pg17>   rc=1   pg_ctl: could not start server
+                               the pg17 prefix then held a library with an
+                               undefined PG19-only symbol, build_simple_rel_hook
+
+    after    smoke.sh <pg17>   rc=0   -- the objects in the tree were not built
+                               against .../pg17a/include/postgresql/server,
+                               whatever the build stamp says; cleaning first
+                               SMOKE TEST PASSED, 9 checks, no foreign symbol
+  ```
+
+  A stamp that DISAGREES was always caught. A stamp that agrees while the objects
+  are foreign is the dangerous direction, and it is the one any hand-run `make`
+  for another major creates.
+
+  **A second change comes with it, and it is a behaviour change rather than a
+  guarantee restored.** These suites discarded `make`'s exit status, so a build
+  that failed left them reporting a full set of checks against the PREVIOUSLY
+  installed library. The builder refuses instead: "the build failed, so there is
+  nothing new to test". A suite that cannot build now says so and stops.
+
+  `objstore_stash_recovery.sh` keeps its own vocabulary, reporting through
+  `pgc_fail` and `pgc_summary` rather than exiting, because its accounting line is
+  what tells the reader nothing measured the guard.
+
+  **`pg_upgrade.sh` and `extension_upgrade.sh` are not part of this and are not a
+  remaining tail of it.** `pg_upgrade.sh` never builds the tree: it tars a copy
+  and builds that against both majors with `make clean` before each, which is the
+  matrix's own safety argument, and a single-major builder cannot express two
+  majors at once. `extension_upgrade.sh` cleans the tree before rebuilding it, and
+  installs an OLD REF into the prefix on purpose -- that is its subject, and no
+  builder whose job is to install what this tree built can express it. The two
+  look like the other eleven from a grep and are a different thing.
+
 - `extension_upgrade.sh` skipped in a linked worktree, because it stat'd `.git`
   instead of asking git (#1224).
 
