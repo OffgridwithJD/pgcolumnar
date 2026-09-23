@@ -1419,32 +1419,32 @@ native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected colu
 native_fetch_coalesce	native_fetch_coalesce	premise: the coalescing helper holds both the bound and the validity copy	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: the wide fetch returns the projected values	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	the validity copy is bounded by the chunk length before it runs	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	3-table answer equals filter-off	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	3-table join order matches filter-off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	3-table plan has coordinator	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	ANTI refusal	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	ANTI refusal	15;16;17;18;19	2026-09-23	the join-type gate widened past JOIN_INNER to SEMI, LEFT and ANTI
 native_join_runtime_filter	native_join_runtime_filter	CROSS refusal	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	LEFT refusal	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	SEMI refusal	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	LEFT refusal	15;16;17;18;19	2026-09-23	the join-type gate widened past JOIN_INNER to SEMI, LEFT and ANTI
+native_join_runtime_filter	native_join_runtime_filter	SEMI refusal	15;16;17;18;19	2026-09-23	the join-type gate widened past JOIN_INNER to SEMI, LEFT and ANTI
 native_join_runtime_filter	native_join_runtime_filter	baseline core Hash Join	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	baseline reads all groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	build rows omit NULL	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	clustered groups removed	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	clustered reads fewer groups	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	collation-mismatch answer equals heap	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	collation-mismatch answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
+native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	default plan has runtime coordinator	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
-native_join_runtime_filter	native_join_runtime_filter	early limit equals heap	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	early limit equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	early limit has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	empty-build answer equals heap	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	empty-build plan has coordinator	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	fact-qual conjunction equals heap	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	fact-qual conjunction equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	fact-qual plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	filter ready before scan	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	int4/int8 answer equals heap	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	int4/int8 bloom rejects most non-matches	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	int4/int8 answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
+native_join_runtime_filter	native_join_runtime_filter	int4/int8 bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	join runtime filter defaults on	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
@@ -1454,14 +1454,14 @@ native_join_runtime_filter	native_join_runtime_filter	plan retains core Hash Joi
 native_join_runtime_filter	native_join_runtime_filter	projection join equals heap	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	projection outer is not wrapped	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	projection scan is chosen	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	rescan answers equal heap	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	runtime answer equals heap	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	runtime answer equals off	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	rescan answers equal heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
+native_join_runtime_filter	native_join_runtime_filter	runtime answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
+native_join_runtime_filter	native_join_runtime_filter	runtime answer equals off	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	saturated answer equals heap	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	saturated bloom is disabled	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	saturated plan has coordinator	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	scattered answer equals heap	15;16;17;18;19	never	-
-native_join_runtime_filter	native_join_runtime_filter	scattered bloom rejects most non-matches	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	scattered answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
+native_join_runtime_filter	native_join_runtime_filter	scattered bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
 native_join_runtime_filter	native_join_runtime_filter	scattered interval cannot drop groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered still reads every group	15;16;17;18;19	never	-
