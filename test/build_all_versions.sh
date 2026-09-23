@@ -40,44 +40,51 @@ SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #
 # Evalled out of the runner the way selftest 530 evals its reader, rather than
 # restating it: a check that recomputes a rule tests the world instead of the code.
-_bav_runner="$SRCDIR/test/run_all_versions.sh"
 
-# THE CAPTURED BLOCK IS VALIDATED BEFORE IT IS EVALLED, and that is not
-# belt-and-braces (@jdatcmd, #1225 review).
+# THE DEFAULT LIST IS ONLY READ WHEN IT IS GOING TO BE USED (@jdatcmd, review).
 #
-# `/^)/` does not match an INDENTED terminator, and the runner's own `SUITES=(`
-# closes with a tab before the paren -- so matching that style is a natural edit
-# rather than a hypothetical. With a tabbed `)` the sed range runs to end of file
-# and eval executes about 1500 lines of the runner: it clobbers this script's
-# variables (SRCDIR among them, which its own refusal then prints as `//test/...`)
-# and is stopped only by `set -u` hitting an unbound variable. Bounded by accident
-# rather than by design.
-#
-# So: accept either terminator, and refuse anything whose lines are not the
-# opener, a path, or the closer. A handful of lines, never fifteen hundred.
-_bav_block="$(sed -n '/^DEFAULT_CONFIGS=(/,/^[[:space:]]*)[[:space:]]*$/p' \
-	"$_bav_runner" 2>/dev/null)"
-_bav_junk="$(printf '%s\n' "$_bav_block" | grep -cvE \
-	'^(DEFAULT_CONFIGS=\(|[[:space:]]*/[A-Za-z0-9._/+-]+[[:space:]]*|[[:space:]]*\)[[:space:]]*)$')"
-# TWO CAUSES, TWO SENTENCES. An absent array and a malformed one are different
-# repairs -- one adds it back, the other fixes its shape -- and printing "N lines
-# were something else" for an EMPTY capture would be the same defect this file
-# already fixes for "could not read" versus "none installed", one level in.
-if [ -z "$_bav_block" ]; then
-	echo "FATAL: no DEFAULT_CONFIGS array found in $_bav_runner" >&2
-	echo "       (naming pg_config paths as arguments bypasses this)" >&2
-	exit 1
-elif [ "$_bav_junk" -ne 0 ]; then
-	echo "FATAL: the major list in $_bav_runner is not the shape this reads" >&2
-	echo "       (expected DEFAULT_CONFIGS=( , paths, ) and nothing else;" >&2
-	echo "        $_bav_junk line(s) were something else, so nothing was evalled)" >&2
-	exit 1
-fi
-eval "$_bav_block"
-
+# The refusals below tell the reader that naming pg_config paths as arguments
+# bypasses them. That was FALSE while the block was read before `$#` was
+# examined: someone with a malformed array who did exactly what the message said
+# got the same refusal. A message that sends the reader where the code will not
+# take them is this file's own subject, one level in.
 if [ "$#" -gt 0 ]; then
 	CONFIGS=("$@")
 else
+	_bav_runner="$SRCDIR/test/run_all_versions.sh"
+
+	# THE CAPTURED BLOCK IS VALIDATED BEFORE IT IS EVALLED, and that is not
+	# belt-and-braces (@jdatcmd, #1225 review).
+	#
+	# `/^)/` does not match an INDENTED terminator, and the runner's own `SUITES=(`
+	# closes with a tab before the paren -- so matching that style is a natural edit
+	# rather than a hypothetical. With a tabbed `)` the sed range runs to end of file
+	# and eval executes about 1500 lines of the runner: it clobbers this script's
+	# variables (SRCDIR among them, which its own refusal then prints as `//test/...`)
+	# and is stopped only by `set -u` hitting an unbound variable. Bounded by accident
+	# rather than by design.
+	#
+	# So: accept either terminator, and refuse anything whose lines are not the
+	# opener, a path, or the closer. A handful of lines, never fifteen hundred.
+	_bav_block="$(sed -n '/^DEFAULT_CONFIGS=(/,/^[[:space:]]*)[[:space:]]*$/p' \
+		"$_bav_runner" 2>/dev/null)"
+	_bav_junk="$(printf '%s\n' "$_bav_block" | grep -cvE \
+		'^(DEFAULT_CONFIGS=\(|[[:space:]]*/[A-Za-z0-9._/+-]+[[:space:]]*|[[:space:]]*\)[[:space:]]*)$')"
+	# TWO CAUSES, TWO SENTENCES. An absent array and a malformed one are different
+	# repairs -- one adds it back, the other fixes its shape -- and printing "N lines
+	# were something else" for an EMPTY capture would be the same defect this file
+	# already fixes for "could not read" versus "none installed", one level in.
+	if [ -z "$_bav_block" ]; then
+		echo "FATAL: no DEFAULT_CONFIGS array found in $_bav_runner" >&2
+		echo "       (naming pg_config paths as arguments bypasses this)" >&2
+		exit 1
+	elif [ "$_bav_junk" -ne 0 ]; then
+		echo "FATAL: the major list in $_bav_runner is not the shape this reads" >&2
+		echo "       (expected DEFAULT_CONFIGS=( , paths, ) and nothing else;" >&2
+		echo "        $_bav_junk line(s) were something else, so nothing was evalled)" >&2
+		exit 1
+	fi
+	eval "$_bav_block"
 	CONFIGS=("${DEFAULT_CONFIGS[@]:-}")
 	# A LIST THAT COULD NOT BE READ IS NOT A LIST OF ZERO MAJORS, and the two
 	# must not print the same sentence. Without this, a renamed array or a moved
