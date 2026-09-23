@@ -18,6 +18,27 @@ true until the next version shipped.
 
 ### Changed
 
+- The arm asserting the build path calls `pgc_build_needs_clean` now strips comments
+  before counting, so a comment naming the call cannot satisfy it (#1222). The arm
+  has always been named "rather than merely naming it" and relied on a trailing
+  quote to tell code from prose. That is not enough in a tree whose house style
+  quotes code verbatim in comments. Driven: replacing the call with
+
+      if false; then  # call to pgc_build_needs_clean "$had" "$want" removed
+
+  left the old arm counting 1 -- from the comment -- and reporting yes on a build
+  path that consulted nothing. With the fix the same mutation gives
+  `1094 passed + 1 failed`, on that arm alone, and the tree restores to 1095.
+
+  A second arm drives the difference directly: counting a file whose only mention
+  is a comment must give `raw=1 stripped=0`. Anchoring at `^` is the cheaper fix
+  where it fits -- a comment line begins with `#`, so `grep -cE
+  '^PGC_EXIT_SKIPPED=66$'` is safe by construction -- but it does not fit a call
+  indented inside an `if`.
+
+  No census movement: the existing row leaves `never` with a measured date and the
+  new row enters as `never`, so `checks_never_observed_red` stays 1509.
+
 - `projection_scan_io` now covers the third return of `pgcolumnar_projection_pages`,
   which neither harness reached (#1208). The function has three returns and the
   existing arms reach two: the miss (`proj_storage_id = 0`) and the covering arm.
