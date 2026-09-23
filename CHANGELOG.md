@@ -18,6 +18,25 @@ true until the next version shipped.
 
 ### Changed
 
+- `projection_scan_io` now covers the third return of `pgcolumnar_projection_pages`,
+  which neither harness reached (#1208). The function has three returns and the
+  existing arms reach two: the miss (`proj_storage_id = 0`) and the covering arm.
+  The third is `if (pages < 1) pages = 1`.
+
+  **It is not the "small projection" case.** `COLUMNAR_PAGE_ROUND_UP` rounds every
+  group to a whole page, so one row already gives `pages = 1` through the covering
+  return. Probed at all three returns:
+
+      empty table + projection   bytes=0       pages=0   this return
+      one row                    bytes=8168    pages=1   covering return
+      32000 rows                 bytes=261376  pages=32  covering return
+
+  The state under test is a projection whose storage holds zero row groups. The
+  oracle is the plan rather than a cost: priced at one page the covering path is
+  chosen, and mutating the line to `pages = 997` drops it from the plan. Proven by
+  removal in both harnesses -- 10 passed + 1 failed, the new arm alone, restored to
+  11 and 11. Green on PG 15, 16, 17, 18 and 19.
+
 - The sorted-pathkeys planning-buffer arm now takes each reading in a fresh backend,
   so a reading cannot carry catalog-cache state accumulated by earlier tests (#1203).
   `fx` is module-scoped, so the arm was reading two measurements out of a connection

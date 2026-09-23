@@ -509,4 +509,4 @@ guard_tests 403
 #     main alone   guard=403 cluster=476  (50 cluster files)
 #     composed     guard=403 cluster=477  (51 cluster files)
 #
-cluster_tests 477
+cluster_tests 478

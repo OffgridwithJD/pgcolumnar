@@ -226,4 +226,4 @@ suites_not_covered 249
 # count by one each and leaves the difference alone. Measured on both trees rather
 # than argued: not-covered identical on main and on this tree, ledger-only suites 0,
 # and registered == covered + not-covered on each.
-checks_never_observed_red 1508
+checks_never_observed_red 1509

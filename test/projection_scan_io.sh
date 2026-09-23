@@ -154,4 +154,54 @@ check "a covering projection whose storage cannot be found is not priced as one 
 	"$(awk -v r="$miss_ratio" "BEGIN{ print (r+0 < 0.8 || r+0 > 1.25) ? \"moved miss_ratio=\" r : \"not-one-page\" }")" \
 	"not-one-page"
 
+# ---- the third return: a projection that IS found and holds no row groups ----
+#
+# pgcolumnar_projection_pages has THREE returns and the arms above reach two:
+# the miss (proj_storage_id = 0 -> fallbackPages) and the covering arm. The
+# third is `if (pages < 1) pages = 1`, and it is not the "small projection"
+# case. COLUMNAR_PAGE_ROUND_UP rounds every group to a WHOLE page, so one row is
+# already a full page and returns through the covering arm. Probed at all three
+# returns on 8ea98fc:
+#
+#     empty table + projection   bytes=0       pages=0   this return
+#     one row                    bytes=8168    pages=1   covering return
+#     32000 rows                 bytes=261376  pages=32  covering return
+#
+# So the state under test is a projection whose storage holds ZERO row groups --
+# a projection on a relation nothing has been written to -- and NOT a small one.
+# An arm built on "a tiny projection" measures the covering return and reports
+# green having never reached this line (#1208).
+#
+# THE ORACLE IS THE PLAN, NOT A COST. Priced at one page the covering path wins;
+# mutated to `pages = 997` it loses and the projection disappears from the plan.
+# A pinned cost would move with every unrelated change to the cost model, and
+# explain_scan already sets seq_page_cost = 1000, so one page against 997 is not
+# a marginal difference.
+psql_run "CREATE TABLE psio_e (ik int, pad text) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('psio_e', stripe_row_limit => 1000, chunk_group_row_limit => 100);"
+psql_run "SELECT pgcolumnar.add_projection('psio_e', 'byik', ARRAY['ik'], ARRAY['ik']);"
+psql_run "ANALYZE psio_e;"
+
+# BOTH HALVES IN ONE READING: the projection must be FOUND (so this is not the
+# miss arm again) and its storage must hold nothing (so pages comes out 0).
+#
+# KEYED ON get_storage_id, NOT ON pgcolumnar.storage. A relation that has never
+# been written to has NO storage catalog row at all -- measured here, 0 rows for
+# psio_e -- while get_storage_id still returns its id, because that comes from
+# the relation's metapage. Joining through pgcolumnar.storage returns the empty
+# string and the premise fails for a reason that has nothing to do with the
+# projection.
+check "premise: the empty projection is found and its storage holds no row groups" \
+	"$(q "SELECT (p.proj_storage_id <> 0)::text || '/' || count(rg.*)::text
+	      FROM pgcolumnar.projection p
+	      LEFT JOIN pgcolumnar.row_group rg ON rg.storage_id = p.proj_storage_id
+	      WHERE p.storage_id = pgcolumnar.get_storage_id('psio_e')
+	        AND p.name = 'byik' AND p.projection_id > 0
+	      GROUP BY p.proj_storage_id;")" \
+	"true/0"
+
+check "an empty covering projection is still priced as one page, so it is chosen" \
+	"$(explain_scan on "SELECT ik FROM psio_e WHERE ik BETWEEN 1 AND 50" | grep -c 'Columnar Projection: byik')" \
+	"1"
+
 pgc_summary
