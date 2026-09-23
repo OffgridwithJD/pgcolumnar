@@ -165,8 +165,31 @@ pgc_build_and_install() {
 	_pgc_bi_had="$(cat "$_pgc_bi_stamp" 2>/dev/null | tr -dc '0-9')"
 	_pgc_bi_objs=no
 	[ -n "$(find "$_pgc_bi_src/src" -maxdepth 1 -name '*.o' -print -quit 2>/dev/null)" ] && _pgc_bi_objs=yes
+	# ASK THE OBJECTS FIRST, THEN THE STAMP (#1219). These are two different
+	# questions and the stamp cannot answer the dangerous one.
+	#
+	# The stamp records which major THIS HARNESS last built. A hand-run `make`
+	# for another major leaves foreign objects and never touches it, so had and
+	# major agree, the clean below is skipped, make finds everything up to date,
+	# and one major's objects are installed into another's prefix. The objects
+	# themselves carry the answer and cannot be out of step with themselves.
+	#
+	# The stamp check stays rather than being replaced: it catches the case
+	# where the objects cannot be read at all (no DWARF, no readelf), and it is
+	# the cheaper of the two. Both fail towards cleaning.
+	_pgc_bi_foreign="$(pgc_objects_built_for "$_pgc_bi_src" "$_pgc_bi_cfg")"
 	# Objects from another major link but do not load (#536).
-	if [ "$(pgc_build_needs_clean "$_pgc_bi_had" "$_pgc_bi_major" "$_pgc_bi_objs")" = yes ]; then
+	if [ "$_pgc_bi_foreign" = no ]; then
+		# SAY WHICH CHECK REFUSED. pgc_build_stale_message reports the STAMP,
+		# and in this case the stamp agrees with the major being built -- that
+		# is the whole point. Printing it here tells the reader "last built for
+		# 17 and this run wants 17; cleaning first", which is a contradiction
+		# and sends them at the wrong thing.
+		echo "-- the objects in the tree were not built against" \
+			"$("$_pgc_bi_cfg" --includedir-server 2>/dev/null || echo 'this major')," \
+			"whatever the build stamp says; cleaning first (#1219)"
+		make -C "$_pgc_bi_src" clean PG_CONFIG="$_pgc_bi_cfg" >/dev/null 2>&1 || true
+	elif [ "$(pgc_build_needs_clean "$_pgc_bi_had" "$_pgc_bi_major" "$_pgc_bi_objs")" = yes ]; then
 		pgc_build_stale_message "$_pgc_bi_had" "$_pgc_bi_major"
 		make -C "$_pgc_bi_src" clean PG_CONFIG="$_pgc_bi_cfg" >/dev/null 2>&1 || true
 	fi
@@ -624,6 +647,79 @@ pgc_start_failure_message() {
 # Objects present with NO stamp are unknown provenance and must be cleaned: that
 # is what a hand-run `make PG_CONFIG=...` leaves, which is how anyone debugging
 # builds and how every gate script here builds.
+# pgc_objects_built_for SRCDIR PG_CONFIG -> yes | no | unknown
+#
+# WHICH MAJOR BUILT THE OBJECTS, asked of the objects themselves (#1219).
+#
+# pgc_build_needs_clean compares a STAMP this harness writes against the major
+# being built. Neither side is a property of the objects in the tree, so a
+# hand-run `make` for another major leaves foreign objects and never touches the
+# stamp: have and want agree, the clean is skipped, make finds everything up to
+# date, and one major's objects are installed into another's prefix. Measured by
+# @OffgridwithJD -- a PG18 run died on `undefined symbol:
+# build_simple_rel_hook`, which is the PG19 name.
+#
+# THE STAMP FAILS CLOSED IN ONE DIRECTION AND OPEN IN THE OTHER, and only the
+# open direction is dangerous. A stale or absent stamp forces a clean nobody
+# needed. A stamp that MATCHES while the objects are foreign is silent. Every
+# way THIS function can fail to read an answer returns "no", so the caller
+# cleans: the cost of being wrong here is a rebuild.
+#
+# The build passes -g, so each .o carries a DWARF directory table naming the
+# server headers it was compiled against. Compare that against what pg_config
+# says it wants.
+#
+# DO NOT PARSE A MAJOR NUMBER OUT OF THE PATH. The layouts differ --
+# /usr/local/pgNN/include/postgresql/server against
+# /usr/include/postgresql/NN/server -- and a pattern written for one returns
+# EMPTY for the other, which reads exactly like "not derivable". Asking
+# pg_config for the string and comparing it whole needs no knowledge of either.
+#
+# DO NOT USE `grep -q` HERE. This file runs under `set -o pipefail`; `grep -q`
+# exits at the first match, readelf dies on the closed pipe, and the pipeline
+# reports FAILURE for a pipeline that matched. Measured by @OffgridwithJD on the
+# same object: `grep -cF` gives 14, `grep -qF` gives rc 141. `grep -c` reads all
+# of its input, so it cannot raise SIGPIPE.
+#
+# EVERY object is checked, not the first. A tree half-rebuilt across majors is
+# precisely the state a cross-major preflight leaves behind, so it is the case
+# this exists for rather than an edge of it.
+pgc_objects_built_for() {
+	local srcdir="${1:-}" cfg="${2:-}" want obj n hits dbg
+
+	want="$("$cfg" --includedir-server 2>/dev/null)" || want=""
+	[ -n "$want" ] || { echo no; return; }
+
+	n=0
+	for obj in "$srcdir"/src/*.o; do
+		[ -f "$obj" ] || continue
+		n=$((n + 1))
+
+		# NO DEBUG INFO IS "UNKNOWN", NOT "FOREIGN", and the difference is the
+		# whole design. A server built without -g -- /usr/local/pg18_nc here,
+		# whose pg_config --cflags carries no -g at all -- produces objects with
+		# ZERO .debug_ sections, so there is nothing to compare. Reporting those
+		# as foreign is correct in the fail-closed sense and useless in
+		# practice: every suite would clean and rebuild on every run, and a
+		# guard that makes the tree slow gets switched off, taking the rule with
+		# it. Returning unknown hands the decision back to the stamp, which is
+		# exactly the behaviour those builds have today -- no protection gained,
+		# none lost.
+		dbg="$(readelf -S "$obj" 2>/dev/null | grep -c 'debug_')" || dbg=0
+		case "$dbg" in '' | *[!0-9]*) dbg=0 ;; esac
+		[ "$dbg" -ge 1 ] || { echo unknown; return; }
+
+		hits="$(readelf --debug-dump=line "$obj" 2>/dev/null \
+			| sed -n '/The Directory Table/,/The File Name Table/p' \
+			| grep -cF "$want")" || hits=0
+		case "$hits" in '' | *[!0-9]*) hits=0 ;; esac
+		[ "$hits" -ge 1 ] || { echo no; return; }
+	done
+
+	[ "$n" -ge 1 ] || { echo unknown; return; }
+	echo yes
+}
+
 pgc_build_needs_clean() {
 	local have="${1:-}" want="${2:-}" objects="${3:-}"
 

@@ -226,4 +226,28 @@ suites_not_covered 249
 # count by one each and leaves the difference alone. Measured on both trees rather
 # than argued: not-covered identical on main and on this tree, ledger-only suites 0,
 # and registered == covered + not-covered on each.
-checks_never_observed_red 1509
+# 1509 -> 1515 for #1219's ten new harness_selftest checks. Re-derived by
+# COUNTING on this tree, never by adding to main's number:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1515
+#
+# with the premise printed beside it, because a pattern that matches nothing
+# counts 0 and reads like a clean answer: 1553 rows total, 38 not `never`.
+#
+# TEN rows and the census moves by SIX, because four carry a measured last-red
+# rather than `never`. Those four are the arms that went red under the two
+# removal proofs -- one deleting pgcolumnar's object check, one deleting the
+# four lines in pgc_build_and_install that call it:
+#
+#     objects built by this very run match the pg_config that built them
+#     and are reported FOREIGN to a different major's pg_config
+#     an unreadable pg_config fails CLOSED rather than assuming a match
+#     pgc_build_and_install consults the objects, not only the stamp
+#
+# Each verdict is transcribed from those runs. The other six stay `never`,
+# including "and it still consults the stamp" -- correctly, since neither
+# mutation removes the stamp check, and claiming a red for it would be a number
+# nobody observed.
+#
+# suites_not_covered does NOT move: harness_selftest is already a covered suite.
+checks_never_observed_red 1515
