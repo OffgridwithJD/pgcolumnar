@@ -26,6 +26,17 @@
 
 set -uo pipefail
 
+# lib.sh FOR THE RECORD ONLY (#1230). The build below stays here: it has a
+# parallel `-j`, the compiler-warning gate that mirrors the matrix, and error
+# extraction from the build log, and the harness builder has none of the three.
+# What was missing was the RECORD -- this script installed a correct library and
+# wrote no stamp, so the next suite run with PGC_SKIP_BUILD=1 refused it with
+# "the binary under test was not built from this source", which was false in both
+# halves. Sourcing is safe here: at source time lib.sh only sets variables and
+# sources portlib.sh, which only computes a port band.
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 PG_CONFIG="${1:-/usr/local/pg17/bin/pg_config}"
 SRCDIR="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
@@ -102,6 +113,16 @@ if ! make PG_CONFIG="$PG_CONFIG" install >/dev/null 2>&1; then
 fi
 [ -f "$SO" ] || { echo "rebuild: $SO missing after install" >&2; exit 1; }
 echo "-- install: OK"
+
+# ---- 3b. record what was just installed, the way the harness does ----------
+# AFTER the install and after the artifact check, never before: the digest is of
+# the library the install wrote, and a record written for an install that failed
+# certifies the previous one. Both stamps, because they answer different
+# questions -- which major built the objects (#536), and whether the binary under
+# test came from this source (#959).
+pgc_write_build_stamp "$SRCDIR/.pgc_built_for_major" "$(pgc_major_of "$PG_CONFIG")"
+pgc_record_source_stamp "$SRCDIR" "$PG_CONFIG"
+echo "-- recorded: major $(pgc_major_of "$PG_CONFIG"), source $(pgc_source_fingerprint "$SRCDIR")"
 
 # ---- 4. verify the .so resolves against THIS postgres ----------------------
 # Every undefined symbol must be satisfied by the server binary or by one of the

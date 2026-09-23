@@ -235,11 +235,38 @@ pgc_build_and_install() {
 	# The digest is read AFTER the install, because the install is what writes the
 	# library. Taken before, it would record the previous one and certify exactly
 	# the state this check exists to refuse.
-	pgc_write_source_stamp \
-		"$(pgc_source_stamp_path "$_pgc_bi_src" "$_pgc_bi_cfg")" \
-		"$(pgc_source_fingerprint "$_pgc_bi_src")" \
-		"$(pgc_installed_library_digest "$_pgc_bi_cfg")"
+	pgc_record_source_stamp "$_pgc_bi_src" "$_pgc_bi_cfg"
 	return 0
+}
+
+# ONE PLACE KNOWS WHAT A RECORD OF AN INSTALL IS (#1230).
+#
+# The three arguments have to be gathered in one order and at one moment: the
+# path is keyed by the installation, the fingerprint is of the SOURCE, and the
+# digest must be read AFTER the install, because the install is what writes the
+# library. Taken before, it records the previous one and certifies exactly the
+# state the freshness check exists to refuse.
+#
+# It is a function rather than three lines at each caller because there are now
+# two callers. `rebuild.sh` keeps its own build -- it has a parallel `-j`, the
+# compiler-warning gate that mirrors the matrix, and error extraction from the
+# build log, none of which the builder above has -- so it could not be routed
+# through the builder to get the record. It was missing only the record, and a
+# second copy of the stamp format is what makes the two drift.
+pgc_record_source_stamp() {	# pgc_record_source_stamp SRCDIR PG_CONFIG
+	# REFUSE RATHER THAN RECORD SOMETHING PLAUSIBLE (@jdatcmd, #1232 review).
+	# With no arguments this did not fail, it wrote a believable record in the
+	# wrong place: the path `./.pgc_source_stamp.0.nolibd41` in the CURRENT
+	# DIRECTORY, keyed by the md5 of an EMPTY pkglibdir -- `d41` is the front of
+	# d41d8cd98f00, the md5 of nothing -- carrying a fingerprint of the current
+	# directory rather than of the source. Both callers pass real arguments, so
+	# it was latent; a function whose job is to record what was installed must
+	# refuse when it has not been told what was installed.
+	[ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
+	pgc_write_source_stamp \
+		"$(pgc_source_stamp_path "${1:-}" "${2:-}")" \
+		"$(pgc_source_fingerprint "${1:-}")" \
+		"$(pgc_installed_library_digest "${2:-}")"
 }
 
 pgc_setup() {

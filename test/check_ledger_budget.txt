@@ -281,4 +281,61 @@ suites_not_covered 249
 # run_all_versions.sh names /usr/local/pgsql, which is a DIFFERENT PG18 build
 # (cassert=1 against cassert=0). Both pass, but picking majors by hand is the
 # same defect as copying a list rather than reading it.
-checks_never_observed_red 1519
+# 1519 -> 1521 for #1230's nine new harness_selftest checks. Re-derived by
+# COUNTING on this tree, with the premise beside it because a pattern that
+# matches nothing counts 0 and reads like a clean answer:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1521
+#     1571 rows total, 50 not `never`
+#
+# NINE rows and the census moves by TWO, because SEVEN of the nine carry a
+# last-red, from two different mutations.
+#
+# Four went red on the tree before the fix, which IS the mutation for them --
+# rebuild.sh writing no record:
+#
+#     premise: lib.sh has one recorder for what was installed
+#     the hand rebuild tool records what it installed rather than only naming it
+#     and the freshness gate then reads the tree as built from this source
+#     and it reads a different source as stale rather than fresh
+#
+# The last two went red as `unknown` rather than as a wrong verdict: with no
+# stamp there is nothing to compare, which is the state the gate calls
+# unverified. That is the right red for this defect -- it could not answer, and
+# then refused.
+#
+# Three went red on a mutation of the part's own instrument: the shim made to
+# answer --pkglibdir with the REAL prefix, which is the accident that would make
+# this part install over the live library.
+#
+#     premise: the shim redirects the install away from the real prefix  [passthrough]
+#     premise: no stamp for this prefix before the rebuild               [present]
+#     and the installed library of the running major was never touched   [overwritten]
+#
+# Every one of those reds carries a VALUE, not just a colour. A mutation that
+# reddens with `got []` has measured nothing, which is how three false rows nearly
+# went into this file on another branch today (@jdatcmd).
+#
+# THE LIVE-PREFIX ARM READS THE MTIME, NOT THE DIGEST, and that is the difference
+# between an arm and a control that cannot fail: the tree it builds is a copy of
+# the tree under test and the build is byte-reproducible, so an install that DID
+# land on the real prefix would write identical bytes.
+#
+# suites_not_covered does NOT move: harness_selftest is already a covered suite.
+#
+# MAJORS MEASURED, not assumed: run serially on pg15a, pg16a, pg17a, pg18a and
+# pg19a, 1121 checks and rc=0 on each, 9 of 9 arms passing on every major.
+# Serially, because a parallel fan-out of this suite dies on ports and resources
+# before it dies on pkglibdir even with distinct prefixes (@jdatcmd: five
+# concurrent, five dead, zero checks).
+#
+# 1521 UNCHANGED for #1232's two review arms. Both carry a last-red, so the
+# census does not move: eleven rows now, nine of them dated.
+#
+#     the recorder refuses when it is not told what was installed   got [0] want [1]
+#     and writes no stamp into the directory it was called from     got [1] want [0]
+#
+# The mutation is the argument guard removed, which is the state the review
+# found: the recorder wrote `./.pgc_source_stamp.0.nolibd41` into the CURRENT
+# DIRECTORY, keyed by the md5 of an empty pkglibdir.
+checks_never_observed_red 1521
