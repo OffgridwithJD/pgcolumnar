@@ -497,4 +497,43 @@ suites_not_covered 249
 # refuses correct code gets switched off and takes its rule with it.
 #
 # suites_not_covered does NOT move: capability_sweep arrives with its rows.
-checks_never_observed_red 1534
+#
+# 1534 -> 1519 for #1236: fifteen native_join_runtime_filter arms that had never
+# been observed red now carry one. Nothing was added and nothing was fixed; the
+# arms were ATTACKED and the ledger records what happened. Counted on this tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1519
+#     1602 rows total, 83 not `never`
+#
+# WHY THESE FIFTEEN. #1236's reading list is the arms that are `never`,
+# non-premise, and sit in a part where a sibling IS dated -- arms that survived
+# an attack aimed at their neighbours. Forty-four of the eighty-seven were in
+# this one part, and the reason was visible once asked: the only mutation ever
+# aimed here flipped the GUC's BOOT VALUE, which can redden "defaults on" and
+# "has a coordinator" and cannot touch a single arm about what the filter DOES.
+#
+# THREE MUTATIONS, EACH WITH ITS PREDICTION MADE FIRST:
+#
+#   M-A  the bloom match forced to true, so the filter never rejects
+#        predicted: the pruning arms; NOT the answer arms
+#        observed:  exactly the three "bloom rejects most non-matches" arms,
+#                   and no answer arm -- pruning stops, answers stay correct
+#
+#   M-B  the bloom probe's verdict inverted, so it rejects what matches
+#        predicted: the answer arms
+#        observed:  nine answer arms, plus the same three pruning arms
+#
+#   M-C  the join-type gate widened past JOIN_INNER
+#        predicted: the refusal arms
+#        observed:  ANTI, LEFT and SEMI refusal -- and NOT "CROSS refusal",
+#                   correctly, since the gate was not widened to CROSS and a
+#                   cross join carries no clause the filter could use
+#
+# Each arm is recorded against the MINIMAL mutation that kills it, so the three
+# reddened by both M-A and M-B carry M-A.
+#
+# TWENTY-NINE ARMS IN THIS PART REMAIN `never`. They are not vacuous as far as
+# this shows; they are unattacked, and they need mutations aimed at plan shape,
+# the NULL handling and the baseline join rather than at the filter's verdict.
+# Saying which is the next reader's job, not an entry in this file.
+checks_never_observed_red 1519

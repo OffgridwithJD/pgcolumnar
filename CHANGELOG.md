@@ -18,6 +18,42 @@ true until the next version shipped.
 
 ### Changed
 
+- Fifteen `native_join_runtime_filter` arms now carry a mutation that reddens
+  them (#1236). No test changed and no code changed: the arms were attacked and
+  the ledger records what happened.
+
+  #1236's reading list is the checks that are `never`, non-premise, and sit in a
+  part where a sibling IS dated -- arms that survived an attack aimed at their
+  neighbours. **Forty-four of the eighty-seven were in this one part**, and the
+  reason was visible as soon as it was asked: the only mutation ever aimed there
+  flipped the GUC's boot value, which can redden "defaults on" and "has a
+  coordinator" and cannot touch a single arm about what the filter does.
+
+  Three mutations, each with its prediction written before it was run:
+
+  ```
+    M-A  the bloom match forced true, so the filter never rejects
+         predicted the pruning arms and not the answer arms
+         observed exactly the three "bloom rejects most non-matches" arms
+
+    M-B  the bloom probe's verdict inverted, so it rejects what matches
+         predicted the answer arms
+         observed nine answer arms, plus the same three pruning arms
+
+    M-C  the join-type gate widened past JOIN_INNER
+         predicted the refusal arms
+         observed ANTI, LEFT and SEMI -- and not CROSS, correctly, since the
+         gate was not widened to it and a cross join carries no clause to use
+  ```
+
+  M-A leaving every answer arm green is the half worth keeping: it says the
+  suite can tell "stopped pruning" from "started lying", which is the property
+  a filter's tests exist to have.
+
+  Twenty-nine arms in that part remain `never`. They are not shown to be vacuous;
+  they are unattacked, and they want mutations aimed at plan shape, NULL handling
+  and the baseline join rather than at the filter's verdict.
+
 - The parallel covering clamp's comment records what was measured rather than
   "unproven" (#1209). It is reachable, the threshold was predicted before it was
   observed, and the clamp itself decides nothing.
