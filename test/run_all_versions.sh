@@ -62,6 +62,7 @@ SUITES=(
 	bloom_sizing
 	cancel_decode
 	catalog_natts
+	catalog_plan_index
 	column_projection
 	concurrency
 	concurrent_diff

@@ -7,6 +7,12 @@ base_scan_io	base_scan_io	premise: the later plan is still a base columnar scan	
 base_scan_io	base_scan_io	premise: the later plan still does not name a covering projection	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the plan is a base columnar scan	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
+catalog_plan_index	catalog_plan_index	planning did not sequentially scan pgcolumnar.options	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
+catalog_plan_index	catalog_plan_index	planning did not sequentially scan pgcolumnar.projection	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
+catalog_plan_index	catalog_plan_index	planning probed pgcolumnar.options through options_pkey	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
+catalog_plan_index	catalog_plan_index	planning probed pgcolumnar.projection through projection_pkey	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
+catalog_plan_index	catalog_plan_index	premise: the filtered scan returned every row	15;16;17;18;19	never	-
+catalog_plan_index	catalog_plan_index	premise: the measured table holds its rows	15;16;17;18;19	never	-
 differential	differential	agg avg	15;16;17;18;19	never	-
 differential	differential	agg count	15;16;17;18;19	never	-
 differential	differential	agg minmax	15;16;17;18;19	never	-

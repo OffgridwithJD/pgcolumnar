@@ -500,4 +500,13 @@ guard_tests 403
 # after a THIRD rebase. This value has read 464, 468, 469 and now 476 as main
 # went 463, 467, 468 and 475 under it; every one was correct for the main of
 # its hour and none survived the next merge. `476 tests collected`.
-cluster_tests 476
+# cluster_tests moved 476 -> 477 for #1198's one new cluster file,
+# test_catalog_plan_index.py. RE-DERIVED BY COLLECTION on the composed tree, not
+# by adding one to either side. Both this branch and main carried 476 and the
+# merge was silent, because the branch's 476 was measured against the previous
+# main and main's 476 was measured without this branch:
+#
+#     main alone   guard=403 cluster=476  (50 cluster files)
+#     composed     guard=403 cluster=477  (51 cluster files)
+#
+cluster_tests 477

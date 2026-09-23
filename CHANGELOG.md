@@ -402,6 +402,19 @@ true until the next version shipped.
   and cuts sentences with `sed`; the pytest half splits on a lookbehind and collects
   with `re`, so a parsing mistake in one is not a parsing mistake in the other.
 
+- Planning a columnar query sequentially scanned `pgcolumnar.options` and `pgcolumnar.projection` (#1198).
+
+  `options_pkey` is `(regclass)` and `projection_pkey` leads with `storage_id`. The planner looks those catalogs up by those columns, and the scans passed `InvalidOid`. One filtered scan of one table then walked every columnar table's options row and every projection row. Measured on PG18 before the change, after `pg_stat_reset()`:
+
+  | catalog | idx_scan | seq_scan |
+  | --- | ---: | ---: |
+  | options | 0 | 2 |
+  | projection | 0 | 2 |
+
+  Both readers now pass their primary key, as `row_group` and `delete_vector` already did. The same lookup on `pgcolumnar.storage` stays a sequential scan: `storage_pkey` is on `storage_id` and that reader looks up by `relation_oid`.
+
+  After the change the same scan reports `idx_scan=2` and `seq_scan=0` on both catalogs, and the filtered count is still every row. Putting `InvalidOid` back on the two planner scans returns `idx_scan=0` and `seq_scan=2`.
+
 - `native_reclaim_cycles` could not reach the defect it guards (#1138).
 
   It is the declared regression guard for #84. Deleting the #84 fix left it reporting

@@ -2031,7 +2031,49 @@ PgColumnarRenameDeclaredSortByColumn(Oid relid, const char *oldName,
 	tupdesc = RelationGetDescr(rel);
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+
+	/*
+	 * options_pkey, like every other scan whose key is that column. The sixth
+	 * site: five moved when the others did and this one did not, and the
+	 * population was a list of function names rather than the property
+	 * "the key column IS the index's column" -- which is what a list silently
+	 * regrows past.
+	 *
+	 * AND THE PROPERTY IS WIDER THAN THIS CHANGE. Counted on both trees rather
+	 * than on one:
+	 *
+	 *     main        44 systable_beginscan calls, 31 InvalidOid, 13 indexed
+	 *     this branch 44                         , 24            , 20
+	 *
+	 * so this change resolves SEVEN sites, and 21 of the remaining 24 have a scan
+	 * key that is a prefix of an existing index. None of the 21 is called a defect
+	 * here, because none has been measured the way these seven were. #1207 carries
+	 * them, with line numbers.
+	 *
+	 * NO PER-CATALOG TABLE HERE, DELIBERATELY. Three independent sweeps agreed on
+	 * 21 and disagreed on how it splits, because a sweep that searches BACKWARDS
+	 * for the nearest ScanKeyInit mis-assigns any function that scans two
+	 * catalogs -- PgColumnarCheckFreeSpaceNoOverlap scans row_group at 1020 and
+	 * free_space at 1041, and a backward search gives both to whichever key it
+	 * meets first. The relation HANDLE passed to systable_beginscan is the ground
+	 * truth; tracing it to its open_columnar_table("<name>") settles it. A table
+	 * of counts in a comment is the thing this comment is warning about.
+	 *
+	 * THE COUNTS ABOVE ARE OF CALLS, NOT OF THE STRING. A first draft said 46 and
+	 * "six", from a `grep -c systable_beginscan` that counted this very
+	 * paragraph's own sentence about systable_beginscan. A comment describing a
+	 * sweep is input to that sweep, which is the same trap one level down from the
+	 * one it is describing.
+	 *
+	 * NO MEASUREMENT WILL SHOW THIS ONE. It runs on ALTER TABLE ... RENAME
+	 * COLUMN, not on a plan, so the planner-path probe that found the others
+	 * cannot reach it. That is the reason to fix it rather than a reason not to.
+	 */
+	{
+		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+
+		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), NULL, 1, key);
+	}
 	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -3183,7 +3225,16 @@ PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts)
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	/*
+	 * options_pkey is (regclass), the same column this key names. Passing
+	 * InvalidOid walked every columnar table's options row on a plan that
+	 * asked about one of them.
+	 */
+	{
+		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+
+		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
+	}
 	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -3298,8 +3349,9 @@ pgcolumnar_effective_stripe_row_limit(Oid relid)
  *		of groups on every plan, which is too much to spend refining a term that
  *		is approximate by construction.
  *
- *		Scanned without an index, like PgColumnarReadOptions immediately above:
- *		the storage index is on storage_id and this looks up by relation_oid.
+ *		Scanned without an index: storage_pkey is on storage_id and this
+ *		looks up by relation_oid. options_pkey does match its lookup, and
+ *		PgColumnarReadOptions uses it; this one cannot.
  */
 int
 pgcolumnar_written_stripe_row_limit(Oid relid)
@@ -3400,7 +3452,11 @@ PgColumnarReadTtl(Oid relid, char **column, Interval **interval)
 
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	{
+		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+
+		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
+	}
 	tuple = systable_getnext(scan);
 	if (HeapTupleIsValid(tuple))
 	{
@@ -3443,7 +3499,11 @@ PgColumnarReadSortBy(Oid relid)
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	{
+		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+
+		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
+	}
 	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -3493,7 +3553,11 @@ PgColumnarDeleteOptions(Oid relid)
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	{
+		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+
+		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), NULL, 1, key);
+	}
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		CatalogTupleDelete(rel, &tuple->t_self);
 	systable_endscan(scan);
@@ -3910,9 +3974,18 @@ PgColumnarListProjections(uint64 storageId)
 	ScanKeyInit(&key[0], Anum_projection_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 
-	/* NULL snapshot -> catalog snapshot: sees committed rows plus this
-	 * transaction's own writes after a CommandCounterIncrement (DDL semantics). */
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	/*
+	 * NULL snapshot -> catalog snapshot: sees committed rows plus this
+	 * transaction's own writes after a CommandCounterIncrement (DDL
+	 * semantics). projection_pkey leads with storage_id, so the index
+	 * answers this key. The snapshot is what makes the index scan see
+	 * those writes; dropping it would not.
+	 */
+	{
+		Oid			projIdx = pgcolumnar_index_oid("projection_pkey");
+
+		scan = systable_beginscan(rel, projIdx, OidIsValid(projIdx), NULL, 1, key);
+	}
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		PgColumnarProjection *p = palloc0(sizeof(PgColumnarProjection));
@@ -3953,7 +4026,11 @@ PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId)
 	ScanKeyInit(&key[1], Anum_projection_projection_id, BTEqualStrategyNumber,
 				F_INT4EQ, Int32GetDatum(projectionId));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 2, key);
+	{
+		Oid			projIdx = pgcolumnar_index_oid("projection_pkey");
+
+		scan = systable_beginscan(rel, projIdx, OidIsValid(projIdx), NULL, 2, key);
+	}
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		CatalogTupleDelete(rel, &tuple->t_self);
 	systable_endscan(scan);
