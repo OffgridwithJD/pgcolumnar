@@ -207,6 +207,25 @@ explain_cov_spc() {	# $1 = seq_page_cost
 		-c "EXPLAIN (COSTS OFF) $Q;" 2>/dev/null || true
 }
 
+# THE THRESHOLD IS NOT SCALE-INVARIANT, and an earlier draft of this
+# comment said it was (@jdatcmd caught it). The claim rested on two fixtures
+# that agreed -- and both were 20,000 rows, so their agreement says the
+# difference is insensitive to CONTENT and says nothing about N. Measured on
+# three fixtures, the rung at seq_page_cost = 4096:
+#
+#     20,000 rows, range 300     projection-only     threshold 2625
+#     32,000 rows, range 8,000   gather+projection   threshold above 4096
+#     50,000 rows, range 12,100  gather+projection   threshold above 4096
+#
+# It GROWS with the row count. C = cpuRun * projScale scales with N while
+# basePagesRead - projPages came out at 2 pages regardless, so the quotient
+# rises: 2625 * 32/20 = 4200 and 2625 * 50/20 = 6560, both above 4096, which
+# is what the two rungs show.
+#
+# So THE ARM IS SAFE BY MARGIN, NOT BY INVARIANCE. 1000000 is roughly 150x
+# the largest threshold observed. Pinning a rung near a crossover would rest
+# on whatever ANALYZE sampled that day; this does not.
+#
 # THE TWO ARMS ARE A PAIR AND NEITHER HALF IS SOUND ALONE (@jdatcmd, review).
 # The second cannot separate "I/O is left whole" from "there is no parallel
 # covering path at all": both read projection-only. The premise at

@@ -245,8 +245,24 @@ def test_projection_parallel(pgc_conn, expect):
     # seq_page_cost = 1 is what excludes the second reading, so deleting it as
     # redundant leaves a passing arm that proves nothing.
     #
-    # The threshold is scale-invariant -- both C and (A - B) are proportional to
-    # the row count -- so this fixture's different N needs no different number.
+    # THE THRESHOLD IS NOT SCALE-INVARIANT, and an earlier draft of this
+    # comment said it was (@jdatcmd caught it). The claim rested on two fixtures
+    # that agreed -- and both were 20,000 rows, so their agreement says the
+    # difference is insensitive to CONTENT and says nothing about N. Measured on
+    # three fixtures, the rung at seq_page_cost = 4096:
+    #
+    #     20,000 rows, range 300     projection-only     threshold 2625
+    #     32,000 rows, range 8,000   gather+projection   threshold above 4096
+    #     50,000 rows, range 12,100  gather+projection   threshold above 4096
+    #
+    # It GROWS with the row count. C = cpuRun * projScale scales with N while
+    # basePagesRead - projPages came out at 2 pages regardless, so the quotient
+    # rises: 2625 * 32/20 = 4200 and 2625 * 50/20 = 6560, both above 4096, which
+    # is what the two rungs show.
+    #
+    # So THE ARM IS SAFE BY MARGIN, NOT BY INVARIANCE. 1000000 is roughly 150x
+    # the largest threshold observed. Pinning a rung near a crossover would rest
+    # on whatever ANALYZE sampled that day; this does not.
     ladder = {spc: _shape(_plan_at_page_cost(pgc_conn, sql, spc))
               for spc in (1, 1024, 4096, 1000000)}
     print("-- page-cost ladder:", ", ".join(f"{k}={v}" for k, v in ladder.items()))

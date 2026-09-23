@@ -54,7 +54,18 @@ true until the next version shipped.
   covering path wins either way. The clamp keeps `cpuRunProj` from going negative,
   an internal quantity no plan exposes.
 
-  Two arms in `projection_parallel.sh` pin the page-cost ladder. They are named for
+  The threshold is **not** scale-invariant, which an earlier draft of this entry
+  claimed. That claim rested on two fixtures that agreed and were both 20,000
+  rows, so their agreement said the margin is insensitive to content and said
+  nothing about the row count. Measured on three fixtures at
+  `seq_page_cost = 4096`: 20,000 rows binds, 32,000 and 50,000 do not. It grows
+  with N, because `cpuRun` scales while `basePagesRead - projPages` stayed at 2
+  pages. The arms are safe by margin -- `1000000` is roughly 150x the largest
+  threshold observed -- rather than by invariance, and no rung near a crossover is
+  asserted.
+
+  Two arms in `projection_parallel.sh` and its pytest twin pin the page-cost
+  ladder. They are named for
   I/O amortisation rather than for the clamp, because the clamp-removal mutation
   does not redden them and an arm named for it would have been vacuous. What does
   redden the second is `(ioRunProj + cpuRunProj) / divisor`.

@@ -6025,8 +6025,12 @@ covering total divided both, an I/O-bound scan would be quoted at 1/N and Gather
 would keep winning however expensive the pages became. It is not a guard on the
 clamp in that block: `unclamped - clamped = (pre - projRun) * (1 - 1/divisor)`
 is strictly positive, so removing the clamp makes the partial path dearer and no
-plan moves. The threshold is scale-invariant, so the two fixtures' different row
-counts need no different numbers.
+plan moves. The threshold is NOT scale-invariant: it grows with the row count, because
+`cpuRun` scales with N while `basePagesRead - projPages` came out at 2 pages
+regardless. Measured at `seq_page_cost = 4096`, 20,000 rows binds and both
+32,000 and 50,000 do not. The arm is safe by margin, 1000000 being roughly 150x
+the largest threshold observed, rather than by invariance, and no rung near a
+crossover is asserted.
 
 | test | what it asserts |
 | --- | --- |
