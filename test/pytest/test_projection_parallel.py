@@ -16,6 +16,13 @@ This file asserts the PLANNER shape, ANALYZE worker rows, and the query's
 count. Independent of test/projection_parallel.sh: same public seam, own
 fixture, own observations. Assertion names match the shell suite so the
 two can be compared by name, not by importing each other.
+
+A SECOND INSTRUMENT IS WORTH WHAT ITS FAILURES DO NOT SHARE (@jdatcmd).
+This file reads `EXPLAIN (FORMAT JSON, COSTS OFF)` and walks the node tree;
+the shell suite greps the text plan for `Columnar Projection: byik`. A
+renamed field, a malformed plan or a truncated pipe hits those two in
+different places, which is the point of having both. Two greps with the same
+blind spot are one run twice, and agreeing by name would not have told us.
 """
 
 
