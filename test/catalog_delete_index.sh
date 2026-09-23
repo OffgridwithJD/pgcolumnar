@@ -43,6 +43,26 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 
+# WHICH BUILD KIND THIS RUN MEASURED, printed rather than asserted.
+#
+# Two of the nine converted scan sites are in PgColumnarCheckFreeSpaceNoOverlap,
+# which is assert-only. On a release build they do not execute, so every arm
+# below is a WEAKER claim there: it says nothing about those two sites rather
+# than clearing them. A green on `debug_assertions = off` is not the same
+# statement as a green on `on`.
+#
+# That distinction cost real time. The probe run that closed the account for
+# #1207 was on a release build and reported the compaction path FULLY CLEAN,
+# while the assert-enabled suite still showed one sequential scan on each of two
+# catalogs. Nothing in the measurement said which build it was, so the zero read
+# as an answer rather than as a partial one. Suggested by @OffgridwithJD.
+#
+# Printed and NOT made an arm on purpose: it records the condition the run
+# happened in, and a removal proof cannot reach a value like that -- breaking
+# the code under test cannot change it. An arm here could not fail for any
+# reason this suite is about.
+echo "-- debug_assertions=$(q "SHOW debug_assertions;")  (off = the two assert-only sites did not run)"
+
 # A second columnar table in the same catalogs. A sequential scan walks its
 # rows too; an index probe does not. Without it every arm below could pass on
 # a catalog that happens to hold one storage's rows.

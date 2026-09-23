@@ -801,6 +801,19 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 		 * accumulating ones, and takes Min() of the offsets, so reading the
 		 * rows in index order rather than heap order cannot change which
 		 * neighbours merge (#1207).
+		 *
+		 * WHAT THAT ARGUMENT RESTS ON, said out loud because it is not
+		 * self-evident (@OffgridwithJD, #1213 review). Order-independence needs
+		 * `nMerge < 2` below to be a cap that never binds, and it never binds
+		 * only because there is AT MOST one left neighbour and one right
+		 * neighbour. With three matches `len` would absorb all three while only
+		 * two rows were deleted, leaving a double-counted extent. The invariant
+		 * that makes three impossible -- file_offset unique, no overlap -- is
+		 * enforced by PgColumnarCheckFreeSpaceNoOverlap, which is ASSERT-ONLY.
+		 * So the cap's safety and that checker are one argument, not two
+		 * independent ones, and a release build carries the invariant without
+		 * checking it. The invariant does hold; it is the independence that
+		 * does not.
 		 */
 		scan = systable_beginscan(rel, fsIdx, OidIsValid(fsIdx), snap, 1, key);
 		while (HeapTupleIsValid(tuple = systable_getnext(scan)))

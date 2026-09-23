@@ -38,6 +38,29 @@ CATALOGS = (
 )
 
 
+def _build_kind(conn):
+    """Which build kind this run measured, printed rather than asserted.
+
+    Two of the nine converted scan sites are in
+    `PgColumnarCheckFreeSpaceNoOverlap`, which is assert-only. On a release
+    build they do not execute, so every arm here is a WEAKER claim there: it
+    says nothing about those two sites rather than clearing them.
+
+    The probe run that closed the account for #1207 was on a release build and
+    reported the compaction path fully clean while the assert-enabled suite
+    still showed a scan on each of two catalogs. Nothing in the measurement
+    said which build it was, so the zero read as an answer rather than a
+    partial one.
+
+    Printed and NOT made an arm: it records the condition the run happened in,
+    and breaking the code under test cannot change it, so no removal proof can
+    reach it.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SHOW debug_assertions")
+        return cur.fetchone()[0]
+
+
 def _counters(conn):
     """Every catalog's (idx_scan, seq_scan) in ONE query.
 
@@ -67,6 +90,8 @@ def _groups_of(conn, table):
 
 def test_retiring_a_group_probes_its_catalogs_by_index(pgc_conn, expect):
     conn = pgc_conn
+    print(f"-- debug_assertions={_build_kind(conn)} "
+          "(off = the two assert-only sites did not run)")
     with conn.cursor() as cur:
         # A second columnar table in the same catalogs. A sequential scan
         # walks its rows too; an index probe does not. Without it every arm
@@ -170,6 +195,7 @@ def test_vacuum_probes_the_row_group_catalog_by_index(pgc_conn, expect):
     does not report through at all.
     """
     conn = pgc_conn
+    print(f"-- debug_assertions={_build_kind(conn)}")
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE vac_main (k bigint) USING pgcolumnar")
         cur.execute("SELECT pgcolumnar.set_options('vac_main', stripe_row_limit => %s)", (GROUP,))
