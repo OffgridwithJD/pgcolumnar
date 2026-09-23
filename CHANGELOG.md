@@ -237,6 +237,56 @@ true until the next version shipped.
   against logical decoding, so a NULL member is a null function-pointer call rather
   than an error. Reported by @jdatcmd.
 
+### Added
+
+- A nightly sweep that refuses a check vanishing when an optional capability is
+  absent (#1185). `test/capability_sweep.sh`, twelve checks.
+
+  A suite that runs fewer checks because a capability is missing reads exactly
+  like a suite that has fewer checks. The accounting reconciles what ran against
+  what was recorded, so a block that records nothing when it does not run is
+  invisible by construction. Measured on `arrow_import.sh` before #1159 fixed it:
+
+  ```
+    with pyarrow     72 passed + 0 failed + 0 unrunnable + 0 skipped   PASSED
+    without          16 passed + 0 failed + 0 unrunnable + 0 skipped   PASSED
+  ```
+
+  **The invariant is not that the name sets must match.** Measured over all 30
+  pyarrow suites, 25 decline as a whole with one failure record and nothing else
+  runs. That is loud, and it is not this defect. A guard demanding equality would
+  refuse 25 correct suites, and a guard that refuses correct code gets switched
+  off and takes its rule with it. So: either the absent run records every name the
+  present run does, or it records a refusal.
+
+  ```
+    A  names preserved, a skip under each arm's own name     5
+    B  loud refusal: one FAIL record, nothing else ran      25
+    C  SILENT LOSS                                           0
+  ```
+
+  Both directions are driven. Putting one suite back into category C gives
+  `got [1] want [0]` and names it in the log, while the 25 category-B suites stay
+  classified as refusals in the same run -- so the guard is known not to fire on
+  correct code as well as known to fire on the defect.
+
+  **Emptying the mask reddens three arms**, which is the one that matters: a
+  failed mask makes both runs the present run, every name set matches trivially,
+  and the sweep passes having compared nothing. Its pass and its vacuity are
+  otherwise indistinguishable.
+
+  It runs as its own nightly job rather than as a registered suite. Two runs of 30
+  suites is 224 seconds, a nightly cost rather than one every pull request pays,
+  and it would otherwise nest inside a runner that already runs six suites at
+  once. It is not behind `PGC_SKIP_TIMING`: `ci.yml` and `nightly.yml` both set
+  that, so a guard behind it never runs anywhere.
+
+  Two things it had to learn about itself. It excludes itself from the population
+  it sweeps -- it names pyarrow in its own shim, so the first run swept itself, one
+  recursive call per suite. And it derives the population with `grep -c` rather
+  than `grep -q`, which under `pipefail` closes the pipe on `sed` and drops a
+  different file each run: measured at 30, 29, 29, 29, 30 over one unchanging tree.
+
 ### Fixed
 
 - Eleven suites built with their own `make`, so neither the build stamp (#536)

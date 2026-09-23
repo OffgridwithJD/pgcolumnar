@@ -637,6 +637,62 @@ jobs:
   #
   # PR CI runs 17 and 18 of this same job. The ends of the range are what this one
   # adds, and the ends are where the gap was.
+  capability-sweep:
+    name: capability name-set sweep (PG 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # A FIRE DRILL SKIPS THE HEAVY GATES, as for the other deep jobs.
+    if: (github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar')
+      && github.event.inputs.fire_drill != 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the PGDG repository and refresh the package lists
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL --connect-timeout 15 --max-time 120 \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo timeout 300 apt-get -o Acquire::Retries=5 update
+
+      - name: Install PostgreSQL 18, the codec headers, and pyarrow
+        run: |
+          set -euo pipefail
+          sudo timeout 600 apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            postgresql-18 postgresql-server-dev-18 \
+            liblz4-dev libzstd-dev zlib1g-dev python3-pip
+          sudo pip3 install --break-system-packages --quiet pyarrow \
+            || sudo pip3 install --quiet pyarrow
+
+      # THE SWEEP'S SUBJECT IS THE ABSENCE OF pyarrow, so its PRESENCE is this
+      # job's precondition. Without it every suite takes the absent path in both
+      # runs, every name set matches trivially, and the sweep passes having
+      # compared nothing -- its pass and its vacuity look identical. The sweep
+      # asserts this itself; the job asserts it too, because a job that installs
+      # a dependency should fail where the install failed rather than four
+      # minutes later inside a guard.
+      - name: Confirm pyarrow is importable by the suites' interpreter
+        run: |
+          set -euo pipefail
+          sudo python3 -c 'import pyarrow; print("pyarrow", pyarrow.__version__)'
+
+      - name: Stop the packaged cluster
+        run: sudo systemctl stop postgresql || true
+
+      # NOT a registered suite and NOT behind PGC_SKIP_TIMING. Two runs of 30
+      # suites is 224 seconds, which is a nightly rather than something every leg
+      # of every PR pays; and ci.yml and nightly.yml both set PGC_SKIP_TIMING, so
+      # a guard behind that variable never runs anywhere.
+      - name: Run the capability name-set sweep
+        run: |
+          sudo -E env "PATH=$PATH" \
+            bash test/capability_sweep.sh /usr/lib/postgresql/18/bin/pg_config
+
   pytest-cluster:
     name: pytest (cluster tests, PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
@@ -747,7 +803,7 @@ jobs:
   red-nightly:
     name: report a red nightly
     runs-on: ubuntu-latest
-    needs: [suites, sanitizer, coverage, upgrade-guard, pytest-cluster]
+    needs: [suites, sanitizer, coverage, upgrade-guard, capability-sweep, pytest-cluster]
     if: always() && (github.event_name == 'workflow_dispatch' || github.repository == 'commandprompt/pgcolumnar')
     permissions:
       contents: read
