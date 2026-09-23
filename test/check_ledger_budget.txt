@@ -226,4 +226,36 @@ suites_not_covered 249
 # count by one each and leaves the difference alone. Measured on both trees rather
 # than argued: not-covered identical on main and on this tree, ledger-only suites 0,
 # and registered == covered + not-covered on each.
-checks_never_observed_red 1509
+# 1509 -> 1515 for #1219's thirteen new harness_selftest checks. Re-derived by
+# COUNTING on this tree, never by adding to main's number:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1515
+#
+# with the premise printed beside it, because a pattern that matches nothing
+# counts 0 and reads like a clean answer: 1556 rows total, 41 not `never`.
+#
+# THIRTEEN rows and the census moves by SIX, because seven carry a measured
+# last-red. FOUR mutations were needed rather than one, and the reason is worth
+# recording: several arms correctly ACCEPT `unknown`, so a helper stubbed to
+# return it passes them. Forcing `yes` and forcing `no` are what discriminate.
+#
+#     yes      4 arms   unknown-reporting, FOREIGN, fails-CLOSED, no-objects
+#     no       3 arms   never-called-foreign, unknown-reporting, no-objects
+#     wiring   1 arm    consults the objects, not only the stamp
+#     strip    1 arm    a caller that only MENTIONS the helper
+#
+# Union seven, transcribed from those runs. The six that stay `never` are the
+# four premises, the caller-text premise, and "and it still consults the stamp"
+# -- correctly, since none of the four mutations removes the stamp check.
+#
+# THE COUNT HAS MOVED THREE TIMES IN THIS BRANCH and each earlier value
+# described a tree somebody had. Ten names (1515) was measured where a host
+# search happened to find a second major. Twelve (1516) was measured after a
+# stub replaced that search, but one arm still DECLINED wherever the build
+# carried debug info, which made the suite EXIT_INCOMPLETE nearly everywhere --
+# rc=67 on a clean checkout, invisible in my own trees because they lack .git
+# and so are FAILED regardless. Thirteen is what runs with nothing declining,
+# verified rc=0 PASSED on 15, 16, 17, 18 and 19.
+#
+# suites_not_covered does NOT move: harness_selftest is already a covered suite.
+checks_never_observed_red 1515

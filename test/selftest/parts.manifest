@@ -52,3 +52,4 @@
 530-a-record-must-name-its-major.sh
 540-an-arm-must-carry-its-measurement.sh
 550-a-header-edit-must-rebuild.sh
+560-the-objects-decide-which-major.sh

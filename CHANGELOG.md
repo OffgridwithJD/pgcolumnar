@@ -120,6 +120,96 @@ true until the next version shipped.
 
 ### Fixed
 
+- A hand-run `make` for another major installed its objects into this one's
+  prefix, and the build stamp could not see it (#1219).
+
+  `pgc_build_and_install` decided whether to clean by comparing a STAMP the
+  harness writes against the major being built. Neither side is a property of
+  the objects in the tree, so a `make` run by hand for another major left
+  foreign objects and never touched the stamp: the two agreed, the clean was
+  skipped, `make` found everything up to date, and one major's objects were
+  installed into another's prefix. Found by @OffgridwithJD while measuring a
+  cross-major preflight -- a PG 18 run died on `undefined symbol:
+  build_simple_rel_hook`, which is the PG 19 name.
+
+  **The stamp fails closed in one direction and open in the other, and only the
+  open direction is dangerous.** A stale or absent stamp forces a clean nobody
+  needed. A stamp that matches while the objects are foreign is silent.
+
+  The objects can answer for themselves. The build passes `-g`, so each `.o`
+  carries a DWARF directory table naming the server headers it was compiled
+  against; `pgc_objects_built_for` compares that against
+  `pg_config --includedir-server`. Not by parsing a major out of the path -- the
+  layouts differ (`/usr/local/pgNN/include/postgresql/server` against
+  `/usr/include/postgresql/NN/server`) and a pattern written for one returns
+  empty for the other, which reads exactly like "not derivable".
+
+  Proved end to end on the case the stamp cannot construct. PG 18 objects, a
+  stamp written to say `17`, run under PG 17:
+
+  | | result |
+  | --- | --- |
+  | with the check | cleans, rebuilds, `4 passed + 0 failed` |
+  | without it | `undefined symbol: pqsignal_be`, server never starts |
+
+  `had=17` and `major=17` agree in both runs, which is the defect; the objects
+  are what refuse.
+
+  **A build without `-g` reports `unknown`, not foreign.** `/usr/local/pg18_nc`
+  carries no `-g` in its `cflags`, so its objects have zero `.debug_` sections
+  and there is nothing to compare. Reporting those as foreign is correct in the
+  fail-closed sense and useless in practice -- every suite would clean and
+  rebuild on every run, and a guard that makes the tree slow gets switched off.
+  `unknown` hands the decision back to the stamp, which is what those builds do
+  today.
+
+  So the three answers are not two, and what each one costs differs:
+
+  | reading | returns | caller |
+  | --- | --- | --- |
+  | DWARF present and disagrees | `no` | cleans, whatever the stamp says |
+  | `pg_config` cannot be asked | `no` | cleans |
+  | no objects | `unknown` | stamp decides |
+  | no `-g`, or no `readelf` | `unknown` | stamp decides |
+
+  **This check needs `-g` and `readelf` to do anything at all**, and where it
+  has neither it adds no protection rather than adding a refusal. That is
+  deliberate, and it is the reason the stamp check stays rather than being
+  replaced.
+
+  The pytest harness drives the same `pgc_build_and_install` out of `lib.sh`
+  rather than carrying a second implementation, so both harnesses gain this from
+  one change; `test_build_refusal.py` holds that wiring, 107 checks.
+
+  `test/selftest/560-the-objects-decide-which-major.sh`, thirteen checks, the
+  same thirteen on 15, 16, 17, 18 and 19, all passing with nothing declining.
+
+  **Nothing branches on what the host happens to have.** The part builds both
+  object kinds itself -- `cc -c` and `cc -g -c` on a two-line source -- and
+  asserts both debug-section counts as premises, so "cc obeyed both" is measured
+  rather than assumed. An earlier revision branched on whether *this* build
+  carried debug info and declined the arm that did not apply; that is #1185's
+  rule applied correctly, and it produced a worse bug. `check_unrunnable` makes
+  a run `EXIT_INCOMPLETE` by design, so an arm that is structurally inapplicable
+  on most hosts made the whole suite incomplete nearly everywhere:
+
+  | | |
+  | --- | --- |
+  | main | `rc=0` 1094 passed + 0 unrunnable, PASSED |
+  | that revision | `rc=67` 1105 passed + 1 unrunnable, INCOMPLETE |
+  | now | `rc=0` 1107 passed + 0 unrunnable, PASSED |
+
+  A declined arm is right when applicability is a property of the **run**. It is
+  wrong when applicability is a property of the **host** and the thing under
+  test is a pure function of a file -- then build the file.
+
+  Three arms read `pgc_build_and_install`'s own text and require it to reach
+  both decisions, because a removal proof of the function alone passes while the
+  lines that call it do nothing. **They strip comments before counting**: the
+  first version passed on prose, green on a caller that consulted nothing, and
+  one arm now builds that exact text and requires zero. `selftest/190` has the
+  same shape on `pgc_build_needs_clean`, tracked in #1222.
+
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).
 
