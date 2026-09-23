@@ -987,30 +987,57 @@ def planbuf_fx(fx):
 
 
 def _planning_buffers(conn, guc, sql):
-    """-> shared hit+read during PLANNING, from the SECOND EXPLAIN.
+    """-> shared hit+read during PLANNING, from the SECOND EXPLAIN of a FRESH BACKEND.
 
     The second, because the first warms the catalog cache and its planning buffers are
     a measurement of that rather than of this query.
+
+    A FRESH CONNECTION PER READING, and that is the part this arm was missing. `fx` is
+    module-scoped, so by the time this test runs its backend has absorbed the DDL of
+    twenty-nine other tests. How much catalog-cache state survives into each reading is
+    then not a property of the query being measured, and two readings taken from one
+    long-lived backend can differ by an amount with no upper bound and no fixed sign --
+    #1203 records five CI failures on two different arms in opposite directions,
+    including the same commit red then green.
+
+    A backend that has just started carries a known amount instead: the first EXPLAIN
+    fills its caches and the second measures the query. What is left is the couple of
+    buffers two fresh backends differ by, which is what the tolerance below is sized
+    for and why it is a tolerance rather than an equality.
+
+    NOT REPRODUCED LOCALLY, and this comment should not pretend otherwise. Fourteen
+    runs on a quiet box -- five of the full cluster corpus, six of this module, three
+    with an injected catalog invalidation between the two readings -- all gave a
+    difference of exactly 0. So this is a change of regime argued from the mechanism,
+    not a red turned green. What it does establish is an upper bound on what a reading
+    can carry, which the previous arrangement had none of.
+
+    The cost is one connection per reading, eight per run of this test.
     """
-    with conn.cursor() as cur:
-        cur.execute(f"SET pgcolumnar.enable_sorted_pathkeys = {guc}")
-        total = None
-        for _ in range(2):
-            cur.execute("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + sql)
-            lines = [r[0] for r in cur.fetchall()]
-            seen_planning = False
-            for line in lines:
-                if line.strip().startswith("Planning:"):
-                    seen_planning = True
-                    continue
-                if seen_planning and "Buffers:" in line:
-                    import re as _re
-                    hit = _re.search(r"shared hit=(\d+)", line)
-                    read = _re.search(r"read=(\d+)", line)
-                    total = (int(hit.group(1)) if hit else 0) + \
-                            (int(read.group(1)) if read else 0)
-                    break
-        cur.execute("RESET pgcolumnar.enable_sorted_pathkeys")
+    import psycopg
+
+    fresh = psycopg.connect(conn.info.dsn, autocommit=True)
+    total = None
+    try:
+        with fresh.cursor() as cur:
+            cur.execute(f"SET pgcolumnar.enable_sorted_pathkeys = {guc}")
+            for _ in range(2):
+                cur.execute("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + sql)
+                lines = [r[0] for r in cur.fetchall()]
+                seen_planning = False
+                for line in lines:
+                    if line.strip().startswith("Planning:"):
+                        seen_planning = True
+                        continue
+                    if seen_planning and "Buffers:" in line:
+                        import re as _re
+                        hit = _re.search(r"shared hit=(\d+)", line)
+                        read = _re.search(r"read=(\d+)", line)
+                        total = (int(hit.group(1)) if hit else 0) + \
+                                (int(read.group(1)) if read else 0)
+                        break
+    finally:
+        fresh.close()
     return total
 
 
