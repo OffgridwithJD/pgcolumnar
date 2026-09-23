@@ -18,6 +18,18 @@ true until the next version shipped.
 
 ### Changed
 
+- The sorted-pathkeys planning-buffer arm now takes each reading in a fresh backend,
+  so a reading cannot carry catalog-cache state accumulated by earlier tests (#1203).
+  `fx` is module-scoped, so the arm was reading two measurements out of a connection
+  that had absorbed the DDL of twenty-nine other tests, and the difference between
+  them had no upper bound and no fixed sign -- five CI failures, on two arms, in
+  opposite directions, including the same commit red then green. **Not reproduced
+  locally**: fourteen runs on a quiet box, five of the full cluster corpus, six of
+  the module and three with an injected catalog invalidation, all gave a difference
+  of exactly 0. This bounds what a reading can carry rather than turning a red green.
+  The arm still discriminates: with the `has_useful_pathkeys` guard removed it reads
+  `differs by 19 (on=235 off=216)` and fails.
+
 - `docs/limitations.md` now says GIN and BRIN can never be chosen, rather than that
   nothing has been seen to choose them (#1143).
 
