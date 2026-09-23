@@ -482,7 +482,14 @@ suite matrix across 15 to 18 on x86_64, and the current major on aarch64. The
 nightly run also includes the ASAN and UBSAN sanitizer gate, against an
 instrumented PostgreSQL, and the coverage report. It also runs the
 extension-upgrade guard. That guard builds the previous release on PostgreSQL
-18, loads data into it, and upgrades it in place. A pytest-cluster job runs the
+18, loads data into it, and upgrades it in place. A capability-sweep job runs every suite
+that uses pyarrow twice on PostgreSQL 18. One run has the package installed and
+the other has it masked. The job compares the set of check names each run
+recorded. A suite may keep its names and record a skip under each one. It may
+instead decline as a whole with a failure. What it may not do is lose a check
+without recording either. That job is not part of the suite matrix. Two runs of
+30 suites take about four minutes. That is a nightly cost, not one every pull
+request should pay. A pytest-cluster job runs the
 pytest corpus on 15 through 18, the same majors as the suites above it. Per-PR
 CI runs that job on 17 and 18. The ends of the range are what the nightly adds,
 and the ends are where the gap was. An arm reddened on 15 that had never run on

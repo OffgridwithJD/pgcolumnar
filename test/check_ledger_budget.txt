@@ -454,4 +454,47 @@ suites_not_covered 249
 # either way. An arm named for the clamp would have been vacuous, and the only
 # reason it is not in this file is that the mutation was run before it was
 # written up.
-checks_never_observed_red 1527
+#
+# 1527 -> 1535 for #1185's twelve new capability_sweep checks. Counted on this
+# tree, with the premise beside it because a pattern that matches nothing counts
+# 0 and reads like a clean answer:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1534
+#     1602 rows total, 68 not `never`
+#
+# THIRTEEN rows and the census moves by SEVEN, because six carry a last-red from
+# three mutations, all driven:
+#
+#   the self-exclusion removed from pgc_cap_population
+#     premise: the sweep is not in the population it sweeps
+#     premise: and no member of the population is this very file
+#
+#   THE FIRST VERSION OF THAT ARM COULD NOT FAIL and this row would have read
+#   `never` for a reason (@jdatcmd, review): it grepped the population for the
+#   same variable the producer had just skipped on, so it was 0 by construction.
+#   A `never` that no mutation can move is worth reading as a question about the
+#   arm.
+#
+# and the two that were already here:
+#
+#   a check_skip block removed from a suite, so its arms vanish untraced
+#     no suite loses a check without recording a skip or a refusal   got [1] want [0]
+#     and the log names the suite: "-- silent: parquet_nested_import"
+#
+#   the shim's pyarrow.py emptied, so both runs are the present run
+#     premise: the shim makes pyarrow unimportable      got [0] want [1]
+#     premise: and pyarrow.parquet with it              got [0] want [1]
+#     premise: the mask held for every run in the sweep got [30] want [0]
+#
+# THE SECOND MUTATION IS THE ONE THAT MATTERS MOST. A failed mask makes both runs
+# the present run, every name set matches trivially, and the sweep passes having
+# compared nothing. Its pass and its vacuity are indistinguishable without those
+# three arms.
+#
+# AND THE GREEN HALF IS DRIVEN IN THE SAME RUN. The 25 suites that decline as a
+# whole stay classified `refused` under the C mutation, so the guard is known not
+# to fire on correct code as well as known to fire on the defect. A guard that
+# refuses correct code gets switched off and takes its rule with it.
+#
+# suites_not_covered does NOT move: capability_sweep arrives with its rows.
+checks_never_observed_red 1534
