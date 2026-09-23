@@ -661,9 +661,19 @@ pgc_start_failure_message() {
 #
 # THE STAMP FAILS CLOSED IN ONE DIRECTION AND OPEN IN THE OTHER, and only the
 # open direction is dangerous. A stale or absent stamp forces a clean nobody
-# needed. A stamp that MATCHES while the objects are foreign is silent. Every
-# way THIS function can fail to read an answer returns "no", so the caller
-# cleans: the cost of being wrong here is a rebuild.
+# needed. A stamp that MATCHES while the objects are foreign is silent.
+#
+# THIS FUNCTION HAS THREE ANSWERS, NOT TWO, and what each costs differs:
+#
+#     DWARF present and disagrees  ->  no       caller cleans, whatever the stamp says
+#     pg_config cannot be asked    ->  no       caller cleans
+#     no objects                   ->  unknown  stamp decides
+#     no -g, or no readelf         ->  unknown  stamp decides
+#
+# An earlier revision of this paragraph claimed every failure returns "no". That
+# was true before the -g refinement below and was not updated with it -- a
+# record drifting from the thing it describes, inside a change about exactly
+# that. Caught in review by @OffgridwithJD, not by any test here.
 #
 # The build passes -g, so each .o carries a DWARF directory table naming the
 # server headers it was compiled against. Compare that against what pg_config

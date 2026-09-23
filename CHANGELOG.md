@@ -181,10 +181,23 @@ true until the next version shipped.
   rather than carrying a second implementation, so both harnesses gain this from
   one change; `test_build_refusal.py` holds that wiring, 107 checks.
 
-  `test/selftest/560-the-objects-decide-which-major.sh`, ten checks. Three of
-  them read `pgc_build_and_install`'s own text and require it to reach both
-  decisions, because a removal proof of the function alone passes while the
-  lines that call it do nothing.
+  `test/selftest/560-the-objects-decide-which-major.sh`, twelve checks, the same
+  twelve on 15, 16, 17, 18 and 19. Three read `pgc_build_and_install`'s own text
+  and require it to reach both decisions, because a removal proof of the
+  function alone passes while the lines that call it do nothing.
+
+  **The arms strip comments before counting, and one arm exists to prove it.**
+  The first version passed on prose: replacing the real call with `# the call to
+  pgc_objects_built_for used to be here` left it green on a caller that
+  consulted nothing. `selftest/190` has the same shape on
+  `pgc_build_needs_clean` and is tracked in #1222.
+
+  **The foreign-object arm uses a stub `pg_config`, not a second install.** It
+  first searched the host for another major's prefix, which does not exist on
+  CI or on @OffgridwithJD's box, so the arm declined there -- and would have
+  declined silently but for a malformed reason code. A stub printing
+  `/nonexistent/include/postgresql/server` proves the same claim everywhere
+  with no discovery.
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).

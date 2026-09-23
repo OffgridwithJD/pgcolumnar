@@ -61,27 +61,33 @@ else
 		"$(pgc_objects_built_for "$PGC_SRCDIR" "$PGC_PG_CONFIG")" "unknown"
 fi
 
-# The load-bearing arm: a DIFFERENT major must be reported as foreign. Pick one
-# that is not the one under test, so this cannot pass by comparing a thing to
-# itself.
-_other_cfg=""
-for _c in /usr/local/pg15/bin/pg_config /usr/local/pg16/bin/pg_config \
-	  /usr/local/pg17/bin/pg_config /usr/local/pg19/bin/pg_config; do
-	[ -x "$_c" ] || continue
-	[ "$("$_c" --includedir-server 2>/dev/null)" = \
-	  "$("$PGC_PG_CONFIG" --includedir-server 2>/dev/null)" ] && continue
-	_other_cfg="$_c"; break
-done
-if [ -n "$_other_cfg" ] && [ "$_has_dwarf" = yes ]; then
-	check "and are reported FOREIGN to a different major's pg_config" \
-		"$(pgc_objects_built_for "$PGC_SRCDIR" "$_other_cfg")" "no"
-elif [ "$_has_dwarf" != yes ]; then
-	check_unrunnable "and are reported FOREIGN to a different major's pg_config" \
-		"UNMET_PRECONDITION" "this build carries no debug info, so provenance is unreadable"
+# THE LOAD-BEARING ARM, and it needs no second server on the host.
+#
+# The first version searched /usr/local/pg15|pg16|pg17|pg19 for a different
+# major to compare against. NONE OF THOSE EXIST on pgcolumnar-audit, whose
+# prefixes carry an `a` suffix, so the arm declined there -- and would have
+# declined SILENTLY AND GREENLY but for a malformed reason code
+# (@OffgridwithJD). A hardcoded list of host paths, inside a change about not
+# trusting hand-maintained records.
+#
+# The claim is only "an includedir that does not match reports no". A stub
+# pg_config that prints a path nothing was built against proves exactly that,
+# on every host, with no discovery and no second install.
+_stub_dir="$(mktemp -d)"
+printf '#!/bin/sh\necho /nonexistent/include/postgresql/server\n' > "$_stub_dir/pg_config"
+chmod +x "$_stub_dir/pg_config"
+
+check "premise: the stub answers, so the comparison has a right-hand side" \
+	"$("$_stub_dir/pg_config" --includedir-server)" "/nonexistent/include/postgresql/server"
+
+if [ "$_has_dwarf" = yes ]; then
+	check "and are reported FOREIGN to an includedir they were not built against" \
+		"$(pgc_objects_built_for "$PGC_SRCDIR" "$_stub_dir/pg_config")" "no"
 else
-	check_unrunnable "and are reported FOREIGN to a different major's pg_config" \
-		"no-second-major" "no other pg_config on this host to compare against"
+	check_unrunnable "and are reported FOREIGN to an includedir they were not built against" \
+		"UNMET_PRECONDITION" "this build carries no debug info, so provenance is unreadable"
 fi
+rm -rf "$_stub_dir"
 
 # Every way of failing to read the objects must land on the safe side: report
 # foreign, so the caller cleans. An unnecessary clean costs a rebuild; the other
@@ -99,10 +105,29 @@ rm -rf "$_empty_dir"
 # pass while the four lines that call it did nothing -- which is how a guard
 # ships that is never consulted. Read the caller's own text and require that it
 # reaches this decision before it cleans.
-_wire="$(sed -n '/^pgc_build_and_install()/,/^}/p' "$PGC_TESTDIR/lib.sh")"
+# COMMENTS STRIPPED FIRST, because a grep aimed at a mechanism matches every
+# comment that DISCUSSES the mechanism. Driven rather than reasoned: replacing
+# the call with `# the call to pgc_objects_built_for used to be here` left both
+# arms below PASSING on a caller that no longer consults anything. The same trap
+# caught @OffgridwithJD twice in one derivation -- `make .*install` matched two
+# suites that only mention it in prose, and `pgc_setup` matched three whose
+# comments explain they do NOT call it.
+_wire="$(sed -n '/^pgc_build_and_install()/,/^}/p' "$PGC_TESTDIR/lib.sh" |
+	sed 's/#.*//')"
 check_num "pgc_build_and_install consults the objects, not only the stamp" \
 	"$(printf '%s\n' "$_wire" | grep -c 'pgc_objects_built_for')" "1"
 check_num "and it still consults the stamp, which answers when the objects cannot" \
 	"$(printf '%s\n' "$_wire" | grep -c 'pgc_build_needs_clean')" "1"
 check_num "premise: the caller's text was actually found, so the counts mean something" \
 	"$(if [ "$(printf '%s\n' "$_wire" | wc -l)" -ge 10 ]; then echo 1; else echo 0; fi)" "1"
+
+# THE ARMS ABOVE MUST NOT PASS ON PROSE. Build the text that defeated the first
+# version -- the name present, the call gone -- and require the same counting to
+# report zero.
+_wire_prose="$(printf '%s\n' \
+	'pgc_build_and_install() {' \
+	'	# the call to pgc_objects_built_for used to be here' \
+	'	_pgc_bi_foreign=unknown' \
+	'}' | sed 's/#.*//')"
+check_num "a caller that only MENTIONS the helper does not count as consulting it" \
+	"$(printf '%s\n' "$_wire_prose" | grep -c 'pgc_objects_built_for')" "0"
