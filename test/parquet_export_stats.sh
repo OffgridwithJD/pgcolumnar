@@ -555,7 +555,17 @@ PY
 	check_num "control: the parser reports the deprecated fields where they exist" \
 		"$(python3 "$STATS_PY" "$PYQ" | grep -c 'has_dep_min=1')" "4"
 else
-	echo "note: pyarrow absent, so the parser's can-report-presence control did not run"
+	# RECORDED UNDER EACH ARM'S OWN NAME, not as a note (#1185). A bare echo
+	# leaves the accounting at `160 passed + 0 skipped` and the verdict PASSED,
+	# so a run that lost both controls reads exactly like a run that kept them.
+	# These two are the controls -- what is left without them is a suite that
+	# cannot fail for the reason it exists.
+	check_skip "control: the parser finds pyarrow's bounds" \
+		"SKIP  pyarrow absent, so the can-report-presence control did not run" \
+		"pyarrow not available"
+	check_skip "control: the parser reports the deprecated fields where they exist" \
+		"SKIP  pyarrow absent, so the can-report-presence control did not run" \
+		"pyarrow not available"
 fi
 
 pgc_summary
