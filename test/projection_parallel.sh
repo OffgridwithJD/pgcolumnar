@@ -163,6 +163,63 @@ check "a covering projection can be a parallel scan" \
 check "a parallel covering projection returns the covering rows once" \
 	"$par_on_count" "$WANT"
 
+# ---- an I/O-dominated covering scan is not quoted at 1/N of its cost (#1209) -
+#
+# Raising seq_page_cost until the base relation's I/O dominates its decode CPU
+# must cost the PARALLEL covering path, because core leaves disk I/O whole and
+# amortises only CPU. If the partial covering total divided both, an I/O-bound
+# scan would be quoted at 1/N and Gather would keep winning however expensive
+# the pages became.
+#
+# THIS IS NOT A GUARD ON THE CLAMP, and the difference is measured rather than
+# assumed. Removing `if (ioRunProj > projRun) ioRunProj = projRun;` entirely
+# changes NOTHING here: every rung of the ladder below reads the same, and the
+# suite passes. The arithmetic says why. At the binding point, with pre =
+# ioRun*projScale > projRun:
+#
+#     clamped     total = startup + projRun
+#     unclamped   total = startup + pre + (projRun - pre)/divisor
+#
+# and since pre > projRun and divisor > 1, the unclamped total is LARGER. The
+# serial covering path wins either way, so no plan moves. The clamp earns its
+# place by keeping cpuRunProj from going negative, which is an internal quantity
+# no plan exposes -- not by changing a decision.
+#
+# What DOES redden the second arm is amortising the I/O: rewriting the total as
+# `(ioRunProj + cpuRunProj) / divisor` gives `got [gather+projection] want
+# [projection-only]` at the top of the ladder.
+#
+# #1209 for the measurement behind this: the clamp IS reachable, at
+# seq_page_cost > C/(A-B) = 2625 on a 20,000-row fixture, predicted from a fit
+# of six points and then confirmed at 2048 (no, by 0.9%) and 4096 (yes).
+SPC_HI=1000000
+explain_cov_spc() {	# $1 = seq_page_cost
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At \
+		-c "SET min_parallel_table_scan_size = 0;" \
+		-c "SET parallel_setup_cost = 0;" \
+		-c "SET parallel_tuple_cost = 0;" \
+		-c "SET max_parallel_workers_per_gather = 2;" \
+		-c "SET pgcolumnar.enable_projection_scan = on;" \
+		-c "SET seq_page_cost = $1;" \
+		-c "EXPLAIN (COSTS OFF) $Q;" 2>/dev/null || true
+}
+
+# The ladder is printed rather than summarised: a failure of the second arm has
+# two possible causes -- the partial total amortising I/O, or a host where the
+# covering projection is not smaller than the base's read columns so no page
+# cost ever tips it -- and the rungs tell them apart.
+echo "-- page-cost ladder, seq_page_cost against plan shape:"
+for _spc in 1 1024 4096 $SPC_HI; do
+	printf '     seq_page_cost=%-8s %s\n' "$_spc" "$(shape "$(explain_cov_spc "$_spc")")"
+done
+
+check "premise: the covering plan is parallel at the default page cost" \
+	"$(shape "$(explain_cov_spc 1)")" "gather+projection"
+
+check "a page cost that makes I/O dominate costs the parallel covering path" \
+	"$(shape "$(explain_cov_spc $SPC_HI)")" "projection-only"
+
 check "premise: EXPLAIN ANALYZE launched two workers" \
 	"$(echo "$par_on_ana" | grep -oE 'Workers Launched: [0-9]+' | head -1 | grep -oE '[0-9]+')" "2"
 

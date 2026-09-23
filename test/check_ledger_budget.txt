@@ -430,4 +430,28 @@ suites_not_covered 249
 # what these numbers are.
 #
 # suites_not_covered does NOT move: harness_selftest is already a covered suite.
-checks_never_observed_red 1526
+#
+# 1526 -> 1527 for #1209's two new projection_parallel checks. Counted on this
+# tree, with the premise beside it because a pattern that matches nothing counts
+# 0 and reads like a clean answer:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1527
+#     1589 rows total, 62 not `never`
+#
+# TWO rows and the census moves by ONE. The arm that carries a last-red is
+#
+#     a page cost that makes I/O dominate costs the parallel covering path
+#
+# reddened by amortising the I/O in the partial covering total,
+# `(ioRunProj + cpuRunProj) / divisor`, which gives
+# `got [gather+projection] want [projection-only]` at the top of the ladder.
+#
+# THE MUTATION I EXPECTED TO REDDEN IT DOES NOT, and that is why the arm is named
+# for I/O amortisation rather than for the clamp. Removing
+# `if (ioRunProj > projRun) ioRunProj = projRun;` changes no plan at all: every
+# rung of the ladder reads the same and the suite passes. The unclamped total is
+# LARGER than the clamped one, not smaller, so the serial covering path wins
+# either way. An arm named for the clamp would have been vacuous, and the only
+# reason it is not in this file is that the mutation was run before it was
+# written up.
+checks_never_observed_red 1527
