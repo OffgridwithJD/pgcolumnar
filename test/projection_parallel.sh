@@ -180,8 +180,10 @@ check "a parallel covering projection returns the covering rows once" \
 #     clamped     total = startup + projRun
 #     unclamped   total = startup + pre + (projRun - pre)/divisor
 #
-# and since pre > projRun and divisor > 1, the unclamped total is LARGER. The
-# serial covering path wins either way, so no plan moves. The clamp earns its
+# and the difference has a sign: unclamped - clamped = (pre - projRun) *
+# (1 - 1/divisor), which is strictly positive because pre > projRun IS the
+# binding condition and divisor > 1 always. Removing the clamp makes the partial
+# path DEARER, so the serial covering path wins either way and no plan moves. The clamp earns its
 # place by keeping cpuRunProj from going negative, which is an internal quantity
 # no plan exposes -- not by changing a decision.
 #

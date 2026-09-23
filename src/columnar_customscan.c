@@ -3411,8 +3411,21 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				 *     clamped     startup + projRun
 				 *     unclamped   startup + pre + (projRun - pre)/divisor
 				 *
-				 * and the unclamped total is LARGER, so the serial covering
-				 * path wins either way. The clamp earns its place by keeping
+				 * and the difference has a sign a reader can check without a
+				 * cluster:
+				 *
+				 *     unclamped - clamped = (pre - projRun) * (1 - 1/divisor)
+				 *
+				 * pre > projRun IS the binding condition and divisor > 1 always,
+				 * so that is strictly positive: removing the clamp makes the
+				 * partial path DEARER. The serial covering path wins either way.
+				 *
+				 * The sentence above this one used to end "so Gather loses",
+				 * which is TRUE and reads as causal. Unclamped, Gather loses
+				 * harder. A true sentence about a coincidence reads as a
+				 * mechanism, and nothing in review catches that.
+				 *
+				 * The clamp earns its place by keeping
 				 * cpuRunProj from going negative -- an internal quantity no
 				 * plan exposes -- and not by deciding anything. Do not write a
 				 * test that claims to guard it through a plan shape: that arm
