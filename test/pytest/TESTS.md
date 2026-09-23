@@ -124,6 +124,7 @@ behaviour, the source of that number is named.
 - [76. test_docs_upgrade_chain.py: the documented upgrade chain must be the one that ships](#76-test_docs_upgrade_chainpy-the-documented-upgrade-chain-must-be-the-one-that-ships)
 - [77. test_projection_parallel.py: a covering projection can be a parallel scan](#77-test_projection_parallelpy-a-covering-projection-can-be-a-parallel-scan)
 - [78. test_ttl_expire.py: the one function that deletes rows, tested twice](#78-test_ttl_expirepy-the-one-function-that-deletes-rows-tested-twice)
+- [79. test_projection_scan_io.py: a covering projection is not priced from the base table's pages](#79-test_projection_scan_iopy-a-covering-projection-is-not-priced-from-the-base-tables-pages)
 
 ## 1. How to read a test in here
 
@@ -6126,3 +6127,20 @@ The shell twin is `test/ttl_expire.sh`, 51 checks. The two halves share no code:
 different tables, different row counts, different retention windows, and the
 refusals asserted by SQLSTATE here (`55000` for no declared retention, `22023` for
 a non-positive interval) where the shell greps its message.
+
+## 79. test_projection_scan_io.py: a covering projection is not priced from the base table's pages
+
+Port of `projection_scan_io.sh`. A covering projection scan inherited the base
+custom-scan I/O term, `seq_page_cost * rel->pages`. That page count is the whole
+relation file: the base plus every projection stored beside it. The covering
+path reads only the projection's own row groups.
+
+Public seam: `EXPLAIN` cost of a covering projection against `pg_relation_size`
+of the table, with `seq_page_cost` raised and CPU terms zeroed so the run is
+pages. A lookup that cannot find the projection's storage must fall back to
+`rel->pages`, not one page. The shell twin uses `psio` / `byik` / 24000 rows;
+this file uses `pciot` / `onck` / 36000 rows. Assertion names match.
+
+| test | what it holds |
+| --- | --- |
+| `test_projection_scan_io` | the table and covering projection exist; the plan uses that projection; the covering scan has a positive run cost; the projection occupies a minority of the relation; the covering run is not priced from the base table's pages; a covering path whose storage cannot be found is not priced as one page |

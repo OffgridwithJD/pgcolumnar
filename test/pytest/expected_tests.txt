@@ -496,4 +496,8 @@ guard_tests 403
 # of its hour and wrong for the next. `475 tests collected` over 49 cluster
 # files. `guard_tests` was re-derived in the same run and did NOT move, which
 # is the expected answer for a file that needs a database.
-cluster_tests 475
+# 475 -> 476: this branch's own test (#1155). RE-DERIVED ON THE COMPOSED TREE
+# after a THIRD rebase. This value has read 464, 468, 469 and now 476 as main
+# went 463, 467, 468 and 475 under it; every one was correct for the main of
+# its hour and none survived the next merge. `476 tests collected`.
+cluster_tests 476
