@@ -6018,9 +6018,23 @@ shell twin uses `cvppar` / `byik` / 32000 rows / `ik BETWEEN 40 AND 8039`;
 this file uses `pcvgath` / `onskey` / 50000 rows / `skey BETWEEN 200 AND
 12299`. Assertion names match.
 
+It also walks a page-cost ladder (#1209). Core leaves disk I/O whole and
+amortises only CPU, so raising `seq_page_cost` until the base relation's I/O
+dominates its decode CPU must cost the parallel covering path; if the partial
+covering total divided both, an I/O-bound scan would be quoted at 1/N and Gather
+would keep winning however expensive the pages became. It is not a guard on the
+clamp in that block: `unclamped - clamped = (pre - projRun) * (1 - 1/divisor)`
+is strictly positive, so removing the clamp makes the partial path dearer and no
+plan moves. The threshold is NOT scale-invariant: it grows with the row count, because
+`cpuRun` scales with N while `basePagesRead - projPages` came out at 2 pages
+regardless. Measured at `seq_page_cost = 4096`, 20,000 rows binds and both
+32,000 and 50,000 do not. The arm is safe by margin, 1000000 being roughly 150x
+the largest threshold observed, rather than by invariance, and no rung near a
+crossover is asserted.
+
 | test | what it asserts |
 | --- | --- |
-| `test_projection_parallel` | the table and covering projection exist; a serial covering query uses the projection; a parallel base scan is available when the projection is off; a covering projection can be a parallel scan; a parallel covering projection returns the covering rows once; EXPLAIN ANALYZE launched two workers and printed a rows= line for each; both launched workers produced rows |
+| `test_projection_parallel` | the table and covering projection exist; a serial covering query uses the projection; a parallel base scan is available when the projection is off; a covering projection can be a parallel scan; a parallel covering projection returns the covering rows once; EXPLAIN ANALYZE launched two workers and printed a rows= line for each; both launched workers produced rows; the covering plan is parallel at the default page cost; a page cost that makes I/O dominate costs the parallel covering path |
 
 ## 78. test_ttl_expire.py: the one function that deletes rows, tested twice
 

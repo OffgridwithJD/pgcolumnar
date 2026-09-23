@@ -18,6 +18,58 @@ true until the next version shipped.
 
 ### Changed
 
+- The parallel covering clamp's comment records what was measured rather than
+  "unproven" (#1209). It is reachable, the threshold was predicted before it was
+  observed, and the clamp itself decides nothing.
+
+  Probed at the clamp site. Both sides are linear in `seq_page_cost`, because the
+  CPU term is not, so three constants fitted from six points predict the crossing:
+
+  ```
+    pre = ioRun * projScale = spc * A          A = 3.1
+    projRun                 = C + spc * B      B = 3.0   C = 262.5
+    binding needs spc > C/(A-B) = 2625
+  ```
+
+  Then measured: 2048 does not bind, missing by 0.9%, and 4096 does. When it binds
+  the plan changes from `Gather -> Parallel Custom Scan` to a serial
+  `Custom Scan (PgColumnarScan)`, which is the consequence #1127 wrote down.
+
+  At the default cost settings it cannot bind, and the reason is a constant rather
+  than a property of the fixture: per row, binding needs the projection to save
+  more than `5.12 * W + 82` bytes, where `W` is the analyzed width of the columns
+  read, because `cpu_operator_cost * W/4` is 5.12 times `seq_page_cost * W/8192`.
+  Measured storage runs at 0.13x and 0.04x of `W`.
+
+  A second fixture built to move that margin did not move it. With a blob constant
+  across runs of 500 sort-key values, inserted scrambled so only the clustered
+  projection sees the runs, `basePagesRead - projPages` came out at 2 pages in both
+  fixtures and the threshold landed at 2625 twice. The base compresses the same
+  data almost as well as the projection does, so the margin is structural.
+
+  **The clamp changes no plan**, which is worth stating because it reads as though
+  it should. Removing it leaves every plan in `projection_parallel.sh` identical
+  and the suite green: at the binding point the unclamped total is `startup + pre +
+  (projRun - pre)/divisor`, which is LARGER than `startup + projRun`, so the serial
+  covering path wins either way. The clamp keeps `cpuRunProj` from going negative,
+  an internal quantity no plan exposes.
+
+  The threshold is **not** scale-invariant, which an earlier draft of this entry
+  claimed. That claim rested on two fixtures that agreed and were both 20,000
+  rows, so their agreement said the margin is insensitive to content and said
+  nothing about the row count. Measured on three fixtures at
+  `seq_page_cost = 4096`: 20,000 rows binds, 32,000 and 50,000 do not. It grows
+  with N, because `cpuRun` scales while `basePagesRead - projPages` stayed at 2
+  pages. The arms are safe by margin -- `1000000` is roughly 150x the largest
+  threshold observed -- rather than by invariance, and no rung near a crossover is
+  asserted.
+
+  Two arms in `projection_parallel.sh` and its pytest twin pin the page-cost
+  ladder. They are named for
+  I/O amortisation rather than for the clamp, because the clamp-removal mutation
+  does not redden them and an arm named for it would have been vacuous. What does
+  redden the second is `(ioRunProj + cpuRunProj) / divisor`.
+
 - `build_all_versions.sh` reads the matrix's major list from `run_all_versions.sh`
   instead of carrying its own copy (#1219). The two copies were identical, so the
   rot was latent rather than live -- but a major moving in one and not the other

@@ -3364,30 +3364,72 @@ PgColumnarSetRelPathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				 * Clamp ioRunProj to projRun. #1127 wrote that this was
 				 * unreachable "with projRun = serialRun * projScale", and
 				 * named "computed independently (for example from the
-				 * projection's own pages)" as what would make it live.
-				 * THIS CHANGE IS THAT, so the premise no longer holds and
-				 * the sentence is corrected rather than carried.
+				 * projection's own pages)" as what would make it live. #1155
+				 * did exactly that, so the premise is gone.
 				 *
-				 * IT IS NOT KNOWN TO BE REACHABLE EITHER, and that is a
-				 * measurement rather than an argument. @OffgridwithJD probed
-				 * it: reached three times in projection_parallel.sh and bound
-				 * zero, with margins 24.4794 against 2122.2110 and 0.2473
-				 * against 163.8619; a fixture built to bind it reached once
-				 * and still did not, 0.2504 against 148.2537. Binding needs
+				 * IT IS REACHABLE, and #1209 measured where. Both sides are
+				 * linear in seq_page_cost, because the CPU term is not:
 				 *
-				 *     2*ioBase - serialRun > baseSurvival * seq_page_cost * projPages
+				 *     pre = ioRun * projScale = spc * A
+				 *     projRun                 = C + spc * B
 				 *
-				 * in which sel cancels, and both attempts moved the margin the
-				 * wrong way, by 87x and then 592x, because
-				 * pgcolumnar_scan_io_run_cost prices only the columns read.
+				 * with A = sel * basePagesRead, B = sel * projPages and
+				 * C = cpuRun * projScale. On a 20,000-row fixture A = 3.1,
+				 * B = 3.0, C = 262.5 reproduced six probe points to the
+				 * decimal, so binding needs spc > C/(A-B) = 2625. Predicted
+				 * before it was run, then 2048 missed by 0.9% and 4096 bound.
 				 *
-				 * So: the old premise is FALSE, and reachability is UNPROVEN.
-				 * The clamp stays because it is cheap and its absence would be
-				 * a silently negative cpuRunProj.
+				 * AT THE DEFAULT GUCS IT CANNOT BIND, and the reason is a
+				 * constant rather than a property of that fixture. Per row,
+				 * binding at seq_page_cost = 1 needs the projection to save
+				 * more than 5.12 * W + 82 bytes, where W is the analyzed width
+				 * of the columns read: cpu_operator_cost * W/4 is 5.12 times
+				 * seq_page_cost * W/8192. The saving is bounded by what the
+				 * base stores, measured at 0.13x and 0.04x of W on two
+				 * fixtures.
 				 *
-				 * When the clamp binds fully, cpuRunProj is zero and the
-				 * partial covering path totals exactly like the serial
-				 * covering path, so Gather loses.
+				 * A SECOND FIXTURE BUILT TO MOVE THAT MARGIN DID NOT MOVE IT.
+				 * A blob constant across runs of 500 sort-key values, inserted
+				 * scrambled so only the clustered projection sees the runs,
+				 * left basePagesRead - projPages at 2 pages -- the same as the
+				 * original -- and the same threshold of 2625. The base
+				 * compresses the same data almost as well as the projection
+				 * does, so the margin is structural rather than incidental.
+				 *
+				 * WHEN IT BINDS, cpuRunProj is zero and the partial covering
+				 * path totals exactly like the serial covering path, so Gather
+				 * loses. Measured: the plan is
+				 * "Gather -> Parallel Custom Scan" up to 2048 and a serial
+				 * "Custom Scan (PgColumnarScan)" at 4096.
+				 *
+				 * THE CLAMP ITSELF CHANGES NO PLAN, which is worth stating
+				 * because it reads as though it should. Removing it entirely
+				 * leaves every plan in test/projection_parallel.sh identical
+				 * and the suite green. At the binding point, with pre > projRun
+				 * and divisor > 1:
+				 *
+				 *     clamped     startup + projRun
+				 *     unclamped   startup + pre + (projRun - pre)/divisor
+				 *
+				 * and the difference has a sign a reader can check without a
+				 * cluster:
+				 *
+				 *     unclamped - clamped = (pre - projRun) * (1 - 1/divisor)
+				 *
+				 * pre > projRun IS the binding condition and divisor > 1 always,
+				 * so that is strictly positive: removing the clamp makes the
+				 * partial path DEARER. The serial covering path wins either way.
+				 *
+				 * The sentence above this one used to end "so Gather loses",
+				 * which is TRUE and reads as causal. Unclamped, Gather loses
+				 * harder. A true sentence about a coincidence reads as a
+				 * mechanism, and nothing in review catches that.
+				 *
+				 * The clamp earns its place by keeping
+				 * cpuRunProj from going negative -- an internal quantity no
+				 * plan exposes -- and not by deciding anything. Do not write a
+				 * test that claims to guard it through a plan shape: that arm
+				 * passes with the clamp removed, which is how this was found.
 				 */
 				ioRunProj = ioRun * projScale;
 				if (ioRunProj > projRun)
