@@ -235,6 +235,47 @@ true until the next version shipped.
   installs an OLD REF into the prefix on purpose -- that is its subject, and no
   builder whose job is to install what this tree built can express it. The two
   look like the other eleven from a grep and are a different thing.
+- `rebuild.sh` installed a correct library and recorded nothing, so the next suite
+  run with `PGC_SKIP_BUILD=1` refused it (#1230).
+
+  The refusal was false in both halves:
+
+  ```
+    A. harness-built, build skipped
+       -- source: 9cea7e4a926b matches the binary under test        rc=0
+    B. append a comment to a .c, then test/rebuild.sh <pg18a>       rc=0
+       the installed .so is built from the edited source
+    C. the same suite, build skipped, the way the matrix runs it    rc=1
+       FATAL: the binary under test was not built from this source
+              (refusing to report checks about code that is not installed)
+  ```
+
+  The binary was built from that source one step earlier, and the code is
+  installed. The reader is sent to the compiler and to a list of 66 files when the
+  answer is that a stamp did not move. It cost three runs the last time it
+  happened, two of them spent deleting object files.
+
+  After the fix, C reads `-- source: 84a75ca2a3bf matches the binary under test`
+  and reports its 11 checks. Editing again WITHOUT rebuilding still refuses, which
+  is the control that matters: the guard is recorded, not weakened.
+
+  **The tool keeps its own build.** Routing it through `pgc_build_and_install`
+  would have traded away the parallel `-j`, the compiler-warning gate that mirrors
+  the matrix's zero-warning rule, and the error extraction from the build log --
+  none of which the harness builder has. Only the record was missing, so only the
+  record moved: `lib.sh` gains `pgc_record_source_stamp`, one place that knows what
+  a record of an install is, and both the builder and the tool call it.
+
+  `test/selftest/580-a-hand-rebuild-must-record.sh`, nine checks, serially on all
+  five majors. Seven of the nine carry an observed red. The driven arms run
+  `rebuild.sh` for real against a `pg_config` shim that redirects `--pkglibdir` and
+  `--sharedir` into a temporary prefix, so nothing reaches a real installation,
+  and cost 2.1 seconds.
+
+  One of those arms watches the live prefix while the run happens, and it reads the
+  **mtime** rather than the digest: the tree it builds is a copy of the tree under
+  test and the build is byte-reproducible, so an install that did land on the real
+  prefix would write identical bytes and a digest arm could never fail.
 
 - `extension_upgrade.sh` skipped in a linked worktree, because it stat'd `.git`
   instead of asking git (#1224).

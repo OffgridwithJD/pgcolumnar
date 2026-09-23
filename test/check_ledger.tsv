@@ -1341,6 +1341,15 @@ harness_selftest	570-a-checkout-test-must-ask-git	and it is still a .git that a 
 harness_selftest	570-a-checkout-test-must-ask-git	no suite decides it is a checkout by stat-ing .git as a directory	15;16;17;18;19	2026-09-23	the -d form restored in extension_upgrade, or the comment stripping removed
 harness_selftest	570-a-checkout-test-must-ask-git	premise: some suite already asks git whether it can answer	15;16;17;18;19	never	-
 harness_selftest	570-a-checkout-test-must-ask-git	premise: the sweep sees .git mentioned in the suites at all	15;16;17;18;19	never	-
+harness_selftest	580-a-hand-rebuild-must-record	and it reads a different source as stale rather than fresh	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, so no stamp is written at all
+harness_selftest	580-a-hand-rebuild-must-record	and the freshness gate then reads the tree as built from this source	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, so no stamp is written at all
+harness_selftest	580-a-hand-rebuild-must-record	and the installed library of the running major was never touched	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
+harness_selftest	580-a-hand-rebuild-must-record	premise: lib.sh has one recorder for what was installed	15;16;17;18;19	2026-09-23	pgc_record_source_stamp removed from lib.sh
+harness_selftest	580-a-hand-rebuild-must-record	premise: no stamp for this prefix before the rebuild	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
+harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild itself succeeded	15;16;17;18;19	never	-
+harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild tool installs, so a stale record is possible	15;16;17;18;19	never	-
+harness_selftest	580-a-hand-rebuild-must-record	premise: the shim redirects the install away from the real prefix	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
+harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild tool records what it installed rather than only naming it	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, or the comment stripping removed
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
