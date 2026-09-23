@@ -284,6 +284,147 @@ true until the next version shipped.
   **mtime** rather than the digest: the tree it builds is a copy of the tree under
   test and the build is byte-reproducible, so an install that did land on the real
   prefix would write identical bytes and a digest arm could never fail.
+- The `.git` sweep shipped with #1224 caught half the spellings it claimed to,
+  and refused three that are correct (#1227).
+
+  `-d[[:space:]]+"?\$?\{?[A-Za-z_]*\}?/?\.git` allowed the optional quote only
+  BEFORE the variable, so `[ -d "$SRCDIR"/.git ]` did not match, and it had no
+  path component, so `"$WORK/$name/.git"` did not either. Found by
+  @OffgridwithJD, who moved the guard's own refusals into one place, counted
+  three of them, and noticed only two had ever been driven.
+
+  Measured over ten spellings, every one either of us has written or found:
+
+      shipped pattern     5 of 10 caught
+      this pattern       10 of 10 caught
+
+  A guard that under-reports is worse than no guard, because it answers the
+  question with a number that reads as coverage.
+
+  IT WAS ALSO WRONG IN THE OTHER DIRECTION. `\.git` with nothing after it is a
+  prefix of `.gitignore`, `.gitattributes` and `.github`, so three correct
+  spellings were refused. The pattern now spans from the test operator to
+  `.git` and requires a non-word character after it:
+
+      five legitimate spellings, this pattern             0 flagged
+      the same five, without the trailing boundary        3 flagged
+
+  The second line is a check, not a remark: naming the change that would make
+  the first arm fail is not the same as making it. The first draft of that arm
+  spelled `.gitattributes` with `-f`, so the form was excluded for having the
+  wrong operator and the boundary it exists to test was never reached.
+
+  LATENT, NOT LIVE, and the number is recorded because the issue named the
+  check and did not run it. The false-positive count over every `test/*.sh` and
+  `test/selftest/*.sh`, comments stripped, is ZERO for the shipped pattern and
+  zero for this one: no suite reads those three names with `-d` today. It is
+  fixed anyway, because a guard that refuses correct code gets switched off and
+  the rule goes with it, and the cost arrives as a red build nobody can explain.
+
+  The ten forms are ASSEMBLED FROM A FRAGMENT rather than written out. The
+  sweep reads this file, so spelling them literally would make the guard count
+  its own test data, which is the defect the part exists to catch and which its
+  first version committed.
+
+  THE CONTROL IS DERIVED FROM THE PATTERN, NOT COPIED (@OffgridwithJD, review).
+  A second hand-written copy of the pattern is a drift site, and it drifts
+  GREEN: edit the boundary in one and the control measures a pattern nobody
+  ships. Stripping the boundary off the real pattern cannot drift, and it fails
+  safe. Measured with the boundary changed to `([^A-Za-z0-9]|$)`:
+
+      derived control, boundary intact     flags 3 of 5, arm passes
+      derived control, boundary drifted    flags 0 of 5, arm goes RED
+
+  because the strip silently becomes a no-op and the control keeps the boundary
+  it was meant to lack. A premise beside it names that cause, so the failure
+  reads as "the boundary strip changed nothing" rather than as an unexplained
+  0 against 3.
+
+  THE SWEEP NOW READS COMMANDS, NOT LINES (@OffgridwithJD, review). bash
+  continues a command after a trailing backslash, so a test spelled over two
+  lines was invisible to both halves of a line-at-a-time sweep. Latent again,
+  with zero live sites, and closed for the same reason as the false positives.
+
+      continuations in test/*.sh and test/selftest/*.sh    6533
+      lines, raw                                          70623
+      lines, folded                                       64090
+      matches, folded                                         0
+      matches, unfolded                                       0
+
+  Comments are stripped BEFORE the fold: the other order joins a comment to the
+  code line below it and strips both, which loses real code rather than gaining
+  it. Parts 260 and 460 already fold with the same sed.
+
+  A BACKSLASH FOLD CLOSES THE CLASS HERE, measured rather than assumed. bash
+  also continues after a trailing `&&`, `||` or `|` with no backslash, and every
+  sweep in this tree folds on `\` only. Those operators cannot hide this
+  pattern, because they join COMMANDS and not a command's words: splitting
+  `[`'s operands with a bare newline is not a continuation but `[: missing ']'`
+  at runtime. All four constructs parsed and run.
+
+  Fourteen mutations back the nineteen arms, one log each, every ledger row
+  merged from a run rather than typed. Two of them are PAIRS in which neither
+  half is evidence alone: the same planted line in a real suite is caught by
+  this sweep and invisible to the shipped one, with nothing different between
+  the runs but the pattern, and the same again for the fold. One of the four is
+  deliberately GREEN and writes no ledger row, because a mutation whose value is
+  that nothing reddens cannot leave a last-red.
+
+- `extension_upgrade.sh` accepted an ENCLOSING repository as the tree's own,
+  and turned a skip with instructions into a fatal error (#1228).
+
+  `git rev-parse` searches upward. A copy with no git presence of its own that
+  happens to sit inside any repository answers yes to `--absolute-git-dir`, so
+  the #1224 gate let it through. `git clone --shared` then takes that path
+  literally rather than walking up. Reported by @OffgridwithJD and driven here
+  on two fixtures, because what the reader is told depends on what the
+  ENCLOSING repository happens to contain:
+
+  ```
+    enclosing repo has no v1.0-alpha tag
+      #1224   FAIL  v1.0-alpha is not present. Fetch tags, or pass a ref
+      now     SKIP  ... sits inside the repository at /tmp/bx/nest
+
+    enclosing repo HAS a v1.0-alpha tag
+      #1224   fatal: repository '/tmp/bx/nest/copy' does not exist
+              FATAL: clone failed
+      now     SKIP  ... sits inside the repository at /tmp/bx/nest
+  ```
+
+  The first is the worse of the two. Both of the #1224 gates pass on a
+  directory that is not a repository at all, and the suite then tells the
+  reader to fetch tags: the ref is being looked for in somebody else's
+  repository, so fetching tags into this tree cannot help, and the instruction
+  is not merely unhelpful but wrong. A skip carrying a usable instruction had
+  become a failure carrying an unusable one.
+
+  `--show-toplevel` separates the three cases, which `--absolute-git-dir`
+  cannot:
+
+  | tree | `--show-toplevel` | verdict |
+  | --- | --- | --- |
+  | linked worktree | itself | its own |
+  | gitfile-staged copy | itself | its own |
+  | nested in a repository | the enclosing root | not its own |
+
+  THE MESSAGES WERE REWRITTEN, not just the test. *"git cannot answer for
+  $SRCDIR"* became false in exactly the way this thread is about once the check
+  changed: git answers, and it answers about a different tree. Both sites now
+  name WHICH of the two situations the reader is in, rather than offering a
+  disjunction to resolve, because they have different repairs:
+
+  ```
+    nested in a repository   It sits inside the repository at <root>, which is
+                             a different tree and does not carry this one's
+                             history.
+    no git anywhere          It has no git presence of its own and none above it.
+  ```
+
+  Both driven, as the principal that runs the suite. The first version of this
+  probe ran its premises as `root` and the suite as `postgres`, and git's
+  dubious-ownership refusal made a nested tree look like a tree with no git:
+  the before and after arms printed the same thing, and the measurement said
+  nothing at all.
 
 - `extension_upgrade.sh` skipped in a linked worktree, because it stat'd `.git`
   instead of asking git (#1224).

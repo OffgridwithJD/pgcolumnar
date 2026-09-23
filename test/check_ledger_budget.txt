@@ -338,4 +338,96 @@ suites_not_covered 249
 # The mutation is the argument guard removed, which is the state the review
 # found: the recorder wrote `./.pgc_source_stamp.0.nolibd41` into the CURRENT
 # DIRECTORY, keyed by the md5 of an empty pkglibdir.
-checks_never_observed_red 1521
+# REBUILT ON MAIN CARRYING #1232, and the number is neither side's. This branch
+# derived 1524 against the previous main; main now holds 1521. 1524 is not 1521
+# plus anything and 1521 is not 1524 minus anything: each was correct for a tree
+# that no longer exists. BOTH this file and the ledger conflicted loudly at the
+# rebase, which is the safe half, and the ledger was rebuilt from main's copy and
+# re-merged from the RUN LOGS rather than resolved by hand. Checked by KEY:
+#
+#     keys on main                                1573
+#     keys on this branch before the rebase       1576
+#     keys on the composed tree                   1587
+#     main keys lost                                 0
+#     this branch's keys lost                        0
+#     composed keys present on neither side          0
+#     duplicate keys                                 0
+#
+# Re-derived by COUNTING on the composed tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1526
+#
+# with the premise printed beside it, because a pattern matching nothing counts 0
+# and reads like a clean answer: 1587 rows total, 61 not `never`, and
+# 1526 + 61 == 1587.
+#
+# 1521 -> 1526 for #1227/#1228's fourteen new harness_selftest checks. Part 570
+# now holds 19 rows of which TEN carry a measured last-red, against 5 rows and 1
+# before. Fourteen mutations were run, one log each, and every row was merged from
+# a run rather than typed:
+#
+#     M1   boundary dropped from the pattern   got [3] want [0]; premise got [no-op]
+#     M2   the #1224 pattern restored          got [5] want [10]; got [3]; got [no-op]
+#     M3   derived control stops stripping     got [no-op]; got [0] want [3]
+#     M4   one form spelled literally          got [1] want [0]
+#     M5   bare rev-parse, not --show-toplevel got [own] want [not-own]
+#     M6   comment stripping removed           got [6] want [0]
+#     M7   the reader renamed away             three arms
+#     M8   .git must be a directory            two arms
+#     M9   "$SRCDIR"/.git planted in a suite   got [1] want [0]
+#     M10  the same plant, #1224 pattern       got [5] want [10]; got [3]; got [no-op]
+#     M11  the boundary drifts                 got [no-op]; got [0] want [3]
+#     M12  continuation-split plant            got [1] want [0]
+#     M13  the same plant, fold removed        GREEN, deliberately
+#     M14  the fold helper stops folding       got [0] want [1]
+#
+# TWO PAIRS, AND NEITHER HALF IS EVIDENCE ALONE. M9 with M10, and M12 with M13:
+# the same planted line in a real suite is caught by this sweep and invisible to
+# the shipped one, with nothing different between the runs but the pattern, or the
+# fold. M13 WRITES NO ROW. A mutation whose whole value is that nothing reddens
+# cannot leave a last-red, so it exists only in the prose; that is the one class
+# of evidence this ledger structurally cannot hold.
+#
+# TWO WERE BROKEN INSTRUMENTS ON A FIRST ATTEMPT, and both are recorded because
+# the failure reads exactly like a finding.
+#
+# The #1224 pattern begins `-d`, so `grep -cE "$pat"` parsed it as an OPTION:
+#
+#     Usage: grep [OPTION]... PATTERNS [FILE]...
+#     FAIL  ... not a measurement, so nothing was compared: got [] want [0]
+#
+# The mutant parsed, the mutation applied, and it reddened the arms predicted. It
+# measured nothing. main's line carries `\-d`, with a backslash, dropped in
+# transcription. `check_num` caught it by refusing to compare an empty value.
+# READ THE VALUE BEFORE THE VERDICT: every real red above carries a number or a
+# word, and both fakes carried `[]`.
+#
+# And M13's first version removed the fold from the HELPER rather than from the
+# SWEEP CALL. Those are two changes: one asks whether the helper works, the other
+# whether the sweep is wired to it. The wrong one also reddens the arm that drives
+# the helper directly, so the run went red for a reason unrelated to the planted
+# line and the pair's point was lost.
+#
+# THE MAJOR SET WAS DERIVED FROM FIVE RUNS, never copied from the neighbouring
+# rows, and the paths came from `DEFAULT_CONFIGS` in run_all_versions.sh rather
+# than being chosen by hand. rc=0, `checks run: 1127`, PASSED, 19 arms of part 570
+# on every one:
+#
+#     /usr/local/pg15/bin/pg_config   /usr/local/pg16/bin/pg_config
+#     /usr/local/pg17/bin/pg_config   /usr/local/pgsql/bin/pg_config
+#     /usr/local/pg19/bin/pg_config
+#
+# `/usr/local/pgsql` is the runner's PG18. THE FIVE WERE RUN THREE TIMES, because
+# a ledger row's major set is a claim about the TEXT that produced it: once for
+# fifteen arms, again after the derived control and the fold added four, and again
+# after a comment-only edit to this part, whose own sweep READS this part. A
+# comment-only change there is a no-op by measurement or not at all.
+#
+# A FIRST ATTEMPT RAN THE FIVE IN PARALLEL and every one of them died: five
+# concurrent clusters could not all start, eight port retries each, 45-line logs,
+# zero checks. The prefixes were distinct, so this is not the `pkglibdir` race the
+# house rule warns about -- separate prefixes are not licence to fan out. Serial is
+# what these numbers are.
+#
+# suites_not_covered does NOT move: harness_selftest is already a covered suite.
+checks_never_observed_red 1526
