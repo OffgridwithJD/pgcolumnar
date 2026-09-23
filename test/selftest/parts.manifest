@@ -53,3 +53,4 @@
 540-an-arm-must-carry-its-measurement.sh
 550-a-header-edit-must-rebuild.sh
 560-the-objects-decide-which-major.sh
+570-a-checkout-test-must-ask-git.sh

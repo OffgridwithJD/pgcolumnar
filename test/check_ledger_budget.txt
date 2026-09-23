@@ -258,4 +258,27 @@ suites_not_covered 249
 # verified rc=0 PASSED on 15, 16, 17, 18 and 19.
 #
 # suites_not_covered does NOT move: harness_selftest is already a covered suite.
-checks_never_observed_red 1515
+# 1515 -> 1519 for #1224's five new harness_selftest checks. Re-derived by
+# COUNTING on this tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1519
+#
+# with the premise beside it, because a pattern matching nothing counts 0 and
+# reads like a clean answer: 1562 rows total, 43 not `never`.
+#
+# FIVE rows and the census moves by FOUR: one carries a last-red, from two
+# mutations that redden the same arm --
+#
+#     no suite decides it is a checkout by stat-ing .git as a directory
+#
+# restoring one `-d` form in extension_upgrade.sh reddens it, and so does
+# removing the comment stripping from the sweep, because the part's own
+# explanatory comment quotes `[ -d "$SRCDIR/.git" ]`. Both the fix and the
+# stripping are load-bearing; neither alone suffices.
+#
+# MAJORS MEASURED AGAINST THE RUNNER'S OWN LIST THIS TIME. Earlier rows in this
+# branch used /usr/local/pg18_nc for the 18 leg; DEFAULT_CONFIGS in
+# run_all_versions.sh names /usr/local/pgsql, which is a DIFFERENT PG18 build
+# (cassert=1 against cassert=0). Both pass, but picking majors by hand is the
+# same defect as copying a list rather than reading it.
+checks_never_observed_red 1519

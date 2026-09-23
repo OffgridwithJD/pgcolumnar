@@ -79,9 +79,20 @@ echo "== extension_upgrade: PG$PGMAJ, old $OLD_SRC"
 EXPLICIT=0
 { [ "$#" -ge 2 ] || [ -n "${PGC_UPGRADE_OLD_SRC:-}" ]; } && EXPLICIT=1
 
-if [ "$EXPLICIT" = 0 ] && [ ! -d "$SRCDIR/.git" ]; then
-	echo "  SKIP  $SRCDIR is not a git checkout, so the default ref $OLD_SRC cannot be built."
-	echo "        The container loop copies the tree without .git. Supply the old source:"
+# ASK GIT WHETHER IT CAN ANSWER, do not stat .git (#1224). A linked worktree's
+# .git is a regular FILE holding `gitdir: <path>`, and so is the one-line gitfile
+# devloop.sh writes into its build dir and that an agent staging across a
+# container boundary has to write. git works in all three; `[ -d .git ]` is false
+# in all three, so this suite skipped its default path in environments selftest
+# 310 lists as supported -- "the audit container, worktrees of a clone" among
+# them. devloop.sh already had the right form and the reason beside it.
+#
+# `git clone --shared` from a linked worktree is measured to work, and old refs
+# are reachable through it, so this is the whole fix rather than a step of it.
+if [ "$EXPLICIT" = 0 ] && ! git -C "$SRCDIR" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+	echo "  SKIP  git cannot answer for $SRCDIR, so the default ref $OLD_SRC cannot be built."
+	echo "        A copy staged without .git and without a gitfile is one way to get here."
+	echo "        Supply the old source:"
 	echo "        PGC_UPGRADE_OLD_SRC=/path/to/old/source, or pass it as the second argument."
 	echo "== extension_upgrade: SKIP"
 	exit 2
@@ -108,9 +119,10 @@ if [ -d "$OLD_SRC" ]; then
 else
 	# Only reachable when an old source was named explicitly, so this is a failure and
 	# not a skip: the caller asked for something this tree cannot provide.
-	if [ ! -d "$SRCDIR/.git" ]; then
-		echo "  FAIL  $SRCDIR is not a git checkout, so the ref $OLD_SRC cannot be built."
-		echo "        The container loop copies the tree without .git. Pass a directory:"
+	if ! git -C "$SRCDIR" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+		echo "  FAIL  git cannot answer for $SRCDIR, so the ref $OLD_SRC cannot be built."
+		echo "        A copy staged without .git and without a gitfile is one way to get"
+		echo "        here. Pass a directory:"
 		echo "        test/extension_upgrade.sh $PG_CONFIG /path/to/old/source"
 		exit 1
 	fi
