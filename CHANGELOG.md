@@ -50,6 +50,17 @@ true until the next version shipped.
   suite can tell "stopped pruning" from "started lying", which is the property
   a filter's tests exist to have.
 
+  **The rows come from `pgc_ledger.py merge` rather than from a script.** The
+  first version of them applied a minimal-attribution policy -- each arm recorded
+  against the smallest mutation that kills it -- with a script that edited
+  `check_ledger.tsv` directly. There is no `minimal` in the tool, because there
+  was no `minimal` anywhere except in one head and a note in another file, and a
+  policy applied by hand is a human judgement written into the one file whose
+  value is that its rows come from runs. Redone with the tool, one merge per
+  mutation, `--target` for every arm that reddened. The three pruning arms
+  therefore carry BOTH M-A and M-B, which is what the column is for: the
+  catalogue of which checks share a cause.
+
   Twenty-nine arms in that part remain `never`. They are not shown to be vacuous;
   they are unattacked, and they want mutations aimed at plan shape, NULL handling
   and the baseline join rather than at the filter's verdict.

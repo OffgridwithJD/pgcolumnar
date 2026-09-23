@@ -529,8 +529,18 @@ suites_not_covered 249
 #                   correctly, since the gate was not widened to CROSS and a
 #                   cross join carries no clause the filter could use
 #
-# Each arm is recorded against the MINIMAL mutation that kills it, so the three
-# reddened by both M-A and M-B carry M-A.
+# FULL ATTRIBUTION, AND THE ROWS COME FROM THE TOOL (#1238 review, @jdatcmd).
+# The first version of these rows assigned each arm the MINIMAL mutation that
+# kills it -- applied by a script that edited this file directly. There is no
+# `minimal` in pgc_ledger.py because there was no `minimal` anywhere except in my
+# head and a note in this file, and a policy applied by hand is a human judgement
+# written into the one file whose value is that its rows come from runs.
+#
+# Redone with `pgc_ledger.py merge`, once per mutation, with --target for every
+# arm that reddened: mutA 3, mutB 12, mutC 3. So the three pruning arms carry
+# BOTH M-A and M-B, which is what the column is for -- the catalogue of which
+# checks share a cause. Minimal attribution is exactly what stopped this file
+# from showing that the three pruning arms and the nine answer arms share M-B.
 #
 # TWENTY-NINE ARMS IN THIS PART REMAIN `never`. They are not vacuous as far as
 # this shows; they are unattacked, and they need mutations aimed at plan shape,
