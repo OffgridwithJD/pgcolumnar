@@ -2315,6 +2315,7 @@ PgColumnarGetSortedInfo(uint64 storageId, int64 *firstGroup, int64 *lastGroup,
 	ScanKeyData key[1];
 	SysScanDesc scan;
 	HeapTuple	tuple;
+	Oid			storIdx;
 
 	*firstGroup = -1;
 	*lastGroup = -1;
@@ -2325,7 +2326,23 @@ PgColumnarGetSortedInfo(uint64 storageId, int64 *firstGroup, int64 *lastGroup,
 	tupdesc = RelationGetDescr(rel);
 	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+
+	/*
+	 * NAME THE INDEX (#1237). The key is storage_id, which storage_pkey is a
+	 * UNIQUE btree on, so this was a sequential scan of the catalog on the one
+	 * column it is indexed by -- 2 * pages per call, growing with the number of
+	 * columnar relations in the database.
+	 *
+	 * It matters because this is on the PLANNING path, not a maintenance one:
+	 * pgcolumnar_sorted_pathkeys reaches it at columnar_customscan.c:1542. The
+	 * comment above says "used by recluster's self-gate", which was true when
+	 * it was written and is no longer the whole truth.
+	 *
+	 * Unlike #1210's lookup on relation_oid, nothing has to be built and no
+	 * decision about #1211 is involved: the index exists and the key is exact.
+	 */
+	storIdx = pgcolumnar_index_oid("storage_pkey");
+	scan = systable_beginscan(rel, storIdx, OidIsValid(storIdx), NULL, 1, key);
 	tuple = systable_getnext(scan);
 	if (HeapTupleIsValid(tuple))
 	{
@@ -2392,11 +2409,25 @@ PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
 	HeapTuple	tuple;
 	bool		found = false;
 	int32		formatVersion = 0;
+	Oid			storIdx;
 
 	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	/* NULL snapshot -> catalog snapshot, same as the other read-side scans. */
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	/*
+	 * NAME THE INDEX (#1237), for the same reason as PgColumnarGetSortedInfo
+	 * above: storage_pkey is a UNIQUE btree on storage_id. This one is NOT on
+	 * the planning path -- measured by @OffgridwithJD, fmtver=0 in all five
+	 * planned shapes -- but it is reached ONCE PER COLUMNAR RELATION SCANNED at
+	 * execution, from columnar_reader.c:644, and a `count(*)` that pays nothing
+	 * at planning still pays this.
+	 *
+	 * Whether that cost MATTERS against actually reading the relation's data is
+	 * not claimed here and has not been measured. The scan is wrong either way:
+	 * it is sequential on an indexed primary key.
+	 */
+	storIdx = pgcolumnar_index_oid("storage_pkey");
+	scan = systable_beginscan(rel, storIdx, OidIsValid(storIdx), NULL, 1, key);
 
 	tuple = systable_getnext(scan);
 	if (HeapTupleIsValid(tuple))
