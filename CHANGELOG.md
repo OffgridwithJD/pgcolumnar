@@ -156,12 +156,12 @@ true until the next version shipped.
   | `git rev-parse HEAD` | `5b20ae8f` |
 
   So the suite skipped its default path in *"the audit container, worktrees of a
-  clone"* — one of the five environments `selftest/310` surveys as supported.
+  clone"*, one of the five environments `selftest/310` surveys as supported.
 
   Both sites now use `git -C "$SRCDIR" rev-parse --absolute-git-dir`, which is
   what `devloop.sh` already used, with the reason recorded beside it: *"SRC may
   itself be a linked worktree, where `.git` is a FILE and that path is not a git
-  directory."* `docs_style.sh` and `native_upgrade_converge.sh` ask git too — the
+  directory."* `docs_style.sh` and `native_upgrade_converge.sh` ask git too, so the
   defect was one file against three, not a missing idiom.
 
   **The suite now runs rather than skipping, which is a stronger claim than the
@@ -184,7 +184,7 @@ true until the next version shipped.
   The arm states the gitfile's nature with `stat -c %F` rather than probing it
   with the discouraged idiom. The first version did probe, and the sweep then
   counted its own demonstration and stayed red after both real sites were
-  fixed — a guard satisfying its own pattern, which is #1222 one level up.
+  fixed. That is a guard satisfying its own pattern, which is #1222 one level up.
 
 - A hand-run `make` for another major installed its objects into this one's
   prefix, and the build stamp could not see it (#1219).
