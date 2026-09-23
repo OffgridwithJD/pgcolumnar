@@ -382,6 +382,7 @@ harness_selftest	180-the-port-walk-must-wrap-not	premise: the auxiliary band has
 harness_selftest	180-the-port-walk-must-wrap-not	premise: the real prober was restored, or every check after this lies	15;16;17;18;19	never	-
 harness_selftest	180-the-port-walk-must-wrap-not	premise: the stub frees exactly one port, 500 past the floor	15;16;17;18;19	never	-
 harness_selftest	180-the-port-walk-must-wrap-not	premise: the stub really does refuse the top of the band	15;16;17;18;19	never	-
+harness_selftest	190-an-in-tree-build-must-not	a comment naming the call does not satisfy the arm above	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	an unknown provenance is not reported as a major	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	an unparseable stamp cleans rather than guessing	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	and an empty WANT is refused rather than compared	15;16;17;18;19	never	-
@@ -394,7 +395,7 @@ harness_selftest	190-an-in-tree-build-must-not	but a tree with no objects at all
 harness_selftest	190-an-in-tree-build-must-not	objects with NO stamp are unknown provenance and must be cleaned	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	premise: the build-stamp decision is exposed to be judged	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	premise: the stamp writer is a function that can be exercised	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	the build path asks pgc_build_needs_clean rather than merely naming it	15;16;17;18;19	never	-
+harness_selftest	190-an-in-tree-build-must-not	the build path asks pgc_build_needs_clean rather than merely naming it	15;16;17;18;19	2026-09-23	the call replaced by a comment naming it
 harness_selftest	190-an-in-tree-build-must-not	the stamp lib.sh writes is exactly the major	15;16;17;18;19	never	-
 harness_selftest	200-additions-go-in-their-own-file	premise: the parts directory exists and was sourced	15;16;17;18;19	never	-
 harness_selftest	200-additions-go-in-their-own-file	the driver holds no checks; they all live in parts	15;16;17;18;19	never	-

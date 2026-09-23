@@ -48,7 +48,36 @@ check "and it is 3 bytes, not an escaped literal" \
 	"$(wc -c < "$_stmp" | tr -d ' ')" "3"
 rm -f "$_stmp"
 
+# COMMENTS STRIPPED BEFORE COUNTING (#1222). The arm's name has always said
+# "rather than merely naming it", and the trailing quote was the whole defence:
+# prose was assumed not to carry one. It does -- this tree's house style quotes
+# code verbatim in comments, which is what makes a long pattern reproducible in
+# a sentence. Driven: replace the call with
+#
+#     elif false; then  # call to pgc_build_needs_clean "$had" "$want" removed
+#
+# and the arm counted 1, from the comment, and said yes on a build path that
+# consulted nothing.
+#
+# Anchoring would also work and is cheaper where it fits -- a comment line
+# begins with `#`, so `grep -cE '^PGC_EXIT_SKIPPED=66$'` is safe by
+# construction. It does not fit here: the call is indented inside an `elif`.
+_bnc_code="$(sed 's/#.*//' "$TESTDIR/lib.sh")"
 check "the build path asks pgc_build_needs_clean rather than merely naming it" \
-	"$([ "$(grep -c 'pgc_build_needs_clean "' "$TESTDIR/lib.sh")" -ge 1 ] && echo yes || echo no)" "yes"
+	"$([ "$(printf '%s\n' "$_bnc_code" | grep -c 'pgc_build_needs_clean "')" -ge 1 ] && echo yes || echo no)" "yes"
+
+# THE DRIVEN CASE, so the fix is not taken on my word. Feed the arm the exact
+# text that defeated it: a file whose only mention of the call is a comment.
+# Counting the stripped copy must report zero where counting the raw file
+# reports one, which is the difference the fix makes and the only thing that
+# distinguishes them.
+_bnc_prose="$(mktemp)"
+printf '%s\n' 'elif false; then  # call to pgc_build_needs_clean "$had" "$want" removed' > "$_bnc_prose"
+check "a comment naming the call does not satisfy the arm above" \
+	"$(printf 'raw=%s stripped=%s' \
+		"$(grep -c 'pgc_build_needs_clean "' "$_bnc_prose")" \
+		"$(sed 's/#.*//' "$_bnc_prose" | grep -c 'pgc_build_needs_clean "')")" \
+	"raw=1 stripped=0"
+rm -f "$_bnc_prose"
 
 
