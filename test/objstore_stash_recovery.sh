@@ -63,14 +63,13 @@ echo "PG_CONFIG=$PG_CONFIG"
 # status, and objstore_module.sh stands up its own. It does need the module
 # installed, so build once here and let each invocation skip it.
 if [ -z "${PGC_SKIP_BUILD:-}" ]; then
-	echo "-- building"
-	make -C "$SRCDIR" PG_CONFIG="$PG_CONFIG" >/dev/null || {
-		pgc_fail "build failed, so nothing below measures the guard"
-		pgc_summary
-	}
-	echo "-- installing"
-	make -C "$SRCDIR" install PG_CONFIG="$PG_CONFIG" >/dev/null || {
-		pgc_fail "install failed, so nothing below measures the guard"
+	# THE HARNESS BUILDER, NOT A HAND-ROLLED make (#1220). It asks the OBJECTS
+	# which major built them (#1219) and keeps the build stamp (#536), neither of
+	# which the two makes below it had. This suite's own vocabulary is kept: a
+	# build that did not happen must be REPORTED here, not merely exited on,
+	# because the accounting line is what says nothing measured the guard.
+	pgc_build_and_install "$SRCDIR" "$PG_CONFIG" "$PGC_MAJOR" || {
+		pgc_fail "the build or install failed, so nothing below measures the guard"
 		pgc_summary
 	}
 fi
