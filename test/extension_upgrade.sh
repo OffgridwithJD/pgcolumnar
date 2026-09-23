@@ -89,9 +89,36 @@ EXPLICIT=0
 #
 # `git clone --shared` from a linked worktree is measured to work, and old refs
 # are reachable through it, so this is the whole fix rather than a step of it.
-if [ "$EXPLICIT" = 0 ] && ! git -C "$SRCDIR" rev-parse --absolute-git-dir >/dev/null 2>&1; then
-	echo "  SKIP  git cannot answer for $SRCDIR, so the default ref $OLD_SRC cannot be built."
-	echo "        A copy staged without .git and without a gitfile is one way to get here."
+# AND IT MUST BE THIS TREE'S REPOSITORY, NOT AN ENCLOSING ONE (#1228).
+# rev-parse searches UPWARD, so a copy with no git presence of its own that
+# happens to sit inside any repository answers yes. `git clone --shared` then
+# takes the path literally rather than walking up and dies with
+# `fatal: repository does not exist`, so the cost was a SKIP carrying
+# instructions becoming a FATAL about a missing repository -- a diagnosis
+# regression rather than a wrong result, measured by @OffgridwithJD.
+#
+# --show-toplevel separates the three, measured: a linked worktree and a
+# gitfile-staged copy both report THEMSELVES, and a directory nested in a
+# repository reports the enclosing root.
+pgc_eu_own_repo() {	# pgc_eu_own_repo DIR -> 0 when DIR is its own work tree
+	local _top
+	_top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
+	[ -n "$_top" ] && [ "$_top" = "$(cd "$1" 2>/dev/null && pwd -P)" ]
+}
+
+if [ "$EXPLICIT" = 0 ] && ! pgc_eu_own_repo "$SRCDIR"; then
+	# WHICH of the two it is, rather than a disjunction the reader has to
+	# resolve themselves. They are different situations with different repairs,
+	# and the enclosing root is the fact that makes the second one legible.
+	_eu_encl="$(git -C "$SRCDIR" rev-parse --show-toplevel 2>/dev/null || true)"
+	echo "  SKIP  $SRCDIR is not its own git work tree, so the default ref" \
+		"$OLD_SRC cannot be built."
+	if [ -n "$_eu_encl" ]; then
+		echo "        It sits inside the repository at $_eu_encl, which is a"
+		echo "        different tree and does not carry this one's history."
+	else
+		echo "        It has no git presence of its own and none above it."
+	fi
 	echo "        Supply the old source:"
 	echo "        PGC_UPGRADE_OLD_SRC=/path/to/old/source, or pass it as the second argument."
 	echo "== extension_upgrade: SKIP"
@@ -119,10 +146,17 @@ if [ -d "$OLD_SRC" ]; then
 else
 	# Only reachable when an old source was named explicitly, so this is a failure and
 	# not a skip: the caller asked for something this tree cannot provide.
-	if ! git -C "$SRCDIR" rev-parse --absolute-git-dir >/dev/null 2>&1; then
-		echo "  FAIL  git cannot answer for $SRCDIR, so the ref $OLD_SRC cannot be built."
-		echo "        A copy staged without .git and without a gitfile is one way to get"
-		echo "        here. Pass a directory:"
+	if ! pgc_eu_own_repo "$SRCDIR"; then
+		_eu_encl="$(git -C "$SRCDIR" rev-parse --show-toplevel 2>/dev/null || true)"
+		echo "  FAIL  $SRCDIR is not its own git work tree, so the ref $OLD_SRC" \
+			"cannot be built."
+		if [ -n "$_eu_encl" ]; then
+			echo "        It sits inside the repository at $_eu_encl, which is a"
+			echo "        different tree and does not carry this one's history."
+		else
+			echo "        It has no git presence of its own and none above it."
+		fi
+		echo "        Pass a directory:"
 		echo "        test/extension_upgrade.sh $PG_CONFIG /path/to/old/source"
 		exit 1
 	fi
