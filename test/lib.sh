@@ -705,6 +705,27 @@ pgc_objects_built_for() {
 		# it. Returning unknown hands the decision back to the stamp, which is
 		# exactly the behaviour those builds have today -- no protection gained,
 		# none lost.
+		#
+		# WHICH BUILDS LOSE OUT IS NOT ARBITRARY, and that is why this is a
+		# choice rather than a hole. The prefixes without -g here are the ones
+		# configured with neither --enable-cassert nor --enable-debug (measured:
+		# pg17_nc and pg18_nc are cassert=0 debug=0; pg17 is 1 and 1). Those are
+		# the measurement builds by local convention -- their output is numbers,
+		# not verdicts -- so the build kind that keeps stamp-only protection is
+		# the one whose results are timings rather than correctness claims. The
+		# repository does not declare that convention, so treat it as an
+		# observation about this host rather than a guarantee.
+		#
+		# UNDEFINED SYMBOLS WERE THE OBVIOUS FALLBACK AND THEY DO NOT WORK.
+		# @OffgridwithJD built it rather than arguing it: `nm -D` needs no debug
+		# info and the count does carry provenance -- the correct pairing is the
+		# minimum in every row -- but even the correct pairing leaves 49 symbols
+		# unresolved, because libc supplies them at load. So there is no
+		# threshold for "is this foreign", only "which candidate server is it
+		# least foreign to", which needs every prefix on the box to decide one
+		# thing about one prefix. And it is weaker where it matters: symbols
+		# catch the LOAD failure, not an ABI change that is symbol-compatible
+		# and corrupts quietly. DWARF provenance catches both.
 		dbg="$(readelf -S "$obj" 2>/dev/null | grep -c 'debug_')" || dbg=0
 		case "$dbg" in '' | *[!0-9]*) dbg=0 ;; esac
 		[ "$dbg" -ge 1 ] || { echo unknown; return; }
