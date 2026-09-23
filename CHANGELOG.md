@@ -18,6 +18,29 @@ true until the next version shipped.
 
 ### Changed
 
+- `build_all_versions.sh` reads the matrix's major list from `run_all_versions.sh`
+  instead of carrying its own copy (#1219). The two copies were identical, so the
+  rot was latent rather than live -- but a major moving in one and not the other
+  means the build check compiles against a set the gate does not use, and
+  reporting "builds on every major" about the wrong majors is the failure that
+  script exists to prevent, one level up.
+
+  Not hypothetical as a shape: the runner's PG18 is `/usr/local/pgsql`, which is
+  not the path a reader guesses, and picking `pg18_nc` by hand instead of reading
+  the array cost @jdatcmd four probes on a phantom regression. A person choosing
+  majors by hand makes the same mistake a stale copy does.
+
+  A list that could not be READ is now distinguished from a list of zero majors.
+  Without that, a renamed array gives `built 0 of 0`, which reads exactly like a
+  host with none of the majors installed and sends the reader to their PATH
+  rather than to the array. Proven by removal -- with `DEFAULT_CONFIGS` deleted
+  from the runner:
+
+      FATAL: no default majors could be read from .../run_all_versions.sh
+
+  and with it restored, `built 0 of 5` on a host lacking those paths and
+  `built 2 of 2` when majors are named explicitly.
+
 - The arm asserting the build path calls `pgc_build_needs_clean` now strips comments
   before counting, so a comment naming the call cannot satisfy it (#1222). The arm
   has always been named "rather than merely naming it" and relied on a trailing

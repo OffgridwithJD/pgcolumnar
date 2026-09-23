@@ -24,18 +24,40 @@ set -uo pipefail
 
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-DEFAULT_CONFIGS=(
-	/usr/local/pg15/bin/pg_config
-	/usr/local/pg16/bin/pg_config
-	/usr/local/pg17/bin/pg_config
-	/usr/local/pgsql/bin/pg_config
-	/usr/local/pg19/bin/pg_config
-)
+# THE MATRIX'S LIST, READ RATHER THAN COPIED (#1219).
+#
+# This file carried its own copy of run_all_versions.sh's DEFAULT_CONFIGS. The two
+# were identical, so the rot was latent rather than live -- but a major moving in
+# one and not the other means this compiles against a set the GATE DOES NOT USE,
+# and reporting "builds on every major" about the wrong majors is the failure this
+# script exists to prevent, one level up.
+#
+# Not hypothetical as a shape: the runner's PG18 is /usr/local/pgsql, which is
+# not the path a reader guesses, and @jdatcmd spent four probes on a phantom
+# regression after hand-picking pg18_nc as "the" PG18 instead of reading this
+# array. A person choosing majors by hand makes the same mistake a stale copy
+# does.
+#
+# Evalled out of the runner the way selftest 530 evals its reader, rather than
+# restating it: a check that recomputes a rule tests the world instead of the code.
+_bav_runner="$SRCDIR/test/run_all_versions.sh"
+eval "$(sed -n '/^DEFAULT_CONFIGS=(/,/^)/p' "$_bav_runner" 2>/dev/null)"
 
 if [ "$#" -gt 0 ]; then
 	CONFIGS=("$@")
 else
-	CONFIGS=("${DEFAULT_CONFIGS[@]}")
+	CONFIGS=("${DEFAULT_CONFIGS[@]:-}")
+	# A LIST THAT COULD NOT BE READ IS NOT A LIST OF ZERO MAJORS, and the two
+	# must not print the same sentence. Without this, a renamed array or a moved
+	# runner gives "built 0 of 0" -- which reads exactly like a host that has
+	# none of the majors installed, and sends the reader to their PATH instead of
+	# to this line.
+	if [ "${#CONFIGS[@]}" -eq 0 ] || [ -z "${CONFIGS[0]}" ]; then
+		echo "FATAL: no default majors could be read from $_bav_runner" >&2
+		echo "       (expected a DEFAULT_CONFIGS=( ... ) array there; naming" >&2
+		echo "        pg_config paths as arguments bypasses this)" >&2
+		exit 1
+	fi
 fi
 
 echo "== pgColumnar build check across majors =="
