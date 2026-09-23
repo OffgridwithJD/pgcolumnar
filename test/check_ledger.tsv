@@ -1336,6 +1336,11 @@ harness_selftest	560-the-objects-decide-which-major	premise: the caller's text w
 harness_selftest	560-the-objects-decide-which-major	premise: the object-provenance decision is exposed to be judged	15;16;17;18;19	never	-
 harness_selftest	560-the-objects-decide-which-major	premise: the tree under test holds objects to judge	15;16;17;18;19	never	-
 harness_selftest	560-the-objects-decide-which-major	the objects of this very run are never called foreign to their own pg_config	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	570-a-checkout-test-must-ask-git	a gitfile is a regular file, which a directory test cannot accept	15;16;17;18;19	never	-
+harness_selftest	570-a-checkout-test-must-ask-git	and it is still a .git that a reader must not skip on	15;16;17;18;19	never	-
+harness_selftest	570-a-checkout-test-must-ask-git	no suite decides it is a checkout by stat-ing .git as a directory	15;16;17;18;19	2026-09-23	the -d form restored in extension_upgrade, or the comment stripping removed
+harness_selftest	570-a-checkout-test-must-ask-git	premise: some suite already asks git whether it can answer	15;16;17;18;19	never	-
+harness_selftest	570-a-checkout-test-must-ask-git	premise: the sweep sees .git mentioned in the suites at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
