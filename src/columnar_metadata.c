@@ -461,6 +461,7 @@ List *
 PgColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
+	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
 	TupleDesc	gtd = RelationGetDescr(grel);
 	ScanKeyData gkey[1];
 	SysScanDesc gscan;
@@ -485,7 +486,7 @@ PgColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 
 	ScanKeyInit(&gkey[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	gscan = systable_beginscan(grel, InvalidOid, false, snap, 1, gkey);
+	gscan = systable_beginscan(grel, rgIdx, OidIsValid(rgIdx), snap, 1, gkey);
 	while (HeapTupleIsValid(gtuple = systable_getnext(gscan)))
 	{
 		TransactionId xmin = HeapTupleHeaderGetXmin(gtuple->t_data);
@@ -550,6 +551,7 @@ static List *
 PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
+	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
 	TupleDesc	gtd = RelationGetDescr(grel);
 	Relation	mrel = open_columnar_table("delete_vector", AccessShareLock);
 	TupleDesc	mtd = RelationGetDescr(mrel);
@@ -564,7 +566,7 @@ PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 
 	ScanKeyInit(&gkey[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	gscan = systable_beginscan(grel, InvalidOid, false, snap, 1, gkey);
+	gscan = systable_beginscan(grel, rgIdx, OidIsValid(rgIdx), snap, 1, gkey);
 	while (HeapTupleIsValid(gtuple = systable_getnext(gscan)))
 	{
 		TransactionId xmin = HeapTupleHeaderGetXmin(gtuple->t_data);
@@ -627,12 +629,52 @@ PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 	return groups;
 }
 
-/* delete every row of a metadata table matching (storageAttno, groupAttno) */
+/*
+ * delete_group_rows
+ *		Delete every row of a metadata table matching (storageAttno, groupAttno),
+ *		probing through indexName.
+ *
+ *		ONE SOURCE LINE HERE IS FIVE SCAN SITES AT RUN TIME. The relation comes
+ *		from a PARAMETER, and PgColumnarDeleteGroupMetadata calls this five
+ *		times -- delete_vector, column_chunk, zone_map, bloom, row_group -- so
+ *		the single systable_beginscan below ran once per catalog per retired
+ *		group. With InvalidOid that was five sequential scans of five catalogs
+ *		for every group a compaction retires, walking every OTHER columnar
+ *		table's rows each time.
+ *
+ *		IT WAS INVISIBLE TO BOTH AUDITS OF THESE SCANS (#1207). Each of them
+ *		attributed a systable_beginscan to a catalog by reading the
+ *		open_columnar_table("<name>") that produced its relation handle, or by
+ *		finding the nearest scan key. Neither can resolve a relation that
+ *		arrives as an argument: at this call site the catalog has no name. What
+ *		found it was a reconciliation rather than a better reading -- probing
+ *		all 44 systable_beginscan sites in this file and requiring
+ *		sum(probes that ran with InvalidOid) == sum(seq_scan over pgcolumnar),
+ *		which failed at 41 counted against 22 probed.
+ *
+ *		The caller passes the index name because this function cannot derive it:
+ *		the pkey of the table named by tableName is what it needs, and only the
+ *		caller knows which table that is. Every one of the five is a prefix
+ *		match on the two keys below, so none of this needs a new index:
+ *
+ *		    delete_vector_pkey  (storage_id, group_number)              exact
+ *		    row_group_pkey      (storage_id, group_number)              exact
+ *		    column_chunk_pkey   (storage_id, group_number, column_index)
+ *		    bloom_pkey          (storage_id, group_number, column_index)
+ *		    zone_map_pkey       (storage_id, group_number, column_index, ...)
+ *
+ *		Deleting while scanning through the index is the pattern core uses for
+ *		its own catalogs (see deleteDependencyRecordsFor and its siblings): the
+ *		scan holds its position by tid, and CatalogTupleDelete updates the index
+ *		entries behind it.
+ */
 static void
-delete_group_rows(const char *tableName, AttrNumber storageAttno,
+delete_group_rows(const char *tableName, const char *indexName,
+				  AttrNumber storageAttno,
 				  AttrNumber groupAttno, uint64 storageId, uint64 groupNumber)
 {
 	Relation	rel = open_columnar_table(tableName, RowExclusiveLock);
+	Oid			idx = pgcolumnar_index_oid(indexName);
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tuple;
@@ -642,7 +684,7 @@ delete_group_rows(const char *tableName, AttrNumber storageAttno,
 	ScanKeyInit(&key[1], groupAttno, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 2, key);
+	scan = systable_beginscan(rel, idx, OidIsValid(idx), NULL, 2, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		CatalogTupleDelete(rel, &tuple->t_self);
 	systable_endscan(scan);
@@ -657,6 +699,7 @@ read_row_group_range(uint64 storageId, uint64 groupNumber,
 {
 	Relation	rel = open_columnar_table("row_group", AccessShareLock);
 	TupleDesc	td = RelationGetDescr(rel);
+	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tuple;
@@ -668,7 +711,12 @@ read_row_group_range(uint64 storageId, uint64 groupNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_row_group_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snap, 2, key);
+	/*
+	 * row_group_pkey IS (storage_id, group_number), so these two keys are the
+	 * whole index. One more sequential scan per retired group, beside the five
+	 * delete_group_rows makes (#1207).
+	 */
+	scan = systable_beginscan(rel, rgIdx, OidIsValid(rgIdx), snap, 2, key);
 	if (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -742,9 +790,19 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 		ItemPointerData mergeTids[2];
 		int			nMerge = 0;
 
+		Oid			fsIdx = pgcolumnar_index_oid("free_space_pkey");
+
 		ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) storageId));
-		scan = systable_beginscan(rel, InvalidOid, false, snap, 1, key);
+		/*
+		 * storage_id leads free_space_pkey (storage_id, file_offset), so the
+		 * one key here is a prefix probe. The loop is order-independent: it
+		 * tests adjacency against the ORIGINAL range bounds, not against the
+		 * accumulating ones, and takes Min() of the offsets, so reading the
+		 * rows in index order rather than heap order cannot change which
+		 * neighbours merge (#1207).
+		 */
+		scan = systable_beginscan(rel, fsIdx, OidIsValid(fsIdx), snap, 1, key);
 		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		{
 			bool		isnull;
@@ -839,15 +897,15 @@ PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 	bool		haveRange = read_row_group_range(storageId, groupNumber,
 												 &fileOffset, &byteLength);
 
-	delete_group_rows("delete_vector", Anum_delete_vector_storage_id,
+	delete_group_rows("delete_vector", "delete_vector_pkey", Anum_delete_vector_storage_id,
 					  Anum_delete_vector_group_number, storageId, groupNumber);
-	delete_group_rows("column_chunk", Anum_column_chunk_storage_id,
+	delete_group_rows("column_chunk", "column_chunk_pkey", Anum_column_chunk_storage_id,
 					  Anum_column_chunk_group_number, storageId, groupNumber);
-	delete_group_rows("zone_map", Anum_zone_map_storage_id,
+	delete_group_rows("zone_map", "zone_map_pkey", Anum_zone_map_storage_id,
 					  Anum_zone_map_group_number, storageId, groupNumber);
-	delete_group_rows("bloom", Anum_bloom_storage_id,
+	delete_group_rows("bloom", "bloom_pkey", Anum_bloom_storage_id,
 					  Anum_bloom_group_number, storageId, groupNumber);
-	delete_group_rows("row_group", Anum_row_group_storage_id,
+	delete_group_rows("row_group", "row_group_pkey", Anum_row_group_storage_id,
 					  Anum_row_group_group_number, storageId, groupNumber);
 
 	/*
@@ -995,6 +1053,8 @@ PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 {
 	Relation	rg;
 	Relation	fs;
+	Oid			rgIdx;
+	Oid			fsIdx;
 	TupleDesc	rgd;
 	TupleDesc	fsd;
 	Snapshot	snap;
@@ -1011,13 +1071,23 @@ PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	rg = open_columnar_table("row_group", AccessShareLock);
 	fs = open_columnar_table("free_space", AccessShareLock);
+	rgIdx = pgcolumnar_index_oid("row_group_pkey");
+	fsIdx = pgcolumnar_index_oid("free_space_pkey");
 	rgd = RelationGetDescr(rg);
 	fsd = RelationGetDescr(fs);
 	ranges = palloc(sizeof(ReclaimRange) * cap);
 
 	ScanKeyInit(&key[0], Anum_row_group_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rg, InvalidOid, false, snap, 1, key);
+	/*
+	 * ASSERT-ONLY, AND THAT IS EXACTLY WHY IT WAS THE LAST ONE FOUND. This
+	 * check does not run in a release build, so a measurement taken on one
+	 * reports zero sequential scans here while every assert-enabled CI leg pays
+	 * two per maintenance operation. Both keys below lead their table's primary
+	 * key, and the loops qsort what they collect, so index order changes
+	 * nothing (#1207).
+	 */
+	scan = systable_beginscan(rg, rgIdx, OidIsValid(rgIdx), snap, 1, key);
 	while (HeapTupleIsValid(t = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -1038,7 +1108,7 @@ PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 
 	ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(fs, InvalidOid, false, snap, 1, key);
+	scan = systable_beginscan(fs, fsIdx, OidIsValid(fsIdx), snap, 1, key);
 	while (HeapTupleIsValid(t = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -1265,6 +1335,7 @@ PgColumnarReconcileFreeList(Relation dataRel)
 	int			nf = 0;
 	int			capf = 64;
 	Relation	fsrel;
+	Oid			fsIdx;
 	TupleDesc	td;
 	List	   *storages = NIL;
 	List	   *tids = NIL;
@@ -1302,6 +1373,7 @@ PgColumnarReconcileFreeList(Relation dataRel)
 	qsort(foots, nf, sizeof(FootRange), footrange_cmp);
 
 	fsrel = open_columnar_table("free_space", RowExclusiveLock);
+	fsIdx = pgcolumnar_index_oid("free_space_pkey");
 	td = RelationGetDescr(fsrel);
 	foreach(lc, storages)
 	{
@@ -1312,7 +1384,13 @@ PgColumnarReconcileFreeList(Relation dataRel)
 
 		ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) sid));
-		scan = systable_beginscan(fsrel, InvalidOid, false, snap, 1, key);
+		/*
+		 * storage_id leads free_space_pkey. The loop tests each row against the
+		 * footprints independently and collects tids, deleting only after every
+		 * scan has finished, so index order rather than heap order changes
+		 * nothing about which rows are collected (#1207).
+		 */
+		scan = systable_beginscan(fsrel, fsIdx, OidIsValid(fsIdx), snap, 1, key);
 		while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		{
 			bool		isnull;
