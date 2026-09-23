@@ -196,22 +196,29 @@ true until the next version shipped.
   objects in the tree and a build stamp made to AGREE with the major being run:
 
   ```
-    before   smoke.sh <pg17>   rc=1   pg_ctl: could not start server
-                               the pg17 prefix then held a library with an
+    before   smoke.sh <pg17a>  rc=1   pg_ctl: could not start server
+                               the pg17a prefix then held a library with an
                                undefined PG19-only symbol, build_simple_rel_hook
 
-    after    smoke.sh <pg17>   rc=0   -- the objects in the tree were not built
+    after    smoke.sh <pg17a>  rc=0   -- the objects in the tree were not built
                                against .../pg17a/include/postgresql/server,
                                whatever the build stamp says; cleaning first
                                SMOKE TEST PASSED, 9 checks, no foreign symbol
   ```
 
+  `pg17a` and `pg19a` are one box's names for a PG17 and a PG19 installation; the
+  point is that they are different majors, not which prefix holds them.
+
   A stamp that DISAGREES was always caught. A stamp that agrees while the objects
   are foreign is the dangerous direction, and it is the one any hand-run `make`
   for another major creates.
 
-  **A second change comes with it, and it is a behaviour change rather than a
-  guarantee restored.** These suites discarded `make`'s exit status, so a build
+  **These eleven also write the source stamp now**, which they never did, so each
+  of them becomes a freshness controller for whatever runs after it with the build
+  skipped. That is the other side of #1230: a run that installs without recording
+  leaves the next suite refusing a binary that is in fact correct.
+
+  **A further change is a behaviour change rather than a guarantee restored.** These suites discarded `make`'s exit status, so a build
   that failed left them reporting a full set of checks against the PREVIOUSLY
   installed library. The builder refuses instead: "the build failed, so there is
   nothing new to test". A suite that cannot build now says so and stops.
