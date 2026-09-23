@@ -594,4 +594,38 @@ suites_not_covered 249
 # YOU KNOW WHAT IS THERE.
 #
 # suites_not_covered does NOT move: catalog_plan_index is already covered.
-checks_never_observed_red 1521
+#
+# 1521 -> 1512 for #1236's second batch: nine index_am_support arms attacked, after
+# this branch was rebased onto a main carrying #1241. RE-DERIVED BY COUNTING on
+# the composed tree -- the branch carried 1510 against the previous main and that
+# number does not survive, because it described a tree that no longer exists:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1512
+#     1606 rows total, 94 not `never`
+#
+# THE SAME SHAPE AS THE FIRST BATCH. index_am_support's only dated rows were two
+# premises about docs/features.md, reddened by a DOCS mutation, which cannot
+# reach one arm about what an index does. Eight behaviour arms sat `never` next
+# to them, unattacked rather than vacuous.
+#
+# TWO MUTATIONS WITH DISJOINT PREDICTED SETS, both confirmed exactly:
+#
+#   M-1  the build drops two rows in three, so the index misses entries
+#        predicted the four "answers its operator" arms and NOT the build arms
+#        observed  exactly those four; CREATE INDEX still succeeds, so every
+#                  "builds an index" arm stayed green
+#
+#   M-2  the build errors, so CREATE INDEX fails
+#        predicted the four "builds an index" arms
+#        observed  those four, plus the GiST overlap premise, which needs an
+#                  index that can no longer be built
+#
+# AND M-2 SHOWS A WEAKNESS IN THE FOUR ANSWER ARMS, which is worth recording
+# where the rows are. With NO index in existence they all stayed GREEN: the arm
+# compares a count taken with `enable_seqscan = off` against one taken with the
+# custom scan off, and `enable_seqscan` is a preference rather than a
+# prohibition, so with no index both sides fall back to the same scan and agree.
+# The arm is named "answers its operator with the same rows the scan returns"
+# and can be satisfied without an index scan happening. Reported on #1236 rather
+# than repaired here: this change records evidence and alters no test.
+checks_never_observed_red 1512

@@ -1383,13 +1383,13 @@ harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild tool i
 harness_selftest	580-a-hand-rebuild-must-record	premise: the shim redirects the install away from the real prefix	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild tool records what it installed rather than only naming it	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, or the comment stripping removed
 harness_selftest	580-a-hand-rebuild-must-record	the recorder refuses when it is not told what was installed	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
-index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
-index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
-index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
-index_am_support	index_am_support	gist builds an index over a columnar table	15;16;17;18;19	never	-
-index_am_support	index_am_support	hash answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
-index_am_support	index_am_support	hash builds an index over a columnar table	15;16;17;18;19	never	-
-index_am_support	index_am_support	premise: an overlap query reaches the row through a GiST index	15;16;17;18;19	never	-
+index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
+index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
+index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
+index_am_support	index_am_support	gist builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
+index_am_support	index_am_support	hash answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
+index_am_support	index_am_support	hash builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
+index_am_support	index_am_support	premise: an overlap query reaches the row through a GiST index	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	premise: btree, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: gist, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: hash, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
@@ -1401,8 +1401,8 @@ index_am_support	index_am_support	premise: the fixture holds every row	15;16;17;
 index_am_support	index_am_support	premise: the gist predicate matches rows at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the hash predicate matches rows at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the spgist predicate matches rows at all	15;16;17;18;19	never	-
-index_am_support	index_am_support	spgist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
-index_am_support	index_am_support	spgist builds an index over a columnar table	15;16;17;18;19	never	-
+index_am_support	index_am_support	spgist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
+index_am_support	index_am_support	spgist builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-
