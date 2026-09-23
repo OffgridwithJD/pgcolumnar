@@ -125,6 +125,7 @@ behaviour, the source of that number is named.
 - [77. test_projection_parallel.py: a covering projection can be a parallel scan](#77-test_projection_parallelpy-a-covering-projection-can-be-a-parallel-scan)
 - [78. test_ttl_expire.py: the one function that deletes rows, tested twice](#78-test_ttl_expirepy-the-one-function-that-deletes-rows-tested-twice)
 - [79. test_projection_scan_io.py: a covering projection is not priced from the base table's pages](#79-test_projection_scan_iopy-a-covering-projection-is-not-priced-from-the-base-tables-pages)
+- [80. test_catalog_plan_index.py: planning uses the options and projection indexes](#80-test_catalog_plan_indexpy-planning-uses-the-options-and-projection-indexes)
 
 ## 1. How to read a test in here
 
@@ -6144,3 +6145,17 @@ this file uses `pciot` / `onck` / 36000 rows. Assertion names match.
 | test | what it holds |
 | --- | --- |
 | `test_projection_scan_io` | the table and covering projection exist; the plan uses that projection; the covering scan has a positive run cost; the projection occupies a minority of the relation; the covering run is not priced from the base table's pages; a covering path whose storage cannot be found is not priced as one page |
+
+## 80. test_catalog_plan_index.py: planning uses the options and projection indexes
+
+Port of `catalog_plan_index.sh`. A plan that asks what one columnar table was written with, and whether it has a projection, sequentially scanned `pgcolumnar.options` and `pgcolumnar.projection`. Both catalogs already have a primary key on the column the scan key names.
+
+The measured statement runs on a second connection. The shell suite gets that by using a fresh `psql` for every statement. This file holds one connection for the writes and opens another for the scan, for the same reason `test_native_delete_vector_index.py` does: the session that just wrote is a different path.
+
+`pg_stat_reset()` is database-wide. The corpus runs serially within a worker.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_catalog_plan_index` | the measured table's row count, that the filtered scan returned every row, and that `options` and `projection` were probed by index with `seq_scan` still 0 |

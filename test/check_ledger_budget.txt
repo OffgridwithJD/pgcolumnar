@@ -211,4 +211,19 @@ suites_not_covered 249
 # sat, so neither the branch's previous value nor main's is the composed one.
 # 1499 -> 1506 for #1155's own nine rows, re-counted after this branch was
 # rebuilt on main rather than added to either side.
-checks_never_observed_red 1506
+# REBUILT ON MAIN CARRYING #1155, and the number is neither side's. This branch
+# derived 1501 against the previous main; main now holds 1506. 1501 is not 1506
+# minus anything and 1506 is not 1501 plus anything -- each was correct for a tree
+# that no longer exists. Re-derived by COUNTING on this tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1508
+#
+# with the premise printed beside it, because a pattern that matches nothing
+# counts 0 and reads like a clean answer: 1541 rows total, 33 not `never`.
+#
+# suites_not_covered does NOT move. catalog_plan_index is a new registered suite
+# that arrives WITH ledger rows, so it raises the registered count and the covered
+# count by one each and leaves the difference alone. Measured on both trees rather
+# than argued: not-covered identical on main and on this tree, ledger-only suites 0,
+# and registered == covered + not-covered on each.
+checks_never_observed_red 1508
