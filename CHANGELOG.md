@@ -30,16 +30,28 @@ true until the next version shipped.
   the array cost @jdatcmd four probes on a phantom regression. A person choosing
   majors by hand makes the same mistake a stale copy does.
 
-  A list that could not be READ is now distinguished from a list of zero majors.
-  Without that, a renamed array gives `built 0 of 0`, which reads exactly like a
-  host with none of the majors installed and sends the reader to their PATH
-  rather than to the array. Proven by removal -- with `DEFAULT_CONFIGS` deleted
-  from the runner:
+  A list that could not be READ is now distinguished from a list of zero majors,
+  and a malformed array from an absent one. Without the first, a renamed array
+  gives `built 0 of 0`, which reads exactly like a host with none of the majors
+  installed and sends the reader to their PATH rather than to the array.
 
-      FATAL: no default majors could be read from .../run_all_versions.sh
+  THE CAPTURED BLOCK IS VALIDATED BEFORE IT IS EVALLED (@jdatcmd, review).
+  `/^)/` does not match an indented terminator, and the runner's own `SUITES=(`
+  closes with a tab, so matching that style is a natural edit rather than a
+  hypothetical. With a tabbed `)` the range ran to end of file and `eval`
+  executed about 1500 lines of the runner, clobbering this script's variables
+  and stopping only when `set -u` hit an unbound name: bounded by accident
+  rather than by design. The reader now accepts either terminator and refuses
+  any block whose lines are not the opener, a path, or the closer.
 
-  and with it restored, `built 0 of 5` on a host lacking those paths and
-  `built 2 of 2` when majors are named explicitly.
+  Driven, four ways:
+
+      paren at column 0             built 1 of 1, PASSED
+      terminator indented           7 lines captured, built 1 of 1, PASSED
+      an assignment smuggled in     refused, 1 line was something else
+      array deleted                 refused, no DEFAULT_CONFIGS array found
+
+  and on a host lacking the default paths, `built 0 of 5` with exit 1.
 
 - The arm asserting the build path calls `pgc_build_needs_clean` now strips comments
   before counting, so a comment naming the call cannot satisfy it (#1222). The arm
