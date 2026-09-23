@@ -662,6 +662,60 @@ true until the next version shipped.
   first version passed on prose, green on a caller that consulted nothing, and
   one arm now builds that exact text and requires zero. `selftest/190` has the
   same shape on `pgc_build_needs_clean`, tracked in #1222.
+- Retiring a row group sequentially scanned five catalogs, once each per group
+  (#1207).
+
+  `delete_group_rows()` opens its catalog from a `const char *tableName`
+  **parameter**, and `PgColumnarDeleteGroupMetadata` calls it five times, for
+  `delete_vector`, `column_chunk`, `zone_map`, `bloom` and `row_group`. So one
+  `systable_beginscan` in the source was five sequential scans per retired group
+  at run time, each walking every other columnar table's rows. Two audits of
+  these scans missed it: both attributed a scan to a catalog by the
+  `open_columnar_table("<name>")` that produced its relation handle, and a
+  relation that arrives as an argument has no name at the call site.
+
+  Nine scan sites now pass an index oid. Every key was already a prefix of an
+  index that exists, so nothing here needs a catalog migration:
+
+  | catalog | key used | index |
+  | --- | --- | --- |
+  | `delete_vector` | `(storage_id, group_number)` | `delete_vector_pkey` |
+  | `row_group` | `(storage_id, group_number)` | `row_group_pkey` |
+  | `column_chunk` | `(storage_id, group_number)` | `column_chunk_pkey` |
+  | `bloom` | `(storage_id, group_number)` | `bloom_pkey` |
+  | `zone_map` | `(storage_id, group_number)` | `zone_map_pkey` |
+  | `free_space` | `(storage_id)` | `free_space_pkey` |
+
+  Measured on PG18, 40 groups with 20 retired, counters reset immediately before
+  `pgcolumnar.compact()`:
+
+  | catalog | seq_scan before | seq_scan after |
+  | --- | ---: | ---: |
+  | `bloom` | 20 | 0 |
+  | `column_chunk` | 20 | 0 |
+  | `delete_vector` | 20 | 0 |
+  | `zone_map` | 20 | 0 |
+  | `free_space` | 22 | 0 |
+  | `row_group` | 43 | 0 |
+
+  The compaction path cost `7 x (retired groups) + 3` sequential scans and now
+  costs none of them. The figure was established by probing all 44
+  `systable_beginscan` sites in `columnar_metadata.c` and requiring the number
+  that ran with `InvalidOid` to equal the sum of `seq_scan` over every
+  `pgcolumnar` catalog; it reconciles exactly at 5, 10, 20 and 40 retired
+  groups. A six-site enumeration failed that check at 41 counted against 22
+  probed, which is how the parameter-named catalog surfaced.
+
+  Two of the nine sites are in `PgColumnarCheckFreeSpaceNoOverlap`, which is
+  assert-only. It was the last one found, and it is worth saying why: a
+  measurement taken on a release build reports zero sequential scans there while
+  every assert-enabled CI leg pays two per maintenance operation.
+
+  `test/catalog_delete_index.sh` (21 checks) and
+  `test/pytest/test_catalog_delete_index.py` (22 checks). Restoring `InvalidOid`
+  on all nine sites reddens 13 of the shell suite's 21 arms; the 8 that survive
+  are the 7 premises and `delete_vector`'s index arm, which passes beforehand
+  because another site already reached that catalog through its index.
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).

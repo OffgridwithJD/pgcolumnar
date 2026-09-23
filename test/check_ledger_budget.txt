@@ -497,4 +497,32 @@ suites_not_covered 249
 # refuses correct code gets switched off and takes its rule with it.
 #
 # suites_not_covered does NOT move: capability_sweep arrives with its rows.
-checks_never_observed_red 1534
+#
+# 1534 -> 1542 for #1207's twenty-one new catalog_delete_index checks, after this
+# branch was rebased onto a main carrying #1219, #1224, #1230, #1209 and #1185.
+# RE-DERIVED BY COUNTING on the composed tree, never by adding to either side's
+# number -- this branch has carried 1514, 1516 and 1508 at various points and not
+# one of them survives a rebase, because each described a tree that no longer
+# exists:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1542
+#
+# with the premise beside it: 1623 rows total, 81 not `never`.
+#
+# THIRTEEN of catalog_delete_index's 21 rows carry a last-red rather than
+# `never`, which is why the suite's own contribution is 8 and not 21. The
+# thirteen are the arms that went red under the removal proof, InvalidOid
+# restored on all nine converted scan sites. The eight survivors are the seven
+# premises and `retiring a group probed pgcolumnar.delete_vector by index`, which
+# passes before the fix because PgColumnarComputeFullyDeletedGroups already
+# reached delete_vector through its index.
+#
+# THE MERGE IS WHERE THIS NUMBER IS MOST DANGEROUS. The ledger rows auto-merge --
+# two branches each adding rows conflict in neither -- while the total that
+# describes them does not, so a clean textual merge leaves a census describing
+# neither tree. git conflicted here, correctly, and the resolution is a recount
+# and not a pick.
+#
+# suites_not_covered does NOT move: catalog_delete_index is a new registered
+# suite arriving WITH its ledger rows.
+checks_never_observed_red 1542
