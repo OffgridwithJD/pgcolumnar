@@ -1322,18 +1322,19 @@ harness_selftest	550-a-header-edit-must-rebuild	every object carries a dependenc
 harness_selftest	550-a-header-edit-must-rebuild	premise: the selftest knows where the tree it builds is	15;16;17;18;19	never	-
 harness_selftest	550-a-header-edit-must-rebuild	premise: this tree is a checkout, so git can answer	15;16;17;18;19	never	-
 harness_selftest	550-a-header-edit-must-rebuild	premise: this tree was compiled here, so there are objects to depend on	15;16;17;18;19	never	-
-harness_selftest	560-the-objects-decide-which-major	a caller that only MENTIONS the helper does not count as consulting it	15;16;17;18;19	2026-09-23	the object check stubbed, its wiring removed, or the comment stripping removed
-harness_selftest	560-the-objects-decide-which-major	a tree with no objects reports unknown, not a false match	15;16;17;18;19	never	-
-harness_selftest	560-the-objects-decide-which-major	an unreadable pg_config fails CLOSED rather than assuming a match	15;16;17;18;19	2026-09-23	the object check stubbed, its wiring removed, or the comment stripping removed
-harness_selftest	560-the-objects-decide-which-major	and are reported FOREIGN to an includedir they were not built against	15;16;17;18;19	2026-09-23	the object check stubbed, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	a caller that only MENTIONS the helper does not count as consulting it	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	a tree with no objects reports unknown, not a false match	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	an object with no debug info reports UNKNOWN, so the stamp still decides	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	an unreadable pg_config fails CLOSED rather than assuming a match	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
 harness_selftest	560-the-objects-decide-which-major	and it still consults the stamp, which answers when the objects cannot	15;16;17;18;19	never	-
-harness_selftest	560-the-objects-decide-which-major	objects built by this very run match the pg_config that built them	15;16;17;18;19	2026-09-23	the object check stubbed, its wiring removed, or the comment stripping removed
-harness_selftest	560-the-objects-decide-which-major	objects with no debug info report UNKNOWN, so the stamp still decides	15;16;17;18;19	never	-
-harness_selftest	560-the-objects-decide-which-major	pgc_build_and_install consults the objects, not only the stamp	15;16;17;18;19	2026-09-23	the object check stubbed, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	objects are reported FOREIGN to an includedir they were not built against	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	pgc_build_and_install consults the objects, not only the stamp	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
+harness_selftest	560-the-objects-decide-which-major	premise: an object compiled without -g carries no debug sections	15;16;17;18;19	never	-
+harness_selftest	560-the-objects-decide-which-major	premise: and the same source with -g carries some, so cc obeyed both	15;16;17;18;19	never	-
 harness_selftest	560-the-objects-decide-which-major	premise: the caller's text was actually found, so the counts mean something	15;16;17;18;19	never	-
 harness_selftest	560-the-objects-decide-which-major	premise: the object-provenance decision is exposed to be judged	15;16;17;18;19	never	-
-harness_selftest	560-the-objects-decide-which-major	premise: the stub answers, so the comparison has a right-hand side	15;16;17;18;19	never	-
 harness_selftest	560-the-objects-decide-which-major	premise: the tree under test holds objects to judge	15;16;17;18;19	never	-
+harness_selftest	560-the-objects-decide-which-major	the objects of this very run are never called foreign to their own pg_config	15;16;17;18;19	2026-09-23	the helper forced to yes or no, its wiring removed, or the comment stripping removed
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	never	-
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	never	-
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	never	-

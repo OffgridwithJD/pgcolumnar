@@ -49,6 +49,24 @@
 #                         produced FIVE reds on a clean tree. devloop.sh now
 #                         writes a one-line gitfile into the build dir, which
 #                         costs no bytes and makes the question answerable.  ok
+#   an agent's staged     `tar --exclude=.git` into ANOTHER MACHINE, where
+#   working copy          devloop's fix does not transfer: the gitfile would
+#                         name a path on the host that the container cannot
+#                         resolve. Stage the gitdir once inside the container
+#                         and point every tree at that instead.              ok
+#                         Measured: twenty reds and `rc=1 FAILED` without it,
+#                         `rc=0 PASSED` with. READ-ONLY consumers only -- N
+#                         trees sharing one stage share HEAD and the index, so
+#                         fetch and check out in the tree that owns a real
+#                         .git and stage the result. Verified that reads leave
+#                         the stage byte-identical.
+#
+# THAT FIFTH ONE COST A WHOLE SESSION, which is why it is here rather than in a
+# commit message. Twenty permanently-red arms do not merely lose their own
+# signal: they make the suite's VERDICT unreadable, so a later change that
+# turned the run EXIT_INCOMPLETE was not missed, it was unreachable. The reds
+# had an explanation, the explanation was correct, and it was load-bearing for
+# a whole session of wrong conclusions.
 #
 # SCOPE. Python artifacts, and git bundles. The tree tracks Iceberg
 # .avro/.puffin and Parquet fixtures, which are inputs rather than output and are

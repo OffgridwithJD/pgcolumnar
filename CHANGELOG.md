@@ -181,23 +181,34 @@ true until the next version shipped.
   rather than carrying a second implementation, so both harnesses gain this from
   one change; `test_build_refusal.py` holds that wiring, 107 checks.
 
-  `test/selftest/560-the-objects-decide-which-major.sh`, twelve checks, the same
-  twelve on 15, 16, 17, 18 and 19. Three read `pgc_build_and_install`'s own text
-  and require it to reach both decisions, because a removal proof of the
-  function alone passes while the lines that call it do nothing.
+  `test/selftest/560-the-objects-decide-which-major.sh`, thirteen checks, the
+  same thirteen on 15, 16, 17, 18 and 19, all passing with nothing declining.
 
-  **The arms strip comments before counting, and one arm exists to prove it.**
-  The first version passed on prose: replacing the real call with `# the call to
-  pgc_objects_built_for used to be here` left it green on a caller that
-  consulted nothing. `selftest/190` has the same shape on
-  `pgc_build_needs_clean` and is tracked in #1222.
+  **Nothing branches on what the host happens to have.** The part builds both
+  object kinds itself -- `cc -c` and `cc -g -c` on a two-line source -- and
+  asserts both debug-section counts as premises, so "cc obeyed both" is measured
+  rather than assumed. An earlier revision branched on whether *this* build
+  carried debug info and declined the arm that did not apply; that is #1185's
+  rule applied correctly, and it produced a worse bug. `check_unrunnable` makes
+  a run `EXIT_INCOMPLETE` by design, so an arm that is structurally inapplicable
+  on most hosts made the whole suite incomplete nearly everywhere:
 
-  **The foreign-object arm uses a stub `pg_config`, not a second install.** It
-  first searched the host for another major's prefix, which does not exist on
-  CI or on @OffgridwithJD's box, so the arm declined there -- and would have
-  declined silently but for a malformed reason code. A stub printing
-  `/nonexistent/include/postgresql/server` proves the same claim everywhere
-  with no discovery.
+  | | |
+  | --- | --- |
+  | main | `rc=0` 1094 passed + 0 unrunnable, PASSED |
+  | that revision | `rc=67` 1105 passed + 1 unrunnable, INCOMPLETE |
+  | now | `rc=0` 1107 passed + 0 unrunnable, PASSED |
+
+  A declined arm is right when applicability is a property of the **run**. It is
+  wrong when applicability is a property of the **host** and the thing under
+  test is a pure function of a file -- then build the file.
+
+  Three arms read `pgc_build_and_install`'s own text and require it to reach
+  both decisions, because a removal proof of the function alone passes while the
+  lines that call it do nothing. **They strip comments before counting**: the
+  first version passed on prose, green on a caller that consulted nothing, and
+  one arm now builds that exact text and requires zero. `selftest/190` has the
+  same shape on `pgc_build_needs_clean`, tracked in #1222.
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).

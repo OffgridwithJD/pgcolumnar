@@ -25,73 +25,78 @@
 check "premise: the object-provenance decision is exposed to be judged" \
 	"$(type -t pgc_objects_built_for)" "function"
 
-# PREMISE FOR EVERY ARM BELOW. These objects are what the suite just built, so
-# they belong to the major under test. With no objects the arms compare nothing
-# and "no" is indistinguishable from a correct refusal.
 _obj_n="$(find "$PGC_SRCDIR/src" -name '*.o' 2>/dev/null | wc -l)"
 check_num "premise: the tree under test holds objects to judge" \
 	"$(if [ "$_obj_n" -ge 1 ]; then echo 1; else echo 0; fi)" "1"
 
-# WHAT THIS BUILD CAN ANSWER AT ALL. A server built without -g produces objects
-# with no .debug_ sections and there is nothing to compare; /usr/local/pg18_nc
-# on this host is such a build, and the arm below would demand "yes" from a
-# tree that cannot say. Measure which case this run is in rather than assuming
-# every major carries debug info.
-_dbg_obj="$(find "$PGC_SRCDIR/src" -name '*.o' 2>/dev/null | head -1)"
-_has_dwarf=no
-[ -n "$_dbg_obj" ] && [ "$(readelf -S "$_dbg_obj" 2>/dev/null | grep -c 'debug_')" -ge 1 ] &&
-	_has_dwarf=yes
-echo "-- objects carry debug info: $_has_dwarf ($(basename "${_dbg_obj:-none}"))"
+# BUILD BOTH OBJECT KINDS RATHER THAN HOPING THE HOST HAS THEM, so every arm
+# below runs on every host and nothing declines.
+#
+# The first version branched on whether THIS build carried debug info and
+# declined the arm that did not apply. That is #1185's rule applied correctly,
+# and it produced a worse bug: check_unrunnable makes a run EXIT_INCOMPLETE by
+# design, so an arm that is STRUCTURALLY inapplicable on most hosts makes the
+# whole suite INCOMPLETE nearly everywhere. Measured by @OffgridwithJD and
+# reproduced here once the tree had a .git to clear the unrelated noise:
+#
+#     main     rc=0   1094 passed + 0 unrunnable   PASSED
+#     branch   rc=67  1105 passed + 1 unrunnable   INCOMPLETE
+#
+# A declined arm is right when applicability is a property of the RUN. It is
+# wrong when applicability is a property of the HOST and the thing under test
+# is a pure function of a file -- then build the file. Same move as replacing
+# the host search with a stub, one layer down.
+_probe_dir="$(mktemp -d)"
+mkdir -p "$_probe_dir/nodbg/src" "$_probe_dir/withdbg/src"
+printf 'int pgc_probe_symbol(void) { return 0; }\n' > "$_probe_dir/t.c"
+cc -c    -o "$_probe_dir/nodbg/src/t.o"   "$_probe_dir/t.c" 2>/dev/null || true
+cc -g -c -o "$_probe_dir/withdbg/src/t.o" "$_probe_dir/t.c" 2>/dev/null || true
 
-# BOTH NAMES ARE RECORDED ON EVERY RUN, one of them declined. An if/else that
-# picks a different check NAME per build kind makes the suite's name set shrink
-# with the environment, which is #1185's defect exactly: the accounting
-# reconciles and the missing arm is invisible. A build without -g cannot answer
-# the first question and cannot fail the second, so each declines where it does
-# not apply.
-if [ "$_has_dwarf" = yes ]; then
-	check "objects built by this very run match the pg_config that built them" \
-		"$(pgc_objects_built_for "$PGC_SRCDIR" "$PGC_PG_CONFIG")" "yes"
-	check_unrunnable "objects with no debug info report UNKNOWN, so the stamp still decides" \
-		"UNMET_PRECONDITION" "this build carries debug info, so provenance is readable"
-else
-	check_unrunnable "objects built by this very run match the pg_config that built them" \
-		"UNMET_PRECONDITION" "this build carries no debug info, so provenance is unreadable"
-	check "objects with no debug info report UNKNOWN, so the stamp still decides" \
-		"$(pgc_objects_built_for "$PGC_SRCDIR" "$PGC_PG_CONFIG")" "unknown"
-fi
+_nodbg_n="$(readelf -S "$_probe_dir/nodbg/src/t.o" 2>/dev/null | grep -c 'debug_' || true)"
+_withdbg_n="$(readelf -S "$_probe_dir/withdbg/src/t.o" 2>/dev/null | grep -c 'debug_' || true)"
+case "$_nodbg_n" in '' | *[!0-9]*) _nodbg_n=0 ;; esac
+case "$_withdbg_n" in '' | *[!0-9]*) _withdbg_n=0 ;; esac
+echo "-- probe objects: nodbg debug sections=$_nodbg_n  withdbg=$_withdbg_n"
 
-# THE LOAD-BEARING ARM, and it needs no second server on the host.
+check_num "premise: an object compiled without -g carries no debug sections" \
+	"$_nodbg_n" "0"
+check_num "premise: and the same source with -g carries some, so cc obeyed both" \
+	"$(if [ "$_withdbg_n" -ge 1 ]; then echo 1; else echo 0; fi)" "1"
+
+# THE TREE'S OWN OBJECTS ARE NEVER CALLED FOREIGN TO THE pg_config THAT BUILT
+# THEM. Asserted as "not no" rather than "yes" on purpose: a -g-less server
+# yields `unknown` here and both answers are correct. What must never happen is
+# this function calling its own build's objects foreign, which is the reading
+# that would make every suite clean and rebuild forever.
+check "the objects of this very run are never called foreign to their own pg_config" \
+	"$(if [ "$(pgc_objects_built_for "$PGC_SRCDIR" "$PGC_PG_CONFIG")" = no ]; \
+		then echo no; else echo not-no; fi)" "not-no"
+
+check "an object with no debug info reports UNKNOWN, so the stamp still decides" \
+	"$(pgc_objects_built_for "$_probe_dir/nodbg" "$PGC_PG_CONFIG")" "unknown"
+
+# THE LOAD-BEARING ARM, and it needs neither a second server nor a particular
+# host build kind.
 #
 # The first version searched /usr/local/pg15|pg16|pg17|pg19 for a different
-# major to compare against. NONE OF THOSE EXIST on pgcolumnar-audit, whose
-# prefixes carry an `a` suffix, so the arm declined there -- and would have
-# declined SILENTLY AND GREENLY but for a malformed reason code
-# (@OffgridwithJD). A hardcoded list of host paths, inside a change about not
-# trusting hand-maintained records.
+# major. NONE of those exist on CI or on pgcolumnar-audit, so the arm declined
+# there -- and would have declined SILENTLY AND GREENLY but for a malformed
+# reason code (@OffgridwithJD). A hardcoded list of host paths, inside a change
+# about not trusting hand-maintained records.
 #
-# The claim is only "an includedir that does not match reports no". A stub
-# pg_config that prints a path nothing was built against proves exactly that,
-# on every host, with no discovery and no second install.
-_stub_dir="$(mktemp -d)"
-printf '#!/bin/sh\necho /nonexistent/include/postgresql/server\n' > "$_stub_dir/pg_config"
-chmod +x "$_stub_dir/pg_config"
+# The claim is only "an includedir that does not match reports no". The -g
+# object above was compiled against no PostgreSQL headers at all, so this host's
+# own pg_config is an includedir it was not built against -- a real mismatch
+# rather than a synthetic one.
+check "objects are reported FOREIGN to an includedir they were not built against" \
+	"$(pgc_objects_built_for "$_probe_dir/withdbg" "$PGC_PG_CONFIG")" "no"
 
-check "premise: the stub answers, so the comparison has a right-hand side" \
-	"$("$_stub_dir/pg_config" --includedir-server)" "/nonexistent/include/postgresql/server"
+rm -rf "$_probe_dir"
 
-if [ "$_has_dwarf" = yes ]; then
-	check "and are reported FOREIGN to an includedir they were not built against" \
-		"$(pgc_objects_built_for "$PGC_SRCDIR" "$_stub_dir/pg_config")" "no"
-else
-	check_unrunnable "and are reported FOREIGN to an includedir they were not built against" \
-		"UNMET_PRECONDITION" "this build carries no debug info, so provenance is unreadable"
-fi
-rm -rf "$_stub_dir"
-
-# Every way of failing to read the objects must land on the safe side: report
-# foreign, so the caller cleans. An unnecessary clean costs a rebuild; the other
-# direction installs one major's objects into another's prefix.
+# Every way of failing to read the objects must land on the safe side for the
+# pg_config case: report foreign, so the caller cleans. An unnecessary clean
+# costs a rebuild; the other direction installs one major's objects into
+# another's prefix.
 check "an unreadable pg_config fails CLOSED rather than assuming a match" \
 	"$(pgc_objects_built_for "$PGC_SRCDIR" /nonexistent/bin/pg_config)" "no"
 

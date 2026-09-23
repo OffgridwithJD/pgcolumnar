@@ -226,37 +226,36 @@ suites_not_covered 249
 # count by one each and leaves the difference alone. Measured on both trees rather
 # than argued: not-covered identical on main and on this tree, ledger-only suites 0,
 # and registered == covered + not-covered on each.
-# 1509 -> 1516 for #1219's twelve new harness_selftest checks. Re-derived by
+# 1509 -> 1515 for #1219's thirteen new harness_selftest checks. Re-derived by
 # COUNTING on this tree, never by adding to main's number:
 #
-#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1516
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1515
 #
 # with the premise printed beside it, because a pattern that matches nothing
-# counts 0 and reads like a clean answer: 1555 rows total, 39 not `never`.
+# counts 0 and reads like a clean answer: 1556 rows total, 41 not `never`.
 #
-# TWELVE rows and the census moves by SEVEN, because five carry a measured
-# last-red. Those five are the arms that went red under four removal proofs --
-# stubbing pgc_objects_built_for, removing the four lines that call it,
-# replacing that call with a comment that names it, and removing the comment
-# stripping the vacuity arm depends on:
+# THIRTEEN rows and the census moves by SIX, because seven carry a measured
+# last-red. FOUR mutations were needed rather than one, and the reason is worth
+# recording: several arms correctly ACCEPT `unknown`, so a helper stubbed to
+# return it passes them. Forcing `yes` and forcing `no` are what discriminate.
 #
-#     objects built by this very run match the pg_config that built them
-#     and are reported FOREIGN to an includedir they were not built against
-#     an unreadable pg_config fails CLOSED rather than assuming a match
-#     pgc_build_and_install consults the objects, not only the stamp
-#     a caller that only MENTIONS the helper does not count as consulting it
+#     yes      4 arms   unknown-reporting, FOREIGN, fails-CLOSED, no-objects
+#     no       3 arms   never-called-foreign, unknown-reporting, no-objects
+#     wiring   1 arm    consults the objects, not only the stamp
+#     strip    1 arm    a caller that only MENTIONS the helper
 #
-# Each verdict is transcribed from those runs. The other seven stay `never`,
-# including "and it still consults the stamp" -- correctly, since none of the
-# four mutations removes the stamp check, and claiming a red for it would be a
-# number nobody observed.
+# Union seven, transcribed from those runs. The six that stay `never` are the
+# four premises, the caller-text premise, and "and it still consults the stamp"
+# -- correctly, since none of the four mutations removes the stamp check.
 #
-# AN EARLIER REVISION OF THIS BLOCK SAID TEN CHECKS AND 1515. That was true of
-# a version whose load-bearing arm searched the host for a second major's
-# pg_config; CI and @OffgridwithJD's host both lack those paths, so the arm
-# declined there and the count described a tree neither of them had. Replacing
-# the search with a stub pg_config added two names and made the set the same
-# everywhere -- measured at twelve on 15, 16, 17, 18 and 19.
+# THE COUNT HAS MOVED THREE TIMES IN THIS BRANCH and each earlier value
+# described a tree somebody had. Ten names (1515) was measured where a host
+# search happened to find a second major. Twelve (1516) was measured after a
+# stub replaced that search, but one arm still DECLINED wherever the build
+# carried debug info, which made the suite EXIT_INCOMPLETE nearly everywhere --
+# rc=67 on a clean checkout, invisible in my own trees because they lack .git
+# and so are FAILED regardless. Thirteen is what runs with nothing declining,
+# verified rc=0 PASSED on 15, 16, 17, 18 and 19.
 #
 # suites_not_covered does NOT move: harness_selftest is already a covered suite.
-checks_never_observed_red 1516
+checks_never_observed_red 1515
