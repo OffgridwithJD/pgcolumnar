@@ -8,6 +8,7 @@ base_scan_io	base_scan_io	premise: the later plan still does not name a covering
 base_scan_io	base_scan_io	premise: the plan is a base columnar scan	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	no suite loses a check without recording a skip or a refusal	15;16;17;18;19	2026-09-23	a check_skip block removed from a suite so its arms vanish with no skip and no fail
+capability_sweep	capability_sweep	premise: and no member of the population is this very file	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: and pyarrow IS importable without the shim, so absence is the shim's doing	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: and pyarrow.parquet with it	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	premise: and the standard library still imports under it	15;16;17;18;19	never	-
@@ -16,7 +17,6 @@ capability_sweep	capability_sweep	premise: the mask held for every run in the sw
 capability_sweep	capability_sweep	premise: the population is the size this tree holds	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: the priming run built and installed cleanly	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: the shim makes pyarrow unimportable	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
-capability_sweep	capability_sweep	premise: and no member of the population is this very file	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the two derivations of the population name the same suites	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: while python itself still runs under the shim	15;16;17;18;19	never	-
@@ -1432,7 +1432,7 @@ native_join_runtime_filter	native_join_runtime_filter	build rows omit NULL	15;16
 native_join_runtime_filter	native_join_runtime_filter	clustered groups removed	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	clustered reads fewer groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
-native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
+native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects;the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	default plan has runtime coordinator	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
@@ -1444,7 +1444,7 @@ native_join_runtime_filter	native_join_runtime_filter	fact-qual conjunction equa
 native_join_runtime_filter	native_join_runtime_filter	fact-qual plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	filter ready before scan	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
-native_join_runtime_filter	native_join_runtime_filter	int4/int8 bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
+native_join_runtime_filter	native_join_runtime_filter	int4/int8 bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects;the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 interval stays off	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	int4/int8 plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	join runtime filter defaults on	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
@@ -1461,7 +1461,7 @@ native_join_runtime_filter	native_join_runtime_filter	saturated answer equals he
 native_join_runtime_filter	native_join_runtime_filter	saturated bloom is disabled	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	saturated plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
-native_join_runtime_filter	native_join_runtime_filter	scattered bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects
+native_join_runtime_filter	native_join_runtime_filter	scattered bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects;the runtime bloom probe's verdict inverted, so the filter rejects what matches
 native_join_runtime_filter	native_join_runtime_filter	scattered interval cannot drop groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered still reads every group	15;16;17;18;19	never	-
@@ -1505,15 +1505,15 @@ parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;
 parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	the leader-participation branch changes the divisor	15;16;17;18;19	never	-
-projection_parallel	projection_parallel	a page cost that makes I/O dominate costs the parallel covering path	15;16;17;18;19	2026-09-23	the partial covering total amortises I/O as well as CPU: (ioRunProj + cpuRunProj) / divisor
-projection_parallel	projection_parallel	premise: the covering plan is parallel at the default page cost	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	a covering projection can be a parallel scan	15;16;17;18;19	2026-09-18	-
+projection_parallel	projection_parallel	a page cost that makes I/O dominate costs the parallel covering path	15;16;17;18;19	2026-09-23	the partial covering total amortises I/O as well as CPU: (ioRunProj + cpuRunProj) / divisor
 projection_parallel	projection_parallel	a parallel covering projection returns the covering rows once	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: ANALYZE printed a rows= line per launched worker	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: EXPLAIN ANALYZE launched two workers	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: a covering projection exists	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: a parallel base scan is available when the projection is off	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: a serial covering query uses the projection	15;16;17;18;19	never	-
+projection_parallel	projection_parallel	premise: the covering plan is parallel at the default page cost	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: the table holds every inserted row	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	workers share the covering projection scan, it is not a single claimer	15;16;17;18;19	2026-09-18	first-wins-claimer
 projection_scan_cost	projection_scan_cost	a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection	15;16;17;18;19	never	-
