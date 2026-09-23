@@ -272,6 +272,14 @@ true until the next version shipped.
   `--sharedir` into a temporary prefix, so nothing reaches a real installation,
   and cost 2.1 seconds.
 
+  `pgc_record_source_stamp` refuses when it is not told what to record
+  (@jdatcmd, review). With no arguments it did not fail: it wrote
+  `./.pgc_source_stamp.0.nolibd41` into the current directory, keyed by the md5 of
+  an empty pkglibdir -- `d41` is the front of `d41d8cd98f00`, the md5 of nothing --
+  holding a fingerprint of the current directory rather than of any source. Both
+  callers pass real arguments, so it was latent; a believable record in the wrong
+  place is worse than none, because the freshness gate reads it.
+
   One of those arms watches the live prefix while the run happens, and it reads the
   **mtime** rather than the digest: the tree it builds is a copy of the tree under
   test and the build is byte-reproducible, so an install that did land on the real

@@ -1344,6 +1344,8 @@ harness_selftest	570-a-checkout-test-must-ask-git	premise: the sweep sees .git m
 harness_selftest	580-a-hand-rebuild-must-record	and it reads a different source as stale rather than fresh	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, so no stamp is written at all
 harness_selftest	580-a-hand-rebuild-must-record	and the freshness gate then reads the tree as built from this source	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, so no stamp is written at all
 harness_selftest	580-a-hand-rebuild-must-record	and the installed library of the running major was never touched	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
+harness_selftest	580-a-hand-rebuild-must-record	and writes no stamp into the directory it was called from	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
+harness_selftest	580-a-hand-rebuild-must-record	the recorder refuses when it is not told what was installed	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
 harness_selftest	580-a-hand-rebuild-must-record	premise: lib.sh has one recorder for what was installed	15;16;17;18;19	2026-09-23	pgc_record_source_stamp removed from lib.sh
 harness_selftest	580-a-hand-rebuild-must-record	premise: no stamp for this prefix before the rebuild	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild itself succeeded	15;16;17;18;19	never	-

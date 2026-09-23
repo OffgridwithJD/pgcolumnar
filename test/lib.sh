@@ -254,6 +254,15 @@ pgc_build_and_install() {
 # through the builder to get the record. It was missing only the record, and a
 # second copy of the stamp format is what makes the two drift.
 pgc_record_source_stamp() {	# pgc_record_source_stamp SRCDIR PG_CONFIG
+	# REFUSE RATHER THAN RECORD SOMETHING PLAUSIBLE (@jdatcmd, #1232 review).
+	# With no arguments this did not fail, it wrote a believable record in the
+	# wrong place: the path `./.pgc_source_stamp.0.nolibd41` in the CURRENT
+	# DIRECTORY, keyed by the md5 of an EMPTY pkglibdir -- `d41` is the front of
+	# d41d8cd98f00, the md5 of nothing -- carrying a fingerprint of the current
+	# directory rather than of the source. Both callers pass real arguments, so
+	# it was latent; a function whose job is to record what was installed must
+	# refuse when it has not been told what was installed.
+	[ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
 	pgc_write_source_stamp \
 		"$(pgc_source_stamp_path "${1:-}" "${2:-}")" \
 		"$(pgc_source_fingerprint "${1:-}")" \

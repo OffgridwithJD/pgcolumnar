@@ -328,4 +328,14 @@ suites_not_covered 249
 # Serially, because a parallel fan-out of this suite dies on ports and resources
 # before it dies on pkglibdir even with distinct prefixes (@jdatcmd: five
 # concurrent, five dead, zero checks).
+#
+# 1521 UNCHANGED for #1232's two review arms. Both carry a last-red, so the
+# census does not move: eleven rows now, nine of them dated.
+#
+#     the recorder refuses when it is not told what was installed   got [0] want [1]
+#     and writes no stamp into the directory it was called from     got [1] want [0]
+#
+# The mutation is the argument guard removed, which is the state the review
+# found: the recorder wrote `./.pgc_source_stamp.0.nolibd41` into the CURRENT
+# DIRECTORY, keyed by the md5 of an empty pkglibdir.
 checks_never_observed_red 1521

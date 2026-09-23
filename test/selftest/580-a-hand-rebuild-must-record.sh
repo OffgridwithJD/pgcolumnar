@@ -44,6 +44,22 @@ _hr_records="$(sed 's/#.*//' "$PGC_TESTDIR/rebuild.sh" 2>/dev/null |
 check_num "the hand rebuild tool records what it installed rather than only naming it" \
 	"$(if [ "$_hr_records" -ge 1 ]; then echo 1; else echo 0; fi)" "1"
 
+# THE RECORDER REFUSES RATHER THAN RECORDING SOMETHING PLAUSIBLE (#1232 review).
+# Called with nothing it used to write `./.pgc_source_stamp.0.nolibd41` into the
+# CURRENT DIRECTORY -- keyed by the md5 of an empty pkglibdir, `d41` being the
+# front of d41d8cd98f00, the md5 of nothing -- holding a fingerprint of the
+# current directory rather than of any source. A believable record in the wrong
+# place is worse than no record, because the freshness gate reads it.
+check_num "the recorder refuses when it is not told what was installed" \
+	"$(pgc_record_source_stamp >/dev/null 2>&1; echo $?)" "1"
+
+# AND WROTE NOTHING WHILE REFUSING, checked from a directory of its own so a
+# stray file cannot be confused with one already there.
+_hr_cwd="$(mktemp -d)"
+check_num "and writes no stamp into the directory it was called from" \
+	"$(cd "$_hr_cwd" && pgc_record_source_stamp >/dev/null 2>&1; ls -A "$_hr_cwd" | wc -l)" "0"
+rm -rf "$_hr_cwd"
+
 # ---- driven, against a pg_config shim so nothing reaches a real prefix -------
 #
 # The arm above is a spelling check and would pass on a call that writes the
