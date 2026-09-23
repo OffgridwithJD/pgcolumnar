@@ -200,3 +200,66 @@ def test_projection_scan_io(pgc_conn, expect):
         "not-one-page",
         "a covering projection whose storage cannot be found is not priced as one page",
     )
+
+
+def test_an_empty_covering_projection_is_priced_as_one_page(pgc_conn, expect):
+    """The THIRD return of pgcolumnar_projection_pages, which the arms above never reach.
+
+    That function has three returns. `test_projection_scan_io` reaches two of them: the
+    miss (`proj_storage_id = 0` -> fallbackPages) and the covering arm. The third is
+    `if (pages < 1) pages = 1`, and it is NOT the "small projection" case --
+    COLUMNAR_PAGE_ROUND_UP rounds every group to a WHOLE page, so one row is already a
+    full page and returns through the covering arm. Probed at all three returns:
+
+        empty table + projection   bytes=0       pages=0   this return
+        one row                    bytes=8168    pages=1   covering return
+        32000 rows                 bytes=261376  pages=32  covering return
+
+    So the state is a projection whose storage holds ZERO row groups -- a projection on a
+    relation nothing has been written to -- and not a small one. An arm built on "a tiny
+    projection" measures the covering return and reports green having never reached this
+    line (#1208).
+
+    THE ORACLE IS THE PLAN, NOT A COST. Priced at one page the covering path wins;
+    mutated to `pages = 997` it loses and the projection leaves the plan. `_plan` already
+    sets seq_page_cost = 1000, so one page against 997 is not a marginal difference, and
+    a pinned cost would move with every unrelated change to the cost model.
+    """
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE pciot_e (ck int, wide text) USING pgcolumnar")
+        cur.execute(
+            "SELECT pgcolumnar.set_options('pciot_e', stripe_row_limit => 1000, "
+            "chunk_group_row_limit => 100)"
+        )
+        cur.execute(
+            "SELECT pgcolumnar.add_projection('pciot_e', 'onck', "
+            "ARRAY['ck'], ARRAY['ck'])"
+        )
+        cur.execute("ANALYZE pciot_e")
+
+        # KEYED ON get_storage_id, NOT ON pgcolumnar.storage. A relation never written
+        # to has NO storage catalog row at all, while get_storage_id still returns its
+        # id, because that comes from the relation's metapage. Joining through
+        # pgcolumnar.storage returns nothing and the premise fails for a reason that has
+        # nothing to do with projections.
+        cur.execute(
+            "SELECT (p.proj_storage_id <> 0)::text || '/' || count(rg.*)::text "
+            "FROM pgcolumnar.projection p "
+            "LEFT JOIN pgcolumnar.row_group rg ON rg.storage_id = p.proj_storage_id "
+            "WHERE p.storage_id = pgcolumnar.get_storage_id('pciot_e') "
+            "AND p.name = 'onck' AND p.projection_id > 0 "
+            "GROUP BY p.proj_storage_id"
+        )
+        row = cur.fetchone()
+    expect.text(
+        row[0] if row else "no projection row",
+        "true/0",
+        "premise: the empty projection is found and its storage holds no row groups",
+    )
+
+    node = _custom_scan(_plan(pgc_conn, "SELECT ck FROM pciot_e WHERE ck BETWEEN 1 AND 50", True))
+    expect.text(
+        (node or {}).get("Columnar Projection") or "none",
+        "onck",
+        "an empty covering projection is still priced as one page, so it is chosen",
+    )

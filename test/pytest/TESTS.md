@@ -6142,9 +6142,18 @@ pages. A lookup that cannot find the projection's storage must fall back to
 `rel->pages`, not one page. The shell twin uses `psio` / `byik` / 24000 rows;
 this file uses `pciot` / `onck` / 36000 rows. Assertion names match.
 
+`pgcolumnar_projection_pages` has THREE returns and the first test reaches two:
+the miss and the covering arm. The third, `if (pages < 1) pages = 1`, needs a
+projection that is FOUND and whose storage holds no row groups -- not a small
+one. `COLUMNAR_PAGE_ROUND_UP` rounds every group to a whole page, so one row
+already returns through the covering arm at `pages = 1`, and an arm built on "a
+tiny projection" reports green having never reached the line (#1208). The empty
+fixtures are `psio_e` and `pciot_e`.
+
 | test | what it holds |
 | --- | --- |
 | `test_projection_scan_io` | the table and covering projection exist; the plan uses that projection; the covering scan has a positive run cost; the projection occupies a minority of the relation; the covering run is not priced from the base table's pages; a covering path whose storage cannot be found is not priced as one page |
+| `test_an_empty_covering_projection_is_priced_as_one_page` | the projection is found and its storage holds no row groups; an empty covering projection is still priced as one page, so it is still chosen |
 
 ## 80. test_catalog_plan_index.py: planning uses the options and projection indexes
 
