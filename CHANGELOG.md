@@ -46,6 +46,38 @@ true until the next version shipped.
   operator with the same rows the scan returns* can be satisfied without an index
   scan happening. Reported on #1236 rather than repaired here, because this
   change records evidence and alters no test.
+- Three suite comments now say what they counted and why they deviate (#1215).
+
+  `arrow_import.sh` explained why it does not use `pgc_skip` and said "THE OTHER
+  29 pyarrow SUITES USE" it. Recounted, the number is **25** -- the suites whose
+  source, comments stripped, calls `pgc_skip` with the pyarrow capability. 29 is
+  not reproducible now under any population except one counting `lib.sh`, where
+  the function is defined, plus three suites that gate on other capabilities and
+  name pyarrow only in prose. Whether it was right when written is unknown, and
+  the comment now says so rather than carrying a bare number.
+
+  The recount is also a worked example of the defect it fixes: the first attempt
+  returned 26, because searching `arrow_import.sh` for `pgc_skip` matches the
+  sentence explaining why it does not call `pgc_skip`. With comments stripped
+  that file scores 0.
+
+  `native_parquet_schema.sh` and `parquet_nested_import.sh` decline arm by arm
+  instead of being terminal, like `arrow_import.sh`, but unlike it said nothing
+  about why -- leaving a reader unable to tell a deliberate deviation from an
+  oversight. Both now carry the measurement that justifies it:
+
+  ```
+    native_parquet_schema    with pyarrow  35 passed +  0 skipped = 35
+                             without       29 passed +  6 skipped = 35
+    parquet_nested_import    with pyarrow   7 passed +  0 skipped =  7
+                             without        5 passed +  2 skipped =  7
+  ```
+
+  Identical name sets either way -- 35 and 7 records in both runs -- and both
+  still exit 0. Terminal is right for a suite with nothing else to do, and
+  neither is that suite.
+
+  Comments only. No test changed, no check added, no behaviour changed.
 
 - Fifteen `native_join_runtime_filter` arms now carry a mutation that reddens
   them (#1236). No test changed and no code changed: the arms were attacked and

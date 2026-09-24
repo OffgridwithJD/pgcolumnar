@@ -84,6 +84,18 @@ chmod 644 "$notpq"
 err="$(q "SELECT count(*) FROM pgcolumnar.parquet_schema('$notpq');" 2>&1)"
 check "bad magic rejected (empty At output)" "$err" ""
 
+# WHY NOT `pgc_skip`, which 25 pyarrow suites use (#1215). It is terminal, and
+# that is right for a suite with nothing else to do. Measured on pg18a, this
+# suite is not that suite:
+#
+#     with pyarrow     35 passed + 0 skipped = 35
+#     without pyarrow  29 passed + 6 skipped = 35
+#
+# 29 of the 35 arms need no pyarrow, the name set is identical in both runs --
+# 35 records either way -- and the run still exits 0. Ending the suite would
+# trade one silence for a larger loss. The six that do need it decline by name
+# below, which is the #1159 model: the coverage lost stays visible as skips
+# rather than becoming a pass.
 # ---- nullable=false path (needs a REQUIRED column; only pyarrow writes one) ---
 if python3 -c 'import pyarrow.parquet' 2>/dev/null; then
 	REQ="$PGC_WORKDIR/required.parquet"

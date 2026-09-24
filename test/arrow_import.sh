@@ -68,7 +68,19 @@ fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
 # sites produce 56 records because some sit in loops, so a list copied from the
 # `check` lines would have been short by five.
 #
-# WHY NOT `pgc_skip`, WHICH THE OTHER 29 pyarrow SUITES USE. It is terminal: it
+# WHY NOT `pgc_skip`, WHICH THE 25 SUITES THAT CALL IT FOR pyarrow USE.
+# The count names its population, because an unqualified one goes stale in
+# silence: it is the suites under test/ whose source, with comments stripped,
+# calls pgc_skip with the pyarrow capability. Stripping matters -- searching
+# this file for the helper's name matches the sentence you are reading, which
+# is how the first recount came back one too high.
+#
+# It said 29 before. That is not reproducible now under any population I could
+# construct except one counting lib.sh, where the function is defined, plus
+# three suites that gate on other capabilities and name pyarrow only in prose
+# (#1215). Whether it was right when written is unknown.
+#
+# pgc_skip is terminal: it
 # ends the run with a named FAIL, or a named SKIP when the dependency is waived.
 # That is right for a suite with nothing else to do and wrong here, because 16 of
 # these checks need no pyarrow at all -- the round trip through our own writer,
