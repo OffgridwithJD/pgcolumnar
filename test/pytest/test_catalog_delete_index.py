@@ -97,9 +97,6 @@ READ_WHOLE = 2147483647
 # cannot measure, this file does not assert.
 FLOOR_PERMILLE = 100
 
-import pytest
-
-import pgc_vacuity
 
 CATALOGS = (
     "bloom",
@@ -111,49 +108,9 @@ CATALOGS = (
 )
 
 
-@pytest.fixture
-def pgc_own_db(pgc_cluster, request):
-    """A private DATABASE, not merely a private schema.
-
-    `pgc_conn` gives every test its own schema, which is the right trade almost
-    everywhere here: isolation without paying an initdb per test. IT IS THE
-    WRONG ONE FOR THIS FILE. The `pgcolumnar` metadata catalogs are per
-    DATABASE and shared by every test in the session, and every claim below is
-    about how big those catalogs are.
-
-    MEASURED, AND IT IS WHY CI FOUND THIS AND A LOCAL RUN COULD NOT. Run alone,
-    this file saw six catalog pages at phase 0 and P1 was worth 223 parts per
-    thousand. Run after the other fifty-one cluster files, it saw thirty-nine
-    pages and P1 was worth 65 -- under the floor. The arm was not wrong and the
-    code was not wrong; the fixture's assumption was, and it held only in the
-    one arrangement I had run.
-
-    The extension is created on the raw connection before the wrapper goes on,
-    the way conftest creates its schema: that is this fixture's own DDL, not the
-    test's writes, and DDL carries no row count anyway.
-    """
-    import psycopg          # deferred: see the module docstring
-
-    name = "pgc_own_" + "".join(
-        ch if ch.isalnum() else "_" for ch in request.node.name
-    )[:40]
-
-    def admin(sql):
-        c = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
-        try:
-            c.execute(sql)
-        finally:
-            c.close()
-
-    admin(f'DROP DATABASE IF EXISTS "{name}"')
-    admin(f'CREATE DATABASE "{name}"')
-    conn = psycopg.connect(pgc_cluster.dsn(dbname=name), autocommit=True)
-    try:
-        conn.execute("CREATE EXTENSION pgcolumnar")
-        yield pgc_vacuity.watch_writes(conn, request.node.nodeid)
-    finally:
-        conn.close()
-        admin(f'DROP DATABASE IF EXISTS "{name}"')
+# `pgc_own_db` moved to conftest.py when a second file needed it (#1217). A
+# guarantee kept in one suite has to be re-fitted to every other that needs it,
+# and this one is about a trap that is invisible from inside the file it bites.
 
 
 def _columnar_relations(conn):

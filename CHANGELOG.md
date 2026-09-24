@@ -1080,6 +1080,53 @@ true until the next version shipped.
   first version passed on prose, green on a caller that consulted nothing, and
   one arm now builds that exact text and requires zero. `selftest/190` has the
   same shape on `pgc_build_needs_clean`, tracked in #1222.
+- Planning paid to probe two catalogs that are empty in the default
+  configuration, and the probe could not win there at any database size (#1217).
+
+  `pgcolumnar.options` gets a row only when `set_options` is called, and
+  `pgcolumnar.projection` only when a projection is added. **An installation
+  doing neither has both empty, and that is the default.** At zero rows the heap
+  the probe replaces is zero pages, so the sequential read it replaces is
+  literally free and the index cannot win however large the database grows.
+  There is no crossover to be above. Measured on `6c3a9510`, 50 plans:
+
+  | columnar tables | `options` | `projection` | per plan |
+  | ---: | --- | --- | ---: |
+  | 10 | heap 0, index 100 | heap 0, index 200 | 6 |
+  | 200 | heap 0, index 100 | heap 0, index 200 | 6 |
+  | 1000 | heap 0, index 100 | heap 0, index 200 | 6 |
+
+  Flat, because there is nothing to scan more of.
+
+  #1198's seven planner-path sites now go through the size check that #1213
+  shipped, and the cost returns to **nothing** -- 300 buffers over 50 plans down
+  to 0, which is the pre-#1198 number exactly. The probe is still taken where it
+  pays: with `projection` at seven pages of other tables' rows, planning reads
+  451 buffers against 1050 for reading it whole.
+
+  **The threshold did not need a second value, and that was not assumed.** 3 was
+  derived entirely on the compaction path, and #1217's own data put the planner
+  crossover near 1200 tables, so a separate constant looked likely. Swept across
+  five database sizes on the planner path, 3 is optimal or tied at every one.
+  The first sweep said otherwise and its fixture was wrong: it planned the
+  FIRST-created table, whose row sits at the head of the heap, so the sequential
+  scan it replaces stops almost immediately. That made a higher threshold look
+  51 buffers better at 1200 tables; measured on the last-created table it is 199
+  worse.
+
+  `test/catalog_plan_index.sh` (14 checks) and
+  `test/pytest/test_catalog_plan_index.py` (15). Four arms were **removed**
+  rather than repaired: they asserted `idx_scan >= 1` and `seq_scan == 0` on each
+  catalog, and they fail against a build that made planning strictly cheaper.
+  That is a guard firing on correct code, the same defect #1213 removed one
+  level over, and it was predicted before this change was written -- the
+  prediction named those four arms, the direction each would move, and the
+  `storage` arms as the ones that must not move, and all three held.
+
+  The port runs on a private database (`pgc_own_db`, moved to `conftest.py` now
+  that a second file needs it), because these catalogs are per database and
+  inside the corpus other files have already populated them.
+
 - Retiring a row group read five catalogs whole, once each per group, and the
   cost grew with every unrelated columnar table in the database (#1207).
 

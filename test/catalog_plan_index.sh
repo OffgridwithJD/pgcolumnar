@@ -22,6 +22,42 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 
+# margin MARGIN FLOOR -- MARGIN when it falls short of FLOOR, else FLOOR.
+#
+# AN ARM'S FAILURE MUST SAY WHAT IT MEASURED (#1164, selftest part 540). An arm
+# that reduces two numbers to a bare one-or-nought before the comparison reports
+# `got [0] want [1]`, which is the word FAILED spelled twice: a reader cannot
+# tell whether the two readings were one buffer apart the wrong way or a
+# thousand. Comparing the MARGIN against its floor reports the margin itself
+# when it falls short.
+#
+# THE ANTI-PATTERN IS DESCRIBED HERE IN WORDS AND NOT QUOTED, DELIBERATELY.
+# Part 540's sweep does not strip comments, and its bracket rule carries no
+# "the recorder is on this line" conjunct -- the awk rule beside it does. So a
+# comment QUOTING the shape is matched as though it were an arm, and then named
+# after whichever recorder call precedes it. Reproduced: a file whose only
+# offending text is such a comment yields one finding, named after an innocent
+# arm; delete the comment and it goes. That is how an untouched, byte-identical
+# storage arm in this file came to be reported as a new offender.
+#
+# The same helper appears in catalog_delete_index.sh. It belongs in lib.sh the
+# moment a third suite wants it; two copies is not yet a population.
+margin() { [ "$1" -lt "$2" ] && echo "$1" || echo "$2"; }
+
+# DEFINED HERE, ABOVE THE FIRST RECORDER CALL, AND THE PLACEMENT IS LOAD-BEARING.
+# Selftest part 540 folds continuations, remembers the NAME from the last
+# recorder call it saw, and attributes any later lossy verdict to it. A helper
+# defined mid-file therefore gets blamed on whichever arm happens to precede it:
+# with this function further down, the part reported
+#
+#     a new arm that cannot say what it measured is refused by name:
+#       got [catalog_plan_index: planning a join probed pgcolumnar.storage ...]
+#
+# naming an arm that is byte-identical to main's and was never touched here.
+# Above every recorder call there is no name to inherit. catalog_delete_index.sh
+# puts its copy in the same place for the same reason.
+
+
 # Other columnar tables sit in the same catalogs. A sequential scan of
 # options or projection walks their rows too; an index probe does not.
 q "CREATE TABLE noise_a (id int) USING pgcolumnar;
@@ -41,37 +77,27 @@ q "SELECT pg_stat_force_next_flush();" >/dev/null
 check_num "premise: the filtered scan returned every row" \
 	"$(q "SELECT count(*) FROM plan_cat WHERE id > 0;")" "800"
 
-opt="$(q "SELECT coalesce(idx_scan,0)::text || ' ' || coalesce(seq_scan,0)::text
-	FROM pg_stat_all_tables
-	WHERE schemaname = 'pgcolumnar' AND relname = 'options';")"
-opt_idx="${opt%% *}"
-opt_seq="${opt##* }"
-echo "-- options idx_scan=$opt_idx seq_scan=$opt_seq"
-if [ "$opt_idx" -ge 1 ]; then
-	opt_idx_ok=1
-else
-	opt_idx_ok=$opt_idx
-fi
-check_num "planning probed pgcolumnar.options through options_pkey" \
-	"$opt_idx_ok" "1"
-check_num "planning did not sequentially scan pgcolumnar.options" \
-	"$opt_seq" "0"
-
-prj="$(q "SELECT coalesce(idx_scan,0)::text || ' ' || coalesce(seq_scan,0)::text
-	FROM pg_stat_all_tables
-	WHERE schemaname = 'pgcolumnar' AND relname = 'projection';")"
-prj_idx="${prj%% *}"
-prj_seq="${prj##* }"
-echo "-- projection idx_scan=$prj_idx seq_scan=$prj_seq"
-if [ "$prj_idx" -ge 1 ]; then
-	prj_idx_ok=1
-else
-	prj_idx_ok=$prj_idx
-fi
-check_num "planning probed pgcolumnar.projection through projection_pkey" \
-	"$prj_idx_ok" "1"
-check_num "planning did not sequentially scan pgcolumnar.projection" \
-	"$prj_seq" "0"
+# THE FOUR ARMS THAT STOOD HERE ASSERTED THE ACCESS PATH, AND THIS CHANGE FAILS
+# THEM (#1217). They read
+#
+#     planning probed pgcolumnar.options through options_pkey      idx_scan >= 1
+#     planning did not sequentially scan pgcolumnar.options        seq_scan == 0
+#     ... and the same two for projection
+#
+# On this fixture both catalogs are EMPTY, so the size check declines both probes
+# and those readings become idx_scan=0 seq_scan=2 and idx_scan=0 seq_scan=4. They
+# fail against a build that made planning strictly cheaper -- 300 buffers over 50
+# plans down to nothing -- which is a guard firing on correct code, and a guard
+# that fires on correct code gets switched off.
+#
+# The same defect #1213 removed from catalog_delete_index.sh, one level over. It
+# was PREDICTED before this change was written rather than found by running it:
+# the prediction named these four arms, the direction each would move, and the
+# storage arms below as the ones that must NOT move. All three held.
+#
+# What replaces them is the work at the default against the work of each extreme
+# setting, measured where each claim is measurable: above, on the empty catalogs
+# this change is about, and below, on a populated one.
 
 # ---- and pgcolumnar.storage, through storage_pkey (#1237) -------------------
 #
@@ -130,9 +156,167 @@ sj_idx="${sj%% *}"
 sj_seq="${sj##* }"
 echo "-- storage after a two-relation join  idx_scan=$sj_idx seq_scan=$sj_seq"
 
+# THESE TWO WERE LOSSY AND PART 540 COULD NOT SEE IT (#1255). Both branches were
+# constants and `sj_idx` was discarded, so a failure printed `got [0] want [1]`
+# and the count went with it -- the #1164 symptom exactly. 540 misses them
+# because both of its matchers require the `&&` spelling and these used the
+# shell `if/then/else` one, so the corpus tracked them as clean rather than as
+# debt. Found by @OffgridwithJD while checking an arm I had called innocent
+# because it was byte-identical to main's; it was, and that was not the reason
+# it went untracked.
+#
+# The `count(*)` arm above is left alone on purpose: `-ge 1` is inside 540's own
+# determinate() carve-out, because exactly one value fails and `got [0]` does
+# say which state was reached.
 check_num "premise: the join reached storage more than once" \
-	"$(if [ "$((sj_idx + sj_seq))" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+	"$(margin "$((sj_idx + sj_seq))" 2)" "2"
 check_num "planning a join probed pgcolumnar.storage through storage_pkey" \
-	"$(if [ "$sj_idx" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+	"$(margin "$sj_idx" 2)" "2"
+
+# ---------------------------------------------------------------------------
+# THE DEFAULT CONFIGURATION, where the probe cannot win at any size (#1217)
+#
+# `pgcolumnar.options` gets a row only when set_options is called, and
+# `pgcolumnar.projection` only when a projection is added. An installation doing
+# neither has BOTH EMPTY -- and that is the default. The fixture above is such an
+# installation: it creates three columnar tables and calls neither.
+#
+# At zero rows the heap being scanned is zero pages, so the scan the probe
+# replaces is LITERALLY FREE and the probe cannot win however large the database
+# grows. Measured on main 6c3a9510, 50 plans, at 10, 200 and 1000 columnar
+# tables alike:
+#
+#     options     heap=0  idx=100      projection  heap=0  idx=200
+#
+# Six index buffers per plan, no heap work at all, and flat in the table count
+# because there is nothing to scan more of. There is no crossover to be above.
+#
+# THESE ARMS ASSERT THE WORK, not the access path, for the reason the four arms
+# above do not: a claim about WHICH path was taken cannot tell a revert from an
+# improvement. See #1213, where arms of that shape failed 13 of 21 against a
+# build that was cheaper at every size.
+# ---------------------------------------------------------------------------
+
+PLAN_CATS="'options','projection'"
+
+# plan_work N [INDEX_MIN_BLOCKS] -- buffers options and projection serve while
+# the same query is planned N times, heap and index both.
+#
+# N plans rather than one, because the effect is per-plan and six buffers is too
+# small a base to divide into. Fifty makes it three hundred against nothing.
+plan_work() {
+	local n="$1" set_clause="" i body=""
+	[ $# -ge 2 ] && set_clause="SET pgcolumnar.index_min_blocks = $2; "
+	for ((i = 0; i < n; i++)); do
+		body="${body}EXPLAIN (COSTS OFF) SELECT count(*) FROM plan_cat WHERE id > 0;"
+	done
+	q "SELECT pg_stat_reset();" >/dev/null
+	q "${set_clause}${body}" >/dev/null
+	q "SELECT pg_stat_force_next_flush();" >/dev/null
+	q "SELECT coalesce(sum(heap_blks_read + heap_blks_hit
+			       + coalesce(idx_blks_read,0) + coalesce(idx_blks_hit,0)), 0)
+		FROM pg_statio_all_tables
+		WHERE schemaname = 'pgcolumnar' AND relname IN ($PLAN_CATS);"
+}
+
+# THE PREMISE THE WHOLE SECTION RESTS ON. If either catalog had rows, the heap
+# would not be free and the arms below would be about a different claim.
+check_num "premise: this fixture is the default configuration, both catalogs empty" 	"$(q "SELECT (SELECT count(*) FROM pgcolumnar.options)
+		   + (SELECT count(*) FROM pgcolumnar.projection)
+		   + (pg_relation_size('pgcolumnar.options') / 8192)
+		   + (pg_relation_size('pgcolumnar.projection') / 8192);")" "0"
+
+plan_default="$(plan_work 50)"
+plan_probe="$(plan_work 50 0)"
+echo "-- 50 plans: default=$plan_default  probe-always=$plan_probe"
+
+# AN ARM EXPECTING ZERO IS OWED A PREMISE THAT ANYTHING WAS MEASURED. A run that
+# planned nothing reports 0 exactly as loudly as one that planned fifty times
+# for free, so the forced-probe reading is what says the instrument was working.
+check_num "premise: forcing the probe costs something, so the instrument measured" 	"$(margin "$plan_probe" 50)" "50"
+
+check_num "planning costs less than probing both catalogs would" 	"$(margin "$((plan_probe - plan_default))" 1)" "1"
+
+# AND THE STRONG FORM, which is what "returns to its exact pre-#1198 number"
+# means: a zero-page heap costs nothing to read, so planning should touch these
+# two catalogs not at all.
+check_num "and touches the empty catalogs not at all" 	"$plan_default" "0"
+
+# ---------------------------------------------------------------------------
+# AND THE PROBE IS STILL TAKEN WHERE IT PAYS (#1217)
+#
+# Declining on an empty catalog is only half the claim: a size check that
+# declined everything would pass every arm above. So populate one catalog past
+# the threshold and require the default to beat reading it whole.
+#
+# THREE HUNDRED PROJECTIONS ON A NOISE TABLE, AND ONE ON THE MEASURED TABLE.
+# `pgcolumnar.projection` takes a row per projection, so one table carries the
+# catalog to seven pages in a loop; `pgcolumnar.options` takes one row per
+# columnar TABLE and would need about four hundred of them to pass three pages.
+# That asymmetry is why this phase drives `projection`.
+#
+# THE BULK GOES ON THE NOISE TABLE, AND THE FIRST DRAFT PUT IT ON THE MEASURED
+# ONE. That fixture read default=1501 against read-whole=1050 -- the probe
+# LOSING at seven pages -- and the fixture was what was wrong. A probe's cost
+# scales with the number of rows MATCHING ITS KEY, not with the size of the
+# catalog; three hundred projections on the measured table means every row
+# matches and the probe must return all of them. Scanning seven pages then wins,
+# and would have been recorded as "the threshold is wrong for the planner path".
+#
+# The shape this change is about is the opposite one: a catalog made large by
+# OTHER tables' rows, where the probe returns one row and the scan walks
+# everything. That is what the noise table builds.
+#
+# NAMING THE GAP RATHER THAN IMPLYING COVERAGE. The five `options_pkey` sites are
+# covered by the arms above, which show the check DECLINING, and not by an arm
+# showing it take the probe. They run the same helper as the two
+# `projection_pkey` sites, which are covered both ways.
+# ---------------------------------------------------------------------------
+
+q "DO \$do\$ BEGIN FOR i IN 1..300 LOOP
+     PERFORM pgcolumnar.add_projection('noise_a', 'pp' || i, ARRAY['id'], ARRAY['id']);
+   END LOOP; END \$do\$;
+   SELECT pgcolumnar.add_projection('plan_cat', 'own', ARRAY['id'], ARRAY['id']);" >/dev/null
+
+prj_pages="$(q "SELECT pg_relation_size('pgcolumnar.projection') / 8192;")"
+min_blocks="$(q "SHOW pgcolumnar.index_min_blocks;")"
+echo "-- projection now $(q "SELECT count(*) FROM pgcolumnar.projection;") rows, ${prj_pages} pages; threshold ${min_blocks}"
+
+# THE PREMISE THIS PHASE CANNOT DO WITHOUT, and it is derived from the setting
+# rather than typed. Below the threshold the default declines the probe and
+# reads the heap -- which is what the other reading does too, so both come back
+# equal and the arm reports no difference. That reads as "the check is gone" and
+# means "the fixture is too small".
+check_num "premise: projection is larger than the threshold, so the two paths differ" \
+	"$(margin "$((prj_pages - min_blocks))" 1)" "1"
+
+# AND THE MEASURED TABLE'S OWN SHARE OF IT MUST BE SMALL, or the probe returns
+# most of the catalog and the comparison is about something else. This is the
+# premise the first draft of this phase did not have, and it is the one that
+# would have caught its fixture.
+own_rows="$(q "SELECT count(*) FROM pgcolumnar.projection p
+	JOIN pgcolumnar.storage s USING (storage_id)
+	WHERE s.relation_oid = 'plan_cat'::regclass::oid;")"
+all_rows="$(q "SELECT count(*) FROM pgcolumnar.projection;")"
+echo "-- the measured table owns $own_rows of $all_rows projection rows"
+
+# A SHARE, NOT A COUNT. The first version of this asserted exactly 1 and read 2,
+# because add_projection writes more than one row per projection -- which is a
+# fact about the function, not about the claim. What the arm needs is that the
+# probe returns a SMALL PART of the catalog; a tenth is far looser than the
+# fixture and still refuses the shape that broke the first draft, where the
+# measured table owned all of it.
+check_num "premise: the measured table owns a small share of that catalog" \
+	"$(margin "$((all_rows - own_rows * 10))" 1)" "1"
+
+pop_default="$(plan_work 50)"
+pop_whole="$(plan_work 50 2147483647)"
+echo "-- 50 plans, projection populated: default=$pop_default  read-whole=$pop_whole"
+
+check_num "premise: reading the populated catalog whole costs something" \
+	"$(margin "$pop_whole" 50)" "50"
+
+check_num "with the catalog populated, planning costs less than reading it whole" \
+	"$(margin "$((pop_whole - pop_default))" 1)" "1"
 
 pgc_summary
