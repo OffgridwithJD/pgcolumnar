@@ -24,11 +24,21 @@ q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 
 # margin MARGIN FLOOR -- MARGIN when it falls short of FLOOR, else FLOOR.
 #
-# AN ARM'S FAILURE MUST SAY WHAT IT MEASURED (#1164, selftest part 540). A bare
-# `$([ A -lt B ] && echo 1 || echo 0)` reports `got [0] want [1]`, which is the
-# word FAILED spelled twice: a reader cannot tell whether the two readings were
-# one buffer apart the wrong way or a thousand. Comparing the MARGIN against its
-# floor reports the margin itself when it falls short.
+# AN ARM'S FAILURE MUST SAY WHAT IT MEASURED (#1164, selftest part 540). An arm
+# that reduces two numbers to a bare one-or-nought before the comparison reports
+# `got [0] want [1]`, which is the word FAILED spelled twice: a reader cannot
+# tell whether the two readings were one buffer apart the wrong way or a
+# thousand. Comparing the MARGIN against its floor reports the margin itself
+# when it falls short.
+#
+# THE ANTI-PATTERN IS DESCRIBED HERE IN WORDS AND NOT QUOTED, DELIBERATELY.
+# Part 540's sweep does not strip comments, and its bracket rule carries no
+# "the recorder is on this line" conjunct -- the awk rule beside it does. So a
+# comment QUOTING the shape is matched as though it were an arm, and then named
+# after whichever recorder call precedes it. Reproduced: a file whose only
+# offending text is such a comment yields one finding, named after an innocent
+# arm; delete the comment and it goes. That is how an untouched, byte-identical
+# storage arm in this file came to be reported as a new offender.
 #
 # The same helper appears in catalog_delete_index.sh. It belongs in lib.sh the
 # moment a third suite wants it; two copies is not yet a population.
@@ -146,10 +156,22 @@ sj_idx="${sj%% *}"
 sj_seq="${sj##* }"
 echo "-- storage after a two-relation join  idx_scan=$sj_idx seq_scan=$sj_seq"
 
+# THESE TWO WERE LOSSY AND PART 540 COULD NOT SEE IT (#1255). Both branches were
+# constants and `sj_idx` was discarded, so a failure printed `got [0] want [1]`
+# and the count went with it -- the #1164 symptom exactly. 540 misses them
+# because both of its matchers require the `&&` spelling and these used the
+# shell `if/then/else` one, so the corpus tracked them as clean rather than as
+# debt. Found by @OffgridwithJD while checking an arm I had called innocent
+# because it was byte-identical to main's; it was, and that was not the reason
+# it went untracked.
+#
+# The `count(*)` arm above is left alone on purpose: `-ge 1` is inside 540's own
+# determinate() carve-out, because exactly one value fails and `got [0]` does
+# say which state was reached.
 check_num "premise: the join reached storage more than once" \
-	"$(if [ "$((sj_idx + sj_seq))" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+	"$(margin "$((sj_idx + sj_seq))" 2)" "2"
 check_num "planning a join probed pgcolumnar.storage through storage_pkey" \
-	"$(if [ "$sj_idx" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+	"$(margin "$sj_idx" 2)" "2"
 
 # ---------------------------------------------------------------------------
 # THE DEFAULT CONFIGURATION, where the probe cannot win at any size (#1217)
