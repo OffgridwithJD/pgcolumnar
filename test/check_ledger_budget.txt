@@ -628,4 +628,46 @@ suites_not_covered 249
 # The arm is named "answers its operator with the same rows the scan returns"
 # and can be satisfied without an index scan happening. Reported on #1236 rather
 # than repaired here: this change records evidence and alters no test.
-checks_never_observed_red 1512
+#
+# 1512 -> 1511 for #1242. Seven arms added and eight rows dated, which is one more
+# row than the change adds, because two of the eight were already in the ledger.
+# RE-DERIVED BY COUNTING on this tree after a rebase onto the main that carries
+# #1240 -- this branch has carried 1520 and 1521 against earlier mains and
+# neither survives, because each described a tree that no longer exists:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1511
+#     1613 rows total, 102 not `never`,  1511 + 102 == 1613
+#     and 1512 + 7 new rows - 8 newly dated == 1511
+#
+# THREE MUTATIONS, each with its prediction written before it ran:
+#
+#   M-A  the #1242 guard removed and both causes stated flatly again
+#        predicted the two wording arms and the two hedge arms
+#        observed  exactly those four
+#
+#   M-B  the guard reports the log and then returns 0, accepting it
+#        predicted the one arm asserting the verdict is still non-zero
+#        observed  exactly that one
+#
+#   M-C  the guard fires on ANY shortfall, not only on no records at all
+#        predicted the two arms written as its controls
+#        observed  FOUR -- those two, plus two arms that were already here:
+#                  "and the two numbers are named, not just the verdict" and
+#                  "and names its own cause instead"
+#
+# M-C IS THE ONE WORTH READING. The over-fire is the failure that would make
+# this change worse than no change -- a guard that swallows the real
+# counted-without-a-record fault while every arm above it stays green -- and the
+# corpus already caught it without help. The prediction was not wrong, it was
+# INCOMPLETE: under-counted by two, in the direction that flatters the new work,
+# so it is recorded here rather than left as a round number.
+#
+# It also killed one of the new arms. The first draft of the control was a
+# byte-for-byte duplicate of "and names its own cause instead" -- same fixture,
+# same grep, same expectation, different name -- and only driving M-C made that
+# visible. Removed rather than shipped, which is why the part went from 1146
+# checks to 1145.
+#
+# The one arm left `never` is the fixture premise, whose only mutation is the
+# fixture itself. A fixture fact, in #1236's taxonomy, not an uncovered guard.
+checks_never_observed_red 1511

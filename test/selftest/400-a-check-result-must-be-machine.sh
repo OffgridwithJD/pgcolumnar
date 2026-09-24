@@ -510,6 +510,63 @@ check "fewer records than counted checks is not described as a subshell" \
 check "and names its own cause instead" \
 	"$(pgc_reconcile_records "$_pl" 2>&1 | grep -c 'counted without emitting a record')" "1"
 
+# ---- a log this function cannot measure is not a suite that lost everything --
+#
+# #1242. The function guards two input faults and its comments name both: an
+# absent log, and a log with no `checks run:` line. It does not guard the third
+# -- a well-formed log of some OTHER producer, which states a count and carries
+# no records because records are not a thing it emits. Handed one, the arithmetic
+# runs anyway and reports that every counted check vanished.
+#
+# Found by sweeping 64 logs through the function rather than by looking for it,
+# which is possible because a bare `bash test/<suite>.sh` never reaches this
+# check -- it lives in run_all_versions.sh, so a development run does not call
+# it. One of the 64 was not a shell-suite log and produced the impossible line.
+#
+# THE FIX IS THE WORDS, NOT THE VERDICT. This still returns non-zero: being
+# handed something it cannot reconcile is worth surfacing. What it must not do
+# is name a cause it has not measured. A positive count with no records at all
+# is ALSO reachable inside the shell harness -- an assignment to PGC_CHECKS that
+# never went through pgc_record -- so the guard deliberately does not claim to
+# know which of the two it is looking at. It says it cannot tell.
+_fl="$PGC_WORKDIR/foreign.log"
+printf 'collected 12 items\nchecks run: 126\naccounting: 126 pass + 0 fail = 126\n' > "$_fl"
+check "premise: the fixture states a count and carries no records at all" \
+	"$(printf 'records=%s stated=%s' \
+		"$(grep -c '^RESULT	' "$_fl")" \
+		"$(sed -n 's/^checks run: \([0-9][0-9]*\)$/\1/p' "$_fl" | tail -1)")" \
+	"records=0 stated=126"
+check "a log with a stated count and no records at all is still not accepted" \
+	"$(pgc_reconcile_records "$_fl" >/dev/null 2>&1 && echo ok || echo mismatch)" "mismatch"
+check "but it is not reported as checks counted without a record" \
+	"$(pgc_reconcile_records "$_fl" 2>&1 | grep -c 'counted without emitting a record')" "0"
+check "and it says the log cannot be reconciled rather than naming a cause" \
+	"$(pgc_reconcile_records "$_fl" 2>&1 | grep -c 'no RESULT records at all')" "1"
+# THE CONTROL IS THE ARM THAT STOPS THE GUARD SWALLOWING THE REAL FAULT: if it
+# fired on any shortfall rather than only on no records at all, a genuine
+# counted-without-a-record suite would go quiet and stay green. That control
+# already exists twenty lines up -- "and names its own cause instead", on this
+# exact fixture -- and a second copy of it was written here and then removed,
+# because driving the over-firing mutation showed the existing pair reddening
+# and the copy adding nothing. What is NOT covered up there is the new wording,
+# which must stay silent on a log this function CAN measure.
+printf 'RESULT\ts\tp\ta\tPASS\t18\t\nchecks run: 3\n' > "$_fl"
+check "the cannot-reconcile wording does not fire on a log that HAS records" \
+	"$(pgc_reconcile_records "$_fl" 2>&1 | grep -c 'no RESULT records at all')" "0"
+
+# ---- the cause is a hypothesis and the count is the measurement --------------
+#
+# #1242, second half. Both branches print a cause under the two numbers, and
+# both state it flatly. On the counter-clobber defect that cost @jdatcmd an
+# afternoon, the flat sentence would have sent a reader to subshells rather than
+# to their own assignment. Marking it keeps the evidence and the guess apart.
+printf 'RESULT\ts\tp\ta\tPASS\t18\t\nRESULT\ts\tp\tb\tPASS\t18\t\nRESULT\ts\tp\tc\tPASS\t18\t\nchecks run: 1\n' > "$_fl"
+check "the subshell cause is marked as a likely cause, not stated as measured" \
+	"$(pgc_reconcile_records "$_fl" 2>&1 | grep -c 'Likely cause:')" "1"
+printf 'RESULT\ts\tp\ta\tPASS\t18\t\nchecks run: 3\n' > "$_fl"
+check "and so is the counted-without-record cause, in the other direction" \
+	"$(pgc_reconcile_records "$_fl" 2>&1 | grep -c 'Likely cause:')" "1"
+
 # ---- and the shape is swept, the way selftest 080 sweeps its cousin ----------
 
 _pipeloop_sites() {	# _pipeloop_sites FILE... -> file:line of a check inside a piped loop

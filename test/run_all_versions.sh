@@ -1065,21 +1065,49 @@ pgc_reconcile_records() {	# pgc_reconcile_records LOGFILE -> 0 ok, 1 mismatch
 		echo "    records=$_records but the log never stated a count, so it did not reach its summary"
 		return 1
 	fi
+	# A LOG THIS FUNCTION CANNOT MEASURE, which is not the same fault as a suite
+	# that lost every outcome (#1242). A stated count with NO records at all has
+	# two possible readings and this function can tell them apart in neither: a
+	# well-formed log of some other producer, which emits no RESULT records
+	# because records are not a thing it emits, or a shell suite whose count was
+	# set without going through pgc_record. Reporting the second would name a
+	# cause that has not been measured.
+	#
+	# It still returns non-zero. Being handed something unreconcilable is worth
+	# surfacing, and going quiet here would let a genuine zero-record suite pass
+	# as clean. Only the words change.
+	#
+	# Found by sweeping a directory of 64 logs rather than by looking for it: a
+	# bare `bash test/<suite>.sh` never reaches this function, so a development
+	# run does not exercise it.
+	if [ "$_records" -eq 0 ] && [ "$_stated" -gt 0 ]; then
+		echo "    the log states checks run: $_stated and carries no RESULT records at all,"
+		echo "    so there is nothing here to reconcile it against. That is a log this"
+		echo "    function cannot measure rather than a suite that lost every outcome, and"
+		echo "    naming either as the cause would be a claim it has not measured."
+		return 1
+	fi
 	if [ "$_records" != "$_stated" ]; then
 		echo "    records=$_records but the log states checks run: $_stated"
 		# NAME THE CAUSE, not just the arithmetic. The two directions have
 		# different causes and a reader who has not met either has no route from
 		# a pair of numbers to the defect. Raised by OffgridwithJD.
+		#
+		# AND MARK IT AS A CAUSE RATHER THAN A MEASUREMENT (#1242). The counts
+		# above are observed; the sentence below is the fault it was written for
+		# and is a guess about which one produced them. Stated flatly it sent a
+		# reader to subshells during the counter-clobber defect, where the cause
+		# was an assignment of their own. The numbers are the evidence.
 		if [ "$_records" -gt "$_stated" ]; then
-			echo "      $((_records - _stated)) check(s) reported an outcome the count never saw:"
-			echo "      a check ran in a subshell, so its counter bump died with it while its"
-			echo "      outcome and record still reached the log. The usual shape is a check"
+			echo "      $((_records - _stated)) check(s) reported an outcome the count never saw."
+			echo "      Likely cause: a check ran in a subshell, so its counter bump died with"
+			echo "      it while its outcome and record still reached the log. The usual shape"
 			# The example is ASSEMBLED, not written out: spelling the shape here
 			# made the sweep in selftest 400 flag this very line.
-			printf '      inside a piped loop -- `cmd %s while read x; do check ...; done`.\n' '|'
+			printf '      is a check inside a piped loop -- `cmd %s while read x; do check ...; done`.\n' '|'
 		else
-			echo "      $((_stated - _records)) check(s) were counted without emitting a record:"
-			echo "      something bumped PGC_CHECKS without going through pgc_record."
+			echo "      $((_stated - _records)) check(s) were counted without emitting a record."
+			echo "      Likely cause: something bumped PGC_CHECKS without going through pgc_record."
 		fi
 		return 1
 	fi
