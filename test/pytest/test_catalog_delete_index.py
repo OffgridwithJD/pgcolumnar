@@ -52,6 +52,15 @@ GROUP = 1000
 DEEP_ROWS = 150000
 DEEP_GROUP = 1024
 
+# The vacuum test needs a BIGGER deep table than the compaction test does, and
+# that is not padding. Its claim is the difference between reading `row_group`
+# whole and fetching one small table's rows from it, so it needs `row_group`
+# itself above the threshold. In a private database with only this test's
+# tables in it, 150,000 rows leaves `row_group` at two pages -- below the
+# setting -- and BOTH paths then read it whole and the arm reports 0. Measured:
+# that is exactly how it failed once the fixture was corrected.
+VAC_DEEP_ROWS = 600000
+
 PROBE_ALWAYS = 0
 READ_WHOLE = 2147483647
 
@@ -88,6 +97,10 @@ READ_WHOLE = 2147483647
 # cannot measure, this file does not assert.
 FLOOR_PERMILLE = 100
 
+import pytest
+
+import pgc_vacuity
+
 CATALOGS = (
     "bloom",
     "column_chunk",
@@ -96,6 +109,60 @@ CATALOGS = (
     "row_group",
     "zone_map",
 )
+
+
+@pytest.fixture
+def pgc_own_db(pgc_cluster, request):
+    """A private DATABASE, not merely a private schema.
+
+    `pgc_conn` gives every test its own schema, which is the right trade almost
+    everywhere here: isolation without paying an initdb per test. IT IS THE
+    WRONG ONE FOR THIS FILE. The `pgcolumnar` metadata catalogs are per
+    DATABASE and shared by every test in the session, and every claim below is
+    about how big those catalogs are.
+
+    MEASURED, AND IT IS WHY CI FOUND THIS AND A LOCAL RUN COULD NOT. Run alone,
+    this file saw six catalog pages at phase 0 and P1 was worth 223 parts per
+    thousand. Run after the other fifty-one cluster files, it saw thirty-nine
+    pages and P1 was worth 65 -- under the floor. The arm was not wrong and the
+    code was not wrong; the fixture's assumption was, and it held only in the
+    one arrangement I had run.
+
+    The extension is created on the raw connection before the wrapper goes on,
+    the way conftest creates its schema: that is this fixture's own DDL, not the
+    test's writes, and DDL carries no row count anyway.
+    """
+    import psycopg          # deferred: see the module docstring
+
+    name = "pgc_own_" + "".join(
+        ch if ch.isalnum() else "_" for ch in request.node.name
+    )[:40]
+
+    def admin(sql):
+        c = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
+        try:
+            c.execute(sql)
+        finally:
+            c.close()
+
+    admin(f'DROP DATABASE IF EXISTS "{name}"')
+    admin(f'CREATE DATABASE "{name}"')
+    conn = psycopg.connect(pgc_cluster.dsn(dbname=name), autocommit=True)
+    try:
+        conn.execute("CREATE EXTENSION pgcolumnar")
+        yield pgc_vacuity.watch_writes(conn, request.node.nodeid)
+    finally:
+        conn.close()
+        admin(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+def _columnar_relations(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_class c JOIN pg_am a ON a.oid = c.relam "
+            "WHERE a.amname = 'pgcolumnar'"
+        )
+        return cur.fetchone()[0]
 
 
 def _permille(part, whole):
@@ -216,7 +283,7 @@ def _compact_work(conn, table, min_blocks=None):
     return sum(per_catalog.values()), per_catalog
 
 
-def _phase(conn, expect, name, prefix, groups, other, other_label):
+def _phase(conn, expect, name, prefix, groups, other, other_label, carried=0):
     """Measure a phase: a control and the default, then `other`.
 
     THE CONTROL IS COMPACTED FIRST, NEXT TO THE DEFAULT. Drift accumulates with
@@ -234,6 +301,16 @@ def _phase(conn, expect, name, prefix, groups, other, other_label):
         sum(_groups_of(conn, t) for t in tables),
         groups * 3,
         f"premise: the three phase {name} targets are the same fixture",
+    )
+    # THE PREMISE THAT WOULD HAVE CAUGHT THE FIXTURE DEFECT. Phase 0's claim is
+    # about a catalog of a few pages, and it reports a smaller margin rather
+    # than an error when the catalogs are large -- 65 parts per thousand
+    # instead of 223, which reads as a weak result and not as a broken fixture.
+    # Counting the relations says which it is.
+    expect.num(
+        _columnar_relations(conn) - carried,
+        3,
+        f"premise: the phase {name} catalogs hold only this file's tables",
     )
 
     control, _ = _compact_work(conn, tables[0])
@@ -285,8 +362,8 @@ def _phase(conn, expect, name, prefix, groups, other, other_label):
     return default, other_work, pages, margin
 
 
-def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_conn, expect):
-    conn = pgc_conn
+def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_own_db, expect):
+    conn = pgc_own_db
     assertions, min_blocks = _build_kind(conn)
     print(f"-- debug_assertions={assertions} "
           "(off = the two assert-only sites did not run)")
@@ -305,7 +382,7 @@ def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_conn, expect):
     )
 
     da, _sa, pages_a, margin_a = _phase(
-        conn, expect, "A", "retA", BIG_GROUPS, READ_WHOLE, "read-whole"
+        conn, expect, "A", "retA", BIG_GROUPS, READ_WHOLE, "read-whole", carried=3
     )
     expect.at_least(
         margin_a,
@@ -331,7 +408,7 @@ def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_conn, expect):
         )
 
     db, sb, pages_b, margin_b = _phase(
-        conn, expect, "B", "retB", BIG_GROUPS, READ_WHOLE, "read-whole"
+        conn, expect, "B", "retB", BIG_GROUPS, READ_WHOLE, "read-whole", carried=7
     )
 
     # THE PREMISE THIS EXPERIMENT NEEDS MOST. The growth arm compares two
@@ -369,7 +446,7 @@ def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_conn, expect):
     )
 
 
-def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_conn, expect):
+def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_own_db, expect):
     """The vacuum path reaches a row_group read the compaction path does not.
 
     `PgColumnarVMSetVisibleForRelation` calls
@@ -396,7 +473,7 @@ def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_conn, expect):
     `vacuum_count` and `last_vacuum`, which this table access method's vacuum
     does not report through at all.
     """
-    conn = pgc_conn
+    conn = pgc_own_db
     assertions, min_blocks = _build_kind(conn)
     print(f"-- debug_assertions={assertions} index_min_blocks={min_blocks}")
 
@@ -408,7 +485,7 @@ def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_conn, expect):
         )
         cur.execute(
             "INSERT INTO vac_deep "
-            f"SELECT g, g % 7, g % 13, 'x' || g FROM generate_series(1,{DEEP_ROWS}) g"
+            f"SELECT g, g % 7, g % 13, 'x' || g FROM generate_series(1,{VAC_DEEP_ROWS}) g"
         )
         cur.execute("CREATE TABLE vac_small (k bigint) USING pgcolumnar")
         cur.execute(
@@ -419,6 +496,21 @@ def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_conn, expect):
 
         cur.execute("SELECT count(*) FROM vac_small")
         expect.at_least(cur.fetchone()[0], 1, "premise: the vacuumed table holds rows")
+        cur.execute(
+            "SELECT pg_relation_size('pgcolumnar.row_group') / 8192"
+        )
+        rg_pages = int(cur.fetchone()[0])
+    print(f"-- row_group pages={rg_pages}, threshold={min_blocks}")
+    # THE PREMISE THE ARM BELOW CANNOT DO WITHOUT, and it is derived from the
+    # setting rather than typed. Below the threshold the default declines the
+    # probe and reads `row_group` whole -- which is what the other reading does
+    # too, so both come back equal and the arm reports 0. That reads as "the fix
+    # is gone" and means "the fixture is too small".
+    expect.at_least(
+        rg_pages - int(min_blocks),
+        1,
+        "premise: row_group is larger than the threshold, so the two paths differ",
+    )
 
     def vacuum_work(min_blocks=None):
         with conn.cursor() as cur:

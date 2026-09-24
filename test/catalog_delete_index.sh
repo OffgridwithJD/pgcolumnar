@@ -220,7 +220,7 @@ margin() { [ "$1" -lt "$2" ] && echo "$1" || echo "$2"; }
 # NO SEPARATE NOISE TABLE. Each phase already holds three storages, so no arm can
 # pass on a catalog that happens to hold only one.
 phase() {
-	local ph="$1" prefix="$2" groups="$3" other="$4" label="$5"
+	local ph="$1" prefix="$2" groups="$3" other="$4" label="$5" carried="${6:-0}"
 	local retired=$(( groups - groups / 2 ))
 	local surviving=$(( (groups / 2) * 1000 ))
 	local t_control="${prefix}_control" t_default="${prefix}_default" t_other="${prefix}_other"
@@ -232,6 +232,21 @@ phase() {
 	check_num "premise: the three phase $ph targets are the same fixture" \
 		"$(( $(groups_of "$t_control") + $(groups_of "$t_default") \
 		     + $(groups_of "$t_other") ))" "$(( groups * 3 ))"
+
+	# THE PREMISE THAT CAUGHT A REAL FIXTURE DEFECT IN THE PORT. Phase 0's claim
+	# is about a catalog of a few pages, and a large one reports a SMALLER
+	# MARGIN rather than an error -- 65 parts per thousand instead of 223, which
+	# reads as a weak result and not as a broken fixture. Counting the columnar
+	# relations says which it is.
+	#
+	# This half gets a cluster of its own so it has always been true here. The
+	# pytest half gets a private SCHEMA and the pgcolumnar catalogs are per
+	# DATABASE, so run after the other fifty-one cluster files its phase 0 saw
+	# thirty-nine catalog pages instead of six and P1 fell under the floor. CI
+	# found it; a local run of one file could not.
+	check_num "premise: the phase $ph catalogs hold only this file's tables" \
+		"$(( $(q "SELECT count(*) FROM pg_class c JOIN pg_am a ON a.oid = c.relam
+			WHERE a.amname = 'pgcolumnar';") - carried ))" "3"
 
 	control="$(compact_work "$t_control")";      echo "--   control:      $(cat_detail)"
 	default="$(compact_work "$t_default")";      echo "--   default:      $(cat_detail)"
@@ -288,7 +303,7 @@ check_num "P1 with a few catalog pages the default does less work than probing e
 # Phase A: more catalog pages, where probing has started to pay
 # ---------------------------------------------------------------------------
 
-phase A del_a 40 2147483647 "read-whole"
+phase A del_a 40 2147483647 "read-whole" 3
 wa_default="$PH_DEFAULT"; wa_scan="$PH_OTHER"; pages_a="$PH_PAGES"
 
 check_num "A1 with more catalog pages the default does less work than reading every one whole" \
@@ -308,8 +323,7 @@ q "CREATE TABLE del_deep (id int, a int, b int, c text) USING pgcolumnar;
    SELECT pgcolumnar.set_options('del_deep', stripe_row_limit => 1024);
    INSERT INTO del_deep SELECT g, g%7, g%13, 'x'||g FROM generate_series(1,200000) g;" >/dev/null
 
-for t in del_b_control del_b_default del_b_scan; do make_target "$t" 40; done
-pages_b="$(catpages)"
+pages_after_deep="$(catpages)"
 
 # THE PREMISE THIS EXPERIMENT NEEDS MOST. The growth arm compares two readings
 # taken over catalogs that are supposed to differ in size. If the deep table
@@ -319,7 +333,7 @@ pages_b="$(catpages)"
 # which the noise had been eaten by shell quoting. Every row was secretly the
 # same database, and the only thing that said so was this quantity, flat at 8
 # pages where it should have reached 65.
-phase B del_b 40 2147483647 "read-whole"
+phase B del_b 40 2147483647 "read-whole" 7
 wb_default="$PH_DEFAULT"; wb_scan="$PH_OTHER"; pages_b="$PH_PAGES"
 
 # THE PREMISE THIS EXPERIMENT NEEDS MOST. The growth arm compares two readings
@@ -330,8 +344,11 @@ wb_default="$PH_DEFAULT"; wb_scan="$PH_OTHER"; pages_b="$PH_PAGES"
 # which the noise had been eaten by shell quoting. Every row was secretly the
 # same database, and the only thing that said so was this quantity, flat at 8
 # pages where it should have reached 65.
+# READ BEFORE PHASE B BUILDS ITS TARGETS, on purpose: this asks whether the
+# DEEP TABLE grew the catalogs, and measuring after phase B's own three tables
+# exist would fold their growth into the answer and make it true either way.
 check_num "premise: the deep table grew the catalogs it is there to grow" \
-	"$(margin "$((pages_b - pages_a))" 1)" "1"
+	"$(margin "$((pages_after_deep - pages_a))" 1)" "1"
 
 check_num "B1 with large catalogs the default does far less work than reading every one whole" \
 	"$(margin "$(permille "$((wb_scan - wb_default))" "$wb_default")" $FLOOR_PERMILLE)" \
@@ -406,6 +423,19 @@ q "CREATE TABLE del_vac (id int) USING pgcolumnar;
    SELECT pgcolumnar.set_options('del_vac', stripe_row_limit => 1000);
    INSERT INTO del_vac SELECT g FROM generate_series(1,2000) g;
    DELETE FROM del_vac WHERE id % 3 = 0;" >/dev/null
+
+rg_pages="$(q "SELECT pg_relation_size('pgcolumnar.row_group') / 8192;")"
+min_blocks="$(q "SHOW pgcolumnar.index_min_blocks;")"
+echo "-- row_group pages=$rg_pages, threshold=$min_blocks"
+
+# THE PREMISE THE ARM BELOW CANNOT DO WITHOUT, and it is derived from the
+# setting rather than typed. Below the threshold the default declines the probe
+# and reads row_group whole -- which is what the other reading does too, so both
+# come back equal and the arm reports 0. That reads as "the fix is gone" and
+# means "the fixture is too small". The port failed exactly that way the moment
+# its fixture was corrected to a private database.
+check_num "premise: row_group is larger than the threshold, so the two paths differ" \
+	"$(margin "$((rg_pages - min_blocks))" 1)" "1"
 
 v_d="$(vac_work del_vac)"
 v_c="$(vac_work del_vac)"

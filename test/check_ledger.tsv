@@ -23,15 +23,19 @@ capability_sweep	capability_sweep	premise: while python itself still runs under 
 catalog_delete_index	catalog_delete_index	A1 with more catalog pages the default does less work than reading every one whole	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	B1 with large catalogs the default does far less work than reading every one whole	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	P1 with a few catalog pages the default does less work than probing every one	15;16;17;18;19	2026-09-24	pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
+catalog_delete_index	catalog_delete_index	premise: row_group is larger than the threshold, so the two paths differ	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes
 catalog_delete_index	catalog_delete_index	premise: the deep table grew the catalogs it is there to grow	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 compaction kept every surviving row	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 reading covers every catalog the arms name	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 reading measured something	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A compaction kept every surviving row	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A reading covers every catalog the arms name	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase A reading measured something	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B catalogs hold only this file's tables	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B compaction kept every surviving row	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B compaction retired the emptied groups	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase B reading covers every catalog the arms name	15;16;17;18;19	never	-

@@ -1055,14 +1055,22 @@ true until the next version shipped.
   assert-enabled CI leg pays for them on each maintenance operation. Both
   suites print `debug_assertions` for that reason.
 
-  `test/catalog_delete_index.sh` (18 checks) and
-  `test/pytest/test_catalog_delete_index.py` (20). They assert the work --
+  `test/catalog_delete_index.sh` (30 checks) and
+  `test/pytest/test_catalog_delete_index.py` (31). They assert the work --
   buffers served out of the six catalogs -- and never the access path. An
   earlier version of both asserted `seq_scan = 0` and `idx_scan >= 1` per
   catalog, and that is a claim about which path was taken: run against the
   size-aware build, which is cheaper at every size, it failed 13 of 21 arms, the
   same 13 a full revert reddens. A guard that fires on correct code gets
   switched off.
+
+  The port runs on a private DATABASE rather than the private schema every other
+  test here gets, because the `pgcolumnar` catalogs are per database and shared
+  by the whole session, and every claim in the file is about how big they are.
+  Run alone the file saw six catalog pages at its smallest phase; run after the
+  other fifty-one cluster files it saw thirty-nine, and the claim there fell from
+  223 parts per thousand to 65. A premise counts the columnar relations so that
+  arrives as a named failure rather than a weak number.
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).
