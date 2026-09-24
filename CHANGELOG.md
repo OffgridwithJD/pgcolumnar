@@ -458,6 +458,61 @@ true until the next version shipped.
 
 ### Fixed
 
+- The hand-rebuild diagnosis can no longer be silent, which is how the first
+  version of it still told the 2026-09-24 nightly nothing (#1248).
+
+  #1249 added `_hr_diagnose` to print `rebuild.log`'s tail when the rebuild
+  fails. The nightly of the same day failed on aarch64 again, with the gate
+  working -- the three dependent arms skipped with a reason instead of cascading
+  -- and **the diagnosis printing nothing at all**, because `rebuild.log` was
+  empty and the function opened with
+
+  ```sh
+    [ -s "${1:-}" ] || return 0
+  ```
+
+  So the one path the diagnosis exists for was the one path it stayed quiet on.
+
+  `_hr_diagnose` now always says something, and distinguishes the two causes,
+  because they are different failures and merging them costs the next reader the
+  night:
+
+  ```
+    ---- rebuild.log, last 20 lines ----
+    ---- rebuild.log is EMPTY (0 bytes): rebuild.sh exited
+         before its first echo ----
+    ---- rebuild.log is MISSING: the redirect never created it ----
+  ```
+
+  Two arms of selftest part 580 asserted the old silence and are replaced rather
+  than adjusted. They were provably wrong: `an empty log produces nothing rather
+  than an empty banner` and `and a log that is not there produces nothing rather
+  than an error` required exactly the behaviour that defeated the diagnosis on
+  aarch64. Four arms now require it to speak, and to name which of the two cases
+  it found.
+
+  **What the old diagnosis could not tell anyone, and this one can.** `[ -s ]`
+  is false for an empty file AND for one that is not there, so a silent
+  `_hr_diagnose` never distinguished them -- and neither did the first draft of
+  this entry, which asserted the log was empty when the only evidence was that
+  `-s` failed. The two have different causes and only one of them fits:
+
+  ```
+    EMPTY    rebuild.sh ran and wrote nothing before dying
+    MISSING  the redirect could not open its target, so bash returned 1 and
+             never ran the command at all
+  ```
+
+  Every exit in `rebuild.sh` before its first unconditional `echo` writes to
+  stderr first, and stderr is inside the same redirect, so EMPTY is not
+  something the script's control flow produces. MISSING is: measured, a failing
+  redirect returns 1, creates no file, and reports on the caller's stderr
+  rather than into the log. That matches `got [1]` and a silent diagnosis
+  exactly. Caught by @jdatcmd.
+
+  This does not explain why the aarch64 rebuild fails. It makes the next nightly
+  say which of the two it is.
+
 - A failed hand rebuild now says why, and stops the arms beneath it reporting on
   a rebuild that did not happen (#1248).
 
