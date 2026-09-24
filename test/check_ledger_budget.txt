@@ -916,7 +916,29 @@ suites_not_covered 249
 # same day, composing two branches that touched DISJOINT parts: the rows
 # conflicted too, and taking one side gave the right count while taking the
 # other silently dropped three rows and reported a number nothing reads as
-# wrong. Union the rows; recount the total.
+# wrong.
+#
+# AND "UNION THE ROWS" IS WHAT I WROTE HERE AND IT IS NOT ENOUGH. Union alone
+# resurrects deletions: a conflict hunk cannot tell a row the other side REMOVED
+# from a row it never had, so a branch that deliberately drops rows gets them
+# back. Measured on #1253's rebase -- naive union 1698 = 1539 + 159 against a
+# correct 1696 = 1539 + 157, and 1698 reads like an ordinary miscount rather
+# than like a bug. Found by @OffgridwithJD, and only because a prediction
+# published beforehand disagreed with the count.
+#
+# THE RULE IS: union the ADDITIONS, honour the DELETIONS, then RECOUNT. Found
+# on #1253's rebase.
+#
+# AND WHETHER A UNION IS SAFE AT ALL DEPENDS ON WHICH KIND OF MERGE YOU HAVE:
+# a branch that deletes no row cannot resurrect anything, so union is safe
+# there and was not on #1253, which deleted two. That distinction is stated
+# in full further down, in the entry that records it beside its own number.
+#
+# NO ENTRY NAME HERE, DELIBERATELY. The first version of this line pointed at
+# "the #1255 entry below", which did not exist on main -- it arrived with a
+# later change. A cross-reference by entry NAME goes stale exactly when
+# entries move, which is the same defect as the sentence this paragraph
+# corrects. Caught by @OffgridwithJD.
 #
 # FOUR ROWS CARRYING HISTORY WERE DELETED, AND THE TOOL REFUSED TO DO IT FOR ME.
 # `orphan-scan --prune` said: "the catalogue is what this ledger is for -- no run
