@@ -112,22 +112,107 @@ _hr_stamp="$(pgc_source_stamp_path "$_hr_tmp/tree" "$_hr_tmp/pg_config")"
 check_text "premise: no stamp for this prefix before the rebuild" \
 	"$(if [ -e "$_hr_stamp" ]; then echo present; else echo absent; fi)" "absent"
 
+# BOTH DECISIONS ARE FUNCTIONS so they can be driven from here rather than only
+# by a box that happens to break (#1248). The branch that matters is the one a
+# healthy machine never takes, which is exactly the branch that had never run
+# until aarch64 took it.
+_hr_dependents() {	# _hr_dependents RC -> run|skip
+	[ "${1:-}" = 0 ] && echo run || echo skip
+}
+_hr_diagnose() {	# _hr_diagnose LOGFILE -> the tail, indented, or nothing
+	[ -s "${1:-}" ] || return 0
+	echo "      ---- rebuild.log, last 20 lines ----"
+	tail -20 "$1" | sed 's/^/      /'
+}
+
 "$PGC_TESTDIR/rebuild.sh" "$_hr_tmp/pg_config" "$_hr_tmp/tree" >"$_hr_tmp/rebuild.log" 2>&1
 _hr_rc=$?
 check_num "premise: the hand rebuild itself succeeded" "$_hr_rc" "0"
 
-check_text "and the freshness gate then reads the tree as built from this source" \
-	"$(pgc_freshness_verdict \
-		"$(head -1 "$_hr_stamp" 2>/dev/null)" \
-		"$(pgc_source_fingerprint "$_hr_tmp/tree")")" "fresh"
+# ---- the premise must GATE, and the failure must SAY SOMETHING (#1248) ------
+#
+# The 2026-09-24 nightly failed here on aarch64 with `got [1] want [0]`, and that
+# was the entire diagnosis: the rebuild's output is captured to a file this part
+# deletes on the way out, so the cause died with the workdir. The three arms
+# below the premise then ran anyway and reported PASS.
+#
+# They were not vacuous that night, because rebuild.sh had in fact written its
+# stamps before failing -- it writes them at step 3b and the symbol check that
+# rejected the build comes after. That is luck rather than design. Had the BUILD
+# failed, the same three arms would have read an absent stamp and reported on a
+# rebuild that never happened.
+#
+# So both decisions are exposed as functions and judged, the way part 190 judges
+# pgc_build_needs_clean, rather than being written inline where nothing can drive
+# the branch that only a broken box takes.
+check_text "premise: the gating decision is exposed to be judged" \
+	"$(type -t _hr_dependents)" "function"
+check_text "premise: the diagnosis is exposed too" \
+	"$(type -t _hr_diagnose)" "function"
 
-# THE SAME READ AGAINST A FINGERPRINT THAT IS NOT THIS TREE'S, so the arm above
-# is known to distinguish rather than to answer "fresh" whatever it is given.
-check_text "and it reads a different source as stale rather than fresh" \
-	"$(pgc_freshness_verdict "$(head -1 "$_hr_stamp" 2>/dev/null)" deadbeefdead)" "stale"
+check_text "a rebuild that succeeded runs the arms that read its stamp" \
+	"$(_hr_dependents 0)" "run"
+check_text "a rebuild that failed skips them rather than reading a stamp it did not write" \
+	"$(_hr_dependents 1)" "skip"
+check_text "and any other status skips too, rather than being read as success" \
+	"$(_hr_dependents "")" "skip"
 
-check_text "and the installed library of the running major was never touched" \
-	"$(if [ "$(stat -c %Y "$_hr_live_so" 2>/dev/null)" = "$_hr_live_before" ];
-	then echo untouched; else echo overwritten; fi)" "untouched"
+_hr_dtmp="$(mktemp -d)"
+printf 'rebuild: UNRESOLVED SYMBOLS against PostgreSQL 18\n__aarch64_ldadd4_acq_rel\n' \
+	> "$_hr_dtmp/full.log"
+: > "$_hr_dtmp/empty.log"
+check_num "a log with content produces a diagnosis to print" \
+	"$([ -n "$(_hr_diagnose "$_hr_dtmp/full.log")" ] && echo 1 || echo 0)" "1"
+check_num "and the diagnosis carries the failing line, not just a status" \
+	"$(_hr_diagnose "$_hr_dtmp/full.log" | grep -c 'UNRESOLVED SYMBOLS')" "1"
+check_num "an empty log produces nothing rather than an empty banner" \
+	"$([ -n "$(_hr_diagnose "$_hr_dtmp/empty.log")" ] && echo 1 || echo 0)" "0"
+check_num "and a log that is not there produces nothing rather than an error" \
+	"$([ -n "$(_hr_diagnose "$_hr_dtmp/nope.log" 2>/dev/null)" ] && echo 1 || echo 0)" "0"
+rm -rf "$_hr_dtmp"
+
+# AND THE REAL SCRIPT MUST LEAVE SOMETHING TO DIAGNOSE. A gate that prints a log
+# is worth nothing if the log is empty on the path that matters, so this drives
+# rebuild.sh's cheapest failure -- a pg_config that is not there -- and asserts it
+# wrote a reason rather than only exiting non-zero.
+_hr_fail_log="$(mktemp)"
+"$PGC_TESTDIR/rebuild.sh" /nonexistent/pg_config "$_hr_tmp/tree" >"$_hr_fail_log" 2>&1
+_hr_fail_rc=$?
+check_num "premise: a rebuild with no pg_config fails" \
+	"$([ "$_hr_fail_rc" != 0 ] && echo 1 || echo 0)" "1"
+check_num "and it writes a reason, so there is something for the gate to print" \
+	"$(grep -c '^rebuild: no such pg_config' "$_hr_fail_log")" "1"
+rm -f "$_hr_fail_log"
+
+if [ "$(_hr_dependents "$_hr_rc")" = run ]; then
+	check_text "and the freshness gate then reads the tree as built from this source" \
+		"$(pgc_freshness_verdict \
+			"$(head -1 "$_hr_stamp" 2>/dev/null)" \
+			"$(pgc_source_fingerprint "$_hr_tmp/tree")")" "fresh"
+
+	# THE SAME READ AGAINST A FINGERPRINT THAT IS NOT THIS TREE'S, so the arm
+	# above is known to distinguish rather than to answer "fresh" whatever it is
+	# given.
+	check_text "and it reads a different source as stale rather than fresh" \
+		"$(pgc_freshness_verdict "$(head -1 "$_hr_stamp" 2>/dev/null)" deadbeefdead)" "stale"
+
+	check_text "and the installed library of the running major was never touched" \
+		"$(if [ "$(stat -c %Y "$_hr_live_so" 2>/dev/null)" = "$_hr_live_before" ];
+		then echo untouched; else echo overwritten; fi)" "untouched"
+else
+	# THE ONLY DIAGNOSIS THERE IS. rebuild.sh's output goes to a file this part
+	# deletes on the way out, so without this the run reports `got [1] want [0]`
+	# and the cause leaves with the workdir -- which is how the aarch64 failure
+	# arrived undiagnosable (#1248).
+	_hr_diagnose "$_hr_tmp/rebuild.log"
+	for _hr_arm in \
+		"and the freshness gate then reads the tree as built from this source" \
+		"and it reads a different source as stale rather than fresh" \
+		"and the installed library of the running major was never touched"; do
+		check_skip "$_hr_arm" \
+			"SKIP  $_hr_arm (the hand rebuild failed, so there is no stamp to read)" \
+			"the hand rebuild failed"
+	done
+fi
 
 rm -rf "$_hr_tmp"
