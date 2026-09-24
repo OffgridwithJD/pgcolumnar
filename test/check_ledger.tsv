@@ -842,6 +842,7 @@ harness_selftest	400-a-check-result-must-be-machine	a failing check emits exactl
 harness_selftest	400-a-check-result-must-be-machine	a failing check still prints its old line	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	a log that never stated a count is not silently accepted	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	a log whose records match its stated count reconciles	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	a log with a stated count and no records at all is still not accepted	15;16;17;18;19	2026-09-23	the zero-record guard reports the log and then returns 0, accepting it
 harness_selftest	400-a-check-result-must-be-machine	a log with fewer records than it claims is caught	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	a log with more records than it claims is caught too	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	a passing check emits exactly one record	15;16;17;18;19	never	-
@@ -860,6 +861,7 @@ harness_selftest	400-a-check-result-must-be-machine	and a harness that set no ma
 harness_selftest	400-a-check-result-must-be-machine	and does match a lib.sh source with a trailing brace	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and it is counted	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and it is counted, so checks run: reports it	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	and it says the log cannot be reconciled rather than naming a cause	15;16;17;18;19	2026-09-23	the zero-record guard removed and both mismatch causes stated flatly again
 harness_selftest	400-a-check-result-must-be-machine	and its major field carries the server major it ran under	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and its name field is the check's name, spaces intact	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and its verdict field says FAIL	15;16;17;18;19	never	-
@@ -867,13 +869,14 @@ harness_selftest	400-a-check-result-must-be-machine	and its verdict field says P
 harness_selftest	400-a-check-result-must-be-machine	and its verdict field says UNRUN, which is neither of the other two	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and leaves one whose variable is assigned earlier	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and leaves one whose variable is the loop it sits in	15;16;17;18;19	never	-
-harness_selftest	400-a-check-result-must-be-machine	and names its own cause instead	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	and names its own cause instead	15;16;17;18;19	2026-09-23	the zero-record guard fires on ANY shortfall, not only on no records at all
 harness_selftest	400-a-check-result-must-be-machine	and not a check after a one-line piped loop that already closed	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and not a piped loop with no check in it	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and not one inside a process-substitution loop, which keeps its shell	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and records FAIL	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and records FAIL, because nothing was compared	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and records PASS when the ratio is inside the bound	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	and so is the counted-without-record cause, in the other direction	15;16;17;18;19	2026-09-23	the zero-record guard fires on ANY shortfall, not only on no records at all;the zero-record guard removed and both mismatch causes stated flatly again
 harness_selftest	400-a-check-result-must-be-machine	and still reports the two numbers	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and that place is pgc_record	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and the REASON_CODE travels in the reason field, not in prose	15;16;17;18;19	never	-
@@ -884,8 +887,9 @@ harness_selftest	400-a-check-result-must-be-machine	and the reason still follows
 harness_selftest	400-a-check-result-must-be-machine	and the timing check is counted as a pass, not a skip	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and the timing check's human line is unchanged	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	and the timing check's verdict is SKIP	15;16;17;18;19	never	-
-harness_selftest	400-a-check-result-must-be-machine	and the two numbers are named, not just the verdict	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	and the two numbers are named, not just the verdict	15;16;17;18;19	2026-09-23	the zero-record guard fires on ANY shortfall, not only on no records at all
 harness_selftest	400-a-check-result-must-be-machine	and with timing enabled the skipped term is zero, not absent	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	but it is not reported as checks counted without a record	15;16;17;18;19	2026-09-23	the zero-record guard removed and both mismatch causes stated flatly again
 harness_selftest	400-a-check-result-must-be-machine	check_num on a non-number emits one record	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	check_num's non-measurement line is unchanged	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	check_ratio on a non-number emits one record	15;16;17;18;19	never	-
@@ -910,6 +914,7 @@ harness_selftest	400-a-check-result-must-be-machine	premise: and that population
 harness_selftest	400-a-check-result-must-be-machine	premise: it is callable	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: it names a check_skip reading an unassigned variable	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: lib.sh is where the check helpers live	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	premise: the fixture states a count and carries no records at all	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: the fixtures carry the shapes this sweep is about	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: the piped-loop sweep read every file it was offered	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: the probe ran every helper shape once	15;16;17;18;19	never	-
@@ -917,6 +922,7 @@ harness_selftest	400-a-check-result-must-be-machine	premise: the sweep classifie
 harness_selftest	400-a-check-result-must-be-machine	premise: the sweep read the suites, so an empty result means something	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	premise: while a file that calls no check is not its business	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the accounting line reconciles four outcomes against the count	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	the cannot-reconcile wording does not fire on a log that HAS records	15;16;17;18;19	2026-09-23	the zero-record guard fires on ANY shortfall, not only on no records at all
 harness_selftest	400-a-check-result-must-be-machine	the major [18.2] is not a major, so that record does not reconcile	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the major [] is not a major, so that record does not reconcile	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the major [eighteen] is not a major, so that record does not reconcile	15;16;17;18;19	never	-
@@ -932,6 +938,7 @@ harness_selftest	400-a-check-result-must-be-machine	the runner defines the recor
 harness_selftest	400-a-check-result-must-be-machine	the same ratio check, ENABLED, emits one record and passes	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the same timing check, ENABLED, emits one record and passes	15;16;17;18;19	never	-
 harness_selftest	400-a-check-result-must-be-machine	the source pattern does not mistake portlib.sh for lib.sh	15;16;17;18;19	never	-
+harness_selftest	400-a-check-result-must-be-machine	the subshell cause is marked as a likely cause, not stated as measured	15;16;17;18;19	2026-09-23	the zero-record guard removed and both mismatch causes stated flatly again
 harness_selftest	400-a-check-result-must-be-machine	the sweep finds a check inside a PIPED loop	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--mutation across two failing checks in one run is refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	--prune REFUSES the whole prune when any orphan carries history	15;16;17;18;19	never	-

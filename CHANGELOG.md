@@ -417,6 +417,63 @@ true until the next version shipped.
 
 ### Fixed
 
+- `pgc_reconcile_records` no longer reports an impossible mismatch on a log it
+  cannot measure (#1242). Handed a log that states `checks run: N` and carries
+  no `RESULT` records at all, it ran the arithmetic anyway and concluded that
+  every counted check had vanished:
+
+  ```
+    records=0 but the log states checks run: 126
+      126 check(s) were counted without emitting a record.
+      Likely cause: something bumped PGC_CHECKS without going through pgc_record.
+  ```
+
+  The function already guards two input faults and its comments name both -- an
+  absent log, and a log with no `checks run:` line at all. The third is a
+  well-formed log of some other producer, which emits no `RESULT` records
+  because records are not a thing it emits.
+
+  **The verdict is unchanged; only the words are.** It still returns non-zero,
+  because being handed something unreconcilable is worth surfacing, and going
+  quiet would let a genuine zero-record suite pass as clean. A positive count
+  with no records is reachable inside this harness too -- an assignment to
+  `PGC_CHECKS` that never went through `pgc_record` -- so the guard does not
+  claim to know which of the two it is looking at. It says it cannot tell.
+
+  Verified from the output rather than from the diff, all four inputs:
+
+  ```
+    states 126, no records      "cannot measure ... rather than a suite that lost every outcome"   rc=1
+    1 record, states 3          "2 check(s) were counted without emitting a record"                rc=1
+    3 records, states 1         "2 check(s) reported an outcome the count never saw"               rc=1
+    1 record, states 1          (silent)                                                           rc=0
+  ```
+
+- The cause under a records/count mismatch is now marked `Likely cause:` rather
+  than stated flatly (#1242). The two counts above it are measured; the sentence
+  below it is the fault the message was written for, and is a guess about which
+  one produced them. Stated as fact it sent a reader to subshells during the
+  counter-clobber defect, where the cause was an assignment of their own.
+
+  How it surfaced is the part worth keeping: not by looking for it. A bare
+  `bash test/<suite>.sh` never reaches this function -- it lives in
+  `run_all_versions.sh` -- so every green called from a development run is
+  called without it. Sweeping 64 accumulated logs through it found one genuine
+  mismatch in zero and one impossible one.
+
+  Seven arms cover the two changes and six of them carry a mutation that reddens
+  them; `test/check_ledger_budget.txt` records all three. The one worth naming
+  here is the over-fire -- a guard that fired on any shortfall rather than only
+  on no records would swallow the real counted-without-a-record fault while
+  every arm above it stayed green. It reddened four arms, and two of them were
+  already in the suite, so the corpus caught that failure without help. The
+  prediction said two; recording the four is the point of writing it down.
+
+  Driving that mutation also showed one of the new arms was a byte-for-byte
+  duplicate of an existing one -- same fixture, same grep, same expectation.
+  Removed rather than shipped, which is why the part went from 1146 checks
+  to 1145.
+
 - Planning a columnar query sequentially scanned `pgcolumnar.storage` on its own
   primary key (#1237).
 
