@@ -98,8 +98,8 @@ n_wide="$(printf '%s\n' "$WIDE" | grep -c .)"
 check_num "premise: the two derivations of the population name the same suites" \
 	"$(LC_ALL=C comm -3 <(printf '%s\n' "$NARROW" | LC_ALL=C sort) \
 		<(printf '%s\n' "$WIDE" | LC_ALL=C sort) | grep -c .)" "0"
-check_num "premise: the population is the size this tree holds" \
-	"$(if [ "$n_narrow" -ge 30 ]; then echo 1; else echo 0; fi)" "1"
+check_text "premise: the population is the size this tree holds" \
+	"$(if [ "$n_narrow" -ge 30 ]; then echo yes; else echo "no ($n_narrow, want >= 30)"; fi)" "yes"
 
 # NOT IN ITS OWN POPULATION, asserted rather than assumed. Measured the other
 # way first: without the exclusion the sweep runs itself once per suite, 20

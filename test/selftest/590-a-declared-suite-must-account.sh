@@ -222,7 +222,7 @@ for _da_f in "$PGC_TESTDIR"/*.sh; do
 	$(sed 's/#.*//' "$_da_f" | grep -nE '(^|[;&|][[:space:]]*|^[[:space:]]+)exit[[:space:]]+0[[:space:]]*$' | grep -v "'")
 	EOF
 done
-check_num "premise: declared suites do have clean exits of their own to check" \
-	"$(if [ "$_da_e0" -ge 4 ]; then echo 1; else echo 0; fi)" "1"
+check_text "premise: declared suites do have clean exits of their own to check" \
+	"$(if [ "$_da_e0" -ge 4 ]; then echo yes; else echo "no ($_da_e0, want >= 4)"; fi)" "yes"
 check_num "every clean exit in a declared suite reaches its summary first" \
 	"$_da_e0_bad" "0"

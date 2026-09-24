@@ -90,6 +90,22 @@ cancel_decode	the many-group table has many groups
 cancel_decode	the scan outlasts the timeout, so a cancel is possible
 column_projection	premise: the unprojected read is large enough to measure (off: $B_OFF)
 column_projection	the cost model prices a narrow projection below a wide one
+# THE SHELL if/then/else SPELLING CAME INTO SCOPE (#1255), and per the rule
+# above these two rows are a claim that the SWEEP changed, checkable off the
+# diff: neither arm is touched by this change. `$(if [ C ]; then echo 1; else
+# echo 0; fi)` is both-constant and discards its operand exactly as the `&&`
+# spelling does, and both of the sweep's matchers required `&&`.
+#
+# FIVE arms were uncovered and NONE of them appears here, so this widening adds
+# no rows at all. Three are repaired in this change -- capability_sweep,
+# selftest 560 and selftest 590. The other two are in `catalog_plan_index.sh`
+# and @jdatcmd repaired them in #1254, verified against this widened matcher:
+# 0 hits on that file. THIS BRANCH THEREFORE DEPENDS ON #1254 LANDING FIRST;
+# ahead of it the sweep finds two arms with no rows and refuses them by name.
+#
+# THE LIST IS 103 AGAIN AND THAT IS A COINCIDENCE. #1174 took it 77 -> 103, two
+# arms have been repaired since, and this widening adds two: 101 + 2. The same
+# total twice by unrelated routes is not evidence either count is right.
 cost_written_geometry	a table written in smaller groups is costed cheaper than one in larger
 differential	matrix chunk groups>=12
 differential	matrix stripes>=2
