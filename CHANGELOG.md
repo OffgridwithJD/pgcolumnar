@@ -18,6 +18,35 @@ true until the next version shipped.
 
 ### Changed
 
+- Nine `index_am_support` arms now carry a mutation that reddens them (#1236).
+  No test changed and no code changed.
+
+  Its only dated rows were two premises about `docs/features.md`, reddened by a
+  **docs** mutation, which cannot reach one arm about what an index does. Eight
+  behaviour arms sat `never` beside them -- unattacked rather than vacuous, the
+  same shape as the first batch.
+
+  Two mutations with disjoint predicted sets, both confirmed exactly:
+
+  ```
+    M-1  the build drops two rows in three, so the index misses entries
+         predicted the four "answers its operator" arms, NOT the build arms
+         observed  exactly those four; CREATE INDEX still succeeds
+
+    M-2  the build errors, so CREATE INDEX fails
+         predicted the four "builds an index" arms
+         observed  those four, plus the GiST overlap premise
+  ```
+
+  **M-2 also shows a weakness in the four answer arms.** With no index in
+  existence they all stayed green: the arm compares a count taken with
+  `enable_seqscan = off` against one taken with the custom scan off, and
+  `enable_seqscan` is a preference rather than a prohibition -- so with no index
+  both sides fall back to the same scan and agree. An arm named *answers its
+  operator with the same rows the scan returns* can be satisfied without an index
+  scan happening. Reported on #1236 rather than repaired here, because this
+  change records evidence and alters no test.
+
 - Fifteen `native_join_runtime_filter` arms now carry a mutation that reddens
   them (#1236). No test changed and no code changed: the arms were attacked and
   the ledger records what happened.
