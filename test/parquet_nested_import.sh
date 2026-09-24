@@ -46,6 +46,14 @@ check "round-trips after delete" \
 	"$(pgc_set_hash "$SEL pna")"
 
 # ---------------------------------------------------------------------------
+# WHY NOT `pgc_skip`, which 25 pyarrow suites use (#1215). It is terminal, and
+# only two of these seven arms need pyarrow. Measured on pg18a:
+#
+#     with pyarrow     7 passed + 0 skipped = 7
+#     without pyarrow  5 passed + 2 skipped = 7
+#
+# Same name set both ways, 7 records either way, and rc=0 without it. The two
+# that need the reference writer decline by name below.
 # pyarrow-written nested Parquet file: list<int32> and struct<x:int,y:string>.
 # This proves we read the Dremel levels the reference writer produces, not just
 # our own exporter's byte layout.

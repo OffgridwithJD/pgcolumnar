@@ -46,6 +46,58 @@ true until the next version shipped.
   operator with the same rows the scan returns* can be satisfied without an index
   scan happening. Reported on #1236 rather than repaired here, because this
   change records evidence and alters no test.
+- Three suite comments now say what they counted and why they deviate (#1215).
+
+  `arrow_import.sh` explained why it does not use `pgc_skip` and said "THE OTHER
+  29 pyarrow SUITES USE" it. **29 was honestly counted and attached to the wrong
+  noun.** At `f738dd4d`, the commit that wrote the sentence, 29 suites other than
+  that one ran `import pyarrow` -- but the sentence is about the suites that USE
+  `pgc_skip`, and 25 did. Measured in a worktree at that commit, excluding
+  `arrow_import.sh`, `lib.sh` and the three drivers:
+
+  ```
+                                       at f738dd4d   today
+      names pyarrow anywhere                34          35
+      names pyarrow in CODE                 29          30
+      runs `import pyarrow` in code         29          30
+      imports it AND calls pgc_skip         25          25
+  ```
+
+  **The predicate separating 34 from 29 is comment stripping**, and the five in
+  the gap name pyarrow only to say they do not use it -- two hand-craft their
+  fixtures, three gate on other capabilities. Same house-style trap as searching
+  `arrow_import.sh` for `pgc_skip` and matching the sentence that says why not to
+  use it.
+
+  So 29 was honestly counted, of the suites whose *code* names pyarrow. 25 has not
+  moved. The count that drifted is the one the sentence did not mean --
+  `capability_sweep.sh` joined the population when #1235 landed. All four rows go
+  in the comment, with the predicate named on each, because three rows invite the
+  reader to guess which "names pyarrow" means -- and guessing differently is how
+  two reviewers got different totals for the same tree before reconciling them.
+
+  The recount is also a worked example of the defect it fixes: the first attempt
+  returned 26, because searching `arrow_import.sh` for `pgc_skip` matches the
+  sentence explaining why it does not call `pgc_skip`. With comments stripped
+  that file scores 0.
+
+  `native_parquet_schema.sh` and `parquet_nested_import.sh` decline arm by arm
+  instead of being terminal, like `arrow_import.sh`, but unlike it said nothing
+  about why -- leaving a reader unable to tell a deliberate deviation from an
+  oversight. Both now carry the measurement that justifies it:
+
+  ```
+    native_parquet_schema    with pyarrow  35 passed +  0 skipped = 35
+                             without       29 passed +  6 skipped = 35
+    parquet_nested_import    with pyarrow   7 passed +  0 skipped =  7
+                             without        5 passed +  2 skipped =  7
+  ```
+
+  Identical name sets either way -- 35 and 7 records in both runs -- and both
+  still exit 0. Terminal is right for a suite with nothing else to do, and
+  neither is that suite.
+
+  Comments only. No test changed, no check added, no behaviour changed.
 
 - Fifteen `native_join_runtime_filter` arms now carry a mutation that reddens
   them (#1236). No test changed and no code changed: the arms were attacked and

@@ -68,7 +68,43 @@ fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
 # sites produce 56 records because some sit in loops, so a list copied from the
 # `check` lines would have been short by five.
 #
-# WHY NOT `pgc_skip`, WHICH THE OTHER 29 pyarrow SUITES USE. It is terminal: it
+# WHY NOT `pgc_skip`, WHICH 25 SUITES USE FOR pyarrow. The count names its
+# population because the number this sentence used to carry did not, and that
+# is the whole lesson here.
+#
+# IT SAID 29, AND 29 WAS HONESTLY COUNTED. At f738dd4d, the commit that wrote
+# the sentence, 29 suites other than this one ran `import pyarrow`. But the
+# sentence is about the suites that USE `pgc_skip`, and 25 did. The number was
+# right for one population and attached to another in the same breath.
+# Measured four ways, because three invites the reader to guess which "names
+# pyarrow" means -- and guessing wrong is how two of us got different totals for
+# the same tree. Excluding this file, lib.sh and the three drivers:
+#
+#                                        at f738dd4d   today
+#     names pyarrow anywhere                 34          35
+#     names pyarrow in CODE                  29          30
+#     runs `import pyarrow` in code          29          30
+#     imports it AND calls pgc_skip          25          25
+#
+# THE PREDICATE THAT SEPARATES 34 FROM 29 IS COMMENT STRIPPING. The five in the
+# gap name pyarrow only to say they do NOT use it: native_parquet_stack and
+# parallel_export_parquet hand-craft their fixtures, and avro_manifest,
+# iceberg_deletes and iceberg_name_mapping gate on other capabilities. Which is
+# the same house-style trap as searching this file for the helper's name and
+# matching the sentence that says WHY NOT to use it.
+#
+# So 29 was honestly counted, of the suites whose CODE names pyarrow. 25 has not
+# moved at all. The number that drifted is the one the sentence did not mean:
+# capability_sweep.sh joined the pyarrow population when #1235 landed.
+#
+# Read at that commit with `git worktree add --detach`. `git archive` returns
+# nothing for test/*.sh, because .gitattributes export-ignores them.
+#
+# COUNTING HERE NEEDS COMMENTS STRIPPED: searching this file for the helper's
+# name matches the sentence you are reading, which is how a recount came back
+# one too high. (#1215)
+#
+# pgc_skip is terminal: it
 # ends the run with a named FAIL, or a named SKIP when the dependency is waived.
 # That is right for a suite with nothing else to do and wrong here, because 16 of
 # these checks need no pyarrow at all -- the round trip through our own writer,
