@@ -126,7 +126,7 @@ behaviour, the source of that number is named.
 - [78. test_ttl_expire.py: the one function that deletes rows, tested twice](#78-test_ttl_expirepy-the-one-function-that-deletes-rows-tested-twice)
 - [79. test_projection_scan_io.py: a covering projection is not priced from the base table's pages](#79-test_projection_scan_iopy-a-covering-projection-is-not-priced-from-the-base-tables-pages)
 - [80. test_catalog_plan_index.py: planning uses the options and projection indexes](#80-test_catalog_plan_indexpy-planning-uses-the-options-and-projection-indexes)
-- [81. test_catalog_delete_index.py: retiring a row group probes its catalogs by index](#81-test_catalog_delete_indexpy-retiring-a-row-group-probes-its-catalogs-by-index)
+- [81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database](#81-test_catalog_delete_indexpy-retiring-a-row-group-costs-no-more-for-a-bigger-database)
 
 ## 1. How to read a test in here
 
@@ -6184,13 +6184,33 @@ The measured statement runs on a second connection. The shell suite gets that by
 | --- | --- |
 | `test_catalog_plan_index` | the measured table's row count, that the filtered scan returned every row, and that `options` and `projection` were probed by index with `seq_scan` still 0 |
 
-## 81. test_catalog_delete_index.py: retiring a row group probes its catalogs by index
+## 81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database
 
-Port of `catalog_delete_index.sh`. `delete_group_rows()` opens its catalog from a `const char *tableName` PARAMETER and `PgColumnarDeleteGroupMetadata` calls it five times, so one `systable_beginscan` in the source was five sequential scans per retired group at run time. Every one of the keys is a prefix of an index that already exists.
+Port of `catalog_delete_index.sh`. `delete_group_rows()` opens its catalog from a `const char *tableName` PARAMETER and `PgColumnarDeleteGroupMetadata` calls it five times, so one `systable_beginscan` in the source was five sequential reads per retired group at run time. The `pgcolumnar` catalogs are shared by every columnar table in the database, so each read was charged for every other table's rows.
 
-The two halves share no code and no fixture. The shell suite retires every OTHER group of forty; this one retires the LAST half of thirty. The shell suite reads one catalog per query; this one reads all six in a single query keyed by `relname`, so no two arms can describe readings taken at different moments.
+THE FIX IS NOT "USE THE INDEX", so the test cannot be "was the index used". A probe is a btree descent plus a heap fetch plus two catcache lookups, which on a catalog of a few pages is MORE work than reading the whole thing and far less on a large one. Both sizes occur in one installation. So these arms measure at three catalog sizes and each carries only the claim its size can support.
 
-THE ONE THING THIS HALF HAS TO DO THAT THE SHELL HALF DOES NOT is flush the statistics before resetting them. This harness holds one connection for the whole file, so the writes leave pending statistics in the backend that `pg_stat_reset()` does not clear; they are flushed afterwards and land on top of the reading. Measured on an otherwise identical single-session fixture: `row_group idx=36 seq=15` without the flush, `idx=32 seq=0` with it. The fifteen were the test's own `DELETE`, one `row_group_exists` scan per retired group, arriving after the counter had been zeroed. The shell half runs every statement in a fresh backend, which flushes on exit, so it cannot reach this state.
+THEY ASSERT THE WORK AND NEVER THE ACCESS PATH: buffers out of `pg_statio_all_tables`, heap and index both. An earlier version asserted `seq_scan == 0` and `idx_scan >= 1` per catalog; run against the build that chooses by catalog size -- cheaper at every size measured -- it failed 13 of 21 arms, the same 13 a full revert reddens. A test that cannot tell a revert from an improvement fires on correct code, and a guard that fires on correct code gets switched off.
+
+NOT A CONSTANT ANYWHERE. Every buffer count is compared against another taken in the same run from the same build, because the numbers are not the same on every major: the same fixture reads 848 buffers on PG17, 845 on PG15 and 895 on PG19. `pgcolumnar.index_min_blocks` decides the path, so the same work is measured two or three ways and the readings are compared to each other.
+
+WHAT MAKES THE COMPARISON TRUSTWORTHY, AND THE TWO FLOORS THAT DID NOT. Compaction writes to `row_group` and `free_space`, so the next compaction reads more of them and two readings from identical code drift apart. A floor of one buffer let a full revert through: fifteen arms of sixteen passed against code with the fix removed. A floor of ten parts per thousand let it through too, because under a revert the drift reaches fourteen to sixteen -- and the two arms that floor was meant to protect were themselves worth only twenty-two and twenty-six, so they were measuring the sequence, not the fix. The floor is now 100 parts per thousand; each phase compacts a control table at the same setting as the measured one and refuses to report on top of the drift; and the control sits ADJACENT to the default, because drift accumulates with distance and a control three steps away once reported 32 against a margin of 31. Two arms were deleted rather than rescued. What a fixture cannot measure, this file does not assert.
+
+Measured, this build against three mutations, in parts per thousand:
+
+| arm | real | revert | probe-always | default replaced |
+| --- | ---: | ---: | ---: | ---: |
+| P1, 6 catalog pages | 284 | 0 | 12 | 284 (passes) |
+| A1, 22 pages | 237 | -1 | -2 | -1 |
+| B1, 76 pages | 1823 | 0 | -1 | 0 |
+| growth, A to B | 960 | 1 | 22 | 1 |
+| vacuum | 714 | 0 | 0 | 0 |
+
+The vacuum arm has no positional confound at all, because a VACUUM is repeatable where a compaction is not: all three of its readings come from one table and only the setting differs. It is vacuumed small on purpose -- the gap widens as the catalog grows and narrows as the vacuumed table grows, and an earlier draft that vacuumed a thirty-group table swung between 200 and 750 from run to run on a base of ten buffers.
+
+The two halves share no code and no fixture. The shell suite uses ten- and forty-group tables, retires every OTHER group and adds 200,000 rows of deep noise; this one uses twelve and forty-five, retires the LAST half, and adds 150,000. The shell suite sums the work in SQL; this one reads it per catalog and sums in Python, and prints the per-catalog breakdown for every setting -- which is how the drift was traced to `row_group` alone, the one catalog a compaction writes to.
+
+THE ONE THING THIS HALF HAS TO DO THAT THE SHELL HALF DOES NOT is flush the statistics before resetting them. This harness holds one connection for the whole file, so the writes leave pending statistics in the backend that `pg_stat_reset()` does not clear; they are flushed afterwards and land on top of the reading. Measured on an otherwise identical single-session fixture: `row_group idx=36 seq=15` without the flush, `idx=32 seq=0` with it. The fifteen were the test's own `DELETE`. The shell half runs every statement in a fresh backend, which flushes on exit, so it cannot reach this state.
 
 `pg_stat_reset()` is database-wide. The corpus runs serially within a worker.
 
@@ -6198,5 +6218,5 @@ THE ONE THING THIS HALF HAS TO DO THAT THE SHELL HALF DOES NOT is flush the stat
 
 | test | what it holds |
 | --- | --- |
-| `test_retiring_a_group_probes_its_catalogs_by_index` | the table's rows, that the delete removed the groups it was aimed at, that the compaction retired them and kept every survivor, that the reading covers all six catalogs, and that each of `bloom`, `column_chunk`, `delete_vector`, `free_space`, `row_group` and `zone_map` was probed by index with `seq_scan` still 0 |
-| `test_vacuum_probes_the_row_group_catalog_by_index` | that the vacuum walked this table's groups, and that it reached `row_group` by index with `seq_scan` 0 -- the `PgColumnarComputeAllVisibleGroups` scan, which the compaction path never reaches |
+| `test_retiring_a_group_costs_no_more_for_a_bigger_database` | per phase: three identical targets, the emptied groups retired, every survivor kept, all six catalogs read, and two compactions at the same setting agreeing well inside the floor. Then that the default does less work than probing every catalog at six pages, less than reading every one whole at twenty-two and at seventy-six, and that its cost grows far less with the database than reading whole does |
+| `test_vacuum_reads_less_of_row_group_than_reading_it_whole` | that the vacuum walked this table's groups, that two vacuums at the same setting agree, and that its `row_group` work is below what reading that catalog whole costs -- the `PgColumnarComputeAllVisibleGroups` read, which the compaction path never reaches |

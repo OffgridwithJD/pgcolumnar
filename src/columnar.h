@@ -525,6 +525,7 @@ extern int64 PgColumnarRetireFullyDeletedGroups(Relation rel);
 
 /* physical reclaim: split freed ranges on allocate and coalesce on free (GUC) */
 extern bool pgcolumnar_reclaim_coalesce;
+extern int	pgcolumnar_index_min_blocks;
 
 /* physical end-truncation opt-in (GUC) */
 extern bool pgcolumnar_enable_end_truncation;

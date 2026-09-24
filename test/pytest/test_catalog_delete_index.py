@@ -1,32 +1,92 @@
-"""Retiring a row group probes its five catalogs through their primary keys.
+"""Retiring a row group must not cost more because other columnar tables exist.
 
 `delete_group_rows()` opens its catalog from a `const char *tableName`
 PARAMETER, and `PgColumnarDeleteGroupMetadata` calls it five times, for
 `delete_vector`, `column_chunk`, `zone_map`, `bloom` and `row_group`. One
-`systable_beginscan` in the source is therefore five sequential scans per
-retired group at run time, and a static enumeration by relation handle cannot
-see any of them: at the call site the catalog has no name.
+`systable_beginscan` in the source was therefore five sequential reads per
+retired group at run time. The `pgcolumnar` metadata catalogs are SHARED by
+every columnar table in the database, so each read was charged for every other
+table's rows.
 
-Independent of `test/catalog_delete_index.sh`: same public seam
-(`pg_stat_all_tables` around one maintenance call), different table, different
-row count, different group size, different retention pattern, and this half
-reads its counters in one query keyed by `relname` rather than one query per
-catalog.
+THE FIX IS NOT "USE THE INDEX". It is "ask the catalog how big it is, and use
+the index when that is the cheaper read". A probe is a btree descent plus a heap
+fetch plus two catcache lookups, which on a catalog of a few pages is MORE work
+than reading the whole thing, and far less on a large one. Both sizes occur in
+one installation, because the catalogs are shared -- so these arms measure at
+three catalog sizes rather than one, and the claim at each is the one that size
+can carry.
+
+WHAT THEY ASSERT. The WORK: buffers served out of the six catalogs, heap and
+index, from `pg_statio_all_tables`. Never the access path. An earlier version
+asserted `seq_scan == 0` and `idx_scan >= 1` per catalog; run against the build
+that chooses by catalog size -- cheaper at every size measured -- it failed 13
+of 21 arms, the same 13 a full revert reddens. A guard that fires on correct
+code gets switched off.
+
+NO CONSTANT ANYWHERE. Every buffer count is compared against another taken in
+the same run from the same build, because the numbers are not the same on every
+major: the same fixture reads 848 buffers on PG17, 845 on PG15 and 895 on PG19.
+`pgcolumnar.index_min_blocks` decides the path -- 0 probes every catalog, a very
+large value reads every one whole -- so the same work is measured two or three
+ways and the readings are compared to each other.
+
+Independent of `test/catalog_delete_index.sh`: different tables, different row
+counts, different group sizes, different retention pattern (this half retires
+the LAST half of its groups, the shell half retires every other one), a smaller
+deep fixture, and this half reads the work per catalog and sums in Python where
+the shell half sums in SQL.
 
 `pg_stat_reset()` is database-wide. Tests run serially within a worker, so
-nothing else is counting during this test, and this file must not be run
+nothing else is counting during these tests, and this file must not be run
 concurrently with another that reads statistics.
-
-WHY EVERY ARM CARRIES A PREMISE. Each arm expects `seq_scan == 0`, and a
-maintenance call that retired nothing reports 0 exactly as loudly as one that
-retired fifteen groups through an index.
 """
 
-ROWS = 30000
+# Phase 0 is small ON PURPOSE. The claim it carries -- that probing every
+# catalog costs more than choosing -- is worth 284 parts per thousand at six
+# catalog pages, 151 at nine and 31 at eighteen, against a drift of 3 to 10
+# throughout. A bigger fixture hides a real effect.
+TINY_GROUPS = 12
+BIG_GROUPS = 45
 GROUP = 1000
-GROUPS = ROWS // GROUP
-RETIRED = GROUPS // 2
-SURVIVING = ROWS - RETIRED * GROUP
+
+DEEP_ROWS = 150000
+DEEP_GROUP = 1024
+
+PROBE_ALWAYS = 0
+READ_WHOLE = 2147483647
+
+# HOW FAR APART TWO READINGS MUST BE BEFORE THIS FILE CALLS THE DIFFERENCE A
+# RESULT, in parts per thousand of the reading they are compared against.
+#
+# MEASURED, NOT CHOSEN, AND THE FIRST TWO ATTEMPTS WERE BOTH WRONG. Every claim
+# compares two compactions of two different tables run one after another, and
+# compaction WRITES to `row_group` and `free_space`, so the next compaction
+# reads more of them. Two readings from identical code drift apart.
+#
+#   A floor of ONE BUFFER let a full revert through: fifteen arms of sixteen
+#   passed against code with the fix removed, carried by 2 to 8 buffers.
+#
+#   A floor of TEN PARTS PER THOUSAND let it through too. Under a full revert
+#   the drift reached 14 to 16 -- above the floor -- and two arms of eighteen
+#   reddened. Worse, the two arms it was meant to protect were worth only 22 and
+#   26, so they sat inside the drift: they measured the sequence, not the fix.
+#
+# The floor is 100, and each claim is made where it is worth several times that.
+# Measured, this build against the three mutations, in parts per thousand:
+#
+#     arm                    real   revert   probe-always   default replaced
+#     P1 (6 pages)            284        0             12        284 (passes)
+#     A1 (22 pages)           237       -1             -2         -1
+#     B1 (76 pages)          1823        0             -1          0
+#     growth (A to B)         960        1             22          1
+#     vacuum                  714        0              0          0
+#
+#     measured drift            -      1-7           2-18        1-7
+#
+# Every claim clears the floor by at least 2.4x; every mutation falls at least
+# 4.5x below it. Two arms were DELETED rather than rescued; what a fixture
+# cannot measure, this file does not assert.
+FLOOR_PERMILLE = 100
 
 CATALOGS = (
     "bloom",
@@ -38,10 +98,15 @@ CATALOGS = (
 )
 
 
+def _permille(part, whole):
+    """`part` as thousandths of `whole`; 0 for a whole of 0, which fails."""
+    return (part * 1000) // whole if whole > 0 else 0
+
+
 def _build_kind(conn):
     """Which build kind this run measured, printed rather than asserted.
 
-    Two of the nine converted scan sites are in
+    Two of the eight converted scan sites are in
     `PgColumnarCheckFreeSpaceNoOverlap`, which is assert-only. On a release
     build they do not execute, so every arm here is a WEAKER claim there: it
     says nothing about those two sites rather than clearing them.
@@ -53,28 +118,43 @@ def _build_kind(conn):
     partial one.
 
     Printed and NOT made an arm: it records the condition the run happened in,
-    and breaking the code under test cannot change it, so no removal proof can
-    reach it.
+    and breaking the code under test cannot change it.
     """
     with conn.cursor() as cur:
         cur.execute("SHOW debug_assertions")
-        return cur.fetchone()[0]
+        assertions = cur.fetchone()[0]
+        cur.execute("SHOW pgcolumnar.index_min_blocks")
+        return assertions, cur.fetchone()[0]
 
 
-def _counters(conn):
-    """Every catalog's (idx_scan, seq_scan) in ONE query.
+def _work(conn):
+    """Buffers the six catalogs have served, heap AND index, per catalog.
 
-    One query rather than one per catalog, so no two arms can describe
-    readings taken at different moments.
+    Index blocks are counted because the question is total work: a probe that
+    read only index pages would otherwise look free, which is the error this
+    file exists to avoid.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT relname, coalesce(idx_scan,0), coalesce(seq_scan,0) "
-            "FROM pg_stat_all_tables "
+            "SELECT relname, "
+            "  coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0) "
+            "+ coalesce(idx_blks_read,0) + coalesce(idx_blks_hit,0) "
+            "FROM pg_statio_all_tables "
             "WHERE schemaname = 'pgcolumnar' AND relname = ANY(%s)",
             (list(CATALOGS),),
         )
-        return {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
+        return {r[0]: int(r[1]) for r in cur.fetchall()}
+
+
+def _catpages(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT coalesce(sum(pg_relation_size('pgcolumnar.' || relname) / 8192), 0) "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'pgcolumnar' AND relname = ANY(%s)",
+            (list(CATALOGS),),
+        )
+        return int(cur.fetchone()[0])
 
 
 def _groups_of(conn, table):
@@ -88,98 +168,209 @@ def _groups_of(conn, table):
         return cur.fetchone()[0]
 
 
-def test_retiring_a_group_probes_its_catalogs_by_index(pgc_conn, expect):
-    conn = pgc_conn
-    print(f"-- debug_assertions={_build_kind(conn)} "
-          "(off = the two assert-only sites did not run)")
+def _make_target(conn, table, groups):
+    """A measurement table: `groups` groups, the last half emptied.
+
+    One per measurement. A compaction retires its groups once, so a second
+    reading of the same table would measure a compaction that found nothing
+    left to do -- which reports a small number for the same reason a fast one
+    does.
+    """
+    rows = groups * GROUP
     with conn.cursor() as cur:
-        # A second columnar table in the same catalogs. A sequential scan
-        # walks its rows too; an index probe does not. Without it every arm
-        # could pass on a catalog that happens to hold one storage's rows.
-        cur.execute("CREATE TABLE retire_side (k bigint) USING pgcolumnar")
-        cur.execute("SELECT pgcolumnar.set_options('retire_side', stripe_row_limit => %s)", (GROUP,))
-        cur.execute("INSERT INTO retire_side SELECT g FROM generate_series(1,9000) g")
-
-        cur.execute("CREATE TABLE retire_main (k bigint, tag int) USING pgcolumnar")
-        cur.execute("SELECT pgcolumnar.set_options('retire_main', stripe_row_limit => %s)", (GROUP,))
+        cur.execute(f"CREATE TABLE {table} (k bigint, tag int) USING pgcolumnar")
         cur.execute(
-            f"INSERT INTO retire_main SELECT g, g % 7 FROM generate_series(1,{ROWS}) g"
+            "SELECT pgcolumnar.set_options(%s, stripe_row_limit => %s)", (table, GROUP)
         )
-
-        cur.execute("SELECT count(*) FROM retire_main")
-        expect.num(cur.fetchone()[0], ROWS, "premise: the measured table holds its rows")
-
-        # Retire the LAST half of the groups rather than every other one, so
-        # this half is not merely the shell suite's pattern in Python.
         cur.execute(
-            f"DELETE FROM retire_main WHERE k > {RETIRED * GROUP}"
+            f"INSERT INTO {table} SELECT g, g % 7 FROM generate_series(1,{rows}) g"
         )
-        cur.execute("SELECT count(*) FROM retire_main")
-        expect.num(
-            cur.fetchone()[0],
-            RETIRED * GROUP,
-            "premise: the delete removed the groups it was aimed at",
-        )
+        cur.execute(f"DELETE FROM {table} WHERE k > {(groups // 2) * GROUP}")
 
-    groups_before = _groups_of(conn, "retire_main")
-    expect.num(groups_before, GROUPS, "premise: the table had every group to retire from")
 
+def _compact_work(conn, table, min_blocks=None):
+    """Total catalog buffers the compaction of `table` cost, and the breakdown.
+
+    FLUSH BEFORE THE RESET, NOT ONLY AFTER. This harness holds ONE connection
+    for the whole file, so the writes that built the fixture leave pending
+    statistics in this backend that `pg_stat_reset()` does not clear -- they
+    flush afterwards and land on top of the reading. The shell twin cannot
+    reach this state: it runs every statement in a fresh backend, which flushes
+    on exit before the next one starts.
+
+    Measured, on an otherwise identical single-session fixture:
+        reset with pending stats   row_group idx=36 seq=15
+        flush BEFORE reset         row_group idx=32 seq=0
+    The fifteen were the test's own DELETE, one scan per retired group,
+    arriving after the counter had been zeroed.
+    """
     with conn.cursor() as cur:
-        # FLUSH BEFORE THE RESET, NOT ONLY AFTER. This harness holds ONE
-        # connection for the whole file, so the writes above leave pending
-        # statistics in this backend that pg_stat_reset() does not clear --
-        # they are flushed afterwards and land on top of the reading. The
-        # shell twin cannot hit this: it runs every statement in a fresh
-        # backend, which flushes on exit before the next one starts.
-        #
-        # Measured, on an otherwise identical single-session fixture:
-        #     reset with pending stats   row_group idx=36 seq=15
-        #     flush BEFORE reset         row_group idx=32 seq=0
-        # The fifteen were this test's own DELETE, one row_group_exists scan
-        # per retired group, arriving after the counter had been zeroed.
         cur.execute("SELECT pg_stat_force_next_flush()")
         cur.execute("SELECT pg_stat_reset()")
-        cur.execute("SELECT pgcolumnar.compact('retire_main')")
+        if min_blocks is not None:
+            cur.execute(f"SET pgcolumnar.index_min_blocks = {min_blocks}")
+        cur.execute("SELECT pgcolumnar.compact(%s)", (table,))
+        cur.execute("RESET pgcolumnar.index_min_blocks")
         cur.execute("SELECT pg_stat_force_next_flush()")
+    per_catalog = _work(conn)
+    return sum(per_catalog.values()), per_catalog
 
-    # READ THE COUNTERS BEFORE ANY OTHER QUERY. pg_stat_all_tables
-    # accumulates, and the premises below are themselves planned queries over
-    # a columnar table, which read these same catalogs.
-    counters = _counters(conn)
 
-    groups_after = _groups_of(conn, "retire_main")
-    print(f"-- row groups {groups_before} -> {groups_after}")
+def _phase(conn, expect, name, prefix, groups, other, other_label):
+    """Measure a phase: a control and the default, then `other`.
+
+    THE CONTROL IS COMPACTED FIRST, NEXT TO THE DEFAULT. Drift accumulates with
+    distance, so a control three steps from the default measures three steps of
+    it and condemns a claim exposed to one. It did: placed last, one phase
+    reported 32 parts per thousand of noise against a margin of 31.
+
+    Returns (default, other, pages).
+    """
+    tables = [f"{prefix}_control", f"{prefix}_default", f"{prefix}_other"]
+    for t in tables:
+        _make_target(conn, t, groups)
+    pages = _catpages(conn)
     expect.num(
-        groups_before - groups_after,
-        RETIRED,
-        "premise: the compaction retired the emptied groups",
+        sum(_groups_of(conn, t) for t in tables),
+        groups * 3,
+        f"premise: the three phase {name} targets are the same fixture",
     )
 
+    control, _ = _compact_work(conn, tables[0])
+    default, by_cat = _compact_work(conn, tables[1])
+    other_work, other_cat = _compact_work(conn, tables[2], other)
+    noise = _permille(abs(control - default), default)
+    margin = _permille(other_work - default, default)
+
+    print(f"-- phase {name}  catalog pages={pages}  work: control={control} "
+          f"default={default} {other_label}={other_work}")
+    print(f"-- phase {name}  permille vs the default: {other_label}={margin} noise={noise}")
+    print(f"--   by catalog  default={by_cat}")
+    print(f"--   by catalog  {other_label}={other_cat}")
+
+    # DERIVED FROM `groups`, NOT ASSUMED EVEN. _make_target empties everything
+    # past the halfway row, so an odd group count retires the larger half:
+    # at 45 groups it is 23 that go and 22 that stay, and a premise written as
+    # `groups // 2` fails on the fixture rather than on the code.
+    expect.num(
+        groups - _groups_of(conn, tables[1]),
+        groups - groups // 2,
+        f"premise: the phase {name} compaction retired the emptied groups",
+    )
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM retire_main")
+        cur.execute(f"SELECT count(*) FROM {tables[1]}")
         expect.num(
             cur.fetchone()[0],
-            RETIRED * GROUP,
-            "premise: the compaction kept every surviving row",
+            (groups // 2) * GROUP,
+            f"premise: the phase {name} compaction kept every surviving row",
         )
-
-    # A catalog missing from the reading would otherwise read as a catalog
-    # that was never scanned, which is the answer these arms look for.
     expect.num(
-        len(counters),
+        len(by_cat),
         len(CATALOGS),
-        "premise: the reading covers every catalog the arms name",
+        f"premise: the phase {name} reading covers every catalog the arms name",
+    )
+    expect.at_least(
+        default, 1, f"premise: the phase {name} reading measured something"
+    )
+    # THE ARMS ARE ONLY AS GOOD AS THIS ONE. A third identical table is
+    # compacted at the SAME setting as the measured one, so the two readings
+    # differ only by where they sit in the sequence. If that ever approaches the
+    # floor the claims are asserted against, the claims stop meaning anything.
+    expect.at_least(
+        FLOOR_PERMILLE - noise,
+        1,
+        f"premise: two phase {name} compactions at the same setting "
+        "agree well inside the floor",
+    )
+    return default, other_work, pages, margin
+
+
+def test_retiring_a_group_costs_no_more_for_a_bigger_database(pgc_conn, expect):
+    conn = pgc_conn
+    assertions, min_blocks = _build_kind(conn)
+    print(f"-- debug_assertions={assertions} "
+          "(off = the two assert-only sites did not run)")
+    print(f"-- pgcolumnar.index_min_blocks={min_blocks} "
+          "(the shipped default this run measures)")
+
+    # NO SEPARATE NOISE TABLE. Each phase already holds three storages, so no
+    # arm can pass on a catalog that happens to hold only one.
+    _d0, _p0, _pages0, margin0 = _phase(
+        conn, expect, "0", "ret0", TINY_GROUPS, PROBE_ALWAYS, "probe-always"
+    )
+    expect.at_least(
+        margin0,
+        FLOOR_PERMILLE,
+        "P1 with a few catalog pages the default does less work than probing every one",
     )
 
-    for cat in CATALOGS:
-        idx, seq = counters.get(cat, (0, 0))
-        print(f"-- {cat} idx_scan={idx} seq_scan={seq}")
-        expect.at_least(idx, 1, f"retiring a group probed pgcolumnar.{cat} by index")
-        expect.num(seq, 0, f"retiring a group did not sequentially scan pgcolumnar.{cat}")
+    da, _sa, pages_a, margin_a = _phase(
+        conn, expect, "A", "retA", BIG_GROUPS, READ_WHOLE, "read-whole"
+    )
+    expect.at_least(
+        margin_a,
+        FLOOR_PERMILLE,
+        "A1 with more catalog pages the default does less work than reading every one whole",
+    )
+    sa = _sa
+
+    # ONE DEEP TABLE, NOT MANY SHALLOW ONES. What makes a sequential read
+    # expensive is catalog PAGES, not how many tables share the catalogs;
+    # reaching this size with one-group tables took a thousand of them.
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE retire_deep (k bigint, a int, b int, c text) USING pgcolumnar"
+        )
+        cur.execute(
+            "SELECT pgcolumnar.set_options('retire_deep', stripe_row_limit => %s)",
+            (DEEP_GROUP,),
+        )
+        cur.execute(
+            "INSERT INTO retire_deep "
+            f"SELECT g, g % 7, g % 13, 'x' || g FROM generate_series(1,{DEEP_ROWS}) g"
+        )
+
+    db, sb, pages_b, margin_b = _phase(
+        conn, expect, "B", "retB", BIG_GROUPS, READ_WHOLE, "read-whole"
+    )
+
+    # THE PREMISE THIS EXPERIMENT NEEDS MOST. The growth arm compares two
+    # readings taken over catalogs that are supposed to differ in size. If the
+    # deep table never landed, both phases measure the same fixture and the arm
+    # passes while proving nothing -- and that is not hypothetical: the sweep
+    # that chose the shipped default first produced a clean table across seven
+    # database sizes in which the noise had been eaten by shell quoting. Every
+    # row was secretly the same database, and the only thing that said so was
+    # this quantity, flat where it should have grown eightfold.
+    expect.at_least(
+        pages_b - pages_a,
+        1,
+        "premise: the deep table grew the catalogs it is there to grow",
+    )
+    expect.at_least(
+        margin_b,
+        FLOOR_PERMILLE,
+        "B1 with large catalogs the default does far less work than reading every one whole",
+    )
+
+    # THE INVARIANT THE ISSUE IS ABOUT, written down as its own arm rather than
+    # left for a reader to compose out of A1 and B1. It is the sentence the bug
+    # report would use: retiring a group must not cost more because other tables
+    # exist.
+    growth_default = db - da
+    growth_scan = sb - sa
+    growth_margin = _permille(growth_scan - growth_default, growth_scan)
+    print(f"-- growth from phase A to phase B: default={growth_default} "
+          f"read-whole={growth_scan} permille={growth_margin}")
+    expect.at_least(
+        growth_margin,
+        FLOOR_PERMILLE,
+        "the default's cost grows far less with the database than reading whole does",
+    )
 
 
-def test_vacuum_probes_the_row_group_catalog_by_index(pgc_conn, expect):
-    """The vacuum path reaches a row_group scan the compaction path does not.
+def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_conn, expect):
+    """The vacuum path reaches a row_group read the compaction path does not.
 
     `PgColumnarVMSetVisibleForRelation` calls
     `PgColumnarComputeAllVisibleGroups`, and nothing in the test above reaches
@@ -187,36 +378,82 @@ def test_vacuum_probes_the_row_group_catalog_by_index(pgc_conn, expect):
     fires, so without this test a change to it would ride along on arms that
     could not fail if it were reverted.
 
-    The premise reads `delete_vector`, a DIFFERENT catalog from the one the
-    arms are about, so it cannot be satisfied by whatever makes them pass.
-    `relallvisible` is the obvious premise and is the wrong quantity: it stays
-    0 on this fixture however many times the table is vacuumed. So do
+    NO POSITIONAL CONFOUND, unlike every arm in the test above, because a VACUUM
+    is repeatable where a compaction is not. All three readings come from ONE
+    table and the only thing that differs is the setting.
+
+    AND IT IS VACUUMED SMALL, ON PURPOSE. The size check is worth the difference
+    between reading `row_group` whole and fetching the vacuumed table's own rows
+    from it, so the gap widens as the catalog grows and narrows as the VACUUMED
+    table grows. An earlier draft vacuumed a thirty-group table and the arm swung
+    between 200 and 750 parts per thousand from run to run on a base of ten
+    buffers.
+
+    The premise reads `delete_vector`, a DIFFERENT catalog from the one the arm
+    is about, so it cannot be satisfied by whatever makes it pass.
+    `relallvisible` is the obvious premise and is the wrong quantity: it stays 0
+    on this fixture however many times the table is vacuumed. So do
     `vacuum_count` and `last_vacuum`, which this table access method's vacuum
     does not report through at all.
     """
     conn = pgc_conn
-    print(f"-- debug_assertions={_build_kind(conn)}")
-    with conn.cursor() as cur:
-        cur.execute("CREATE TABLE vac_main (k bigint) USING pgcolumnar")
-        cur.execute("SELECT pgcolumnar.set_options('vac_main', stripe_row_limit => %s)", (GROUP,))
-        cur.execute("INSERT INTO vac_main SELECT g FROM generate_series(1,12000) g")
-        cur.execute("DELETE FROM vac_main WHERE k % 3 = 0")
+    assertions, min_blocks = _build_kind(conn)
+    print(f"-- debug_assertions={assertions} index_min_blocks={min_blocks}")
 
-        cur.execute("SELECT count(*) FROM vac_main")
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE vac_deep (k bigint, a int, b int, c text) USING pgcolumnar")
+        cur.execute(
+            "SELECT pgcolumnar.set_options('vac_deep', stripe_row_limit => %s)",
+            (DEEP_GROUP,),
+        )
+        cur.execute(
+            "INSERT INTO vac_deep "
+            f"SELECT g, g % 7, g % 13, 'x' || g FROM generate_series(1,{DEEP_ROWS}) g"
+        )
+        cur.execute("CREATE TABLE vac_small (k bigint) USING pgcolumnar")
+        cur.execute(
+            "SELECT pgcolumnar.set_options('vac_small', stripe_row_limit => %s)", (GROUP,)
+        )
+        cur.execute("INSERT INTO vac_small SELECT g FROM generate_series(1,3000) g")
+        cur.execute("DELETE FROM vac_small WHERE k % 3 = 0")
+
+        cur.execute("SELECT count(*) FROM vac_small")
         expect.at_least(cur.fetchone()[0], 1, "premise: the vacuumed table holds rows")
 
-        # Flush before the reset; see the note in the test above.
-        cur.execute("SELECT pg_stat_force_next_flush()")
-        cur.execute("SELECT pg_stat_reset()")
-        cur.execute("VACUUM vac_main")
-        cur.execute("SELECT pg_stat_force_next_flush()")
+    def vacuum_work(min_blocks=None):
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_stat_force_next_flush()")
+            cur.execute("SELECT pg_stat_reset()")
+            if min_blocks is not None:
+                cur.execute(f"SET pgcolumnar.index_min_blocks = {min_blocks}")
+            cur.execute("VACUUM vac_small")
+            cur.execute("RESET pgcolumnar.index_min_blocks")
+            cur.execute("SELECT pg_stat_force_next_flush()")
+        return _work(conn)
 
-    counters = _counters(conn)
-    dv_idx, _dv_seq = counters.get("delete_vector", (0, 0))
-    rg_idx, rg_seq = counters.get("row_group", (0, 0))
-    print(f"-- VACUUM: row_group idx_scan={rg_idx} seq_scan={rg_seq} "
-          f"delete_vector idx_scan={dv_idx}")
+    w_default = vacuum_work()
+    w_control = vacuum_work()
+    w_scan = vacuum_work(READ_WHOLE)
+    v_default = w_default.get("row_group", 0)
+    v_control = w_control.get("row_group", 0)
+    v_scan = w_scan.get("row_group", 0)
+    noise = _permille(abs(v_control - v_default), v_default)
+    margin = _permille(v_scan - v_default, v_default)
+    print(f"-- VACUUM row_group work: default={v_default} control={v_control} "
+          f"read-whole={v_scan} permille={margin} noise={noise}")
 
-    expect.at_least(dv_idx, 1, "premise: the vacuum walked this table's groups")
-    expect.at_least(rg_idx, 1, "the vacuum probed pgcolumnar.row_group by index")
-    expect.num(rg_seq, 0, "the vacuum did not sequentially scan pgcolumnar.row_group")
+    expect.at_least(
+        w_default.get("delete_vector", 0),
+        1,
+        "premise: the vacuum walked this table's groups",
+    )
+    expect.at_least(
+        FLOOR_PERMILLE - noise,
+        1,
+        "premise: two vacuums of the same table at the same setting agree well inside the floor",
+    )
+    expect.at_least(
+        margin,
+        FLOOR_PERMILLE,
+        "the vacuum's default does less row_group work than reading it whole",
+    )

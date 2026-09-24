@@ -26,6 +26,7 @@
 #include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "storage/lock.h"
 #include "storage/procarray.h"
 #include "utils/array.h"
@@ -147,6 +148,7 @@
 static Oid	pgcolumnar_schema_oid(void);
 static Relation open_columnar_table(const char *name, LOCKMODE lockmode);
 static Oid	pgcolumnar_index_oid(const char *name);
+static Oid	pgcolumnar_scan_index_oid(Relation rel, const char *name);
 
 /*
  * pgcolumnar_schema_oid
@@ -386,6 +388,76 @@ pgcolumnar_index_oid(const char *name)
 }
 
 /*
+ * pgcolumnar_index_min_blocks
+ *		Heap pages at or above which pgcolumnar_scan_index_oid() prefers an
+ *		index probe to a sequential scan. Zero probes always; a very large
+ *		value never probes.
+ *
+ *		DERIVED BY MEASUREMENT (#1213). Total buffers for `compact()` over 40
+ *		row groups with 20 retired, against every threshold from "always probe"
+ *		to "never probe", on PG 15, 17 and 19, over two families of fixture:
+ *		many small columnar tables (0 to 1000, catalogs 8 to 65 pages) and one
+ *		deep one (catalogs 8 to 390 pages). 24 size points in all.
+ *
+ *		Scored against the cheapest threshold at each point:
+ *
+ *		    threshold   total cost above best   worst point   worse than main
+ *		            0             1561 buffers          155   10 of 24 points
+ *		            2              448                   69    7
+ *		            3               19                    4    3
+ *		            5               95                   42    none
+ *		          8..16          791..3862          162..716   none
+ *		        never           15477                 7913     --
+ *
+ *		3 costs least overall by a factor of five and never more than 4 buffers
+ *		at any point. Its whole cost is one shape: a `zone_map` of exactly four
+ *		pages, which is worth scanning and gets probed. THE OPTIMUM IS NOT THE
+ *		SAME FOR EVERY CATALOG, because the hot ones are scanned more often per
+ *		retired group: `row_group` pays for a probe at three pages (probing it
+ *		there saves 42), `zone_map` not until five (probing it at four costs 4).
+ *		One value for all six is a deliberate compromise, and the measurement
+ *		above prices it at 19 buffers across 24 points.
+ *
+ *		Re-derive rather than adjust. #1217 would cache the index Oid, which
+ *		removes the fixed cost of a probe and so moves this number down.
+ */
+int			pgcolumnar_index_min_blocks = 3;
+
+/*
+ * pgcolumnar_scan_index_oid
+ *		The index to hand systable_beginscan for a keyed scan of `rel`, or
+ *		InvalidOid to read the heap instead.
+ *
+ *		An index probe is not unconditionally cheaper than a sequential scan.
+ *		Reading a heap of n pages costs n buffer touches; probing costs the
+ *		btree descent plus the heap fetch, plus the two catcache lookups
+ *		pgcolumnar_index_oid() makes on every call. Below a few pages the
+ *		sequential scan is the cheaper read.
+ *
+ *		Both sides of that comparison are reachable in one installation,
+ *		because these catalogs are shared by every columnar table in the
+ *		database: `row_group` is one page where there is one table and 23 in a
+ *		database holding two million rows of columnar data. A path that commits
+ *		to one access method is therefore wrong at one end of that range
+ *		whichever end it picks, and #1213 measured it wrong at both.
+ *
+ *		So ask the relation. RelationGetNumberOfBlocks() answers from smgr's
+ *		cached block count after the first call in a backend. The decision is
+ *		per relation and per call, so a path touching six catalogs of different
+ *		sizes picks for each rather than committing all six one way.
+ *
+ *		pgcolumnar_index_min_blocks is derived by measurement; see its
+ *		declaration above.
+ */
+static Oid
+pgcolumnar_scan_index_oid(Relation rel, const char *name)
+{
+	if (RelationGetNumberOfBlocks(rel) < (BlockNumber) pgcolumnar_index_min_blocks)
+		return InvalidOid;
+	return pgcolumnar_index_oid(name);
+}
+
+/*
  * PgColumnarNextStorageId
  *		Draw the next value from pgcolumnar.storageid_seq (spec 3, 7.6).
  */
@@ -461,7 +533,7 @@ List *
 PgColumnarComputeAllVisibleGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
-	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
+	Oid			rgIdx = pgcolumnar_scan_index_oid(grel, "row_group_pkey");
 	TupleDesc	gtd = RelationGetDescr(grel);
 	ScanKeyData gkey[1];
 	SysScanDesc gscan;
@@ -551,7 +623,7 @@ static List *
 PgColumnarComputeFullyDeletedGroups(uint64 storageId, TransactionId oldestXmin)
 {
 	Relation	grel = open_columnar_table("row_group", AccessShareLock);
-	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
+	Oid			rgIdx = pgcolumnar_scan_index_oid(grel, "row_group_pkey");
 	TupleDesc	gtd = RelationGetDescr(grel);
 	Relation	mrel = open_columnar_table("delete_vector", AccessShareLock);
 	TupleDesc	mtd = RelationGetDescr(mrel);
@@ -674,7 +746,7 @@ delete_group_rows(const char *tableName, const char *indexName,
 				  AttrNumber groupAttno, uint64 storageId, uint64 groupNumber)
 {
 	Relation	rel = open_columnar_table(tableName, RowExclusiveLock);
-	Oid			idx = pgcolumnar_index_oid(indexName);
+	Oid			idx = pgcolumnar_scan_index_oid(rel, indexName);
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tuple;
@@ -699,7 +771,7 @@ read_row_group_range(uint64 storageId, uint64 groupNumber,
 {
 	Relation	rel = open_columnar_table("row_group", AccessShareLock);
 	TupleDesc	td = RelationGetDescr(rel);
-	Oid			rgIdx = pgcolumnar_index_oid("row_group_pkey");
+	Oid			rgIdx = pgcolumnar_scan_index_oid(rel, "row_group_pkey");
 	ScanKeyData key[2];
 	SysScanDesc scan;
 	HeapTuple	tuple;
@@ -790,7 +862,7 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 		ItemPointerData mergeTids[2];
 		int			nMerge = 0;
 
-		Oid			fsIdx = pgcolumnar_index_oid("free_space_pkey");
+		Oid			fsIdx = pgcolumnar_scan_index_oid(rel, "free_space_pkey");
 
 		ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) storageId));
@@ -1084,8 +1156,8 @@ PgColumnarCheckFreeSpaceNoOverlap(uint64 storageId)
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	rg = open_columnar_table("row_group", AccessShareLock);
 	fs = open_columnar_table("free_space", AccessShareLock);
-	rgIdx = pgcolumnar_index_oid("row_group_pkey");
-	fsIdx = pgcolumnar_index_oid("free_space_pkey");
+	rgIdx = pgcolumnar_scan_index_oid(rg, "row_group_pkey");
+	fsIdx = pgcolumnar_scan_index_oid(fs, "free_space_pkey");
 	rgd = RelationGetDescr(rg);
 	fsd = RelationGetDescr(fs);
 	ranges = palloc(sizeof(ReclaimRange) * cap);
@@ -1386,7 +1458,7 @@ PgColumnarReconcileFreeList(Relation dataRel)
 	qsort(foots, nf, sizeof(FootRange), footrange_cmp);
 
 	fsrel = open_columnar_table("free_space", RowExclusiveLock);
-	fsIdx = pgcolumnar_index_oid("free_space_pkey");
+	fsIdx = pgcolumnar_scan_index_oid(fsrel, "free_space_pkey");
 	td = RelationGetDescr(fsrel);
 	foreach(lc, storages)
 	{
