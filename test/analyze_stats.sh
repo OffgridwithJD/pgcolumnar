@@ -302,6 +302,11 @@ check "having an index available saves the point lookup real work" \
 # and on the fixed build 341 ms against a 155 ms scan, which is why the threshold
 # has room. The reference is a full scan of the same table: ANALYZE reads a
 # sample and must not cost multiples of reading everything.
+# ins_ms TIMES THE WHOLE FIXTURE BUILD -- the DROP and CREATE as well as the
+# INSERT -- because they arrive in one psql_run and cannot be timed apart. It
+# therefore OVERSTATES the insert, which inflates the cap: the safe direction.
+# The name is kept because the arms below are ledgered under it. Named by
+# @jdatcmd.
 _as_t0=$(date +%s%N)
 psql_run "DROP TABLE IF EXISTS as_w;
 	CREATE TABLE as_w (a bigint, b int, c int, d int, e timestamptz,
@@ -371,23 +376,36 @@ check_num "and one millisecond past it the derived bound takes over" \
 	"$(pgc_analyze_cap_ms 251)" "5020"
 check_num "a missing or zero insert time still yields the floor, not zero" \
 	"$(pgc_analyze_cap_ms 0)" "5000"
-# THE INPUT GUARD WAS UNCOVERED UNTIL THIS ARM (#1236's taxonomy). Removing it
+# THE INPUT GUARD WAS UNCOVERED UNTIL THESE ARMS (#1236's taxonomy). Removing it
 # reddened NOTHING on five majors, and the reason is that 0, "", "abc" and a
-# negative all reach the floor anyway -- `$(( ))` reads them as 0. The one input
-# it actually defends is a PARTIALLY numeric token, where bash raises an
-# arithmetic syntax error and the function prints nothing at all:
+# negative all reach the floor anyway -- `$(( ))` reads them as 0.
 #
-#     pgc_analyze_cap_ms 12abc     with the guard  5000
-#                                  without it      <arithmetic error, no output>
+# WHAT IT DEFENDS IS A CLASS, NOT ONE TOKEN: everything `[ "$_i" -gt 0 ]`
+# refuses, which is anything bash will not read as an int64. Two members, and
+# the second is the dangerous one:
 #
-# So it is an uncovered guard rather than a redundant condition, and it is
-# covered rather than deleted.
+#     pgc_analyze_cap_ms 12abc                    guarded 5000
+#                                                 unguarded <arithmetic error, no output>
+#     pgc_analyze_cap_ms 99999999999999999999     guarded 5000
+#                                                 unguarded 7751640039368425452
+#
+# The arithmetic error is LOUD. The overflow is not: `$(( ))` wraps silently and
+# returns a positive number that sails past the floor, so the unguarded function
+# yields a 7.7-quintillion-millisecond cap -- a bound that can never fail, which
+# looks exactly like a passing test. No insert will take 10^20 ms; the point is
+# that the first version of this comment named the partially numeric token as
+# "the one input it actually defends", and that sentence is what a later reader
+# would use to justify deleting a guard that also catches the silent case.
+# Named by @jdatcmd. So: an uncovered guard rather than a redundant condition,
+# and covered rather than deleted.
 check_num "a malformed insert time yields the floor rather than an arithmetic error" \
 	"$(pgc_analyze_cap_ms '12abc' 2>/dev/null)" "5000"
+check_num "and an insert time past int64 yields the floor rather than a cap that cannot fail" \
+	"$(pgc_analyze_cap_ms '99999999999999999999' 2>/dev/null)" "5000"
 
 check "ANALYZE on a wide table completes well inside its derived cap" \
 	"$(awk -v a="$an_ms" -v c="$cap_ms" \
-		'BEGIN { print (c > 0 && a < c) ? "yes" : "no (" a "ms against a " c "ms cap)" }')" \
+		'BEGIN { print (a < c) ? "yes" : "no (" a "ms against a " c "ms cap)" }')" \
 	"yes"
 
 # --- 6. the fetch cost keeps the planner off an unclustered ordered index (#355) --

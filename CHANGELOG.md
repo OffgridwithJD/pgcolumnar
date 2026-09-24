@@ -458,6 +458,32 @@ true until the next version shipped.
 
 ### Fixed
 
+- The ANALYZE cap's input guard defends a class, and the comment named one
+  member of it (#1252).
+
+  The first version said a partially numeric token was "the one input it
+  actually defends". The guard refuses everything bash will not read as an
+  int64, and the other member is the dangerous one:
+
+  ```
+    pgc_analyze_cap_ms 12abc
+      guarded 5000   unguarded <arithmetic error>
+    pgc_analyze_cap_ms 99999999999999999999
+      guarded 5000   unguarded 7751640039368425452
+  ```
+
+  `$(( ))` wraps silently and returns a positive number past the floor, so the
+  unguarded function yields a cap that can never fail. An arithmetic error is
+  loud; a bound that always passes looks like a green test. An arm now covers
+  the overflow member, and the sentence that would have justified deleting the
+  guard is gone.
+
+  The dead `c > 0` conjunct in the same arm is removed by the same rule: it
+  cannot fire, because the cap is never below its floor, and a condition that
+  cannot be covered gets removed.
+
+  Both named by @jdatcmd on #1258.
+
 - `analyze_stats`' wide-table bound is derived from the run and floored, instead
   of being a ratio over a 20 ms scan that was mostly process startup (#1252).
 
