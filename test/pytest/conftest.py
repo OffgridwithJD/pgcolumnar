@@ -189,6 +189,54 @@ def _serve_cluster(cluster, root, verdict, worker_id):
 
 
 @pytest.fixture
+def pgc_own_db(pgc_cluster, request):
+    """A private DATABASE, where `pgc_conn` gives a private schema.
+
+    `pgc_conn` is the right trade almost everywhere: isolation without paying an
+    initdb per test. IT IS THE WRONG ONE FOR ANY TEST WHOSE CLAIMS ARE ABOUT THE
+    SIZE OR EMPTINESS OF THE pgcolumnar CATALOGS, because those live in the
+    database and are shared by every test in the session.
+
+    Measured, and it is why this exists (#1213): a file asserting a claim about
+    catalog size saw six catalog pages run alone and thirty-nine run after the
+    other fifty-one cluster files, and the claim fell from 223 parts per
+    thousand to 65 -- under its floor. The arm was not wrong and the code was not
+    wrong; the fixture's assumption was, and it held only in the arrangement
+    that had been run. CI found it and a single-file run could not.
+
+    The extension is created on the raw connection before the wrapper goes on,
+    the way pgc_conn creates its schema: that is this fixture's own DDL, not the
+    test's writes, and DDL carries no row count anyway.
+
+    A test using this must still not run concurrently with another that reads
+    database-wide statistics, because pg_stat_reset() is per database and this
+    one is private only to the test, not to the cluster.
+    """
+    import psycopg          # deferred: see the module docstring
+
+    name = "pgc_own_" + "".join(
+        ch if ch.isalnum() else "_" for ch in request.node.name
+    )[:40]
+
+    def admin(sql):
+        c = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
+        try:
+            c.execute(sql)
+        finally:
+            c.close()
+
+    admin(f'DROP DATABASE IF EXISTS "{name}"')
+    admin(f'CREATE DATABASE "{name}"')
+    conn = psycopg.connect(pgc_cluster.dsn(dbname=name), autocommit=True)
+    try:
+        conn.execute("CREATE EXTENSION pgcolumnar")
+        yield pgc_vacuity.watch_writes(conn, request.node.nodeid)
+    finally:
+        conn.close()
+        admin(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+@pytest.fixture
 def pgc_conn(pgc_cluster, request):
     """A direct connection, in a schema private to this one test.
 

@@ -125,7 +125,7 @@ behaviour, the source of that number is named.
 - [77. test_projection_parallel.py: a covering projection can be a parallel scan](#77-test_projection_parallelpy-a-covering-projection-can-be-a-parallel-scan)
 - [78. test_ttl_expire.py: the one function that deletes rows, tested twice](#78-test_ttl_expirepy-the-one-function-that-deletes-rows-tested-twice)
 - [79. test_projection_scan_io.py: a covering projection is not priced from the base table's pages](#79-test_projection_scan_iopy-a-covering-projection-is-not-priced-from-the-base-tables-pages)
-- [80. test_catalog_plan_index.py: planning uses the options and projection indexes](#80-test_catalog_plan_indexpy-planning-uses-the-options-and-projection-indexes)
+- [80. test_catalog_plan_index.py: planning pays for these catalogs only when they hold something](#80-test_catalog_plan_indexpy-planning-pays-for-these-catalogs-only-when-they-hold-something)
 - [81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database](#81-test_catalog_delete_indexpy-retiring-a-row-group-costs-no-more-for-a-bigger-database)
 
 ## 1. How to read a test in here
@@ -6170,11 +6170,19 @@ fixtures are `psio_e` and `pciot_e`.
 | `test_projection_scan_io` | the table and covering projection exist; the plan uses that projection; the covering scan has a positive run cost; the projection occupies a minority of the relation; the covering run is not priced from the base table's pages; a covering path whose storage cannot be found is not priced as one page |
 | `test_an_empty_covering_projection_is_priced_as_one_page` | the projection is found and its storage holds no row groups; an empty covering projection is still priced as one page, so it is still chosen |
 
-## 80. test_catalog_plan_index.py: planning uses the options and projection indexes
+## 80. test_catalog_plan_index.py: planning pays for these catalogs only when they hold something
 
-Port of `catalog_plan_index.sh`. A plan that asks what one columnar table was written with, and whether it has a projection, sequentially scanned `pgcolumnar.options` and `pgcolumnar.projection`. Both catalogs already have a primary key on the column the scan key names.
+Port of `catalog_plan_index.sh`. A plan that asks what one columnar table was written with, and whether it has a projection, sequentially scanned `pgcolumnar.options` and `pgcolumnar.projection`. Both catalogs already have a primary key on the column the scan key names, and #1198 made planning use it.
 
-The measured statement runs on a second connection. The shell suite gets that by using a fresh `psql` for every statement. This file holds one connection for the writes and opens another for the scan, for the same reason `test_native_delete_vector_index.py` does: the session that just wrote is a different path.
+THAT WAS A REGRESSION ON THE DEFAULT CONFIGURATION, AND THIS FILE NOW SAYS SO. A row reaches `options` only when `set_options` is called and `projection` only when a projection is added, so an installation doing neither has both empty. At zero rows the heap the probe replaces is zero pages, the scan is literally free, and the probe cannot win however large the database grows -- there is no crossover to be above. Measured on main before the fix: six index buffers per plan, flat at 10, 200 and 1000 columnar tables alike. #1217 routes those seven sites through the size check shipped in #1213, and the cost returns to nothing.
+
+FOUR ARMS WERE REMOVED RATHER THAN REPAIRED. They asserted `idx_scan >= 1` and `seq_scan == 0` on each catalog -- which path was taken, not how much work was done -- and they fail against the build that made planning strictly cheaper. That is a guard firing on correct code, the same defect #1213 removed from `catalog_delete_index.sh`. It was predicted before the change was written: the prediction named those four arms, the direction each would move, and the storage arms as the ones that must not move, and all three held.
+
+ON A PRIVATE DATABASE, for the two tests whose claims are about catalog size. `pgc_conn` gives a private schema and these catalogs are per database, so inside the corpus other files have already populated them; `pgc_own_db` in `conftest.py` gives a database of its own. That fixture exists because the same trap bit `test_catalog_delete_index.py` first -- see section 81.
+
+THE BULK OF THE PROJECTIONS GOES ON A TABLE THAT IS NOT THE MEASURED ONE. A probe's cost scales with the rows matching its key, not with the size of the catalog. The shell twin's first draft put 300 projections on the measured table, so every row matched, and it read the probe LOSING at seven pages -- which would have been recorded as "the threshold is wrong for the planner path". A premise now asserts the measured table owns a small share.
+
+The two halves share no fixture: the shell suite drives `projection` to 7 pages with 300 projections on a noise table and measures 50 plans; this one uses 260 and a different measured table, and reads the work per catalog rather than summing in SQL.
 
 `pg_stat_reset()` is database-wide. The corpus runs serially within a worker.
 
@@ -6182,7 +6190,9 @@ The measured statement runs on a second connection. The shell suite gets that by
 
 | test | what it holds |
 | --- | --- |
-| `test_catalog_plan_index` | the measured table's row count, that the filtered scan returned every row, and that `options` and `projection` were probed by index with `seq_scan` still 0 |
+| `test_catalog_plan_index` | the measured table's row count, that the filtered scan returned every row, and that planning a `count(*)` and a two-relation join reach `pgcolumnar.storage` through `storage_pkey` |
+| `test_planning_costs_nothing_on_the_default_configuration` | that this fixture really is the default configuration with both catalogs empty, that forcing the probe costs something so the instrument measured, that planning costs less than probing both, and that it touches the empty catalogs **not at all** |
+| `test_planning_still_probes_a_populated_catalog` | that `projection` is larger than the threshold so the two paths differ, that the measured table owns a small share of it, that reading it whole costs something, and that planning costs less than reading it whole |
 
 ## 81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database
 

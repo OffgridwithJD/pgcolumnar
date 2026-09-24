@@ -2233,7 +2233,7 @@ PgColumnarRenameDeclaredSortByColumn(Oid relid, const char *oldName,
 	 * cannot reach it. That is the reason to fix it rather than a reason not to.
 	 */
 	{
-		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+		Oid			optIdx = pgcolumnar_scan_index_oid(rel, "options_pkey");
 
 		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), NULL, 1, key);
 	}
@@ -3425,7 +3425,7 @@ PgColumnarReadOptions(Oid relid, PgColumnarOptions *opts)
 	 * asked about one of them.
 	 */
 	{
-		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+		Oid			optIdx = pgcolumnar_scan_index_oid(rel, "options_pkey");
 
 		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
 	}
@@ -3647,7 +3647,7 @@ PgColumnarReadTtl(Oid relid, char **column, Interval **interval)
 	ScanKeyInit(&key[0], Anum_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 	{
-		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+		Oid			optIdx = pgcolumnar_scan_index_oid(rel, "options_pkey");
 
 		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
 	}
@@ -3694,7 +3694,7 @@ PgColumnarReadSortBy(Oid relid)
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
 	{
-		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+		Oid			optIdx = pgcolumnar_scan_index_oid(rel, "options_pkey");
 
 		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), snapshot, 1, key);
 	}
@@ -3748,7 +3748,7 @@ PgColumnarDeleteOptions(Oid relid)
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
 	{
-		Oid			optIdx = pgcolumnar_index_oid("options_pkey");
+		Oid			optIdx = pgcolumnar_scan_index_oid(rel, "options_pkey");
 
 		scan = systable_beginscan(rel, optIdx, OidIsValid(optIdx), NULL, 1, key);
 	}
@@ -4176,7 +4176,7 @@ PgColumnarListProjections(uint64 storageId)
 	 * those writes; dropping it would not.
 	 */
 	{
-		Oid			projIdx = pgcolumnar_index_oid("projection_pkey");
+		Oid			projIdx = pgcolumnar_scan_index_oid(rel, "projection_pkey");
 
 		scan = systable_beginscan(rel, projIdx, OidIsValid(projIdx), NULL, 1, key);
 	}
@@ -4221,7 +4221,7 @@ PgColumnarDeleteProjectionRow(uint64 storageId, int projectionId)
 				F_INT4EQ, Int32GetDatum(projectionId));
 
 	{
-		Oid			projIdx = pgcolumnar_index_oid("projection_pkey");
+		Oid			projIdx = pgcolumnar_scan_index_oid(rel, "projection_pkey");
 
 		scan = systable_beginscan(rel, projIdx, OidIsValid(projIdx), NULL, 2, key);
 	}

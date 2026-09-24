@@ -897,4 +897,50 @@ suites_not_covered 249
 # not there holds none" (G, redundant) and "a preflight that built nothing says
 # how many it built", which predates this change -- K reddens its two siblings
 # but leaves the `built 0 of 3` line intact.
-checks_never_observed_red 1534
+#
+# 1534 -> 1539 for #1217, RE-ANCHORED after #1219 landed under this branch.
+# It was written against 1532 and rebased onto a main that now declares 1534;
+# the arithmetic below is redone against what main actually holds, not adjusted
+# by the difference. Counted:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1539
+#     1694 rows total, 155 not `never`,  1539 + 155 == 1694
+#
+#     4 rows REMOVED, all of them dated        never unchanged, dated -4
+#     8 rows ADDED: 5 arrive `never`, 3 dated  never +5,        dated +3
+#     1534 + 5 == 1539        1690 - 4 + 8 == 1694
+#
+# THE ROWS AUTO-MERGED AND ONLY THIS LINE CONFLICTED, which is the shape to be
+# careful about rather than reassured by: a conflict on the total is a prompt to
+# RECOUNT, not a choice between two numbers. Measured on a different pair the
+# same day, composing two branches that touched DISJOINT parts: the rows
+# conflicted too, and taking one side gave the right count while taking the
+# other silently dropped three rows and reported a number nothing reads as
+# wrong. Union the rows; recount the total.
+#
+# FOUR ROWS CARRYING HISTORY WERE DELETED, AND THE TOOL REFUSED TO DO IT FOR ME.
+# `orphan-scan --prune` said: "the catalogue is what this ledger is for -- no run
+# can recreate it. Reconcile them instead: rename the ledger row to the check's
+# new name, or say in the commit why the history may go." This is the second
+# route.
+#
+#     planning probed pgcolumnar.options through options_pkey
+#     planning did not sequentially scan pgcolumnar.options
+#     planning probed pgcolumnar.projection through projection_pkey
+#     planning did not sequentially scan pgcolumnar.projection
+#
+# THEY ARE NOT RENAMES AND MUST NOT BE RECORDED AS ONE. Each asserted WHICH
+# ACCESS PATH was taken; their replacements assert HOW MUCH WORK was done. Moving
+# a path claim's history onto a work claim's row would say those arms had been
+# observed red under a mutation they never ran, which is the one thing a ledger
+# exists to prevent. The history is real and it is history of a check that should
+# not exist: all four fail against a build that made planning strictly cheaper --
+# 300 buffers over 50 plans down to nothing -- which is a guard firing on correct
+# code.
+#
+# What replaces them was observed red under three mutations, one of which is
+# PARTIAL: reverting only the five options_pkey sites and keeping the two
+# projection ones reddens exactly one arm, at exactly the residual cost.
+#
+# suites_not_covered does NOT move: catalog_plan_index is already covered.
+checks_never_observed_red 1539
