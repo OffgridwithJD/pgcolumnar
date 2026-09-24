@@ -18,6 +18,47 @@ true until the next version shipped.
 
 ### Changed
 
+- Eighteen arms across `validity_elision`, selftest part 190 and
+  `native_join_vector_agg` now carry a mutation that reddens them (#1236). No
+  test changed and no code changed: the arms were attacked and the ledger
+  records what happened.
+
+  Six mutations over three parts, each prediction written before it ran:
+
+  ```
+    veC    the elision predicate forced true              5 arms
+    b190A  pgc_build_needs_clean never asks for a clean    5 arms
+    b190B  the stamp writes an escaped literal (#898)      2 arms
+    b190C  pgc_build_needs_clean always demands a clean    2 arms
+    b190D  unknown provenance reported as a major, PG?     2 arms
+    jvaB   the dim-side uniqueness refusal disabled        2 arms
+  ```
+
+  **b190A and b190C are opposites and redden disjoint pairs.** A guard that
+  never cleans loses the five arms about when a clean is required; a guard that
+  always cleans loses exactly two -- "building the same major again needs no
+  clean" and "but a tree with no objects at all needs nothing, stamp or not".
+  Only those two can tell a correct guard from one that is merely fail-closed,
+  and a guard that cleans unconditionally would pass every other arm in the part.
+
+  **Fifteen of the eighteen are newly dated.** The other three are
+  `validity_elision` arms already dated under the inverse mutation -- the
+  predicate forced *false* rather than *true* -- so they now carry both strings.
+  An arm reddened by a predicate in either direction is stronger evidence than
+  one reddened in a single direction, and the ledger keeps both rather than
+  overwriting.
+
+  Re-derived on the merged tree rather than carried forward. All six had been
+  run once before #1240 and #1241 landed, and all six were re-run against
+  `ac80762a`, reproducing their earlier results exactly -- same names, not merely
+  the same counts, with a control showing the comparison can separate unrelated
+  sets. "The check names still exist" and "the mutation still reddens them" are
+  different claims, and only re-running tests the second.
+
+  The two C mutations ran with a forced `make clean`: PGXS here has no
+  `--enable-depend`, so a stale object after a header edit would leave `veC`
+  reddening nothing and reading exactly like a fixture fact.
+
 - Nine `index_am_support` arms now carry a mutation that reddens them (#1236).
   No test changed and no code changed.
 
