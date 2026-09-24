@@ -458,6 +458,52 @@ true until the next version shipped.
 
 ### Fixed
 
+- A failed hand rebuild now says why, and stops the arms beneath it reporting on
+  a rebuild that did not happen (#1248).
+
+  The 2026-09-24 nightly failed on aarch64 with the whole diagnosis being
+
+  ```
+    FAIL  premise: the hand rebuild itself succeeded: got [1] want [0]
+  ```
+
+  and nothing else. `rebuild.sh`'s output goes to a file the part deletes on the
+  way out, so the cause left with the workdir. **The three arms below that
+  premise then ran anyway and reported PASS.**
+
+  They were not vacuous that night, and only by luck: `rebuild.sh` writes both
+  stamps at step 3b and the unresolved-symbol check that rejected the build comes
+  after, so the stamps the three arms read had in fact been written. Had the
+  *build* failed, the same three arms would have read an absent stamp. That is
+  what "the premise does not gate" costs.
+
+  Both decisions are now functions the part drives directly, the way part 190
+  drives `pgc_build_needs_clean`, rather than inline branches that only a broken
+  machine exercises:
+
+  ```
+    _hr_dependents RC   ->  run | skip
+    _hr_diagnose  LOG   ->  the last 20 lines, indented, or nothing
+  ```
+
+  Driven with `rebuild.sh` forced to exit 1 *after* its stamp, reproducing the
+  aarch64 shape exactly:
+
+  ```
+    FAIL   premise: the hand rebuild itself succeeded
+    SKIP   and the freshness gate then reads the tree as built from this source
+    SKIP   and it reads a different source as stale rather than fresh
+    SKIP   and the installed library of the running major was never touched
+    the diagnosis is printed, and carries the failing line rather than a status
+  ```
+
+  **This does not fix the aarch64 failure and does not guess at it.** The
+  hypothesis is GCC's outline-atomic helpers (`__aarch64_*`) resolving from
+  libgcc and falling outside the `ldd` reference set the symbol check builds, and
+  there is no aarch64 box here to test it on. What this change does is make the
+  next nightly report the symbol names instead of a bare exit status, so the fix
+  after it is measured rather than reasoned about.
+
 - `pgc_reconcile_records` no longer reports an impossible mismatch on a log it
   cannot measure (#1242). Handed a log that states `checks run: N` and carries
   no `RESULT` records at all, it ran the arithmetic anyway and concluded that

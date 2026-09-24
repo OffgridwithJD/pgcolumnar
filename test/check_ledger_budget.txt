@@ -799,4 +799,40 @@ suites_not_covered 249
 # each. Counted on both trees rather than reasoned: registered == covered +
 # not_covered holds on each, and the only name in the difference either way is
 # catalog_delete_index.
-checks_never_observed_red 1530
+#
+# 1530 -> 1532 for #1248, composed onto the main that carries #1213.
+# RE-DERIVED BY COUNTING, decomposed by population:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1532
+#     1673 rows total, 141 not `never`,  1532 + 141 == 1673
+#
+#     11 new rows: 3 arrive `never`, 8 arrive dated
+#      1 pre-existing row flips never -> dated
+#     1530 - 1 + 3 == 1532
+#
+# THIS BRANCH HAS CARRIED 1508 AND NOW 1532, and only the second describes a tree
+# that exists. BOTH figures were published before this merge existed -- mine and
+# @jdatcmd's, derived from different sides -- and both said 1532. A recount
+# compared only against itself is the derived-term problem: it always looks
+# consistent. Two predictions made independently and one count is not.
+#
+# THE ROWS AUTO-MERGED AND ONLY THIS LINE CONFLICTED, which is the right shape:
+# the rows are all true facts about checks and compose silently; the total is
+# derived and must not. Checked per part, because a total cannot see one row
+# lost and another duplicated: catalog_delete_index 30 rows from #1213, part 580
+# 22 rows from here, zero duplicate keys.
+#
+# SIX MUTATIONS, and the part has zero non-premise arms never observed red.
+# A, B and C force rebuild.sh to exit 1 AFTER it writes its stamp, which is the
+# aarch64 shape exactly; D, E and F leave rebuild.sh alone and attack the
+# healthy path. B reproduces the ORIGINAL defect beside the fix: with the gate
+# reverted the dependents PASS despite the failed premise.
+#
+# The two gate arms carry the SINGULAR gate mutation rather than the compound.
+# @jdatcmd drove the revert alone and got exactly those two: they call the gate
+# with the literals 1 and "", so the rebuild's status never reaches them and the
+# forced failure is inert for them.
+#
+# The three rows arriving `never` are premises: two `type -t` exposure checks
+# and one asserting that a rebuild with no pg_config fails.
+checks_never_observed_red 1532
