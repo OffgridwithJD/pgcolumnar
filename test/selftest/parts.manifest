@@ -55,3 +55,4 @@
 560-the-objects-decide-which-major.sh
 570-a-checkout-test-must-ask-git.sh
 580-a-hand-rebuild-must-record.sh
+590-a-declared-suite-must-account.sh

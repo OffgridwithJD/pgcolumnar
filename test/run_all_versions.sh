@@ -859,6 +859,8 @@ pgc_stamp_log() {	# pgc_stamp_log LOGFILE FINGERPRINT
 	# suites and still print PASS, because verfail is per major and the file was
 	# not. Written beside every increment of the counter they belong to, so the
 	# names and the count cannot drift apart.
+	_acc_terminated="$builddir/accounting.terminated"
+	: >"$_acc_terminated"
 	_acc_ranfile="$builddir/accounting.ran"
 	_acc_skipfile="$builddir/accounting.skipped"
 	: >"$_acc_ranfile"
@@ -984,7 +986,7 @@ pgc_suite_declares_accounting() {	# pgc_suite_declares_accounting FILE -> yes|no
 	fi
 }
 
-pgc_log_shows_accounting() {	# pgc_log_shows_accounting LOGFILE -> yes|no
+pgc_log_shows_accounting() {	# pgc_log_shows_accounting LOGFILE -> yes|terminated|no
 	# The runtime twin of the declaration above. pgc_summary prints this line on
 	# EVERY exit path -- pass, failure, skip and incomplete -- before it decides
 	# the status, so its presence says "this suite reached its summary" and not
@@ -998,10 +1000,26 @@ pgc_log_shows_accounting() {	# pgc_log_shows_accounting LOGFILE -> yes|no
 	# of thing that reads as an oversight later.
 	local _log="$1"
 	[ -f "$_log" ] || { echo no; return 0; }
-	if grep -qE '^accounting: [0-9]+ passed \+ [0-9]+ failed \+ [0-9]+ unrunnable \+ [0-9]+ skipped = [0-9]+$' "$_log"; then
-		echo yes
-	else
+	if ! grep -qE '^accounting: [0-9]+ passed \+ [0-9]+ failed \+ [0-9]+ unrunnable \+ [0-9]+ skipped = [0-9]+$' "$_log"; then
 		echo no
+		return 0
+	fi
+	# THREE STATES, NOT TWO (#1233). Before the EXIT trap emitted accounting, the
+	# presence of that line meant "this suite reached its summary", because
+	# pgc_summary was the only thing that printed it. It is no longer: a suite
+	# that dies on one of pgc_setup's eight exits now prints the line too, and
+	# without this branch a terminated run and a completed one give the same
+	# verdict to every caller.
+	#
+	# `yes` therefore keeps its ORIGINAL meaning -- reached its summary -- and
+	# the new state gets its own value rather than being folded into either
+	# neighbour. Folding it into `yes` loses the mid-run death; folding it into
+	# `no` restores the false "declared but never accounted" the trap was added
+	# to remove.
+	if grep -q ': TERMINATED before its summary$' "$_log"; then
+		echo terminated
+	else
+		echo yes
 	fi
 }
 
@@ -1465,12 +1483,17 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 		# Only a suite that reached its summary has a count to reconcile against
 		# (#917). One that was never dispatched, or that does not use lib.sh's
 		# accounting at all, has nothing to compare and is not a mismatch.
-		if [ "$(pgc_log_shows_accounting "$builddir/${s}.log")" = yes ]; then
+		# A TERMINATED log reconciles too (#1233): it carries a `checks run:`
+		# and the RESULT lines behind it, and whether those agree is the same
+		# question. Only `no` has nothing to compare.
+		case "$(pgc_log_shows_accounting "$builddir/${s}.log")" in
+		yes|terminated)
 			if ! pgc_reconcile_records "$builddir/${s}.log"; then
 				echo "    in $s"
 				_rec_bad=$((_rec_bad + 1))
 			fi
-		fi
+			;;
+		esac
 	done
 	if [ "$_rec_bad" != 0 ]; then
 		echo "  $_rec_bad suite(s) on PG$major state a check count their records do not match"
@@ -1511,9 +1534,31 @@ pgc_tally_suite() {	# pgc_tally_suite NAME VERDICT LOGFILE
 				_acc_absent=$((_acc_absent + 1))
 				;;
 		esac
-		[ "$(pgc_log_shows_accounting "$builddir/${s}.log")" = yes ] \
-			&& printf '%s\n' "$s" >>"$_acc_observed"
+		# TERMINATED COUNTS AS OBSERVED, and is NAMED separately (#1233). It
+		# produced the accounting it declared, so it is not "declared but never
+		# accounted" -- reporting it as such was the false positive the trap
+		# removed. But a suite that stopped before its summary is not the same
+		# as one that ran to completion, and the difference is worth printing
+		# rather than swallowing: the rc already fails the run, this says which
+		# suite and why.
+		case "$(pgc_log_shows_accounting "$builddir/${s}.log")" in
+		yes)
+			printf '%s\n' "$s" >>"$_acc_observed"
+			;;
+		terminated)
+			printf '%s\n' "$s" >>"$_acc_observed"
+			printf '%s\n' "$s" >>"$_acc_terminated"
+			;;
+		esac
 	done
+	# NAMED, NOT COUNTED, and not a failure on its own: the suite's own rc has
+	# already failed the run. This says WHICH suite stopped before its summary,
+	# which the accounting line alone no longer distinguishes (#1233).
+	if [ -s "$_acc_terminated" ]; then
+		while IFS= read -r _t; do
+			[ -n "$_t" ] && echo "  terminated before its summary on PG$major: $_t"
+		done <"$_acc_terminated"
+	fi
 	if [ "$_acc_absent" != 0 ]; then
 		echo "  $_acc_absent registered suite(s) on PG$major have no file, which is not a pass"
 		verfail=1

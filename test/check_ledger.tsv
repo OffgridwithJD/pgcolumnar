@@ -1390,6 +1390,25 @@ harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild tool i
 harness_selftest	580-a-hand-rebuild-must-record	premise: the shim redirects the install away from the real prefix	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild tool records what it installed rather than only naming it	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, or the comment stripping removed
 harness_selftest	580-a-hand-rebuild-must-record	the recorder refuses when it is not told what was installed	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
+harness_selftest	590-a-declared-suite-must-account	a completed suite still reads as having reached its summary	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	a suite that DID reach its summary is not given a second one	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	a suite that never reached its summary is given the accounting it owes	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	a terminated suite reads as terminated, not as a completed one	15;16;17;18;19	2026-09-23	pgc_log_shows_accounting folded back to two values, so a terminated log reads as a completed one
+harness_selftest	590-a-declared-suite-must-account	and a log with no accounting still reads as none	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	and it is marked TERMINATED, so a reader can tell it from a full run	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	and nothing still arms the bare teardown	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	and pgc_setup still calls pgc_summary on none of them	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	every clean exit in a declared suite reaches its summary first	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	premise: declared suites do have clean exits of their own to check	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	premise: lib.sh is where the exits and the trap both live	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	premise: pgc_setup still has the eight exits this covers	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	premise: the reader is callable once evalled	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	premise: the reader that consumes this line is where it was	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	premise: the reader's own pattern was extracted, not guessed	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	the EXIT trap runs the wrapper, so every exit reaches the accounting	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	the line it emits is the line the reconciliation reads	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	590-a-declared-suite-must-account	the suite's own counters are restored after every driving block	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	the wrapper captures the exit status before anything overwrites it	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
