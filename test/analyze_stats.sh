@@ -302,6 +302,7 @@ check "having an index available saves the point lookup real work" \
 # and on the fixed build 341 ms against a 155 ms scan, which is why the threshold
 # has room. The reference is a full scan of the same table: ANALYZE reads a
 # sample and must not cost multiples of reading everything.
+_as_t0=$(date +%s%N)
 psql_run "DROP TABLE IF EXISTS as_w;
 	CREATE TABLE as_w (a bigint, b int, c int, d int, e timestamptz,
 	                   f text, g text, h text) USING pgcolumnar;
@@ -309,23 +310,84 @@ psql_run "DROP TABLE IF EXISTS as_w;
 		'2020-01-01'::timestamptz + (g || ' sec')::interval,
 		repeat('x', 200) || g, repeat('y', 200) || g, repeat('z', 200) || g
 	FROM generate_series(1, ${PGC_ANALYZE_WIDE_ROWS:-40000}) g;" >/dev/null
+_as_t1=$(date +%s%N)
+ins_ms=$(( (_as_t1 - _as_t0) / 1000000 ))
 
 t0=$(date +%s%N)
 psql_run "ANALYZE as_w;" >/dev/null
 t1=$(date +%s%N)
 an_ms=$(( (t1 - t0) / 1000000 ))
 
-t0=$(date +%s%N)
-psql_run "SET pgcolumnar.enable_vectorization = off;
-	SELECT count(h) FROM as_w;" >/dev/null
-t1=$(date +%s%N)
-scan_ms=$(( (t1 - t0) / 1000000 ))
+# THE BOUND IS DERIVED FROM THE RUN AND FLOORED (#1252). It used to be
+# `an_ms < scan_ms * 20`, and both halves of that were wrong.
+#
+# THE OLD DENOMINATOR WAS MOSTLY NOT A SCAN. `psql_run` spawns a psql process
+# and connects over TCP, and the timed region includes that. Measured on
+# pgcolumnar-audit, pg17a, five interleaved rounds, the same wrapper around
+# `SELECT 1` as the control:
+#
+#     empty  7.8 ms    insert 316.6 ms    scan 20.0 ms    analyze 115.2 ms
+#
+# so the scan carried ~12 ms of work above an ~8 ms floor -- 1.5x its own noise
+# -- while the insert carried ~309 ms, 40x it. A ratio over the scan measures the
+# floor as much as the scan, which is why the same guard read 5.8 locally and
+# 25.2 on a CI runner and went red there on a branch that could not reach ANALYZE.
+#
+# AND THE TWO TERMS DID NOT MOVE TOGETHER. On that CI run ANALYZE was 3.1x this
+# box while the scan was 0.7x it. The insert reads and writes the same rows the
+# ANALYZE samples, so it tracks the same hardware and the same data volume.
+#
+# THE FLOOR IS NOT DECORATION. A relative guard tightens silently whenever its
+# baseline improves, which is exactly how the old one arrived here: the comment
+# above justified 20x against "341 ms against a 155 ms scan", and no machine has
+# measured a 155 ms scan since. The floor means a future faster write path
+# cannot squeeze this bound into a flake.
+#
+# THE BUG IS A HANG, NOT A SLOWDOWN, so the bound does not need to be tight.
+# Measured by removal against f82bdcd's parent, same fixture, each tree building
+# its own .so: UNFIXED did not complete within 180 s (an unbounded run was killed
+# at 10m52s of 99.9% CPU, still running) against 206 ms fixed. At least 3000x.
+pgc_analyze_cap_ms() {	# pgc_analyze_cap_ms INSERT_MS -> the ceiling for ANALYZE
+	local _i="${1:-0}" _d
+	[ "$_i" -gt 0 ] 2>/dev/null || _i=0
+	_d=$(( _i * 20 ))
+	[ "$_d" -gt 5000 ] && echo "$_d" || echo 5000
+}
 
-echo "-- wide-table ANALYZE ${an_ms} ms against a ${scan_ms} ms full scan"
+cap_ms=$(pgc_analyze_cap_ms "$ins_ms")
+echo "-- wide-table ANALYZE ${an_ms} ms against a ${cap_ms} ms cap (insert ${ins_ms} ms)"
 
-check "ANALYZE on a wide table is not many times a full scan of it" \
-	"$(awk -v a="$an_ms" -v s="$scan_ms" \
-		'BEGIN { print (s > 0 && a < s * 20) ? "yes" : "no (" a "ms against a " s "ms scan)" }')" \
+# THE DECISION IS DRIVEN WITH LITERALS FIRST, so the branch a healthy machine
+# never takes is judged here rather than only by a box that happens to be slow.
+check_num "premise: the cap is exposed as a function, not written inline" \
+	"$([ "$(type -t pgc_analyze_cap_ms)" = function ] && echo 1 || echo 0)" "1"
+check_num "a fast machine still gets the floor, not a bound that shrinks with it" \
+	"$(pgc_analyze_cap_ms 1)" "5000"
+check_num "and a slow one gets a budget proportional to its own insert" \
+	"$(pgc_analyze_cap_ms 1000)" "20000"
+check_num "the floor and the derived bound meet where they should" \
+	"$(pgc_analyze_cap_ms 250)" "5000"
+check_num "and one millisecond past it the derived bound takes over" \
+	"$(pgc_analyze_cap_ms 251)" "5020"
+check_num "a missing or zero insert time still yields the floor, not zero" \
+	"$(pgc_analyze_cap_ms 0)" "5000"
+# THE INPUT GUARD WAS UNCOVERED UNTIL THIS ARM (#1236's taxonomy). Removing it
+# reddened NOTHING on five majors, and the reason is that 0, "", "abc" and a
+# negative all reach the floor anyway -- `$(( ))` reads them as 0. The one input
+# it actually defends is a PARTIALLY numeric token, where bash raises an
+# arithmetic syntax error and the function prints nothing at all:
+#
+#     pgc_analyze_cap_ms 12abc     with the guard  5000
+#                                  without it      <arithmetic error, no output>
+#
+# So it is an uncovered guard rather than a redundant condition, and it is
+# covered rather than deleted.
+check_num "a malformed insert time yields the floor rather than an arithmetic error" \
+	"$(pgc_analyze_cap_ms '12abc' 2>/dev/null)" "5000"
+
+check "ANALYZE on a wide table completes well inside its derived cap" \
+	"$(awk -v a="$an_ms" -v c="$cap_ms" \
+		'BEGIN { print (c > 0 && a < c) ? "yes" : "no (" a "ms against a " c "ms cap)" }')" \
 	"yes"
 
 # --- 6. the fetch cost keeps the planner off an unclustered ordered index (#355) --
