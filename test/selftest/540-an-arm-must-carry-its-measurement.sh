@@ -198,6 +198,26 @@ check "carried: the branch names the number" \
 	"$([ "$n" -ge 5 ] && echo yes || echo "no (found $n)")" "yes"
 PROBE
 
+# THE SHELL if/then/else FIXTURE (#1255), with its own carve-out controls and a
+# HELPER PLACED BELOW AN INNOCENT ARM -- the shape that proves the `[` rule's
+# same-line recorder conjunct, since without it the helper is charged upward.
+_lam_probe_ifs="$PGC_WORKDIR/lam_probe_ifs.sh"
+cat > "$_lam_probe_ifs" <<'PROBE'
+check_num "an if/then/else verdict whose operand vanishes" \
+	"$(if [ "$sj" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+check_num "determinate: an if/then/else against a floor of one" \
+	"$(if [ "$rows" -ge 1 ]; then echo 1; else echo 0; fi)" "1"
+check_num "determinate: an if/then/else on a file test" \
+	"$(if [ -f "$CB" ]; then echo 1; else echo 0; fi)" "1"
+check_text "carried: the if/then/else branch names the number" \
+	"$(if [ "$n" -ge 5 ]; then echo yes; else echo "no (found $n)"; fi)" "yes"
+check_text "innocent: this arm carries its own value" \
+	"$(printf '%s' "$probed")" "yes"
+margin() {
+	echo "$([ "$1" -gt "$2" ] && echo over || echo under)"
+}
+PROBE
+
 _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 	awk '
 		function determinate(t) {
@@ -236,6 +256,19 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 				line = line nxt
 			}
 		}
+		# A WHOLE-LINE COMMENT IS NOT CODE (#1255). A comment QUOTING the
+		# anti-pattern supplied a real match, and the missing recorder conjunct
+		# below then gave it the name of whatever arm preceded it -- so a file
+		# was refused for a shape it only DESCRIBED. It takes both defects; each
+		# alone is inert. Found by @jdatcmd, who had written such a comment.
+		#
+		# WHOLE-LINE ONLY, AND DELIBERATELY NOT `sub(/#.*/, "")`. 214 check names
+		# in this corpus contain a `#` -- `(#355 premise)`, `(#1164)` -- and
+		# stripping from the first one truncates the NAME the sweep reports,
+		# which trades a false positive for a corpus of mangled rows. A `#` in
+		# the middle of a line may be inside a string; a `#` at the start of one
+		# cannot be.
+		line ~ /^[[:space:]]*#/ { next }
 		# The recorder call carries the NAME in its first quoted argument.
 		line ~ /(^|[[:space:]])(check|check_num|check_text|check_ratio|pgc_fail|check_skip)[[:space:]]+"/ {
 			nm = line
@@ -276,6 +309,14 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 				if (!awk_determinate(cond) && name != "") print suite "\t" name
 			}
 		}
+		# THE SAME SAME-LINE CONJUNCT THE awk RULE CARRIES (#1255). Without it
+		# this rule fires on any line and then uses `name`, the LAST name seen,
+		# so a helper holding this shape is charged to whichever recorder arm
+		# precedes it. The comment above the awk rule explains exactly this and
+		# was applied to one rule of the two. Adding it here found nothing on
+		# the corpus -- 101 before, 101 after, both comm directions empty -- so
+		# it closes a shape rather than removing a live wrong name.
+		line ~ /(^|[[:space:]])(check|check_num|check_text|check_ratio|pgc_fail|check_skip)[[:space:]]+"/ &&
 		line ~ /\$\([[:space:]]*\[[^]]*\][[:space:]]*&&[[:space:]]*echo/ {
 			body = line
 			sub(/^.*\$\([[:space:]]*\[/, "", body)
@@ -284,6 +325,34 @@ _lam_sweep() {  # _lam_sweep FILE -> one "suite<TAB>name" per lossy arm
 			# (b) a branch that interpolates carries the value already.
 			if (arms ~ /\$/) next
 			if (determinate(test)) next
+			if (name != "") print suite "\t" name
+		}
+		# THE SHELL if/then/else SPELLING (#1255). The two rules above both
+		# require `&&`, so `$(if [ COND ]; then echo 1; else echo 0; fi)` passed
+		# through untouched -- both branches constant, the operand discarded, and
+		# `got [0] want [1]` printed on failure, which is the symptom #1164 is
+		# named for. Five live arms were lossy this way and none was tracked.
+		#
+		# NOT one of the gaps this file already records: all three of those are
+		# awk -- a verdict in a variable, an awk `if/else` inside BEGIN, and an
+		# awk at the end of a pipe. Both awk gaps were left open on the stated
+		# ground of "ZERO ARE LOSSY TODAY", which was right for them and is not
+		# available here.
+		#
+		# THE SAME TWO CARVE-OUTS as the `[` rule, for the same reasons: a
+		# branch that interpolates carries its value already, and a determinate
+		# test names its own subject.
+		line ~ /(^|[[:space:]])(check|check_num|check_text|check_ratio|pgc_fail|check_skip)[[:space:]]+"/ &&
+		line ~ /\$\([[:space:]]*if[[:space:]]*\[/ {
+			ib = line
+			sub(/^.*\$\([[:space:]]*if[[:space:]]*\[/, "", ib)
+			itest = ib; sub(/\].*$/, "", itest)
+			iarms = ib; sub(/^[^]]*\][[:space:]]*;?[[:space:]]*/, "", iarms)
+			sub(/[[:space:]]*fi[[:space:]]*\).*$/, "", iarms)
+			if (iarms !~ /then[[:space:]]*echo/) next
+			if (iarms !~ /else[[:space:]]*echo/) next
+			if (iarms ~ /\$/) next
+			if (determinate(itest)) next
 			if (name != "") print suite "\t" name
 		}
 	' suite="$(basename "${1%.sh}")" "$1"
@@ -326,6 +395,47 @@ check "control: the sweep sees an awk verdict that discards its operands" \
 _lam_awk_names="$(_lam_sweep "$_lam_probe_awk" | cut -f2 | sort | tr '\n' ';')"
 check_text "control: a determinate or carrying awk arm is not swept up" \
 	"$_lam_awk_names" "an awk verdict rendered as a number;an awk verdict whose operands vanish;"
+
+_lam_ifs_hits="$(_lam_sweep "$_lam_probe_ifs" | wc -l | tr -d ' ')"
+check "control: the sweep sees a shell if/then/else that discards its operand" \
+	"$_lam_ifs_hits" "1"
+
+# AND NAMES IT, which is the half a count cannot check. The innocent arm sits
+# directly above a helper holding the `&&` shape, so a sweep without the
+# same-line conjunct reports TWO names here and one of them is a real arm that
+# is not lossy. Naming rather than counting is what distinguishes those.
+_lam_ifs_names="$(_lam_sweep "$_lam_probe_ifs" | cut -f2 | sort | tr '\n' ';')"
+check_text "control: the carve-outs hold and the innocent arm above the helper is not named" \
+	"$_lam_ifs_names" "an if/then/else verdict whose operand vanishes;"
+
+# A COMMENT DESCRIBES THE SHAPE, IT DOES NOT COMMIT IT (#1255). A file was
+# refused for an anti-pattern it only WROTE ABOUT, and the name it was refused
+# under belonged to an innocent arm above the comment.
+#
+# IT MUST QUOTE A WHOLE RECORDER CALL, NOT A FRAGMENT, and the first version of
+# this fixture quoted a fragment -- which made both arms below VACUOUS. A
+# fragment carries no recorder call on its line, so the same-line conjunct added
+# above already refuses it whether or not comments are skipped: the arms passed
+# with the rule and without it, and mutation C reddened NOTHING on five majors.
+# Measured, once the fixture was fixed:
+#
+#     fragment comment     0 hits with the rule, 0 without   <- conjunct blocks it
+#     whole-call comment   0 hits with the rule, 1 without   <- what the rule is for
+#
+# And the name the unguarded sweep invents is `a quoted arm that only exists in
+# prose` -- not a mis-attributed real arm but one that exists nowhere, which is
+# the worse of the two failures.
+_lam_cmt="$PGC_WORKDIR/lam_probe_cmt.sh"
+cat > "$_lam_cmt" <<'PROBE'
+check_text "innocent: an arm that carries its own value" \
+	"$(printf '%s' "$probed")" "yes"
+# check_num "a quoted arm that only exists in prose" \
+# 	"$([ "$a" -lt "$b" ] && echo 1 || echo 0)" "1"
+PROBE
+check_num "premise: the comment fixture quotes a whole recorder call, not a fragment" \
+	"$(grep -cE '^[[:space:]]*#[[:space:]]*check_num[[:space:]]+"' "$_lam_cmt")" "1"
+check_num "a comment quoting an arm is not an instance of one" \
+	"$(_lam_sweep "$_lam_cmt" | wc -l | tr -d ' ')" "0"
 
 # The corpus, against the tracked debt. Both directions, in one pass.
 _lam_found="$PGC_WORKDIR/lam_found.tsv"

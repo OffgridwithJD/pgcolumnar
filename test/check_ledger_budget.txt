@@ -986,4 +986,46 @@ suites_not_covered 249
 # merge each, under the single mutation `_hr_diagnose` restored to its silent
 # `[ -s ] || return 0` form. 4 arms x 5 majors = 20 reds, and no other check went
 # red in any of the five logs.
-checks_never_observed_red 1539
+
+# #1255: 1539 -> 1540. THE ONE NEW `never` IS A FIXTURE PREMISE, and the other
+# three new arms arrive dated. Counted on the main that carries #1253
+# (78ac624), the third base this branch has been anchored on:
+#
+#     ledger rows     1696 + 4 = 1700
+#     never           1539 + 1 = 1540
+#     dated            157 + 3 =  160
+#     1540 + 160 == 1700
+#
+# THIS REBASE WAS SAFE TO UNION AND THE PREVIOUS ONE WAS NOT, which is the
+# distinction worth recording. #1253 DELETED two rows, so a union re-added them
+# and produced 1698 = 1539 + 159 against a published 1696 -- a number that reads
+# like a miscount rather than a bug. This branch deletes NO row from either
+# check_ledger.tsv or lossy_arms.tsv, so a union cannot resurrect anything and
+# only the total line conflicted. Union the ADDITIONS, honour the DELETIONS,
+# then recount; check which of the two you have before trusting the merge.
+#
+# lossy_arms.tsv does NOT move: 101 before, 101 after. The widening uncovered
+# five arms; three are repaired here and @jdatcmd repaired the other two in
+# #1254, verified against this matcher at 0 hits on that file. A widening that
+# adds no rows is the claim this file demands beside one that does.
+#
+# THREE MUTATIONS AND ONLY TWO INDEPENDENT KILLS. A (the if/then/else spelling
+# removed) and B (the same-line recorder conjunct removed) redden the SAME TWO
+# arms on all five majors, because the first of the two is a COUNT and any extra
+# hit perturbs it. Two mutations reddening one pair is two reds, not four proofs;
+# recorded as one mutation naming the other rather than as two independent kills.
+# C reddens exactly one arm, the comment one, on all five.
+#
+# C REDDENED NOTHING ON ITS FIRST RUN AND THE ARMS WERE VACUOUS. The fixture
+# quoted a FRAGMENT of the anti-pattern, and a fragment carries no recorder call
+# on its line -- so the same-line conjunct already refused it whether or not
+# comments were skipped, and both arms passed with the rule and without it.
+# Measured after the fixture was corrected to quote a WHOLE recorder call:
+#
+#     fragment comment     0 hits with the rule, 0 without   <- conjunct blocks it
+#     whole-call comment   0 hits with the rule, 1 without   <- what the rule is for
+#
+# The name the unguarded sweep invents for the second is `a quoted arm that only
+# exists in prose` -- an arm that exists nowhere, which is worse than a
+# mis-attributed real one. Only the mutation found this; the suite was green.
+checks_never_observed_red 1540

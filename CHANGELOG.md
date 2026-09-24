@@ -512,6 +512,43 @@ true until the next version shipped.
 
   This does not explain why the aarch64 rebuild fails. It makes the next nightly
   say which of the two it is.
+- Selftest part 540 could not see the shell `if/then/else` verdict, so five live
+  arms discarded their operands untracked (#1255).
+
+  540 refuses an arm whose failure cannot say what it measured. Both of its
+  matchers required the `&&` spelling, so this passed through:
+
+  ```sh
+    "$(if [ "$sj_idx" -ge 2 ]; then echo 1; else echo 0; fi)"
+  ```
+
+  Both branches are constants, `sj_idx` is discarded, and the arm renders
+  `got [0] want [1]` -- the symptom #1164 is named for. 12 raw matches,
+  7 excused
+  by 540's own `determinate()` carve-outs, five in scope and none tracked.
+  The
+  gaps 540 already records are all awk and all say "zero are lossy today".
+
+  Three of the five are repaired here; `catalog_plan_index.sh`'s two were
+  repaired in #1254. `lossy_arms.tsv` therefore does not move: 101 before, 101
+  after.
+
+  Two further matcher defects, found together and each inert alone:
+
+  - The `[ ... ] && echo` rule had no same-line recorder conjunct, though the
+    awk rule beside it does and the comment above that one explains why. It used
+    `name`, the last name seen, so a helper was charged to whichever arm
+    preceded it.
+  - Whole-line comments were read as code, so a comment **quoting** a recorder
+    call was swept as an instance of it, under a name that exists nowhere.
+
+  Comment skipping is whole-line only, and deliberately not `sub(/#.*/, "")`:
+  214 check names in this corpus contain a `#`, so stripping from the first one
+  truncates the name the sweep reports and trades a false positive for a corpus
+  of mangled rows.
+
+  The lifted sweep was validated against the shipped list before being used for
+  any of this -- 101 found, 101 tracked, both `comm` directions empty.
 
 - A failed hand rebuild now says why, and stops the arms beneath it reporting on
   a rebuild that did not happen (#1248).

@@ -1385,12 +1385,16 @@ harness_selftest	530-a-record-must-name-its-major	premise: it is callable	15;16;
 harness_selftest	530-a-record-must-name-its-major	premise: the runner defines the reader this part evals	15;16;17;18;19	never	-
 harness_selftest	530-a-record-must-name-its-major	the runner calls the reader over every suite's log	15;16;17;18;19	never	-
 harness_selftest	530-a-record-must-name-its-major	the word in a REASON is not a record that names no major	15;16;17;18;19	never	-
+harness_selftest	540-an-arm-must-carry-its-measurement	a comment quoting an arm is not an instance of one	15;16;17;18;19	2026-09-24	whole-line comments read as code again, so a comment QUOTING a recorder call is swept as an instance of it
 harness_selftest	540-an-arm-must-carry-its-measurement	a new arm that cannot say what it measured is refused by name	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	a repaired arm must have its row removed, so the list only shrinks	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: a determinate or carrying arm is not swept up	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: a determinate or carrying awk arm is not swept up	15;16;17;18;19	never	-
+harness_selftest	540-an-arm-must-carry-its-measurement	control: the carve-outs hold and the innocent arm above the helper is not named	15;16;17;18;19	2026-09-24	 else echo 0; fi)` is invisible again (mutation B, the same-line recorder conjunct removed from the `[` rule, reddens the SAME two arms -- they are not independent); then echo 1;the shell if/then/else spelling removed from the matcher, so `$(if [ C ]
+harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees a shell if/then/else that discards its operand	15;16;17;18;19	2026-09-24	 else echo 0; fi)` is invisible again (mutation B, the same-line recorder conjunct removed from the `[` rule, reddens the SAME two arms -- they are not independent); then echo 1;the shell if/then/else spelling removed from the matcher, so `$(if [ C ]
 harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees a threshold arm and a floor arm	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	control: the sweep sees an awk verdict that discards its operands	15;16;17;18;19	never	-
+harness_selftest	540-an-arm-must-carry-its-measurement	premise: the comment fixture quotes a whole recorder call, not a fragment	15;16;17;18;19	never	-
 harness_selftest	540-an-arm-must-carry-its-measurement	premise: the sweep read the corpus and classified arms in it	15;16;17;18;19	never	-
 harness_selftest	550-a-header-edit-must-rebuild	and the dependency files are ignored, so a built tree is still clean	15;16;17;18;19	never	-
 harness_selftest	550-a-header-edit-must-rebuild	and the dependency files name the project headers, not just the .c	15;16;17;18;19	never	-

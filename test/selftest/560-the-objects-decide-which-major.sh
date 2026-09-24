@@ -123,8 +123,10 @@ check_num "pgc_build_and_install consults the objects, not only the stamp" \
 	"$(printf '%s\n' "$_wire" | grep -c 'pgc_objects_built_for')" "1"
 check_num "and it still consults the stamp, which answers when the objects cannot" \
 	"$(printf '%s\n' "$_wire" | grep -c 'pgc_build_needs_clean')" "1"
-check_num "premise: the caller's text was actually found, so the counts mean something" \
-	"$(if [ "$(printf '%s\n' "$_wire" | wc -l)" -ge 10 ]; then echo 1; else echo 0; fi)" "1"
+_odm_wire_lines="$(printf '%s\n' "$_wire" | wc -l | tr -d ' ')"
+check_text "premise: the caller's text was actually found, so the counts mean something" \
+	"$(if [ "$_odm_wire_lines" -ge 10 ]; then echo yes;
+		else echo "no ($_odm_wire_lines lines, want >= 10)"; fi)" "yes"
 
 # THE ARMS ABOVE MUST NOT PASS ON PROSE. Build the text that defeated the first
 # version -- the name present, the call gone -- and require the same counting to
