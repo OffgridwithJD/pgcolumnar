@@ -78,6 +78,11 @@ PGC_UNRUN=0
 # reason is a code plus a detail from the start. A code outside this set is a
 # FAILURE rather than a silent acceptance: an enum that accepts anything is not
 # an enum, and the first invented code would make it prose again.
+# Set by pgc_summary the moment it starts, and read by the EXIT trap (#1233).
+# It answers one question: did this suite reach its own summary? A suite that
+# dies on one of pgc_setup's FATALs never does, and before this it also produced
+# no accounting line -- which is the same signal a mid-run crash gives.
+PGC_SUMMARY_PRINTED=0
 PGC_UNRUN_REASONS="MISSING_DEPENDENCY UNSUPPORTED_MAJOR ABSENT_FIXTURE UNAVAILABLE_ENDPOINT UNMET_PRECONDITION"
 
 # ---- cluster identity helpers ----------------------------------------------
@@ -317,7 +322,7 @@ pgc_setup() {
 	# between mktemp above and this line there is nothing to remove the workdir.
 	# Stopping a cluster that was never started is a no-op, so arming it early
 	# costs nothing and covers every failure path after the directory exists.
-	trap pgc_teardown EXIT
+	trap pgc_on_exit EXIT
 
 	# The matrix runner builds and installs once per version and sets
 	# PGC_SKIP_BUILD so parallel suites do not each rebuild (a no-op relink) or
@@ -533,6 +538,64 @@ pgc_setup() {
 		esac
 	}
 	psql_run "CREATE EXTENSION pgcolumnar;" >/dev/null
+}
+
+# ---- the accounting a declared suite owes even when it dies early (#1233) ---
+#
+# pgc_setup has EIGHT exit paths -- the build, the concurrent-install stamp, the
+# freshness report, the start failure, the running-binary check, the database
+# create, a cluster we did not start, and the existence check -- and calls
+# pgc_summary on none of them. Every one of the 252 suites that calls pgc_setup
+# also calls pgc_summary, so every one of them DECLARES accounting and then, on
+# any of those eight, exits without producing it.
+#
+# That is not a false PASS: rc is 1 and the FATAL is correct. What is lost is
+# the machine-readable line, and six readers consume it -- run_all_versions.sh's
+# reconciliation, pgc_vacuity.py, test_check_records.py,
+# test_residual_is_counted.py, test_suite_accounting.py and smoke.sh. To all of
+# them a declared suite with no accounting is indistinguishable from a suite
+# that died mid-run. run_all_versions.sh already names the case in the
+# reconciliation's own comment -- "declared but never accounted: the suite died
+# before reaching its summary" -- so the comment is older than the defect.
+#
+# EMITTED FROM THE TRAP, WHICH IS ONE SITE RATHER THAN EIGHT. pgc_teardown
+# already runs on every one of those exits. A per-exit patch fixes the ones that
+# exist today and cannot cover the ninth; this covers it by construction.
+#
+# THE FALSE-POSITIVE POPULATION IS EMPTY, measured rather than assumed. A suite
+# that deliberately exits early would be mislabelled TERMINATED, and a guard
+# that mislabels correct behaviour gets switched off. There are twelve exits in
+# this file and no others reachable from a suite: eight in pgc_setup and four in
+# pgc_summary. No suite of the 252 has a bare exit of its own, and pgc_skip --
+# the one helper that looks like an early exit -- ends with pgc_summary on both
+# branches. So every exit from a declared suite is either a FATAL or the
+# summary, and there is no third case to get wrong.
+pgc_exit_accounting() {
+	[ "${PGC_SUMMARY_PRINTED:-0}" = 0 ] || return 0
+	echo
+	echo "checks run: $PGC_CHECKS"
+	echo "checks unrunnable: $PGC_UNRUN"
+	# THE SAME SHAPE THE READERS MATCH, deliberately: pgc_log_shows_accounting
+	# anchors on this exact line, and a differently-shaped one would leave the
+	# reconciliation still unable to see the suite.
+	echo "accounting: $PGC_PASSED passed + $PGC_FAILED failed + $PGC_UNRUN unrunnable + $PGC_SKIPPED skipped = $PGC_CHECKS"
+	# AND A MARKER, so the three states stay distinguishable to a READER as well
+	# as to a parser: ran to completion (pgc_summary prints PASSED, FAILED,
+	# SKIPPED or INCOMPLETE), terminated before its summary (this), and died
+	# mid-run (no accounting at all, which is what the reconciliation still
+	# catches).
+	echo "$(basename "$0"): TERMINATED before its summary"
+}
+
+# The EXIT trap: accounting first, then teardown, and the status untouched.
+# `$?` is captured on the first line because everything after it overwrites it,
+# and the trap must not change what the suite exited with -- a FATAL is rc=1 and
+# stays rc=1.
+pgc_on_exit() {
+	local _rc=$?
+	pgc_exit_accounting
+	pgc_teardown
+	return $_rc
 }
 
 pgc_teardown() {
@@ -1896,6 +1959,11 @@ pgc_skip() {  # pgc_skip <capability> <message>
 # count 2 separately and report how many suites actually ran, which is what #422
 # did one level up for how many VERSIONS actually ran.
 pgc_summary() {
+	# FIRST, before any output and before any branch: every path out of this
+	# function exits, so a flag set later would be missed by whichever path
+	# takes an early one. The trap only needs to know that the summary was
+	# REACHED, not that it completed.
+	PGC_SUMMARY_PRINTED=1
 	local _failed=$PGC_FAILED
 	local _sum=$((PGC_PASSED + PGC_FAILED + PGC_UNRUN + PGC_SKIPPED))
 	echo

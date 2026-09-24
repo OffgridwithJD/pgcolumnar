@@ -514,6 +514,71 @@ true until the next version shipped.
   duplicate of an existing one -- same fixture, same grep, same expectation.
   Removed rather than shipped, which is why the part went from 1146 checks
   to 1145.
+- 252 suites declared accounting and then exited without it on any of
+  `pgc_setup`'s eight failure paths (#1233).
+
+  Every suite that calls `pgc_setup` also calls `pgc_summary`, so every one of
+  them DECLARES accounting. `pgc_setup` has eight `exit 1` sites and calls
+  `pgc_summary` on none of them.
+
+  **NOT A FALSE PASS.** `rc` is 1 and the FATAL is correct on all eight. What
+  was lost is the machine-readable line, and six readers consume it:
+  `run_all_versions.sh`'s reconciliation, `pgc_vacuity.py`,
+  `test_check_records.py`, `test_residual_is_counted.py`,
+  `test_suite_accounting.py` and `smoke.sh`. To every one of them a declared
+  suite with no accounting is indistinguishable from a suite that died mid-run.
+  `run_all_versions.sh` already names the case in the reconciliation's own
+  comment, so the comment is older than the defect it describes.
+
+  Reported against the build failure alone; it is every failure exit, measured
+  by driving a NON-build one:
+
+  ```
+    control   rc=0  accounting lines=1  TERMINATED=0  tail: PASSED
+    mutant    rc=1  accounting lines=1  TERMINATED=1  tail: TERMINATED before its summary
+  ```
+
+  EMITTED FROM THE TRAP, WHICH IS ONE SITE RATHER THAN EIGHT. `pgc_teardown`
+  already runs on every one of them, so `trap pgc_on_exit EXIT` covers the ninth
+  exit by construction. A per-exit patch cannot promise that. The wrapper
+  captures `$?` on its first line, so a FATAL is rc=1 and stays rc=1.
+
+  The line it emits is the one `pgc_log_shows_accounting` anchors on, and the
+  marker beside it keeps three states distinguishable to a reader as well as to
+  a parser: ran to completion, terminated before its summary, died mid-run.
+
+  THE READER LEARNED A THIRD STATE, because emitting the line was not enough
+  (@OffgridwithJD, review). `pgc_log_shows_accounting`'s own comment states its
+  contract: *"its presence says 'this suite reached its summary'"*. Emitting on
+  every exit silently ended that, and a `set -e` abort RUNS the EXIT trap, so
+  only `SIGKILL` leaves no accounting at all and the mid-run death became
+  invisible too. `TERMINATED` was emitted and nothing parsed it.
+
+  ```
+    yes          reached its summary           unchanged meaning
+    terminated   stopped before it             named in the run's report
+    no           no accounting at all          unchanged meaning
+  ```
+
+  Folding `terminated` into `yes` loses the mid-run death; folding it into `no`
+  restores the false *declared but never accounted* the trap was added to
+  remove. Both call sites reconcile a terminated log, because it carries a count
+  and the records behind it, and the reconciliation names it rather than
+  counting it as a fault: the suite's own `rc` has already failed the run.
+
+  `test/selftest/590-a-declared-suite-must-account.sh`, nineteen checks, of
+  which eight are reddened by reverting the trap and one by folding the reader
+  back to two values. Five majors on the composed tree: rc=0, `checks run: 1164`,
+  PASSED. The last three drive a completed log, a terminated log and
+  an accounting-less log THROUGH the reader and assert the verdict: **the arms
+  that existed asserted the line was emitted and that the pattern matched it,
+  and none asserted what a reader concluded from it.** That was the gap the
+  first version came through.
+
+  THE FALSE-POSITIVE SURFACE IS MEASURED, not assumed empty. Four `exit 0` sites
+  exist in declared suites and every one reaches its summary first, three on the
+  previous line and `logical_subscriber` on the same line. An arm asserts it,
+  because a guard that mislabels correct behaviour gets switched off.
 
 - Planning a columnar query sequentially scanned `pgcolumnar.storage` on its own
   primary key (#1237).

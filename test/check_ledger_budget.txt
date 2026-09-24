@@ -721,4 +721,60 @@ suites_not_covered 249
 # and only re-running tests the second. The two C mutations ran with a forced
 # `make clean`: PGXS here has no --enable-depend, so a stale object after a
 # HEADER edit would leave veC reddening nothing and reading like a fixture fact.
-checks_never_observed_red 1496
+# 1496 -> 1506 for #1233's nineteen new harness_selftest checks. Re-derived by
+# COUNTING on this tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1506
+#
+# with the premise beside it, because a pattern matching nothing counts 0 and
+# reads like a clean answer: 1632 rows total, 126 not `never`,
+# 1506 + 126 == 1632.
+#
+# PREDICTED BEFORE IT WAS COUNTED, and counted by both sessions independently.
+# The branch had previously carried 1522 and 1528, each correct for a main that
+# no longer exists; neither was carried across. The ledger was rebuilt from
+# main and re-merged from FRESH logs run on the composed tree, because the held
+# logs described a tree of 1157 checks and this one runs 1164.
+#
+# NINETEEN ROWS AND THE CENSUS MOVES BY TEN, because NINE carry a measured
+# last-red from two mutations:
+#
+#     the EXIT trap reverted to the bare pgc_teardown          8 arms
+#     pgc_log_shows_accounting folded back to two values       1 arm
+#
+# THE SECOND MUTATION EXISTS BECAUSE THE FIRST VERSION OF THIS CHANGE EMITTED A
+# MARKER NOTHING READ. `TERMINATED` was printed and no consumer parsed it, so a
+# terminated run and a completed one gave the same verdict to all six readers --
+# and every arm in the part stayed green, because they asserted the line was
+# EMITTED and that the reader's pattern MATCHED it, and none asserted what a
+# reader CONCLUDED. Reported by @OffgridwithJD. `echo yes` in place of the
+# three-way branch now reddens exactly one arm, so the reader is guarded rather
+# than merely correct.
+#
+# THE MAJOR SET WAS DERIVED FROM FIVE RUNS on the COMPOSED tree against
+# DEFAULT_CONFIGS read out of run_all_versions.sh: rc=0, `checks run: 1164`,
+# PASSED, 19 arms of part 590 on pg15, pg16, pg17, pgsql (the runner's PG18)
+# and pg19. 1164 was predicted from two directions that shared no intermediate:
+# 1157 + 7 from this branch's own earlier run, and 1145 + 19 from main.
+#
+# FIVE DEFECTS OF MY OWN IN THIS CHANGE, and only two were found by reading it:
+#
+#   the wrapper diagnosis   `grep` on the author's host is a shell FUNCTION, not
+#                           GNU grep: 0 where /usr/bin/grep answers 3. The first
+#                           version of part 590 blamed GNU ERE semantics for a
+#                           defect that does not exist.
+#   the pipefail race       `sed | grep -q` in a part added to the very suite
+#                           that refuses it. Caught by the harness.
+#   the counter clobber     a selftest part is SOURCED, so PGC_CHECKS=7 clobbered
+#                           the live counters: `checks run: 10 ... INCOMPLETE`,
+#                           rc=67, on a run of over a thousand -- with every arm
+#                           passing. Caught by an implausible total.
+#   the lossy restore       the FIX for the clobber snapshotted once at the top,
+#                           wiping the arms that ran between snapshot and
+#                           restore. Caught by the arm written for exactly that.
+#   the unread marker       see above. A `set -e` abort RUNS the EXIT trap --
+#                           measured -- so only SIGKILL leaves no accounting at
+#                           all, and the mid-run death became invisible too.
+#
+# suites_not_covered does NOT move: harness_selftest is already a covered suite.
+checks_never_observed_red 1506
