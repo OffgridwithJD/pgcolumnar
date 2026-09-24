@@ -400,20 +400,20 @@ harness_selftest	180-the-port-walk-must-wrap-not	premise: the real prober was re
 harness_selftest	180-the-port-walk-must-wrap-not	premise: the stub frees exactly one port, 500 past the floor	15;16;17;18;19	never	-
 harness_selftest	180-the-port-walk-must-wrap-not	premise: the stub really does refuse the top of the band	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	a comment naming the call does not satisfy the arm above	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	an unknown provenance is not reported as a major	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	an unparseable stamp cleans rather than guessing	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	and an empty WANT is refused rather than compared	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	and in the other direction too	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	and it is 3 bytes, not an escaped literal	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	and it says plainly that no major was recorded	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	building a DIFFERENT major needs a clean, which is the #536 case	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	building the same major again needs no clean	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	but a tree with no objects at all needs nothing, stamp or not	15;16;17;18;19	never	-
-harness_selftest	190-an-in-tree-build-must-not	objects with NO stamp are unknown provenance and must be cleaned	15;16;17;18;19	never	-
+harness_selftest	190-an-in-tree-build-must-not	an unknown provenance is not reported as a major	15;16;17;18;19	2026-09-23	an unknown provenance is reported as a major, PG?, instead of saying none was recorded
+harness_selftest	190-an-in-tree-build-must-not	an unparseable stamp cleans rather than guessing	15;16;17;18;19	2026-09-23	pgc_build_needs_clean never asks for a clean
+harness_selftest	190-an-in-tree-build-must-not	and an empty WANT is refused rather than compared	15;16;17;18;19	2026-09-23	pgc_build_needs_clean never asks for a clean
+harness_selftest	190-an-in-tree-build-must-not	and in the other direction too	15;16;17;18;19	2026-09-23	pgc_build_needs_clean never asks for a clean
+harness_selftest	190-an-in-tree-build-must-not	and it is 3 bytes, not an escaped literal	15;16;17;18;19	2026-09-23	the build stamp writes an escaped literal, restoring the #898 bug
+harness_selftest	190-an-in-tree-build-must-not	and it says plainly that no major was recorded	15;16;17;18;19	2026-09-23	an unknown provenance is reported as a major, PG?, instead of saying none was recorded
+harness_selftest	190-an-in-tree-build-must-not	building a DIFFERENT major needs a clean, which is the #536 case	15;16;17;18;19	2026-09-23	pgc_build_needs_clean never asks for a clean
+harness_selftest	190-an-in-tree-build-must-not	building the same major again needs no clean	15;16;17;18;19	2026-09-23	pgc_build_needs_clean always demands a clean
+harness_selftest	190-an-in-tree-build-must-not	but a tree with no objects at all needs nothing, stamp or not	15;16;17;18;19	2026-09-23	pgc_build_needs_clean always demands a clean
+harness_selftest	190-an-in-tree-build-must-not	objects with NO stamp are unknown provenance and must be cleaned	15;16;17;18;19	2026-09-23	pgc_build_needs_clean never asks for a clean
 harness_selftest	190-an-in-tree-build-must-not	premise: the build-stamp decision is exposed to be judged	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	premise: the stamp writer is a function that can be exercised	15;16;17;18;19	never	-
 harness_selftest	190-an-in-tree-build-must-not	the build path asks pgc_build_needs_clean rather than merely naming it	15;16;17;18;19	2026-09-23	the call replaced by a comment naming it
-harness_selftest	190-an-in-tree-build-must-not	the stamp lib.sh writes is exactly the major	15;16;17;18;19	never	-
+harness_selftest	190-an-in-tree-build-must-not	the stamp lib.sh writes is exactly the major	15;16;17;18;19	2026-09-23	the build stamp writes an escaped literal, restoring the #898 bug
 harness_selftest	200-additions-go-in-their-own-file	premise: the parts directory exists and was sourced	15;16;17;18;19	never	-
 harness_selftest	200-additions-go-in-their-own-file	the driver holds no checks; they all live in parts	15;16;17;18;19	never	-
 harness_selftest	200-additions-go-in-their-own-file	the driver sources the parts by glob, not by a list	15;16;17;18;19	never	-
@@ -1478,8 +1478,8 @@ native_join_runtime_filter	native_join_runtime_filter	scattered plan has coordin
 native_join_runtime_filter	native_join_runtime_filter	scattered still reads every group	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	LEFT join answer equals heap	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	LEFT join refuses the join fold	15;16;17;18;19	never	-
-native_join_vector_agg	native_join_vector_agg	duplicate dim keys answer equals heap	15;16;17;18;19	never	-
-native_join_vector_agg	native_join_vector_agg	duplicate dim keys refuse the join fold	15;16;17;18;19	never	-
+native_join_vector_agg	native_join_vector_agg	duplicate dim keys answer equals heap	15;16;17;18;19	2026-09-23	the dim-side uniqueness refusal disabled
+native_join_vector_agg	native_join_vector_agg	duplicate dim keys refuse the join fold	15;16;17;18;19	2026-09-23	the dim-side uniqueness refusal disabled
 native_join_vector_agg	native_join_vector_agg	extra join filter answer equals GUC off	15;16;17;18;19	2026-09-12	-
 native_join_vector_agg	native_join_vector_agg	extra join filter answer equals heap	15;16;17;18;19	2026-09-12	-
 native_join_vector_agg	native_join_vector_agg	extra join filter refuses the join fold	15;16;17;18;19	2026-09-12	-
@@ -1599,15 +1599,15 @@ validity_elision	validity_elision	premise: the first fixture holds no nulls at a
 validity_elision	validity_elision	premise: the join arms below reach the columnar side by index too	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: the per-chunk arm's residual was summed over chunks that exist	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: the residual was summed over chunks that exist	15;16;17;18;19	never	-
-validity_elision	validity_elision	premise: the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	never	-
-validity_elision	validity_elision	single-row fetches of the null-bearing column return its nulls as nulls	15;16;17;18;19	never	-
+validity_elision	validity_elision	premise: the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
+validity_elision	validity_elision	single-row fetches of the null-bearing column return its nulls as nulls	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	single-row fetches through the elided path return the row asked for	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
 validity_elision	validity_elision	the full column fetched by index matches the heap, row for row	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
 validity_elision	validity_elision	the full column holds no row the heap does not	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
 validity_elision	validity_elision	the full column preserves its null count	15;16;17;18;19	never	-
 validity_elision	validity_elision	the full column reads back exactly what the heap holds	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
-validity_elision	validity_elision	the nulls column fetched by index matches the heap, row for row	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
-validity_elision	validity_elision	the nulls column holds no row the heap does not	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the nulls column fetched by index matches the heap, row for row	15;16;17;18;19	2026-09-23	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
+validity_elision	validity_elision	the nulls column holds no row the heap does not	15;16;17;18;19	2026-09-23	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	the nulls column preserves its null count	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
-validity_elision	validity_elision	the nulls column reads back exactly what the heap holds	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
+validity_elision	validity_elision	the nulls column reads back exactly what the heap holds	15;16;17;18;19	2026-09-23	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	while a column with nulls still stores one, sized one bit per row	15;16;17;18;19	never	-

@@ -670,4 +670,55 @@ suites_not_covered 249
 #
 # The one arm left `never` is the fixture premise, whose only mutation is the
 # fixture itself. A fixture fact, in #1236's taxonomy, not an uncovered guard.
-checks_never_observed_red 1511
+#
+# 1511 -> 1496 for #1236's third, fourth and fifth batches: three parts attacked
+# with six mutations, 18 rows touched, none of them a new row. RE-DERIVED BY
+# COUNTING on the tree that carries #1244, which this branch was rebased onto:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1496
+#     1613 rows total, 117 not `never`,  1496 + 117 == 1613
+#
+# THIS BRANCH HAS CARRIED 1497 AND NOW 1496, and only the second describes a
+# tree that exists. The first was counted against a main without #1244. It was
+# also PREDICTED at 1496 before the rebase ran, from #1244's published
+# 1613/1511/102 plus this branch's 15 newly-dated -- which is the point of
+# publishing the population beside the number: the recount had something
+# external to disagree with rather than only itself.
+#
+# EIGHTEEN ROWS TOUCHED, FIFTEEN NEWLY DATED, and the gap is deliberate. Three
+# `validity_elision` arms were already dated 2026-09-18 under the INVERSE
+# mutation -- the elision predicate forced FALSE, so every reader expects a
+# bitmap the writer did not write. This batch forces it TRUE. Both directions
+# redden the same three arms, so those rows carry both mutation strings and the
+# later date rather than the newer observation overwriting the older. An arm
+# reddened by a predicate in either direction is better evidence than one
+# reddened in a single direction.
+#
+# THE SIX MUTATIONS, each with its prediction written before it ran:
+#
+#   veC    the elision predicate forced true              5 arms
+#   b190A  pgc_build_needs_clean never asks for a clean    5 arms
+#   b190B  the stamp writes an escaped literal (#898)      2 arms
+#   b190C  pgc_build_needs_clean always demands a clean    2 arms
+#   b190D  unknown provenance reported as a major, PG?     2 arms
+#   jvaB   the dim-side uniqueness refusal disabled        2 arms
+#
+# b190A AND b190C ARE OPPOSITES AND REDDEN DISJOINT PAIRS. Never-clean loses the
+# five arms about when a clean is required; always-clean loses exactly two --
+# "building the same major again needs no clean" and "but a tree with no objects
+# at all needs nothing, stamp or not". Only those two separate a correct guard
+# from one that is merely fail-closed: a guard that cleaned unconditionally
+# passes every other arm in that part. Checked exhaustively rather than by the
+# run alone -- part 190 has 15 arms, 5 assert "yes", 2 assert "no", and the
+# remaining 8 drive the message function, the stamp writer, static greps or
+# `type -t`, so none of them can depend on the decision's value.
+#
+# RE-DERIVED ON THE MERGED TREE, NOT CARRIED FORWARD. All six ran once before
+# #1240 and #1241 landed and were re-run against the merged tree, reproducing
+# their earlier results exactly -- same names, not merely the same counts, with
+# a control showing the comparison can separate two unrelated sets. "The check
+# names still exist" and "the mutation still reddens them" are different claims
+# and only re-running tests the second. The two C mutations ran with a forced
+# `make clean`: PGXS here has no --enable-depend, so a stale object after a
+# HEADER edit would leave veC reddening nothing and reading like a fixture fact.
+checks_never_observed_red 1496
