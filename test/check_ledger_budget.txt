@@ -943,4 +943,47 @@ suites_not_covered 249
 # projection ones reddens exactly one arm, at exactly the residual cost.
 #
 # suites_not_covered does NOT move: catalog_plan_index is already covered.
+
+# #1248 FOLLOW-UP: THIS NUMBER DOES NOT MOVE. Four arms replace two in part 580
+# and all six are dated, so `never` is untouched. RE-ANCHORED A SECOND TIME, on
+# the main that carries #1254 (8bd5014b):
+#
+#     ledger rows     1694 - 2 + 4 = 1696
+#     part 580 rows     22 - 2 + 4 =   24
+#     dated            155 - 2 + 4 =  157
+#     never                   1539   unchanged
+#     1539 + 157 == 1696
+#
+# The delta is constant at -2 + 4; the base has now moved twice under this
+# branch -- 1673, then 1690, then 1694. Each earlier decomposition was counted
+# correctly against a tree that no longer exists, which is why they are
+# re-anchored rather than adjusted by a difference.
+#
+# THE ROWS CONFLICT, NOT JUST THIS LINE, AND UNION IS NOT THE WHOLE ANSWER.
+# I wrote on #1251 that the rows auto-merge and only the total needs resolving.
+# False, and @jdatcmd measured it: composing this branch conflicts in
+# check_ledger.tsv itself, and taking a side drops rows silently while reporting
+# a plausible total.
+#
+# BUT "UNION THE ROWS" IS ALSO NOT ENOUGH, which this rebase demonstrated.
+# A union re-added the two rows this branch deliberately DELETES, giving
+# 1698 = 1539 + 159 against a published prediction of 1696 = 1539 + 157 -- a
+# number that looks like an ordinary miscount. Union the ADDITIONS, then honour
+# the DELETIONS, then recount. A conflict hunk cannot tell a removed row from a
+# row the other side never had.
+#
+# THE TWO REMOVED ROWS CARRY HISTORY AND IT IS DELIBERATELY NOT TRANSFERRED.
+# `orphan-scan --prune` refused them and said to reconcile or to say in the
+# commit why the history may go. It may go because these arms are not renamed,
+# they are REVERSED. Their recorded mutation is
+#
+#     _hr_diagnose banners unconditionally, so an empty or absent log still prints
+#
+# which is exactly what the four new arms REQUIRE. Carrying it forward would
+# assert each new arm is reddened by the behaviour it demands.
+#
+# The four new rows are dated on all five majors from five separate runs, one
+# merge each, under the single mutation `_hr_diagnose` restored to its silent
+# `[ -s ] || return 0` form. 4 arms x 5 majors = 20 reds, and no other check went
+# red in any of the five logs.
 checks_never_observed_red 1539

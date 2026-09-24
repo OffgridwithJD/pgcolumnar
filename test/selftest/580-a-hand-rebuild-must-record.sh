@@ -119,10 +119,24 @@ check_text "premise: no stamp for this prefix before the rebuild" \
 _hr_dependents() {	# _hr_dependents RC -> run|skip
 	[ "${1:-}" = 0 ] && echo run || echo skip
 }
-_hr_diagnose() {	# _hr_diagnose LOGFILE -> the tail, indented, or nothing
-	[ -s "${1:-}" ] || return 0
+_hr_diagnose() {	# _hr_diagnose LOGFILE -> the tail, or WHY there is no tail
+	# NEVER SILENT. The first version returned early on `[ -s ]`, so the
+	# 2026-09-24 nightly -- which failed with an EMPTY rebuild.log on aarch64 --
+	# printed no diagnosis at all. An absent log and an empty one are different
+	# failures: one means the redirect never opened, the other means rebuild.sh
+	# exited before its first echo. Naming which one costs a line and saves a
+	# night.
+	local _f="${1:-}"
+	if [ ! -f "$_f" ]; then
+		echo "      ---- rebuild.log is MISSING: the redirect never created it ----"
+		return 0
+	fi
+	if [ ! -s "$_f" ]; then
+		echo "      ---- rebuild.log is EMPTY (0 bytes): rebuild.sh exited before its first echo ----"
+		return 0
+	fi
 	echo "      ---- rebuild.log, last 20 lines ----"
-	tail -20 "$1" | sed 's/^/      /'
+	tail -20 "$_f" | sed 's/^/      /'
 }
 
 "$PGC_TESTDIR/rebuild.sh" "$_hr_tmp/pg_config" "$_hr_tmp/tree" >"$_hr_tmp/rebuild.log" 2>&1
@@ -165,10 +179,22 @@ check_num "a log with content produces a diagnosis to print" \
 	"$([ -n "$(_hr_diagnose "$_hr_dtmp/full.log")" ] && echo 1 || echo 0)" "1"
 check_num "and the diagnosis carries the failing line, not just a status" \
 	"$(_hr_diagnose "$_hr_dtmp/full.log" | grep -c 'UNRESOLVED SYMBOLS')" "1"
-check_num "an empty log produces nothing rather than an empty banner" \
-	"$([ -n "$(_hr_diagnose "$_hr_dtmp/empty.log")" ] && echo 1 || echo 0)" "0"
-check_num "and a log that is not there produces nothing rather than an error" \
-	"$([ -n "$(_hr_diagnose "$_hr_dtmp/nope.log" 2>/dev/null)" ] && echo 1 || echo 0)" "0"
+# THESE ARMS USED TO DEMAND SILENCE, AND THE SILENCE WAS THE DEFECT (#1248).
+# The 2026-09-24 nightly failed the premise on aarch64 with an EMPTY rebuild.log.
+# `[ -s ]` returned early, so the whole diagnosis was nothing at all -- the exact
+# outcome this part exists to prevent, reached through the arm that required it.
+# A diagnosis that can be silent is not a diagnosis. When there is no tail to
+# print it must say so, and say which of the two causes it found, because
+# "rebuild.sh wrote no reason" and "the log was never created" are different
+# failures and merging them costs the next reader the night.
+check_num "an empty log still produces a diagnosis, because silence is the bug" \
+	"$([ -n "$(_hr_diagnose "$_hr_dtmp/empty.log")" ] && echo 1 || echo 0)" "1"
+check_num "and it names the log as empty rather than printing a bare banner" \
+	"$(_hr_diagnose "$_hr_dtmp/empty.log" | grep -c 'rebuild.log is EMPTY')" "1"
+check_num "a log that is not there also produces a diagnosis" \
+	"$([ -n "$(_hr_diagnose "$_hr_dtmp/nope.log" 2>/dev/null)" ] && echo 1 || echo 0)" "1"
+check_num "and it distinguishes missing from empty, so the two causes do not merge" \
+	"$(_hr_diagnose "$_hr_dtmp/nope.log" 2>/dev/null | grep -c 'rebuild.log is MISSING')" "1"
 rm -rf "$_hr_dtmp"
 
 # AND THE REAL SCRIPT MUST LEAVE SOMETHING TO DIAGNOSE. A gate that prints a log
