@@ -15,7 +15,7 @@
 #
 #   Adding a check to a suite that is already covered does not move it, which is
 #   what makes it safe to bound.
-suites_not_covered 249
+suites_not_covered 248
 #
 # checks_never_observed_red -- A CENSUS. NOT a ceiling, and it must not become
 #   one.
@@ -1050,4 +1050,47 @@ suites_not_covered 249
 # The name the unguarded sweep invents for the second is `a quoted arm that only
 # exists in prose` -- an arm that exists nowhere, which is worse than a
 # mis-attributed real one. Only the mutation found this; the suite was green.
-checks_never_observed_red 1540
+
+# #1252: 1540 -> 1574, AND suites_not_covered 249 -> 248. THE SUITE ITSELF
+# ARRIVES IN THE LEDGER, which is most of this diff and needs saying plainly.
+#
+# `analyze_stats` had ZERO rows on main. Recording that the new arms redden
+# means merging a RUN of the suite they live in, and the tool refuses to
+# attribute a mutation across partial or multiple runs -- so registering all 40
+# of its checks is the mechanism, not scope added on top. Decomposed:
+#
+#     ledger rows   1700 + 40 = 1740
+#     never         1540 + 34 = 1574      32 pre-existing arms + 2 of the new 8
+#     dated          160 +  6 =  166      the 6 arms four mutations redden
+#     1574 + 166 == 1740
+#
+# suites_not_covered falls by exactly one, which is the direction that ceiling
+# is allowed to move. 20 suites covered before, 21 now.
+#
+# FOUR MUTATIONS, AND A AND B ARE DISJOINT. That is worth stating because the
+# last two changes I made had mutations that were not:
+#
+#     A  the floor removed          3 arms   x 5 majors
+#     B  the scaling removed        2 arms   x 5 majors   disjoint from A
+#     C  the input guard removed    1 arm    x 5 majors   isolates what A also hits
+#     D  the floor moved by one     4 arms   x 5 majors   the only one reaching the tie
+#
+# C REDDENED NOTHING ON ITS FIRST RUN and the guard was uncovered, not redundant.
+# 0, "", "abc" and a negative all reach the floor anyway because `$(( ))` reads
+# them as 0. The input it actually defends is a PARTIALLY numeric token:
+#
+#     pgc_analyze_cap_ms 12abc     with the guard  5000
+#                                  without it      arithmetic error, no output
+#
+# So an arm was added to cover it rather than the guard deleted -- #1236's
+# taxonomy, and the measurement is what chose between the two readings.
+#
+# TWO OF THE EIGHT NEW ARMS ARRIVE `never` AND CANNOT HONESTLY BE MUTATED HERE.
+# `premise: the cap is exposed as a function` is a `type -t` check, and every
+# mutation replaces a body while keeping the name. And `ANALYZE on a wide table
+# completes well inside its derived cap` has a removal proof rather than a
+# mutation: against f82bdcd's parent the unfixed build did not complete in 180 s
+# -- an unbounded run was killed at 10m52s of 99.9% CPU -- against 206 ms fixed.
+# That is a different tree, so it is not expressible as a same-tree mutation and
+# the row stays `never` rather than being dated on evidence of another kind.
+checks_never_observed_red 1574

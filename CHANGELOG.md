@@ -458,6 +458,41 @@ true until the next version shipped.
 
 ### Fixed
 
+- `analyze_stats`' wide-table bound is derived from the run and floored, instead
+  of being a ratio over a 20 ms scan that was mostly process startup (#1252).
+
+  The arm read `an_ms < scan_ms * 20`. It went red on a CI runner against a
+  branch of five test and docs files that cannot reach the ANALYZE path, and
+  passed when the same jobs were re-run at the same commit.
+
+  Measured on `pgcolumnar-audit`, pg17a, five interleaved rounds, with the same
+  `psql_run` wrapper around `SELECT 1` as the control:
+
+  ```
+    empty  7.8 ms    insert 316.6 ms    scan 20.0 ms    analyze 115.2 ms
+  ```
+
+  The scan carried about 12 ms of work above an 8 ms floor -- 1.5x its own noise
+  -- so the ratio measured the floor as much as the scan. The two terms did not
+  move together either: on the failing CI run ANALYZE was 3.1x this box while
+  the scan was 0.7x it.
+
+  The bound is now `max(5000, insert_ms * 20)`. The insert reads and writes the
+  same rows the ANALYZE samples, so it tracks the machine and the data volume;
+  the floor stops a future faster write path squeezing the bound into a flake,
+  which is how the old one arrived here -- its 20x was justified against "341 ms
+  against a 155 ms scan" and no machine has measured a 155 ms scan since.
+
+  The bug being defended is a hang, not a slowdown, so the bound does not need
+  to be tight. Measured by removal against `f82bdcd`'s parent, same fixture:
+  the unfixed build did not complete within 180 s, and an unbounded run was
+  killed at 10m52s of 99.9% CPU still running, against 206 ms fixed.
+
+  The decision is a function driven with literals, so the branch a healthy
+  machine never takes is judged rather than left to a box that happens to be
+  slow. `analyze_stats` also enters the mutation ledger for the first time:
+  `suites_not_covered` falls from 249 to 248.
+
 - The hand-rebuild diagnosis can no longer be silent, which is how the first
   version of it still told the 2026-09-24 nightly nothing (#1248).
 
