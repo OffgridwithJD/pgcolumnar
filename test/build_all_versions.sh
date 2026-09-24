@@ -102,6 +102,48 @@ fi
 echo "== pgColumnar build check across majors =="
 
 failed=0
+# Remove every build artifact from a tree, and SAY WHETHER IT WORKED (#1219).
+#
+# The final sweep used to be `make -C "$SRCDIR" clean >/dev/null 2>&1 || true`
+# with no PG_CONFIG. PGXS resolves `pg_config` from PATH, so on a box with no
+# packaged one that make fails, the `|| true` eats the failure, and the tree
+# keeps the last major's objects while the script still prints PASSED. Measured,
+# same tree, pg18a then pg19a:
+#
+#     normal PATH              built 2 of 2  PASSED   objects left:  0
+#     PATH with no pg_config   built 2 of 2  PASSED   objects left: 36
+#
+# PASSING A pg_config IS NOT THE FIX. `make clean` needs PGXS loaded to do
+# anything at all, objects live in src/ AND objstore/, and a clean whose failure
+# is swallowed cannot be told from one that worked. So: try make when a
+# pg_config is at hand, because PGXS knows about artifacts this sweep does not
+# name; then remove by find, which needs no pg_config; then VERIFY, because a
+# sweep that reports nothing is the defect being fixed.
+# THE DETECTOR IS ITS OWN FUNCTION so it can be judged directly. Folded into
+# the cleaner it was unreachable: in every fixture the sweep works, so `clean` is
+# the right answer and a cleaner that ALWAYS says `clean` reddens nothing.
+# Measured -- that mutation passed all five arms. Splitting it out is what gives
+# the detection logic a killer; the belt-and-braces re-check inside the cleaner
+# still only fires when the sweep fails, which cannot be staged as root, and
+# that residue is recorded rather than papered over.
+pgc_bav_tree_has_objects() {	# pgc_bav_tree_has_objects DIR -> yes|no
+	local _d="${1:-}"
+	[ -n "$_d" ] && [ -d "$_d" ] || { echo no; return; }
+	if [ -n "$(find "$_d" \( -name '*.o' -o -name '*.bc' -o -name '*.so' \) -type f 2>/dev/null | head -1)" ]; then
+		echo yes
+	else
+		echo no
+	fi
+}
+
+pgc_bav_clean_tree() {	# pgc_bav_clean_tree SRCDIR [PG_CONFIG] -> clean|dirty
+	local _d="${1:-}" _pgc="${2:-}"
+	[ -n "$_d" ] && [ -d "$_d" ] || { echo dirty; return; }
+	[ -n "$_pgc" ] && make -C "$_d" clean PG_CONFIG="$_pgc" >/dev/null 2>&1
+	find "$_d" \( -name '*.o' -o -name '*.bc' -o -name '*.so' \) -type f -delete 2>/dev/null
+	[ "$(pgc_bav_tree_has_objects "$_d")" = yes ] && echo dirty || echo clean
+}
+
 built=0
 for pgc in "${CONFIGS[@]}"; do
 	if [ ! -x "$pgc" ]; then
@@ -129,8 +171,14 @@ for pgc in "${CONFIGS[@]}"; do
 done
 
 # Leave no object tree behind from whichever major happened to be last: the next
-# build against a different major would link objects compiled for this one.
-make -C "$SRCDIR" clean >/dev/null 2>&1 || true
+# build against a different major would link objects compiled for this one. The
+# verdict is read rather than discarded -- the previous form swallowed its own
+# failure and left the tree dirty on any box without a pg_config on PATH (#1219).
+if [ "$(pgc_bav_clean_tree "$SRCDIR" "${pgc:-}")" != clean ]; then
+	echo "build_all_versions: objects remain in $SRCDIR after the final sweep;" >&2
+	echo "       the next build against another major would link them" >&2
+	failed=1
+fi
 
 # What was actually compiled, next to what was asked for. Without this line the
 # verdict below collapses "built five" and "built none" into the same word: a

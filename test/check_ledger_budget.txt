@@ -835,4 +835,66 @@ suites_not_covered 249
 #
 # The three rows arriving `never` are premises: two `type -t` exposure checks
 # and one asserting that a rebuild with no pg_config fails.
-checks_never_observed_red 1532
+#
+# 1532 -> 1534 for #1219, composed onto the main that carries #1213 AND #1248.
+# RE-DERIVED BY COUNTING:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1534
+#     1690 rows total, 156 not `never`,  1534 + 156 == 1690
+#
+#     17 new rows: 13 arrive dated, 4 arrive `never`
+#      2 pre-existing rows flip never -> dated   (two of the #809 arms, via K)
+#     1532 - 2 + 4 == 1534
+#
+# THIS BRANCH HAS NOW CARRIED THREE NUMBERS -- 1508, 1532 and 1534 -- and only the
+# last describes a tree that exists. They are not corrections of each other:
+# each was counted correctly on the tree it was written against. 1508 was
+# against a main with neither #1213 nor #1248; 1532 against one with #1213
+# alone; 1534 against one with both. The delta this branch contributes is
+# constant at -2 + 4; the base moved twice.
+#
+# AND 1532 APPEARED TWICE FOR UNRELATED REASONS. It is what #1248 composed with
+# #1213 came to, and it is what THIS branch came to when rebased onto #1213
+# alone -- different rows, different deltas, same total. Had #1248 not landed
+# first, this file would now read 1532 and be right; it reads 1534 and is right.
+# Two trees agreeing on a number is not evidence either is correct. Recount on
+# the tree you have.
+#
+# THE DECOMPOSITION ABOVE WAS WRONG IN AN EARLIER VERSION of this file, and the
+# way it was wrong is worth keeping. It said "9 arrive dated, 8 arrive never"
+# and "1506 - 2 + 8 == 1508". The split is 13/4 and 1506 - 2 + 8 is 1512: TWO
+# COMPENSATING ERRORS REACHING THE RIGHT ANSWER. Nothing failed, because the
+# shipped number was right -- but a reader checking the working got 1512 and
+# could not tell whether to distrust the count or the comment. The cause: the
+# diff shows 19 `+` lines, which is 17 new rows PLUS the 2 pre-existing rows
+# that changed, and counting `+` lines as new rows produced the 9/8. Caught by
+# @jdatcmd.
+#
+# ELEVEN MUTATIONS. Three are the point:
+#
+#   C  the cleaner never verifies and always answers `clean`
+#      -> reddened NOTHING, twice: inline, and again after the detector was
+#         split out. Its verdict is only load-bearing when the SWEEP FAILS, and
+#         that cannot be staged as root -- chmod does not stop an unlink, and
+#         anything `find -type f -delete` removes, the `-type f` re-check cannot
+#         see either. FIXED BY STUBBING WHAT THE CODE CONSULTS rather than by a
+#         cleverer fixture: the cleaner asks the detector, so the detector is
+#         stubbed to `yes` and the cleaner must answer `dirty`. The real one is
+#         restored and the restore ASSERTED against a freshly created object,
+#         because an unrestored stub makes every later arm measure a function
+#         this part wrote.
+#
+#   G  the detector's own directory guard removed -> reddens NOTHING, and that
+#      is correct rather than a gap. Measured with and without it over
+#      '/nonexistent/nope', '' and '/tmp': identical answers, because `find` on
+#      a missing path already yields nothing and falls through to `no`. A
+#      REDUNDANT CONDITION in #1236's taxonomy, not an uncovered one.
+#
+#   A and B redden the SAME four arms, so this set catches "no sweep at all" and
+#      "sweep only src/" without distinguishing them.
+#
+# TWO NON-PREMISE ARMS REMAIN `never` HERE, both named: "and a directory that is
+# not there holds none" (G, redundant) and "a preflight that built nothing says
+# how many it built", which predates this change -- K reddens its two siblings
+# but leaves the `built 0 of 3` line intact.
+checks_never_observed_red 1534
