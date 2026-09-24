@@ -994,6 +994,83 @@ true until the next version shipped.
   first version passed on prose, green on a caller that consulted nothing, and
   one arm now builds that exact text and requires zero. `selftest/190` has the
   same shape on `pgc_build_needs_clean`, tracked in #1222.
+- Retiring a row group read five catalogs whole, once each per group, and the
+  cost grew with every unrelated columnar table in the database (#1207).
+
+  `delete_group_rows()` opens its catalog from a `const char *tableName`
+  **parameter**, and `PgColumnarDeleteGroupMetadata` calls it five times, for
+  `delete_vector`, `column_chunk`, `zone_map`, `bloom` and `row_group`. So one
+  `systable_beginscan` in the source was five sequential reads per retired group
+  at run time, and two more sit beside it on the compaction path. The
+  `pgcolumnar` metadata catalogs are shared by every columnar table in the
+  database, so each of those reads was charged for every other table's rows.
+
+  Two audits of these scans missed it. Both attributed a scan to a catalog by
+  the `open_columnar_table("<name>")` that produced its relation handle, and a
+  relation that arrives as an argument has no name at the call site. What found
+  it was a reconciliation rather than a better reading: probing all 44
+  `systable_beginscan` sites and requiring the number that ran without an index
+  to equal the sum of `seq_scan` over every catalog failed at 41 counted against
+  22 probed.
+
+  Eight sites now choose between an index probe and a sequential read **by
+  asking the catalog how many pages it has**. Every key was already a prefix of
+  an index that exists, so nothing here needs a catalog migration.
+
+  **Choosing by size, rather than always probing, is the whole of the fix.** An
+  index probe is not unconditionally cheaper: it is a btree descent plus a heap
+  fetch plus two catcache lookups, which on a one-page catalog is more work than
+  reading the whole thing. The same catalog is one page in a database with one
+  columnar table and hundreds in a database with a thousand, so a path that
+  commits to either method is wrong at one end of that range. Measured in
+  buffers, for `pgcolumnar.compact()` over 40 row groups with 20 retired:
+
+  | catalogs | always read whole | always probe | **by size** |
+  | ---: | ---: | ---: | ---: |
+  | 8 pages | 848 | 1000 | **848** |
+  | 18 pages | 1112 | 1080 | **1038** |
+  | 46 pages | 1672 | 1086 | **1041** |
+  | 390 pages | 8993 | 1122 | **1080** |
+
+  Always probing is a regression of up to 18 per cent on a small database;
+  always reading whole costs 8.3 times as much on a large one. Choosing by size
+  is within 4 buffers of the best of the two at every size measured.
+
+  `pgcolumnar.index_min_blocks` is the page count at which the choice flips.
+  Its default of **3** is derived rather than chosen: every threshold from
+  always-probe to never-probe, on PG 15, 17 and 19, over two families of fixture
+  (many small columnar tables; one deep one), 24 size points. Scored against the
+  cheapest threshold at each point, 3 costs 19 buffers in total where its
+  nearest rival costs 95, and never more than 4 at any single point. The
+  optimum is not the same for every catalog -- `row_group` pays for a probe at
+  three pages, `zone_map` not until five, because the hot catalogs are read more
+  often per retired group -- so one value for all six is a priced compromise
+  rather than a truth. Setting it very large restores the behaviour of every
+  earlier release exactly; setting it to 0 always probes. Both are slower at
+  some database size.
+
+  Two of the eight sites are in `PgColumnarCheckFreeSpaceNoOverlap`, which is
+  assert-only. It was the last one found, and it is worth saying why: a
+  measurement taken on a release build reports those two clean while every
+  assert-enabled CI leg pays for them on each maintenance operation. Both
+  suites print `debug_assertions` for that reason.
+
+  `test/catalog_delete_index.sh` (30 checks) and
+  `test/pytest/test_catalog_delete_index.py` (31). They assert the work --
+  buffers served out of the six catalogs -- and never the access path. An
+  earlier version of both asserted `seq_scan = 0` and `idx_scan >= 1` per
+  catalog, and that is a claim about which path was taken: run against the
+  size-aware build, which is cheaper at every size, it failed 13 of 21 arms, the
+  same 13 a full revert reddens. A guard that fires on correct code gets
+  switched off.
+
+  The port runs on a private DATABASE rather than the private schema every other
+  test here gets, because the `pgcolumnar` catalogs are per database and shared
+  by the whole session, and every claim in the file is about how big they are.
+  Run alone the file saw six catalog pages at its smallest phase; run after the
+  other fifty-one cluster files it saw thirty-nine, and the claim there fell from
+  223 parts per thousand to 65. A premise counts the columnar relations so that
+  arrives as a named failure rather than a weak number.
 
 - A subset pytest run failed on PG 15-17, and the message told you to break the
   check (#1204).

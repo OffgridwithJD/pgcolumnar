@@ -20,6 +20,36 @@ capability_sweep	capability_sweep	premise: the shim makes pyarrow unimportable	1
 capability_sweep	capability_sweep	premise: the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the two derivations of the population name the same suites	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: while python itself still runs under the shim	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	A1 with more catalog pages the default does less work than reading every one whole	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
+catalog_delete_index	catalog_delete_index	B1 with large catalogs the default does far less work than reading every one whole	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
+catalog_delete_index	catalog_delete_index	P1 with a few catalog pages the default does less work than probing every one	15;16;17;18;19	2026-09-24	pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
+catalog_delete_index	catalog_delete_index	premise: row_group is larger than the threshold, so the two paths differ	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes
+catalog_delete_index	catalog_delete_index	premise: the deep table grew the catalogs it is there to grow	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 catalogs hold only this file's tables	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 compaction kept every surviving row	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 compaction retired the emptied groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 reading covers every catalog the arms name	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase 0 reading measured something	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A catalogs hold only this file's tables	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A compaction kept every surviving row	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A compaction retired the emptied groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A reading covers every catalog the arms name	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase A reading measured something	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B catalogs hold only this file's tables	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B compaction kept every surviving row	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B compaction retired the emptied groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B reading covers every catalog the arms name	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the phase B reading measured something	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the three phase 0 targets are the same fixture	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the three phase A targets are the same fixture	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the three phase B targets are the same fixture	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: the vacuum walked this table's groups	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: two phase 0 compactions at the same setting agree well inside the floor	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: two phase A compactions at the same setting agree well inside the floor	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: two phase B compactions at the same setting agree well inside the floor	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	premise: two vacuums of the same table at the same setting agree well inside the floor	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	the default's cost grows far less with the database than reading whole does	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
+catalog_delete_index	catalog_delete_index	the vacuum's default does less row_group work than reading it whole	15;16;17;18;19	2026-09-24	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_plan_index	catalog_plan_index	a no-qual count did not sequentially scan pgcolumnar.storage	15;16;17;18;19	2026-09-23	both storage_id scans reverted to InvalidOid, so the catalog is swept sequentially on its own primary key
 catalog_plan_index	catalog_plan_index	planning a join probed pgcolumnar.storage through storage_pkey	15;16;17;18;19	2026-09-23	both storage_id scans reverted to InvalidOid, so the catalog is swept sequentially on its own primary key
 catalog_plan_index	catalog_plan_index	planning did not sequentially scan pgcolumnar.options	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans

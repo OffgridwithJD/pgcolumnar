@@ -3534,6 +3534,20 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomIntVariable("pgcolumnar.index_min_blocks",
+							"Heap pages at or above which a keyed scan of a "
+							"pgcolumnar metadata catalog probes that catalog's "
+							"index instead of reading it sequentially. Below a "
+							"few pages the sequential read is cheaper. 0 always "
+							"probes; a very large value never does.",
+							NULL,
+							&pgcolumnar_index_min_blocks,
+							3,
+							0, INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pgcolumnar.enable_end_truncation",
 							 "Allow pgcolumnar.truncate() to physically return "
 							 "trailing reclaimed blocks to the OS. Off (the default) "

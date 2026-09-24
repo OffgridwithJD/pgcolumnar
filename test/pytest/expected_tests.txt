@@ -509,4 +509,21 @@ guard_tests 403
 #     main alone   guard=403 cluster=476  (50 cluster files)
 #     composed     guard=403 cluster=477  (51 cluster files)
 #
-cluster_tests 478
+# cluster_tests moved for #1207's new cluster file, test_catalog_delete_index.py,
+# which holds two tests. RE-DERIVED BY COLLECTION against this branch's actual
+# base, never by adding two to either side: this branch has carried 478, 479 and
+# 480 against three different mains, and each described a tree that no longer
+# exists.
+#
+#     main 1bcfb92b    guard=403 cluster=478  (51 cluster files)
+#     this tree        guard=403 cluster=480  (52 cluster files)
+#
+# THE FIRST ATTEMPT AT THE MAIN FIGURE READ 480, AND IT WAS THE MEASUREMENT THAT
+# WAS WRONG. It collected in a copy of this working tree with
+# `git checkout origin/main -- .` applied, which restores the files main has and
+# does not remove the ones it does not: the new test file was still sitting
+# there, so "main" collected 52 files. `git checkout -f` plus `git clean -fd`
+# gives 51 and 478, which is what main's own expected_tests.txt declares -- and
+# agreeing with the committed number is how the corrected measurement was
+# recognised as the right one.
+cluster_tests 480

@@ -777,4 +777,26 @@ suites_not_covered 249
 #                           all, and the mid-run death became invisible too.
 #
 # suites_not_covered does NOT move: harness_selftest is already a covered suite.
-checks_never_observed_red 1506
+#
+# #1207 adds catalog_delete_index with 30 checks. 24 of them are premises and
+# are `never`; the other 6 were observed red under three mutations of the code:
+#
+#     the eight converted scan sites back to InvalidOid      5 arms
+#     the size check deleted, so every site probes           5 arms
+#     the default replaced by one that never probes          5 arms
+#
+#   Five each, not the same five. The third leaves P1 green -- correctly,
+#   because at six catalog pages declining every probe IS the cheaper read --
+#   and reddens instead the premise that row_group is bigger than the threshold,
+#   which a threshold of 2147483647 makes false.
+#
+#   1506 + 24 = 1530, and 1530 is also what counting field five over the file
+#   returns: 1662 rows, 132 not `never`, and 1662 == 1530 + 132 printed beside
+#   it rather than asserted.
+#
+# suites_not_covered does NOT move. catalog_delete_index is a newly REGISTERED
+# suite that arrives WITH ledger rows, so registered and covered rise by one
+# each. Counted on both trees rather than reasoned: registered == covered +
+# not_covered holds on each, and the only name in the difference either way is
+# catalog_delete_index.
+checks_never_observed_red 1530
