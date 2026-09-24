@@ -49,12 +49,25 @@ true until the next version shipped.
 - Three suite comments now say what they counted and why they deviate (#1215).
 
   `arrow_import.sh` explained why it does not use `pgc_skip` and said "THE OTHER
-  29 pyarrow SUITES USE" it. Recounted, the number is **25** -- the suites whose
-  source, comments stripped, calls `pgc_skip` with the pyarrow capability. 29 is
-  not reproducible now under any population except one counting `lib.sh`, where
-  the function is defined, plus three suites that gate on other capabilities and
-  name pyarrow only in prose. Whether it was right when written is unknown, and
-  the comment now says so rather than carrying a bare number.
+  29 pyarrow SUITES USE" it. **29 was honestly counted and attached to the wrong
+  noun.** At `f738dd4d`, the commit that wrote the sentence, 29 suites other than
+  that one ran `import pyarrow` -- but the sentence is about the suites that USE
+  `pgc_skip`, and 25 did. Measured in a worktree at that commit, excluding
+  `arrow_import.sh`, `lib.sh` and the three drivers:
+
+  ```
+                            at f738dd4d   today
+      names pyarrow             34          35
+      runs `import pyarrow`     29          30
+      calls pgc_skip pyarrow    25          25
+  ```
+
+  29 reproduces at that commit by the `import pyarrow` reading and only that one;
+  naming pyarrow anywhere gave 34 even then. 25 has not moved. The count that
+  drifted is the one the sentence did not mean -- `capability_sweep.sh` joined the
+  pyarrow population when #1235 landed. The comment now carries all three rows, so
+  a reader learns the transferable thing: a number can be correct and still be
+  attached to the wrong population.
 
   The recount is also a worked example of the defect it fixes: the first attempt
   returned 26, because searching `arrow_import.sh` for `pgc_skip` matches the
