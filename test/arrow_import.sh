@@ -76,15 +76,24 @@ fifo_release() { exec 9<>"$1" 2>/dev/null; exec 9>&- 2>/dev/null; }
 # the sentence, 29 suites other than this one ran `import pyarrow`. But the
 # sentence is about the suites that USE `pgc_skip`, and 25 did. The number was
 # right for one population and attached to another in the same breath.
-# Measured, excluding this file, lib.sh and the three drivers:
+# Measured four ways, because three invites the reader to guess which "names
+# pyarrow" means -- and guessing wrong is how two of us got different totals for
+# the same tree. Excluding this file, lib.sh and the three drivers:
 #
-#                          at f738dd4d   today
-#     names pyarrow            34          35
-#     runs `import pyarrow`    29          30
-#     calls pgc_skip pyarrow   25          25
+#                                        at f738dd4d   today
+#     names pyarrow anywhere                 34          35
+#     names pyarrow in CODE                  29          30
+#     runs `import pyarrow` in code          29          30
+#     imports it AND calls pgc_skip          25          25
 #
-# So 29 is reproducible at that commit by the `import pyarrow` reading and by
-# that reading only -- naming pyarrow anywhere gave 34 even then. 25 has not
+# THE PREDICATE THAT SEPARATES 34 FROM 29 IS COMMENT STRIPPING. The five in the
+# gap name pyarrow only to say they do NOT use it: native_parquet_stack and
+# parallel_export_parquet hand-craft their fixtures, and avro_manifest,
+# iceberg_deletes and iceberg_name_mapping gate on other capabilities. Which is
+# the same house-style trap as searching this file for the helper's name and
+# matching the sentence that says WHY NOT to use it.
+#
+# So 29 was honestly counted, of the suites whose CODE names pyarrow. 25 has not
 # moved at all. The number that drifted is the one the sentence did not mean:
 # capability_sweep.sh joined the pyarrow population when #1235 landed.
 #

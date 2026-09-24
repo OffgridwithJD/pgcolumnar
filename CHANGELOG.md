@@ -56,18 +56,25 @@ true until the next version shipped.
   `arrow_import.sh`, `lib.sh` and the three drivers:
 
   ```
-                            at f738dd4d   today
-      names pyarrow             34          35
-      runs `import pyarrow`     29          30
-      calls pgc_skip pyarrow    25          25
+                                       at f738dd4d   today
+      names pyarrow anywhere                34          35
+      names pyarrow in CODE                 29          30
+      runs `import pyarrow` in code         29          30
+      imports it AND calls pgc_skip         25          25
   ```
 
-  29 reproduces at that commit by the `import pyarrow` reading and only that one;
-  naming pyarrow anywhere gave 34 even then. 25 has not moved. The count that
-  drifted is the one the sentence did not mean -- `capability_sweep.sh` joined the
-  pyarrow population when #1235 landed. The comment now carries all three rows, so
-  a reader learns the transferable thing: a number can be correct and still be
-  attached to the wrong population.
+  **The predicate separating 34 from 29 is comment stripping**, and the five in
+  the gap name pyarrow only to say they do not use it -- two hand-craft their
+  fixtures, three gate on other capabilities. Same house-style trap as searching
+  `arrow_import.sh` for `pgc_skip` and matching the sentence that says why not to
+  use it.
+
+  So 29 was honestly counted, of the suites whose *code* names pyarrow. 25 has not
+  moved. The count that drifted is the one the sentence did not mean --
+  `capability_sweep.sh` joined the population when #1235 landed. All four rows go
+  in the comment, with the predicate named on each, because three rows invite the
+  reader to guess which "names pyarrow" means -- and guessing differently is how
+  two reviewers got different totals for the same tree before reconciling them.
 
   The recount is also a worked example of the defect it fixes: the first attempt
   returned 26, because searching `arrow_import.sh` for `pgc_skip` matches the
