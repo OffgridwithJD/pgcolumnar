@@ -1093,4 +1093,32 @@ suites_not_covered 248
 # -- an unbounded run was killed at 10m52s of 99.9% CPU -- against 206 ms fixed.
 # That is a different tree, so it is not expressible as a same-tree mutation and
 # the row stays `never` rather than being dated on evidence of another kind.
+
+# #1252 FOLLOW-UP: 1574 does NOT move; one arm arrives dated. Counted on the
+# main that carries #1258 (493e018d):
+#
+#     ledger rows   1740 + 1 = 1741
+#     dated          166 + 1 =  167
+#     never                1574   unchanged
+#     1574 + 167 == 1741
+#
+# THE GUARD DEFENDS A CLASS AND THE COMMENT NAMED ONE MEMBER OF IT. The first
+# version said the partially numeric token was "the one input it actually
+# defends". It is not: the guard refuses everything bash will not read as an
+# int64, and the other member is worse --
+#
+#     pgc_analyze_cap_ms 12abc                 guarded 5000  unguarded <arith error>
+#     pgc_analyze_cap_ms 99999999999999999999  guarded 5000  unguarded 7751640039368425452
+#
+# -- because `$(( ))` WRAPS SILENTLY and hands back a positive number past the
+# floor, so the unguarded function returns a cap that can never fail. An
+# arithmetic error is loud; a bound that always passes looks like a green test.
+# Named by @jdatcmd, who also pointed out that the original sentence is exactly
+# what a later reader would cite to justify deleting the guard.
+#
+# AND A DEAD CONJUNCT IS REMOVED BY THE SAME ARGUMENT. `c > 0` in the awk cannot
+# fire: pgc_analyze_cap_ms returns max(5000, ...), so `cap_ms` is never <= 0. It
+# was meaningful in the old form where `scan_ms` really could be 0. By the rule
+# used for the input guard one line above -- a condition either gets covered or
+# gets removed -- this one cannot be covered, so it goes.
 checks_never_observed_red 1574
