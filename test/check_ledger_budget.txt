@@ -546,4 +546,52 @@ suites_not_covered 249
 # this shows; they are unattacked, and they need mutations aimed at plan shape,
 # the NULL handling and the baseline join rather than at the filter's verdict.
 # Saying which is the next reader's job, not an entry in this file.
-checks_never_observed_red 1519
+# 1519 -> 1521 for #1237's four new catalog_plan_index checks. Re-derived by
+# COUNTING on this tree:
+#
+#     awk -F'\t' '$5=="never"' test/check_ledger.tsv | wc -l   ->  1521
+#
+# with the premise beside it, because a pattern matching nothing counts 0 and
+# reads like a clean answer: 1606 rows total, 85 not `never`, 1521 + 85 == 1606.
+#
+# FOUR ROWS AND THE CENSUS MOVES BY TWO. Two carry a measured last-red from one
+# mutation, both `storage_id` scans reverted to `InvalidOid`:
+#
+#     a no-qual count did not sequentially scan pgcolumnar.storage   got [1] want [0]
+#     planning a join probed pgcolumnar.storage through storage_pkey got [0] want [1]
+#
+# The two that stay `never` are fixture premises: that a no-qual count reached
+# the catalog at all, and that the join reached it more than once. They exist so
+# the two arms above cannot pass over a measurement that never happened.
+#
+# RED BEFORE GREEN, WITH SOURCE AND BINARY IN STEP EACH TIME:
+#
+#     unfixed   count(*) idx=0 seq=1   join idx=0 seq=5    8 passed + 2 failed
+#     fixed     count(*) idx=1 seq=0   join idx=4 seq=1   10 passed + 0 failed
+#
+# and the pytest twin separately, because the twins' regimes diverge: unfixed
+# rc=1 with `storage after count(*) idx_scan=0 seq_scan=1`, fixed rc=0 with 10
+# of 10. The twin aborts at its first failure where the shell suite runs on, so
+# it reports 8 checks against the shell's 10 -- a divergence in the FAILURE
+# output, not in the names.
+#
+# THE MAJOR SET WAS DERIVED FROM FIVE RUNS against DEFAULT_CONFIGS read out of
+# run_all_versions.sh: rc=0 and 10 passed + 0 failed on pg15, pg16, pg17, pgsql
+# (the runner's PG18) and pg19.
+#
+# FIVE INSTRUMENT FAILURES BEFORE THE FIRST MEASUREMENT, none of them about the
+# change, and one defect behind all five. Each time the run produced no verdict
+# and each time a grep written for the expected answer hid the cause:
+#
+#     a FATAL matching none of PASS|FAIL|accounting, read as "ran, printed nothing"
+#     a raw `make install`, which does NOT write the source stamp -- only
+#       pgc_build_and_install does -- so the freshness gate refused (#1230)
+#     a harness build as `postgres` into a tree a root-run `make` had left
+#       root-owned, dying on Permission denied writing a .d file
+#     a grep for `storage` matching the TEST FILE'S OWN COMMENTS echoed back
+#
+# `head -12` on the log settled it in one go. READ THE TAIL, THEN FILTER ONCE
+# YOU KNOW WHAT IS THERE.
+#
+# suites_not_covered does NOT move: catalog_plan_index is already covered.
+checks_never_observed_red 1521

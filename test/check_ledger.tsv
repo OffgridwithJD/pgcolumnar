@@ -20,11 +20,15 @@ capability_sweep	capability_sweep	premise: the shim makes pyarrow unimportable	1
 capability_sweep	capability_sweep	premise: the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the two derivations of the population name the same suites	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: while python itself still runs under the shim	15;16;17;18;19	never	-
+catalog_plan_index	catalog_plan_index	a no-qual count did not sequentially scan pgcolumnar.storage	15;16;17;18;19	2026-09-23	both storage_id scans reverted to InvalidOid, so the catalog is swept sequentially on its own primary key
+catalog_plan_index	catalog_plan_index	planning a join probed pgcolumnar.storage through storage_pkey	15;16;17;18;19	2026-09-23	both storage_id scans reverted to InvalidOid, so the catalog is swept sequentially on its own primary key
 catalog_plan_index	catalog_plan_index	planning did not sequentially scan pgcolumnar.options	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
 catalog_plan_index	catalog_plan_index	planning did not sequentially scan pgcolumnar.projection	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
 catalog_plan_index	catalog_plan_index	planning probed pgcolumnar.options through options_pkey	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
 catalog_plan_index	catalog_plan_index	planning probed pgcolumnar.projection through projection_pkey	15;16;17;18;19	2026-09-22	InvalidOid on the planner options and projection scans
+catalog_plan_index	catalog_plan_index	premise: a no-qual count over a columnar table touched storage at all	15;16;17;18;19	never	-
 catalog_plan_index	catalog_plan_index	premise: the filtered scan returned every row	15;16;17;18;19	never	-
+catalog_plan_index	catalog_plan_index	premise: the join reached storage more than once	15;16;17;18;19	never	-
 catalog_plan_index	catalog_plan_index	premise: the measured table holds its rows	15;16;17;18;19	never	-
 differential	differential	agg avg	15;16;17;18;19	never	-
 differential	differential	agg count	15;16;17;18;19	never	-

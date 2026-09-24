@@ -73,4 +73,66 @@ check_num "planning probed pgcolumnar.projection through projection_pkey" \
 check_num "planning did not sequentially scan pgcolumnar.projection" \
 	"$prj_seq" "0"
 
+# ---- and pgcolumnar.storage, through storage_pkey (#1237) -------------------
+#
+# Two readers key on storage_id and both passed InvalidOid, so both scanned the
+# catalog sequentially on the one column storage_pkey is a UNIQUE btree over:
+#
+#     PgColumnarGetSortedInfo           PLANNING, via pgcolumnar_sorted_pathkeys
+#     PgColumnarCheckNativeFormatVersion EXECUTION, once per relation scanned
+#
+# THE TWO SHAPES ARE DIFFERENT ARMS BECAUSE THEY REACH DIFFERENT CODE, and a
+# single shape cannot tell them apart. Measured on the unfixed tree, scans of
+# pgcolumnar.storage per planned query by shape:
+#
+#     count(*), no qual                  0 at planning, 1 at execution
+#     qual on a plain column             1
+#     qual on a column with a projection 4
+#     two columnar relations, one qual   4   <- 2 limit lookups + 2 sorted lookups
+#
+# A `count(*)` never reaches the row-group-limit lookup, so the ONLY storage
+# access it makes is the format-version one. That makes seq_scan == 0 a clean
+# reading for that site and nothing else.
+#
+# THE JOIN IS MEASURED ON idx_scan RATHER THAN seq_scan, deliberately. Its two
+# remaining sequential scans come from pgcolumnar_written_stripe_row_limit,
+# which keys on relation_oid and has NO index to name -- that is #1210 and
+# #1211 and is not this change. Asserting seq_scan == 0 there would fail for a
+# defect this change does not claim to fix, and asserting seq_scan == 2 would
+# pin a number that #1210 is expected to move.
+q "CREATE TABLE plan_cat_j (id int) USING pgcolumnar;
+   INSERT INTO plan_cat_j SELECT g FROM generate_series(1,800) g;" >/dev/null
+
+storage_stat() {	# -> "idx_scan seq_scan"
+	q "SELECT coalesce(idx_scan,0)::text || ' ' || coalesce(seq_scan,0)::text
+		FROM pg_stat_all_tables
+		WHERE schemaname = 'pgcolumnar' AND relname = 'storage';"
+}
+
+q "SELECT pg_stat_reset();" >/dev/null
+q "SELECT count(*) FROM plan_cat;" >/dev/null
+q "SELECT pg_stat_force_next_flush();" >/dev/null
+st="$(storage_stat)"
+st_idx="${st%% *}"
+st_seq="${st##* }"
+echo "-- storage after count(*)  idx_scan=$st_idx seq_scan=$st_seq"
+
+check_num "premise: a no-qual count over a columnar table touched storage at all" \
+	"$(if [ "$((st_idx + st_seq))" -ge 1 ]; then echo 1; else echo 0; fi)" "1"
+check_num "a no-qual count did not sequentially scan pgcolumnar.storage" \
+	"$st_seq" "0"
+
+q "SELECT pg_stat_reset();" >/dev/null
+q "SELECT count(*) FROM plan_cat a JOIN plan_cat_j b ON a.id = b.id WHERE a.id > 0;" >/dev/null
+q "SELECT pg_stat_force_next_flush();" >/dev/null
+sj="$(storage_stat)"
+sj_idx="${sj%% *}"
+sj_seq="${sj##* }"
+echo "-- storage after a two-relation join  idx_scan=$sj_idx seq_scan=$sj_seq"
+
+check_num "premise: the join reached storage more than once" \
+	"$(if [ "$((sj_idx + sj_seq))" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+check_num "planning a join probed pgcolumnar.storage through storage_pkey" \
+	"$(if [ "$sj_idx" -ge 2 ]; then echo 1; else echo 0; fi)" "1"
+
 pgc_summary

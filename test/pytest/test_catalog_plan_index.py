@@ -101,3 +101,78 @@ def test_catalog_plan_index(pgc_cluster, pgc_conn, expect):
         0,
         "planning did not sequentially scan pgcolumnar.projection",
     )
+
+    # ---- and pgcolumnar.storage, through storage_pkey (#1237) --------------
+    #
+    # Two readers key on storage_id and both passed InvalidOid, so both scanned
+    # the catalog sequentially on the one column storage_pkey is a UNIQUE btree
+    # over: PgColumnarGetSortedInfo at PLANNING (via pgcolumnar_sorted_pathkeys)
+    # and PgColumnarCheckNativeFormatVersion once per relation scanned at
+    # EXECUTION.
+    #
+    # TWO SHAPES BECAUSE THEY REACH DIFFERENT CODE. A no-qual count never
+    # reaches the row-group-limit lookup, so its only storage access is the
+    # format-version one and seq_scan == 0 reads cleanly. The join is measured
+    # on idx_scan instead: its remaining sequential scan comes from
+    # pgcolumnar_written_stripe_row_limit, which keys on relation_oid and has
+    # no index to name -- that is #1210 and #1211, not this change. Measured
+    # unfixed, join idx=0 seq=5; fixed, idx=4 seq=1, and the 1 is that lookup.
+    #
+    # Its own cursor and its own reader connection, like the arms above: the
+    # session that wrote the rows must not be the session being measured.
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE planner_join (n bigint) USING pgcolumnar")
+        cur.execute(
+            f"INSERT INTO planner_join SELECT g FROM generate_series(1,{ROWS}) g"
+        )
+        cur.execute("SELECT pg_stat_reset()")
+
+    reader = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
+    try:
+        with reader.cursor() as cur:
+            cur.execute(f'SET search_path TO "{schema}", public')
+            cur.execute("SELECT count(*) FROM planner_opts")
+            cur.execute("SELECT pg_stat_force_next_flush()")
+    finally:
+        reader.close()
+
+    st_idx, st_seq = _stats(pgc_conn, "storage")
+    print(f"-- storage after count(*) idx_scan={st_idx} seq_scan={st_seq}")
+    expect.at_least(
+        st_idx + st_seq,
+        1,
+        "premise: a no-qual count over a columnar table touched storage at all",
+    )
+    expect.num(
+        st_seq,
+        0,
+        "a no-qual count did not sequentially scan pgcolumnar.storage",
+    )
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("SELECT pg_stat_reset()")
+
+    reader = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
+    try:
+        with reader.cursor() as cur:
+            cur.execute(f'SET search_path TO "{schema}", public')
+            cur.execute(
+                "SELECT count(*) FROM planner_opts a "
+                "JOIN planner_join b ON a.n = b.n WHERE a.n >= 1"
+            )
+            cur.execute("SELECT pg_stat_force_next_flush()")
+    finally:
+        reader.close()
+
+    sj_idx, sj_seq = _stats(pgc_conn, "storage")
+    print(f"-- storage after a two-relation join idx_scan={sj_idx} seq_scan={sj_seq}")
+    expect.at_least(
+        sj_idx + sj_seq,
+        2,
+        "premise: the join reached storage more than once",
+    )
+    expect.at_least(
+        sj_idx,
+        2,
+        "planning a join probed pgcolumnar.storage through storage_pkey",
+    )

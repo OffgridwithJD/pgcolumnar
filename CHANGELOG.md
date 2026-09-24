@@ -336,6 +336,47 @@ true until the next version shipped.
 
 ### Fixed
 
+- Planning a columnar query sequentially scanned `pgcolumnar.storage` on its own
+  primary key (#1237).
+
+  Two readers key on `storage_id` and both passed `InvalidOid`, so both swept the
+  catalog sequentially on the one column `storage_pkey` is a UNIQUE btree over:
+
+  | reader | phase | reached from |
+  | --- | --- | --- |
+  | `PgColumnarGetSortedInfo` | planning | `pgcolumnar_sorted_pathkeys` |
+  | `PgColumnarCheckNativeFormatVersion` | execution, once per relation scanned | `columnar_reader.c:644` |
+
+  Unlike #1210 nothing had to be built and no decision about #1211 was involved:
+  the index exists and the key is exact.
+
+  ```
+    unfixed   count(*) idx=0 seq=1    join idx=0 seq=5
+    fixed     count(*) idx=1 seq=0    join idx=4 seq=1
+  ```
+
+  The four converted scans are `GetSortedInfo` twice at planning and
+  `CheckNativeFormatVersion` twice at execution. **THE RESIDUE IS
+  `pgcolumnar_written_stripe_row_limit`, ONCE PER COLUMNAR RELATION THAT REACHES
+  IT** (#1210, #1211), which keys on `relation_oid` and has no index to name.
+  One here because this query's qual is on one side of the join only;
+  @OffgridwithJD measures two where both sides reach it. `seq` becoming 1 is a
+  property of the query, not of the change.
+
+  WHICH IS WHY THE JOIN ARM ASSERTS `idx_scan >= 2` RATHER THAN `seq_scan == 0`.
+  Asserting zero would fail for a defect this change does not fix, and asserting
+  one would pin a number #1210 is expected to move.
+
+  The two shapes are separate arms because they reach different code. A no-qual
+  count never reaches the row-group-limit lookup, so its only storage access is
+  the format-version one and `seq_scan == 0` reads cleanly for that site alone.
+
+  HOW IT WAS FOUND: two instruments disagreeing, and both being right. An `elog`
+  inside `pgcolumnar_written_stripe_row_limit` counted 2 scans for a join;
+  `pg_stat_all_tables.seq_scan` on the catalog counted 4. An elog at one
+  function counts arrivals at that function; a counter on the relation counts
+  scans from any caller. The gap was the second reader.
+
 - Eleven suites built with their own `make`, so neither the build stamp (#536)
   nor the cross-major object check (#1219) protected them (#1220). They now route
   through `pgc_build_and_install`.
