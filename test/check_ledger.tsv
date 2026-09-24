@@ -514,11 +514,28 @@ harness_selftest	280-the-shared-cluster-config-must-not	premise: the cluster-con
 harness_selftest	280-the-shared-cluster-config-must-not	premise: the detector fires on the line that caused #799	15;16;17;18;19	never	-
 harness_selftest	280-the-shared-cluster-config-must-not	the per-suite escape hatch PGC_EXTRA_CONF is still applied to the config	15;16;17;18;19	never	-
 harness_selftest	280-the-shared-cluster-config-must-not	the shared cluster config sets no pgcolumnar.* GUC	15;16;17;18;19	never	-
-harness_selftest	290-a-preflight-that-built-nothing	a preflight that built nothing does not report PASSED	15;16;17;18;19	never	-
-harness_selftest	290-a-preflight-that-built-nothing	a preflight that built nothing exits non-zero	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	a preflight that built nothing does not report PASSED	15;16;17;18;19	2026-09-24	the zero-build refusal removed, so a preflight that built nothing reports PASSED
+harness_selftest	290-a-preflight-that-built-nothing	a preflight that built nothing exits non-zero	15;16;17;18;19	2026-09-24	the zero-build refusal removed, so a preflight that built nothing reports PASSED
 harness_selftest	290-a-preflight-that-built-nothing	a preflight that built nothing says how many it built	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	a tree full of objects is reported clean after the sweep	15;16;17;18;19	2026-09-24	the cleaner always answers dirty, whatever the detector says;the find sweep removed, so only make clean is relied on;the sweep looks only in src/, missing objstore/
+harness_selftest	290-a-preflight-that-built-nothing	a tree holding objects is detected as holding them	15;16;17;18;19	2026-09-24	the detector blinded, so it never reports an object
+harness_selftest	290-a-preflight-that-built-nothing	a tree with nothing to remove is clean, not an error	15;16;17;18;19	2026-09-24	the cleaner always answers dirty, whatever the detector says;the find sweep removed, so only make clean is relied on;the sweep looks only in src/, missing objstore/
+harness_selftest	290-a-preflight-that-built-nothing	and a directory that is not there holds none	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	and a directory that is not there is dirty rather than silently clean	15;16;17;18;19	2026-09-24	the missing-or-empty directory guard removed
+harness_selftest	290-a-preflight-that-built-nothing	and clean when it reports none	15;16;17;18;19	2026-09-24	the cleaner always answers dirty, whatever the detector says
+harness_selftest	290-a-preflight-that-built-nothing	and it left the source alone	15;16;17;18;19	2026-09-24	the sweep loses its name filter and deletes every file it finds
+harness_selftest	290-a-preflight-that-built-nothing	and no argument at all is dirty rather than sweeping the cwd	15;16;17;18;19	2026-09-24	the missing-or-empty directory guard removed
+harness_selftest	290-a-preflight-that-built-nothing	and the detector now says the tree holds none	15;16;17;18;19	2026-09-24	the find sweep removed, so only make clean is relied on;the sweep looks only in src/, missing objstore/
+harness_selftest	290-a-preflight-that-built-nothing	and the objects are gone, including the ones outside src/	15;16;17;18;19	2026-09-24	the find sweep removed, so only make clean is relied on;the sweep looks only in src/, missing objstore/
+harness_selftest	290-a-preflight-that-built-nothing	and the old swallow-everything form is gone	15;16;17;18;19	2026-09-24	the old swallow-everything make clean put back alongside the new call
 harness_selftest	290-a-preflight-that-built-nothing	premise: and it built none of them	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	premise: and the leftover detector it reads is exposed too	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	premise: the fixture holds objects in both source directories	15;16;17;18;19	never	-
 harness_selftest	290-a-preflight-that-built-nothing	premise: the probe run skipped every major	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	premise: the real detector is back, and sees a real object	15;16;17;18;19	2026-09-24	the detector blinded, so it never reports an object
+harness_selftest	290-a-preflight-that-built-nothing	premise: the tree cleaner is exposed to be judged	15;16;17;18;19	never	-
+harness_selftest	290-a-preflight-that-built-nothing	the cleaner says dirty when the detector reports objects left behind	15;16;17;18;19	2026-09-24	the cleaner never verifies and always answers clean
+harness_selftest	290-a-preflight-that-built-nothing	the script asks the cleaner rather than merely defining it	15;16;17;18;19	2026-09-24	the call site reverted, so the cleaner is defined but never asked
 harness_selftest	300-a-test-script-must-be-runnable	and every executable script declares one	15;16;17;18;19	never	-
 harness_selftest	300-a-test-script-must-be-runnable	and every script a document names exists	15;16;17;18;19	never	-
 harness_selftest	300-a-test-script-must-be-runnable	and every script a document names is executable	15;16;17;18;19	never	-

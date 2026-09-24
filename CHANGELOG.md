@@ -503,6 +503,46 @@ true until the next version shipped.
   there is no aarch64 box here to test it on. What this change does is make the
   next nightly report the symbol names instead of a bare exit status, so the fix
   after it is measured rather than reasoned about.
+- The cross-major preflight leaves no object tree behind, on a box with no
+  `pg_config` on `PATH` (#1219).
+
+  `test/build_all_versions.sh` ends with a clean, and its comment says why:
+  "Leave no object tree behind from whichever major happened to be last: the
+  next build against a different major would link objects compiled for this
+  one." It was written as
+
+  ```sh
+  make -C "$SRCDIR" clean >/dev/null 2>&1 || true
+  ```
+
+  with no `PG_CONFIG` and its failure swallowed. PGXS resolves `pg_config` from
+  `PATH`, so on a box without a packaged one that `make` fails, the `|| true`
+  eats it, and the tree keeps the last major's objects while the script prints
+  PASSED. Measured, same tree, pg18a then pg19a:
+
+  ```
+    normal PATH              built 2 of 2  PASSED   objects left:  0
+    PATH with no pg_config   built 2 of 2  PASSED   objects left: 36
+  ```
+
+  **Passing a `pg_config` is not the fix.** `make clean` needs PGXS loaded to do
+  anything, objects live in `src/` *and* `objstore/`, and a clean whose failure
+  is swallowed cannot be told from one that worked. The sweep now removes by
+  `find` -- needing no `pg_config` -- and then verifies, through two functions the
+  selftest drives directly:
+
+  ```
+    pgc_bav_tree_has_objects DIR          -> yes | no
+    pgc_bav_clean_tree SRCDIR [PG_CONFIG] -> clean | dirty
+  ```
+
+  End to end, the real script under `env -i PATH=<no pg_config>` now leaves
+  **0 objects** where it left 36.
+
+  The consequence was bounded -- #1221's DWARF provenance catches foreign objects
+  on the next suite and cleans them -- so this cost a rebuild rather than a wrong
+  install. What it did not cost is nothing, and the comment promised something it
+  did not always do.
 
 - `pgc_reconcile_records` no longer reports an impossible mismatch on a log it
   cannot measure (#1242). Handed a log that states `checks run: N` and carries
