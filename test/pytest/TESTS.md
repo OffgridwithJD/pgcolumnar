@@ -130,6 +130,8 @@ behaviour, the source of that number is named.
 - [82. test_rewrite_storage_oid.py: a type rewrite keeps the storage row on the live table](#82-test_rewrite_storage_oidpy-a-type-rewrite-keeps-the-storage-row-on-the-live-table)
 - [83. test_catalog_scan_index.py: twelve metadata scans do not read their catalog whole](#83-test_catalog_scan_indexpy-twelve-metadata-scans-do-not-read-their-catalog-whole)
 - [84. test_native_format.py: the format stamp is a range, and an append raises it](#84-test_native_formatpy-the-format-stamp-is-a-range-and-an-append-raises-it)
+- [85. test_native_agg.py: min/max over timestamptz read no data](#85-test_native_aggpy-minmax-over-timestamptz-read-no-data)
+- [86. test_format_downgrade.py: an alpha4 binary refuses what this build wrote](#86-test_format_downgradepy-an-alpha4-binary-refuses-what-this-build-wrote)
 
 ## 1. How to read a test in here
 
@@ -6344,3 +6346,40 @@ Not ported, and declared INCOMPLETE in `test_compare_to_bash.py`: the metapage-v
 | test | what it holds |
 | --- | --- |
 | `test_the_format_stamp_is_a_range_and_an_append_raises_it` | this build stamps 2; a table stamped 1 is read on all four entry points and returns its rows; reading leaves its stamp at 1 and appending raises it to 2; stamps 3 and 0 are refused with `0A000` on all four; the backend survives |
+
+## 85. test_native_agg.py: min/max over timestamptz read no data
+
+A partial port of `native_agg.sh`, covering the arms #1293 added. "What is the latest reading?" is `max(ts)`, and an ungrouped, unfiltered `min`/`max` is answered from the row groups' zone maps. The suite already proved the metadata node is chosen and that the answer matches heap, on `int4` and `text`. Neither shows the data went unread: with every group forced dirty, the node is still chosen, every parity arm stays green, and `max(ts)` reads 414 blocks against a decode's 403 (shell twin).
+
+THE ARM READS THE TABLE'S OWN BLOCKS from `pg_statio`, against a control that must decode the column (`max(at + interval '0 s')`). A tenth rather than zero, because the metapage and its neighbours are read either way: 13 blocks here, and 15 on a 10M-row table measured on #1293. The margin `decode - 10 * reading` is what is compared, so a failure reports by how much it fell short.
+
+THE ROW COUNT IS A PREMISE because the shell twin's first draft overflowed `int` computing its timestamps. The `INSERT` failed without a word, and every arm measured an empty table: the decode "control" read 3 blocks. Parity is then checked again after deleting the newest and oldest rows, because a zone map still records deleted values (#149).
+
+Removal proof, on this twin: forcing every group dirty reddens `max(ts) reads under a tenth of the blocks a decode of ts reads` (got -1487, wanted at least 1).
+
+Not ported, and declared INCOMPLETE in `test_compare_to_bash.py`: the `int4`/`text` parity, `sum`/`avg`, parallel-plan and fallback arms.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_min_max_over_timestamptz_read_no_data` | the table holds every row; `max(ts)` plans the metadata node; a decode reads at least 10 blocks; `max` and `min` each read under a tenth of that; parity with heap before and after deleting rows at both ends |
+
+## 86. test_format_downgrade.py: an alpha4 binary refuses what this build wrote
+
+Port of `format_downgrade.sh` (#1137). 1.0-alpha5 stops writing a validity bitmap for a chunk with no nulls, and an alpha4 binary misreads such a chunk without refusing it: with the real `v1.0-alpha4` library, 9 of 40 single-row fetches returned NULL for a row that holds a value. The fix is the format stamp. A table this build writes carries `format_version` 2, alpha4 refuses any stamp but 1, and a table this build only reads keeps 1.
+
+THE CLAIM IS ABOUT TWO BINARIES, so this test uses both, and it runs only when it is alone: see the second test below. It builds `v1.0-alpha4` from the tag, which it fetches when the checkout is shallow, as CI's is. It writes two tables with the old build, upgrades to this tree, reads one, appends to the other and creates a third. Then it puts the old library back under the upgraded catalog, which is what a package rollback does. `native_format.sh`'s arms stand in for alpha4 with a catalog `UPDATE`; this one does not.
+
+ON A CLUSTER OF ITS OWN, AND THE PREFIX IS PUT BACK EXACTLY. The session cluster shares the install prefix. So before anything is installed, every `pgcolumnar*` file in the library and extension directories is saved, bytes and mtime, and restored in a `finally` by atomic rename. Anything the old install added is removed. The mtime matters because the harness compares the library's mtime with the postmaster's start. Nothing is written into a library in place, because a copy over a library a running postmaster has mapped corrupts it. Measured: the prefix's library afterwards is byte-identical to the one this tree built.
+
+Refusal is asserted by SQLSTATE `0A000`, on a scan and on an index fetch with the custom scan off. The index fetch is the path that returned the silent NULLs.
+
+Removal proof: with `COLUMNAR_NATIVE_FORMAT_VERSION` set back to 1, the stamps read `1 1 1` and the test fails there. On the shell twin the same mutation reddens five arms, and alpha4 answers `ok` on the appended table's index fetch. That `ok` is the silent read this test exists to refuse.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_an_alpha4_binary_refuses_what_this_build_wrote` | the old build stores both tables; the libraries differ; the upgrade succeeds and this build reads the old table; the stamps are `1 2 2` for read, appended and new; on the old library again, the table only read is still read and fetched by index, and the appended and new tables are refused with `0A000` on a scan and on an index fetch |
+| `test_the_library_swap_declines_beside_other_workers` | the decision that makes the swap decline beside other xdist workers, driven with the environments pytest-xdist sets: a serial run and a one-worker run proceed, a run beside three other workers declines, and a worker with no stated count is treated as not alone. A backend another worker started during the swap would load alpha4 against this tree's catalogs and fail in an unrelated test; atomic renames protect only processes that had already mapped the library (found by @jdatcmd). Under `-n`, the swap test declines as `UNMET_PRECONDITION` with that reason, so a parallel run ends INCOMPLETE naming it rather than risking someone else's test |

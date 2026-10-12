@@ -2043,6 +2043,35 @@ if [ "${PGC_RUN_UPGRADE:-0}" = 1 ]; then
 		SUMMARY+=("FAIL   extension_upgrade (no runnable pg_config)")
 		overall=1
 	fi
+
+	# Format downgrade (#1137), on the same switch, invoked rather than only
+	# exempted for extension_upgrade's reason (#396): a guard nobody runs is the
+	# failure. It rolls the library back to the previous release under an upgraded
+	# catalog and requires the old binary to refuse what this build wrote. It
+	# builds that release from a throwaway clone, so it takes the same old source.
+	if [ -x "$_ex" ]; then
+		_fdlog="$(mktemp "/tmp/pgcolumnar-fmtdown-${_exmaj}.XXXXXX.log")"
+		bash "$SRCDIR/test/format_downgrade.sh" "$_ex" \
+			${PGC_DOWNGRADE_OLD_SRC:+"$PGC_DOWNGRADE_OLD_SRC"} >"$_fdlog" 2>&1
+		_fdrc=$?
+		if [ "$_fdrc" = 0 ]; then
+			echo "  PASS  format_downgrade PG$_exmaj"
+			SUMMARY+=("PASS   format_downgrade PG$_exmaj")
+			rm -f "$_fdlog"
+		elif [ "$_fdrc" = 2 ]; then
+			echo "  SKIP  format_downgrade PG$_exmaj"
+			grep -E '^\s*(SKIP|  )' "$_fdlog" | sed 's/^/      /'
+			SUMMARY+=("SKIP   format_downgrade PG$_exmaj")
+			rm -f "$_fdlog"
+		else
+			echo "  FAIL  format_downgrade PG$_exmaj"
+			grep -E '^\s*FAIL' "$_fdlog" | sed 's/^/      >> /'
+			tail -30 "$_fdlog" | sed 's/^/      /'
+			echo "      full log: $_fdlog"
+			SUMMARY+=("FAIL   format_downgrade PG$_exmaj")
+			overall=1
+		fi
+	fi
 fi
 
 echo
