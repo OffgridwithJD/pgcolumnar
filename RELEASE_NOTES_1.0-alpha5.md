@@ -103,7 +103,9 @@ Measured on the ClickBench sample, which has no nulls:
 | chunks without a bitmap | 0 of 735 | 735 of 735 |
 
 Both changes apply to data this release writes. Data written before the upgrade
-keeps its old layout until it is rewritten. TODO(release): verify.
+keeps its old layout until it is rewritten. Measured on PostgreSQL 17: a row
+group alpha4 wrote kept descriptor version 2 after the upgrade, the next insert
+wrote version 3, and the table read back every row correctly.
 
 ## Range pruning (#1144)
 
