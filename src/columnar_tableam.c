@@ -94,6 +94,7 @@ bool		pgcolumnar_autovacuum = false;		/* #415 daemon master switch */
 int			pgcolumnar_autovacuum_naptime = 60;
 double		pgcolumnar_autovacuum_compact_threshold = 0.2;
 double		pgcolumnar_autovacuum_recluster_threshold = 0.05;
+bool		pgcolumnar_autovacuum_expire = false;
 int			pgcolumnar_maintenance_hold_ms = 0;	/* dev/test fault injection */
 
 /* value set for columnar.compression (spec 5, 8.3) */
@@ -4201,7 +4202,7 @@ _PG_init(void)
 							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pgcolumnar.autovacuum",
-							 "Run the pgColumnar maintenance daemon (compact_rewrite / recluster).",
+							 "Run the pgColumnar maintenance daemon (compact_rewrite / recluster, and expire when pgcolumnar.autovacuum_expire is on).",
 							 "Off by default. When on it runs ONLY the online ShareUpdateExclusiveLock "
 							 "verbs, and yields (like autovacuum) to any statement needing a stronger lock.",
 							 &pgcolumnar_autovacuum,
@@ -4233,6 +4234,16 @@ _PG_init(void)
 							 NULL,
 							 &pgcolumnar_autovacuum_recluster_threshold,
 							 0.05, 0.0, 1.0,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pgcolumnar.autovacuum_expire",
+							 "Let the maintenance daemon run pgcolumnar.expire on tables that declare a retention.",
+							 "Off by default, because expire deletes rows: turning the daemon on does not "
+							 "by itself apply any retention. Has no effect while pgcolumnar.autovacuum is off.",
+							 &pgcolumnar_autovacuum_expire,
+							 false,
 							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);

@@ -2376,6 +2376,9 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 	/* the lazy lock, as compact takes: readers and writers continue */
 	rel = table_open(relid, ShareUpdateExclusiveLock);
 
+	/* dev/test: hold SUEL so the daemon's yield is observable in expire too (#1290) */
+	pgcolumnar_maintenance_hold();
+
 	if (!PgColumnarIsColumnarRelation(relid))
 	{
 		table_close(rel, ShareUpdateExclusiveLock);

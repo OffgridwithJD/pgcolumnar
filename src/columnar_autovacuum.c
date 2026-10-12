@@ -12,8 +12,10 @@
  *
  * TWO INVARIANTS make this safe to run unattended:
  *
- * 1. Only the ShareUpdateExclusiveLock verbs -- pgcolumnar.compact_rewrite and
- *    pgcolumnar.recluster (now self-gating, #415 part A) -- are ever called.
+ * 1. Only the ShareUpdateExclusiveLock verbs -- pgcolumnar.compact_rewrite,
+ *    pgcolumnar.recluster (now self-gating, #415 part A) and, when
+ *    pgcolumnar.autovacuum_expire is on, pgcolumnar.expire (#1290) -- are ever
+ *    called.
  *    Never vacuum()/vacuum_sorted()/cluster(), which take AccessExclusiveLock.
  *    SUEL does not block readers or ordinary writers, so the daemon cannot block
  *    production by construction.
@@ -219,6 +221,68 @@ av_mark_as_autovacuum(void)
 }
 
 /*
+ * Run pgcolumnar.expire on one table that declares a retention (#1290), in its
+ * own transaction inside PG_TRY.
+ *
+ * ITS OWN TRANSACTION, NOT av_maintain_one's: expire deletes rows and can fail
+ * on its own account -- the declared retention column was dropped, or its type
+ * changed -- and a failure here must not roll back a compact_rewrite that was
+ * due on the same table. It runs FIRST, so a compaction does not rewrite row
+ * groups that are about to be retired.
+ *
+ * Only reached when pgcolumnar.autovacuum_expire is on. That switch is off by
+ * default (the owner's decision on #1290): turning the daemon on must not
+ * start deleting rows by itself.
+ */
+static void
+av_expire_one(const char *qualname)
+{
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	SetCurrentStatementStartTimestamp();
+
+	PG_TRY();
+	{
+		char		q[512];
+		int64		retired = 0;
+
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "pgcolumnar autovacuum: SPI_connect failed");
+
+		snprintf(q, sizeof(q), "SELECT pgcolumnar.expire(%s)",
+				 quote_literal_cstr(qualname));
+		if (SPI_execute(q, false, 1) == SPI_OK_SELECT && SPI_processed == 1)
+		{
+			bool		isnull;
+			Datum		d = SPI_getbinval(SPI_tuptable->vals[0],
+										 SPI_tuptable->tupdesc, 1, &isnull);
+
+			if (!isnull)
+				retired = DatumGetInt64(d);
+		}
+		elog(LOG, "pgcolumnar autovacuum: expire %s retired " INT64_FORMAT " row groups",
+			 qualname, retired);
+
+		SPI_finish();
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		MemoryContext ecxt = MemoryContextSwitchTo(TopMemoryContext);
+		ErrorData  *ed = CopyErrorData();
+
+		elog(LOG, "pgcolumnar autovacuum: skipped expire on %s: %s", qualname, ed->message);
+		FreeErrorData(ed);
+		MemoryContextSwitchTo(ecxt);
+
+		FlushErrorState();
+		AbortCurrentTransaction();
+	}
+	PG_END_TRY();
+}
+
+/*
  * Run one maintenance verb on one table, each in its own transaction inside
  * PG_TRY: a query-cancel (the lock yield) or any error aborts just this op and
  * the caller continues to the next table.
@@ -358,7 +422,9 @@ pgcolumnar_av_worker_main(Datum arg)
 	Oid			dbid;
 	uint32		conn_flags = 0;
 	List	   *tables = NIL;
+	List	   *hasTtl = NIL;
 	ListCell   *lc;
+	ListCell   *lt;
 
 	memcpy(&dbid, MyBgworkerEntry->bgw_extra, sizeof(Oid));
 
@@ -373,16 +439,23 @@ pgcolumnar_av_worker_main(Datum arg)
 
 	av_mark_as_autovacuum();
 
-	/* Snapshot the columnar-table list once, in its own transaction. */
+	/*
+	 * Snapshot the columnar-table list once, in its own transaction, with
+	 * whether each declares a retention. Both halves must be set, as
+	 * PgColumnarReadTtl reads it: a half declaration is no retention, and
+	 * calling expire on it would only log an error every pass.
+	 */
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
 		int			ret = SPI_execute(
-			"SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) "
+			"SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname), "
+			"       COALESCE(o.ttl_column IS NOT NULL AND o.ttl_interval IS NOT NULL, false) "
 			"FROM pg_class c "
 			"JOIN pg_am a ON a.oid = c.relam "
 			"JOIN pg_namespace n ON n.oid = c.relnamespace "
+			"LEFT JOIN pgcolumnar.options o ON o.regclass = c.oid "
 			"WHERE a.amname = 'pgcolumnar' AND c.relkind = 'r'",
 			true, 0);
 		if (ret == SPI_OK_SELECT)
@@ -397,9 +470,13 @@ pgcolumnar_av_worker_main(Datum arg)
 
 				if (!isnull)
 				{
+					bool		ttlnull;
+					Datum		t = SPI_getbinval(SPI_tuptable->vals[i],
+												 SPI_tuptable->tupdesc, 2, &ttlnull);
 					MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
 
 					tables = lappend(tables, pstrdup(TextDatumGetCString(d)));
+					hasTtl = lappend_int(hasTtl, !ttlnull && DatumGetBool(t));
 					MemoryContextSwitchTo(old);
 				}
 			}
@@ -409,8 +486,11 @@ pgcolumnar_av_worker_main(Datum arg)
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
-	foreach(lc, tables)
+	forboth(lc, tables, lt, hasTtl)
 	{
+		CHECK_FOR_INTERRUPTS();
+		if (pgcolumnar_autovacuum_expire && lfirst_int(lt))
+			av_expire_one((const char *) lfirst(lc));
 		CHECK_FOR_INTERRUPTS();
 		av_maintain_one((const char *) lfirst(lc));
 	}
