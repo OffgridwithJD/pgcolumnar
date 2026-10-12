@@ -39,6 +39,18 @@ true until the next version shipped.
   parity again after the newest and oldest rows are deleted. The first draft of
   the fixture overflowed `int`, its `INSERT` failed without a word, and every arm
   measured an empty table. A row-count premise now comes first.
+- `docs/how-to.md` has a recipe for the latest reading per device (#1293), and
+  `test/latest_reading.sh` with its pytest twin runs the recipe's SQL straight from
+  the document. Each documented form must return the rows `DISTINCT ON` returns;
+  with the documented btree the `LATERAL` form must read under a tenth of the
+  table; and without it, the trap the section warns about must hold: the table is
+  read about once per device. Measured on #1293 with 10 million rows and 1,000
+  devices: 45 ms with the btree, 12.6 minutes without it, and 5.6 seconds for
+  `DISTINCT ON`. Editing the document's recipe to order ascending reddens the
+  parity arm on every major. The first red run, before the section existed, also
+  showed a vacuous arm: "under a tenth of the table" passed on empty SQL, because
+  a query that reads nothing reads under a tenth of anything. It now requires at
+  least one block read.
 
 ### Changed
 

@@ -1652,6 +1652,14 @@ inheritance	inheritance	premise: while its leaf is an ordinary relation	15;16;17
 inheritance	inheritance	row identities match the heap	15;16;17;18;19	never	-
 inheritance	inheritance	the child is visible through the parent	15;16;17;18;19	never	-
 inheritance	inheritance	ungrouped vector aggregation also sees the child rows	15;16;17;18;19	never	-
+latest_reading	latest_reading	premise: the document's index exists	15;16;17;18;19	never	-
+latest_reading	latest_reading	premise: the document's three recipe blocks were found	15;16;17;18;19	never	-
+latest_reading	latest_reading	premise: the indexed LATERAL form read the table at all	15;16;17;18;19	never	-
+latest_reading	latest_reading	premise: the table holds every row	15;16;17;18;19	never	-
+latest_reading	latest_reading	the GROUP BY form returns what DISTINCT ON returns	15;16;17;18;19	never	-
+latest_reading	latest_reading	the LATERAL form returns what DISTINCT ON returns	15;16;17;18;19	2026-10-12	the document's LATERAL recipe orders by ts ascending, so it returns each device's FIRST reading
+latest_reading	latest_reading	with the btree the LATERAL form reads under a tenth of the table	15;16;17;18;19	never	-
+latest_reading	latest_reading	without the btree the LATERAL form reads the table once per device	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	a sequential scan of the same poisoned chunk is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	an index fetch of a chunk whose page_length is 2^32 too large is refused (XX001)	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	backend survived the sequential refusal	15;16;17;18;19	never	-
