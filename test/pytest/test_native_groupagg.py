@@ -658,6 +658,39 @@ def test_the_group_estimate_bound_is_accurate_and_narrow(pgc_conn, expect):
                 "a non-time expression key gets no bound either")
 
 
+def test_the_bound_reads_the_zone_maps_in_one_catalog_scan(pgc_conn, expect):
+    """The range costs one catalog scan, not one per row group (#1304 review).
+
+    The first version probed zone_map_pkey once per group, on every plan: 109 -> 313
+    planning buffers at 67 groups, about 3 per group. Counted as the planning
+    transaction's own scans, which no other session can move, on the table AND its
+    index, because a catalog index scan counts on the index. No WHERE, so the
+    filter's survival estimate, which samples zone maps on purpose, is not counted.
+    """
+    _exec(pgc_conn, "CREATE TABLE gbz (ts timestamptz, v float8) USING pgcolumnar")
+    _exec(pgc_conn, "SELECT pgcolumnar.set_options('gbz', stripe_row_limit => 1000, "
+                    "chunk_group_row_limit => 1000)")
+    _exec(pgc_conn, "INSERT INTO gbz SELECT '2026-01-01'::timestamptz + g * interval '1 second', g "
+                    "FROM generate_series(1,50000) g")
+    _exec(pgc_conn, "ANALYZE gbz")
+    _gb_session(pgc_conn)
+
+    groups = int(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group "
+                                "WHERE storage_id = pgcolumnar.get_storage_id('gbz')"))
+    _exec(pgc_conn, "BEGIN")
+    try:
+        _exec(pgc_conn, "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b")
+        scans = int(_one(pgc_conn,
+                         "SELECT pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass) "
+                         "+ pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass)"))
+    finally:
+        _exec(pgc_conn, "ROLLBACK")
+    print(f"-- {groups} row groups, {scans} zone_map scans while planning")
+    expect.at_least(groups, 40,
+                    "premise: the fixture has many row groups, so one scan and one per group differ")
+    expect.num(scans, 1, "planning a bucketed GROUP BY scans zone_map once, not once per row group")
+
+
 def test_a_mixed_timestamp_predicate_never_narrows_the_bound(pgc_conn, expect):
     """PostgreSQL has cross-type operators, so a `timestamp` Const compared against a
     `timestamptz` column stays bare and reaches the extraction instead of being
