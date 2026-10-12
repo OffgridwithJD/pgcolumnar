@@ -9,18 +9,12 @@
  * alpha4 install would never run it and a fresh install would silently get a
  * different catalog from an upgraded one.
  *
- * EMPTY ON PURPOSE, AND THAT IS WHY IT EXISTS. This change opens the cycle and
- * nothing else. The file is here so that the work already pointed at alpha5 --
- * the zone-map summary that overlap and containment pruning needs (#1144), and
- * cascading step 2 (#1139) -- appends to a script that already exists rather
- * than racing to create it, and so that the version bump is reviewable on its
- * own rather than inside a feature diff.
- *
- * PostgreSQL requires the file to exist and to be readable; an upgrade script
- * that adds nothing is a valid one. `ALTER EXTENSION pgcolumnar UPDATE` from
- * alpha4 reaches alpha5 through this file and changes no catalog object, which
- * is what test/extension_upgrade.sh asserts by comparing the upgraded catalog
- * against a fresh install of the new version.
+ * IT WAS CREATED EMPTY to open the cycle, so that the work already pointed at
+ * alpha5 appended to a script that existed rather than racing to create it. It
+ * is no longer empty. It now adds `pgcolumnar.zone_map.max_upper` for range
+ * pruning (#1144), and replaces `reset_options`, `set_options` and `"analyze"`
+ * (#1265, #1276). test/extension_upgrade.sh asserts that the upgraded catalog is
+ * byte-identical to a fresh install of the new version.
  */
 
 -- The greatest upper bound of a RANGE column's values in a zone map unit
