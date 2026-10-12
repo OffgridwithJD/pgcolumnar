@@ -17,6 +17,11 @@ pgc_setup "${1:-/usr/lib/postgresql/18/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 
+# at_least GOT FLOOR -- GOT when it falls short of FLOOR, else FLOOR, so a failing
+# arm reports the number it measured rather than a bare 0 (selftest part 540).
+at_least() { [ "$1" -lt "$2" ] && echo "$1" || echo "$2"; }
+
+
 q "CREATE TABLE rew_keep (id int) USING pgcolumnar;
    INSERT INTO rew_keep SELECT g FROM generate_series(1,40) g;
    CREATE TABLE rew_oid (id int, note text) USING pgcolumnar;
@@ -102,5 +107,86 @@ check_num "premise: the refreshed matview still holds every row" \
 	"$(q "SELECT count(*) FROM rew_mv;")" "900"
 check_num "and REFRESH still leaves it pointing at itself" \
 	"$(points_at rew_mv)" "1"
+
+# ---- the repair gate must leave alone the partitions an ALTER did not touch -
+#
+# The gate above runs for every inheritor of an ALTER's target. An ALTER that
+# does not recurse -- DETACH, DETACH CONCURRENTLY, ATTACH, ALTER TABLE ONLY --
+# locks only the parent and the partition it names, and the gate opened every
+# OTHER partition with NoLock to read its storage id. On an assert-enabled build
+# relation_open aborted the backend:
+#
+#     TRAP: failed Assert("lockmode != NoLock || ... CheckRelationLockedByMe ...")
+#     <- PgColumnarRetargetStorageRelation <- pgcolumnar_process_utility
+#
+# measured for all four forms on a parent with two columnar partitions, PG 15
+# and 17. One partition hides it: no other partition is left to open.
+#
+# THE FIX SKIPS A RELATION THE STATEMENT HOLDS NO LOCK ON, rather than locking it,
+# since a relation the statement rewrote is locked by it until commit. So the
+# arms read WHAT THE GATE READ: blocks of the untouched partition, from
+# pg_statio, flushed by the ALTER's own session. The unfixed gate reads that
+# partition's metapage; the fixed one reads nothing of it. That holds on every
+# build, release builds included, where the Assert does not exist and an "it
+# did not crash" arm would be green on the unfixed code.
+#
+# The partitions are columnar explicitly, so the fixture is the same on every
+# major (a parent cannot carry USING before PostgreSQL 17).
+setup_parts() {
+	q "DROP TABLE IF EXISTS lp, lp_1, lp_2, lp_3 CASCADE;
+	   CREATE TABLE lp (ts timestamptz, v int) PARTITION BY RANGE (ts);
+	   CREATE TABLE lp_1 PARTITION OF lp FOR VALUES FROM ('2026-01-01') TO ('2026-02-01') USING pgcolumnar;
+	   CREATE TABLE lp_2 PARTITION OF lp FOR VALUES FROM ('2026-02-01') TO ('2026-03-01') USING pgcolumnar;
+	   CREATE TABLE lp_3 (ts timestamptz, v int) USING pgcolumnar;
+	   INSERT INTO lp SELECT '2026-01-01'::timestamptz + g * interval '1 h', g
+	     FROM generate_series(1, 1000) g;" >/dev/null
+}
+# up -- wait for the server to accept connections again. On the unfixed code on
+# an assert build each ALTER below aborts a backend and the postmaster restarts
+# every session; the next arm must measure the code, not the restart.
+up() { local i; for i in $(seq 1 60); do [ "$(q "SELECT 1;")" = 1 ] && return 0; sleep 1; done; return 1; }
+# lp1_blocks_during STATEMENT -> lp_1 blocks read by STATEMENT, or nothing when
+# the session did not survive to flush. Its own session, one transaction per
+# -c, so DETACH CONCURRENTLY runs outside a transaction block as it must.
+lp1_blocks_during() {
+	q "SELECT pg_stat_reset();" >/dev/null
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "$1" -c "SELECT pg_stat_force_next_flush()" >/dev/null 2>&1 ||
+		{ up; return; }
+	q "SELECT coalesce(heap_blks_read, 0) + coalesce(heap_blks_hit, 0)
+	   FROM pg_statio_user_tables WHERE relname = 'lp_1';"
+}
+
+setup_parts
+check "premise: both columnar partitions hold their rows" \
+	"$(q "SELECT count(*) FROM lp_1;")|$(q "SELECT count(*) FROM lp_2;")" "743|257"
+
+# THE CONTROL: the instrument sees a read of lp_1 when there is one. Without it
+# every zero below could be an instrument that cannot see.
+ctl="$(lp1_blocks_during "SELECT count(*) FROM lp_1")"
+check_num "control: reading lp_1 shows up as blocks read from it" \
+	"$( [ -n "$ctl" ] && at_least "$ctl" 1 )" "1"
+
+for alter in \
+	"ALTER TABLE ONLY lp ALTER COLUMN v SET DEFAULT 0" \
+	"ALTER TABLE lp ATTACH PARTITION lp_3 FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')" \
+	"ALTER TABLE lp DETACH PARTITION lp_2" \
+	"ALTER TABLE lp DETACH PARTITION lp_2 CONCURRENTLY"; do
+	setup_parts
+	n="$(lp1_blocks_during "$alter")"
+	echo "-- lp_1 blocks read during: $alter -> ${n:-session aborted}"
+	check_num "the repair gate does not read a partition the ALTER did not touch: ${alter#ALTER TABLE }" \
+		"${n:-aborted}" "0"
+done
+
+# The rewrite repair still reaches a partition the statement DID rewrite: a type
+# change on the parent recurses, locks every partition, and rewrites both.
+setup_parts
+q "ALTER TABLE lp ALTER COLUMN v TYPE bigint;" >/dev/null
+check "and a rewrite through the parent still repoints every partition's storage row" \
+	"$(q "SELECT string_agg((s.relation_oid = c.oid)::int::text, '' ORDER BY c.relname)
+	      FROM pg_class c JOIN pgcolumnar.storage s
+	        ON s.storage_id = pgcolumnar.get_storage_id(c.oid::regclass)
+	      WHERE c.relname IN ('lp_1', 'lp_2');")" "11"
 
 pgc_summary

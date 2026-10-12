@@ -1821,17 +1821,24 @@ range_pruning	range_pruning	premise: the range type collates differently from it
 range_pruning	range_pruning	so does a containment probe	15;16;17;18;19	never	-
 range_pruning	range_pruning	the overlap qual is pushed down, where it used to be dropped	15;16;17;18;19	never	-
 range_pruning	range_pruning	the same for a containment probe far to its right	15;16;17;18;19	never	-
-rewrite_storage_oid	rewrite_storage_oid	a matview created WITH DATA leaves its storage row pointing at itself	15;16;17;18;19	2026-10-12	the rewrite repair gate no longer covers CreateTableAsStmt, so a matview created WITH DATA keeps the transient's OID
-rewrite_storage_oid	rewrite_storage_oid	a type rewrite leaves the storage row pointing at the live table	15;16;17;18;19	2026-09-24	the rewrite hook does not retarget storage.relation_oid
-rewrite_storage_oid	rewrite_storage_oid	and REFRESH still leaves it pointing at itself	15;16;17;18;19	2026-10-12	the rewrite repair gate no longer covers RefreshMatViewStmt
+rewrite_storage_oid	rewrite_storage_oid	a matview created WITH DATA leaves its storage row pointing at itself	15;16;17;18;19	2026-10-12	the repair gate skips every relation, as if no inheritor were locked by the statement;the rewrite repair gate no longer covers CreateTableAsStmt, so a matview created WITH DATA keeps the transient's OID
+rewrite_storage_oid	rewrite_storage_oid	a type rewrite leaves the storage row pointing at the live table	15;16;17;18;19	2026-10-12	the repair gate skips every relation, as if no inheritor were locked by the statement;the rewrite hook does not retarget storage.relation_oid
+rewrite_storage_oid	rewrite_storage_oid	and REFRESH still leaves it pointing at itself	15;16;17;18;19	2026-10-12	the repair gate skips every relation, as if no inheritor were locked by the statement;the rewrite repair gate no longer covers RefreshMatViewStmt
+rewrite_storage_oid	rewrite_storage_oid	and a rewrite through the parent still repoints every partition's storage row	15;16;17;18;19	2026-10-12	the repair gate skips every relation, as if no inheritor were locked by the statement
+rewrite_storage_oid	rewrite_storage_oid	control: reading lp_1 shows up as blocks read from it	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: CREATE TABLE ... AS leaves its storage row pointing at itself	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: a table that was not rewritten still points at itself	15;16;17;18;19	never	-
+rewrite_storage_oid	rewrite_storage_oid	premise: both columnar partitions hold their rows	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the CREATE TABLE AS table holds them too	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the matview holds the rows it was created with	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the refreshed matview still holds every row	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the rewritten table still holds every row	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the storage row points at the live table before the rewrite	15;16;17;18;19	never	-
 rewrite_storage_oid	rewrite_storage_oid	premise: the table holds every inserted row	15;16;17;18;19	never	-
+rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: ONLY lp ALTER COLUMN v SET DEFAULT 0	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
+rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp ATTACH PARTITION lp_3 FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
+rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp DETACH PARTITION lp_2	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
+rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp DETACH PARTITION lp_2 CONCURRENTLY	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-

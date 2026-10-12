@@ -1223,4 +1223,15 @@ suites_not_covered 247
 #     projection_parallel    1   a worker never wires the shared row-group counter
 #
 #     never   1662 - 11 = 1651
-checks_never_observed_red 1651
+# The repair gate's unlocked partition open (OffgridwithJD): 1651 -> 1653.
+# rewrite_storage_oid gains seven checks. Five are dated, all on five majors:
+# the four "does not read a partition the ALTER did not touch" arms by the
+# unfixed gate, and "a rewrite through the parent still repoints every
+# partition's storage row" by a gate that skips every relation. The control and
+# the partition premise arrive `never`.
+#
+#     ledger rows   1859 + 7 = 1866
+#     never         1651 + 2 = 1653
+#     dated          208 + 5 =  213
+#     1653 + 213 == 1866
+checks_never_observed_red 1653
