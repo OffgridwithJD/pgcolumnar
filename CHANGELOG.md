@@ -18,6 +18,28 @@ true until the next version shipped.
 
 ### Changed
 
+- Five selftest parts and `rewrite_storage_oid` no longer hold a check that has
+  never been red (#1236). Nine checks now carry a mutation that reddens them,
+  each measured on all five majors: 570's fold arm, two in 290, one in 560, three
+  in 580 and both matview arms in `rewrite_storage_oid`. The `WITH DATA` matview
+  arm reddens on 17, 18 and 19 only, because PostgreSQL 15 and 16 fill a new
+  matview in place and the defect it guards cannot happen there.
+
+  Three checks that only described their own fixture are renamed `premise:`,
+  two in 570 and one in 190, because no change to the code under test can
+  redden them. For 190's, that was measured rather than argued: replacing the
+  arm's comment strip with a raw read left all 1213 selftest checks green on
+  every major. The owner decided on 2026-10-12 that such checks are renamed, not
+  kept as arms or deleted.
+
+- Four more suites, `catalog_delete_index`, `catalog_plan_index`,
+  `projection_scan_cost` and `projection_parallel`, no longer hold a check that
+  has never been red (#1236). Nine arms and two premises now carry a mutation
+  that reddens them on all five majors. One arm in `projection_parallel`,
+  "workers share the covering projection scan", stayed green when no worker
+  shared anything, because it only asks that both workers produced rows. It
+  is recorded on #1236 rather than changed here.
+
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens
   CI from `expected_tests.txt`, `TESTS.md`, the ledger plus its budget, and
