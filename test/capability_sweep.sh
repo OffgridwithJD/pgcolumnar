@@ -256,7 +256,11 @@ check_num "no suite loses a check without recording a skip or a refusal" \
 # suite that stops calling pgc_skip pyarrow leaves this side, and must then read
 # preserved, or the silent arm above catches it.
 DECLINERS="$(for _cap_b in $NARROW; do
-	sed 's/#.*//' "$TESTDIR/$_cap_b" | grep -qE 'pgc_skip[[:space:]]+"?pyarrow' && printf '%s\n' "$_cap_b"
+	# grep -c, NOT grep -q: -q exits at the first match, sed dies of SIGPIPE, and
+	# under pipefail the pipeline fails, so a suite that DOES call pgc_skip drops
+	# out at random. Measured here: three of 25 dropped on one run. The header of
+	# this file records the same race for the population itself.
+	[ "$(sed 's/#.*//' "$TESTDIR/$_cap_b" | grep -cE 'pgc_skip[[:space:]]+"?pyarrow')" -gt 0 ] && printf '%s\n' "$_cap_b"
 done | LC_ALL=C sort)"
 check_num "premise: some suites in the population call pgc_skip pyarrow" \
 	"$([ -n "$DECLINERS" ] && echo 1 || echo 0)" "1"
