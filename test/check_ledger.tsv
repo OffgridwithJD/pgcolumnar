@@ -1759,18 +1759,18 @@ parallel_scan_cost	parallel_scan_cost	premise: the serial plan has no Gather	15;
 parallel_scan_cost	parallel_scan_cost	premise: the serial plan is a columnar scan	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
 parallel_scan_cost	parallel_scan_cost	the leader-participation branch changes the divisor	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	and no row-group row behind	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	and read back as heap does	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	and the rows land in columnar partitions	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	pg_partman creates a DEFAULT partition, as docs/how-to.md says	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	and no row-group row behind	15;16;17;18;19	2026-10-12	the drop hook stops deleting row_group rows, so they outlive their deleted storage row
+partman_columnar	partman_columnar	and read back as heap does	15;16;17;18;19	2026-10-12	a sequential scan drops the last row group from its list, so every one-group partition reads empty
+partman_columnar	partman_columnar	and the rows land in columnar partitions	15;16;17;18;19	2026-10-12	a sequential scan drops the last row group from its list, so every one-group partition reads empty
+partman_columnar	partman_columnar	premise: pg_partman creates a DEFAULT partition, as docs/how-to.md says	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: pg_partman is installed in this database	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: retention dropped partitions	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	premise: the rows went in	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	retention leaves no pgcolumnar storage row behind	15;16;17;18;19	2026-10-12	the drop hook stops deleting a storage's row_group and storage rows, so a partition pg_partman drops leaves them behind
-partman_columnar	partman_columnar	run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	the partitions maintenance creates ahead are columnar too	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	with default_table_access_method every partition pg_partman makes is columnar	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	without default_table_access_method pg_partman makes heap partitions	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	premise: run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	premise: the partitions maintenance creates ahead are columnar too	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	premise: the rows went in	15;16;17;18;19	2026-10-12	a sequential scan drops the last row group from its list, so every one-group partition reads empty
+partman_columnar	partman_columnar	premise: with default_table_access_method every partition pg_partman makes is columnar	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	premise: without default_table_access_method pg_partman makes heap partitions	15;16;17;18;19	never	-
+partman_columnar	partman_columnar	retention leaves no pgcolumnar storage row behind	15;16;17;18;19	2026-10-12	the drop hook stops deleting the storage row, so a partition pg_partman drops leaves it behind
 projection_parallel	projection_parallel	a covering projection can be a parallel scan	15;16;17;18;19	2026-09-18	-
 projection_parallel	projection_parallel	a page cost that makes I/O dominate costs the parallel covering path	15;16;17;18;19	2026-09-23	the partial covering total amortises I/O as well as CPU: (ioRunProj + cpuRunProj) / divisor
 projection_parallel	projection_parallel	a parallel covering projection returns the covering rows once	15;16;17;18;19	2026-10-12	a parallel worker never wires the shared row-group counter, so every worker scans every group

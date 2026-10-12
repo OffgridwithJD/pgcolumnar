@@ -18,9 +18,17 @@
 #   behaviour, not ours; it is asserted because docs/how-to.md tells users so, and a
 #   pg_partman that changed it should turn this red rather than leave the doc wrong.
 #
-# The first arm pins the trap rather than the recipe, on purpose: it is the reason
+# The first check pins the trap rather than the recipe, on purpose: it is the reason
 # the documentation exists, and a pg_partman that started honouring the parent's
 # access method should be noticed, not silently make the warning stale.
+#
+# CHECKS NO CHANGE TO THIS REPOSITORY CAN REDDEN ARE PREMISES (the owner's rule,
+# #1236). Which access method a partition gets, whether pg_partman makes a DEFAULT
+# partition, and which lock its maintenance holds are core's and pg_partman's
+# behaviour. They are still asserted -- a pg_partman release that changes one
+# turns it red, and the document with it -- but as premises, not as arms of this
+# repository. The arms are what pgcolumnar decides: what a scan returns, and what
+# the drop hook leaves in the catalogs.
 #
 # pg_partman is an external extension. A box without it FAILS this suite (lib.sh's
 # rule for every capability but pyarrow); set PGC_ALLOW_MISSING_PG_PARTMAN=1 to make
@@ -56,7 +64,7 @@ using=""; [ "$PGC_MAJOR" -ge 17 ] && using="USING pgcolumnar"
 q "CREATE TABLE plain_m (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts) $using;" >/dev/null
 q "SELECT partman.create_parent('public.plain_m', 'ts', '1 day', p_premake := 2,
      p_start_partition := (date_trunc('day', now()) - interval '2 days')::text);" >/dev/null
-check "without default_table_access_method pg_partman makes heap partitions" \
+check "premise: without default_table_access_method pg_partman makes heap partitions" \
 	"$(am_counts plain_m | sed -E 's/=[0-9]+//g')" "heap"
 
 # ---- 2. the recipe -----------------------------------------------------------
@@ -64,11 +72,11 @@ q "ALTER DATABASE \"$PGC_DB\" SET default_table_access_method = 'pgcolumnar';" >
 q "CREATE TABLE ts_m (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts) $using;" >/dev/null
 q "SELECT partman.create_parent('public.ts_m', 'ts', '1 day', p_premake := 3,
      p_start_partition := (date_trunc('day', now()) - interval '40 days')::text);" >/dev/null
-check_num "pg_partman creates a DEFAULT partition, as docs/how-to.md says" \
+check_num "premise: pg_partman creates a DEFAULT partition, as docs/how-to.md says" \
 	"$(q "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
 	      WHERE i.inhparent = 'ts_m'::regclass
 	        AND pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT';")" "1"
-check "with default_table_access_method every partition pg_partman makes is columnar" \
+check "premise: with default_table_access_method every partition pg_partman makes is columnar" \
 	"$(am_counts ts_m)" "pgcolumnar=$(q "SELECT count(*) FROM pg_inherits WHERE inhparent = 'ts_m'::regclass;")"
 
 q "CREATE TABLE ts_h (ts timestamptz, v int) USING heap;" >/dev/null
@@ -80,9 +88,11 @@ check_num "premise: the rows went in" "$(q "SELECT count(*) FROM ts_m;")" "3000"
 check "and the rows land in columnar partitions" \
 	"$(q "SELECT string_agg(DISTINCT a.amname, ',') FROM ts_m t
 	      JOIN pg_class c ON c.oid = t.tableoid JOIN pg_am a ON a.oid = c.relam;")" "pgcolumnar"
+# Every row, in order, hashed: an unfiltered count/sum/min/max is answered from
+# zone maps and would not exercise the scan at all.
 check "and read back as heap does" \
-	"$(q "SELECT count(*), sum(v), min(ts), max(ts) FROM ts_m;")" \
-	"$(q "SELECT count(*), sum(v), min(ts), max(ts) FROM ts_h;")"
+	"$(q "SELECT md5(string_agg(ts::text || ':' || v, ',' ORDER BY ts, v)) FROM ts_m;")" \
+	"$(q "SELECT md5(string_agg(ts::text || ':' || v, ',' ORDER BY ts, v)) FROM ts_h;")"
 
 # ---- 3. maintenance: ahead, retention, and the parent lock ------------------
 q "UPDATE partman.part_config SET premake = 6, retention = '20 days',
@@ -97,7 +107,7 @@ echo "-- partitions $kids_before -> $kids_after, storage rows $st_before -> $(q 
 dropped=$((kids_before - kids_after))
 check "premise: retention dropped partitions" \
 	"$([ "$dropped" -ge 1 ] && echo dropped || echo "dropped $dropped")" "dropped"
-check "the partitions maintenance creates ahead are columnar too" \
+check "premise: the partitions maintenance creates ahead are columnar too" \
 	"$(am_counts ts_m)" "pgcolumnar=$kids_after"
 check_num "retention leaves no pgcolumnar storage row behind" \
 	"$(q "SELECT count(*) FROM pgcolumnar.storage s
@@ -105,7 +115,7 @@ check_num "retention leaves no pgcolumnar storage row behind" \
 check_num "and no row-group row behind" \
 	"$(q "SELECT count(*) FROM pgcolumnar.row_group r
 	      WHERE NOT EXISTS (SELECT 1 FROM pgcolumnar.storage s WHERE s.storage_id = r.storage_id);")" "0"
-check "run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says" \
+check "premise: run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says" \
 	"$lock" "AccessExclusiveLock"
 
 pgc_summary

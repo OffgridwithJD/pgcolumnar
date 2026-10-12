@@ -66,7 +66,7 @@ def test_pg_partman_makes_columnar_partitions_with_one_setting(pgc_own_db, expec
         cur.execute("SELECT pm.create_parent('public.raw_events', 'at', '1 week', p_premake := 2,"
                     " p_start_partition := (date_trunc('week', now()) - interval '1 week')::text)")
     expect.text(" ".join(x.split("=")[0] for x in _am_counts(conn, "raw_events").split()), "heap",
-                "without default_table_access_method pg_partman makes heap partitions")
+                "premise: without default_table_access_method pg_partman makes heap partitions")
 
     # The recipe.
     dbname = _one(conn, "SELECT current_database()")
@@ -80,10 +80,10 @@ def test_pg_partman_makes_columnar_partitions_with_one_setting(pgc_own_db, expec
     expect.num(_one(conn, "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
                           " WHERE i.inhparent = 'metrics'::regclass"
                           " AND pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT'"), 1,
-               "pg_partman creates a DEFAULT partition, as docs/how-to.md says")
+               "premise: pg_partman creates a DEFAULT partition, as docs/how-to.md says")
     kids = _kids(conn, "metrics")
     expect.text(_am_counts(conn, "metrics"), f"pgcolumnar={kids}",
-                "with default_table_access_method every partition pg_partman makes is columnar")
+                "premise: with default_table_access_method every partition pg_partman makes is columnar")
 
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE metrics_heap (at timestamptz, n bigint) USING heap")
@@ -94,7 +94,9 @@ def test_pg_partman_makes_columnar_partitions_with_one_setting(pgc_own_db, expec
     expect.text(_one(conn, "SELECT string_agg(DISTINCT a.amname, ',') FROM metrics t"
                            " JOIN pg_class c ON c.oid = t.tableoid JOIN pg_am a ON a.oid = c.relam"),
                 "pgcolumnar", "and the rows land in columnar partitions")
-    agg = "SELECT count(*)::text || '|' || sum(n) || '|' || min(at) || '|' || max(at) FROM {}"
+    # Every row, in order, hashed: an unfiltered count/sum/min/max is answered from
+    # zone maps and would not exercise the scan at all.
+    agg = "SELECT md5(string_agg(at::text || ':' || n, ',' ORDER BY at, n)) FROM {}"
     expect.text(_one(conn, agg.format("metrics")), _one(conn, agg.format("metrics_heap")),
                 "and read back as heap does")
 
@@ -116,7 +118,7 @@ def test_pg_partman_makes_columnar_partitions_with_one_setting(pgc_own_db, expec
     expect.text("dropped" if after < before else f"dropped {before - after}", "dropped",
                 "premise: retention dropped partitions")
     expect.text(_am_counts(conn, "metrics"), f"pgcolumnar={after}",
-                "the partitions maintenance creates ahead are columnar too")
+                "premise: the partitions maintenance creates ahead are columnar too")
     expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.storage s WHERE NOT EXISTS"
                           " (SELECT 1 FROM pg_class c WHERE c.oid = s.relation_oid)"), 0,
                "retention leaves no pgcolumnar storage row behind")
@@ -124,4 +126,4 @@ def test_pg_partman_makes_columnar_partitions_with_one_setting(pgc_own_db, expec
                           " (SELECT 1 FROM pgcolumnar.storage s WHERE s.storage_id = r.storage_id)"), 0,
                "and no row-group row behind")
     expect.text(lock, "AccessExclusiveLock",
-                "run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says")
+                "premise: run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says")
