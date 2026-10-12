@@ -512,25 +512,28 @@ check_text "a cached ordered plan sees rows appended after it was planned" \
 # any claim truncated to NIL at the end anyway, so the read is pure waste, and
 # it is per plan.
 #
-# The oracle is a COUNT (buffers touched during PLANNING), not a duration.
-# Planning-time milliseconds would answer the same question, and on this host
-# they are not a fair instrument; a buffer count cannot be moved by another
-# process. It is also a work-done check rather than a correctness one: the
-# answers are identical either way, so nothing else in this suite could see it.
-
-# The query is planned TWICE in one session and the SECOND reading is taken.
-# A first plan in a fresh backend also fills the catalog caches, and that
-# first-touch cost is a couple of buffers that differ between two psql
-# invocations. Asserted as equality it made this arm flake by 2 either way.
-planbuf() {	# planbuf GUC QUERY -> shared buffers hit+read during planning
+# The oracle is a COUNT of the rows planning reads from pgcolumnar.row_group, not
+# of buffers and not a duration (#1203). The decision reads the row-group list
+# through row_group_pkey. This arm used to count every shared buffer planning
+# touched, and most of those belong to PostgreSQL's own catalogs, whose cache
+# state differs from one backend to the next: it failed in CI on both arms, in
+# both directions, and on one commit red then green. It was never reproduced on a
+# quiet box, so the cause of that noise is not known. The noise was in buffers
+# this arm does not care about.
+#
+# pg_stat_get_xact_tuples_returned reads THIS transaction's own counts, so no
+# other backend and no autovacuum can add to them, and a plain EXPLAIN plans
+# without executing. Heap and index are summed so the count survives a change of
+# access path. Measured on PG17, twelve readings each, with and without three
+# sessions running DDL alongside: 1000 for both settings with no ORDER BY, 2000
+# against 1000 with one, every reading identical.
+grouprows() {	# grouprows GUC QUERY -> row_group rows read while planning QUERY
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-		-d "$PGC_DB" -At -c "SET pgcolumnar.enable_sorted_pathkeys=$1" \
-		-c "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) $2" \
-		-c "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) $2" 2>/dev/null \
-		| awk '/^Planning:/{p++;next} p==2&&/Buffers:/{h=0;r=0;
-			if (match($0,/shared hit=[0-9]+/)) h=substr($0,RSTART+11,RLENGTH-11);
-			if (match($0,/read=[0-9]+/)) r=substr($0,RSTART+5,RLENGTH-5);
-			print h+r; exit}'
+		-d "$PGC_DB" -At -c "SET pgcolumnar.enable_sorted_pathkeys=$1" -c "BEGIN" \
+		-c "EXPLAIN (COSTS OFF) $2" \
+		-c "SELECT pg_stat_get_xact_tuples_returned('pgcolumnar.row_group'::regclass)
+		     + pg_stat_get_xact_tuples_returned('pgcolumnar.row_group_pkey'::regclass)" \
+		-c "ROLLBACK" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
 psql_run "CREATE TABLE pb (id int, k int, j int) USING pgcolumnar;"
 # The row_group catalog holds one row per STRIPE, so stripe_row_limit is what
@@ -549,25 +552,24 @@ check "premise: the fixture has many groups, so a per-group read would show" \
 check_text "premise: and it is marked, so the claim is not refused at condition 1" \
 	"$(q "SELECT sorted_kind FROM pgcolumnar.storage WHERE storage_id = pgcolumnar.get_storage_id('pb');")" \
 	"lexicographic"
-PB_NOORDER_ON="$(planbuf on  'SELECT count(*) FROM pb WHERE j = 3')"
-PB_NOORDER_OFF="$(planbuf off 'SELECT count(*) FROM pb WHERE j = 3')"
-check_num "premise: the planning buffer count is a measurement, not an empty string" \
-	"$PB_NOORDER_OFF" "$PB_NOORDER_OFF"
-# A tolerance rather than equality, because two backends differ by a couple of
-# buffers whatever this code does. It is set far below the effect it has to
-# detect: without the guard this arm read +44 on this fixture and grows
-# with the group count, while the control below pins that the instrument can
-# still see a real read.
-PB_DELTA=$(( PB_NOORDER_ON - PB_NOORDER_OFF ))
-[ "$PB_DELTA" -lt 0 ] && PB_DELTA=$(( -PB_DELTA ))
+PB_NOORDER_ON="$(grouprows on  'SELECT count(*) FROM pb WHERE j = 3')"
+PB_NOORDER_OFF="$(grouprows off 'SELECT count(*) FROM pb WHERE j = 3')"
+check "premise: planning reads the group list at all, so a zero below is not an instrument that cannot see it" \
+	"$([ "${PB_NOORDER_OFF:-0}" -ge "$PB_GROUPS" ] && echo yes || echo "no (${PB_NOORDER_OFF:-empty} over $PB_GROUPS groups)")" "yes"
+# Equality, not a tolerance: the count is this backend's own rows from one
+# catalog, so nothing but the planner's own reads can move it. With the guard
+# removed it read 2000 against 1000 here, one whole extra pass over the list.
+echo "-- group-list rows read while planning, no ORDER BY: on=$PB_NOORDER_ON off=$PB_NOORDER_OFF over $PB_GROUPS groups"
 check "a query with no ORDER BY does not read the group list to decide" \
-	"$([ "$PB_DELTA" -le 5 ] && echo yes || echo "no (on=$PB_NOORDER_ON off=$PB_NOORDER_OFF over $PB_GROUPS groups)")" "yes"
+	"$([ "$PB_NOORDER_ON" = "$PB_NOORDER_OFF" ] && echo yes || echo "no (on=$PB_NOORDER_ON off=$PB_NOORDER_OFF over $PB_GROUPS groups)")" "yes"
 # The control that stops the arm above from being satisfied by a function that
-# never reads anything: the query that CAN use the ordering must still pay.
-PB_ORDER_ON="$(planbuf on  'SELECT k FROM pb ORDER BY k LIMIT 10')"
-PB_ORDER_OFF="$(planbuf off 'SELECT k FROM pb ORDER BY k LIMIT 10')"
+# never reads anything: the query that CAN use the ordering must still read the
+# list, which costs at least one row per group.
+PB_ORDER_ON="$(grouprows on  'SELECT k FROM pb ORDER BY k LIMIT 10')"
+PB_ORDER_OFF="$(grouprows off 'SELECT k FROM pb ORDER BY k LIMIT 10')"
+echo "-- group-list rows read while planning, ORDER BY: on=$PB_ORDER_ON off=$PB_ORDER_OFF (needs at least $PB_GROUPS more)"
 check "control: a query that CAN use the ordering does read to decide" \
-	"$([ "$PB_ORDER_ON" -gt $(( PB_ORDER_OFF + 5 )) ] && echo yes || echo "no ($PB_ORDER_ON vs $PB_ORDER_OFF)")" "yes"
+	"$([ $(( ${PB_ORDER_ON:-0} - ${PB_ORDER_OFF:-0} )) -ge "$PB_GROUPS" ] && echo yes || echo "no ($PB_ORDER_ON vs $PB_ORDER_OFF over $PB_GROUPS groups)")" "yes"
 
 # --- the two OTHER paths this hook could reach, which must claim nothing -----
 #

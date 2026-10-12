@@ -88,6 +88,16 @@ true until the next version shipped.
   The specification's section 13, `docs/limitations.md` and
   `docs/installation.md` now describe the range. Going back to an older binary
   after a newer one has written to a table is refused rather than misread.
+- The `sorted_pathkeys` arm that asks whether a query with no `ORDER BY` reads
+  the row-group list now counts the rows planning reads from
+  `pgcolumnar.row_group`, not the shared buffers planning touches (#1203). The
+  buffer count failed in CI on both arms, in both directions, and on one commit
+  red then green, and was never reproduced locally. The row count is this
+  transaction's own, so no other session can move it, and the arm is now an
+  equality. On PG17 it read 1000 for both settings with no `ORDER BY` and 2000
+  against 1000 with one, identically across twelve readings with and without
+  concurrent DDL. With the guard it tests removed, it read 2000 against 1000 and
+  failed in both twins. The cause of the buffer noise is still unknown.
 
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens
