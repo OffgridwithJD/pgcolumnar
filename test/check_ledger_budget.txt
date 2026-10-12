@@ -1347,4 +1347,20 @@ suites_not_covered 247
 #     never         1700 +  5 = 1705
 #     dated          272 +  7 =  279
 #     1705 + 279 == 1984
-checks_never_observed_red 1705
+#
+# #1236 follow-up (parts 540 and 590): 1705 -> 1684. Six mutations of part 540's
+# sweep and part 590's readers, each run on all five majors, merged one log at a
+# time with --mutation and --target. They date 21 existing checks: 6 in part 540,
+# 3 in part 590 and 12 in part 390, which 590's mutations also redden. The logs
+# were run on c1e253f; between it and this base, test/selftest/{390,540,590}*
+# are unchanged and lib.sh changed only in pgc_skip's pyarrow branch, which
+# these parts do not read. All 21 names exist in a clean run on #1286's tree.
+# The logs also carried three names #1284 had since renamed (190 x1, 570 x2);
+# merge added them back as never rows and they were removed again, as #1284 did.
+# orphan-scan against that clean run: orphans=0.
+#
+#     ledger rows   1984 +  0 = 1984
+#     never         1705 - 21 = 1684
+#     dated          279 + 21 =  300
+#     1684 + 300 == 1984
+checks_never_observed_red 1684
