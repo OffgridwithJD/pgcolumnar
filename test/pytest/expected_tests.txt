@@ -543,4 +543,4 @@ guard_tests 404
 # own test is not in it. Git conflicted again -- loudly, because the key moved
 # on both sides -- and the answer is neither branch's number. Collected on the
 # rebased tree, not added up.
-cluster_tests 488
+cluster_tests 489

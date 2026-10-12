@@ -1177,4 +1177,16 @@ suites_not_covered 247
 # REBASED FROM 1bcfb92b ONTO 81ec3ddc, 32 commits, by the maintainer rather than
 # the author. The branch predates #1261, and three of its five CI reds were
 # fixed by the rebase alone rather than by any change here -- see the PR.
-checks_never_observed_red 1633
+# #1207 (OffgridwithJD): 1633 -> 1671. `catalog_scan_index` enters the ledger
+# with 49 checks. The 11 path arms are dated by one mutation, the twelve
+# converted sites reverted to InvalidOid, merged one major at a time from a
+# five-major run. The 38 premises arrive `never`.
+#
+#     ledger rows   1810 + 49 = 1859
+#     never         1633 + 38 = 1671
+#     dated          177 + 11 =  188
+#     1671 + 188 == 1859
+#
+# suites_not_covered does not move: the suite is registered and covered in the
+# same change.
+checks_never_observed_red 1671

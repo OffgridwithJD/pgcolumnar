@@ -188,6 +188,24 @@ def _serve_cluster(cluster, root, verdict, worker_id):
         shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.fixture(scope="module")
+def server_dir():
+    """A directory the SERVER can write, which `tmp_path` is not.
+
+    `COPY ... TO` and `parallel_copy` are executed by the backend, and the backend runs
+    as a different user: pytest's `tmp_path` lives under `/tmp/pytest-of-root/` at mode
+    700, so the server cannot reach it and the error names a permission rather than the
+    real cause. Opening the parents matters as much as the leaf -- one closed directory
+    above makes the subtree unreachable however open the leaf is -- so this makes its
+    own directory instead of trying to prise `tmp_path` open.
+    """
+    import tempfile
+    d = pathlib.Path(tempfile.mkdtemp(prefix="pgc_server_dir_"))
+    os.chmod(d, 0o777)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
 @pytest.fixture
 def pgc_own_db(pgc_cluster, request):
     """A private DATABASE, where `pgc_conn` gives a private schema.
