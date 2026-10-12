@@ -20,6 +20,7 @@ offset) and rows.
 """
 
 import re
+import time
 
 import psycopg
 
@@ -175,6 +176,48 @@ def test_partition_create_ahead(pgc_conn, expect):
                 "and its partitions start on the width's boundary in the key's own wall clock")
     with conn.cursor() as cur:
         cur.execute("SET TimeZone = 'UTC'")
+
+    # Inputs that broke the first version (@jdatcmd, #1308 review).
+    def value_or_state(sql):
+        try:
+            return str(_one(conn, sql))
+        except psycopg.Error as e:
+            return e.sqlstate or "?"
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE gen (at timestamptz NOT NULL, reading float8,"
+                    " doubled float8 GENERATED ALWAYS AS (reading * 2) STORED) PARTITION BY RANGE (at)")
+    gen = value_or_state("SELECT pgcolumnar.partition_create_ahead('gen', '6 hours', 2)")
+    doubled = value_or_state("INSERT INTO gen (at, reading) VALUES (now(), 2.25) RETURNING doubled")
+    expect.text(f"{gen}|{doubled}", "3|4.5",
+                "a parent with a generated column gets its partitions, and the column stays generated")
+
+    # 31 two-byte characters, 62 bytes: the date suffix must still fit, so the
+    # prefix is shortened by whole characters, never by a broken byte.
+    long_name = "\u00e9" * 31
+    with conn.cursor() as cur:
+        cur.execute(f'CREATE TABLE "{long_name}" (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)')
+    long_made = value_or_state(f"""SELECT pgcolumnar.partition_create_ahead('"{long_name}"', '6 hours', 2)""")
+    kept = _one(conn, "SELECT count(*) FILTER (WHERE c.relname ~ '_[0-9]{8}T[0-9]{6}$' AND octet_length(c.relname) <= 63)"
+                      f""" FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = '"{long_name}"'::regclass""")
+    expect.text(f"{long_made}|{kept}", "3|3",
+                "a parent with a 63-character name gets partitions whose names keep their dates")
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE swarm (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
+    t0 = time.monotonic()
+    swarm = value_or_state("SELECT pgcolumnar.partition_create_ahead('swarm', '1 minute', 5000)")
+    ms = int((time.monotonic() - t0) * 1000)
+    expect.text(f"{swarm}|{_kids(conn, 'swarm')}|{'prompt' if ms < 5000 else f'took {ms} ms'}", "22023|0|prompt",
+                "a call that would create more than 1000 partitions is refused before any DDL")
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE capped (at timestamptz NOT NULL, reading float8) PARTITION BY RANGE (at)")
+        cur.execute("CREATE TABLE capped_rest PARTITION OF capped FOR VALUES FROM ('2025-06-01') TO (MAXVALUE)"
+                    " USING pgcolumnar")
+    capped = value_or_state("SELECT pgcolumnar.partition_create_ahead('capped', '1 day', 2)")
+    expect.text(f"{capped}|{_kids(conn, 'capped')}", "55000|1",
+                "a parent with a partition bounded by MAXVALUE is refused, and nothing is created")
 
     # Refused: a DEFAULT partition.
     with conn.cursor() as cur:

@@ -35,6 +35,12 @@ check_num "premise: the function exists" \
 	"$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 	      WHERE n.nspname = 'pgcolumnar' AND p.proname = 'partition_create_ahead';")" "1"
 
+sqlstate_or() {	# sqlstate_or SQL -> the single value it returns, or the SQLSTATE it fails with
+	local out
+	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1)
+	case "$out" in ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1;; *) echo "$out";; esac
+}
 kids() { q "SELECT count(*) FROM pg_inherits WHERE inhparent = '$1'::regclass;"; }
 ams()  { q "SELECT coalesce(string_agg(DISTINCT a.amname, ','), 'none') FROM pg_inherits i
             JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_am a ON a.oid = c.relam
@@ -136,6 +142,40 @@ check "a timestamp parent made east of UTC covers the local now plus the lead" \
 
 check "and its partitions start on the width's boundary in the key's own wall clock" \
 	"$(bounds tz_tokyo | awk -F'|' '$1 !~ / 00:00:00$/ {print "not midnight: " $1; bad=1; exit} END {if (!bad) print "ok"}')" "ok"
+
+# ---- inputs that broke the first version (@jdatcmd, #1308 review) ---------------
+# A stored generated column: LIKE without INCLUDING GENERATED made it a plain
+# column, and ATTACH refused the partition.
+q "CREATE TABLE gen (ts timestamptz NOT NULL, v int, w int GENERATED ALWAYS AS (v * 2) STORED)
+   PARTITION BY RANGE (ts);" >/dev/null
+gen_made="$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('gen', '1 day', 1);")"
+check "a parent with a generated column gets its partitions, and the column stays generated" \
+	"$gen_made|$(q "INSERT INTO gen VALUES (now(), 21); SELECT w FROM gen;" | tail -1)" "2|42"
+
+# A 63-character name: the 16-character date suffix must survive, or the second
+# partition's name truncates onto the first's.
+LONG="p_$(printf 'x%.0s' $(seq 1 61))"
+q "CREATE TABLE $LONG (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
+long_made="$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('$LONG', '1 day', 2);")"
+check "a parent with a 63-character name gets partitions whose names keep their dates" \
+	"$long_made|$(q "SELECT count(*) FILTER (WHERE c.relname ~ '_[0-9]{8}T[0-9]{6}\$' AND octet_length(c.relname) <= 63)
+	   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = '$LONG'::regclass;")" "3|3"
+
+# No bound on the work: one call with a tiny width ran for minutes holding locks,
+# then failed on the lock table with nothing created. Refused before any DDL.
+q "CREATE TABLE many (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
+t0=$(date +%s%N)
+many="$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('many', '1 second', 20000);")"
+many_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "a call that would create more than 1000 partitions is refused before any DDL" \
+	"$many|$(kids many)|$([ "$many_ms" -lt 5000 ] && echo prompt || echo "took $many_ms ms")" "22023|0|prompt"
+
+# A partition bounded by MAXVALUE: the bound reader ignored it, and the first new
+# partition overlapped it.
+q "CREATE TABLE tail (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
+   CREATE TABLE tail_rest PARTITION OF tail FOR VALUES FROM ('2026-01-01') TO (MAXVALUE) USING pgcolumnar;" >/dev/null
+check "a parent with a partition bounded by MAXVALUE is refused, and nothing is created" \
+	"$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('tail', '1 day', 2);")|$(kids tail)" "55000|1"
 
 # ---- refused: a DEFAULT partition -------------------------------------------------
 q "CREATE TABLE td (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);

@@ -2016,6 +2016,10 @@ DECLARE
 	ts_hi     timestamp;
 	ts_target timestamp;
 	child     text;
+	prefix    text;
+	n         int := 0;
+	probe_ts  timestamp;
+	probe_tz  timestamptz;
 	made      int := 0;
 BEGIN
 	IF width IS NULL OR width <= interval '0' OR ahead IS NULL OR ahead < 0 THEN
@@ -2040,9 +2044,26 @@ BEGIN
 			USING ERRCODE = '55000',
 			      HINT = 'A DEFAULT partition rules out DETACH CONCURRENTLY, so the partition lifecycle refuses to manage this table.';
 	END IF;
+	-- An upper bound of MAXVALUE leaves no room ahead, and the bound reader below
+	-- would not see it: the first new partition would overlap it (#1308 review).
+	IF EXISTS (SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+			   WHERE i.inhparent = parent
+				 AND pg_get_expr(c.relpartbound, c.oid) ~ 'TO \(MAXVALUE\)') THEN
+		RAISE EXCEPTION '% has a partition bounded by MAXVALUE', parent
+			USING ERRCODE = '55000',
+			      HINT = 'Nothing can be created after a partition that reaches MAXVALUE.';
+	END IF;
 
 	SELECT n.nspname, c.relname INTO nsp, rel
 	  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = parent;
+	-- Names are the parent's name and a 16-byte date suffix, and must fit in 63
+	-- bytes: the prefix is shortened, by characters, until they do, so the date
+	-- always survives (#1308 review: a 63-character parent's second partition
+	-- truncated onto its first).
+	prefix := rel;
+	WHILE octet_length(prefix) + 16 > 63 LOOP
+		prefix := left(prefix, -1);
+	END LOOP;
 
 	/*
 	 * A `timestamp` key holds wall-clock time with no zone, so it is reasoned
@@ -2066,10 +2087,23 @@ BEGIN
 			END IF;
 		END IF;
 		ts_target := localtimestamp + ahead * width;
+		probe_ts := ts_lo;
+		WHILE probe_ts <= ts_target AND n <= 1000 LOOP
+			n := n + 1;
+			probe_ts := probe_ts + width;
+		END LOOP;
+		-- Counted before any DDL: one call creating thousands of partitions holds
+		-- their locks to the end and can fail on the lock table with nothing made
+		-- (#1308 review: '1 second' x 20000 ran 6 minutes, then out of shared memory).
+		IF n > 1000 THEN
+			RAISE EXCEPTION 'partition_create_ahead would create more than 1000 partitions of %', parent
+				USING ERRCODE = '22023',
+				      HINT = 'Use a wider width, a shorter lead, or several calls.';
+		END IF;
 		WHILE ts_lo <= ts_target LOOP
 			ts_hi := ts_lo + width;
-			child := rel || '_' || to_char(ts_lo, 'YYYYMMDD"T"HH24MISS');
-			EXECUTE format('CREATE TABLE %I.%I (LIKE %s INCLUDING DEFAULTS INCLUDING CONSTRAINTS) USING pgcolumnar',
+			child := prefix || '_' || to_char(ts_lo, 'YYYYMMDD"T"HH24MISS');
+			EXECUTE format('CREATE TABLE %I.%I (LIKE %s INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING GENERATED) USING pgcolumnar',
 			               nsp, child, parent);
 			EXECUTE format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)',
 			               parent, nsp, child, ts_lo::text, ts_hi::text);
@@ -2092,10 +2126,23 @@ BEGIN
 		END IF;
 	END IF;
 	target := now() + ahead * width;
+	probe_tz := lo;
+	WHILE probe_tz <= target AND n <= 1000 LOOP
+		n := n + 1;
+		probe_tz := probe_tz + width;
+	END LOOP;
+	-- Counted before any DDL: one call creating thousands of partitions holds
+	-- their locks to the end and can fail on the lock table with nothing made
+	-- (#1308 review: '1 second' x 20000 ran 6 minutes, then out of shared memory).
+	IF n > 1000 THEN
+		RAISE EXCEPTION 'partition_create_ahead would create more than 1000 partitions of %', parent
+			USING ERRCODE = '22023',
+			      HINT = 'Use a wider width, a shorter lead, or several calls.';
+	END IF;
 	WHILE lo <= target LOOP
 		hi := lo + width;
-		child := rel || '_' || to_char(lo AT TIME ZONE 'UTC', 'YYYYMMDD"T"HH24MISS');
-		EXECUTE format('CREATE TABLE %I.%I (LIKE %s INCLUDING DEFAULTS INCLUDING CONSTRAINTS) USING pgcolumnar',
+		child := prefix || '_' || to_char(lo AT TIME ZONE 'UTC', 'YYYYMMDD"T"HH24MISS');
+		EXECUTE format('CREATE TABLE %I.%I (LIKE %s INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING GENERATED) USING pgcolumnar',
 		               nsp, child, parent);
 		EXECUTE format('ALTER TABLE %s ATTACH PARTITION %I.%I FOR VALUES FROM (%L) TO (%L)',
 		               parent, nsp, child, lo::text, hi::text);
