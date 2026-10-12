@@ -34,9 +34,11 @@ PostgreSQL `CLUSTER`. Column names must exist and cannot be virtual generated
 columns.
 
 `ttl_column name` and `ttl_interval interval` declare a retention. They are read
-only by [`pgcolumnar.expire`](#pgcolumnarexpiretablename-regclass-returns-bigint),
-which you run yourself. Declaring a retention does not delete anything on its
-own. Both are needed: either one alone means no retention.
+only by [`pgcolumnar.expire`](#pgcolumnarexpiretablename-regclass-returns-bigint).
+Declaring a retention does not delete anything on its own. `expire` runs when
+you call it, or when the maintenance daemon calls it with
+`pgcolumnar.autovacuum_expire` on. Both are needed: either one alone means no
+retention.
 
 `ttl_interval` must be a positive interval. Zero and negative intervals raise
 `22023`. A negative interval would put the cutoff in the future, so `expire`
@@ -46,7 +48,7 @@ would drop rows that are still inside their retention.
 SELECT pgcolumnar.set_options('events', sort_by => ARRAY['customer_id','ts']);
 SELECT pgcolumnar.reset_options('events', sort_by => true);   -- clear it
 
--- declare a retention; nothing is deleted until you call expire
+-- declare a retention; nothing is deleted until expire runs
 SELECT pgcolumnar.set_options('events', ttl_column => 'ts',
                               ttl_interval => '90 days');
 ```
@@ -208,8 +210,10 @@ Drops row groups whose rows are all older than the retention declared by
 `set_options`. Returns the number of groups dropped. Holds only
 `ShareUpdateExclusiveLock`, so it runs against a live table.
 
-**This deletes rows.** It runs only when you call it. No other operation applies
-a retention, and `VACUUM` never does.
+**This deletes rows.** It runs when you call it, or when the maintenance daemon
+calls it with both `pgcolumnar.autovacuum` and `pgcolumnar.autovacuum_expire`
+on. The second is off by default. No other operation applies a retention, and
+`VACUUM` never does.
 
 Each group it drops is recorded in `pgcolumnar.retired_group`, in the same
 transaction. An incremental rollup reads that record to keep the summary of rows

@@ -39,6 +39,22 @@ true until the next version shipped.
   and the alpha4 to alpha5 upgrade; `native_upgrade_converge` 21/21. ttl_expire and
   its pytest twin hold it: exactly the retired groups are recorded, a rolled-back
   expire and a `compact_rewrite` record nothing, and a drop clears the rows.
+- The maintenance daemon can apply retention (#1290). With
+  `pgcolumnar.autovacuum_expire` on, as well as `pgcolumnar.autovacuum`, each pass
+  runs `pgcolumnar.expire` on every table whose options declare both
+  `ttl_column` and `ttl_interval`. The new setting is off by default, by the
+  owner's decision on #1290: `expire` deletes rows, so turning the daemon on does
+  not by itself apply a retention. `expire` runs first, in its own transaction,
+  so one that fails (its retention column was dropped) is logged and skipped
+  without undoing the compaction that follows. `expire` now calls the maintenance
+  hold after taking its lock, as `compact_rewrite` does, so the daemon's yield is
+  testable there too. A no-op `expire` costs one zone-map scan per row group:
+  0.05 ms at 10 groups, 2.7 ms at 1000, measured on PG17. `test/autovacuum_expire.sh`
+  and an independent `test_autovacuum_expire.py` each hold 16 checks: the switch
+  is off by default; with it off, the daemon compacts but retires nothing; with it
+  on, the aged rows go, the fresh rows stay, and a table with no retention is never
+  touched or named; a failing `expire` does not undo a compaction; and the daemon
+  yields `expire`'s lock to an `ACCESS EXCLUSIVE` request within 8 s of a 30 s hold.
 
 - `test/format_downgrade.sh` and `test_format_downgrade.py` test #1137's promise
   with both real libraries. They build `v1.0-alpha4`, write with it, upgrade to the

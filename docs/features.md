@@ -231,8 +231,9 @@ and writes continue.
   curve.
 - `pgcolumnar.expire(table)` drops row groups whose rows have all passed the
   retention declared with `set_options(ttl_column, ttl_interval)`. A group with
-  one live row is kept whole, so nothing inside the retention is dropped. It
-  never runs on its own; you call it by name.
+  one live row is kept whole, so nothing inside the retention is dropped. You
+  call it by name, or the maintenance daemon calls it when
+  `pgcolumnar.autovacuum_expire` is on.
 - `pgcolumnar.truncate(table)` returns the reclaimed end blocks to the operating
   system, taking a brief `AccessExclusiveLock` only when it is free.
 
@@ -244,9 +245,10 @@ and writes continue.
   whether a table has crossed the compact and recluster thresholds.
 - `pgcolumnar.autovacuum` is a background maintenance daemon. When on, a per-database
   worker runs `compact_rewrite` and `recluster` on a schedule for tables that
-  `maintenance_due` reports as due. It runs only those two online operations, so it
-  never takes an exclusive lock, and it yields to a stronger lock a session
-  requests.
+  `maintenance_due` reports as due. With `pgcolumnar.autovacuum_expire` also on,
+  it runs `expire` on every table that declares a retention. It runs only these
+  online operations, so it never takes an exclusive lock, and it yields to a
+  stronger lock a session requests.
 
 ## Parallel bulk ingest
 

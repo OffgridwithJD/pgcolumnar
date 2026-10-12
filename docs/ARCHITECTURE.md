@@ -254,8 +254,10 @@ The maintenance daemon (`pgcolumnar.autovacuum`). A background-worker launcher
 starts one short-lived worker per database on a schedule. Each worker consults
 `pgcolumnar.maintenance_due` for the tables that have crossed the compact-rewrite
 or recluster thresholds, then runs `pgcolumnar.compact_rewrite` and
-`pgcolumnar.recluster` on them through SPI, each in its own transaction. It calls
-only those two `ShareUpdateExclusiveLock` verbs, and it registers as an
+`pgcolumnar.recluster` on them through SPI, each in its own transaction. With
+`pgcolumnar.autovacuum_expire` on, it first runs `pgcolumnar.expire` on each table
+that declares a retention, in a transaction of its own. It calls only these
+`ShareUpdateExclusiveLock` verbs, and it registers as an
 autovacuum-kind process so it yields to a stronger lock a session requests.
 
 ### columnar_unique.c

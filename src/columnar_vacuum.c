@@ -2341,9 +2341,10 @@ pgcolumnar_cluster_hilbert(PG_FUNCTION_ARGS)
  *		without fetching. A fetch would correctly fail once the catalog rows
  *		are gone; skipping the fetch is what made the ghosts visible.
  *
- *		This is called by name and never runs on its own. It deletes rows, and an
- *		operation a user runs for maintenance must not do that silently, so it is
- *		not wired into vacuum, compact or autovacuum.
+ *		It deletes rows, so nothing calls it implicitly: not vacuum, not compact.
+ *		The maintenance daemon calls it only when pgcolumnar.autovacuum_expire is
+ *		on, a switch that is off by default (#1290), so turning the daemon on
+ *		does not by itself apply a retention.
  */
 Datum
 pgcolumnar_expire(PG_FUNCTION_ARGS)
