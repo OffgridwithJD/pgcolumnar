@@ -310,10 +310,50 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
   through the table's metapage.
 - No table data is converted. TODO(release): confirm after #1137 lands, and
   state whether existing tables keep their current format stamp.
-- TODO(release): verify whether a storage row left wrong by `ALTER COLUMN TYPE`
-  (#1211) or by `CREATE MATERIALIZED VIEW ... WITH DATA` (#1275) under alpha4 is
-  repaired by the upgrade. The upgrade script does not touch
-  `pgcolumnar.storage`.
+- It does not repair a catalog entry that alpha4 left wrong. See "After the
+  upgrade: repair entries alpha4 left wrong".
+
+### After the upgrade: repair entries alpha4 left wrong
+
+Two alpha4 defects, fixed in this release (#1211, #1275), left a table's storage
+row naming a relation that no longer exists. The upgrade does not repair rows
+that already exist. The table still reads and writes correctly, and `DROP TABLE`
+still removes the row. Repair them anyway, so the catalog describes your tables.
+
+This was measured on PostgreSQL 17, on tables created under alpha4. After the
+upgrade, the rows stayed wrong through reads, inserts, `pgcolumnar.analyze()`
+and `VACUUM`. Each repair below made them correct.
+
+1. In each database, find the rows that name no relation:
+
+   ```sql
+   SELECT s.storage_id, s.relation_oid
+   FROM pgcolumnar.storage s
+   WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = s.relation_oid);
+   ```
+
+   If the query returns no row, this database needs nothing.
+
+2. For each columnar materialized view, run:
+
+   ```sql
+   REFRESH MATERIALIZED VIEW view_name;
+   ```
+
+   **CAUTION:** the next step takes an `ACCESS EXCLUSIVE` lock and rewrites the
+   whole table. Run it when the table can be locked for that long.
+
+3. For each columnar table that ran `ALTER TABLE ... ALTER COLUMN ... TYPE`
+   under alpha4, rewrite it once. Converting a column to its own type with
+   `USING` forces the rewrite and changes no data:
+
+   ```sql
+   ALTER TABLE table_name ALTER COLUMN column_name TYPE column_type USING column_name;
+   ```
+
+4. Run the query from step 1 again.
+
+   Expected result: no row.
 
 See [docs/installation.md](docs/installation.md) for the full upgrade procedure.
 
