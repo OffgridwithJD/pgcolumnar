@@ -71,6 +71,19 @@ true until the next version shipped.
   FAILS the suite unless `PGC_ALLOW_MISSING_PG_PARTMAN=1` is set. The CI suites
   and pytest jobs now install `postgresql-N-partman` from PGDG, in the cache key
   as well as the install.
+- A ctid range reads only the row groups that hold it. The table access method
+  now implements TID range scans (`scan_set_tidrange`), so a query like
+  `WHERE ctid >= '(1340,62)'` restricts the reader to the row groups that
+  intersect the range. Before, it read every group and filtered per row: on
+  #1294, a range matching 0 rows of a 10-million-row table read all 67 groups.
+  Measured with 400,000 rows: the last 2.5% by ctid read 28 blocks, against 923
+  for the whole table. PostgreSQL 19's parallel TID range scan shares the
+  reader's group claim. The custom scan still treats ctid as a per-row filter,
+  so with parallelism cheap the planner may prefer it. `test/tid_range_scan.sh`
+  and its pytest twin hold the bounds no row has (offset 0, and offsets past the
+  291 a block holds, which the executor produces for `ctid < '(B,0)'`), rescans,
+  deletes and compaction. The first build read those offsets unclamped and
+  returned rows of the next block; the twin's arms for them were red against it.
 
 ### Changed
 

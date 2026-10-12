@@ -293,6 +293,7 @@ SUITES=(
 	storage_row_repair
 	tablesample
 	temporal
+	tid_range_scan
 	truncate_cleanup
 	ttl_expire
 	ungrouped_vector_agg

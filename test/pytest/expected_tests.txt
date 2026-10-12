@@ -554,4 +554,6 @@ guard_tests 413
 #
 # cluster_tests 497 -> 498 for #1304's test_the_bound_reads_the_zone_maps_in_one_catalog_scan,
 # collected over the cluster files on the tree rebased onto 503f080 (#1286).
-cluster_tests 498
+# 498 -> 500 for the TID range scan pair: test_tid_range_scan.py's two tests.
+# Collected on this tree, after #1304.
+cluster_tests 500
