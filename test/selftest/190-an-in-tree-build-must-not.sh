@@ -73,7 +73,11 @@ check "the build path asks pgc_build_needs_clean rather than merely naming it" \
 # distinguishes them.
 _bnc_prose="$(mktemp)"
 printf '%s\n' 'elif false; then  # call to pgc_build_needs_clean "$had" "$want" removed' > "$_bnc_prose"
-check "a comment naming the call does not satisfy the arm above" \
+# A PREMISE, NOT AN ARM (#1236). It runs its own copy of the strip on a line
+# printf just wrote, so no change to lib.sh or to the arm above can redden it:
+# replace the arm's strip with a raw read and this still passes. It shows the
+# idiom works; the arm above is what holds lib.sh to it.
+check "premise: stripping comments drops a call named only in a comment" \
 	"$(printf 'raw=%s stripped=%s' \
 		"$(grep -c 'pgc_build_needs_clean "' "$_bnc_prose")" \
 		"$(sed 's/#.*//' "$_bnc_prose" | grep -c 'pgc_build_needs_clean "')")" \

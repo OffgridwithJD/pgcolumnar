@@ -97,11 +97,16 @@ check_num "no suite decides it is a checkout by stat-ing .git as a directory" \
 # sweep above then counted its own demonstration and stayed red after both real
 # sites were fixed. A guard whose own text satisfies its pattern is the defect
 # it exists to catch, one level up.
+# THESE TWO ARE PREMISES, NOT ARMS (#1236). They assert what `printf >` just
+# made, so no change to this repository can redden them: that is POSIX, not
+# pgcolumnar. They stay because they make the gitfile concrete beside the sweep
+# that depends on it, and the sweep is the arm. Named as arms, they were counted
+# as coverage they cannot give.
 _ck_dir="$(mktemp -d)"
 printf 'gitdir: %s\n' "$_ck_dir/nowhere" > "$_ck_dir/.git"
-check_text "a gitfile is a regular file, which a directory test cannot accept" \
+check_text "premise: the gitfile fixture is a regular file, not a directory" \
 	"$(stat -c %F "$_ck_dir/.git" 2>/dev/null)" "regular file"
-check_text "and it is still a .git that a reader must not skip on" \
+check_text "premise: the gitfile fixture exists, so a reader must not skip it" \
 	"$(if test -e "$_ck_dir/.git"; then echo present; else echo absent; fi)" "present"
 rm -rf "$_ck_dir"
 

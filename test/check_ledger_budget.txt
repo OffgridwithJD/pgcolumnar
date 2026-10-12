@@ -1189,4 +1189,38 @@ suites_not_covered 247
 #
 # suites_not_covered does not move: the suite is registered and covered in the
 # same change.
-checks_never_observed_red 1671
+#
+# REBUILT ONTO c1e253f, after #1285 landed. The ledger rows were not merged by
+# hand: the same mutation logs were merged again by a script, and that script run
+# on be31874 reproduces the pre-rebase ledger byte for byte.
+#
+# #1236, first batch: 1671 -> 1662. Nine checks dated, all from mutation runs on
+# all five majors, merged one log at a time with --mutation and --target:
+#
+#     harness_selftest 570   1   the fold arm (its four neighbours were dated)
+#     harness_selftest 290   2   the built-count line; the missing-directory answer
+#     harness_selftest 560   1   the build path's stamp consultation
+#     harness_selftest 580   3   both control: arms, and one premise the deletion
+#                                 of pgc_symbol_is_toolchain also reddened
+#     rewrite_storage_oid    2   both matview arms; the WITH DATA arm reddens on
+#                                 17, 18 and 19 only, because PostgreSQL 15 and 16
+#                                 fill a new matview in place rather than swapping
+#
+#     never   1671 - 9 = 1662
+#
+# Three checks were renamed premise: (two in 570, one in 190) because no change to
+# the code under test can redden them (#1236, owner's decision 2026-10-12). They
+# stay never, under their new names, so the rename alone does not move this count.
+#
+# #1236, second batch: 1662 -> 1651. Eleven checks dated, same method:
+#
+#     catalog_delete_index   2   both DROP arms; the two mutations already in the
+#                                 ledger for this part, re-run, reach them
+#     catalog_plan_index     3   the #1210 change reversed on the current tree
+#     projection_scan_cost   5   three arms, plus the two "plan uses the covering
+#                                 projection" premises the no-discount mutation
+#                                 also reddens
+#     projection_parallel    1   a worker never wires the shared row-group counter
+#
+#     never   1662 - 11 = 1651
+checks_never_observed_red 1651
