@@ -245,10 +245,18 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
 
 ## Known issues
 
-- TODO(release): verify whether the alpha4 known issues still apply. Both are
-  closed on GitHub, and no alpha5 commit under `src/` names either:
-  - #1074: a codec setting can make a high-entropy text table larger.
-  - #1075: the block codec compresses a region it then discards.
+- **Setting a codec can make a table larger, on high-entropy text** (#1074).
+  This is unchanged from alpha4. Measured on this release, 200,000 rows of
+  random 64-character hex text:
+
+  | `pgcolumnar.compression` | relation bytes | against `none` |
+  | --- | ---: | ---: |
+  | `none` | 7,036,928 | 100% |
+  | `lz4` | 7,036,928 | 100% |
+  | `zstd` | 7,135,232 | 101.40% |
+
+  If a table stores long high-entropy text, measure both settings. See
+  [docs/features.md](docs/features.md).
 
 ## Upgrading
 
