@@ -1847,6 +1847,15 @@ rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partitio
 rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp ATTACH PARTITION lp_3 FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
 rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp DETACH PARTITION lp_2	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
 rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partition the ALTER did not touch: lp DETACH PARTITION lp_2 CONCURRENTLY	15;16;17;18;19	2026-10-12	the repair gate opens every inheritor with NoLock again, so it reads the metapage of a partition the ALTER never locked (an Assert on assert builds)
+storage_row_repair	storage_row_repair	REFRESH MATERIALIZED VIEW repairs the view's row	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row
+storage_row_repair	storage_row_repair	a same-type ALTER COLUMN ... USING repairs the table's row	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row
+storage_row_repair	storage_row_repair	after both repairs the notes' query finds nothing	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
+storage_row_repair	storage_row_repair	and so does the refreshed view	15;16;17;18;19	never	-
+storage_row_repair	storage_row_repair	and the repaired table holds the same rows	15;16;17;18;19	never	-
+storage_row_repair	storage_row_repair	premise: no row names a missing relation before the damage	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
+storage_row_repair	storage_row_repair	premise: the damaged table still reads every row	15;16;17;18;19	never	-
+storage_row_repair	storage_row_repair	premise: the release notes give the query that finds wrong rows	15;16;17;18;19	never	-
+storage_row_repair	storage_row_repair	the notes' query finds both rows alpha4 left wrong	15;16;17;18;19	2026-10-12	the release notes' query is edited from NOT EXISTS to EXISTS
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-

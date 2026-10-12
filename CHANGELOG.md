@@ -134,6 +134,16 @@ true until the next version shipped.
   against 1000 with one, identically across twelve readings with and without
   concurrent DDL. With the guard it tests removed, it read 2000 against 1000 and
   failed in both twins. The cause of the buffer noise is still unknown.
+- `docs/installation.md` gave a query to find the databases that need
+  `ALTER EXTENSION pgcolumnar UPDATE`. It could not work: `pg_extension` lists
+  only the current database's extensions, so the query listed every connectable
+  database or none. The guide now lists the databases and checks each one.
+  `docs/configuration.md` said `index_min_blocks` restores "every release before
+  1.0-alpha6"; it means alpha4 and earlier.
+  Both are now tested, in both harnesses: `storage_row_repair` performs the
+  release notes' repair procedure, reading its query from the notes, and a docs
+  check refuses any documented query that tests `pg_extension` while listing
+  databases.
 
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens

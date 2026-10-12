@@ -71,6 +71,8 @@ NO_CLUSTER = [
     # Landed on main in #922 after this list was written, and the arm above caught
     # it: the property says it needs no database, so the declaration must say so too.
     "test_suite_accounting.py",
+    # #1288: reads docs/*.md and README.md only.
+    "test_docs_cross_database_query.py",
     # The classifier's own controls, split out of this file so the job whose file
     # list IS this list actually runs them. This file cannot be in the list: it
     # hands cluster-bound file names to pytest, so it needs what they need.

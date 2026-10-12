@@ -1243,4 +1243,19 @@ suites_not_covered 247
 #     never         1653 + 7 = 1660
 #     dated          213 + 1 =  214
 #     1660 + 214 == 1874
-checks_never_observed_red 1660
+#
+# #1288: 1660 -> 1664. storage_row_repair is a new suite, nine checks, all on five
+# majors. Five are dated by two mutations, each run on all five majors and merged one
+# log at a time with its own failed set as the targets:
+#
+#     PgColumnarRetargetStorageRelation returns at once   3 red on 15/16, 4 on 17+
+#                                                         (the WITH DATA premise is
+#                                                         born wrong only from 17)
+#     the notes' query edited from NOT EXISTS to EXISTS   3 red on every major
+#
+# Four stay never: two premises, and the two arms that the data is unchanged after
+# the repair, which no repair mutation here reaches. Replayed from the saved logs
+# onto #1303's ledger, not merged by hand.
+#
+#     never   1660 + 4 = 1664
+checks_never_observed_red 1664

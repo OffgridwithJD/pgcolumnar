@@ -123,11 +123,18 @@ ALTER EXTENSION pgcolumnar UPDATE;
 SELECT extversion FROM pg_extension WHERE extname = 'pgcolumnar';
 ```
 
-To find the databases that need it:
+To find the databases that need it, list the databases you can connect to:
 
 ```sql
-SELECT datname FROM pg_database WHERE datallowconn
-  AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcolumnar');
+SELECT datname FROM pg_database WHERE datallowconn;
+```
+
+Then connect to each one and check whether it has the extension. A query cannot
+do this from one database, because `pg_extension` lists only the extensions of
+the database you are connected to:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'pgcolumnar';
 ```
 
 ### If you skipped step 3

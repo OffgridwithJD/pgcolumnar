@@ -261,7 +261,9 @@
 # adding one: `403 tests collected` over the 24 NO_CLUSTER files. `cluster_tests`
 # was re-derived in the same run and did NOT move -- 467 -- which is the expected
 # answer for a change that touches only the layer and its own guard.
-guard_tests 404
+# 404 -> 405 for #1288: test_docs_cross_database_query.py, cluster-free, in NO_CLUSTER.
+# Re-derived by collection on 038600e (after #1303): `405 tests collected`.
+guard_tests 405
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
@@ -543,4 +545,6 @@ guard_tests 404
 # own test is not in it. Git conflicted again -- loudly, because the key moved
 # on both sides -- and the answer is neither branch's number. Collected on the
 # rebased tree, not added up.
-cluster_tests 495
+# 495 -> 496 for #1288: test_storage_row_repair.py. Re-derived by collection on
+# 038600e (after #1303): `496 tests collected`.
+cluster_tests 496

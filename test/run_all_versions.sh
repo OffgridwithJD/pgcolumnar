@@ -289,6 +289,7 @@ SUITES=(
 	sorted_pathkeys
 	sorted_projection
 	stats_privilege
+	storage_row_repair
 	tablesample
 	temporal
 	truncate_cleanup

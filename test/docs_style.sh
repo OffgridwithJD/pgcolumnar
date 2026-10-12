@@ -795,6 +795,23 @@ check "and says WHY rebasing works where merging does not" \
 	"$(grep -c 'merging \*\*into\*\*' "$SRCDIR/CONTEXT.md")" "1"
 
 
+# A QUERY CANNOT ASK ANOTHER DATABASE WHAT EXTENSIONS IT HAS (#1288). pg_extension is a
+# per-database catalog, so a statement that reads pg_database and tests pg_extension in the
+# same breath answers for the CURRENT database only: it lists every connectable database or
+# none. docs/installation.md shipped exactly that as "the databases that need the upgrade".
+# Read per statement inside ```sql blocks, so prose that explains the rule cannot trip it.
+_xdb_stmts="$(for f in $docs; do
+	awk '/^[[:space:]]*```sql/ {b=1; next} b && /^[[:space:]]*```/ {b=0; print ";"; next} b {printf "%s ", $0}' "$f"
+done | tr ';' '\n')"
+# The failure carries the count it measured: selftest part 540 refuses an arm that
+# answers only "no".
+_xdb_n="$(printf '%s\n' "$_xdb_stmts" | grep -c 'SELECT')"
+check "premise: the scan read SQL statements from the documents" \
+	"$([ "$_xdb_n" -ge 10 ] && echo yes || echo "no ($_xdb_n SELECT statements, want at least 10)")" "yes"
+check "no documented query tests pg_extension while listing databases" \
+	"$(printf '%s\n' "$_xdb_stmts" | grep 'pg_database' | grep -c 'pg_extension')" "0"
+
+
 echo "checks run: $checks"
 if [ "$fail" = 0 ]; then
 	echo "docs_style.sh: PASSED"
