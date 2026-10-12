@@ -1390,4 +1390,24 @@ suites_not_covered 247
 #     never         1684 - 1 = 1683
 #     dated          300 + 1 =  301
 #     1683 + 301 == 1984
-checks_never_observed_red 1683
+#
+# #1290 (PR #1307): 1683 -> 1686. autovacuum_expire enters the ledger with 19
+# checks. The mutation runs were of this PR's code on its first base
+# (503f080); the rebases onto #1304, #1306, #1312, #1315, #1316, #1318, #1313, #1314 and #1320 since then touched
+# columnar_tableam.c, columnar_metadata.c, columnar_vector.c and columnar.h,
+# none in the daemon's or expire's code, and the clean suite re-run on the
+# rebased tree is 19/19 on each of 15-19. The suite is now covered, so
+# suites_not_covered stays 247. Sixteen are dated by thirteen
+# mutations, each merged one log at a time with --mutation and --target:
+# the expire switch bypassed, forced off, defaulted on; the has_ttl filter
+# removed, and with it a retention invented where none is declared; a failed
+# expire skipping the compaction; the hold removed from expire; the worker no
+# longer PROC_IS_AUTOVACUUM; the retired LOG line removed; 'retired 0' logged
+# at LOG; the skipped LOG line removed; the worker exiting on the first failed
+# expire; and expire retiring every group. The three still never are premises.
+#
+#     ledger rows   1984 + 19 = 2003
+#     never         1683 +  3 = 1686
+#     dated          301 + 16 =  317
+#     1686 + 317 == 2003
+checks_never_observed_red 1686
