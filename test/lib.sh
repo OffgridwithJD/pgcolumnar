@@ -1984,7 +1984,7 @@ pgc_skip() {  # pgc_skip <capability> <message>
 	allow_one="PGC_ALLOW_MISSING_$cap"
 	why=""
 	if [ "$cap" = PYARROW ]; then
-		why="pyarrow is optional on a developer box, see #1215"
+		why="$1 is optional on a developer box, see #1215"
 	elif [ "${PGC_ALLOW_MISSING:-0}" = 1 ] || [ "${!allow_one:-0}" = 1 ]; then
 		why="waived by $allow_one or PGC_ALLOW_MISSING"
 	fi

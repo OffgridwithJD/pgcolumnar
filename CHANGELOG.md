@@ -172,6 +172,11 @@ true until the next version shipped.
   workflow installs pyarrow and stops if the suites cannot import it, so CI
   does not lose these suites silently. `docs/testing.md` also said a skipped
   suite exits 2; it exits 66, and the page now says so.
+  The nightly `capability_sweep.sh` counts these suites as `declined`, a fourth
+  outcome beside `preserved`, `refused` and `silent`. A suite is `declined` only
+  if it records a SKIP naming the capability, and `silent` must still be zero.
+  The sweep now also asserts that the suites that decline are exactly the ones
+  whose code calls `pgc_skip pyarrow`.
 
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens

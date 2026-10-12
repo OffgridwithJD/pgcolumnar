@@ -57,3 +57,4 @@
 580-a-hand-rebuild-must-record.sh
 590-a-declared-suite-must-account.sh
 600-a-missing-pyarrow-declines.sh
+610-a-declined-capability-is-not-silent.sh
