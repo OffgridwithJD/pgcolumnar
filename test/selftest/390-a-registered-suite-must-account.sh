@@ -669,16 +669,22 @@ _o28="$PGC_WORKDIR/acc928"; mkdir -p "$_o28"
 # which is precisely the job of a premise that asserts a fixture really is in the
 # state the test needs. Without it the two readers would have agreed on this log for
 # the wrong reason and the arm about their disagreement would have been vacuous.
+#
+# THREE OF THE CHECKS BELOW ARE ARMS, NOT PREMISES. They call run_all_versions.sh's
+# own readers, so a change to those readers reddens them: two mutations of the
+# narrow reader did, on all five majors (#1313). A check a repository change can
+# redden is not a premise (#1236), so they carry no prefix. They measure the
+# readers part 590 also drives, which is why 590's mutations redden part 390.
 printf 'accounting: 3 passed + 0 failed + 0 unrunnable + 0 skipped = 3\nx.sh: PASSED\n' > "$_o28/libsh.log"
 printf 'checks run: 9\nowntally.sh: PASSED\n' > "$_o28/own.log"
 printf 'some output\nPASSED\n' > "$_o28/neither.log"
-check "premise: a lib.sh accounting line is seen by the narrow reader" \
+check "a lib.sh accounting line is seen by the narrow reader" \
 	"$(pgc_log_shows_accounting "$_o28/libsh.log")" "yes"
-check "premise: a private tally is NOT seen by the narrow reader" \
+check "a private tally is NOT seen by the narrow reader" \
 	"$(pgc_log_shows_accounting "$_o28/own.log")" "no"
 check "premise: but IS seen by the wide one, which is where the 2 came from" \
 	"$(pgc_log_shows_any_accounting "$_o28/own.log")" "yes"
-check "premise: and a log with neither is seen by neither" \
+check "and a log with neither is seen by neither" \
 	"$(pgc_log_shows_any_accounting "$_o28/neither.log")$(pgc_log_shows_accounting "$_o28/neither.log")" "nono"
 
 # The difference names the private-tally suite and nothing else.

@@ -964,9 +964,6 @@ harness_selftest	390-a-registered-suite-must-account	equal sets reconcile	15;16;
 harness_selftest	390-a-registered-suite-must-account	every registered suite has a file	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	nor no for every one of them	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	opposite errors do not cancel: both directions are reported	15;16;17;18;19	never	-
-harness_selftest	390-a-registered-suite-must-account	premise: a lib.sh accounting line is seen by the narrow reader	15;16;17;18;19	2026-10-12	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
-harness_selftest	390-a-registered-suite-must-account	premise: a private tally is NOT seen by the narrow reader	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
-harness_selftest	390-a-registered-suite-must-account	premise: and a log with neither is seen by neither	15;16;17;18;19	2026-10-12	part 590's narrow reader answers yes where it found no accounting line
 harness_selftest	390-a-registered-suite-must-account	premise: and produced exactly one accounting line to be read	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	premise: and so is the wide reader it is paired with	15;16;17;18;19	never	-
 harness_selftest	390-a-registered-suite-must-account	premise: and that count excludes the definition line, which mentions it	15;16;17;18;19	never	-
