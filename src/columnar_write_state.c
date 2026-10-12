@@ -754,7 +754,7 @@ PgColumnarEnsureStorageRow(Relation rel)
 
 	s.storageId = PgColumnarStorageId(rel);
 	s.relationOid = RelationGetRelid(rel);
-	s.formatVersion = COLUMNAR_NATIVE_VERSION_MAJOR;
+	s.formatVersion = COLUMNAR_NATIVE_FORMAT_VERSION;
 	s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
 	s.rowGroupLimit = stripeRowLimit;
 	PgColumnarInsertNativeStorageRow(&s);
@@ -3156,7 +3156,7 @@ pgcolumnar_flush_row_group(PgColumnarWriteState *writeState)
 
 		s.storageId = writeState->storageId;
 		s.relationOid = writeState->relid;
-		s.formatVersion = COLUMNAR_NATIVE_VERSION_MAJOR;
+		s.formatVersion = COLUMNAR_NATIVE_FORMAT_VERSION;
 		s.vectorLength = COLUMNAR_NATIVE_VECTOR_LENGTH;
 		s.rowGroupLimit = writeState->stripeRowLimit;
 		PgColumnarInsertNativeStorageRow(&s);

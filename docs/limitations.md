@@ -62,6 +62,22 @@ The metapage version guards the physical block layout. The native format version
 guards the data encoding. Thus the build also catches a future version that
 changes the encoding but keeps the metapage layout.
 
+The native format version is 2 from 1.0-alpha5. Version 2 does not store a
+validity bitmap for a column chunk that holds no null
+([issue #1130](https://github.com/commandprompt/pgcolumnar/issues/1130)). A build
+reads every version from 1 to the version that it writes. So 1.0-alpha5 reads the
+tables that 1.0-alpha4 wrote. When 1.0-alpha5 first writes to such a table, it
+raises the table's version to 2. The table then holds chunks that an older build
+cannot read
+([issue #1137](https://github.com/commandprompt/pgcolumnar/issues/1137)). A query
+that only reads the table does not change its version.
+
+Do not go back to an older build after a newer build has written to a table. The
+older build refuses the table, and it reports an error rather than a wrong answer.
+1.0-alpha4 refuses any version except 1. Before this change, 1.0-alpha4 could
+return NULL for a row that holds a value when it read a table that 1.0-alpha5 had
+written.
+
 The build refuses a version that it does not know. It reports `unsupported
 columnar format version` for the metapage, or `unsupported columnar native format
 version` for the data format. The read then fails. It does not read bytes that a
@@ -103,7 +119,9 @@ across a PostgreSQL major upgrade. It runs as an opt-in gate
 majors, in the copy transfer mode and in the link transfer mode.
 
 There is no in-place upgrade across an incompatible format version. The format has
-not changed during the pre-release, so no migration has been needed. The project has not
+changed once during the pre-release, to version 2 in 1.0-alpha5. That change is
+compatible in one direction. A newer build reads the older tables, so no
+migration has been needed. The project has not
 committed to an upgrade path or to a compatibility guarantee. Until it does, a
 change to an incompatible version needs a reload. This is the same position as
 the release-status note above. Keep the source that you loaded a columnar table

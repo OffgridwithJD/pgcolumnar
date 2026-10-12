@@ -3999,7 +3999,9 @@ static uint64 columnarFetchClock = 0;
  * Memoized native-format-version validation for the by-row-number fetch path
  * (#240). pgcolumnar_fetch_row runs once per row, so checking the storage's
  * format_version against a catalog row on every call would be a per-row systable
- * scan on a hot path. The value is immutable for a storage, so one check per
+ * scan on a hot path. The value only ever RISES, and only from one version this
+ * build reads to another (#1137: the first write by a newer build raises 1 to
+ * 2), so a check that passed stays true for the command and one per
  * (command, storageId) is enough; this single slot is cleared in
  * PgColumnarDiscardFetchCache, the same command/transaction boundary the fetch
  * cache resets on.
@@ -4800,6 +4802,18 @@ pgcolumnar_fetch_row(Relation rel, Snapshot snapshot, uint64 rowNumber,
 		MemoryContextDelete(tmp);
 		return true;
 	}
+
+	/*
+	 * THE STAMP GATE'S ONE EXEMPTION, HELD BY CODE RATHER THAN A COMMENT
+	 * (#1137). The format-version check above runs only when wantValues is
+	 * set, on the reasoning that a liveness-only probe decodes nothing. That
+	 * is true exactly while every byte read below sits after the return just
+	 * above. Since the stamp moved to 2, this is the only thing between an
+	 * older or newer layout and a silent misread on this path, so a refactor
+	 * that reaches the decode without passing the check must fail here, on
+	 * every assert-enabled build the suites run, not in a user's query.
+	 */
+	Assert(columnarFetchFmtOk && columnarFetchFmtOkStorageId == storageId);
 
 	/*
 	 * The group's bytes and its decoded columns are the expensive part and the

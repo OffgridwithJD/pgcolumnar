@@ -43,7 +43,19 @@
  * and per-chunk bloom filters for skipping.
  */
 #define COLUMNAR_NATIVE_MAGIC "PGCN"		/* native format magic tag */
-#define COLUMNAR_NATIVE_VERSION_MAJOR 1
+/*
+ * The native format stamp, pgcolumnar.storage.format_version (#1137). A build
+ * WRITES COLUMNAR_NATIVE_FORMAT_VERSION and READS every version from
+ * COLUMNAR_NATIVE_FORMAT_MIN_READABLE up to it; anything else is refused at
+ * every decode entry point before a byte is read.
+ *
+ *   1   through 1.0-alpha4
+ *   2   1.0-alpha5: a chunk with no nulls stores no validity bitmap (#1130).
+ *       A version-1 reader would take the chunk's first bytes for a bitmap and
+ *       return NULL for some rows that hold a value; stamped 2, it refuses.
+ */
+#define COLUMNAR_NATIVE_FORMAT_VERSION 2
+#define COLUMNAR_NATIVE_FORMAT_MIN_READABLE 1
 #define COLUMNAR_NATIVE_VECTOR_LENGTH 1024	/* values per vector (fixed) */
 
 /*
@@ -98,13 +110,11 @@
  *                        one bit; a zero bit answers "null" before any version
  *                        check is reached.
  *
- * So downgrading a binary below the one that wrote the table is NOT supported,
- * and this is the shape of the failure rather than a guarantee about it.
- * pgcolumnar.storage.format_version is the stamp that could refuse such a table
- * early on both paths, and it cannot express this change today: it is checked
- * `!= COLUMNAR_NATIVE_VERSION_MAJOR`, so bumping it would also make THIS build
- * refuse every table alpha4 wrote. Tracked separately; see the issue linked from
- * the #1130 changelog entry.
+ * That was the shape of the failure before #1137. A table this build writes, or
+ * appends to, is now stamped COLUMNAR_NATIVE_FORMAT_VERSION 2, and an alpha4
+ * binary refuses it at every decode entry point before reading a chunk byte.
+ * The table above is what remains for a binary older than the stamp itself,
+ * which no change here can reach.
  */
 #define COLUMNAR_NATIVE_ENCDESC_MIN_READABLE 2
 

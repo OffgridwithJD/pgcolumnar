@@ -56,8 +56,8 @@ load_pair "SELECT s,
            FROM generate_series(1, 5000) s"
 
 sid="$(storage_id_of t_col)"
-check "native format_version is 1" \
-	"$(q "SELECT format_version FROM pgcolumnar.storage WHERE storage_id = $sid;")" "1"
+check "native format_version is 2" \
+	"$(q "SELECT format_version FROM pgcolumnar.storage WHERE storage_id = $sid;")" "2"
 check "native vector_length is 1024" \
 	"$(q "SELECT vector_length FROM pgcolumnar.storage WHERE storage_id = $sid;")" "1024"
 
@@ -104,7 +104,7 @@ check "backend survives the rejection" "$(q 'SELECT 1;')" "1"
 psql_run "CREATE TABLE fv (id int, v text) USING pgcolumnar;"
 psql_run "INSERT INTO fv SELECT s, md5(s::text) FROM generate_series(1, 2000) s;"
 psql_run "CREATE INDEX fv_id ON fv (id);"
-check "table reads at native format_version 1" "$(q 'SELECT count(*) FROM fv;')" "2000"
+check "table reads at the native format_version this build writes" "$(q 'SELECT count(*) FROM fv;')" "2000"
 fvsid="$(storage_id_of fv)"
 psql_run "UPDATE pgcolumnar.storage SET format_version = 99 WHERE storage_id = $fvsid;"
 # Three decode shapes must all reject. A seq scan opens a read state
@@ -127,5 +127,64 @@ check "the failure is the native-format-version guard" \
 check "the native-format error names the offending version" \
 	"$(contains "$fverr_idx" '99')" "yes"
 check "backend survives the native-format rejection" "$(q 'SELECT 1;')" "1"
+
+# --- 5: the stamp is a RANGE, and an append raises it (#1137) ---------------
+# 1.0-alpha5 writes chunks with no validity bitmap (#1130), which an alpha4
+# binary misreads: some rows that hold a value come back NULL. So this build
+# stamps 2, and alpha4 -- which refuses any stamp but 1 -- refuses the table at
+# every decode entry point. This build still reads 1 (MIN_READABLE). Each arm
+# below drives all four entry points that check the stamp:
+#
+#     seq scan        PgColumnarBeginReadWithStorage   SELECT v ... LIMIT
+#     aggregate scan  PgColumnarBeginAggScan           count(*)
+#     group agg scan  PgColumnarBeginGroupAggScan      GROUP BY
+#     row fetch       pgcolumnar_fetch_row             index scan of a non-key column,
+#                                                      custom scan OFF
+#
+# THE CUSTOM SCAN HAS TO BE OFF FOR THE FOURTH, and that was measured rather
+# than assumed. With it on, the index query is served by pgcolumnar's own scan
+# node and never reaches pgcolumnar_fetch_row's decode: with that path's stamp
+# check deleted outright, every arm here still passed.
+#
+# A catalog UPDATE stands in for the other build's stamp; the value is read from
+# pgcolumnar.storage, so no bytes need forging.
+sqlstate_of() {	# the SQLSTATE a statement fails with, or "ok"
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -Atq -c "$1" 2>&1 >/dev/null)"
+	if [ -z "$out" ]; then echo ok; else echo "$out" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1; fi
+}
+four_paths() {	# TABLE -> "scan agg group fetch", each a SQLSTATE or ok
+	echo "$(sqlstate_of "SELECT v FROM $1 LIMIT 1;") \
+$(sqlstate_of "SELECT count(*) FROM $1;") \
+$(sqlstate_of "SELECT id % 3, count(*) FROM $1 GROUP BY 1;") \
+$(sqlstate_of "SET pgcolumnar.enable_custom_scan=off; SET enable_seqscan=off; SET enable_bitmapscan=off; SELECT v FROM $1 WHERE id = 42;")"
+}
+stamp_of() { q "SELECT format_version FROM pgcolumnar.storage WHERE storage_id = $(storage_id_of "$1");"; }
+
+psql_run "CREATE TABLE fr (id int, v text) USING pgcolumnar;"
+psql_run "INSERT INTO fr SELECT s, md5(s::text) FROM generate_series(1, 2000) s;"
+psql_run "CREATE INDEX fr_id ON fr (id);"
+frsid="$(storage_id_of fr)"
+check "premise: the fixture was stamped by this build" "$(stamp_of fr)" "2"
+
+# What an alpha4 table looks like to this build.
+psql_run "UPDATE pgcolumnar.storage SET format_version = 1 WHERE storage_id = $frsid;"
+check "a table stamped 1 is read on all four paths" "$(four_paths fr)" "ok ok ok ok"
+check "and returns its rows" "$(q 'SELECT count(*), sum(id) FROM fr;')" "2000|2001000"
+check "reading a table stamped 1 does not raise its stamp" "$(stamp_of fr)" "1"
+
+# Appending is what puts bitmap-less chunks in it, so appending moves the stamp.
+psql_run "INSERT INTO fr SELECT s, md5(s::text) FROM generate_series(2001, 2100) s;"
+check "appending to a table stamped 1 raises its stamp" "$(stamp_of fr)" "2"
+check "and the table still reads whole" "$(q 'SELECT count(*), sum(id) FROM fr;')" "2100|2206050"
+
+# Either side of the range is refused, everywhere, by SQLSTATE rather than by
+# the absence of a wrong answer. 0A000 is feature_not_supported.
+psql_run "UPDATE pgcolumnar.storage SET format_version = 3 WHERE storage_id = $frsid;"
+check "a stamp above this build's is refused on all four paths" "$(four_paths fr)" "0A000 0A000 0A000 0A000"
+psql_run "UPDATE pgcolumnar.storage SET format_version = 0 WHERE storage_id = $frsid;"
+check "a stamp below MIN_READABLE is refused on all four paths" "$(four_paths fr)" "0A000 0A000 0A000 0A000"
+check "backend survives the range rejections" "$(q 'SELECT 1;')" "1"
 
 pgc_summary

@@ -21,7 +21,7 @@ SID="$(q "SELECT pgcolumnar.get_storage_id('nw');")"
 check "native storage row written" \
 	"$(q "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id = $SID;")" "1"
 check "native format version recorded" \
-	"$(q "SELECT format_version FROM pgcolumnar.storage WHERE storage_id = $SID;")" "1"
+	"$(q "SELECT format_version FROM pgcolumnar.storage WHERE storage_id = $SID;")" "2"
 check "native vector length recorded" \
 	"$(q "SELECT vector_length FROM pgcolumnar.storage WHERE storage_id = $SID;")" "1024"
 check "native row groups (5000 rows / 1000 limit)" \
