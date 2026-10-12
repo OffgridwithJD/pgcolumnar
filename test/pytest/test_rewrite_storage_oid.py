@@ -148,3 +148,98 @@ def test_a_matview_created_with_data_points_at_itself(pgc_conn, expect):
     expect.num(
         _points_at(pgc_conn, "mv_data"), 1, "and REFRESH still leaves it pointing at itself"
     )
+
+
+def test_the_repair_gate_leaves_untouched_partitions_alone(pgc_conn, pgc_cluster, expect):
+    """An ALTER that does not recurse must not make the gate open other partitions.
+
+    The repair gate runs for every inheritor of an ALTER's target. DETACH,
+    DETACH CONCURRENTLY, ATTACH and ALTER TABLE ONLY lock only the parent and
+    the partition they name, and the gate opened every OTHER partition with
+    NoLock to read its storage id: an Assert in relation_open on an
+    assert-enabled build, an unlocked open on a release build. Two columnar
+    partitions are needed; with one, nothing else is left to open.
+
+    The fix skips a relation the statement holds no lock on. So each arm reads
+    the blocks of the untouched partition in pg_statio, flushed by the ALTER's
+    own session: the unfixed gate reads its metapage, the fixed gate reads
+    nothing of it, on every build. A session the ALTER aborted flushes nothing
+    and reports None, which the arm refuses rather than reading as zero.
+
+    Independent of the shell twin: its own tables and row counts, and DETACH
+    CONCURRENTLY runs on an autocommit connection of its own.
+    """
+    import psycopg
+
+    schema = _one(pgc_conn, "SELECT current_schema()")
+
+    def setup():
+        with pgc_conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS gp, gp_a, gp_b, gp_c CASCADE")
+            cur.execute("CREATE TABLE gp (ts timestamptz, n int) PARTITION BY RANGE (ts)")
+            cur.execute("CREATE TABLE gp_a PARTITION OF gp FOR VALUES FROM ('2025-06-01')"
+                        " TO ('2025-07-01') USING pgcolumnar")
+            cur.execute("CREATE TABLE gp_b PARTITION OF gp FOR VALUES FROM ('2025-07-01')"
+                        " TO ('2025-08-01') USING pgcolumnar")
+            cur.execute("CREATE TABLE gp_c (ts timestamptz, n int) USING pgcolumnar")
+            cur.execute("INSERT INTO gp SELECT '2025-06-01'::timestamptz + g * interval '2 h', g"
+                        " FROM generate_series(1, 600) g")
+
+    def gp_a_blocks_during(statement):
+        """Blocks of gp_a read while `statement` ran in a session of its own."""
+        with pgc_conn.cursor() as cur:
+            cur.execute("SELECT pg_stat_force_next_flush()")
+            cur.execute("SELECT pg_stat_reset()")
+        try:
+            other = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
+            try:
+                other.execute(f'SET search_path TO "{schema}", public')
+                other.execute(statement)
+                other.execute("SELECT pg_stat_force_next_flush()")
+            finally:
+                other.close()
+        except psycopg.OperationalError:
+            return None
+        return _one(pgc_conn, "SELECT coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0)"
+                              " FROM pg_statio_user_tables WHERE relname = 'gp_a'"
+                              f" AND schemaname = '{schema}'")
+
+    setup()
+    # June at 2 h steps from 02:00 on the 1st: 359 rows; the rest are July's.
+    expect.text(f"{_one(pgc_conn, 'SELECT count(*) FROM gp_a')}|"
+                f"{_one(pgc_conn, 'SELECT count(*) FROM gp_b')}",
+                "359|241", "premise: both columnar partitions hold their rows")
+
+    expect.at_least(gp_a_blocks_during("SELECT count(*) FROM gp_a") or 0, 1,
+                    "control: reading lp_1 shows up as blocks read from it")
+
+    # (statement, the shell twin's name for it). A literal, so the loop below
+    # cannot run zero times.
+    pairs = [
+        ("ALTER TABLE ONLY gp ALTER COLUMN n SET DEFAULT 0",
+         "ONLY lp ALTER COLUMN v SET DEFAULT 0"),
+        ("ALTER TABLE gp ATTACH PARTITION gp_c FOR VALUES FROM ('2025-08-01') TO ('2025-09-01')",
+         "lp ATTACH PARTITION lp_3 FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')"),
+        ("ALTER TABLE gp DETACH PARTITION gp_b", "lp DETACH PARTITION lp_2"),
+        ("ALTER TABLE gp DETACH PARTITION gp_b CONCURRENTLY",
+         "lp DETACH PARTITION lp_2 CONCURRENTLY"),
+    ]
+    for alter, name in pairs:
+        setup()
+        n = gp_a_blocks_during(alter)
+        print(f"-- gp_a blocks read during: {alter} -> {n}")
+        expect.num(n, 0,
+                   f"the repair gate does not read a partition the ALTER did not touch: {name}")
+
+    setup()
+    with pgc_conn.cursor() as cur:
+        cur.execute("ALTER TABLE gp ALTER COLUMN n TYPE bigint")
+    expect.text(
+        _one(pgc_conn,
+             "SELECT string_agg((s.relation_oid = c.oid)::int::text, '' ORDER BY c.relname)"
+             " FROM pg_class c JOIN pgcolumnar.storage s"
+             " ON s.storage_id = pgcolumnar.get_storage_id(c.oid::regclass)"
+             f" WHERE c.relname IN ('gp_a', 'gp_b') AND c.relnamespace = '{schema}'::regnamespace"),
+        "11",
+        "and a rewrite through the parent still repoints every partition's storage row",
+    )

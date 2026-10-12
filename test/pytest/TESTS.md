@@ -6299,6 +6299,7 @@ THE `REFRESH` ARM GUARDS THE PATH THAT ALREADY WORKED. It repaired this before t
 | --- | --- |
 | `test_rewrite_storage_oid` | the storage row matches the live regclass before the rewrite, the row count survives, an unrewritten table still matches itself, and the rewritten table's storage row matches the live regclass afterwards |
 | `test_a_matview_created_with_data_points_at_itself` | that the matview and the `CREATE TABLE AS` table both hold their rows, that `CREATE TABLE ... AS` points at itself (the control that narrows the fix), that a matview created `WITH DATA` points at itself, and that `REFRESH` still does |
+| `test_the_repair_gate_leaves_untouched_partitions_alone` | on a parent with two columnar partitions, that `ALTER TABLE ONLY`, `ATTACH`, `DETACH` and `DETACH CONCURRENTLY` read no block of the partition they did not name, against a control that a real read of it is visible. The gate used to open that partition with `NoLock`, an Assert on assert builds and an unlocked open on release builds; the fix skips any relation the statement holds no lock on. A session the ALTER aborted reports `None`, which the arm refuses. Also that a type rewrite through the parent still repoints both partitions' storage rows, so the skip does not skip what it must repair |
 
 ## 83. test_catalog_scan_index.py: twelve metadata scans do not read their catalog whole
 

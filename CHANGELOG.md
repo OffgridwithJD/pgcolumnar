@@ -129,6 +129,35 @@ true until the next version shipped.
 
 ### Fixed
 
+- An `ALTER TABLE` on a partitioned columnar table that does not recurse no
+  longer opens the other partitions without a lock. `DETACH PARTITION`,
+  `DETACH PARTITION ... CONCURRENTLY`, `ATTACH PARTITION` and `ALTER TABLE ONLY`
+  all hit it whenever the parent had two or more columnar partitions. On an
+  assert-enabled build the backend aborted in `relation_open`:
+
+      TRAP: failed Assert("lockmode != NoLock || ... CheckRelationLockedByMe ...")
+      <- PgColumnarRetargetStorageRelation <- pgcolumnar_process_utility
+
+  On a release build the Assert is compiled out, so the effect was an unlocked
+  open of each other partition, racing a concurrent `DROP` of it. Measured on
+  PG 15 and 17. The repair gate added for #1211 in this release runs for every
+  inheritor of the ALTER's target, and only an ALTER that recurses has locked
+  them all. Found while probing `DETACH PARTITION CONCURRENTLY` for #1297, where
+  it also left the partition half-detached.
+
+  The gate now skips a relation the statement holds no lock on, because a
+  relation the statement rewrote stays locked by it until commit. Locking every
+  partition instead would have been correct, but it costs one lock per partition
+  on every such ALTER, and a table with thousands of partitions could run out of
+  the shared lock table on a statement that needed one lock.
+
+  `rewrite_storage_oid.sh` and its pytest twin read the blocks of the partition
+  the ALTER did not name, which works on every build. Unfixed code reads its
+  metapage (`got [1]` on a release build; the session aborts on an assert
+  build), and the fix reads nothing. A rewrite through the parent still repoints
+  both partitions' storage rows: a mutation that skips every relation reddens
+  that arm and the existing repair arms.
+
 - Twelve metadata lookups no longer read their whole catalog to answer a
   question about one table (#1207). Each passed `InvalidOid` to
   `systable_beginscan` on a key an existing index starts with, and the

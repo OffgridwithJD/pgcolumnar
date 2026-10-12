@@ -28,6 +28,7 @@
 #include "commands/sequence.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "storage/procarray.h"
 #include "utils/array.h"
@@ -2292,6 +2293,24 @@ PgColumnarRetargetStorageRelation(Oid relid)
 	Oid			storIdx;
 
 	if (!OidIsValid(relid) || !PgColumnarIsColumnarRelation(relid))
+		return;
+
+	/*
+	 * ONLY A RELATION THIS STATEMENT ALREADY HOLDS (#1297 probe). The repair
+	 * gate calls this for every inheritor of the ALTER's target, and an ALTER
+	 * that does not recurse -- DETACH, DETACH CONCURRENTLY, ATTACH, ALTER TABLE
+	 * ONLY -- locks none of the OTHER partitions. Opening them with NoLock was
+	 * an Assert in relation_open on every assert-enabled build, and on a release
+	 * build an unlocked open racing a concurrent DROP.
+	 *
+	 * Taking AccessShareLock instead would be correct and would cost one lock
+	 * per partition on every such ALTER, which on a table of thousands of
+	 * partitions can exhaust the shared lock table where the statement itself
+	 * needed one lock. It is also unnecessary: a relation this statement
+	 * rewrote is locked by it until commit, so a relation this transaction
+	 * holds no lock on cannot be one whose storage row needs repointing.
+	 */
+	if (!CheckRelationOidLockedByMe(relid, AccessShareLock, true))
 		return;
 
 	userRel = table_open(relid, NoLock);
