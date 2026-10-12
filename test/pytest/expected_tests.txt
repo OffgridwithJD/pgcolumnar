@@ -551,4 +551,7 @@ guard_tests 413
 # rebased tree, not added up.
 # 495 -> 496 for #1288: test_storage_row_repair.py. Re-derived by collection on
 # 038600e (after #1303): `496 tests collected`.
-cluster_tests 497
+#
+# cluster_tests 497 -> 498 for #1304's test_the_bound_reads_the_zone_maps_in_one_catalog_scan,
+# collected over the cluster files on the tree rebased onto 503f080 (#1286).
+cluster_tests 498
