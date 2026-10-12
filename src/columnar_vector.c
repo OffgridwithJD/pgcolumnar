@@ -2059,8 +2059,8 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 	uint64		storageId;
 	Snapshot	snap;
 	List	   *groups;
+	List	   *zones;
 	ListCell   *lc;
-	PgColumnarZoneMapSession sess;
 	bool		any = false;
 	bool		ok = true;
 	int			col = tsvar->varattno - 1;
@@ -2077,23 +2077,30 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 	att = TupleDescAttr(td, col);
 	storageId = PgColumnarStorageId(r);
 	snap = PgColumnarCatalogSnapshot(GetActiveSnapshot());
-	groups = PgColumnarReadRowGroupList(storageId, snap);
-	memset(&sess, 0, sizeof(sess));
-	sess.what = "group estimate";
 
-	foreach(lc, groups)
+	/*
+	 * TWO CATALOG SCANS, NOT ONE PER GROUP (#1304 review): the group list, for the
+	 * count, and every group's zone map for this column. A group with no zone-map
+	 * row for the column is missing from the second list, and a range that leaves
+	 * out a group is not a bound, so the counts must agree.
+	 */
+	groups = PgColumnarReadRowGroupList(storageId, snap);
+	zones = PgColumnarReadWholeChunkZoneMapsForColumn(storageId, col, snap);
+	if (list_length(zones) != list_length(groups))
+		ok = false;
+
+	foreach(lc, zones)
 	{
-		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
-		NativeZoneMapMetadata *z = PgColumnarReadZoneMapForColumn(storageId,
-																  rg->groupNumber,
-																  col, snap, &sess);
+		NativeZoneMapMetadata *z = (NativeZoneMapMetadata *) lfirst(lc);
 		char	   *cur;
 		double		vmin,
 					vmax;
 
-		if (z == NULL || !z->hasMinMax)
+		if (!ok)
+			break;
+		if (!z->hasMinMax)
 		{
-			if (z != NULL && z->valueCount == 0)
+			if (z->valueCount == 0)
 				continue;		/* all null: contributes no bucket */
 			ok = false;
 			break;
@@ -2108,8 +2115,8 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 		*hi = any ? Max(*hi, vmax) : vmax;
 		any = true;
 	}
-	PgColumnarCloseZoneMapSession(&sess);
 	list_free_deep(groups);
+	list_free_deep(zones);
 	table_close(r, AccessShareLock);
 	return ok && any;
 }
