@@ -31,9 +31,10 @@
 #
 # THE OVER-ESTIMATE ARM came out of review and is why the sizing happens on the
 # first grow rather than at Begin. estimate_num_groups cannot see through a
-# function, so `GROUP BY date_trunc('day', ts)` over a high-cardinality timestamp
-# reaches this node with an estimate of every row against a handful of real
-# groups. Sizing at Begin allocated 131,072 entries for 47 groups: 128x the
+# expression, so `GROUP BY v / 100000` over a high-cardinality column reaches
+# this node with an estimate of every row against a handful of real groups.
+# (The arm used date_trunc('day', ts) until #1304 bounded truncating time keys
+# from the zone maps, which made that estimate right and this arm vacuous.) Sizing at Begin allocated 131,072 entries for 47 groups: 128x the
 # memory of growing from nothing, to save zero rehashing, on the most ordinary
 # grouping in analytics. A table that never outgrows its first 1024 entries must
 # never be charged for a wrong estimate.
@@ -137,10 +138,10 @@ check "the table is never larger than the real group count needs (#810 review)" 
 	   || echo "OVERSIZED ($CAP entries for $NGROUPS groups, which need $NEEDED)")" "bounded"
 
 # ---- the over-estimate arm (review of #810) -------------------------------
-EXPR_Q="SELECT date_trunc('day', ts) d, count(*) FROM gts_expr GROUP BY 1"
+EXPR_Q="SELECT v / 100000 d, count(*) FROM gts_expr GROUP BY 1"
 EXPR_PLAN="$(explain_with "$BIG" "$EXPR_Q")"
 EXPR_CAP="$(field "$EXPR_PLAN" 'Columnar Group Table Capacity')"
-EXPR_REAL="$(q1 "SELECT count(*) FROM (SELECT date_trunc('day', ts) FROM gts_expr GROUP BY 1) s")"
+EXPR_REAL="$(q1 "SELECT count(*) FROM (SELECT v / 100000 FROM gts_expr GROUP BY 1) s")"
 EXPR_EST="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -Atq \
 	-c "$ON $BIG EXPLAIN (COSTS ON) $EXPR_Q" 2>&1 | sed -n 's/.*rows=\([0-9]*\).*width.*/\1/p' | head -1)"
 echo "-- expression key: planner estimate $EXPR_EST, real groups $EXPR_REAL, capacity ${EXPR_CAP:-0}"
@@ -157,17 +158,17 @@ check "a wrong estimate cannot inflate a table that never needed to grow (#810 r
 	   || echo "INFLATED ($EXPR_CAP entries for $EXPR_REAL real groups)")" "not inflated"
 
 check "and the expression key still answers correctly" "$EXPR_REAL" \
-	"$(q1 "SELECT count(DISTINCT date_trunc('day', ts)) FROM gts_expr")"
+	"$(q1 "SELECT count(DISTINCT v / 100000) FROM gts_expr")"
 
 # ---- the jump bound -------------------------------------------------------
 # The arm above cannot see the jump bound: 6 groups fit in the starting 1024, so
 # the table never grows and no jump is taken. This one has enough real groups to
 # force a grow while keeping the estimate wildly wrong, which is the only shape
 # where the bound is observable.
-MIN_Q="SELECT date_trunc('minute', ts) d, count(*) FROM gts_expr GROUP BY 1"
+MIN_Q="SELECT v / 60 d, count(*) FROM gts_expr GROUP BY 1"
 MIN_PLAN="$(explain_with "$BIG" "$MIN_Q")"
 MIN_CAP="$(field "$MIN_PLAN" 'Columnar Group Table Capacity')"
-MIN_REAL="$(q1 "SELECT count(*) FROM (SELECT date_trunc('minute', ts) FROM gts_expr GROUP BY 1) s")"
+MIN_REAL="$(q1 "SELECT count(*) FROM (SELECT v / 60 FROM gts_expr GROUP BY 1) s")"
 MIN_NEED="$(awk -v g="${MIN_REAL:-1}" 'BEGIN { c = 1024; while (c * 0.7 < g) c *= 2; printf "%d", c }')"
 echo "-- minute key: real groups $MIN_REAL need $MIN_NEED entries; allocated ${MIN_CAP:-0}"
 
@@ -181,7 +182,7 @@ check "a grow cannot jump to a wrong estimate, only toward it (#810 review)" \
 	   'BEGIN { print (c > 0 && c <= 8 * n) ? "bounded" : "UNBOUNDED (" c " for a need of " n ")" }')" "bounded"
 
 check "and the minute key answers correctly too" "$MIN_REAL" \
-	"$(q1 "SELECT count(DISTINCT date_trunc('minute', ts)) FROM gts_expr")"
+	"$(q1 "SELECT count(DISTINCT v / 60) FROM gts_expr")"
 
 check "and the answer is the same under a small work_mem" \
 	"$(q1 "SET work_mem='1MB'; SELECT count(*) FROM (SELECT k, sum(v) FROM gts GROUP BY k) s")" "$NGROUPS"
