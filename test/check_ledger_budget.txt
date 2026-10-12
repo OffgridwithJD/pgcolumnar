@@ -1276,4 +1276,24 @@ suites_not_covered 247
 #     never         1664 +  7 = 1671
 #     dated          219 +  5 =  224
 #     1671 + 224 == 1895
-checks_never_observed_red 1671
+#
+# #1215 (PR #1286): 1671 -> 1674. Twelve new checks, nine dated, three premises:
+#
+#     harness_selftest 600   5 checks: 4 dated, 1 premise
+#     harness_selftest 610   5 checks: 4 dated, 1 premise
+#     capability_sweep       2 checks: 1 dated, 1 premise; and the silent arm
+#                                       re-dated
+#
+# Every date comes from a mutation run on all five majors, merged one log at a
+# time with --mutation and --target, replayed from the saved logs onto #1288's
+# ledger. The part 600 mutation logs predate #1284's renames, so the three
+# old-name rows they carried were removed again, as #1284 did. Carried onto
+# #1302's ledger unchanged: #1291's rows are another suite, and the result is
+# main's rows less the one re-dated row plus 13 (12 new, 1 re-dated), checked
+# row by row.
+#
+#     ledger rows   1895 + 12 = 1907
+#     never         1671 +  3 = 1674
+#     dated          224 +  9 =  233
+#     1674 + 233 == 1907
+checks_never_observed_red 1674

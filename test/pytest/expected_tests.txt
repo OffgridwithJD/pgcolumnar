@@ -263,7 +263,9 @@
 # answer for a change that touches only the layer and its own guard.
 # 404 -> 405 for #1288: test_docs_cross_database_query.py, cluster-free, in NO_CLUSTER.
 # Re-derived by collection on 038600e (after #1303): `405 tests collected`.
-guard_tests 405
+# 405 -> 412 for #1215: test_capability_decline.py, seven tests, cluster-free and in
+# NO_CLUSTER. Re-derived by collection on 73d9663: `412 tests collected`.
+guard_tests 412
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
