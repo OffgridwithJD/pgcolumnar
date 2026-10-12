@@ -10,15 +10,17 @@ before this release's two encoding changes. Range columns can now skip chunk
 groups on overlap and containment queries. Catalog reads cost less in a database
 with many columnar tables.
 
-This release changes how column chunks are stored. An alpha4 build cannot read
-safely what this release writes. Read "On-disk format" before you upgrade.
+This release changes how column chunks are stored. Once it writes to a table,
+an alpha4 build refuses to read that table. Read "On-disk format" before you
+upgrade.
 
 This release requires one upgrade command. See "Upgrading" at the end.
 
 ## Highlights
 
-- **TODO(release): #1137, the on-disk format version check.** See "On-disk
-  format". This is likely the most important item for anyone who upgrades.
+- **An older build refuses a table it cannot read** (#1137). A table this
+  release has written to carries format version 2. An alpha4 build refuses it on
+  every read path, instead of returning a wrong answer. See "On-disk format".
 - **Smaller tables.** On ClickBench `hits_0.parquet` (1,000,000 rows, 105
   columns), stored chunk bytes fell from 81,869,112 to 64,984,810. Two changes
   produce this. An encoding is kept only when it is smaller after compression.
@@ -36,32 +38,36 @@ This release requires one upgrade command. See "Upgrading" at the end.
   view can now hold per-table options. Its catalog entry is correct from the
   moment it is created.
 
-## On-disk format: TODO(release): #1137
+## On-disk format (#1137)
 
-TODO(release): #1137. Replace this section once #1137 lands. Issue #1137 adds a
-format version stamp that this release writes, and a range check on read. Its
-purpose is to make an older build refuse a newer table early and loudly on
-every read path. State here:
+Each columnar table records a format version, `pgcolumnar.storage.format_version`.
+This release changes it as follows:
 
-- the new stamp value
-- the range of versions this build reads
-- what an alpha4 build does with a table this build wrote
-- whether existing tables are restamped
+- **This release writes version 2.** Every table it creates starts at 2.
+- **It reads versions 1 and 2.** It reads every table alpha4 wrote. It refuses
+  any other version, with SQLSTATE `0A000` (`unsupported columnar native format
+  version`), before it reads any data.
+- **A write raises a table from 1 to 2. A read never does.** An alpha4 table
+  stays at 1 until this release first writes a row group into it. Until then,
+  alpha4 can still read it. That covers `INSERT`, `COPY`, the new row versions of
+  `UPDATE`, `compact_rewrite`, `recluster` and `parallel_copy`. `SELECT` never
+  moves it, and neither does `DELETE`. A rewrite builds new storage, which
+  starts at 2.
+- **alpha4 refuses a version 2 table on every read path.** It does not return a
+  wrong answer. Measured with an alpha4 build on PostgreSQL 17: a sequential scan
+  and 40 single-row fetches were all refused. That held for a table this release
+  created and for an alpha4 table it then appended to. A query on a table with a
+  covering projection was refused too.
 
-What is true without #1137:
+Why the version moved: each column chunk carries an encoding descriptor (a small
+header that records how the chunk's values are encoded). Its version moves from 2
+to 3, because a chunk with no nulls no longer stores a validity bitmap (#1130).
+An alpha4 build that read such a chunk returned NULL for some rows that hold a
+value. Measured before this change: 16 of 40 single-row fetches returned NULL,
+and the other 24 raised an error. The format version is what turns that wrong
+answer into a refusal.
 
-- The native data format stays PGCN v1. The metapage version is unchanged.
-- Each column chunk carries an encoding descriptor (a small header that records
-  how the chunk's values are encoded). Its version moves from 2 to 3. This
-  release reads versions 2 and 3, so it reads every table that alpha4 wrote. No
-  conversion is needed.
-- An alpha4 build cannot read a version 3 chunk safely. A sequential scan fails
-  with `unrecognized native encoding descriptor`. An index fetch can fail, or it
-  can return NULL for a row that holds a value. Measured on an alpha4 build: 16
-  of 40 single-row fetches returned NULL, and the other 24 raised the error.
-
-The NULL case is a wrong answer, not an error. That is why downgrading is not
-supported. See the warning in "Upgrading".
+The native data format stays PGCN v1. The metapage version is unchanged.
 
 ## Smaller tables
 
@@ -279,11 +285,10 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
 
 1. Run `make install` with the same `PG_CONFIG`.
 
-   **WARNING:** You cannot safely go back to alpha4 after the next step. Once
-   the server loads the alpha5 library, the chunks it writes use encoding
-   descriptor version 3. An alpha4 build can return NULL for a row that holds a
-   value in such a chunk. If you may need to roll back, take a backup first.
-   TODO(release): confirm after #1137 lands.
+   **WARNING:** Plan any rollback before you write with alpha5. Once alpha5
+   writes to a table, that table carries format version 2, and alpha4 refuses to
+   read it. A table alpha5 has only read stays readable by alpha4. To roll back
+   after alpha5 has written, restore from a backup taken before the upgrade.
 
 2. Restart the server, so that it loads the new library.
 3. Connect to one database from the list.
@@ -318,8 +323,8 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
   partitioned table or a view used to succeed. It now raises an error.
 - It replaces `pgcolumnar."analyze"`. The new version finds a table's storage
   through the table's metapage.
-- No table data is converted. TODO(release): confirm after #1137 lands, and
-  state whether existing tables keep their current format stamp.
+- No table data is converted, and no table's format version changes. A table
+  moves from version 1 to 2 the first time alpha5 writes to it.
 - It does not repair a catalog entry that alpha4 left wrong. See "After the
   upgrade: repair entries alpha4 left wrong".
 
