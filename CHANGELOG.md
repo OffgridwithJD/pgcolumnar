@@ -74,6 +74,18 @@ true until the next version shipped.
 
 ### Changed
 
+- The planner estimates the number of groups for a time-bucket key from the
+  table's own data (#1292). `GROUP BY date_trunc(unit, ts)` and, newly,
+  `GROUP BY date_bin(stride, ts, origin)` were estimated near the row count
+  unless the query bounded `ts` on both sides: 300,000 groups for 11 on the test
+  fixture, and 60x to 3,600x too high on #1292's measurements. A missing end of
+  the range now comes from the zone maps, the smallest and largest value of `ts`
+  in every row group, so a query bounded on one side only, or not at all, is
+  estimated within a small factor of the truth and never below it. This is
+  the first step towards turning the vectorized grouping path on by default.
+  A `timestamp` constant compared against a `timestamptz` column still does not
+  set the range.
+
 - Five selftest parts and `rewrite_storage_oid` no longer hold a check that has
   never been red (#1236). Nine checks now carry a mutation that reddens them,
   each measured on all five majors: 570's fold arm, two in 290, one in 560, three

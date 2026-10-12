@@ -606,6 +606,8 @@ extern NativeZoneMapMetadata *PgColumnarReadZoneMapForColumn(uint64 storageId,
 									 Snapshot snapshot,
 									 PgColumnarZoneMapSession *sess);
 extern void PgColumnarCloseZoneMapSession(PgColumnarZoneMapSession *sess);
+extern List *PgColumnarReadWholeChunkZoneMapsForColumn(uint64 storageId, int columnIndex,
+													   Snapshot snapshot);
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 
 /* declared retention, read by pgcolumnar.expire (#403 item 5a) */

@@ -5646,8 +5646,9 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_avg_float8_overflows_the_way_core_overflows` | the node fires and raises out of range, which a row comparison cannot express |
 | `test_degenerate_inputs_produce_no_groups` | a predicate matching nothing, and an empty table |
 | `test_the_path_pays_for_the_folding_it_does` | the isolated #349 arm and its two node premises |
-| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; no range, a lookalike function and a non-time key each get no bound |
-| `test_a_mixed_timestamp_predicate_gets_no_bound` | a cross-type predicate under a non-UTC TimeZone gets none, while the matching-type one still gets a bound |
+| `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; with no time bound, with only a lower one, and for `date_bin`, the estimate is between the true group count and four times it, from the zone maps (#1292); a lookalike function and a non-time key get no bound |
+| `test_the_bound_reads_the_zone_maps_in_one_catalog_scan` | planning a bucketed GROUP BY over 50 row groups scans zone_map and its index once in all, not once per group (#1304) |
+| `test_a_mixed_timestamp_predicate_never_narrows_the_bound` | a cross-type predicate under a non-UTC TimeZone never narrows the estimate below the true group count (#1292); the matching-type one still gets a tight bound |
 
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 

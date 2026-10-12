@@ -617,12 +617,29 @@ def test_the_group_estimate_bound_is_accurate_and_narrow(pgc_conn, expect):
     expect.text("yes" if 3900 <= plain <= 4100 else f"no [{plain}]", "yes",
                 "an informed estimate (plain column) is not replaced")
 
-    # No Const bound on the key means no range, so no bound. Asserting the estimate
-    # is LARGE is the point: a bound would have shrunk it.
-    unbounded = _estimate(pgc_conn,
-                          "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")
-    expect.text("yes" if unbounded > 1000 else f"no [{unbounded}]", "yes",
-                "a truncating key with no range bound gets no bound from us")
+    # A MISSING END OF THE RANGE COMES FROM THE ZONE MAPS (#1292). This used to assert
+    # that a key with no Const bound gets no bound at all. The owner chose on #1292 to
+    # gate the grouped path on this estimate, and a gate cannot use one that is 60x to
+    # 3600x high (measured there), while a dashboard query bounds only one side. Each
+    # case asserts both directions: at least the true count, because under-estimating
+    # is the harmful direction, and at most four times it.
+    def within(sql):
+        est = _estimate(pgc_conn, sql)
+        act = int(_rows(pgc_conn, f"SELECT count(*) FROM ({sql}) z")[0][0])
+        ok = act >= 1 and act <= est <= 4 * act
+        return "ok" if ok else f"estimate {est} for {act} groups"
+
+    expect.text(within("SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b"),
+                "ok", "with no time bound at all, a truncating key is bounded from the zone maps")
+    expect.text(within("SELECT date_trunc('minute', ts) b, avg(v) FROM gb "
+                       "WHERE ts >= '2026-01-01' GROUP BY b"),
+                "ok", "with only a lower time bound, a truncating key is still bounded")
+    expect.text(within("SELECT date_bin('1 minute', ts, timestamptz '2026-01-01') b, avg(v) "
+                       f"FROM gb {GB_WINDOW} GROUP BY b"),
+                "ok", "a date_bin key is bounded as a truncating key is")
+    expect.text(within("SELECT date_bin('5 minutes', ts, timestamptz '2026-01-01') b, avg(v) "
+                       "FROM gb GROUP BY b"),
+                "ok", "and a date_bin key with no time bound is bounded from the zone maps")
 
     # A user function with date_trunc's SHAPE must not get date_trunc's BOUND.
     # PL/pgSQL because an SQL function would be inlined and lose the shape. Matching
@@ -641,7 +658,40 @@ def test_the_group_estimate_bound_is_accurate_and_narrow(pgc_conn, expect):
                 "a non-time expression key gets no bound either")
 
 
-def test_a_mixed_timestamp_predicate_gets_no_bound(pgc_conn, expect):
+def test_the_bound_reads_the_zone_maps_in_one_catalog_scan(pgc_conn, expect):
+    """The range costs one catalog scan, not one per row group (#1304 review).
+
+    The first version probed zone_map_pkey once per group, on every plan: 109 -> 313
+    planning buffers at 67 groups, about 3 per group. Counted as the planning
+    transaction's own scans, which no other session can move, on the table AND its
+    index, because a catalog index scan counts on the index. No WHERE, so the
+    filter's survival estimate, which samples zone maps on purpose, is not counted.
+    """
+    _exec(pgc_conn, "CREATE TABLE gbz (ts timestamptz, v float8) USING pgcolumnar")
+    _exec(pgc_conn, "SELECT pgcolumnar.set_options('gbz', stripe_row_limit => 1000, "
+                    "chunk_group_row_limit => 1000)")
+    _exec(pgc_conn, "INSERT INTO gbz SELECT '2026-01-01'::timestamptz + g * interval '1 second', g "
+                    "FROM generate_series(1,50000) g")
+    _exec(pgc_conn, "ANALYZE gbz")
+    _gb_session(pgc_conn)
+
+    groups = int(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group "
+                                "WHERE storage_id = pgcolumnar.get_storage_id('gbz')"))
+    _exec(pgc_conn, "BEGIN")
+    try:
+        _exec(pgc_conn, "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b")
+        scans = int(_one(pgc_conn,
+                         "SELECT pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass) "
+                         "+ pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass)"))
+    finally:
+        _exec(pgc_conn, "ROLLBACK")
+    print(f"-- {groups} row groups, {scans} zone_map scans while planning")
+    expect.at_least(groups, 40,
+                    "premise: the fixture has many row groups, so one scan and one per group differ")
+    expect.num(scans, 1, "planning a bucketed GROUP BY scans zone_map once, not once per row group")
+
+
+def test_a_mixed_timestamp_predicate_never_narrows_the_bound(pgc_conn, expect):
     """PostgreSQL has cross-type operators, so a `timestamp` Const compared against a
     `timestamptz` column stays bare and reaches the extraction instead of being
     wrapped in a cast. Both are int64 microseconds on different scales -- wall clock
@@ -657,18 +707,26 @@ def test_a_mixed_timestamp_predicate_gets_no_bound(pgc_conn, expect):
     _exec(pgc_conn, "SET TimeZone='Asia/Kolkata'")
     _gb_session(pgc_conn)
 
-    mixed = _estimate(pgc_conn,
-                      "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm "
-                      "WHERE ts >= timestamp '2026-01-01 00:00' "
-                      "AND ts < timestamp '2026-01-01 12:00' GROUP BY b")
+    # THE PROPERTY THE MIXED-TYPE RULE PROTECTS, stated directly (#1292). This used to
+    # assert "gets NO bound", the observable sign that the mixed predicate was unused.
+    # With the zone maps supplying a range there is a bound either way, so the arm now
+    # asserts that a wall-clock window read as UTC never narrows the estimate below the
+    # truth. 04:00-08:00 Kolkata is 22:30-02:30 UTC, 150 minutes of this data; read as
+    # UTC it would clip the data to 04:00-04:48, about 50.
+    mixed_sql = ("SELECT date_trunc('minute',ts) b, avg(v) FROM gbm "
+                 "WHERE ts >= timestamp '2026-01-01 04:00' "
+                 "AND ts < timestamp '2026-01-01 08:00' GROUP BY b")
+    mixed = _estimate(pgc_conn, mixed_sql)
+    mixed_actual = int(_rows(pgc_conn, f"SELECT count(*) FROM ({mixed_sql}) z")[0][0])
     matching = _estimate(pgc_conn,
                          "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm "
                          "WHERE ts >= timestamptz '2026-01-01 00:00+00' "
                          "AND ts < timestamptz '2026-01-01 12:00+00' GROUP BY b")
-    print(f"-- mixed-type predicate {mixed}, matching-type predicate {matching}")
-    # The two arms are a pair: "no bound" and "a bound" have to be distinguishable
-    # on this fixture, and core's own estimate here is six figures, so they are.
-    expect.text("yes" if mixed > 50000 else f"no [{mixed}]", "yes",
-                "a mixed timestamp/timestamptz predicate gets NO bound")
+    print(f"-- mixed-type predicate {mixed} for {mixed_actual} groups, "
+          f"matching-type predicate {matching}")
+    expect.at_least(mixed_actual, 100, "premise: the mixed-type window holds data")
+    expect.text("yes" if mixed >= mixed_actual
+                else f"no (estimate {mixed} for {mixed_actual} groups)", "yes",
+                "a mixed timestamp/timestamptz predicate never narrows the estimate below the true count")
     expect.text("yes" if matching < 5000 else f"no [{matching}]", "yes",
                 "while a matching-type predicate still gets one")

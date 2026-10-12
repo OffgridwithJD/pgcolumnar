@@ -3506,6 +3506,51 @@ PgColumnarReadZoneMapList(uint64 storageId, uint64 groupNumber, Snapshot snapsho
  *		is (storage_id, group_number, column_index, vector_index), so this probes
  *		the exact column. Returns NULL when the column has no whole-chunk zone map.
  */
+/*
+ * PgColumnarReadWholeChunkZoneMapsForColumn
+ *		Every row group's whole-chunk zone map for one column, in ONE catalog scan
+ *		keyed on the storage id (#1304 review). The planner's time-bucket bound needs
+ *		all of them, and one probe per group cost about three buffers per group on
+ *		every plan. Groups come back in zone_map_pkey order; a group with no row for
+ *		the column is simply absent, so a caller needing all groups compares counts.
+ */
+List *
+PgColumnarReadWholeChunkZoneMapsForColumn(uint64 storageId, int columnIndex,
+										  Snapshot snapshot)
+{
+	Relation	rel = open_columnar_table("zone_map", AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	Oid			idxOid;
+	HeapTuple	tuple;
+	List	   *result = NIL;
+
+	ScanKeyInit(&key[0], Anum_zone_map_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	idxOid = pgcolumnar_scan_index_oid(rel, "zone_map_pkey");
+	scan = systable_beginscan(rel, idxOid, OidIsValid(idxOid), snapshot, 1, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		int16		col = DatumGetInt16(
+			heap_getattr(tuple, Anum_zone_map_column_index, tupdesc, &isnull));
+		int32		vecIndex = DatumGetInt32(
+			heap_getattr(tuple, Anum_zone_map_vector_index, tupdesc, &isnull));
+		uint64		groupNumber;
+
+		if (col != columnIndex || vecIndex != -1)
+			continue;			/* this column's whole-chunk rows only */
+		groupNumber = (uint64) DatumGetInt64(
+			heap_getattr(tuple, Anum_zone_map_group_number, tupdesc, &isnull));
+		result = lappend(result,
+						 zonemap_from_tuple(tuple, tupdesc, storageId, groupNumber, -1));
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return result;
+}
+
 NativeZoneMapMetadata *
 PgColumnarReadZoneMapForColumn(uint64 storageId, uint64 groupNumber,
 							   int columnIndex, Snapshot snapshot,

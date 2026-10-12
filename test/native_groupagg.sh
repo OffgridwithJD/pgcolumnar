@@ -450,10 +450,58 @@ plain_before=$(gbest "SELECT host, avg(v) FROM gb GROUP BY host")
 check "an informed estimate (plain column) is not replaced" \
 	"$([ "$plain_before" -ge 3900 ] && [ "$plain_before" -le 4100 ] && echo yes || echo no)" "yes"
 
-# No Const bound on the key means no range, so no bound. The estimate stays whatever core
-# produced; asserting it is LARGE is the point, since a bound would have shrunk it.
-check "a truncating key with no range bound gets no bound from us" \
-	"$([ "$(gbest "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
+# A MISSING END OF THE RANGE COMES FROM THE ZONE MAPS (#1292). This arm used to assert
+# the opposite -- "a truncating key with no range bound gets no bound from us" -- and that
+# was the design until the owner chose, on #1292, to gate the grouped path on this
+# estimate. A gate cannot use a number 60x to 3600x too high (measured on #1292), and a
+# dashboard query bounds only one side ("the last day"). The zone maps hold every row
+# group's minimum and maximum of the key's column, which is the range the scan reads.
+#
+# Each arm states BOTH directions: at least the true group count, because an
+# under-estimate is the direction that under-sizes the hash table and would let the gate
+# pass a query the runtime cap then refuses; and at most 4x, which is the accuracy a gate
+# needs. Each reports the estimate and the truth when it fails.
+gbwithin() {	# gbwithin QUERY -> "ok" when actual <= estimate <= 4*actual
+	local est act
+	est="$(gbest "$1")"
+	act="$(q "SELECT count(*) FROM ($1) z;")"
+	if [ -n "$est" ] && [ -n "$act" ] && [ "$act" -ge 1 ] && [ "$est" -ge "$act" ] && [ "$est" -le $((act * 4)) ]; then
+		echo ok
+	else
+		echo "estimate ${est:-none} for ${act:-none} groups"
+	fi
+}
+check "with no time bound at all, a truncating key is bounded from the zone maps" \
+	"$(gbwithin "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" "ok"
+check "with only a lower time bound, a truncating key is still bounded" \
+	"$(gbwithin "SELECT date_trunc('minute', ts) b, avg(v) FROM gb WHERE ts >= '2026-01-01' GROUP BY b")" "ok"
+check "a date_bin key is bounded as a truncating key is" \
+	"$(gbwithin "SELECT date_bin('1 minute', ts, timestamptz '2026-01-01') b, avg(v) FROM gb $W GROUP BY b")" "ok"
+check "and a date_bin key with no time bound is bounded from the zone maps" \
+	"$(gbwithin "SELECT date_bin('5 minutes', ts, timestamptz '2026-01-01') b, avg(v) FROM gb GROUP BY b")" "ok"
+
+# THE RANGE COSTS ONE CATALOG SCAN, NOT ONE PER ROW GROUP (#1304 review). The first
+# version probed zone_map_pkey once per group, on every plan: 109 -> 313 planning
+# buffers at 67 groups, about 3 per group, so ~20,000 per plan at a billion rows. Counted
+# as the planning transaction's own zone_map scans, which no other session can move (the
+# #1287 instrument), on the table AND its index: a catalog index scan counts on the
+# INDEX, and reading the table's counter alone gave 0 against 50 real probes. No WHERE,
+# so the filter's survival estimate -- which samples zone
+# maps on purpose -- is not in the count; 50 groups, so one scan and one per group are
+# far apart.
+psql_run "CREATE TABLE gbz (ts timestamptz, v float8) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('gbz', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
+	INSERT INTO gbz SELECT '2026-01-01'::timestamptz + g * interval '1 second', g FROM generate_series(1,50000) g;
+	ANALYZE gbz;" >/dev/null 2>&1
+gbz_groups="$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('gbz');")"
+gbz_scans="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+	-c "$GB" -c "BEGIN" -c "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b" \
+	-c "SELECT pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass)
+	          + pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass)" -c "ROLLBACK" 2>&1 | grep -E '^[0-9]+$' | tail -1)"
+check "premise: the fixture has many row groups, so one scan and one per group differ" \
+	"$([ "${gbz_groups:-0}" -ge 40 ] && echo yes || echo "no (${gbz_groups:-none} groups)")" "yes"
+check_num "planning a bucketed GROUP BY scans zone_map once, not once per row group" \
+	"${gbz_scans:-}" "1"
 # A user function with date_trunc's SHAPE must not get date_trunc's BOUND. PL/pgSQL
 # because an SQL function would be inlined and lose the shape. Matching on shape alone
 # estimated this at 722 against 499,999 actual, a 692x UNDER-estimate, which is the
@@ -475,9 +523,21 @@ psql_run "CREATE TABLE gbm (ts timestamptz, v float8) USING pgcolumnar;
 gbmest() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 	-d "$PGC_DB" -At -q -c "SET TimeZone='Asia/Kolkata';" -c "$GB" \
 	-c "EXPLAIN (COSTS ON) $1" 2>&1 | grep -oE "rows=[0-9]+" | head -1 | cut -d= -f2; }
-check "a mixed timestamp/timestamptz predicate gets NO bound" \
-	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
-	   WHERE ts >= timestamp '2026-01-01 00:00' AND ts < timestamp '2026-01-01 12:00' GROUP BY b")" -gt 50000 ] && echo yes || echo no)" "yes"
+# WHAT THE MIXED-TYPE RULE PROTECTS, stated directly (#1292). This asserted "gets NO
+# bound", which was the observable sign that the mixed predicate was not used. With the
+# zone maps supplying a range, there is a bound either way, so the arm now asserts the
+# property itself: a wall-clock window read as UTC must never narrow the estimate below
+# the true group count. Under Asia/Kolkata, 04:00-08:00 wall clock is 22:30-02:30 UTC,
+# 150 minutes of data; read as UTC it would clip the data to 04:00-04:48, about 50.
+gbmcount() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -At -q -c "SET TimeZone='Asia/Kolkata';" -c "SELECT count(*) FROM ($1) z;" 2>&1; }
+GBM_MIXED="SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
+	   WHERE ts >= timestamp '2026-01-01 04:00' AND ts < timestamp '2026-01-01 08:00' GROUP BY b"
+gbm_est="$(gbmest "$GBM_MIXED")"; gbm_act="$(gbmcount "$GBM_MIXED")"
+check "premise: the mixed-type window holds data" \
+	"$([ "${gbm_act:-0}" -ge 100 ] && echo yes || echo "no (${gbm_act:-none} groups)")" "yes"
+check "a mixed timestamp/timestamptz predicate never narrows the estimate below the true count" \
+	"$([ "${gbm_est:-0}" -ge "${gbm_act:-1}" ] && echo yes || echo "no (estimate ${gbm_est:-none} for ${gbm_act:-none} groups)")" "yes"
 check "while a matching-type predicate still gets one" \
 	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
 	   WHERE ts >= timestamptz '2026-01-01 00:00+00' AND ts < timestamptz '2026-01-01 12:00+00' GROUP BY b")" -lt 5000 ] && echo yes || echo no)" "yes"
