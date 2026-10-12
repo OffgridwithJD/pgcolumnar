@@ -323,6 +323,35 @@ declared retention raises an error rather than doing nothing.
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.
 
+## Create time partitions ahead
+
+`pgcolumnar.partition_create_ahead` keeps a time-partitioned table ready for
+the rows that are coming. Call it from a scheduler, such as pg_cron, more often
+than the width:
+
+```sql
+CREATE TABLE metrics (ts timestamptz NOT NULL, device int, value float8)
+    PARTITION BY RANGE (ts);
+
+-- Daily partitions, up to three days ahead of now.
+SELECT pgcolumnar.partition_create_ahead('metrics', '1 day', 3);
+```
+
+Every partition that it creates is columnar. It continues from the highest
+existing upper bound, so the partitions stay contiguous, and a second call
+creates nothing.
+
+It takes `SHARE UPDATE EXCLUSIVE` on the parent, not `ACCESS EXCLUSIVE`, so
+queries and inserts on the table continue while it runs.
+
+For a `timestamp` key, which has no time zone, "now" is the session's local
+time, and partitions start on the width's boundary in that time.
+
+The function refuses a table that has a DEFAULT partition.
+
+`test/partition_lifecycle.sh` checks each of these statements, in sessions
+west and east of UTC.
+
 ## Manage time partitions with pg_partman
 
 pg_partman can create and drop columnar partitions. It needs one setting to do
