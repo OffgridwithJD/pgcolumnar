@@ -33,14 +33,63 @@ check_num "premise: the table has many row groups, so skipping can show" "$(at_l
 # ctid of the row with a given id, as the AM numbers it
 tid_of() { q "SELECT ctid FROM tr WHERE id = $1;"; }
 LAST="$(tid_of 390001)"; MID_A="$(tid_of 150001)"; MID_B="$(tid_of 170000)"; END="$(tid_of 400000)"
+# Offset 0 is no row's offset, and neither is any offset past the 291 a block
+# holds (MaxHeapTuplesPerPage), though a bound may name either: the executor
+# turns `ctid < '(B,0)'` into an upper bound of (B-1,65535). Those are the edges
+# the AM must translate; read unclamped, offset 400 named a row in block B+1.
+BLK="${MID_A#(}"; BLK="${BLK%%,*}"
 echo "-- ctids: 390001=$LAST 150001=$MID_A 170000=$MID_B 400000=$END"
+
+check "premise: a ctid range plans a TID range scan, so the arms below exercise it" \
+	"$(q "EXPLAIN SELECT id FROM tr WHERE ctid >= '$LAST';" | grep -c 'Tid Range Scan')" "1"
 
 hash() { q "SET enable_tidscan = ${2:-on}; SELECT md5(string_agg(id::text || v, ',' ORDER BY id)) || '|' || count(*) FROM tr WHERE $1;" | tail -1; }
 for pred in "ctid >= '$LAST'" "ctid >= '$MID_A' AND ctid <= '$MID_B'" "ctid < '$MID_A'" \
-            "ctid > '$END'" "ctid >= '(0,0)'"; do
+            "ctid > '$END'" "ctid >= '(0,0)'" \
+            "ctid <= '($BLK,0)'" "ctid > '($BLK,0)'" "ctid < '($BLK,1)'" "ctid <= '(0,0)'" \
+            "ctid >= '($BLK,7)' AND ctid < '($BLK,7)'" \
+            "ctid < '($BLK,0)'" "ctid >= '($BLK,400)'" "ctid <= '($BLK,400)'" \
+            "ctid > '($BLK,65535)'" "ctid >= '($BLK,291)' AND ctid <= '($BLK,292)'"; do
 	check "a ctid range returns what the per-row filter returns: ${pred//$LAST/LAST}" \
 		"$(hash "$pred" on)" "$(hash "$pred" off)"
 done
+
+# Rescan: an outer row per range, so the scan is rescanned with new bounds and
+# a reader built for the previous range must not survive into the next one.
+LATQ="SELECT string_agg(r.n || ':' || x.c || ':' || x.h, ' ' ORDER BY r.n)
+   FROM (VALUES (1, '$MID_A'::tid, '$MID_B'::tid), (2, '$LAST'::tid, '$END'::tid),
+                (3, '(0,1)'::tid, '$MID_A'::tid), (4, '$END'::tid, '$LAST'::tid)) r(n, lo, hi),
+   LATERAL (SELECT count(*) c, md5(string_agg(id::text, ',' ORDER BY id)) h FROM tr
+            WHERE ctid >= r.lo AND ctid <= r.hi) x"
+lat() { q "SET enable_tidscan = $1; $LATQ;" | tail -1; }
+# The query the arm runs, not a stand-in: a draft that left the lateral's
+# output unreferenced planned no scan of tr at all.
+check "premise: the per-range join rescans a TID range scan" \
+	"$(q "EXPLAIN $LATQ;" | grep -c 'Tid Range Scan')" "1"
+check "a TID range scan rescanned with new bounds returns what the filter returns" "$(lat on)" "$(lat off)"
+
+# PostgreSQL 19 runs a TID range scan in parallel: each worker sets the range
+# and the reader's shared group claim hands out only the restricted groups. The
+# custom scan is turned off because, with parallelism cheap, the planner prefers
+# a parallel custom scan that filters ctid per row, and this arm is about the
+# AM's path.
+if [ "$PGC_MAJOR" -ge 19 ]; then
+	PAR="SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0; SET min_parallel_table_scan_size = 0;
+	     SET max_parallel_workers_per_gather = 2; SET parallel_leader_participation = off;
+	     SET pgcolumnar.enable_custom_scan = off;"
+	PQ="SELECT md5(string_agg(id::text || v, ',' ORDER BY id)) || '|' || count(*) FROM tr
+	    WHERE ctid >= '$MID_A' AND ctid <= '$LAST'"
+	plan="$(q "$PAR EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) $PQ;")"
+	check "premise: the range runs as a parallel TID range scan with two workers" \
+		"$(grep -c 'Parallel Tid Range Scan' <<<"$plan")|$(grep -o 'Workers Launched: [0-9]*' <<<"$plan")" \
+		"1|Workers Launched: 2"
+	check "a parallel TID range scan returns what the filter returns" \
+		"$(q "$PAR $PQ;" | tail -1)" "$(hash "ctid >= '$MID_A' AND ctid <= '$LAST'" off)"
+else
+	check_skip "a parallel TID range scan returns what the filter returns" \
+		"SKIP  a parallel TID range scan returns what the filter returns (PostgreSQL $PGC_MAJOR has none; 19 added it)" \
+		"PostgreSQL $PGC_MAJOR has no parallel TID range scan"
+fi
 
 # max(v || 'x'), not max(v): an unfiltered count/max is answered from zone maps
 # (#1293) and read 5 blocks of this table in the first draft, so the "whole
@@ -64,5 +113,18 @@ check "and rows deleted inside the range stay deleted" \
 	"$(hash "ctid >= '$LAST'" on)" "$(hash "ctid >= '$LAST'" off)"
 check_num "premise: the delete removed rows from the range" \
 	"$(q "SET enable_tidscan = off; SELECT count(*) FROM tr WHERE ctid >= '$LAST';" | tail -1)" "9000"
+
+# Compaction moves a group's surviving rows into a new group with new, higher
+# row numbers. The range over the old addresses now names rows nowhere, and the
+# range over the new ones must find them all.
+check_num "premise: compaction rewrote the group the delete thinned" \
+	"$(q "SELECT pgcolumnar.compact_rewrite('tr', 0.05, 0);")" "1"
+MOVED="$(tid_of 390001)"
+check "premise: compaction gave the surviving rows new addresses" \
+	"$([ "$MOVED" != "$LAST" ] && echo moved || echo "kept $MOVED")" "moved"
+for pred in "ctid >= '$LAST'" "ctid >= '$MOVED'" "ctid >= '$MID_A' AND ctid <= '$MOVED'"; do
+	check "after compaction a ctid range returns what the filter returns: ${pred//$LAST/LAST}" \
+		"$(hash "$pred" on)" "$(hash "$pred" off)"
+done
 
 pgc_summary

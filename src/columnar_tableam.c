@@ -289,6 +289,18 @@ typedef struct PgColumnarScanDescData
 	 */
 	MemoryContext scanContext;
 	PgColumnarAnalyzeState *analyzeState;
+
+	/*
+	 * A TID range scan: the inclusive row-number bounds scan_set_tidrange
+	 * derived from the requested item pointers, and the row groups that
+	 * intersect them. The reader is restricted to those groups when it is
+	 * built, so a range over the tail of a table reads the tail only.
+	 */
+	bool		hasRowRange;
+	uint64		minRow;
+	uint64		maxRow;
+	uint64	   *rangeGroups;
+	int			numRangeGroups;
 } PgColumnarScanDescData;
 typedef struct PgColumnarScanDescData *PgColumnarScanDesc;
 
@@ -658,6 +670,9 @@ pgcolumnar_scan_read_state(PgColumnarScanDesc scan, TupleDesc tupdesc)
 										 scan->rs_base.rs_parallel, NULL,
 										 scan->rs_base.rs_nkeys,
 										 scan->rs_base.rs_key);
+		if (scan->hasRowRange)
+			PgColumnarReadRestrictToGroups(scan->readState, scan->rangeGroups,
+										 scan->numRangeGroups);
 		MemoryContextSwitchTo(oldContext);
 	}
 
@@ -747,6 +762,133 @@ pgcolumnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
 	slot->tts_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
 
 	return true;
+}
+
+/*
+ * pgcolumnar_scan_set_tidrange
+ *		Bound the scan to the item pointers [mintid, maxtid], inclusive.
+ *
+ * Item pointers here are synthetic row addresses (columnar.h), so the bounds
+ * become row numbers and the row groups that hold any of them are found from
+ * the row-group catalog at the scan's snapshot. Rows outside the range in a
+ * boundary group are filtered by getnextslot_tidrange.
+ *
+ * Called before the first getnextslot_tidrange and again after each rescan,
+ * so a reader built for an earlier range is ended here; the next row builds a
+ * fresh one restricted to the new groups.
+ */
+static void
+pgcolumnar_scan_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
+							 ItemPointer maxtid)
+{
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
+	uint64		lo;
+	uint64		hi;
+	List	   *groups;
+	ListCell   *lc;
+	MemoryContext oldContext;
+
+	if (scan->readState != NULL)
+	{
+		PgColumnarEndRead(scan->readState);
+		scan->readState = NULL;
+	}
+
+	/*
+	 * A bound may name an offset no row uses: 0, or anything past the
+	 * COLUMNAR_VALID_ITEMPOINTER_OFFSETS a block holds -- the executor turns
+	 * "ctid < '(B,0)'" into an upper bound of (B-1, 65535). Rows of block B
+	 * are B*K + (offset - 1) for offset 1..K, so a lower bound below offset 1
+	 * means the block's first row and one past K the next block's first row;
+	 * an upper bound past K means the block's last row and one below offset 1
+	 * the row before the block, which is no row at all for block 0.
+	 */
+	{
+		uint64		k = COLUMNAR_VALID_ITEMPOINTER_OFFSETS;
+		uint64		blk = ItemPointerGetBlockNumberNoCheck(mintid);
+		uint64		off = ItemPointerGetOffsetNumberNoCheck(mintid);
+
+		if (off < FirstOffsetNumber)
+			lo = blk * k;
+		else if (off > k)
+			lo = (blk + 1) * k;
+		else
+			lo = blk * k + (off - FirstOffsetNumber);
+
+		blk = ItemPointerGetBlockNumberNoCheck(maxtid);
+		off = ItemPointerGetOffsetNumberNoCheck(maxtid);
+		if (off > k)
+			hi = blk * k + (k - 1);
+		else if (off >= FirstOffsetNumber)
+			hi = blk * k + (off - FirstOffsetNumber);
+		else if (blk > 0)
+			hi = blk * k - 1;
+		else
+		{
+			/* below row 0, which no row uses: an empty range */
+			lo = 1;
+			hi = 0;
+		}
+	}
+
+	scan->hasRowRange = true;
+	scan->minRow = lo;
+	scan->maxRow = hi;
+
+	oldContext = MemoryContextSwitchTo(scan->scanContext);
+	if (scan->rangeGroups != NULL)
+		pfree(scan->rangeGroups);
+	scan->numRangeGroups = 0;
+	groups = (lo <= hi) ?
+		PgColumnarReadRowGroupList(PgColumnarStorageId(sscan->rs_rd),
+								   sscan->rs_snapshot) : NIL;
+	scan->rangeGroups = (uint64 *) palloc(sizeof(uint64) *
+										  Max(list_length(groups), 1));
+	foreach(lc, groups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+
+		if (rg->rowCount == 0 ||
+			rg->firstRowNumber > hi ||
+			rg->firstRowNumber + rg->rowCount - 1 < lo)
+			continue;
+		scan->rangeGroups[scan->numRangeGroups++] = rg->groupNumber;
+	}
+	list_free_deep(groups);
+	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * pgcolumnar_scan_getnextslot_tidrange
+ *		The next row whose item pointer is inside the range set above.
+ *
+ * The reader visits only the groups that intersect the range; rows of those
+ * groups outside it are skipped. A row past the upper bound does not end the
+ * scan: group order is not row-number order once compaction has moved rows
+ * into later groups, so stopping there could drop rows that are in range.
+ */
+static bool
+pgcolumnar_scan_getnextslot_tidrange(TableScanDesc sscan,
+									 ScanDirection direction,
+									 TupleTableSlot *slot)
+{
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
+
+	Assert(scan->hasRowRange);
+	if (scan->minRow > scan->maxRow || scan->numRangeGroups == 0)
+	{
+		ExecClearTuple(slot);
+		return false;
+	}
+
+	while (pgcolumnar_scan_getnextslot(sscan, direction, slot))
+	{
+		uint64		row = PgColumnarItemPointerToRowNumber(&slot->tts_tid);
+
+		if (row >= scan->minRow && row <= scan->maxRow)
+			return true;
+	}
+	return false;
 }
 
 /* -------------------------------------------------------------------------
@@ -2252,6 +2394,8 @@ static const TableAmRoutine pgcolumnar_am_methods = {
 	.scan_begin = pgcolumnar_scan_begin,
 	.scan_end = pgcolumnar_scan_end,
 	.scan_rescan = pgcolumnar_scan_rescan,
+	.scan_set_tidrange = pgcolumnar_scan_set_tidrange,
+	.scan_getnextslot_tidrange = pgcolumnar_scan_getnextslot_tidrange,
 	.scan_getnextslot = pgcolumnar_scan_getnextslot,
 
 	.parallelscan_estimate = pgcolumnar_parallelscan_estimate,
