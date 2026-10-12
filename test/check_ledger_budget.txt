@@ -1296,4 +1296,19 @@ suites_not_covered 247
 #     never         1671 +  3 = 1674
 #     dated          224 +  9 =  233
 #     1674 + 233 == 1907
-checks_never_observed_red 1674
+#
+# TID range scans, #1306 (OffgridwithJD): 1674 -> 1693. tid_range_scan enters the
+# ledger with 36 checks from a five-major run on this tree (after #1304); the
+# parallel plan premise runs on 19 only. Seventeen are dated by ten mutations of
+# src/columnar_tableam.c, each merged one log at a time with --mutation and
+# --target (the parallel claim on PG19, the rest on PG17; #1304 did not touch
+# that file). Nineteen arrive `never`: eleven premises, and eight arms no mutant
+# of this change reddens -- ranges whose bounds are real rows, the empty range,
+# the deleted rows, and rows inserted earlier in the same transaction -- kept
+# because they hold the access method against the per-row filter.
+#
+#     ledger rows   1907 + 36 = 1943
+#     never         1674 + 19 = 1693
+#     dated          233 + 17 =  250
+#     1693 + 250 == 1943
+checks_never_observed_red 1693

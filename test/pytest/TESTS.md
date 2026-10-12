@@ -6494,7 +6494,9 @@ The oracle is the same query with `enable_tidscan = off`, which is that per-row 
 
 THE BOUNDS THAT MATTER ARE THE ONES NO ROW HAS. A block holds 291 rows, at offsets 1 to 291, but a bound may name offset 0 or anything up to 65535. The executor turns `ctid < '(B,0)'` into an upper bound of `(B-1,65535)`. The first build read those offsets unclamped, so offset 400 named a row in the next block. The shell twin's arms for those bounds went red against it, which is how it was found.
 
-Also held: a rescan with new bounds per outer row (the plan premise is taken on the very query compared, because a draft whose lateral output went unreferenced planned no scan at all); deletes inside the range; and compaction, which gives a thinned group's surviving rows new, higher row numbers. On PostgreSQL 19, a parallel TID range scan with two workers is held too. Below 19 that test is `UNSUPPORTED_MAJOR` and listed in `expected_unrunnable.txt`.
+CURSORS. PostgreSQL counts a TID range scan as able to scan backward, so it puts no Material above one under a cursor that may scroll, and a backward fetch reached the access method, which refused it (`0A000`). Found by @jdatcmd reviewing #1306. A planner hook now puts a Material above a cursor's plan that holds a TID range scan of a columnar table. The arms: a SCROLL cursor's `FETCH LAST`, `BACKWARD` and `ABSOLUTE` match the filter's plan, and a plain DECLARE (which the portal makes scrollable) answers a backward fetch correctly. Both were red before the hook.
+
+Also held: rows inserted earlier in the same transaction are in the range; a rescan with new bounds per outer row (the plan premise is taken on the very query compared, because a draft whose lateral output went unreferenced planned no scan at all); deletes inside the range; and compaction, which gives a thinned group's surviving rows new, higher row numbers. On PostgreSQL 19, a parallel TID range scan with two workers is held too. Below 19 that test is `UNSUPPORTED_MAJOR` and listed in `expected_unrunnable.txt`.
 
 On a private database, because `pg_stat_reset()` resets the whole database's counters.
 
@@ -6505,10 +6507,12 @@ Removal proofs, each red on PostgreSQL 19 on the arm named:
 - without the boundary-row filter: the tail range and the parallel arm;
 - with the reader kept across a rescan: the rescan arm;
 - without the shared parallel claim: the parallel arm, which returned every row twice.
+- without the planner hook: both cursor arms;
+- with the hook for SCROLL cursors only: the plain-cursor arm.
 
 ### Every test
 
 | test | what it holds |
 | --- | --- |
-| `test_a_ctid_range_reads_only_its_row_groups` | the table has its rows and many groups; a ctid range plans a TID range scan; eleven ranges, including offsets 0, 291, 500 and 65535, return what the per-row filter returns; a rescanned scan does too; the tail range reads at least one block and under a fifth of the table; deleted rows stay deleted; after compaction moves rows, ranges over the old and new addresses return what the filter returns |
+| `test_a_ctid_range_reads_only_its_row_groups` | the table has its rows and many groups; a ctid range plans a TID range scan; eleven ranges, including offsets 0, 291, 500 and 65535, return what the per-row filter returns; a rescanned scan does too; a SCROLL cursor and a plain cursor fetch backward correctly; rows inserted earlier in the transaction are in the range; the tail range reads at least one block and under a fifth of the table; deleted rows stay deleted; after compaction moves rows, ranges over the old and new addresses return what the filter returns |
 | `test_a_parallel_tid_range_scan_returns_what_the_filter_returns` | PostgreSQL 19+: the range runs as a parallel TID range scan with two workers launched, and returns what the filter returns. Below 19, `UNSUPPORTED_MAJOR` |

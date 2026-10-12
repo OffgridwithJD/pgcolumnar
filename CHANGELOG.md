@@ -84,6 +84,9 @@ true until the next version shipped.
   291 a block holds, which the executor produces for `ctid < '(B,0)'`), rescans,
   deletes and compaction. The first build read those offsets unclamped and
   returned rows of the next block; the twin's arms for them were red against it.
+  A cursor over a ctid range gets a Material above the scan, so `FETCH
+  BACKWARD` and `FETCH LAST` work: PostgreSQL treats a TID range scan as able to
+  scan backward, and without it the fetch reached the access method and failed.
 
 ### Changed
 
