@@ -136,6 +136,7 @@ behaviour, the source of that number is named.
 - [88. test_storage_row_repair.py: the alpha5 release notes' repair procedure works as written](#88-test_storage_row_repairpy-the-alpha5-release-notes-repair-procedure-works-as-written)
 - [89. test_docs_cross_database_query.py: no documented query asks another database for its extensions](#89-test_docs_cross_database_querypy-no-documented-query-asks-another-database-for-its-extensions)
 - [90. test_partman_columnar.py: pg_partman makes columnar partitions with one setting](#90-test_partman_columnarpy-pg_partman-makes-columnar-partitions-with-one-setting)
+- [91. test_capability_decline.py: a missing pyarrow declines by name, and nothing declines silently](#91-test_capability_declinepy-a-missing-pyarrow-declines-by-name-and-nothing-declines-silently)
 
 ## 1. How to read a test in here
 
@@ -6455,3 +6456,30 @@ Removal proof, one mutation per arm, every major on the shell twin: the drop hoo
 | test | what it holds |
 | --- | --- |
 | `test_pg_partman_makes_columnar_partitions_with_one_setting` | pg_partman installed; without the setting every partition is heap; with it, a `DEFAULT` partition exists and every partition is columnar; the rows land columnar and read back as heap does; maintenance drops partitions past retention, creates the ones ahead columnar, and leaves no orphaned storage or row-group row; and it holds `AccessExclusiveLock` on the parent |
+
+## 91. test_capability_decline.py: a missing pyarrow declines by name, and nothing declines silently
+
+The pytest half of selftest parts 600 and 610, held by the Python harness's own machinery. It does not source, call or read `lib.sh`, `capability_sweep.sh` or either part: the twins are independent (the first version drove `lib.sh` from Python, and the harness-independence inventory refused it).
+
+The owner's rule of 2026-10-12 (#1215): a missing capability may be bypassed as a named skip, the run stays green, and no test may be silent. On this side that is `expect.declines(capability, *, name)`, a fourth record verdict `DECLINED`, and `expect.require_module(module, *, name)`. Five holes are closed, from OffgridwithJD's review of #1286:
+
+1. where `PGC_REQUIRE` names the capability, as CI does, a decline FAILS;
+2. a decline must be the test's first outcome, and no check may follow it;
+3. only an ABSENT module declines: a broken install (an `ImportError` from inside) fails;
+4. a test file that imports pyarrow outside `require_module` is refused, in each of six import spellings, and each one is proven seen;
+5. the run's accounting line carries `+ N declined` when there are any, and each decline is printed by name with its capability.
+
+Written red first: all seven failed before `pgc_vacuity` had the methods. The four failure arms pin their failure's MESSAGE, because a missing method also fails an inner test, so outcomes alone could not tell "refused for the right reason" from "crashed".
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_missing_pyarrow_declines_by_name_and_the_run_stays_green` | the inner run passes and exits 0; the accounting line carries `+ 1 declined`; the decline is printed with its node id and capability |
+| `test_pgc_require_turns_a_decline_into_a_failure` | with `PGC_REQUIRE=pyarrow` the same test fails, and says pyarrow is required |
+| `test_a_decline_after_a_counted_check_is_refused` | a decline after a recorded check is refused as not the first outcome |
+| `test_a_check_after_a_decline_is_refused` | a check recorded after a decline is refused |
+| `test_only_a_declinable_capability_may_decline` | `btree_gist` cannot decline; it is not in the closed list |
+| `test_a_broken_install_fails_rather_than_declines` | a `pyarrow` that raises `ImportError` from inside fails with its own error |
+| `test_a_missing_dependency_of_pyarrow_fails_rather_than_declines` | a `pyarrow` that cannot import its own dependency raises `ModuleNotFoundError` naming that dependency, and fails rather than declines; shown red with `require_module`'s `.name` check deleted (OffgridwithJD, review of #1286) |
+| `test_every_unguarded_import_spelling_is_refused` | each of six spellings, `__import__` among them, is named and refused; a file using `require_module` is not |

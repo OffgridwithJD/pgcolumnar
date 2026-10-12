@@ -48,12 +48,13 @@ base_scan_io	base_scan_io	premise: the later plan is still a base columnar scan	
 base_scan_io	base_scan_io	premise: the later plan still does not name a covering projection	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the plan is a base columnar scan	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
-capability_sweep	capability_sweep	no suite loses a check without recording a skip or a refusal	15;16;17;18;19	2026-09-23	a check_skip block removed from a suite so its arms vanish with no skip and no fail
+capability_sweep	capability_sweep	no suite loses a check without recording a skip or a refusal	15;16;17;18;19	2026-10-12	a check_skip block removed from a suite so its arms vanish with no skip and no fail;the pyarrow decline reason stops naming the capability, so no skip counts as declined
 capability_sweep	capability_sweep	premise: and no member of the population is this very file	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: and pyarrow IS importable without the shim, so absence is the shim's doing	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: and pyarrow.parquet with it	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	premise: and the standard library still imports under it	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: every suite in the population was classified	15;16;17;18;19	never	-
+capability_sweep	capability_sweep	premise: some suites in the population call pgc_skip pyarrow	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: the mask held for every run in the sweep	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	premise: the population is the size this tree holds	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: the priming run built and installed cleanly	15;16;17;18;19	never	-
@@ -61,6 +62,7 @@ capability_sweep	capability_sweep	premise: the shim makes pyarrow unimportable	1
 capability_sweep	capability_sweep	premise: the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the two derivations of the population name the same suites	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: while python itself still runs under the shim	15;16;17;18;19	never	-
+capability_sweep	capability_sweep	the suites that decline are exactly the suites that call pgc_skip pyarrow	15;16;17;18;19	2026-10-12	the pyarrow decline reason stops naming the capability, so no skip counts as declined
 catalog_delete_index	catalog_delete_index	A1 with more catalog pages the default does less work than reading every one whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	B1 with large catalogs the default does far less work than reading every one whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	P1 with a few catalog pages the default does less work than probing every one	15;16;17;18;19	2026-10-12	pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
@@ -1599,6 +1601,16 @@ harness_selftest	590-a-declared-suite-must-account	the EXIT trap runs the wrappe
 harness_selftest	590-a-declared-suite-must-account	the line it emits is the line the reconciliation reads	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	the suite's own counters are restored after every driving block	15;16;17;18;19	never	-
 harness_selftest	590-a-declared-suite-must-account	the wrapper captures the exit status before anything overwrites it	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
+harness_selftest	600-a-missing-pyarrow-declines	a missing pyarrow declines the suite instead of failing it	15;16;17;18;19	2026-10-12	pgc_skip treats pyarrow like any other capability again, so a missing pyarrow fails the suite
+harness_selftest	600-a-missing-pyarrow-declines	and it records a skip under the check's own name, not a failure	15;16;17;18;19	2026-10-12	pgc_skip treats pyarrow like any other capability again, so a missing pyarrow fails the suite
+harness_selftest	600-a-missing-pyarrow-declines	control: a missing btree_gist still fails the suite	15;16;17;18;19	2026-10-12	pgc_skip declines every missing capability, not only pyarrow
+harness_selftest	600-a-missing-pyarrow-declines	control: and an explicit waiver still turns that failure into a skip	15;16;17;18;19	2026-10-12	pgc_skip ignores PGC_ALLOW_MISSING_<CAPABILITY>, so only the run-wide waiver works
+harness_selftest	600-a-missing-pyarrow-declines	premise: lib.sh defines pgc_skip	15;16;17;18;19	never	-
+harness_selftest	610-a-declined-capability-is-not-silent	premise: the sweep defines its verdict where this part reads it	15;16;17;18;19	never	-
+harness_selftest	610-a-declined-capability-is-not-silent	the verdict: names lost beside a failure are refused	15;16;17;18;19	2026-10-12	pgc_capability_verdict answers declined for every input
+harness_selftest	610-a-declined-capability-is-not-silent	the verdict: names lost beside a skip naming the capability are declined	15;16;17;18;19	2026-10-12	pgc_capability_verdict has no declined outcome, so a lost name beside a skip reads silent
+harness_selftest	610-a-declined-capability-is-not-silent	the verdict: names lost with neither a failure nor a skip are silent	15;16;17;18;19	2026-10-12	pgc_capability_verdict answers declined for every input
+harness_selftest	610-a-declined-capability-is-not-silent	the verdict: no name lost is preserved	15;16;17;18;19	2026-10-12	pgc_capability_verdict answers declined for every input
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries

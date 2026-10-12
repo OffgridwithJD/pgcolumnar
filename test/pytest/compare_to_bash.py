@@ -148,6 +148,9 @@ _NAME_ARG = {
     "cannot_run": None,
     "plan_marker": None,
     "plan_node": None,
+    # #1215: both take the check name as a required KEYWORD, like cannot_run's.
+    "declines": None,
+    "require_module": None,
 }
 
 

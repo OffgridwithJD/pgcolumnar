@@ -160,21 +160,36 @@ check_num "premise: and pyarrow IS importable without the shim, so absence is th
 
 # ---- the verdict, a pure function so the selftest can drive it -------------
 #
-# Two inputs and three outcomes. It takes the numbers rather than the logs so it
+# Three inputs and four outcomes. It takes the numbers rather than the logs so it
 # can be exercised without running a suite, the same reason pgc_freshness_verdict
 # and pgc_build_needs_clean take theirs.
-pgc_capability_verdict() {	# pgc_capability_verdict LOST_NAMES FAIL_RECORDS -> verdict
-	local lost="${1:-}" fails="${2:-}"
+#
+# DECLINED IS ITS OWN OUTCOME (#1215, the owner's rule of 2026-10-12): a missing
+# capability may be bypassed as a SKIP, but no test may be silent. A suite that
+# loses its names and records a SKIP naming the capability has said what it did
+# not run; a suite that loses them and records nothing has not. Folding the first
+# into `silent` reddened the sweep on the 25 suites the rule allows to skip, and
+# folding it into `preserved` would hide them. So the two stay apart, and `silent`
+# must still be zero.
+pgc_capability_verdict() {	# pgc_capability_verdict LOST FAILS NAMED_SKIPS -> verdict
+	local lost="${1:-}" fails="${2:-}" skips="${3:-}"
 	case "$lost" in ''|*[!0-9]*) echo unknown; return ;; esac
 	case "$fails" in ''|*[!0-9]*) echo unknown; return ;; esac
+	case "$skips" in ''|*[!0-9]*) echo unknown; return ;; esac
 	if [ "$lost" -eq 0 ]; then
 		echo preserved
 	elif [ "$fails" -ge 1 ]; then
 		echo refused
+	elif [ "$skips" -ge 1 ]; then
+		echo declined
 	else
 		echo silent
 	fi
 }
+
+# Its four cases are asserted by selftest part 610, which evals this text: they
+# need no suite run, and a sweep built on a verdict that misfiled one case would
+# count it wrongly thirty times over and still reconcile.
 
 cap_names() {	# cap_names LOGFILE -> the recorded check names, sorted
 	grep -oP '^RESULT\t[^\t]*\t[^\t]*\t\K[^\t]*' "$1" 2>/dev/null | LC_ALL=C sort -u
@@ -195,8 +210,10 @@ check_num "premise: the priming run built and installed cleanly" "$prime_rc" "0"
 
 n_preserved=0
 n_refused=0
+n_declined=0
 n_silent=0
 silent_names=""
+declined_names=""
 mask_failures=0
 
 for s in $NARROW; do
@@ -211,22 +228,47 @@ for s in $NARROW; do
 	[ "$(cap_rc "$SHIM" 'import pyarrow')" = 1 ] || mask_failures=$((mask_failures + 1))
 	lost="$(LC_ALL=C comm -23 <(cap_names "$w_log") <(cap_names "$o_log") | grep -c .)"
 	fails="$(grep -cP '^RESULT\t.*\tFAIL\t' "$o_log")"
-	case "$(pgc_capability_verdict "$lost" "$fails")" in
+	# A SKIP COUNTS ONLY IF ITS REASON NAMES THE CAPABILITY, read from the record
+	# rather than from the exit code: exit 66 also means a major without the
+	# feature, which is not this.
+	skips="$(awk -F'\t' '$1 == "RESULT" && $5 == "SKIP" && $7 ~ /pyarrow/' "$o_log" | grep -c .)"
+	case "$(pgc_capability_verdict "$lost" "$fails" "$skips")" in
 		preserved) n_preserved=$((n_preserved + 1)) ;;
 		refused)   n_refused=$((n_refused + 1)) ;;
+		declined)  n_declined=$((n_declined + 1)); declined_names="$declined_names $s" ;;
 		*)         n_silent=$((n_silent + 1)); silent_names="$silent_names $stem" ;;
 	esac
 	rm -f "$w_log" "$o_log"
 done
 
-echo "-- preserved=$n_preserved refused=$n_refused silent=$n_silent of $n_narrow"
+echo "-- preserved=$n_preserved refused=$n_refused declined=$n_declined silent=$n_silent of $n_narrow"
 [ -n "$silent_names" ] && echo "-- silent:$silent_names"
 
 check_num "premise: the mask held for every run in the sweep" "$mask_failures" "0"
 check_num "premise: every suite in the population was classified" \
-	"$((n_preserved + n_refused + n_silent))" "$n_narrow"
+	"$((n_preserved + n_refused + n_declined + n_silent))" "$n_narrow"
 check_num "no suite loses a check without recording a skip or a refusal" \
 	"$n_silent" "0"
+
+# THE SUITES THAT DECLINE ARE THE SUITES THAT ASK TO, derived from the source and
+# compared as SETS. A count would let a suite that stopped declining trade places
+# with one that started; a literal 25 would go stale the day a suite is added. A
+# suite that stops calling pgc_skip pyarrow leaves this side, and must then read
+# preserved, or the silent arm above catches it.
+DECLINERS="$(for _cap_b in $NARROW; do
+	# grep -c, NOT grep -q: -q exits at the first match, sed dies of SIGPIPE, and
+	# under pipefail the pipeline fails, so a suite that DOES call pgc_skip drops
+	# out at random. Measured here: three of 25 dropped on one run. The header of
+	# this file records the same race for the population itself.
+	[ "$(sed 's/#.*//' "$TESTDIR/$_cap_b" | grep -cE 'pgc_skip[[:space:]]+"?pyarrow')" -gt 0 ] && printf '%s\n' "$_cap_b"
+done | LC_ALL=C sort)"
+check_num "premise: some suites in the population call pgc_skip pyarrow" \
+	"$([ -n "$DECLINERS" ] && echo 1 || echo 0)" "1"
+_cap_diff="$(LC_ALL=C comm -3 <(printf '%s\n' "$DECLINERS") \
+	<(printf '%s\n' $declined_names | LC_ALL=C sort) | tr -d '\t' | grep .)"
+[ -n "$_cap_diff" ] && echo "-- decline mismatch: $(printf '%s ' $_cap_diff)"
+check_num "the suites that decline are exactly the suites that call pgc_skip pyarrow" \
+	"$(printf '%s\n' "$_cap_diff" | grep -c .)" "0"
 
 rm -rf "$SHIM" "$prime_log"
 pgc_summary

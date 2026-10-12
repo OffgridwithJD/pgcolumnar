@@ -1,0 +1,176 @@
+"""A missing pyarrow declines a pytest test by name; nothing declines silently (#1215).
+
+The pytest half of selftest parts 600 and 610, held by the PYTHON harness's own
+machinery. It does not source, call or read lib.sh, capability_sweep.sh or either
+part: the twins are independent, and each harness answers for itself.
+
+The owner's rule of 2026-10-12: a missing capability may be bypassed as a named skip,
+the run stays green, and no test may be silent or vacuous. On this side that is
+`expect.declines` and `expect.require_module`, with five ways a decline could hide
+something closed off (OffgridwithJD, review of #1286):
+
+  1 where pyarrow is supposed to be (CI, PGC_REQUIRE=pyarrow) a decline FAILS
+  2 a decline is a test's only outcome: not after a check, and no check after it
+  3 only an ABSENT module declines; a broken install fails
+  4 a test file that imports pyarrow outside require_module is refused, in every
+    import spelling, each proven seen
+  5 the run's accounting line carries the declines
+
+Runs pytest inside pytest; needs no cluster and no driver.
+"""
+
+# Absent for ONE inner test, through monkeypatch so it is undone: pytester runs
+# in-process, and a module-level sys.modules entry would leak into every later test.
+ABSENT = "    import sys\n"
+
+
+def test_a_missing_pyarrow_declines_by_name_and_the_run_stays_green(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pytester.makepyfile(ABSENT + """
+    def test_inner_declines_green(expect, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        pa = expect.require_module("pyarrow", name="the parquet fixture can be written")
+        assert pa is None
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a declined test leaves the run green", passed=1, failed=0)
+    expect.num(result.ret, 0, "and the run exits 0")
+    out = result.stdout.str()
+    expect.contains(out, "+ 1 declined",
+                    "the accounting line carries the decline (hole 5)")
+    expect.contains(out, "DECLINED  test_a_missing_pyarrow_declines_by_name_and_the_run_stays_green.py::test_inner_declines_green: pyarrow",
+                    "and the decline is named, with its capability")
+
+
+def test_pgc_require_turns_a_decline_into_a_failure(pytester, monkeypatch, expect):
+    monkeypatch.setenv("PGC_REQUIRE", "pyarrow")
+    pytester.makepyfile(ABSENT + """
+    def test_inner_required_fails(expect, monkeypatch):
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        expect.require_module("pyarrow", name="the parquet fixture can be written")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "with PGC_REQUIRE=pyarrow a missing pyarrow fails (hole 1)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "PGC_REQUIRE names pyarrow",
+                    "and it fails BECAUSE pyarrow is required, not for another reason")
+
+
+def test_a_decline_after_a_counted_check_is_refused(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pytester.makepyfile("""
+    def test_half_ran(expect):
+        expect.num(1, 1, "a check that ran")
+        expect.declines("pyarrow", name="too late to decline")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a decline after a counted check is refused (hole 2)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "a decline must be the test's first outcome",
+                    "and it is refused for that reason")
+
+
+def test_a_check_after_a_decline_is_refused(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pytester.makepyfile("""
+    def test_kept_going(expect):
+        expect.declines("pyarrow", name="declined")
+        expect.num(1, 1, "a check after the decline")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a check after a decline is refused (hole 2)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "after this test declined",
+                    "and it is refused for that reason")
+
+
+def test_only_a_declinable_capability_may_decline(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pytester.makepyfile("""
+    def test_wrong_capability(expect):
+        expect.declines("btree_gist", name="not optional")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a capability outside the closed list cannot decline",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "is not a declinable capability",
+                    "and it is refused for that reason")
+
+
+def test_a_broken_install_fails_rather_than_declines(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pkg = pytester.mkpydir("pyarrow")
+    (pkg / "__init__.py").write_text("raise ImportError('pyarrow built against another ABI')\n")
+    pytester.syspathinsert()
+    pytester.makepyfile("""
+    import sys
+
+    def test_inner_broken_install_fails(expect, monkeypatch):
+        # Drop any pyarrow already imported in this process, so the broken stub is
+        # what the import finds.
+        for k in [k for k in sys.modules if k == "pyarrow" or k.startswith("pyarrow.")]:
+            monkeypatch.delitem(sys.modules, k)
+        expect.require_module("pyarrow", name="the parquet fixture can be written")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "an ImportError from inside an installed pyarrow fails (hole 3)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "pyarrow built against another ABI",
+                    "and the failure is the broken install's own error, not a decline")
+
+
+def test_a_missing_dependency_of_pyarrow_fails_rather_than_declines(pytester, monkeypatch, expect):
+    # An installed pyarrow that cannot import one of ITS dependencies raises
+    # ModuleNotFoundError too, but naming the dependency. Declining on that would
+    # green a broken install (hole 3); only a missing pyarrow itself declines.
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pkg = pytester.mkpydir("pyarrow")
+    (pkg / "__init__.py").write_text("import numpy_is_not_here\n")
+    pytester.syspathinsert()
+    pytester.makepyfile("""
+    import sys
+
+    def test_inner_missing_dependency_fails(expect, monkeypatch):
+        for k in [k for k in sys.modules if k == "pyarrow" or k.startswith("pyarrow.")]:
+            monkeypatch.delitem(sys.modules, k)
+        expect.require_module("pyarrow", name="the parquet fixture can be written")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a pyarrow missing its own dependency fails (hole 3)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "No module named 'numpy_is_not_here'",
+                    "and the failure names the missing dependency, not a decline")
+
+
+SPELLINGS = {
+    "test_spell_dunder.py": "m = __import__('pyarrow')\n",
+    "test_spell_import.py": "import pyarrow\n",
+    "test_spell_import_sub.py": "import pyarrow.parquet as pq\n",
+    "test_spell_from.py": "from pyarrow import table\n",
+    "test_spell_from_sub.py": "from pyarrow.parquet import write_table\n",
+    "test_spell_importlib.py": "import importlib\nm = importlib.import_module('pyarrow.parquet')\n",
+}
+
+
+def test_every_unguarded_import_spelling_is_refused(pytester, monkeypatch, expect):
+    # The caller's PGC_REQUIRE must not decide this test (CI exports it).
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    for fname, body in SPELLINGS.items():
+        pytester.makepyfile(**{fname[:-3]: body + "\ndef test_x(expect):\n    expect.num(1, 1, 'x')\n"})
+    pytester.makepyfile(test_guarded="""
+    def test_guarded(expect):
+        expect.require_module("pyarrow", name="guarded")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    out = result.stdout.str()
+    seen = [f for f in SPELLINGS if f"{f[:-3]}.py imports pyarrow outside require_module" in out]
+    expect.num(len(seen), len(SPELLINGS),
+               "premise: the scan finds each of the six import spellings (hole 4)")
+    expect.num(1 if result.ret != 0 else 0, 1, "and a run carrying them is refused")
+    expect.num(out.count("test_guarded.py imports pyarrow"), 0,
+               "while a file that goes through require_module is not named")

@@ -259,6 +259,12 @@ jobs:
           test -n "$WANT"
           echo "running $(set -- $FILES; echo $#) cluster file(s): $FILES"
           echo "expecting $WANT collected test(s)"
+          # PYARROW IS REQUIRED HERE (#1215). A ported pyarrow test declines green on a
+          # developer box without it; in CI that would be green forever, so CI proves
+          # the module imports and sets PGC_REQUIRE, which turns a decline into a
+          # failure (OffgridwithJD, review of #1286).
+          /tmp/pgcvenv/bin/python -c 'import pyarrow, pyarrow.parquet; print("pyarrow", pyarrow.__version__)'
+          export PGC_REQUIRE=pyarrow
           PYTHONPATH=. /tmp/pgcvenv/bin/pytest -q \
             --pg-config /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
             --pgc-expect-tests "$WANT" \

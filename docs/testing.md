@@ -317,14 +317,14 @@ you got before deciding whether something is wrong.
 | outcome | exit | when |
 | --- | :-: | --- |
 | `PASSED` | 0 | the suite ran its checks and they held |
-| `SKIPPED (ran no checks)` | 2 | the feature under test does not exist on this major |
+| `SKIPPED (ran no checks)` | 66 | the feature under test does not exist on this major, or pyarrow is not installed |
 | `FAILED` | 1 | a check failed, **or** a tool the suite measures with is missing |
 
 The matrix prints `suites that ran: n of m (skipped: k)` for each major, and names
 the skipped suites. A skip counts in `k`, not in `n`.
 
-**A missing dependency fails rather than skips, and that is deliberate.** The box
-cannot gate that suite. Reporting a pass would claim coverage nobody has. Two
+**A missing dependency fails rather than skips, except pyarrow.** The box cannot
+gate that suite, and reporting a pass would claim coverage nobody has. Two
 dependencies come from outside this repository:
 
 | suite | needs | where it comes from |
@@ -332,15 +332,22 @@ dependencies come from outside this repository:
 | the Arrow and Parquet suites | `pyarrow` | `pip install pyarrow`, as the user the suites run as |
 | `temporal.sh` | `btree_gist` | PostgreSQL **contrib**. A PGDG package ships it; a source build configured without contrib does not |
 
+**Without pyarrow, the Arrow and Parquet suites report `SKIPPED` and the run does
+not fail** (#1215). A box without pyarrow is a supported developer configuration.
+The matrix still names each skipped suite. The nightly workflow installs pyarrow
+and stops if the suites' interpreter cannot import it, so CI does not lose these
+suites silently.
+
 Build and install `contrib/btree_gist` against each source tree when the matrix
-runs against source builds. To run knowingly without a dependency, waive it:
+runs against source builds. To run knowingly without it, or without any other
+dependency, waive it:
 
 ```sh
 PGC_ALLOW_MISSING_BTREE_GIST=1 test/temporal.sh /path/to/pg_config
 PGC_ALLOW_MISSING=1            test/run_all_versions.sh
 ```
 
-A waived suite reports `SKIPPED` and exits 2, so the coverage loss stays visible
+A waived suite reports `SKIPPED` and exits 66, so the coverage loss stays visible
 in the skipped count rather than becoming a pass.
 
 Measured on PostgreSQL 18, one suite, four configurations:
@@ -349,8 +356,8 @@ Measured on PostgreSQL 18, one suite, four configurations:
 | --- | :-: | --- |
 | `btree_gist` present | 0 | `PASSED`, 5 checks |
 | `btree_gist` absent | 1 | `FAILED` |
-| `btree_gist` absent, waived | 2 | `SKIPPED` |
-| PostgreSQL 17, feature absent | 2 | `SKIPPED (ran no checks)` |
+| `btree_gist` absent, waived | 66 | `SKIPPED` |
+| PostgreSQL 17, feature absent | 66 | `SKIPPED (ran no checks)` |
 
 ## Cross-major upgrade
 
