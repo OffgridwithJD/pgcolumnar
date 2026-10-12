@@ -51,6 +51,11 @@
 #include "storage/smgr.h"
 #include "storage/spin.h"
 #include "utils/builtins.h"
+#include "optimizer/planner.h"
+#include "optimizer/planmain.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "parser/parsetree.h"
 #include "utils/guc.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -889,6 +894,120 @@ pgcolumnar_scan_getnextslot_tidrange(TableScanDesc sscan,
 			return true;
 	}
 	return false;
+}
+
+/*
+ * Cursors over a TID range scan (#1306 review).
+ *
+ * PostgreSQL counts a TID range scan as able to scan backward
+ * (ExecSupportsBackwardScan), so it puts no Material above one under a cursor
+ * that may scroll, and a backward fetch reaches the access method, which reads
+ * forward only and refuses (pgcolumnar_scan_getnextslot). That covers a SCROLL
+ * cursor, and a plain DECLARE too: the portal makes a cursor scrollable when
+ * its plan claims backward support. So when a cursor's plan holds a TID range
+ * scan of a columnar table, a Material goes on top, as standard_planner does
+ * for a SCROLL cursor over a plan that cannot run backward.
+ */
+static planner_hook_type pgcolumnar_prev_planner_hook = NULL;
+
+static bool
+pgcolumnar_plan_has_columnar_tidrange(Plan *plan, List *rtable, int *maxid)
+{
+	bool		found = false;
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+	*maxid = Max(*maxid, plan->plan_node_id);
+	if (IsA(plan, TidRangeScan))
+	{
+		RangeTblEntry *rte = rt_fetch(((Scan *) plan)->scanrelid, rtable);
+
+		if (rte->rtekind == RTE_RELATION && PgColumnarIsColumnarRelation(rte->relid))
+			found = true;
+	}
+	found |= pgcolumnar_plan_has_columnar_tidrange(plan->lefttree, rtable, maxid);
+	found |= pgcolumnar_plan_has_columnar_tidrange(plan->righttree, rtable, maxid);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		case T_SubqueryScan:
+			found |= pgcolumnar_plan_has_columnar_tidrange(((SubqueryScan *) plan)->subplan,
+														 rtable, maxid);
+			break;
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		default:
+			break;
+	}
+	return found;
+}
+
+/* PostgreSQL 19 passes the planner hook an ExplainState as well */
+#if PG_VERSION_NUM >= 190000
+#define PGC_PLANNER_PARAMS	Query *parse, const char *query_string, int cursorOptions, \
+							ParamListInfo boundParams, ExplainState *es
+#define PGC_PLANNER_ARGS	parse, query_string, cursorOptions, boundParams, es
+#else
+#define PGC_PLANNER_PARAMS	Query *parse, const char *query_string, int cursorOptions, \
+							ParamListInfo boundParams
+#define PGC_PLANNER_ARGS	parse, query_string, cursorOptions, boundParams
+#endif
+
+static PlannedStmt *
+pgcolumnar_planner(PGC_PLANNER_PARAMS)
+{
+	PlannedStmt *stmt;
+	int			maxid = 0;
+
+	stmt = pgcolumnar_prev_planner_hook
+		? pgcolumnar_prev_planner_hook(PGC_PLANNER_ARGS)
+		: standard_planner(PGC_PLANNER_ARGS);
+
+	/*
+	 * A cursor that may scroll: SCROLL, or a DECLARE (CURSOR_OPT_FAST_PLAN)
+	 * that did not say NO SCROLL. Nothing else fetches backward.
+	 */
+	if ((cursorOptions & CURSOR_OPT_NO_SCROLL) ||
+		!(cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_FAST_PLAN)) ||
+		stmt->planTree == NULL || IsA(stmt->planTree, Material))
+		return stmt;
+	if (pgcolumnar_plan_has_columnar_tidrange(stmt->planTree, stmt->rtable, &maxid))
+	{
+		Plan	   *sub = stmt->planTree;
+		Plan	   *mat = materialize_finished_plan(sub);
+		List	   *tlist = NIL;
+		ListCell   *lc;
+
+		/*
+		 * The plan is already finished, so the Material's target list is built
+		 * as set_plan_references would build it: one OUTER_VAR per column of
+		 * the plan below. It gets a node id of its own.
+		 */
+		foreach(lc, sub->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+			Var		   *v = makeVar(OUTER_VAR, tle->resno, exprType((Node *) tle->expr),
+									exprTypmod((Node *) tle->expr),
+									exprCollation((Node *) tle->expr), 0);
+
+			tlist = lappend(tlist, makeTargetEntry((Expr *) v, tle->resno,
+												   tle->resname, tle->resjunk));
+		}
+		mat->targetlist = tlist;
+		mat->plan_node_id = maxid + 1;
+		stmt->planTree = mat;
+	}
+	return stmt;
 }
 
 /* -------------------------------------------------------------------------
@@ -4063,6 +4182,9 @@ _PG_init(void)
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	pgcolumnar_prev_planner_hook = planner_hook;
+	planner_hook = pgcolumnar_planner;
 
 	MarkGUCPrefixReserved("pgcolumnar");
 

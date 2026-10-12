@@ -68,6 +68,46 @@ check "premise: the per-range join rescans a TID range scan" \
 	"$(q "EXPLAIN $LATQ;" | grep -c 'Tid Range Scan')" "1"
 check "a TID range scan rescanned with new bounds returns what the filter returns" "$(lat on)" "$(lat off)"
 
+# Cursors. PostgreSQL counts a TID range scan as able to scan backward
+# (ExecSupportsBackwardScan), so no Material goes above it: a SCROLL cursor, and a
+# plain DECLARE that the portal makes scrollable for the same reason, send a
+# backward fetch straight to the access method. Found by @jdatcmd reviewing
+# #1306: FETCH LAST errored where main's plan answered. Compared, outcome for
+# outcome, with the same session under enable_tidscan = off.
+CQ="SELECT id FROM tr WHERE ctid >= '$MID_A' AND ctid <= '$MID_B'"
+cursor_run() {	# cursor_run on|off SCROLL|plain -> every fetch's rows or SQLSTATE, on one line
+	local kind=""; [ "$2" = SCROLL ] && kind="SCROLL"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-v VERBOSITY=sqlstate -c "SET enable_tidscan = $1" -c "BEGIN" \
+		-c "DECLARE c $kind CURSOR FOR $CQ" -c "FETCH 2 FROM c" -c "FETCH LAST FROM c" \
+		-c "FETCH BACKWARD 2 FROM c" -c "FETCH ABSOLUTE 3 FROM c" -c "COMMIT" 2>&1 | tr '\n' ' '
+}
+check "premise: the cursor's query plans a TID range scan" \
+	"$(q "EXPLAIN $CQ;" | grep -c 'Tid Range Scan')" "1"
+check "a SCROLL cursor over a ctid range fetches backward as the filter's plan does" \
+	"$(cursor_run on SCROLL)" "$(cursor_run off SCROLL)"
+# A plain DECLARE over the filter's plan is made forward-only (55000 on a backward
+# fetch). Over a TID range scan it is made scrollable, so it must answer as a
+# SCROLL cursor does, correctly; what it may never do is reach the access method.
+check "a plain cursor over a ctid range answers a backward fetch correctly" \
+	"$(cursor_run on plain)" "$(cursor_run off SCROLL)"
+
+# Rows written earlier in the same transaction: set_tidrange reads the row-group
+# catalog, and the pending writes must be in it by then (#1306 review).
+same_xact() {	# same_xact on|off -> count|digest of the range after an insert in the same transaction
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-c "SET enable_tidscan = $1" -c "BEGIN" \
+		-c "INSERT INTO tr SELECT g, md5(g::text) FROM generate_series(400001, 400700) g" \
+		-c "SELECT count(*) || '|' || md5(string_agg(id::text, ',' ORDER BY id)) FROM tr WHERE ctid >= '$LAST'" \
+		-c "ROLLBACK" 2>&1 | grep '|'
+}
+check "premise: inside a transaction the range still plans a TID range scan" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	   -c "BEGIN" -c "INSERT INTO tr VALUES (0, 'x')" -c "EXPLAIN SELECT id FROM tr WHERE ctid >= '$LAST'" -c "ROLLBACK" |
+	   grep -c 'Tid Range Scan')" "1"
+check "rows inserted earlier in the same transaction are in the range, as the filter sees them" \
+	"$(same_xact on)" "$(same_xact off)"
+
 # PostgreSQL 19 runs a TID range scan in parallel: each worker sets the range
 # and the reader's shared group claim hands out only the restricted groups. The
 # custom scan is turned off because, with parallelism cheap, the planner prefers

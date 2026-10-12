@@ -18,6 +18,8 @@ counters, and nothing else may be counting there. Independent of
 `test/tid_range_scan.sh`: its own columns, row count, group size, and ranges.
 """
 
+import psycopg
+
 ROWS = 260000
 GROUP = 7000
 
@@ -119,6 +121,60 @@ def test_a_ctid_range_reads_only_its_row_groups(pgc_own_db, expect):
         off = _one(conn, lat)
         cur.execute("RESET enable_tidscan")
     expect.text(on, off, "a TID range scan rescanned with new bounds returns what the filter returns")
+
+    # Cursors (#1306 review). A TID range scan counts as able to scan backward, so
+    # no Material goes above it: a SCROLL cursor, and a plain DECLARE the portal
+    # makes scrollable, send a backward fetch to the access method. Compared,
+    # fetch for fetch, with the same session under enable_tidscan = off.
+    cq = f"SELECT k FROM tids WHERE ctid > '{a}' AND ctid < '{b}'"
+    expect.text("yes" if "Tid Range Scan" in _plan(conn, cq) else "no", "yes",
+                "premise: the cursor's query plans a TID range scan")
+
+    def cursor_run(tidscan, kind):
+        out = []
+        with conn.cursor() as cur:
+            cur.execute(f"SET enable_tidscan = {tidscan}")
+            cur.execute("BEGIN")
+            cur.execute(f"DECLARE c {kind} CURSOR FOR {cq}")
+            for f in ("FETCH 3 FROM c", "FETCH LAST FROM c", "FETCH BACKWARD 4 FROM c",
+                      "FETCH ABSOLUTE 2 FROM c"):
+                try:
+                    cur.execute(f)
+                    out.append(",".join(str(r[0]) for r in cur.fetchall()))
+                except psycopg.Error as e:
+                    out.append(f"error {e.sqlstate}")
+                    break
+            cur.execute("ROLLBACK")
+            cur.execute("RESET enable_tidscan")
+        return " | ".join(out)
+    expect.text(cursor_run("on", "SCROLL"), cursor_run("off", "SCROLL"),
+                "a SCROLL cursor over a ctid range fetches backward as the filter's plan does")
+    # A plain DECLARE over the filter's plan is made forward-only; over a TID
+    # range scan it is made scrollable, so it must answer as a SCROLL cursor
+    # does. What it may never do is reach the access method backward.
+    expect.text(cursor_run("on", ""), cursor_run("off", "SCROLL"),
+                "a plain cursor over a ctid range answers a backward fetch correctly")
+
+    # Rows written earlier in the same transaction are in the range.
+    def same_xact(tidscan):
+        with conn.cursor() as cur:
+            cur.execute(f"SET enable_tidscan = {tidscan}")
+            cur.execute("BEGIN")
+            cur.execute(f"INSERT INTO tids SELECT g, 'pending' FROM generate_series({ROWS + 1}, {ROWS + 650}) g")
+            cur.execute("EXPLAIN SELECT k FROM tids WHERE ctid >= '" + tail + "'")
+            plan = "\n".join(r[0] for r in cur.fetchall())
+            cur.execute("SELECT count(*) || '|' || md5(string_agg(k::text, ',' ORDER BY k))"
+                        f" FROM tids WHERE ctid >= '{tail}'")
+            got = cur.fetchone()[0]
+            cur.execute("ROLLBACK")
+            cur.execute("RESET enable_tidscan")
+        return plan, got
+    plan_on, got_on = same_xact("on")
+    _, got_off = same_xact("off")
+    expect.text("yes" if "Tid Range Scan" in plan_on else "no", "yes",
+                "premise: inside a transaction the range still plans a TID range scan")
+    expect.text(got_on, got_off,
+                "rows inserted earlier in the same transaction are in the range, as the filter sees them")
 
     whole = _blocks(conn, "true")
     part = _blocks(conn, f"ctid >= '{tail}'")
