@@ -260,7 +260,13 @@ av_expire_one(const char *qualname)
 			if (!isnull)
 				retired = DatumGetInt64(d);
 		}
-		elog(LOG, "pgcolumnar autovacuum: expire %s retired " INT64_FORMAT " row groups",
+		/*
+		 * LOG only when something was retired: a line per retention table per
+		 * pass, forever, is noise an administrator learns to ignore
+		 * (OffgridwithJD on #1307). av_maintain_one logs only a verb that ran.
+		 */
+		elog(retired > 0 ? LOG : DEBUG1,
+			 "pgcolumnar autovacuum: expire %s retired " INT64_FORMAT " row groups",
 			 qualname, retired);
 
 		SPI_finish();
@@ -456,7 +462,8 @@ pgcolumnar_av_worker_main(Datum arg)
 			"JOIN pg_am a ON a.oid = c.relam "
 			"JOIN pg_namespace n ON n.oid = c.relnamespace "
 			"LEFT JOIN pgcolumnar.options o ON o.regclass = c.oid "
-			"WHERE a.amname = 'pgcolumnar' AND c.relkind = 'r'",
+			"WHERE a.amname = 'pgcolumnar' AND c.relkind = 'r' "
+			"ORDER BY c.oid",
 			true, 0);
 		if (ret == SPI_OK_SELECT)
 		{

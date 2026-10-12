@@ -172,6 +172,10 @@ def run(ax, pgc_cluster):
     st["logged_retired"] = _log_count(pgc_cluster,
                                       rf"pgcolumnar autovacuum: expire .*\b{SCHEMA}\.ex_off retired 2 row groups")
     st["none_skipped"] = _log_count(pgc_cluster, rf"pgcolumnar autovacuum: skipped .*\bex_none\b")
+    # More passes find nothing left in ex_off; those must not write at LOG.
+    time.sleep(2 * NAP + 1)
+    st["zero_logged"] = _log_count(pgc_cluster,
+                                   rf"pgcolumnar autovacuum: expire .*\b{SCHEMA}\.ex_off retired 0 row groups")
 
     # isolate: built with expire off, so neither verb runs until both are set.
     _reload(ax, pgcolumnar__autovacuum_expire="off")
@@ -190,7 +194,11 @@ def run(ax, pgc_cluster):
     # with the hold on the worker spends 30s inside expire on each of them.
     ax.execute("DROP TABLE ex_copy, ex_off, ex_bad")
     _reload(ax, pgcolumnar__maintenance_hold_ms=30000)
-    _ttl_table(ax, "ex_hold")
+    # One transaction, so the listing worker sees all three in creation order:
+    # ex_hold (held), ex_gone (dropped during the hold), ex_after (still reached).
+    with ax.transaction():
+        for t in ("ex_hold", "ex_gone", "ex_after"):
+            _ttl_table(ax, t)
     st["held"] = _until(lambda: _one(
         ax, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
             " WHERE l.relation = 'ex_hold'::regclass AND l.mode = 'ShareUpdateExclusiveLock'"
@@ -198,6 +206,7 @@ def run(ax, pgc_cluster):
 
     import psycopg
 
+    ax.execute("DROP TABLE ex_gone")
     t0 = time.monotonic()
     lk = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
     try:
@@ -215,6 +224,8 @@ def run(ax, pgc_cluster):
     time.sleep(1)
     st["yield_logged"] = _log_count(pgc_cluster,
                                     r"pgcolumnar autovacuum: skipped .*\bex_hold\b.*canceling statement")
+    st["after_aged"] = _until(lambda: _aged(ax, "ex_after"), 0, seconds=45)
+    st["gone_skipped"] = _log_count(pgc_cluster, r"pgcolumnar autovacuum: skipped expire on .*\bex_gone\b")
     _reload(ax, pgcolumnar__maintenance_hold_ms=0)
     print(f"-- yield: lock {st['lock_state']} after {st['lock_s']:.1f}s;"
           f" busy_dead={st['busy_dead']} on_aged={st['on_aged']} bad_dead={st['bad_dead']}")
@@ -244,6 +255,7 @@ def test_with_the_switch_on_the_daemon_expires_only_what_aged(run, expect):
                 "ON: the daemon logged what it retired")
     expect.num(run["none_skipped"], 0,
                "ON: a table with no retention is never named in a skipped line")
+    expect.num(run["zero_logged"], 0, "a pass that retires nothing logs nothing at LOG for that table")
 
 
 def test_a_failing_expire_does_not_undo_the_compaction(run, expect):
@@ -262,3 +274,9 @@ def test_the_daemon_yields_the_lock_it_holds_inside_expire(run, expect):
                 "yield: and it was granted fast (<= 8s, far under the 30s hold)")
     expect.text("yes" if run["yield_logged"] >= 1 else "no", "yes",
                 "yield: the daemon logged cancelling expire")
+
+
+def test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on(run, expect):
+    expect.num(run["after_aged"], 0, "dropped: and the pass goes on to expire the next table")
+    expect.text("yes" if run["gone_skipped"] >= 1 else "no", "yes",
+                "dropped: a table dropped mid-pass is logged as skipped")

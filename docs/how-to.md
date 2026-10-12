@@ -331,11 +331,13 @@ SELECT pg_reload_conf();
 
 The daemon then runs `expire` on every table that declares a retention, once
 per `pgcolumnar.autovacuum_naptime` (default 60 seconds), and logs
-`pgcolumnar autovacuum: expire <table> retired <n> row groups`.
+`pgcolumnar autovacuum: expire <table> retired <n> row groups` when it retires
+any. A pass that retires nothing logs at `DEBUG1` only.
 
 For a `date` or `timestamp` retention column, the cutoff depends on the time
 zone. The daemon uses the server's `TimeZone` setting, which may differ from
-the time zone your sessions use.
+the time zone your sessions use. For a cutoff in your session's time zone, run
+`pgcolumnar.expire` by hand from that session.
 
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.

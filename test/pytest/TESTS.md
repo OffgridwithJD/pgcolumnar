@@ -6576,7 +6576,7 @@ Red on main at d208bce in both twins (got 0, want 1); green with the heading res
 
 Port of `autovacuum_expire.sh` (#1290). `pgcolumnar.autovacuum_expire` is off by default, the owner's decision on #1290: `expire` deletes rows, so turning the daemon on must not start deleting them by itself. With both switches on, each pass runs `expire` on every table that declares a retention, in its own transaction, before compaction.
 
-Independent of the shell suite: its own schema, connection, SQL and polling, and its fresh-row count differs (500 rows against the suite's 1000). The check names match, so `compare_to_bash` grades the pair one-for-one (16 of 16).
+Independent of the shell suite: its own schema, connection, SQL and polling, and its fresh-row count differs (500 rows against the suite's 1000). The check names match, so `compare_to_bash` grades the pair one-for-one (19 of 19).
 
 WHERE THE PORT DIFFERS. The shell suite starts its server with the daemon on and a 2 s naptime in `postgresql.conf`. This corpus shares one cluster per worker, so the settings arrive by `ALTER SYSTEM` and a reload, and the switches are read back from a fresh session. Because the cluster is shared and the daemon visits every database, teardown resets every setting the module changed, each reset on its own, so a build without the switch cannot leave the others in force.
 
@@ -6590,6 +6590,7 @@ Written red first: on main the fixture raises `unrecognized configuration parame
 | --- | --- |
 | `test_the_switch_exists_and_is_off_by_default` | the launcher runs; the switch reads `off` while the daemon is `on`; a manual `expire` on the same fixture retires its two aged groups |
 | `test_with_the_switch_off_the_daemon_expires_nothing` | the daemon compacts a deleted-heavy table in the window, so it is running passes, and the aged table keeps all 2000 aged rows |
-| `test_with_the_switch_on_the_daemon_expires_only_what_aged` | the aged rows go; the 500 fresh rows stay; a table with no retention keeps every row and is never named in a skipped line; the log names what was retired |
+| `test_with_the_switch_on_the_daemon_expires_only_what_aged` | the aged rows go; the 500 fresh rows stay; a table with no retention keeps every row and is never named in a skipped line; the log names what was retired; later passes that retire nothing write no LOG line for the table |
 | `test_a_failing_expire_does_not_undo_the_compaction` | `expire` on a table whose retention column was dropped fails with `42703`, and the compaction due on that table still lands |
 | `test_the_daemon_yields_the_lock_it_holds_inside_expire` | the worker holds ShareUpdateExclusiveLock inside `expire`; a session's ACCESS EXCLUSIVE is granted within 8 s of a 30 s hold, and the log shows the cancel |
+| `test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on` | while the worker holds `ex_hold`, `ex_gone` is dropped; after the cancel the same pass logs `ex_gone` as skipped and still expires `ex_after` |

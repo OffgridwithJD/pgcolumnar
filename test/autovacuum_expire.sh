@@ -94,6 +94,12 @@ check "ON: the daemon logged what it retired" \
 	"$(grep -c 'pgcolumnar autovacuum: expire .*ex_off retired 2 row groups' "$PGC_LOGFILE" 2>/dev/null | awk '{print ($1 >= 1) ? "yes" : "no"}')" "yes"
 check_num "ON: a table with no retention is never named in a skipped line" \
 	"$(grep -c 'pgcolumnar autovacuum: skipped .*ex_none' "$PGC_LOGFILE" 2>/dev/null)" "0"
+# Two more passes find nothing left to retire in ex_off. A line per table per
+# pass, forever, is noise an administrator learns to ignore (OffgridwithJD on
+# #1307), so a pass that retires nothing logs below LOG.
+sleep 5
+check_num "a pass that retires nothing logs nothing at LOG for that table" \
+	"$(grep -c 'pgcolumnar autovacuum: expire .*ex_off retired 0 row groups' "$PGC_LOGFILE" 2>/dev/null)" "0"
 
 # ---- isolate: a failing expire does not undo the compaction -----------------
 # Built with expire off, so neither verb runs until both conditions are set.
@@ -125,7 +131,19 @@ check "isolate: a failing expire does not roll back the compaction due on the sa
 psql_run "DROP TABLE ex_copy, ex_off, ex_bad;"
 psql_run "ALTER SYSTEM SET pgcolumnar.maintenance_hold_ms = 30000;"
 psql_run "SELECT pg_reload_conf();"
-mk_ttl ex_hold
+# One transaction, so the worker that lists them sees all three, in creation
+# order: ex_hold, then ex_gone, which is dropped while the worker holds
+# ex_hold, then ex_after, which the same pass must still reach.
+psql_run "BEGIN;
+	CREATE TABLE ex_hold (ts timestamptz, v int) USING pgcolumnar;
+	CREATE TABLE ex_gone (ts timestamptz, v int) USING pgcolumnar;
+	CREATE TABLE ex_after (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options(t, chunk_group_row_limit => $CG, stripe_row_limit => $CG,
+	       ttl_column => 'ts', ttl_interval => '1 day') FROM unnest(ARRAY['ex_hold','ex_gone','ex_after']::regclass[]) t;
+	INSERT INTO ex_hold SELECT $OLD + g * interval '1 second', g FROM generate_series(1, 2*$CG) g;
+	INSERT INTO ex_gone SELECT $OLD + g * interval '1 second', g FROM generate_series(1, 2*$CG) g;
+	INSERT INTO ex_after SELECT $OLD + g * interval '1 second', g FROM generate_series(1, 2*$CG) g;
+	COMMIT;"
 holds() {
 	q "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
 	   WHERE l.relation = 'ex_hold'::regclass AND l.mode = 'ShareUpdateExclusiveLock'
@@ -133,6 +151,7 @@ holds() {
 }
 check "premise: the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)" \
 	"$(poll 40 holds 1)" "1"
+psql_run "DROP TABLE ex_gone;"
 t0=$(date +%s)
 STATE="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 	-d "$PGC_DB" -qtA 2>&1 <<SQLEOF | sed -n 's/^ERROR:  \([0-9A-Z]\{5\}\).*/\1/p' | head -1
@@ -148,6 +167,11 @@ check "yield: and it was granted fast (<= 8s, far under the 30s hold)" \
 sleep 1
 check "yield: the daemon logged cancelling expire" \
 	"$([ "$(grep -c 'pgcolumnar autovacuum: skipped .*ex_hold.* canceling statement' "$PGC_LOGFILE" 2>/dev/null)" -ge 1 ] && echo yes || echo no)" "yes"
+# After the cancel the same worker goes on down its list: ex_gone no longer
+# exists, and ex_after is expired (after its own 30s hold).
+check_num "dropped: and the pass goes on to expire the next table" "$(poll 45 'aged ex_after' 0)" "0"
+check "dropped: a table dropped mid-pass is logged as skipped" \
+	"$([ "$(grep -c 'pgcolumnar autovacuum: skipped expire on .*ex_gone' "$PGC_LOGFILE" 2>/dev/null)" -ge 1 ] && echo yes || echo no)" "yes"
 psql_run "ALTER SYSTEM RESET pgcolumnar.maintenance_hold_ms;"
 psql_run "SELECT pg_reload_conf();"
 
