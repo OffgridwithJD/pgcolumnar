@@ -95,6 +95,7 @@ COMPLETE = ["advisory_lock_class",
             "catalog_scan_index",
             "differential",
             "encode_post_codec",
+            "format_downgrade",
             "hilbert_cluster",
             "hilbert_locality",
             "iceberg_fdw",
@@ -135,6 +136,12 @@ COMPLETE = ["advisory_lock_class",
 # about the PORT rather than a licence: the standing arm does not grade it, so the
 # reason is the only thing standing between a declared gap and a forgotten one.
 INCOMPLETE = {
+    # #1293 ported the arms it added: min/max over timestamptz read no data, and
+    # stay right after deletes. The int4/text parity, sum/avg, parallel-plan and
+    # fallback arms of the shell suite predate it and are #432's to port.
+    "native_agg": "the timestamptz min/max arms (blocks read against a decode "
+                  "control, parity before and after deletes) are ported; the "
+                  "int4/text parity, sum/avg, parallel-plan and fallback arms are not",
     # The port asserts the engine counters, the heap oracle, the scattered zero
     # and the declared-collation property. The shell suite additionally pins the
     # three states of max_upper and its own fixture geometry by name, and those

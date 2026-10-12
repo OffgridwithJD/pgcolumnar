@@ -16,6 +16,30 @@ true until the next version shipped.
 
 ## [Unreleased]
 
+### Added
+
+- `test/format_downgrade.sh` and `test_format_downgrade.py` test #1137's promise
+  with both real libraries. They build `v1.0-alpha4`, write with it, upgrade to the
+  tree under test, write again, and then put the alpha4 library back under the
+  upgraded catalog. alpha4 must still read a table this build only read, and must
+  refuse with `0A000` a table this build appended to or created, on a scan and on
+  an index fetch. With the stamp set back to 1, the stamps read `1 1 1` and five
+  arms go red; alpha4 then answers `ok` on an index fetch it cannot decode. The
+  shell suite runs under `PGC_RUN_UPGRADE=1`, like `extension_upgrade.sh`. The
+  pytest twin runs in CI on every major. It fetches the tag when the checkout is
+  shallow, and it puts the install prefix back exactly: same files, same bytes,
+  same mtimes.
+
+- `native_agg.sh` and a new `test_native_agg.py` test that `max(ts)` and `min(ts)`
+  over `timestamptz` read no data (#1293). The suite proved that the metadata node
+  is chosen and that the answer matches heap, but a build that kept the node and
+  decoded every group anyway passed it. With every group forced dirty, `max(ts)`
+  read 414 blocks against a decode's 403, and every existing arm stayed green. The
+  new arms compare the table's own blocks with a decode of the column, and check
+  parity again after the newest and oldest rows are deleted. The first draft of
+  the fixture overflowed `int`, its `INSERT` failed without a word, and every arm
+  measured an empty table. A row-count premise now comes first.
+
 ### Changed
 
 - Five selftest parts and `rewrite_storage_oid` no longer hold a check that has

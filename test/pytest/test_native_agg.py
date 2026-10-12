@@ -1,0 +1,114 @@
+"""min/max over timestamptz are answered from zone maps and read no data (#1293).
+
+"What is the latest reading?" -- `max(ts)` -- is the time-series question. An
+ungrouped, unfiltered `min`/`max` is answered from the row groups' zone maps
+(Phase D5b), and a group with deletes is decoded rather than folded (#149).
+
+THE ARM THIS FILE EXISTS FOR IS THE BLOCK COUNT. Proving the metadata node is
+chosen and that the answer matches heap does not show the data went unread: a
+build that kept the node and decoded every group anyway returns the same answer.
+Measured on the shell twin with every group forced dirty: max(ts) read 414 blocks
+against a decode's 403, and every parity arm stayed green. So each arm reads the
+table's own blocks from pg_statio against a control that must decode the column.
+
+A partial port of `test/native_agg.sh`: the timestamptz arms only. The int4,
+text, sum/avg, parallel and fallback arms are not ported, and
+`test_compare_to_bash.py` declares the pair INCOMPLETE with that reason.
+Independent of the shell twin: its own table, row count, key spacing and
+delete windows.
+
+`pg_stat_reset()` is database-wide; this file must not run concurrently with
+another that reads statistics.
+"""
+
+ROWS = 300000
+
+
+def _one(conn, sql):
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _blocks(conn, table, sql):
+    """Blocks of `table` read while `sql` ran.
+
+    FLUSH BEFORE THE RESET: this connection's own pending statistics would
+    otherwise land on top of the reading (test_catalog_delete_index.py).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_stat_force_next_flush()")
+        cur.execute("SELECT pg_stat_reset()")
+        cur.execute(sql)
+        cur.fetchall()
+        cur.execute("SELECT pg_stat_force_next_flush()")
+        cur.execute(
+            "SELECT coalesce(heap_blks_read,0) + coalesce(heap_blks_hit,0)"
+            " FROM pg_statio_user_tables WHERE relname = %s"
+            " AND schemaname = current_schema()",
+            (table,),
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+def test_min_max_over_timestamptz_read_no_data(pgc_conn, expect):
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE readings (sensor bigint, at timestamptz) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('readings', stripe_row_limit => 2000)")
+        # bigint arithmetic: the shell twin's first draft overflowed int here, the
+        # INSERT failed silently, and every arm measured an empty table.
+        cur.execute(
+            "INSERT INTO readings SELECT g % 37, '2025-11-15'::timestamptz"
+            f" + ((g::bigint * 104729) % {ROWS}) * interval '2 min'"
+            f" FROM generate_series(1, {ROWS}) g"
+        )
+        cur.execute("CREATE TABLE readings_heap AS SELECT * FROM readings")
+
+    expect.num(_one(pgc_conn, "SELECT count(*) FROM readings"), ROWS,
+               "premise: the timestamptz table holds every row inserted")
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("EXPLAIN SELECT max(at) FROM readings")
+        plan = "\n".join(r[0] for r in cur.fetchall())
+    expect.text("yes" if "Columnar Vectorized Aggregates" in plan else "no", "yes",
+                "premise: max(ts) over timestamptz plans the metadata agg node")
+
+    decode = _blocks(pgc_conn, "readings", "SELECT max(at + interval '0 s') FROM readings")
+    mx = _blocks(pgc_conn, "readings", "SELECT max(at) FROM readings")
+    mn = _blocks(pgc_conn, "readings", "SELECT min(at) FROM readings")
+    print(f"-- readings blocks: decode={decode} max={mx} min={mn}")
+
+    expect.at_least(decode, 10, "control: decoding ts reads the table's blocks")
+    # The margin is decode - 10 * reading: positive passes, and a failure
+    # reports by how much it fell short.
+    expect.at_least(decode - 10 * mx, 1,
+                    "max(ts) reads under a tenth of the blocks a decode of ts reads")
+    expect.at_least(decode - 10 * mn, 1,
+                    "min(ts) reads under a tenth of the blocks a decode of ts reads")
+
+    def both(sql):
+        return (str(_one(pgc_conn, sql.format(t="readings"))),
+                str(_one(pgc_conn, sql.format(t="readings_heap"))))
+
+    got, want = both("SELECT max(at) FROM {t}")
+    expect.text(got, want, "max(timestamptz) parity")
+    got, want = both("SELECT min(at) FROM {t}")
+    expect.text(got, want, "min(timestamptz) parity")
+
+    # The newest and oldest readings deleted: a zone map still records them.
+    with pgc_conn.cursor() as cur:
+        for t in ("readings", "readings_heap"):
+            cur.execute(
+                f"DELETE FROM {t} WHERE at > (SELECT max(at) FROM readings_heap) - interval '1 hour'"
+                f" OR at < (SELECT min(at) FROM readings_heap) + interval '45 min'"
+            )
+    n, nh = (_one(pgc_conn, "SELECT count(*) FROM readings"),
+             _one(pgc_conn, "SELECT count(*) FROM readings_heap"))
+    expect.text(f"{n < ROWS}|{n}", f"True|{nh}",
+                "premise: the deletes removed rows at both ends, the same rows from each")
+    got, want = both("SELECT max(at) FROM {t}")
+    expect.text(got, want, "max(timestamptz) parity after deleting the newest rows")
+    got, want = both("SELECT min(at) FROM {t}")
+    expect.text(got, want, "min(timestamptz) parity after deleting the oldest rows")

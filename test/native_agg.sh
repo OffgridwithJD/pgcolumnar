@@ -39,6 +39,10 @@ plan() {
 # no separate Aggregate node above a scan; a fallback plan has an Aggregate node
 # and no such line.
 has_aggnode() { grep -q 'Columnar Vectorized Aggregates' <<<"$1" && echo yes || echo no; }
+# at_least GOT FLOOR -- GOT when it falls short of FLOOR, else FLOOR, so a failing
+# arm reports the number it measured (selftest part 540). An empty GOT stays
+# empty, which check_num refuses as "not a measurement" rather than reading as 0.
+at_least() { [ -z "$1" ] && return; [ "$1" -lt "$2" ] && echo "$1" || echo "$2"; }
 has_gather() { grep -q 'Gather' <<<"$1" && echo yes || echo no; }
 
 # Same, with a parallel plan available: workers allowed, no setup charge, and no
@@ -133,5 +137,67 @@ psql_run "CREATE TABLE e (id int, label text) USING pgcolumnar;"
 check "empty count(*)"  "$(q 'SELECT count(*) FROM e;')"                 "0"
 check "empty sum NULL"  "$(q 'SELECT sum(id) IS NULL FROM e;')"          "t"
 check "empty min NULL"  "$(q 'SELECT min(label) IS NULL FROM e;')"       "t"
+
+# ---- min/max over timestamptz read no data, and stay right after deletes (#1293)
+#
+# "What is the latest reading?" -- max(ts) -- is the time-series question, and
+# the arms above cover min/max only on int4 and text. They also prove the
+# metadata node is CHOSEN and that the answer matches heap; neither shows the
+# data was not read. A build that kept the node and decoded every group anyway
+# would return the same answers and pass them all.
+#
+# So these arms read the TABLE's own blocks, from pg_statio, flushed by the
+# querying session, against a control that must decode the same column.
+psql_run "CREATE TABLE tz (dev int, ts timestamptz) USING pgcolumnar;"
+psql_run "SELECT pgcolumnar.set_options('tz', stripe_row_limit => 1000);"
+psql_run "INSERT INTO tz SELECT g % 50, '2026-03-01'::timestamptz + ((g::bigint * 7919) % 400000) * interval '1 min'
+          FROM generate_series(1, 400000) g;"
+psql_run "CREATE TABLE tzh AS SELECT * FROM tz;"
+# THE ROW COUNT FIRST. The first draft computed g * 7919 in int, which overflows
+# past g = 271,000; the INSERT failed, psql_run reported nothing, and every arm
+# below measured an empty table -- the decode "control" read 3 blocks.
+check_num "premise: the timestamptz table holds every row inserted" \
+	"$(q 'SELECT count(*) FROM tz;')" "400000"
+
+tz_blocks() {	# tz_blocks QUERY -> blocks of tz read while QUERY ran, in its own session
+	q "SELECT pg_stat_reset();" >/dev/null
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -At -c "$1" -c "SELECT pg_stat_force_next_flush()" >/dev/null 2>&1
+	q "SELECT coalesce(heap_blks_read, 0) + coalesce(heap_blks_hit, 0)
+	   FROM pg_statio_user_tables WHERE relname = 'tz';"
+}
+tz_decode="$(tz_blocks "SELECT max(ts + interval '0 s') FROM tz")"
+tz_max="$(tz_blocks "SELECT max(ts) FROM tz")"
+tz_min="$(tz_blocks "SELECT min(ts) FROM tz")"
+echo "-- tz blocks read: decode=$tz_decode max=$tz_max min=$tz_min"
+
+check "premise: max(ts) over timestamptz plans the metadata agg node" \
+	"$(has_aggnode "$(plan 'SELECT max(ts) FROM tz')")" "yes"
+# THE CONTROL. A decode of ts has to show up, or every comparison below is
+# against an instrument that cannot see a read.
+check_num "control: decoding ts reads the table's blocks" \
+	"$(at_least "$tz_decode" 10)" "10"
+# A tenth, not zero: the metapage and its neighbours are read either way (15
+# blocks against 6,603 on a 10M-row table, measured on #1293). The margin is
+# reported, not collapsed to a yes or no.
+# The margin is decode - 10 * reading: positive passes, and a failure reports by
+# how much it fell short.
+check_num "max(ts) reads under a tenth of the blocks a decode of ts reads" \
+	"$( [ -n "$tz_max" ] && at_least $((tz_decode - 10 * tz_max)) 1 )" "1"
+check_num "min(ts) reads under a tenth of the blocks a decode of ts reads" \
+	"$( [ -n "$tz_min" ] && at_least $((tz_decode - 10 * tz_min)) 1 )" "1"
+
+check "max(timestamptz) parity" "$(q 'SELECT max(ts) FROM tz;')" "$(q 'SELECT max(ts) FROM tzh;')"
+check "min(timestamptz) parity" "$(q 'SELECT min(ts) FROM tz;')" "$(q 'SELECT min(ts) FROM tzh;')"
+
+# The newest and oldest readings deleted: a zone map still records them, so a
+# group with deletes must not be folded from it (#149).
+psql_run "DELETE FROM tz  WHERE ts > (SELECT max(ts) FROM tzh) - interval '30 min' OR ts < (SELECT min(ts) FROM tzh) + interval '30 min';"
+psql_run "DELETE FROM tzh WHERE ts > (SELECT max(ts) FROM tzh) - interval '30 min' OR ts < (SELECT min(ts) FROM tzh) + interval '30 min';"
+check "premise: the deletes removed rows at both ends, the same rows from each" \
+	"$(q 'SELECT count(*) < 400000 FROM tz;')|$(q 'SELECT count(*) FROM tz;')" \
+	"t|$(q 'SELECT count(*) FROM tzh;')"
+check "max(timestamptz) parity after deleting the newest rows" "$(q 'SELECT max(ts) FROM tz;')" "$(q 'SELECT max(ts) FROM tzh;')"
+check "min(timestamptz) parity after deleting the oldest rows" "$(q 'SELECT min(ts) FROM tz;')" "$(q 'SELECT min(ts) FROM tzh;')"
 
 pgc_summary

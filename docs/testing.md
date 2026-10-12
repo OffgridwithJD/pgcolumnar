@@ -423,6 +423,32 @@ PGC_RUN_UPGRADE=1 PGC_UPGRADE_OLD_SRC=/root/pgcolumnar-1.0-alpha \
     test/run_all_versions.sh
 ```
 
+## Format downgrade
+
+`PGC_RUN_UPGRADE=1` also runs `test/format_downgrade.sh`, once, against the first
+major in the list. It checks the other direction: what an older build does with a
+table that this build has written to.
+
+From 1.0-alpha5, a table that this build writes carries format version 2, and
+1.0-alpha4 refuses any version except 1. A table that this build only reads keeps
+version 1. The suite tests that promise with both real libraries. It installs
+`v1.0-alpha4` and writes two tables with it. It upgrades to the tree under test,
+reads one table, appends to the other and creates a third. Then it puts the
+alpha4 library back under the upgraded catalog. The old library must still read
+the table that was only read. It must refuse the other two with SQLSTATE `0A000`,
+on a scan and on an index fetch.
+
+It finds the old source the same way as the extension upgrade suite, from a ref or a
+directory. Pass the directory by environment through the runner:
+
+```sh
+PGC_RUN_UPGRADE=1 PGC_DOWNGRADE_OLD_SRC=/root/pgcolumnar-1.0-alpha4 \
+    test/run_all_versions.sh
+```
+
+The suite puts the tree's own library back when it exits, so a suite that runs after
+it never finds the old one installed.
+
 Without it, in a tree that has no `.git`, the suite reports **SKIP** and the matrix
 records `SKIP`. It does not report a pass, because a gate that goes green having run
 nothing is the defect this suite exists to catch. It does not report a failure either. Being unable to
