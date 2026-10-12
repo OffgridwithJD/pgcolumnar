@@ -972,59 +972,45 @@ def planbuf_fx(fx):
     return fx
 
 
-def _planning_buffers(conn, guc, sql):
-    """-> shared hit+read during PLANNING, from the SECOND EXPLAIN of a FRESH BACKEND.
+def _group_list_rows(conn, guc, sql):
+    """-> rows this backend read from `pgcolumnar.row_group` while PLANNING `sql`.
 
-    The second, because the first warms the catalog cache and its planning buffers are
-    a measurement of that rather than of this query.
+    A COUNT OF THE WORK THE ARM IS ABOUT, NOT OF BUFFERS (#1203). The decision this
+    test guards reads the relation's row-group list, through `row_group_pkey`. The
+    arm used to count every shared buffer planning touched, and most of those belong
+    to PostgreSQL's own catalogs, whose cache state differs from one backend to the
+    next. That reading failed in CI on both arms, in both directions, and on one
+    commit red then green. It was never reproduced on a quiet box, so the cause of
+    the noise is still not known; what is known is that the noise was in buffers this
+    arm does not care about.
 
-    A FRESH CONNECTION PER READING, and that is the part this arm was missing. `fx` is
-    module-scoped, so by the time this test runs its backend has absorbed the DDL of
-    twenty-nine other tests. How much catalog-cache state survives into each reading is
-    then not a property of the query being measured, and two readings taken from one
-    long-lived backend can differ by an amount with no upper bound and no fixed sign --
-    #1203 records five CI failures on two different arms in opposite directions,
-    including the same commit red then green.
+    The rows come from `pg_stat_get_xact_tuples_returned`, which reads THIS
+    transaction's own counts. No other backend and no autovacuum can add to them, and
+    plain EXPLAIN plans without executing, so every row counted was read to plan.
+    Measured on PG17 against this fixture, twelve readings each, with and without
+    three sessions running DDL alongside: 1000 for both settings with no ORDER BY,
+    2000 against 1000 with one. Every reading identical.
 
-    A backend that has just started carries a known amount instead: the first EXPLAIN
-    fills its caches and the second measures the query. What is left is the couple of
-    buffers two fresh backends differ by, which is what the tolerance below is sized
-    for and why it is a tolerance rather than an equality.
-
-    NOT REPRODUCED LOCALLY, and this comment should not pretend otherwise. Fourteen
-    runs on a quiet box -- five of the full cluster corpus, six of this module, three
-    with an injected catalog invalidation between the two readings -- all gave a
-    difference of exactly 0. So this is a change of regime argued from the mechanism,
-    not a red turned green. What it does establish is an upper bound on what a reading
-    can carry, which the previous arrangement had none of.
-
-    The cost is one connection per reading, eight per run of this test.
+    The heap and the index are summed so the count survives a change of access path:
+    below `index_min_blocks` the same read is a sequential scan of the heap.
     """
     import psycopg
 
-    fresh = psycopg.connect(conn.info.dsn, autocommit=True)
-    total = None
+    fresh = psycopg.connect(conn.info.dsn)
     try:
         with fresh.cursor() as cur:
             cur.execute(f"SET pgcolumnar.enable_sorted_pathkeys = {guc}")
-            for _ in range(2):
-                cur.execute("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + sql)
-                lines = [r[0] for r in cur.fetchall()]
-                seen_planning = False
-                for line in lines:
-                    if line.strip().startswith("Planning:"):
-                        seen_planning = True
-                        continue
-                    if seen_planning and "Buffers:" in line:
-                        import re as _re
-                        hit = _re.search(r"shared hit=(\d+)", line)
-                        read = _re.search(r"read=(\d+)", line)
-                        total = (int(hit.group(1)) if hit else 0) + \
-                                (int(read.group(1)) if read else 0)
-                        break
+            cur.execute("EXPLAIN (COSTS OFF) " + sql)
+            cur.fetchall()
+            cur.execute("SELECT pg_stat_get_xact_tuples_returned("
+                        "'pgcolumnar.row_group'::regclass) + "
+                        "pg_stat_get_xact_tuples_returned("
+                        "'pgcolumnar.row_group_pkey'::regclass)")
+            rows = cur.fetchone()[0]
+        fresh.rollback()
     finally:
         fresh.close()
-    return total
+    return rows
 
 
 def test_a_query_that_cannot_use_the_order_does_not_pay_to_decide(planbuf_fx, expect):
@@ -1037,43 +1023,31 @@ def test_a_query_that_cannot_use_the_order_does_not_pay_to_decide(planbuf_fx, ex
         expect.text(_storage(cur, "pb", "sorted_kind"), "lexicographic",
                     "premise: and it is marked, so the claim is not refused at "
                     "condition 1")
-    on = _planning_buffers(conn, "on", "SELECT count(*) FROM pb WHERE j = 3")
-    off = _planning_buffers(conn, "off", "SELECT count(*) FROM pb WHERE j = 3")
-    expect.num(1 if isinstance(off, int) else 0, 1,
-               "premise: the planning buffer count is a measurement, not an empty "
-               "string")
-    # A TOLERANCE, not equality: two backends differ by a couple of buffers whatever
-    # this code does. Set far below the effect it must detect -- without the guard this
-    # read +44 on this fixture, and it grows with the group count.
-    #
-    # PRINTED ON EVERY RUN, pass or fail. A tolerance is a claim about a distribution
-    # and the distance from the bound is the only evidence for it, so a green run is a
-    # data point about headroom rather than a boolean.
-    #
-    # THE GROUP COUNT IS IN THE FAILURE MESSAGE, and it is the third value the shell
-    # twin prints. It is load-bearing rather than context: the delta GROWS with the
-    # group count, and at a hundred groups the unguarded read was +6 -- close enough to
-    # the noise floor that the arm could not discriminate. A reader looking at a future
-    # red needs to know the fixture had its thousand groups before believing the delta.
-    # It is recoverable from the `premise: the fixture has many groups` arm above, but
-    # that is the reader doing a join, and not needing one is the whole point.
-    gap = abs(on - off)
-    print(f"-- planning buffers, no ORDER BY: on={on} off={off} "
-          f"|on-off|={gap} (tolerance 5) over {groups} groups")
-    expect.text("within 5" if gap <= 5
-                else f"differs by {gap} (on={on} off={off} over {groups} groups)",
-                "within 5",
+    on = _group_list_rows(conn, "on", "SELECT count(*) FROM pb WHERE j = 3")
+    off = _group_list_rows(conn, "off", "SELECT count(*) FROM pb WHERE j = 3")
+    expect.at_least(off, groups,
+                    "premise: planning reads the group list at all, so a zero below "
+                    "is not an instrument that cannot see it")
+    # EQUALITY, NOT A TOLERANCE. The count is this backend's own rows from one catalog,
+    # so nothing but the planner's own reads can move it. With the guard removed it
+    # read 2000 against 1000 here: one whole extra pass over a thousand groups.
+    print(f"-- group-list rows read while planning, no ORDER BY: on={on} off={off} "
+          f"over {groups} groups")
+    expect.text("the same" if on == off
+                else f"differs by {on - off} (on={on} off={off} over {groups} groups)",
+                "the same",
                 "a query with no ORDER BY does not read the group list to decide")
 
     # THE CONTROL that stops the arm above from being satisfied by a function that never
-    # reads anything: the query that CAN use the ordering must still pay.
-    order_on = _planning_buffers(conn, "on", "SELECT k FROM pb ORDER BY k LIMIT 10")
-    order_off = _planning_buffers(conn, "off", "SELECT k FROM pb ORDER BY k LIMIT 10")
-    margin = order_on - order_off
-    print(f"-- planning buffers, ORDER BY: on={order_on} off={order_off} "
-          f"margin={margin} (needs > 5)")
-    expect.text("reads more" if margin > 5
-                else f"margin {margin} (on={order_on} off={order_off})",
+    # reads anything: the query that CAN use the ordering must still read the list, and
+    # reading it costs at least one row per group.
+    order_on = _group_list_rows(conn, "on", "SELECT k FROM pb ORDER BY k LIMIT 10")
+    order_off = _group_list_rows(conn, "off", "SELECT k FROM pb ORDER BY k LIMIT 10")
+    print(f"-- group-list rows read while planning, ORDER BY: on={order_on} "
+          f"off={order_off} (needs at least {groups} more)")
+    expect.text("reads more" if order_on - order_off >= groups
+                else f"margin {order_on - order_off} (on={order_on} off={order_off} "
+                     f"over {groups} groups)",
                 "reads more",
                 "control: a query that CAN use the ordering does read to decide")
 
