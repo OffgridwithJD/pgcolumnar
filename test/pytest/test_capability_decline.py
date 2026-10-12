@@ -124,7 +124,31 @@ def test_a_broken_install_fails_rather_than_declines(pytester, monkeypatch, expe
                     "and the failure is the broken install's own error, not a decline")
 
 
+def test_a_missing_dependency_of_pyarrow_fails_rather_than_declines(pytester, monkeypatch, expect):
+    # An installed pyarrow that cannot import one of ITS dependencies raises
+    # ModuleNotFoundError too, but naming the dependency. Declining on that would
+    # green a broken install (hole 3); only a missing pyarrow itself declines.
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pkg = pytester.mkpydir("pyarrow")
+    (pkg / "__init__.py").write_text("import numpy_is_not_here\n")
+    pytester.syspathinsert()
+    pytester.makepyfile("""
+    import sys
+
+    def test_inner_missing_dependency_fails(expect, monkeypatch):
+        for k in [k for k in sys.modules if k == "pyarrow" or k.startswith("pyarrow.")]:
+            monkeypatch.delitem(sys.modules, k)
+        expect.require_module("pyarrow", name="the parquet fixture can be written")
+""")
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.outcomes(result, "a pyarrow missing its own dependency fails (hole 3)",
+                    passed=0, failed=1)
+    expect.contains(result.stdout.str(), "No module named 'numpy_is_not_here'",
+                    "and the failure names the missing dependency, not a decline")
+
+
 SPELLINGS = {
+    "test_spell_dunder.py": "m = __import__('pyarrow')\n",
     "test_spell_import.py": "import pyarrow\n",
     "test_spell_import_sub.py": "import pyarrow.parquet as pq\n",
     "test_spell_from.py": "from pyarrow import table\n",
@@ -146,7 +170,7 @@ def test_every_unguarded_import_spelling_is_refused(pytester, monkeypatch, expec
     out = result.stdout.str()
     seen = [f for f in SPELLINGS if f"{f[:-3]}.py imports pyarrow outside require_module" in out]
     expect.num(len(seen), len(SPELLINGS),
-               "premise: the scan finds each of the five import spellings (hole 4)")
+               "premise: the scan finds each of the six import spellings (hole 4)")
     expect.num(1 if result.ret != 0 else 0, 1, "and a run carrying them is refused")
     expect.num(out.count("test_guarded.py imports pyarrow"), 0,
                "while a file that goes through require_module is not named")

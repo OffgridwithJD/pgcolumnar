@@ -6466,7 +6466,7 @@ The owner's rule of 2026-10-12 (#1215): a missing capability may be bypassed as 
 1. where `PGC_REQUIRE` names the capability, as CI does, a decline FAILS;
 2. a decline must be the test's first outcome, and no check may follow it;
 3. only an ABSENT module declines: a broken install (an `ImportError` from inside) fails;
-4. a test file that imports pyarrow outside `require_module` is refused, in each of five import spellings, and each one is proven seen;
+4. a test file that imports pyarrow outside `require_module` is refused, in each of six import spellings, and each one is proven seen;
 5. the run's accounting line carries `+ N declined` when there are any, and each decline is printed by name with its capability.
 
 Written red first: all seven failed before `pgc_vacuity` had the methods. The four failure arms pin their failure's MESSAGE, because a missing method also fails an inner test, so outcomes alone could not tell "refused for the right reason" from "crashed".
@@ -6481,4 +6481,5 @@ Written red first: all seven failed before `pgc_vacuity` had the methods. The fo
 | `test_a_check_after_a_decline_is_refused` | a check recorded after a decline is refused |
 | `test_only_a_declinable_capability_may_decline` | `btree_gist` cannot decline; it is not in the closed list |
 | `test_a_broken_install_fails_rather_than_declines` | a `pyarrow` that raises `ImportError` from inside fails with its own error |
-| `test_every_unguarded_import_spelling_is_refused` | each of five spellings is named and refused; a file using `require_module` is not |
+| `test_a_missing_dependency_of_pyarrow_fails_rather_than_declines` | a `pyarrow` that cannot import its own dependency raises `ModuleNotFoundError` naming that dependency, and fails rather than declines; shown red with `require_module`'s `.name` check deleted (OffgridwithJD, review of #1286) |
+| `test_every_unguarded_import_spelling_is_refused` | each of six spellings, `__import__` among them, is named and refused; a file using `require_module` is not |
