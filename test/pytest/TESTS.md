@@ -133,6 +133,8 @@ behaviour, the source of that number is named.
 - [85. test_native_agg.py: min/max over timestamptz read no data](#85-test_native_aggpy-minmax-over-timestamptz-read-no-data)
 - [86. test_format_downgrade.py: an alpha4 binary refuses what this build wrote](#86-test_format_downgradepy-an-alpha4-binary-refuses-what-this-build-wrote)
 - [87. test_latest_reading.py: the latest-reading recipe does what the document says](#87-test_latest_readingpy-the-latest-reading-recipe-does-what-the-document-says)
+- [88. test_storage_row_repair.py: the alpha5 release notes' repair procedure works as written](#88-test_storage_row_repairpy-the-alpha5-release-notes-repair-procedure-works-as-written)
+- [89. test_docs_cross_database_query.py: no documented query asks another database for its extensions](#89-test_docs_cross_database_querypy-no-documented-query-asks-another-database-for-its-extensions)
 
 ## 1. How to read a test in here
 
@@ -6404,3 +6406,31 @@ Removal proof: the document's `LATERAL` edited to `ORDER BY ts` (ascending) retu
 | test | what it holds |
 | --- | --- |
 | `test_the_latest_reading_recipe_does_what_the_document_says` | the document's three blocks are found; the table holds its rows; without the btree the `LATERAL` form reads the table about once per device; the `GROUP BY` form and, with the document's index, the `LATERAL` form return the rows `DISTINCT ON` returns; the indexed `LATERAL` reads at least one block and under a tenth of the table |
+
+## 88. test_storage_row_repair.py: the alpha5 release notes' repair procedure works as written
+
+Two alpha4 defects (#1211, #1275) left a table's `pgcolumnar.storage` row naming a relation that no longer exists, and the upgrade does not repair existing rows. `RELEASE_NOTES_1.0-alpha5.md` gives a query that finds them and two repairs: `REFRESH MATERIALIZED VIEW` for a view, and a same-type `ALTER COLUMN ... USING` for a table. Instructions are validated by performing them, so this performs them.
+
+THE BROKEN STATE IS MADE, NOT INHERITED: each storage row is pointed at a table created and dropped for the purpose. That matches what a real alpha4 build left behind, measured on PG17. THE QUERY IS READ FROM THE NOTES, so an edit to the document is what runs.
+
+SCOPED TO ITS OWN STORAGE IDS. `pgc_conn` gives a private schema in a shared database, and the pgcolumnar catalogs are per database. So the count asserted is of the rows the notes' query returns for the ids this test damaged, the original and the post-repair ones both.
+
+Removal proofs on PG17: disabling `PgColumnarRetargetStorageRelation` reddens it at the premise. Editing the notes' query from `NOT EXISTS` to `EXISTS` reddens it too.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_release_notes_repair_procedure_works` | the notes give the query; it finds neither row before the damage and both after; the damaged table still reads every row; each repair repoints its row; the query then finds nothing; the table and the view hold the same rows |
+
+## 89. test_docs_cross_database_query.py: no documented query asks another database for its extensions
+
+`pg_extension` is a per-database catalog. A statement that reads `pg_database` and tests `pg_extension` answers for the current database only, so it lists every connectable database or none. `docs/installation.md` shipped exactly that as the way to find the databases that need the upgrade (#1288). Only fenced SQL is read, split into statements, so prose that explains the rule cannot trip it. It needs no cluster, so it is in `NO_CLUSTER`.
+
+Red with the old query restored (got 1, want 0). Its premise is red when the fence pattern is broken and nothing is scanned (got 0, wanted at least 10). That is the case where the arm alone would pass on nothing.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_no_documented_query_asks_another_database_for_its_extensions` | at least ten SQL statements were read; none reads `pg_database` and tests `pg_extension` |
