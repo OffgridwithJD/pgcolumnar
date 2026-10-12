@@ -164,6 +164,14 @@ true until the next version shipped.
   release notes' repair procedure, reading its query from the notes, and a docs
   check refuses any documented query that tests `pg_extension` while listing
   databases.
+- Without pyarrow, the 25 Arrow and Parquet suites that call `pgc_skip pyarrow`
+  now report `SKIPPED` and exit 66, and the run does not fail (#1215). Before,
+  each reported one `FAIL` and reddened the whole run on a box without pyarrow.
+  The owner decided this on 2026-10-12. Every other missing dependency, such as
+  `btree_gist` for `temporal.sh`, still fails unless it is waived. The nightly
+  workflow installs pyarrow and stops if the suites cannot import it, so CI
+  does not lose these suites silently. `docs/testing.md` also said a skipped
+  suite exits 2; it exits 66, and the page now says so.
 
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens

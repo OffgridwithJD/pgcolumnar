@@ -1971,17 +1971,29 @@ chunk_group_count() {
 # deliberately not the same code path. PostgreSQL 15 has no WITHOUT OVERLAPS to
 # test and no amount of installing will give it one, so those gates call
 # pgc_summary directly and report SKIPPED. Nothing is broken there. Here it is.
+#
+# EXCEPT PYARROW, which declines by default (#1215, owner's decision 2026-10-12).
+# A box without pyarrow is a supported developer configuration, and the 25 suites
+# that need it were the reddest thing such a box produced. The nightly installs
+# pyarrow and stops when the suites' interpreter cannot import it, so CI cannot
+# lose them silently; the run summary still names every suite that skipped.
+# Every other capability keeps the rule above.
 pgc_skip() {  # pgc_skip <capability> <message>
-	local cap allow_one
+	local cap allow_one why
 	cap="$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
 	allow_one="PGC_ALLOW_MISSING_$cap"
-	if [ "${PGC_ALLOW_MISSING:-0}" = 1 ] || [ "${!allow_one:-0}" = 1 ]; then
+	why=""
+	if [ "$cap" = PYARROW ]; then
+		why="pyarrow is optional on a developer box, see #1215"
+	elif [ "${PGC_ALLOW_MISSING:-0}" = 1 ] || [ "${!allow_one:-0}" = 1 ]; then
+		why="waived by $allow_one or PGC_ALLOW_MISSING"
+	fi
+	if [ -n "$why" ]; then
 		# The unwaived branch below records a FAIL. This one printed and left
 		# PGC_CHECKS at zero, so waiving a dependency also erased the outcome --
 		# the same asymmetry check_timing had, in the function whose whole
 		# subject is "a missing dependency is not a pass".
-		check_skip "$2" "SKIP  $2 (waived by $allow_one or PGC_ALLOW_MISSING)" \
-			"waived by $allow_one or PGC_ALLOW_MISSING"
+		check_skip "$2" "SKIP  $2 ($why)" "$why"
 		pgc_summary
 	fi
 	pgc_record FAIL "$2" "FAIL  $2"
