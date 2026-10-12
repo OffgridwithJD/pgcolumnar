@@ -39,6 +39,23 @@ FULL_SUM = ROWS * (ROWS + 1) // 2
 SRCDIR = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
+def _beside_other_workers(env):
+    """True when this process may share the install prefix with other workers.
+
+    pytest-xdist sets PYTEST_XDIST_WORKER in every worker and
+    PYTEST_XDIST_WORKER_COUNT to the number of workers. A serial run sets
+    neither. A worker with no stated count is treated as not alone: guessing
+    "alone" is the direction that breaks someone else's test.
+    """
+    count = env.get("PYTEST_XDIST_WORKER_COUNT")
+    if count is not None:
+        try:
+            return int(count) > 1
+        except ValueError:
+            return True
+    return "PYTEST_XDIST_WORKER" in env
+
+
 def _run(argv, **kw):
     return subprocess.run(argv, check=True, capture_output=True, text=True, **kw)
 
@@ -86,6 +103,12 @@ def _sqlstate(dsn, statements):
 
 def test_an_alpha4_binary_refuses_what_this_build_wrote(pgc_cluster, expect):
     from pgc_cluster import Cluster, pick_port
+
+    if _beside_other_workers(os.environ):
+        expect.cannot_run("UNMET_PRECONDITION",
+                          "swaps the library in the shared install prefix, which a backend "
+                          "another xdist worker starts would load; run this file without -n")
+        return
 
     pg_config = pgc_cluster.pg_config
     libdir, sharedir = pgc_cluster.libdir, pgc_cluster.sharedir
@@ -200,3 +223,27 @@ def test_an_alpha4_binary_refuses_what_this_build_wrote(pgc_cluster, expect):
             cluster.stop()
         _restore(snap, [libdir, extdir])
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_the_library_swap_declines_beside_other_workers(expect):
+    """The swap puts alpha4's library in the SHARED prefix for a few seconds.
+
+    A backend that another xdist worker starts during that window loads alpha4
+    against this tree's catalogs, and fails in an unrelated test, at random, in a
+    way a serial run cannot reproduce. Atomic renames protect processes that had
+    already mapped the library, not new ones. So the test declines -- named,
+    UNMET_PRECONDITION, never a pass -- whenever it is not alone. Found by
+    @jdatcmd reviewing #1301.
+
+    Driven through the decision itself, with the environments pytest-xdist sets,
+    so both directions are asserted without starting workers.
+    """
+    expect.text(str(_beside_other_workers({})), "False",
+                "a serial run is alone, so the swap runs")
+    expect.text(str(_beside_other_workers({"PYTEST_XDIST_WORKER_COUNT": "1"})), "False",
+                "one xdist worker is alone, so the swap runs")
+    expect.text(str(_beside_other_workers({"PYTEST_XDIST_WORKER_COUNT": "4",
+                                           "PYTEST_XDIST_WORKER": "gw2"})), "True",
+                "beside three other workers the swap declines")
+    expect.text(str(_beside_other_workers({"PYTEST_XDIST_WORKER": "gw0"})), "True",
+                "a worker whose count is not stated is assumed not to be alone")
