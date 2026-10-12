@@ -48,6 +48,49 @@ true until the next version shipped.
 
 ### Fixed
 
+- Twelve metadata lookups no longer read their whole catalog to answer a
+  question about one table (#1207). Each passed `InvalidOid` to
+  `systable_beginscan` on a key an existing index starts with, and the
+  `pgcolumnar` catalogs are shared by every columnar table in the database, so
+  each paid for every other table's rows:
+
+      free_space              the compaction reuse, both end-truncation reads
+      row_group               row_group_exists, reached by EVERY DELETE
+      storage                 three existence checks on every write, and the
+                              sorted-extent update
+      projection_declaration  list, rename a column, drop one, drop all
+
+  Each now goes through `pgcolumnar_scan_index_oid()`, so it probes the index
+  once the catalog reaches `pgcolumnar.index_min_blocks` pages and reads the heap
+  below that, as the earlier conversions do (#1213, #1217). Measured on PG 17
+  with 400 other projected tables in the database, catalog buffers per
+  operation, before and after:
+
+      one-row DELETE        row_group                45 -> 19
+      INSERT                storage                  19 -> 13
+      vacuum_sorted         storage                 128 -> 93
+      compact_rewrite       free_space               43 -> 37
+      truncate()            free_space               26 -> 17
+      RENAME COLUMN         projection_declaration    9 -> 4
+
+  `test/catalog_scan_index.sh` and its pytest twin drive eleven operations
+  that between them reach all twelve sites. Each operation runs after the
+  population has put its catalog above the threshold, and each arm asserts the
+  operation made no sequential scan of that catalog. That is a path assertion,
+  which `catalog_delete_index.sh` warns against, and it is used here only where
+  a premise shows that declining the probe cannot be correct. Two cost-based
+  versions were tried first and a revert passed both. The full revert reddens
+  all eleven arms on PG 15 through 19. Reverting each site on its own reddens
+  the arm for the operation that reaches it.
+
+  Two side effects, neither a behaviour anyone relied on.
+  `PgColumnarAllocateFreeSpace` picks the smallest range that fits, and a tie
+  now goes to the lowest file offset instead of heap order. Projection
+  declarations are listed in name order instead of heap order.
+
+  The `server_dir` pytest fixture moved to `conftest.py`, because a second file
+  now needs a directory the server can write.
+
 - `CREATE MATERIALIZED VIEW ... USING pgcolumnar ... WITH DATA` no longer
   orphans `pgcolumnar.storage.relation_oid` (#1275). The statement builds a
   transient relation, fills it and swaps, exactly as a rewriting `ALTER` does,

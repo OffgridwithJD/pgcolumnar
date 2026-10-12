@@ -720,22 +720,8 @@ def test_an_enum_add_value_before_does_not_renumber(fx, expect):
 # The appended rows carry k = -600..-1, all below the run, so a plan still claiming the
 # old order answers 0,0,0,0,0 where the truth is -600,-599,-598,-597,-596.
 
-@pytest.fixture(scope="module")
-def server_dir():
-    """A directory the SERVER can write, which `tmp_path` is not.
-
-    `COPY ... TO` and `parallel_copy` are executed by the backend, and the backend runs
-    as a different user: pytest's `tmp_path` lives under `/tmp/pytest-of-root/` at mode
-    700, so the server cannot reach it and the error names a permission rather than the
-    real cause. Opening the parents matters as much as the leaf -- one closed directory
-    above makes the subtree unreachable however open the leaf is -- so this makes its
-    own directory instead of trying to prise `tmp_path` open.
-    """
-    import os, shutil, tempfile
-    d = pathlib.Path(tempfile.mkdtemp(prefix="pgc_sorted_pathkeys_"))
-    os.chmod(d, 0o777)
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+# `server_dir` moved to conftest.py when a second file needed it (#1207), as
+# `pgc_own_db` did before it.
 
 
 WANT_FIRST5 = [-600, -599, -598, -597, -596]

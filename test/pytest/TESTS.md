@@ -128,6 +128,7 @@ behaviour, the source of that number is named.
 - [80. test_catalog_plan_index.py: planning pays for these catalogs only when they hold something](#80-test_catalog_plan_indexpy-planning-pays-for-these-catalogs-only-when-they-hold-something)
 - [81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database](#81-test_catalog_delete_indexpy-retiring-a-row-group-costs-no-more-for-a-bigger-database)
 - [82. test_rewrite_storage_oid.py: a type rewrite keeps the storage row on the live table](#82-test_rewrite_storage_oidpy-a-type-rewrite-keeps-the-storage-row-on-the-live-table)
+- [83. test_catalog_scan_index.py: twelve metadata scans do not read their catalog whole](#83-test_catalog_scan_indexpy-twelve-metadata-scans-do-not-read-their-catalog-whole)
 
 ## 1. How to read a test in here
 
@@ -6297,3 +6298,25 @@ THE `REFRESH` ARM GUARDS THE PATH THAT ALREADY WORKED. It repaired this before t
 | --- | --- |
 | `test_rewrite_storage_oid` | the storage row matches the live regclass before the rewrite, the row count survives, an unrewritten table still matches itself, and the rewritten table's storage row matches the live regclass afterwards |
 | `test_a_matview_created_with_data_points_at_itself` | that the matview and the `CREATE TABLE AS` table both hold their rows, that `CREATE TABLE ... AS` points at itself (the control that narrows the fix), that a matview created `WITH DATA` points at itself, and that `REFRESH` still does |
+
+## 83. test_catalog_scan_index.py: twelve metadata scans do not read their catalog whole
+
+Port of `catalog_scan_index.sh` (#1207). Twelve `systable_beginscan` calls in `columnar_metadata.c` passed `InvalidOid` on a key that an existing index starts with, so each read its whole catalog to answer a question about one table. There are three on `free_space` (the compaction reuse and both end-truncation reads), one on `row_group` (`row_group_exists`, reached by EVERY `DELETE`), four on `storage` (three existence checks in `PgColumnarInsertNativeStorageRow` and the sorted-extent update), and four on `projection_declaration` (list, rename a column, drop one, drop all). The fix routes each through `pgcolumnar_scan_index_oid()`.
+
+IT ASSERTS THE PATH, AND SECTION 81 SAYS NOT TO, so the reason has to be stated. A path assertion is wrong where declining a probe can be right, which is on a catalog below `pgcolumnar.index_min_blocks`. Every arm here runs after 350 other projected tables have put all four target catalogs above that threshold, and a premise asserts it against the live setting. The resolver never declines on such a catalog, so a sequential scan of it during the operation can only be one of these sites still reading whole. Buffers and `idx_scan` are printed beside each arm as diagnosis.
+
+TWO COST MEASURES WERE TRIED FIRST, AND A REVERT SURVIVED BOTH. Comparing the default against `index_min_blocks` forced high let a full revert through on four arms of nine. The setting also governs the scans converted earlier (#1213, #1237), so forcing it made those read whole too, and the forced reading came out worse than the unfixed code's. Growth from an empty database to the populated one failed on correct code instead. A probe costs about three buffers where a one-page catalog costs one, and `vacuum_sorted` makes 28 `storage` scans, so the fixed build grew by more than the pages added.
+
+EVERY ARM HAS AN EFFECT PREMISE, AND BOTH SILENT FAILURES IT GUARDS AGAINST HAPPENED. `compact()` cannot retire rows deleted by a transaction that has not committed, so a fixture that deleted and compacted in one transaction left no free range to measure. `pgcolumnar.truncate()` refuses a transaction block, so a multi-statement call raised and read zero. "No sequential scan" is exactly what an operation that never ran reports. Each arm therefore asserts what the operation changed, and that it reached the catalog at all.
+
+THE END-TRUNCATION TARGET HAS NO PROJECTION. A projection is its own storage in the same file, written after the base's groups, so its live data sits behind the base's last group and there is no tail to reclaim. Measured: with the projection, `truncate()` returns 0 and both free ranges stay; without it, 3 blocks are reclaimed and one range is left.
+
+Removal proof, on the shell twin at PG 17: the full revert reddens all eleven path arms, and reverting each of the twelve sites ALONE reddens at least one arm named for the operation that reaches it. This twin aborts at its first failure, so under the revert it reports the first arm (`storage seq_scan=2`).
+
+The two halves share no code and no fixture. The shell suite adds 400 tables with `int` keys and retires groups 0 and 2; this one adds 350 with `bigint` keys and retires groups 1 and 3, and its effect values differ throughout. This half flushes statistics before each reset, for the reason section 81 gives.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_catalog_scans_do_not_read_their_catalog_whole` | each of the four catalogs at or above `index_min_blocks`; then, for eleven operations (an insert into an existing table, into a table created in the same transaction, a `parallel_copy` load, a one-row delete, `compact_rewrite`, `truncate()`, `vacuum_sorted`, renaming a projected column, `TRUNCATE`, `drop_projection`, `DROP TABLE`), that the target held two free ranges, that the operation took effect, that it reached its catalog, and that it made no sequential scan of it |

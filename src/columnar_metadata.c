@@ -1028,6 +1028,7 @@ bool
 PgColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
 						  TransactionId oldestXmin, uint64 *fileOffset)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("free_space", RowExclusiveLock);
 	TupleDesc	td = RelationGetDescr(rel);
 	ScanKeyData key[1];
@@ -1044,7 +1045,8 @@ PgColumnarAllocateFreeSpace(uint64 storageId, uint64 dataLength,
 	snap = RegisterSnapshot(GetLatestSnapshot());
 	ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, snap, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "free_space_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snap, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -1245,6 +1247,7 @@ bool
 PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 							  TransactionId oldestXmin)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("free_space", AccessShareLock);
 	TupleDesc	td = RelationGetDescr(rel);
 	Snapshot	snap = RegisterSnapshot(GetLatestSnapshot());
@@ -1255,7 +1258,8 @@ PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 
 	ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, snap, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "free_space_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snap, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -1289,6 +1293,7 @@ PgColumnarTrailingFreeSpaceSafe(uint64 storageId, uint64 liveEnd,
 void
 PgColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("free_space", RowExclusiveLock);
 	TupleDesc	td = RelationGetDescr(rel);
 	Snapshot	snap = RegisterSnapshot(GetLatestSnapshot());
@@ -1300,7 +1305,8 @@ PgColumnarDeleteFreeSpaceAtOrAbove(uint64 storageId, uint64 liveEnd)
 
 	ScanKeyInit(&key[0], Anum_free_space_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, snap, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "free_space_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snap, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -1748,6 +1754,7 @@ delete_vector_lock_chunk_group(uint64 storageId, uint64 stripeId, int chunkId)
 static bool
 row_group_exists(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("row_group", AccessShareLock);
 	ScanKeyData key[2];
 	SysScanDesc scan;
@@ -1757,7 +1764,8 @@ row_group_exists(uint64 storageId, uint64 groupNumber, Snapshot snapshot)
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 	ScanKeyInit(&key[1], Anum_row_group_group_number, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) groupNumber));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 2, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "row_group_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 2, key);
 	found = HeapTupleIsValid(systable_getnext(scan));
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
@@ -2031,6 +2039,7 @@ columnar_relation_is_new_in_xact(Oid relid)
 void
 PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("storage", RowExclusiveLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	Datum		values[Natts_native_storage];
@@ -2074,7 +2083,8 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 		snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 		ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) s->storageId));
-		scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+		scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
+		scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
 		exists = HeapTupleIsValid(systable_getnext(scan));
 		systable_endscan(scan);
 		PopActiveSnapshot();
@@ -2112,7 +2122,8 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 		snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 		ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 					F_INT8EQ, Int64GetDatum((int64) s->storageId));
-		scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+		scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
+		scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
 		exists = HeapTupleIsValid(systable_getnext(scan));
 		systable_endscan(scan);
 		if (exists)
@@ -2144,7 +2155,8 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 	snapshot = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 	ScanKeyInit(&key[0], Anum_native_storage_storage_id, BTEqualStrategyNumber,
 				F_INT8EQ, Int64GetDatum((int64) s->storageId));
-	scan = systable_beginscan(rel, InvalidOid, false, snapshot, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
 	exists = HeapTupleIsValid(systable_getnext(scan));
 	systable_endscan(scan);
 	PopActiveSnapshot();
@@ -2474,6 +2486,7 @@ void
 PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup,
 						  List *sortByNames, const char *sortedKind)
 {
+	Oid			scanIdx;
 	Relation	rel;
 	TupleDesc	tupdesc;
 	ScanKeyData key[1];
@@ -2513,7 +2526,8 @@ PgColumnarSetSortedExtent(uint64 storageId, int64 firstGroup, int64 lastGroup,
 				F_INT8EQ, Int64GetDatum((int64) storageId));
 
 	/* NULL snapshot -> catalog snapshot, as the other read-side scans use. */
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), NULL, 1, key);
 	tuple = systable_getnext(scan);
 	if (HeapTupleIsValid(tuple))
 	{
@@ -4071,6 +4085,7 @@ PgColumnarInsertProjectionRow(const PgColumnarProjection *proj)
 List *
 PgColumnarListProjectionDeclarations(Oid relid)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("projection_declaration",
 										  AccessShareLock);
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -4082,7 +4097,8 @@ PgColumnarListProjectionDeclarations(Oid relid)
 	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "projection_declaration_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), NULL, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		PgColumnarProjectionDeclaration *d =
@@ -4213,6 +4229,7 @@ void
 PgColumnarRenameProjectionDeclarationColumn(Oid relid, const char *oldName,
 											 const char *newName)
 {
+	Oid			scanIdx;
 	Relation	rel;
 	TupleDesc	tupdesc;
 	ScanKeyData key[1];
@@ -4223,7 +4240,8 @@ PgColumnarRenameProjectionDeclarationColumn(Oid relid, const char *oldName,
 	tupdesc = RelationGetDescr(rel);
 	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "projection_declaration_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), NULL, 1, key);
 
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
@@ -4288,6 +4306,7 @@ PgColumnarRenameProjectionDeclarationColumn(Oid relid, const char *oldName,
 void
 PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("projection_declaration",
 										  RowExclusiveLock);
 	ScanKeyData key[1];
@@ -4298,7 +4317,8 @@ PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "projection_declaration_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), NULL, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		bool		isnull;
@@ -4329,6 +4349,7 @@ PgColumnarDeleteProjectionDeclaration(Oid relid, const char *name)
 void
 PgColumnarDeleteProjectionDeclarationsForRel(Oid relid)
 {
+	Oid			scanIdx;
 	Relation	rel = open_columnar_table("projection_declaration",
 										  RowExclusiveLock);
 	ScanKeyData key[1];
@@ -4338,7 +4359,8 @@ PgColumnarDeleteProjectionDeclarationsForRel(Oid relid)
 	ScanKeyInit(&key[0], Anum_projection_declaration_rel, BTEqualStrategyNumber,
 				F_OIDEQ, ObjectIdGetDatum(relid));
 
-	scan = systable_beginscan(rel, InvalidOid, false, NULL, 1, key);
+	scanIdx = pgcolumnar_scan_index_oid(rel, "projection_declaration_pkey");
+	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), NULL, 1, key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 		CatalogTupleDelete(rel, &tuple->t_self);
 	systable_endscan(scan);
