@@ -75,18 +75,18 @@ JAN_BOUND="FOR VALUES FROM ('2026-01-01 00:00:00+00') TO ('2026-02-01 00:00:00+0
 psql_run "SET timezone = 'UTC'; ALTER DATABASE \"$PGC_DB\" SET timezone = 'UTC';"
 build m
 check_num "premise: the parent holds every row" "$(q "SELECT count(*) FROM m;")" "16992"
-check_num "premise: January holds its share" "$(q "SELECT count(*) FROM m_jan;")" "8928"
+check_num "premise: the cold partition holds its share" "$(q "SELECT count(*) FROM m_jan;")" "8928"
 before="$(digest m)"
-check "premise: January is a local columnar partition with its bound" "$(jan_shape m)" "r:pgcolumnar:$JAN_BOUND"
+check "premise: the cold partition is local and columnar, with its bound" "$(jan_shape m)" "r:pgcolumnar:$JAN_BOUND"
 jan_storage="$(q "SELECT pgcolumnar.get_storage_id('m_jan');")"
 
 # ---- the move ---------------------------------------------------------------
-check "tier_partition moves January and returns the rows it moved" \
+check "tier_partition moves the cold partition and returns the rows it moved" \
 	"$(q "SELECT pgcolumnar.tier_partition('m_jan', 'tier_pq', '$W/m_jan.parquet');")" "8928"
 # The relkind rides along: with nothing moved the digest is trivially unchanged.
 check "the answers over the parent are the same after the move" \
 	"$(digest m)|$(q "SELECT relkind FROM pg_class WHERE oid = 'm_jan'::regclass;")" "$before|f"
-check "January is now a foreign partition with its own name and bound" "$(jan_shape m)" "f:-:$JAN_BOUND"
+check "the cold partition is now a foreign partition with its own name and bound" "$(jan_shape m)" "f:-:$JAN_BOUND"
 check "the foreign partition reads the exported file" \
 	"$(q "SELECT srvname || ':' || array_to_string(ftoptions, ',') FROM pg_foreign_table t
 	      JOIN pg_foreign_server s ON s.oid = t.ftserver WHERE t.ftrelid = 'm_jan'::regclass;")" \
@@ -100,9 +100,9 @@ check_num "nor any row-group row" \
 # ---- pruning over the mixed parent ------------------------------------------
 plan_jan="$(q "EXPLAIN SELECT max(v) FROM m WHERE ts < '2026-01-20';")"
 plan_feb="$(q "EXPLAIN SELECT max(v) FROM m WHERE ts >= '2026-02-10';")"
-check "a January query scans only the foreign partition" \
+check "a query on the tiered range scans only the foreign partition" \
 	"$(grep -c 'Foreign Scan' <<<"$plan_jan")|$(grep -c 'm_feb' <<<"$plan_jan")" "1|0"
-check "a February query scans only the local partition, beside a foreign one" \
+check "a query on the other range scans only the local partition, beside a foreign one" \
 	"$(grep -c 'Foreign Scan' <<<"$plan_feb")|$(grep -c 'm_feb' <<<"$plan_feb")|$(grep -c 'Foreign Scan' <<<"$plan_jan")" "0|1|1"
 check "an insert routed to the tiered range is refused" \
 	"$(sqlstate "INSERT INTO m VALUES ('2026-01-15', 1, 1, 'x');")" "0A000"
@@ -115,6 +115,8 @@ psql_run "CREATE TABLE lone (ts timestamptz, v int) USING pgcolumnar;"
 check "a table that is not a partition is refused" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('lone', 'tier_pq', '$W/lone.parquet');")" "42809"
 psql_run "CREATE TABLE m_mar PARTITION OF m FOR VALUES FROM ('2026-03-01') TO ('2026-04-01') USING heap;"
+# Refused by export_parquet, the first step, so nothing has moved: the arm holds
+# the property, not which line of tier_partition raises it.
 check "a partition that is not columnar is refused" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_mar', 'tier_pq', '$W/m_mar.parquet');")" "42809"
 psql_run "CREATE TABLE m_def PARTITION OF m DEFAULT USING pgcolumnar;"
@@ -126,7 +128,7 @@ check "a server of another wrapper is refused" \
 check "an existing path is refused, so no file a table reads is overwritten" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_feb', 'tier_pq', '$W/m_jan.parquet');")" "58P02"
 check "and the refusals moved nothing" "$(digest m)" "$rb"
-check "premise: February is still local after the refusals" \
+check "premise: the other partition is still local after the refusals" \
 	"$(q "SELECT relkind FROM pg_class WHERE oid = 'm_feb'::regclass;")" "r"
 
 # ---- the parent's lock ------------------------------------------------------
@@ -138,11 +140,184 @@ lock="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgre
 	    WHERE relation = 'k'::regclass AND pid = pg_backend_pid() AND granted" \
 	-c "ROLLBACK" 2>&1)"
 # Line 2 is the call's result: a rollback of a call that never ran proves nothing.
-check "premise: inside the transaction the call moved January" "$(sed -n 2p <<<"$lock")" "8928"
+check "premise: inside the transaction the call moved the cold partition" "$(sed -n 2p <<<"$lock")" "8928"
 check "the call holds ACCESS EXCLUSIVE on the parent until commit, as the docs say" \
 	"$(grep -o 'AccessExclusiveLock' <<<"$lock")" "AccessExclusiveLock"
 check "a rollback after the whole call leaves the rows local, exactly once" \
 	"$(digest k)|$(jan_shape k)" "$kb|r:pgcolumnar:$JAN_BOUND"
+
+# ---- a write in flight when the move starts ---------------------------------
+# Without the SHARE lock the export does not see an uncommitted insert, DETACH
+# then waits for it to commit, and DROP takes the row with the partition: lost.
+# With it, the move waits for the insert and exports the row.
+build w
+wb="$(q "SELECT count(*) FROM w;")"; wj="$(q "SELECT count(*) FROM w_jan;")"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	-c "BEGIN" -c "INSERT INTO w_jan VALUES ('2026-01-31 23:59:00+00', 99, 4242, 'in flight')" \
+	-c "SELECT pg_sleep(3)" -c "COMMIT" >/dev/null 2>&1 &
+writer=$!
+sleep 1
+t0=$(date +%s%N)
+moved="$(q "SELECT pgcolumnar.tier_partition('w_jan', 'tier_pq', '$W/w_jan.parquet');")"
+waited=$(( ($(date +%s%N) - t0) / 1000000 ))
+wait "$writer"
+echo "-- the move waited ${waited} ms for the writer"
+check_num "premise: the move started while the insert was in flight, and waited for it" \
+	"$([ "$waited" -ge 1000 ] && echo 1 || echo "waited only $waited ms")" "1"
+check "a write in flight when the move starts is in the exported rows" \
+	"$moved|$(q "SELECT count(*) FROM w;")|$(q "SELECT count(*) FROM w WHERE note = 'in flight';")" \
+	"$((wj + 1))|$((wb + 1))|1"
+
+# ---- isolation: a writer that commits between the caller's snapshot and the lock
+# Measured by @jdatcmd on #1295: the SHARE lock does not refresh a REPEATABLE READ
+# snapshot, so the export missed rows that DROP then took with the partition.
+iso_sqlstate() { sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' "$1" | head -1; }
+n=0
+for lvl in "read committed" "repeatable read" "serializable"; do
+	n=$((n + 1)); build i
+	ib="$(q "SELECT count(*) FROM i;")"; ij="$(q "SELECT count(*) FROM i_jan;")"
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-v VERBOSITY=sqlstate -c "BEGIN ISOLATION LEVEL $lvl" -c "SELECT 'seen=' || count(*) FROM i_jan" \
+		-c "SELECT pg_sleep(2)" \
+		-c "SELECT 'moved=' || pgcolumnar.tier_partition('i_jan', 'tier_pq', '$W/i_$n.parquet')" \
+		-c "COMMIT" > "$W/iso_$n.out" 2>&1 &
+	mover=$!
+	sleep 1
+	q "INSERT INTO i_jan VALUES ('2026-01-20 12:00:00+00', 7, 7, 'committed between');" >/dev/null
+	wait "$mover"
+	check_num "premise: at $lvl the caller's snapshot was taken before the writer committed" \
+		"$(sed -n 's/^seen=//p' "$W/iso_$n.out")" "$ij"
+	check "at $lvl a row committed between the caller's snapshot and the lock survives" \
+		"$(q "SELECT count(*) FROM i;")|$(q "SELECT count(*) FROM i WHERE note = 'committed between';")" "$((ib + 1))|1"
+	if [ "$lvl" = "read committed" ]; then
+		check "at read committed the move goes ahead and exports that row" \
+			"$(sed -n 's/^moved=//p' "$W/iso_$n.out")|$(q "SELECT relkind FROM pg_class WHERE oid = 'i_jan'::regclass;")" "$((ij + 1))|f"
+	else
+		check "at $lvl the move is refused, and the rows stay local" \
+			"$(iso_sqlstate "$W/iso_$n.out")|$(q "SELECT relkind FROM pg_class WHERE oid = 'i_jan'::regclass;")" "25000|r"
+	fi
+done
+
+# ---- refused up front: what ATTACH or DROP would trip over --------------------
+# Each refusal leaves the rows local and writes no file: before this, a UNIQUE
+# index on the parent surfaced at ATTACH, after the export, as an orphan file.
+refused_cleanly() {	# refused_cleanly TABLE PATH -> "rows|relkind|file"
+	echo "$(digest "$1")|$(q "SELECT relkind FROM pg_class WHERE oid = '${1}_jan'::regclass;")|$([ -e "$2" ] && echo file || echo nofile)"
+}
+build u
+psql_run "CREATE UNIQUE INDEX u_key ON u (ts);"
+ub="$(digest u)"
+check "a parent with a UNIQUE index is refused before anything moves" \
+	"$(sqlstate "SELECT pgcolumnar.tier_partition('u_jan', 'tier_pq', '$W/u.parquet');")|$(refused_cleanly u "$W/u.parquet")" \
+	"0A000|$ub|r|nofile"
+
+build d
+db="$(digest d)"
+# Each dependent made and removed in statements of its own, with a premise that it
+# exists: a multi-statement -c is one transaction, and in the first draft a failed
+# CREATE rolled back the DROP of the case before, so the foreign-key arm passed
+# on a leftover trigger and tested nothing.
+dep_case() {	# dep_case PATH PREMISE_SQL -> "premise|sqlstate|rows|relkind|file"
+	echo "$(q "$2")|$(sqlstate "SELECT pgcolumnar.tier_partition('d_jan', 'tier_pq', '$1');")|$(refused_cleanly d "$1")"
+}
+psql_run "CREATE VIEW d_view AS SELECT * FROM d_jan;"
+check "a partition a view depends on is refused before anything moves" \
+	"$(dep_case "$W/d1.parquet" "SELECT count(*) FROM pg_views WHERE viewname = 'd_view';")" "1|2BP01|$db|r|nofile"
+psql_run "DROP VIEW d_view;"
+psql_run "ALTER TABLE d_jan ENABLE ROW LEVEL SECURITY;"
+psql_run "CREATE POLICY d_pol ON d_jan USING (dev > 0);"
+check "a partition with a row-level policy is refused before anything moves" \
+	"$(dep_case "$W/d2.parquet" "SELECT count(*) FROM pg_policy WHERE polname = 'd_pol';")" "1|2BP01|$db|r|nofile"
+psql_run "DROP POLICY d_pol ON d_jan;"
+psql_run "ALTER TABLE d_jan DISABLE ROW LEVEL SECURITY;"
+psql_run "CREATE FUNCTION d_trg() RETURNS trigger LANGUAGE plpgsql AS \$\$BEGIN RETURN NEW; END\$\$;"
+psql_run "CREATE TRIGGER d_local BEFORE UPDATE ON d_jan FOR EACH ROW EXECUTE FUNCTION d_trg();"
+check "a partition with a trigger of its own is refused before anything moves" \
+	"$(dep_case "$W/d3.parquet" "SELECT count(*) FROM pg_trigger WHERE tgname = 'd_local';")" "1|2BP01|$db|r|nofile"
+psql_run "DROP TRIGGER d_local ON d_jan;"
+# A foreign key REFERENCING a columnar table is refused by pgcolumnar itself (row
+# locking), so the case that can arise is one the partition holds: a foreign
+# table cannot carry it, and DROP would take it.
+psql_run "CREATE TABLE d_dev (k int PRIMARY KEY) USING heap;"
+psql_run "INSERT INTO d_dev SELECT g FROM generate_series(0, 12) g;"
+psql_run "ALTER TABLE d_jan ADD CONSTRAINT d_fk FOREIGN KEY (dev) REFERENCES d_dev (k);"
+check "a partition with a foreign key of its own is refused before anything moves" \
+	"$(dep_case "$W/d4.parquet" "SELECT count(*) FROM pg_constraint WHERE conname = 'd_fk';")" "1|2BP01|$db|r|nofile"
+psql_run "ALTER TABLE d_jan DROP CONSTRAINT d_fk;"
+check_num "with the dependents gone, the same partition moves" \
+	"$(q "SELECT pgcolumnar.tier_partition('d_jan', 'tier_pq', '$W/d5.parquet');")" "8928"
+
+# ---- what the foreign table carries over --------------------------------------
+build a
+psql_run "CREATE ROLE tier_reader; GRANT SELECT ON a_jan TO tier_reader;
+          COMMENT ON TABLE a_jan IS 'January, cold';"
+check_num "premise: the cold partition was moved with its grant and comment set" \
+	"$(q "SELECT pgcolumnar.tier_partition('a_jan', 'tier_pq', '$W/a.parquet');")" "8928"
+check "the foreign partition keeps the partition's grants and comment" \
+	"$(q "SELECT relkind::text || '|' || has_table_privilege('tier_reader', 'a_jan', 'SELECT') || '|' ||
+	         coalesce(obj_description('a_jan'::regclass, 'pg_class'), '-') FROM pg_class WHERE oid = 'a_jan'::regclass;")" \
+	"f|true|January, cold"
+
+# ---- an insert routed to the cold partition, racing the swap ------------------
+# The mover holds SHARE on the partition and then asks for ACCESS EXCLUSIVE on the
+# parent; an insert through the parent holds ROW EXCLUSIVE on the parent and waits
+# for the partition. Whichever side the deadlock detector aborts, every row must
+# be exactly once.
+build r
+rb="$(q "SELECT count(*) FROM r;")"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At -v VERBOSITY=sqlstate \
+	-c "SET pgcolumnar.tier_fault_after = 'pause'" \
+	-c "SELECT 'moved=' || pgcolumnar.tier_partition('r_jan', 'tier_pq', '$W/r.parquet')" > "$W/race_mover.out" 2>&1 &
+mover=$!
+sleep 1
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At -v VERBOSITY=sqlstate \
+	-c "INSERT INTO r VALUES ('2026-01-26 08:00:00+00', 3, 3, 'raced')" > "$W/race_writer.out" 2>&1
+wait "$mover"
+echo "-- race: mover [$(tr '\n' ' ' < "$W/race_mover.out")] writer [$(tr '\n' ' ' < "$W/race_writer.out")]"
+raced="$(q "SELECT count(*) FROM r WHERE note = 'raced';")"
+check_num "premise: one side of the race gave way or both went through, and nothing hung" \
+	"$(grep -c 'moved=\|ERROR' "$W/race_mover.out")" "1"
+check "an insert racing the move leaves every row exactly once, whichever side gives way" \
+	"$(q "SELECT count(*) FROM r;")|$raced" "$((rb + raced))|$raced"
+
+# ---- a bounded wait for the parent's lock -------------------------------------
+build l
+lb="$(digest l)"
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	-c "BEGIN" -c "SELECT count(*) FROM l" -c "SELECT pg_sleep(6)" -c "COMMIT" >/dev/null 2>&1 &
+reader=$!
+sleep 1
+t0=$(date +%s%N)
+lk="$(sqlstate "SELECT pgcolumnar.tier_partition('l_jan', 'tier_pq', '$W/l.parquet', lock_wait => '1 second');")"
+lms=$(( ($(date +%s%N) - t0) / 1000000 ))
+wait "$reader"
+echo "-- the move gave up on the parent's lock after ${lms} ms"
+check "a parent held by a long reader times the move out, as lock_wait says" \
+	"$lk|$([ "$lms" -lt 4000 ] && echo prompt || echo "took $lms ms")" "55P03|prompt"
+check "and the timed-out move leaves the rows local, with nothing attached" \
+	"$(digest l)|$(q "SELECT relkind FROM pg_class WHERE oid = 'l_jan'::regclass;")" "$lb|r"
+
+# The bound is set for the move's own locks only: set_config(..., true) would
+# otherwise last to the end of the caller's transaction.
+build t
+lt="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	-c "BEGIN" -c "SET LOCAL lock_timeout = '7s'" \
+	-c "SELECT 'moved=' || pgcolumnar.tier_partition('t_jan', 'tier_pq', '$W/t.parquet', lock_wait => '3 seconds')" \
+	-c "SHOW lock_timeout" -c "ROLLBACK" 2>&1)"
+check "premise: the move ran inside the caller's transaction" "$(sed -n 's/^moved=//p' <<<"$lt")" "8928"
+check "after the move the caller's lock_timeout is the caller's again" "$(sed -n '/^moved=/{n;p}' <<<"$lt")" "7s"
+
+# ---- a retry after a failure, over the file the failure left ------------------
+build o
+ob="$(digest o)"
+o_err="$(errtext "SET pgcolumnar.tier_fault_after = 'export'" \
+	"SELECT pgcolumnar.tier_partition('o_jan', 'tier_pq', '$W/o.parquet')")"
+check "premise: the first attempt failed after export and left its file" \
+	"$(grep -o 'injected fault after export' <<<"$o_err")|$([ -e "$W/o.parquet" ] && echo file || echo nofile)" \
+	"injected fault after export|file"
+check "a retry over the failed attempt's file moves the partition, exactly once" \
+	"$(q "SELECT pgcolumnar.tier_partition('o_jan', 'tier_pq', '$W/o.parquet');")|$(digest o)|$(q "SELECT relkind FROM pg_class WHERE oid = 'o_jan'::regclass;")" \
+	"8928|$ob|f"
 
 # ---- a failure after each step ----------------------------------------------
 for step in export detach drop create attach; do

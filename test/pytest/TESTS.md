@@ -143,6 +143,7 @@ behaviour, the source of that number is named.
 - [95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading](#95-test_docs_how_to_sectionspy-the-pg_partman-how-to-keeps-its-own-heading)
 - [96. test_autovacuum_expire.py: the daemon expires retention tables only when told to](#96-test_autovacuum_expirepy-the-daemon-expires-retention-tables-only-when-told-to)
 - [97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-and-equal-a-full-recompute)
+- [98. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once](#98-test_tier_partitionpy-tier_partition-moves-a-cold-partition-to-parquet-exactly-once)
 
 ## 1. How to read a test in here
 
@@ -6619,3 +6620,26 @@ Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation 
 | test | what it holds |
 | --- | --- |
 | `test_rollup_phase_one` | the rollup equals a full recompute after the first refresh, appends with late rows, a bulk append, and a rebase; a refresh with nothing new folds nothing; rows committed during a refresh are folded by the next, once; two concurrent refreshes fold each row once; zones agree; a refresh after a small append reads under a fifth of the source; a rewritten source is refused until `rebase_rollup`; a delete is refused (phase 1); a heap rollup behaves the same; REPEATABLE READ is refused; an owner who is not a superuser creates and refreshes a rollup, and another role sees none of it; bad definitions are refused with `22023` |
+
+## 98. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once
+
+Port of `tier_partition.sh` (#1295). The owner's decision on #1295: the move is atomic, with a brief ACCESS EXCLUSIVE on the parent. The export runs under the partition's SHARE lock. Then the function detaches and drops the partition, creates a foreign table with the partition's own name, columns, owner, grants and comment, and attaches it with the partition's own bounds.
+
+EXACTLY ONCE IS TESTED, NOT ARGUED. The developer GUC `pgcolumnar.tier_fault_after` raises an error right after the step it names (`pause` sleeps instead, for the race arm). Each fault arm first requires that the error raised is the injected one: a missing function also fails and leaves the rows where they were.
+
+What the arms found, in order:
+- `pg_stat_file(...) IS NOT NULL` is false for an existing file, because `creation` is NULL on Linux, so the first existing-path refusal never fired, and a second move overwrote a file another partition was reading.
+- Without the SHARE lock, a write in flight when the move started was dropped with the partition.
+- @jdatcmd's review: at REPEATABLE READ or SERIALIZABLE the SHARE lock does not refresh the snapshot. The first version, at those levels, exported without a row that another session committed between the caller's snapshot and the lock, and dropped it: `16992|0` where `16993|1` was owed. Those levels are now refused (`25000`).
+- The first version silently moved a partition with a row-level policy, dropping the policy, and left an orphan file behind a UNIQUE index on the parent. Both are refused before anything moves now, as are a view, a trigger of its own and a foreign key of its own.
+- A foreign key REFERENCING a columnar table is refused by pgcolumnar itself, so it cannot arise. In the first draft of that arm the setup failed, rolled back the previous case's DROP with it (a multi-statement string is one transaction), and the arm passed on a leftover trigger. Each dependent is now made in statements of its own, with a premise that it exists, and a control arm shows the same partition moves once they are gone.
+- The deadlock @jdatcmd predicted is real: an insert through the parent racing the move ends with one side cancelled (`40P01`), and every row is still exactly once.
+
+On a private database, because foreign servers are per database. A local path stands in for object storage. The pytest half uses connections in threads where the shell half uses background sessions.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_tier_partition_moves_a_partition_exactly_once` | the move returns the rows moved; the parent's answers are the same; the cold range is a foreign partition with the same name and bound, reading the exported file; no pgcolumnar catalog rows are left; pruning keeps the ranges apart; an insert into the tiered range is refused; five refusals move nothing; the parent is held ACCESS EXCLUSIVE until commit, and a rollback leaves the rows local; a write in flight is exported; a fault after each of the five steps leaves the rows exactly once, still local |
+| `test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency` | at each isolation level a row committed between the snapshot and the lock survives, and only READ COMMITTED moves; a UNIQUE parent and four kinds of dependent are refused with no file left, and the partition moves once they are gone; grants and comment carry over; a racing insert leaves every row once; lock_wait times a held parent out with nothing attached; the caller's lock_timeout survives; a retry over a failed attempt's file moves the partition |

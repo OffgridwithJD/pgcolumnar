@@ -507,6 +507,75 @@ and refreshes only the rollups that it owns.
 
 `test/rollup.sh` checks each of these statements.
 
+## Move cold partitions to Parquet
+
+`pgcolumnar.tier_partition` moves one columnar partition into a Parquet file.
+It then attaches the file as a foreign partition with the same name, bounds,
+grants and comment. Queries on the parent return the same rows before and after
+the move.
+
+```sql
+CREATE SERVER cold FOREIGN DATA WRAPPER pgcolumnar_parquet;
+
+SELECT pgcolumnar.tier_partition('metrics_2026_01', 'cold',
+                                 's3://archive/metrics/2026_01.parquet');
+```
+
+The function returns the number of rows that it moved. It runs as one
+transaction: if it fails at any step, the rows stay in the columnar partition,
+exactly once.
+
+**Run it at READ COMMITTED.** The function refuses `REPEATABLE READ` and
+`SERIALIZABLE` (`25000`). An older snapshot does not see rows that other
+sessions committed just before the move. Those rows would be dropped with the
+partition, not exported.
+
+**It locks the parent briefly.** The export runs under a `SHARE` lock on the
+partition, so writes to that partition wait and reads continue. Then the
+function holds `ACCESS EXCLUSIVE` on the parent until it commits. That lock
+covers the catalog changes only, not the export.
+
+**Every lock waits at most `lock_wait`.** The default is 10 seconds. A long
+query on the parent would otherwise make every new query wait behind the move.
+When the wait runs out, the move fails with `55P03` and the rows stay where they
+were:
+
+```sql
+SELECT pgcolumnar.tier_partition('metrics_2026_01', 'cold',
+                                 's3://archive/metrics/2026_01.parquet',
+                                 lock_wait => '2 seconds');
+```
+
+An insert into the partition's range that runs at the same moment can deadlock
+with the move. PostgreSQL then cancels one of the two (`40P01`). Either way,
+every row is stored exactly once.
+
+**A failed attempt leaves its file behind.** A transaction cannot remove a file
+that it wrote. You can retry with the same `path`: the function overwrites a
+file that no foreign table in the database reads. It refuses a `path` that a
+foreign table in this database reads (`58P02`). It cannot see readers outside
+the database, so do not reuse a path that another system reads.
+
+The function refuses these partitions before it moves anything:
+
+- A `DEFAULT` partition, a partition that is not columnar, or a table that is
+  not a partition.
+- A partition whose parent has a `UNIQUE` index or a primary key. A foreign
+  table cannot be attached under one.
+- A partition that a view depends on (`2BP01`).
+- A partition that has a row-level policy, a trigger of its own, or a foreign
+  key of its own (`2BP01`). Dropping the partition would remove these objects.
+
+After the move:
+
+- An insert into the moved range fails, because a Parquet foreign table is
+  read-only.
+- Partition pruning works as before. A query that touches only the local
+  partitions does not read the Parquet file.
+
+`test/tier_partition.sh` checks each of these statements. It uses a local path,
+not object storage.
+
 ## Keep tables optimized automatically
 
 A background daemon can compact and recluster tables on a schedule. The threshold
