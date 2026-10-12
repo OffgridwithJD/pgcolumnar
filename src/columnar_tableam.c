@@ -963,6 +963,43 @@ pgcolumnar_plan_has_columnar_tidrange(Plan *plan, List *rtable, int *maxid)
 #define PGC_PLANNER_ARGS	parse, query_string, cursorOptions, boundParams
 #endif
 
+#ifdef USE_ASSERT_CHECKING
+/* Every plan_node_id in a plan tree, and whether any repeats. */
+static void
+pgcolumnar_plan_ids(Plan *plan, Bitmapset **seen, bool *dup)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+	if (bms_is_member(plan->plan_node_id, *seen))
+		*dup = true;
+	*seen = bms_add_member(*seen, plan->plan_node_id);
+	pgcolumnar_plan_ids(plan->lefttree, seen, dup);
+	pgcolumnar_plan_ids(plan->righttree, seen, dup);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				pgcolumnar_plan_ids(lfirst(lc), seen, dup);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				pgcolumnar_plan_ids(lfirst(lc), seen, dup);
+			break;
+		case T_SubqueryScan:
+			pgcolumnar_plan_ids(((SubqueryScan *) plan)->subplan, seen, dup);
+			break;
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				pgcolumnar_plan_ids(lfirst(lc), seen, dup);
+			break;
+		default:
+			break;
+	}
+}
+#endif
+
 static PlannedStmt *
 pgcolumnar_planner(PGC_PLANNER_PARAMS)
 {
@@ -1004,8 +1041,37 @@ pgcolumnar_planner(PGC_PLANNER_PARAMS)
 												   tle->resname, tle->resjunk));
 		}
 		mat->targetlist = tlist;
+
+		/*
+		 * A node id of its own, above every id in the final plan:
+		 * set_plan_references numbers the main tree and then the subplans from
+		 * one counter, so the main tree's largest id is not the largest (#1306
+		 * review). The walker above stops at the main tree, so the subplans'
+		 * ids are folded in here.
+		 */
+		foreach(lc, stmt->subplans)
+		{
+			int			subid = 0;
+
+			(void) pgcolumnar_plan_has_columnar_tidrange((Plan *) lfirst(lc),
+														 stmt->rtable, &subid);
+			maxid = Max(maxid, subid);
+		}
 		mat->plan_node_id = maxid + 1;
 		stmt->planTree = mat;
+#ifdef USE_ASSERT_CHECKING
+		{
+			/* plannodes.h: plan_node_id is unique across the final plan tree */
+			Bitmapset  *seen = NULL;
+			bool		dup = false;
+
+			pgcolumnar_plan_ids(stmt->planTree, &seen, &dup);
+			foreach(lc, stmt->subplans)
+				pgcolumnar_plan_ids((Plan *) lfirst(lc), &seen, &dup);
+			if (dup)
+				elog(ERROR, "pgcolumnar: duplicate plan_node_id after adding a Material above a cursor's plan");
+		}
+#endif
 	}
 	return stmt;
 }

@@ -6510,9 +6510,11 @@ Removal proofs, each red on PostgreSQL 19 on the arm named:
 - without the planner hook: both cursor arms;
 - with the hook for SCROLL cursors only: the plain-cursor arm.
 
+THE MATERIAL'S NODE ID. `set_plan_references` numbers the main tree and then the subplans from one counter, so the Material's id must be above the subplans' ids too; the first version took the main tree's largest and repeated a subplan's id (found by @jdatcmd). An assert build checks that every id in the final plan is unique and raises an error otherwise. So `a SCROLL cursor whose query has a subplan fetches backward as the filter's plan does` was red (`XX000`) before the fix on assert builds. On a release build it checks the fetches alone.
+
 ### Every test
 
 | test | what it holds |
 | --- | --- |
-| `test_a_ctid_range_reads_only_its_row_groups` | the table has its rows and many groups; a ctid range plans a TID range scan; eleven ranges, including offsets 0, 291, 500 and 65535, return what the per-row filter returns; a rescanned scan does too; a SCROLL cursor and a plain cursor fetch backward correctly; rows inserted earlier in the transaction are in the range; the tail range reads at least one block and under a fifth of the table; deleted rows stay deleted; after compaction moves rows, ranges over the old and new addresses return what the filter returns |
+| `test_a_ctid_range_reads_only_its_row_groups` | the table has its rows and many groups; a ctid range plans a TID range scan; eleven ranges, including offsets 0, 291, 500 and 65535, return what the per-row filter returns; a rescanned scan does too; a SCROLL cursor and a plain cursor fetch backward correctly, and so does a SCROLL cursor whose query has a subplan; rows inserted earlier in the transaction are in the range; the tail range reads at least one block and under a fifth of the table; deleted rows stay deleted; after compaction moves rows, ranges over the old and new addresses return what the filter returns |
 | `test_a_parallel_tid_range_scan_returns_what_the_filter_returns` | PostgreSQL 19+: the range runs as a parallel TID range scan with two workers launched, and returns what the filter returns. Below 19, `UNSUPPORTED_MAJOR` |

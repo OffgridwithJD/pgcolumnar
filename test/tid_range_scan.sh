@@ -92,6 +92,20 @@ check "a SCROLL cursor over a ctid range fetches backward as the filter's plan d
 check "a plain cursor over a ctid range answers a backward fetch correctly" \
 	"$(cursor_run on plain)" "$(cursor_run off SCROLL)"
 
+# A cursor whose query has a subplan: the Material's node id must not repeat one
+# of the subplan's (#1306 review). set_plan_references numbers the main tree, then
+# the subplans, from one counter; an assert build checks the ids are unique.
+SQ="SELECT id, (SELECT max(id) FROM tr) AS top FROM tr WHERE ctid >= '$MID_A' AND ctid <= '$MID_B'"
+sub_cursor() {	# sub_cursor on|off -> the fetches of a SCROLL cursor over SQ
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-v VERBOSITY=sqlstate -c "SET enable_tidscan = $1" -c "BEGIN" -c "DECLARE c SCROLL CURSOR FOR $SQ" \
+		-c "FETCH LAST FROM c" -c "FETCH BACKWARD 2 FROM c" -c "COMMIT" 2>&1 | tr '\n' ' '
+}
+check "premise: the subquery cursor plans a TID range scan and a subplan" \
+	"$(q "EXPLAIN $SQ;" | grep -c 'Tid Range Scan\|InitPlan')" "2"
+check "a SCROLL cursor whose query has a subplan fetches backward as the filter's plan does" \
+	"$(sub_cursor on)" "$(sub_cursor off)"
+
 # Rows written earlier in the same transaction: set_tidrange reads the row-group
 # catalog, and the pending writes must be in it by then (#1306 review).
 same_xact() {	# same_xact on|off -> count|digest of the range after an insert in the same transaction
