@@ -1234,4 +1234,13 @@ suites_not_covered 247
 #     never         1651 + 2 = 1653
 #     dated          208 + 5 =  213
 #     1653 + 213 == 1866
-checks_never_observed_red 1653
+# #1293 (OffgridwithJD): 1653 -> 1660. latest_reading enters the ledger with 8
+# checks from a five-major run. One is dated: "the LATERAL form returns what
+# DISTINCT ON returns", by the document's recipe edited to order ascending, which
+# returns each device's first reading. The other 7 arrive `never`.
+#
+#     ledger rows   1866 + 8 = 1874
+#     never         1653 + 7 = 1660
+#     dated          213 + 1 =  214
+#     1660 + 214 == 1874
+checks_never_observed_red 1660

@@ -132,6 +132,7 @@ behaviour, the source of that number is named.
 - [84. test_native_format.py: the format stamp is a range, and an append raises it](#84-test_native_formatpy-the-format-stamp-is-a-range-and-an-append-raises-it)
 - [85. test_native_agg.py: min/max over timestamptz read no data](#85-test_native_aggpy-minmax-over-timestamptz-read-no-data)
 - [86. test_format_downgrade.py: an alpha4 binary refuses what this build wrote](#86-test_format_downgradepy-an-alpha4-binary-refuses-what-this-build-wrote)
+- [87. test_latest_reading.py: the latest-reading recipe does what the document says](#87-test_latest_readingpy-the-latest-reading-recipe-does-what-the-document-says)
 
 ## 1. How to read a test in here
 
@@ -6383,3 +6384,23 @@ Removal proof: with `COLUMNAR_NATIVE_FORMAT_VERSION` set back to 1, the stamps r
 | --- | --- |
 | `test_an_alpha4_binary_refuses_what_this_build_wrote` | the old build stores both tables; the libraries differ; the upgrade succeeds and this build reads the old table; the stamps are `1 2 2` for read, appended and new; on the old library again, the table only read is still read and fetched by index, and the appended and new tables are refused with `0A000` on a scan and on an index fetch |
 | `test_the_library_swap_declines_beside_other_workers` | the decision that makes the swap decline beside other xdist workers, driven with the environments pytest-xdist sets: a serial run and a one-worker run proceed, a run beside three other workers declines, and a worker with no stated count is treated as not alone. A backend another worker started during the swap would load alpha4 against this tree's catalogs and fail in an unrelated test; atomic renames protect only processes that had already mapped the library (found by @jdatcmd). Under `-n`, the swap test declines as `UNMET_PRECONDITION` with that reason, so a parallel run ends INCOMPLETE naming it rather than risking someone else's test |
+
+## 87. test_latest_reading.py: the latest-reading recipe does what the document says
+
+Port of `latest_reading.sh` (#1293). The recipe's SQL is read out of `docs/how-to.md`'s "Find the latest reading per device" section, by this file's own extraction (Python, not the shell twin's awk). So an edit to the document is what runs: a recipe that stops returning the right rows, or stops being cheap, turns this red. The approach is jdatcmd's, from #1288.
+
+Measured on #1293 with 10 million rows and 1,000 devices: `DISTINCT ON` took 5.6 s, the btree plus `LATERAL` form 45 ms, and the same `LATERAL` without the btree 12.6 minutes. Asserted here: each documented form returns exactly the rows `DISTINCT ON` returns; with the btree the `LATERAL` form reads under a tenth of the table; and without it the table is read about once per device, which is the trap the document warns about.
+
+A ZERO IS NOT A MEASUREMENT. On the shell twin, the red run before the section existed passed "under a tenth of the table" on empty SQL: a query that reads nothing reads under a tenth of anything. Reading at least one block is now its own premise.
+
+THE FIXTURE NEEDS MANY ROWS PER DEVICE. The `LATERAL` form costs about a block per device whatever the table's size, so at 5,000 rows per device it read 45 blocks of a 177-page table and "a tenth" failed. Here it is 36,000 rows per device.
+
+On a private database, because the document names its tables, `readings` and `devices`.
+
+Removal proof: the document's `LATERAL` edited to `ORDER BY ts` (ascending) returns each device's first reading, and `the LATERAL form returns what DISTINCT ON returns` fails. On the shell twin that is the only red, on every major.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_latest_reading_recipe_does_what_the_document_says` | the document's three blocks are found; the table holds its rows; without the btree the `LATERAL` form reads the table about once per device; the `GROUP BY` form and, with the document's index, the `LATERAL` form return the rows `DISTINCT ON` returns; the indexed `LATERAL` reads at least one block and under a tenth of the table |
