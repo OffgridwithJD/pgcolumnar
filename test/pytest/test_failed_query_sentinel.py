@@ -67,6 +67,8 @@ _LEFT_OPERAND_KIND = {
     "plan": "EXPLAIN plan, not a query value",
     "exc": "exception object, not a query value",
     "reason": "unrunnable declaration, not a comparison",
+    "capability": "a decline on an optional capability (#1215), not a comparison",
+    "module": "an optional module imported or declined on (#1215), not a comparison",
 }
 
 

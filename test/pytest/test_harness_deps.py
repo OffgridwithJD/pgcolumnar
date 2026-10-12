@@ -73,6 +73,9 @@ NO_CLUSTER = [
     "test_suite_accounting.py",
     # #1288: reads docs/*.md and README.md only.
     "test_docs_cross_database_query.py",
+    # #1215: inner pytest runs of expect.declines and require_module. Needs no
+    # cluster and no driver; it never reaches into the shell harness.
+    "test_capability_decline.py",
     # The classifier's own controls, split out of this file so the job whose file
     # list IS this list actually runs them. This file cannot be in the list: it
     # hands cluster-bound file names to pytest, so it needs what they need.

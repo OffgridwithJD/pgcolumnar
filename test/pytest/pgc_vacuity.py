@@ -20,6 +20,7 @@ were added for issue #418 after "empty compared with empty" printed PASS, and
 """
 
 import ast
+import os
 import numbers
 import pathlib
 import re
@@ -232,7 +233,15 @@ EXIT_INCOMPLETE = 67
 # no outcome recorded, which is the reconciliation failure itself. SKIP has no
 # counterpart here: a bare skip is refused at collection, and the honest form is
 # expect.cannot_run(), which records UNRUN.
-RECORD_VERDICTS = ("PASS", "FAIL", "UNRUN")
+RECORD_VERDICTS = ("PASS", "FAIL", "UNRUN", "DECLINED")
+
+# The capabilities a test may DECLINE on, rather than declare unrunnable (#1215, the
+# owner's decision of 2026-10-12, mirrored from lib.sh's pgc_skip). A decline is a
+# named outcome that leaves the run green; everything else that cannot run goes
+# through cannot_run and ends the run INCOMPLETE. Closed, so "optional" cannot grow
+# by one call site at a time. PGC_REQUIRE (comma-separated) names capabilities that
+# must be present here, as CI does, and turns a decline of them into a failure.
+DECLINABLE_CAPABILITIES = ("pyarrow",)
 
 
 class VacuityError(AssertionError):
@@ -347,6 +356,7 @@ class Expect:
         self.nodeid = nodeid
         self._records = []
         self.unrunnable = None
+        self.declined = None
 
     @property
     def records(self):
@@ -420,6 +430,11 @@ class Expect:
         operation; it is phase 2's work and is not claimed here. What IS claimed
         here is the count, which the probe above shows is 2 and correct.
         """
+        if self.declined is not None and verdict != "DECLINED":
+            raise VacuityError(
+                f"{name}: a check recorded after this test declined on "
+                f"{self.declined!r}. A decline means the test measured nothing, so it "
+                f"must be the test's only outcome: return right after declines().")
         self._records.append(_Record(name, verdict, reason))
 
     # -- numbers -----------------------------------------------------------
@@ -1024,6 +1039,64 @@ class Expect:
 
     # -- the third state ---------------------------------------------------
     @_resolving
+    def declines(self, capability, *, name, detail=""):
+        """Decline this test because an OPTIONAL capability is absent (#1215).
+
+        A named outcome, verdict DECLINED, that leaves the run green. The shell's
+        pgc_skip does the same for pyarrow; the two harnesses do not call each
+        other. Five things keep it from becoming a way to stop asserting quietly
+        (OffgridwithJD, review of #1286):
+
+          - only a capability in DECLINABLE_CAPABILITIES may decline;
+          - where PGC_REQUIRE names the capability -- CI -- this FAILS instead;
+          - it must be the test's first outcome, and no check may follow it;
+          - require_module() declines only on the module being ABSENT;
+          - each decline is printed by name, and counted in the accounting line.
+        """
+        if capability not in DECLINABLE_CAPABILITIES:
+            raise VacuityError(
+                f"{name}: {capability!r} is not a declinable capability "
+                f"{DECLINABLE_CAPABILITIES}. A missing dependency that is not optional "
+                f"is unrunnable: use cannot_run('MISSING_DEPENDENCY', ...).")
+        if self._records:
+            raise VacuityError(
+                f"{name}: a decline must be the test's first outcome, and this test "
+                f"already recorded {len(self._records)} check(s). A test that half ran "
+                f"and then declined would read as one that measured nothing.")
+        required = [c.strip() for c in os.environ.get("PGC_REQUIRE", "").split(",")
+                    if c.strip()]
+        # ONE record, after every refusal: a VacuityError raised after the record
+        # would be recorded as a failed assertion (test_every_refusal_precedes_its_
+        # record). Where the capability is required, the record is a FAIL and the
+        # AssertionError below is the ordinary failure of a comparison.
+        must_have = capability in required
+        self._record(name, verdict="FAIL" if must_have else "DECLINED",
+                     reason=f"{capability}: {detail}".rstrip(": "))
+        if must_have:
+            raise AssertionError(
+                f"{name}: PGC_REQUIRE names {capability}, so it must be present here, "
+                f"and it is not: {detail}")
+        self.declined = capability
+
+    def require_module(self, module, *, name):
+        """-> the imported module, or None after declining because it is ABSENT.
+
+        Declines only on ModuleNotFoundError naming the module or its top-level
+        package. A module that is installed but broken -- an ImportError raised from
+        inside it, or an OSError loading its library -- propagates and fails the test,
+        because a broken install is not an absent one.
+        """
+        import importlib
+        top = module.split(".")[0]
+        try:
+            return importlib.import_module(module)
+        except ModuleNotFoundError as e:
+            if e.name not in (module, top):
+                raise
+            self.declines(top, name=name, detail=f"{module} is not installed")
+            return None
+
+    @_resolving
     def cannot_run(self, reason, detail="", *, name=None):
         """Declare this test unrunnable. Not a pass, and not a silent skip.
 
@@ -1296,6 +1369,7 @@ class _RecordCollector:
     def __init__(self):
         self.records = []      # (nodeid, verdict, name)
         self.offences = []
+        self.declined = []     # (nodeid, name, reason): the capability is in reason
 
     def pytest_runtest_logreport(self, report):
         if report.when != "call":
@@ -1305,6 +1379,8 @@ class _RecordCollector:
         for key, value in getattr(report, "user_properties", ()):
             if key == "pgc_records_held":
                 held = value
+            elif key == "pgc_declined":
+                self.declined.extend((report.nodeid, n, r) for n, r in value)
             elif key == "pgc_records":
                 arrived = list(value)
         if held is None and arrived is None:
@@ -1351,6 +1427,13 @@ def pytest_runtest_makereport(item, call):
             report.user_properties.append(("pgc_records_held", rec.count))
             report.user_properties.append(
                 ("pgc_records", [(r.verdict, r.name) for r in rec.records]))
+            # A decline's capability rides in its reason, which pgc_records does not
+            # carry. Its own property, like pgc_unrunnable, so the record pairs that
+            # the reconciliation compares keep their shape.
+            if rec.declined is not None:
+                report.user_properties.append(
+                    ("pgc_declined", [(r.name, r.reason) for r in rec.records
+                                      if r.verdict == "DECLINED"]))
     return report
 
 
@@ -1367,6 +1450,13 @@ def pytest_terminal_summary(terminalreporter):
     claims in one test and one in another, where a per-test count would say 2 and
     the records say 5.
     """
+    # DIRECT IMPORTS OF A DECLINABLE CAPABILITY, named whatever collection did. A file
+    # whose top-level import fails yields no items, so no hook that walks items ever
+    # sees it -- measured: the scan found the file and nothing printed.
+    # pytest_sessionfinish turns the same list into a failure.
+    for site in getattr(terminalreporter.config, "pgc_capability_imports", None) or []:
+        terminalreporter.write_line(f"REFUSED  {site}")
+
     collector = getattr(terminalreporter.config, "pgc_unrunnable", None)
     if collector is not None and collector.items:
         terminalreporter.write_line("")
@@ -1381,10 +1471,17 @@ def pytest_terminal_summary(terminalreporter):
     for _nodeid, verdict, _name in records.records:
         if verdict in tally:
             tally[verdict] += 1
+    if records.declined:
+        terminalreporter.write_line("")
+        for nodeid, nm, why in records.declined:
+            terminalreporter.write_line(f"DECLINED  {nodeid}: {why}: {nm}")
     terminalreporter.write_line(f"checks run: {len(records.records)}")
+    # DECLINED joins the line only when present, so a run with no declines prints the
+    # line every reader and guard already parses, byte for byte.
+    shown = [v for v in RECORD_VERDICTS if v != "DECLINED" or tally[v]]
     terminalreporter.write_line(
         "accounting: "
-        + " + ".join(f"{tally[v]} {v.lower()}" for v in RECORD_VERDICTS)
+        + " + ".join(f"{tally[v]} {v.lower()}" for v in shown)
         + f" = {sum(tally.values())}"
     )
 
@@ -1454,6 +1551,12 @@ def pytest_sessionfinish(session, exitstatus):
     an unrunnable test is a failure, because the failure is the more urgent fact.
     So this only ever moves a run OFF zero, and never off a non-zero status.
     """
+    # A test file that imports a declinable capability outside require_module is
+    # refused (#1286 review): it would fail on a box without the module, or pass
+    # having caught its own ImportError, and either way the decline is not named.
+    if getattr(session.config, "pgc_capability_imports", None) and session.exitstatus == 0:
+        session.exitstatus = 1
+
     # THE RECONCILIATION, FIRST, because it is a statement about whether the run
     # can be believed at all rather than about one test (#937 phase 3).
     #
@@ -1883,6 +1986,63 @@ def _order_guard(_killers=("sorted", "set", "frozenset")):
 
 
 _order_killed_names, _sorted_ordered_sites = _order_guard()
+
+
+def _capability_import_sites(path, capabilities=DECLINABLE_CAPABILITIES):
+    """-> one line per place a test file imports a declinable capability directly.
+
+    A test that imports pyarrow itself, instead of through expect.require_module,
+    fails at import when pyarrow is absent, or worse, wraps the import in its own
+    try and passes having measured nothing. Either way the decline is not named.
+    Read from the AST, so a comment or a string that mentions the module cannot
+    trip it, and every spelling is covered: `import m`, `import m.sub as x`,
+    `from m import x`, `from m.sub import x`, `importlib.import_module('m...')`
+    and `__import__('m...')` (OffgridwithJD, review of #1286).
+    """
+    try:
+        tree = ast.parse(pathlib.Path(path).read_text(), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []
+    base = pathlib.Path(path).name
+    sites = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        elif isinstance(node, ast.Call) and node.args:
+            f = node.func
+            fname = f.attr if isinstance(f, ast.Attribute) else (
+                f.id if isinstance(f, ast.Name) else "")
+            arg = node.args[0]
+            if fname in ("import_module", "__import__") and isinstance(arg, ast.Constant) \
+                    and isinstance(arg.value, str):
+                names = [arg.value]
+        for n in names:
+            top = n.split(".")[0]
+            if top in capabilities:
+                sites.append(f"{base} imports {top} outside require_module "
+                             f"(line {node.lineno})")
+    return sites
+
+
+def pytest_collect_file(file_path, parent):
+    """Scan each test file for direct imports of a declinable capability.
+
+    At FILE collection, before the module is imported: a file whose top-level
+    `import pyarrow` fails produces no items at all, so a scan over items would
+    never see the one file it exists for.
+    """
+    if file_path.suffix == ".py" and file_path.name.startswith("test_"):
+        found = _capability_import_sites(file_path)
+        if found:
+            store = getattr(parent.config, "pgc_capability_imports", None)
+            if store is None:
+                store = []
+                parent.config.pgc_capability_imports = store
+            store.extend(found)
+    return None
 
 
 def _broad_except_sites(path):
