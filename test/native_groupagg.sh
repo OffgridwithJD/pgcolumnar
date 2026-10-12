@@ -500,9 +500,21 @@ psql_run "CREATE TABLE gbm (ts timestamptz, v float8) USING pgcolumnar;
 gbmest() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
 	-d "$PGC_DB" -At -q -c "SET TimeZone='Asia/Kolkata';" -c "$GB" \
 	-c "EXPLAIN (COSTS ON) $1" 2>&1 | grep -oE "rows=[0-9]+" | head -1 | cut -d= -f2; }
-check "a mixed timestamp/timestamptz predicate gets NO bound" \
-	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
-	   WHERE ts >= timestamp '2026-01-01 00:00' AND ts < timestamp '2026-01-01 12:00' GROUP BY b")" -gt 50000 ] && echo yes || echo no)" "yes"
+# WHAT THE MIXED-TYPE RULE PROTECTS, stated directly (#1292). This asserted "gets NO
+# bound", which was the observable sign that the mixed predicate was not used. With the
+# zone maps supplying a range, there is a bound either way, so the arm now asserts the
+# property itself: a wall-clock window read as UTC must never narrow the estimate below
+# the true group count. Under Asia/Kolkata, 04:00-08:00 wall clock is 22:30-02:30 UTC,
+# 150 minutes of data; read as UTC it would clip the data to 04:00-04:48, about 50.
+gbmcount() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+	-d "$PGC_DB" -At -q -c "SET TimeZone='Asia/Kolkata';" -c "SELECT count(*) FROM ($1) z;" 2>&1; }
+GBM_MIXED="SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
+	   WHERE ts >= timestamp '2026-01-01 04:00' AND ts < timestamp '2026-01-01 08:00' GROUP BY b"
+gbm_est="$(gbmest "$GBM_MIXED")"; gbm_act="$(gbmcount "$GBM_MIXED")"
+check "premise: the mixed-type window holds data" \
+	"$([ "${gbm_act:-0}" -ge 100 ] && echo yes || echo "no (${gbm_act:-none} groups)")" "yes"
+check "a mixed timestamp/timestamptz predicate never narrows the estimate below the true count" \
+	"$([ "${gbm_est:-0}" -ge "${gbm_act:-1}" ] && echo yes || echo "no (estimate ${gbm_est:-none} for ${gbm_act:-none} groups)")" "yes"
 check "while a matching-type predicate still gets one" \
 	"$([ "$(gbmest "SELECT date_trunc('minute',ts) b, avg(v) FROM gbm
 	   WHERE ts >= timestamptz '2026-01-01 00:00+00' AND ts < timestamptz '2026-01-01 12:00+00' GROUP BY b")" -lt 5000 ] && echo yes || echo no)" "yes"

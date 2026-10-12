@@ -2041,6 +2041,79 @@ pgcolumnar_groupagg_outmap(List *exprs, List *groupKeys, Index scanrelid,
  *		value is used to make a plan cheaper, so an under-estimate would
  *		under-price the arm and under-size the Finalize's hash table.
  */
+/*
+ * pgcolumnar_zonemap_time_range
+ *		The smallest and largest value of a timestamp column over every row group,
+ *		from the zone maps (#1292). Returns false when any group that holds values
+ *		has no usable zone map for the column -- a column added after the group was
+ *		written, say -- because a range that leaves out one group is not a bound.
+ */
+static bool
+pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsvar,
+							  double *lo, double *hi)
+{
+	RangeTblEntry *rte = planner_rt_fetch(input_rel->relid, root);
+	Relation	r;
+	TupleDesc	td;
+	Form_pg_attribute att;
+	uint64		storageId;
+	Snapshot	snap;
+	List	   *groups;
+	ListCell   *lc;
+	PgColumnarZoneMapSession sess;
+	bool		any = false;
+	bool		ok = true;
+	int			col = tsvar->varattno - 1;
+
+	if (rte == NULL || !OidIsValid(rte->relid) || tsvar->varattno <= 0)
+		return false;
+	r = table_open(rte->relid, AccessShareLock);
+	td = RelationGetDescr(r);
+	if (col >= td->natts)
+	{
+		table_close(r, AccessShareLock);
+		return false;
+	}
+	att = TupleDescAttr(td, col);
+	storageId = PgColumnarStorageId(r);
+	snap = PgColumnarCatalogSnapshot(GetActiveSnapshot());
+	groups = PgColumnarReadRowGroupList(storageId, snap);
+	memset(&sess, 0, sizeof(sess));
+	sess.what = "group estimate";
+
+	foreach(lc, groups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+		NativeZoneMapMetadata *z = PgColumnarReadZoneMapForColumn(storageId,
+																  rg->groupNumber,
+																  col, snap, &sess);
+		char	   *cur;
+		double		vmin,
+					vmax;
+
+		if (z == NULL || !z->hasMinMax)
+		{
+			if (z != NULL && z->valueCount == 0)
+				continue;		/* all null: contributes no bucket */
+			ok = false;
+			break;
+		}
+		cur = (char *) z->minimum;
+		vmin = (double) DatumGetTimestamp(PgColumnarDecodeValue(att, &cur,
+										z->minimum + z->minimumLen, CurrentMemoryContext));
+		cur = (char *) z->maximum;
+		vmax = (double) DatumGetTimestamp(PgColumnarDecodeValue(att, &cur,
+										z->maximum + z->maximumLen, CurrentMemoryContext));
+		*lo = any ? Min(*lo, vmin) : vmin;
+		*hi = any ? Max(*hi, vmax) : vmax;
+		any = true;
+	}
+	PgColumnarCloseZoneMapSession(&sess);
+	list_free_deep(groups);
+	table_close(r, AccessShareLock);
+	return ok && any;
+}
+
 static double
 pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 							   Node *expr)
@@ -2079,6 +2152,36 @@ pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 	 * deliberately: its argument is a duration rather than a point in time, so a
 	 * range on it does not describe a scanned window.
 	 */
+	if (f->funcid == F_DATE_BIN_INTERVAL_TIMESTAMP_TIMESTAMP ||
+		f->funcid == F_DATE_BIN_INTERVAL_TIMESTAMPTZ_TIMESTAMPTZ)
+	{
+		/*
+		 * date_bin(stride, source, origin) (#1292): the same bucketing with the
+		 * width given as an interval. A stride with months is not a fixed width,
+		 * and date_bin itself refuses one, so it gets no bound here either.
+		 */
+		Const	   *stride;
+		Interval   *iv;
+
+		if (list_length(f->args) != 3 || !IsA(linitial(f->args), Const) ||
+			!IsA(lsecond(f->args), Var))
+			return 0.0;
+		stride = (Const *) linitial(f->args);
+		if (stride->constisnull || stride->consttype != INTERVALOID)
+			return 0.0;
+		iv = DatumGetIntervalP(stride->constvalue);
+		if (iv->month != 0)
+			return 0.0;
+		width = (double) iv->time + (double) iv->day * (double) USECS_PER_DAY;
+		if (width <= 0)
+			return 0.0;
+		tsvar = (Var *) lsecond(f->args);
+		if (tsvar->varno != input_rel->relid || tsvar->varlevelsup != 0)
+			return 0.0;
+		if (tsvar->vartype != TIMESTAMPOID && tsvar->vartype != TIMESTAMPTZOID)
+			return 0.0;
+		goto have_width;
+	}
 	if (f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMP &&
 		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ &&
 		f->funcid != F_DATE_TRUNC_TEXT_TIMESTAMPTZ_TEXT)
@@ -2115,6 +2218,8 @@ pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 	else if (pg_strcasecmp(unitstr, "century") == 0)		width = 36500.0 * USECS_PER_DAY;
 	else if (pg_strcasecmp(unitstr, "millennium") == 0)		width = 365000.0 * USECS_PER_DAY;
 	else return 0.0;
+
+have_width:
 	/*
 	 * month, quarter and year use their SHORTEST possible length above, so the
 	 * bucket count is over-estimated rather than under-estimated. This must stay
@@ -2180,7 +2285,27 @@ pgcolumnar_truncating_time_bound(PlannerInfo *root, RelOptInfo *input_rel,
 		}
 	}
 
-	if (!havelo || !havehi || hi <= lo)
+	/*
+	 * A MISSING END COMES FROM THE ZONE MAPS (#1292), and both ends are clipped to
+	 * them when they are known. Every row group's whole-chunk zone map holds the
+	 * minimum and maximum of the key's column, so together they bound every value
+	 * the scan can read: deletes only shrink that, never widen it. All groups are
+	 * read, not a sample -- a sampled maximum can miss the true one, which would
+	 * UNDER-estimate, the direction a gate on this number must never take.
+	 */
+	{
+		double		zlo,
+					zhi;
+
+		if (pgcolumnar_zonemap_time_range(root, input_rel, tsvar, &zlo, &zhi))
+		{
+			lo = havelo ? Max(lo, zlo) : zlo;
+			hi = havehi ? Min(hi, zhi) : zhi;
+			havelo = havehi = true;
+		}
+	}
+
+	if (!havelo || !havehi || hi < lo)
 		return 0.0;
 	return floor((hi - lo) / width) + 2.0;
 }
