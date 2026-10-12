@@ -51,6 +51,11 @@
 #include "storage/smgr.h"
 #include "storage/spin.h"
 #include "utils/builtins.h"
+#include "optimizer/planner.h"
+#include "optimizer/planmain.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "parser/parsetree.h"
 #include "utils/guc.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
@@ -289,6 +294,18 @@ typedef struct PgColumnarScanDescData
 	 */
 	MemoryContext scanContext;
 	PgColumnarAnalyzeState *analyzeState;
+
+	/*
+	 * A TID range scan: the inclusive row-number bounds scan_set_tidrange
+	 * derived from the requested item pointers, and the row groups that
+	 * intersect them. The reader is restricted to those groups when it is
+	 * built, so a range over the tail of a table reads the tail only.
+	 */
+	bool		hasRowRange;
+	uint64		minRow;
+	uint64		maxRow;
+	uint64	   *rangeGroups;
+	int			numRangeGroups;
 } PgColumnarScanDescData;
 typedef struct PgColumnarScanDescData *PgColumnarScanDesc;
 
@@ -658,6 +675,9 @@ pgcolumnar_scan_read_state(PgColumnarScanDesc scan, TupleDesc tupdesc)
 										 scan->rs_base.rs_parallel, NULL,
 										 scan->rs_base.rs_nkeys,
 										 scan->rs_base.rs_key);
+		if (scan->hasRowRange)
+			PgColumnarReadRestrictToGroups(scan->readState, scan->rangeGroups,
+										 scan->numRangeGroups);
 		MemoryContextSwitchTo(oldContext);
 	}
 
@@ -747,6 +767,247 @@ pgcolumnar_scan_getnextslot(TableScanDesc sscan, ScanDirection direction,
 	slot->tts_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
 
 	return true;
+}
+
+/*
+ * pgcolumnar_scan_set_tidrange
+ *		Bound the scan to the item pointers [mintid, maxtid], inclusive.
+ *
+ * Item pointers here are synthetic row addresses (columnar.h), so the bounds
+ * become row numbers and the row groups that hold any of them are found from
+ * the row-group catalog at the scan's snapshot. Rows outside the range in a
+ * boundary group are filtered by getnextslot_tidrange.
+ *
+ * Called before the first getnextslot_tidrange and again after each rescan,
+ * so a reader built for an earlier range is ended here; the next row builds a
+ * fresh one restricted to the new groups.
+ */
+static void
+pgcolumnar_scan_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
+							 ItemPointer maxtid)
+{
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
+	uint64		lo;
+	uint64		hi;
+	List	   *groups;
+	ListCell   *lc;
+	MemoryContext oldContext;
+
+	if (scan->readState != NULL)
+	{
+		PgColumnarEndRead(scan->readState);
+		scan->readState = NULL;
+	}
+
+	/*
+	 * A bound may name an offset no row uses: 0, or anything past the
+	 * COLUMNAR_VALID_ITEMPOINTER_OFFSETS a block holds -- the executor turns
+	 * "ctid < '(B,0)'" into an upper bound of (B-1, 65535). Rows of block B
+	 * are B*K + (offset - 1) for offset 1..K, so a lower bound below offset 1
+	 * means the block's first row and one past K the next block's first row;
+	 * an upper bound past K means the block's last row and one below offset 1
+	 * the row before the block, which is no row at all for block 0.
+	 */
+	{
+		uint64		k = COLUMNAR_VALID_ITEMPOINTER_OFFSETS;
+		uint64		blk = ItemPointerGetBlockNumberNoCheck(mintid);
+		uint64		off = ItemPointerGetOffsetNumberNoCheck(mintid);
+
+		if (off < FirstOffsetNumber)
+			lo = blk * k;
+		else if (off > k)
+			lo = (blk + 1) * k;
+		else
+			lo = blk * k + (off - FirstOffsetNumber);
+
+		blk = ItemPointerGetBlockNumberNoCheck(maxtid);
+		off = ItemPointerGetOffsetNumberNoCheck(maxtid);
+		if (off > k)
+			hi = blk * k + (k - 1);
+		else if (off >= FirstOffsetNumber)
+			hi = blk * k + (off - FirstOffsetNumber);
+		else if (blk > 0)
+			hi = blk * k - 1;
+		else
+		{
+			/* below row 0, which no row uses: an empty range */
+			lo = 1;
+			hi = 0;
+		}
+	}
+
+	scan->hasRowRange = true;
+	scan->minRow = lo;
+	scan->maxRow = hi;
+
+	oldContext = MemoryContextSwitchTo(scan->scanContext);
+	if (scan->rangeGroups != NULL)
+		pfree(scan->rangeGroups);
+	scan->numRangeGroups = 0;
+	groups = (lo <= hi) ?
+		PgColumnarReadRowGroupList(PgColumnarStorageId(sscan->rs_rd),
+								   sscan->rs_snapshot) : NIL;
+	scan->rangeGroups = (uint64 *) palloc(sizeof(uint64) *
+										  Max(list_length(groups), 1));
+	foreach(lc, groups)
+	{
+		NativeRowGroupMetadata *rg = (NativeRowGroupMetadata *) lfirst(lc);
+
+		if (rg->rowCount == 0 ||
+			rg->firstRowNumber > hi ||
+			rg->firstRowNumber + rg->rowCount - 1 < lo)
+			continue;
+		scan->rangeGroups[scan->numRangeGroups++] = rg->groupNumber;
+	}
+	list_free_deep(groups);
+	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * pgcolumnar_scan_getnextslot_tidrange
+ *		The next row whose item pointer is inside the range set above.
+ *
+ * The reader visits only the groups that intersect the range; rows of those
+ * groups outside it are skipped. A row past the upper bound does not end the
+ * scan: group order is not row-number order once compaction has moved rows
+ * into later groups, so stopping there could drop rows that are in range.
+ */
+static bool
+pgcolumnar_scan_getnextslot_tidrange(TableScanDesc sscan,
+									 ScanDirection direction,
+									 TupleTableSlot *slot)
+{
+	PgColumnarScanDesc scan = (PgColumnarScanDesc) sscan;
+
+	Assert(scan->hasRowRange);
+	if (scan->minRow > scan->maxRow || scan->numRangeGroups == 0)
+	{
+		ExecClearTuple(slot);
+		return false;
+	}
+
+	while (pgcolumnar_scan_getnextslot(sscan, direction, slot))
+	{
+		uint64		row = PgColumnarItemPointerToRowNumber(&slot->tts_tid);
+
+		if (row >= scan->minRow && row <= scan->maxRow)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Cursors over a TID range scan (#1306 review).
+ *
+ * PostgreSQL counts a TID range scan as able to scan backward
+ * (ExecSupportsBackwardScan), so it puts no Material above one under a cursor
+ * that may scroll, and a backward fetch reaches the access method, which reads
+ * forward only and refuses (pgcolumnar_scan_getnextslot). That covers a SCROLL
+ * cursor, and a plain DECLARE too: the portal makes a cursor scrollable when
+ * its plan claims backward support. So when a cursor's plan holds a TID range
+ * scan of a columnar table, a Material goes on top, as standard_planner does
+ * for a SCROLL cursor over a plan that cannot run backward.
+ */
+static planner_hook_type pgcolumnar_prev_planner_hook = NULL;
+
+static bool
+pgcolumnar_plan_has_columnar_tidrange(Plan *plan, List *rtable, int *maxid)
+{
+	bool		found = false;
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+	*maxid = Max(*maxid, plan->plan_node_id);
+	if (IsA(plan, TidRangeScan))
+	{
+		RangeTblEntry *rte = rt_fetch(((Scan *) plan)->scanrelid, rtable);
+
+		if (rte->rtekind == RTE_RELATION && PgColumnarIsColumnarRelation(rte->relid))
+			found = true;
+	}
+	found |= pgcolumnar_plan_has_columnar_tidrange(plan->lefttree, rtable, maxid);
+	found |= pgcolumnar_plan_has_columnar_tidrange(plan->righttree, rtable, maxid);
+	switch (nodeTag(plan))
+	{
+		case T_Append:
+			foreach(lc, ((Append *) plan)->appendplans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		case T_MergeAppend:
+			foreach(lc, ((MergeAppend *) plan)->mergeplans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		case T_SubqueryScan:
+			found |= pgcolumnar_plan_has_columnar_tidrange(((SubqueryScan *) plan)->subplan,
+														 rtable, maxid);
+			break;
+		case T_CustomScan:
+			foreach(lc, ((CustomScan *) plan)->custom_plans)
+				found |= pgcolumnar_plan_has_columnar_tidrange(lfirst(lc), rtable, maxid);
+			break;
+		default:
+			break;
+	}
+	return found;
+}
+
+/* PostgreSQL 19 passes the planner hook an ExplainState as well */
+#if PG_VERSION_NUM >= 190000
+#define PGC_PLANNER_PARAMS	Query *parse, const char *query_string, int cursorOptions, \
+							ParamListInfo boundParams, ExplainState *es
+#define PGC_PLANNER_ARGS	parse, query_string, cursorOptions, boundParams, es
+#else
+#define PGC_PLANNER_PARAMS	Query *parse, const char *query_string, int cursorOptions, \
+							ParamListInfo boundParams
+#define PGC_PLANNER_ARGS	parse, query_string, cursorOptions, boundParams
+#endif
+
+static PlannedStmt *
+pgcolumnar_planner(PGC_PLANNER_PARAMS)
+{
+	PlannedStmt *stmt;
+	int			maxid = 0;
+
+	stmt = pgcolumnar_prev_planner_hook
+		? pgcolumnar_prev_planner_hook(PGC_PLANNER_ARGS)
+		: standard_planner(PGC_PLANNER_ARGS);
+
+	/*
+	 * A cursor that may scroll: SCROLL, or a DECLARE (CURSOR_OPT_FAST_PLAN)
+	 * that did not say NO SCROLL. Nothing else fetches backward.
+	 */
+	if ((cursorOptions & CURSOR_OPT_NO_SCROLL) ||
+		!(cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_FAST_PLAN)) ||
+		stmt->planTree == NULL || IsA(stmt->planTree, Material))
+		return stmt;
+	if (pgcolumnar_plan_has_columnar_tidrange(stmt->planTree, stmt->rtable, &maxid))
+	{
+		Plan	   *sub = stmt->planTree;
+		Plan	   *mat = materialize_finished_plan(sub);
+		List	   *tlist = NIL;
+		ListCell   *lc;
+
+		/*
+		 * The plan is already finished, so the Material's target list is built
+		 * as set_plan_references would build it: one OUTER_VAR per column of
+		 * the plan below. It gets a node id of its own.
+		 */
+		foreach(lc, sub->targetlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+			Var		   *v = makeVar(OUTER_VAR, tle->resno, exprType((Node *) tle->expr),
+									exprTypmod((Node *) tle->expr),
+									exprCollation((Node *) tle->expr), 0);
+
+			tlist = lappend(tlist, makeTargetEntry((Expr *) v, tle->resno,
+												   tle->resname, tle->resjunk));
+		}
+		mat->targetlist = tlist;
+		mat->plan_node_id = maxid + 1;
+		stmt->planTree = mat;
+	}
+	return stmt;
 }
 
 /* -------------------------------------------------------------------------
@@ -2252,6 +2513,8 @@ static const TableAmRoutine pgcolumnar_am_methods = {
 	.scan_begin = pgcolumnar_scan_begin,
 	.scan_end = pgcolumnar_scan_end,
 	.scan_rescan = pgcolumnar_scan_rescan,
+	.scan_set_tidrange = pgcolumnar_scan_set_tidrange,
+	.scan_getnextslot_tidrange = pgcolumnar_scan_getnextslot_tidrange,
 	.scan_getnextslot = pgcolumnar_scan_getnextslot,
 
 	.parallelscan_estimate = pgcolumnar_parallelscan_estimate,
@@ -3919,6 +4182,9 @@ _PG_init(void)
 							PGC_USERSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	pgcolumnar_prev_planner_hook = planner_hook;
+	planner_hook = pgcolumnar_planner;
 
 	MarkGUCPrefixReserved("pgcolumnar");
 

@@ -18,7 +18,7 @@
 # land without it.
 #
 # FORMAT: major<space>nodeid. Comments and blank lines are ignored. A major with
-# no rows expects nothing to decline, which is what 18 and 19 claim.
+# no rows expects nothing to decline, which is what 19 claims.
 
 # PostgreSQL 15, 16 and 17: pgcolumnar.analyze() writes through
 # pg_restore_attribute_stats, which core added in PostgreSQL 18.
@@ -46,3 +46,9 @@
 15 test_temporal.py::test_temporal
 16 test_temporal.py::test_temporal
 17 test_temporal.py::test_temporal
+
+# PostgreSQL 15 to 18: parallel TID range scans arrived in PostgreSQL 19.
+15 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
+16 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
+17 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns
+18 test_tid_range_scan.py::test_a_parallel_tid_range_scan_returns_what_the_filter_returns

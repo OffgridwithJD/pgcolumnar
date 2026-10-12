@@ -131,6 +131,7 @@ COMPLETE = ["advisory_lock_class",
             "stats_privilege",
             "storage_row_repair",
             "temporal",
+            "tid_range_scan",
             "ttl_expire",
             "validity_elision",
             "zonemap_boundaries"]

@@ -1880,6 +1880,42 @@ storage_row_repair	storage_row_repair	premise: no row names a missing relation b
 storage_row_repair	storage_row_repair	premise: the damaged table still reads every row	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	premise: the release notes give the query that finds wrong rows	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	the notes' query finds both rows alpha4 left wrong	15;16;17;18;19	2026-10-12	the release notes' query is edited from NOT EXISTS to EXISTS
+tid_range_scan	tid_range_scan	a SCROLL cursor over a ctid range fetches backward as the filter's plan does	15;16;17;18;19	2026-10-12	no planner hook: a cursor over a TID range scan gets no Material
+tid_range_scan	tid_range_scan	a TID range scan rescanned with new bounds returns what the filter returns	15;16;17;18;19	2026-10-12	getnextslot_tidrange without the boundary-row filter;scan_set_tidrange keeping the reader of the previous range
+tid_range_scan	tid_range_scan	a ctid range over the last row groups reads under a fifth of the table	15;16;17;18;19	2026-10-12	scan_set_tidrange without the group restriction
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid < '(515,0)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;an upper bound's offset past 291 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid < '(515,1)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid < '(515,137)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid <= '(0,0)'	15;16;17;18;19	2026-10-12	an upper bound below row 0 read as the last row
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid <= '(515,0)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid <= '(515,400)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;an upper bound's offset past 291 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid > '(1374,167)'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid > '(515,0)'	15;16;17;18;19	2026-10-12	getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid > '(515,65535)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= '(0,0)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= '(515,137)' AND ctid <= '(584,57)'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= '(515,291)' AND ctid <= '(515,292)'	15;16;17;18;19	2026-10-12	an upper bound's offset past 291 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= '(515,400)'	15;16;17;18;19	2026-10-12	a lower bound's offset past 291 read unclamped;getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= '(515,7)' AND ctid < '(515,7)'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid >= 'LAST'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	a parallel TID range scan returns what the filter returns	15;16;17;18;19	2026-10-12	scan_set_tidrange dropping the parallel scan's shared group claim
+tid_range_scan	tid_range_scan	a plain cursor over a ctid range answers a backward fetch correctly	15;16;17;18;19	2026-10-12	no planner hook: a cursor over a TID range scan gets no Material;the planner hook covering SCROLL cursors only, not a plain DECLARE
+tid_range_scan	tid_range_scan	after compaction a ctid range returns what the filter returns: ctid >= '(1477,195)'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	after compaction a ctid range returns what the filter returns: ctid >= '(515,137)' AND ctid <= '(1477,195)'	15;16;17;18;19	2026-10-12	getnextslot_tidrange without the boundary-row filter
+tid_range_scan	tid_range_scan	after compaction a ctid range returns what the filter returns: ctid >= 'LAST'	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	and rows deleted inside the range stay deleted	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: a ctid range plans a TID range scan, so the arms below exercise it	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: compaction gave the surviving rows new addresses	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: compaction rewrote the group the delete thinned	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: inside a transaction the range still plans a TID range scan	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: reading the whole table reads its blocks	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: the cursor's query plans a TID range scan	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: the delete removed rows from the range	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: the per-range join rescans a TID range scan	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: the range runs as a parallel TID range scan with two workers	19	never	-
+tid_range_scan	tid_range_scan	premise: the table has many row groups, so skipping can show	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	premise: the table holds every row	15;16;17;18;19	never	-
+tid_range_scan	tid_range_scan	rows inserted earlier in the same transaction are in the range, as the filter sees them	15;16;17;18;19	never	-
 validity_elision	validity_elision	a chunk claiming no bitmap while it holds fewer values than rows is refused	15;16;17;18;19	never	-
 validity_elision	validity_elision	a column with no nulls stores no validity bitmap	15;16;17;18;19	2026-09-18	writer: flush_one_column's presentCount == rowCount forced false, so the bitmap is written even when the chunk holds no null
 validity_elision	validity_elision	a null-free column elides its bitmap beside a null-bearing one in the same row group	15;16;17;18;19	never	-
