@@ -170,8 +170,10 @@ names, settings and table syntax are all the same.
 
 The source records the on-disk format version. The specification also records it,
 in [../design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md](https://github.com/commandprompt/pgcolumnar/blob/main/design/NATIVE_FORMAT_AND_INTERFACE_SPEC.md).
-A build that keeps the same format version reads the tables that earlier builds
-of that version wrote. A conversion is not necessary.
+A build reads the tables that earlier builds wrote, from format version 1 up to the
+version that it writes. A conversion is not necessary. The reverse is not true. A
+table that a newer build has written to is refused by an older build. See
+[limitations.md](limitations.md) for the details.
 
 ## Remove
 

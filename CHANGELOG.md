@@ -39,6 +39,55 @@ true until the next version shipped.
   "workers share the covering projection scan", stayed green when no worker
   shared anything, because it only asks that both workers produced rows. It
   is recorded on #1236 rather than changed here.
+- The native format stamp, `pgcolumnar.storage.format_version`, is now 2, and a
+  build reads a RANGE of stamps instead of exactly one (#1137). The owner chose
+  option 2 on the issue for this release.
+
+  #1130 stopped writing a validity bitmap for a chunk with no nulls, and an
+  alpha4 binary misreads such a chunk without refusing it. Measured on PG 17
+  with the real alpha4 `.so` against tables written by three builds, one
+  sequential scan and 40 single-row index fetches each, custom scan off:
+
+      written by                       alpha4 seq scan   alpha4 fetches
+      main before this change (1)      reads             0 right, 9 NULL for a
+                                                         row holding a value,
+                                                         32 errors
+      this change (2)                  refused, 0A000    41 refused
+      main, then appended to by this   refused, 0A000    41 refused
+
+  The check was an equality, so raising the stamp would also have made this
+  build refuse every table alpha4 wrote. It is now
+  `COLUMNAR_NATIVE_FORMAT_MIN_READABLE (1) <= v <= COLUMNAR_NATIVE_FORMAT_VERSION
+  (2)`.
+
+  The third row is a hole the issue's option 2 did not cover. The issue had
+  existing tables keep stamp 1, but this build writes bitmap-less chunks when it
+  APPENDS to one of them. A table stamped 1 would then hold chunks alpha4
+  misreads, and alpha4 would accept the stamp. So the first write by this build
+  raises an older stamp to 2, in `PgColumnarInsertNativeStorageRow`, which every
+  flush already calls. A table that is only read keeps its stamp, so reading
+  alone never locks an older binary out. The bulk loader's unlocked fast path
+  skips the raise and falls through to the locked path, because two unserialized
+  loaders would race on the UPDATE.
+
+  The fetch path's one exemption from the stamp check, a liveness-only probe
+  that decodes nothing, is now held by an `Assert` at the decode point instead
+  of a comment. Disabling that path's check makes a correctly stamped table trip
+  it (`TRAP: failed Assert("columnarFetchFmtOk && ...")`) on the assert-enabled
+  builds every suite runs. Without the `Assert`, that mutation passed every arm.
+
+  `native_format.sh` gains eight arms, all on four decode entry points: a table
+  stamped 1 is read, an append raises the stamp, a read does not, and stamps 3
+  and 0 are refused by SQLSTATE. Each of four mutations is caught by the arm
+  aimed at it. Those mutations are the equality restored, the raise removed,
+  the build still writing 1, and the lower bound dropped. The fetch arm turns
+  the custom scan off. With it on, the index query never reaches
+  `pgcolumnar_fetch_row`, and that path's check could be deleted with every
+  arm still green, which was measured.
+
+  The specification's section 13, `docs/limitations.md` and
+  `docs/installation.md` now describe the range. Going back to an older binary
+  after a newer one has written to a table is refused rather than misread.
 
 - `test/pytest/README.md` now names all four registries a new pytest test has to
   be entered in, and which of them a local run can catch. Adding one test reddens

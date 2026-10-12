@@ -2036,6 +2036,63 @@ columnar_relation_is_new_in_xact(Oid relid)
 	return isNew;
 }
 
+/*
+ * storage_row_probe
+ *		Read the storage row the scan positioned on, if any (#1137).
+ *
+ *		Returns STORAGE_ROW_ABSENT, STORAGE_ROW_CURRENT, or STORAGE_ROW_OLDER when
+ *		the row's format_version is below `formatVersion` -- a table an earlier
+ *		build wrote. With `raise`, an older row is first updated to
+ *		`formatVersion`.
+ *
+ *		THE STAMP MUST MOVE WHEN THIS BUILD APPENDS TO AN OLDER TABLE. The stamp
+ *		is what lets an older binary refuse bytes it cannot read, and this build
+ *		writes chunks with no validity bitmap (#1130). A table stamped 1 that this
+ *		build has appended to holds those chunks, and an alpha4 binary would accept
+ *		the stamp and read a row that holds a value as NULL. Raising the stamp on
+ *		the first flush closes that: the whole table becomes one this build can
+ *		read (every version from COLUMNAR_NATIVE_FORMAT_MIN_READABLE up) and an
+ *		older one refuses. A table this build only READS keeps its stamp, so
+ *		reading alone never locks an older binary out.
+ */
+#define STORAGE_ROW_ABSENT	0
+#define STORAGE_ROW_CURRENT	1
+#define STORAGE_ROW_OLDER	2
+
+static int
+storage_row_probe(Relation rel, SysScanDesc scan, int32 formatVersion, bool raise)
+{
+	HeapTuple	tuple = systable_getnext(scan);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	bool		isnull;
+	Datum		d;
+
+	if (!HeapTupleIsValid(tuple))
+		return STORAGE_ROW_ABSENT;
+
+	d = heap_getattr(tuple, Anum_native_storage_format_version, tupdesc, &isnull);
+	if (isnull || DatumGetInt32(d) >= formatVersion)
+		return STORAGE_ROW_CURRENT;
+
+	if (raise)
+	{
+		Datum		values[Natts_native_storage];
+		bool		nulls[Natts_native_storage];
+		bool		replace[Natts_native_storage];
+		HeapTuple	newTuple;
+
+		memset(values, 0, sizeof(values));
+		memset(nulls, false, sizeof(nulls));
+		memset(replace, false, sizeof(replace));
+		values[Anum_native_storage_format_version - 1] = Int32GetDatum(formatVersion);
+		replace[Anum_native_storage_format_version - 1] = true;
+		newTuple = heap_modify_tuple(tuple, tupdesc, values, nulls, replace);
+		CatalogTupleUpdate(rel, &newTuple->t_self, newTuple);
+		heap_freetuple(newTuple);
+	}
+	return STORAGE_ROW_OLDER;
+}
+
 void
 PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 {
@@ -2085,7 +2142,15 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 					F_INT8EQ, Int64GetDatum((int64) s->storageId));
 		scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
 		scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
-		exists = HeapTupleIsValid(systable_getnext(scan));
+		/*
+		 * Only a row already at this build's stamp lets the loader skip the
+		 * lock. An older one has to be raised, and raising is an UPDATE that two
+		 * unserialized loaders would race on, so it falls through to the locked
+		 * path below. The coordinator's PgColumnarEnsureStorageRow takes that
+		 * path first, so in practice the loaders find it raised.
+		 */
+		exists = storage_row_probe(rel, scan, s->formatVersion, false) ==
+			STORAGE_ROW_CURRENT;
 		systable_endscan(scan);
 		PopActiveSnapshot();
 		if (exists)
@@ -2124,7 +2189,9 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 					F_INT8EQ, Int64GetDatum((int64) s->storageId));
 		scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
 		scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
-		exists = HeapTupleIsValid(systable_getnext(scan));
+		/* Invisible to every other backend, so the raise cannot race. */
+		exists = storage_row_probe(rel, scan, s->formatVersion, true) !=
+			STORAGE_ROW_ABSENT;
 		systable_endscan(scan);
 		if (exists)
 		{
@@ -2157,7 +2224,13 @@ PgColumnarInsertNativeStorageRow(const NativeStorageMetadata *s)
 				F_INT8EQ, Int64GetDatum((int64) s->storageId));
 	scanIdx = pgcolumnar_scan_index_oid(rel, "storage_pkey");
 	scan = systable_beginscan(rel, scanIdx, OidIsValid(scanIdx), snapshot, 1, key);
-	exists = HeapTupleIsValid(systable_getnext(scan));
+	/*
+	 * Under the advisory lock, held to transaction end, so a second writer
+	 * re-checks only after this one's raise has committed and finds the row
+	 * current.
+	 */
+	exists = storage_row_probe(rel, scan, s->formatVersion, true) !=
+		STORAGE_ROW_ABSENT;
 	systable_endscan(scan);
 	PopActiveSnapshot();
 	if (exists)
@@ -2720,13 +2793,22 @@ PgColumnarCheckNativeFormatVersion(uint64 storageId, const char *relName)
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
 
-	if (found && formatVersion != COLUMNAR_NATIVE_VERSION_MAJOR)
+	/*
+	 * A RANGE, NOT AN EQUALITY (#1137). An equality made the stamp unable to
+	 * move: raising it for a new layout would also have refused every table the
+	 * previous build wrote. This build reads every version from
+	 * COLUMNAR_NATIVE_FORMAT_MIN_READABLE to the one it writes.
+	 */
+	if (found && (formatVersion < COLUMNAR_NATIVE_FORMAT_MIN_READABLE ||
+				  formatVersion > COLUMNAR_NATIVE_FORMAT_VERSION))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("unsupported columnar native format version %d",
 						formatVersion),
-				 errdetail("Relation \"%s\" was written with native format version %d; this build supports version %d.",
-						   relName, formatVersion, COLUMNAR_NATIVE_VERSION_MAJOR)));
+				 errdetail("Relation \"%s\" was written with native format version %d; this build reads versions %d to %d.",
+						   relName, formatVersion,
+						   COLUMNAR_NATIVE_FORMAT_MIN_READABLE,
+						   COLUMNAR_NATIVE_FORMAT_VERSION)));
 }
 
 void

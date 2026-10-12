@@ -129,6 +129,7 @@ behaviour, the source of that number is named.
 - [81. test_catalog_delete_index.py: retiring a row group costs no more for a bigger database](#81-test_catalog_delete_indexpy-retiring-a-row-group-costs-no-more-for-a-bigger-database)
 - [82. test_rewrite_storage_oid.py: a type rewrite keeps the storage row on the live table](#82-test_rewrite_storage_oidpy-a-type-rewrite-keeps-the-storage-row-on-the-live-table)
 - [83. test_catalog_scan_index.py: twelve metadata scans do not read their catalog whole](#83-test_catalog_scan_indexpy-twelve-metadata-scans-do-not-read-their-catalog-whole)
+- [84. test_native_format.py: the format stamp is a range, and an append raises it](#84-test_native_formatpy-the-format-stamp-is-a-range-and-an-append-raises-it)
 
 ## 1. How to read a test in here
 
@@ -6320,3 +6321,25 @@ The two halves share no code and no fixture. The shell suite adds 400 tables wit
 | test | what it holds |
 | --- | --- |
 | `test_catalog_scans_do_not_read_their_catalog_whole` | each of the four catalogs at or above `index_min_blocks`; then, for eleven operations (an insert into an existing table, into a table created in the same transaction, a `parallel_copy` load, a one-row delete, `compact_rewrite`, `truncate()`, `vacuum_sorted`, renaming a projected column, `TRUNCATE`, `drop_projection`, `DROP TABLE`), that the target held two free ranges, that the operation took effect, that it reached its catalog, and that it made no sequential scan of it |
+
+## 84. test_native_format.py: the format stamp is a range, and an append raises it
+
+A partial port of `native_format.sh`: the arms #1137 added and the format-version pin. #1130 stopped writing a validity bitmap for a chunk with no nulls, and an alpha4 binary misreads such a chunk without refusing it. Measured with the real alpha4 `.so`, 40 single-row fetches gave 9 NULL values for rows that hold one. So this build stamps `format_version` 2, and alpha4, which refuses any stamp but 1, refuses the table. The check became a range, `1 <= v <= 2`, so this build still reads what alpha4 wrote.
+
+THE FIRST WRITE RAISES THE STAMP, AND A READ DOES NOT. A table stamped 1 that this build appends to holds chunks alpha4 misreads, so the stamp has to move on that write. The arms set a stamp of 1 by catalog `UPDATE`, which is what an alpha4 table looks like, and check that reading leaves it at 1 and appending raises it to 2.
+
+FOUR ENTRY POINTS, AND THE FOURTH NEEDS THE CUSTOM SCAN OFF. The stamp is checked in the sequential scan, the aggregate scan, the group-aggregate scan and the by-row fetch. With the custom scan on, an index query is served by pgcolumnar's own node and never reaches `pgcolumnar_fetch_row`. That path's check was deleted outright on the shell twin and every arm still passed.
+
+REFUSED BY SQLSTATE, `0A000`, not by the absence of a wrong answer. Stamps 3 and 0 are both refused on all four paths.
+
+`RESET ALL` IS NOT USED after the fetch path's settings, because it also drops the private `search_path` that `pgc_conn` sets. The first draft did this, and every later query failed `42P01` instead of measuring anything.
+
+Removal proof, on this twin: making the append path skip the raise reddens `appending to a table stamped 1 raises its stamp` (got 1, want 2).
+
+Not ported, and declared INCOMPLETE in `test_compare_to_bash.py`: the metapage-version arms, which need a C hook bound at test time, and the diverse-type round trip against a heap mirror.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_format_stamp_is_a_range_and_an_append_raises_it` | this build stamps 2; a table stamped 1 is read on all four entry points and returns its rows; reading leaves its stamp at 1 and appending raises it to 2; stamps 3 and 0 are refused with `0A000` on all four; the backend survives |

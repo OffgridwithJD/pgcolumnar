@@ -281,10 +281,22 @@ configuration reference.
 ## 13. Format identity and versioning
 
 - Metapage magic: `PGCN`. Major version starts at 1.
-- The major version is the compatibility gate. A reader reads any minor within a
-  major it implements; a new minor is additive (a new optional catalog column, a
-  new encoding scheme a reader may not produce but must decode if the descriptor
-  requires it, subject to the reader knowing the scheme).
+- The metapage major version gates the physical block layout.
+- `pgcolumnar.storage.format_version` gates the data encoding, and it is a RANGE
+  (#1137). A build writes `COLUMNAR_NATIVE_FORMAT_VERSION` and reads every version
+  from `COLUMNAR_NATIVE_FORMAT_MIN_READABLE` up to it. It refuses anything else at
+  every decode entry point, before it reads a chunk byte. The stamp moves when a
+  build writes something that an older reader would misread rather than refuse.
+
+      1   through 1.0-alpha4
+      2   1.0-alpha5: a column chunk with no nulls stores no validity bitmap (#1130)
+
+  A table carries the stamp of the newest build that wrote to it. The first write
+  by a newer build raises an older stamp, because that write adds chunks the older
+  reader cannot read. Reading alone never changes the stamp.
+- An additive change (a new optional catalog column, or an encoding that a reader
+  must decode only if a descriptor asks for it and the reader knows the scheme)
+  does not move the stamp.
 - The native format has no requirement to read the 1.0-dev format (magic and
   version differ). A one-time migration path is `COPY` or Arrow/Parquet import
   from a 1.0-dev table into a native table.
