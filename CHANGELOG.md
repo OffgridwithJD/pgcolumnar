@@ -51,6 +51,26 @@ true until the next version shipped.
   showed a vacuous arm: "under a tenth of the table" passed on empty SQL, because
   a query that reads nothing reads under a tenth of anything. It now requires at
   least one block read.
+- `docs/how-to.md` documents managing time partitions with pg_partman (#1291), and
+  `test/partman_columnar.sh` with its pytest twin checks every statement the
+  section makes. Measured with pg_partman 5.4.1 on PostgreSQL 15 to 19:
+
+      without default_table_access_method   every partition is heap, even on 17+
+                                            where the parent carries USING pgcolumnar
+      with it                               every partition is columnar, including the
+                                            DEFAULT one and those made ahead; rows
+                                            land there and read back as heap does
+      retention                             partitions dropped, no pgcolumnar
+                                            storage or row-group row left behind
+      run_maintenance                       holds ACCESS EXCLUSIVE on the parent
+
+  The first arm pins the trap rather than the recipe, so a pg_partman that starts
+  honouring the parent's access method turns it red instead of leaving the warning
+  stale. Without the drop hook's catalog cleanup, the retention arm reads 20
+  orphaned storage rows. pg_partman is an external extension, so a box without it
+  FAILS the suite unless `PGC_ALLOW_MISSING_PG_PARTMAN=1` is set. The CI suites
+  and pytest jobs now install `postgresql-N-partman` from PGDG, in the cache key
+  as well as the install.
 
 ### Changed
 
