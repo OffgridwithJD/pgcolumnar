@@ -298,6 +298,7 @@ SUITES=(
 	tablesample
 	temporal
 	tid_range_scan
+	tier_partition
 	timeseries_recipes
 	truncate_cleanup
 	ttl_expire

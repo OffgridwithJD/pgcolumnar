@@ -622,6 +622,28 @@ Records the source's current row groups as folded, without changing the rollup,
 and returns the number of row groups recorded. Use it after a rewrite of the
 source, when the rollup was current before the rewrite.
 
+### pgcolumnar.tier_partition(partition regclass, server name, path text, lock_wait interval DEFAULT '10 seconds') returns bigint
+
+Moves the columnar partition `partition` to a Parquet file at `path`. Then
+attaches the file as a foreign table of `server`, which must use the
+`pgcolumnar_parquet` wrapper. The foreign table takes the partition's name,
+columns, owner, bounds, grants and comment. Returns the number of rows moved.
+
+The function runs as one transaction, at READ COMMITTED only (`25000`
+otherwise). It holds `ACCESS EXCLUSIVE` on the parent from the detach until
+commit. Every lock waits at most `lock_wait` (`55P03`).
+
+The function refuses these:
+
+- a `path` that a foreign table in this database reads (`58P02`);
+- a `DEFAULT` partition (`0A000`);
+- a parent with a `UNIQUE` index or primary key (`0A000`);
+- a partition that other objects depend on (`2BP01`);
+- a relation that is not a columnar partition (`42809`).
+
+See
+[Move cold partitions to Parquet](how-to.md#move-cold-partitions-to-parquet).
+
 ### pgcolumnar.import_arrow(rel regclass, path text) returns bigint
 
 Inserts the rows of an Arrow IPC stream file at `path` into the existing table
