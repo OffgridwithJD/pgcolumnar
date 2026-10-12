@@ -803,8 +803,11 @@ check "and says WHY rebasing works where merging does not" \
 _xdb_stmts="$(for f in $docs; do
 	awk '/^[[:space:]]*```sql/ {b=1; next} b && /^[[:space:]]*```/ {b=0; print ";"; next} b {printf "%s ", $0}' "$f"
 done | tr ';' '\n')"
+# The failure carries the count it measured: selftest part 540 refuses an arm that
+# answers only "no".
+_xdb_n="$(printf '%s\n' "$_xdb_stmts" | grep -c 'SELECT')"
 check "premise: the scan read SQL statements from the documents" \
-	"$([ "$(printf '%s\n' "$_xdb_stmts" | grep -c 'SELECT')" -ge 10 ] && echo yes || echo no)" "yes"
+	"$([ "$_xdb_n" -ge 10 ] && echo yes || echo "no ($_xdb_n SELECT statements, want at least 10)")" "yes"
 check "no documented query tests pg_extension while listing databases" \
 	"$(printf '%s\n' "$_xdb_stmts" | grep 'pg_database' | grep -c 'pg_extension')" "0"
 
