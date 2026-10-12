@@ -1881,6 +1881,7 @@ storage_row_repair	storage_row_repair	premise: the damaged table still reads eve
 storage_row_repair	storage_row_repair	premise: the release notes give the query that finds wrong rows	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	the notes' query finds both rows alpha4 left wrong	15;16;17;18;19	2026-10-12	the release notes' query is edited from NOT EXISTS to EXISTS
 tid_range_scan	tid_range_scan	a SCROLL cursor over a ctid range fetches backward as the filter's plan does	15;16;17;18;19	2026-10-12	no planner hook: a cursor over a TID range scan gets no Material
+tid_range_scan	tid_range_scan	a SCROLL cursor whose query has a subplan fetches backward as the filter's plan does	15;16;17;18;19	2026-10-12	the Material's node id from the main tree's largest, not above the subplans'
 tid_range_scan	tid_range_scan	a TID range scan rescanned with new bounds returns what the filter returns	15;16;17;18;19	2026-10-12	getnextslot_tidrange without the boundary-row filter;scan_set_tidrange keeping the reader of the previous range
 tid_range_scan	tid_range_scan	a ctid range over the last row groups reads under a fifth of the table	15;16;17;18;19	2026-10-12	scan_set_tidrange without the group restriction
 tid_range_scan	tid_range_scan	a ctid range returns what the per-row filter returns: ctid < '(515,0)'	15;16;17;18;19	2026-10-12	a lower bound at offset 0 read unclamped;an upper bound's offset past 291 read unclamped;getnextslot_tidrange without the boundary-row filter
@@ -1913,6 +1914,7 @@ tid_range_scan	tid_range_scan	premise: the cursor's query plans a TID range scan
 tid_range_scan	tid_range_scan	premise: the delete removed rows from the range	15;16;17;18;19	never	-
 tid_range_scan	tid_range_scan	premise: the per-range join rescans a TID range scan	15;16;17;18;19	never	-
 tid_range_scan	tid_range_scan	premise: the range runs as a parallel TID range scan with two workers	19	never	-
+tid_range_scan	tid_range_scan	premise: the subquery cursor plans a TID range scan and a subplan	15;16;17;18;19	never	-
 tid_range_scan	tid_range_scan	premise: the table has many row groups, so skipping can show	15;16;17;18;19	never	-
 tid_range_scan	tid_range_scan	premise: the table holds every row	15;16;17;18;19	never	-
 tid_range_scan	tid_range_scan	rows inserted earlier in the same transaction are in the range, as the filter sees them	15;16;17;18;19	never	-

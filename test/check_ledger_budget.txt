@@ -1311,4 +1311,12 @@ suites_not_covered 247
 #     never         1674 + 19 = 1693
 #     dated          233 + 17 =  250
 #     1693 + 250 == 1943
-checks_never_observed_red 1693
+#
+# #1306 follow-up, plan_node_id (OffgridwithJD): 1693 -> 1694. Two checks: the
+# subplan-cursor arm, dated by the fix removed (red XX000 on an assert build,
+# PG16), and its premise, `never`.
+#
+#     ledger rows   1943 + 2 = 1945
+#     never         1693 + 1 = 1694
+#     dated          250 + 1 =  251
+checks_never_observed_red 1694

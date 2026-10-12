@@ -87,6 +87,8 @@ true until the next version shipped.
   A cursor over a ctid range gets a Material above the scan, so `FETCH
   BACKWARD` and `FETCH LAST` work: PostgreSQL treats a TID range scan as able to
   scan backward, and without it the fetch reached the access method and failed.
+  The Material's plan node id now sits above the subplans' ids as well, so a
+  cursor whose query has a subquery no longer repeats a node id.
 
 ### Changed
 

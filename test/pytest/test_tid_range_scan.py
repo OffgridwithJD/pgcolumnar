@@ -155,6 +155,32 @@ def test_a_ctid_range_reads_only_its_row_groups(pgc_own_db, expect):
     expect.text(cursor_run("on", ""), cursor_run("off", "SCROLL"),
                 "a plain cursor over a ctid range answers a backward fetch correctly")
 
+    # A cursor whose query has a subplan: the Material's node id must not repeat
+    # one of the subplan's (#1306 review); an assert build checks they are unique.
+    sq = (f"SELECT k, (SELECT min(k) FROM tids) AS low FROM tids"
+          f" WHERE ctid > '{a}' AND ctid < '{b}'")
+    sub_plan = _plan(conn, sq)
+    expect.num(int("Tid Range Scan" in sub_plan) + int("InitPlan" in sub_plan), 2,
+               "premise: the subquery cursor plans a TID range scan and a subplan")
+
+    def sub_cursor(tidscan):
+        out = []
+        with conn.cursor() as cur:
+            cur.execute(f"SET enable_tidscan = {tidscan}")
+            cur.execute("BEGIN")
+            try:
+                cur.execute(f"DECLARE c SCROLL CURSOR FOR {sq}")
+                for f in ("FETCH LAST FROM c", "FETCH BACKWARD 3 FROM c"):
+                    cur.execute(f)
+                    out.append(",".join(f"{r[0]}/{r[1]}" for r in cur.fetchall()))
+            except psycopg.Error as e:
+                out.append(f"error {e.sqlstate}")
+            cur.execute("ROLLBACK")
+            cur.execute("RESET enable_tidscan")
+        return " | ".join(out)
+    expect.text(sub_cursor("on"), sub_cursor("off"),
+                "a SCROLL cursor whose query has a subplan fetches backward as the filter's plan does")
+
     # Rows written earlier in the same transaction are in the range.
     def same_xact(tidscan):
         with conn.cursor() as cur:
