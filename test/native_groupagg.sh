@@ -450,10 +450,35 @@ plain_before=$(gbest "SELECT host, avg(v) FROM gb GROUP BY host")
 check "an informed estimate (plain column) is not replaced" \
 	"$([ "$plain_before" -ge 3900 ] && [ "$plain_before" -le 4100 ] && echo yes || echo no)" "yes"
 
-# No Const bound on the key means no range, so no bound. The estimate stays whatever core
-# produced; asserting it is LARGE is the point, since a bound would have shrunk it.
-check "a truncating key with no range bound gets no bound from us" \
-	"$([ "$(gbest "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" -gt 1000 ] && echo yes || echo no)" "yes"
+# A MISSING END OF THE RANGE COMES FROM THE ZONE MAPS (#1292). This arm used to assert
+# the opposite -- "a truncating key with no range bound gets no bound from us" -- and that
+# was the design until the owner chose, on #1292, to gate the grouped path on this
+# estimate. A gate cannot use a number 60x to 3600x too high (measured on #1292), and a
+# dashboard query bounds only one side ("the last day"). The zone maps hold every row
+# group's minimum and maximum of the key's column, which is the range the scan reads.
+#
+# Each arm states BOTH directions: at least the true group count, because an
+# under-estimate is the direction that under-sizes the hash table and would let the gate
+# pass a query the runtime cap then refuses; and at most 4x, which is the accuracy a gate
+# needs. Each reports the estimate and the truth when it fails.
+gbwithin() {	# gbwithin QUERY -> "ok" when actual <= estimate <= 4*actual
+	local est act
+	est="$(gbest "$1")"
+	act="$(q "SELECT count(*) FROM ($1) z;")"
+	if [ -n "$est" ] && [ -n "$act" ] && [ "$act" -ge 1 ] && [ "$est" -ge "$act" ] && [ "$est" -le $((act * 4)) ]; then
+		echo ok
+	else
+		echo "estimate ${est:-none} for ${act:-none} groups"
+	fi
+}
+check "with no time bound at all, a truncating key is bounded from the zone maps" \
+	"$(gbwithin "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")" "ok"
+check "with only a lower time bound, a truncating key is still bounded" \
+	"$(gbwithin "SELECT date_trunc('minute', ts) b, avg(v) FROM gb WHERE ts >= '2026-01-01' GROUP BY b")" "ok"
+check "a date_bin key is bounded as a truncating key is" \
+	"$(gbwithin "SELECT date_bin('1 minute', ts, timestamptz '2026-01-01') b, avg(v) FROM gb $W GROUP BY b")" "ok"
+check "and a date_bin key with no time bound is bounded from the zone maps" \
+	"$(gbwithin "SELECT date_bin('5 minutes', ts, timestamptz '2026-01-01') b, avg(v) FROM gb GROUP BY b")" "ok"
 # A user function with date_trunc's SHAPE must not get date_trunc's BOUND. PL/pgSQL
 # because an SQL function would be inlined and lose the shape. Matching on shape alone
 # estimated this at 722 against 499,999 actual, a 692x UNDER-estimate, which is the

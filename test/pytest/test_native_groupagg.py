@@ -617,12 +617,29 @@ def test_the_group_estimate_bound_is_accurate_and_narrow(pgc_conn, expect):
     expect.text("yes" if 3900 <= plain <= 4100 else f"no [{plain}]", "yes",
                 "an informed estimate (plain column) is not replaced")
 
-    # No Const bound on the key means no range, so no bound. Asserting the estimate
-    # is LARGE is the point: a bound would have shrunk it.
-    unbounded = _estimate(pgc_conn,
-                          "SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b")
-    expect.text("yes" if unbounded > 1000 else f"no [{unbounded}]", "yes",
-                "a truncating key with no range bound gets no bound from us")
+    # A MISSING END OF THE RANGE COMES FROM THE ZONE MAPS (#1292). This used to assert
+    # that a key with no Const bound gets no bound at all. The owner chose on #1292 to
+    # gate the grouped path on this estimate, and a gate cannot use one that is 60x to
+    # 3600x high (measured there), while a dashboard query bounds only one side. Each
+    # case asserts both directions: at least the true count, because under-estimating
+    # is the harmful direction, and at most four times it.
+    def within(sql):
+        est = _estimate(pgc_conn, sql)
+        act = int(_rows(pgc_conn, f"SELECT count(*) FROM ({sql}) z")[0][0])
+        ok = act >= 1 and act <= est <= 4 * act
+        return "ok" if ok else f"estimate {est} for {act} groups"
+
+    expect.text(within("SELECT date_trunc('minute', ts) b, avg(v) FROM gb GROUP BY b"),
+                "ok", "with no time bound at all, a truncating key is bounded from the zone maps")
+    expect.text(within("SELECT date_trunc('minute', ts) b, avg(v) FROM gb "
+                       "WHERE ts >= '2026-01-01' GROUP BY b"),
+                "ok", "with only a lower time bound, a truncating key is still bounded")
+    expect.text(within("SELECT date_bin('1 minute', ts, timestamptz '2026-01-01') b, avg(v) "
+                       f"FROM gb {GB_WINDOW} GROUP BY b"),
+                "ok", "a date_bin key is bounded as a truncating key is")
+    expect.text(within("SELECT date_bin('5 minutes', ts, timestamptz '2026-01-01') b, avg(v) "
+                       "FROM gb GROUP BY b"),
+                "ok", "and a date_bin key with no time bound is bounded from the zone maps")
 
     # A user function with date_trunc's SHAPE must not get date_trunc's BOUND.
     # PL/pgSQL because an SQL function would be inlined and lose the shape. Matching
