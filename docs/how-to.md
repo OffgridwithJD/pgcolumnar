@@ -323,6 +323,60 @@ declared retention raises an error rather than doing nothing.
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.
 
+## Manage time partitions with pg_partman
+
+pg_partman can create and drop columnar partitions. It needs one setting to do
+so, and without it the partitions it makes are not columnar.
+
+Before you start: install pg_partman (PGDG ships it as `postgresql-N-partman`),
+and create it in its own schema.
+
+```sql
+CREATE SCHEMA partman;
+CREATE EXTENSION pg_partman SCHEMA partman;
+```
+
+1. Make columnar the default access method where pg_partman runs. A database
+   setting is the simplest place.
+
+```sql
+ALTER DATABASE mydb SET default_table_access_method = 'pgcolumnar';
+```
+
+2. Create the parent and hand it to pg_partman.
+
+```sql
+CREATE TABLE metrics (ts timestamptz NOT NULL, v float8)
+    PARTITION BY RANGE (ts);
+SELECT partman.create_parent('public.metrics', 'ts', '1 day', p_premake := 4);
+```
+
+3. Set the retention, and run maintenance on a schedule.
+
+```sql
+UPDATE partman.part_config
+   SET retention = '90 days', retention_keep_table = false
+ WHERE parent_table = 'public.metrics';
+SELECT partman.run_maintenance('public.metrics');
+```
+
+**Without step 1, every partition is a heap table.** pg_partman does not take the
+access method from the parent. That holds even on PostgreSQL 17 and later, where
+the parent itself can carry `USING pgcolumnar`. Changing the access method of
+pg_partman's template table does not help either. Measured with pg_partman 5.4.1
+on PostgreSQL 15 to 19.
+
+**The setting has a cost.** Every table created in that database becomes
+columnar unless it names another access method.
+
+**Maintenance locks the parent.** `run_maintenance` holds `ACCESS EXCLUSIVE` on
+the parent table while it runs, so queries on the table wait for it. pg_partman
+also creates a `DEFAULT` partition.
+
+When a partition is dropped by retention, its pgcolumnar catalog rows go with it.
+
+`test/partman_columnar.sh` checks each of these statements.
+
 ## Keep tables optimized automatically
 
 A background daemon can compact and recluster tables on a schedule. The threshold

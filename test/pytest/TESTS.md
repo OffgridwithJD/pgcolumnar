@@ -135,6 +135,7 @@ behaviour, the source of that number is named.
 - [87. test_latest_reading.py: the latest-reading recipe does what the document says](#87-test_latest_readingpy-the-latest-reading-recipe-does-what-the-document-says)
 - [88. test_storage_row_repair.py: the alpha5 release notes' repair procedure works as written](#88-test_storage_row_repairpy-the-alpha5-release-notes-repair-procedure-works-as-written)
 - [89. test_docs_cross_database_query.py: no documented query asks another database for its extensions](#89-test_docs_cross_database_querypy-no-documented-query-asks-another-database-for-its-extensions)
+- [90. test_partman_columnar.py: pg_partman makes columnar partitions with one setting](#90-test_partman_columnarpy-pg_partman-makes-columnar-partitions-with-one-setting)
 
 ## 1. How to read a test in here
 
@@ -6434,3 +6435,23 @@ Red with the old query restored (got 1, want 0). Its premise is red when the fen
 | test | what it holds |
 | --- | --- |
 | `test_no_documented_query_asks_another_database_for_its_extensions` | at least ten SQL statements were read; none reads `pg_database` and tests `pg_extension` |
+
+## 90. test_partman_columnar.py: pg_partman makes columnar partitions with one setting
+
+Port of `partman_columnar.sh` (#1291). The owner's question was whether pg_partman works with columnar partitions on every major; if it does, we document and test that. Measured with pg_partman 5.4.1 on PostgreSQL 15 to 19. Out of the box every partition it makes is heap, even on 17+ where the parent carries `USING pgcolumnar`. With `default_table_access_method = pgcolumnar` every partition is columnar, including the `DEFAULT` one and those made ahead, and retention leaves no pgcolumnar catalog row behind.
+
+THE TRAP IS PINNED, AS A PREMISE. Which access method core gives a partition, whether pg_partman makes a `DEFAULT` partition, and the `ACCESS EXCLUSIVE` its maintenance holds on the parent are core's and pg_partman's behaviour. No change to this repository can redden them, so by the owner's #1236 rule they are premises (found by @jdatcmd reviewing #1302). They are still asserted, because `docs/how-to.md` states them, and a pg_partman release that changes one must turn the document red with it. The arms are what pgcolumnar decides: what a scan returns and what the drop hook leaves in the catalogs.
+
+"READ BACK AS HEAP DOES" HASHES EVERY ROW IN ORDER. An unfiltered `count`/`sum`/`min`/`max` is answered from zone maps and would never exercise the scan, so a scan mutation could not have reddened it.
+
+ON A PRIVATE DATABASE, because the recipe is a database setting and the retention arms count the whole storage catalog. The lock is read inside one explicit `BEGIN`/`COMMIT`. A first draft set `autocommit = False` on the fixture's connection, which did not open a transaction, and read `none`.
+
+pg_partman missing is `MISSING_DEPENDENCY`, an unrunnable that fails the run, never a pass. CI installs `postgresql-N-partman` from PGDG.
+
+Removal proof, one mutation per arm, every major on the shell twin: the drop hook keeping the `storage` row reddens `retention leaves no pgcolumnar storage row behind` (20); keeping `row_group` rows reddens `and no row-group row behind` (20); a scan that drops its last row group reddens `and read back as heap does` and `and the rows land in columnar partitions`. A first scan mutation dropped a group only when there were two or more. Every partition here holds one group, so it changed nothing, and was replaced.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_pg_partman_makes_columnar_partitions_with_one_setting` | pg_partman installed; without the setting every partition is heap; with it, a `DEFAULT` partition exists and every partition is columnar; the rows land columnar and read back as heap does; maintenance drops partitions past retention, creates the ones ahead columnar, and leaves no orphaned storage or row-group row; and it holds `AccessExclusiveLock` on the parent |

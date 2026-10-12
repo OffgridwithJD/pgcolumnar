@@ -1258,4 +1258,22 @@ suites_not_covered 247
 # onto #1303's ledger, not merged by hand.
 #
 #     never   1660 + 4 = 1664
-checks_never_observed_red 1664
+# #1291 (OffgridwithJD): 1664 -> 1671. partman_columnar enters the ledger with
+# 12 checks from five-major runs, replayed from the saved logs onto this base.
+# Every arm is dated, each by its own mutation:
+#
+#     drop hook keeps the storage row   retention leaves no pgcolumnar storage row behind
+#     drop hook keeps row_group rows    and no row-group row behind
+#     the scan drops its last group     and read back as heap does,
+#                                       and the rows land in columnar partitions
+#                                       (and the premise "the rows went in")
+#
+# The 7 still `never` are premises: the access method core gives a partition,
+# pg_partman's DEFAULT partition and its parent lock. No change to this
+# repository can redden them (the owner's #1236 rule).
+#
+#     ledger rows   1883 + 12 = 1895
+#     never         1664 +  7 = 1671
+#     dated          219 +  5 =  224
+#     1671 + 224 == 1895
+checks_never_observed_red 1671

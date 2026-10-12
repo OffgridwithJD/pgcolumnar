@@ -547,4 +547,4 @@ guard_tests 405
 # rebased tree, not added up.
 # 495 -> 496 for #1288: test_storage_row_repair.py. Re-derived by collection on
 # 038600e (after #1303): `496 tests collected`.
-cluster_tests 496
+cluster_tests 497
