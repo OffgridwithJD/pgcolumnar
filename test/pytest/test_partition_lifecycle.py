@@ -109,7 +109,7 @@ def test_partition_create_ahead(pgc_conn, expect):
     with conn.cursor() as cur:
         cur.execute(f"INSERT INTO gauge SELECT now() + g * interval '17 min', g"
                     f" FROM generate_series(0, 77) g")
-    expect.num(_one(conn, "SELECT count(*) FROM gauge"), 78, "premise: rows within the covered range go in")
+    expect.num(_one(conn, "SELECT count(*) FROM gauge"), 78, "rows within the covered range go in")
     expect.text(_one(conn, "SELECT string_agg(DISTINCT a.amname, ',') FROM gauge t"
                            " JOIN pg_class c ON c.oid = t.tableoid JOIN pg_am a ON a.oid = c.relam"),
                 "pgcolumnar", "and land in columnar partitions")

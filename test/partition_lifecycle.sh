@@ -73,7 +73,7 @@ check_num "asking further ahead creates only the difference" \
 
 # ---- rows go in, columnar ------------------------------------------------------
 q "INSERT INTO tl SELECT now() + g * interval '1 hour', g FROM generate_series(0, 100) g;" >/dev/null
-check_num "premise: rows within the covered range go in" "$(q "SELECT count(*) FROM tl;")" "101"
+check_num "rows within the covered range go in" "$(q "SELECT count(*) FROM tl;")" "101"
 check "and land in columnar partitions" \
 	"$(q "SELECT string_agg(DISTINCT a.amname, ',') FROM tl t JOIN pg_class c ON c.oid = t.tableoid
 	      JOIN pg_am a ON a.oid = c.relam;")" "pgcolumnar"

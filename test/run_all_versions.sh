@@ -248,6 +248,7 @@ SUITES=(
 	parquet_level_width
 	parquet_nested
 	parquet_nested_import
+	partition_lifecycle
 	partman_columnar
 	pg19_vacuum_options
 	pg_dump_roundtrip
