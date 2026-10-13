@@ -2173,3 +2173,433 @@ BEGIN
 	RETURN made;
 END;
 $create_ahead$;
+
+/* ---------------------------------------------------------------------------
+ * Incremental rollups, phase 1: append-only (#1294).
+ *
+ * A rollup is a VIEW over a partials table. The partials table holds, per
+ * (bucket, group_by...) key, the parts each aggregate combines from: count, sum,
+ * min, max, and for avg a sum and a count. The view turns those into the
+ * aggregates. refresh_rollup folds the rows of row groups that are new since the
+ * last refresh, in ONE statement, so the group list it reads, the rows it folds
+ * and the groups it records all come from one snapshot (#1294 point 1).
+ *
+ * pgcolumnar.rollup and pgcolumnar.rollup_group are readable and writable by
+ * anyone, row-level security limiting each role to the rollups it owns: the
+ * refresh runs as its caller and writes them in that statement.
+ * ------------------------------------------------------------------------- */
+CREATE TABLE pgcolumnar.rollup (
+	rollup regclass PRIMARY KEY,       -- the view
+	partials regclass NOT NULL,        -- the table behind it
+	source regclass NOT NULL,
+	source_storage bigint NOT NULL,    -- the source's storage id when recorded
+	ts_column name NOT NULL,
+	width interval NOT NULL,
+	origin timestamptz NOT NULL,
+	group_by name[] NOT NULL,
+	agg_functions text[] NOT NULL,
+	agg_columns name[] NOT NULL
+);
+
+CREATE TABLE pgcolumnar.rollup_group (
+	rollup regclass NOT NULL,
+	group_number bigint NOT NULL,
+	row_count bigint NOT NULL,
+	deleted_count bigint NOT NULL,
+	PRIMARY KEY (rollup, group_number)
+);
+
+ALTER TABLE pgcolumnar.rollup ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pgcolumnar.rollup_group ENABLE ROW LEVEL SECURITY;
+CREATE POLICY rollup_owner ON pgcolumnar.rollup
+	USING (pg_has_role(current_user,
+					   (SELECT c.relowner FROM pg_class c WHERE c.oid = rollup), 'USAGE'));
+CREATE POLICY rollup_group_owner ON pgcolumnar.rollup_group
+	USING (pg_has_role(current_user,
+					   (SELECT c.relowner FROM pg_class c WHERE c.oid = rollup), 'USAGE'));
+GRANT SELECT, INSERT, UPDATE, DELETE ON pgcolumnar.rollup, pgcolumnar.rollup_group TO PUBLIC;
+
+/*
+ * The source's row groups, with each one's deleted count. SECURITY DEFINER
+ * because row_group and delete_vector carry no GRANT; the caller must be able to
+ * SELECT the source. STABLE, so it reads with the calling statement's snapshot
+ * and refresh_rollup keeps to one snapshot.
+ */
+-- The item pointer the access method gives a row number (#1319 review).
+CREATE FUNCTION pgcolumnar.row_tid(row_number bigint)
+	RETURNS tid
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE
+	AS 'MODULE_PATHNAME', 'pgcolumnar_row_tid';
+
+CREATE FUNCTION pgcolumnar.rollup_source_groups(source regclass)
+	RETURNS TABLE (group_number bigint, first_row_number bigint, row_count bigint,
+				   deleted_count bigint)
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
+AS $rsg$
+BEGIN
+	PERFORM pgcolumnar.require_caller_select(source);
+	RETURN QUERY
+		SELECT g.group_number, g.first_row_number, g.row_count,
+			   coalesce(d.deleted_count, 0)::bigint
+		  FROM pgcolumnar.row_group g
+		  LEFT JOIN pgcolumnar.delete_vector d
+			ON d.storage_id = g.storage_id AND d.group_number = g.group_number
+		 WHERE g.storage_id = pgcolumnar.get_storage_id(source);
+END
+$rsg$;
+
+/*
+ * The source's row groups that retention retired (pgcolumnar.retired_group,
+ * written only by expire, #1314). SECURITY DEFINER because that catalog carries
+ * no GRANT; the caller must be able to SELECT the source.
+ */
+CREATE FUNCTION pgcolumnar.rollup_source_retired(source regclass)
+	RETURNS TABLE (group_number bigint)
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
+AS $rsr$
+BEGIN
+	PERFORM pgcolumnar.require_caller_select(source);
+	RETURN QUERY
+		SELECT r.group_number FROM pgcolumnar.retired_group r
+		 WHERE r.storage_id = pgcolumnar.get_storage_id(source);
+END
+$rsr$;
+
+CREATE FUNCTION pgcolumnar.create_rollup(rollup name, source regclass, ts_column name,
+										 width interval, origin timestamptz,
+										 group_by name[], agg_functions text[],
+										 agg_columns name[],
+										 access_method name DEFAULT 'pgcolumnar')
+	RETURNS regclass
+	LANGUAGE plpgsql
+	SET search_path = pg_catalog, pg_temp
+AS $cr$
+DECLARE
+	nsp		name;
+	tstype	regtype;
+	cols	text := '';
+	vcols	text := '';
+	gcols	text := '';
+	i		int;
+	fn		text;
+	col		name;
+	ctype	regtype;
+	ptype	text;
+	partials text;
+	view_oid regclass;
+BEGIN
+	IF width IS NULL OR width <= interval '0' OR extract(month FROM width) <> 0
+	   OR extract(year FROM width) <> 0 THEN
+		RAISE EXCEPTION 'a rollup width must be positive and have no months or years'
+			USING ERRCODE = 'invalid_parameter_value',
+				  DETAIL = 'date_bin, which buckets the rows, takes no width in months.';
+	END IF;
+	IF agg_functions IS NULL OR agg_columns IS NULL
+	   OR cardinality(agg_functions) = 0
+	   OR cardinality(agg_functions) <> cardinality(agg_columns) THEN
+		RAISE EXCEPTION 'agg_functions and agg_columns must be non-empty and of the same length'
+			USING ERRCODE = 'invalid_parameter_value';
+	END IF;
+	SELECT a.atttypid::regtype INTO tstype FROM pg_attribute a
+	 WHERE a.attrelid = source AND a.attname = ts_column AND NOT a.attisdropped;
+	IF tstype IS DISTINCT FROM 'timestamptz'::regtype THEN
+		RAISE EXCEPTION 'column "%" of % is not a timestamptz column', ts_column, source
+			USING ERRCODE = 'invalid_parameter_value';
+	END IF;
+
+	-- Each aggregate checked against the five that combine across partial
+	-- results, and each column against the source: structured input, never SQL
+	-- text (#1294 point 11).
+	FOR i IN 1 .. cardinality(agg_functions) LOOP
+		fn := agg_functions[i];
+		col := agg_columns[i];
+		IF fn NOT IN ('count', 'sum', 'min', 'max', 'avg') THEN
+			RAISE EXCEPTION '"%" is not an aggregate a rollup can combine', fn
+				USING ERRCODE = 'invalid_parameter_value',
+					  HINT = 'Use count, sum, min, max or avg.';
+		END IF;
+		IF col = '*' THEN
+			IF fn <> 'count' THEN
+				RAISE EXCEPTION '* goes only with count, not %', fn
+					USING ERRCODE = 'invalid_parameter_value';
+			END IF;
+			cols := cols || ', count bigint NOT NULL';
+			vcols := vcols || ', count';
+			CONTINUE;
+		END IF;
+		SELECT a.atttypid::regtype INTO ctype FROM pg_attribute a
+		 WHERE a.attrelid = source AND a.attname = col AND a.attnum > 0 AND NOT a.attisdropped;
+		IF ctype IS NULL THEN
+			RAISE EXCEPTION 'column "%" does not exist in %', col, source
+				USING ERRCODE = 'invalid_parameter_value';
+		END IF;
+		ptype := CASE WHEN ctype IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype,
+									  'numeric'::regtype) THEN 'numeric'
+					  WHEN ctype IN ('float4'::regtype, 'float8'::regtype) THEN 'float8'
+					  ELSE NULL END;
+		IF fn IN ('sum', 'avg') AND ptype IS NULL THEN
+			RAISE EXCEPTION '% of a % column cannot be folded', fn, ctype
+				USING ERRCODE = 'invalid_parameter_value';
+		END IF;
+		CASE fn
+			WHEN 'count' THEN
+				cols := cols || format(', %I bigint NOT NULL', 'count_' || col);
+				vcols := vcols || format(', %I', 'count_' || col);
+			WHEN 'sum' THEN
+				cols := cols || format(', %I %s', 'sum_' || col, ptype);
+				vcols := vcols || format(', %I', 'sum_' || col);
+			WHEN 'min', 'max' THEN
+				cols := cols || format(', %I %s', fn || '_' || col, ctype);
+				vcols := vcols || format(', %I', fn || '_' || col);
+			WHEN 'avg' THEN
+				cols := cols || format(', %I %s, %I bigint NOT NULL', 'avg_' || col || '__sum', ptype,
+									   'avg_' || col || '__n');
+				vcols := vcols || format(', (%I / nullif(%I, 0))::%s AS %I', 'avg_' || col || '__sum',
+										 'avg_' || col || '__n', ptype, 'avg_' || col);
+		END CASE;
+	END LOOP;
+
+	IF group_by IS NOT NULL THEN
+		FOREACH col IN ARRAY group_by LOOP
+			SELECT a.atttypid::regtype INTO ctype FROM pg_attribute a
+			 WHERE a.attrelid = source AND a.attname = col AND a.attnum > 0 AND NOT a.attisdropped;
+			IF ctype IS NULL THEN
+				RAISE EXCEPTION 'group_by column "%" does not exist in %', col, source
+					USING ERRCODE = 'invalid_parameter_value';
+			END IF;
+			gcols := gcols || format(', %I %s', col, ctype);
+		END LOOP;
+	END IF;
+
+	-- In the source's schema: this function's search_path is pg_catalog, so
+	-- current_schema() would name the system schema, not the caller's.
+	SELECT n.nspname INTO nsp FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	 WHERE c.oid = source;
+	partials := rollup || '__partials';
+	EXECUTE format('CREATE TABLE %I.%I (bucket timestamptz%s%s) USING %I',
+				   nsp, partials, gcols, cols, access_method);
+	EXECUTE format('CREATE VIEW %I.%I AS SELECT bucket%s%s FROM %I.%I',
+				   nsp, rollup,
+				   (SELECT coalesce(string_agg(format(', %I', g), ''), '') FROM unnest(group_by) g),
+				   vcols, nsp, partials);
+	view_oid := format('%I.%I', nsp, rollup)::regclass;
+	INSERT INTO pgcolumnar.rollup VALUES
+		(view_oid, format('%I.%I', nsp, partials)::regclass, source,
+		 pgcolumnar.get_storage_id(source), ts_column, width, origin,
+		 coalesce(group_by, '{}'), agg_functions, agg_columns);
+	RETURN view_oid;
+END
+$cr$;
+
+COMMENT ON FUNCTION pgcolumnar.create_rollup(name, regclass, name, interval, timestamptz, name[], text[], name[], name)
+	IS 'create an incremental rollup: a view of date_bin(width, ts_column, origin) buckets per group_by key, with count, sum, min, max or avg per (agg_functions, agg_columns); fill it with refresh_rollup (#1294)';
+
+/*
+ * The fold, one statement for one snapshot. Built per rollup from its catalog
+ * row: every identifier through %I and every value through %L.
+ */
+CREATE FUNCTION pgcolumnar.refresh_rollup(rollup regclass)
+	RETURNS bigint
+	LANGUAGE plpgsql
+	SET search_path = pg_catalog, pg_temp
+AS $rr$
+DECLARE
+	r		pgcolumnar.rollup;
+	changed	text;
+	keys	text := '';
+	keyeq	text := '';
+	rowcols	text;
+	rcols	name[];
+	dsel	text := '';
+	icols	text := '';
+	isel	text := '';
+	uset	text := '';
+	i		int;
+	fn		text;
+	col		name;
+	c		text;
+	g		name;
+	folded	bigint;
+BEGIN
+	-- A REPEATABLE READ caller's snapshot predates the lock below, so a refresh
+	-- that waited for another would fold the same groups again.
+	IF current_setting('transaction_isolation') <> 'read committed' THEN
+		RAISE EXCEPTION 'refresh_rollup runs only at READ COMMITTED, not %',
+			upper(current_setting('transaction_isolation'))
+			USING ERRCODE = 'invalid_transaction_state';
+	END IF;
+	SELECT * INTO r FROM pgcolumnar.rollup x WHERE x.rollup = refresh_rollup.rollup;
+	IF NOT FOUND THEN
+		RAISE EXCEPTION '% is not a rollup', rollup USING ERRCODE = 'undefined_object';
+	END IF;
+	-- Self-conflicting, so two refreshes run one after the other; readers pass.
+	EXECUTE format('LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE', r.partials);
+
+	IF pgcolumnar.get_storage_id(r.source) <> r.source_storage THEN
+		RAISE EXCEPTION 'the source of rollup % was rewritten since its last refresh', rollup
+			USING ERRCODE = 'object_not_in_prerequisite_state',
+				  HINT = 'If the rollup is current, pgcolumnar.rebase_rollup records the source''s new row groups.';
+	END IF;
+	-- Retention keeps history (the owner's decision on #1294): a recorded group
+	-- that expire retired leaves the snapshot, and its buckets keep the rows they
+	-- folded. Retirement is permanent, so this need not share the fold's snapshot.
+	DELETE FROM pgcolumnar.rollup_group rg
+	 WHERE rg.rollup = r.rollup
+	   AND rg.group_number IN (SELECT t.group_number FROM pgcolumnar.rollup_source_retired(r.source) t);
+	-- Phase 1 folds appends only: any other recorded group that is gone, or has
+	-- new deletions, needs phase 2's dirty buckets.
+	SELECT string_agg(rg.group_number::text, ', ' ORDER BY rg.group_number) INTO changed
+	  FROM pgcolumnar.rollup_group rg
+	  LEFT JOIN pgcolumnar.rollup_source_groups(r.source) s USING (group_number)
+	 WHERE rg.rollup = r.rollup
+	   AND (s.group_number IS NULL OR s.deleted_count <> rg.deleted_count);
+	IF changed IS NOT NULL THEN
+		RAISE EXCEPTION 'rollup %: row groups % of its source were deleted from or rewritten', rollup, changed
+			USING ERRCODE = 'feature_not_supported',
+				  DETAIL = 'This version folds appended row groups only; changed ones need dirty buckets (phase 2).';
+	END IF;
+
+	FOREACH g IN ARRAY r.group_by LOOP
+		keys := keys || format(', %I', g);
+		keyeq := keyeq || format(' AND p.%I IS NOT DISTINCT FROM d.%I', g, g);
+	END LOOP;
+	rcols := ARRAY[r.ts_column];
+	FOR i IN 1 .. cardinality(r.agg_functions) LOOP
+		fn := r.agg_functions[i];
+		col := r.agg_columns[i];
+		IF col = '*' THEN
+			dsel := dsel || ', count(*) AS count';
+			icols := icols || ', count';
+			isel := isel || ', d.count';
+			uset := uset || ', count = p.count + d.count';
+			CONTINUE;
+		END IF;
+		IF NOT col = ANY (rcols) THEN rcols := rcols || col; END IF;
+		CASE fn
+			WHEN 'count' THEN
+				c := 'count_' || col;
+				dsel := dsel || format(', count(%I) AS %I', col, c);
+				uset := uset || format(', %I = p.%I + d.%I', c, c, c);
+			WHEN 'sum' THEN
+				c := 'sum_' || col;
+				dsel := dsel || format(', sum(%I)::%s AS %I', col,
+									   (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+										 WHERE a.attrelid = r.partials AND a.attname = c), c);
+				uset := uset || format(', %I = CASE WHEN p.%I IS NULL THEN d.%I WHEN d.%I IS NULL THEN p.%I ELSE p.%I + d.%I END',
+									   c, c, c, c, c, c, c);
+			WHEN 'min', 'max' THEN
+				c := fn || '_' || col;
+				dsel := dsel || format(', %s(%I) AS %I', fn, col, c);
+				uset := uset || format(', %I = %s(p.%I, d.%I)', c,
+									   CASE fn WHEN 'min' THEN 'least' ELSE 'greatest' END, c, c);
+			WHEN 'avg' THEN
+				c := 'avg_' || col || '__sum';
+				dsel := dsel || format(', sum(%I)::%s AS %I, count(%I) AS %I', col,
+									   (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+										 WHERE a.attrelid = r.partials AND a.attname = c), c,
+									   col, 'avg_' || col || '__n');
+				uset := uset || format(', %I = CASE WHEN p.%I IS NULL THEN d.%I WHEN d.%I IS NULL THEN p.%I ELSE p.%I + d.%I END',
+									   c, c, c, c, c, c, c)
+							 || format(', %I = p.%I + d.%I', 'avg_' || col || '__n',
+									   'avg_' || col || '__n', 'avg_' || col || '__n');
+				icols := icols || format(', %I', 'avg_' || col || '__n');
+				isel := isel || format(', d.%I', 'avg_' || col || '__n');
+		END CASE;
+		icols := icols || format(', %I', c);
+		isel := isel || format(', d.%I', c);
+	END LOOP;
+	FOREACH g IN ARRAY r.group_by LOOP
+		IF NOT g = ANY (rcols) THEN rcols := rcols || g; END IF;
+	END LOOP;
+	-- each source column once: sum, min and max of v all read the same v
+	SELECT string_agg(format('%I', x), ', ' ORDER BY o) INTO rowcols
+	  FROM unnest(rcols) WITH ORDINALITY u(x, o);
+
+	-- ONE statement: the group list, the rows of the new groups (one TID range
+	-- per group, so only their row groups are read), the fold into the partials
+	-- and the record of the groups folded all see the same snapshot. A group
+	-- that commits while this runs is in none of them, and the next refresh
+	-- takes it. pgcolumnar.rollup_pause holds the statement open for that arm.
+	EXECUTE format($f$
+		WITH cur AS (
+			SELECT * FROM pgcolumnar.rollup_source_groups(%1$L::regclass)
+		), held AS (
+			SELECT pg_sleep(CASE WHEN current_setting('pgcolumnar.rollup_pause', true) = 'on'
+								 THEN 2 ELSE 0 END) AS slept
+		), new_groups AS (
+			SELECT c.* FROM cur c
+			 WHERE NOT EXISTS (SELECT 1 FROM pgcolumnar.rollup_group rg
+								WHERE rg.rollup = %2$L::regclass AND rg.group_number = c.group_number)
+		), rows AS MATERIALIZED (
+			SELECT s.* FROM new_groups ng, held,
+			LATERAL (SELECT %3$s FROM %1$s
+					  WHERE ctid >= pgcolumnar.row_tid(ng.first_row_number)
+						AND ctid <= pgcolumnar.row_tid(ng.first_row_number + ng.row_count - 1)
+					 -- OFFSET 0 keeps this subquery from being pulled up into a join:
+					 -- PostgreSQL builds a TID range scan only from a relation's own
+					 -- restrictions, and as a join clause the range read every group.
+					 OFFSET 0) s
+		), delta AS (
+			SELECT date_bin(%4$L::interval, %5$I, %6$L::timestamptz) AS bucket%7$s%8$s
+			  FROM rows GROUP BY 1%9$s
+		), upd AS (
+			UPDATE %10$s p SET %11$s
+			  FROM delta d WHERE p.bucket IS NOT DISTINCT FROM d.bucket%12$s
+			RETURNING p.bucket%13$s
+		), ins AS (
+			INSERT INTO %10$s (bucket%7$s%14$s)
+			SELECT d.bucket%15$s%16$s FROM delta d
+			 WHERE NOT EXISTS (SELECT 1 FROM upd p WHERE p.bucket IS NOT DISTINCT FROM d.bucket%12$s)
+		), recorded AS (
+			INSERT INTO pgcolumnar.rollup_group
+			SELECT %2$L::regclass, ng.group_number, ng.row_count, ng.deleted_count FROM new_groups ng
+		)
+		SELECT count(*) FROM rows
+		$f$,
+		r.source, r.rollup, rowcols, r.width, r.ts_column, r.origin,
+		keys, dsel,
+		(SELECT coalesce(string_agg(format(', %s', n + 1), ''), '') FROM generate_series(1, cardinality(r.group_by)) n),
+		r.partials, substr(uset, 3), keyeq,
+		(SELECT coalesce(string_agg(format(', p.%I', x), ''), '') FROM unnest(r.group_by) x),
+		icols,
+		(SELECT coalesce(string_agg(format(', d.%I', x), ''), '') FROM unnest(r.group_by) x),
+		isel)
+	INTO folded;
+	RETURN folded;
+END
+$rr$;
+
+COMMENT ON FUNCTION pgcolumnar.refresh_rollup(regclass)
+	IS 'fold the rows of the row groups appended to a rollup''s source since its last refresh, in one statement; returns the rows folded (#1294, phase 1: appends only)';
+
+CREATE FUNCTION pgcolumnar.rebase_rollup(rollup regclass)
+	RETURNS bigint
+	LANGUAGE plpgsql
+	SET search_path = pg_catalog, pg_temp
+AS $rb$
+DECLARE
+	r		pgcolumnar.rollup;
+	n		bigint;
+BEGIN
+	SELECT * INTO r FROM pgcolumnar.rollup x WHERE x.rollup = rebase_rollup.rollup;
+	IF NOT FOUND THEN
+		RAISE EXCEPTION '% is not a rollup', rollup USING ERRCODE = 'undefined_object';
+	END IF;
+	EXECUTE format('LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE', r.partials);
+	-- The caller asserts the rollup is current: the source's groups are recorded
+	-- as folded, and the rollup's rows are not touched (#1294 point 9).
+	DELETE FROM pgcolumnar.rollup_group rg WHERE rg.rollup = r.rollup;
+	INSERT INTO pgcolumnar.rollup_group
+		SELECT r.rollup, s.group_number, s.row_count, s.deleted_count
+		  FROM pgcolumnar.rollup_source_groups(r.source) s;
+	GET DIAGNOSTICS n = ROW_COUNT;
+	UPDATE pgcolumnar.rollup x SET source_storage = pgcolumnar.get_storage_id(r.source)
+	 WHERE x.rollup = r.rollup;
+	RETURN n;
+END
+$rb$;
+
+COMMENT ON FUNCTION pgcolumnar.rebase_rollup(regclass)
+	IS 'record a rollup''s source row groups as folded without touching the rollup, after the source was rewritten; the caller asserts the rollup is current (#1294)';

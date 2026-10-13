@@ -668,6 +668,30 @@ PgColumnarRowNumberToItemPointer(uint64 rowNumber, ItemPointer tid)
 	ItemPointerSet(tid, blockno, offset);
 }
 
+/*
+ * pgcolumnar.row_tid(row_number bigint) -> tid
+ *		The item pointer the access method gives a row number, for SQL that
+ *		needs a row group's TID range (refresh_rollup, #1294). The mapping lives
+ *		here once: restated in SQL as 291 rows a block it held only at the
+ *		default block size (#1319 review).
+ */
+PG_FUNCTION_INFO_V1(pgcolumnar_row_tid);
+Datum
+pgcolumnar_row_tid(PG_FUNCTION_ARGS)
+{
+	int64		rowNumber = PG_GETARG_INT64(0);
+	ItemPointer tid;
+
+	if (rowNumber < 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("row number " INT64_FORMAT " is out of range", rowNumber),
+				 errdetail("Row numbers start at 1.")));
+	tid = (ItemPointer) palloc(sizeof(ItemPointerData));
+	PgColumnarRowNumberToItemPointer((uint64) rowNumber, tid);
+	PG_RETURN_POINTER(tid);		/* PG_RETURN_ITEMPOINTER is 16+; tid is by reference */
+}
+
 uint64
 PgColumnarItemPointerToRowNumber(ItemPointer tid)
 {

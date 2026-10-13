@@ -457,6 +457,56 @@ When a partition is dropped by retention, its pgcolumnar catalog rows go with it
 
 `test/partman_columnar.sh` checks each of these statements.
 
+## Keep a rollup up to date
+
+A rollup keeps an aggregate per time bucket, such as hourly averages, and folds
+in only the rows added since the last refresh. Queries read the rollup instead
+of the raw table.
+
+```sql
+SELECT pgcolumnar.create_rollup(
+    'metrics_hourly', 'metrics', 'ts', '1 hour', '2026-01-01 00:00:00+00',
+    group_by      => '{device}',
+    agg_functions => '{count,sum,min,max,avg}',
+    agg_columns   => '{*,value,value,value,value}');
+
+SELECT pgcolumnar.refresh_rollup('metrics_hourly');   -- returns rows folded
+SELECT * FROM metrics_hourly WHERE bucket >= now() - interval '1 day';
+```
+
+The rollup is a view with a `bucket` column, the `group_by` columns, and one
+column for each aggregate. The aggregate columns are named `count`, or the
+function and the column, as in `sum_value` and `avg_value`. The buckets come
+from `date_bin(width, ts, origin)`, so every session gets the same buckets,
+whatever its time zone. The width cannot include months.
+
+A refresh reads only the row groups added since the last refresh. Rows that
+arrive late, with old timestamps, are still folded into their buckets. Rows
+that commit while a refresh runs are folded by the next refresh. Two refreshes
+that run at the same time fold each row once. A refresh after a small append
+reads a small part of the table.
+
+The rollup equals what the same `GROUP BY` over the whole table returns. Count,
+sum, min and max are exact, and so is the average of an integer column. The
+average of a `float8` column can differ from a full recompute in the last digits.
+
+**Retention keeps the rollup's history.** When `pgcolumnar.expire`, or the
+maintenance daemon, drops old rows of the source, the rollup keeps its rows for
+those buckets. So, for example, hourly averages can outlive the raw data.
+
+**This version folds appended rows only.** If rows of the source are deleted or
+updated in any other way, `refresh_rollup` refuses (`0A000`) and changes
+nothing. If the source
+is rewritten, for example by `pgcolumnar.vacuum`, `refresh_rollup` refuses with
+`55000`. If the rollup was current before the rewrite, run
+`pgcolumnar.rebase_rollup` to record the rewritten table and continue.
+
+Run `refresh_rollup` at READ COMMITTED. A role that is not a superuser needs
+`USAGE` on schema `pgcolumnar`, which a superuser grants. Each role then sees
+and refreshes only the rollups that it owns.
+
+`test/rollup.sh` checks each of these statements.
+
 ## Keep tables optimized automatically
 
 A background daemon can compact and recluster tables on a schedule. The threshold

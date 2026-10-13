@@ -142,6 +142,25 @@ true until the next version shipped.
   long, and refuses, before creating anything, a call that would create more
   than 1000 partitions (`22023`) and a parent with a partition bounded by
   `MAXVALUE` (`55000`).
+- Incremental rollups, phase 1 (#1294). `pgcolumnar.create_rollup` defines an
+  aggregate per `date_bin` time bucket and `group_by` key (count, sum, min, max,
+  avg), kept as a view over a partials table; `pgcolumnar.refresh_rollup` folds
+  only the row groups appended since the last refresh, in one statement, reading
+  each new group through its own TID range. Late rows are folded into their
+  buckets, rows committed during a refresh are folded by the next one, and two
+  concurrent refreshes fold each row once. The rollup equals a full recompute:
+  exactly for counts, integer sums and averages, min and max, and within 1e-12
+  for `float8` averages. Rows that `expire` retires keep their buckets in the
+  rollup, so the rollup's history outlives the raw data. This phase refuses any
+  other delete or update in the source (`0A000`) and a rewritten source
+  (`55000`, until `pgcolumnar.rebase_rollup`). Each group's TID range comes from
+  the access method's own mapping (`pgcolumnar.row_tid`), not a block size
+  restated in SQL.
+  The rollup catalogs carry row-level security, so each role sees only the
+  rollups it owns. Found while it was written: a lateral per-group subquery
+  pulled up into a join read every row group (114 blocks of a 103-block table
+  for one new group), because PostgreSQL builds a TID range scan only from a
+  relation's own restrictions; `OFFSET 0` keeps it a scan (15 blocks).
 
 ### Changed
 

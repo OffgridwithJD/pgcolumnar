@@ -591,6 +591,37 @@ refused before it creates any (`22023`). The function takes
 `SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS EXCLUSIVE`. See
 [Create time partitions ahead](how-to.md#create-time-partitions-ahead).
 
+### pgcolumnar.create_rollup(rollup name, source regclass, ts_column name, width interval, origin timestamptz, group_by name[], agg_functions text[], agg_columns name[], access_method name DEFAULT 'pgcolumnar') returns regclass
+
+Creates a rollup of `source` in the source's schema. A rollup is a view of
+`date_bin(width, ts_column, origin)` buckets per `group_by` key, with one column
+per aggregate. Each aggregate is a function from `agg_functions` (`count`,
+`sum`, `min`, `max` or `avg`) applied to the column at the same position in
+`agg_columns`. `*` goes only with `count`. `ts_column` must be `timestamptz`.
+The data is kept in a table named `<rollup>__partials`, with access method
+`access_method`. The function refuses a width with months, an unknown function,
+arrays of different lengths, and a column the source does not have (`22023`).
+See [Keep a rollup up to date](how-to.md#keep-a-rollup-up-to-date).
+
+### pgcolumnar.refresh_rollup(rollup regclass) returns bigint
+
+Folds the rows of the row groups added to the source since the last refresh,
+and returns the number of rows folded. Runs at READ COMMITTED only (`25000`).
+Row groups that `pgcolumnar.expire` retired are dropped from the refresh's
+record, and the rollup keeps their buckets. Refuses after any other delete or
+update in the source (`0A000`), and after a rewrite of the source (`55000`).
+
+### pgcolumnar.row_tid(row_number bigint) returns tid
+
+Returns the item pointer that a columnar table gives the row with this row
+number. Row numbers start at 1 (`22003` otherwise).
+
+### pgcolumnar.rebase_rollup(rollup regclass) returns bigint
+
+Records the source's current row groups as folded, without changing the rollup,
+and returns the number of row groups recorded. Use it after a rewrite of the
+source, when the rollup was current before the rewrite.
+
 ### pgcolumnar.import_arrow(rel regclass, path text) returns bigint
 
 Inserts the rows of an Arrow IPC stream file at `path` into the existing table

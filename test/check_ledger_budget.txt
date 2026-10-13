@@ -1410,4 +1410,22 @@ suites_not_covered 247
 #     never         1683 +  3 = 1686
 #     dated          301 + 16 =  317
 #     1686 + 317 == 2003
-checks_never_observed_red 1686
+#
+# #1294 phase 1, rollups, PR #1319 (OffgridwithJD): 1686 -> 1698. rollup enters
+# the ledger with 56 checks from a five-major run on this tree. Forty-four are
+# dated by twenty-five mutations (the rollup functions, row_tid, and
+# get_storage_id's SELECT check, which is what refuses create_rollup), each merged
+# one log at a time with --mutation and --target; no premise is among them (ten
+# checks that read the code's output were renamed from premises first, #1236).
+# Twelve arrive `never`: five premises (the functions exist, the source's rows,
+# vacuum's renumbering, the NULL fixture, expire's retirement) and seven arms --
+# 'and the refused refresh changed nothing' holds because a refused refresh
+# rolls back; the rest read the rollup or the refresh in ways no mutant of this
+# change reaches (the documented columns, old buckets present, a read at all,
+# rows present before the delete and the rewrite, a non-empty zone rollup).
+#
+#     ledger rows   2003 + 56 = 2059
+#     never         1686 + 12 = 1698
+#     dated          317 + 44 =  361
+#     1698 + 361 == 2059
+checks_never_observed_red 1698
