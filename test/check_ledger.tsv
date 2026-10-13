@@ -204,6 +204,17 @@ catalog_scan_index	catalog_scan_index	premise: truncating a projected table reac
 catalog_scan_index	catalog_scan_index	premise: truncating a projected table took effect	15;16;17;18;19	never	-
 catalog_scan_index	catalog_scan_index	renaming a projected column does not read pgcolumnar.projection_declaration whole	15;16;17;18;19	2026-10-12	the twelve converted sites reverted to InvalidOid, so each reads its catalog whole
 catalog_scan_index	catalog_scan_index	truncating a projected table does not read pgcolumnar.projection_declaration whole	15;16;17;18;19	2026-10-12	the twelve converted sites reverted to InvalidOid, so each reads its catalog whole
+collation_change	collation_change	a collation change made through a partitioned parent reaches the columnar partition	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour);only the named relation, not its inheritors
+collation_change	collation_change	a projection sorted on the column answers a range as heap does	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour);the projection column forgotten at its list position, without the rownumber column's offset;the projection storages' bounds not forgotten
+collation_change	collation_change	a table sorted under the old collation orders ORDER BY ... LIMIT as heap does	15;16;17;18;19	2026-10-13	the sorted-pathkeys claim's refusal of collatable columns removed
+collation_change	collation_change	after the collation change min and max are heap's	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour);the min/max fold skips a group with values and no bounds as all-NULL
+collation_change	collation_change	and a range below an upper-case bound returns heap's rows	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour)
+collation_change	collation_change	and an equality on a value C sorts first returns heap's rows	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour)
+collation_change	collation_change	premise: the collation change rewrote nothing	15;16;17;18;19	never	-
+collation_change	collation_change	premise: the columnar table has several row groups	15;16;17;18;19	never	-
+collation_change	collation_change	premise: the new collation orders a lower-case letter before an upper-case one that C puts first	15;16;17;18;19	never	-
+collation_change	collation_change	rows written after the change join heap's answer	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour)
+collation_change	collation_change	the column's extent is not the old collation's bound	15;16;17;18;19	2026-10-13	nothing forgotten after a collation change (main's behaviour);the column's extent rows kept
 column_extent	column_extent	DROP TABLE removes them	15;16;17;18;19	2026-10-13	PgColumnarDeleteMetadata leaves the extent rows
 column_extent	column_extent	TRUNCATE removes the old storage's extent rows	15;16;17;18;19	2026-10-13	PgColumnarDeleteMetadata leaves the extent rows
 column_extent	column_extent	a column added after older groups has no complete extent (those groups have no zone map for it)	15;16;17;18;19	2026-10-13	a recompute that ignores a group with no zone map for the column;pgcolumnar.column_extent returns a row with no complete extent;the extent trusted without a complete row
