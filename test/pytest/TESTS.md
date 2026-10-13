@@ -6195,8 +6195,9 @@ restored byte-identical.
 | `test_a_date_retention_column_truncates_toward_keeping` | the rounding, which only this arm notices |
 | `test_the_cutoff_is_the_sessions_own_date` | the cutoff is the session's, asserted as an identity rather than as a difference |
 | `test_expire_records_what_it_retires_and_nothing_else` | `expire` writes exactly the groups it retires to `pgcolumnar.retired_group` (#1294); a rolled-back `expire` and a `compact_rewrite` record nothing; dropping the table drops its rows |
+| `test_a_no_op_expire_reads_the_extent_not_every_zone_map` | #1310: with the retention column's extent (#1304 option 5) past the cutoff, a no-op `expire` makes 0 zone-map scans where it made one per group; the same groups retire with or without the extent; aged rows written in `expire`'s own transaction retire; a column left with only NULLs needs no reads. Counted in a fresh connection, with the test schema's `search_path` carried over. Seen red first: 40 scans |
 
-The shell twin is `test/ttl_expire.sh`, 51 checks. The two halves share no code:
+The shell twin is `test/ttl_expire.sh`, 67 checks since #1310, all in the mutation ledger. The two halves share no code:
 different tables, different row counts, different retention windows, and the
 refusals asserted by SQLSTATE here (`55000` for no declared retention, `22023` for
 a non-positive interval) where the shell greps its message.

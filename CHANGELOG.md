@@ -18,6 +18,14 @@ true until the next version shipped.
 
 ### Added
 
+- A `pgcolumnar.expire` that has nothing to retire now answers from the
+  retention column's extent in one index lookup, instead of one zone-map probe
+  per row group (#1310). Most passes of the maintenance daemon are such passes. When
+  the extent's minimum is not below the cutoff, no group can qualify; otherwise
+  `expire` decides group by group as before. Measured as zone-map scans for a
+  no-op `expire` over 50 groups: 50 before, 0 after. `test/ttl_expire.sh` and
+  `test_ttl_expire.py`; `ttl_expire` now enters the mutation ledger.
+
 - The planner's estimate of how many time buckets a `GROUP BY date_trunc(...)`
   or `date_bin(...)` produces now reads a per-column extent
   (`pgcolumnar.column_extent`) in one index lookup, instead of every row group's
