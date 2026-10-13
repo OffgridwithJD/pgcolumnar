@@ -140,6 +140,7 @@ behaviour, the source of that number is named.
 - [92. test_tid_range_scan.py: a ctid range reads only the row groups that hold it](#92-test_tid_range_scanpy-a-ctid-range-reads-only-the-row-groups-that-hold-it)
 - [93. test_partition_lifecycle.py: partition_create_ahead keeps a time-partitioned parent ahead of now](#93-test_partition_lifecyclepy-partition_create_ahead-keeps-a-time-partitioned-parent-ahead-of-now)
 - [94. test_approx_aggregates.py: hll and tdigest over columnar tables, the compatibility statement](#94-test_approx_aggregatespy-hll-and-tdigest-over-columnar-tables-the-compatibility-statement)
+- [95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading](#95-test_docs_how_to_sectionspy-the-pg_partman-how-to-keeps-its-own-heading)
 
 ## 1. How to read a test in here
 
@@ -6556,3 +6557,15 @@ hll 2.19 does not build against PostgreSQL 19, so `test_hll_over_columnar` is `U
 | --- | --- |
 | `test_tdigest_over_columnar` | the columnar table returns every row written; the tdigest aggregate reads through the columnar scan; its p99 over columnar equals heap's exactly; within 0.1% of the exact percentile; a tdigest stored per day in a columnar table still answers within 0.1% |
 | `test_hll_over_columnar` | the hll aggregate reads through the columnar scan; the sketch over columnar is byte-identical to heap's; the estimate is within 6.9% of the exact count; a stored hll comes back byte for byte, and the union of daily sketches counts what one sketch counts |
+
+## 95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading
+
+An edit that inserted the approximate-aggregates section before the pg_partman how-to replaced its heading instead (3627327, #1315). Every docs check passed, because the steps were still valid Markdown, filed under "Count distinct values and percentiles approximately". The pytest half of the docs_style.sh arm of the same name, written independently: it splits the how-to on its level-two headings and reads the section's first paragraph. It needs no cluster, so it is in `NO_CLUSTER`.
+
+Red on main at d208bce in both twins (got 0, want 1); green with the heading restored.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_how_to_keeps_its_pg_partman_section_under_its_own_heading` | the how-to has a "Manage time partitions with pg_partman" section, and it opens with the pg_partman paragraph its steps belong to |

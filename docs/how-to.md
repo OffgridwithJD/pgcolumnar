@@ -384,6 +384,7 @@ Both sketch types can be stored in a columnar table, for example one sketch per
 day. A stored `hll` comes back byte for byte, so `hll_union_agg` over the daily
 sketches counts what one sketch over all the rows counts.
 
+## Manage time partitions with pg_partman
 
 pg_partman can create and drop columnar partitions. It needs one setting to do
 so, and without it the partitions it makes are not columnar.
