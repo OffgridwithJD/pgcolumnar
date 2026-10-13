@@ -174,6 +174,7 @@ def test_the_owner_is_allowed(pgc_conn, expect):
                 "owner compact allowed")
     expect.text(f"{outcomes['recluster']}|{counts['recluster']}", "allowed|3000",
                 "owner recluster allowed")
+    expect.num(len(outcomes), 9, "premise: the owner ran all nine maintenance functions")
     for call in OWNER_ORDER:
         fn = call.split("(")[0]
         expect.text(outcomes[fn], "allowed", f"owner allowed: {fn}")
