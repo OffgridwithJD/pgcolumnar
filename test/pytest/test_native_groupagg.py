@@ -316,32 +316,17 @@ def test_a_lone_negative_zero_keeps_its_sign(pgc_conn, expect):
 
 # ---- shapes the node must decline, still answering correctly -----------------
 
-def test_a_group_count_over_the_cap_stops_rather_than_growing(pgc_conn, expect):
-    """The cap bounds the ACTUAL group count at execution, not the planner's estimate.
-
-    The node is forced here -- hashagg and sort off leave it the only grouping path
-    -- so the cap path is exercised whatever the planner would cost on this fixture.
-    Its real-world plan choice is covered by the arms above.
+def test_a_key_well_under_the_gate_takes_the_node(pgc_conn, expect):
+    """Since #1292 phase 2 the node is taken only for an estimate of at most a tenth
+    of pgcolumnar.groupagg_max_groups, so the runtime cap is reached only through a
+    wrong estimate; test_on_by_default_and_gated_on_the_estimate proves that path.
+    (Before the gate this forced the node under a cap of 100 with hashagg and sort
+    off; the gate now declines that plan, which is the point of it.)
     """
     _make_pair(expect, pgc_conn)
     expect.plan_marker(_plan(pgc_conn, "SELECT g, count(*) FROM t_col GROUP BY g"),
-                       MARKER, name="plan: node still chosen (no estimate gate)")
+                       MARKER, name="plan: the node is chosen for a key well under the gate")
 
-    # autocommit is on, so the deliberate error below cannot poison what follows.
-    # Only psycopg.Error is caught: a bug in this file should raise.
-    _exec(pgc_conn, "SET enable_hashagg=off")
-    _exec(pgc_conn, "SET enable_sort=off")
-    _exec(pgc_conn, "SET pgcolumnar.groupagg_max_groups=100")
-    named = "no"
-    try:
-        _rows(pgc_conn, "SELECT g, count(*) FROM t_col GROUP BY g")
-    except psycopg.Error as exc:
-        named = "yes" if "groupagg_max_groups" in str(exc) else f"no [{exc}]"
-    expect.text(named, "yes", "over-cap stops with a groupagg_max_groups error")
-
-    _exec(pgc_conn, "RESET enable_hashagg")
-    _exec(pgc_conn, "RESET enable_sort")
-    _exec(pgc_conn, "RESET pgcolumnar.groupagg_max_groups")
     # Named at the call rather than through `_oracle`, and without a second node
     # premise, because the shell suite spends a bare `diff_query` here: the node was
     # asserted three lines above and asserting it again would publish a premise the
@@ -741,3 +726,95 @@ def test_a_mixed_timestamp_predicate_never_narrows_the_bound(pgc_conn, expect):
                 "a mixed timestamp/timestamptz predicate never narrows the estimate below the true count")
     expect.text("yes" if matching < 5000 else f"no [{matching}]", "yes",
                 "while a matching-type predicate still gets one")
+
+
+# ---- on by default, gated on an upper bound (#1292 phase 2) -----------------
+
+def _under_cap(conn, cap, sql):
+    _exec(conn, f"SET pgcolumnar.groupagg_max_groups = {cap}")
+    try:
+        return _plan(conn, sql)
+    finally:
+        _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+
+
+def _groups_or_error(conn, cap, sql):
+    """The number of groups the query returns under that cap, or its error. The query
+    runs itself: wrapped in count(*), the planner drops the unused aggregates and the
+    node refuses that shape, so a wrapper would measure a different plan."""
+    _exec(conn, f"SET pgcolumnar.groupagg_max_groups = {cap}")
+    try:
+        return str(len(_rows(conn, sql)))
+    except psycopg.Error as exc:
+        return f"ERROR: {exc.diag.message_primary}"
+    finally:
+        _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+
+
+def test_on_by_default_and_gated_on_an_upper_bound(pgc_conn, expect):
+    """The grouped path is on by default, and taken only when a TRUE UPPER BOUND on
+    the group count (the live row count, or the time buckets the zone maps allow)
+    is within groupagg_max_groups. A gate on the estimate let a skewed key through
+    and errored (@OffgridwithJD on #1330); a bound never does.
+
+    Independent of the shell suite's section 10: its own generators; the numbers the
+    names state are shared.
+    """
+    conn = pgc_conn
+    expect.text(_one(conn, "SELECT boot_val || '|' || setting FROM pg_settings"
+                           " WHERE name = 'pgcolumnar.enable_group_vectorization'"), "on|on",
+                "the grouped path is on by default")
+    gen = ("SELECT '2026-05-01 00:00:00+00'::timestamptz + g * interval '648 ms',"
+           " ((g * 7) % 200000)::int, (g % 777)::int FROM generate_series(1, 400000) g")
+    for name, am in (("gate_c", "pgcolumnar"), ("gate_hp", "heap")):
+        _exec(conn, f"CREATE TABLE {name} (ts timestamptz, k int, i int) USING {am}")
+        _exec(conn, f"INSERT INTO {name} {gen}")
+        _exec(conn, f"ANALYZE {name}")
+    bucket = ("SELECT date_bin('5 minutes', ts, '2026-01-01 00:00:00+00') b, count(*), sum(i)"
+              " FROM gate_c GROUP BY b")
+    expect.plan_marker(_plan(conn, bucket), MARKER,
+                       name="by default a five-minute bucket query takes the grouped path")
+    expect.plan_marker(_under_cap(conn, 100000, bucket), MARKER,
+                       name="a five-minute bucket query over more rows than the cap still takes the grouped path")
+    high = "SELECT k, count(*), sum(i) FROM {} GROUP BY k"
+    expect.plan_marker(_under_cap(conn, 100000, high.format("gate_c")), MARKER, absent=True,
+                       name="a plain key over more rows than the cap is declined")
+    _exec(conn, "SET pgcolumnar.groupagg_max_groups = 100000")
+    declined = _rows(conn, high.format("gate_c"))
+    _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+    expect.rows(declined, _rows(conn, high.format("gate_hp")),
+                "and the declined query answers what heap answers")
+    expect.plan_marker(_under_cap(conn, 10000000, high.format("gate_c")), MARKER,
+                       name="raising groupagg_max_groups to 10,000,000 lets the same query take the grouped path")
+
+    # 95% of 800,000 rows on key 0 and the rest unique: 40,001 groups, which a fresh
+    # ANALYZE puts far lower. Under a cap of 30,000 the row count declines it.
+    _exec(conn, "CREATE TABLE gate_skew (k bigint, v int) USING pgcolumnar")
+    _exec(conn, "INSERT INTO gate_skew SELECT CASE WHEN g % 20 = 7 THEN g * 3 ELSE 0 END, g"
+                " FROM generate_series(1, 800000) g")
+    _exec(conn, "ANALYZE gate_skew")
+    nd = _one(conn, "SELECT n_distinct FROM pg_stats WHERE tablename = 'gate_skew' AND attname = 'k'")
+    expect.text("below" if nd is not None and 0 <= nd <= 3000 else str(nd), "below",
+                "premise: ANALYZE estimates the skewed key's 40,001 groups below 3,000")
+    skq = "SELECT k, count(*), sum(v) FROM gate_skew GROUP BY k"
+    taken = MARKER in str(_under_cap(conn, 30000, skq))
+    expect.text(f"{1 if taken else 0}|{_groups_or_error(conn, 30000, skq)}", "0|40001",
+                "a skewed key whose estimate is far too low is declined under a cap of 30,000, and answers every group")
+
+    # The runtime cap stays as the backstop: a cached plan made under the default
+    # cap runs under 1,000.
+    _exec(conn, f"PREPARE gk AS {high.format('gate_c')}")
+    planned = MARKER in str(_one(conn, "EXPLAIN (COSTS OFF, FORMAT JSON) EXECUTE gk"))
+    _rows(conn, "EXECUTE gk")
+    _exec(conn, "SET pgcolumnar.groupagg_max_groups = 1000")
+    got = "no error"
+    try:
+        _rows(conn, "EXECUTE gk")
+    except psycopg.Error as exc:
+        d = exc.diag
+        got = ("1" if "exceeded pgcolumnar.groupagg_max_groups (1000)" in (d.message_primary or "") else "0") + "|" + \
+              ("1" if (d.message_hint or "").startswith("Raise pgcolumnar.groupagg_max_groups") else "0")
+    _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+    _exec(conn, "DEALLOCATE gk")
+    expect.text(f"{1 if planned else 0}|{got}", "1|1|1",
+                "a cached plan run under a lower cap stops at the runtime cap, with its hint")

@@ -218,26 +218,13 @@ oracle "oracle exact: GROUP BY added column" \
 
 # ---- 7. fallback shapes: not the node, still the right answer ---------------
 
-# The cap bounds the actual group count at execution, not the planner's group
-# estimate (unreliable for expression keys): over the cap the node stops with
-# guidance rather than building an unbounded hash table. The node is forced here
-# (the only grouping path left with hashagg and sort off) so the cap-enforcement
-# path is exercised deterministically regardless of how the planner would cost it
-# on this small table; the node's real-world plan choice is covered above and by
-# the benchmark. The cap is set in-session so the executor reads it directly.
-check "plan: node still chosen (no estimate gate)" \
+# Since #1292 phase 2 the planner takes the node only for an estimate of at most a
+# tenth of pgcolumnar.groupagg_max_groups, so the runtime cap is reached only when
+# the estimate is wrong; section 10 proves that path with a stale-statistics
+# fixture. (Before the gate this section forced the node with hashagg and sort off
+# under a cap of 100; the gate now declines that plan, which is the point of it.)
+check "plan: the node is chosen for a key well under the gate" \
 	"$(pgc_is_groupvec "SELECT g, count(*) FROM t_col GROUP BY g")" yes
-# Capture to a variable before grepping: the query errors on purpose, so psql
-# exits non-zero, and under `set -o pipefail` a `psql | grep` pipeline would
-# report psql's failure even when grep matched -- flipping this check to a false
-# negative. Grepping the captured text keeps psql's exit status out of it.
-oc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-	-d "$PGC_DB" -Atc "SET pgcolumnar.enable_group_vectorization=on;
-		SET enable_hashagg=off; SET enable_sort=off;
-		SET pgcolumnar.groupagg_max_groups=100;
-		SELECT g, count(*) FROM t_col GROUP BY g" 2>&1 || true)"
-n_err="$(grep -q 'groupagg_max_groups' <<<"$oc_out" && echo yes || echo no)"
-check "over-cap stops with a groupagg_max_groups error" "$n_err" yes
 diff_query "oracle exact: default cap runs the high-cardinality key" \
 	"SELECT g, count(*), sum(i4) FROM %T GROUP BY g"
 
@@ -548,5 +535,77 @@ check "while a matching-type predicate still gets one" \
 
 check "a non-time expression key gets no bound either" \
 	"$([ "$(gbest "SELECT upper(host) b, avg(v) FROM gb GROUP BY b")" -gt 100 ] && echo yes || echo no)" "yes"
+
+# ---- 10. on by default, gated on an upper bound (#1292 phase 2) -------------
+# The grouped path is on by default, and the planner takes it only when a TRUE
+# UPPER BOUND on the group count is within pgcolumnar.groupagg_max_groups: the
+# relation's live row count, or, where every key is a time bucket, the buckets the
+# zone maps allow. Over the cap the node errors, since its plan is fixed by then,
+# so a gate on an ESTIMATE let a skewed key through: @OffgridwithJD measured on
+# #1330 a fresh ANALYZE estimating 29,356 groups for 2,000,001, and the query
+# that main answers errored by default. With a bound, the default never errors.
+# The database-level setting the sections above use is cleared, so these arms see
+# the compiled default.
+psql_run "ALTER DATABASE $PGC_DB RESET pgcolumnar.enable_group_vectorization;"
+check "the grouped path is on by default" \
+	"$(q "SELECT boot_val || '|' || setting FROM pg_settings WHERE name = 'pgcolumnar.enable_group_vectorization';")" "on|on"
+# 400,000 rows over two days: 576 five-minute buckets, and k with 200,000 values.
+GATE_GEN="SELECT '2026-02-01 00:00:00+00'::timestamptz + g * interval '432 ms', (g % 200000)::int, (g % 1000)::int
+	FROM generate_series(1, 400000) g"
+psql_run "CREATE TABLE gate_t (ts timestamptz, k int, i int) USING pgcolumnar;
+	INSERT INTO gate_t $GATE_GEN;
+	CREATE TABLE gate_h (ts timestamptz, k int, i int);
+	INSERT INTO gate_h $GATE_GEN;
+	ANALYZE gate_t; ANALYZE gate_h;"
+BUCKETQ="SELECT date_bin('5 minutes', ts, '2026-01-01 00:00:00+00') b, count(*), sum(i) FROM gate_t GROUP BY b"
+HIGHK="SELECT k, count(*), sum(i) FROM %T GROUP BY k"
+# groups_or_error CAP QUERY -> the number of groups the query returns under that cap,
+# or its error. The query runs itself: wrapped in SELECT count(*) FROM (...), the
+# planner drops the unused aggregates and the node refuses that shape, so the
+# wrapper would measure a different plan.
+groups_or_error() {
+	local out
+	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "$2" 2>&1)"
+	if grep -q '^ERROR' <<<"$out"; then grep -m1 '^ERROR' <<<"$out"; else grep -c '' <<<"$out"; fi
+}
+under_cap() {	# under_cap CAP QUERY -> 1 when the grouped node is planned under that cap
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "EXPLAIN (COSTS OFF) $2" 2>&1 \
+		| grep -c 'Columnar Vectorized Group Keys'
+}
+check "by default a five-minute bucket query takes the grouped path" "$(pgc_is_groupvec "$BUCKETQ")" yes
+check "a five-minute bucket query over more rows than the cap still takes the grouped path" \
+	"$(under_cap 100000 "$BUCKETQ")" "1"
+check "a plain key over more rows than the cap is declined" "$(under_cap 100000 "${HIGHK//%T/gate_t}")" "0"
+check "and the declined query answers what heap answers" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET pgcolumnar.groupagg_max_groups = 100000" \
+		-c "SELECT md5(string_agg(x::text, ',' ORDER BY x)) FROM (${HIGHK//%T/gate_t}) x" 2>&1)" \
+	"$(q "SELECT md5(string_agg(x::text, ',' ORDER BY x)) FROM (${HIGHK//%T/gate_h}) x;")"
+check "raising groupagg_max_groups to 10,000,000 lets the same query take the grouped path" \
+	"$(under_cap 10000000 "${HIGHK//%T/gate_t}")" "1"
+
+# @OffgridwithJD's shape on #1330: one key holds most rows, the rest are unique.
+# A fresh ANALYZE samples 30,000 rows and estimates the groups from them, far too
+# few (29,356 for 2,000,001 there). Here 95% of 800,000 rows share key 0, so
+# 40,001 groups, and under a cap of 30,000 a tenth-of-the-cap gate on the estimate
+# (3,000) would take the path and error. The row count, 800,000, declines it.
+psql_run "CREATE TABLE gate_sk (k bigint, v int) USING pgcolumnar;
+	INSERT INTO gate_sk SELECT CASE WHEN g % 20 = 0 THEN g ELSE 0 END, g FROM generate_series(1, 800000) g;
+	ANALYZE gate_sk;"
+SKQ="SELECT k, count(*), sum(v) FROM gate_sk GROUP BY k"
+check "premise: ANALYZE estimates the skewed key's 40,001 groups below 3,000" \
+	"$(q "SELECT CASE WHEN n_distinct BETWEEN 0 AND 3000 THEN 'below' ELSE n_distinct::text END FROM pg_stats WHERE tablename = 'gate_sk' AND attname = 'k';")" "below"
+check "a skewed key whose estimate is far too low is declined under a cap of 30,000, and answers every group" \
+	"$(under_cap 30000 "$SKQ")|$(groups_or_error 30000 "$SKQ")" "0|40001"
+
+# The runtime cap stays as the backstop. With a bound it is reached only when the
+# cap falls after planning: a cached plan made under the default runs under 1,000.
+rc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+	-c "PREPARE gk AS ${HIGHK//%T/gate_t}" -c "EXPLAIN (COSTS OFF) EXECUTE gk" -c "EXECUTE gk" \
+	-c "SET pgcolumnar.groupagg_max_groups = 1000" -c "EXECUTE gk" 2>&1 || true)"
+check "a cached plan run under a lower cap stops at the runtime cap, with its hint" \
+	"$(grep -c 'Columnar Vectorized Group Keys' <<<"$rc_out")|$(grep -c 'exceeded pgcolumnar.groupagg_max_groups (1000)' <<<"$rc_out")|$(grep -c 'HINT:  Raise pgcolumnar.groupagg_max_groups' <<<"$rc_out")" "1|1|1"
 
 pgc_summary

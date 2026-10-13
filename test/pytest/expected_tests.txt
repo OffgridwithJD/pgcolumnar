@@ -597,4 +597,10 @@ guard_tests 419
 #
 # cluster_tests 525 -> 526 for #1327's test_collation_change.py, one test, by collection
 # on this branch rebased onto 4c72242 (#1326).
-cluster_tests 526
+#
+# cluster_tests 526 -> 527 for #1292 phase 2 in test_native_groupagg.py: one test
+# renamed (the over-cap test, whose forced plan the gate now declines, became
+# test_a_key_well_under_the_gate_takes_the_node) and one added
+# (test_on_by_default_and_gated_on_the_estimate), by collection on this branch
+# rebased onto c90976d (#1329): 945 collected on main, 946 here.
+cluster_tests 527

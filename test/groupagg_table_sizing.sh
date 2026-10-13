@@ -61,7 +61,9 @@ psql_run "INSERT INTO gts_expr SELECT '2026-01-01'::timestamptz + (i || ' second
           FROM generate_series(1,500000) i;"
 psql_run "ANALYZE gts_expr;"
 
-ON="SET pgcolumnar.enable_group_vectorization=on;"
+# The cap is raised so the gate (a tenth of it, #1292 phase 2) admits the 200,000-group
+# fixture: this suite measures the hash table's sizing, not the plan choice.
+ON="SET pgcolumnar.enable_group_vectorization=on; SET pgcolumnar.groupagg_max_groups=10000000;"
 BIG="SET work_mem='64MB';"
 
 explain_with() {	# $1 = extra SET, $2 = query

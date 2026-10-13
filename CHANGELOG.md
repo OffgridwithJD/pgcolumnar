@@ -227,6 +227,24 @@ true until the next version shipped.
 
 ### Changed
 
+- `GROUP BY` is vectorized by default (#1292).
+  `pgcolumnar.enable_group_vectorization` is now `on`. The planner takes the
+  grouped path only when an upper bound on the group count is within
+  `pgcolumnar.groupagg_max_groups`: the table's live row count, or, for
+  time-bucket keys, the buckets #369's and #1304's bounds allow. Above that the
+  ordinary plan runs. Before, the path was off because over the cap it errors at
+  execution, and on by default that error would have reached any high-cardinality
+  `GROUP BY`. The first version gated on the estimate, and @OffgridwithJD's review
+  showed a skewed key fooling ANALYZE by 68x with fresh statistics (29,356
+  estimated for 2,000,001) and erroring by default; a bound cannot be fooled so.
+  The runtime cap stays as the backstop for a cap lowered, or a table grown,
+  after planning; `native_groupagg` shows it with a cached plan. Three suites assumed the old default: `native_groupagg` forced the
+  node under a cap of 100, which the gate now declines; `groupagg_table_sizing`
+  raises the cap for its 200,000-group fixture; and `vector_agg_tlist_shape`
+  pins the grouped path off, because it tests the ungrouped fold. The docs said
+  the path took only plain columns and `count`, `sum` and `avg`; it also takes
+  `date_bin`, `date_trunc`, `min` and `max`.
+
 - The planner estimates the number of groups for a time-bucket key from the
   table's own data (#1292). `GROUP BY date_trunc(unit, ts)` and, newly,
   `GROUP BY date_bin(stride, ts, origin)` were estimated near the row count

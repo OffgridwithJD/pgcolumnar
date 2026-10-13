@@ -92,13 +92,15 @@
 bool		pgcolumnar_enable_vectorization = true;
 
 /*
- * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
- * grouped path is built out incrementally; the ungrouped path is unaffected.
- * groupagg_max_groups caps the ACTUAL group count at execution time; exceeding
- * it raises an error (see pgcolumnar_groupagg_lookup) rather than routing to core
- * HashAgg. It is not a plan-time gate.
+ * GUC: extend the vectorized aggregate to GROUP BY (#289). On by default since
+ * #1292 phase 2, because the planner now takes the path only when an UPPER
+ * BOUND on the group count is within groupagg_max_groups (see
+ * pgcolumnar_group_count_upper_bound). groupagg_max_groups still caps the
+ * ACTUAL group count at execution time; exceeding it raises an error (see
+ * pgcolumnar_groupagg_lookup) rather than routing to core HashAgg, which now
+ * needs the cap lowered, or the table grown past it, after planning.
  */
-bool		pgcolumnar_enable_group_vectorization = false;
+bool		pgcolumnar_enable_group_vectorization = true;
 int			pgcolumnar_groupagg_max_groups = 1000000;
 
 /*
@@ -2367,13 +2369,12 @@ have_width:
  *		A query with no such bound gets no bound from us.
  */
 static double
-pgcolumnar_group_estimate_bound(PlannerInfo *root, RelOptInfo *input_rel,
-							  List *groupExprs)
+pgcolumnar_group_estimate_bound(PlannerInfo *root, List *groupExprs,
+							  double timeProduct)
 {
 	ListCell   *lc;
-	double		bound = 1.0;
 
-	if (groupExprs == NIL)
+	if (groupExprs == NIL || timeProduct <= 0.0 || timeProduct >= (double) INT_MAX)
 		return 0.0;
 
 	foreach(lc, groupExprs)
@@ -2381,7 +2382,6 @@ pgcolumnar_group_estimate_bound(PlannerInfo *root, RelOptInfo *input_rel,
 		Node	   *expr = (Node *) lfirst(lc);
 		VariableStatData vardata;
 		bool		informed;
-		double		one;
 
 		/*
 		 * Core's own question: does anything actually know about this expression?
@@ -2392,16 +2392,64 @@ pgcolumnar_group_estimate_bound(PlannerInfo *root, RelOptInfo *input_rel,
 		ReleaseVariableStats(vardata);
 		if (informed)
 			return 0.0;
-
-		one = pgcolumnar_truncating_time_bound(root, input_rel, expr);
-		if (one <= 0.0)
-			return 0.0;		/* one unbounded key and the product is unbounded */
-
-		bound *= one;
-		if (bound >= (double) INT_MAX)
-			return 0.0;
 	}
-	return bound;
+	return timeProduct;
+}
+
+/*
+ * pgcolumnar_time_bucket_products
+ *		Each key's time-bucket bound (pgcolumnar_truncating_time_bound), read ONCE
+ *		per plan, because each reads the zone maps (#1304: once per plan, not once
+ *		per row group, and not twice). *product is their product, and *withNull
+ *		the product with one more group per key for NULL; both are 0 when any key
+ *		has no bound.
+ */
+static void
+pgcolumnar_time_bucket_products(PlannerInfo *root, RelOptInfo *input_rel,
+								List *groupExprs, double *product, double *withNull)
+{
+	ListCell   *lc;
+
+	*product = 1.0;
+	*withNull = 1.0;
+	foreach(lc, groupExprs)
+	{
+		double		one = pgcolumnar_truncating_time_bound(root, input_rel,
+														   (Node *) lfirst(lc));
+
+		if (one <= 0.0)
+		{
+			*product = 0.0;
+			*withNull = 0.0;
+			return;
+		}
+		*product *= one;
+		*withNull *= one + 1.0;
+	}
+}
+
+/*
+ * pgcolumnar_group_count_upper_bound
+ *		A TRUE upper bound on the number of groups, for the gate (#1292 phase 2).
+ *
+ *		The relation's live row count always bounds it: no grouping makes more
+ *		groups than rows. input_rel->tuples is that count, read from the
+ *		row-group catalog and the delete vectors (relation_estimate_size), not
+ *		ANALYZE's sample, and before any WHERE, whose selectivity is an estimate.
+ *
+ *		Where EVERY key is a truncating time function with a bound from its
+ *		range (#369's quals, #1304's zone maps), the product of those bounds,
+ *		with one more group per key for NULL, is tighter (timeWithNull, from
+ *		pgcolumnar_time_bucket_products). Unlike pgcolumnar_group_estimate_bound,
+ *		this applies even to a key that has statistics, because statistics are
+ *		an estimate and the buckets a bound.
+ */
+static double
+pgcolumnar_group_count_upper_bound(RelOptInfo *input_rel, double timeWithNull)
+{
+	double		rows = Max(input_rel->tuples, 0.0);
+
+	return (timeWithNull > 0.0 && timeWithNull < rows) ? timeWithNull : rows;
 }
 
 static void
@@ -2417,6 +2465,8 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	ListCell   *lc;
 	int			naggs = 0;
 	double		dNumGroups;
+	double		timeProduct;
+	double		timeWithNull;
 	Path	   *cheapest;
 	Cost		serialScanCost = 0.0;
 	double		serialScanRows = 0.0;
@@ -2462,13 +2512,11 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 
 	/*
 	 * estimate_num_groups only sizes the path's row estimate; it is deliberately
-	 * NOT a gate. For an expression key such as date_trunc(...) the planner
-	 * cannot estimate distinctness and returns a count near the input row count
-	 * (here ~8.4M estimated against 48k actual), which would wrongly disable this
-	 * path on exactly the large tables it helps. The unbounded-hash-table guard
-	 * is the execution-time cap on the actual group count
-	 * (pgcolumnar.groupagg_max_groups), which errors with guidance -- see
-	 * pgcolumnar_groupagg_lookup -- rather than silently declining the feature.
+	 * NOT the gate. For an expression key such as date_trunc(...) it cannot see
+	 * distinctness and returns a count near the input row count (~8.4M estimated
+	 * against 48k actual), and for a skewed plain key ANALYZE's own estimator
+	 * can be 68x LOW with fresh statistics (#1330 review: 29,356 estimated for
+	 * 2,000,001). The gate (THE GATE below) uses an upper bound instead.
 	 */
 	groupExprs = groupKeys;
 	dNumGroups = estimate_num_groups(root, groupExprs,
@@ -2499,13 +2547,30 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 	 * downward: Min() cannot raise an estimate, so a shape we get wrong is priced
 	 * no worse than it is today.
 	 */
+	pgcolumnar_time_bucket_products(root, input_rel, groupExprs,
+									&timeProduct, &timeWithNull);
 	{
-		double		bound = pgcolumnar_group_estimate_bound(root, input_rel,
-														  groupExprs);
+		double		bound = pgcolumnar_group_estimate_bound(root, groupExprs,
+														  timeProduct);
 
 		if (bound > 0.0 && bound < dNumGroups)
 			dNumGroups = Max(1.0, bound);
 	}
+
+	/*
+	 * THE GATE (#1292 phase 2, the owner's decision: gate now, never error
+	 * later): take the path only when an UPPER BOUND on the group count is
+	 * within the runtime cap. Over the cap the node errors, since its plan is
+	 * fixed by then, so with the path on by default a gate that let a group
+	 * count past the cap would turn a working query into an error. An estimate
+	 * cannot be that gate: a skewed key fools ANALYZE (see above). A bound can,
+	 * and the default then never errors; the cap is reached only if it falls,
+	 * or the table grows past it, after planning. A user who wants more groups
+	 * on this path raises groupagg_max_groups.
+	 */
+	if (pgcolumnar_group_count_upper_bound(input_rel, timeWithNull) >
+		(double) pgcolumnar_groupagg_max_groups)
+		return;
 
 	/*
 	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time

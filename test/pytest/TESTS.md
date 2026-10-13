@@ -5650,7 +5650,7 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_the_accumulators_fold_identically_with_the_path_off_and_on` | the float and average accumulators, and the exact ones, byte-identical off versus on |
 | `test_min_max_keep_the_display_scale_core_keeps` | numeric values equal by value and differing in display scale keep the later one on a tie |
 | `test_a_lone_negative_zero_keeps_its_sign` | summing `-0.0` prints `-0`, which folding into `+0.0` would lose |
-| `test_a_group_count_over_the_cap_stops_rather_than_growing` | over the cap the node errors naming `groupagg_max_groups`, and the default cap runs the high-cardinality key correctly |
+| `test_a_key_well_under_the_gate_takes_the_node` | a key well under the gate (#1292) takes the node, and it answers the high-cardinality key as heap does |
 | `test_an_output_built_on_a_key_falls_back_and_still_answers` | `f(key)` output and a bare `GROUP BY` with no aggregate both fall back, and the answer is still right |
 | `test_a_non_deterministic_collation_key_falls_back` | the fallback happens and the grouping is case-insensitive; declines under the shell suite's own name where ICU is absent |
 | `test_sum_real_matches_heap_rather_than_returning_zero` | blocker 1: the node fires, matches heap, and is not zero |
@@ -5661,6 +5661,7 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; with no time bound, with only a lower one, and for `date_bin`, the estimate is between the true group count and four times it, from the zone maps (#1292); a lookalike function and a non-time key get no bound |
 | `test_the_bound_reads_the_zone_maps_in_one_catalog_scan` | planning a bucketed GROUP BY over 50 row groups scans zone_map and its index once in all, not once per group (#1304) |
 | `test_a_mixed_timestamp_predicate_never_narrows_the_bound` | a cross-type predicate under a non-UTC TimeZone never narrows the estimate below the true group count (#1292); the matching-type one still gets a tight bound |
+| `test_on_by_default_and_gated_on_an_upper_bound` | the grouped path is on by default and taken only when an upper bound on the groups (the row count, or the time buckets) is within the cap: a bucket query over more rows than the cap is taken, a plain key over more rows is declined (answering as heap does) until the cap is raised, and a skewed key that fools ANALYZE is declined and answers every group; a cached plan run under a lower cap stops at the runtime cap with its hint (#1292, #1330 review) |
 
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 
