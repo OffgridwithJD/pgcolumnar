@@ -36,6 +36,14 @@ def _session(dsn, *sqls):
         return "lost"
 
 
+def _ready(dsn):
+    """Wait, up to 30 s, until the server answers: an arm before may have crashed it."""
+    for _ in range(60):
+        if _session(dsn, "SELECT 1") == "1":
+            return
+        time.sleep(0.5)
+
+
 def test_a_write_prepared_and_finished_in_one_session(pgc_own_db, pgc_cluster, expect):
     conn = pgc_own_db
     dsn = pgc_cluster.dsn(dbname=conn.execute("SELECT current_database()").fetchone()[0])
@@ -72,7 +80,8 @@ def test_a_write_prepared_and_finished_in_one_session(pgc_own_db, pgc_cluster, e
                 "and the session's next write, after COMMIT PREPARED, lands")
 
     # The index-fetch cache: an index fetch on each side of COMMIT PREPARED, same rows.
-    conn.execute("CREATE INDEX pq_k ON pq (k)")
+    _ready(dsn)
+    _session(dsn, "CREATE INDEX pq_k ON pq (k)")
     with psycopg.connect(dsn, autocommit=True) as c:
         for s in ("SET enable_seqscan = off", "SET enable_bitmapscan = off",
                   "SET pgcolumnar.enable_custom_scan = off"):
@@ -90,10 +99,7 @@ def test_a_write_prepared_and_finished_in_one_session(pgc_own_db, pgc_cluster, e
 
     # Wait for the server to be back if anything above crashed it, then read the log.
     # Its own connections: after a crash the fixture's connection is gone too.
-    for _ in range(60):
-        if _session(dsn, "SELECT 1") == "1":
-            break
-        time.sleep(0.5)
+    _ready(dsn)
     with log.open(errors="replace") as f:
         f.seek(seen)
         gained = f.read()

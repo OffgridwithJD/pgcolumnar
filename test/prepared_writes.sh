@@ -80,6 +80,7 @@ check "and the session's next write, after COMMIT PREPARED, lands" \
 # fix that also discarded it at PREPARE changed no arm here, so it is not in the
 # fix. The premise keeps this arm honest: with the custom scan on, the plan never
 # reached the cache at all, and the arm passed by testing nothing.
+ready	# the arm before may have crashed the server; the premise below must not read that
 q "CREATE INDEX pw_id ON pw (id);" >/dev/null
 check "premise: the fetch is an index scan, which is what reaches the fetch cache" \
 	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
