@@ -1745,4 +1745,16 @@ suites_not_covered 246
 #     never         1796 + 2 = 1798
 #     dated          520 + 3 =  523
 #     1798 + 523 == 2321
-checks_never_observed_red 1798
+#
+# #1236, dated premises (jdatcmd): 1798 -> 1802. 27 checks named `premise:` carried
+# a red date, so a mutation had reddened each: each is an arm and loses the prefix.
+# Their rows are renamed with their history, so rows and census do not move for them.
+# The gate now refuses a dated `premise:` row, and harness_selftest part 410 gains
+# four checks for that rule (1234/1234 on each of 15-19). All four arrive never; the
+# rule's own red was shown against the gate without it, which is not a ledger event.
+#
+#     ledger rows   2321 + 4 = 2325
+#     never         1798 + 4 = 1802
+#     dated          523     =  523
+#     1802 + 523 == 2325
+checks_never_observed_red 1802
