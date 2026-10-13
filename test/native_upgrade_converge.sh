@@ -137,7 +137,12 @@ for v in "${_NUC_FIXTURES[@]}"; do
 	cp "$src" "$dst"
 	STAGED+=("$dst")
 done
+# CHAINED, not replacing: pgc_setup armed `trap pgc_on_exit EXIT`, and bash keeps
+# one EXIT trap. Without this line the trap below replaced it, and every run left
+# its server listening and its workdir in /tmp (selftest part 620). First, so it
+# reads the suite's exit status before anything here overwrites `$?`.
 cleanup() {
+	pgc_on_exit
 	for f in "${STAGED[@]:-}"; do
 		[ -n "$f" ] || continue
 		if [ -f "$f.pgcbak" ]; then
