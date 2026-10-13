@@ -52,6 +52,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
 #include "utils/typcache.h"
 
 PG_FUNCTION_INFO_V1(pgcolumnar_column_extent);
