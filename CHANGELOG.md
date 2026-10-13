@@ -99,7 +99,11 @@ true until the next version shipped.
   read a `timestamp` key's bounds in the session's zone and wrote them from UTC,
   which left a four-hour gap between partitions in New York and started daily
   partitions at 15:00 in Tokyo. `test/partition_lifecycle.sh` and its pytest
-  twin hold each statement in sessions west and east of UTC.
+  twin hold each statement in sessions west and east of UTC. It also copes with a
+  stored generated column on the parent and with a parent name up to 63 bytes
+  long, and refuses, before creating anything, a call that would create more
+  than 1000 partitions (`22023`) and a parent with a partition bounded by
+  `MAXVALUE` (`55000`).
 
 ### Changed
 

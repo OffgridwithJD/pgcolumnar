@@ -347,7 +347,9 @@ queries and inserts on the table continue while it runs.
 For a `timestamp` key, which has no time zone, "now" is the session's local
 time, and partitions start on the width's boundary in that time.
 
-The function refuses a table that has a DEFAULT partition.
+The function refuses a table that has a DEFAULT partition, or a partition
+bounded by `MAXVALUE`. It also refuses a call that would create more than 1000
+partitions, before it creates any. Use a wider width or a shorter lead.
 
 `test/partition_lifecycle.sh` checks each of these statements, in sessions
 west and east of UTC.

@@ -577,7 +577,9 @@ plus `ahead` widths. Returns the number of partitions created. A second call
 creates none. The first new partition starts at the highest existing upper
 bound. With no partitions, it starts at the width's boundary that holds now.
 `parent` must be partitioned by RANGE on one `timestamp` or `timestamptz`
-column, and must have no DEFAULT partition (`55000`). The function takes
+column. It must have no DEFAULT partition and no partition bounded by
+`MAXVALUE` (`55000`). A call that would create more than 1000 partitions is
+refused before it creates any (`22023`). The function takes
 `SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS EXCLUSIVE`. See
 [Create time partitions ahead](how-to.md#create-time-partitions-ahead).
 

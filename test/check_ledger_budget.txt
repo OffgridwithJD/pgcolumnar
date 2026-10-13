@@ -1319,4 +1319,17 @@ suites_not_covered 247
 #     ledger rows   1943 + 2 = 1945
 #     never         1693 + 1 = 1694
 #     dated          250 + 1 =  251
-checks_never_observed_red 1694
+#
+# #1297 / PR #1308 (OffgridwithJD): 1694 -> 1700. partition_lifecycle enters the
+# ledger with 27 checks from a five-major run. Twenty-one are dated by eleven
+# mutations of partition_create_ahead (seven from the first round, four from the
+# #1308 review's fixes), each merged one log at a time with --mutation and
+# --target. The six that arrive `never` are all premises. The logs ran on the
+# tree before #1306/#1312 merged; those touched only columnar_tableam.c's TID
+# range and cursor paths, which this suite does not reach.
+#
+#     ledger rows   1945 + 27 = 1972
+#     never         1694 +  6 = 1700
+#     dated          251 + 21 =  272
+#     1700 + 272 == 1972
+checks_never_observed_red 1700
