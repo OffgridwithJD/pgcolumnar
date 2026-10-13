@@ -274,10 +274,13 @@ q "CREATE SCHEMA \"Drop Zone\";
      FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
    CREATE TABLE \"Drop Zone\".\"New Part\" PARTITION OF \"Drop Zone\".\"Metrics\"
      FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;" >/dev/null
-run_plan '"Drop Zone"."Metrics"' '2020-02-01 00:00+00'
+# Every statement must run: a DETACH that fails on a bad name still leaves the
+# DROP to remove an attached partition (under ACCESS EXCLUSIVE on the parent), so
+# the tables left alone cannot tell a quoting bug apart.
+quoted_failures="$(run_plan '"Drop Zone"."Metrics"' '2020-02-01 00:00+00')"
 check "a plan for names that need quoting runs as returned" \
-	"$(q "SELECT string_agg(c.relname, ',') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-	      WHERE n.nspname = 'Drop Zone' AND c.relkind IN ('r', 'p');")" "Metrics,New Part"
+	"${quoted_failures:-every statement ran}|$(q "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	      WHERE n.nspname = 'Drop Zone' AND c.relkind IN ('r', 'p');")" "every statement ran|Metrics,New Part"
 
 # A partition that is itself partitioned is listed whole: the concurrent detach
 # takes it with its children, and DROP drops them.

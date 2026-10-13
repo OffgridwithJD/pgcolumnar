@@ -504,11 +504,11 @@ If a concurrent detach was interrupted, the partition stays pending. The next
 plan finishes that detach with `DETACH PARTITION ... FINALIZE` instead of starting
 it again.
 
-The cutoff has the key's type: a `timestamptz` for a `timestamptz` key, as in
-the example, and a `timestamp` for a `timestamp` key, such as
-`localtimestamp - interval '90 days'`. A cutoff of the other type is refused
-(`42804`), because comparing across the two depends on the session's time zone,
-and the same call would plan differently from two sessions.
+The cutoff must have the key's type. A `timestamptz` key takes a `timestamptz`
+cutoff, as in the example. A `timestamp` key takes a `timestamp` cutoff, such
+as `localtimestamp - interval '90 days'`. A cutoff of the other type is refused
+(`42804`). Comparing across the two types depends on the session's time zone,
+so the same call could plan differently from two sessions.
 
 A partition that is itself partitioned is planned as one, and the `DROP` takes
 its children with it. A partition that `tier_partition` moved to Parquet is
