@@ -579,4 +579,7 @@ guard_tests 419
 #
 # cluster_tests 511 -> 513 for #1296's test_timeseries_recipes.py, two tests, by collection
 # on this branch rebased onto 024e737.
-cluster_tests 513
+#
+# cluster_tests 513 -> 516 for #1295's test_tier_partition.py (three tests), by collection
+# on this branch rebased onto 2e34f90 (#1322).
+cluster_tests 516
