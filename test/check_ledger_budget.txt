@@ -1636,4 +1636,14 @@ suites_not_covered 246
 #     never         1804 + 1 = 1805
 #     dated          505 + 1 =  506
 #     1805 + 506 == 2311
+#
+# #1339, the pytest audit (jdatcmd): 1805 -> 1805. harness_selftest part 510 gains two
+# checks from a five-major run (1230/1230 on each of 15-19), both dated by one
+# mutation: run_all_versions.sh deriving the debt as suites_ran - accounted, under
+# which exactly those two are red on every major (1228 + 2). Neither arrives never.
+#
+#     ledger rows   2311 + 2 = 2313
+#     never         1805 + 0 = 1805
+#     dated          506 + 2 =  508
+#     1805 + 508 == 2313
 checks_never_observed_red 1805

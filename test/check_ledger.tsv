@@ -1520,9 +1520,11 @@ harness_selftest	500-the-gate-takes-a-prior-the-caller-names	premise: the suites
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the prior is chosen from a closed set of policies	15;16;17;18;19	never	-
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the runner takes its prior ceiling policy from PGC_LEDGER_AGAINST	15;16;17;18;19	never	-
 harness_selftest	500-the-gate-takes-a-prior-the-caller-names	the suites job names a prior ceiling for the gate	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	a ran count the names do not support is reported, not absorbed	15;16;17;18;19	2026-10-13	run_all_versions.sh deriving the debt as suites_ran - accounted, not counting it from the names
 harness_selftest	510-a-residual-must-be-counted	a real debt is counted and named by the same block	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	a suite that ran and did not account is named by the residual	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and a real debt is still not a major failure, which is the old behaviour	15;16;17;18;19	never	-
+harness_selftest	510-a-residual-must-be-counted	and it fails the major	15;16;17;18;19	2026-10-13	run_all_versions.sh deriving the debt as suites_ran - accounted, not counting it from the names
 harness_selftest	510-a-residual-must-be-counted	and it records the name of every suite that skipped	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and no line in it carries a negative suite count at all	15;16;17;18;19	never	-
 harness_selftest	510-a-residual-must-be-counted	and no sort feeding one is left on the caller's locale	15;16;17;18;19	never	-
