@@ -568,9 +568,10 @@ When a partition is dropped by retention, its pgcolumnar catalog rows go with it
 
 ## Keep a rollup up to date
 
-A rollup keeps an aggregate per time bucket, such as hourly averages, and folds
-in only the rows added since the last refresh. Queries read the rollup instead
-of the raw table.
+A rollup keeps an aggregate per time bucket, such as hourly averages. A refresh
+folds in the rows added since the last refresh, and recomputes only the buckets
+whose rows were deleted or updated. Queries read the rollup instead of the raw
+table.
 
 ```sql
 SELECT pgcolumnar.create_rollup(
@@ -579,7 +580,7 @@ SELECT pgcolumnar.create_rollup(
     agg_functions => '{count,sum,min,max,avg}',
     agg_columns   => '{*,value,value,value,value}');
 
-SELECT pgcolumnar.refresh_rollup('metrics_hourly');   -- returns rows folded
+SELECT pgcolumnar.refresh_rollup('metrics_hourly');   -- returns rows read
 SELECT * FROM metrics_hourly WHERE bucket >= now() - interval '1 day';
 ```
 
@@ -603,11 +604,20 @@ average of a `float8` column can differ from a full recompute in the last digits
 maintenance daemon, drops old rows of the source, the rollup keeps its rows for
 those buckets. So, for example, hourly averages can outlive the raw data.
 
-**This version folds appended rows only.** If rows of the source are deleted or
-updated in any other way, `refresh_rollup` refuses (`0A000`) and changes
-nothing. If the source
-is rewritten, for example by `pgcolumnar.vacuum`, `refresh_rollup` refuses with
-`55000`. If the rollup was current before the rewrite, run
+**Deletes and updates are recomputed.** Rows can be deleted or updated, or
+`pgcolumnar.compact_rewrite` can rewrite a row group. The next refresh then
+recomputes, from the source, each bucket that the changed row groups covered.
+It leaves the other buckets as they are.
+
+**A refresh never recomputes history.** A bucket can hold rows that retention
+dropped. If such a bucket needs a recompute, `refresh_rollup` refuses (`0A000`)
+and changes nothing, because a recompute would lose those rows. A delete that reaches a row group
+spanning such a bucket is refused too, even when the deleted rows are recent.
+If the rollup is right as it stands, run `pgcolumnar.rebase_rollup` to accept
+the source as it is now.
+
+If the source is rewritten, for example by `pgcolumnar.vacuum`, `refresh_rollup`
+refuses with `55000`. If the rollup was current before the rewrite, run
 `pgcolumnar.rebase_rollup` to record the rewritten table and continue.
 
 Run `refresh_rollup` at READ COMMITTED. A role that is not a superuser needs

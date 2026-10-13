@@ -636,11 +636,16 @@ See [Keep a rollup up to date](how-to.md#keep-a-rollup-up-to-date).
 
 ### pgcolumnar.refresh_rollup(rollup regclass) returns bigint
 
-Folds the rows of the row groups added to the source since the last refresh,
-and returns the number of rows folded. Runs at READ COMMITTED only (`25000`).
+Brings the rollup up to date in one statement, and returns the number of
+source rows it read. It folds the rows of the row groups added to the source
+since the last refresh. For each row group deleted from or rewritten since, it
+recomputes from the source the buckets that the group's rows fall in, and
+nothing else. Runs at READ COMMITTED only (`25000`).
+
 Row groups that `pgcolumnar.expire` retired are dropped from the refresh's
-record, and the rollup keeps their buckets. Refuses after any other delete or
-update in the source (`0A000`), and after a rewrite of the source (`55000`).
+record, and the rollup keeps their buckets as history. Refuses, changing
+nothing, when a bucket to recompute holds history (`0A000`), and after a rewrite
+of the source (`55000`).
 
 ### pgcolumnar.row_tid(row_number bigint) returns tid
 
@@ -650,8 +655,10 @@ number. Row numbers start at 1 (`22003` otherwise).
 ### pgcolumnar.rebase_rollup(rollup regclass) returns bigint
 
 Records the source's current row groups as folded, without changing the rollup,
-and returns the number of row groups recorded. Use it after a rewrite of the
-source, when the rollup was current before the rewrite.
+and returns the number of row groups recorded. It reads every row group to
+record the time range of its rows, and keeps the rollup's history. Use it after
+a rewrite of the source, or after a refusal to recompute history, when the
+rollup is right as it stands.
 
 ### pgcolumnar.tier_partition(partition regclass, server name, path text, lock_wait interval DEFAULT '10 seconds') returns bigint
 
