@@ -594,4 +594,7 @@ guard_tests 419
 #
 # cluster_tests 524 -> 525 for #1310's test_a_no_op_expire_reads_the_extent_not_every_zone_map,
 # by collection on this branch (stacked on #1304 option 5).
-cluster_tests 525
+#
+# cluster_tests 525 -> 526 for #1327's test_collation_change.py, one test, by collection
+# on this branch rebased onto 4c72242 (#1326).
+cluster_tests 526

@@ -29,7 +29,7 @@ COLL="$(q "SELECT collname FROM pg_collation WHERE collname IN ('en_US.utf8', 'e
            AND collencoding IN (-1, pg_char_to_encoding(current_setting('server_encoding')))
            ORDER BY collname LIMIT 1;")"
 [ -n "$COLL" ] || pgc_skip en_us_collation "the server has no en_US collation to change a C column to"
-check "premise: the new collation orders 'a' before 'B', which C does not" \
+check "premise: the new collation orders a lower-case letter before an upper-case one that C puts first" \
 	"$(q "SELECT ('a' < 'B' COLLATE \"$COLL\")::text || '|' || ('a' < 'B' COLLATE \"C\")::text;")" "true|false"
 
 # Three row groups, each holding upper- and lower-case values, so a group's C
@@ -45,7 +45,7 @@ for t in cc ch; do
 	q "INSERT INTO $t SELECT g, CASE g % 4 WHEN 0 THEN 'a' WHEN 1 THEN 'B' WHEN 2 THEN 'm' ELSE 'b' END || (g % 7)
 	   FROM generate_series(1, 3000) g;" >/dev/null
 done
-check "premise: the columnar table has three row groups" \
+check "premise: the columnar table has several row groups" \
 	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('cc');")" "3"
 before="$(q "SELECT pg_relation_filenode('cc');")"
 for t in cc ch; do
@@ -59,7 +59,7 @@ same() {	# same SQL-with-%T -> "same", or both answers when they differ
 	[ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
 }
 check "after the collation change min and max are heap's" "$(same "SELECT min(s) || '|' || max(s) FROM %T;")" "same"
-check "and a range below 'B' returns heap's rows" \
+check "and a range below an upper-case bound returns heap's rows" \
 	"$(same "SELECT count(*) || ':' || string_agg(DISTINCT s, ',' ORDER BY s) FROM %T WHERE s < 'B';")" "same"
 check "and an equality on a value C sorts first returns heap's rows" \
 	"$(same "SELECT count(*) FROM %T WHERE s = 'a0';")" "same"

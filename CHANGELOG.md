@@ -356,6 +356,15 @@ true until the next version shipped.
 
 ### Fixed
 
+- Changing a text column's collation without a rewrite no longer gives wrong
+  answers (#1327). `ALTER COLUMN ... TYPE text COLLATE <other>` keeps the
+  table's files, so the zone maps kept minima and maxima ordered under the old
+  collation. Ranges, equalities and `min()`/`max()` then skipped rows that the
+  new collation orders differently. The column's stored bounds are now
+  forgotten after such a change, in the table and in its projections, and its
+  extent is dropped. Queries stay correct and read those groups until a
+  rewrite builds new zone maps. `test/collation_change.sh` and an independent
+  `test_collation_change.py`. Reported by @jdatcmd.
 - `test/native_upgrade_converge.sh` no longer leaves its PostgreSQL server
   running and its workdir in `/tmp` after every run (#1321). It armed its own
   `trap cleanup EXIT` after `pgc_setup`, which replaced the harness's
