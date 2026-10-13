@@ -1757,4 +1757,17 @@ suites_not_covered 246
 #     never         1798 + 4 = 1802
 #     dated          523     =  523
 #     1802 + 523 == 2325
-checks_never_observed_red 1802
+#
+# #1339, projection_parallel (jdatcmd): 1802 -> 1803. The sharing arm required both
+# workers to return rows, which two workers each scanning every group also do. A new
+# arm requires their rows to add up to the covering rows once; with the worker init
+# not wiring the shared row-group counter it is red on each of 15-19 (16000 against
+# 8000), beside the count arm it reddens with (--target names both). A second new
+# arm asserts the count query's own plan, gather+projection; it arrives never.
+# Clean: 13/13 on each of 15-19.
+#
+#     ledger rows   2325 + 2 = 2327
+#     never         1802 + 1 = 1803
+#     dated          523 + 1 =  524
+#     1803 + 524 == 2327
+checks_never_observed_red 1803
