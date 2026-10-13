@@ -118,13 +118,14 @@ def test_expire_retires_expired_groups_and_keeps_the_straddling_one(pgc_conn, ex
     # below able to fail. Counted within a day either side, because a day is
     # wider than the ~2.1 days a 1,000-row group covers here only in the sense
     # that matters: rows on both sides of the cutoff close to it.
-    straddle = _one(
-        pgc_conn,
-        f"SELECT count(*) FROM ttl_ts WHERE ts >= {cutoff} - interval '1 day' "
-        f"AND ts < {cutoff} + interval '1 day'")
-    expect.at_least(
-        straddle, 1,
-        "premise: rows exist on both sides of the cutoff within one day of it")
+    # Each side counted on its own (#1339): one count over the two-day window was
+    # met by rows on one side alone.
+    below, above = (_one(pgc_conn, f"SELECT count(*) FROM ttl_ts WHERE ts >= {cutoff} - interval '1 day'"
+                                   f" AND ts < {cutoff}"),
+                    _one(pgc_conn, f"SELECT count(*) FROM ttl_ts WHERE ts >= {cutoff}"
+                                   f" AND ts < {cutoff} + interval '1 day'"))
+    expect.text("straddled" if below > 0 and above > 0 else f"NO STRADDLE ({below}|{above})", "straddled",
+                "premise: rows exist on both sides of the cutoff within one day of it")
 
     with pgc_conn.cursor() as cur:
         cur.execute(
@@ -206,13 +207,20 @@ def test_a_null_retention_value_keeps_its_group(pgc_conn, expect):
     # A TABLE-LEVEL COUNT CANNOT SEE A ROW GROUP, and passes just as readily on a
     # fixture where the NULLs sit in a group of their own -- which is the
     # arrangement this premise exists to exclude. Count the groups holding both.
-    expect.num(
+    # And THAT group holds an expired row (#1339): counting groups with NULLs alone
+    # was met by a group of nothing but NULLs. Rows reach their group through
+    # row_tid() over the group's row numbers.
+    expect.text(
         _one(pgc_conn,
-             "SELECT count(*) FROM (SELECT z.group_number FROM pgcolumnar.zone_map z "
-             "JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id "
-             "WHERE s.relation_oid = 'ttl_nul'::regclass AND z.null_count > 0 "
-             "GROUP BY z.group_number) g"),
-        1,
+             "WITH ng AS (SELECT DISTINCT z.storage_id, z.group_number FROM pgcolumnar.zone_map z"
+             " JOIN pgcolumnar.storage s ON s.storage_id = z.storage_id"
+             " WHERE s.relation_oid = 'ttl_nul'::regclass AND z.null_count > 0)"
+             " SELECT (SELECT count(*) FROM ng) || '|' ||"
+             " (SELECT count(*) > 0 FROM ttl_nul t WHERE t.ts < now() - interval '4 days'"
+             " AND t.ctid IN (SELECT pgcolumnar.row_tid(n) FROM pgcolumnar.row_group rg"
+             " JOIN ng USING (storage_id, group_number),"
+             " generate_series(rg.first_row_number, rg.first_row_number + rg.row_count - 1) n))"),
+        "1|true",
         "premise: and the SAME row group holds expired rows and NULL ones")
 
     expect.num(
@@ -306,7 +314,7 @@ def test_an_index_only_scan_does_not_return_retired_rows(pgc_conn, expect):
              "SELECT CASE WHEN relallvisible > 0 THEN 'set' ELSE 'none' END "
              "FROM pg_class WHERE oid = 'ttl_ios'::regclass"),
         "set",
-        "premise: and VACUUM really did set visibility-map bits to clear")
+        "and VACUUM really did set visibility-map bits to clear")
 
     expect.at_least(
         _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_ios')"), 1,
@@ -418,7 +426,7 @@ def test_a_deleted_null_stops_pinning_its_group(pgc_conn, expect):
              "FROM pgcolumnar.zone_map z JOIN pgcolumnar.storage s "
              "ON s.storage_id = z.storage_id WHERE s.relation_oid = 'ttl_dn'::regclass"),
         "still recorded",
-        "premise: but the zone map still records the deleted NULLs")
+        "but the zone map still records the deleted NULLs")
     expect.num(
         _one(pgc_conn,
              "SELECT count(*) FROM ttl_dn WHERE ts >= now() - interval '120 days'"),
@@ -553,8 +561,16 @@ def test_the_cutoff_is_the_sessions_own_date(pgc_conn, expect):
     check name, so a port over different zones asserts every property correctly
     and still cannot be graded against the suite it mirrors.
     """
-    for tz in ("UTC", "Pacific/Midway"):
-        table = "ttl_tz_" + "".join(c if c.isalnum() else "_" for c in tz)
+    # The second zone is chosen so its date is not UTC's (#1339): Midway alone had
+    # UTC's date from 11:00 UTC on, and an expire that ignored the session zone
+    # passed there for half of every day. Arms name the zone by what it is, so their
+    # ledger keys do not move with the clock.
+    other = _one(pgc_conn, "SELECT CASE WHEN extract(hour FROM now() AT TIME ZONE 'UTC') < 11"
+                           " THEN 'Pacific/Midway' ELSE 'Pacific/Kiritimati' END")
+    expect.text(str(_one(pgc_conn, "SELECT (now() AT TIME ZONE %s)::date <> (now() AT TIME ZONE 'UTC')::date",
+                         (other,))), "True", "premise: the second zone's date is not UTC's right now")
+    for tz, lbl in (("UTC", "UTC"), (other, "a zone on another date")):
+        table = "ttl_tz_" + "".join(c if c.isalnum() else "_" for c in lbl)
         with pgc_conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {table}")
             cur.execute(f"CREATE TABLE {table} (id int, d date, v text) USING pgcolumnar")
@@ -591,7 +607,7 @@ def test_the_cutoff_is_the_sessions_own_date(pgc_conn, expect):
         expect.text(
             "straddles" if 0 < want < before else f"want {want} of {before}",
             "straddles",
-            f"premise: in {tz} the fixture straddles that session's cutoff")
+            f"premise: in {lbl} the fixture straddles that session's cutoff")
 
         # AND NO GROUP STRADDLES IT, which is what makes the identity below legal.
         # `expire` keeps a straddling group WHOLE, so "survivors == rows at or
@@ -604,13 +620,37 @@ def test_the_cutoff_is_the_sessions_own_date(pgc_conn, expect):
             "one per group" if groups == dates and per_date == [GROUP]
             else f"{groups} groups, {dates} dates, rows per date {per_date}",
             "one per group",
-            f"premise: one date per row group in {tz}, so no group straddles the cutoff")
+            f"premise: one date per row group in {lbl}, so no group straddles the cutoff")
         expect.num(
             after, want,
-            f"expire in {tz} keeps exactly the rows at or after that session's cutoff")
+            f"expire in {lbl} keeps exactly the rows at or after that session's cutoff")
         expect.num(
             below, 0,
-            f"and no row older than {tz}'s own cutoff survives")
+            f"and no row older than {lbl}'s own cutoff survives")
+
+
+def test_a_timestamp_retention_column_uses_the_sessions_local_time(pgc_conn, expect):
+    """A `timestamp` column has no zone, so expire's cutoff is the session's LOCAL now
+    minus the interval (#1339: no test had a timestamp retention column at all).
+
+    In Kiritimati, UTC+14, the local cutoff and a UTC one are fourteen hours apart.
+    6,000 rows 36 s apart are six groups of ten hours, starting 40 hours before the
+    local cutoff: four groups lie wholly before it and go, the fifth holds it and
+    stays. A cutoff taken in UTC would sit 26 hours in and retire two.
+    """
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE ttl_lt (id int, ts timestamp, v text) USING pgcolumnar")
+        cur.execute(f"SELECT pgcolumnar.set_options('ttl_lt', stripe_row_limit => {GROUP})")
+        cur.execute("SET TimeZone = 'Pacific/Kiritimati'")
+        cur.execute("INSERT INTO ttl_lt SELECT g, localtimestamp - interval '2 days' - interval '40 hours'"
+                    " + (g - 1) * interval '36 s', 'v' || g FROM generate_series(1, 6000) g")
+        cur.execute("SELECT pgcolumnar.set_options('ttl_lt', ttl_column => 'ts', ttl_interval => '2 days')")
+    expect.num(_groups(pgc_conn, "ttl_lt"), 6, "premise: the timestamp fixture is six groups of 1,000 rows")
+    with pgc_conn.cursor() as cur:
+        cur.execute("SELECT pgcolumnar.expire('ttl_lt')")
+        cur.execute("RESET TimeZone")
+    expect.text(_one(pgc_conn, "SELECT count(*) || '|' || min(id) FROM ttl_lt"), "2000|4001",
+                "expire on a timestamp column retires the groups wholly before the session's local cutoff")
 
 
 def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
@@ -715,7 +755,7 @@ def test_a_no_op_expire_reads_the_extent_not_every_zone_map(pgc_conn, pgc_cluste
                 f" FROM generate_series(1, {4 * GROUP}) g",
                 f"INSERT INTO ttl_ny SELECT now() + g * interval '1 s', g FROM generate_series(1, {GROUP}) g")
     without = run("ttl_ny", f"DELETE FROM pgcolumnar.column_extent WHERE storage_id = {sid}").split(" ")[0]
-    expect.text(without, "n=4", "premise: without the extent, expire retires the aged groups")
+    expect.text(without, "n=4", "without the extent, expire retires the aged groups")
     expect.text(run("ttl_ny").split(" ")[0], without, "with the extent, expire retires the same groups")
 
     table("ttl_nz", "3 days",
@@ -729,5 +769,5 @@ def test_a_no_op_expire_reads_the_extent_not_every_zone_map(pgc_conn, pgc_cluste
           f" FROM generate_series(1, {3 * GROUP}) g",
           f"INSERT INTO ttl_nn SELECT NULL, g FROM generate_series(1, {2 * GROUP}) g")
     expect.num(_one(pgc_conn, "SELECT pgcolumnar.expire('ttl_nn')"), 3,
-               "premise: expire retires the aged groups and keeps those of NULLs")
+               "expire retires the aged groups and keeps those of NULLs")
     expect.text(run("ttl_nn"), "n=0 scans=0", "a later expire on a column of only NULLs reads no zone map")
