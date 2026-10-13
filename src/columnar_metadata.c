@@ -973,16 +973,6 @@ record_free_space(uint64 storageId, uint64 fileOffset, uint64 byteLength)
 }
 
 /*
- * PgColumnarRetireGroup
- *		Drop all catalog rows for one row group (row_group, column_chunk,
- *		zone_map, bloom, delete_vector) in the current transaction (Phase F3a). The
- *		storage row is left intact. Heap MVCC on these deletes keeps the group
- *		readable to older snapshots. The group's data byte range is recorded in
- *		free_space so a later reservation can reuse it once the oldest-xmin horizon
- *		passes this transaction (physical reclaim); the blocks are not freed here.
- *		The caller must have verified the group is fully deleted as-of oldestXmin.
- */
-/*
  * PgColumnarRecordRetention
  *		Record that pgcolumnar.expire retired a row group for retention (#1294).
  *		An incremental rollup that keeps history must not recompute a bucket whose
@@ -1009,6 +999,16 @@ PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber)
 	table_close(rel, RowExclusiveLock);
 }
 
+/*
+ * PgColumnarRetireGroup
+ *		Drop all catalog rows for one row group (row_group, column_chunk,
+ *		zone_map, bloom, delete_vector) in the current transaction (Phase F3a). The
+ *		storage row is left intact. Heap MVCC on these deletes keeps the group
+ *		readable to older snapshots. The group's data byte range is recorded in
+ *		free_space so a later reservation can reuse it once the oldest-xmin horizon
+ *		passes this transaction (physical reclaim); the blocks are not freed here.
+ *		The caller must have verified the group is fully deleted as-of oldestXmin.
+ */
 void
 PgColumnarRetireGroup(uint64 storageId, uint64 groupNumber)
 {
