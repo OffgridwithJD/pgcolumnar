@@ -2505,9 +2505,10 @@ pgcolumnar_expire(PG_FUNCTION_ARGS)
 	 * means no early exit. With no complete extent the loop decides as before.
 	 */
 	{
-		Datum		emin,
-					emax;
-		bool		hasValues;
+		/* read only when the column has a value; initialised for gcc's LTO pass */
+		Datum		emin = (Datum) 0,
+					emax = (Datum) 0;
+		bool		hasValues = false;
 
 		if (PgColumnarExtentBound(rel, attno - 1, GetActiveSnapshot(),
 								  &emin, &emax, &hasValues) &&
