@@ -5662,6 +5662,7 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_the_bound_reads_the_zone_maps_in_one_catalog_scan` | planning a bucketed GROUP BY over 50 row groups scans zone_map and its index once in all, not once per group (#1304) |
 | `test_a_mixed_timestamp_predicate_never_narrows_the_bound` | a cross-type predicate under a non-UTC TimeZone never narrows the estimate below the true group count (#1292); the matching-type one still gets a tight bound |
 | `test_on_by_default_and_gated_on_an_upper_bound` | the grouped path is on by default and taken only when an upper bound on the groups (the row count, or the time buckets) is within the cap: a bucket query over more rows than the cap is taken, a plain key over more rows is declined (answering as heap does) until the cap is raised, and a skewed key that fools ANALYZE is declined and answers every group; a cached plan run under a lower cap stops at the runtime cap with its hint (#1292, #1330 review) |
+| `test_a_null_key_counts_as_a_group_in_the_bucket_bound` | three minute buckets fill the bucket bound and NULL rows add a fourth group; under a cap of 3 the path is declined and all four groups answer, where a bound without the NULL group errors (#1330 review) |
 
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 
