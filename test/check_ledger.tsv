@@ -1602,7 +1602,7 @@ harness_selftest	590-a-declared-suite-must-account	and a log with no accounting 
 harness_selftest	590-a-declared-suite-must-account	and it is marked TERMINATED, so a reader can tell it from a full run	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	and nothing still arms the bare teardown	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	and pgc_setup still calls pgc_summary on none of them	15;16;17;18;19	2026-10-12	lib.sh's pgc_setup calls pgc_summary before one of its exit 1 paths
-harness_selftest	590-a-declared-suite-must-account	every clean exit in a declared suite reaches its summary first	15;16;17;18;19	never	-
+harness_selftest	590-a-declared-suite-must-account	every clean exit in a declared suite reaches its summary first	15;16;17;18;19	2026-10-13	a declared suite (ttl_expire.sh) gains a clean exit 0 that skips pgc_summary
 harness_selftest	590-a-declared-suite-must-account	premise: declared suites do have clean exits of their own to check	15;16;17;18;19	never	-
 harness_selftest	590-a-declared-suite-must-account	premise: lib.sh is where the exits and the trap both live	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	premise: pgc_setup still has the eight exits this covers	15;16;17;18;19	never	-

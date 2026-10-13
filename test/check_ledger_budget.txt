@@ -1370,4 +1370,24 @@ suites_not_covered 247
 # fresh runs on this tree: a clean run (1223/1223) and both 590 mutations, on
 # each of 15-19, merged with --mutation and --target. Those runs also re-observe
 # 20 of the other dated rows, whose last-observed-red date moves to 2026-10-13.
-checks_never_observed_red 1684
+#
+# #1236 follow-up (part 590's last two): 1684 -> 1683.
+# 'every clean exit in a declared suite reaches its summary first' is dated by
+# a declared suite (ttl_expire.sh) gaining a clean exit 0 that skips
+# pgc_summary, run on all five majors and merged with --mutation and --target.
+# Those logs predate #1313's renames, so the three old-name rows they carried
+# back were removed again; orphan-scan against a clean run with today's names:
+# orphans=0.
+#
+# 'the suite's own counters are restored after every driving block' STAYS
+# never, and not for want of a mutation. Removing a restore reddens it on all
+# five majors, but it also corrupts the run's own counters (measured: 1223
+# records against 'checks run: 30'), and the ledger refuses a log that does not
+# reconcile as evidence about anything. Any real failure of the restore corrupts
+# the counts the same way, so this arm can be seen red but never dated.
+#
+#     ledger rows   1984 + 0 = 1984
+#     never         1684 - 1 = 1683
+#     dated          300 + 1 =  301
+#     1683 + 301 == 1984
+checks_never_observed_red 1683
