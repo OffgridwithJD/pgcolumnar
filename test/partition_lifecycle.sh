@@ -372,6 +372,18 @@ states="$states;$(stmt_state "${df_plan[1]}")"
 check "after a DETACH that fails, the plan's DROP refuses and the partition stays attached" \
 	"$states|$(kids df)|$(q "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'df_1'::regclass;")" "55P03;55000|2|1"
 
+# A partition whose name holds the DO block's own dollar-quote tag (jdatcmd, #1331
+# review): the guarded drop must still be one statement that runs as returned.
+q 'CREATE TABLE dq (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE "dq$pgcolumnar_drop$1" PARTITION OF dq FOR VALUES FROM ('"'2020-01-01 00:00+00'"') TO ('"'2020-02-01 00:00+00'"') USING pgcolumnar;
+   CREATE TABLE dq_2 PARTITION OF dq FOR VALUES FROM ('"'2020-02-01 00:00+00'"') TO ('"'2020-03-01 00:00+00'"') USING pgcolumnar;' >/dev/null
+check "premise: a partition is named with the drop block's dollar-quote tag" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname = 'dq\$pgcolumnar_drop\$1';")" "1"
+dq_failures="$(run_plan dq '2020-02-01 00:00+00')"
+check "a partition named with the drop block's dollar-quote tag is dropped by the plan as returned" \
+	"${dq_failures:-every statement ran}|$(q "SELECT count(*) FROM pg_class WHERE relname = 'dq\$pgcolumnar_drop\$1';")|$(kids dq)" \
+	"every statement ran|0|1"
+
 # Refusals, as partition_create_ahead refuses.
 check "a drop plan for a parent with a DEFAULT partition is refused" \
 	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('td', now())")" "55000"
