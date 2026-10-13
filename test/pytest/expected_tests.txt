@@ -267,7 +267,8 @@
 # NO_CLUSTER. Re-derived by collection on 73d9663: `412 tests collected`.
 # guard_tests 412 -> 413 for test_a_missing_dependency_of_pyarrow_fails_rather_than_declines
 # (#1286 review), collected over the NO_CLUSTER files on this tree.
-guard_tests 413
+# guard_tests 413 -> 414 for #1305's test_an_unguarded_import_is_refused_under_xdist_too, by collection.
+guard_tests 414
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

@@ -6486,6 +6486,7 @@ Written red first: all seven failed before `pgc_vacuity` had the methods. The fo
 | `test_a_broken_install_fails_rather_than_declines` | a `pyarrow` that raises `ImportError` from inside fails with its own error |
 | `test_a_missing_dependency_of_pyarrow_fails_rather_than_declines` | a `pyarrow` that cannot import its own dependency raises `ModuleNotFoundError` naming that dependency, and fails rather than declines; shown red with `require_module`'s `.name` check deleted (OffgridwithJD, review of #1286) |
 | `test_every_unguarded_import_spelling_is_refused` | each of six spellings, `__import__` among them, is named and refused; a file using `require_module` is not |
+| `test_an_unguarded_import_is_refused_under_xdist_too` | under `-n 2` the controller names the unguarded import once and the run is refused, as the serial run is: workers ship their sites back through `workeroutput` (#1305) |
 
 ## 92. test_tid_range_scan.py: a ctid range reads only the row groups that hold it
 
