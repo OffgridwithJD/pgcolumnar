@@ -1476,4 +1476,21 @@ suites_not_covered 247
 #     never         1701 + 33 = 1734
 #     dated          373 + 38 =  411
 #     1734 + 411 == 2145
-checks_never_observed_red 1734
+#
+# #1323, a write prepared and finished in one session (OffgridwithJD): 1734 ->
+# 1739. prepared_writes enters the ledger with 11 checks from a five-major run
+# (11/11 on each of 15-19). Six are dated by three mutations of the fix (each
+# discard removed, and both, which is main); no premise is among them -- the
+# index-scan premise read 0 under a mutation until it waited for the server the
+# previous arm had crashed, and the run was redone. Five arrive `never`: three
+# premises (prepared transactions on, the server log present, the plan an index
+# scan) and two arms -- the index fetch across COMMIT PREPARED, which holds
+# without any discard (one at PREPARE changed no arm, so the fix has none), and
+# no prepared transaction left behind, which a crash during COMMIT PREPARED
+# does not leave either.
+#
+#     ledger rows   2145 + 11 = 2156
+#     never         1734 +  5 = 1739
+#     dated          411 +  6 =  417
+#     1739 + 417 == 2156
+checks_never_observed_red 1739
