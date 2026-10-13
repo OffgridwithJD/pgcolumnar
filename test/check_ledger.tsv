@@ -1763,7 +1763,7 @@ native_chunk_length_bound	native_chunk_length_bound	backend survived the sequent
 native_chunk_length_bound	native_chunk_length_bound	backend survived the truncated-length fetch	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: a point lookup uses the index, not a sequential columnar scan	15;16;17;18;19	never	-
 native_chunk_length_bound	native_chunk_length_bound	premise: that fetch returns the row	15;16;17;18;19	never	-
-native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	15;16;17;18;19	never	-
+native_fetch_coalesce	native_fetch_coalesce	a wide index fetch does not pin once per column	15;16;17;18;19	2026-10-13	the coalesced fetch merging no adjacent ranges, so each column is read on its own
 native_fetch_coalesce	native_fetch_coalesce	premise: a point lookup uses the index	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: fetching every projected column touched a measurable number of buffers	15;16;17;18;19	never	-
 native_fetch_coalesce	native_fetch_coalesce	premise: fetching one projected column touched a measurable number of buffers	15;16;17;18;19	never	-

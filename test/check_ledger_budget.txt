@@ -1701,8 +1701,20 @@ suites_not_covered 246
 # mutation cannot produce. The unbounded fixture's heap mirror was copied from the
 # columnar table and is now written from its values.
 #
-#     ledger rows   2315
-#     never         1797
-#     dated         518
+#     ledger rows   2313 + 2     = 2315
+#     never         1797 + 1 - 1 = 1797
+#     dated          516 + 1 + 1 =  518
 #     1797 + 518 == 2315
-checks_never_observed_red 1797
+#
+# #1339, native_fetch_coalesce (jdatcmd): 1797 -> 1796. "a wide index fetch does not
+# pin once per column" allowed one pin per extra column, the very cost its name
+# forbids: with coalescing disabled a 16-column fetch read 86 buffers against 71
+# for one column, on the bound to the pin, and it had never been observed red. The
+# bound is now three pins over the one-column fetch (70 and 70 coalesced); that
+# mutation reddens it on each of 15-19 (7/7 green), in both twins.
+#
+#     ledger rows   2315
+#     never         1797 - 1 = 1796
+#     dated          518 + 1 =  519
+#     1796 + 519 == 2315
+checks_never_observed_red 1796
