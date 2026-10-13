@@ -1783,4 +1783,24 @@ suites_not_covered 246
 #     never         1803 + 0 = 1803
 #     dated          524 + 9 =  533
 #     1803 + 533 == 2336
-checks_never_observed_red 1803
+#
+# #1339 audit, my assigned files, batch one: collation_change, tier_partition,
+# column_extent (OffgridwithJD): 1803 -> 1801. Four new arms, each dated:
+#   - before the change the column's extent is the C collation's bound
+#     (column_extent() returning no row);
+#   - before expire the extent covers the table, before DROP the table has extent
+#     rows to remove (no extent row ever written);
+#   - and with SELECT on the table the same role reads its extent (column_extent()
+#     refused to every non-superuser).
+# Three column_extent checks named `premise:` test product code and lose the
+# prefix, their rows renamed with their history (#1236). Two are now dated:
+# "expire retires ..." (expire returning 0), "compact_rewrite rewrites ..."
+# (compact_rewrite returning 0). "parallel_copy's loaders ... all commit" stays
+# never. Five-major runs: collation_change 12/12, column_extent 39/39,
+# tier_partition 71/71 on 18-19 and 70 + 1 named SKIP on 15-17.
+#
+#     ledger rows   2336 + 4     = 2340
+#     never         1803 - 2     = 1801
+#     dated          533 + 4 + 2 =  539
+#     1801 + 539 == 2340
+checks_never_observed_red 1801
