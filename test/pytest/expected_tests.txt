@@ -275,7 +275,9 @@
 # in test_residual_is_counted.py, by collection over the NO_CLUSTER files on this tree.
 # guard_tests 420 -> 424 for #1339's four test_runshape.py arms (a skip, an xfail or an
 # importorskip in a test body, and an xfail marker), by collection over the NO_CLUSTER files.
-guard_tests 424
+# guard_tests 424 -> 425 for #1339's test_an_install_that_leaves_no_library_is_refused in
+# test_build_refusal.py, by collection over the NO_CLUSTER files.
+guard_tests 425
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

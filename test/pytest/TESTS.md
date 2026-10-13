@@ -1054,6 +1054,7 @@ fix; noticing is.
 | --- | --- |
 | `test_build_once_rebuilds_when_another_process_replaced_the_library` | a third party overwriting the library rebuilds instead of certifying, and the build actually runs |
 | `test_build_once_rebuilds_when_the_library_was_deleted` | absent is not fresh |
+| `test_an_install_that_leaves_no_library_is_refused` | an install that reports success and leaves no library is refused, and writes no marker; it used to be certified as "absent" (#1339) |
 | `test_a_prefix_that_cannot_be_observed_never_certifies` | a prefix that cannot be seen is never certified: no marker, so the next call builds |
 
 **Why a per-source constant cannot work.** The library's digest is not a function of the

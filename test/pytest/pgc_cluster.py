@@ -407,13 +407,15 @@ def build_and_install(srcdir, pg_config, major, runner=None):
     compile" is the last thing that may be said quietly.
     """
     srcdir = str(srcdir)
-    script = (
-        f'. "{srcdir}/test/lib.sh" || exit 1; '
-        f'pgc_build_and_install "{srcdir}" "{pg_config}" "{major}"'
-    )
+    # THE VALUES GO IN AS ARGUMENTS, NOT INTO THE SCRIPT TEXT (#1339). Spliced into
+    # double quotes, a `$` in the path was expanded by bash: a tree under
+    # "broken tree $HOME" sourced "broken tree /root/test/lib.sh". As positional
+    # parameters nothing in them is ever parsed as shell.
+    script = ('. "$1/test/lib.sh" || exit 1; '
+              'pgc_build_and_install "$1" "$2" "$3"')
     run = runner or (lambda argv: subprocess.run(
         argv, capture_output=True, text=True))
-    proc = run(["bash", "-c", script])
+    proc = run(["bash", "-c", script, "bash", srcdir, str(pg_config), str(major)])
     if proc.returncode != 0:
         raise RuntimeError(
             f"pgcolumnar failed to build or install from {srcdir}; refusing to "
@@ -615,6 +617,14 @@ def build_once(srcdir, pg_config, major, lock_path=None, runner=None):
                 pass
             build_and_install(srcdir, pg_config, major, runner=runner)
             lib = installed_library(pg_config)
+            # AN INSTALL THAT LEAVES NO LIBRARY IS A BROKEN INSTALL (#1339). It used to
+            # be written into the marker as "absent" and certified, so the next call
+            # skipped the build over a prefix holding nothing. Raised, not skipped, for
+            # the reason build_and_install raises.
+            if lib == "absent":
+                raise RuntimeError(
+                    f"pgcolumnar's install from {srcdir} reported success but left no "
+                    f"library in {pg_config}'s pkglibdir; refusing to certify it.")
             # AFTER the install, because the install is what writes the library: a
             # fingerprint taken before it would record the previous one and certify
             # exactly the state this guard exists to refuse.
