@@ -1731,4 +1731,18 @@ suites_not_covered 246
 #     never         1796 - 1 + 1 = 1796
 #     dated          519 + 1     =  520
 #     1796 + 520 == 2316
-checks_never_observed_red 1796
+#
+# A build with no pg_config must refuse, not wait on stdin (#1344, OffgridwithJD):
+# 1796 -> 1798. Selftest part 630, five checks from a five-major run
+# (harness_selftest 1235/1235 on each of 15-19). Its three arms are dated by runs on
+# PG16: main's Makefile (the hang and the closed-stdin rc 0), a partial fix that
+# gives sed </dev/null without the refusal (the naming arm and rc 0), and a refusal
+# that does not name PG_CONFIG (the naming arm and the closed-stdin arm, #1346
+# review). The two never rows are premises about the fixture: the Makefile is where
+# the part expects, and the FIFO really is a stdin a reader waits on.
+#
+#     ledger rows   2316 + 5 = 2321
+#     never         1796 + 2 = 1798
+#     dated          520 + 3 =  523
+#     1798 + 523 == 2321
+checks_never_observed_red 1798
