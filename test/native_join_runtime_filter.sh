@@ -104,11 +104,12 @@ check "int4/int8 answer equals heap" "$(pc "${rf_on}$SQLX"|tail -1)" "$(q "SELEC
 # must not claim an ordering; Bloom may still reject. 200 text keys.
 q "$(cat <<'SQL'
 CREATE TABLE dim_txt(k text COLLATE "C");
-INSERT INTO dim_txt SELECT (40 + 100 * g)::text FROM generate_series(0,199) g;
+INSERT INTO dim_txt SELECT (15000 + g)::text FROM generate_series(0,199) g;
 CREATE TABLE fact_txt(k text COLLATE "C", payload text) USING pgcolumnar;
 SELECT pgcolumnar.set_options($t$fact_txt$t$, stripe_row_limit => 1000);
 INSERT INTO fact_txt SELECT g::text, repeat(md5(g::text), 8) FROM generate_series(1,20000) g;
-CREATE TABLE heap_txt AS SELECT * FROM fact_txt;
+CREATE TABLE heap_txt(k text COLLATE "C", payload text);
+INSERT INTO heap_txt SELECT g::text, repeat(md5(g::text), 8) FROM generate_series(1,20000) g;
 ANALYZE dim_txt;
 ANALYZE fact_txt;
 SQL
@@ -118,6 +119,23 @@ SELECT count(*),sum(length(fact_txt.k)),sum(length(fact_txt.payload))
 FROM fact_txt JOIN dim_txt ON fact_txt.k = dim_txt.k COLLATE "POSIX"
 SQL
 )
+# THE FIXTURE MUST BE ONE THE INTERVAL COULD PRUNE (#1339). The dimension keys used
+# to span C-order "10060".."9960", which overlaps every fact group, so a wrongly
+# attached interval removed nothing either and the "stays off" arm passed with the
+# collation gate removed. The 200 keys "15000".."15199" leave every group whose keys
+# start with 2-9 outside the hull, and the control below proves an interval prunes
+# them when the collations DO match. Two hundred, not ten: under ten build rows no
+# Bloom filter is built (measured: "Runtime Filter Bloom: false"), and the Bloom arm
+# below would have nothing to measure. The heap mirror is written from the generator.
+SQLM=$(cat <<'SQL'
+SELECT count(*),sum(length(fact_txt.k)),sum(length(fact_txt.payload))
+FROM fact_txt JOIN dim_txt ON fact_txt.k = dim_txt.k
+SQL
+)
+onm="$(pc "${rf_on}SET max_parallel_workers_per_gather=0;SET enable_nestloop=off;SET enable_mergejoin=off;EXPLAIN(ANALYZE,TIMING off,SUMMARY off)$SQLM")"
+mgrp="$(val 'Runtime Filter Groups Removed' "$onm")"
+check "with matching collations the same fixture's interval removes row groups" \
+	"$([ "${mgrp:-0}" -ge 1 ] && echo "removed ($mgrp)" || echo "REMOVED NONE")" "removed ($mgrp)"
 onc="$(pc "${rf_on}SET max_parallel_workers_per_gather=0;SET enable_nestloop=off;SET enable_mergejoin=off;EXPLAIN(ANALYZE,TIMING off,SUMMARY off)$SQLC")"
 check "collation-mismatch plan has coordinator" "$(grep -c 'Columnar Runtime Filter Coordinator' <<<"$onc")" 1
 cgrp="$(val 'Runtime Filter Groups Removed' "$onc")"

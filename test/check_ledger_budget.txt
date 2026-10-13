@@ -1717,4 +1717,18 @@ suites_not_covered 246
 #     never         1797 - 1 = 1796
 #     dated          518 + 1 =  519
 #     1796 + 519 == 2315
+#
+# #1339, native_join_runtime_filter (jdatcmd): 1796 -> 1796. "collation-mismatch
+# interval stays off" could not fail: the dimension keys spanned C-order
+# "10060".."9960", which overlaps every fact group, so with the collation gate removed
+# the interval still removed nothing, and it had never been observed red. The 200 keys
+# are now "15000".."15199", a hull that groups starting 2-9 fall outside; under that
+# mutation it is red on each of 15-19 (47/47 green), and so is the bloom arm. A new
+# control, "with matching collations the same fixture's interval removes row groups",
+# shows the fixture can prune at all; it arrives never.
+#
+#     ledger rows   2315 + 1     = 2316
+#     never         1796 - 1 + 1 = 1796
+#     dated          519 + 1     =  520
+#     1796 + 520 == 2316
 checks_never_observed_red 1796

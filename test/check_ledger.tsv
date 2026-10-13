@@ -1783,8 +1783,8 @@ native_join_runtime_filter	native_join_runtime_filter	build rows omit NULL	15;16
 native_join_runtime_filter	native_join_runtime_filter	clustered groups removed	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	clustered reads fewer groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch answer equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
-native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	2026-09-23	the runtime bloom match forced to true, so the filter never rejects;the runtime bloom probe's verdict inverted, so the filter rejects what matches
-native_join_runtime_filter	native_join_runtime_filter	collation-mismatch interval stays off	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	collation-mismatch bloom rejects most non-matches	15;16;17;18;19	2026-10-13	the runtime bloom match forced to true, so the filter never rejects;the runtime bloom probe's verdict inverted, so the filter rejects what matches;the runtime filter's interval allowed whatever the operator's collation
+native_join_runtime_filter	native_join_runtime_filter	collation-mismatch interval stays off	15;16;17;18;19	2026-10-13	the runtime filter's interval allowed whatever the operator's collation
 native_join_runtime_filter	native_join_runtime_filter	collation-mismatch plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	default plan has runtime coordinator	15;16;17;18;19	2026-09-18	pgcolumnar.enable_join_runtime_filter boot value true -> false
 native_join_runtime_filter	native_join_runtime_filter	early limit equals heap	15;16;17;18;19	2026-09-23	the runtime bloom probe's verdict inverted, so the filter rejects what matches
@@ -1816,6 +1816,7 @@ native_join_runtime_filter	native_join_runtime_filter	scattered bloom rejects mo
 native_join_runtime_filter	native_join_runtime_filter	scattered interval cannot drop groups	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered plan has coordinator	15;16;17;18;19	never	-
 native_join_runtime_filter	native_join_runtime_filter	scattered still reads every group	15;16;17;18;19	never	-
+native_join_runtime_filter	native_join_runtime_filter	with matching collations the same fixture's interval removes row groups	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	LEFT join answer equals heap	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	LEFT join refuses the join fold	15;16;17;18;19	never	-
 native_join_vector_agg	native_join_vector_agg	duplicate dim keys answer equals heap	15;16;17;18;19	2026-09-23	the dim-side uniqueness refusal disabled

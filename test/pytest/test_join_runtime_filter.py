@@ -276,12 +276,14 @@ def test_collation_mismatch_bloom_only(pgc_conn, expect):
         cur.execute(
             """
             CREATE TABLE dimc(k text COLLATE "C");
-            INSERT INTO dimc SELECT (60 + 100 * g)::text FROM generate_series(0, 199) g;
+            INSERT INTO dimc SELECT (15600 + g)::text FROM generate_series(0, 199) g;
             CREATE TABLE factc(k text COLLATE "C", payload text) USING pgcolumnar;
             SELECT pgcolumnar.set_options($t$factc$t$, stripe_row_limit => 1000);
             INSERT INTO factc SELECT g::text, repeat(md5(g::text), 8)
             FROM generate_series(1, 20000) g;
-            CREATE TABLE heapc AS SELECT * FROM factc;
+            CREATE TABLE heapc(k text COLLATE "C", payload text);
+            INSERT INTO heapc SELECT g::text, repeat(md5(g::text), 8)
+            FROM generate_series(1, 20000) g;
             ANALYZE dimc;
             ANALYZE factc
             """
@@ -291,6 +293,17 @@ def test_collation_mismatch_bloom_only(pgc_conn, expect):
         cur.execute("SET max_parallel_workers_per_gather=0")
         cur.execute("SET enable_nestloop=off")
         cur.execute("SET enable_mergejoin=off")
+        # A FIXTURE THE INTERVAL COULD PRUNE (#1339): 200 keys "15600".."15799" leave
+        # every group whose keys start with 2-9 outside the C-order hull, and the
+        # matching-collation control proves an interval removes them. The old keys
+        # spanned "10060".."9960", which overlaps every group, so the "stays off" arm
+        # passed with the collation gate removed. Two hundred keys, because under ten
+        # build rows no Bloom filter is built and the Bloom arm would measure nothing.
+        cur.execute(
+            "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF) "
+            "SELECT count(*) FROM factc JOIN dimc ON factc.k = dimc.k"
+        )
+        matched_plan = cur.fetchone()[0]
         sql = """
             SELECT count(*), sum(length(factc.k)), sum(length(factc.payload))
             FROM factc JOIN dimc ON factc.k = dimc.k COLLATE "POSIX"
@@ -313,6 +326,11 @@ def test_collation_mismatch_bloom_only(pgc_conn, expect):
         plan,
         provider="Columnar Runtime Filter Coordinator",
         name="collation-mismatch plan uses the runtime coordinator",
+    )
+    expect.at_least(
+        _removed_or_zero(matched_plan),
+        1,
+        "with matching collations the same fixture's interval removes row groups",
     )
     expect.num(
         _removed_or_zero(plan),
