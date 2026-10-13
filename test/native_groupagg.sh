@@ -608,4 +608,16 @@ rc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 check "a cached plan run under a lower cap stops at the runtime cap, with its hint" \
 	"$(grep -c 'Columnar Vectorized Group Keys' <<<"$rc_out")|$(grep -c 'exceeded pgcolumnar.groupagg_max_groups (1000)' <<<"$rc_out")|$(grep -c 'HINT:  Raise pgcolumnar.groupagg_max_groups' <<<"$rc_out")" "1|1|1"
 
+# A NULL key is one more group, and the bucket bound must count it. @OffgridwithJD's
+# shape on #1330: buckets at 00:00:59, 00:01:30 and 00:02:00 fill the bound of 3
+# (floor(61 s / 60 s) + 2), so the NULL rows make a fourth group. Under a cap of 3 a
+# bound without the NULL group takes the path and errors.
+psql_run "CREATE TABLE gate_nb (ts timestamptz, v int) USING pgcolumnar;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:00:59+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:01:30+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:02:00+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT NULL, g FROM generate_series(1, 50) g;"
+check "a NULL key counts as a group in the bucket bound: four groups under a cap of 3 are declined and all answered" \
+	"$(groups_or_error 3 "SELECT date_trunc('minute', ts) b, count(*) FROM gate_nb GROUP BY b")" "4"
+
 pgc_summary

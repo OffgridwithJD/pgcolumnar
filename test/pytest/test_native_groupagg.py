@@ -818,3 +818,17 @@ def test_on_by_default_and_gated_on_an_upper_bound(pgc_conn, expect):
     _exec(conn, "DEALLOCATE gk")
     expect.text(f"{1 if planned else 0}|{got}", "1|1|1",
                 "a cached plan run under a lower cap stops at the runtime cap, with its hint")
+
+
+def test_a_null_key_counts_as_a_group_in_the_bucket_bound(pgc_conn, expect):
+    """@OffgridwithJD's shape on #1330: three minute buckets fill the bound exactly
+    (lo 00:00:59, hi 00:02:00: floor(61 s / 60 s) + 2 = 3), and NULL rows add a
+    fourth group. Under a cap of 3, a bound without the NULL group takes the path
+    and errors. This file's own rows: other second offsets, 40 rows a group.
+    """
+    conn = pgc_conn
+    _exec(conn, "CREATE TABLE nul_b (ts timestamptz, v int) USING pgcolumnar")
+    for ts in ("'2026-03-01 10:00:59+00'", "'2026-03-01 10:01:05+00'", "'2026-03-01 10:02:00+00'", "NULL"):
+        _exec(conn, f"INSERT INTO nul_b SELECT {ts}, g FROM generate_series(1, 40) g")
+    expect.text(_groups_or_error(conn, 3, "SELECT date_trunc('minute', ts) b, count(*) FROM nul_b GROUP BY b"), "4",
+                "a NULL key counts as a group in the bucket bound: four groups under a cap of 3 are declined and all answered")
