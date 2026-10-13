@@ -143,17 +143,21 @@ def test_partition_create_ahead(pgc_conn, expect):
         expect.at_least(west, 5, f"premise: a {key} parent continued from a hand-made partition, in a session west of UTC")
         expect.text(_contiguous(_bounds(conn, t)), "ok",
                     f"a {key} parent's partitions are contiguous across a non-UTC session")
-        # One row at the lower bound of every partition: each must route.
-        firsts = [f for f, _ in _bounds(conn, t)]
+        # One row at every boundary, each computed HERE from the seed's lower bound and
+        # the width (#1339), as the shell twin does. Taken from the function's own
+        # FROM bounds, every row landed on a partition's inclusive lower edge whatever
+        # the function did, so a gap between partitions could not fail it.
+        n = len(_bounds(conn, t))
         routed = 0
-        for f in firsts:
+        for g in range(n):
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"INSERT INTO {t} VALUES ('{f}'::{key}, 1)")
+                    cur.execute(f"INSERT INTO {t} VALUES ((date_trunc('day', now() - interval '1 day')"
+                                f" + {g} * interval '{WIDTH}')::{key}, 1)")
                 routed += 1
             except psycopg.Error:
                 pass
-        expect.num(routed, len(firsts),
+        expect.num(routed, n,
                    f"and a row at every boundary has exactly one partition to go to ({key})")
         with conn.cursor() as cur:
             cur.execute("SET TimeZone = 'UTC'")

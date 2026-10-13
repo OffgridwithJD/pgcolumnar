@@ -1674,4 +1674,19 @@ suites_not_covered 246
 #     never         1804 - 6 = 1798
 #     dated          509 + 6 =  515
 #     1798 + 515 == 2313
-checks_never_observed_red 1798
+#
+# The tier_partition race arm takes its want from the writer (#1339 audit,
+# test_tier_partition:377, OffgridwithJD): 1798 -> 1797. The arm read `raced` back
+# and put it on both sides, so a committed insert the move then dropped passed. It
+# now expects the row once if the writer was told INSERT 0 1, and not at all if the
+# writer was refused. Dated by tier_partition without the SHARE lock on the
+# partition, the mutation already recorded on the in-flight arm, which reddens with
+# it (--target names both). On main under that mutation the race arm stayed green
+# with the writer's row lost (`writer [INSERT 0 1]`, raced 0). Clean: 71/71 on
+# 18-19, 70 + 1 named SKIP on 15-17, in both suites' five-major runs.
+#
+#     ledger rows   2313 + 0 = 2313
+#     never         1798 - 1 = 1797
+#     dated          515 + 1 =  516
+#     1797 + 516 == 2313
+checks_never_observed_red 1797

@@ -374,7 +374,11 @@ def test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency(
     raced = _one(conn, "SELECT count(*) FROM race WHERE label = 'raced'")
     expect.num(1 if ("moved" in out) != ("mover" in out) else 0, 1,
                "premise: one side of the race gave way or both went through, and nothing hung")
-    expect.text(f"{_one(conn, 'SELECT count(*) FROM race')}|{raced}", f"{rb + raced}|{raced}",
+    # The want comes from the writer, not from the table (#1339): a committed insert
+    # is there exactly once, a refused one not at all. With `raced` on both sides, a
+    # row the writer was told had committed and the move then dropped passed.
+    w_ok = 1 if out.get("writer") == "ok" else 0
+    expect.text(f"{_one(conn, 'SELECT count(*) FROM race')}|{raced}", f"{rb + w_ok}|{w_ok}",
                 "an insert racing the move leaves every row exactly once, whichever side gives way")
 
     # A parent held by a long reader, and lock_wait.

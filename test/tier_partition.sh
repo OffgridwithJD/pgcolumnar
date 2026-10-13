@@ -277,8 +277,15 @@ echo "-- race: mover [$(tr '\n' ' ' < "$W/race_mover.out")] writer [$(tr '\n' ' 
 raced="$(q "SELECT count(*) FROM r WHERE note = 'raced';")"
 check_num "premise: one side of the race gave way or both went through, and nothing hung" \
 	"$(grep -c 'moved=\|ERROR' "$W/race_mover.out")" "1"
+# THE WANT COMES FROM THE WRITER, NOT FROM THE TABLE (#1339). Reading `raced` back
+# and putting it on both sides held for 0 and 1 alike, so a row the writer was told
+# had committed and the move then dropped passed: with tier_partition's LOCK ... IN
+# SHARE MODE removed, the insert commits into the partition during the pause and
+# the DROP takes it. A committed insert must be there exactly once, a refused one
+# not at all.
+w_ok="$(grep -c '^INSERT 0 1$' "$W/race_writer.out")"
 check "an insert racing the move leaves every row exactly once, whichever side gives way" \
-	"$(q "SELECT count(*) FROM r;")|$raced" "$((rb + raced))|$raced"
+	"$(q "SELECT count(*) FROM r;")|$raced" "$((rb + w_ok))|$w_ok"
 
 # ---- a bounded wait for the parent's lock -------------------------------------
 build l
