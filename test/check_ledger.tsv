@@ -39,6 +39,18 @@ analyze_stats	analyze_stats	the sampled tuples carry a valid item pointer	15;16;
 analyze_stats	analyze_stats	the server survived ANALYZE	15;16;17;18;19	never	-
 analyze_stats	analyze_stats	without the fetch penalty an unclustered ORDER BY takes the index (#355 premise)	15;16;17;18;19	never	-
 analyze_stats	analyze_stats	without the penalty a selective scattered condition takes the index (#362 premise)	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	an hll stored in a columnar table comes back byte for byte	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	and the union of the stored sketches counts what one sketch over all rows counts	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	hll over a columnar table builds the same sketch, byte for byte, as over heap	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	premise: a tdigest stored in a columnar table still answers: the union of daily digests is within 0.1% at p99	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	premise: and its estimate is within three standard errors (6.9%) of the exact distinct count	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	premise: and its p99 is within 0.1% of the exact percentile	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	premise: hll is installed in this database	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	premise: tdigest is installed in this database	15;16;17;18;19	never	-
+approx_aggregates	approx_aggregates	tdigest over a columnar table gives exactly what it gives over heap	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	the columnar table returns the 200,000 rows written, over 50,000 devices	15;16;17;18;19	2026-10-13	the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	the hll aggregate reads through the columnar scan	15;16;17;18;19	2026-10-13	pgcolumnar.enable_custom_scan defaults to off, in both its C initializer and its GUC boot value;the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
+approx_aggregates	approx_aggregates	the tdigest aggregate reads through the columnar scan	15;16;17;18;19	2026-10-13	pgcolumnar.enable_custom_scan defaults to off, in both its C initializer and its GUC boot value;the custom scan off by default, and the access-method scan skips every row whose row number ends in 999
 base_scan_io	base_scan_io	a base scan is not priced from sibling projection pages	15;16;17;18;19	2026-09-21	projPages = 0 (keep whole-file pages)
 base_scan_io	base_scan_io	premise: a covering projection exists	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: adding the projection enlarged the relation file	15;16;17;18;19	never	-
