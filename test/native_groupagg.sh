@@ -494,6 +494,10 @@ psql_run "CREATE TABLE gbz (ts timestamptz, v float8) USING pgcolumnar;
 	INSERT INTO gbz SELECT '2026-01-01'::timestamptz + g * interval '1 second', g FROM generate_series(1,50000) g;
 	ANALYZE gbz;" >/dev/null 2>&1
 gbz_groups="$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('gbz');")"
+# THE FALLBACK IS WHAT THIS MEASURES. Since #1304 option 5 a complete column extent
+# bounds the range with no zone_map scan at all (column_extent.sh asserts 0); without
+# one the planner reads the zone maps, and that read must stay one scan.
+q "DELETE FROM pgcolumnar.column_extent WHERE storage_id = pgcolumnar.get_storage_id('gbz');" >/dev/null
 gbz_scans="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
 	-c "$GB" -c "BEGIN" -c "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b" \
 	-c "SELECT pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass)

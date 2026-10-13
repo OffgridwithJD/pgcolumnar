@@ -658,7 +658,7 @@ def test_the_group_estimate_bound_is_accurate_and_narrow(pgc_conn, expect):
                 "a non-time expression key gets no bound either")
 
 
-def test_the_bound_reads_the_zone_maps_in_one_catalog_scan(pgc_conn, expect):
+def test_the_bound_reads_the_zone_maps_in_one_catalog_scan(pgc_conn, pgc_cluster, expect):
     """The range costs one catalog scan, not one per row group (#1304 review).
 
     The first version probed zone_map_pkey once per group, on every plan: 109 -> 313
@@ -677,14 +677,25 @@ def test_the_bound_reads_the_zone_maps_in_one_catalog_scan(pgc_conn, expect):
 
     groups = int(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.row_group "
                                 "WHERE storage_id = pgcolumnar.get_storage_id('gbz')"))
-    _exec(pgc_conn, "BEGIN")
-    try:
-        _exec(pgc_conn, "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b")
-        scans = int(_one(pgc_conn,
+    # The fallback is what this measures: since #1304 option 5 a complete column
+    # extent bounds the range with no zone_map scan (test_column_extent.py asserts
+    # 0), and without one the zone-map read must stay one scan.
+    _exec(pgc_conn, "DELETE FROM pgcolumnar.column_extent "
+                    "WHERE storage_id = pgcolumnar.get_storage_id('gbz')")
+    # ON A FRESH CONNECTION. The "xact" counters are this backend's pending stats,
+    # which are flushed to shared memory at most about once a second, not at
+    # transaction end -- so in pgc_conn they still held the INSERT's own zone_map
+    # reads (the column extent's first recompute, at its commit), and read 3 for a
+    # plan that scanned once. The shell twin starts a new psql, so it never saw them.
+    with psycopg.connect(pgc_cluster.dsn(dbname=_one(pgc_conn, "SELECT current_database()"))) as m:
+        _exec(m, "SELECT set_config('search_path', %s, false)" % (
+            "'" + _one(pgc_conn, "SELECT current_setting('search_path')").replace("'", "''") + "'"))
+        _gb_session(m)
+        _exec(m, "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM gbz GROUP BY b")
+        scans = int(_one(m,
                          "SELECT pg_stat_get_xact_numscans('pgcolumnar.zone_map'::regclass) "
                          "+ pg_stat_get_xact_numscans('pgcolumnar.zone_map_pkey'::regclass)"))
-    finally:
-        _exec(pgc_conn, "ROLLBACK")
+        m.rollback()
     print(f"-- {groups} row groups, {scans} zone_map scans while planning")
     expect.at_least(groups, 40,
                     "premise: the fixture has many row groups, so one scan and one per group differ")

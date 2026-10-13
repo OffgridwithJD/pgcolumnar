@@ -25,7 +25,7 @@
 
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-export PGC_EXTRA_CONF='max_prepared_transactions=2'
+export PGC_EXTRA_CONF=$'max_prepared_transactions=8\nmax_worker_processes=16'
 pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
@@ -99,23 +99,22 @@ check "a writer that finds no complete extent recomputes one over every group" "
 
 # ---- concurrent writers never share a row --------------------------------------
 #
-# Two sessions flush groups into one table at once and commit; an in-place update
-# from both would fail ("tuple concurrently updated") or lose one widening.
+# Ordinary writers into one table are serialized by the storage-row lock (class
+# 102) from their first flush to their commit, so they never overlap. The writers
+# that do are parallel_copy's loaders: separate sessions flushing into one storage
+# at once, each preparing its transaction. An in-place update from two of them
+# would fail ("tuple concurrently updated") or lose one's widening; and each
+# writes its row at PRE_PREPARE, so one missing would leave the extent too narrow.
+# The file's earliest rows and its latest are far apart in it, so different loaders
+# hold them.
 q "CREATE TABLE cw (ts timestamptz, v int) USING pgcolumnar;
    SELECT pgcolumnar.set_options('cw', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
    INSERT INTO cw SELECT '2026-06-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 2000) g;" >/dev/null
-writer() {	# writer FROM-TS -> its psql output; flushes three groups, holds them, commits
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
-		-v ON_ERROR_STOP=1 -c "BEGIN;
-		INSERT INTO cw SELECT '$1'::timestamptz + g * interval '1 s', g FROM generate_series(1, 3000) g;
-		SELECT pg_sleep(2); COMMIT;" 2>&1
-}
-writer "2020-01-01" > "$PGC_WORKDIR/cw1.out" & w1=$!
-writer "2030-01-01" > "$PGC_WORKDIR/cw2.out" & w2=$!
-wait "$w1"; r1=$?; wait "$w2"; r2=$?
-check "two writers flushing into one table at once both commit" \
-	"$r1 $r2 $(cat "$PGC_WORKDIR/cw1.out" "$PGC_WORKDIR/cw2.out" | grep -c ERROR)" "0 0 0"
-check "and the extent covers both" "$(ext cw ts)" "$(truth cw ts)"
+q "COPY (SELECT '2020-01-01'::timestamptz + g * interval '1 day', g FROM generate_series(1, 4000) g)
+   TO '$PGC_WORKDIR/cw.txt' WITH (FORMAT text);" >/dev/null
+check "parallel_copy's loaders, flushing into one table at once, all commit" \
+	"$(q "SELECT pgcolumnar.parallel_copy('cw', '$PGC_WORKDIR/cw.txt', 4);")" "4000"
+check "and the extent covers what they loaded" "$(ext cw ts)" "$(truth cw ts)"
 
 # ---- a writer that aborts leaves nothing; a rolled-back savepoint only widens --
 q "BEGIN; INSERT INTO cw SELECT '1990-01-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 3000) g; ROLLBACK;" >/dev/null
