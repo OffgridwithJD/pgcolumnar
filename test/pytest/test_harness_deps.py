@@ -77,6 +77,9 @@ NO_CLUSTER = [
     # #1215: inner pytest runs of expect.declines and require_module. Needs no
     # cluster and no driver; it never reaches into the shell harness.
     "test_capability_decline.py",
+    # #1321: reads the suites and lib.sh as text, with its own Python reader. Needs
+    # no cluster and no driver, and never runs the shell harness.
+    "test_suite_exit_trap.py",
     # The classifier's own controls, split out of this file so the job whose file
     # list IS this list actually runs them. This file cannot be in the list: it
     # hands cluster-bound file names to pytest, so it needs what they need.
