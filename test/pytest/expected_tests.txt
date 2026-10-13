@@ -562,4 +562,7 @@ guard_tests 415
 #
 # cluster_tests 501 -> 503 for #1296's test_approx_aggregates.py, two tests,
 # collected over the cluster files on this branch (main at 2f0ffc3).
-cluster_tests 503
+#
+# cluster_tests 503 -> 504 for #1294's test_expire_records_what_it_retires_and_nothing_else,
+# collected over the cluster files on this branch rebased onto d208bce.
+cluster_tests 504

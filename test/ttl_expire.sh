@@ -487,4 +487,42 @@ for _tz in UTC Pacific/Midway; do
 	check "and no row older than $_tz's own cutoff survives" "$_below" "0"
 done
 
+# ---- expire records what it retires, for rollups that keep history (#1294) ----
+# An incremental rollup keeps its buckets when retention drops their raw rows (the
+# owner's decision on #1294), so its refresh must tell a group RETIRED BY RETENTION
+# from one deleted or rewritten. expire writes each group it retires to
+# pgcolumnar.retired_group, in its own transaction; nothing else writes there.
+psql_run "CREATE TABLE ttl_rec (ts timestamptz, v int) USING pgcolumnar;
+	SELECT pgcolumnar.set_options('ttl_rec', ttl_column => 'ts', ttl_interval => '1 day');
+	INSERT INTO ttl_rec SELECT now() - interval '30 days' + g * interval '1 second', g FROM generate_series(1, 3000) g;
+	INSERT INTO ttl_rec SELECT now() + g * interval '1 second', g FROM generate_series(1, 1000) g;"
+_sid="$(q "SELECT pgcolumnar.get_storage_id('ttl_rec');")"
+_rgs() { q "SELECT string_agg(group_number::text, ',' ORDER BY group_number) FROM pgcolumnar.row_group WHERE storage_id = $_sid;"; }
+_rec() { q "SELECT COALESCE(string_agg(group_number::text, ',' ORDER BY group_number), '') FROM pgcolumnar.retired_group WHERE storage_id = $_sid;"; }
+_before="$(_rgs)"
+check "premise: the record fixture has three aged-out row groups ahead of the current ones" "$_before" "1,2,3,4"
+
+# Rolled back first: the record belongs to expire's transaction, so a retire that
+# never happened leaves no trace a refresh could mistake for retention.
+psql_run "BEGIN; SELECT pgcolumnar.expire('ttl_rec'); ROLLBACK;"
+check "a rolled-back expire records nothing" "$(_rec)|$(_rgs)" "|1,2,3,4"
+
+_n="$(q "SELECT pgcolumnar.expire('ttl_rec');")"
+check_num "premise: expire retired the three aged groups" "${_n:-0}" "3"
+check "expire records exactly the groups it retired" "$(_rec)" "1,2,3"
+check "and they are the groups gone from the row-group catalog" "$(_rgs)" "4"
+
+# A compaction retires groups too, but that is a change to the data, which a rollup
+# must recompute; recording it as retention would keep a wrong bucket forever.
+psql_run "INSERT INTO ttl_rec SELECT now() + g * interval '1 second', g FROM generate_series(1001, 3000) g;
+	DELETE FROM ttl_rec WHERE v % 10 < 6 AND ts > now();
+	SELECT pgcolumnar.compact_rewrite('ttl_rec', 0.1);"
+check "premise: compact_rewrite retired a group" \
+	"$([ "$(_rgs)" != "4,5,6" ] && echo retired || echo "nothing retired [$(_rgs)]")" "retired"
+check "a compaction's retired groups are not recorded as retention" "$(_rec)" "1,2,3"
+
+psql_run "DROP TABLE ttl_rec;"
+check_num "dropping the table drops its retention record" \
+	"$(q "SELECT count(*) FROM pgcolumnar.retired_group WHERE storage_id = $_sid;")" "0"
+
 pgc_summary

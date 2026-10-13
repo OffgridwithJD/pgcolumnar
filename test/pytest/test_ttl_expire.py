@@ -611,3 +611,55 @@ def test_the_cutoff_is_the_sessions_own_date(pgc_conn, expect):
         expect.num(
             below, 0,
             f"and no row older than {tz}'s own cutoff survives")
+
+
+def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
+    """expire writes each group it retires to pgcolumnar.retired_group (#1294).
+
+    An incremental rollup keeps its buckets when retention drops their raw rows,
+    the owner's decision on #1294, so its refresh has to tell a group retired by
+    retention from one deleted or rewritten. Only expire records, and only in its
+    own transaction: a rolled-back expire and a compaction both leave nothing.
+    """
+    def rgs(sid):
+        return _one(pgc_conn, "SELECT COALESCE(string_agg(group_number::text, ',' "
+                              "ORDER BY group_number), '') FROM pgcolumnar.row_group "
+                              "WHERE storage_id = %s", (sid,))
+
+    def rec(sid):
+        return _one(pgc_conn, "SELECT COALESCE(string_agg(group_number::text, ',' "
+                              "ORDER BY group_number), '') FROM pgcolumnar.retired_group "
+                              "WHERE storage_id = %s", (sid,))
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("CREATE TABLE ttl_rr (ts timestamptz, v int) USING pgcolumnar")
+        cur.execute(f"SELECT pgcolumnar.set_options('ttl_rr', stripe_row_limit => {GROUP},"
+                    " ttl_column => 'ts', ttl_interval => '2 days')")
+        # Three groups dated ten days back, then two current ones.
+        cur.execute(f"INSERT INTO ttl_rr SELECT now() - interval '10 days' + g * interval '1 minute', g"
+                    f" FROM generate_series(1, {3 * GROUP}) g")
+        cur.execute(f"INSERT INTO ttl_rr SELECT now() + g * interval '1 minute', g"
+                    f" FROM generate_series(1, {2 * GROUP}) g")
+    sid = _one(pgc_conn, "SELECT pgcolumnar.get_storage_id('ttl_rr')")
+    expect.text(rgs(sid), "1,2,3,4,5", "premise: the record fixture has three aged-out row groups ahead of the current ones")
+
+    pgc_conn.execute("BEGIN")
+    pgc_conn.execute("SELECT pgcolumnar.expire('ttl_rr')")
+    pgc_conn.execute("ROLLBACK")
+    expect.text(f"{rec(sid)}|{rgs(sid)}", "|1,2,3,4,5", "a rolled-back expire records nothing")
+
+    n = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_rr')")
+    expect.num(n, 3, "premise: expire retired the three aged groups")
+    expect.text(rec(sid), "1,2,3", "expire records exactly the groups it retired")
+    expect.text(rgs(sid), "4,5", "and they are the groups gone from the row-group catalog")
+
+    with pgc_conn.cursor() as cur:
+        cur.execute("DELETE FROM ttl_rr WHERE v % 10 < 6")
+        cur.execute("SELECT pgcolumnar.compact_rewrite('ttl_rr', 0.1)")
+    expect.text("retired" if rgs(sid) != "4,5" else "nothing retired [4,5]", "retired",
+                "premise: compact_rewrite retired a group")
+    expect.text(rec(sid), "1,2,3", "a compaction's retired groups are not recorded as retention")
+
+    pgc_conn.execute("DROP TABLE ttl_rr")
+    expect.num(_one(pgc_conn, "SELECT count(*) FROM pgcolumnar.retired_group WHERE storage_id = %s",
+                    (sid,)), 0, "dropping the table drops its retention record")

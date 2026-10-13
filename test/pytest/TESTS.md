@@ -6187,6 +6187,7 @@ restored byte-identical.
 | `test_a_deleted_null_stops_pinning_its_group` | `null_count` is a write-time record, not a live count |
 | `test_a_date_retention_column_truncates_toward_keeping` | the rounding, which only this arm notices |
 | `test_the_cutoff_is_the_sessions_own_date` | the cutoff is the session's, asserted as an identity rather than as a difference |
+| `test_expire_records_what_it_retires_and_nothing_else` | `expire` writes exactly the groups it retires to `pgcolumnar.retired_group` (#1294); a rolled-back `expire` and a `compact_rewrite` record nothing; dropping the table drops its rows |
 
 The shell twin is `test/ttl_expire.sh`, 51 checks. The two halves share no code:
 different tables, different row counts, different retention windows, and the
