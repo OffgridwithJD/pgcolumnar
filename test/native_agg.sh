@@ -175,7 +175,7 @@ tz_max="$(tz_blocks "SELECT max(ts) FROM tz")"
 tz_min="$(tz_blocks "SELECT min(ts) FROM tz")"
 echo "-- tz blocks read: decode=$tz_decode max=$tz_max min=$tz_min"
 
-check "premise: max(ts) over timestamptz plans the metadata agg node" \
+check "max(ts) over timestamptz plans the metadata agg node" \
 	"$(has_aggnode "$(plan 'SELECT max(ts) FROM tz')")" "yes"
 # THE CONTROL. A decode of ts has to show up, or every comparison below is
 # against an instrument that cannot see a read.
@@ -198,7 +198,7 @@ check "min(timestamptz) parity" "$(q 'SELECT min(ts) FROM tz;')" "$(q 'SELECT mi
 # group with deletes must not be folded from it (#149).
 psql_run "DELETE FROM tz  WHERE ts > (SELECT max(ts) FROM tzh) - interval '30 min' OR ts < (SELECT min(ts) FROM tzh) + interval '30 min';"
 psql_run "DELETE FROM tzh WHERE ts > (SELECT max(ts) FROM tzh) - interval '30 min' OR ts < (SELECT min(ts) FROM tzh) + interval '30 min';"
-check "premise: the deletes removed rows at both ends, the same rows from each" \
+check "the deletes removed rows at both ends, the same rows from each" \
 	"$(q 'SELECT count(*) < 400000 FROM tz;')|$(q 'SELECT count(*) FROM tz;')" \
 	"t|$(q 'SELECT count(*) FROM tzh;')"
 check "max(timestamptz) parity after deleting the newest rows" "$(q 'SELECT max(ts) FROM tz;')" "$(q 'SELECT max(ts) FROM tzh;')"

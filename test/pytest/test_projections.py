@@ -771,7 +771,7 @@ def test_a_projection_dropped_mid_transaction_stops_receiving_writes(pgc_conn, e
     with pgc_conn.cursor() as cur:
         expect.num(_one(cur, "SELECT count(*) FROM pgcolumnar.projection_declaration "
                              "WHERE name = 'dp'"), 0,
-                   "premise: the drop really removed the projection")
+                   "the drop really removed the projection")
         expect.num(_one(cur, "SELECT count(*) FROM dt"), 66,
                    "and the base table still took every row")
 

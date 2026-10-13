@@ -407,7 +407,7 @@ psql_run "BEGIN;
 	  SELECT pgcolumnar.drop_projection('dt', 'dp');
 	  INSERT INTO dt SELECT g, g FROM generate_series(200, 210) g;
 	  COMMIT;"
-check "premise: the drop really removed the projection" \
+check "the drop really removed the projection" \
 	"$(q "SELECT count(*) FROM pgcolumnar.projection_declaration WHERE name = 'dp';")" "0"
 check "and the base table still took every row" \
 	"$(q "SELECT count(*) FROM dt;")" "66"

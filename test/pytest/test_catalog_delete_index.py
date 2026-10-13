@@ -274,7 +274,7 @@ def _phase(conn, expect, name, prefix, groups, other, other_label, carried=0):
     expect.num(
         groups - _groups_of(conn, tables[1]),
         groups - groups // 2,
-        f"premise: the phase {name} compaction retired the emptied groups",
+        f"the phase {name} compaction retired the emptied groups",
     )
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM {tables[1]}")

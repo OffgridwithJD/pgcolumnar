@@ -117,7 +117,7 @@ def test_native_fetch_coalesce(pgc_conn, expect):
     expect.rows(
         [got],
         [want],
-        "premise: the wide fetch returns the projected values",
+        "the wide fetch returns the projected values",
     )
 
     with pgc_conn.cursor() as cur:

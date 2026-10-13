@@ -125,7 +125,7 @@ while [ "$i" -lt "$NCOLS" ]; do
 	fi
 	i=$((i + 1))
 done
-check "premise: the wide fetch returns the projected values" \
+check "the wide fetch returns the projected values" \
 	"$(fetch_val "${FORCE} SELECT ${sel_wide} FROM nfc WHERE id = 1;")" "$expect_wide"
 
 # ---- the validity copy must be bounded by the chunk, not by the row count -----

@@ -120,7 +120,7 @@ state_as() {  # state_as <role> <sql>
 # change made these return zero rows for everyone, a no-error owner arm would
 # stay green while the deny arms stayed green and the suite would pass over a
 # function that does nothing.
-check_num "premise: the owner reads the projection, and gets rows" \
+check_num "the owner reads the projection, and gets rows" \
 	"$(q "SELECT count(*) FROM pgcolumnar.read_projection('secret','p1');")" "$ROWS"
 check_num "premise: the owner reconstructs, and gets rows" \
 	"$(q "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('secret','p1');")" "$ROWS"
