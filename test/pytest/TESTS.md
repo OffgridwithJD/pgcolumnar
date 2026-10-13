@@ -142,6 +142,7 @@ behaviour, the source of that number is named.
 - [94. test_approx_aggregates.py: hll and tdigest over columnar tables, the compatibility statement](#94-test_approx_aggregatespy-hll-and-tdigest-over-columnar-tables-the-compatibility-statement)
 - [95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading](#95-test_docs_how_to_sectionspy-the-pg_partman-how-to-keeps-its-own-heading)
 - [96. test_autovacuum_expire.py: the daemon expires retention tables only when told to](#96-test_autovacuum_expirepy-the-daemon-expires-retention-tables-only-when-told-to)
+- [97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-and-equal-a-full-recompute)
 
 ## 1. How to read a test in here
 
@@ -6594,3 +6595,23 @@ Written red first: on main the fixture raises `unrecognized configuration parame
 | `test_a_failing_expire_does_not_undo_the_compaction` | `expire` on a table whose retention column was dropped fails with `42703`, and the compaction due on that table still lands |
 | `test_the_daemon_yields_the_lock_it_holds_inside_expire` | the worker holds ShareUpdateExclusiveLock inside `expire`; a session's ACCESS EXCLUSIVE is granted within 8 s of a 30 s hold, and the log shows the cancel |
 | `test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on` | while the worker holds `ex_hold`, `ex_gone` is dropped; after the cancel the same pass logs `ex_gone` as skipped and still expires `ex_after` |
+
+## 97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute
+
+Port of `rollup.sh` (#1294, phase 1: append-only). `create_rollup` makes a view over a partials table; `refresh_rollup` folds the rows of the row groups appended since the last refresh, in ONE statement, so the group list, the folded rows and the recorded groups share a snapshot. The design, its twelve points and the owner's decisions are on #1294.
+
+THE ORACLE is a full recompute of the same GROUP BY, every time. Exactness was fixed by the design: count, integer sum, min, max and the avg of an integer column exact; the avg of `float8` within a relative 1e-12. This file uses an integer avg; the shell twin a float one.
+
+What the arms found while the code was written:
+- A lateral per-group subquery was pulled up into a join, and a TID range scan is built only from a relation's own restrictions, so the refresh read every row group: 114 blocks of a 103-block table for one new group. `OFFSET 0` keeps it a scan: 15 blocks.
+- `pgcolumnar.vacuum` gives a table a new storage id and may keep its group numbers, so the source's identity is the storage id.
+- Every arm run as a superuser bypassed the row-level security on the rollup catalogs. An owner and a stranger are now ordinary roles; PUBLIC has no USAGE on schema `pgcolumnar` (by design, docs/administration.md), so the test grants it as an administrator would.
+- The first draft's source load overflowed `int` and left the table empty, and three arms passed on emptiness; each has a premise that requires a real measure now.
+
+Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, and a rebase that clears the rollup.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_rollup_phase_one` | the rollup equals a full recompute after the first refresh, appends with late rows, a bulk append, and a rebase; a refresh with nothing new folds nothing; rows committed during a refresh are folded by the next, once; two concurrent refreshes fold each row once; zones agree; a refresh after a small append reads under a fifth of the source; a rewritten source is refused until `rebase_rollup`; a delete is refused (phase 1); a heap rollup behaves the same; REPEATABLE READ is refused; an owner who is not a superuser creates and refreshes a rollup, and another role sees none of it; bad definitions are refused with `22023` |

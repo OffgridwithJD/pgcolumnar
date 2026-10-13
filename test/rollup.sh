@@ -225,14 +225,17 @@ check "a refresh at REPEATABLE READ is refused" \
 refused_create() { sqlstate "SELECT pgcolumnar.create_rollup('$1', 'src', 'ts', '$2', '$ORIGIN', '{}', '$3', '$4');"; }
 check "a width with months is refused" "$(refused_create r_m '1 month' '{count}' '{*}')" "22023"
 check "an aggregate that does not combine is refused" "$(refused_create r_p '1 hour' '{median}' '{v}')" "22023"
+# More columns than functions: a shorter columns array would be caught by the
+# column check instead, and the arm would not see this check go.
 check "aggregate functions and columns of different lengths are refused" \
-	"$(refused_create r_l '1 hour' '{count,sum}' '{*}')" "22023"
+	"$(refused_create r_l '1 hour' '{count}' '{*,v}')" "22023"
+# Under min: under sum the "cannot be folded" check would catch it first.
 check "an aggregate column the source does not have is refused" \
-	"$(refused_create r_c '1 hour' '{sum}' '{nosuch}')" "22023"
+	"$(refused_create r_c '1 hour' '{min}' '{nosuch}')" "22023"
 check "* with anything but count is refused" "$(refused_create r_s '1 hour' '{sum}' '{*}')" "22023"
-# A refused call rolls back, so no change to the functions can leave a table:
-# a premise (#1236), kept so a non-transactional rewrite would be seen.
-check_num "premise: and no refused rollup left a table behind" \
+# An arm, not a premise: with a refusal removed, the create succeeds and leaves a
+# table (the months-check mutation did), so a repository change reddens it.
+check_num "and no refused rollup left a table behind" \
 	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s');")" "0"
 
 pgc_summary

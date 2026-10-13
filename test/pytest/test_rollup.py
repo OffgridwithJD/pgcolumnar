@@ -267,10 +267,12 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                             f" '{{}}', '{funcs}', '{cols}')")
     expect.text(refused("q_m", "2 months", "{count}", "{*}"), "22023", "a width with months is refused")
     expect.text(refused("q_p", "1 hour", "{stddev}", "{temp}"), "22023", "an aggregate that does not combine is refused")
-    expect.text(refused("q_l", "1 hour", "{count,max}", "{*}"), "22023",
+    # More columns than functions, so only the length check can catch it.
+    expect.text(refused("q_l", "1 hour", "{count}", "{*,temp}"), "22023",
                 "aggregate functions and columns of different lengths are refused")
-    expect.text(refused("q_c", "1 hour", "{max}", "{humidity}"), "22023",
+    # Under min, which has no "cannot be folded" check to catch it first.
+    expect.text(refused("q_c", "1 hour", "{min}", "{humidity}"), "22023",
                 "an aggregate column the source does not have is refused")
     expect.text(refused("q_s", "1 hour", "{max}", "{*}"), "22023", "* with anything but count is refused")
     expect.num(_one(conn, "SELECT count(*) FROM pg_class WHERE relname IN ('q_m', 'q_p', 'q_l', 'q_c', 'q_s')"), 0,
-               "premise: and no refused rollup left a table behind")
+               "and no refused rollup left a table behind")
