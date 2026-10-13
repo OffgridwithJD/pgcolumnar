@@ -139,6 +139,7 @@ behaviour, the source of that number is named.
 - [91. test_capability_decline.py: a missing pyarrow declines by name, and nothing declines silently](#91-test_capability_declinepy-a-missing-pyarrow-declines-by-name-and-nothing-declines-silently)
 - [92. test_tid_range_scan.py: a ctid range reads only the row groups that hold it](#92-test_tid_range_scanpy-a-ctid-range-reads-only-the-row-groups-that-hold-it)
 - [93. test_partition_lifecycle.py: partition_create_ahead keeps a time-partitioned parent ahead of now](#93-test_partition_lifecyclepy-partition_create_ahead-keeps-a-time-partitioned-parent-ahead-of-now)
+- [94. test_approx_aggregates.py: hll and tdigest over columnar tables, the compatibility statement](#94-test_approx_aggregatespy-hll-and-tdigest-over-columnar-tables-the-compatibility-statement)
 
 ## 1. How to read a test in here
 
@@ -6535,3 +6536,22 @@ Removal proofs, each red in both twins: the prototype's zone handling; `CREATE T
 | test | what it holds |
 | --- | --- |
 | `test_partition_create_ahead` | from nothing it reaches now plus the lead, columnar, contiguous and one width wide; a second call creates nothing, and asking further ahead creates only the difference; rows land in columnar partitions; the parent is never held ACCESS EXCLUSIVE; west of UTC, for both key types, partitions continue a hand-made one contiguously and a row at every boundary routes; east of UTC, a timestamp parent covers the local now and starts on the width's boundary; inputs that broke the first version (a generated column, a 63-character name, more than 1000 partitions, a MAXVALUE bound) are handled or refused before any DDL; a DEFAULT partition is refused and nothing is created |
+
+## 94. test_approx_aggregates.py: hll and tdigest over columnar tables, the compatibility statement
+
+Port of `approx_aggregates.sh` (#1296 phase 2). Phase 0 on #1296 decided that approximate distinct counts and percentiles come from the `hll` and `tdigest` extensions for 1.0, so this pair is the tested compatibility statement for them; docs/how-to.md names the versions.
+
+Independent of the shell suite: its own generator (other multipliers, the same 200,000 rows and 50,000 devices, because the check names state them), its own SQL. `compare_to_bash` grades the pair 14 literal matches, 0 missing.
+
+THE HEAP MIRROR IS WRITTEN FROM THE GENERATOR, never copied from the columnar table. The shell suite first built it by `CREATE TABLE ... AS SELECT * FROM ax`, which reads through the scan under test: with a mutation dropping one row in a thousand, every equality stayed green on all five majors. Writing both sides from the generator turned seven checks red under the same mutation.
+
+The bounds against the exact answer are premises, as pg_partman's are: they state the extension's own error, and a change here that broke them would break the equalities first.
+
+hll 2.19 does not build against PostgreSQL 19, so `test_hll_over_columnar` is `UNSUPPORTED_MAJOR` there and listed in `expected_unrunnable.txt`. CI installs both extensions from PGDG for 15 to 18.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_tdigest_over_columnar` | the columnar table returns every row written; the tdigest aggregate reads through the columnar scan; its p99 over columnar equals heap's exactly; within 0.1% of the exact percentile; a tdigest stored per day in a columnar table still answers within 0.1% |
+| `test_hll_over_columnar` | the hll aggregate reads through the columnar scan; the sketch over columnar is byte-identical to heap's; the estimate is within 6.9% of the exact count; a stored hll comes back byte for byte, and the union of daily sketches counts what one sketch counts |
