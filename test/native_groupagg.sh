@@ -246,9 +246,12 @@ if [ "$(q "SELECT 1 FROM pg_collation WHERE collname = 'ci'")" = "1" ]; then
 	          FROM generate_series(1, 5000) g;"
 	check "plan: non-deterministic collation key falls back" \
 		"$(pgc_is_groupvec "SELECT k, count(*) FROM t_ci GROUP BY k")" no
+	# THE QUERY THE PLAN ARM ASKS ABOUT (#1339). A GROUP BY with no aggregate always
+	# falls back, so the old answer compared core with core. The rows of the grouped
+	# query are counted instead, against the 10 the name states and the folded count.
 	check "answer: non-deterministic collation grouping is case-insensitive (10 groups)" \
-		"$(q "SELECT count(*) FROM (SELECT k FROM t_ci GROUP BY k) s")" \
-		"$(q "SELECT count(DISTINCT lower(k)) FROM t_ci")"
+		"$(q "SELECT k, count(*) FROM t_ci GROUP BY k" | grep -c .)|$(q "SELECT count(DISTINCT lower(k)) FROM t_ci")" \
+		"10|10"
 else
 	check_skip "the non-deterministic collation case" "SKIP  non-deterministic collation (ICU unavailable)" "ICU unavailable"
 fi

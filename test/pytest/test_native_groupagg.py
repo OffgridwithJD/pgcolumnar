@@ -103,10 +103,15 @@ def _rows(conn, sql):
     Text, because the two storage types can return the same value in different
     Python types for `numeric` and the comparison is about the VALUE. Sorted,
     because neither GROUP BY nor either scan promises an order.
+
+    NULL IS "\\0", NOT "" (#1339). Mapped to "", a NULL and an empty string compared
+    equal, so a node returning '' for min(host) over the NULL-host group matched
+    heap's NULL. PostgreSQL text cannot hold a NUL byte, so nothing stored can
+    collide with it. The shell twin hashes `_row::text`, which tells them apart too.
     """
     with conn.cursor() as cur:
         cur.execute(sql)
-        return sorted(tuple("" if v is None else str(v) for v in row)
+        return sorted(tuple("\0" if v is None else str(v) for v in row)
                       for row in cur.fetchall())
 
 
@@ -386,13 +391,20 @@ def test_a_non_deterministic_collation_key_falls_back(pgc_conn, expect):
                     "(CASE WHEN g % 2 = 0 THEN 'host' ELSE 'HOST' END) || ((g / 2) % 10), g "
                     "FROM generate_series(1, 5000) g")
     _groupvec(pgc_conn, True)
+    # THE QUERY THE PLAN ARM ASKS ABOUT (#1339). The answer used to come from
+    # `SELECT count(*) FROM (SELECT k FROM t_ci GROUP BY k) s`: a GROUP BY with no
+    # aggregate, which always falls back, so both sides were core and a node grouping
+    # by bytes could not change it. The rows of `k, count(*) ... GROUP BY k` are
+    # counted here instead, against the 10 the name states and the case-folded count.
+    # BEFORE the plan arm, so a node that takes the query AND groups by bytes shows
+    # the wrong answer rather than stopping at the plan.
+    groups = len(_rows(pgc_conn, "SELECT k, count(*) FROM t_ci GROUP BY k"))
+    folded = _one(pgc_conn, "SELECT count(DISTINCT lower(k)) FROM t_ci")
+    expect.text(f"{groups}|{folded}", "10|10",
+                "answer: non-deterministic collation grouping is case-insensitive (10 groups)")
     expect.plan_marker(_plan(pgc_conn, "SELECT k, count(*) FROM t_ci GROUP BY k"),
                        MARKER, absent=True,
                        name="plan: non-deterministic collation key falls back")
-    groups = _rows(pgc_conn, "SELECT count(*) FROM (SELECT k FROM t_ci GROUP BY k) s")
-    folded = _rows(pgc_conn, "SELECT count(DISTINCT lower(k)) FROM t_ci")
-    expect.rows(groups, folded,
-                "answer: non-deterministic collation grouping is case-insensitive (10 groups)")
 
 
 # ---- the two reproduced wrong-answer blockers --------------------------------
