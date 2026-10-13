@@ -508,7 +508,7 @@ psql_run "BEGIN; SELECT pgcolumnar.expire('ttl_rec'); ROLLBACK;"
 check "a rolled-back expire records nothing" "$(_rec)|$(_rgs)" "|1,2,3,4"
 
 _n="$(q "SELECT pgcolumnar.expire('ttl_rec');")"
-check_num "premise: expire retired the three aged groups" "${_n:-0}" "3"
+check_num "expire retired the three aged groups" "${_n:-0}" "3"
 check "expire records exactly the groups it retired" "$(_rec)" "1,2,3"
 check "and they are the groups gone from the row-group catalog" "$(_rgs)" "4"
 

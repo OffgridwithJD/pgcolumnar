@@ -649,7 +649,7 @@ def test_expire_records_what_it_retires_and_nothing_else(pgc_conn, expect):
     expect.text(f"{rec(sid)}|{rgs(sid)}", "|1,2,3,4,5", "a rolled-back expire records nothing")
 
     n = _one(pgc_conn, "SELECT pgcolumnar.expire('ttl_rr')")
-    expect.num(n, 3, "premise: expire retired the three aged groups")
+    expect.num(n, 3, "expire retired the three aged groups")
     expect.text(rec(sid), "1,2,3", "expire records exactly the groups it retired")
     expect.text(rgs(sid), "4,5", "and they are the groups gone from the row-group catalog")
 
