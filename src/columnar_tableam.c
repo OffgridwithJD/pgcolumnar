@@ -4072,9 +4072,10 @@ _PG_init(void)
 
 	DefineCustomBoolVariable("pgcolumnar.enable_group_vectorization",
 							 "Use the vectorized aggregate fast path for GROUP BY queries.",
-							 "Taken only when the planner estimates at most a tenth of "
-							 "pgcolumnar.groupagg_max_groups groups; otherwise the "
-							 "ordinary plan runs.",
+							 "Taken only when an upper bound on the group count (the "
+							 "row count, or the time buckets) is within "
+							 "pgcolumnar.groupagg_max_groups; otherwise the ordinary "
+							 "plan runs.",
 							 &pgcolumnar_enable_group_vectorization,
 							 true,
 							 PGC_USERSET,
@@ -4109,9 +4110,10 @@ _PG_init(void)
 							"Enforced at execution against the real number of groups: "
 							"over the cap the query errors rather than falling back, "
 							"since the plan is fixed by then. The planner takes the "
-							"grouped path only for an estimate of at most a tenth of "
-							"it, so the error means the estimate was wrong. Raise it, "
-							"or turn off pgcolumnar.enable_group_vectorization.",
+							"grouped path only when an upper bound on the group count "
+							"is within it, so the error means it fell, or the table "
+							"grew, after planning. Raise it, or turn off "
+							"pgcolumnar.enable_group_vectorization.",
 							&pgcolumnar_groupagg_max_groups,
 							1000000, 1, INT_MAX,
 							PGC_USERSET,
