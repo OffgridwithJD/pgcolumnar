@@ -78,6 +78,15 @@ def _refresh(conn, rollup="gauge_15m"):
     return _state(conn, f"SELECT pgcolumnar.refresh_rollup('{rollup}')")
 
 
+def _folds(conn, rollup="gauge_15m"):
+    # "folded", or the SQLSTATE: a count of five digits would read as one.
+    try:
+        _one(conn, f"SELECT pgcolumnar.refresh_rollup('{rollup}')")
+        return "folded"
+    except psycopg.Error as e:
+        return e.sqlstate or "?"
+
+
 def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     conn = pgc_own_db
     dsn = pgc_cluster.dsn(dbname=_one(conn, "SELECT current_database()"))
@@ -201,13 +210,53 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(_refresh(conn), "600", "after a rebase the next refresh folds exactly the appended rows")
     expect.text(_matches(conn), _oracle(conn), "and after the rebase the rollup equals a full recompute")
 
-    # Phase 1 refuses anything but appends.
-    before = _matches(conn)
-    expect.at_least(_one(conn, "SELECT count(*) FROM gauge_15m"), 1, "the rollup holds rows before the delete")
+    # Phase 2: a delete, update or rewrite makes the buckets of the changed groups
+    # dirty; the refresh recomputes them and leaves every other partial alone (a
+    # recomputed partial is a new row, so a new ctid). The groups were last
+    # recorded by rebase_rollup, so this also needs rebase to record time ranges.
+    far = "bucket >= '2026-02-04 00:00:00+00'"     # past every group the delete reaches
+    at_far = ("SELECT count(*) || '|' || md5(string_agg(ctid::text, ',' ORDER BY ctid))"
+              f" FROM gauge_15m__partials WHERE {far}")
+    far_before = _one(conn, at_far)
+    expect.at_least(_one(conn, f"SELECT count(*) FROM gauge_15m__partials WHERE {far}"), 1,
+                    "premise: the rollup holds partials the delete below cannot reach")
     with conn.cursor() as cur:
         cur.execute("DELETE FROM feed WHERE sensor = 4 AND at < '2026-02-01 01:00:00+00'")
-    expect.text(_refresh(conn), "0A000", "a refresh after a delete is refused until phase 2")
-    expect.text(_matches(conn), before, "and the refused refresh changed nothing")
+    expect.text(_folds(conn), "folded",
+                "a refresh after a delete is not refused")
+    expect.text(_matches(conn), _oracle(conn), "and after a delete the rollup equals a full recompute")
+    expect.text(_one(conn, at_far), far_before,
+                "and the refresh rewrote no partial outside the changed groups' time range")
+    expect.text(_refresh(conn), "0", "and the next refresh, with nothing changed since, recomputes nothing")
+
+    with conn.cursor() as cur:
+        cur.execute("UPDATE feed SET at = at + interval '3 days 7 hours'"
+                    " WHERE at >= '2026-02-02 08:00:00+00' AND at < '2026-02-02 08:10:00+00'")
+    _refresh(conn)
+    expect.text(_matches(conn), _oracle(conn),
+                "after an update that moves rows to another bucket the rollup equals a full recompute")
+
+    # A dirty bucket and a new group in one refresh: the recompute already counts
+    # the new rows in the dirty bucket. 150 rows an hour apart outrun any group.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM feed WHERE sensor = 2 AND at >= '2026-02-02 20:00:00+00'"
+                    " AND at < '2026-02-02 20:15:00+00'")
+        cur.execute("INSERT INTO feed SELECT '2026-02-02 20:05:00+00'::timestamptz + g * interval '1 hour',"
+                    " 2, g * 3, g / 7.0 FROM generate_series(0, 149) g")
+    _refresh(conn)
+    expect.text(_matches(conn), _oracle(conn),
+                "after a delete and an append that straddles its bucket, a refresh counts the new rows once")
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM feed WHERE at >= '2026-02-05 00:00:00+00' AND at < '2026-02-05 09:00:00+00'")
+    try:
+        rewrote = _one(conn, "SELECT pgcolumnar.compact_rewrite('feed', 0.02)")
+    except psycopg.Error:
+        rewrote = -1
+    expect.at_least(rewrote, 1, "premise: compact_rewrite rewrote a row group")
+    _refresh(conn)
+    expect.text(_matches(conn), _oracle(conn), "after compact_rewrite the rollup equals a full recompute")
+    expect.text(_refresh(conn), "0", "and the refresh after the rewrite recomputes nothing")
 
     # The TID range of each row group comes from the access method's own mapping
     # (row_tid), so it holds exactly the group's rows at any block size.
@@ -243,6 +292,11 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 "a rollup with NULL keys and NULL timestamps equals a full recompute")
     expect.at_least(_one(conn, f"SELECT count(*) FROM ({holes_recompute}) z WHERE sensor IS NULL OR bucket IS NULL"), 2,
                     "premise: and the fixture has NULL-key and NULL-bucket groups")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM holes WHERE at IS NULL AND sensor = 1")
+    _refresh(conn, "holes_15m")
+    expect.text(_digest(conn, "SELECT * FROM holes_15m"), _digest(conn, holes_recompute),
+                "after a delete of rows whose ts is NULL the NULL-bucket rollup equals a full recompute")
 
     # Retention keeps history: groups expire retires (pgcolumnar.retired_group,
     # #1314) leave the snapshot, and their buckets keep what they folded.
@@ -265,6 +319,10 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.at_least(_one(conn, "SELECT pgcolumnar.expire('aged')"), 1, "premise: expire retired the old row groups")
     expect.text(f"{_refresh(conn, 'aged_hourly')}|{_one(conn, hist)}", f"0|{before_hist}",
                 "a refresh after retention folds nothing, refuses nothing, and keeps every bucket")
+    expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.rollup_group rg JOIN pgcolumnar.retired_group t"
+                          " ON t.group_number = rg.group_number AND t.storage_id = pgcolumnar.get_storage_id('aged')"
+                          " WHERE rg.rollup = 'aged_hourly'::regclass"), 0,
+               "and the rollup no longer records the groups retention retired")
     with conn.cursor() as cur:
         cur.execute("INSERT INTO aged SELECT now() - interval '5 hours' + g * interval '3 s', g % 83"
                     " FROM generate_series(1, 700) g")
@@ -277,6 +335,79 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     still_old = _one(conn, "SELECT count(*) FROM aged_hourly WHERE bucket < now() - interval '60 days'")
     expect.text(f"{recent}|{still_old}", f"{recomputed}|{old_buckets}",
                 "and the recent buckets equal a recompute, while the expired ones keep their history")
+
+    # History and dirty buckets: a bucket that also holds a retired group's rows
+    # cannot be recomputed, so that refresh is refused and changes nothing; a
+    # delete whose buckets hold no history folds. One group per INSERT: OLD
+    # retires, KEPT shares OLD's hour H and reaches past the cutoff, LATE is
+    # days later.
+    h = f"date_bin('1 hour', now() - interval '20 days', '{ORIGIN}')"
+
+    def layer(table):
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {table} (at timestamptz, reading int) USING pgcolumnar")
+            cur.execute(f"SELECT pgcolumnar.set_options('{table}', stripe_row_limit => 5000)")
+            cur.execute(f"INSERT INTO {table} SELECT {h} + g * interval '7 s', g FROM generate_series(1, 300) g")
+            cur.execute(f"INSERT INTO {table} SELECT {h} + interval '40 min' + g * interval '10 min', g"
+                        " FROM generate_series(1, 1000) g")
+            cur.execute(f"INSERT INTO {table} SELECT {h} + interval '12 days' + g * interval '1 min', g"
+                        " FROM generate_series(1, 900) g")
+            cur.execute(f"SELECT pgcolumnar.create_rollup('{table}_hourly', '{table}', 'at', '1 hour', '{ORIGIN}',"
+                        " '{}', '{count,max}', '{*,reading}')")
+            cur.execute(f"SELECT pgcolumnar.refresh_rollup('{table}_hourly')")
+            cur.execute(f"SELECT pgcolumnar.set_options('{table}', ttl_column => 'at', ttl_interval => '14 days')")
+            cur.execute(f"SELECT pgcolumnar.expire('{table}')")
+    layer("layered")
+    expect.text(_one(conn, f"SELECT count(*) FILTER (WHERE at < {h} + interval '40 min') || '|'"
+                           f" || count(*) FILTER (WHERE at >= {h} + interval '40 min' AND at < {h} + interval '1 hour')"
+                           " FROM layered"), "0|1",
+                "premise: expire retired the group in bucket D alone and kept the one that shares it")
+    lq = "SELECT md5(string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket)) FROM layered_hourly"
+    lr = (f"SELECT md5(string_agg(b || ':' || n || ':' || m, ',' ORDER BY b)) FROM (SELECT date_bin('1 hour', at,"
+          f" '{ORIGIN}') b, count(*) n, max(reading) m FROM layered GROUP BY 1) x")
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM layered WHERE at >= {h} + interval '12 days 5 hours' AND reading % 3 = 0")
+    expect.text(f"{_folds(conn, 'layered_hourly')}|{_one(conn, f'{lq} WHERE bucket > {h}')}"
+                f"|{_one(conn, f'SELECT count || chr(58) || max_reading FROM layered_hourly WHERE bucket = {h}')}",
+                f"folded|{_one(conn, f'{lr} WHERE b > {h}')}|301:300",
+                "a delete in buckets with no history, next to retired ones, folds: "
+                "those buckets equal a recompute and D keeps its history")
+    before_layered = _one(conn, lq)
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM layered WHERE at >= {h} + interval '2 hours' AND at < {h} + interval '3 hours'")
+    expect.text(f"{_refresh(conn, 'layered_hourly')}|{_one(conn, lq)}", f"0A000|{before_layered}",
+                "a delete in a bucket that holds retired history is refused, and the rollup is unchanged")
+
+    # No refresh between expire and the delete: the same refresh retires the
+    # history that blocks it.
+    layer("relayered")
+    rq = lq.replace("layered_hourly", "relayered_hourly")
+    before_re = _one(conn, rq)
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM relayered WHERE at >= {h} + interval '2 hours' AND at < {h} + interval '3 hours'")
+    expect.text(f"{_refresh(conn, 'relayered_hourly')}|{_one(conn, rq)}", f"0A000|{before_re}",
+                "a delete in a bucket whose history the same refresh retires is refused, and the rollup is unchanged")
+
+    # A day is 24 hours to date_bin in every zone. In Europe/Berlin 2026-03-29 is
+    # 23 hours long; the UTC day bucket must be recomputed to its end (rows run to
+    # 23:40 UTC).
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE springs (at timestamptz, reading int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('springs', stripe_row_limit => 4000)")
+        cur.execute("INSERT INTO springs SELECT '2026-03-28 00:00:00+00'::timestamptz + g * interval '4 min', g"
+                    " FROM generate_series(1, 715) g")
+        cur.execute(f"SELECT pgcolumnar.create_rollup('springs_daily', 'springs', 'at', '1 day', '{ORIGIN}',"
+                    " '{}', '{count,max}', '{*,reading}')")
+        cur.execute("SELECT pgcolumnar.refresh_rollup('springs_daily')")
+        cur.execute("DELETE FROM springs WHERE reading = 2")
+        cur.execute("SET TimeZone = 'Europe/Berlin'")
+        cur.execute("SELECT pgcolumnar.refresh_rollup('springs_daily')")
+        cur.execute("SET TimeZone = 'UTC'")
+    expect.text(_one(conn, "SELECT string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket)"
+                           " FROM springs_daily"),
+                _one(conn, f"SELECT string_agg(b || ':' || n || ':' || m, ',' ORDER BY b) FROM (SELECT"
+                           f" date_bin('1 day', at, '{ORIGIN}') b, count(*) n, max(reading) m FROM springs GROUP BY 1) x"),
+                "a refresh in a zone with a DST change recomputes a whole day bucket")
 
     # Ordinary roles: row-level security on the rollup catalogs is what is tested.
     with conn.cursor() as cur:
