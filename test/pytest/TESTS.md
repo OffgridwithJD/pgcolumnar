@@ -5661,7 +5661,7 @@ every major for this pair, which is the designed third state and not a failure.
 | `test_the_group_estimate_bound_is_accurate_and_narrow` | the bound is 12 and is an upper bound; an informed estimate is untouched; with no time bound, with only a lower one, and for `date_bin`, the estimate is between the true group count and four times it, from the zone maps (#1292); a lookalike function and a non-time key get no bound |
 | `test_the_bound_reads_the_zone_maps_in_one_catalog_scan` | planning a bucketed GROUP BY over 50 row groups scans zone_map and its index once in all, not once per group (#1304) |
 | `test_a_mixed_timestamp_predicate_never_narrows_the_bound` | a cross-type predicate under a non-UTC TimeZone never narrows the estimate below the true group count (#1292); the matching-type one still gets a tight bound |
-| `test_on_by_default_and_gated_on_the_estimate` | the grouped path is on by default; a five-minute bucket query takes it and a 200,000-group key is declined (answering as heap does) until the cap is raised; a stale estimate the gate believes still stops at the runtime cap with its hint (#1292) |
+| `test_on_by_default_and_gated_on_an_upper_bound` | the grouped path is on by default and taken only when an upper bound on the groups (the row count, or the time buckets) is within the cap: a bucket query over more rows than the cap is taken, a plain key over more rows is declined (answering as heap does) until the cap is raised, and a skewed key that fools ANALYZE is declined and answers every group; a cached plan run under a lower cap stops at the runtime cap with its hint (#1292, #1330 review) |
 
 ## 72. test_analyze_function.py: statistics collected by reading, not by sampling
 
