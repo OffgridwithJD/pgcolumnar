@@ -2028,8 +2028,11 @@ if [ "${PGC_RUN_UPGRADE:-0}" = 1 ]; then
 		# PGC_UPGRADE_OLD_SRC carries a directory through, which is the only form that
 		# works where the tree has no .git, and the documented container loop is exactly
 		# that. Without it the suite falls back to a ref and cannot build one there.
-		bash "$SRCDIR/test/extension_upgrade.sh" "$_ex" \
-			${PGC_UPGRADE_OLD_SRC:+"$PGC_UPGRADE_OLD_SRC"} >"$_exlog" 2>&1
+		# From /, not this checkout: the suite runs psql as the postgres user, which
+		# inherits the working directory, and a checkout under a 0750 home is one it
+		# cannot enter ("could not change directory", #1337). Its paths are absolute.
+		(cd / && bash "$SRCDIR/test/extension_upgrade.sh" "$_ex" \
+			${PGC_UPGRADE_OLD_SRC:+"$PGC_UPGRADE_OLD_SRC"}) >"$_exlog" 2>&1
 		_exrc=$?
 		# Exit 2 is "the environment could not supply an old source", which is not a
 		# product failure. It is reported as SKIP and not as PASS, because a gate that
@@ -2064,8 +2067,9 @@ if [ "${PGC_RUN_UPGRADE:-0}" = 1 ]; then
 	# builds that release from a throwaway clone, so it takes the same old source.
 	if [ -x "$_ex" ]; then
 		_fdlog="$(mktemp "/tmp/pgcolumnar-fmtdown-${_exmaj}.XXXXXX.log")"
-		bash "$SRCDIR/test/format_downgrade.sh" "$_ex" \
-			${PGC_DOWNGRADE_OLD_SRC:+"$PGC_DOWNGRADE_OLD_SRC"} >"$_fdlog" 2>&1
+		# From /, for extension_upgrade's reason above (#1337).
+		(cd / && bash "$SRCDIR/test/format_downgrade.sh" "$_ex" \
+			${PGC_DOWNGRADE_OLD_SRC:+"$PGC_DOWNGRADE_OLD_SRC"}) >"$_fdlog" 2>&1
 		_fdrc=$?
 		if [ "$_fdrc" = 0 ]; then
 			echo "  PASS  format_downgrade PG$_exmaj"
