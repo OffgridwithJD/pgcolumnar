@@ -182,6 +182,7 @@ def test_projection_parallel(pgc_conn, expect):
     par_off = _plan(pgc_conn, sql, 2, False)
     par_on = _plan(pgc_conn, sql, 2, True)
     par_on_count = _count(pgc_conn, count_sql, 2, True)
+    count_plan = _plan(pgc_conn, count_sql, 2, True)
 
     # Up to five ANALYZE attempts, stopping at the first with both workers busy
     # (#1336). A worker that starts late may find every group claimed on a correct
@@ -219,6 +220,13 @@ def test_projection_parallel(pgc_conn, expect):
         "gather+projection",
         "a covering projection can be a parallel scan",
     )
+    # THE COUNT'S OWN PLAN (#1339): it comes from a different query from the one
+    # whose shape is asserted above, and nothing asked how it planned.
+    expect.text(
+        _shape(count_plan),
+        "gather+projection",
+        "the parallel count is a parallel covering projection scan",
+    )
     expect.num(
         par_on_count,
         want,
@@ -238,6 +246,14 @@ def test_projection_parallel(pgc_conn, expect):
         n_busy,
         2,
         "workers share the covering projection scan, it is not a single claimer",
+    )
+    # AND SHARE IT, NOT DUPLICATE IT (#1339). Two busy workers is also what two
+    # workers each scanning every group look like. With the leader not participating,
+    # the workers' rows are everything the Gather returns.
+    expect.num(
+        sum(worker_rows),
+        want,
+        "the workers' rows add up to the covering rows, each returned once",
     )
 
     # ---- the page-cost ladder (#1209) ------------------------------------

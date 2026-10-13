@@ -59,12 +59,16 @@ def test_min_max_over_timestamptz_read_no_data(pgc_conn, expect):
         cur.execute("SELECT pgcolumnar.set_options('readings', stripe_row_limit => 2000)")
         # bigint arithmetic: the shell twin's first draft overflowed int here, the
         # INSERT failed silently, and every arm measured an empty table.
-        cur.execute(
-            "INSERT INTO readings SELECT g % 37, '2025-11-15'::timestamptz"
-            f" + ((g::bigint * 104729) % {ROWS}) * interval '2 min'"
-            f" FROM generate_series(1, {ROWS}) g"
-        )
-        cur.execute("CREATE TABLE readings_heap AS SELECT * FROM readings")
+        # THE HEAP IS WRITTEN FROM THE GENERATOR, NOT COPIED (#1339). It was a CTAS
+        # from `readings`, so a write path that stored every timestamp shifted, in
+        # the data and the zone map alike, put the same shift on both sides and every
+        # parity arm agreed with it.
+        gen = ("SELECT g % 37, '2025-11-15'::timestamptz"
+               f" + ((g::bigint * 104729) % {ROWS}) * interval '2 min'"
+               f" FROM generate_series(1, {ROWS}) g")
+        cur.execute(f"INSERT INTO readings {gen}")
+        cur.execute("CREATE TABLE readings_heap (sensor bigint, at timestamptz) USING heap")
+        cur.execute(f"INSERT INTO readings_heap {gen}")
 
     expect.num(_one(pgc_conn, "SELECT count(*) FROM readings"), ROWS,
                "premise: the timestamptz table holds every row inserted")

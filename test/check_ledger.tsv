@@ -1943,7 +1943,7 @@ prepared_writes	prepared_writes	premise: the fetch is an index scan, which is wh
 prepared_writes	prepared_writes	premise: the server log is where a crash would be recorded	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	a covering projection can be a parallel scan	15;16;17;18;19	2026-09-18	-
 projection_parallel	projection_parallel	a page cost that makes I/O dominate costs the parallel covering path	15;16;17;18;19	2026-09-23	the partial covering total amortises I/O as well as CPU: (ioRunProj + cpuRunProj) / divisor
-projection_parallel	projection_parallel	a parallel covering projection returns the covering rows once	15;16;17;18;19	2026-10-12	a parallel worker never wires the shared row-group counter, so every worker scans every group
+projection_parallel	projection_parallel	a parallel covering projection returns the covering rows once	15;16;17;18;19	2026-10-13	a parallel worker never wires the shared row-group counter, so every worker scans every group
 projection_parallel	projection_parallel	premise: ANALYZE printed a rows= line per launched worker	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: EXPLAIN ANALYZE launched two workers	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: a covering projection exists	15;16;17;18;19	never	-
@@ -1951,6 +1951,8 @@ projection_parallel	projection_parallel	premise: a parallel base scan is availab
 projection_parallel	projection_parallel	premise: a serial covering query uses the projection	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: the covering plan is parallel at the default page cost	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	premise: the table holds every inserted row	15;16;17;18;19	never	-
+projection_parallel	projection_parallel	the parallel count is a parallel covering projection scan	15;16;17;18;19	never	-
+projection_parallel	projection_parallel	the workers' rows add up to the covering rows, each returned once	15;16;17;18;19	2026-10-13	a parallel worker never wires the shared row-group counter, so every worker scans every group
 projection_parallel	projection_parallel	workers share the covering projection scan, it is not a single claimer	15;16;17;18;19	2026-10-13	first-wins-claimer;only the first parallel worker claims row groups, so one worker scans the whole table (#1336)
 projection_scan_cost	projection_scan_cost	a clause that mentions the sort key but cannot prune on it does not cheapen a covering projection	15;16;17;18;19	2026-10-12	a covering projection is discounted for any clause that mentions the sort key, as before #1126
 projection_scan_cost	projection_scan_cost	a non-sort-key restriction does not cheapen a covering projection	15;16;17;18;19	2026-09-18	-

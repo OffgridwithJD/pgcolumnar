@@ -115,8 +115,14 @@ def test_update_fans_the_new_row_number_out_to_projections(pgc_conn, expect):
             _set(cur, "SELECT a::text || '|' || c::text FROM pu"),
             "read_projection still matches the live base",
         )
+        # AGAINST HEAP, NOT THE BASE (#1339). Both arms above and this one used to
+        # compare with `pu` itself, and b was never compared with heap after its own
+        # update: an UPDATE that kept b's old value while fanning the new row number
+        # out matched the base it had just written, and every arm stayed green.
         expect.rows(
             _set(cur, "SELECT pgcolumnar.reconstruct_via_projection('pu','pc')"),
-            _set(cur, "SELECT a::text || '|' || b || '|' || c::text FROM pu"),
+            _set(cur, "SELECT a::text || '|' || b || '|' || c::text FROM pu_h"),
             "reconstruct via the projection still rebuilds every live row",
         )
+        expect.rows(_set(cur, "SELECT a, b, c FROM pu"), _set(cur, "SELECT a, b, c FROM pu_h"),
+                    "every column matches heap after updating a non-projected column")

@@ -289,6 +289,18 @@ def test_which_layer_refused_without_reading_the_message(pgc_cluster, pgc_conn, 
     expect.sqlstate(err, "42704",
                     "while the EXECUTE role reaches the projection lookup on the same call")
 
+    # THE SAME QUESTION OF reconstruct_via_projection (#1339). It has its own REVOKE
+    # and its own copy of the C check, and only read_projection was asked: with its
+    # REVOKE deleted, t_prjnone reached the C body, got 42501 there, and every arm in
+    # this file stayed green.
+    rcall = call.replace("read_projection", "reconstruct_via_projection")
+    _, err = _as(pgc_cluster, NONE, rcall, schema)
+    expect.sqlstate(err, "42501",
+                    "reconstruct: the no-EXECUTE role never reaches the body, so the grant is what stopped it")
+    _, err = _as(pgc_cluster, EXEC, rcall, schema)
+    expect.sqlstate(err, "42704",
+                    "reconstruct: the EXECUTE role reaches the projection lookup on the same call")
+
 
 def test_the_base_acl_is_checked_before_the_projection_is_looked_up(
         pgc_cluster, pgc_conn, expect):
@@ -310,6 +322,11 @@ def test_the_base_acl_is_checked_before_the_projection_is_looked_up(
                  "'prj_secret','no_such_proj')", schema)
     expect.sqlstate(err, "42501",
                     "the base ACL is checked before the projection name is looked up")
+    _, err = _as(pgc_cluster, EXEC,
+                 "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection("
+                 "'prj_secret','no_such_proj')", schema)
+    expect.sqlstate(err, "42501",
+                    "reconstruct: the base ACL is checked before the projection name is looked up")
 
 
 @pytest.mark.parametrize("func,name", WITH_SELECT)
@@ -392,3 +409,8 @@ def test_the_acl_is_checked_before_rls_so_no_privilege_discloses_no_rls_state(
                  schema)
     expect.sqlstate(err, "42501",
                     "a caller with no SELECT is told a privilege is missing, not that RLS is in force")
+    _, err = _as(pgc_cluster, EXEC,
+                 "SELECT count(*) FROM pgcolumnar.reconstruct_via_projection('prj_secret','p1')",
+                 schema)
+    expect.sqlstate(err, "42501",
+                    "reconstruct: a caller with no SELECT is told a privilege is missing, not that RLS is in force")
