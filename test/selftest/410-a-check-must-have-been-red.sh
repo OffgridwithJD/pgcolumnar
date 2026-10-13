@@ -1396,3 +1396,26 @@ check "and a genuine observation says so with --reds-are-real" \
 check "control: an all-PASS log still merges with no flag at all" \
 	"$(_led_rc merge --ledger "$_r946/d.tsv" --date 2026-09-10 "$_r946/green.log")" "0"
 unset _r946
+
+# ---- a premise the ledger has seen go red (#1236) ---------------------------
+#
+# A `premise:` check claims no repository change can redden it. A date in its
+# last-observed-red column says a mutation did, so one of the two claims is false and
+# the gate refuses rather than choosing. The control is the same ledger with `never`:
+# without it the arm passes on a gate that returns 1 for any reason at all.
+
+_r1236="$PGC_WORKDIR/r1236"; mkdir -p "$_r1236"
+printf 'RESULT\tdemo\tpart1\tpremise: the fixture holds rows\tPASS\t18\t\nRESULT\tdemo\tpart1\tsecond check\tPASS\t18\t\nchecks run: 2\n' > "$_r1236/p.log"
+printf 'suites_not_covered 0\n' > "$_r1236/b.txt"
+printf 'demo\tpart1\tpremise: the fixture holds rows\t18\tnever\t-\ndemo\tpart1\tsecond check\t18\tnever\t-\n' > "$_r1236/never.tsv"
+sed 's/\tnever\t-$/\t2026-10-01\t-/;2s/\t2026-10-01\t-$/\tnever\t-/' "$_r1236/never.tsv" > "$_r1236/dated.tsv"
+check "the dated fixture differs from the control in the premise row's date alone" \
+	"$(diff "$_r1236/never.tsv" "$_r1236/dated.tsv" | grep -c '^>.*premise: the fixture holds rows	18	2026-10-01')" "1"
+check "control: an undated premise passes the gate" \
+	"$(_led_rc gate --ledger "$_r1236/never.tsv" --budget "$_r1236/b.txt" --registered "$_lw/registered" "$_r1236/p.log")" "0"
+check "a premise the ledger has seen go red is refused" \
+	"$(_led_rc gate --ledger "$_r1236/dated.tsv" --budget "$_r1236/b.txt" --registered "$_lw/registered" "$_r1236/p.log")" "1"
+check "and it is named, so the reviewer knows which row" \
+	"$(_led_run gate --ledger "$_r1236/dated.tsv" --budget "$_r1236/b.txt" --registered "$_lw/registered" "$_r1236/p.log" \
+		| grep -c 'a premise the ledger has seen go red: demo	part1	premise: the fixture holds rows')" "1"
+unset _r1236

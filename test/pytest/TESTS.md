@@ -2840,6 +2840,23 @@ warned unconditionally, which would train the warning out of being read.
 The shell twin is `test/selftest/520-a-merged-row-must-cover-the-majors.sh`. Same
 properties, own fixtures, and neither file names the other.
 
+### A premise the ledger has seen go red is refused (#1236)
+
+A check named `premise:` claims no repository change can redden it. A date in its
+last-observed-red column says a mutation did. One of the two is false, so the gate
+refuses the row and names it. The reviewer then decides: drop the prefix, because the
+check is an arm, or move the date to the check that earned it.
+
+The gate decides this from the ledger alone, so it covers every row, not only the rows
+the run observed.
+
+| test | what it holds |
+| --- | --- |
+| `test_the_gate_refuses_a_premise_the_ledger_has_seen_go_red` | a dated `premise:` row makes the gate fail, and the output names the row once |
+| `test_a_premise_never_observed_red_passes_the_gate` | the control: the same fixture with `never` passes, so the refusal above is this rule and not another route to rc=1 |
+
+The shell twin is the last section of `test/selftest/410-a-check-must-have-been-red.sh`.
+
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 
 **Why this file exists.** `assert-inside-a-loop-over-zero-rows` in VACUITY_MODES.md 3.5
