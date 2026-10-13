@@ -4,9 +4,10 @@
 #
 # WRITTEN BEFORE THE CODE, against the API proposed on #1294:
 #
-#     pgcolumnar.create_rollup(rollup, source, ts_column, width, origin,
-#                              group_by name[], aggregates text[])
-#     pgcolumnar.refresh_rollup(rollup) -> rows folded
+#     pgcolumnar.create_rollup(rollup, source, ts_column, width, origin, group_by name[],
+#                              agg_functions text[], agg_columns name[], access_method)
+#     pgcolumnar.refresh_rollup(rollup regclass) -> rows folded
+#     pgcolumnar.rebase_rollup(rollup regclass) -> row groups recorded
 #
 # The rollup is a table, one row per (bucket, group_by...) key, with columns
 # `bucket`, the group_by columns, then one per aggregate named `count`, or
@@ -39,7 +40,7 @@ sqlstate() {	# sqlstate SQL -> the SQLSTATE it fails with, or ok
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 check_num "premise: the rollup functions exist" \
 	"$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-	      WHERE n.nspname = 'pgcolumnar' AND p.proname IN ('create_rollup', 'refresh_rollup');")" "2"
+	      WHERE n.nspname = 'pgcolumnar' AND p.proname IN ('create_rollup', 'refresh_rollup', 'rebase_rollup');")" "3"
 
 ORIGIN="2026-01-01 00:00:00+00"
 q "CREATE TABLE src (ts timestamptz, dev int, v bigint, f float8) USING pgcolumnar;
@@ -68,8 +69,8 @@ avg_gap() {
 matches() { echo "$(exact "SELECT * FROM r_hourly")|$(avg_gap)"; }
 oracle() { echo "$(exact "$RECOMPUTE")|t"; }
 
-q "SELECT pgcolumnar.create_rollup('r_hourly', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}',
-   '{count(*), sum(v), min(v), max(v), avg(f)}');" >/dev/null
+AGGS="'{count,sum,min,max,avg}', '{*,v,v,v,f}'"
+q "SELECT pgcolumnar.create_rollup('r_hourly', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}', $AGGS);" >/dev/null
 check "premise: the rollup table exists with the documented columns" \
 	"$(q "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
 	      WHERE attrelid = to_regclass('r_hourly') AND attnum > 0 AND NOT attisdropped;")" \
@@ -118,8 +119,8 @@ check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 # The bucket is a pure function of ts: refreshes from different zones agree.
 for z in UTC Asia/Kolkata; do
 	r="r_$(tr '/' '_' <<<"$z" | tr 'A-Z' 'a-z')"
-	q "SET TimeZone = '$z'; SELECT pgcolumnar.create_rollup('$r', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}',
-	   '{count(*), sum(v), min(v), max(v), avg(f)}'); SELECT pgcolumnar.refresh_rollup('$r');" >/dev/null
+	q "SET TimeZone = '$z'; SELECT pgcolumnar.create_rollup('$r', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}', $AGGS);
+	   SELECT pgcolumnar.refresh_rollup('$r');" >/dev/null
 done
 check "refreshes from sessions in UTC and Asia/Kolkata build the same rollup" \
 	"$(exact "SELECT * FROM r_utc")" "$(exact "SELECT * FROM r_asia_kolkata")"
@@ -142,6 +143,28 @@ check_num "a refresh after a small append reads under a fifth of the source" \
 	"$( [ -n "$read_blocks" ] && [ "$read_blocks" -ge 1 ] && at_least $((pages - 5 * read_blocks)) 1 || echo "read ${read_blocks:-nothing}")" "1"
 check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
+# A rewrite renumbers every row group (#1294 point 9): the snapshot no longer names
+# the source's groups, so a refresh is refused, and rebase_rollup records the
+# current groups without touching the rollup.
+groups_before="$(q "SELECT string_agg(group_number::text, ',' ORDER BY group_number) FROM pgcolumnar.row_group
+	WHERE storage_id = pgcolumnar.get_storage_id('src');")"
+q "SELECT pgcolumnar.vacuum('src');" >/dev/null
+groups_after="$(q "SELECT string_agg(group_number::text, ',' ORDER BY group_number) FROM pgcolumnar.row_group
+	WHERE storage_id = pgcolumnar.get_storage_id('src');")"
+check "premise: pgcolumnar.vacuum gave the source's row groups new identities" \
+	"$([ -n "$groups_after" ] && [ "$groups_after" != "$groups_before" ] && echo renumbered || echo "same: $groups_after")" "renumbered"
+vb="$(exact "SELECT * FROM r_hourly")"
+check_num "premise: the rollup holds rows before the rewrite" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
+check "a refresh after the source was rewritten is refused, naming rebase_rollup" \
+	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_hourly');")|$(exact "SELECT * FROM r_hourly")" "55000|$vb"
+check_num "rebase_rollup records the source's current row groups" \
+	"$(at_least "$(q "SELECT pgcolumnar.rebase_rollup('r_hourly');")" 1)" "1"
+check "and leaves the rollup's rows alone" "$(exact "SELECT * FROM r_hourly")" "$vb"
+load 38301 39100 "2026-03-17 00:00:00+00"
+check_num "after a rebase the next refresh folds exactly the appended rows" \
+	"$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "800"
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
+
 # Phase 1 folds appends only; anything else is refused, and the rollup is untouched.
 before="$(exact "SELECT * FROM r_hourly")"
 check_num "premise: the rollup holds rows before the delete" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
@@ -151,10 +174,17 @@ check "a refresh after a delete is refused until phase 2" \
 check "and the refused refresh changed nothing" "$(exact "SELECT * FROM r_hourly")" "$before"
 
 # Refused at creation.
-check "a width with months is refused" \
-	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_m', 'src', 'ts', '1 month', '$ORIGIN', '{}', '{count(*)}');")" "22023"
-check "an aggregate that does not combine is refused" \
-	"$(sqlstate "SELECT pgcolumnar.create_rollup('r_p', 'src', 'ts', '1 hour', '$ORIGIN', '{}',
-	   '{percentile_cont(0.5) WITHIN GROUP (ORDER BY v)}');")" "0A000"
+# Refused at creation, each with 22023: the aggregates are structured input
+# checked against the five that combine, never SQL text (#1294 point 11).
+refused_create() { sqlstate "SELECT pgcolumnar.create_rollup('$1', 'src', 'ts', '$2', '$ORIGIN', '{}', '$3', '$4');"; }
+check "a width with months is refused" "$(refused_create r_m '1 month' '{count}' '{*}')" "22023"
+check "an aggregate that does not combine is refused" "$(refused_create r_p '1 hour' '{median}' '{v}')" "22023"
+check "aggregate functions and columns of different lengths are refused" \
+	"$(refused_create r_l '1 hour' '{count,sum}' '{*}')" "22023"
+check "an aggregate column the source does not have is refused" \
+	"$(refused_create r_c '1 hour' '{sum}' '{nosuch}')" "22023"
+check "* with anything but count is refused" "$(refused_create r_s '1 hour' '{sum}' '{*}')" "22023"
+check_num "and no refused rollup left a table behind" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s');")" "0"
 
 pgc_summary
