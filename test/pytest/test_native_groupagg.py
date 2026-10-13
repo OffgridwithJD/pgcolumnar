@@ -316,32 +316,17 @@ def test_a_lone_negative_zero_keeps_its_sign(pgc_conn, expect):
 
 # ---- shapes the node must decline, still answering correctly -----------------
 
-def test_a_group_count_over_the_cap_stops_rather_than_growing(pgc_conn, expect):
-    """The cap bounds the ACTUAL group count at execution, not the planner's estimate.
-
-    The node is forced here -- hashagg and sort off leave it the only grouping path
-    -- so the cap path is exercised whatever the planner would cost on this fixture.
-    Its real-world plan choice is covered by the arms above.
+def test_a_key_well_under_the_gate_takes_the_node(pgc_conn, expect):
+    """Since #1292 phase 2 the node is taken only for an estimate of at most a tenth
+    of pgcolumnar.groupagg_max_groups, so the runtime cap is reached only through a
+    wrong estimate; test_on_by_default_and_gated_on_the_estimate proves that path.
+    (Before the gate this forced the node under a cap of 100 with hashagg and sort
+    off; the gate now declines that plan, which is the point of it.)
     """
     _make_pair(expect, pgc_conn)
     expect.plan_marker(_plan(pgc_conn, "SELECT g, count(*) FROM t_col GROUP BY g"),
-                       MARKER, name="plan: node still chosen (no estimate gate)")
+                       MARKER, name="plan: the node is chosen for a key well under the gate")
 
-    # autocommit is on, so the deliberate error below cannot poison what follows.
-    # Only psycopg.Error is caught: a bug in this file should raise.
-    _exec(pgc_conn, "SET enable_hashagg=off")
-    _exec(pgc_conn, "SET enable_sort=off")
-    _exec(pgc_conn, "SET pgcolumnar.groupagg_max_groups=100")
-    named = "no"
-    try:
-        _rows(pgc_conn, "SELECT g, count(*) FROM t_col GROUP BY g")
-    except psycopg.Error as exc:
-        named = "yes" if "groupagg_max_groups" in str(exc) else f"no [{exc}]"
-    expect.text(named, "yes", "over-cap stops with a groupagg_max_groups error")
-
-    _exec(pgc_conn, "RESET enable_hashagg")
-    _exec(pgc_conn, "RESET enable_sort")
-    _exec(pgc_conn, "RESET pgcolumnar.groupagg_max_groups")
     # Named at the call rather than through `_oracle`, and without a second node
     # premise, because the shell suite spends a bare `diff_query` here: the node was
     # asserted three lines above and asserting it again would publish a premise the
@@ -741,3 +726,55 @@ def test_a_mixed_timestamp_predicate_never_narrows_the_bound(pgc_conn, expect):
                 "a mixed timestamp/timestamptz predicate never narrows the estimate below the true count")
     expect.text("yes" if matching < 5000 else f"no [{matching}]", "yes",
                 "while a matching-type predicate still gets one")
+
+
+# ---- on by default, gated on the estimate (#1292 phase 2) --------------------
+
+def test_on_by_default_and_gated_on_the_estimate(pgc_conn, expect):
+    """The owner's decision on #1292: the grouped path is on by default, and taken
+    only when the estimated group count is at most a tenth of groupagg_max_groups.
+
+    Independent of the shell suite's section 10: its own generator (three days at
+    648 ms, multipliers of its own); the numbers the names state are shared.
+    """
+    conn = pgc_conn
+    expect.text(_one(conn, "SELECT boot_val || '|' || setting FROM pg_settings"
+                           " WHERE name = 'pgcolumnar.enable_group_vectorization'"), "on|on",
+                "the grouped path is on by default")
+    gen = ("SELECT '2026-05-01 00:00:00+00'::timestamptz + g * interval '648 ms',"
+           " ((g * 7) % 200000)::int, (g % 777)::int FROM generate_series(1, 400000) g")
+    for name, am in (("gate_c", "pgcolumnar"), ("gate_hp", "heap")):
+        _exec(conn, f"CREATE TABLE {name} (ts timestamptz, k int, i int) USING {am}")
+        _exec(conn, f"INSERT INTO {name} {gen}")
+        _exec(conn, f"ANALYZE {name}")
+    expect.plan_marker(_plan(conn, "SELECT date_bin('5 minutes', ts, '2026-01-01 00:00:00+00') b,"
+                                   " count(*), sum(i) FROM gate_c GROUP BY b"),
+                       MARKER, name="by default a five-minute bucket query takes the grouped path")
+    high = "SELECT k, count(*), sum(i) FROM {} GROUP BY k"
+    expect.plan_marker(_plan(conn, high.format("gate_c")), MARKER, absent=True,
+                       name="by default a key estimated at 200,000 groups is declined")
+    expect.rows(_rows(conn, high.format("gate_c")), _rows(conn, high.format("gate_hp")),
+                "and the declined query answers what heap answers")
+    _exec(conn, "SET pgcolumnar.groupagg_max_groups = 10000000")
+    expect.plan_marker(_plan(conn, high.format("gate_c")), MARKER,
+                       name="raising groupagg_max_groups to 10,000,000 lets the same query take the grouped path")
+    _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+
+    # ANALYZE sees 50 keys; 5,000 more arrive unanalyzed. Under a cap of 1,000 the
+    # gate (100) believes the estimate, and the runtime cap stops the query.
+    _exec(conn, "CREATE TABLE gate_stale (k int, v int) USING pgcolumnar WITH (autovacuum_enabled = off)")
+    _exec(conn, "INSERT INTO gate_stale SELECT (g * 3) % 50, g FROM generate_series(1, 3000) g")
+    _exec(conn, "ANALYZE gate_stale")
+    _exec(conn, "INSERT INTO gate_stale SELECT 70000 + g, g FROM generate_series(1, 5000) g")
+    _exec(conn, "SET pgcolumnar.groupagg_max_groups = 1000")
+    expect.plan_marker(_plan(conn, "SELECT k, count(*) FROM gate_stale GROUP BY k"), MARKER,
+                       name="an estimate of about 50 groups takes the grouped path under a cap of 1,000")
+    got = "no error"
+    try:
+        _rows(conn, "SELECT k, count(*) FROM gate_stale GROUP BY k")
+    except psycopg.Error as exc:
+        d = exc.diag
+        got = ("1" if "exceeded pgcolumnar.groupagg_max_groups (1000)" in (d.message_primary or "") else "0") + "|" + \
+              ("1" if (d.message_hint or "").startswith("Raise pgcolumnar.groupagg_max_groups") else "0")
+    _exec(conn, "RESET pgcolumnar.groupagg_max_groups")
+    expect.text(got, "1|1", "a misestimate the gate passes is still stopped at the runtime cap, with its hint")

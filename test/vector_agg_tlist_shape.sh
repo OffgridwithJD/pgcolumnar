@@ -51,9 +51,11 @@ check "premise: the sort column has NULLs, which the aggregates must skip" \
 
 # Vectorized-aggregate node count in the plan. The whole question is which path
 # ran, so this is asserted per arm rather than assumed.
+# The grouped path is pinned off: this suite is about the UNGROUPED fold, and since
+# #1292 phase 2 the grouped path is on by default and prints the same marker.
 vec() { q "SELECT count(*) FROM (SELECT 1) z;" >/dev/null
 	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-		-d "$PGC_DB" -At -c "EXPLAIN (COSTS OFF) $1" 2>/dev/null \
+		-d "$PGC_DB" -At -c "SET pgcolumnar.enable_group_vectorization = off" -c "EXPLAIN (COSTS OFF) $1" 2>/dev/null \
 		| grep -cE 'Columnar Vectorized Aggregates: [1-9]'; }
 
 # ansq LABEL QUERY-with-%T : identical answer from heap and columnar.

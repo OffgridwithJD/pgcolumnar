@@ -218,26 +218,13 @@ oracle "oracle exact: GROUP BY added column" \
 
 # ---- 7. fallback shapes: not the node, still the right answer ---------------
 
-# The cap bounds the actual group count at execution, not the planner's group
-# estimate (unreliable for expression keys): over the cap the node stops with
-# guidance rather than building an unbounded hash table. The node is forced here
-# (the only grouping path left with hashagg and sort off) so the cap-enforcement
-# path is exercised deterministically regardless of how the planner would cost it
-# on this small table; the node's real-world plan choice is covered above and by
-# the benchmark. The cap is set in-session so the executor reads it directly.
-check "plan: node still chosen (no estimate gate)" \
+# Since #1292 phase 2 the planner takes the node only for an estimate of at most a
+# tenth of pgcolumnar.groupagg_max_groups, so the runtime cap is reached only when
+# the estimate is wrong; section 10 proves that path with a stale-statistics
+# fixture. (Before the gate this section forced the node with hashagg and sort off
+# under a cap of 100; the gate now declines that plan, which is the point of it.)
+check "plan: the node is chosen for a key well under the gate" \
 	"$(pgc_is_groupvec "SELECT g, count(*) FROM t_col GROUP BY g")" yes
-# Capture to a variable before grepping: the query errors on purpose, so psql
-# exits non-zero, and under `set -o pipefail` a `psql | grep` pipeline would
-# report psql's failure even when grep matched -- flipping this check to a false
-# negative. Grepping the captured text keeps psql's exit status out of it.
-oc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
-	-d "$PGC_DB" -Atc "SET pgcolumnar.enable_group_vectorization=on;
-		SET enable_hashagg=off; SET enable_sort=off;
-		SET pgcolumnar.groupagg_max_groups=100;
-		SELECT g, count(*) FROM t_col GROUP BY g" 2>&1 || true)"
-n_err="$(grep -q 'groupagg_max_groups' <<<"$oc_out" && echo yes || echo no)"
-check "over-cap stops with a groupagg_max_groups error" "$n_err" yes
 diff_query "oracle exact: default cap runs the high-cardinality key" \
 	"SELECT g, count(*), sum(i4) FROM %T GROUP BY g"
 
