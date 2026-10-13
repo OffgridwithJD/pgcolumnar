@@ -109,11 +109,16 @@ def test_a_successful_build_is_silent(expect):
 
 
 def _fake_tree(tmp_path, verdict_rc):
-    """A tree whose test/lib.sh defines the function with a fixed verdict."""
+    """A tree whose test/lib.sh defines the function with a fixed verdict.
+
+    It reports its argument count and each argument on stderr (#1339), so an arm can
+    see the quoting and the order rather than only the exit status.
+    """
     (tmp_path / "test").mkdir(parents=True, exist_ok=True)
     (tmp_path / "test" / "lib.sh").write_text(
         "pgc_build_and_install() {\n"
         "  echo '-- building'\n"
+        "  printf 'ARGS %s [%s] [%s] [%s]\\n' \"$#\" \"$1\" \"$2\" \"$3\" >&2\n"
         f"  [ {verdict_rc} -eq 0 ] || {{ echo 'FATAL: the build failed' >&2; return 1; }}\n"
         "  return 0\n"
         "}\n"
@@ -124,11 +129,16 @@ def _fake_tree(tmp_path, verdict_rc):
 def test_the_shell_path_really_refuses(tmp_path, expect):
     """The real bash invocation, not an injected runner: sourcing, quoting and
     the exit status all have to work for the refusal to arrive."""
-    tree = _fake_tree(tmp_path / "broken", 1)
+    # A SPACE AND A `$` IN THE PATH (#1339). The tree used to sit in a plain tmp_path
+    # and the fake ignored its arguments, so dropping the quotes or swapping the
+    # arguments left both arms green.
+    tree = _fake_tree(tmp_path / "broken tree $HOME", 1)
     with pytest.raises(RuntimeError) as exc:
         build_and_install(tree, "/bin/false", "18")
     expect.at_least(str(exc.value).count("FATAL: the build failed"), 1,
                     "the shell's own FATAL reaches the Python caller")
+    expect.contains(str(exc.value), f"ARGS 3 [{tree}] [/bin/false] [18]",
+                    "and lib.sh received the tree, pg_config and major, each one whole")
 
 
 def test_the_shell_path_accepts_a_good_build(tmp_path, expect):
@@ -160,6 +170,20 @@ def _answerable(tmp_path, name="cfg"):
     return _pg_config_answering(tmp_path, libdir), libdir
 
 
+def _installs_into(libdir, calls):
+    """A runner that does what an install does: record the call and write the library.
+
+    THE SAME BYTES EACH TIME, so an unchanged prefix still matches its marker. The
+    runners these replace wrote nothing, so the prefix held no library and the arms
+    passed only because build_once certified "absent" (#1339), which it now refuses.
+    """
+    def run(argv):
+        calls.append(argv)
+        (pathlib.Path(libdir) / "pgcolumnar.so").write_bytes(b"build")
+        return _Proc(0)
+    return run
+
+
 def test_build_once_builds_once_and_then_skips(tmp_path, expect):
     """The xdist workers share one prefix, so the install is serialised rather
     than skipped."""
@@ -169,10 +193,7 @@ def test_build_once_builds_once_and_then_skips(tmp_path, expect):
     pgc, libdir = _answerable(tmp_path)
     lock = str(tmp_path / "lock")
     calls = []
-
-    def counting(argv):
-        calls.append(argv)
-        return _Proc(0)
+    counting = _installs_into(libdir, calls)
 
     first = build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)
     second = build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)
@@ -201,10 +222,7 @@ def test_build_once_rebuilds_for_a_different_prefix(tmp_path, expect):
         (tmp_path / n).mkdir()
         pfx.append(str(_pg_config_answering(tmp_path / n, shared)))
     calls = []
-
-    def counting(argv):
-        calls.append(argv)
-        return _Proc(0)
+    counting = _installs_into(shared, calls)
 
     build_once(tree, pfx[0], "18", lock_path=lock, runner=counting)
     build_once(tree, pfx[1], "18", lock_path=lock, runner=counting)
@@ -234,10 +252,7 @@ def test_editing_the_source_rebuilds(tmp_path, expect):
     pgc, libdir = _answerable(tmp_path)
     lock = str(tmp_path / "lock3")
     calls = []
-
-    def counting(argv):
-        calls.append(argv)
-        return _Proc(0)
+    counting = _installs_into(libdir, calls)
 
     build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)
     build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)
@@ -328,6 +343,24 @@ def test_build_once_rebuilds_when_the_library_was_deleted(tmp_path, expect):
     expect.num(len(calls), 2, "and the build ran")
 
 
+def test_an_install_that_leaves_no_library_is_refused(tmp_path, expect):
+    """Absent is not fresh, and that includes absent straight after an install (#1339).
+
+    The install reported success and the prefix holds no library: a broken install
+    target. build_once used to write "absent" into the marker and certify it, so the
+    next call skipped the build over a prefix with nothing in it.
+    """
+    tree = _tree_with_source(tmp_path, "noinstall", "int a = 1;\n")
+    pgc, libdir = _answerable(tmp_path)
+    lock = str(tmp_path / "lock-noinstall")
+    with pytest.raises(RuntimeError) as exc:
+        build_once(tree, str(pgc), "18", lock_path=lock, runner=lambda argv: _Proc(0))
+    expect.contains(str(exc.value), "no library",
+                    "an install that leaves no library is refused, and says why")
+    expect.num(1 if pathlib.Path(lock + ".done").exists() else 0, 0,
+               "and no marker was written, so the next call cannot skip")
+
+
 def test_a_prefix_that_cannot_be_observed_never_certifies(tmp_path, expect):
     """The degraded path FAILS CLOSED (#956 review, @jdatcmd).
 
@@ -376,14 +409,20 @@ def test_an_unfingerprintable_tree_always_rebuilds(tmp_path, expect):
     expect.text(repr(source_fingerprint(tree)), "None",
                 "a tree with nothing to compile has no fingerprint")
     lock = str(tmp_path / "lock4")
+    # AN ANSWERING PREFIX THAT HOLDS A LIBRARY (#1339). With `/bin/pg_config` the arm
+    # depended on the machine: where that path does not exist the prefix is
+    # unobservable, no marker is written, and both calls build whatever the
+    # fingerprint says -- so removing the `fp and` guard left it green there.
+    pgc, libdir = _answerable(tmp_path)
     calls = []
 
-    def counting(argv):
+    def installing(argv):
         calls.append(argv)
+        (libdir / "pgcolumnar.so").write_bytes(b"build")
         return _Proc(0)
 
-    build_once(tree, "/bin/pg_config", "18", lock_path=lock, runner=counting)
-    build_once(tree, "/bin/pg_config", "18", lock_path=lock, runner=counting)
+    build_once(tree, str(pgc), "18", lock_path=lock, runner=installing)
+    build_once(tree, str(pgc), "18", lock_path=lock, runner=installing)
     expect.num(len(calls), 2, "both calls build, because neither could be certified")
 
 
@@ -487,13 +526,10 @@ def test_the_fingerprint_covers_a_separately_built_module(tmp_path, expect):
 def test_an_objstore_edit_forces_a_second_build(tmp_path, expect):
     """The consequence, end to end, which is what the finding was about."""
     tree = _tree_with_objstore(tmp_path, "fp2")
-    pgc, _libdir = _answerable(tmp_path, "objstore")
+    pgc, libdir = _answerable(tmp_path, "objstore")
     lock = str(tmp_path / "lock_obj")
     calls = []
-
-    def counting(argv):
-        calls.append(argv)
-        return _Proc(0)
+    counting = _installs_into(libdir, calls)
 
     build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)
     build_once(tree, str(pgc), "18", lock_path=lock, runner=counting)

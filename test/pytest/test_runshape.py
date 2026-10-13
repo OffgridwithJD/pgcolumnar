@@ -100,6 +100,75 @@ def test_layer_rejects_a_fixture_that_skips(pytester, expect):
     result.stdout.fnmatch_lines(["*skipped during setup*"])
 
 
+# A SKIP OR XFAIL IN THE TEST BODY (#1339, pgc_vacuity.py:2578). The setup guard above
+# sees only `report.when == "setup"`, and the marker scan only `skip` and `skipif`. A
+# body that calls pytest.skip(), pytest.xfail() or pytest.importorskip() raises past
+# `pytest_runtest_call`'s guards, and an `xfail` marker turns a failing assertion
+# into "xfailed". Each exits 0 with no record of what did not run.
+
+
+def test_layer_rejects_a_skip_in_the_test_body(pytester, expect):
+    """`if major < 18: pytest.skip("old")` removes the test and reads green."""
+    pytester.makepyfile(
+        """
+        import pytest
+        def test_old_major(expect):
+            pytest.skip("old")
+            expect.num(1, 1, "never reached")
+        """
+    )
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.run_failed(result, "a skip in the test body must fail the run")
+    result.stdout.fnmatch_lines(["*skipped or xfailed while running*"])
+
+
+def test_layer_rejects_an_xfail_in_the_test_body(pytester, expect):
+    """pytest.xfail() in the body reports "xfailed", which pytest counts as success."""
+    pytester.makepyfile(
+        """
+        import pytest
+        def test_flaky(expect):
+            pytest.xfail("flaky")
+        """
+    )
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.run_failed(result, "an xfail in the test body must fail the run")
+    result.stdout.fnmatch_lines(["*skipped or xfailed while running*"])
+
+
+def test_layer_rejects_an_importorskip_in_the_test_body(pytester, expect):
+    """importorskip skips without passing through expect.cannot_run's closed list."""
+    pytester.makepyfile(
+        """
+        import pytest
+        def test_needs_a_module(expect):
+            pytest.importorskip("pgc_no_such_module_anywhere")
+            expect.num(1, 1, "never reached")
+        """
+    )
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.run_failed(result, "an importorskip in the test body must fail the run")
+    result.stdout.fnmatch_lines(["*skipped or xfailed while running*"])
+
+
+def test_layer_rejects_an_xfail_marker(pytester, expect):
+    """xfail_strict catches an XPASS. It does not catch the failure xfail hides.
+
+    A pgColumnar change that makes this count 99 is reported "1 xfailed", rc 0.
+    """
+    pytester.makepyfile(
+        """
+        import pytest
+        @pytest.mark.xfail(reason="flaky")
+        def test_count(expect):
+            expect.num(99, 100, "rows")
+        """
+    )
+    result = pytester.runpytest("-p", "pgc_vacuity")
+    expect.run_failed(result, "an xfail marker must fail the run")
+    result.stderr.fnmatch_lines(["*carries a bare @pytest.mark.xfail*"])
+
+
 def test_layer_allows_a_declared_unrunnable_test(pytester, expect):
     """The control and the escape hatch: expect.cannot_run stays available.
 

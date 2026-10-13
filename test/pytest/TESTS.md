@@ -1054,6 +1054,7 @@ fix; noticing is.
 | --- | --- |
 | `test_build_once_rebuilds_when_another_process_replaced_the_library` | a third party overwriting the library rebuilds instead of certifying, and the build actually runs |
 | `test_build_once_rebuilds_when_the_library_was_deleted` | absent is not fresh |
+| `test_an_install_that_leaves_no_library_is_refused` | an install that reports success and leaves no library is refused, and writes no marker; it used to be certified as "absent" (#1339) |
 | `test_a_prefix_that_cannot_be_observed_never_certifies` | a prefix that cannot be seen is never certified: no marker, so the next call builds |
 
 **Why a per-source constant cannot work.** The library's digest is not a function of the
@@ -1387,6 +1388,10 @@ than a single test, which is why they were built before the rest of the backlog.
 | `test_layer_rejects_a_parametrize_over_an_empty_list` | an empty parameter set fails the run | `1 skipped`, exit 0 |
 | `test_layer_accepts_a_parametrize_with_cases` | **positive control** | a real parameter set is untouched |
 | `test_layer_rejects_a_fixture_that_skips` | a skip arriving during setup fails the run | every dependent test skips, exit 0 |
+| `test_layer_rejects_a_skip_in_the_test_body` | `pytest.skip()` in the body fails the run (#1339) | the test reads as skipped, exit 0 |
+| `test_layer_rejects_an_xfail_in_the_test_body` | `pytest.xfail()` in the body fails the run | "xfailed", which pytest counts as success |
+| `test_layer_rejects_an_importorskip_in_the_test_body` | `pytest.importorskip()` in the body fails the run | a skip that bypasses `expect.cannot_run`'s closed list of reasons |
+| `test_layer_rejects_an_xfail_marker` | an `xfail` marker is refused at collection, as `skip` is | `xfail_strict` catches an XPASS, but a failing test under xfail is still exit 0 |
 | `test_layer_allows_a_declared_unrunnable_test` | **escape hatch and control** | `expect.cannot_run` records a counted assertion instead of skipping |
 | `test_layer_allows_a_deliberately_selected_subset` | `-k` is a deliberate act, not tests lost | the guard reported 15 deselected tests as never reported and failed a healthy run |
 | `test_layer_allows_an_explicitly_deselected_test` | `--deselect` reaches the same hook by another route | pinned separately so one fix cannot cover only one spelling |
@@ -1714,6 +1719,8 @@ fixtures are read off `conftest.py` rather than named in the classifier.
 | `test_the_membership_report_names_a_database_free_file_left_undeclared` | the hole itself, on a fixture, with the control beside it |
 | `test_the_membership_report_names_a_declared_file_that_needs_a_cluster` | the other direction: a listed file that starts using a cluster fixture |
 | `test_the_membership_report_names_a_declared_file_that_is_gone` | a rename is still caught, and as its own kind rather than as a cluster need |
+| `test_a_declared_file_that_needs_the_driver_is_named_as_such` | the `needs-the-driver` kind, on a fixture corpus, because no file in the real tree reaches that branch (#1339) |
+| `test_the_partition_mode_prints_both_halves` | `--partition` prints each file in the half it belongs to; before this, nothing ran that mode |
 | `test_the_gate_runs_the_membership_decision_rather_than_only_this_file` | selftest 350 runs the decision, and the command line it uses works |
 | `test_ci_derives_the_file_list_rather_than_repeating_it` | the CI job asks this module for `NO_CLUSTER`, names no file literally, and states no count |
 | `test_the_job_installs_no_database_driver` | the job asserts psycopg is absent rather than assuming it |
