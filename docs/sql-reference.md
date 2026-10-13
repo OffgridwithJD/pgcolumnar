@@ -450,6 +450,37 @@ which counts as appended. The record is internal storage metadata and `pg_dump`
 does not carry it, so a restored table reports no sorted groups until you sort it
 again.
 
+### pgcolumnar.column_extent(rel regclass, col name)
+
+Shows the bound the planner uses for a column's smallest and largest value, when
+it estimates how many time buckets a `GROUP BY date_trunc(...)` or `date_bin(...)`
+produces. Returns one row, or none:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `complete` | bool | Always true when a row is returned. |
+| `minimum` | text | The smallest value, printed by the column's type. NULL if the column holds no non-NULL value. |
+| `maximum` | text | The largest value, printed the same way. |
+
+The bound is kept in `pgcolumnar.column_extent`, and the planner reads it in one
+index lookup however many row groups the table has. Writes widen it when they
+commit. Every operation that drops or rewrites row groups recomputes it before
+committing: `expire`, `compact_rewrite`, `VACUUM`, `recluster`. So it can be
+wider than the data only by rows that are deleted but still stored.
+
+No row means the planner reads every row group's zone map instead, which gives
+the same answer at a cost that grows with the table. That happens for:
+
+- a column added after some row groups were written;
+- a type with no ordering;
+- a table written by an earlier version, until its next recompute.
+
+The values are column data, so the caller needs `SELECT` on the table.
+
+```sql
+SELECT minimum, maximum FROM pgcolumnar.column_extent('events', 'ts');
+```
+
 ### pgcolumnar.maintenance_due(rel regclass, compact_due_fraction float8 DEFAULT 0.2, recluster_due_fraction float8 DEFAULT 0.05)
 
 Reports whether an online maintenance verb is worth running on a table, from its

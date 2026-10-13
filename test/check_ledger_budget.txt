@@ -1493,4 +1493,51 @@ suites_not_covered 247
 #     never         1734 +  5 = 1739
 #     dated          411 +  6 =  417
 #     1739 + 417 == 2156
-checks_never_observed_red 1739
+#
+# #1304 option 5, the per-column extent (OffgridwithJD): 1739 -> 1745.
+# column_extent enters the ledger with 33 checks from a five-major run
+# (column_extent.sh 33/33 on each of 15-19). Twenty-seven are dated by eighteen
+# mutations of the extent code, its SQL and the planner's read, each merged one
+# log at a time with --mutation and --target; no premise is among them. A
+# nineteenth mutation survived and is equivalent: the existence check reading
+# the catalog snapshot instead of its own, after the CommandCounterIncrement
+# that refreshes both. Six arrive `never`: two premises (the function exists,
+# the fixture's row groups) and four arms held by construction -- expire and
+# compact_rewrite still retire and rewrite with the extent in place,
+# parallel_copy's loaders all commit (no row is ever updated in place, so there
+# is no update to conflict), and with no extent the planner's zone-map read is
+# still one scan (main's code, guarded by native_groupagg too).
+#
+#     ledger rows   2156 + 33 = 2189
+#     never         1739 +  6 = 1745
+#     dated          417 + 27 =  444
+#     1745 + 444 == 2189
+#
+# Option 5, a transaction's own flushed groups (OffgridwithJD): 1745 -> 1746.
+# Three checks from a five-major run of the fixed tree (column_extent.sh 36/36
+# on each of 15-19). The two arms are dated by the run before the fix, the
+# tree whose bound left out the transaction's own pending fold: column_extent
+# read 'no', and the estimate was 35 rows against the zone maps' 5000. The
+# premise that the plans gave two estimates is a fact about the instrument and
+# arrives never.
+#
+#     ledger rows   2189 + 3 = 2192
+#     never         1745 + 1 = 1746
+#     dated          444 + 2 =  446
+#     1746 + 446 == 2192
+#
+# #1325 review (jdatcmd): 1746 -> 1745. Of column_extent's seven never rows,
+# four were not premises. Three hold by construction -- compact_rewrite and
+# expire still retiring with the extent in place, and parallel_copy's loaders
+# all committing -- and are renamed premise: in both twins; their old rows are
+# removed and the renamed ones arrive never from a five-major run of the
+# renamed suite (36/36 on each of 15-19). The fourth, the planner falling back
+# to one zone_map scan without the extent rows, is dated by a mutation that
+# removes the fallback; the estimate check beside it went red under the same
+# mutation and was already dated.
+#
+#     ledger rows   2192 - 3 + 3 = 2192
+#     never         1746 - 1     = 1745
+#     dated          446 + 1     =  447
+#     1745 + 447 == 2192
+checks_never_observed_red 1745

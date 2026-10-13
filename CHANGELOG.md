@@ -18,6 +18,21 @@ true until the next version shipped.
 
 ### Added
 
+- The planner's estimate of how many time buckets a `GROUP BY date_trunc(...)`
+  or `date_bin(...)` produces now reads a per-column extent
+  (`pgcolumnar.column_extent`) in one index lookup, instead of every row group's
+  zone map (#1304, for #1292). Planning cost no longer grows with the table.
+  - **Writes:** a write adds its own extent row when it commits.
+  - **Recomputed:** every operation that drops or rewrites row groups (`expire`,
+    `compact_rewrite`, `VACUUM`, `recluster`) recomputes the extent before
+    committing. So it is never narrower than the data, and wider only by rows
+    deleted but still stored.
+  - **Fallback:** where the zone maps cannot give a bound, the planner reads them
+    as before: a column added after older groups, or a type with no ordering.
+  - **Inspection:** `pgcolumnar.column_extent(rel, col)` shows the bound.
+  - **Tests:** `test/column_extent.sh` and an independent
+    `test_column_extent.py`.
+
 - Approximate distinct counts and percentiles over columnar tables are tested
   with the `hll` and `tdigest` extensions (#1296 phase 2), and a how-to section
   states the tested versions: hll 2.19 on PostgreSQL 15 to 18 (it does not build

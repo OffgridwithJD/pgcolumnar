@@ -983,6 +983,36 @@ CREATE TABLE pgcolumnar.retired_group (
 CREATE UNIQUE INDEX retired_group_pkey
 	ON pgcolumnar.retired_group USING btree (storage_id, group_number);
 
+/* ---------------------------------------------------------------------------
+ * pgcolumnar.column_extent (#1304 option 5)
+ *
+ * A bound on every value of a column, for the planner's bucket estimate: one
+ * index lookup instead of every row group's zone map. Rows are inserted and
+ * deleted, never updated: each committing writer adds one row (complete =
+ * false) for what it flushed, and a recompute over every visible zone map
+ * replaces the rows it saw with one complete row. The planner trusts the rows
+ * only when a complete one is visible; then their fold is a true bound.
+ * minimum and maximum are encoded as the zone maps encode them; NULL when the
+ * row saw no value. No GRANT: the values are column data, like zone_map's.
+ * ------------------------------------------------------------------------- */
+CREATE TABLE pgcolumnar.column_extent (
+	storage_id bigint NOT NULL,
+	column_index smallint NOT NULL,
+	complete bool NOT NULL,
+	minimum bytea,
+	maximum bytea
+);
+CREATE INDEX column_extent_pkey
+	ON pgcolumnar.column_extent USING btree (storage_id, column_index);
+
+CREATE FUNCTION pgcolumnar.column_extent(rel regclass, col name)
+	RETURNS TABLE (complete bool, minimum text, maximum text)
+	LANGUAGE C STRICT STABLE
+	AS 'MODULE_PATHNAME', 'pgcolumnar_column_extent';
+
+COMMENT ON FUNCTION pgcolumnar.column_extent(regclass, name)
+	IS 'the bound on a column the planner reads from pgcolumnar.column_extent, printed by the column type; no row when it would read the zone maps instead (#1304); requires SELECT on the table';
+
 
 /* ---------------------------------------------------------------------------
  * Incremental rollups, phase 1: append-only (#1294).

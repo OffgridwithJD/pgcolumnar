@@ -612,6 +612,34 @@ extern List *PgColumnarReadWholeChunkZoneMapsForColumn(uint64 storageId, int col
 extern void PgColumnarDeleteMetadata(uint64 storageId);
 extern void PgColumnarRecordRetention(uint64 storageId, uint64 groupNumber);
 
+/* pgcolumnar.column_extent (#1304 option 5): columnar_metadata.c */
+typedef struct NativeExtentRow
+{
+	ItemPointerData tid;
+	bool		complete;
+	bool		hasValues;		/* false: the row's writer saw only NULLs */
+	char	   *minimum;
+	int			minimumLen;
+	char	   *maximum;
+	int			maximumLen;
+} NativeExtentRow;
+extern bool PgColumnarExtentCatalogPresent(void);
+extern void PgColumnarInsertExtentRow(uint64 storageId, int columnIndex, bool complete,
+									  const char *minimum, int minimumLen,
+									  const char *maximum, int maximumLen);
+extern List *PgColumnarReadExtentRows(uint64 storageId, int columnIndex, Snapshot snapshot);
+extern void PgColumnarDeleteExtentRow(ItemPointer tid);
+extern Oid	PgColumnarStorageRelationOid(uint64 storageId, Snapshot snapshot);
+
+/* the extent's lifecycle: columnar_extent.c */
+extern void PgColumnarExtentNote(Oid relid, uint64 storageId, int columnIndex,
+								 const NativeZoneMapMetadata *z);
+extern void PgColumnarExtentMarkRecompute(uint64 storageId);
+extern void PgColumnarExtentPreCommit(void);
+extern void PgColumnarExtentAtXactEnd(void);
+extern bool PgColumnarExtentBound(Relation rel, int columnIndex, Snapshot snapshot,
+								  Datum *minimum, Datum *maximum, bool *hasValues);
+
 /* declared retention, read by pgcolumnar.expire (#403 item 5a) */
 extern bool PgColumnarReadTtl(Oid relid, char **column, Interval **interval);
 
@@ -1007,6 +1035,7 @@ extern char *PgColumnarDecompressValueStream(const char *comp, uint32 compLen,
 #define PGCOLUMNAR_LOCKCLASS_STORAGE_ROW	102
 #define PGCOLUMNAR_LOCKCLASS_UNIQUE_KEY		103
 #define PGCOLUMNAR_LOCKCLASS_ROW_IDENTITY	104
+#define PGCOLUMNAR_LOCKCLASS_EXTENT			105
 
 /* -------------------------------------------------------------------------
  * concurrent unique-key insert serialization (pgcolumnar_unique.c, issue #5)

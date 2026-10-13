@@ -2079,6 +2079,33 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 	snap = PgColumnarCatalogSnapshot(GetActiveSnapshot());
 
 	/*
+	 * THE EXTENT FIRST (#1304 option 5): one index lookup, constant in the table,
+	 * when a complete extent is visible. A timestamp is byval, so the bound
+	 * outlives the relation. Otherwise the zone maps below, which are correct and
+	 * cost a scan of every group's.
+	 */
+	{
+		/*
+		 * Set only when the column has a value, which the return below checks;
+		 * initialised because gcc 13/14 with LTO cannot see that, and CI treats
+		 * its maybe-uninitialized warning as a failure (#1325 review).
+		 */
+		Datum		emin = (Datum) 0,
+					emax = (Datum) 0;
+		bool		hasValues = false;
+
+		if (PgColumnarExtentBound(r, col, snap, &emin, &emax, &hasValues))
+		{
+			table_close(r, AccessShareLock);
+			if (!hasValues)
+				return false;	/* no value at all: nothing to bound */
+			*lo = (double) DatumGetTimestamp(emin);
+			*hi = (double) DatumGetTimestamp(emax);
+			return true;
+		}
+	}
+
+	/*
 	 * TWO CATALOG SCANS, NOT ONE PER GROUP (#1304 review): the group list, for the
 	 * count, and every group's zone map for this column. A group with no zone-map
 	 * row for the column is missing from the second list, and a range that leaves
@@ -2301,8 +2328,8 @@ have_width:
 	 * UNDER-estimate, the direction a gate on this number must never take.
 	 */
 	{
-		double		zlo,
-					zhi;
+		double		zlo = 0,
+					zhi = 0;	/* set whenever the call returns true */
 
 		if (pgcolumnar_zonemap_time_range(root, input_rel, tsvar, &zlo, &zhi))
 		{
