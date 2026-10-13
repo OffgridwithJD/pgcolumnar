@@ -1428,4 +1428,19 @@ suites_not_covered 247
 #     never         1686 + 12 = 1698
 #     dated          317 + 44 =  361
 #     1698 + 361 == 2059
-checks_never_observed_red 1698
+#
+# #1296 phase 1 (timeseries_recipes, PR #1311): 1698 -> 1700. 10 checks from
+# five-major runs on this tree, so the suite is covered and suites_not_covered
+# stays 247. Eight are dated by eight mutations of the recipes in docs/how-to.md,
+# each merged one log at a time with --mutation and --target: date_trunc
+# buckets, an inner join, LOCF by lag, interpolation toward the wrong
+# neighbour, an ordered aggregate, and each of the three recipe headings
+# renamed. The three 'the how-to gives the ... recipe' checks were premises in
+# the first draft; editing the document reddens them, so by #1236 they are arms
+# (OffgridwithJD's review of #1311). The two still never are fixture premises.
+#
+#     ledger rows   2059 + 10 = 2069
+#     never         1698 +  2 = 1700
+#     dated          361 +  8 =  369
+#     1700 + 369 == 2069
+checks_never_observed_red 1700
