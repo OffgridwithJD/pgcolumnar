@@ -826,17 +826,17 @@ A dimension with duplicate keys stays on the core Agg plan.
 A LEFT join stays on the core Agg plan.
 Grouped aggregation over a join is not this path.
 
-A separate opt-in path vectorizes `GROUP BY`. It is off by default. Set
-`pgcolumnar.enable_group_vectorization` to `on` to enable it. It covers
+A separate path vectorizes `GROUP BY`. It is on by default
+(`pgcolumnar.enable_group_vectorization`), and the planner takes it only when it
+estimates at most a tenth of `pgcolumnar.groupagg_max_groups` groups. It covers
 `SELECT <keys>, agg(col) ... [WHERE ...] GROUP BY <keys>` on one columnar
 relation. Each key must be non-volatile, hashable, and computable from that
 relation. A collatable key must use a deterministic collation. Each output must
 be a supported aggregate or a bare key reference. This path also accepts `sum`
 and `avg` on `bigint`, `numeric`, and floating-point columns, which the ungrouped
 path rejects. `pgcolumnar.groupagg_max_groups` caps the group count, default
-1,000,000. The cap is checked at execution against the real count, so a query
-that exceeds it errors rather than switching plans. Raise the cap or turn the
-path off.
+1,000,000. The cap is checked at execution against the real count. So a query
+whose estimate was more than ten times too low errors; it cannot switch plans. Run `ANALYZE`, raise the cap, or turn the path off.
 
 
 ## Join runtime filter

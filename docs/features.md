@@ -76,11 +76,15 @@ stronger codec writes less.
   Neither path uses the per-tuple executor path. `count(*)` with no filter is one case of
   this: it is answered from each row group's stored row count and reads no column
   data. Set `pgcolumnar.enable_vectorization` to `off` to force an ordinary
-  aggregate over the scan instead. An opt-in path vectorizes `GROUP BY` too. Set
-  `pgcolumnar.enable_group_vectorization` to `on` to group and aggregate in one
-  pass over the reader. It is off by default. That pass applies where the
-  query groups by plain columns, aggregates with `count`, `sum` or `avg`, and
-  filters only with comparisons the scan keys express. There it reads each
+  aggregate over the scan instead. `GROUP BY` is vectorized too, by default. The
+  scan groups and aggregates in one pass over the reader. The planner takes this
+  path when it estimates at most a tenth of `pgcolumnar.groupagg_max_groups`
+  groups. It takes
+  plain columns and `date_bin` or `date_trunc` keys, and `count`, `sum`, `avg`,
+  `min` and `max`. Set `pgcolumnar.enable_group_vectorization` to `off` to turn
+  it off. Within it, the batch fold needs plain-column
+  keys and `count`, `sum` or `avg`. It also needs a filter of only the
+  comparisons the scan keys express. There it reads each
   column's values directly instead of one row at a time. `EXPLAIN` reports
   `Columnar Batch Fold` on the node. Other shapes read row at a time and return
   the same results.

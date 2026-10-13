@@ -906,17 +906,19 @@ limitations guide.
 ## Vectorize a GROUP BY aggregate
 
 The vectorized aggregate path computes an ungrouped aggregate over decoded
-vectors. An opt-in setting extends it to `GROUP BY`.
+vectors. It also covers `GROUP BY`, on by default, when the planner estimates a
+bounded number of groups.
 
 ```sql
-SET pgcolumnar.enable_group_vectorization = on;
 EXPLAIN (ANALYZE) SELECT region, sum(amount) FROM events GROUP BY region;
 ```
 
-**Tuning.** Turn it on for a `GROUP BY` with a bounded number of distinct groups.
-The plan then shows `Columnar Vectorized Group Keys`. A query that exceeds
-`pgcolumnar.groupagg_max_groups` (default 1000000) raises an error, so leave the
-setting off for high-cardinality grouping.
+**Tuning.** The plan shows `Columnar Vectorized Group Keys` when the path is
+taken. The planner takes it only for an estimate of at most a tenth of
+`pgcolumnar.groupagg_max_groups` (default 1000000), so 100,000 groups. Raise the
+cap to keep more groups on the fast path. If statistics are stale and the real
+group count passes the cap, the query raises an error: run `ANALYZE`, or raise
+the cap.
 
 ## Count rows quickly
 
