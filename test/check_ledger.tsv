@@ -2166,7 +2166,7 @@ tier_partition	tier_partition	a virtual generated column moves and reads back th
 tier_partition	tier_partition	a write in flight when the move starts is in the exported rows	15;16;17;18;19	2026-10-13	tier_partition returning 0 rows moved;tier_partition without the SHARE lock on the partition
 tier_partition	tier_partition	after the move the caller's lock_timeout is the caller's again	15;16;17;18;19	2026-10-13	tier_partition leaving lock_wait as the caller's lock_timeout
 tier_partition	tier_partition	an existing path is refused, so no file a table reads is overwritten	15;16;17;18;19	2026-10-13	tier_partition without the path refusal
-tier_partition	tier_partition	an insert racing the move leaves every row exactly once, whichever side gives way	15;16;17;18;19	never	-
+tier_partition	tier_partition	an insert racing the move leaves every row exactly once, whichever side gives way	15;16;17;18;19	2026-10-13	tier_partition without the SHARE lock on the partition
 tier_partition	tier_partition	an insert routed to the tiered range is refused	15;16;17;18;19	never	-
 tier_partition	tier_partition	and no foreign table behind it after attach	15;16;17;18;19	never	-
 tier_partition	tier_partition	and no foreign table behind it after create	15;16;17;18;19	never	-
