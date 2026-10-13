@@ -119,6 +119,14 @@ for r in 1 2 3 4 5; do
 	# a healthy call returns an integer group count; the bug returned an ERROR line
 	check "compact_rewrite cycle $r returns a count (no self-conflict)" \
 		"$(grep -Eq '^[0-9]+$' <<<"$rw" && echo ok || echo "bad:$rw")" "ok"
+	# THE COUNT IS READ, NOT ONLY ITS SHAPE (#1339). Zero is a count, so a
+	# compact_rewrite that returned 0 without rewriting anything passed the arm above,
+	# and so did every other arm here: parity holds while deletes stay masked, and a
+	# file nothing writes never grows. Each cycle deletes one row in eight from every
+	# group, which every group's 0.02 threshold admits, and #84 needs more than one
+	# group rewritten in one command to reach the defect.
+	check "compact_rewrite cycle $r rewrites several groups in one command, the shape #84 needs" \
+		"$(grep -Eq '^[0-9]+$' <<<"$rw" && [ "$rw" -ge 2 ] && echo "several" || echo "only:$rw")" "several"
 	check "parity after compact_rewrite cycle $r" "$(hash_n)" "$(hash_h)"
 	sizes[$r]="$(fsize)"
 done
