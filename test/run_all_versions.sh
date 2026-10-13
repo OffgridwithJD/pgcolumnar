@@ -67,6 +67,7 @@ SUITES=(
 	catalog_natts
 	catalog_plan_index
 	catalog_scan_index
+	collation_change
 	column_extent
 	column_projection
 	concurrency

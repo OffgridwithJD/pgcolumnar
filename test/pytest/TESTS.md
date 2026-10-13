@@ -148,6 +148,7 @@ behaviour, the source of that number is named.
 - [100. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once](#100-test_tier_partitionpy-tier_partition-moves-a-cold-partition-to-parquet-exactly-once)
 - [101. test_prepared_writes.py: a write prepared and finished in one session leaves the backend alive](#101-test_prepared_writespy-a-write-prepared-and-finished-in-one-session-leaves-the-backend-alive)
 - [102. test_column_extent.py: the per-column extent is a true bound, recomputed whenever groups go](#102-test_column_extentpy-the-per-column-extent-is-a-true-bound-recomputed-whenever-groups-go)
+- [103. test_collation_change.py: a collation change without a rewrite leaves columnar answering as heap does](#103-test_collation_changepy-a-collation-change-without-a-rewrite-leaves-columnar-answering-as-heap-does)
 
 ## 1. How to read a test in here
 
@@ -6730,3 +6731,19 @@ Written red first: the shell twin, against main, with the function absent (42883
 | `test_a_shrink_is_recomputed_never_guessed` | after `expire`, `compact_rewrite` and VACUUM retire or rewrite groups, the extent equals the data left, and after `expire` it moved |
 | `test_no_complete_extent_where_the_zone_maps_cannot_give_one` | a column added after older groups, and a `point` column even after a recompute, get no complete extent |
 | `test_housekeeping_and_privilege` | fifty committing writers leave at most nine rows; TRUNCATE and DROP remove them; an ordinary role cannot read the catalog, nor the function without SELECT |
+
+## 103. test_collation_change.py: a collation change without a rewrite leaves columnar answering as heap does
+
+Port of `collation_change.sh` (#1327, found by @jdatcmd reviewing #1325). `ALTER COLUMN ... TYPE text COLLATE <other>` keeps the relfilenode, so no zone map is rewritten. The stored minima and maxima were the old collation's, and the reader compared them under the new one. Chunk-group pruning and the min/max fold then skipped rows that the new collation orders differently.
+
+THE ORACLE IS HEAP: the same rows, the same `ALTER` and the same query. A server with no en_US collation cannot show the bug, so the test calls `cannot_run`, which fails the run rather than passing it.
+
+THE FIX FORGETS THE BOUNDS RATHER THAN RECOMPUTING THEM. After an `ALTER` that changes a type, every columnar relation it reached that was not rewritten has its changed columns' zone-map minima and maxima nulled, in the base storage and in every projection storage. The column's extent rows are deleted. Counts and sums stay. A zone map with values and no bounds is already the state that a type with no ordering writes, and every reader treats it as "nothing is known". The ungrouped min/max fold was the exception: it skipped such a group as if it were all NULL, and returned NULL where heap returned a value.
+
+Independent of the shell suite: its own values (`c`, `Q`, `x`, `q` against the shell's `a`, `B`, `m`, `b`), its own geometry (four groups), and two list partitions where the shell has one range partition. The projection lists the column second, so its storage index differs from the shell's. The check names match.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_collation_change_without_a_rewrite` | after the change, columnar answers as heap does for: `min`/`max`, a range, an equality, rows written afterwards, a columnar partition reached through its parent, a `vacuum_sorted` table under `ORDER BY ... LIMIT`, and a projection sorted on the column. The extent is never the old collation's bound. The relfilenode is unchanged (premise) |

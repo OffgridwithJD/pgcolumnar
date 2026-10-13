@@ -3785,6 +3785,21 @@ pgcolumnar_fill_native_metadata_agg(PgColumnarAggScanState *state, int *ndirty)
 					missingColumn = true;
 					break;
 				}
+
+				/*
+				 * Values with no minimum and maximum: a type with no ordering,
+				 * or a column whose collation changed without a rewrite, whose
+				 * bounds were forgotten (#1327). The zone map cannot answer
+				 * min() or max() for it, and skipping it as if all NULL
+				 * returned NULL where heap returned a value.
+				 */
+				if ((state->specs[a].kind == COLUMNAR_AGG_MIN ||
+					 state->specs[a].kind == COLUMNAR_AGG_MAX) &&
+					!byCol[ai]->hasMinMax && byCol[ai]->valueCount > 0)
+				{
+					missingColumn = true;
+					break;
+				}
 			}
 
 			if (missingColumn)

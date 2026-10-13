@@ -1559,4 +1559,21 @@ suites_not_covered 246
 #     never         1745 + 51 = 1796
 #     dated          447 + 16 =  463
 #     1796 + 463 == 2259
-checks_never_observed_red 1796
+#
+# #1327, a collation change without a rewrite (OffgridwithJD): 1796 -> 1799.
+# collation_change enters the ledger with 11 checks from a five-major run
+# (collation_change.sh 11/11 on each of 15-19). Eight arms are dated by seven
+# mutations, each merged one log at a time with --mutation and --target:
+# nothing forgotten (main's behaviour, seven arms), the projection storages
+# skipped, the projection column at the wrong index, the named relation only,
+# the min/max fold treating a group with values and no bounds as all-NULL, the
+# extent rows kept, and the sorted-pathkeys claim's refusal of collatable
+# columns removed. The three never rows are premises about the fixture and the
+# server: the collation orders differently from C, several row groups, and no
+# rewrite.
+#
+#     ledger rows   2259 + 11 = 2270
+#     never         1796 +  3 = 1799
+#     dated          463 +  8 =  471
+#     1799 + 471 == 2270
+checks_never_observed_red 1799

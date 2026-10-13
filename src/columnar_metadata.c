@@ -4762,6 +4762,84 @@ PgColumnarDeleteExtentRow(ItemPointer tid)
 }
 
 /*
+ * PgColumnarForgetColumnOrdering
+ *		The column's stored minima and maxima were computed under an ordering that
+ *		no longer holds: its collation changed and nothing was rewritten (#1327).
+ *
+ * Every zone-map row of the column, whole-chunk and per-vector, loses its
+ * minimum and maximum, and the column's extent rows are deleted. The rows stay,
+ * with their counts and sums, which no ordering decides. A zone map with values
+ * and no minimum and maximum is the state a type with no ordering already
+ * writes, and every reader already treats it as "nothing is known": no group is
+ * pruned, min() and max() decode, expire keeps the group, and a recompute of the
+ * extent refuses, so the extent stays absent until a rewrite builds new zone
+ * maps.
+ *
+ * Forgetting rather than recomputing: a recompute decodes the column in every
+ * group, inside the ALTER and under its ACCESS EXCLUSIVE lock, which is the cost
+ * the collation change was spared by not rewriting.
+ */
+void
+PgColumnarForgetColumnOrdering(uint64 storageId, int columnIndex)
+{
+	Relation	rel = open_columnar_table("zone_map", RowExclusiveLock);
+	TupleDesc	td = RelationGetDescr(rel);
+	ScanKeyData key[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Oid			idx;
+	Datum		values[Natts_zone_map];
+	bool		nulls[Natts_zone_map];
+	bool		replace[Natts_zone_map];
+
+	memset(values, 0, sizeof(values));
+	memset(nulls, 0, sizeof(nulls));
+	memset(replace, 0, sizeof(replace));
+	nulls[Anum_zone_map_minimum - 1] = replace[Anum_zone_map_minimum - 1] = true;
+	nulls[Anum_zone_map_maximum - 1] = replace[Anum_zone_map_maximum - 1] = true;
+
+	ScanKeyInit(&key[0], Anum_zone_map_storage_id, BTEqualStrategyNumber,
+				F_INT8EQ, Int64GetDatum((int64) storageId));
+	idx = pgcolumnar_scan_index_oid(rel, "zone_map_pkey");
+	scan = systable_beginscan(rel, idx, OidIsValid(idx), NULL, 1, key);
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	{
+		bool		isnull;
+		HeapTuple	updated;
+
+		if (DatumGetInt16(heap_getattr(tuple, Anum_zone_map_column_index, td,
+									   &isnull)) != columnIndex)
+			continue;
+		(void) heap_getattr(tuple, Anum_zone_map_minimum, td, &isnull);
+		if (isnull)
+			continue;			/* already no bound: an all-NULL unit */
+		updated = heap_modify_tuple(tuple, td, values, nulls, replace);
+		CatalogTupleUpdate(rel, &updated->t_self, updated);
+		heap_freetuple(updated);
+	}
+	systable_endscan(scan);
+	table_close(rel, RowExclusiveLock);
+
+	if (PgColumnarExtentCatalogPresent())
+	{
+		ListCell   *lc;
+		Snapshot	snap;
+
+		/*
+		 * Registered: PG18 asserts that a snapshot used for a heap scan is
+		 * registered or active, and an assert build aborts on an unregistered
+		 * one (measured: every collation change crashed on 18 and 19).
+		 */
+		CommandCounterIncrement();
+		snap = RegisterSnapshot(GetLatestSnapshot());
+		foreach(lc, PgColumnarReadExtentRows(storageId, columnIndex, snap))
+			PgColumnarDeleteExtentRow(&((NativeExtentRow *) lfirst(lc))->tid);
+		UnregisterSnapshot(snap);
+	}
+	CommandCounterIncrement();
+}
+
+/*
  * The relation a storage id belongs to, from pgcolumnar.storage, or InvalidOid.
  * A projection's storage names its base relation too; callers that need the
  * base storage compare PgColumnarStorageId of the opened relation. Pass a
