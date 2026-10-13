@@ -490,8 +490,13 @@ The rollup equals what the same `GROUP BY` over the whole table returns. Count,
 sum, min and max are exact, and so is the average of an integer column. The
 average of a `float8` column can differ from a full recompute in the last digits.
 
+**Retention keeps the rollup's history.** When `pgcolumnar.expire`, or the
+maintenance daemon, drops old rows of the source, the rollup keeps its rows for
+those buckets. So, for example, hourly averages can outlive the raw data.
+
 **This version folds appended rows only.** If rows of the source are deleted or
-updated, `refresh_rollup` refuses (`0A000`) and changes nothing. If the source
+updated in any other way, `refresh_rollup` refuses (`0A000`) and changes
+nothing. If the source
 is rewritten, for example by `pgcolumnar.vacuum`, `refresh_rollup` refuses with
 `55000`. If the rollup was current before the rewrite, run
 `pgcolumnar.rebase_rollup` to record the rewritten table and continue.

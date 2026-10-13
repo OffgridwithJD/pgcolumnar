@@ -1035,6 +1035,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON pgcolumnar.rollup, pgcolumnar.rollup_gro
  * SELECT the source. STABLE, so it reads with the calling statement's snapshot
  * and refresh_rollup keeps to one snapshot.
  */
+-- The item pointer the access method gives a row number (#1319 review).
+CREATE FUNCTION pgcolumnar.row_tid(row_number bigint)
+	RETURNS tid
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE
+	AS 'MODULE_PATHNAME', 'pgcolumnar_row_tid';
+
 CREATE FUNCTION pgcolumnar.rollup_source_groups(source regclass)
 	RETURNS TABLE (group_number bigint, first_row_number bigint, row_count bigint,
 				   deleted_count bigint)
@@ -1052,6 +1058,24 @@ BEGIN
 		 WHERE g.storage_id = pgcolumnar.get_storage_id(source);
 END
 $rsg$;
+
+/*
+ * The source's row groups that retention retired (pgcolumnar.retired_group,
+ * written only by expire, #1314). SECURITY DEFINER because that catalog carries
+ * no GRANT; the caller must be able to SELECT the source.
+ */
+CREATE FUNCTION pgcolumnar.rollup_source_retired(source regclass)
+	RETURNS TABLE (group_number bigint)
+	LANGUAGE plpgsql STABLE SECURITY DEFINER
+	SET search_path = pg_catalog, pg_temp
+AS $rsr$
+BEGIN
+	PERFORM pgcolumnar.require_caller_select(source);
+	RETURN QUERY
+		SELECT r.group_number FROM pgcolumnar.retired_group r
+		 WHERE r.storage_id = pgcolumnar.get_storage_id(source);
+END
+$rsr$;
 
 CREATE FUNCTION pgcolumnar.create_rollup(rollup name, source regclass, ts_column name,
 										 width interval, origin timestamptz,
@@ -1228,8 +1252,14 @@ BEGIN
 			USING ERRCODE = 'object_not_in_prerequisite_state',
 				  HINT = 'If the rollup is current, pgcolumnar.rebase_rollup records the source''s new row groups.';
 	END IF;
-	-- Phase 1 folds appends only: a recorded group that is gone, or has new
-	-- deletions, needs phase 2's dirty buckets.
+	-- Retention keeps history (the owner's decision on #1294): a recorded group
+	-- that expire retired leaves the snapshot, and its buckets keep the rows they
+	-- folded. Retirement is permanent, so this need not share the fold's snapshot.
+	DELETE FROM pgcolumnar.rollup_group rg
+	 WHERE rg.rollup = r.rollup
+	   AND rg.group_number IN (SELECT t.group_number FROM pgcolumnar.rollup_source_retired(r.source) t);
+	-- Phase 1 folds appends only: any other recorded group that is gone, or has
+	-- new deletions, needs phase 2's dirty buckets.
 	SELECT string_agg(rg.group_number::text, ', ' ORDER BY rg.group_number) INTO changed
 	  FROM pgcolumnar.rollup_group rg
 	  LEFT JOIN pgcolumnar.rollup_source_groups(r.source) s USING (group_number)
@@ -1315,10 +1345,8 @@ BEGIN
 		), rows AS MATERIALIZED (
 			SELECT s.* FROM new_groups ng, held,
 			LATERAL (SELECT %3$s FROM %1$s
-					  WHERE ctid >= format('(%%s,%%s)', ng.first_row_number / 291,
-										   ng.first_row_number %% 291 + 1)::tid
-						AND ctid <= format('(%%s,%%s)', (ng.first_row_number + ng.row_count - 1) / 291,
-										   (ng.first_row_number + ng.row_count - 1) %% 291 + 1)::tid
+					  WHERE ctid >= pgcolumnar.row_tid(ng.first_row_number)
+						AND ctid <= pgcolumnar.row_tid(ng.first_row_number + ng.row_count - 1)
 					 -- OFFSET 0 keeps this subquery from being pulled up into a join:
 					 -- PostgreSQL builds a TID range scan only from a relation's own
 					 -- restrictions, and as a join clause the range read every group.

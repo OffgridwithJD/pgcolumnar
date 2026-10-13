@@ -58,9 +58,12 @@ RECOMPUTE = (f"SELECT date_bin('15 minutes', at, '{ORIGIN}') AS bucket, sensor, 
 
 
 def _digest(conn, rel_sql):
-    return _one(conn, "SELECT count(*) || '|' || md5(string_agg(bucket || ',' || sensor || ',' || count"
-                      " || ',' || sum_reading || ',' || max_temp || ',' || avg_reading, ';'"
-                      f" ORDER BY bucket, sensor)) FROM ({rel_sql}) x")
+    # concat_ws over coalesce: a plain || turns a row with any NULL into NULL, and
+    # string_agg drops it, so NULL keys would be compared by their absence.
+    return _one(conn, "SELECT count(*) || '|' || md5(string_agg(concat_ws(',', coalesce(bucket::text, '~'),"
+                      " coalesce(sensor::text, '~'), count, coalesce(sum_reading::text, '~'),"
+                      " coalesce(max_temp::text, '~'), coalesce(avg_reading::text, '~')), ';'"
+                      f" ORDER BY bucket NULLS FIRST, sensor NULLS FIRST)) FROM ({rel_sql}) x")
 
 
 def _matches(conn, rollup="gauge_15m"):
@@ -205,6 +208,75 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
         cur.execute("DELETE FROM feed WHERE sensor = 4 AND at < '2026-02-01 01:00:00+00'")
     expect.text(_refresh(conn), "0A000", "a refresh after a delete is refused until phase 2")
     expect.text(_matches(conn), before, "and the refused refresh changed nothing")
+
+    # The TID range of each row group comes from the access method's own mapping
+    # (row_tid), so it holds exactly the group's rows at any block size.
+    bad, groups = conn.execute(
+        "SELECT count(*) FILTER (WHERE got <> want), count(*) FROM ("
+        " SELECT g.row_count - g.deleted_count AS want,"
+        "  (SELECT count(*) FROM feed WHERE ctid >= pgcolumnar.row_tid(g.first_row_number)"
+        "     AND ctid <= pgcolumnar.row_tid(g.first_row_number + g.row_count - 1)) AS got"
+        " FROM pgcolumnar.rollup_source_groups('feed') g) x").fetchone()
+    expect.text(f"{bad}|{groups}",
+                f"0|{_one(conn, 'SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id(' + chr(39) + 'feed' + chr(39) + ')')}",
+                "each row group's TID range holds exactly that group's rows")
+
+    # NULL keys and NULL timestamps (#1319 review): keys match with IS NOT
+    # DISTINCT FROM, and a NULL ts is a NULL bucket.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE holes (at timestamptz, sensor int, reading bigint, temp float8) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('holes', stripe_row_limit => 1000)")
+        cur.execute("INSERT INTO holes SELECT CASE WHEN g % 13 = 0 THEN NULL ELSE '2026-07-01'::timestamptz"
+                    " + g * interval '47 s' END, CASE WHEN g % 6 = 0 THEN NULL ELSE g % 4 END, g, g / 4.0"
+                    " FROM generate_series(1, 2600) g")
+        cur.execute(f"SELECT pgcolumnar.create_rollup('holes_15m', 'holes', 'at', '15 minutes', '{ORIGIN}',"
+                    f" '{{sensor}}', '{AGG_FUNCS}', '{AGG_COLS}')")
+        cur.execute("SELECT pgcolumnar.refresh_rollup('holes_15m')")
+        cur.execute("INSERT INTO holes SELECT CASE WHEN g % 13 = 0 THEN NULL ELSE '2026-07-01'::timestamptz"
+                    " + g * interval '47 s' END, CASE WHEN g % 6 = 0 THEN NULL ELSE g % 4 END, g, g / 4.0"
+                    " FROM generate_series(2601, 3900) g")
+    expect.text(_refresh(conn, "holes_15m"), "1300", "premise: the second refresh of the NULL-key rollup folded the append")
+    holes_recompute = RECOMPUTE.replace("FROM feed", "FROM holes")
+    nulls = f"SELECT count(*) FILTER (WHERE sensor IS NULL) || ' ' || count(*) FILTER (WHERE bucket IS NULL) FROM ({{}}) z"
+    expect.text(f"{_digest(conn, 'SELECT * FROM holes_15m')}|{_one(conn, nulls.format('SELECT * FROM holes_15m'))}",
+                f"{_digest(conn, holes_recompute)}|{_one(conn, nulls.format(holes_recompute))}",
+                "a rollup with NULL keys and NULL timestamps equals a full recompute")
+    expect.at_least(_one(conn, f"SELECT count(*) FROM ({holes_recompute}) z WHERE sensor IS NULL OR bucket IS NULL"), 2,
+                    "premise: and the fixture has NULL-key and NULL-bucket groups")
+
+    # Retention keeps history: groups expire retires (pgcolumnar.retired_group,
+    # #1314) leave the snapshot, and their buckets keep what they folded.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE aged (at timestamptz, reading int) USING pgcolumnar")
+        cur.execute("SELECT pgcolumnar.set_options('aged', stripe_row_limit => 1000)")
+        cur.execute("INSERT INTO aged SELECT now() - interval '90 days' + g * interval '45 s', g % 97"
+                    " FROM generate_series(1, 3200) g")
+        cur.execute("INSERT INTO aged SELECT now() - interval '3 days' + g * interval '20 s', g % 89"
+                    " FROM generate_series(1, 1600) g")
+        cur.execute(f"SELECT pgcolumnar.create_rollup('aged_hourly', 'aged', 'at', '1 hour', '{ORIGIN}', '{{}}',"
+                    " '{count,max}', '{*,reading}')")
+    expect.text(_refresh(conn, "aged_hourly"), "4800", "premise: the history rollup folded every row")
+    hist = "SELECT md5(string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket)) FROM aged_hourly"
+    before_hist = _one(conn, hist)
+    old_buckets = _one(conn, "SELECT count(*) FROM aged_hourly WHERE bucket < now() - interval '60 days'")
+    expect.at_least(old_buckets, 1, "premise: the history rollup holds old buckets")
+    with conn.cursor() as cur:
+        cur.execute("SELECT pgcolumnar.set_options('aged', ttl_column => 'at', ttl_interval => '14 days')")
+    expect.at_least(_one(conn, "SELECT pgcolumnar.expire('aged')"), 1, "premise: expire retired the old row groups")
+    expect.text(f"{_refresh(conn, 'aged_hourly')}|{_one(conn, hist)}", f"0|{before_hist}",
+                "a refresh after retention folds nothing, refuses nothing, and keeps every bucket")
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO aged SELECT now() - interval '5 hours' + g * interval '3 s', g % 83"
+                    " FROM generate_series(1, 700) g")
+    expect.text(_refresh(conn, "aged_hourly"), "700", "and after retention an append still folds")
+    recent = _one(conn, "SELECT md5(string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket))"
+                        " FROM aged_hourly WHERE bucket >= now() - interval '14 days'")
+    recomputed = _one(conn, f"SELECT md5(string_agg(b || ':' || n || ':' || m, ',' ORDER BY b)) FROM"
+                            f" (SELECT date_bin('1 hour', at, '{ORIGIN}') b, count(*) n, max(reading) m FROM aged"
+                            " WHERE at >= now() - interval '14 days' GROUP BY 1) x WHERE b >= now() - interval '14 days'")
+    still_old = _one(conn, "SELECT count(*) FROM aged_hourly WHERE bucket < now() - interval '60 days'")
+    expect.text(f"{recent}|{still_old}", f"{recomputed}|{old_buckets}",
+                "and the recent buckets equal a recompute, while the expired ones keep their history")
 
     # Ordinary roles: row-level security on the rollup catalogs is what is tested.
     with conn.cursor() as cur:

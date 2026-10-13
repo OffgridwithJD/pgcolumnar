@@ -37,6 +37,12 @@ sqlstate() {	# sqlstate SQL -> the SQLSTATE it fails with, or ok
 	echo "$out" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1
 }
 
+sqlstate_or() {	# sqlstate_or SQL -> the single value it returns, or the SQLSTATE it fails with
+	local out
+	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -c "$1" 2>&1)
+	case "$out" in ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1;; *) echo "$out";; esac
+}
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 check_num "premise: the rollup functions exist" \
 	"$(q "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -58,8 +64,11 @@ check_num "premise: the source holds every row" "$(q "SELECT count(*) FROM src;"
 RECOMPUTE="SELECT date_bin('1 hour', ts, '$ORIGIN') AS bucket, dev, count(*) AS count,
            sum(v)::numeric AS sum_v, min(v) AS min_v, max(v) AS max_v, avg(f) AS avg_f
            FROM src GROUP BY 1, 2"
-exact() { q "SELECT count(*) || '|' || md5(string_agg(bucket || ',' || dev || ',' || count || ',' || sum_v
-             || ',' || min_v || ',' || max_v, ';' ORDER BY bucket, dev)) FROM ($1) x;"; }
+# concat_ws over coalesce: a plain || makes a row with any NULL into NULL, and
+# string_agg then drops it, so NULL keys would be compared by not being there.
+exact() { q "SELECT count(*) || '|' || md5(string_agg(concat_ws(',', coalesce(bucket::text, '~'),
+             coalesce(dev::text, '~'), count, coalesce(sum_v::text, '~'), coalesce(min_v::text, '~'),
+             coalesce(max_v::text, '~')), ';' ORDER BY bucket NULLS FIRST, dev NULLS FIRST)) FROM ($1) x;"; }
 # the worst relative difference of avg_f between the rollup and the recompute
 avg_gap() {
 	q "SELECT coalesce(max(abs(r.avg_f - o.avg_f) / greatest(abs(o.avg_f), 1e-300)), 0) < 1e-12
@@ -181,6 +190,63 @@ check "a refresh after a delete is refused until phase 2" \
 check "and the refused refresh changed nothing" "$(exact "SELECT * FROM r_hourly")" "$before"
 
 # Refused at creation.
+# Each new group is read through a TID range built from its row numbers. The
+# mapping is the access method's (row_tid, in C), not restated in SQL: 291 rows
+# per block holds only at the default block size (#1319 review). Every group's
+# range must hold exactly its rows.
+check "each row group's TID range holds exactly that group's rows" \
+	"$(q "SELECT count(*) FILTER (WHERE got <> want) || '|' || count(*) FROM (
+	        SELECT g.row_count - g.deleted_count AS want,
+	               (SELECT count(*) FROM src WHERE ctid >= pgcolumnar.row_tid(g.first_row_number)
+	                  AND ctid <= pgcolumnar.row_tid(g.first_row_number + g.row_count - 1)) AS got
+	          FROM pgcolumnar.rollup_source_groups('src') g) x;")" \
+	"0|$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('src');")"
+
+# NULL group keys and NULL timestamps: the fold matches keys with IS NOT DISTINCT
+# FROM, and a NULL ts is a NULL bucket. Measured right by @jdatcmd on #1319; an
+# = in place of IS NOT DISTINCT FROM would duplicate the NULL partials.
+q "CREATE TABLE nk (ts timestamptz, dev int, v bigint) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('nk', stripe_row_limit => 1000);
+   INSERT INTO nk SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE '2026-06-01'::timestamptz + g * interval '61 s' END,
+          CASE WHEN g % 7 = 0 THEN NULL ELSE g % 5 END, g FROM generate_series(1, 3000) g;" >/dev/null
+q "SELECT pgcolumnar.create_rollup('r_nk', 'nk', 'ts', '1 hour', '$ORIGIN', '{dev}', '{count,sum,min,max}', '{*,v,v,v}');
+   SELECT pgcolumnar.refresh_rollup('r_nk');" >/dev/null
+q "INSERT INTO nk SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE '2026-06-01'::timestamptz + g * interval '61 s' END,
+          CASE WHEN g % 7 = 0 THEN NULL ELSE g % 5 END, g FROM generate_series(3001, 4500) g;" >/dev/null
+check_num "premise: the second refresh of the NULL-key rollup folded the append" "$(q "SELECT pgcolumnar.refresh_rollup('r_nk');")" "1500"
+NKR="SELECT date_bin('1 hour', ts, '$ORIGIN') AS bucket, dev, count(*) AS count, sum(v)::numeric AS sum_v,
+     min(v) AS min_v, max(v) AS max_v FROM nk GROUP BY 1, 2"
+check "a rollup with NULL keys and NULL timestamps equals a full recompute" \
+	"$(exact "SELECT * FROM r_nk")|$(q "SELECT count(*) FROM r_nk WHERE dev IS NULL;") $(q "SELECT count(*) FROM r_nk WHERE bucket IS NULL;")" \
+	"$(exact "$NKR")|$(q "SELECT count(*) FROM ($NKR) z WHERE dev IS NULL;") $(q "SELECT count(*) FROM ($NKR) z WHERE bucket IS NULL;")"
+check_num "premise: and the fixture has NULL-key and NULL-bucket groups" \
+	"$(at_least "$(q "SELECT count(*) FROM ($NKR) z WHERE dev IS NULL OR bucket IS NULL;")" 2)" "2"
+
+# Retention keeps history (owner's decision on #1294 point 2): groups that expire
+# retires are recorded in pgcolumnar.retired_group (#1314), and a refresh drops
+# them from its snapshot without touching their buckets. Any other missing group
+# is still refused (the delete arm above).
+q "CREATE TABLE hist (ts timestamptz, v int) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('hist', stripe_row_limit => 1000);
+   INSERT INTO hist SELECT now() - interval '200 days' + g * interval '1 min', g FROM generate_series(1, 3000) g;
+   INSERT INTO hist SELECT now() - interval '1 day' + g * interval '10 s', g FROM generate_series(1, 2000) g;" >/dev/null
+q "SELECT pgcolumnar.create_rollup('r_hist', 'hist', 'ts', '1 day', '$ORIGIN', '{}', '{count,sum}', '{*,v}');" >/dev/null
+check_num "premise: the history rollup folded every row" "$(q "SELECT pgcolumnar.refresh_rollup('r_hist');")" "5000"
+hb="$(q "SELECT md5(string_agg(bucket || ':' || count || ':' || sum_v, ',' ORDER BY bucket)) FROM r_hist;")"
+ob="$(q "SELECT count(*) FROM r_hist WHERE bucket < now() - interval '100 days';")"
+check_num "premise: the history rollup holds old buckets" "$(at_least "${ob:-0}" 1)" "1"
+q "SELECT pgcolumnar.set_options('hist', ttl_column => 'ts', ttl_interval => '30 days');" >/dev/null
+retired="$(q "SELECT pgcolumnar.expire('hist');")"
+check_num "premise: expire retired the old row groups" "$(at_least "${retired:-0}" 1)" "1"
+check "a refresh after retention folds nothing, refuses nothing, and keeps every bucket" \
+	"$(sqlstate_or "SELECT pgcolumnar.refresh_rollup('r_hist');")|$(q "SELECT md5(string_agg(bucket || ':' || count || ':' || sum_v, ',' ORDER BY bucket)) FROM r_hist;")" \
+	"0|$hb"
+q "INSERT INTO hist SELECT now() - interval '2 hours' + g * interval '1 s', g FROM generate_series(1, 500) g;" >/dev/null
+check_num "and after retention an append still folds" "$(q "SELECT pgcolumnar.refresh_rollup('r_hist');")" "500"
+check "and the recent buckets equal a recompute, while the expired ones keep their history" \
+	"$(q "SELECT md5(string_agg(bucket || ':' || count || ':' || sum_v, ',' ORDER BY bucket)) FROM r_hist WHERE bucket >= now() - interval '30 days';")|$(q "SELECT count(*) FROM r_hist WHERE bucket < now() - interval '100 days';")" \
+	"$(q "SELECT md5(string_agg(b || ':' || n || ':' || s, ',' ORDER BY b)) FROM (SELECT date_bin('1 day', ts, '$ORIGIN') b, count(*) n, sum(v)::numeric s FROM hist WHERE ts >= now() - interval '30 days' GROUP BY 1) x WHERE b >= now() - interval '30 days';")|$ob"
+
 # Not only for superusers: a superuser bypasses row-level security, so every arm
 # above ran past the policies on pgcolumnar.rollup and rollup_group. A table's
 # owner can roll it up; another role sees nothing of it and cannot refresh it.

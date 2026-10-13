@@ -150,8 +150,12 @@ true until the next version shipped.
   buckets, rows committed during a refresh are folded by the next one, and two
   concurrent refreshes fold each row once. The rollup equals a full recompute:
   exactly for counts, integer sums and averages, min and max, and within 1e-12
-  for `float8` averages. This phase refuses deletes and updates in the source
-  (`0A000`) and a rewritten source (`55000`, until `pgcolumnar.rebase_rollup`).
+  for `float8` averages. Rows that `expire` retires keep their buckets in the
+  rollup, so the rollup's history outlives the raw data. This phase refuses any
+  other delete or update in the source (`0A000`) and a rewritten source
+  (`55000`, until `pgcolumnar.rebase_rollup`). Each group's TID range comes from
+  the access method's own mapping (`pgcolumnar.row_tid`), not a block size
+  restated in SQL.
   The rollup catalogs carry row-level security, so each role sees only the
   rollups it owns. Found while it was written: a lateral per-group subquery
   pulled up into a join read every row group (114 blocks of a 103-block table

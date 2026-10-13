@@ -607,8 +607,14 @@ See [Keep a rollup up to date](how-to.md#keep-a-rollup-up-to-date).
 
 Folds the rows of the row groups added to the source since the last refresh,
 and returns the number of rows folded. Runs at READ COMMITTED only (`25000`).
-Refuses after a delete or update in the source (`0A000`), and after a rewrite of
-the source (`55000`).
+Row groups that `pgcolumnar.expire` retired are dropped from the refresh's
+record, and the rollup keeps their buckets. Refuses after any other delete or
+update in the source (`0A000`), and after a rewrite of the source (`55000`).
+
+### pgcolumnar.row_tid(row_number bigint) returns tid
+
+Returns the item pointer that a columnar table gives the row with this row
+number. Row numbers start at 1 (`22003` otherwise).
 
 ### pgcolumnar.rebase_rollup(rollup regclass) returns bigint
 
