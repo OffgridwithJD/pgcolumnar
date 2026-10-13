@@ -92,14 +92,19 @@
 bool		pgcolumnar_enable_vectorization = true;
 
 /*
- * GUC: extend the vectorized aggregate to GROUP BY (#289). Default off while the
- * grouped path is built out incrementally; the ungrouped path is unaffected.
- * groupagg_max_groups caps the ACTUAL group count at execution time; exceeding
- * it raises an error (see pgcolumnar_groupagg_lookup) rather than routing to core
- * HashAgg. It is not a plan-time gate.
+ * GUC: extend the vectorized aggregate to GROUP BY (#289). On by default since
+ * #1292 phase 2, because the planner now takes the path only when the estimated
+ * group count is at most GROUPAGG_GATE_FRACTION of groupagg_max_groups (see
+ * PgColumnarTryGroupAggPath). groupagg_max_groups still caps the ACTUAL group
+ * count at execution time; exceeding it raises an error (see
+ * pgcolumnar_groupagg_lookup) rather than routing to core HashAgg, which now
+ * means the estimate was wrong by more than the gate's margin.
  */
-bool		pgcolumnar_enable_group_vectorization = false;
+bool		pgcolumnar_enable_group_vectorization = true;
 int			pgcolumnar_groupagg_max_groups = 1000000;
+
+/* the share of groupagg_max_groups an estimate may reach and still take the path */
+#define GROUPAGG_GATE_FRACTION 0.1
 
 /*
  * GUC: extend the ungrouped vectorized aggregate to the shapes a zone map cannot
@@ -2461,14 +2466,15 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		return;
 
 	/*
-	 * estimate_num_groups only sizes the path's row estimate; it is deliberately
-	 * NOT a gate. For an expression key such as date_trunc(...) the planner
-	 * cannot estimate distinctness and returns a count near the input row count
-	 * (here ~8.4M estimated against 48k actual), which would wrongly disable this
-	 * path on exactly the large tables it helps. The unbounded-hash-table guard
-	 * is the execution-time cap on the actual group count
-	 * (pgcolumnar.groupagg_max_groups), which errors with guidance -- see
-	 * pgcolumnar_groupagg_lookup -- rather than silently declining the feature.
+	 * The estimate sizes the path's rows and, since #1292 phase 2, gates it (see
+	 * THE GATE below). It was not a gate before because for an expression key
+	 * such as date_trunc(...) estimate_num_groups cannot see distinctness and
+	 * returns a count near the input row count (~8.4M estimated against 48k
+	 * actual), which would have declined this path on exactly the large tables
+	 * it helps. The bound below (#369, and #1304's time buckets) brings those
+	 * estimates within a small factor, which is what makes the gate usable. The
+	 * execution-time cap (pgcolumnar.groupagg_max_groups, which errors with
+	 * guidance in pgcolumnar_groupagg_lookup) stays as the backstop.
 	 */
 	groupExprs = groupKeys;
 	dNumGroups = estimate_num_groups(root, groupExprs,
@@ -2506,6 +2512,19 @@ PgColumnarTryGroupAggPath(PlannerInfo *root, RelOptInfo *input_rel,
 		if (bound > 0.0 && bound < dNumGroups)
 			dNumGroups = Max(1.0, bound);
 	}
+
+	/*
+	 * THE GATE (#1292 phase 2, the owner's decision): take the path only when
+	 * the estimate is at most a tenth of the runtime cap. Over the cap the node
+	 * errors, since its plan is fixed by then, so with the path on by default an
+	 * ungated high-cardinality GROUP BY would turn a working query into an
+	 * error. The tenth is a margin for an estimate up to 10x low. An estimate
+	 * with nothing behind it is near the row count and declined: the ordinary
+	 * plan runs, as it did before the default changed. A user who wants more
+	 * groups on this path raises groupagg_max_groups, and the gate rises with it.
+	 */
+	if (dNumGroups > GROUPAGG_GATE_FRACTION * (double) pgcolumnar_groupagg_max_groups)
+		return;
 
 	/*
 	 * Pseudoconstant (gating) quals -- e.g. WHERE (SELECT false) -- are one-time
