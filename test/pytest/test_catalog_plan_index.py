@@ -106,6 +106,12 @@ def test_catalog_plan_index(pgc_cluster, pgc_conn, expect):
         cur.execute(
             f"INSERT INTO planner_join SELECT g FROM generate_series(1,{ROWS}) g"
         )
+        # FLUSH BEFORE THE RESET (#1339), as _storage_blocks below does. A backend
+        # flushes pending statistics at most once a second, so this writer's own
+        # storage accesses could land after the reset and inside the reading.
+        # Measured: without the flush, the writer alone put idx_scan=1 seq_scan=2 on
+        # pgcolumnar.storage after the reset; with it, 0 and 0.
+        cur.execute("SELECT pg_stat_force_next_flush()")
         cur.execute("SELECT pg_stat_reset()")
 
     reader = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
@@ -131,6 +137,7 @@ def test_catalog_plan_index(pgc_cluster, pgc_conn, expect):
     )
 
     with pgc_conn.cursor() as cur:
+        cur.execute("SELECT pg_stat_force_next_flush()")
         cur.execute("SELECT pg_stat_reset()")
 
     reader = psycopg.connect(pgc_cluster.dsn(), autocommit=True)
