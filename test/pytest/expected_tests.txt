@@ -279,7 +279,9 @@
 # test_build_refusal.py, by collection over the NO_CLUSTER files.
 # guard_tests 425 -> 427 for #1344's test_build_needs_pg_config.py, two tests, the twin
 # of selftest part 630, collected over the NO_CLUSTER files on this tree.
-guard_tests 427
+# guard_tests 427 -> 429 for #1236's two gate arms in test_mutation_ledger.py (a dated
+# premise is refused, and its control), by collection over the NO_CLUSTER files on this tree.
+guard_tests 429
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and

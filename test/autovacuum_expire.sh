@@ -66,7 +66,7 @@ check "the daemon's expire switch exists and is OFF by default" \
 
 # ---- the fixture is one an expire would change ------------------------------
 mk_ttl ex_copy
-check_num "premise: a manual expire on the same fixture retires its two aged groups" \
+check_num "a manual expire on the same fixture retires its two aged groups" \
 	"$(q "SELECT pgcolumnar.expire('ex_copy');")" "2"
 
 # ---- OFF: the daemon runs, compacts, and does not expire --------------------
@@ -149,7 +149,7 @@ holds() {
 	   WHERE l.relation = 'ex_hold'::regclass AND l.mode = 'ShareUpdateExclusiveLock'
 	     AND l.granted AND a.backend_type = 'pgcolumnar autovacuum worker';"
 }
-check "premise: the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)" \
+check "the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)" \
 	"$(poll 40 holds 1)" "1"
 psql_run "DROP TABLE ex_gone;"
 t0=$(date +%s)

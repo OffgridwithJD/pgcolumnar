@@ -121,10 +121,10 @@ else
 	echo "-- belongs in docs/limitations.md with its evidence, not in a bullet here:"
 	echo "-- an exclusion outside the claim bullet is checked against nothing."
 fi
-check "premise: the claim bullet holds the claim and nothing else" \
+check "the claim bullet holds the claim and nothing else" \
 	"$FORM" "the claim and nothing else"
 
-check "premise: the features page names at least one index access method" \
+check "the features page names at least one index access method" \
 	"$(awk -v n="$(claimed_ams | wc -l)" 'BEGIN { print (n + 0 > 0) ? "named" : "named-nothing" }')" \
 	"named"
 
@@ -190,7 +190,7 @@ psql_run "DROP INDEX IF EXISTS iam_probe;"
 # THE OTHER HALF OF THE PAGE'S CLAIM, and the reason the range methods are on it.
 # An overlap query has no scan-side pruning, so the index is not an optimisation
 # here, it is the only fast path. This asserts the plan rather than the timing.
-check "premise: an overlap query reaches the row through a GiST index" \
+check "an overlap query reaches the row through a GiST index" \
 	"$(q "SET pgcolumnar.enable_custom_scan = off; SET enable_seqscan = off;
 		DROP INDEX IF EXISTS iam_probe;
 		CREATE INDEX iam_probe ON iam USING gist (span);

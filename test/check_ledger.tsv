@@ -57,15 +57,15 @@ autovacuum_expire	autovacuum_expire	ON: a table with no retention keeps every ro
 autovacuum_expire	autovacuum_expire	ON: no row inside the retention was lost	15;16;17;18;19	2026-10-12	expire retires every row group, the cutoff comparison made always true
 autovacuum_expire	autovacuum_expire	ON: the daemon expired the aged-out rows without being asked	15;16;17;18;19	2026-10-12	the daemon never runs expire, its call guarded by false
 autovacuum_expire	autovacuum_expire	ON: the daemon logged what it retired	15;16;17;18;19	2026-10-12	expire retires every row group, the cutoff comparison made always true;the daemon never runs expire, its call guarded by false;the daemon's 'expire <t> retired <n> row groups' LOG line removed
+autovacuum_expire	autovacuum_expire	a manual expire on the same fixture retires its two aged groups	15;16;17;18;19	2026-10-12	expire retires every row group, the cutoff comparison made always true
 autovacuum_expire	autovacuum_expire	a pass that retires nothing logs nothing at LOG for that table	15;16;17;18;19	2026-10-12	the daemon logs 'retired 0 row groups' at LOG on every pass
 autovacuum_expire	autovacuum_expire	dropped: a table dropped mid-pass is logged as skipped	15;16;17;18;19	2026-10-12	the daemon worker exits after the first expire that fails, abandoning the rest of its pass;the daemon's 'skipped expire on <t>' LOG line removed
 autovacuum_expire	autovacuum_expire	dropped: and the pass goes on to expire the next table	15;16;17;18;19	2026-10-12	the daemon worker exits after the first expire that fails, abandoning the rest of its pass
 autovacuum_expire	autovacuum_expire	isolate: a failing expire does not roll back the compaction due on the same table	15;16;17;18;19	2026-10-12	an expire that fails makes the daemon skip that table's compaction, as one shared transaction would;the daemon worker exits after the first expire that fails, abandoning the rest of its pass
-autovacuum_expire	autovacuum_expire	premise: a manual expire on the same fixture retires its two aged groups	15;16;17;18;19	2026-10-12	expire retires every row group, the cutoff comparison made always true
 autovacuum_expire	autovacuum_expire	premise: expire on a table whose TTL column is gone fails with undefined_column	15;16;17;18;19	never	-
 autovacuum_expire	autovacuum_expire	premise: the daemon compacted a deleted-heavy table, so it was running passes	15;16;17;18;19	never	-
-autovacuum_expire	autovacuum_expire	premise: the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)	15;16;17;18;19	2026-10-12	pgcolumnar_maintenance_hold removed from expire, so the daemon holds no lock inside expire long enough to yield;the daemon never runs expire, its call guarded by false;the daemon runs expire on every table and PgColumnarReadTtl invents a 1 day retention on ts where none is declared
 autovacuum_expire	autovacuum_expire	premise: the maintenance launcher is running	15;16;17;18;19	never	-
+autovacuum_expire	autovacuum_expire	the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)	15;16;17;18;19	2026-10-12	pgcolumnar_maintenance_hold removed from expire, so the daemon holds no lock inside expire long enough to yield;the daemon never runs expire, its call guarded by false;the daemon runs expire on every table and PgColumnarReadTtl invents a 1 day retention on ts where none is declared
 autovacuum_expire	autovacuum_expire	the daemon's expire switch exists and is OFF by default	15;16;17;18;19	2026-10-12	pgcolumnar.autovacuum_expire defaults to on, in both its C initializer and its GUC boot value
 autovacuum_expire	autovacuum_expire	yield: and it was granted fast (<= 8s, far under the 30s hold)	15;16;17;18;19	2026-10-12	the daemon worker no longer sets PROC_IS_AUTOVACUUM, so core never cancels it for a stronger lock
 autovacuum_expire	autovacuum_expire	yield: the AccessExclusive lock on a table in expire was granted	15;16;17;18;19	2026-10-12	the daemon worker no longer sets PROC_IS_AUTOVACUUM, so core never cancels it for a stronger lock
@@ -79,25 +79,24 @@ base_scan_io	base_scan_io	premise: the later plan is still a base columnar scan	
 base_scan_io	base_scan_io	premise: the later plan still does not name a covering projection	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the plan is a base columnar scan	15;16;17;18;19	never	-
 base_scan_io	base_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
+capability_sweep	capability_sweep	and no member of the population is this very file	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
+capability_sweep	capability_sweep	and pyarrow.parquet with it	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	no suite loses a check without recording a skip or a refusal	15;16;17;18;19	2026-10-12	a check_skip block removed from a suite so its arms vanish with no skip and no fail;the pyarrow decline reason stops naming the capability, so no skip counts as declined
-capability_sweep	capability_sweep	premise: and no member of the population is this very file	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: and pyarrow IS importable without the shim, so absence is the shim's doing	15;16;17;18;19	never	-
-capability_sweep	capability_sweep	premise: and pyarrow.parquet with it	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	premise: and the standard library still imports under it	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: every suite in the population was classified	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: some suites in the population call pgc_skip pyarrow	15;16;17;18;19	never	-
-capability_sweep	capability_sweep	premise: the mask held for every run in the sweep	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	premise: the population is the size this tree holds	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: the priming run built and installed cleanly	15;16;17;18;19	never	-
-capability_sweep	capability_sweep	premise: the shim makes pyarrow unimportable	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
-capability_sweep	capability_sweep	premise: the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 capability_sweep	capability_sweep	premise: the two derivations of the population name the same suites	15;16;17;18;19	never	-
 capability_sweep	capability_sweep	premise: while python itself still runs under the shim	15;16;17;18;19	never	-
+capability_sweep	capability_sweep	the mask held for every run in the sweep	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
+capability_sweep	capability_sweep	the shim makes pyarrow unimportable	15;16;17;18;19	2026-09-23	the shim's pyarrow.py emptied, so both runs are the present run
 capability_sweep	capability_sweep	the suites that decline are exactly the suites that call pgc_skip pyarrow	15;16;17;18;19	2026-10-12	the pyarrow decline reason stops naming the capability, so no skip counts as declined
+capability_sweep	capability_sweep	the sweep is not in the population it sweeps	15;16;17;18;19	2026-09-23	the self-exclusion removed from pgc_cap_population, so the sweep enters its own population
 catalog_delete_index	catalog_delete_index	A1 with more catalog pages the default does less work than reading every one whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	B1 with large catalogs the default does far less work than reading every one whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	P1 with a few catalog pages the default does less work than probing every one	15;16;17;18;19	2026-10-12	pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
-catalog_delete_index	catalog_delete_index	premise: row_group is larger than the threshold, so the two paths differ	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes
 catalog_delete_index	catalog_delete_index	premise: the deep table grew the catalogs it is there to grow	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the drop fixture grew the catalogs it is there to grow	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: the phase 0 catalogs hold only this file's tables	15;16;17;18;19	never	-
@@ -124,6 +123,7 @@ catalog_delete_index	catalog_delete_index	premise: two phase 0 compactions at th
 catalog_delete_index	catalog_delete_index	premise: two phase A compactions at the same setting agree well inside the floor	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: two phase B compactions at the same setting agree well inside the floor	15;16;17;18;19	never	-
 catalog_delete_index	catalog_delete_index	premise: two vacuums of the same table at the same setting agree well inside the floor	15;16;17;18;19	never	-
+catalog_delete_index	catalog_delete_index	row_group is larger than the threshold, so the two paths differ	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes
 catalog_delete_index	catalog_delete_index	the default's cost grows far less with the database than reading whole does	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
 catalog_delete_index	catalog_delete_index	the drop's default does less catalog work than reading them whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes
 catalog_delete_index	catalog_delete_index	the vacuum's default does less row_group work than reading it whole	15;16;17;18;19	2026-10-12	pgcolumnar_index_min_blocks default 3 -> 2147483647, so no site probes;pgcolumnar_scan_index_oid stops asking the relation its size, so every site probes;the eight converted scan sites back to InvalidOid
@@ -723,9 +723,9 @@ harness_selftest	290-a-preflight-that-built-nothing	premise: and it built none o
 harness_selftest	290-a-preflight-that-built-nothing	premise: and the leftover detector it reads is exposed too	15;16;17;18;19	never	-
 harness_selftest	290-a-preflight-that-built-nothing	premise: the fixture holds objects in both source directories	15;16;17;18;19	never	-
 harness_selftest	290-a-preflight-that-built-nothing	premise: the probe run skipped every major	15;16;17;18;19	never	-
-harness_selftest	290-a-preflight-that-built-nothing	premise: the real detector is back, and sees a real object	15;16;17;18;19	2026-09-24	the detector blinded, so it never reports an object
 harness_selftest	290-a-preflight-that-built-nothing	premise: the tree cleaner is exposed to be judged	15;16;17;18;19	never	-
 harness_selftest	290-a-preflight-that-built-nothing	the cleaner says dirty when the detector reports objects left behind	15;16;17;18;19	2026-09-24	the cleaner never verifies and always answers clean
+harness_selftest	290-a-preflight-that-built-nothing	the real detector is back, and sees a real object	15;16;17;18;19	2026-09-24	the detector blinded, so it never reports an object
 harness_selftest	290-a-preflight-that-built-nothing	the script asks the cleaner rather than merely defining it	15;16;17;18;19	2026-09-24	the call site reverted, so the cleaner is defined but never asked
 harness_selftest	300-a-test-script-must-be-runnable	and every executable script declares one	15;16;17;18;19	never	-
 harness_selftest	300-a-test-script-must-be-runnable	and every script a document names exists	15;16;17;18;19	never	-
@@ -1212,6 +1212,7 @@ harness_selftest	410-a-check-must-have-been-red	a log whose source fingerprint i
 harness_selftest	410-a-check-must-have-been-red	a major the ledger holds no row for refuses nothing, as an uncovered suite does	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a name that appeared while another disappeared is reported as a rename	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a named mutation is recorded against the check that reddened	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	a premise the ledger has seen go red is refused	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a real refusal is a different status from an integrity failure	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a ref that does not resolve is an integrity failure, not a bootstrap	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	a ref that exists with the budget still compares	15;16;17;18;19	never	-
@@ -1256,6 +1257,7 @@ harness_selftest	410-a-check-must-have-been-red	and it entered as debt, not as a
 harness_selftest	410-a-check-must-have-been-red	and it is REFUSED, not merely printed	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it is a different sentence from the refusal, not the same one twice	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it is named, so the author knows which one	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	and it is named, so the reviewer knows which row	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it is that case that says the change introduces the file	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it is the new one that is named, not the one already ledgered	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	and it names the verdict, so the author knows which record	15;16;17;18;19	never	-
@@ -1315,6 +1317,7 @@ harness_selftest	410-a-check-must-have-been-red	control: a prune that leaves not
 harness_selftest	410-a-check-must-have-been-red	control: a well-formed log still merges	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: all-clean logs leave both flags down	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: an all-PASS log still merges with no flag at all	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	control: an undated premise passes the gate	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and a clean run still returns 0 under it	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and merges it when the fingerprint is the expected one	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	control: and still records the mutation against the check that reddened	15;16;17;18;19	never	-
@@ -1385,6 +1388,7 @@ harness_selftest	410-a-check-must-have-been-red	the budget names a ceiling and a
 harness_selftest	410-a-check-must-have-been-red	the ceiling refuses being exceeded	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the check the run still emits is not called an orphan	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the committed census matches the committed ledger	15;16;17;18;19	never	-
+harness_selftest	410-a-check-must-have-been-red	the dated fixture differs from the control in the premise row's date alone	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the distance travels with a refusal too, not only with a pass	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the four categories account for every ledger row	15;16;17;18;19	never	-
 harness_selftest	410-a-check-must-have-been-red	the gate refuses to run without the registered suite list	15;16;17;18;19	never	-
@@ -1611,18 +1615,18 @@ harness_selftest	570-a-checkout-test-must-ask-git	a test split over a line conti
 harness_selftest	570-a-checkout-test-must-ask-git	and matches none of .gitignore, .gitattributes, .github or a plain dir	15;16;17;18;19	2026-10-12	the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it;the same planted line, read by the pattern shipped in #1224;the sweep pattern loses its trailing non-word boundary;the sweep pattern shipped in #1224 is restored verbatim
 harness_selftest	570-a-checkout-test-must-ask-git	and unfolded it is invisible, so the fold is what finds it	15;16;17;18;19	2026-10-12	the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it
 harness_selftest	570-a-checkout-test-must-ask-git	but a directory inside another repository is NOT its own work tree	15;16;17;18;19	2026-09-23	the work-tree reader decides with the bare rev-parse, not --show-toplevel
+harness_selftest	570-a-checkout-test-must-ask-git	it is callable once evalled	15;16;17;18;19	2026-09-23	the work-tree reader this part evals is renamed away
 harness_selftest	570-a-checkout-test-must-ask-git	no suite decides it is a checkout by stat-ing .git as a directory	15;16;17;18;19	2026-10-12	a .git test split over a line continuation is planted in a real suite;a quote-before-the-slash .git test is planted in a real suite;one test form is spelled literally instead of built from a fragment;the -d form restored in extension_upgrade, or the comment stripping removed;the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it;the sweep stops stripping comments before reading the suites;the work-tree reader insists .git is a directory
 harness_selftest	570-a-checkout-test-must-ask-git	premise: five legitimate spellings were built to test against	15;16;17;18;19	never	-
-harness_selftest	570-a-checkout-test-must-ask-git	premise: it is callable once evalled	15;16;17;18;19	2026-09-23	the work-tree reader this part evals is renamed away
 harness_selftest	570-a-checkout-test-must-ask-git	premise: rev-parse does answer for the nested directory	15;16;17;18;19	never	-
 harness_selftest	570-a-checkout-test-must-ask-git	premise: some suite already asks git whether it can answer	15;16;17;18;19	never	-
-harness_selftest	570-a-checkout-test-must-ask-git	premise: stripping the boundary actually changed the pattern	15;16;17;18;19	2026-10-12	the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it;the boundary in the sweep pattern drifts, so the strip becomes a no-op;the derived control stops stripping the boundary;the same planted line, read by the pattern shipped in #1224;the sweep pattern loses its trailing non-word boundary;the sweep pattern shipped in #1224 is restored verbatim
 harness_selftest	570-a-checkout-test-must-ask-git	premise: ten spellings were built to test the pattern against	15;16;17;18;19	never	-
 harness_selftest	570-a-checkout-test-must-ask-git	premise: the continuation fixture really is two lines	15;16;17;18;19	never	-
 harness_selftest	570-a-checkout-test-must-ask-git	premise: the gitfile fixture exists, so a reader must not skip it	15;16;17;18;19	never	-
 harness_selftest	570-a-checkout-test-must-ask-git	premise: the gitfile fixture is a regular file, not a directory	15;16;17;18;19	never	-
-harness_selftest	570-a-checkout-test-must-ask-git	premise: the suite defines the work-tree reader this part evals	15;16;17;18;19	2026-09-23	the work-tree reader this part evals is renamed away
 harness_selftest	570-a-checkout-test-must-ask-git	premise: the sweep sees .git mentioned in the suites at all	15;16;17;18;19	never	-
+harness_selftest	570-a-checkout-test-must-ask-git	stripping the boundary actually changed the pattern	15;16;17;18;19	2026-10-12	the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it;the boundary in the sweep pattern drifts, so the strip becomes a no-op;the derived control stops stripping the boundary;the same planted line, read by the pattern shipped in #1224;the sweep pattern loses its trailing non-word boundary;the sweep pattern shipped in #1224 is restored verbatim
+harness_selftest	570-a-checkout-test-must-ask-git	the suite defines the work-tree reader this part evals	15;16;17;18;19	2026-09-23	the work-tree reader this part evals is renamed away
 harness_selftest	570-a-checkout-test-must-ask-git	the sweep matches every spelling that stats .git as a directory	15;16;17;18;19	2026-09-23	the same planted line, read by the pattern shipped in #1224;the sweep pattern shipped in #1224 is restored verbatim
 harness_selftest	570-a-checkout-test-must-ask-git	without the trailing boundary the same pattern flags three of them	15;16;17;18;19	2026-10-12	the .git pattern relaxed to match the bare name, so a test split over a line continuation is found without folding and the fold stops being what finds it;the boundary in the sweep pattern drifts, so the strip becomes a no-op;the derived control stops stripping the boundary
 harness_selftest	580-a-hand-rebuild-must-record	a PostgreSQL symbol is NOT exempt, so the check still has a subject	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;the symbol exemption matches every name, so the check has no subject left and a genuinely mislinked major would resolve clean
@@ -1645,22 +1649,22 @@ harness_selftest	580-a-hand-rebuild-must-record	and the installed library of the
 harness_selftest	580-a-hand-rebuild-must-record	and writes no stamp into the directory it was called from	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
 harness_selftest	580-a-hand-rebuild-must-record	control: and it does NOT blame the exemption	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh
 harness_selftest	580-a-hand-rebuild-must-record	control: with the exemption present, the same call fails on the pg_config	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;rebuild.sh words its missing pg_config refusal differently, so the control no longer sees it
+harness_selftest	580-a-hand-rebuild-must-record	lib.sh has one recorder for what was installed	15;16;17;18;19	2026-09-23	pgc_record_source_stamp removed from lib.sh
+harness_selftest	580-a-hand-rebuild-must-record	no stamp for this prefix before the rebuild	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	premise: a rebuild with no pg_config fails	15;16;17;18;19	never	-
 harness_selftest	580-a-hand-rebuild-must-record	premise: and the callers are still there, so this is scope not syntax	15;16;17;18;19	never	-
-harness_selftest	580-a-hand-rebuild-must-record	premise: lib.sh has one recorder for what was installed	15;16;17;18;19	2026-09-23	pgc_record_source_stamp removed from lib.sh
-harness_selftest	580-a-hand-rebuild-must-record	premise: no stamp for this prefix before the rebuild	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	premise: the diagnosis is exposed too	15;16;17;18;19	never	-
 harness_selftest	580-a-hand-rebuild-must-record	premise: the gating decision is exposed to be judged	15;16;17;18;19	never	-
-harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild itself succeeded	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;rebuild.sh forced to exit 1 after writing its stamp, reproducing the aarch64 shape;rebuild.sh forced to fail after its stamp AND _hr_diagnose gutted, so the failure prints no reason;rebuild.sh forced to fail after its stamp AND the gate reverted, so a failed rebuild still runs the arms beneath it;the symbol exemption matches nothing, so every toolchain name rebuild.sh has always ignored is reported as an unresolved symbol
 harness_selftest	580-a-hand-rebuild-must-record	premise: the hand rebuild tool installs, so a stale record is possible	15;16;17;18;19	never	-
 harness_selftest	580-a-hand-rebuild-must-record	premise: the mutation left lib.sh loadable	15;16;17;18;19	never	-
 harness_selftest	580-a-hand-rebuild-must-record	premise: the mutation removed the definition and nothing else	15;16;17;18;19	never	-
-harness_selftest	580-a-hand-rebuild-must-record	premise: the shim redirects the install away from the real prefix	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
-harness_selftest	580-a-hand-rebuild-must-record	premise: the symbol exemption is exposed to be judged	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh
 harness_selftest	580-a-hand-rebuild-must-record	the exemption sees through an @GLIBC version suffix	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;the symbol exemption matches nothing, so every toolchain name rebuild.sh has always ignored is reported as an unresolved symbol
+harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild itself succeeded	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;rebuild.sh forced to exit 1 after writing its stamp, reproducing the aarch64 shape;rebuild.sh forced to fail after its stamp AND _hr_diagnose gutted, so the failure prints no reason;rebuild.sh forced to fail after its stamp AND the gate reverted, so a failed rebuild still runs the arms beneath it;the symbol exemption matches nothing, so every toolchain name rebuild.sh has always ignored is reported as an unresolved symbol
 harness_selftest	580-a-hand-rebuild-must-record	the hand rebuild tool records what it installed rather than only naming it	15;16;17;18;19	2026-09-23	the record call removed from rebuild.sh, or the comment stripping removed
 harness_selftest	580-a-hand-rebuild-must-record	the recorder refuses when it is not told what was installed	15;16;17;18;19	2026-09-23	the argument guard removed from pgc_record_source_stamp
+harness_selftest	580-a-hand-rebuild-must-record	the shim redirects the install away from the real prefix	15;16;17;18;19	2026-09-23	the shim answers --pkglibdir with the real prefix, so the install is not redirected
 harness_selftest	580-a-hand-rebuild-must-record	the stack canary object is exempt, whatever the architecture calls it	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh;the symbol exemption matches nothing, so every toolchain name rebuild.sh has always ignored is reported as an unresolved symbol
+harness_selftest	580-a-hand-rebuild-must-record	the symbol exemption is exposed to be judged	15;16;17;18;19	2026-10-12	pgc_symbol_is_toolchain deleted from the real lib.sh
 harness_selftest	580-a-hand-rebuild-must-record	without the exemption it refuses EARLIER, naming the missing function	15;16;17;18;19	2026-09-25	rebuild.sh's fail-closed assertion is removed, so a missing exemption function leaves the undefined list empty and the check reports success
 harness_selftest	590-a-declared-suite-must-account	a completed suite still reads as having reached its summary	15;16;17;18;19	2026-10-13	part 590's reader of a producer's accounting line answers 'terminated' where it found the line
 harness_selftest	590-a-declared-suite-must-account	a suite that DID reach its summary is not given a second one	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
@@ -1671,8 +1675,8 @@ harness_selftest	590-a-declared-suite-must-account	and it is marked TERMINATED, 
 harness_selftest	590-a-declared-suite-must-account	and nothing still arms the bare teardown	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	and pgc_setup still calls pgc_summary on none of them	15;16;17;18;19	2026-10-12	lib.sh's pgc_setup calls pgc_summary before one of its exit 1 paths
 harness_selftest	590-a-declared-suite-must-account	every clean exit in a declared suite reaches its summary first	15;16;17;18;19	2026-10-13	a declared suite (ttl_expire.sh) gains a clean exit 0 that skips pgc_summary
+harness_selftest	590-a-declared-suite-must-account	lib.sh is where the exits and the trap both live	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	premise: declared suites do have clean exits of their own to check	15;16;17;18;19	never	-
-harness_selftest	590-a-declared-suite-must-account	premise: lib.sh is where the exits and the trap both live	15;16;17;18;19	2026-09-23	the EXIT trap reverted to the bare pgc_teardown, so the eight pgc_setup exits emit no accounting
 harness_selftest	590-a-declared-suite-must-account	premise: pgc_setup still has the eight exits this covers	15;16;17;18;19	never	-
 harness_selftest	590-a-declared-suite-must-account	premise: the reader is callable once evalled	15;16;17;18;19	never	-
 harness_selftest	590-a-declared-suite-must-account	premise: the reader that consumes this line is where it was	15;16;17;18;19	never	-
@@ -1701,26 +1705,26 @@ harness_selftest	630-a-build-with-no-pg-config-must	and the refusal is make's ow
 harness_selftest	630-a-build-with-no-pg-config-must	and with stdin closed it refuses, rather than exiting 0 having done nothing	15;16;17;18;19	2026-10-13	sed given </dev/null but no refusal: make goes on with an empty PGXS and exits 0;the Makefile before #1344: an empty PGXS hands the CC probe's sed no file, so it reads stdin;the refusal fires but does not name PG_CONFIG
 harness_selftest	630-a-build-with-no-pg-config-must	premise: a reader of this stdin waits rather than reaching EOF	15;16;17;18;19	never	-
 harness_selftest	630-a-build-with-no-pg-config-must	premise: the selftest knows where the Makefile it drives is	15;16;17;18;19	never	-
+index_am_support	index_am_support	an overlap query reaches the row through a GiST index	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	btree answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	btree builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	gist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	gist builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	hash answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	hash builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
-index_am_support	index_am_support	premise: an overlap query reaches the row through a GiST index	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
 index_am_support	index_am_support	premise: btree, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: gist, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: hash, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: spgist, which the page claims, has a probe in this suite	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the btree predicate matches rows at all	15;16;17;18;19	never	-
-index_am_support	index_am_support	premise: the claim bullet holds the claim and nothing else	15;16;17;18;19	2026-09-19	docs/features.md qualifies the claim inside its own bullet: 'builds ... over a columnar table, though spgist cannot be chosen'. The first version of this suite screened for negation tokens and passed this, because \bnot\b has no word boundary before the 'not' in 'cannot';the whitelist refuses it for being a form the suite cannot read
-index_am_support	index_am_support	premise: the features page names at least one index access method	15;16;17;18;19	2026-09-19	docs/features.md qualifies the claim inside its own bullet: 'builds ... over a columnar table, though spgist cannot be chosen'. The first version of this suite screened for negation tokens and passed this, because \bnot\b has no word boundary before the 'not' in 'cannot';docs/features.md stops naming any index access method, so the extractor finds nothing and the per-method loop runs zero times;the whitelist refuses it for being a form the suite cannot read
 index_am_support	index_am_support	premise: the fixture holds every row	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the gist predicate matches rows at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the hash predicate matches rows at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	premise: the spgist predicate matches rows at all	15;16;17;18;19	never	-
 index_am_support	index_am_support	spgist answers its operator with the same rows the scan returns	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan drops two rows in three, so the index misses entries
 index_am_support	index_am_support	spgist builds an index over a columnar table	15;16;17;18;19	2026-09-23	pgcolumnar_index_build_range_scan errors, so CREATE INDEX fails
+index_am_support	index_am_support	the claim bullet holds the claim and nothing else	15;16;17;18;19	2026-09-19	docs/features.md qualifies the claim inside its own bullet: 'builds ... over a columnar table, though spgist cannot be chosen'. The first version of this suite screened for negation tokens and passed this, because \bnot\b has no word boundary before the 'not' in 'cannot';the whitelist refuses it for being a form the suite cannot read
+index_am_support	index_am_support	the features page names at least one index access method	15;16;17;18;19	2026-09-19	docs/features.md qualifies the claim inside its own bullet: 'builds ... over a columnar table, though spgist cannot be chosen'. The first version of this suite screened for negation tokens and passed this, because \bnot\b has no word boundary before the 'not' in 'cannot';docs/features.md stops naming any index access method, so the extractor finds nothing and the per-method loop runs zero times;the whitelist refuses it for being a form the suite cannot read
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a 50000-row correlated range uses the custom scan, not a fetching index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	a selective point lookup still uses the index	15;16;17;18;19	never	-
 index_fetch_penalty_crossover	index_fetch_penalty_crossover	both paths return the same aggregate at 50000	15;16;17;18;19	never	-
@@ -1922,10 +1926,10 @@ partman_columnar	partman_columnar	premise: pg_partman is installed in this datab
 partman_columnar	partman_columnar	premise: retention dropped partitions	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: run_maintenance holds an exclusive lock on the parent, as docs/how-to.md says	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: the partitions maintenance creates ahead are columnar too	15;16;17;18;19	never	-
-partman_columnar	partman_columnar	premise: the rows went in	15;16;17;18;19	2026-10-12	a sequential scan drops the last row group from its list, so every one-group partition reads empty
 partman_columnar	partman_columnar	premise: with default_table_access_method every partition pg_partman makes is columnar	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: without default_table_access_method pg_partman makes heap partitions	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	retention leaves no pgcolumnar storage row behind	15;16;17;18;19	2026-10-12	the drop hook stops deleting the storage row, so a partition pg_partman drops leaves it behind
+partman_columnar	partman_columnar	the rows went in	15;16;17;18;19	2026-10-12	a sequential scan drops the last row group from its list, so every one-group partition reads empty
 prepared_writes	prepared_writes	a delete prepared and committed in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the delete-vector buffers
 prepared_writes	prepared_writes	an index fetch before PREPARE, and the same row fetched first after COMMIT PREPARED, in one session	15;16;17;18;19	never	-
 prepared_writes	prepared_writes	an insert prepared and committed in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the pending write states
@@ -1956,13 +1960,13 @@ projection_scan_cost	projection_scan_cost	premise: a covering projection exists	
 projection_scan_cost	projection_scan_cost	premise: every compared scan has a positive run cost	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	premise: every misattributed scan has a positive run cost	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	premise: every unprunable-clause scan has a positive run cost	15;16;17;18;19	never	-
-projection_scan_cost	projection_scan_cost	premise: the loose plan uses the covering projection	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount
 projection_scan_cost	projection_scan_cost	premise: the misattributed query has a covering projection	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	premise: the prunable range is priced above the one-stripe floor, so the arms differ	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	premise: the table holds every inserted row	15;16;17;18;19	never	-
-projection_scan_cost	projection_scan_cost	premise: the tight plan uses the covering projection	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount
 projection_scan_cost	projection_scan_cost	premise: without the projection scan, the loose plan is a base columnar scan	15;16;17;18;19	never	-
 projection_scan_cost	projection_scan_cost	premise: without the projection scan, the tight plan is a base columnar scan	15;16;17;18;19	never	-
+projection_scan_cost	projection_scan_cost	the loose plan uses the covering projection	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount
+projection_scan_cost	projection_scan_cost	the tight plan uses the covering projection	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount
 projection_scan_cost	projection_scan_cost	tight and loose covering scans are not both priced at half the base	15;16;17;18;19	2026-09-17	-
 projection_scan_cost	projection_scan_cost	while a plain range on the sort key still earns its discount	15;16;17;18;19	2026-10-12	no restriction ever earns the sort-key discount
 projection_scan_io	projection_scan_io	a covering projection is not priced from the base table's pages	15;16;17;18;19	2026-09-19	rel->pages
@@ -2104,7 +2108,7 @@ storage_row_repair	storage_row_repair	a same-type ALTER COLUMN ... USING repairs
 storage_row_repair	storage_row_repair	after both repairs the notes' query finds nothing	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
 storage_row_repair	storage_row_repair	and so does the refreshed view	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	and the repaired table holds the same rows	15;16;17;18;19	never	-
-storage_row_repair	storage_row_repair	premise: no row names a missing relation before the damage	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
+storage_row_repair	storage_row_repair	no row names a missing relation before the damage	15;16;17;18;19	2026-10-12	PgColumnarRetargetStorageRelation returns at once, so no repair repoints a storage row;the release notes' query is edited from NOT EXISTS to EXISTS
 storage_row_repair	storage_row_repair	premise: the damaged table still reads every row	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	premise: the release notes give the query that finds wrong rows	15;16;17;18;19	never	-
 storage_row_repair	storage_row_repair	the notes' query finds both rows alpha4 left wrong	15;16;17;18;19	2026-10-12	the release notes' query is edited from NOT EXISTS to EXISTS
@@ -2301,14 +2305,13 @@ validity_elision	validity_elision	an implausible row count on an elided chunk is
 validity_elision	validity_elision	and the backend survives that refusal	15;16;17;18;19	never	-
 validity_elision	validity_elision	and the backend survives that refusal too	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: each fixture is a single row group, which is what the expected size assumes	15;16;17;18;19	never	-
-validity_elision	validity_elision	premise: the arms below reach the row through an index scan	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
 validity_elision	validity_elision	premise: the block codec is off, so the residual is the bitmap and nothing else	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: the join arms below reach the columnar side by index too	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: the per-chunk arm's residual was summed over chunks that exist	15;16;17;18;19	never	-
 validity_elision	validity_elision	premise: the residual was summed over chunks that exist	15;16;17;18;19	never	-
-validity_elision	validity_elision	premise: the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	single-row fetches of the null-bearing column return its nulls as nulls	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	single-row fetches through the elided path return the row asked for	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect
+validity_elision	validity_elision	the arms below reach the row through an index scan	15;16;17;18;19	2026-09-18	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write
 validity_elision	validity_elision	the full column fetched by index matches the heap, row for row	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;reader: pgcolumnar_fetch_get_row uses the group-wide validityBytes instead of this chunk's own, which is the pre-fix defect;the reader returning row 5 of every row group as NULL
 validity_elision	validity_elision	the full column holds no row the heap does not	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the reader returning row 5 of every row group as NULL
 validity_elision	validity_elision	the full column preserves its null count	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
@@ -2318,4 +2321,5 @@ validity_elision	validity_elision	the nulls column fetched by index matches the 
 validity_elision	validity_elision	the nulls column holds no row the heap does not	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the reader returning row 5 of every row group as NULL;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	the nulls column preserves its null count	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the reader returning row 5 of every row group as NULL
 validity_elision	validity_elision	the nulls column reads back exactly what the heap holds	15;16;17;18;19	2026-10-13	reader: PgColumnarEncdescOmitsValidity returns false, so every reader expects a bitmap the writer did not write;the reader returning row 5 of every row group as NULL;the validity-elision predicate forced true, so every column reads as if its bitmap were elided
+validity_elision	validity_elision	the second fixture holds nulls, so its bitmap is load-bearing	15;16;17;18;19	2026-09-23	the validity-elision predicate forced true, so every column reads as if its bitmap were elided
 validity_elision	validity_elision	while a column with nulls still stores one, sized one bit per row	15;16;17;18;19	never	-

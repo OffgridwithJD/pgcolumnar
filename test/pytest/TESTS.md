@@ -2840,6 +2840,23 @@ warned unconditionally, which would train the warning out of being read.
 The shell twin is `test/selftest/520-a-merged-row-must-cover-the-majors.sh`. Same
 properties, own fixtures, and neither file names the other.
 
+### A premise the ledger has seen go red is refused (#1236)
+
+A check named `premise:` claims no repository change can redden it. A date in its
+last-observed-red column says a mutation did. One of the two is false, so the gate
+refuses the row and names it. The reviewer then decides: drop the prefix, because the
+check is an arm, or move the date to the check that earned it.
+
+The gate decides this from the ledger alone, so it covers every row, not only the rows
+the run observed.
+
+| test | what it holds |
+| --- | --- |
+| `test_the_gate_refuses_a_premise_the_ledger_has_seen_go_red` | a dated `premise:` row makes the gate fail, and the output names the row once |
+| `test_a_premise_never_observed_red_passes_the_gate` | the control: the same fixture with `never` passes, so the refusal above is this rule and not another route to rc=1 |
+
+The shell twin is the last section of `test/selftest/410-a-check-must-have-been-red.sh`.
+
 ## 24. test_loop_coverage_premise.py: a loop that never ran asserted nothing
 
 **Why this file exists.** `assert-inside-a-loop-over-zero-rows` in VACUITY_MODES.md 3.5
@@ -5380,8 +5397,8 @@ So the failure modes are proven by mutating the DOCUMENT rather than the code:
 | mutation | result |
 | --- | --- |
 | add `gin` to the sentence, with no probe for it | `premise: gin, which the page claims, has a probe in this suite` fails |
-| remove every method name from the sentence | `premise: the features page names at least one index access method` fails; the loop runs zero times and cannot pass vacuously |
-| **`builds btree, hash and gist but NOT spgist`** | `premise: the claim bullet holds the claim and nothing else` fails, in both harnesses |
+| remove every method name from the sentence | `the features page names at least one index access method` fails; the loop runs zero times and cannot pass vacuously |
+| **`builds btree, hash and gist but NOT spgist`** | `the claim bullet holds the claim and nothing else` fails, in both harnesses |
 | **the denial written after `columnar table`** | the same premise fails, in both harnesses |
 | **`...though spgist cannot be chosen`** | the same premise fails — see below |
 | **legitimate prose added to the claim bullet** | the same premise fails, on purpose |
@@ -5477,14 +5494,14 @@ awk. Neither file names the other.
 
 | arm | what it holds |
 | --- | --- |
-| `premise: the features page names at least one index access method` | the extractor found something, so a green loop means work happened |
-| `premise: the claim bullet holds the claim and nothing else` | the bullet is the one form a name-reader can read, so the names ARE the claim |
+| `the features page names at least one index access method` | the extractor found something, so a green loop means work happened |
+| `the claim bullet holds the claim and nothing else` | the bullet is the one form a name-reader can read, so the names ARE the claim |
 | `premise: the fixture holds every row` | the corpus is what the probes assume |
 | `premise: <am>, which the page claims, has a probe in this suite` | a claim on the page without evidence here is a failure, not a skip |
 | `<am> builds an index over a columnar table` | the method builds |
 | `premise: the <am> predicate matches rows at all` | the comparison below is not two empty sets agreeing |
 | `<am> answers its operator with the same rows the scan returns` | the index path and the scan path agree |
-| `premise: an overlap query reaches the row through a GiST index` | the plan, asserted, for the claim that ranges have an index path |
+| `an overlap query reaches the row through a GiST index` | the plan, asserted, for the claim that ranges have an index path |
 
 ### Every test
 

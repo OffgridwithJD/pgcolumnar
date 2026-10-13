@@ -1235,6 +1235,21 @@ def cmd_gate(args):
               f"red against the other.")
         rc = 1
 
+    # A PREMISE THE LEDGER HAS SEEN GO RED (#1236). A `premise:` check claims no
+    # repository change can redden it; a date in its last-observed-red column says a
+    # mutation did. One of the two is false, and either way a reviewer must decide which:
+    # rename it to an arm, or move the date to the check that earned it. Decidable from
+    # the ledger alone, so it covers every row, not only the rows this run observed.
+    dated = sorted(k for k, v in rows.items()
+                   if k[2].startswith("premise:") and v[1] != NEVER)
+    for suite, part, name in dated:
+        print(f"    a premise the ledger has seen go red: {suite}\t{part}\t{name}\t"
+              f"(last red {rows[(suite, part, name)][1]})")
+    if dated:
+        print(f"    {len(dated)} premise row(s) carry a red observation. A check a "
+              f"mutation reddened is an arm: drop the `premise:` prefix.")
+        rc = 1
+
     # THE REFUSAL: a check the committed ledger has never seen, IN A SUITE THE
     # LEDGER COVERS.
     #

@@ -1521,3 +1521,46 @@ def test_an_existing_rows_widening_is_not_reported_as_a_subset(tmp_path, expect)
     expect.num(out.count("WARNING"), 0,
                "the pre-existing minority row is not re-reported on an unrelated merge")
     expect.num(rc, 0, "and the merge succeeds")
+
+
+PREMISE_LOG = ("RESULT\tdemo\tpart1\tpremise: the fixture holds rows\tPASS\t18\t\n"
+               "RESULT\tdemo\tpart1\tsecond check\tPASS\t18\t\nchecks run: 2\n")
+
+
+def _premise_gate(tmp_path, last_red):
+    ledger = _w(tmp_path, "l.tsv",
+                f"demo\tpart1\tpremise: the fixture holds rows\t18\t{last_red}\t-\n"
+                "demo\tpart1\tsecond check\t18\tnever\t-\n")
+    budget = _w(tmp_path, "b.txt", "suites_not_covered 0\n")
+    reg = _w(tmp_path, "reg", "demo\n")
+    log = _w(tmp_path, "p.log", PREMISE_LOG)
+    return _run("gate", "--ledger", ledger, "--budget", budget, "--registered", reg, log)
+
+
+def test_the_gate_refuses_a_premise_the_ledger_has_seen_go_red(tmp_path, expect):
+    """#1236. A `premise:` check is one no repository change can redden.
+
+    A date in its last-observed-red column says a mutation DID redden it, so one of the
+    two claims is false: either the check tests the code and is an arm, or the date was
+    recorded against the wrong check. Both are a reviewer's question, so the gate asks it.
+
+    Decidable from the ledger alone, so it covers every row, not only the rows this run
+    observed. The control below shows the same fixture with `never` passes, which is what
+    makes rc=1 here this refusal and not another route to it.
+    """
+    out, rc = _premise_gate(tmp_path, "2026-10-01")
+    expect.num(out.count("a premise the ledger has seen go red"), 1,
+               "a dated premise row is refused, and named once")
+    expect.contains(out, "premise: the fixture holds rows",
+                    "with the check's name, so the reviewer can find it")
+    expect.num(rc, 1, "and the gate fails rather than noting it")
+    expect.contains(out, "Traceback", "rc came from the refusal, not from a crash",
+                    absent=True)
+
+
+def test_a_premise_never_observed_red_passes_the_gate(tmp_path, expect):
+    """The control for the refusal above: the same fixture, with `never`."""
+    out, rc = _premise_gate(tmp_path, "never")
+    expect.num(out.count("a premise the ledger has seen go red"), 0,
+               "an undated premise is not refused")
+    expect.num(rc, 0, "and the same fixture passes the gate")

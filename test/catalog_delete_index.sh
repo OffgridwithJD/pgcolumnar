@@ -434,7 +434,7 @@ echo "-- row_group pages=$rg_pages, threshold=$min_blocks"
 # come back equal and the arm reports 0. That reads as "the fix is gone" and
 # means "the fixture is too small". The port failed exactly that way the moment
 # its fixture was corrected to a private database.
-check_num "premise: row_group is larger than the threshold, so the two paths differ" \
+check_num "row_group is larger than the threshold, so the two paths differ" \
 	"$(margin "$((rg_pages - min_blocks))" 1)" "1"
 
 v_d="$(vac_work del_vac)"
