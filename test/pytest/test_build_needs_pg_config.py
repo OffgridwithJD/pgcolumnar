@@ -83,7 +83,11 @@ def test_with_stdin_open_it_ends_and_names_pg_config(tmp_path, expect):
 def test_with_stdin_closed_it_still_refuses(tmp_path, expect):
     # The other face: with stdin closed sed finds EOF, the parse goes on, and make
     # exits 0. A test of its own, so this arm does not ride on the hang.
-    rc2, _ = _make_without_pg_config(tmp_path, stdin_open=False)
+    rc2, out2 = _make_without_pg_config(tmp_path, stdin_open=False)
     print(f"-- the same make, stdin closed: rc {rc2}")
-    expect.text("yes" if rc2 not in (None, 0) else f"no (rc {rc2})", "yes",
+    # THIS refusal, not any non-zero exit: a Makefile that fails to parse exits 2
+    # as well, and would satisfy a bare rc test (#1346 review, jdatcmd).
+    errs = [ln for ln in out2.splitlines() if "***" in ln]
+    refused = rc2 not in (None, 0) and any("PG_CONFIG" in ln for ln in errs)
+    expect.text("yes" if refused else f"no (rc {rc2}: {errs[0] if errs else 'no make error'})", "yes",
                 "and with stdin closed it refuses, rather than exiting 0 having done nothing")

@@ -54,6 +54,9 @@ timeout 20 make -n -C "$_np_src" clean PG_CONFIG="$_np_tmp/no-such/pg_config" \
 	</dev/null >"$_np_tmp/out2" 2>&1
 _np_rc2=$?
 echo "      the same make, stdin closed: rc $_np_rc2"
+# THIS refusal, not any non-zero exit: a Makefile that fails to parse exits 2 as
+# well, and would satisfy a bare rc test (#1346 review, jdatcmd).
 check "and with stdin closed it refuses, rather than exiting 0 having done nothing" \
-	"$([ "$_np_rc2" != 0 ] && [ "$_np_rc2" != 124 ] && echo yes || echo "no (rc $_np_rc2)")" "yes"
+	"$([ "$_np_rc2" != 0 ] && [ "$_np_rc2" != 124 ] && grep -E '\*\*\*.*PG_CONFIG' "$_np_tmp/out2" >/dev/null \
+		&& echo yes || echo "no (rc $_np_rc2: $(grep -m1 -F '***' "$_np_tmp/out2" || echo 'no make error'))")" "yes"
 rm -rf "$_np_tmp"
