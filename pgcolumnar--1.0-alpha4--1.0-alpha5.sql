@@ -987,6 +987,14 @@ $create_ahead$;
  * plan differently from two sessions. Two overloads, each refusing the other
  * type of key (42804); an untyped literal resolves to timestamptz.
  *
+ * THE DROP REFUSES WHILE THE PARTITION IS ATTACHED (jdatcmd, #1331 review). Any
+ * DETACH can fail -- a lock_timeout, a cancelled concurrent wait, a permission
+ * error -- and \gexec carries on unless ON_ERROR_STOP is set. A plain DROP of an
+ * attached partition would then take ACCESS EXCLUSIVE on the parent. So each
+ * drop is a DO block that raises 55000 while the partition is still in
+ * pg_inherits, a pending one included; the next plan's FINALIZE picks that up.
+ * A DROP may run inside DO; only DETACH ... CONCURRENTLY must be top-level.
+ *
  * The same refusals as partition_create_ahead, with the same codes: a DEFAULT
  * partition rules out the concurrent detach, and is refused rather than dropped
  * with the exclusive one. No ownership check: this reads catalogs the caller
@@ -1060,7 +1068,9 @@ BEGIN
 	LOOP
 		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
 		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
-		RETURN NEXT format('DROP %s %s', CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
+		                   p.part::text, p.part::text,
+		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
 	END LOOP;
 END
 $drop_plan_tz$;
@@ -1083,7 +1093,9 @@ BEGIN
 	LOOP
 		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
 		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
-		RETURN NEXT format('DROP %s %s', CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
+		                   p.part::text, p.part::text,
+		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
 	END LOOP;
 END
 $drop_plan_ts$;
