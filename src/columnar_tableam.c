@@ -2670,6 +2670,20 @@ pgcolumnar_xact_callback(XactEvent event, void *arg)
 			PgColumnarFlushAllDeleteVectors();
 
 			/*
+			 * PREPARE frees TopTransactionContext and never reaches the
+			 * COMMIT/ABORT arms below, so the pending write states and delete
+			 * vectors -- children of that context, now flushed -- must be let go
+			 * of here. Without this the session's next transaction walked the
+			 * freed lists at its PRE_COMMIT, and a COMMIT PREPARED in the same
+			 * session died of SIGSEGV (#1323).
+			 */
+			if (event == XACT_EVENT_PREPARE)
+			{
+				PgColumnarDiscardAllPendingWrites();
+				PgColumnarDiscardAllDeleteVectors();
+			}
+
+			/*
 			 * PREPARE deletes TopTransactionContext without ever reaching the
 			 * COMMIT/ABORT arms below, so a memo slot populated outside any
 			 * executor lifecycle (a fetch during a utility command has no

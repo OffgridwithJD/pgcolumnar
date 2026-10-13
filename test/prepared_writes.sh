@@ -72,6 +72,22 @@ check "and the session's next write, after COMMIT PREPARED, lands" \
 		"INSERT INTO pw SELECT g, 'after' FROM generate_series(1, 7) g" \
 		"SELECT count(*) FROM pw WHERE v = 'after'")" "7"
 
+# The index-fetch cache is the third per-transaction cache COMMIT and ABORT reset.
+# An index fetch on each side of COMMIT PREPARED, in one session, same rows: it
+# works without a discard at PREPARE. Measured, not assumed -- a version of the
+# fix that also discarded it at PREPARE changed no arm here, so it is not in the
+# fix. The premise keeps this arm honest: with the custom scan on, the plan never
+# reached the cache at all, and the arm passed by testing nothing.
+q "CREATE INDEX pw_id ON pw (id);" >/dev/null
+check "premise: the fetch is an index scan, which is what reaches the fetch cache" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+		-c "SET enable_seqscan = off" -c "SET enable_bitmapscan = off" -c "SET pgcolumnar.enable_custom_scan = off" \
+		-c "EXPLAIN SELECT v FROM pw WHERE id = 120" 2>&1 | grep -c 'Index Scan using pw_id')" "1"
+check "an index fetch before PREPARE, and the same row fetched first after COMMIT PREPARED, in one session" \
+	"$(session "SET enable_seqscan = off" "SET enable_bitmapscan = off" "SET pgcolumnar.enable_custom_scan = off" \
+		"BEGIN" "SELECT string_agg(v, ',') FROM pw WHERE id IN (120, 121, 122)" "PREPARE TRANSACTION 'pw_fetch'" \
+		"COMMIT PREPARED 'pw_fetch'" "SELECT string_agg(v, ',') FROM pw WHERE id IN (120, 121, 122)")" "changed,changed,changed"
+
 ready
 check "no backend was terminated by a signal" \
 	"$(grep -c 'was terminated by signal' "$PGC_LOGFILE")" "0"
