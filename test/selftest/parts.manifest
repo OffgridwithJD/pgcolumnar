@@ -58,3 +58,4 @@
 590-a-declared-suite-must-account.sh
 600-a-missing-pyarrow-declines.sh
 610-a-declined-capability-is-not-silent.sh
+620-a-suite-s-own-trap-must-stop.sh
