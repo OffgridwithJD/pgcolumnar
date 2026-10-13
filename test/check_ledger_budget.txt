@@ -1689,4 +1689,20 @@ suites_not_covered 246
 #     never         1798 - 1 = 1797
 #     dated          515 + 1 =  516
 #     1797 + 516 == 2313
+#
+# #1339, range_pruning (jdatcmd): 1797 -> 1797. Its skip arms passed with max_upper
+# never used: the probe windows sat early in the table, so every unit after them
+# is pruned on its LOWER bound alone (the pytest twin passed 2/2 under that
+# mutation). A window near the end leaves the units before it to their upper
+# bounds; "a clustered overlap near the end skips the four vectors only their upper
+# bounds rule out" is red under it on each of 15-19 (33/33 green), and so is "a
+# window no row can meet reads no chunk group at all", never red before. The late
+# window's heap comparison arrives never: it guards over-pruning, which this
+# mutation cannot produce. The unbounded fixture's heap mirror was copied from the
+# columnar table and is now written from its values.
+#
+#     ledger rows   2315
+#     never         1797
+#     dated         518
+#     1797 + 518 == 2315
 checks_never_observed_red 1797

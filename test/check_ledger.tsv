@@ -1970,14 +1970,16 @@ projection_scan_io	projection_scan_io	premise: the empty projection is found and
 projection_scan_io	projection_scan_io	premise: the plan uses the covering projection	15;16;17;18;19	never	-
 projection_scan_io	projection_scan_io	premise: the projection row still exists after its storage id is cleared	15;16;17;18;19	never	-
 projection_scan_io	projection_scan_io	premise: the table holds every inserted row	15;16;17;18;19	never	-
+range_pruning	range_pruning	a clustered overlap near the end skips the four vectors only their upper bounds rule out	15;16;17;18;19	2026-10-13	native_range_excludes never using max_upper (haveUpper forced false)
 range_pruning	range_pruning	a clustered overlap skips vectors instead of decoding them	15;16;17;18;19	never	-
 range_pruning	range_pruning	a scattered column skips nothing, which is what the documentation says	15;16;17;18;19	never	-
 range_pruning	range_pruning	a unit holding an unbounded range is never pruned from above	15;16;17;18;19	never	-
-range_pruning	range_pruning	a window no row can meet reads no chunk group at all	15;16;17;18;19	never	-
+range_pruning	range_pruning	a window no row can meet reads no chunk group at all	15;16;17;18;19	2026-10-13	native_range_excludes never using max_upper (haveUpper forced false)
 range_pruning	range_pruning	a window no row can meet returns nothing, from both	15;16;17;18;19	never	-
 range_pruning	range_pruning	an empty range contributes no bound, so its units record NULL	15;16;17;18;19	never	-
 range_pruning	range_pruning	and an unbounded range records a bound that is present but empty	15;16;17;18;19	never	-
 range_pruning	range_pruning	and still returns the right rows	15;16;17;18;19	never	-
+range_pruning	range_pruning	and that late overlap returns the heap's rows	15;16;17;18;19	never	-
 range_pruning	range_pruning	and the rows themselves match, not only the count	15;16;17;18;19	never	-
 range_pruning	range_pruning	and the zone map is probed for it	15;16;17;18;19	never	-
 range_pruning	range_pruning	containment of a point returns the heap's rows	15;16;17;18;19	never	-
