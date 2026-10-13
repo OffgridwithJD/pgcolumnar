@@ -375,10 +375,10 @@ SELECT tdigest_percentile(v, 100, 0.99) FROM readings;
 ```
 
 Over a columnar table, each gives exactly what it gives over the same rows in a
-heap table, and both read through the columnar scan, reading only the column they
-aggregate. Their error against the exact answer is the extension's own: about 2.3%
-per standard error for `hll` at its default precision, and well under 0.1% at the
-99th percentile for `tdigest` at compression 100.
+heap table. Both read through the columnar scan, and read only the column they
+aggregate. Their error against the exact answer is the extension's own. For `hll`
+at its default precision, one standard error is about 2.3%. For `tdigest` at
+compression 100, the 99th percentile is well within 0.1%.
 
 Both sketch types can be stored in a columnar table, for example one sketch per
 day. A stored `hll` comes back byte for byte, so `hll_union_agg` over the daily
