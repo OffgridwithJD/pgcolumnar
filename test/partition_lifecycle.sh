@@ -42,6 +42,15 @@ sqlstate_or() {	# sqlstate_or SQL -> the single value it returns, or the SQLSTAT
 	case "$out" in ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$out" | head -1;; *) echo "$out";; esac
 }
 kids() { q "SELECT count(*) FROM pg_inherits WHERE inhparent = '$1'::regclass;"; }
+# rc REL -> the relation as the function's messages name it: they format regclass
+# under its own search_path (pg_catalog, pg_temp), so always schema-qualified.
+rc() { q "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = '$1'::regclass;"; }
+refusal() {	# refusal SQL -> "SQLSTATE message" of the error it raises, or "ok: VALUE"
+	local out
+	out=$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" \
+		-X -At -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -c "$1" 2>&1)
+	case "$out" in ERROR:*) sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\): \(.*\)$/\1 \2/p' <<<"$out" | head -1;; *) echo "ok: $out";; esac
+}
 ams()  { q "SELECT coalesce(string_agg(DISTINCT a.amname, ','), 'none') FROM pg_inherits i
             JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_am a ON a.oid = c.relam
             WHERE i.inhparent = '$1'::regclass;"; }
@@ -177,6 +186,48 @@ q "CREATE TABLE tail (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
 check "a parent with a partition bounded by MAXVALUE is refused, and nothing is created" \
 	"$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('tail', '1 day', 2);")|$(kids tail)" "55000|1"
 
+# ---- refused before any DDL, each by its own check (#1341) ------------------------
+# The MESSAGE is in the want, not just the code: with the width check gone, a zero
+# or negative width never moves the counting loop on, and the 1000-partition cap
+# answers with the same 22023.
+q "CREATE TABLE wa (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
+check "a width that is not positive, or a negative lead, is refused before any DDL" \
+	"$(refusal "SELECT pgcolumnar.partition_create_ahead('wa', '0 seconds', 1);")|$(refusal "SELECT pgcolumnar.partition_create_ahead('wa', '-1 day', 1);")|$(refusal "SELECT pgcolumnar.partition_create_ahead('wa', '1 day', -1);")|$(kids wa)" \
+	"22023 width must be positive and ahead not negative|22023 width must be positive and ahead not negative|22023 width must be positive and ahead not negative|0"
+q "CREATE TABLE lp (ts timestamptz NOT NULL, v int) PARTITION BY LIST (ts);
+   CREATE TABLE mc (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts, v);
+   CREATE TABLE np (ts timestamptz NOT NULL, v int) USING pgcolumnar;" >/dev/null
+check "a parent that is not RANGE-partitioned on one column is refused before any DDL" \
+	"$(refusal "SELECT pgcolumnar.partition_create_ahead('lp', '1 day', 1);")|$(refusal "SELECT pgcolumnar.partition_create_ahead('mc', '1 day', 1);")|$(refusal "SELECT pgcolumnar.partition_create_ahead('np', '1 day', 1);")|$(kids lp)|$(kids mc)" \
+	"55000 $(rc lp) is not RANGE-partitioned on one column|55000 $(rc mc) is not RANGE-partitioned on one column|55000 $(rc np) is not RANGE-partitioned on one column|0|0"
+q "CREATE TABLE kd (d date NOT NULL, v int) PARTITION BY RANGE (d);
+   CREATE TABLE ki (k bigint NOT NULL, v int) PARTITION BY RANGE (k);" >/dev/null
+check "a parent partitioned on a key that is not a timestamp is refused before any DDL" \
+	"$(refusal "SELECT pgcolumnar.partition_create_ahead('kd', '1 day', 1);")|$(refusal "SELECT pgcolumnar.partition_create_ahead('ki', '1 day', 1);")|$(kids kd)|$(kids ki)" \
+	"55000 $(rc kd) is partitioned on date, not on a timestamp|55000 $(rc ki) is partitioned on bigint, not on a timestamp|0|0"
+
+# ---- month and year widths (#1341) ------------------------------------------------
+# date_bin cannot bin by months or years, so a width holding either starts at the
+# first of the current month, and each bound is the last one plus the width: the
+# calendar's month, not a fixed 30 days.
+for key in timestamptz timestamp; do
+	q "CREATE TABLE mo_$key (ts $key NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
+	nowexpr="now()"; [ "$key" = timestamp ] && nowexpr="localtimestamp"
+	check "a $key parent with a month width starts at this month's first and steps by calendar months" \
+		"$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('mo_$key', '1 month', 2);")|$(q "SELECT count(*) FILTER (WHERE f = date_trunc('month', f) AND t = f + interval '1 month') || '|' || (min(f) = date_trunc('month', $nowexpr))
+		   FROM (SELECT (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[1]::$key AS f,
+		                (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[2]::$key AS t
+		         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'mo_$key'::regclass) b;")" \
+		"3|3|true"
+done
+q "CREATE TABLE yr (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);" >/dev/null
+check "a year width starts at this month's first and steps by calendar years" \
+	"$(sqlstate_or "SELECT pgcolumnar.partition_create_ahead('yr', '1 year', 1);")|$(q "SELECT count(*) FILTER (WHERE f = date_trunc('month', f) AND t = f + interval '1 year') || '|' || (min(f) = date_trunc('month', now()))
+	   FROM (SELECT (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[1]::timestamptz AS f,
+	                (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[2]::timestamptz AS t
+	         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'yr'::regclass) b;")" \
+	"2|2|true"
+
 # ---- refused: a DEFAULT partition -------------------------------------------------
 q "CREATE TABLE td (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
    CREATE TABLE td_default PARTITION OF td DEFAULT USING pgcolumnar;" >/dev/null
@@ -265,6 +316,9 @@ check "a timestamp key's plan for a timestamp cutoff is the same from sessions w
 check "a cutoff of the other timestamp type is refused" \
 	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00+00'::timestamptz)")|$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-01 00:00'::timestamp)")" \
 	"42804|42804"
+check "a NULL cutoff is refused, in both overloads" \
+	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', NULL::timestamptz)")|$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dw', NULL::timestamp)")" \
+	"22023|22023"
 
 # Bounds at the ends of the range: MINVALUE below is listed once its upper bound
 # is past, MAXVALUE above never is.

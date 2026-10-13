@@ -211,6 +211,20 @@ check "a parent with a UNIQUE index is refused before anything moves" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('u_jan', 'tier_pq', '$W/u.parquet');")|$(refused_cleanly u "$W/u.parquet")" \
 	"0A000|$ub|r|nofile"
 
+# A server that does not exist (#1341). Without its own branch the NULL wrapper name
+# compares as NULL, nothing is refused, and core's own "server does not exist"
+# arrives only at CREATE FOREIGN TABLE, after the export has written the file.
+build ns
+nsb="$(digest ns)"
+check "a server that does not exist is refused before anything moves" \
+	"$(sqlstate "SELECT pgcolumnar.tier_partition('ns_jan', 'tier_no_such', '$W/ns.parquet');")|$(refused_cleanly ns "$W/ns.parquet")" \
+	"42704|$nsb|r|nofile"
+
+# The fault hook's own guard (#1341): a step that is not one of tier_partition's
+# must be refused, so a typo cannot leave a test believing it injected a fault.
+check "a fault step that is not one of tier_partition's is refused" \
+	"$(sqlstate "SET pgcolumnar.tier_fault_after = 'exprot';")" "22023"
+
 build d
 db="$(digest d)"
 # Each dependent made and removed in statements of its own, with a premise that it
