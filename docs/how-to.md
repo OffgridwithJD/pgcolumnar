@@ -482,6 +482,49 @@ partitions, before it creates any. Use a wider width or a shorter lead.
 `test/partition_lifecycle.sh` checks each of these statements, in sessions
 west and east of UTC.
 
+## Drop old time partitions
+
+`pgcolumnar.partition_drop_plan` returns the statements that retire every
+partition whose whole range is older than a cutoff. It does not run them, because
+`DETACH PARTITION ... CONCURRENTLY` cannot run inside a function. Run each one as
+its own statement, for example with psql's `\gexec`:
+
+```sql
+\set ON_ERROR_STOP on
+SELECT * FROM pgcolumnar.partition_drop_plan('metrics', now() - interval '90 days') \gexec
+```
+
+For each old partition, in range order, the plan detaches it concurrently and
+then drops it. The concurrent detach takes no exclusive lock on the parent, so
+queries and inserts on the table continue. The drop locks only the detached
+partition, which no query reaches through the parent any more. A partition whose
+upper bound equals the cutoff is old. A partition that straddles the cutoff is
+kept.
+
+If a concurrent detach was interrupted, the partition stays pending. The next
+plan finishes that detach with `DETACH PARTITION ... FINALIZE` instead of starting
+it again.
+
+The drop refuses while its partition is still attached (`55000`). So if a detach
+fails, for example on a lock timeout, the drop after it does not lock the parent
+or remove the partition. A later plan retries it. `ON_ERROR_STOP` stops the run
+at the first failure, which also keeps the plan's other statements from running.
+
+The cutoff must have the key's type. A `timestamptz` key takes a `timestamptz`
+cutoff, as in the example. A `timestamp` key takes a `timestamp` cutoff, such
+as `localtimestamp - interval '90 days'`. A cutoff of the other type is refused
+(`42804`). Comparing across the two types depends on the session's time zone,
+so the same call could plan differently from two sessions.
+
+A partition that is itself partitioned is planned as one, and the `DROP` takes
+its children with it. A partition that `tier_partition` moved to Parquet is
+planned with `DROP FOREIGN TABLE`. That removes the foreign table, and the
+Parquet file stays where it is: delete it yourself when you no longer need it.
+
+The function refuses the same tables as `partition_create_ahead`, because a
+DEFAULT partition rules out a concurrent detach. A run of the plan drops the
+partitions' rows: nothing keeps them.
+
 ## Count distinct values and percentiles approximately
 
 For large tables, approximate distinct counts and percentiles cost far less than

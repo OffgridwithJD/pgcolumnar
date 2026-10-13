@@ -1606,4 +1606,23 @@ suites_not_covered 246
 #     never         1800 + 1 = 1801
 #     dated          484 + 1 =  485
 #     1801 + 485 == 2286
-checks_never_observed_red 1801
+#
+# #1297, the drop half: partition_drop_plan (OffgridwithJD): 1801 -> 1804.
+# partition_lifecycle, already covered, gains 23 checks from a five-major run
+# (partition_lifecycle.sh 50/50 on each of 15-19). Twenty arms are dated by
+# seventeen mutations, each merged one log at a time with --mutation and
+# --target: a pending detach not finalised, the cutoff made strict, the cutoff
+# type check removed, the timestamp overload comparing across zones, the DEFAULT
+# and key-type refusals removed, catalog order, no DROP, a DROP that does not
+# refuse while the partition is attached (#1331 review), a plain DETACH, no
+# cutoff filter, the lower bound read for the upper, MINVALUE left out, a tiered
+# partition dropped as a table, names unquoted, sub-partitioned partitions left
+# out, and the drop hook leaving storage behind. The three never rows are
+# premises about the fixtures: the partitions, the pending detach, and the
+# tiered January.
+#
+#     ledger rows   2286 + 23 = 2309
+#     never         1801 +  3 = 1804
+#     dated          485 + 20 =  505
+#     1804 + 505 == 2309
+checks_never_observed_red 1804

@@ -963,6 +963,142 @@ BEGIN
 	RETURN made;
 END;
 $create_ahead$;
+
+/*
+ * pgcolumnar.partition_drop_plan (#1297)
+ *
+ * The statements that retire every partition of a RANGE-partitioned parent
+ * whose whole range is older than cutoff (its upper bound at or before it), in
+ * range order: ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY, then DROP
+ * TABLE (DROP FOREIGN TABLE for one tier_partition moved to Parquet, whose file
+ * stays). A partition a concurrent detach left pending gets DETACH ... FINALIZE
+ * instead. A partition reaching MAXVALUE is never old; one from MINVALUE is, once
+ * its upper bound is past. A partition that is itself partitioned is listed whole.
+ *
+ * RETURNED, NOT RUN. DETACH ... CONCURRENTLY is refused inside any function, DO
+ * block or procedure, on every major (#1297 note 1), and a plain DETACH or a
+ * DROP of an attached partition takes ACCESS EXCLUSIVE on the parent, which
+ * blocks every query on the table. The caller runs each statement at top level:
+ *
+ *     SELECT * FROM pgcolumnar.partition_drop_plan('metrics', now() - interval '90 days') \gexec
+ *
+ * THE CUTOFF'S TYPE IS THE KEY'S (jdatcmd, #1297). A timestamp bound compared
+ * with a timestamptz cutoff converts in the session's zone, so one call could
+ * plan differently from two sessions. Two overloads, each refusing the other
+ * type of key (42804); an untyped literal resolves to timestamptz.
+ *
+ * THE DROP REFUSES WHILE THE PARTITION IS ATTACHED (jdatcmd, #1331 review). Any
+ * DETACH can fail -- a lock_timeout, a cancelled concurrent wait, a permission
+ * error -- and \gexec carries on unless ON_ERROR_STOP is set. A plain DROP of an
+ * attached partition would then take ACCESS EXCLUSIVE on the parent. So each
+ * drop is a DO block that raises 55000 while the partition is still in
+ * pg_inherits, a pending one included; the next plan's FINALIZE picks that up.
+ * A DROP may run inside DO; only DETACH ... CONCURRENTLY must be top-level.
+ *
+ * The same refusals as partition_create_ahead, with the same codes: a DEFAULT
+ * partition rules out the concurrent detach, and is refused rather than dropped
+ * with the exclusive one. No ownership check: this reads catalogs the caller
+ * can see, and DETACH checks ownership when the statements run.
+ */
+CREATE FUNCTION pgcolumnar.partition_drop_candidates(parent regclass, cutoff_type regtype)
+	RETURNS TABLE (part regclass, pending boolean, foreign_table boolean, upper_bound text)
+	LANGUAGE plpgsql STABLE
+	SET search_path = pg_catalog, pg_temp
+	AS $drop_candidates$
+DECLARE
+	strat   "char";
+	natts   int;
+	defid   oid;
+	keytype regtype;
+BEGIN
+	SELECT pt.partstrat, pt.partnatts, pt.partdefid, a.atttypid::regtype
+	  INTO strat, natts, defid, keytype
+	  FROM pg_partitioned_table pt
+	  JOIN pg_attribute a ON a.attrelid = pt.partrelid AND a.attnum = pt.partattrs[0]
+	 WHERE pt.partrelid = parent;
+	IF NOT FOUND OR strat <> 'r' OR natts <> 1 THEN
+		RAISE EXCEPTION '% is not RANGE-partitioned on one column', parent
+			USING ERRCODE = '55000';
+	END IF;
+	IF keytype NOT IN ('timestamptz'::regtype, 'timestamp'::regtype) THEN
+		RAISE EXCEPTION '% is partitioned on %, not on a timestamp', parent, keytype
+			USING ERRCODE = '55000';
+	END IF;
+	IF defid <> 0 THEN
+		RAISE EXCEPTION '% has a DEFAULT partition', parent
+			USING ERRCODE = '55000',
+			      HINT = 'A DEFAULT partition rules out DETACH CONCURRENTLY, so the partition lifecycle refuses to manage this table.';
+	END IF;
+	IF keytype <> cutoff_type THEN
+		RAISE EXCEPTION '% is partitioned on %, so its cutoff must be a %, not a %',
+			parent, keytype, keytype, cutoff_type
+			USING ERRCODE = '42804',
+			      HINT = CASE WHEN keytype = 'timestamp'::regtype
+			                  THEN 'Pass a timestamp, for example localtimestamp - interval ''90 days''.'
+			                  ELSE 'Pass a timestamptz, for example now() - interval ''90 days''.' END;
+	END IF;
+	-- MAXVALUE above has no upper bound to read, and is never old
+	RETURN QUERY
+		SELECT b.part, b.pending, b.foreign_table, b.upper_bound
+		  FROM (SELECT c.oid::regclass AS part, i.inhdetachpending AS pending,
+		               c.relkind = 'f' AS foreign_table,
+		               (regexp_match(pg_get_expr(c.relpartbound, c.oid),
+		                             'TO \(''([^'']+)''\)'))[1] AS upper_bound
+		          FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+		         WHERE i.inhparent = parent) b
+		 WHERE b.upper_bound IS NOT NULL;
+END
+$drop_candidates$;
+
+CREATE FUNCTION pgcolumnar.partition_drop_plan(parent regclass, cutoff timestamptz)
+	RETURNS SETOF text
+	LANGUAGE plpgsql STABLE
+	SET search_path = pg_catalog, pg_temp
+	AS $drop_plan_tz$
+DECLARE
+	p record;
+BEGIN
+	IF cutoff IS NULL THEN
+		RAISE EXCEPTION 'cutoff must not be NULL' USING ERRCODE = '22023';
+	END IF;
+	FOR p IN
+		SELECT d.* FROM pgcolumnar.partition_drop_candidates(parent, 'timestamptz') d
+		 WHERE d.upper_bound::timestamptz <= cutoff
+		 ORDER BY d.upper_bound::timestamptz
+	LOOP
+		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
+		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
+		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
+		                   p.part::text, p.part::text,
+		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+	END LOOP;
+END
+$drop_plan_tz$;
+
+CREATE FUNCTION pgcolumnar.partition_drop_plan(parent regclass, cutoff timestamp)
+	RETURNS SETOF text
+	LANGUAGE plpgsql STABLE
+	SET search_path = pg_catalog, pg_temp
+	AS $drop_plan_ts$
+DECLARE
+	p record;
+BEGIN
+	IF cutoff IS NULL THEN
+		RAISE EXCEPTION 'cutoff must not be NULL' USING ERRCODE = '22023';
+	END IF;
+	FOR p IN
+		SELECT d.* FROM pgcolumnar.partition_drop_candidates(parent, 'timestamp') d
+		 WHERE d.upper_bound::timestamp <= cutoff
+		 ORDER BY d.upper_bound::timestamp
+	LOOP
+		RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s %s', parent, p.part,
+		                   CASE WHEN p.pending THEN 'FINALIZE' ELSE 'CONCURRENTLY' END);
+		RETURN NEXT format('DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %L::regclass) THEN RAISE EXCEPTION ''%% is still attached to its parent; its DETACH did not finish'', %L USING ERRCODE = ''55000''; END IF; DROP %s %s; END $pgcolumnar_drop$',
+		                   p.part::text, p.part::text,
+		                   CASE WHEN p.foreign_table THEN 'FOREIGN TABLE' ELSE 'TABLE' END, p.part);
+	END LOOP;
+END
+$drop_plan_ts$;
 /* ---------------------------------------------------------------------------
  * pgcolumnar.retired_group (#1294)
  *

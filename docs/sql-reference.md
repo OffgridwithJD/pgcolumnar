@@ -622,6 +622,25 @@ refused before it creates any (`22023`). The function takes
 `SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS EXCLUSIVE`. See
 [Create time partitions ahead](how-to.md#create-time-partitions-ahead).
 
+### pgcolumnar.partition_drop_plan(parent regclass, cutoff timestamptz | timestamp) returns setof text
+
+Returns the statements that retire every partition of `parent` whose upper bound
+is at or before `cutoff`, in range order. Each partition gets
+`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`, then a `DO` block that runs
+`DROP TABLE`, or `DROP FOREIGN TABLE` for a partition `tier_partition` moved to
+Parquet (the file stays). The block refuses (`55000`) while the partition is
+still attached, so a failed detach is never followed by a drop that locks the
+parent. A partition that an interrupted concurrent detach
+left pending gets `DETACH PARTITION ... FINALIZE` instead. A partition that is
+itself partitioned is listed whole. The names are schema-qualified. The
+function runs nothing: run each statement at top level, for example with
+`\gexec`, because a concurrent detach cannot run inside a function. `cutoff`
+must have the key's type; the other type is refused (`42804`), and an untyped
+literal is a `timestamptz`. It refuses a parent with the same codes as
+`partition_create_ahead` (`55000`), and a NULL cutoff (`22023`).
+`pgcolumnar.partition_drop_candidates(parent, cutoff_type)` holds the checks
+the two overloads share. See [Drop old time partitions](how-to.md#drop-old-time-partitions).
+
 ### pgcolumnar.create_rollup(rollup name, source regclass, ts_column name, width interval, origin timestamptz, group_by name[], agg_functions text[], agg_columns name[], access_method name DEFAULT 'pgcolumnar') returns regclass
 
 Creates a rollup of `source` in the source's schema. A rollup is a view of

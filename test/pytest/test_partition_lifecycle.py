@@ -230,3 +230,253 @@ def test_partition_create_ahead(pgc_conn, expect):
         state = e.sqlstate or "?"
     expect.text(state, "55000", "a parent with a DEFAULT partition is refused")
     expect.num(_kids(conn, "fallback"), 1, "and nothing was created for it")
+
+
+def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
+    """partition_drop_plan returns the statements that retire every partition wholly
+    older than the cutoff: DETACH ... CONCURRENTLY then DROP, in range order, or
+    DETACH ... FINALIZE for one a concurrent detach left pending. They are returned,
+    not run, because DETACH ... CONCURRENTLY refuses to run inside any function
+    (#1297 note 1); each is run here at top level in its own autocommit session.
+
+    Its own fixture: weekly partitions in 2019 where the shell suite has monthly
+    ones in 2020, Asia/Tokyo where it has America/New_York, and this test's private
+    schema, which every statement names.
+    """
+    conn = pgc_conn
+    schema = _one(conn, "SELECT current_schema()")
+    dsn = pgc_cluster.dsn(dbname=_one(conn, "SELECT current_database()"))
+
+    def plan(parent, cutoff):
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT s FROM pgcolumnar.partition_drop_plan('{parent}', %s) s", (cutoff,))
+            return [r[0] for r in cur.fetchall()]
+
+    def run(statements):
+        with psycopg.connect(dsn, autocommit=True) as c:
+            for st in statements:
+                c.execute(st)
+
+    def q(name):
+        return f"{schema}.{name}"
+
+    def gdrop(kind, name):
+        """The drop the plan gives a partition: a DO block that refuses (55000)
+        while it is still attached, so a failed DETACH is never followed by a DROP
+        that locks the parent (#1331 review)."""
+        lit = "'" + name.replace("'", "''") + "'"
+        return ("DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits"
+                f" WHERE inhrelid = {lit}::regclass) THEN RAISE EXCEPTION '% is still attached to its parent;"
+                f" its DETACH did not finish', {lit} USING ERRCODE = '55000'; END IF; DROP {kind} {name};"
+                " END $pgcolumnar_drop$")
+
+    def sqlstate_with(sql, setup=None):
+        """'ok', or the SQLSTATE the statement failed with, in its own session."""
+        try:
+            with psycopg.connect(dsn, autocommit=True) as c:
+                c.execute(f"SET search_path TO {schema}")
+                if setup:
+                    c.execute(setup)
+                c.execute(sql)
+            return "ok"
+        except psycopg.Error as e:
+            return e.sqlstate
+
+    def sqlstate(sql):
+        try:
+            with psycopg.connect(dsn, autocommit=True) as c:
+                c.execute(f"SET search_path TO {schema}")
+                c.execute(sql).fetchall()
+            return "no error"
+        except psycopg.Error as e:
+            return e.sqlstate
+
+
+    weeks = ["2019-03-04", "2019-03-11", "2019-03-18", "2019-03-25", "2019-04-01", "2019-04-08"]
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xl (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts)")
+        # newest first, so catalog order is not range order
+        for i, (lo, hi) in reversed(list(enumerate(zip(weeks, weeks[1:])))):
+            cur.execute(f"CREATE TABLE xl_w{i} PARTITION OF xl FOR VALUES FROM ('{lo} 00:00+00')"
+                        f" TO ('{hi} 00:00+00') USING pgcolumnar")
+        cur.execute("INSERT INTO xl SELECT '2019-03-04 00:00+00'::timestamptz + g * interval '30 min', g"
+                    " FROM generate_series(0, 1679) g")
+    expect.text(f"{_one(conn, 'SELECT count(DISTINCT tableoid) FROM xl')}|{_kids(conn, 'xl')}", "5|5",
+                "premise: the drop fixture has several partitions, each holding rows")
+
+    want = []
+    for i in range(3):
+        want += [f"ALTER TABLE {q('xl')} DETACH PARTITION {q(f'xl_w{i}')} CONCURRENTLY", gdrop("TABLE", q(f"xl_w{i}"))]
+    expect.text("\n".join(plan("xl", "2019-03-28 12:00+00")), "\n".join(want),
+                "the plan retires the partitions wholly before the cutoff, in range order")
+    expect.num(sum(1 for s in plan("xl", "2019-03-18 00:00+00") if s.startswith("DO ")), 2,
+               "a cutoff on a partition's upper bound includes it")
+    expect.num(len(plan("xl", "2018-12-31 00:00+00")), 0, "a cutoff before every partition plans nothing")
+
+    sids = [_one(conn, f"SELECT pgcolumnar.get_storage_id('xl_w{i}')") for i in range(3)]
+    run(plan("xl", "2019-03-28 12:00+00"))
+    left = _one(conn, "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_inherits i"
+                      " JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'xl'::regclass")
+    gone = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                      f" WHERE n.nspname = '{schema}' AND c.relname IN ('xl_w0', 'xl_w1', 'xl_w2')")
+    expect.text(f"{left}|{gone}", "xl_w3,xl_w4|0", "running the plan leaves only the partitions it did not name")
+    expect.num(_one(conn, "SELECT count(*) FROM xl"),
+               _one(conn, "SELECT count(*) FROM generate_series(0, 1679) g"
+                          " WHERE '2019-03-04 00:00+00'::timestamptz + g * interval '30 min' >= '2019-03-25 00:00+00'"),
+               "and every row the remaining partitions held is still there")
+    expect.num(_one(conn, "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id = ANY (%s)" % (
+                   "ARRAY[" + ",".join(str(s) for s in sids) + "]::bigint[]")), 0,
+               "and the dropped partitions' pgcolumnar storage rows are gone")
+    expect.text(f"{len(plan('xl', '2019-03-28 12:00+00'))}|{_kids(conn, 'xl')}", "0|2",
+                "a second plan for the same cutoff is empty, and the partitions it kept are still attached")
+
+    # The cutoff's type must be the key's: a timestamp key with a timestamp cutoff
+    # plans the same in every session, and a cutoff of the other type is refused.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xw (ts timestamp NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xw_a PARTITION OF xw FOR VALUES FROM ('2019-05-01 00:00') TO ('2019-05-01 06:00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xw_b PARTITION OF xw FOR VALUES FROM ('2019-05-01 06:00') TO ('2019-05-01 12:00') USING pgcolumnar")
+    got = []
+    for zone in ("Asia/Tokyo", "America/Denver"):
+        with psycopg.connect(dsn, autocommit=True) as c:
+            c.execute(f"SET search_path TO {schema}")
+            c.execute(f"SET TimeZone = '{zone}'")
+            got.append(c.execute("SELECT coalesce(string_agg(s, ';'), 'none')"
+                                 " FROM pgcolumnar.partition_drop_plan('xw', '2019-05-01 06:00'::timestamp) s").fetchone()[0])
+    one = f"ALTER TABLE {q('xw')} DETACH PARTITION {q('xw_a')} CONCURRENTLY;" + gdrop("TABLE", q("xw_a"))
+    expect.text("|".join(got), f"{one}|{one}",
+                "a timestamp key's plan for a timestamp cutoff is the same from sessions west and east of UTC")
+    expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xw', '2019-05-01 06:00+00'::timestamptz)") + "|"
+                + sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xl', '2019-04-01 00:00'::timestamp)"),
+                "42804|42804", "a cutoff of the other timestamp type is refused")
+
+    # MINVALUE below is listed once its upper bound is past; MAXVALUE above never.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xm (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xm_lo PARTITION OF xm FOR VALUES FROM (MINVALUE) TO ('2019-07-01 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xm_hi PARTITION OF xm FOR VALUES FROM ('2019-07-01 00:00+00') TO (MAXVALUE) USING pgcolumnar")
+    lo = [s for s in plan("xm", "2019-07-01 00:00+00") if s.startswith("DO ")]
+    hi = [s for s in plan("xm", "infinity") if "xm_hi" in s]
+    expect.text(f"{';'.join(lo)}|{len(hi)}", gdrop("TABLE", q("xm_lo")) + "|0",
+                "a partition from MINVALUE is listed once its upper bound is past, one to MAXVALUE never")
+
+    # Names that need quoting, in a schema that needs quoting.
+    with conn.cursor() as cur:
+        cur.execute('CREATE SCHEMA "Py Drop"')
+        cur.execute('CREATE TABLE "Py Drop"."Readings" (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)')
+        cur.execute('CREATE TABLE "Py Drop"."Week One" PARTITION OF "Py Drop"."Readings"'
+                    " FOR VALUES FROM ('2019-08-05 00:00+00') TO ('2019-08-12 00:00+00') USING pgcolumnar")
+        cur.execute('CREATE TABLE "Py Drop"."Week Two" PARTITION OF "Py Drop"."Readings"'
+                    " FOR VALUES FROM ('2019-08-12 00:00+00') TO ('2019-08-19 00:00+00') USING pgcolumnar")
+    try:
+        run(plan('"Py Drop"."Readings"', "2019-08-12 00:00+00"))
+        left = _one(conn, "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_class c"
+                          " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                          " WHERE n.nspname = 'Py Drop' AND c.relkind IN ('r', 'p')")
+    finally:
+        conn.execute('DROP SCHEMA "Py Drop" CASCADE')
+    expect.text(left, "Readings,Week Two", "a plan for names that need quoting runs as returned")
+
+    # A partition that is itself partitioned is listed whole and dropped with its children.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xs (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xs_h1 PARTITION OF xs FOR VALUES FROM ('2019-01-01 00:00+00') TO ('2019-07-01 00:00+00')"
+                    " PARTITION BY RANGE (ts)")
+        for name, lo_, hi_ in (("xs_h1_a", "2019-01-01", "2019-04-01"), ("xs_h1_b", "2019-04-01", "2019-07-01")):
+            cur.execute(f"CREATE TABLE {name} PARTITION OF xs_h1 FOR VALUES FROM ('{lo_} 00:00+00') TO ('{hi_} 00:00+00')"
+                        " USING pgcolumnar")
+        cur.execute("CREATE TABLE xs_h2 PARTITION OF xs FOR VALUES FROM ('2019-07-01 00:00+00') TO ('2020-01-01 00:00+00')"
+                    " USING pgcolumnar")
+        cur.execute("INSERT INTO xs SELECT '2019-01-01 00:00+00'::timestamptz + g * interval '1 day' FROM generate_series(0, 364) g")
+    expect.text(";".join(plan("xs", "2019-07-01 00:00+00")),
+                f"ALTER TABLE {q('xs')} DETACH PARTITION {q('xs_h1')} CONCURRENTLY;" + gdrop("TABLE", q("xs_h1")),
+                "a partition that is itself partitioned is planned whole")
+    run(plan("xs", "2019-07-01 00:00+00"))
+    gone = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                      f" WHERE n.nspname = '{schema}' AND c.relname IN ('xs_h1', 'xs_h1_a', 'xs_h1_b')")
+    kept = _one(conn, "SELECT count(*) FROM generate_series(0, 364) g"
+                      " WHERE '2019-01-01 00:00+00'::timestamptz + g * interval '1 day' >= '2019-07-01 00:00+00'")
+    expect.text(f"{gone}|{_one(conn, 'SELECT count(*) FROM xs')}", f"0|{kept}",
+                "and running the plan drops it with its children")
+
+    # A partition tier_partition moved to Parquet: DROP FOREIGN TABLE, and its file stays.
+    path = _one(conn, "SELECT current_setting('data_directory')") + f"/{schema}_xt_jan.parquet"
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE SERVER {schema}_pq FOREIGN DATA WRAPPER pgcolumnar_parquet")
+        cur.execute("CREATE TABLE xt (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xt_jan PARTITION OF xt FOR VALUES FROM ('2019-01-01 00:00+00') TO ('2019-02-01 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xt_feb PARTITION OF xt FOR VALUES FROM ('2019-02-01 00:00+00') TO ('2019-03-01 00:00+00') USING pgcolumnar")
+        cur.execute("INSERT INTO xt SELECT '2019-01-01 00:00+00'::timestamptz + g * interval '2 hours', g FROM generate_series(0, 670) g")
+    try:
+        moved = _one(conn, f"SELECT pgcolumnar.tier_partition('xt_jan', '{schema}_pq', '{path}')")
+        kind = _one(conn, "SELECT relkind FROM pg_class WHERE oid = 'xt_jan'::regclass")
+        expect.text(f"{moved}|{kind}", "372|f", "premise: the January partition was tiered to Parquet")
+        tiered = plan("xt", "2019-02-01 00:00+00")
+        expect.text(";".join(tiered),
+                    f"ALTER TABLE {q('xt')} DETACH PARTITION {q('xt_jan')} CONCURRENTLY;" + gdrop("FOREIGN TABLE", q("xt_jan")),
+                    "a tiered partition is planned with DROP FOREIGN TABLE")
+        run(tiered)
+        left = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                          f" WHERE n.nspname = '{schema}' AND c.relname = 'xt_jan'")
+        size = _one(conn, f"SELECT (pg_stat_file('{path}', true)).size")
+        expect.text(f"{left}|{'file-kept' if size else 'file-gone'}", "0|file-kept",
+                    "and running it drops the foreign table and leaves its Parquet file")
+    finally:
+        conn.execute(f"DROP SERVER {schema}_pq CASCADE")
+
+    # A pending detach: an older snapshot holds the second phase, a timeout cancels it.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xp (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xp_1 PARTITION OF xp FOR VALUES FROM ('2019-06-01 00:00+00') TO ('2019-06-08 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xp_2 PARTITION OF xp FOR VALUES FROM ('2019-06-08 00:00+00') TO ('2019-06-15 00:00+00') USING pgcolumnar")
+    with psycopg.connect(dsn) as holder:
+        holder.execute(f"SET search_path TO {schema}")
+        holder.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        holder.execute("SELECT count(*) FROM xp").fetchone()
+        with psycopg.connect(dsn, autocommit=True) as d:
+            d.execute(f"SET search_path TO {schema}")
+            d.execute("SET statement_timeout = '1500ms'")
+            try:
+                d.execute("ALTER TABLE xp DETACH PARTITION xp_1 CONCURRENTLY")
+            except psycopg.errors.QueryCanceled:
+                pass
+        holder.rollback()
+    expect.text(str(_one(conn, "SELECT inhdetachpending FROM pg_inherits WHERE inhrelid = 'xp_1'::regclass")),
+                "True", "premise: the interrupted detach left the partition pending")
+    pending_plan = plan("xp", "2019-06-08 00:00+00")
+    expect.text(";".join(pending_plan),
+                f"ALTER TABLE {q('xp')} DETACH PARTITION {q('xp_1')} FINALIZE;" + gdrop("TABLE", q("xp_1")),
+                "a pending detach is finalised, not started again")
+    run(pending_plan)
+    gone = _one(conn, "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                      f" WHERE n.nspname = '{schema}' AND c.relname = 'xp_1'")
+    expect.text(f"{gone}|{_kids(conn, 'xp')}", "0|1", "and running it drops the pending partition")
+
+    # A DETACH that fails on the parent's lock, and then the rest of the plan once
+    # the lock is gone: the DROP must refuse, and the partition stay attached.
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xf (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xf_1 PARTITION OF xf FOR VALUES FROM ('2019-09-01 00:00+00') TO ('2019-09-08 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xf_2 PARTITION OF xf FOR VALUES FROM ('2019-09-08 00:00+00') TO ('2019-09-15 00:00+00') USING pgcolumnar")
+    detach, drop = plan("xf", "2019-09-08 00:00+00")
+    states = []
+    with psycopg.connect(dsn) as holder:
+        holder.execute(f"SET search_path TO {schema}")
+        holder.execute("LOCK TABLE xf IN SHARE UPDATE EXCLUSIVE MODE")
+        states.append(sqlstate_with(detach, "SET lock_timeout = '1500ms'"))
+        holder.rollback()
+    states.append(sqlstate_with(drop))
+    attached = _one(conn, "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'xf_1'::regclass")
+    expect.text(f"{';'.join(states)}|{_kids(conn, 'xf')}|{attached}", "55P03;55000|2|1",
+                "after a DETACH that fails, the plan's DROP refuses and the partition stays attached")
+
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xd (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute("CREATE TABLE xd_default PARTITION OF xd DEFAULT USING pgcolumnar")
+        cur.execute("CREATE TABLE xn (k bigint NOT NULL) PARTITION BY RANGE (k)")
+        cur.execute("CREATE TABLE xnl (k int)")
+    expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xd', now())"), "55000",
+                "a drop plan for a parent with a DEFAULT partition is refused")
+    expect.text(sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xn', now())") + "|"
+                + sqlstate("SELECT * FROM pgcolumnar.partition_drop_plan('xnl', now())"), "55000|55000",
+                "a drop plan for a parent not partitioned on a timestamp is refused")

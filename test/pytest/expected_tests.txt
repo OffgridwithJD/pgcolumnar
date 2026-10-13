@@ -603,4 +603,7 @@ guard_tests 419
 # test_a_key_well_under_the_gate_takes_the_node) and one added
 # (test_on_by_default_and_gated_on_the_estimate), by collection on this branch
 # rebased onto c90976d (#1329): 945 collected on main, 946 here.
-cluster_tests 527
+#
+# cluster_tests 527 -> 528 for #1297's test_partition_drop_plan, by collection on
+# this branch rebased onto b55cb23 (#1330).
+cluster_tests 528
