@@ -1625,4 +1625,15 @@ suites_not_covered 246
 #     never         1801 +  3 = 1804
 #     dated          485 + 20 =  505
 #     1804 + 505 == 2309
-checks_never_observed_red 1804
+#
+# The drop block's body as a literal (#1331 review, OffgridwithJD): 1804 -> 1805.
+# Two checks from a five-major run (partition_lifecycle.sh 52/52 on each of
+# 15-19): the arm, a partition named with the block's dollar-quote tag dropped
+# as planned, dated by the run on main's dollar-quoted drop; and its premise,
+# that the fixture's name holds the tag, which arrives never.
+#
+#     ledger rows   2309 + 2 = 2311
+#     never         1804 + 1 = 1805
+#     dated          505 + 1 =  506
+#     1805 + 506 == 2311
+checks_never_observed_red 1805

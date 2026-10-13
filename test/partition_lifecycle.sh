@@ -204,10 +204,12 @@ plan() { q "SELECT string_agg(s, E'\n') FROM pgcolumnar.partition_drop_plan('$1'
 # The drop each partition gets: a DO block that refuses (55000) while the partition
 # is still attached, so a DETACH that failed cannot be followed by a DROP that takes
 # ACCESS EXCLUSIVE on the parent (jdatcmd, #1331 review).
+sqlit() { local x="${1//\'/\'\'}"; printf "'%s'" "$x"; }	# a SQL string literal
 gdrop() {	# gdrop 'TABLE'|'FOREIGN TABLE' QUALIFIED-NAME -> the planned statement
-	local lit="'${2//\'/\'\'}'"
-	printf "DO \$pgcolumnar_drop\$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = %s::regclass) THEN RAISE EXCEPTION '%% is still attached to its parent; its DETACH did not finish', %s USING ERRCODE = '55000'; END IF; DROP %s %s; END \$pgcolumnar_drop\$" \
-		"$lit" "$lit" "$1" "$2"
+	# The body is a string literal, not dollar-quoted, so no name can end it.
+	local body
+	body="BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = $(sqlit "$2")::regclass) THEN RAISE EXCEPTION '% is still attached to its parent; its DETACH did not finish', $(sqlit "$2") USING ERRCODE = '55000'; END IF; DROP $1 $2; END"
+	printf 'DO %s' "$(sqlit "$body")"
 }
 run_plan() {	# each statement top-level, as \gexec would run it
 	local line
@@ -371,6 +373,18 @@ wait "$holder"
 states="$states;$(stmt_state "${df_plan[1]}")"
 check "after a DETACH that fails, the plan's DROP refuses and the partition stays attached" \
 	"$states|$(kids df)|$(q "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'df_1'::regclass;")" "55P03;55000|2|1"
+
+# A partition whose name holds the DO block's own dollar-quote tag (jdatcmd, #1331
+# review): the guarded drop must still be one statement that runs as returned.
+q 'CREATE TABLE dq (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE "dq$pgcolumnar_drop$1" PARTITION OF dq FOR VALUES FROM ('"'2020-01-01 00:00+00'"') TO ('"'2020-02-01 00:00+00'"') USING pgcolumnar;
+   CREATE TABLE dq_2 PARTITION OF dq FOR VALUES FROM ('"'2020-02-01 00:00+00'"') TO ('"'2020-03-01 00:00+00'"') USING pgcolumnar;' >/dev/null
+check "premise: a partition is named with the drop block's dollar-quote tag" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname = 'dq\$pgcolumnar_drop\$1';")" "1"
+dq_failures="$(run_plan dq '2020-02-01 00:00+00')"
+check "a partition named with the drop block's dollar-quote tag is dropped by the plan as returned" \
+	"${dq_failures:-every statement ran}|$(q "SELECT count(*) FROM pg_class WHERE relname = 'dq\$pgcolumnar_drop\$1';")|$(kids dq)" \
+	"every statement ran|0|1"
 
 # Refusals, as partition_create_ahead refuses.
 check "a drop plan for a parent with a DEFAULT partition is refused" \

@@ -263,12 +263,14 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     def gdrop(kind, name):
         """The drop the plan gives a partition: a DO block that refuses (55000)
         while it is still attached, so a failed DETACH is never followed by a DROP
-        that locks the parent (#1331 review)."""
-        lit = "'" + name.replace("'", "''") + "'"
-        return ("DO $pgcolumnar_drop$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits"
-                f" WHERE inhrelid = {lit}::regclass) THEN RAISE EXCEPTION '% is still attached to its parent;"
-                f" its DETACH did not finish', {lit} USING ERRCODE = '55000'; END IF; DROP {kind} {name};"
-                " END $pgcolumnar_drop$")
+        that locks the parent (#1331 review). Its body is a string literal, not
+        dollar-quoted, so no partition name can end it."""
+        def lit(x):
+            return "'" + x.replace("'", "''") + "'"
+        body = ("BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_inherits"
+                f" WHERE inhrelid = {lit(name)}::regclass) THEN RAISE EXCEPTION '% is still attached to its parent;"
+                f" its DETACH did not finish', {lit(name)} USING ERRCODE = '55000'; END IF; DROP {kind} {name}; END")
+        return "DO " + lit(body)
 
     def sqlstate_with(sql, setup=None):
         """'ok', or the SQLSTATE the statement failed with, in its own session."""
@@ -469,6 +471,21 @@ def test_partition_drop_plan(pgc_conn, pgc_cluster, expect):
     attached = _one(conn, "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'xf_1'::regclass")
     expect.text(f"{';'.join(states)}|{_kids(conn, 'xf')}|{attached}", "55P03;55000|2|1",
                 "after a DETACH that fails, the plan's DROP refuses and the partition stays attached")
+
+    # A partition named with the drop block's own dollar-quote tag (#1331 review).
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE xq (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
+        cur.execute('CREATE TABLE "xq$pgcolumnar_drop$a" PARTITION OF xq'
+                    " FOR VALUES FROM ('2019-10-01 00:00+00') TO ('2019-10-08 00:00+00') USING pgcolumnar")
+        cur.execute("CREATE TABLE xq_b PARTITION OF xq"
+                    " FOR VALUES FROM ('2019-10-08 00:00+00') TO ('2019-10-15 00:00+00') USING pgcolumnar")
+    named = ("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+             f" WHERE n.nspname = '{schema}' AND c.relname = 'xq$pgcolumnar_drop$a'")
+    expect.num(_one(conn, named), 1, "premise: a partition is named with the drop block's dollar-quote tag")
+    failed = [st for st in plan("xq", "2019-10-08 00:00+00") if sqlstate_with(st) != "ok"]
+    expect.text(f"{'; '.join(failed) or 'every statement ran'}|{_one(conn, named)}|{_kids(conn, 'xq')}",
+                "every statement ran|0|1",
+                "a partition named with the drop block's dollar-quote tag is dropped by the plan as returned")
 
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE xd (ts timestamptz NOT NULL) PARTITION BY RANGE (ts)")
