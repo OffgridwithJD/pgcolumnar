@@ -99,6 +99,17 @@ count_cov() {
 		| grep -v '^SET$'
 }
 
+explain_count() {
+	# The count arm's OWN plan (#1339): its query is not the one explain_cov shows.
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+		-d "$PGC_DB" -Atq \
+		-c "$PAR" \
+		-c "SET max_parallel_workers_per_gather = 2;" \
+		-c "SET pgcolumnar.enable_projection_scan = on;" \
+		-c "EXPLAIN (COSTS OFF) SELECT count(*) FROM cvppar WHERE ik BETWEEN $LO AND $HI;" \
+		| grep -v '^SET$'
+}
+
 shape() {
 	local plan="$1"
 	local g p
@@ -174,6 +185,11 @@ check "premise: a parallel base scan is available when the projection is off" \
 check "a covering projection can be a parallel scan" \
 	"$(shape "$par_on_plan")" "gather+projection"
 
+# THE COUNT'S OWN PLAN (#1339). The count comes from a different query from the one
+# whose shape is asserted above; if it planned serially or as a base scan, this arm
+# would check nothing about the parallel covering path.
+check "the parallel count is a parallel covering projection scan" \
+	"$(shape "$(explain_count)")" "gather+projection"
 check "a parallel covering projection returns the covering rows once" \
 	"$par_on_count" "$WANT"
 
@@ -272,5 +288,11 @@ check "premise: ANALYZE printed a rows= line per launched worker" \
 # workers produced rows, in at least one of the attempts above.
 check "workers share the covering projection scan, it is not a single claimer" \
 	"$n_busy" "2"
+# AND SHARE IT, NOT DUPLICATE IT (#1339). Two busy workers is also what two workers
+# each scanning every group look like. With the leader not participating, the
+# workers' rows are everything the Gather returns, so they must add up to the
+# covering rows exactly once.
+check "the workers' rows add up to the covering rows, each returned once" \
+	"$(echo "$rows_list" | awk '{s+=$1} END{print s+0}')" "$WANT"
 
 pgc_summary
