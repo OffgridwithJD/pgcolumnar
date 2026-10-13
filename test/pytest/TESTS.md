@@ -4625,6 +4625,7 @@ and neither file names the other.
 | `test_the_summary_block_was_extracted_rather_than_an_empty_range` | an empty extraction runs nothing and reports clean, so the block is asserted before it is used |
 | `test_the_printed_breakdown_takes_a_count_a_count_can_take` | the line a reader sees carries no negative, and names the skipped-but-accounted category |
 | `test_the_same_block_counts_and_names_a_real_debt` | the same block still counts and names a genuine debt, so it is not printing `0 did not` unconditionally |
+| `test_a_ran_count_the_names_do_not_support_fails_the_major` | told 4 ran while the names say 3, the block reports that the breakdown does not add up and fails the major; a block deriving the debt by subtraction would make it add up by construction (#1339) |
 | `test_no_code_path_subtracts_the_wide_population_from_the_ran_count` | the defect's shape is refused at the source, over CODE lines only -- the comment explaining it quotes it verbatim |
 
 The load-bearing assertion is that the printed breakdown takes a count a count
