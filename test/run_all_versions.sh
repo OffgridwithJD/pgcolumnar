@@ -282,6 +282,7 @@ SUITES=(
 	rewrite_group_scan
 	rewrite_storage_oid
 	rls_direct_storage
+	rollup
 	row_triggers
 	scan_decode_cost
 	scan_direction

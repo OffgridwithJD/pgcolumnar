@@ -122,7 +122,7 @@ for z in UTC Asia/Kolkata; do
 	q "SET TimeZone = '$z'; SELECT pgcolumnar.create_rollup('$r', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}', $AGGS);
 	   SELECT pgcolumnar.refresh_rollup('$r');" >/dev/null
 done
-check "refreshes from sessions in UTC and Asia/Kolkata build the same rollup" \
+check "refreshes from sessions in different time zones build the same rollup" \
 	"$(exact "SELECT * FROM r_utc")" "$(exact "SELECT * FROM r_asia_kolkata")"
 # Empty equals empty: in the first red run both were, and the arm above passed.
 check_num "premise: the zone rollups hold a row per key of the recompute" \
@@ -133,7 +133,7 @@ check_num "premise: and that is not zero" "$(at_least "$(q "SELECT count(*) FROM
 # The source is grown first: on a 26-page table the refresh's fixed cost (the
 # group list, the storage id) is itself more than a fifth (measured: 15 blocks).
 load 100001 300000 "2026-04-01 00:00:00+00"
-check_num "a refresh folds a bulk append of 200,000 rows" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "200000"
+check_num "a refresh folds a bulk append" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "200000"
 check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 load 37301 38300 "2026-03-16 00:00:00+00"
 q "SELECT pg_stat_reset();" >/dev/null
@@ -203,7 +203,22 @@ check "another role sees none of its rollup catalog rows" \
 	"$(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup") $(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup_group")" "0 0"
 # Row-level security hides the catalog row, so to that role it is no rollup at
 # all (42704), which also says nothing about whether one exists.
-check "and cannot refresh it" "$(as_role ru_b "SELECT pgcolumnar.refresh_rollup('public.own_r')" | grep -oE '[0-9A-Z]{5}$' || true)" "42704"
+check "and cannot refresh it" "$(as_role ru_b "SELECT pgcolumnar.refresh_rollup('public.own_r')" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p')" "42704"
+
+# access_method: the partials need not be columnar (#1294 point 12 measures which
+# serves a hot rollup better). A heap rollup folds and matches the same way.
+q "SELECT pgcolumnar.create_rollup('r_heap', 'src', 'ts', '1 hour', '$ORIGIN', '{dev}', $AGGS, 'heap');" >/dev/null
+check "a rollup kept in a heap table refreshes and equals a full recompute" \
+	"$(q "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.oid = 'r_heap__partials'::regclass;")|$(q "SELECT pgcolumnar.refresh_rollup('r_heap') > 0;")|$(exact "SELECT * FROM r_heap")" \
+	"heap|t|$(exact "$RECOMPUTE")"
+
+# REPEATABLE READ: the caller's snapshot would predate the refresh's lock, and a
+# refresh that waited for another would fold the same groups again.
+check "a refresh at REPEATABLE READ is refused" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	   -v VERBOSITY=sqlstate -c "BEGIN ISOLATION LEVEL REPEATABLE READ" \
+	   -c "SELECT pgcolumnar.refresh_rollup('r_utc')" -c "ROLLBACK" 2>&1 |
+	   sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' | head -1)" "25000"
 
 # Refused at creation, each with 22023: the aggregates are structured input
 # checked against the five that combine, never SQL text (#1294 point 11).
@@ -215,7 +230,9 @@ check "aggregate functions and columns of different lengths are refused" \
 check "an aggregate column the source does not have is refused" \
 	"$(refused_create r_c '1 hour' '{sum}' '{nosuch}')" "22023"
 check "* with anything but count is refused" "$(refused_create r_s '1 hour' '{sum}' '{*}')" "22023"
-check_num "and no refused rollup left a table behind" \
+# A refused call rolls back, so no change to the functions can leave a table:
+# a premise (#1236), kept so a non-transactional rewrite would be seen.
+check_num "premise: and no refused rollup left a table behind" \
 	"$(q "SELECT count(*) FROM pg_class WHERE relname IN ('r_m', 'r_p', 'r_l', 'r_c', 'r_s');")" "0"
 
 pgc_summary
