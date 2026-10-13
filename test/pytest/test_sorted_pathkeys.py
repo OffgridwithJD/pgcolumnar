@@ -1102,10 +1102,16 @@ def test_a_plain_gather_never_sits_above_a_scan_claiming_an_order(fx, expect):
         for guc in ("max_parallel_workers_per_gather = 4", "parallel_setup_cost = 0",
                     "parallel_tuple_cost = 0", "min_parallel_table_scan_size = 0"):
             cur.execute("SET " + guc)
+        # AN UNORDERED SCAN OF THE SAME TABLE MUST PLAN A GATHER (#1339). The check used
+        # to be len(plan) >= 1, which any EXPLAIN satisfies; with no parallel path for
+        # the table at all the arm below then passed because no Gather existed. A
+        # repository change can redden this, so it is an arm, not a premise (#1236).
+        cur.execute("EXPLAIN (COSTS OFF) SELECT k, j FROM c WHERE j >= 0")
+        unordered = [r[0] for r in cur.fetchall()]
+        expect.num(sum(1 for l in unordered if l.strip(" ->").startswith("Gather")), 1,
+                   "parallelism is actually available for this table in that session")
         cur.execute("EXPLAIN (COSTS OFF) SELECT k, j FROM c ORDER BY k, j LIMIT 20")
         plan = [r[0] for r in cur.fetchall()]
-        expect.at_least(len(plan), 1,
-                        "premise: parallelism was actually available in that session")
         bare_gather = sum(1 for l in plan if l.strip(" ->") == "Gather")
         keeps_order = sum(1 for l in plan
                           if "Gather Merge" in l or "Sort" in l.strip(" ->"))

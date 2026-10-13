@@ -609,8 +609,12 @@ par() {	# run with parallelism on, since pgc_setup pins the gather workers to 0
 		psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -c "$1" 2>&1
 }
 PARPLAN="$(par "EXPLAIN (COSTS OFF) SELECT k, j FROM c ORDER BY k, j LIMIT 20")"
-check "premise: parallelism was actually available in that session" \
-	"$([ -n "$PARPLAN" ] && echo yes || echo no)" "yes"
+# AN UNORDERED SCAN OF THE SAME TABLE MUST PLAN A GATHER (#1339). This used to check
+# only that EXPLAIN printed something, which any plan does; with no parallel path
+# for the table at all, the arm below then read "ok" because no Gather existed. A
+# check a repository change can redden is an arm, not a premise (#1236).
+check "parallelism is actually available for this table in that session" \
+	"$(par "EXPLAIN (COSTS OFF) SELECT k, j FROM c WHERE j >= 0" | grep -cE '^ *(->)? *Gather')" "1"
 # grep -c, never grep -q: a reader that exits early takes the writer down with
 # EPIPE under pipefail and reports the pattern ABSENT whatever the string held
 # (selftest 080). -c consumes all of its input, so the count is the answer.
