@@ -3663,6 +3663,9 @@ pgcolumnar_get_relation_info(PlannerInfo *root, Oid relationObjectId,
  * module init
  * ------------------------------------------------------------------------- */
 
+/* pgcolumnar.rollup_pause (#1294): read by refresh_rollup through current_setting */
+static bool pgcolumnar_rollup_pause = false;
+
 void
 _PG_init(void)
 {
@@ -4092,6 +4095,21 @@ _PG_init(void)
 	 * time via GetConfigOption; link-local ranges are refused there
 	 * unconditionally, list or no list.
 	 */
+	/*
+	 * A developer pause for pgcolumnar.refresh_rollup (#1294): with it on, the
+	 * refresh sleeps two seconds inside its one statement, after its snapshot
+	 * is taken, so a test can commit rows in that window and show they are
+	 * folded by the next refresh, once. Superuser-only and off by default.
+	 */
+	DefineCustomBoolVariable("pgcolumnar.rollup_pause",
+							 "Developer pause: hold refresh_rollup open inside its statement.",
+							 NULL,
+							 &pgcolumnar_rollup_pause,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomStringVariable("pgcolumnar.objstore_allowed_endpoints",
 							   "Remote endpoints the object-store module may connect to.",
 							   "Comma-separated host or host:port entries; empty refuses all remote access.",

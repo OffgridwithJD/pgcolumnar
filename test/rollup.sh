@@ -130,6 +130,11 @@ check_num "premise: the zone rollups hold a row per key of the recompute" \
 check_num "premise: and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")" 1)" "1"
 
 # Cost: after a small append to the whole table, a refresh reads the new groups.
+# The source is grown first: on a 26-page table the refresh's fixed cost (the
+# group list, the storage id) is itself more than a fifth (measured: 15 blocks).
+load 100001 300000 "2026-04-01 00:00:00+00"
+check_num "a refresh folds a bulk append of 200,000 rows" "$(q "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "200000"
+check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 load 37301 38300 "2026-03-16 00:00:00+00"
 q "SELECT pg_stat_reset();" >/dev/null
 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
@@ -146,11 +151,13 @@ check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 # A rewrite renumbers every row group (#1294 point 9): the snapshot no longer names
 # the source's groups, so a refresh is refused, and rebase_rollup records the
 # current groups without touching the rollup.
-groups_before="$(q "SELECT string_agg(group_number::text, ',' ORDER BY group_number) FROM pgcolumnar.row_group
-	WHERE storage_id = pgcolumnar.get_storage_id('src');")"
+# The identity is the storage id and the group numbers: measured, pgcolumnar.vacuum
+# gives a table a new storage id and may keep its group numbers.
+groups_before="$(q "SELECT pgcolumnar.get_storage_id('src') || ':' || string_agg(group_number::text, ',' ORDER BY group_number)
+	FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('src');")"
 q "SELECT pgcolumnar.vacuum('src');" >/dev/null
-groups_after="$(q "SELECT string_agg(group_number::text, ',' ORDER BY group_number) FROM pgcolumnar.row_group
-	WHERE storage_id = pgcolumnar.get_storage_id('src');")"
+groups_after="$(q "SELECT pgcolumnar.get_storage_id('src') || ':' || string_agg(group_number::text, ',' ORDER BY group_number)
+	FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('src');")"
 check "premise: pgcolumnar.vacuum gave the source's row groups new identities" \
 	"$([ -n "$groups_after" ] && [ "$groups_after" != "$groups_before" ] && echo renumbered || echo "same: $groups_after")" "renumbered"
 vb="$(exact "SELECT * FROM r_hourly")"
@@ -174,6 +181,30 @@ check "a refresh after a delete is refused until phase 2" \
 check "and the refused refresh changed nothing" "$(exact "SELECT * FROM r_hourly")" "$before"
 
 # Refused at creation.
+# Not only for superusers: a superuser bypasses row-level security, so every arm
+# above ran past the policies on pgcolumnar.rollup and rollup_group. A table's
+# owner can roll it up; another role sees nothing of it and cannot refresh it.
+# PUBLIC has no USAGE on schema pgcolumnar (measured: 42501 for any call), so the
+# roles get it as an administrator would grant it; what is then tested is the
+# row-level security on the rollup catalogs.
+q "CREATE ROLE ru_a; CREATE ROLE ru_b; GRANT USAGE, CREATE ON SCHEMA public TO ru_a, ru_b;
+   GRANT USAGE ON SCHEMA pgcolumnar TO ru_a, ru_b;" >/dev/null
+as_role() { env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	-v VERBOSITY=sqlstate -c "SET ROLE $1" -c "$2" 2>&1 | grep -v '^SET$' | tail -1; }
+as_role ru_a "CREATE TABLE own_src (ts timestamptz, v int) USING pgcolumnar" >/dev/null
+as_role ru_a "INSERT INTO own_src SELECT '2026-05-01'::timestamptz + g * interval '1 min', g FROM generate_series(1, 5000) g" >/dev/null
+check "a table's owner, not a superuser, creates a rollup of it" \
+	"$(as_role ru_a "SELECT pgcolumnar.create_rollup('own_r', 'own_src', 'ts', '1 day', '$ORIGIN', '{}', '{count,sum}', '{*,v}')")" "own_r"
+check_num "and refreshes it" "$(as_role ru_a "SELECT pgcolumnar.refresh_rollup('own_r')")" "5000"
+check "and reads what a recompute gives" \
+	"$(as_role ru_a "SELECT string_agg(bucket || ':' || count || ':' || sum_v, ' ' ORDER BY bucket) FROM own_r")" \
+	"$(q "SELECT string_agg(b || ':' || n || ':' || s, ' ' ORDER BY b) FROM (SELECT date_bin('1 day', ts, '$ORIGIN') b, count(*) n, sum(v)::numeric s FROM own_src GROUP BY 1) x;")"
+check "another role sees none of its rollup catalog rows" \
+	"$(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup") $(as_role ru_b "SELECT count(*) FROM pgcolumnar.rollup_group")" "0 0"
+# Row-level security hides the catalog row, so to that role it is no rollup at
+# all (42704), which also says nothing about whether one exists.
+check "and cannot refresh it" "$(as_role ru_b "SELECT pgcolumnar.refresh_rollup('public.own_r')" | grep -oE '[0-9A-Z]{5}$' || true)" "42704"
+
 # Refused at creation, each with 22023: the aggregates are structured input
 # checked against the five that combine, never SQL text (#1294 point 11).
 refused_create() { sqlstate "SELECT pgcolumnar.create_rollup('$1', 'src', 'ts', '$2', '$ORIGIN', '{}', '$3', '$4');"; }
