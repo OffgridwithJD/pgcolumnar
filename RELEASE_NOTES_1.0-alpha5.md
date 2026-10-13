@@ -90,8 +90,8 @@ table. The setting is off by default, because `expire` deletes rows.
 
 `expire` drops whole row groups whose rows are all older than the cutoff. It
 now records each group it retires in a new catalog, `pgcolumnar.retired_group`.
-When nothing can qualify, it answers from the column's extent in one index
-lookup instead of reading every row group's zone map (#1310).
+When the column's extent shows that nothing can qualify, it answers in one
+index lookup instead of reading every row group's zone map (#1310).
 
 ### Time partitions (#1291, #1297)
 
@@ -102,6 +102,11 @@ without it, every partition is heap. The how-to shows the setup.
 Without pg_partman, `pgcolumnar.partition_create_ahead(parent, width, ahead)`
 creates columnar partitions ahead of the incoming rows. It never takes an
 `ACCESS EXCLUSIVE` lock on the parent.
+
+`pgcolumnar.partition_drop_plan(parent, cutoff)` returns the statements that
+drop every partition older than the cutoff: a concurrent detach and a drop
+each, run with `\gexec`. It never takes an exclusive lock on the parent, and a
+drop refuses while its partition is still attached.
 
 ### Cold partitions move to Parquet (#1295)
 
@@ -355,7 +360,9 @@ test suites; only a superuser can set them. See
 - **A rollup refresh refuses some changes** (#1294). A refresh refuses when it
   would recompute a bucket that holds retained history. A delete from a row
   group that also reaches such a bucket is refused too, even if the deleted rows
-  are recent. Run `pgcolumnar.rebase_rollup` if the rollup is right as it is.
+  are recent. A refresh also refuses when rows were deleted from a row group
+  that `expire` retired before the refresh. Run `pgcolumnar.rebase_rollup` if
+  the rollup is right as it is.
 - **Setting a codec can make a table larger, on high-entropy text** (#1074).
   This is unchanged from alpha4. Measured on this release, 200,000 rows of
   random 64-character hex text:
@@ -422,9 +429,10 @@ test suites; only a superuser can set them. See
 - It adds four catalogs: `pgcolumnar.retired_group`, `pgcolumnar.column_extent`,
   `pgcolumnar.rollup` and `pgcolumnar.rollup_group`. The two rollup catalogs carry
   row-level security, so each role sees only the rollups it owns.
-- It adds the functions `partition_create_ahead`, `tier_partition`,
-  `create_rollup`, `refresh_rollup`, `rebase_rollup`, `column_extent` and
-  `row_tid`, and two internal helpers for rollups.
+- It adds the functions `partition_create_ahead`, `partition_drop_plan`,
+  `tier_partition`, `create_rollup`, `refresh_rollup`, `rebase_rollup`,
+  `column_extent` and `row_tid`. It also adds three internal helpers: two for
+  rollups and one for partitions.
 - `pgcolumnar.column_extent` starts empty for existing tables. Until a table's
   next `expire`, `compact_rewrite`, `VACUUM` or `recluster`, the planner reads
   its zone maps instead. The answer is the same; only planning costs more.
