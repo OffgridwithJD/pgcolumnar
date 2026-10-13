@@ -161,6 +161,19 @@ true until the next version shipped.
   pulled up into a join read every row group (114 blocks of a 103-block table
   for one new group), because PostgreSQL builds a TID range scan only from a
   relation's own restrictions; `OFFSET 0` keeps it a scan (15 blocks).
+- `pgcolumnar.tier_partition(partition, server, path, lock_wait)` moves a cold
+  columnar partition to a Parquet file and attaches the file in its place as a
+  foreign partition with the same name, bounds, grants and comment (#1295). It
+  runs as one transaction at READ COMMITTED: the export holds a `SHARE` lock on
+  the partition, and the parent is held `ACCESS EXCLUSIVE` from the detach until
+  commit, which covers catalog work only. Every lock waits at most `lock_wait`.
+  A failure at any step leaves the rows exactly once, still local; the tests
+  prove it with a developer fault after each step. It refuses, before anything
+  moves, `REPEATABLE READ` and `SERIALIZABLE` (an older snapshot would drop
+  rows committed just before the lock), a parent with a `UNIQUE` index, and a
+  partition that a view, a policy, its own trigger or its own foreign key
+  depends on. A path a foreign table in the database reads is refused; a retry
+  over a failed attempt's file is allowed.
 
 ### Changed
 
