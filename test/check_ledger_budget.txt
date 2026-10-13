@@ -1661,4 +1661,17 @@ suites_not_covered 246
 #     never         1805 - 1     = 1804
 #     dated          508 + 1     =  509
 #     1804 + 509 == 2313
-checks_never_observed_red 1804
+#
+# #1339, encode_post_codec (jdatcmd): 1804 -> 1798. Its heap mirrors were copied FROM
+# the columnar tables, through the decoder under test, so its six read-back arms
+# could not fail on a decode defect: with the reader returning row 5 of every row
+# group as NULL, the suite passed 11/11 and the pytest twin 2/2. All six had never
+# been observed red. The mirrors are now written from the same generator, seeded in
+# the same session (the shell twin's setseed ran in its own psql session and never
+# reached the INSERT), and that mutation reddens all six on each of 15-19.
+#
+#     ledger rows   2313
+#     never         1804 - 6 = 1798
+#     dated          509 + 6 =  515
+#     1798 + 515 == 2313
+checks_never_observed_red 1798

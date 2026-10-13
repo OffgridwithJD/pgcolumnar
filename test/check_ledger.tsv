@@ -459,12 +459,12 @@ encode_post_codec	encode_post_codec	a chunk is not stored larger than it would b
 encode_post_codec	encode_post_codec	and that column stays far below the no-encoding size, so the win is real	15;16;17;18;19	never	-
 encode_post_codec	encode_post_codec	premise: both fixtures hold every row	15;16;17;18;19	never	-
 encode_post_codec	encode_post_codec	premise: the tail fixture's range is set by outliers, not by its typical value	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the rep column holds no row the heap does not	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the rep column preserves its checksum	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the rep column reads back exactly what the heap holds	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the tail column holds no row the heap does not	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the tail column preserves its checksum	15;16;17;18;19	never	-
-encode_post_codec	encode_post_codec	the tail column reads back exactly what the heap holds	15;16;17;18;19	never	-
+encode_post_codec	encode_post_codec	the rep column holds no row the heap does not	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
+encode_post_codec	encode_post_codec	the rep column preserves its checksum	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
+encode_post_codec	encode_post_codec	the rep column reads back exactly what the heap holds	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
+encode_post_codec	encode_post_codec	the tail column holds no row the heap does not	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
+encode_post_codec	encode_post_codec	the tail column preserves its checksum	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
+encode_post_codec	encode_post_codec	the tail column reads back exactly what the heap holds	15;16;17;18;19	2026-10-13	the reader returning row 5 of every row group as NULL
 encode_post_codec	encode_post_codec	while a column where encoding genuinely wins still encodes	15;16;17;18;19	never	-
 harness_selftest	030-assertions	nothing leaked into the squatter	15;16;17;18;19	never	-
 harness_selftest	030-assertions	pgc_port_free says the squatter's port is busy	15;16;17;18;19	never	-
