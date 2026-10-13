@@ -496,9 +496,18 @@ def test_a_projection_scan_reflects_deletes(planner, expect):
         cur.execute("DELETE FROM ps_h WHERE a BETWEEN 5000 AND 6000")
         expect.row_set(_rows(cur, COVERING), _rows(cur, COVERING_H),
                        "projection scan matches oracle after delete")
+        # WHAT THE UNRESTRICTED QUERY READS (#1339). This arm was named "full-range
+        # projection scan", but the planner considers a projection only when its first
+        # sort-key column is restricted, so it read the base. Measured: even
+        # `WHERE c BETWEEN 0 AND 999`, which keeps every row, plans the base, because
+        # the projection prunes nothing. The arm above is the one that reads the
+        # projection after the delete; this one is named for what it reads, and the
+        # plan is asserted so the name cannot drift from it again.
+        expect.text(str(_projection_in_plan(_plan(cur, "SELECT a, c FROM ps"))), "None",
+                    "an unrestricted query reads the base, not the projection")
         expect.row_set(_rows(cur, "SELECT a, c FROM ps"),
                        _rows(cur, "SELECT a, c FROM ps_h"),
-                       "full-range projection scan matches oracle")
+                       "an unrestricted base scan matches oracle after delete")
 
 
 # ==================== REBUILD: vacuum renumbers every row underneath the projection

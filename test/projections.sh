@@ -204,7 +204,14 @@ psql_run "DELETE FROM ps_h WHERE a BETWEEN 5000 AND 6000;"
 check "projection scan matches oracle after delete" \
 	"$(pgc_set_hash "SELECT a, c FROM ps WHERE c BETWEEN 100 AND 200")" \
 	"$(pgc_set_hash "SELECT a, c FROM ps_h WHERE c BETWEEN 100 AND 200")"
-check "full-range projection scan matches oracle" \
+# WHAT THE UNRESTRICTED QUERY READS (#1339). Named "full-range projection scan", it
+# read the base: a projection is considered only when its first sort-key column is
+# restricted, and even c BETWEEN 0 AND 999 plans the base because nothing prunes.
+# The arm above reads the projection after the delete; this one is named for what
+# it reads, with the plan asserted so the name cannot drift from it again.
+check "an unrestricted query reads the base, not the projection" \
+	"$(q "EXPLAIN (COSTS OFF) SELECT a, c FROM ps;" | grep -c 'Columnar Projection')" "0"
+check "an unrestricted base scan matches oracle after delete" \
 	"$(pgc_set_hash "SELECT a, c FROM ps")" \
 	"$(pgc_set_hash "SELECT a, c FROM ps_h")"
 

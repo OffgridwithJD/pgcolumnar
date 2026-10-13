@@ -53,8 +53,13 @@ check "covering projection scan matches heap after updating a non-projected colu
 check "read_projection still matches the live base" \
 	"$(pgc_set_hash "SELECT pgcolumnar.read_projection('pu','pc')")" \
 	"$(pgc_set_hash "SELECT a::text || '|' || c::text FROM pu")"
+# AGAINST HEAP, NOT THE BASE (#1339): b was never compared with heap after its own
+# update, so an UPDATE that kept b's old value matched the base it had just written.
 check "reconstruct via the projection still rebuilds every live row" \
 	"$(pgc_set_hash "SELECT pgcolumnar.reconstruct_via_projection('pu','pc')")" \
-	"$(pgc_set_hash "SELECT a::text || '|' || b || '|' || c::text FROM pu")"
+	"$(pgc_set_hash "SELECT a::text || '|' || b || '|' || c::text FROM pu_h")"
+check "every column matches heap after updating a non-projected column" \
+	"$(pgc_set_hash "SELECT a, b, c FROM pu")" \
+	"$(pgc_set_hash "SELECT a, b, c FROM pu_h")"
 
 pgc_summary
