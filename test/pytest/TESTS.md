@@ -149,6 +149,7 @@ behaviour, the source of that number is named.
 - [101. test_prepared_writes.py: a write prepared and finished in one session leaves the backend alive](#101-test_prepared_writespy-a-write-prepared-and-finished-in-one-session-leaves-the-backend-alive)
 - [102. test_column_extent.py: the per-column extent is a true bound, recomputed whenever groups go](#102-test_column_extentpy-the-per-column-extent-is-a-true-bound-recomputed-whenever-groups-go)
 - [103. test_collation_change.py: a collation change without a rewrite leaves columnar answering as heap does](#103-test_collation_changepy-a-collation-change-without-a-rewrite-leaves-columnar-answering-as-heap-does)
+- [104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin](#104-test_build_needs_pg_configpy-a-build-with-no-pg_config-refuses-it-does-not-wait-on-stdin)
 
 ## 1. How to read a test in here
 
@@ -6773,3 +6774,18 @@ Independent of the shell suite: its own values (`c`, `Q`, `x`, `q` against the s
 | test | what it holds |
 | --- | --- |
 | `test_a_collation_change_without_a_rewrite` | after the change, columnar answers as heap does for: `min`/`max`, a range, an equality, rows written afterwards, a columnar partition reached through its parent, a `vacuum_sorted` table under `ORDER BY ... LIMIT`, and a projection sorted on the column. The extent is never the old collation's bound. The relfilenode is unchanged (premise) |
+
+## 104. test_build_needs_pg_config.py: a build with no pg_config refuses, it does not wait on stdin
+
+The pytest half of selftest part 630 (#1344). With no `pg_config` that answers, `$(PGXS)` was empty and the Makefile's CC probe ran `sed` with no file, so it read make's stdin. With stdin left open, as in a background job or a CI step, the build waited forever. With stdin closed, `make clean` exited 0 having cleaned nothing. The Makefile now refuses as soon as `PGXS` is empty, and says what to set.
+
+DRIVEN, NOT READ. `make -n clean` runs on the real Makefile with `PG_CONFIG` naming nothing. `-n` does the parse in full, where the probe and the refusal both live, and builds or removes nothing. stdin is a pipe the test holds open and never writes to, and the process group is killed at 20 seconds, so a hung `sed` does not outlive the test. Its own driver (subprocess and `os.pipe`), where the shell part uses a FIFO and `timeout(1)`. The check names match.
+
+Needs no cluster and no driver.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_with_stdin_open_it_ends_and_names_pg_config` | with stdin open and silent, make ends within 20 seconds, and its own `*** ... Stop.` error names `PG_CONFIG`. The pipe really is one a reader waits on (premise) |
+| `test_with_stdin_closed_it_still_refuses` | with stdin closed, make exits non-zero rather than 0 |
