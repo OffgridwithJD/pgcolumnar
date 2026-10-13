@@ -98,6 +98,21 @@ def test_range_pruning(pgc_conn, expect):
                 _ids(pgc_conn, f"SELECT id FROM rp_heap WHERE span && {probe}"),
                 "and an overlap returns the heap's rows")
 
+    # NEAR THE END (#1339). The probe above sits in group 2 of 12, so the groups after
+    # it are pruned on their LOWER bounds alone, and the arm above passed with
+    # max_upper ignored entirely. A probe in the last group leaves the eleven before
+    # it to the upper bound each records: exactly the groups holding a match are read.
+    late = "tstzrange(timestamptz '2025-04-24 04:00', timestamptz '2025-04-24 06:00')"
+    lsql = f"SELECT id FROM rp_col WHERE span && {late}"
+    lplan = _plan(pgc_conn, lsql)
+    lread = _counter(lplan, "Columnar Chunk Groups Read")
+    lheap = _ids(pgc_conn, f"SELECT id FROM rp_heap WHERE span && {late}")
+    holding = len({(i - 1) // GROUP for i in lheap})
+    expect.text(f"read {lread} of {_counter(lplan, 'Columnar Chunk Groups Total')}, {holding} hold a match",
+                f"read {holding} of {ROWS // GROUP}, {holding} hold a match",
+                "a clustered overlap near the end reads only the groups that hold a match")
+    expect.rows(_ids(pgc_conn, lsql), lheap, "and that late overlap returns the heap's rows")
+
     contains = "SELECT id FROM %s WHERE span @> timestamptz '2024-03-01 02:15'"
     expect.rows(_ids(pgc_conn, contains % "rp_col"),
                 _ids(pgc_conn, contains % "rp_heap"),

@@ -90,6 +90,12 @@ WINDOW="tstzrange('2020-01-02 00:00+00','2020-01-02 01:00+00')"
 WEEK="tstzrange('2020-01-05 00:00+00','2020-01-12 00:00+00')"
 POINT="'2020-01-02 00:30+00'::timestamptz"
 FUTURE="tstzrange('2099-01-01 00:00+00','2099-01-02 00:00+00')"
+# NEAR THE END (#1339). A window at minute 45,360 falls in the last of the group's five
+# vectors. The four before it start before the window ends, so their LOWER bounds
+# cannot rule them out; only the upper bound each one records can. The one-hour
+# WINDOW above sits in the first vector, so the vectors after it are skipped on lower
+# bounds alone, and its skip arm passed with max_upper ignored entirely.
+LATE="tstzrange('2020-02-01 12:00+00','2020-02-01 13:00+00')"
 
 # ---- premises -------------------------------------------------------------
 check "premise: the clustered fixture holds the rows the numbers below count" \
@@ -144,6 +150,11 @@ SKIPPED="$(counter r_col "span && $WINDOW" 'Vectors Skipped')"
 check "a clustered overlap skips vectors instead of decoding them" \
 	"$([ "${SKIPPED:-0}" -gt 0 ] && echo "skipped ($SKIPPED)" || echo "SKIPPED NOTHING")" \
 	"skipped ($SKIPPED)"
+SKIPPED_LATE="$(counter r_col "span && $LATE" 'Vectors Skipped')"
+check "a clustered overlap near the end skips the four vectors only their upper bounds rule out" \
+	"$SKIPPED_LATE" "4"
+check_text "and that late overlap returns the heap's rows" \
+	"$(fingerprint r_col "span && $LATE")" "$(fingerprint r_heap "span && $LATE")"
 SKIPPED_PT="$(counter r_col "span @> $POINT" 'Vectors Skipped')"
 check "so does a containment probe" \
 	"$([ "${SKIPPED_PT:-0}" -gt 0 ] && echo "skipped ($SKIPPED_PT)" || echo "SKIPPED NOTHING")" \
@@ -167,7 +178,12 @@ psql_run "DROP TABLE IF EXISTS u_col; DROP TABLE IF EXISTS u_heap;
             FROM generate_series(1,20000) g;
           INSERT INTO u_col VALUES (20001, tstzrange('2020-01-03'::timestamptz, NULL));
           INSERT INTO u_col VALUES (20002, 'empty'::tstzrange);
-          INSERT INTO u_heap SELECT * FROM u_col;
+          INSERT INTO u_heap SELECT g,
+            tstzrange('2020-01-01'::timestamptz + (g||' minutes')::interval,
+                      '2020-01-01'::timestamptz + (g||' minutes')::interval + interval '1 hour')
+            FROM generate_series(1,20000) g;
+          INSERT INTO u_heap VALUES (20001, tstzrange('2020-01-03'::timestamptz, NULL));
+          INSERT INTO u_heap VALUES (20002, 'empty'::tstzrange);
           ANALYZE u_col;" >/dev/null
 check "a unit holding an unbounded range is never pruned from above" \
 	"$(fingerprint u_col "span && $FUTURE")" "$(fingerprint u_heap "span && $FUTURE")"

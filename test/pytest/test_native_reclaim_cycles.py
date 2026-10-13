@@ -139,6 +139,14 @@ def test_native_reclaim_cycles(pgc_conn, expect):
             verdict, "ok",
             f"compact_rewrite cycle {r} returns a count (no self-conflict)",
         )
+        # THE COUNT IS READ, NOT ONLY ITS TYPE (#1339): 0 is an int, so a
+        # compact_rewrite that rewrote nothing passed every arm in this file. Every
+        # group loses one row in eight per cycle, and #84 needs several groups
+        # rewritten in one command to reach the defect.
+        expect.text(
+            "several" if verdict == "ok" and got >= 2 else f"only:{got!r}", "several",
+            f"compact_rewrite cycle {r} rewrites several groups in one command, the shape #84 needs",
+        )
         expect.rows(
             _rows(pgc_conn, "n"), _rows(pgc_conn, "h"),
             f"parity after compact_rewrite cycle {r}",
