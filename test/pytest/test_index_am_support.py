@@ -126,7 +126,7 @@ def test_every_access_method_the_page_claims_builds_and_answers(pgc_conn, expect
     expect.text(
         "the claim and nothing else" if readable else "unreadable",
         "the claim and nothing else",
-        "premise: the claim bullet holds the claim and nothing else",
+        "the claim bullet holds the claim and nothing else",
     )
 
     # COUNTED, not a flag. The loop below is derived from `ams`, and a premise
@@ -135,7 +135,7 @@ def test_every_access_method_the_page_claims_builds_and_answers(pgc_conn, expect
     # `test_loop_coverage_premise` recognises only the counted form.
     expect.at_least(
         len(ams), 1,
-        "premise: the features page names at least one index access method",
+        "the features page names at least one index access method",
     )
 
 
@@ -214,5 +214,5 @@ def test_every_access_method_the_page_claims_builds_and_answers(pgc_conn, expect
         expect.num(
             sum(1 for line in plan
                 if re.search(r"Index (Only )?Scan using ias_probe", line)), 1,
-            "premise: an overlap query reaches the row through a GiST index",
+            "an overlap query reaches the row through a GiST index",
         )

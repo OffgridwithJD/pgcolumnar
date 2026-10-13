@@ -471,7 +471,7 @@ def test_vacuum_reads_less_of_row_group_than_reading_it_whole(pgc_own_db, expect
     expect.at_least(
         rg_pages - int(min_blocks),
         1,
-        "premise: row_group is larger than the threshold, so the two paths differ",
+        "row_group is larger than the threshold, so the two paths differ",
     )
 
     def vacuum_work(min_blocks=None):

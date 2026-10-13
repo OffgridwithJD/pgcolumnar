@@ -35,7 +35,7 @@ check_num "premise: the hand rebuild tool installs, so a stale record is possibl
 
 # AND that one place knows how to write the record, so the arm below is not
 # asking for a second copy of the stamp format.
-check_num "premise: lib.sh has one recorder for what was installed" \
+check_num "lib.sh has one recorder for what was installed" \
 	"$(sed 's/#.*//' "$PGC_TESTDIR/lib.sh" | grep -c '^pgc_record_source_stamp()')" "1"
 
 # COMMENTS STRIPPED (#1222): a comment naming the recorder must not satisfy this.
@@ -90,7 +90,7 @@ tar cf - --exclude=.git -C "$PGC_TESTDIR/.." . 2>/dev/null | tar xf - -C "$_hr_t
 
 # THE SHIM MUST ACTUALLY REDIRECT, or the arm below measures the live prefix and
 # passes for the wrong reason -- and would have installed over it to do so.
-check_text "premise: the shim redirects the install away from the real prefix" \
+check_text "the shim redirects the install away from the real prefix" \
 	"$(if [ "$("$_hr_tmp/pg_config" --pkglibdir)" = "$_hr_tmp/prefix/lib" ] &&
 		[ "$("$_hr_tmp/pg_config" --bindir)" = "$("$PGC_SELFTEST_PG_CONFIG" --bindir)" ];
 	then echo redirected; else echo passthrough; fi)" "redirected"
@@ -109,7 +109,7 @@ _hr_live_so="$("$PGC_SELFTEST_PG_CONFIG" --pkglibdir)/pgcolumnar.so"
 _hr_live_before="$(stat -c %Y "$_hr_live_so" 2>/dev/null)"
 
 _hr_stamp="$(pgc_source_stamp_path "$_hr_tmp/tree" "$_hr_tmp/pg_config")"
-check_text "premise: no stamp for this prefix before the rebuild" \
+check_text "no stamp for this prefix before the rebuild" \
 	"$(if [ -e "$_hr_stamp" ]; then echo present; else echo absent; fi)" "absent"
 
 # BOTH DECISIONS ARE FUNCTIONS so they can be driven from here rather than only
@@ -141,7 +141,7 @@ _hr_diagnose() {	# _hr_diagnose LOGFILE -> the tail, or WHY there is no tail
 
 "$PGC_TESTDIR/rebuild.sh" "$_hr_tmp/pg_config" "$_hr_tmp/tree" >"$_hr_tmp/rebuild.log" 2>&1
 _hr_rc=$?
-check_num "premise: the hand rebuild itself succeeded" "$_hr_rc" "0"
+check_num "the hand rebuild itself succeeded" "$_hr_rc" "0"
 
 # ---- the premise must GATE, and the failure must SAY SOMETHING (#1248) ------
 #
@@ -179,7 +179,7 @@ check_text "premise: the diagnosis is exposed too" \
 #
 # Literals run the same on every architecture. The end-to-end behaviour on
 # aarch64 is NOT covered by these arms and the next nightly is what covers it.
-check_text "premise: the symbol exemption is exposed to be judged" \
+check_text "the symbol exemption is exposed to be judged" \
 	"$(type -t pgc_symbol_is_toolchain)" "function"
 
 check_text "the stack canary object is exempt, whatever the architecture calls it" \

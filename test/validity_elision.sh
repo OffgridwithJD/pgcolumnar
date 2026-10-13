@@ -176,7 +176,7 @@ check "premise: each fixture is a single row group, which is what the expected s
 # group read as NULL, it read 1. A check a repository change can redden is an arm.
 check "the full column reads back no nulls at all" "$full_nulls" "0"
 
-check "premise: the second fixture holds nulls, so its bitmap is load-bearing" \
+check "the second fixture holds nulls, so its bitmap is load-bearing" \
 	"$(awk -v n="$some_nulls" 'BEGIN { print (n + 0 > 0) ? "has-nulls" : "none" }')" \
 	"has-nulls"
 
@@ -263,7 +263,7 @@ FORCE="SET pgcolumnar.enable_custom_scan = off;
 # table AM's fetch, so arms over a single-column table pass against a build
 # whose fetch path is broken. "Index Only Scan" does not match this anchored
 # pattern, which is the point of anchoring it.
-check "premise: the arms below reach the row through an index scan" \
+check "the arms below reach the row through an index scan" \
 	"$(q "$FORCE EXPLAIN (COSTS OFF) SELECT v FROM ve_full WHERE k = 12345;" |
 		grep -cE '^[[:space:]]*Index Scan using')" \
 	"1"

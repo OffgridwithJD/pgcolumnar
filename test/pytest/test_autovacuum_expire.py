@@ -237,7 +237,7 @@ def test_the_switch_exists_and_is_off_by_default(run, expect):
     expect.text(run["switches"], "on/off",
                 "the daemon's expire switch exists and is OFF by default")
     expect.num(run["manual"], 2,
-               "premise: a manual expire on the same fixture retires its two aged groups")
+               "a manual expire on the same fixture retires its two aged groups")
 
 
 def test_with_the_switch_off_the_daemon_expires_nothing(run, expect):
@@ -267,7 +267,7 @@ def test_a_failing_expire_does_not_undo_the_compaction(run, expect):
 
 def test_the_daemon_yields_the_lock_it_holds_inside_expire(run, expect):
     expect.num(run["held"], 1,
-               "premise: the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)")
+               "the daemon holds ShareUpdateExclusiveLock inside expire (the hold window is open)")
     expect.text(run["lock_state"], "granted",
                 "yield: the AccessExclusive lock on a table in expire was granted")
     expect.text("fast" if run["lock_s"] <= 8 else f"slow({run['lock_s']:.0f}s)", "fast",

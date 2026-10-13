@@ -192,7 +192,7 @@ def test_a_column_with_no_nulls_stores_no_validity_bitmap(pgc_conn, expect):
         some_nulls = _count(c, "SELECT count(*) FROM vb_nulls WHERE v IS NULL")
         expect.text(
             "has-nulls" if some_nulls > 0 else "none", "has-nulls",
-            "premise: the second fixture holds nulls, so its bitmap is load-bearing",
+            "the second fixture holds nulls, so its bitmap is load-bearing",
         )
 
         expect.num(full_res, 0,
@@ -344,7 +344,7 @@ def test_the_fetch_path_reads_an_elided_chunk_correctly(pgc_conn, expect):
         plan = [row[0] for row in c.fetchall()]
         expect.num(
             sum(1 for line in plan if line.lstrip().startswith("Index Scan using")), 1,
-            "premise: the arms below reach the row through an index scan",
+            "the arms below reach the row through an index scan",
         )
 
         # AND THE SHAPE THE NEXT ARMS ACTUALLY RUN. The premise above plans a
