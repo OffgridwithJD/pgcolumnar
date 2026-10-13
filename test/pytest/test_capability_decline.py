@@ -174,3 +174,29 @@ def test_every_unguarded_import_spelling_is_refused(pytester, monkeypatch, expec
     expect.num(1 if result.ret != 0 else 0, 1, "and a run carrying them is refused")
     expect.num(out.count("test_guarded.py imports pyarrow"), 0,
                "while a file that goes through require_module is not named")
+
+
+def test_an_unguarded_import_is_refused_under_xdist_too(pytester, monkeypatch, expect):
+    """The refusal reaches the controller when workers do the collecting (#1305).
+
+    Under `-n`, pytest_collect_file runs in the workers, so the sites they found
+    never reached the controller, which prints the summary and sets the exit status:
+    measured by @OffgridwithJD, the serial run said REFUSED and exited 1, the `-n 2`
+    run said `2 passed` and exited 0. A subprocess, because xdist's workers are.
+    """
+    import pathlib
+    monkeypatch.delenv("PGC_REQUIRE", raising=False)
+    pkg = pytester.mkpydir("pyarrow")
+    (pkg / "parquet.py").write_text("")
+    here = pathlib.Path(__file__).resolve().parent
+    monkeypatch.setenv("PYTHONPATH", f"{pytester.path}:{here}")
+    pytester.makepyfile(test_bad="import pyarrow.parquet as pq\n\ndef test_x(expect):\n    expect.num(1, 1, 'x')\n",
+                        test_ok="def test_y(expect):\n    expect.num(1, 1, 'y')\n")
+    serial = pytester.runpytest_subprocess("-p", "pgc_vacuity", "-p", "no:cacheprovider")
+    xdist = pytester.runpytest_subprocess("-p", "pgc_vacuity", "-p", "no:cacheprovider", "-n", "2")
+    expect.num(1 if serial.ret != 0 and "REFUSED  test_bad.py" in serial.stdout.str() else 0, 1,
+               "premise: the serial run refuses the unguarded import")
+    out = xdist.stdout.str()
+    expect.num(out.count("REFUSED  test_bad.py imports pyarrow outside require_module"), 1,
+               "under -n 2 the controller names the unguarded import, once")
+    expect.num(1 if xdist.ret != 0 else 0, 1, "and the -n 2 run is refused, not green")
