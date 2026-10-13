@@ -856,19 +856,25 @@ def test_the_membership_report_names_a_declared_file_that_is_gone(tmp_path, expe
 
 
 def test_the_gate_runs_the_membership_decision_rather_than_only_this_file(expect):
-    """A guard that does not run is a comment, and nothing in the gate runs
-    pytest over this file: the corpus is not in `SUITES` (README.md), and the
-    `pytest-guards` job runs the database-free files, which this is not.
+    """A guard that does not run is a comment, so the gate must run this file.
 
-    So selftest 350 runs the decision through this module's command line. This
-    arm is what keeps that true."""
-    part = (HERE.parent / "selftest" / "350-the-pytest-corpus-must-be.sh")
-    expect.text(repr(part.is_file()), "True", "premise: selftest 350 is where this expects")
-    text = part.read_text()
-    expect.at_least(text.count("--disagree"), 1,
-                    "selftest 350 decides the membership in the gate")
-    # And the command line it uses must work, rather than being a string nobody
-    # ran: the same call, made here.
+    IT IS RUN BY CI'S CLUSTER JOB, NOT BY SELFTEST 350 (#1339). This arm used to
+    count the string `--disagree` in selftest 350, on the premise that the part ran
+    the decision through this module's command line. It no longer does, by jd's rule
+    that a shell arm driving the python decider agrees with it by construction; the
+    only `--disagree` left there is the comment saying so, and the arm stayed green
+    on it. The gate runs this file because the cluster job runs the complement of
+    NO_CLUSTER, derived from this module, and this file is not in NO_CLUSTER.
+
+    The command line is still asserted below: it must run and refuse a misuse, so a
+    human (or a future part) calling it gets an answer, not a traceback."""
+    ci = (HERE.parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+    cluster = ci[ci.index("pytest (cluster tests"):]
+    expect.at_least(cluster.count("if p.name not in NO_CLUSTER"), 1,
+                    "the gate's cluster job runs the complement of NO_CLUSTER")
+    expect.text(repr(HERE.joinpath("test_harness_deps.py").name in NO_CLUSTER), "False",
+                "and this file is in that complement, so the gate runs its membership decision")
+    # The command line must work, rather than being a string nobody ran.
     proc = subprocess.run([sys.executable, str(HERE / "test_harness_deps.py"),
                            "--disagree", str(HERE)],
                           capture_output=True, text=True)

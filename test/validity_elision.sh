@@ -109,7 +109,13 @@ psql_run "ALTER DATABASE $PGC_DB SET pgcolumnar.compression = 'none';"
 # provably broken, and the premise arm is what caught them.
 psql_run "CREATE TABLE ve_full (k bigint, v bigint) USING pgcolumnar;"
 psql_run "INSERT INTO ve_full SELECT g, g FROM generate_series(1, $ROWS) g;"
-psql_run "CREATE TABLE ve_full_h AS SELECT * FROM ve_full;"
+# THE HEAP MIRRORS ARE WRITTEN FROM THE GENERATOR, NOT COPIED FROM THE TABLE (#1339).
+# A CREATE TABLE ... AS SELECT FROM ve_full reads through the reader under test, so
+# a read that turned a present value into NULL was copied into the oracle too and
+# every comparison with it stayed equal: measured, with row 5 of every group read
+# as NULL, the EXCEPT ALL arms stayed green.
+psql_run "CREATE TABLE ve_full_h (k bigint, v bigint);"
+psql_run "INSERT INTO ve_full_h SELECT g, g FROM generate_series(1, $ROWS) g;"
 
 # Every tenth row NULL: enough that the bitmap is genuinely needed, and not so
 # many that the column stops holding values to compare.
@@ -117,7 +123,10 @@ psql_run "CREATE TABLE ve_nulls (k bigint, v bigint) USING pgcolumnar;"
 psql_run "INSERT INTO ve_nulls
 	SELECT g, CASE WHEN g % 10 = 0 THEN NULL ELSE g END
 	FROM generate_series(1, $ROWS) g;"
-psql_run "CREATE TABLE ve_nulls_h AS SELECT * FROM ve_nulls;"
+psql_run "CREATE TABLE ve_nulls_h (k bigint, v bigint);"
+psql_run "INSERT INTO ve_nulls_h
+	SELECT g, CASE WHEN g % 10 = 0 THEN NULL ELSE g END
+	FROM generate_series(1, $ROWS) g;"
 
 full_nulls="$(q "SELECT count(*) FROM ve_full WHERE v IS NULL;" | tail -1)"
 some_nulls="$(q "SELECT count(*) FROM ve_nulls WHERE v IS NULL;" | tail -1)"
@@ -162,7 +171,10 @@ check "premise: the residual was summed over chunks that exist" \
 check "premise: each fixture is a single row group, which is what the expected size assumes" \
 	"$groups" "11"
 
-check "premise: the first fixture holds no nulls at all" "$full_nulls" "0"
+# AN ARM, NOT A PREMISE (#1339, #1236). It counts the nulls THROUGH THE READER, so a
+# read that turns a present value into NULL reddens it: measured, with row 5 of every
+# group read as NULL, it read 1. A check a repository change can redden is an arm.
+check "the full column reads back no nulls at all" "$full_nulls" "0"
 
 check "premise: the second fixture holds nulls, so its bitmap is load-bearing" \
 	"$(awk -v n="$some_nulls" 'BEGIN { print (n + 0 > 0) ? "has-nulls" : "none" }')" \

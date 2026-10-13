@@ -126,14 +126,21 @@ def _load(cur):
 
     cur.execute("CREATE TABLE vb_full (k bigint, v bigint) USING pgcolumnar")
     cur.execute(f"INSERT INTO vb_full SELECT g, g FROM generate_series(1, {ROWS}) g")
-    cur.execute("CREATE TABLE vb_full_h AS SELECT * FROM vb_full")
+    # THE HEAP MIRRORS ARE WRITTEN FROM THE GENERATOR, NOT COPIED (#1339): a copy
+    # reads through the reader under test, so a read defect lands on both sides.
+    cur.execute("CREATE TABLE vb_full_h (k bigint, v bigint)")
+    cur.execute(f"INSERT INTO vb_full_h SELECT g, g FROM generate_series(1, {ROWS}) g")
 
     cur.execute("CREATE TABLE vb_nulls (k bigint, v bigint) USING pgcolumnar")
     cur.execute(
         f"INSERT INTO vb_nulls SELECT g, CASE WHEN g % {NULL_EVERY} = 0 THEN NULL "
         f"ELSE g END FROM generate_series(1, {ROWS}) g"
     )
-    cur.execute("CREATE TABLE vb_nulls_h AS SELECT * FROM vb_nulls")
+    cur.execute("CREATE TABLE vb_nulls_h (k bigint, v bigint)")
+    cur.execute(
+        f"INSERT INTO vb_nulls_h SELECT g, CASE WHEN g % {NULL_EVERY} = 0 THEN NULL "
+        f"ELSE g END FROM generate_series(1, {ROWS}) g"
+    )
 
 
 def _count(cur, sql, args=()):
@@ -180,7 +187,7 @@ def test_a_column_with_no_nulls_stores_no_validity_bitmap(pgc_conn, expect):
         )
 
         full_nulls = _count(c, "SELECT count(*) FROM vb_full WHERE v IS NULL")
-        expect.num(full_nulls, 0, "premise: the first fixture holds no nulls at all")
+        expect.num(full_nulls, 0, "the full column reads back no nulls at all")  # an arm: counted through the reader (#1339)
 
         some_nulls = _count(c, "SELECT count(*) FROM vb_nulls WHERE v IS NULL")
         expect.text(

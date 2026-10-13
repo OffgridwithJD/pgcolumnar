@@ -183,18 +183,35 @@ def test_build_once_builds_once_and_then_skips(tmp_path, expect):
 
 def test_build_once_rebuilds_for_a_different_prefix(tmp_path, expect):
     """Keying the marker on 'did anyone build' would reintroduce the defect for
-    anyone who runs the corpus against two majors in turn."""
+    anyone who runs the corpus against two majors in turn.
+
+    THE PREFIX MUST BE THE ONLY DIFFERENCE (#1339). The first version passed two
+    pg_config paths that do not exist, so no library was ever observed, no marker
+    was ever written, and every call built whatever the key held: with the prefix
+    and major dropped from the key, it stayed green. Here both prefixes answer, and
+    answer the SAME library directory, at the same major, and a control shows the
+    marker is written and honoured for an unchanged prefix.
+    """
     tree = _tree_with_source(tmp_path, "ok3", "int a = 1;\n")
     lock = str(tmp_path / "lock2")
+    shared = tmp_path / "shared_lib"
+    shared.mkdir()
+    pfx = []
+    for n in ("pfx_a", "pfx_b"):
+        (tmp_path / n).mkdir()
+        pfx.append(str(_pg_config_answering(tmp_path / n, shared)))
     calls = []
 
     def counting(argv):
         calls.append(argv)
         return _Proc(0)
 
-    build_once(tree, "/usr/local/pg18a/bin/pg_config", "18", lock_path=lock, runner=counting)
-    build_once(tree, "/usr/local/pg19a/bin/pg_config", "19", lock_path=lock, runner=counting)
+    build_once(tree, pfx[0], "18", lock_path=lock, runner=counting)
+    build_once(tree, pfx[1], "18", lock_path=lock, runner=counting)
     expect.num(len(calls), 2, "a different prefix builds again")
+    again = build_once(tree, pfx[1], "18", lock_path=lock, runner=counting)
+    expect.text(f"{again}|{len(calls)}", "already-built|2",
+                "control: the same prefix again finds the marker and does not build")
 
 
 def _tree_with_source(tmp_path, name, body):

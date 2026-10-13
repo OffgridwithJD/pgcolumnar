@@ -188,14 +188,14 @@ def test_the_summary_block_was_extracted_rather_than_an_empty_range(expect):
                 "and it ends at its own closing fi, not mid-statement")
 
 
-def _run_block(tmp_path, acc_names, expect_names=("alpha", "beta", "gamma")):
+def _run_block(tmp_path, acc_names, expect_names=("alpha", "beta", "gamma"), suites_ran=3):
     ran = _write(tmp_path, "e2e_ran", *expect_names)
     skipped = _write(tmp_path, "e2e_skip", "delta", "eps")
     acc = _write(tmp_path, "e2e_acc_" + str(len(acc_names)), *acc_names)
     script = (
         "\n".join(_extract(n) for n in READERS) + "\n"
         + f'_acc_ranfile="{ran}"; _acc_skipfile="{skipped}"; _acc_accounted="{acc}"\n'
-        + "suites_ran=3; suites_skipped=2; suites_incomplete=0; verfail=0\n"
+        + f"suites_ran={suites_ran}; suites_skipped=2; suites_incomplete=0; verfail=0\n"
         + "SUITES=(alpha beta gamma delta eps)\n"
         + _summary_block() + "\n"
         + 'echo "verfail=$verfail"\n'
@@ -235,6 +235,23 @@ def test_the_same_block_counts_and_names_a_real_debt(tmp_path, expect):
                "and the suites are named rather than left as a number")
     expect.num(out.count("verfail=0"), 1,
                "and a debt is still not a major failure, which is the old behaviour")
+
+
+def test_a_ran_count_the_names_do_not_support_fails_the_major(tmp_path, expect):
+    """THE PARTITION IS A MEASUREMENT ONLY IF NEITHER BUCKET IS A LEFTOVER (#1339).
+
+    The arms above keep suites_ran equal to the names that ran, so a block that
+    derived the debt as `suites_ran - accounted` prints the same strings and passed
+    them all (measured: 9 passed with that subtraction in the runner). Here the
+    runner is told 4 suites ran while the names say 3, all accounted. Counted from
+    the names, 3 + 0 != 4, and the block must say so and fail the major; derived by
+    subtraction, 3 + 1 == 4 by construction and it stays silent.
+    """
+    out, _ = _run_block(tmp_path, ["alpha", "beta", "gamma"], suites_ran=4)
+    expect.num(out.count("the ran breakdown does not add up: 4 ran, 3 accounted + 0 did not"), 1,
+               "a ran count the names do not support is reported, not absorbed")
+    expect.num(out.count("verfail=1"), 1,
+               "and it fails the major")
 
 
 def test_no_code_path_subtracts_the_wide_population_from_the_ran_count(expect):

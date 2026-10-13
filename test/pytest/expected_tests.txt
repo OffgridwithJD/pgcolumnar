@@ -271,7 +271,9 @@
 # guard_tests 414 -> 415 for test_docs_how_to_sections.py (the lost pg_partman heading), by collection.
 # guard_tests 415 -> 419 for #1321's test_suite_exit_trap.py, four tests, the twin of
 # selftest part 620, collected over the NO_CLUSTER files on this tree.
-guard_tests 419
+# guard_tests 419 -> 420 for #1339's test_a_ran_count_the_names_do_not_support_fails_the_major
+# in test_residual_is_counted.py, by collection over the NO_CLUSTER files on this tree.
+guard_tests 420
 
 # The complement: tests that need the driver and a throwaway cluster. Until #1016 these ran
 # in no CI job at all -- a quarter of the corpus, green when somebody ran them by hand and
