@@ -504,9 +504,19 @@ If a concurrent detach was interrupted, the partition stays pending. The next
 plan finishes that detach with `DETACH PARTITION ... FINALIZE` instead of starting
 it again.
 
-For a `timestamp` key, the cutoff is read as the session's local time. The
-function refuses the same tables as `partition_create_ahead`, because a DEFAULT
-partition rules out a concurrent detach. A run of the plan drops the
+The cutoff has the key's type: a `timestamptz` for a `timestamptz` key, as in
+the example, and a `timestamp` for a `timestamp` key, such as
+`localtimestamp - interval '90 days'`. A cutoff of the other type is refused
+(`42804`), because comparing across the two depends on the session's time zone,
+and the same call would plan differently from two sessions.
+
+A partition that is itself partitioned is planned as one, and the `DROP` takes
+its children with it. A partition that `tier_partition` moved to Parquet is
+planned with `DROP FOREIGN TABLE`. That removes the foreign table, and the
+Parquet file stays where it is: delete it yourself when you no longer need it.
+
+The function refuses the same tables as `partition_create_ahead`, because a
+DEFAULT partition rules out a concurrent detach. A run of the plan drops the
 partitions' rows: nothing keeps them.
 
 ## Count distinct values and percentiles approximately
