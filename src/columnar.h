@@ -262,6 +262,7 @@ extern bool pgcolumnar_autovacuum;
 extern int	pgcolumnar_autovacuum_naptime;
 extern double pgcolumnar_autovacuum_compact_threshold;
 extern double pgcolumnar_autovacuum_recluster_threshold;
+extern bool pgcolumnar_autovacuum_expire;
 extern void PgColumnarAutovacuumRegister(void);
 extern int	pgcolumnar_maintenance_hold_ms;	/* dev/test: hold SUEL this long in a maintenance verb */
 

@@ -214,6 +214,12 @@ It is off by default. When it is on, a launcher wakes every
 database. Each worker asks `pgcolumnar.maintenance_due()` which columnar tables
 have crossed a threshold, then runs the verb it recommends.
 
+With `pgcolumnar.autovacuum_expire` also on (default off), each worker first
+runs `pgcolumnar.expire` on every table that declares a retention. Each `expire`
+runs in its own transaction. One that fails is logged and skipped, and the
+compaction that follows still runs. The switch is separate because `expire` deletes rows:
+turning the daemon on does not by itself apply a retention.
+
 The daemon calls only the online `ShareUpdateExclusiveLock` verbs. It never
 calls `vacuum`, `vacuum_sorted`, or `cluster`. So it does not block readers or
 writers. It also yields the way autovacuum does: it cancels its own maintenance

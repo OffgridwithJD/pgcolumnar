@@ -53,6 +53,7 @@ SUITES=(
 	arrow_nested_import
 	audit
 	autovacuum
+	autovacuum_expire
 	autovacuum_yield
 	avro_manifest
 	base_scan_io

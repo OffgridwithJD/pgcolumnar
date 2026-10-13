@@ -292,8 +292,8 @@ to bound each call and keep it incremental.
 
 Declare how long rows are kept, then drop what has passed it.
 
-Before you start: the column must be `timestamp` or `timestamptz`, and you must
-own the table.
+Before you start: the column must be `date`, `timestamp` or `timestamptz`, and
+you must own the table.
 
 1. Declare the retention. Both halves are required.
 
@@ -316,9 +316,28 @@ has passed the retention, so a group holding one live row is kept whole. Some
 rows older than the interval therefore survive until the rest of their group
 ages out. Nothing inside the retention is ever dropped.
 
-It takes `ShareUpdateExclusiveLock`, so reads and writes continue. It never runs
-on its own: call it by name, or schedule it. Calling it on a table with no
-declared retention raises an error rather than doing nothing.
+It takes `ShareUpdateExclusiveLock`, so reads and writes continue. Calling it on
+a table with no declared retention raises an error rather than doing nothing.
+
+3. To expire on a schedule instead, let the maintenance daemon run `expire`.
+   Both settings are needed; the second is off by default, so turning on the
+   daemon alone never deletes rows.
+
+```sql
+ALTER SYSTEM SET pgcolumnar.autovacuum = on;
+ALTER SYSTEM SET pgcolumnar.autovacuum_expire = on;
+SELECT pg_reload_conf();
+```
+
+The daemon then runs `expire` on every table that declares a retention, once
+per `pgcolumnar.autovacuum_naptime` (default 60 seconds), and logs
+`pgcolumnar autovacuum: expire <table> retired <n> row groups` when it retires
+any. A pass that retires nothing logs at `DEBUG1` only.
+
+For a `date` or `timestamp` retention column, the cutoff depends on the time
+zone. The daemon uses the server's `TimeZone` setting, which may differ from
+the time zone your sessions use. For a cutoff in your session's time zone, run
+`pgcolumnar.expire` by hand from that session.
 
 `pgcolumnar.reset_options` has no argument for the retention. To stop expiring,
 set `ttl_interval` to a span no row will reach.

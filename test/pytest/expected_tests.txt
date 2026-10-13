@@ -565,4 +565,10 @@ guard_tests 415
 #
 # cluster_tests 503 -> 504 for #1294's test_expire_records_what_it_retires_and_nothing_else,
 # collected over the cluster files on this branch rebased onto d208bce.
-cluster_tests 504
+#
+# cluster_tests 504 -> 509 for #1290's test_autovacuum_expire.py, by collection
+# on this branch rebased onto c0ee868.
+#
+# cluster_tests 509 -> 510 for #1290's test_autovacuum_expire.py, by collection
+# on this branch rebased onto c0ee868.
+cluster_tests 510

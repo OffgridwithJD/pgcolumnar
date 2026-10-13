@@ -57,7 +57,8 @@ CREATE TABLE pgcolumnar.options (
 	encode_effort name,
 	sort_by name[],                    -- declared physical sort key (#288)
 	-- Declared retention (#403 item 5a), read only by pgcolumnar.expire.
-	-- Nothing drops rows on its own: expire is called by name.
+	-- Nothing drops rows on its own: expire is called by name, or by the
+	-- daemon when pgcolumnar.autovacuum_expire is on (off by default, #1290).
 	ttl_column name,
 	ttl_interval interval
 );
