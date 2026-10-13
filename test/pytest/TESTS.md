@@ -142,7 +142,7 @@ behaviour, the source of that number is named.
 - [94. test_approx_aggregates.py: hll and tdigest over columnar tables, the compatibility statement](#94-test_approx_aggregatespy-hll-and-tdigest-over-columnar-tables-the-compatibility-statement)
 - [95. test_docs_how_to_sections.py: the pg_partman how-to keeps its own heading](#95-test_docs_how_to_sectionspy-the-pg_partman-how-to-keeps-its-own-heading)
 - [96. test_autovacuum_expire.py: the daemon expires retention tables only when told to](#96-test_autovacuum_expirepy-the-daemon-expires-retention-tables-only-when-told-to)
-- [97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-and-equal-a-full-recompute)
+- [97. test_rollup.py: incremental rollups fold appended row groups, recompute changed ones, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-recompute-changed-ones-and-equal-a-full-recompute)
 - [98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim](#98-test_timeseries_recipespy-the-gap-fill-locf-and-interpolation-recipes-answer-what-they-claim)
 - [99. test_suite_exit_trap.py: a suite's own EXIT trap must still stop its cluster](#99-test_suite_exit_trappy-a-suites-own-exit-trap-must-still-stop-its-cluster)
 - [100. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once](#100-test_tier_partitionpy-tier_partition-moves-a-cold-partition-to-parquet-exactly-once)
@@ -6603,9 +6603,9 @@ Written red first: on main the fixture raises `unrecognized configuration parame
 | `test_the_daemon_yields_the_lock_it_holds_inside_expire` | the worker holds ShareUpdateExclusiveLock inside `expire`; a session's ACCESS EXCLUSIVE is granted within 8 s of a 30 s hold, and the log shows the cancel |
 | `test_a_table_dropped_mid_pass_is_skipped_and_the_pass_goes_on` | while the worker holds `ex_hold`, `ex_gone` is dropped; after the cancel the same pass logs `ex_gone` as skipped and still expires `ex_after` |
 
-## 97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute
+## 97. test_rollup.py: incremental rollups fold appended row groups, recompute changed ones, and equal a full recompute
 
-Port of `rollup.sh` (#1294, phase 1: append-only). `create_rollup` makes a view over a partials table; `refresh_rollup` folds the rows of the row groups appended since the last refresh, in ONE statement, so the group list, the folded rows and the recorded groups share a snapshot. The design, its twelve points and the owner's decisions are on #1294.
+Port of `rollup.sh` (#1294, phases 1 and 2). `create_rollup` makes a view over a partials table; `refresh_rollup` folds the rows of the row groups appended since the last refresh, in ONE statement, so the group list, the folded rows and the recorded groups share a snapshot. The design, its twelve points and the owner's decisions are on #1294.
 
 THE ORACLE is a full recompute of the same GROUP BY, every time. Exactness was fixed by the design: count, integer sum, min, max and the avg of an integer column exact; the avg of `float8` within a relative 1e-12. This file uses an integer avg; the shell twin a float one.
 
@@ -6619,13 +6619,17 @@ From @jdatcmd's review of #1319: the refresh restated 291 rows a block in SQL, w
 
 A role that cannot SELECT the source cannot create a rollup of it (42501). `create_rollup` has no check of its own for this: it reads the source's storage id through `get_storage_id`, which refuses such a caller, and the arm was red only when that check was removed. `entry_point_privilege.sh` buckets `create_rollup` as relation-taking by its second argument and `row_tid` as taking no relation.
 
-Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, a rebase that clears the rollup, `=` in place of `IS NOT DISTINCT FROM` (only the NULL arm), retired groups kept in the snapshot, and `row_tid` with 290 rows a block.
+Phase 2, dirty buckets: a delete, an update or a `compact_rewrite` in the source makes the buckets of the changed row groups dirty, and the refresh recomputes them from the source in the same statement, folding new groups into the clean buckets only. A bucket that holds retained history is never recomputed: such a refresh is refused (`0A000`) and writes nothing, including when the history is retired by that same refresh. Arms: a delete (and no partial outside the changed groups' range rewritten), an update moving rows to another bucket, a delete plus an append straddling its bucket, `compact_rewrite`, a deleted row with a NULL ts, the two history cases, a day bucket refreshed in Europe/Berlin across its DST switch, and the record kept tidy (a recounted group, a forgotten one, retired groups dropped). Writing the DST arm showed that the first fixture's bucket began after the switch, because this file's ORIGIN is 06:00 UTC, so the arm was green under the mutation it was for; the rows were moved into the bucket that contains the switch.
+
+Phase 2 mutations, each red on PG17 at the arm the shell twin names: new rows folded into dirty buckets too, every bucket recomputed, no history refusal, blocking on stored history only, a rebase without ranges, the NULL bucket never dirty, the width added in the session's zone, new groups recorded without ranges, no recount, no forget, retired groups kept in the record, and the retired ranges never stored.
+
+Phase 1 removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, a rebase that clears the rollup, `=` in place of `IS NOT DISTINCT FROM` (only the NULL arm), retired groups kept in the snapshot, and `row_tid` with 290 rows a block.
 
 ### Every test
 
 | test | what it holds |
 | --- | --- |
-| `test_rollup_phase_one` | the rollup equals a full recompute after the first refresh, appends with late rows, a bulk append, and a rebase; a refresh with nothing new folds nothing; rows committed during a refresh are folded by the next, once; two concurrent refreshes fold each row once; zones agree; a refresh after a small append reads under a fifth of the source; a rewritten source is refused until `rebase_rollup`; a delete is refused (phase 1); a heap rollup behaves the same; REPEATABLE READ is refused; an owner who is not a superuser creates and refreshes a rollup, and another role sees none of it; bad definitions are refused with `22023` |
+| `test_rollup_phase_one` | the rollup equals a full recompute after the first refresh, appends with late rows, a bulk append, and a rebase; a refresh with nothing new folds nothing; rows committed during a refresh are folded by the next, once; two concurrent refreshes fold each row once; zones agree; a refresh after a small append reads under a fifth of the source; a rewritten source is refused until `rebase_rollup`; after a delete, an update, a straddling append, `compact_rewrite` or a deleted NULL-ts row the rollup equals a full recompute, rewriting no partial outside the changed groups' range; a recompute that would reach retained history is refused with `0A000` and changes nothing; a day bucket is recomputed whole across a DST switch; a heap rollup behaves the same; REPEATABLE READ is refused; an owner who is not a superuser creates and refreshes a rollup, and another role sees none of it; bad definitions are refused with `22023` |
 
 ## 98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim
 
