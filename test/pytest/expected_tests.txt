@@ -606,4 +606,8 @@ guard_tests 419
 #
 # cluster_tests 527 -> 528 for #1297's test_partition_drop_plan, by collection on
 # this branch rebased onto b55cb23 (#1330).
-cluster_tests 528
+#
+# cluster_tests 528 -> 529 for the #1330 review's NULL-group arm in
+# test_native_groupagg.py, one test, by collection on this branch rebased onto
+# 614eb02 (#1331).
+cluster_tests 529

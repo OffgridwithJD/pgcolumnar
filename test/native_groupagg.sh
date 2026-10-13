@@ -563,14 +563,20 @@ HIGHK="SELECT k, count(*), sum(i) FROM %T GROUP BY k"
 # or its error. The query runs itself: wrapped in SELECT count(*) FROM (...), the
 # planner drops the unused aggregates and the node refuses that shape, so the
 # wrapper would measure a different plan.
+# Both helpers turn hash aggregation and sorting off, so the grouped path wins
+# whenever the gate offers it: these arms test the gate, not the cost model. A
+# declined query still runs, on the disabled plan. Without this, a gate that let a
+# skewed key through could still lose on cost, and the arm would stay green.
 groups_or_error() {
 	local out
 	out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET enable_hashagg = off" -c "SET enable_sort = off" \
 		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "$2" 2>&1)"
 	if grep -q '^ERROR' <<<"$out"; then grep -m1 '^ERROR' <<<"$out"; else grep -c '' <<<"$out"; fi
 }
 under_cap() {	# under_cap CAP QUERY -> 1 when the grouped node is planned under that cap
-	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+	env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At -q \
+		-c "SET enable_hashagg = off" -c "SET enable_sort = off" \
 		-c "SET pgcolumnar.groupagg_max_groups = $1" -c "EXPLAIN (COSTS OFF) $2" 2>&1 \
 		| grep -c 'Columnar Vectorized Group Keys'
 }
@@ -607,5 +613,17 @@ rc_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postg
 	-c "SET pgcolumnar.groupagg_max_groups = 1000" -c "EXECUTE gk" 2>&1 || true)"
 check "a cached plan run under a lower cap stops at the runtime cap, with its hint" \
 	"$(grep -c 'Columnar Vectorized Group Keys' <<<"$rc_out")|$(grep -c 'exceeded pgcolumnar.groupagg_max_groups (1000)' <<<"$rc_out")|$(grep -c 'HINT:  Raise pgcolumnar.groupagg_max_groups' <<<"$rc_out")" "1|1|1"
+
+# A NULL key is one more group, and the bucket bound must count it. @OffgridwithJD's
+# shape on #1330: buckets at 00:00:59, 00:01:30 and 00:02:00 fill the bound of 3
+# (floor(61 s / 60 s) + 2), so the NULL rows make a fourth group. Under a cap of 3 a
+# bound without the NULL group takes the path and errors.
+psql_run "CREATE TABLE gate_nb (ts timestamptz, v int) USING pgcolumnar;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:00:59+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:01:30+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT '2026-01-01 00:02:00+00', g FROM generate_series(1, 50) g;
+	INSERT INTO gate_nb SELECT NULL, g FROM generate_series(1, 50) g;"
+check "a NULL key counts as a group in the bucket bound: four groups under a cap of 3 are declined and all answered" \
+	"$(groups_or_error 3 "SELECT date_trunc('minute', ts) b, count(*) FROM gate_nb GROUP BY b")" "4"
 
 pgc_summary
