@@ -339,6 +339,13 @@ true until the next version shipped.
   `pgc_on_exit`; its cleanup now calls `pgc_on_exit` first. Selftest part 620
   fails any suite that calls `pgc_setup` and arms an EXIT trap reaching neither
   `pgc_on_exit` nor `pgc_teardown`. Reported by @OffgridwithJD.
+- `COMMIT PREPARED` (or `ROLLBACK PREPARED`) in the same session that prepared a
+  pgcolumnar write no longer crashes the backend (#1323). PREPARE frees the
+  transaction's memory without reaching the code that forgets the pending write
+  states and delete vectors, so the session's next transaction walked freed
+  lists. They are now let go of at PREPARE. Committing from another session,
+  which is what `parallel_copy` does, was never affected. `test/prepared_writes.sh`
+  and an independent `test_prepared_writes.py`. Reported by @OffgridwithJD.
 
 - An `ALTER TABLE` on a partitioned columnar table that does not recurse no
   longer opens the other partitions without a lock. `DETACH PARTITION`,

@@ -1846,6 +1846,17 @@ partman_columnar	partman_columnar	premise: the rows went in	15;16;17;18;19	2026-
 partman_columnar	partman_columnar	premise: with default_table_access_method every partition pg_partman makes is columnar	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	premise: without default_table_access_method pg_partman makes heap partitions	15;16;17;18;19	never	-
 partman_columnar	partman_columnar	retention leaves no pgcolumnar storage row behind	15;16;17;18;19	2026-10-12	the drop hook stops deleting the storage row, so a partition pg_partman drops leaves it behind
+prepared_writes	prepared_writes	a delete prepared and committed in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the delete-vector buffers
+prepared_writes	prepared_writes	an index fetch before PREPARE, and the same row fetched first after COMMIT PREPARED, in one session	15;16;17;18;19	never	-
+prepared_writes	prepared_writes	an insert prepared and committed in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the pending write states
+prepared_writes	prepared_writes	an insert prepared and rolled back in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the pending write states
+prepared_writes	prepared_writes	an update prepared and committed in one session leaves the session answering	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the delete-vector buffers;PREPARE without letting go of the pending write states
+prepared_writes	prepared_writes	and no prepared transaction is left behind	15;16;17;18;19	never	-
+prepared_writes	prepared_writes	and the session's next write, after COMMIT PREPARED, lands	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the pending write states
+prepared_writes	prepared_writes	no backend was terminated by a signal	15;16;17;18;19	2026-10-13	PREPARE letting go of neither (main before #1323);PREPARE without letting go of the delete-vector buffers;PREPARE without letting go of the pending write states
+prepared_writes	prepared_writes	premise: prepared transactions are enabled	15;16;17;18;19	never	-
+prepared_writes	prepared_writes	premise: the fetch is an index scan, which is what reaches the fetch cache	15;16;17;18;19	never	-
+prepared_writes	prepared_writes	premise: the server log is where a crash would be recorded	15;16;17;18;19	never	-
 projection_parallel	projection_parallel	a covering projection can be a parallel scan	15;16;17;18;19	2026-09-18	-
 projection_parallel	projection_parallel	a page cost that makes I/O dominate costs the parallel covering path	15;16;17;18;19	2026-09-23	the partial covering total amortises I/O as well as CPU: (ioRunProj + cpuRunProj) / divisor
 projection_parallel	projection_parallel	a parallel covering projection returns the covering rows once	15;16;17;18;19	2026-10-12	a parallel worker never wires the shared row-group counter, so every worker scans every group

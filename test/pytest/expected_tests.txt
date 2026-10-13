@@ -582,4 +582,7 @@ guard_tests 419
 #
 # cluster_tests 513 -> 516 for #1295's test_tier_partition.py (three tests), by collection
 # on this branch rebased onto 2e34f90 (#1322).
-cluster_tests 516
+#
+# cluster_tests 516 -> 517 for #1323's test_prepared_writes.py, one test, by collection
+# on this branch rebased onto 305e15e (#1317).
+cluster_tests 517
