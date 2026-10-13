@@ -155,7 +155,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 "refreshes from sessions in different time zones build the same rollup")
     expect.num(_one(conn, "SELECT count(*) FROM z_utc"), _one(conn, f"SELECT count(*) FROM ({RECOMPUTE}) z"),
                "the zone rollups hold a row per key of the recompute")
-    expect.at_least(_one(conn, "SELECT count(*) FROM z_utc"), 1, "premise: and that is not zero")
+    expect.at_least(_one(conn, "SELECT count(*) FROM z_utc"), 1, "and that is not zero")
 
     # Cost, on a source of real size.
     _load(conn, 100001, 260000, "2026-03-01 00:00:00+00")
@@ -171,7 +171,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                       " FROM pg_statio_user_tables WHERE relname = 'feed'")
     pages = _one(conn, "SELECT pg_relation_size('feed') / 8192")
     print(f"-- refresh after an 800-row append read {read} of {pages} blocks")
-    expect.at_least(read, 1, "premise: the refresh after a small append read the source at all")
+    expect.at_least(read, 1, "the refresh after a small append read the source at all")
     expect.at_least(pages - 5 * read if read else 0, 1,
                     "a refresh after a small append reads under a fifth of the source")
     expect.text(_matches(conn), _oracle(conn), "and the rollup equals a full recompute")
@@ -187,7 +187,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text("renumbered" if identity() != before else "same", "renumbered",
                 "premise: pgcolumnar.vacuum gave the source's row groups new identities")
     vb = _matches(conn)
-    expect.at_least(_one(conn, "SELECT count(*) FROM gauge_15m"), 1, "premise: the rollup holds rows before the rewrite")
+    expect.at_least(_one(conn, "SELECT count(*) FROM gauge_15m"), 1, "the rollup holds rows before the rewrite")
     expect.text(f"{_refresh(conn)}|{_matches(conn)}", f"55000|{vb}",
                 "a refresh after the source was rewritten is refused, naming rebase_rollup")
     # Not through _state: a SQLSTATE such as 42883 is all digits and would read as a count.
@@ -203,7 +203,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
 
     # Phase 1 refuses anything but appends.
     before = _matches(conn)
-    expect.at_least(_one(conn, "SELECT count(*) FROM gauge_15m"), 1, "premise: the rollup holds rows before the delete")
+    expect.at_least(_one(conn, "SELECT count(*) FROM gauge_15m"), 1, "the rollup holds rows before the delete")
     with conn.cursor() as cur:
         cur.execute("DELETE FROM feed WHERE sensor = 4 AND at < '2026-02-01 01:00:00+00'")
     expect.text(_refresh(conn), "0A000", "a refresh after a delete is refused until phase 2")
@@ -235,7 +235,7 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
         cur.execute("INSERT INTO holes SELECT CASE WHEN g % 13 = 0 THEN NULL ELSE '2026-07-01'::timestamptz"
                     " + g * interval '47 s' END, CASE WHEN g % 6 = 0 THEN NULL ELSE g % 4 END, g, g / 4.0"
                     " FROM generate_series(2601, 3900) g")
-    expect.text(_refresh(conn, "holes_15m"), "1300", "premise: the second refresh of the NULL-key rollup folded the append")
+    expect.text(_refresh(conn, "holes_15m"), "1300", "the second refresh of the NULL-key rollup folded the append")
     holes_recompute = RECOMPUTE.replace("FROM feed", "FROM holes")
     nulls = f"SELECT count(*) FILTER (WHERE sensor IS NULL) || ' ' || count(*) FILTER (WHERE bucket IS NULL) FROM ({{}}) z"
     expect.text(f"{_digest(conn, 'SELECT * FROM holes_15m')}|{_one(conn, nulls.format('SELECT * FROM holes_15m'))}",
@@ -255,11 +255,11 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                     " FROM generate_series(1, 1600) g")
         cur.execute(f"SELECT pgcolumnar.create_rollup('aged_hourly', 'aged', 'at', '1 hour', '{ORIGIN}', '{{}}',"
                     " '{count,max}', '{*,reading}')")
-    expect.text(_refresh(conn, "aged_hourly"), "4800", "premise: the history rollup folded every row")
+    expect.text(_refresh(conn, "aged_hourly"), "4800", "the history rollup folded every row")
     hist = "SELECT md5(string_agg(bucket || ':' || count || ':' || max_reading, ',' ORDER BY bucket)) FROM aged_hourly"
     before_hist = _one(conn, hist)
     old_buckets = _one(conn, "SELECT count(*) FROM aged_hourly WHERE bucket < now() - interval '60 days'")
-    expect.at_least(old_buckets, 1, "premise: the history rollup holds old buckets")
+    expect.at_least(old_buckets, 1, "the history rollup holds old buckets")
     with conn.cursor() as cur:
         cur.execute("SELECT pgcolumnar.set_options('aged', ttl_column => 'at', ttl_interval => '14 days')")
     expect.at_least(_one(conn, "SELECT pgcolumnar.expire('aged')"), 1, "premise: expire retired the old row groups")

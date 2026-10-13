@@ -136,7 +136,7 @@ check "refreshes from sessions in different time zones build the same rollup" \
 # Empty equals empty: in the first red run both were, and the arm above passed.
 check_num "the zone rollups hold a row per key of the recompute" \
 	"$(q "SELECT count(*) FROM r_utc;")" "$(q "SELECT count(*) FROM ($RECOMPUTE) z;")"
-check_num "premise: and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")" 1)" "1"
+check_num "and that is not zero" "$(at_least "$(q "SELECT count(*) FROM r_utc;")" 1)" "1"
 
 # Cost: after a small append to the whole table, a refresh reads the new groups.
 # The source is grown first: on a 26-page table the refresh's fixed cost (the
@@ -151,7 +151,7 @@ env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$P
 read_blocks="$(q "SELECT coalesce(heap_blks_read, 0) + coalesce(heap_blks_hit, 0) FROM pg_statio_user_tables WHERE relname = 'src';")"
 pages="$(q "SELECT pg_relation_size('src') / 8192;")"
 echo "-- refresh after a 1000-row append read $read_blocks of $pages blocks"
-check_num "premise: the refresh after a small append read the source at all" "$(at_least "$read_blocks" 1)" "1"
+check_num "the refresh after a small append read the source at all" "$(at_least "$read_blocks" 1)" "1"
 # Reading nothing also reads under a fifth: the arm requires a read.
 check_num "a refresh after a small append reads under a fifth of the source" \
 	"$( [ -n "$read_blocks" ] && [ "$read_blocks" -ge 1 ] && at_least $((pages - 5 * read_blocks)) 1 || echo "read ${read_blocks:-nothing}")" "1"
@@ -170,7 +170,7 @@ groups_after="$(q "SELECT pgcolumnar.get_storage_id('src') || ':' || string_agg(
 check "premise: pgcolumnar.vacuum gave the source's row groups new identities" \
 	"$([ -n "$groups_after" ] && [ "$groups_after" != "$groups_before" ] && echo renumbered || echo "same: $groups_after")" "renumbered"
 vb="$(exact "SELECT * FROM r_hourly")"
-check_num "premise: the rollup holds rows before the rewrite" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
+check_num "the rollup holds rows before the rewrite" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
 check "a refresh after the source was rewritten is refused, naming rebase_rollup" \
 	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_hourly');")|$(exact "SELECT * FROM r_hourly")" "55000|$vb"
 check_num "rebase_rollup records the source's current row groups" \
@@ -183,7 +183,7 @@ check "and the rollup equals a full recompute" "$(matches)" "$(oracle)"
 
 # Phase 1 folds appends only; anything else is refused, and the rollup is untouched.
 before="$(exact "SELECT * FROM r_hourly")"
-check_num "premise: the rollup holds rows before the delete" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
+check_num "the rollup holds rows before the delete" "$(at_least "$(q "SELECT count(*) FROM r_hourly;")" 1)" "1"
 q "DELETE FROM src WHERE dev = 3 AND ts < '2026-03-01 06:00:00+00';" >/dev/null
 check "a refresh after a delete is refused until phase 2" \
 	"$(sqlstate "SELECT pgcolumnar.refresh_rollup('r_hourly');")" "0A000"
@@ -213,7 +213,7 @@ q "SELECT pgcolumnar.create_rollup('r_nk', 'nk', 'ts', '1 hour', '$ORIGIN', '{de
    SELECT pgcolumnar.refresh_rollup('r_nk');" >/dev/null
 q "INSERT INTO nk SELECT CASE WHEN g % 11 = 0 THEN NULL ELSE '2026-06-01'::timestamptz + g * interval '61 s' END,
           CASE WHEN g % 7 = 0 THEN NULL ELSE g % 5 END, g FROM generate_series(3001, 4500) g;" >/dev/null
-check_num "premise: the second refresh of the NULL-key rollup folded the append" "$(q "SELECT pgcolumnar.refresh_rollup('r_nk');")" "1500"
+check_num "the second refresh of the NULL-key rollup folded the append" "$(q "SELECT pgcolumnar.refresh_rollup('r_nk');")" "1500"
 NKR="SELECT date_bin('1 hour', ts, '$ORIGIN') AS bucket, dev, count(*) AS count, sum(v)::numeric AS sum_v,
      min(v) AS min_v, max(v) AS max_v FROM nk GROUP BY 1, 2"
 check "a rollup with NULL keys and NULL timestamps equals a full recompute" \
@@ -231,10 +231,10 @@ q "CREATE TABLE hist (ts timestamptz, v int) USING pgcolumnar;
    INSERT INTO hist SELECT now() - interval '200 days' + g * interval '1 min', g FROM generate_series(1, 3000) g;
    INSERT INTO hist SELECT now() - interval '1 day' + g * interval '10 s', g FROM generate_series(1, 2000) g;" >/dev/null
 q "SELECT pgcolumnar.create_rollup('r_hist', 'hist', 'ts', '1 day', '$ORIGIN', '{}', '{count,sum}', '{*,v}');" >/dev/null
-check_num "premise: the history rollup folded every row" "$(q "SELECT pgcolumnar.refresh_rollup('r_hist');")" "5000"
+check_num "the history rollup folded every row" "$(q "SELECT pgcolumnar.refresh_rollup('r_hist');")" "5000"
 hb="$(q "SELECT md5(string_agg(bucket || ':' || count || ':' || sum_v, ',' ORDER BY bucket)) FROM r_hist;")"
 ob="$(q "SELECT count(*) FROM r_hist WHERE bucket < now() - interval '100 days';")"
-check_num "premise: the history rollup holds old buckets" "$(at_least "${ob:-0}" 1)" "1"
+check_num "the history rollup holds old buckets" "$(at_least "${ob:-0}" 1)" "1"
 q "SELECT pgcolumnar.set_options('hist', ttl_column => 'ts', ttl_interval => '30 days');" >/dev/null
 retired="$(q "SELECT pgcolumnar.expire('hist');")"
 check_num "premise: expire retired the old row groups" "$(at_least "${retired:-0}" 1)" "1"
