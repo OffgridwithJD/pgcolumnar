@@ -209,12 +209,13 @@ run_plan() {	# each statement top-level, as \gexec would run it
 	done <<<"$(plan "$1" "$2")"
 }
 q "CREATE TABLE dl (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
-   CREATE TABLE dl_01 PARTITION OF dl FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
-   CREATE TABLE dl_02 PARTITION OF dl FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;
    CREATE TABLE dl_03 PARTITION OF dl FOR VALUES FROM ('2020-03-01 00:00+00') TO ('2020-04-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dl_02 PARTITION OF dl FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;
    CREATE TABLE dl_04 PARTITION OF dl FOR VALUES FROM ('2020-04-01 00:00+00') TO ('2020-05-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dl_01 PARTITION OF dl FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
    INSERT INTO dl SELECT '2020-01-01 00:00+00'::timestamptz + g * interval '1 hour', g FROM generate_series(0, 2903) g;" >/dev/null
-check "premise: the drop fixture has four partitions, each holding rows" \
+# Created out of range order, so a plan in catalog order is not a plan in range order.
+check "premise: the drop fixture has several partitions, each holding rows" \
 	"$(q "SELECT count(DISTINCT tableoid) FROM dl;")|$(kids dl)" "4|4"
 check "the plan retires the partitions wholly before the cutoff, in range order" \
 	"$(plan dl '2020-03-15 00:00+00')" \
@@ -262,7 +263,7 @@ sleep 1
 env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -q \
 	-c "SET statement_timeout = '2s'" -c "ALTER TABLE dp DETACH PARTITION dp_1 CONCURRENTLY" >/dev/null 2>&1
 wait "$holder"
-check "premise: the interrupted detach left dp_1 pending" \
+check "premise: the interrupted detach left the partition pending" \
 	"$(q "SELECT inhdetachpending FROM pg_inherits WHERE inhrelid = 'dp_1'::regclass;")" "t"
 check "a pending detach is finalised, not started again" \
 	"$(q "SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dp', '2020-02-01 00:00+00') s;")" \

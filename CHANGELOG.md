@@ -18,6 +18,13 @@ true until the next version shipped.
 
 ### Added
 
+- `pgcolumnar.partition_drop_plan(parent, cutoff)` returns the statements that
+  retire every time partition whose whole range is older than `cutoff`: a
+  `DETACH PARTITION ... CONCURRENTLY` and a `DROP TABLE` each, in range order,
+  or `DETACH ... FINALIZE` for a partition an interrupted detach left pending
+  (#1297). Run them with `\gexec`. The parent is never locked exclusively.
+  `test/partition_lifecycle.sh` and `test_partition_lifecycle.py`.
+
 - A `pgcolumnar.expire` that has nothing to retire now answers from the
   retention column's extent in one index lookup, instead of one zone-map probe
   per row group (#1310). Most passes of the maintenance daemon are such passes. When

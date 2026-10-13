@@ -622,6 +622,19 @@ refused before it creates any (`22023`). The function takes
 `SHARE UPDATE EXCLUSIVE` on the parent, never `ACCESS EXCLUSIVE`. See
 [Create time partitions ahead](how-to.md#create-time-partitions-ahead).
 
+### pgcolumnar.partition_drop_plan(parent regclass, cutoff timestamptz) returns setof text
+
+Returns the statements that retire every partition of `parent` whose upper bound
+is at or before `cutoff`, in range order. Each partition gets
+`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`, then `DROP TABLE`. A
+partition that an interrupted concurrent detach left pending gets
+`DETACH PARTITION ... FINALIZE` instead. The names are schema-qualified. The
+function runs nothing: run each statement at top level, for example with
+`\gexec`, because a concurrent detach cannot run inside a function. For a
+`timestamp` key, `cutoff` is read as the session's local time. It refuses a
+parent with the same codes as `partition_create_ahead` (`55000`), and a NULL
+cutoff (`22023`). See [Drop old time partitions](how-to.md#drop-old-time-partitions).
+
 ### pgcolumnar.create_rollup(rollup name, source regclass, ts_column name, width interval, origin timestamptz, group_by name[], agg_functions text[], agg_columns name[], access_method name DEFAULT 'pgcolumnar') returns regclass
 
 Creates a rollup of `source` in the source's schema. A rollup is a view of

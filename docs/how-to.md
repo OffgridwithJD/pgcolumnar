@@ -482,6 +482,33 @@ partitions, before it creates any. Use a wider width or a shorter lead.
 `test/partition_lifecycle.sh` checks each of these statements, in sessions
 west and east of UTC.
 
+## Drop old time partitions
+
+`pgcolumnar.partition_drop_plan` returns the statements that retire every
+partition whose whole range is older than a cutoff. It does not run them, because
+`DETACH PARTITION ... CONCURRENTLY` cannot run inside a function. Run each one as
+its own statement, for example with psql's `\gexec`:
+
+```sql
+SELECT * FROM pgcolumnar.partition_drop_plan('metrics', now() - interval '90 days') \gexec
+```
+
+For each old partition, in range order, the plan detaches it concurrently and
+then drops it. The concurrent detach takes no exclusive lock on the parent, so
+queries and inserts on the table continue. The drop locks only the detached
+partition, which no query reaches through the parent any more. A partition whose
+upper bound equals the cutoff is old. A partition that straddles the cutoff is
+kept.
+
+If a concurrent detach was interrupted, the partition stays pending. The next
+plan finishes that detach with `DETACH PARTITION ... FINALIZE` instead of starting
+it again.
+
+For a `timestamp` key, the cutoff is read as the session's local time. The
+function refuses the same tables as `partition_create_ahead`, because a DEFAULT
+partition rules out a concurrent detach. A run of the plan drops the
+partitions' rows: nothing keeps them.
+
 ## Count distinct values and percentiles approximately
 
 For large tables, approximate distinct counts and percentiles cost far less than
