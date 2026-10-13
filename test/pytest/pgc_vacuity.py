@@ -1554,7 +1554,16 @@ def pytest_sessionfinish(session, exitstatus):
     # A test file that imports a declinable capability outside require_module is
     # refused (#1286 review): it would fail on a box without the module, or pass
     # having caught its own ImportError, and either way the decline is not named.
-    if getattr(session.config, "pgc_capability_imports", None) and session.exitstatus == 0:
+    #
+    # UNDER XDIST THE WORKERS COLLECT, so the sites they found are shipped back
+    # through workeroutput and merged on the controller in pytest_testnodedown
+    # (#1305). Measured before that: the serial run said REFUSED and exited 1, the
+    # -n 2 run said `2 passed` and exited 0.
+    if hasattr(session.config, "workerinput"):
+        sites = getattr(session.config, "pgc_capability_imports", None)
+        if sites:
+            session.config.workeroutput["pgc_capability_imports"] = list(sites)
+    elif getattr(session.config, "pgc_capability_imports", None) and session.exitstatus == 0:
         session.exitstatus = 1
 
     # THE RECONCILIATION, FIRST, because it is a statement about whether the run
@@ -2025,6 +2034,26 @@ def _capability_import_sites(path, capabilities=DECLINABLE_CAPABILITIES):
                 sites.append(f"{base} imports {top} outside require_module "
                              f"(line {node.lineno})")
     return sites
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    """Merge a worker's unguarded-import sites into the controller's list (#1305).
+
+    Every worker collects every file, so each site arrives once per worker; the
+    list keeps the first of each. Optional, because the hook exists only when
+    xdist is loaded.
+    """
+    sites = getattr(node, "workeroutput", {}).get("pgc_capability_imports") or []
+    if not sites:
+        return
+    store = getattr(node.config, "pgc_capability_imports", None)
+    if store is None:
+        store = []
+        node.config.pgc_capability_imports = store
+    for site in sites:
+        if site not in store:
+            store.append(site)
 
 
 def pytest_collect_file(file_path, parent):
