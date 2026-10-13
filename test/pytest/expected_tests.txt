@@ -588,4 +588,7 @@ guard_tests 419
 #
 # cluster_tests 517 -> 523 for #1304 option 5's test_column_extent.py, six tests,
 # by collection on this branch rebased onto 036d452 (#1324).
-cluster_tests 523
+#
+# cluster_tests 523 -> 524 for option 5's test_a_transaction_reads_its_own_flushed_groups,
+# by collection on the same tree.
+cluster_tests 524

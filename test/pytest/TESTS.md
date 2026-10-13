@@ -6713,6 +6713,7 @@ WHAT WRITING IT FOUND:
 
 - **Ordinary writers never overlap.** Concurrent writers into one table are serialized by the storage-row lock (class 102) from their first flush to their commit. The concurrency arm therefore uses `parallel_copy`, whose loaders flush into one storage at once, each through PREPARE.
 - **COMMIT PREPARED crashes in the preparing session.** On main, `COMMIT PREPARED` in the session that prepared a pgcolumnar write crashes the backend (#1323), so this file commits from another session.
+- **A transaction did not see its own groups in the extent.** Its extent row is written at pre-commit, but its groups are visible to it from the moment they flush. A plan made in between bounded the column by the committed rows alone, which is an under-estimate: 61 rows against the zone maps' 4500 in this file's fixture. The bound now adds the transaction's own pending fold.
 - **The xact scan counters carry over.** `pg_stat_get_xact_numscans` reports a backend's pending stats, flushed about once a second rather than at transaction end. A measurement in the same connection as the writes counts their zone-map reads too, so the planning arm measures on a fresh connection.
 
 Written red first: the shell twin, against main, with the function absent (42883).
@@ -6724,6 +6725,7 @@ Written red first: the shell twin, against main, with the function absent (42883
 | `test_the_extent_is_the_columns_own_order` | `timestamptz`, `int` across 256 and negative, negative `numeric`, `date` and `text COLLATE "C"`: each column's extent is the data's min and max, over several row groups |
 | `test_the_planner_reads_the_extent_not_the_zone_maps` | planning a bucketed GROUP BY scans `zone_map` 0 times with a complete extent and 1 without, with the same estimate; with no rows the function returns none; the next writer recomputes one over every group |
 | `test_writers_concurrent_aborted_and_prepared` | `parallel_copy` with three loaders, an aborted writer, a rolled-back savepoint (containment), PREPARE and COMMIT PREPARED, and a table created in a rolled-back savepoint (no orphan rows) |
+| `test_a_transaction_reads_its_own_flushed_groups` | inside a transaction that has flushed groups far outside the committed extent, `column_extent` contains them, and a plan estimates as it does with the extent rows deleted (the zone maps) |
 | `test_a_shrink_is_recomputed_never_guessed` | after `expire`, `compact_rewrite` and VACUUM retire or rewrite groups, the extent equals the data left, and after `expire` it moved |
 | `test_no_complete_extent_where_the_zone_maps_cannot_give_one` | a column added after older groups, and a `point` column even after a recompute, get no complete extent |
 | `test_housekeeping_and_privilege` | fifty committing writers leave at most nine rows; TRUNCATE and DROP remove them; an ordinary role cannot read the catalog, nor the function without SELECT |
