@@ -2208,6 +2208,92 @@ BEGIN
 END;
 $create_ahead$;
 
+/*
+ * pgcolumnar.partition_drop_plan (#1297)
+ *
+ * The statements that retire every partition of a RANGE-partitioned parent
+ * whose whole range is older than cutoff (its upper bound at or before it), in
+ * range order: ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY, then DROP
+ * TABLE. A partition a concurrent detach left pending gets DETACH ... FINALIZE
+ * instead. A partition reaching MAXVALUE is never old.
+ *
+ * RETURNED, NOT RUN. DETACH ... CONCURRENTLY is refused inside any function, DO
+ * block or procedure, on every major (#1297 note 1), and a plain DETACH or a
+ * DROP of an attached partition takes ACCESS EXCLUSIVE on the parent, which
+ * blocks every query on the table. The caller runs each statement at top level:
+ *
+ *     SELECT * FROM pgcolumnar.partition_drop_plan('metrics', now() - interval '90 days') \gexec
+ *
+ * The DROP still takes ACCESS EXCLUSIVE on the partition it drops; after the
+ * detach nothing reaches that partition through the parent.
+ *
+ * A `timestamp` key holds wall-clock time, so cutoff is read as the session's
+ * wall-clock time for it, as partition_create_ahead reads "now". The same
+ * refusals as partition_create_ahead, with the same codes: a DEFAULT partition
+ * rules out the concurrent detach, and is refused rather than dropped with the
+ * exclusive one.
+ */
+CREATE FUNCTION pgcolumnar.partition_drop_plan(parent regclass, cutoff timestamptz)
+	RETURNS SETOF text
+	LANGUAGE plpgsql STABLE
+	SET search_path = pg_catalog, pg_temp
+	AS $drop_plan$
+DECLARE
+	strat   "char";
+	natts   int;
+	defid   oid;
+	keytype regtype;
+	p       record;
+BEGIN
+	IF cutoff IS NULL THEN
+		RAISE EXCEPTION 'cutoff must not be NULL' USING ERRCODE = '22023';
+	END IF;
+	SELECT pt.partstrat, pt.partnatts, pt.partdefid, a.atttypid::regtype
+	  INTO strat, natts, defid, keytype
+	  FROM pg_partitioned_table pt
+	  JOIN pg_attribute a ON a.attrelid = pt.partrelid AND a.attnum = pt.partattrs[0]
+	 WHERE pt.partrelid = parent;
+	IF NOT FOUND OR strat <> 'r' OR natts <> 1 THEN
+		RAISE EXCEPTION '% is not RANGE-partitioned on one column', parent
+			USING ERRCODE = '55000';
+	END IF;
+	IF keytype NOT IN ('timestamptz'::regtype, 'timestamp'::regtype) THEN
+		RAISE EXCEPTION '% is partitioned on %, not on a timestamp', parent, keytype
+			USING ERRCODE = '55000';
+	END IF;
+	IF defid <> 0 THEN
+		RAISE EXCEPTION '% has a DEFAULT partition', parent
+			USING ERRCODE = '55000',
+			      HINT = 'A DEFAULT partition rules out DETACH CONCURRENTLY, so the partition lifecycle refuses to manage this table.';
+	END IF;
+
+	FOR p IN
+		SELECT b.part, b.pending
+		  FROM (SELECT c.oid::regclass AS part, i.inhdetachpending AS pending,
+		               (regexp_match(pg_get_expr(c.relpartbound, c.oid),
+		                             'FROM \(''([^'']+)''\)'))[1] AS lo,
+		               (regexp_match(pg_get_expr(c.relpartbound, c.oid),
+		                             'TO \(''([^'']+)''\)'))[1] AS hi
+		          FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+		         WHERE i.inhparent = parent) b
+		 WHERE b.hi IS NOT NULL
+		   AND CASE WHEN keytype = 'timestamp'::regtype
+		            THEN b.hi::timestamp <= cutoff::timestamp
+		            ELSE b.hi::timestamptz <= cutoff END
+		 -- range order; a timestamp bound converts to timestamptz in one zone, monotonically
+		 ORDER BY CASE WHEN keytype = 'timestamp'::regtype
+		               THEN b.hi::timestamp::timestamptz ELSE b.hi::timestamptz END
+	LOOP
+		IF p.pending THEN
+			RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s FINALIZE', parent, p.part);
+		ELSE
+			RETURN NEXT format('ALTER TABLE %s DETACH PARTITION %s CONCURRENTLY', parent, p.part);
+		END IF;
+		RETURN NEXT format('DROP TABLE %s', p.part);
+	END LOOP;
+END
+$drop_plan$;
+
 /* ---------------------------------------------------------------------------
  * Incremental rollups (#1294).
  *

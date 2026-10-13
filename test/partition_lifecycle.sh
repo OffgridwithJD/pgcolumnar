@@ -194,8 +194,8 @@ check "and nothing was created for it" \
 #
 #   partition_drop_plan(parent regclass, cutoff timestamptz) -> SETOF text
 #
-# The statements that retire every partition whose whole range is older than
-# cutoff, in range order: DETACH ... CONCURRENTLY, then DROP. They cannot run
+# The statements, schema-qualified, that retire every partition whose whole range
+# is older than cutoff, in range order: DETACH ... CONCURRENTLY, then DROP. They cannot run
 # inside a function (DETACH CONCURRENTLY refuses any function, DO block or
 # procedure, on every major: #1297 note 1), so the function RETURNS them and
 # the caller runs each as its own top-level statement (\gexec). A partition a
@@ -218,8 +218,8 @@ check "premise: the drop fixture has four partitions, each holding rows" \
 	"$(q "SELECT count(DISTINCT tableoid) FROM dl;")|$(kids dl)" "4|4"
 check "the plan retires the partitions wholly before the cutoff, in range order" \
 	"$(plan dl '2020-03-15 00:00+00')" \
-	"$(printf '%s\n' 'ALTER TABLE dl DETACH PARTITION dl_01 CONCURRENTLY' 'DROP TABLE dl_01' \
-	                 'ALTER TABLE dl DETACH PARTITION dl_02 CONCURRENTLY' 'DROP TABLE dl_02')"
+	"$(printf '%s\n' 'ALTER TABLE public.dl DETACH PARTITION public.dl_01 CONCURRENTLY' 'DROP TABLE public.dl_01' \
+	                 'ALTER TABLE public.dl DETACH PARTITION public.dl_02 CONCURRENTLY' 'DROP TABLE public.dl_02')"
 check "a cutoff on a partition's upper bound includes it" \
 	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-01 00:00+00') s WHERE s LIKE 'DROP%';")" "2"
 check "a cutoff before every partition plans nothing" \
@@ -238,13 +238,16 @@ check "a second plan for the same cutoff is empty" \
 	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-15 00:00+00');")" "0"
 
 # A timestamp (no zone) key: the cutoff is read in the session's zone, as the key's
-# wall-clock time.
+# wall-clock time. 23:00 in New York is 04:00 the next day in UTC, so a cutoff read
+# in UTC would retire dw_a at the second cutoff too.
 q "CREATE TABLE dw (ts timestamp NOT NULL) PARTITION BY RANGE (ts);
    CREATE TABLE dw_a PARTITION OF dw FOR VALUES FROM ('2021-01-01') TO ('2021-01-02') USING pgcolumnar;
    CREATE TABLE dw_b PARTITION OF dw FOR VALUES FROM ('2021-01-02') TO ('2021-01-03') USING pgcolumnar;" >/dev/null
 check "a timestamp key's bounds are compared in the session's wall-clock time" \
-	"$(q "SET TimeZone = 'America/New_York'; SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00-05') s;")" \
-	"ALTER TABLE dw DETACH PARTITION dw_a CONCURRENTLY;DROP TABLE dw_a"
+	"$(env PGTZ=America/New_York PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
+	   -c "SELECT coalesce(string_agg(s, ';'), 'none') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00-05') s" \
+	   -c "SELECT coalesce(string_agg(s, ';'), 'none') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-01 23:00-05') s" 2>&1 | paste -sd'|')" \
+	"ALTER TABLE public.dw DETACH PARTITION public.dw_a CONCURRENTLY;DROP TABLE public.dw_a|none"
 
 # An interrupted concurrent detach leaves the partition pending: a transaction
 # holding an older snapshot makes the second phase wait, and a statement timeout
@@ -263,7 +266,7 @@ check "premise: the interrupted detach left dp_1 pending" \
 	"$(q "SELECT inhdetachpending FROM pg_inherits WHERE inhrelid = 'dp_1'::regclass;")" "t"
 check "a pending detach is finalised, not started again" \
 	"$(q "SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dp', '2020-02-01 00:00+00') s;")" \
-	"ALTER TABLE dp DETACH PARTITION dp_1 FINALIZE;DROP TABLE dp_1"
+	"ALTER TABLE public.dp DETACH PARTITION public.dp_1 FINALIZE;DROP TABLE public.dp_1"
 run_plan dp '2020-02-01 00:00+00'
 check "and running it drops the pending partition" \
 	"$(q "SELECT count(*) FROM pg_class WHERE relname = 'dp_1';")|$(kids dp)" "0|1"
