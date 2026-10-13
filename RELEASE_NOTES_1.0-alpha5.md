@@ -4,7 +4,8 @@ Release date: TODO(release)
 Previous release: 1.0-alpha4 (2026-09-17)
 
 pgColumnar is a columnar table access method for PostgreSQL. This is the fifth
-alpha. Its theme is encoding, as measured. Tables that this release writes are
+alpha. It has two themes. The first is time series: retention, partitions, cold
+storage, rollups and bucketed queries. The second is encoding, as measured. Tables that this release writes are
 smaller: on the ClickBench sample, the same data takes 20.6% fewer bytes than
 before this release's two encoding changes. Range columns can now skip chunk
 groups on overlap and containment queries. Catalog reads cost less in a database
@@ -18,6 +19,12 @@ This release requires one upgrade command. See "Upgrading" at the end.
 
 ## Highlights
 
+- **Time series.** Seven features for time-series tables. The maintenance daemon
+  can apply retention. pg_partman and two new functions manage time partitions.
+  A cold partition can move to a Parquet file. Incremental rollups keep
+  per-bucket aggregates. See "Time series".
+- **`GROUP BY` is vectorized by default** (#1292). This changes a default:
+  `pgcolumnar.enable_group_vectorization` is now `on`. See "Settings".
 - **An older build refuses a table it cannot read** (#1137). A table this
   release has written to carries format version 2. An alpha4 build refuses it on
   every read path, instead of returning a wrong answer. See "On-disk format".
@@ -68,6 +75,81 @@ and the other 24 raised an error. The format version is what turns that wrong
 answer into a refusal.
 
 The native data format stays PGCN v1. The metapage version is unchanged.
+
+## Time series
+
+Each feature below has a section in [docs/how-to.md](docs/how-to.md), and each
+statement is checked by a test suite.
+
+### The maintenance daemon can apply retention (#1290)
+
+A table declares a retention with `pgcolumnar.set_options(..., ttl_column,
+ttl_interval)`. With `pgcolumnar.autovacuum_expire` on, as well as
+`pgcolumnar.autovacuum`, each daemon pass runs `pgcolumnar.expire` on every such
+table. The setting is off by default, because `expire` deletes rows.
+
+`expire` drops whole row groups whose rows are all older than the cutoff. It
+now records each group it retires in a new catalog, `pgcolumnar.retired_group`.
+When the column's extent shows that nothing can qualify, it answers in one
+index lookup instead of reading every row group's zone map (#1310).
+
+### Time partitions (#1291, #1297)
+
+pg_partman 5.4.1 manages columnar partitions on PostgreSQL 15 to 19. Set
+`default_table_access_method` to `pgcolumnar` for the partitions it creates;
+without it, every partition is heap. The how-to shows the setup.
+
+Without pg_partman, `pgcolumnar.partition_create_ahead(parent, width, ahead)`
+creates columnar partitions ahead of the incoming rows. It never takes an
+`ACCESS EXCLUSIVE` lock on the parent.
+
+`pgcolumnar.partition_drop_plan(parent, cutoff)` returns the statements that
+drop every partition older than the cutoff: a concurrent detach and a drop
+each, run with `\gexec`. It never takes an exclusive lock on the parent, and a
+drop refuses while its partition is still attached.
+
+### Cold partitions move to Parquet (#1295)
+
+`pgcolumnar.tier_partition(partition, server, path, lock_wait)` writes a cold
+columnar partition to a Parquet file. It attaches the file in the partition's
+place, as a foreign partition with the same name, bounds, grants and comment.
+It runs in one transaction. The parent is locked `ACCESS EXCLUSIVE` from the
+detach until commit. Every lock it takes waits at most `lock_wait`.
+
+### Incremental rollups (#1294)
+
+`pgcolumnar.create_rollup` defines aggregates per `date_bin` bucket and
+`group_by` key: `count`, `sum`, `min`, `max` and `avg`.
+`pgcolumnar.refresh_rollup` brings the rollup up to date in one statement. It
+folds in the row groups added since the last refresh. It recomputes the buckets
+of row groups that were deleted from or rewritten. The rollup equals a full
+recompute of the same query, except that a `float8` average can differ in the
+last digits.
+
+Retention keeps the rollup's history: buckets keep their rows after `expire`
+drops the raw data. A refresh refuses (`0A000`) and changes nothing when it
+would have to recompute such a bucket. After a rewrite of the source, for
+example by `pgcolumnar.vacuum`, a refresh refuses with `55000`.
+`pgcolumnar.rebase_rollup` accepts the source as it is now.
+
+### Bucketed queries (#1292, #1293)
+
+`GROUP BY` is vectorized by default. The planner takes the grouped path only
+when the group count cannot exceed `pgcolumnar.groupagg_max_groups`. The
+table's row count bounds the groups, and so do the time buckets for a
+`date_bin` or `date_trunc` key. The planner estimates the number of buckets
+from the time column's range, read in one index lookup (#1304).
+
+`max(ts)` and `min(ts)` on a `timestamptz` column are answered from each row
+group's stored bounds, without reading column data, for row groups with no
+deleted rows. The how-to has a recipe for the latest reading per device.
+
+### Gap filling and approximate aggregates (#1296)
+
+The how-to has recipes to fill gaps, carry the last value forward and
+interpolate. The `hll` and `tdigest` extensions work over columnar tables and
+give exactly what they give over heap. Tested: hll 2.19 on PostgreSQL 15 to 18,
+and tdigest 1.4.3 on 15 to 19. hll 2.19 does not build against PostgreSQL 19.
 
 ## Smaller tables
 
@@ -211,17 +293,34 @@ It never removes a row that is inside the window.
 
 ## Settings
 
-Two settings are added. None is removed, and no default changes.
+Three settings are added and one default changes. None is removed.
 
 | setting | type | default | purpose |
 | --- | --- | --- | --- |
+| `pgcolumnar.enable_group_vectorization` | boolean | `on` (was `off`) | Vectorize `GROUP BY`. The planner takes the path only when the group count cannot exceed `pgcolumnar.groupagg_max_groups`. `off` restores alpha4's plans. |
+| `pgcolumnar.autovacuum_expire` | boolean | `off` | Let the maintenance daemon run `pgcolumnar.expire` on tables that declare a retention. |
 | `pgcolumnar.enable_post_codec_encoding_choice` | boolean | `on` | Keep an encoding only when it is smaller after block compression. `off` restores the earlier choice. |
 | `pgcolumnar.index_min_blocks` | integer | `3` | Page count at or above which a catalog lookup uses the catalog's index. `0` always uses the index. A very large value never does. |
 
-Both can be set per session. See [docs/configuration.md](docs/configuration.md).
+`pgcolumnar.autovacuum_expire` is set in the server configuration and takes
+effect on reload. The others can be set per session. Two developer settings,
+`pgcolumnar.rollup_pause` and `pgcolumnar.tier_fault_after`, exist for the
+test suites; only a superuser can set them. See
+[docs/configuration.md](docs/configuration.md).
 
 ## Fixed
 
+- **Changing a column's collation gave wrong answers** (#1327).
+  `ALTER COLUMN ... TYPE text COLLATE <other>` keeps the table's files, so the
+  zone maps kept bounds ordered under the old collation. Range and equality
+  queries and `min()`/`max()` then skipped rows. Such a change now forgets the
+  column's stored bounds.
+- **`COMMIT PREPARED` in the session that prepared a columnar write crashed the
+  backend** (#1323). The same holds for `ROLLBACK PREPARED`.
+- **An `ALTER TABLE` on a partitioned columnar table could open partitions
+  without a lock.** This happened for `DETACH PARTITION`, `ATTACH PARTITION` and
+  `ALTER TABLE ONLY` when the parent had two or more columnar partitions. An
+  assert-enabled build aborted.
 - **A partitioned table that names `pgcolumnar` could abort the backend**
   (#1259). From PostgreSQL 17, a partitioned table can carry
   `USING pgcolumnar` as the default for its partitions. It has no storage of its
@@ -253,6 +352,17 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
 
 ## Known issues
 
+- **A grouped query can still hit `pgcolumnar.groupagg_max_groups`.** The
+  planner checks the cap when it plans. A prepared statement planned before the
+  cap was lowered, or before the table grew past it, raises an error at
+  execution. Raise the cap, or set `pgcolumnar.enable_group_vectorization` to
+  `off`. Spilling instead of erroring is #1300.
+- **A rollup refresh refuses some changes** (#1294). A refresh refuses when it
+  would recompute a bucket that holds retained history. A delete from a row
+  group that also reaches such a bucket is refused too, even if the deleted rows
+  are recent. A refresh also refuses when rows were deleted from a row group
+  that `expire` retired before the refresh. Run `pgcolumnar.rebase_rollup` if
+  the rollup is right as it is.
 - **Setting a codec can make a table larger, on high-entropy text** (#1074).
   This is unchanged from alpha4. Measured on this release, 200,000 rows of
   random 64-character hex text:
@@ -316,6 +426,16 @@ Both can be set per session. See [docs/configuration.md](docs/configuration.md).
 
 - It adds the column `max_upper` (type `bytea`) to `pgcolumnar.zone_map`.
   Existing rows get NULL, which means "no summary".
+- It adds four catalogs: `pgcolumnar.retired_group`, `pgcolumnar.column_extent`,
+  `pgcolumnar.rollup` and `pgcolumnar.rollup_group`. The two rollup catalogs carry
+  row-level security, so each role sees only the rollups it owns.
+- It adds the functions `partition_create_ahead`, `partition_drop_plan`,
+  `tier_partition`, `create_rollup`, `refresh_rollup`, `rebase_rollup`,
+  `column_extent` and `row_tid`. It also adds three internal helpers: two for
+  rollups and one for partitions.
+- `pgcolumnar.column_extent` starts empty for existing tables. Until a table's
+  next `expire`, `compact_rewrite`, `VACUUM` or `recluster`, the planner reads
+  its zone maps instead. The answer is the same; only planning costs more.
 - It replaces `pgcolumnar.set_options`. The new version also accepts a columnar
   materialized view.
 - It replaces `pgcolumnar.reset_options`. The new version refuses any relation
