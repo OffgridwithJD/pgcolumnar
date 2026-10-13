@@ -549,4 +549,53 @@ check "while a matching-type predicate still gets one" \
 check "a non-time expression key gets no bound either" \
 	"$([ "$(gbest "SELECT upper(host) b, avg(v) FROM gb GROUP BY b")" -gt 100 ] && echo yes || echo no)" "yes"
 
+# ---- 10. on by default, gated on the estimate (#1292 phase 2) ----------------
+# The owner's decision on #1292: the grouped path is on by default, and taken only
+# when the estimated group count is at most 10% of pgcolumnar.groupagg_max_groups.
+# Over that the ordinary plan runs, so a high-cardinality GROUP BY is not turned
+# into an error by the default. The runtime cap stays as the backstop for an
+# estimate that is wrong, and an arm below shows it still is.
+# The database-level setting the sections above use is cleared, so these arms see
+# the compiled default.
+psql_run "ALTER DATABASE $PGC_DB RESET pgcolumnar.enable_group_vectorization;"
+check "the grouped path is on by default" \
+	"$(q "SELECT boot_val || '|' || setting FROM pg_settings WHERE name = 'pgcolumnar.enable_group_vectorization';")" "on|on"
+# 400,000 rows over two days: 576 five-minute buckets, and k with 200,000 values.
+GATE_GEN="SELECT '2026-02-01 00:00:00+00'::timestamptz + g * interval '432 ms', (g % 200000)::int, (g % 1000)::int
+	FROM generate_series(1, 400000) g"
+psql_run "CREATE TABLE gate_t (ts timestamptz, k int, i int) USING pgcolumnar;
+	INSERT INTO gate_t $GATE_GEN;
+	CREATE TABLE gate_h (ts timestamptz, k int, i int);
+	INSERT INTO gate_h $GATE_GEN;
+	ANALYZE gate_t; ANALYZE gate_h;"
+check "by default a five-minute bucket query takes the grouped path" \
+	"$(pgc_is_groupvec "SELECT date_bin('5 minutes', ts, '2026-01-01 00:00:00+00') b, count(*), sum(i) FROM gate_t GROUP BY b")" yes
+HIGHK="SELECT k, count(*), sum(i) FROM %T GROUP BY k"
+check "by default a key estimated at 200,000 groups is declined" \
+	"$(pgc_is_groupvec "${HIGHK//%T/gate_t}")" no
+check "and the declined query answers what heap answers" \
+	"$(q "SELECT md5(string_agg(x::text, ',' ORDER BY x)) FROM (${HIGHK//%T/gate_t}) x;")" \
+	"$(q "SELECT md5(string_agg(x::text, ',' ORDER BY x)) FROM (${HIGHK//%T/gate_h}) x;")"
+check "raising groupagg_max_groups to 10,000,000 lets the same query take the grouped path" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-c "SET pgcolumnar.groupagg_max_groups = 10000000" -c "EXPLAIN (COSTS OFF) ${HIGHK//%T/gate_t}" 2>&1 \
+		| grep -c 'Columnar Vectorized Group Keys')" "1"
+
+# An estimate the gate believes and the data contradicts: ANALYZE sees 50 keys,
+# then 5,000 more arrive unanalyzed. Under a cap of 1,000 the gate (100) passes the
+# estimate of about 50, and the runtime cap stops the query with its guidance.
+psql_run "CREATE TABLE gate_m (k int, v int) USING pgcolumnar WITH (autovacuum_enabled = off);
+	INSERT INTO gate_m SELECT g % 50, g FROM generate_series(1, 2000) g;
+	ANALYZE gate_m;
+	INSERT INTO gate_m SELECT 1000 + g, g FROM generate_series(1, 5000) g;"
+MIS="SET pgcolumnar.groupagg_max_groups = 1000;"
+check "an estimate of about 50 groups takes the grouped path under a cap of 1,000" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+		-c "$MIS" -c "EXPLAIN (COSTS OFF) SELECT k, count(*) FROM gate_m GROUP BY k" 2>&1 \
+		| grep -c 'Columnar Vectorized Group Keys')" "1"
+mis_out="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -At \
+	-c "$MIS" -c "SELECT k, count(*) FROM gate_m GROUP BY k" 2>&1 || true)"
+check "a misestimate the gate passes is still stopped at the runtime cap, with its hint" \
+	"$(grep -c 'exceeded pgcolumnar.groupagg_max_groups (1000)' <<<"$mis_out")|$(grep -c 'HINT:  Raise pgcolumnar.groupagg_max_groups' <<<"$mis_out")" "1|1"
+
 pgc_summary
