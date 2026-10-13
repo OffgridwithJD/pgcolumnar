@@ -126,6 +126,16 @@ conflicts=$(grep -rlE '^(<<<<<<< |>>>>>>> )' "$SRCDIR/docs" "$SRCDIR"/*.md 2>/de
 check "no document carries a merge conflict marker" \
 	"$([ -z "$conflicts" ] && echo none || echo "$conflicts")" "none"
 
+# THE pg_partman HOW-TO KEEPS ITS OWN HEADING. An edit that inserted a section
+# before it replaced the heading instead (3627327, #1315), and every check here
+# passed: the steps were still valid Markdown, now filed under "Count distinct
+# values and percentiles approximately". The section is found by its heading and
+# must open with the pg_partman paragraph its steps belong to.
+partman_open="$(awk '$0 == "## Manage time partitions with pg_partman" {f=1; next}
+	f && NF {print; exit}' "$SRCDIR/docs/how-to.md")"
+check "the how-to keeps its pg_partman section under its own heading" \
+	"$(printf '%s' "$partman_open" | grep -c '^pg_partman can create and drop columnar partitions')" "1"
+
 # CHANGELOG.md: dash characters only. See the scope note above.
 dashes=$(grep -c '—\|–' "$SRCDIR/CHANGELOG.md" || true)
 check "CHANGELOG.md carries no em or en dash" "$dashes" "0"

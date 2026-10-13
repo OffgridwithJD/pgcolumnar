@@ -73,6 +73,7 @@ NO_CLUSTER = [
     "test_suite_accounting.py",
     # #1288: reads docs/*.md and README.md only.
     "test_docs_cross_database_query.py",
+    "test_docs_how_to_sections.py",
     # #1215: inner pytest runs of expect.declines and require_module. Needs no
     # cluster and no driver; it never reaches into the shell harness.
     "test_capability_decline.py",
