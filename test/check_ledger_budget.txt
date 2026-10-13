@@ -1646,4 +1646,19 @@ suites_not_covered 246
 #     never         1805 + 0 = 1805
 #     dated          506 + 2 =  508
 #     1805 + 508 == 2313
-checks_never_observed_red 1805
+#
+# #1339, validity_elision (jdatcmd): 1805 -> 1804. Its heap mirrors were copied FROM
+# the columnar tables, so a read defect landed on both sides: with the reader
+# returning row 5 of every row group as NULL, the EXCEPT ALL arms stayed green. The
+# mirrors are now written from the generator, and that mutation reddens 9 checks on
+# each of 15-19 (25/25 green unmutated). One of them, "the full column preserves its
+# null count", was never red before and is now dated. "premise: the first fixture
+# holds no nulls at all" counts nulls through the reader, so it is an arm (#1236);
+# it was already dated on main (2026-09-18), a dated premise. It is renamed "the full
+# column reads back no nulls at all", and its row carries the old row's history.
+#
+#     ledger rows   2313 - 1 + 1 = 2313
+#     never         1805 - 1     = 1804
+#     dated          508 + 1     =  509
+#     1804 + 509 == 2313
+checks_never_observed_red 1804
