@@ -39,7 +39,7 @@ def _ext(conn, table, col):
     """'true|min|max', 'none' when no complete extent, or 'error <SQLSTATE>'."""
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT complete::text || '|' || minimum || '|' || maximum"
+            cur.execute("SELECT complete::text || '|' || coalesce(minimum, '-') || '|' || coalesce(maximum, '-')"
                         f" FROM pgcolumnar.column_extent('{table}', '{col}')")
             row = cur.fetchone()
     except psycopg.Error as e:
@@ -212,8 +212,12 @@ def test_no_complete_extent_where_the_zone_maps_cannot_give_one(pgc_own_db, expe
                 "a column added after older groups has no complete extent (those groups have no zone map for it)")
     expect.text(_ext(conn, "ac", "ts"), _truth(conn, "ac", "ts"),
                 "while the column that was there from the start still has one")
-    _run(conn, "CREATE TABLE no (p point) USING pgcolumnar",
-         "INSERT INTO no SELECT point(g, -g) FROM generate_series(1, 2400) g")
+    # A recompute (VACUUM after a fully deleted group) must refuse a column whose
+    # values have no ordering, not claim it holds none.
+    _run(conn, "CREATE TABLE no (p point, k int) USING pgcolumnar")
+    _small_groups(conn, "no")
+    _run(conn, "INSERT INTO no SELECT point(g, -g), g FROM generate_series(1, 2400) g",
+         "DELETE FROM no WHERE k > 2000", "VACUUM no")
     expect.text(_ext(conn, "no", "p"), "none", "a type with no ordering gets no extent")
 
 

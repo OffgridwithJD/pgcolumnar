@@ -635,7 +635,6 @@ extern Oid	PgColumnarStorageRelationOid(uint64 storageId, Snapshot snapshot);
 extern void PgColumnarExtentNote(Oid relid, uint64 storageId, int columnIndex,
 								 const NativeZoneMapMetadata *z);
 extern void PgColumnarExtentMarkRecompute(uint64 storageId);
-extern void PgColumnarExtentForget(uint64 storageId);
 extern void PgColumnarExtentPreCommit(void);
 extern void PgColumnarExtentAtXactEnd(void);
 extern bool PgColumnarExtentBound(Relation rel, int columnIndex, Snapshot snapshot,

@@ -2026,7 +2026,6 @@ PgColumnarDeleteMetadata(uint64 storageId)
 	 */
 	if (PgColumnarExtentCatalogPresent())
 		delete_rows_by_storage_id("column_extent", Anum_column_extent_storage_id, storageId);
-	PgColumnarExtentForget(storageId);
 	delete_rows_by_storage_id("row_group", Anum_row_group_storage_id, storageId);
 	delete_rows_by_storage_id("storage", Anum_native_storage_storage_id, storageId);
 

@@ -39,7 +39,7 @@ ext() {		# ext TABLE COLUMN -> "complete|min|max", "none" when no complete exten
 	local r
 	r="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At \
 		-v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate \
-		-c "SELECT complete || '|' || minimum || '|' || maximum FROM pgcolumnar.column_extent('$1', '$2');" 2>&1)"
+		-c "SELECT complete || '|' || coalesce(minimum, '-') || '|' || coalesce(maximum, '-') FROM pgcolumnar.column_extent('$1', '$2');" 2>&1)"
 	case "$r" in ERROR:*) echo "error $(sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p' <<<"$r" | head -1)";; "") echo none;; *) echo "$r";; esac
 }
 truth() {	# truth TABLE COLUMN -> "true|min|max" from the data itself
@@ -191,7 +191,14 @@ q "CREATE TABLE ac (ts timestamptz) USING pgcolumnar;
 check "a column added after older groups has no complete extent (those groups have no zone map for it)" \
 	"$(ext ac v)" "none"
 check "while the column that was there from the start still has one" "$(ext ac ts)" "$(truth ac ts)"
-q "CREATE TABLE no (p point) USING pgcolumnar; INSERT INTO no SELECT point(g, g) FROM generate_series(1, 2000) g;" >/dev/null
+# Even after a recompute: a type with no ordering has values its zone maps cannot
+# bound, and a recompute must refuse rather than claim the column holds none. A
+# fully deleted group, then VACUUM, makes one run.
+q "CREATE TABLE no (p point, k int) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('no', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
+   INSERT INTO no SELECT point(g, g), g FROM generate_series(1, 3000) g;
+   DELETE FROM no WHERE k > 2000;" >/dev/null
+q "VACUUM no;" >/dev/null
 check "a type with no ordering gets no extent" "$(ext no p)" "none"
 
 # ---- housekeeping -----------------------------------------------------------------

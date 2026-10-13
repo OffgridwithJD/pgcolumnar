@@ -167,24 +167,6 @@ PgColumnarExtentMarkRecompute(uint64 storageId)
 	(void) hash_search(extent_recompute, &storageId, HASH_ENTER, NULL);
 }
 
-/* the storage's metadata is gone in this transaction: write nothing for it */
-void
-PgColumnarExtentForget(uint64 storageId)
-{
-	if (extent_pending != NULL)
-	{
-		HASH_SEQ_STATUS st;
-		ExtentEntry *e;
-
-		hash_seq_init(&st, extent_pending);
-		while ((e = (ExtentEntry *) hash_seq_search(&st)) != NULL)
-			if (e->key.storageId == storageId)
-				(void) hash_search(extent_pending, &e->key, HASH_REMOVE, NULL);
-	}
-	if (extent_recompute != NULL)
-		(void) hash_search(extent_recompute, &storageId, HASH_REMOVE, NULL);
-}
-
 void
 PgColumnarExtentAtXactEnd(void)
 {
