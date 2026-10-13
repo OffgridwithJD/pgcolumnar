@@ -388,13 +388,15 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
     expect.text(f"{_refresh(conn, 'relayered_hourly')}|{_one(conn, rq)}", f"0A000|{before_re}",
                 "a delete in a bucket whose history the same refresh retires is refused, and the rollup is unchanged")
 
-    # A day is 24 hours to date_bin in every zone. In Europe/Berlin 2026-03-29 is
-    # 23 hours long; the UTC day bucket must be recomputed to its end (rows run to
-    # 23:40 UTC).
+    # A day is 24 hours to date_bin in every zone. Europe/Berlin moves its clocks
+    # at 01:00 UTC on 2026-03-29, inside the bucket [03-28 06:00, 03-29 06:00) UTC
+    # (ORIGIN is at 06:00), so that bucket is 23 hours long in Berlin. It must be
+    # recomputed to its end: the rows run to 05:40 UTC. (Rows ending at 23:40 UTC
+    # first, a bucket the switch is not in, left this arm green under the mutation.)
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE springs (at timestamptz, reading int) USING pgcolumnar")
         cur.execute("SELECT pgcolumnar.set_options('springs', stripe_row_limit => 4000)")
-        cur.execute("INSERT INTO springs SELECT '2026-03-28 00:00:00+00'::timestamptz + g * interval '4 min', g"
+        cur.execute("INSERT INTO springs SELECT '2026-03-27 06:00:00+00'::timestamptz + g * interval '4 min', g"
                     " FROM generate_series(1, 715) g")
         cur.execute(f"SELECT pgcolumnar.create_rollup('springs_daily', 'springs', 'at', '1 day', '{ORIGIN}',"
                     " '{}', '{count,max}', '{*,reading}')")
