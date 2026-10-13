@@ -144,6 +144,7 @@ behaviour, the source of that number is named.
 - [96. test_autovacuum_expire.py: the daemon expires retention tables only when told to](#96-test_autovacuum_expirepy-the-daemon-expires-retention-tables-only-when-told-to)
 - [97. test_rollup.py: incremental rollups fold appended row groups, and equal a full recompute](#97-test_rolluppy-incremental-rollups-fold-appended-row-groups-and-equal-a-full-recompute)
 - [98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim](#98-test_timeseries_recipespy-the-gap-fill-locf-and-interpolation-recipes-answer-what-they-claim)
+- [99. test_suite_exit_trap.py: a suite's own EXIT trap must still stop its cluster](#99-test_suite_exit_trappy-a-suites-own-exit-trap-must-still-stop-its-cluster)
 
 ## 1. How to read a test in here
 
@@ -6639,3 +6640,20 @@ Red first: on main the how-to has no recipes, so the premise reads 0 and the com
 | --- | --- |
 | `test_the_recipes_are_in_the_how_to` | each of the three headings has a `sql` block naming `readings` |
 | `test_each_recipe_matches_the_reference` | the table is columnar; the gap fill, LOCF and interpolation match the Python reference for all 24 hours; the gap fill gives the same buckets in an Asia/Kolkata session; its aggregate runs as the vectorized grouped node when that is on |
+
+## 99. test_suite_exit_trap.py: a suite's own EXIT trap must still stop its cluster
+
+The pytest twin of selftest part 620 (#1321). `pgc_setup` arms `trap pgc_on_exit EXIT`, which stops the server, removes the workdir and gives a suite that died its accounting (#1233). Bash keeps one EXIT trap, so a suite that arms its own after `pgc_setup` must call back into `pgc_on_exit` or `pgc_teardown`. `native_upgrade_converge.sh` did not, and every run left its server listening and its workdir in `/tmp`.
+
+Independent of the part: it reads the suites and `lib.sh` as text but never sources or runs them, and its reader is Python's own. Trap lines are split with `shlex`. Comments are removed by the shell's rule (a `#` that starts a word, outside quotes, with backslash escapes) rather than by cutting everything after `#`. A one-line handler is read as that line, and any other up to its closing brace. The check names match the part's, five of them. It is not graded by `compare_to_bash`, which pairs `test/<stem>.sh` with `test_<stem>.py` and so cannot see a selftest part; `test_capability_decline.py` (parts 600 and 610) is the precedent.
+
+Written red first: on the tree before the fix, the population arm fails naming `native_upgrade_converge.sh` and nothing else. Five mutations of this file's reader each redden the same arms as the matching mutation of the part: it never reports, it keeps comments, it reads past a one-line handler, it accepts only `pgc_on_exit`, and it sees `EXIT` only last on the line.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_the_detector_flags_a_handler_that_reaches_neither` | two suites the test writes, one trapping `EXIT` and one `EXIT INT TERM`, are both reported |
+| `test_the_detector_is_not_satisfied_by_a_comment_or_the_next_function` | the teardown named only in a comment, or only in the function after a one-line handler, does not count |
+| `test_the_detector_passes_a_handler_that_chains` | a handler calling `pgc_on_exit`, one calling `pgc_teardown`, a quoted handler, and a suite without `pgc_setup` are not reported |
+| `test_no_suites_own_exit_trap_leaves_its_cluster_running` | `pgc_setup` still arms `trap pgc_on_exit EXIT` (premise), and no suite in `test/` is reported |

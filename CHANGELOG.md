@@ -320,6 +320,13 @@ true until the next version shipped.
 
 ### Fixed
 
+- `test/native_upgrade_converge.sh` no longer leaves its PostgreSQL server
+  running and its workdir in `/tmp` after every run (#1321). It armed its own
+  `trap cleanup EXIT` after `pgc_setup`, which replaced the harness's
+  `pgc_on_exit`; its cleanup now calls `pgc_on_exit` first. Selftest part 620
+  fails any suite that calls `pgc_setup` and arms an EXIT trap reaching neither
+  `pgc_on_exit` nor `pgc_teardown`. Reported by @OffgridwithJD.
+
 - An `ALTER TABLE` on a partitioned columnar table that does not recurse no
   longer opens the other partitions without a lock. `DETACH PARTITION`,
   `DETACH PARTITION ... CONCURRENTLY`, `ATTACH PARTITION` and `ALTER TABLE ONLY`
