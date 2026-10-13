@@ -261,6 +261,7 @@ SUITES=(
 	phase6
 	planner_choice_quality
 	preimage_rewrite
+	prepared_writes
 	projection_drop_column
 	projection_parallel
 	projection_privilege

@@ -28,6 +28,8 @@ pgc_setup "${1:-/usr/local/pg17/bin/pg_config}"
 
 q "CREATE EXTENSION IF NOT EXISTS pgcolumnar;" >/dev/null
 check "premise: prepared transactions are enabled" "$(q "SHOW max_prepared_transactions;")" "4"
+check "premise: the server log is where a crash would be recorded" \
+	"$([ -f "$PGC_LOGFILE" ] && echo present || echo "absent ($PGC_LOGFILE)")" "present"
 
 ready() {	# wait, up to 30 s, until the server answers a query
 	local i

@@ -146,6 +146,7 @@ behaviour, the source of that number is named.
 - [98. test_timeseries_recipes.py: the gap-fill, LOCF and interpolation recipes answer what they claim](#98-test_timeseries_recipespy-the-gap-fill-locf-and-interpolation-recipes-answer-what-they-claim)
 - [99. test_suite_exit_trap.py: a suite's own EXIT trap must still stop its cluster](#99-test_suite_exit_trappy-a-suites-own-exit-trap-must-still-stop-its-cluster)
 - [100. test_tier_partition.py: tier_partition moves a cold partition to Parquet, exactly once](#100-test_tier_partitionpy-tier_partition-moves-a-cold-partition-to-parquet-exactly-once)
+- [101. test_prepared_writes.py: a write prepared and finished in one session leaves the backend alive](#101-test_prepared_writespy-a-write-prepared-and-finished-in-one-session-leaves-the-backend-alive)
 
 ## 1. How to read a test in here
 
@@ -6684,3 +6685,17 @@ On a private database, because foreign servers are per database. A local path st
 | `test_tier_partition_moves_a_partition_exactly_once` | the move returns the rows moved; the parent's answers are the same; the cold range is a foreign partition with the same name and bound, reading the exported file; no pgcolumnar catalog rows are left; pruning keeps the ranges apart; an insert into the tiered range is refused; five refusals move nothing; the parent is held ACCESS EXCLUSIVE until commit, and a rollback leaves the rows local; a write in flight is exported; a fault after each of the five steps leaves the rows exactly once, still local |
 | `test_tier_partition_refuses_what_it_cannot_move_and_survives_concurrency` | at each isolation level a row committed between the snapshot and the lock survives, and only READ COMMITTED moves; a UNIQUE parent and four kinds of dependent are refused with no file left, and the partition moves once they are gone; grants and comment carry over; a racing insert leaves every row once; lock_wait times a held parent out with nothing attached; the caller's lock_timeout survives; a retry over a failed attempt's file moves the partition |
 | `test_tier_partition_moves_a_virtual_generated_column` | PostgreSQL 18+: a partition whose parent has a virtual generated column moves and reads back the same; below 18, `UNSUPPORTED_MAJOR`, listed in `expected_unrunnable.txt` |
+
+## 101. test_prepared_writes.py: a write prepared and finished in one session leaves the backend alive
+
+Port of `prepared_writes.sh` (#1323). PREPARE frees TopTransactionContext without reaching the COMMIT/ABORT arms of the transaction callback, and the pending write states and delete-vector buffers live in children of it. The session's next transaction, the COMMIT PREPARED itself, walked the freed lists at its PRE_COMMIT and died of SIGSEGV. Committing from another session never touched them, which is the path `parallel_copy` takes, so nothing in the corpus had reached this.
+
+Each arm runs in one connection, a transaction per statement, and asserts what that connection returns. A crash also shows as a "terminated by signal" line that the shared cluster's server log gained during this test; only lines written after the test began are counted, after a premise that the log is there. Independent of the shell suite: its own table, row counts and values. The check names match.
+
+Red on main, the first arm reading `lost`. Each of the two discards is red under its own removal. The index-fetch arm has a premise that the plan is an Index Scan, because with the custom scan on, the fetch never reaches the fetch cache. A discard of that cache at PREPARE changed no arm, so it is not in the fix.
+
+### Every test
+
+| test | what it holds |
+| --- | --- |
+| `test_a_write_prepared_and_finished_in_one_session` | an insert, a delete and an update prepared and committed in one session, an insert prepared and rolled back, a write after COMMIT PREPARED, and an index fetch on each side of it, all answered by the same session; the server log gains no "terminated by signal"; no prepared transaction is left |
