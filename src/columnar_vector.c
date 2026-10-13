@@ -2085,9 +2085,14 @@ pgcolumnar_zonemap_time_range(PlannerInfo *root, RelOptInfo *input_rel, Var *tsv
 	 * cost a scan of every group's.
 	 */
 	{
-		Datum		emin,
-					emax;
-		bool		hasValues;
+		/*
+		 * Set only when the column has a value, which the return below checks;
+		 * initialised because gcc 13/14 with LTO cannot see that, and CI treats
+		 * its maybe-uninitialized warning as a failure (#1325 review).
+		 */
+		Datum		emin = (Datum) 0,
+					emax = (Datum) 0;
+		bool		hasValues = false;
 
 		if (PgColumnarExtentBound(r, col, snap, &emin, &emax, &hasValues))
 		{
@@ -2323,8 +2328,8 @@ have_width:
 	 * UNDER-estimate, the direction a gate on this number must never take.
 	 */
 	{
-		double		zlo,
-					zhi;
+		double		zlo = 0,
+					zhi = 0;	/* set whenever the call returns true */
 
 		if (pgcolumnar_zonemap_time_range(root, input_rel, tsvar, &zlo, &zhi))
 		{
