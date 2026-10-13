@@ -150,6 +150,34 @@ check "a table created in a rolled-back savepoint leaves no extent rows" \
 	"$(q "SELECT count(*) FROM pgcolumnar.column_extent e
 	      WHERE NOT EXISTS (SELECT 1 FROM pgcolumnar.storage s WHERE s.storage_id = e.storage_id);")" "0"
 
+# ---- a transaction reads its own flushed groups in the extent --------------------
+#
+# Its extent row is written at pre-commit, but its groups are visible to it from the
+# moment they flush. A plan made in between must not bound the column by the
+# committed rows alone: that is an UNDER-estimate, the direction the gate on this
+# bound must never take. The oracle is the same transaction with the extent rows
+# deleted, so the planner falls back to the zone maps, which do include them.
+q "CREATE TABLE ot (ts timestamptz, v int) USING pgcolumnar;
+   SELECT pgcolumnar.set_options('ot', stripe_row_limit => 1000, chunk_group_row_limit => 1000);
+   INSERT INTO ot SELECT '2026-06-01'::timestamptz + g * interval '1 s', g FROM generate_series(1, 2000) g;
+   ANALYZE ot;" >/dev/null
+OWN_INS="INSERT INTO ot SELECT '2050-01-01'::timestamptz + g * interval '1 min', g FROM generate_series(1, 3000) g"
+check "a transaction's own flushed groups are inside the extent it reads before commit" \
+	"$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At -q \
+		-c "BEGIN" -c "$OWN_INS" \
+		-c "SELECT CASE WHEN e.complete AND e.minimum::timestamptz <= (SELECT min(ts) FROM ot)
+		                AND e.maximum::timestamptz >= (SELECT max(ts) FROM ot) THEN 'yes' ELSE 'no' END
+		    FROM pgcolumnar.column_extent('ot', 'ts') e" -c "ROLLBACK" 2>&1)" "yes"
+own_plans="$(env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -At -q \
+	-c "$GB" -c "BEGIN" -c "$OWN_INS" \
+	-c "SELECT 'plan'" -c "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM ot GROUP BY b" \
+	-c "DELETE FROM pgcolumnar.column_extent WHERE storage_id = $(sid ot)" \
+	-c "SELECT 'plan'" -c "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM ot GROUP BY b" -c "ROLLBACK" 2>&1 |
+	awk '/^plan$/ { want = 1; next } want && match($0, /rows=[0-9]+/) { print substr($0, RSTART, RLENGTH); want = 0 }')"
+check "and a plan made in that transaction estimates as the zone maps do" \
+	"$(sed -n 1p <<<"$own_plans")" "$(sed -n 2p <<<"$own_plans")"
+check "premise: the transaction's plans gave two estimates" "$(wc -l <<<"$own_plans")" "2"
+
 # ---- a shrink is recomputed, never guessed (jdatcmd, #1304) ---------------------
 #
 # Each path that retires or rewrites groups recomputes the extent in the same

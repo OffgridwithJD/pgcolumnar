@@ -168,6 +168,51 @@ def test_writers_concurrent_aborted_and_prepared(pgc_own_db, pgc_cluster, expect
                "a table created in a rolled-back savepoint leaves no extent rows")
 
 
+def test_a_transaction_reads_its_own_flushed_groups(pgc_own_db, pgc_cluster, expect):
+    """Its extent row is written at pre-commit, but its groups are visible to it as
+    soon as they flush; a plan made in between must not bound the column by the
+    committed rows alone. The oracle is the same transaction with the extent rows
+    deleted, which sends the planner to the zone maps."""
+    conn = pgc_own_db
+    dsn = pgc_cluster.dsn(dbname=_one(conn, "SELECT current_database()"))
+    _run(conn, "CREATE TABLE ow (ts timestamptz, v int) USING pgcolumnar")
+    _small_groups(conn, "ow")
+    _run(conn, "INSERT INTO ow SELECT '2025-03-03'::timestamptz + g * interval '2 s', g FROM generate_series(1, 1800) g",
+         "ANALYZE ow")
+    sid = _sid(conn, "ow")
+    own = "INSERT INTO ow SELECT '1999-09-09'::timestamptz + g * interval '1 min', g FROM generate_series(1, 2700) g"
+    plan = "EXPLAIN SELECT date_trunc('minute', ts) b, avg(v) FROM ow GROUP BY b"
+
+    def estimate(cur):
+        cur.execute(plan)
+        text = "\n".join(r[0] for r in cur.fetchall())
+        return text.split("rows=", 1)[1].split(" ", 1)[0] if "rows=" in text else ""
+
+    with psycopg.connect(dsn) as c:
+        with c.cursor() as cur:
+            cur.execute(own)
+            cur.execute("SELECT CASE WHEN e.complete AND e.minimum::timestamptz <= (SELECT min(ts) FROM ow)"
+                        " AND e.maximum::timestamptz >= (SELECT max(ts) FROM ow) THEN 'yes' ELSE 'no' END"
+                        " FROM pgcolumnar.column_extent('ow', 'ts') e")
+            row = cur.fetchone()
+            inside = row[0] if row else "none"
+        c.rollback()
+    expect.text(inside, "yes", "a transaction's own flushed groups are inside the extent it reads before commit")
+
+    with psycopg.connect(dsn) as c:
+        with c.cursor() as cur:
+            cur.execute(GB)
+            cur.execute(own)
+            with_extent = estimate(cur)
+            cur.execute(f"DELETE FROM pgcolumnar.column_extent WHERE storage_id = {sid}")
+            from_zone_maps = estimate(cur)
+        c.rollback()
+    expect.text("two" if with_extent and from_zone_maps else f"[{with_extent}] [{from_zone_maps}]", "two",
+                "premise: the transaction's plans gave two estimates")
+    expect.text(f"rows={with_extent}", f"rows={from_zone_maps}",
+                "and a plan made in that transaction estimates as the zone maps do")
+
+
 def test_a_shrink_is_recomputed_never_guessed(pgc_own_db, expect):
     conn = pgc_own_db
     _run(conn, "CREATE TABLE ex (ts timestamptz, v int) USING pgcolumnar")
