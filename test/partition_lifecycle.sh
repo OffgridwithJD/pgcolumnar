@@ -190,4 +190,90 @@ check "a parent with a DEFAULT partition is refused" \
 check "and nothing was created for it" \
 	"$(kids td)|$(q "SELECT count(*) FROM pg_proc WHERE proname = 'partition_create_ahead';")" "1|1"
 
+# ==== the drop half: partition_drop_plan (#1297) ================================
+#
+#   partition_drop_plan(parent regclass, cutoff timestamptz) -> SETOF text
+#
+# The statements that retire every partition whose whole range is older than
+# cutoff, in range order: DETACH ... CONCURRENTLY, then DROP. They cannot run
+# inside a function (DETACH CONCURRENTLY refuses any function, DO block or
+# procedure, on every major: #1297 note 1), so the function RETURNS them and
+# the caller runs each as its own top-level statement (\gexec). A partition a
+# concurrent detach left pending gets DETACH ... FINALIZE instead.
+plan() { q "SELECT string_agg(s, E'\n') FROM pgcolumnar.partition_drop_plan('$1', '$2') s;"; }
+run_plan() {	# each statement top-level, as \gexec would run it
+	local line
+	while IFS= read -r line; do
+		[ -n "$line" ] && env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres \
+			-d "$PGC_DB" -X -q -v ON_ERROR_STOP=1 -c "$line" >/dev/null 2>&1 || echo "failed: $line"
+	done <<<"$(plan "$1" "$2")"
+}
+q "CREATE TABLE dl (ts timestamptz NOT NULL, v int) PARTITION BY RANGE (ts);
+   CREATE TABLE dl_01 PARTITION OF dl FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dl_02 PARTITION OF dl FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dl_03 PARTITION OF dl FOR VALUES FROM ('2020-03-01 00:00+00') TO ('2020-04-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dl_04 PARTITION OF dl FOR VALUES FROM ('2020-04-01 00:00+00') TO ('2020-05-01 00:00+00') USING pgcolumnar;
+   INSERT INTO dl SELECT '2020-01-01 00:00+00'::timestamptz + g * interval '1 hour', g FROM generate_series(0, 2903) g;" >/dev/null
+check "premise: the drop fixture has four partitions, each holding rows" \
+	"$(q "SELECT count(DISTINCT tableoid) FROM dl;")|$(kids dl)" "4|4"
+check "the plan retires the partitions wholly before the cutoff, in range order" \
+	"$(plan dl '2020-03-15 00:00+00')" \
+	"$(printf '%s\n' 'ALTER TABLE dl DETACH PARTITION dl_01 CONCURRENTLY' 'DROP TABLE dl_01' \
+	                 'ALTER TABLE dl DETACH PARTITION dl_02 CONCURRENTLY' 'DROP TABLE dl_02')"
+check "a cutoff on a partition's upper bound includes it" \
+	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-01 00:00+00') s WHERE s LIKE 'DROP%';")" "2"
+check "a cutoff before every partition plans nothing" \
+	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2019-06-01 00:00+00');")" "0"
+sids="$(q "SELECT string_agg(pgcolumnar.get_storage_id(c)::text, ',') FROM unnest(ARRAY['dl_01','dl_02']::regclass[]) c;")"
+run_plan dl '2020-03-15 00:00+00'
+check "running the plan leaves only the partitions it did not name" \
+	"$(q "SELECT string_agg(c.relname, ',' ORDER BY c.relname) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+	      WHERE i.inhparent = 'dl'::regclass;")|$(q "SELECT count(*) FROM pg_class WHERE relname IN ('dl_01', 'dl_02');")" "dl_03,dl_04|0"
+check "and every row the remaining partitions held is still there" \
+	"$(q "SELECT count(*) FROM dl;")" "$(q "SELECT count(*) FROM generate_series(0, 2903) g
+	   WHERE '2020-01-01 00:00+00'::timestamptz + g * interval '1 hour' >= '2020-03-01 00:00+00';")"
+check "and the dropped partitions' pgcolumnar storage rows are gone" \
+	"$(q "SELECT count(*) FROM pgcolumnar.storage WHERE storage_id IN (${sids:-0});")" "0"
+check "a second plan for the same cutoff is empty" \
+	"$(q "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dl', '2020-03-15 00:00+00');")" "0"
+
+# A timestamp (no zone) key: the cutoff is read in the session's zone, as the key's
+# wall-clock time.
+q "CREATE TABLE dw (ts timestamp NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE dw_a PARTITION OF dw FOR VALUES FROM ('2021-01-01') TO ('2021-01-02') USING pgcolumnar;
+   CREATE TABLE dw_b PARTITION OF dw FOR VALUES FROM ('2021-01-02') TO ('2021-01-03') USING pgcolumnar;" >/dev/null
+check "a timestamp key's bounds are compared in the session's wall-clock time" \
+	"$(q "SET TimeZone = 'America/New_York'; SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dw', '2021-01-02 00:00-05') s;")" \
+	"ALTER TABLE dw DETACH PARTITION dw_a CONCURRENTLY;DROP TABLE dw_a"
+
+# An interrupted concurrent detach leaves the partition pending: a transaction
+# holding an older snapshot makes the second phase wait, and a statement timeout
+# cancels it there.
+q "CREATE TABLE dp (ts timestamptz NOT NULL) PARTITION BY RANGE (ts);
+   CREATE TABLE dp_1 PARTITION OF dp FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-02-01 00:00+00') USING pgcolumnar;
+   CREATE TABLE dp_2 PARTITION OF dp FOR VALUES FROM ('2020-02-01 00:00+00') TO ('2020-03-01 00:00+00') USING pgcolumnar;" >/dev/null
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -q \
+	-c "BEGIN ISOLATION LEVEL REPEATABLE READ" -c "SELECT count(*) FROM dp" -c "SELECT pg_sleep(8)" -c "COMMIT" >/dev/null 2>&1 &
+holder=$!
+sleep 1
+env PATH="$PGC_BINDIR:$PATH" psql -h 127.0.0.1 -p "$PGC_PORT" -U postgres -d "$PGC_DB" -X -q \
+	-c "SET statement_timeout = '2s'" -c "ALTER TABLE dp DETACH PARTITION dp_1 CONCURRENTLY" >/dev/null 2>&1
+wait "$holder"
+check "premise: the interrupted detach left dp_1 pending" \
+	"$(q "SELECT inhdetachpending FROM pg_inherits WHERE inhrelid = 'dp_1'::regclass;")" "t"
+check "a pending detach is finalised, not started again" \
+	"$(q "SELECT string_agg(s, ';') FROM pgcolumnar.partition_drop_plan('dp', '2020-02-01 00:00+00') s;")" \
+	"ALTER TABLE dp DETACH PARTITION dp_1 FINALIZE;DROP TABLE dp_1"
+run_plan dp '2020-02-01 00:00+00'
+check "and running it drops the pending partition" \
+	"$(q "SELECT count(*) FROM pg_class WHERE relname = 'dp_1';")|$(kids dp)" "0|1"
+
+# Refusals, as partition_create_ahead refuses.
+check "a drop plan for a parent with a DEFAULT partition is refused" \
+	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('td', now())")" "55000"
+q "CREATE TABLE dn (k int NOT NULL) PARTITION BY RANGE (k);
+   CREATE TABLE dnl (k int);" >/dev/null
+check "a drop plan for a parent not partitioned on a timestamp is refused" \
+	"$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dn', now())")|$(sqlstate_or "SELECT count(*) FROM pgcolumnar.partition_drop_plan('dnl', now())")" "55000|55000"
+
 pgc_summary
