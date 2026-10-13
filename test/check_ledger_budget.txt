@@ -1803,4 +1803,19 @@ suites_not_covered 246
 #     never         1803 - 2     = 1801
 #     dated          533 + 4 + 2 =  539
 #     1801 + 539 == 2340
-checks_never_observed_red 1801
+#
+# #1339 audit, ttl_expire (OffgridwithJD): 1801 -> 1798. Three new rows: the
+# timestamp retention arm, dated by expire's timestamp cutoff taken from the UTC
+# wall clock; two premises (the second zone's date is not UTC's, the timestamp
+# fixture's six groups), never. Eight rows renamed with their history: four checks
+# named premise: that test expire, VACUUM or the zone map lose the prefix (#1236),
+# and the four Pacific/Midway checks are named "a zone on another date", because the
+# zone is now chosen at run time. Dated here: the two renamed expire arms and three
+# existing arms first seen red (expire returning 0); the zone arms again by expire's
+# date cutoff taken from the UTC wall clock. Five-major runs: 70/70 on each of 15-19.
+#
+#     ledger rows   2340 + 3         = 2343
+#     never         1801 + 2 - 2 - 3 = 1798
+#     dated          539 + 1 + 2 + 3 =  545
+#     1798 + 545 == 2343
+checks_never_observed_red 1798
