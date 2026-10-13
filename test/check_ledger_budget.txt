@@ -1595,4 +1595,15 @@ suites_not_covered 246
 #     never         1799 - 2 +  3 = 1800
 #     dated          471 - 1 + 14 =  484
 #     1800 + 484 == 2284
-checks_never_observed_red 1800
+#
+# #1328 review (OffgridwithJD found rows deleted from a group that expire then
+# retires were kept in history): 1800 -> 1801. rollup gains two checks from a
+# five-major run (72/72 on each of 15-19): the refusal, dated by two mutations
+# (the refusal removed, and expire recording the deleted count as 0), each red
+# at it alone on every major; and its premise, that expire retired the group.
+#
+#     ledger rows   2284 + 2 = 2286
+#     never         1800 + 1 = 1801
+#     dated          484 + 1 =  485
+#     1801 + 485 == 2286
+checks_never_observed_red 1801

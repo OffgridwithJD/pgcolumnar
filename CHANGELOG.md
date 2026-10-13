@@ -207,6 +207,10 @@ true until the next version shipped.
   look like a delete and lose history, so it is read in the fold's own snapshot;
   and a bucket's end is its start plus the width in plain seconds, because a
   `timestamptz` plus `'1 day'` is 23 or 25 hours across a DST change.
+  From @OffgridwithJD's review: rows deleted from a group that `expire` then
+  retires, before the next refresh, cannot be recomputed and would be kept as
+  history, so such a refresh is refused (`0A000`) too; `expire` now records each
+  retired group's deleted count in `pgcolumnar.retired_group` for this.
 - `pgcolumnar.tier_partition(partition, server, path, lock_wait)` moves a cold
   columnar partition to a Parquet file and attaches the file in its place as a
   foreign partition with the same name, bounds, grants and comment (#1295). It

@@ -1995,6 +1995,7 @@ rewrite_storage_oid	rewrite_storage_oid	the repair gate does not read a partitio
 rollup	rollup	* with anything but count is refused	15;16;17;18;19	2026-10-13	create_rollup allowing * with any function
 rollup	rollup	a delete in a bucket that holds retired history is refused, and the rollup is unchanged	15;16;17;18;19	2026-10-13	refresh_rollup not storing the retired groups' ranges as history;refresh_rollup recording new groups without their time range;refresh_rollup without the history refusal
 rollup	rollup	a delete in a bucket whose history the same refresh retires is refused, and the rollup is unchanged	15;16;17;18;19	2026-10-13	refresh_rollup blocking on stored history only, not on groups the same refresh retires;refresh_rollup recording new groups without their time range;refresh_rollup without the history refusal
+rollup	rollup	a delete in a group that expire then retires is refused, and the rollup is unchanged	15;16;17;18;19	2026-10-13	expire recording a retired group's deleted count as 0;refresh_rollup not refusing a retiring group whose deleted count moved
 rollup	rollup	a delete in buckets with no history, next to retired ones, folds: those buckets equal a recompute and D keeps its history	15;16;17;18;19	2026-10-13	refresh_rollup recomputing every bucket once any group changed;refresh_rollup recording new groups without their time range;refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	a refresh after a delete is not refused	15;16;17;18;19	2026-10-13	refresh_rollup refusing any change but appends (phase 1, main before this branch)
 rollup	rollup	a refresh after a small append reads under a fifth of the source	15;16;17;18;19	2026-10-13	refresh_rollup folding every group, ignoring the recorded snapshot;refresh_rollup's per-group subquery without OFFSET 0, so it becomes a join and reads every group
@@ -2044,6 +2045,7 @@ rollup	rollup	each row group's TID range holds exactly that group's rows	15;16;1
 rollup	rollup	premise: and the fixture has NULL-key and NULL-bucket groups	15;16;17;18;19	never	-
 rollup	rollup	premise: compact_rewrite rewrote a row group	15;16;17;18;19	never	-
 rollup	rollup	premise: expire retired the group in bucket D alone and kept the one that shares it	15;16;17;18;19	never	-
+rollup	rollup	premise: expire retired the group the delete thinned	15;16;17;18;19	never	-
 rollup	rollup	premise: expire retired the old row groups	15;16;17;18;19	never	-
 rollup	rollup	premise: pgcolumnar.vacuum gave the source's row groups new identities	15;16;17;18;19	never	-
 rollup	rollup	premise: the rollup functions exist	15;16;17;18;19	never	-
