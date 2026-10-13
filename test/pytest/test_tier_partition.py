@@ -147,8 +147,11 @@ def test_tier_partition_moves_a_partition_exactly_once(pgc_own_db, pgc_cluster, 
                     "42809", "a partition that is not columnar is refused")
     expect.text(_sqlstate(conn, f"SELECT pgcolumnar.tier_partition('s_rest', 'tq', '{server_dir}/rest.parquet')"),
                     "0A000", "a DEFAULT partition is refused")
-    expect.text(_sqlstate(conn, f"SELECT pgcolumnar.tier_partition('s_apr', 'ti', '{server_dir}/apr.parquet')"),
-                    "42809", "a server of another wrapper is refused")
+    # Before anything moves (#1339): a refusal from a later step, after the export,
+    # would leave the file behind with the same SQLSTATE.
+    other = _sqlstate(conn, f"SELECT pgcolumnar.tier_partition('s_apr', 'ti', '{server_dir}/apr.parquet')")
+    expect.text(f"{other}|{'file' if (server_dir / 'apr.parquet').exists() else 'nofile'}",
+                "42809|nofile", "a server of another wrapper is refused")
     expect.text(_sqlstate(conn, f"SELECT pgcolumnar.tier_partition('s_apr', 'tq', '{path}')"),
                     "58P02", "an existing path is refused, so no file a table reads is overwritten")
     expect.text(_digest(conn, "s"), rb, "and the refusals moved nothing")

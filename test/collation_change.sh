@@ -47,6 +47,12 @@ for t in cc ch; do
 done
 check "premise: the columnar table has several row groups" \
 	"$(q "SELECT count(*) FROM pgcolumnar.row_group WHERE storage_id = pgcolumnar.get_storage_id('cc');")" "3"
+# THE EXTENT EXISTED, AND HELD C'S BOUND (#1339). The arm after the change accepts
+# "none", because the fix forgets the extent; without this one, a column_extent()
+# that never returns a row passed it too.
+check "before the change the column's extent is the C collation's bound" \
+	"$(q "SELECT coalesce((SELECT minimum || '|' || maximum FROM pgcolumnar.column_extent('cc', 's')), 'none');")" \
+	"$(q "SELECT min(s) || '|' || max(s) FROM ch;")"
 before="$(q "SELECT pg_relation_filenode('cc');")"
 for t in cc ch; do
 	q "ALTER TABLE $t ALTER COLUMN s TYPE text COLLATE \"$COLL\";" >/dev/null
@@ -56,7 +62,8 @@ check "premise: the collation change rewrote nothing" "$(q "SELECT pg_relation_f
 same() {	# same SQL-with-%T -> "same", or both answers when they differ
 	local c h
 	c="$(q "${1//%T/cc}")"; h="$(q "${1//%T/ch}")"
-	[ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
+	# An answer is required (#1339): two empty answers are not the same answer.
+	[ -n "$c" ] && [ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
 }
 check "after the collation change min and max are heap's" "$(same "SELECT min(s) || '|' || max(s) FROM %T;")" "same"
 check "and a range below an upper-case bound returns heap's rows" \
@@ -104,7 +111,8 @@ done
 same2() {	# same2 SQL-with-%T over vs and vh
 	local c h
 	c="$(q "${1//%T/vs}")"; h="$(q "${1//%T/vh}")"
-	[ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
+	# An answer is required (#1339): two empty answers are not the same answer.
+	[ -n "$c" ] && [ "$c" = "$h" ] && echo same || echo "columnar [$c] heap [$h]"
 }
 check "a table sorted under the old collation orders ORDER BY ... LIMIT as heap does" \
 	"$(same2 "SELECT string_agg(s, ',') FROM (SELECT s FROM %T ORDER BY s, k LIMIT 6) x;")" "same"

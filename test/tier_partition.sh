@@ -123,8 +123,11 @@ psql_run "CREATE TABLE m_def PARTITION OF m DEFAULT USING pgcolumnar;"
 check "a DEFAULT partition is refused" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_def', 'tier_pq', '$W/m_def.parquet');")" "0A000"
 psql_run "CREATE SERVER tier_ice FOREIGN DATA WRAPPER pgcolumnar_iceberg;"
+# Before anything moves (#1339): a refusal that came only from a later step, after
+# the export, would leave the file behind with the same SQLSTATE.
 check "a server of another wrapper is refused" \
-	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_feb', 'tier_ice', '$W/m_feb.parquet');")" "42809"
+	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_feb', 'tier_ice', '$W/m_feb.parquet');")|$([ -e "$W/m_feb.parquet" ] && echo file || echo nofile)" \
+	"42809|nofile"
 check "an existing path is refused, so no file a table reads is overwritten" \
 	"$(sqlstate "SELECT pgcolumnar.tier_partition('m_feb', 'tier_pq', '$W/m_jan.parquet');")" "58P02"
 check "and the refusals moved nothing" "$(digest m)" "$rb"
