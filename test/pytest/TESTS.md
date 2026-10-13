@@ -6610,6 +6610,8 @@ What the arms found while the code was written:
 
 From @jdatcmd's review of #1319: the refresh restated 291 rows a block in SQL, which holds only at the default block size, so the TID range of each group now comes from `pgcolumnar.row_tid` (the access method's own mapping), and an arm requires every group's range to hold exactly its rows. NULL group keys and NULL timestamps have an arm in each twin, and writing it showed both twins' digests dropped any row with a NULL (`||` then `string_agg`); they use `concat_ws` over `coalesce` now. Retention keeps history: a group `expire` retired leaves the snapshot and its buckets keep their rows (#1314's `retired_group`).
 
+A role that cannot SELECT the source cannot create a rollup of it (42501). `create_rollup` has no check of its own for this: it reads the source's storage id through `get_storage_id`, which refuses such a caller, and the arm was red only when that check was removed. `entry_point_privilege.sh` buckets `create_rollup` as relation-taking by its second argument and `row_tid` as taking no relation.
+
 Removal proofs, each red on its arm: no `OFFSET 0` (the cost arm), no isolation check, no lock (two refreshes double-fold), no identity check, no changed-group check, the folded groups recorded from a fresh read (rows committed mid-refresh lost), min combined as max, no row-level security, a rebase that clears the rollup, `=` in place of `IS NOT DISTINCT FROM` (only the NULL arm), retired groups kept in the snapshot, and `row_tid` with 290 rows a block.
 
 ### Every test

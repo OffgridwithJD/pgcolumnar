@@ -310,6 +310,11 @@ def test_rollup_phase_one(pgc_own_db, pgc_cluster, expect):
                 "another role sees none of its rollup catalog rows")
     expect.text(as_role("rp_other", "SELECT pgcolumnar.refresh_rollup('public.meter_daily')"), "42704",
                 "and cannot refresh it")
+    # create_rollup reads the source's storage id through get_storage_id, which
+    # refuses a caller that cannot SELECT the table: refused at creation.
+    expect.text(as_role("rp_other", f"SELECT pgcolumnar.create_rollup('other_daily', 'public.meter', 'at', '1 day',"
+                                    f" '{ORIGIN}', '{{}}', '{{count}}', '{{*}}')"),
+                "42501", "a role that cannot read the source cannot create a rollup of it")
 
     # access_method: a heap rollup folds and matches the same way.
     with conn.cursor() as cur:

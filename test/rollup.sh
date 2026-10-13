@@ -270,6 +270,12 @@ check "another role sees none of its rollup catalog rows" \
 # Row-level security hides the catalog row, so to that role it is no rollup at
 # all (42704), which also says nothing about whether one exists.
 check "and cannot refresh it" "$(as_role ru_b "SELECT pgcolumnar.refresh_rollup('public.own_r')" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p')" "42704"
+# create_rollup takes the source as a relation, and it reads the source's
+# storage id through pgcolumnar.get_storage_id, which refuses a caller that
+# cannot SELECT the table (42501; one of entry_point_privilege.sh's guarded
+# entry points). So the refusal comes at creation, not at the first refresh.
+check "a role that cannot read the source cannot create a rollup of it" \
+	"$(as_role ru_b "SELECT pgcolumnar.create_rollup('b_r', 'public.own_src', 'ts', '1 day', '$ORIGIN', '{}', '{count}', '{*}')" | sed -n 's/^ERROR: *\([0-9A-Z]\{5\}\).*/\1/p')" "42501"
 
 # access_method: the partials need not be columnar (#1294 point 12 measures which
 # serves a hot rollup better). A heap rollup folds and matches the same way.
